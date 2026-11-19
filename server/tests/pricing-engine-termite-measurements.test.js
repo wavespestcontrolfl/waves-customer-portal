@@ -14,7 +14,7 @@ const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
 
 // The deprecated client engine (client/src/lib/estimateEngine.js calculateEstimate), bundled as the drift test bundles it, with the
 // pre-swap costs in its source: Talak ($41.57 / 96 oz) on both bifenthrin keys of both lines, and the lower Taurus cost the trench
-// describe below configures ($78 / 78 oz). Its one-time rows carry a name and no service.
+// describe below configures ($30 / 78 oz). Its one-time rows carry a name and no service.
 let preSwapClientEstimate;
 function clientEstimate(form) {
   if (!preSwapClientEstimate) {
@@ -27,7 +27,7 @@ function clientEstimate(form) {
     };
     let source = fs.readFileSync(file, 'utf8');
     source = swap(source, 'containerCost: 30.90,\n    containerOz: 128,', 'containerCost: 41.57,\n    containerOz: 96,', 4);
-    source = swap(source, 'containerCost: 95.00, // mirrors SPECIALTY.trenching', 'containerCost: 78.00, // mirrors SPECIALTY.trenching', 1);
+    source = swap(source, 'containerCost: 95.00, // mirrors SPECIALTY.trenching', 'containerCost: 30.00, // mirrors SPECIALTY.trenching', 1);
     const out = require('esbuild').buildSync({
       stdin: { contents: source, resolveDir: path.dirname(file), sourcefile: 'estimateEngine.js', loader: 'js' },
       bundle: true, format: 'cjs', platform: 'node', write: false, logLevel: 'silent',
@@ -239,6 +239,36 @@ describe('termite measurement overrides and safeguards', () => {
     expect(bifen.productSurcharge).toBe(0);
     expect(bifen.price).toBe(2784);
     expect(bifen.warnings).toContain('Repellent pyrethroid barrier; not equivalent to non-repellent fipronil.');
+  });
+
+  // The Crosscheck Plus label (EPA 10404-120; the Talak 7.9 F label says the same) allows the 0.12% termite dilution only at half
+  // the 0.06% volume, so the active ingredient per foot stays the 0.06% amount (pre-push audit 9). Fipronil labels allow 0.125% at
+  // the full volume.
+  test('a bifenthrin high rate is the stronger dilution at a reduced volume: the same product per foot and the same price', () => {
+    const measurements = { perimeterLF: 400, dirtLF: 400, concreteLF: 0 };
+    const trench = (extra) => priceTrenching({}, { measurements, productKey: 'talstar_p', labelConfirmed: true, ...extra });
+    const standard = trench({});
+    const high = trench({ applicationRate: 'high' });
+    expect(standard).toMatchObject({ finishedGallons: 80, productOzPerFinishedGallon: 1, productOz: 80, concentrationLabel: '0.06%', price: 4000 });
+    expect(high).toMatchObject({ finishedGallons: 40, dirtFinishedGallons: 40, productOzPerFinishedGallon: 2, productOz: 80, concentrationLabel: '0.12%' });
+    expect(high.allocatedChemicalCost).toBe(standard.allocatedChemicalCost);
+    expect(high.includedChemicalCost).toBe(standard.includedChemicalCost); // the install price includes the labeled volume
+    expect(high.price).toBe(4480); // the +12% install premium, as before
+    expect(high.warnings.join(' ')).toMatch(/reduced finished volume, the same active ingredient per foot/);
+    const products = require('../services/pricing-engine/constants').SPECIALTY.trenching.products;
+    const savedHigh = products.talstar_p.productOzPerFinishedGallonAtHighRate;
+    products.talstar_p.productOzPerFinishedGallonAtHighRate = 1.5; // a configured high dilution keeps the product per foot too
+    try {
+      expect(trench({ applicationRate: 'high' })).toMatchObject({ finishedGallons: 53.33, productOz: 80 });
+    } finally {
+      products.talstar_p.productOzPerFinishedGallonAtHighRate = savedHigh;
+    }
+    const taurus = priceTrenching({}, { measurements, productKey: 'taurus_sc', applicationRate: 'high', labelConfirmed: true });
+    expect(taurus).toMatchObject({ finishedGallons: 80, productOz: 128 });
+    expect(taurus.warnings).toContain('High/problem-soil rate increases chemical usage and requires label confirmation.');
+    // A custom dilution is a manual override (sent to review): it keeps the labeled volume.
+    expect(trench({ applicationRate: 'high', customProductOzPerFinishedGallon: 2 }))
+      .toMatchObject({ finishedGallons: 80, productOz: 160, requiresManualReview: true });
   });
 
   test('trenching high rate and warranty restrictions surface review and quote gates', () => {
@@ -982,7 +1012,10 @@ describe('saved bifenthrin label checks follow the bottle on server replay', () 
     ];
     try {
       expect(counts()).toEqual([true, true]);
-      Object.assign(pre, { catalogProductName: 'Atticus Talak 7.9 F', label: 'Talak 7.9 F - Bifenthrin' });
+      // A partial overlay: a configured Talak label over the code's Crosscheck Plus catalog link (pre-push audit 9).
+      Object.assign(pre, { label: 'Talak 7.9 F - Bifenthrin' });
+      expect(counts()).toEqual([false, true]);
+      Object.assign(pre, { catalogProductName: 'Atticus Talak 7.9 F' });
       Object.assign(trench, { label: 'Talak 7.9 F - Bifenthrin' });
       expect(counts()).toEqual([false, false]);
     } finally {
@@ -1124,9 +1157,10 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
   const input = (extra = {}) => ({ ...PROFILE, services: { trenching: { perimeterLF: 400, productKey: 'talstar_p', applicationRate: 'high', ...extra } } });
   const trenchLine = (estimate) => estimate.lineItems.find((line) => line.service === 'trenching');
   const saved = { taurus: { ...products.taurus_sc }, talstar: { ...products.talstar_p } };
-  // A lower configured Taurus cost ($78 / 78 oz, the included chemistry): at the high rate the earlier bottle cost more per finished
-  // gallon than the included one, so the sent quote carried a product surcharge the new bottle does not.
-  beforeEach(() => { Object.assign(products.taurus_sc, { containerCost: 78, containerOz: 78 }); });
+  // A lower configured Taurus cost ($30 / 78 oz, the included chemistry): the earlier bottle cost more per labeled finished gallon than
+  // the included one, so the sent quote carried a product surcharge the new bottle does not. The high rate uses the standard amount
+  // of product (0.12% at half the volume), so its surcharge is the standard rate's.
+  beforeEach(() => { Object.assign(products.taurus_sc, { containerCost: 30, containerOz: 78 }); });
   afterEach(() => {
     Object.assign(products.taurus_sc, saved.taurus);
     Object.assign(products.talstar_p, saved.talstar);
@@ -1139,13 +1173,13 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
       Object.assign(products.talstar_p, saved.talstar);
     }
   };
-  const PIN = { productKey: 'talstar_p', applicationRate: 'high', productOz: 168, productSurcharge: 8 };
+  const PIN = { productKey: 'talstar_p', applicationRate: 'high', productOz: 84, productSurcharge: 15 };
   const priced = (extra, knobs) => trenchLine(generateEstimate({ ...input(extra), trenchingTermiticidePricingKnobs: knobs }));
 
   test('the engine keeps the stored surcharge for the same product, rate and product oz only', () => {
-    expect(trenchLine(sentQuote())).toMatchObject({ price: 4936, productSurcharge: 8, productOz: 168 });
+    expect(trenchLine(sentQuote())).toMatchObject({ price: 4943, productSurcharge: 15, productOz: 84 });
     expect(trenchLine(generateEstimate(input()))).toMatchObject({ price: 4928, productSurcharge: 0 });
-    expect(priced({}, PIN).price).toBe(4936);
+    expect(priced({}, PIN).price).toBe(4943);
     expect(priced({}, { ...PIN, productKey: 'bifen_it' }).price).toBe(4928);
     expect(priced({}, { ...PIN, applicationRate: 'standard' }).price).toBe(4928);
     expect(priced({ perimeterLF: 420 }, PIN).productSurcharge).toBe(0);
@@ -1155,9 +1189,9 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
   // config (a custom cost divides by the configured container oz): the swap moves them too (pre-push audit 8: a custom rate of 4 oz a
   // finished gallon, 336 oz).
   test.each([
-    ['a custom rate', { applicationRate: 'standard', customProductOzPerFinishedGallon: 4 }, { sent: 4514, fresh: 4420, productOz: 336, productSurcharge: 114 }],
-    ['a custom product cost', { customProductCost: 41.57 }, { sent: 4936, fresh: 4928, productOz: 168, productSurcharge: 8 }],
-    ['a custom container size', { customContainerOz: 96 }, { sent: 4936, fresh: 4928, productOz: 168, productSurcharge: 8 }],
+    ['a custom rate', { applicationRate: 'standard', customProductOzPerFinishedGallon: 4 }, { sent: 4573, fresh: 4480, productOz: 336, productSurcharge: 173 }],
+    ['a custom product cost', { customProductCost: 41.57 }, { sent: 4943, fresh: 4930, productOz: 84, productSurcharge: 15 }],
+    ['a custom container size', { customContainerOz: 96 }, { sent: 4943, fresh: 4930, productOz: 84, productSurcharge: 15 }],
   ])('a quote with %s keeps its sent surcharge on replay', (_label, extra, want) => {
     const sent = trenchLine(sentQuote(extra));
     expect(sent).toMatchObject({ price: want.sent, productOz: want.productOz, productSurcharge: want.productSurcharge });
@@ -1171,13 +1205,13 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
     const quoted = clientEstimate({ svcTrenching: true, trenchingPerimeterLF: 400, trenchingProductKey: 'talstar_p', trenchingApplicationRate: 'high' });
     const row = quoted.oneTime.items.find((item) => item.name === 'Trenching');
     expect(row.service).toBeUndefined();
-    expect(row).toMatchObject({ price: 4936, ...PIN });
+    expect(row).toMatchObject({ price: 4943, ...PIN });
     const stored = { engineInputs: input(), result: quoted };
     expect(replay.trenchingKnobSignalForReplay(stored)).toEqual(PIN);
     const { extractEngineInputs } = require('../routes/estimate-public');
-    expect(trenchLine(generateEstimate(extractEngineInputs(stored))).price).toBe(4936);
+    expect(trenchLine(generateEstimate(extractEngineInputs(stored))).price).toBe(4943);
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
-    expect(trenchLine((await serverRecomputeFromEstimateData(stored, { ...REPLAY_DEPS, replaySavedPricingKnobs: true })).rawEngineResult).price).toBe(4936);
+    expect(trenchLine((await serverRecomputeFromEstimateData(stored, { ...REPLAY_DEPS, replaySavedPricingKnobs: true })).rawEngineResult).price).toBe(4943);
     const other = { result: { oneTime: { items: [{ ...row, name: 'Bora-Care' }, { ...row, service: 'bora_care' }] } } };
     expect(replay.trenchingKnobSignalForReplay(other)).toBeNull();
   });
@@ -1193,14 +1227,14 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
   test('both replay paths keep the sent price; a posted save and a planted copy price the new bottle', async () => {
     const { extractEngineInputs } = require('../routes/estimate-public');
     const engineResult = sentQuote();
-    expect(trenchLine(generateEstimate(extractEngineInputs({ engineInputs: input(), engineResult }))).price).toBe(4936);
+    expect(trenchLine(generateEstimate(extractEngineInputs({ engineInputs: input(), engineResult }))).price).toBe(4943);
     const planted = { engineInputs: { ...input(), trenchingTermiticidePricingKnobs: PIN } };
     expect(extractEngineInputs(planted).trenchingTermiticidePricingKnobs).toBeUndefined();
     expect(trenchLine(generateEstimate(extractEngineInputs(planted))).price).toBe(4928);
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
     const deps = REPLAY_DEPS;
     const stored = { engineInputs: { ...input(), trenchingTermiticidePricingKnobs: PIN }, engineResult };
-    expect(trenchLine((await serverRecomputeFromEstimateData(stored, { ...deps, replaySavedPricingKnobs: true })).rawEngineResult).price).toBe(4936);
+    expect(trenchLine((await serverRecomputeFromEstimateData(stored, { ...deps, replaySavedPricingKnobs: true })).rawEngineResult).price).toBe(4943);
     expect(trenchLine((await serverRecomputeFromEstimateData(stored, deps)).rawEngineResult).price).toBe(4928);
     const { CLIENT_IDENTITY_FIELDS } = require('../services/estimate-client-identity-fields');
     expect(CLIENT_IDENTITY_FIELDS).toContain('trenchingTermiticidePricingKnobs');

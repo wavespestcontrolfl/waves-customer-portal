@@ -156,3 +156,22 @@ describe('reopening a bifenthrin pre-slab estimate saved before the Crosscheck P
     expect(options).toMatchObject({ preslabProductKey: 'talstar_p', preslabLabelConfirmed: false, bifenthrinLabelBottle: 'lesco_crosscheck_plus' });
   });
 });
+
+// The trenching box reads "Label rate and trench depth confirmed": a check is for the rate and depth it was ticked for (pre-push audit 9).
+describe('the trenching label check', () => {
+  const TRENCH = { svcTrenching: true, trenchingPerimeterLF: '240', trenchingProductKey: 'taurus_sc', trenchingLabelConfirmed: true, homeSqFt: '2400', lotSqFt: '9000', stories: '2' };
+  const labelCheck = () => screen.getByLabelText('Label rate and trench depth confirmed');
+
+  it.each([
+    ['application rate', 'estimate-trenchingApplicationRate', 'high'],
+    ['trench depth', 'estimate-trenchingDepthFt', '1'],
+  ])('clears when the %s changes, and sends the quote unchecked', async (_name, id, value) => {
+    reopen(TRENCH, HOUSE);
+    await waitFor(() => expect(labelCheck()).toBeChecked());
+    fireEvent.change(document.getElementById(id), { target: { value } });
+    await waitFor(() => expect(labelCheck()).not.toBeChecked());
+    fireEvent.click(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ }));
+    await waitFor(() => expect(callsTo('/calculate-estimate')).toHaveLength(1));
+    expect(JSON.parse(callsTo('/calculate-estimate')[0][1].body).options).toMatchObject({ trenchingLabelConfirmed: false });
+  });
+});

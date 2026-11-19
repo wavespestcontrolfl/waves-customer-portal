@@ -1994,8 +1994,12 @@ const SPECIALTY = {
         containerOz: 128,
         productOzPerFinishedGallonAtStandardRate: 1.0,
         productOzPerFinishedGallonAtHighRate: 2.0,
+        // The label (Crosscheck Plus, EPA 10404-120; the Talak 7.9 F label, EPA 91234-145, says the same) allows the 0.12%
+        // termite dilution only at a reduced volume, so the active ingredient per foot stays the 0.06% amount (Volume
+        // Adjustment Chart: 4.0 gal per 10 LF at 0.06%, 2.0 gal at 0.12%). priceTrenching cuts the high-rate volume to match.
+        highRateReducesVolume: true,
         standardConcentrationLabel: '0.06%',
-        highConcentrationLabel: 'high_rate',
+        highConcentrationLabel: '0.12%',
         defaultWarrantyPositioning: 'limited',
         warrantyRisk: 'high_for_long_warranty',
         warnings: [
@@ -2015,8 +2019,9 @@ const SPECIALTY = {
         containerOz: 128,
         productOzPerFinishedGallonAtStandardRate: 1.0,
         productOzPerFinishedGallonAtHighRate: 2.0,
+        highRateReducesVolume: true, // the same label rule as bifen_it
         standardConcentrationLabel: '0.06%',
-        highConcentrationLabel: 'high_rate',
+        highConcentrationLabel: '0.12%',
         defaultWarrantyPositioning: 'limited',
         warrantyRisk: 'high_for_long_warranty',
         warnings: [

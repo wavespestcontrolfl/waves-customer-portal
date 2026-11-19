@@ -7062,9 +7062,13 @@ function resolveTrenchDepthPriceMultiplier(cfg = {}, trenchDepthFt) {
 // prices, aliases included. Fipronil checks are unchanged.
 const BIFENTHRIN_LABEL_BOTTLE = 'lesco_crosscheck_plus';
 const BIFENTHRIN_TERMITICIDE_KEYS = new Set(['talstar_p', 'bifen_it']);
-// The bottle a configured product names: its catalog link (pre-slab), else its label (a trenching product has no link). Both come
-// from pricing_config over the code.
-const namesCrosscheckPlus = (product = {}) => /crosscheck/i.test(String(product.catalogProductName || product.label || ''));
+// The bottle a configured product names: every name it carries, its catalog link (pre-slab) and its label (a trenching product
+// has no link). Each comes from pricing_config over the code field by field, so a partial overlay can mix them (a Talak label over
+// the code's Crosscheck Plus link): every name present must name Crosscheck Plus.
+const namesCrosscheckPlus = (product = {}) => {
+  const names = [product.catalogProductName, product.label].filter((name) => String(name ?? '').trim() !== '');
+  return names.length > 0 && names.every((name) => /crosscheck/i.test(String(name)));
+};
 function labelCheckCounts(options, productKey, product) {
   if (!optionBooleanTrue(options.labelConfirmed)) return false;
   return !BIFENTHRIN_TERMITICIDE_KEYS.has(productKey)
@@ -7113,6 +7117,12 @@ function priceTrenching(property = {}, options = {}, replay) {
       ? product.productOzPerFinishedGallonAtHighRate
       : product.productOzPerFinishedGallonAtStandardRate,
   );
+  // A label that allows its high-rate dilution only at a reduced volume (highRateReducesVolume: the bifenthrin bottles) gets the
+  // finished volume cut in proportion, so the active ingredient per foot stays the standard-rate amount (0.12% at half the 0.06%
+  // volume). A custom dilution is a manual override (sent to review) and keeps the labeled volume.
+  const reducesVolume = rateResolution.applicationRate === 'high' && product.highRateReducesVolume
+    && !hasValue(options.customProductOzPerFinishedGallon);
+  const volumeFactor = reducesVolume ? Math.min(1, product.productOzPerFinishedGallonAtStandardRate / productOzPerFinishedGallon) : 1;
   const containerCost = optionPositiveNumber(options, 'customProductCost', product.containerCost);
   const containerOz = optionPositiveNumber(options, 'customContainerOz', product.containerOz);
   const trenchDepthFt = optionPositiveNumber(options, 'trenchDepthFt', cfg.defaultTrenchDepthFt || 1);
@@ -7135,7 +7145,9 @@ function priceTrenching(property = {}, options = {}, replay) {
     ...warrantyResolution.warnings,
   ];
   if (rateResolution.applicationRate === 'high') {
-    warningList.push('High/problem-soil rate increases chemical usage and requires label confirmation.');
+    warningList.push(volumeFactor < 1
+      ? 'High/problem-soil rate: the stronger dilution at a reduced finished volume, the same active ingredient per foot (label volume adjustment). Requires label confirmation.'
+      : 'High/problem-soil rate increases chemical usage and requires label confirmation.');
   }
   if (product.chemistryType === 'repellent_pyrethroid') {
     warningList.push('Repellent pyrethroid barrier; not equivalent to non-repellent fipronil.');
@@ -7272,17 +7284,20 @@ function priceTrenching(property = {}, options = {}, replay) {
   }
 
   const finishedGallonsPerLFPerFtDepth = (cfg.finishedGallonsPer10LFPerFtDepth || 4) / 10;
-  const dirtFinishedGallons = measurements.dirtLF * finishedGallonsPerLFPerFtDepth * trenchDepthFt;
-  const concreteFinishedGallons = measurements.concreteLF *
+  const labeledDirtGallons = measurements.dirtLF * finishedGallonsPerLFPerFtDepth * trenchDepthFt;
+  const labeledConcreteGallons = measurements.concreteLF *
     finishedGallonsPerLFPerFtDepth *
     trenchDepthFt *
     (1 + concreteVolumePadPct);
+  const dirtFinishedGallons = labeledDirtGallons * volumeFactor;
+  const concreteFinishedGallons = labeledConcreteGallons * volumeFactor;
   const finishedGallons = dirtFinishedGallons + concreteFinishedGallons;
   const productOz = finishedGallons * productOzPerFinishedGallon;
   const chemicalCostPerOz = containerCost / containerOz;
   const allocatedChemicalCost = productOz * chemicalCostPerOz;
   const includedProduct = cfg.products?.[cfg.defaultIncludedProductKey] || cfg.products?.[cfg.defaultProductKey] || product;
-  const includedChemicalCost = finishedGallons *
+  // The install price includes the included product at its standard rate over the labeled volume, a reduced volume or not.
+  const includedChemicalCost = (labeledDirtGallons + labeledConcreteGallons) *
     includedProduct.productOzPerFinishedGallonAtStandardRate *
     (includedProduct.containerCost / includedProduct.containerOz);
   const chemicalPremiumCost = Math.max(0, allocatedChemicalCost - includedChemicalCost);

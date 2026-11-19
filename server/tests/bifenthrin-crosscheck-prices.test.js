@@ -45,7 +45,8 @@ describe('LESCO Crosscheck Plus bifenthrin cost', () => {
     expect(prices('termidor_sc')).toEqual([1024, 2047, 4095, 1196, 2391, 4783]);
     expect(prices('taurus_sc')).toEqual([1000, 2000, 4000, 1148, 2297, 4593]);
     expect(trench('talstar_p', 'standard', 100).allocatedChemicalCost).toBe(4.83); // was 8.66 at 96 fl oz / $41.57
-    expect(trench('talstar_p', 'high', 400).allocatedChemicalCost).toBe(38.63); // was 69.28
+    // The label's high rate is 0.12% at half the volume: 80 oz for 400 LF, as at the standard rate (was 160 oz, $69.28 at the Talak cost).
+    expect(trench('talstar_p', 'high', 400)).toMatchObject({ finishedGallons: 40, productOz: 80, allocatedChemicalCost: 19.31 });
   });
 
   test('mosquito prices do not move: only cost and margin follow the bifenthrin figure', () => {

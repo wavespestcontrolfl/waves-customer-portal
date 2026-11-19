@@ -7,6 +7,25 @@
 const migration = require('../models/migrations/20261119020000_bifenthrin_option_crosscheck');
 const constants = require('../services/pricing-engine/constants');
 
+// The inventory price handler's recalculation (routes/admin-inventory recalcBestPrice), which Step P runs when the catalog best price
+// is not the SiteOne row's alone. Simulated on the fake rows, all 1 gal packs: the cheapest active, approved, unexpired row wins,
+// scaled to the catalog size, with its flags. The real one needs Postgres.
+jest.mock('../routes/admin-inventory', () => ({ recalcBestPrice: jest.fn() }));
+const inventory = require('../routes/admin-inventory');
+async function simulatedRecalc(productId, knex) {
+  const product = await knex('products_catalog').where({ id: productId }).first();
+  const now = Date.now();
+  const eligible = (await knex('vendor_pricing').where({ product_id: productId })).filter((v) => v.is_active === true
+    && v.approval_status === 'approved' && !(v.expires_at && new Date(v.expires_at).getTime() <= now));
+  const [best] = eligible.sort((a, b) => Number(a.price) - Number(b.price));
+  await knex('products_catalog').where({ id: productId }).update({
+    best_price: Math.round((Number(best.price) / 128) * Number(product.unit_size_oz) * 100) / 100, best_price_amount_cached: Number(best.price),
+    best_vendor_pricing_id: best.id, best_price_updated_at: new Date(), best_price_status: 'current', needs_pricing: false,
+  });
+  await knex('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
+  await knex('vendor_pricing').where({ id: best.id }).update({ is_best_price: true });
+}
+
 function fakeKnex(db) {
   let idSeq = 1000;
   const knex = (table) => {
@@ -136,7 +155,14 @@ let warn;
 beforeEach(() => {
   warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
   jest.spyOn(console, 'info').mockImplementation(() => {});
+  inventory.recalcBestPrice.mockReset();
+  inventory.recalcBestPrice.mockImplementation(simulatedRecalc);
 });
+// The recalculation ran for p1, on the migration's own connection (its transaction).
+const expectRecalculated = (knex, times = 1) => {
+  expect(inventory.recalcBestPrice).toHaveBeenCalledTimes(times);
+  expect(inventory.recalcBestPrice).toHaveBeenLastCalledWith('p1', knex);
+};
 afterEach(() => jest.restoreAllMocks());
 
 const snapshot = (db) => JSON.stringify(db);
@@ -219,6 +245,7 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
         best_price_status: 'current', needs_pricing: false, cost_per_unit: null, unit_size_oz: '128.00', container_size: '1 gal',
       });
       expect(db.products_catalog[0].best_price_updated_at.getTime()).toBeGreaterThan(STALE_AT.getTime());
+      expect(inventory.recalcBestPrice).not.toHaveBeenCalled(); // one SiteOne row backing the price: its result is written directly
       expect(db.price_history).toHaveLength(1);
       expect(db.price_history[0]).toMatchObject({ product_id: 'p1', vendor_id: 'ven1', price: 58.42, quantity: '1 gal', source: 'manual' });
 
@@ -267,30 +294,33 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(db.pricing_config_audit.map((r) => r.config_key).sort()).toEqual(['onetime_preslab', 'onetime_trenching']);
     });
 
-    test('two vendor rows: the stale SiteOne row is corrected, the catalog best price waits under the stale mark, both rows move', async () => {
+    // Pre-push audit 9: job costing reads the catalog best_price directly (calculateInventoryCost), so it must not keep $58.42.
+    test('two vendor rows: the stale SiteOne row is corrected, then the inventory recalculation picks the catalog best price', async () => {
       const db = world({ vendors: [vendorRow(), SECOND_VENDOR] });
       const knex = fakeKnex(db);
+      const pricedAtRecalc = [];
+      inventory.recalcBestPrice.mockImplementation(async (id, conn) => {
+        pricedAtRecalc.push((await conn('vendor_pricing').where({ id: 'v1' }).first()).price);
+        return simulatedRecalc(id, conn);
+      });
       await migration.up(knex);
       expect(db.vendor_pricing.map((v) => v.price)).toEqual([30.9, '70.00']);
       expect(db.vendor_pricing[0]).toMatchObject({ previous_price: 58.42, price_amount: 30.9, landed_cost: 30.9, price_per_oz: 0.2414 });
       expect(db.price_history).toHaveLength(1);
-      const warnings = warn.mock.calls.map((c) => c[0]).join('\n');
-      expect(warnings).toMatch(/catalog best price left alone: it does not have exactly one vendor row/);
-      expect(warnings).toMatch(STALE_WARNING);
-      expectMarked(db.products_catalog[0]);
+      expectRecalculated(knex);
+      expect(pricedAtRecalc).toEqual([30.9]);
+      expect(db.products_catalog[0]).toMatchObject({ best_price: 30.9, best_vendor_pricing_id: 'v1', needs_pricing: false, best_price_status: 'current' });
+      expect(warn.mock.calls.map((c) => c[0]).join('\n')).not.toMatch(/needs pricing/);
       bothRowsRewritten(db);
-      expect(auditKeys(db)).toEqual(['inventory:lesco_crosscheck_plus_price', 'inventory:lesco_crosscheck_plus_stale', 'onetime_preslab', 'onetime_trenching']);
+      expect(auditKeys(db)).toEqual(['inventory:lesco_crosscheck_plus_price', 'onetime_preslab', 'onetime_trenching']);
       const price = db.pricing_config_audit.find((r) => r.config_key === migration.CATALOG_AUDIT_KEY);
-      expect(Object.keys(JSON.parse(price.new_value))).toEqual(['vendor_pricing']);
-      const mark = db.pricing_config_audit.find((r) => r.config_key === migration.STALE_AUDIT_KEY);
-      expect(JSON.parse(mark.old_value)).toEqual([{
-        id: 'p1', needs_pricing: false, best_price_status: 'current',
-        seen: { best_price: '58.42', best_price_amount_cached: '58.4200', best_price_updated_at: STALE_AT.toISOString(), best_vendor_pricing_id: 'v1', unit_size_oz: '128.00' },
-      }]);
-      expect(JSON.parse(db.pricing_changelog[0].after_value).bifenthrin).toMatch(/marked needs pricing \(stale\)/);
+      expect(JSON.parse(price.new_value).catalog_recalculated).toMatchObject({ best_price: 30.9, best_vendor_pricing_id: 'v1', needs_pricing: false });
+      expect(JSON.parse(price.old_value).catalog_seen).toMatchObject({ best_price: '58.42', best_vendor_pricing_id: 'v1' });
+      expect(JSON.parse(db.pricing_changelog[0].after_value).bifenthrin).not.toMatch(/marked needs pricing/);
       const after = snapshot(db);
       await migration.up(knex);
       expect(snapshot(db)).toBe(after); // a re-run is a no-op
+      expect(inventory.recalcBestPrice).toHaveBeenCalledTimes(1);
     });
 
     test('the same item number at another vendor too: only the SiteOne row is corrected; the other quote keeps its price', async () => {
@@ -298,10 +328,10 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       const db = world({ vendors: [vendorRow(), elsewhere] });
       await migration.up(fakeKnex(db));
       expect(db.vendor_pricing.map((v) => v.price)).toEqual([30.9, '58.42']);
-      expect(db.vendor_pricing[1]).toEqual(elsewhere);
+      expect({ ...db.vendor_pricing[1], is_best_price: false }).toEqual(elsewhere); // only the recalculation's winner flag moves
       expect(db.price_history).toHaveLength(1);
       expect(db.price_history[0]).toMatchObject({ vendor_id: 'ven1' });
-      expectMarked(db.products_catalog[0]);
+      expect(db.products_catalog[0]).toMatchObject({ best_price: 30.9, best_vendor_pricing_id: 'v1', needs_pricing: false, best_price_status: 'current' });
       bothRowsRewritten(db);
     });
 
@@ -328,7 +358,7 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
     });
 
     test('marked: the admin seed moves like the Talak rows; a row with no bifenthrin product anywhere is left alone with a warning', async () => {
-      const db = world({ preslab: preslabRow(SEED_PRESLAB, SEED_PRESLAB), trench: { floor: 600 }, vendors: [vendorRow(), SECOND_VENDOR] });
+      const db = world({ preslab: preslabRow(SEED_PRESLAB, SEED_PRESLAB), trench: { floor: 600 }, vendors: [vendorRow({ shipping_cost: '5.00' })] });
       await migration.up(fakeKnex(db));
       for (const option of OPTIONS) expect(productOf(db, 'onetime_preslab', option)).toEqual(PRESLAB_REWRITTEN);
       expect(rowOf(db, 'onetime_trenching')).toEqual({ floor: 600 });
@@ -406,27 +436,23 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       bothRowsRewritten(db);
     });
 
-    // The SiteOne row is still the stale entry, but the catalog best price needs the recalculation's own winner rules: the row is
-    // corrected like the handler does (no later recalculation can pick $58.42 again), and the catalog row waits under the stale mark
-    // whatever price it holds: the corrected row may now be the cheapest, and only the recalculation picks the winner.
+    // The SiteOne row is still the stale entry, but the catalog best price is not that row's alone: the row is corrected like the
+    // handler does, and the handler's own recalculation then picks the winner from current prices (here the corrected row).
     test.each([
       ['a winner that is not the vendor row', { catalog: [catalogRow({ best_vendor_pricing_id: 'other' })] }],
       ['a winner at another vendor\'s price', OTHER_WINNER_WORLD],
       ['an inactive product', { catalog: [catalogRow({ active: false })] }],
       ['a catalog size that is not 128 oz', { catalog: [catalogRow({ unit_size_oz: '96.00' })] }],
-    ])('%s: the SiteOne row is corrected and the catalog row waits, marked, for the next recalculation', async (_name, overrides) => {
+    ])('%s: the SiteOne row is corrected and the inventory recalculation picks the catalog best price', async (_name, overrides) => {
       const db = world(overrides);
-      const catalogBefore = { ...db.products_catalog[0] };
-      await migration.up(fakeKnex(db));
+      const knex = fakeKnex(db);
+      await migration.up(knex);
       expect(db.vendor_pricing[0]).toMatchObject({ previous_price: 58.42, price: 30.9, price_amount: 30.9, landed_cost: 30.9, price_per_oz: 0.2414 });
       expect(db.price_history).toHaveLength(1);
-      expect(db.products_catalog[0]).toMatchObject({
-        best_price: catalogBefore.best_price, best_price_updated_at: catalogBefore.best_price_updated_at, needs_pricing: true, best_price_status: 'stale',
-      });
-      const warnings = warn.mock.calls.map((c) => c[0]).join('\n');
-      expect(warnings).toMatch(/catalog best price left alone/);
-      expect(warnings).toMatch(STALE_WARNING);
-      expect(auditKeys(db)).toContain('inventory:lesco_crosscheck_plus_stale');
+      expectRecalculated(knex);
+      expect(db.products_catalog[0]).toMatchObject({ best_vendor_pricing_id: 'v1', needs_pricing: false, best_price_status: 'current' });
+      expect(warn.mock.calls.map((c) => c[0]).join('\n')).not.toMatch(/needs pricing/);
+      expect(auditKeys(db)).not.toContain('inventory:lesco_crosscheck_plus_stale');
       bothRowsRewritten(db);
     });
 
@@ -542,9 +568,11 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(await linkedQuotes(db)).toEqual([743, 743]);
     });
 
-    // The hold's world: Step P blocked by a second vendor row, the Crosscheck Plus row still at 58.42, the Talak row as production.
+    // The hold's world: Step P must leave the SiteOne row (shipping: its landed cost would need it), so the Crosscheck Plus row still
+    // holds 58.42; the Talak row as production.
+    const HELD_SITEONE = vendorRow({ shipping_cost: '5.00' });
     const heldWorld = (extra = {}) => world({
-      catalog: [catalogRow(), talakCatalogRow()], vendors: [vendorRow(), SECOND_VENDOR, talakVendorRow()], ...extra,
+      catalog: [catalogRow(), talakCatalogRow()], vendors: [HELD_SITEONE, SECOND_VENDOR, talakVendorRow()], ...extra,
     });
 
     test('through the bridge with the catalog link: marked, the stale $58.42 stays out of slab quotes ($743 from the config, never $1,023)', async () => {
@@ -564,7 +592,7 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       ['a row with no products at all', (db) => { db.pricing_config[0].data = JSON.stringify({ link_container_costs_to_catalog: true }); }, [743, 743]],
       ['no pre-slab row', (db) => { db.pricing_config.shift(); }, [743, 743]],
     ])('through the bridge with the catalog link: marked, %s never quotes the stale price', async (_name, shape, quotes) => {
-      const db = world({ vendors: [vendorRow(), SECOND_VENDOR] });
+      const db = world({ vendors: [HELD_SITEONE] });
       shape(db);
       await migration.up(fakeKnex(db));
       expectMarked(db.products_catalog[0]);
@@ -574,14 +602,12 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(await linkedQuotes(db)).toEqual([1023, 1023]);
     });
 
-    test('through the bridge with the catalog link: a winner at another vendor\'s price is marked, so quotes take the config ($743)', async () => {
+    test('through the bridge with the catalog link: under another vendor\'s winner, the recalculation picks the corrected row ($743)', async () => {
       const db = world(OTHER_WINNER_WORLD);
+      expect((await linkedQuotes(db))[0]).toBeGreaterThan(743); // the old winner's $45.00
       await migration.up(fakeKnex(db));
-      expect(db.products_catalog[0]).toMatchObject({ best_price: '45.00', needs_pricing: true, best_price_status: 'stale' });
+      expect(db.products_catalog[0]).toMatchObject({ best_price: 30.9, best_vendor_pricing_id: 'v1', needs_pricing: false, best_price_status: 'current' });
       expect(await linkedQuotes(db)).toEqual([743, 743]);
-      // The mark is what keeps it out: lifted, the link takes the old winner's $45.00 over the corrected $30.90.
-      Object.assign(db.products_catalog[0], { needs_pricing: false, best_price_status: 'current' });
-      expect((await linkedQuotes(db))[0]).toBeGreaterThan(743);
     });
 
     test('through the bridge: marked, the stale price stays out of the mosquito bifenthrin cost too (code 30.90 / 128)', async () => {
@@ -734,74 +760,34 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(db.pricing_config_audit).toEqual([]);
     });
 
-    test('after an up() that corrected the SiteOne row and marked the catalog stale, down() restores the rows, the price and the mark', async () => {
-      const db = world({ vendors: [vendorRow(), SECOND_VENDOR] });
+    // up() ran the recalculation, so down() restores the vendor row and its history and runs it again: the catalog follows the rows.
+    test('after an up() that recalculated the catalog, down() restores the SiteOne row and recalculates: the old winner returns', async () => {
+      const db = world(OTHER_WINNER_WORLD);
       const original = JSON.stringify(db.pricing_config);
-      const inventoryBefore = JSON.stringify([db.vendor_pricing, db.products_catalog]);
+      const vendorsBefore = JSON.stringify(db.vendor_pricing);
       const knex = fakeKnex(db);
       await migration.up(knex);
-      expectMarked(db.products_catalog[0]);
-      expect(db.vendor_pricing[0].price).toBe(30.9);
+      expect(db.products_catalog[0]).toMatchObject({ best_price: 30.9, best_vendor_pricing_id: 'v1' });
       await migration.down(knex);
+      expectRecalculated(knex, 2);
       expect(db.pricing_config.map((r) => JSON.parse(r.data))).toEqual(JSON.parse(original).map((r) => JSON.parse(r.data)));
-      expect(JSON.stringify([db.vendor_pricing, db.products_catalog])).toBe(inventoryBefore);
+      expect(JSON.stringify(db.vendor_pricing)).toBe(vendorsBefore);
+      expect(db.products_catalog[0]).toMatchObject({ best_price: 45, best_vendor_pricing_id: 'other', needs_pricing: false, best_price_status: 'current' });
       expect(db.price_history).toEqual([]);
       expect(db.pricing_config_audit).toEqual([]);
       expect(db.pricing_changelog).toEqual([]);
     });
 
-    test('after a vendor-only Step P on a 96 oz catalog row, down() restores the vendor row and its history; a recalculation since keeps them', async () => {
-      const db = world({ catalog: [catalogRow({ unit_size_oz: '96.00' })] });
-      const inventoryBefore = JSON.stringify([db.vendor_pricing, db.products_catalog]);
-      const knex = fakeKnex(db);
-      await migration.up(knex);
-      expect(db.vendor_pricing[0].price).toBe(30.9);
-      expect(db.price_history).toHaveLength(1);
-      await migration.down(knex);
-      expect(JSON.stringify([db.vendor_pricing, db.products_catalog])).toBe(inventoryBefore);
-      expect(db.price_history).toEqual([]);
-      expect(db.pricing_config_audit).toEqual([]);
-
-      await migration.up(knex);
-      Object.assign(db.products_catalog[0], { best_price: '30.90', best_price_updated_at: new Date('2026-11-20T15:00:00.000Z') });
-      await migration.down(knex);
-      expect(db.vendor_pricing[0].price).toBe(30.9);
-      expect(warn.mock.calls.map((c) => c[0]).join('\n')).toMatch(/down: the LESCO Crosscheck Plus price changed since this migration - leaving it alone/);
-    });
-
-    test('after a vendor-only Step P under another vendor\'s winner, down() lifts the mark and restores the row; a recalculation since keeps both', async () => {
-      const db = world(OTHER_WINNER_WORLD);
-      const inventoryBefore = JSON.stringify([db.vendor_pricing, db.products_catalog]);
-      const knex = fakeKnex(db);
-      await migration.up(knex);
-      expect(db.products_catalog[0]).toMatchObject({ needs_pricing: true, best_price_status: 'stale' });
-      await migration.down(knex);
-      expect(JSON.stringify([db.vendor_pricing, db.products_catalog])).toBe(inventoryBefore);
-      expect(db.price_history).toEqual([]);
-      expect(db.pricing_config_audit).toEqual([]);
-
-      await migration.up(knex);
-      // A recalculation read the corrected row: it won, and the mark stays until the next one clears it.
-      Object.assign(db.products_catalog[0], { best_price: '30.90', best_vendor_pricing_id: 'v1', best_price_updated_at: new Date('2026-11-20T15:00:00.000Z') });
-      await migration.down(knex);
-      expect(db.vendor_pricing[0].price).toBe(30.9);
-      expect(db.products_catalog[0]).toMatchObject({ best_price: '30.90', needs_pricing: true, best_price_status: 'stale' });
-      const warnings = warn.mock.calls.map((c) => c[0]).join('\n');
-      expect(warnings).toMatch(/down: the LESCO Crosscheck Plus price changed since this migration - leaving it alone/);
-      expect(warnings).toMatch(/down: the LESCO Crosscheck Plus catalog row p1 changed since this migration - leaving its mark alone/);
-    });
-
-    test('a recalculation after the stale mark (it read the corrected row and cleared the mark) is kept by down(), row and catalog', async () => {
+    test('after a recalculating up(), a price entered on the SiteOne row since is kept by down(), and nothing recalculates', async () => {
       const db = world({ vendors: [vendorRow(), SECOND_VENDOR] });
       const knex = fakeKnex(db);
       await migration.up(knex);
-      Object.assign(db.products_catalog[0], { best_price: '30.90', needs_pricing: false, best_price_status: 'current' });
+      db.vendor_pricing[0] = { ...db.vendor_pricing[0], price: 29.99, price_amount: 29.99 };
       await migration.down(knex);
-      expect(db.products_catalog[0]).toMatchObject({ best_price: '30.90', needs_pricing: false, best_price_status: 'current' });
-      expect(db.vendor_pricing[0].price).toBe(30.9);
-      const warnings = warn.mock.calls.map((c) => c[0]).join('\n');
-      expect(warnings).toMatch(/down: the LESCO Crosscheck Plus price changed since this migration - leaving it alone/);
-      expect(warnings).toMatch(/catalog row p1 changed since this migration - leaving its mark alone/);
+      expect(db.vendor_pricing[0].price).toBe(29.99);
+      expect(db.price_history).toHaveLength(1);
+      expect(inventory.recalcBestPrice).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls.map((c) => c[0]).join('\n')).toMatch(/down: the LESCO Crosscheck Plus price changed since this migration - leaving it alone/);
     });
 
     test('with one key rewritten and the other an admin edit, down() restores only the rewritten key', async () => {

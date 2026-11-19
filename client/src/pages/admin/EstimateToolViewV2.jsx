@@ -141,9 +141,11 @@ const productToken = (value) => String(value).trim().toLowerCase().replace(/[\s/
 // Each termiticide product field and the label check made for the product it selects.
 const LABEL_CHECKS = [
   { productField: "preslabProductKey", checkField: "preslabLabelConfirmed", name: "pre-slab", resolve: normalizePreSlabProductKey, keepAsSaved: PRE_SLAB_INGREDIENT_NAMES },
-  { productField: "trenchingProductKey", checkField: "trenchingLabelConfirmed", name: "trenching", resolve: normalizeTrenchingProductKey },
+  // The trenching box confirms the label rate and trench depth too ("Label rate and trench depth confirmed").
+  { productField: "trenchingProductKey", checkField: "trenchingLabelConfirmed", name: "trenching", resolve: normalizeTrenchingProductKey, alsoConfirms: ["trenchingApplicationRate", "trenchingDepthFt"] },
 ];
-const LABEL_CHECK_FOR_PRODUCT = Object.fromEntries(LABEL_CHECKS.map(({ productField, checkField }) => [productField, checkField]));
+const LABEL_CHECK_FOR_FIELD = Object.fromEntries(LABEL_CHECKS.flatMap(({ productField, checkField, alsoConfirms = [] }) =>
+  [productField, ...alsoConfirms].map((field) => [field, checkField])));
 
 // A saved alias ("talak", "Crosscheck Plus") becomes its option key, so the picker shows the product the engine prices and the label
 // panel shows that product's warning. A blank or unrecognized value, or a pre-slab ingredient name, is left as saved.
@@ -2716,8 +2718,9 @@ export default function EstimateToolViewV2({
         ...(key === "trenchingPerimeterLF" ? { _trenchingPerimeterAuto: false } : {}),
         ...(key === "boracareSqft" ? { _boracareSqftAuto: false } : {}),
         ...(key === "preslabSqft" ? { _preslabSqftAuto: false } : {}),
-        // A label check is for the product chosen when it was ticked: choosing another product clears it.
-        ...(LABEL_CHECK_FOR_PRODUCT[key] ? { [LABEL_CHECK_FOR_PRODUCT[key]]: false } : {}),
+        // A label check is for what its box confirmed when it was ticked (the product; for trenching also the rate and depth):
+        // changing one clears it.
+        ...(LABEL_CHECK_FOR_FIELD[key] ? { [LABEL_CHECK_FOR_FIELD[key]]: false } : {}),
         // palmCount ONLY: the auto flag tracks the PROPERTY count's
           // provenance — a treatment-count edit says nothing about it, and
           // flipping the flag there would leave a stale property prefill

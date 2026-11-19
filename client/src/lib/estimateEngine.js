@@ -1482,6 +1482,7 @@ const TRENCHING_TERMITICIDE_PRODUCTS = {
     containerOz: 128,
     standardOzPerGal: 1.0,
     highOzPerGal: 2.0,
+    highRateReducesVolume: true, // mirrors SPECIALTY.trenching: 0.12% only at half the 0.06% volume (label)
     warning: 'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Do not attach long repair-and-retreat warranty without admin approval.',
   },
   talstar_p: {
@@ -1494,6 +1495,7 @@ const TRENCHING_TERMITICIDE_PRODUCTS = {
     containerOz: 128,
     standardOzPerGal: 1.0,
     highOzPerGal: 2.0,
+    highRateReducesVolume: true, // mirrors SPECIALTY.trenching: 0.12% only at half the 0.06% volume (label)
     warning: 'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Do not attach long repair-and-retreat warranty without admin approval.',
   },
 };
@@ -3148,14 +3150,19 @@ export function calculateEstimate(inputs) {
       const applicationRate = normalizeTrenchingRate(trenchingApplicationRate);
       const depth = toPositiveNumber(trenchingDepthFt) || 0.5;
       const concretePad = 0.20;
-      const dirtFinishedGallons = dl * 0.4 * depth;
-      const concreteFinishedGallons = cl * 0.4 * depth * (1 + concretePad);
+      const labeledDirtGallons = dl * 0.4 * depth;
+      const labeledConcreteGallons = cl * 0.4 * depth * (1 + concretePad);
+      // Mirrors server priceTrenching: a label that allows its high-rate dilution only at a reduced volume (the bifenthrin
+      // bottles) gets the volume cut in proportion; the included chemistry stays the labeled volume.
+      const volumeFactor = applicationRate === 'high' && product.highRateReducesVolume ? product.standardOzPerGal / product.highOzPerGal : 1;
+      const dirtFinishedGallons = labeledDirtGallons * volumeFactor;
+      const concreteFinishedGallons = labeledConcreteGallons * volumeFactor;
       const finishedGallons = dirtFinishedGallons + concreteFinishedGallons;
       const productOzPerFinishedGallon = applicationRate === 'high' ? product.highOzPerGal : product.standardOzPerGal;
       const productOz = finishedGallons * productOzPerFinishedGallon;
       const allocatedChemicalCost = productOz * (product.containerCost / product.containerOz);
       const included = TRENCHING_TERMITICIDE_PRODUCTS.taurus_sc;
-      const includedChemicalCost = finishedGallons * included.standardOzPerGal * (included.containerCost / included.containerOz);
+      const includedChemicalCost = (labeledDirtGallons + labeledConcreteGallons) * included.standardOzPerGal * (included.containerCost / included.containerOz);
       const chemicalPremiumCost = Math.max(0, allocatedChemicalCost - includedChemicalCost);
       const productSurcharge = Math.round(chemicalPremiumCost * 1.45);
       // Depth + high-rate install premiums (mirror of server SPECIALTY.trenching:
