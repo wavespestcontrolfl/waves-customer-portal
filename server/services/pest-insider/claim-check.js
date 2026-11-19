@@ -65,7 +65,7 @@ const FREQUENCY_ADVERB = {
 // with a number they still pair as units (quantityPairs).
 const MEASURE_UNITS = new Set(['second', 'minute', 'hour', 'day', 'week', 'month', 'year', 'decade', 'century', 'inch', 'foot', 'mile', 'meter',
   'millimeter', 'centimeter', 'kilometer', 'degree', 'pound', 'ounce', 'gallon', 'quart', 'acre', 'generation', 'lifetime']);
-const TIME_OF_DAY = new Set(['morning', 'afternoon', 'evening', 'night', 'nighttime', 'daytime', 'daylight', 'dawn', 'dusk', 'sunrise', 'sunset',
+const TIME_OF_DAY = new Set(['morning', 'afternoon', 'evening', 'night', 'nighttime', 'daytime', 'daylight', 'predawn', 'dawn', 'dusk', 'sunrise', 'sunset',
   'midnight', 'noon', 'overnight', 'tonight']);
 const ORDINALS = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10 };
 const MULTIPLES = { single: 1, double: 2, doubles: 2, doubled: 2, twofold: 2, triple: 3, triples: 3, tripled: 3, threefold: 3, quadruple: 4 };

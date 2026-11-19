@@ -1,4 +1,5 @@
 // Pest Insider fact bank + identifier species: the data every issue is written from.
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const bank = require('../data/pest-insider-facts-v1.json');
@@ -8,6 +9,34 @@ const { SPECIES, identifierSpecies } = require('../services/pest-insider/plan');
 const { getEntry, listEntries } = require('../services/species-catalog');
 
 const SERVICES = ['pest', 'lawn', 'tree_shrub', 'mosquito', 'termite', 'rodent'];
+
+// Every entry is reviewed copy: its title, statement and lead lines print,
+// and its statement and quotes are the evidence the copy check reads. The
+// check binds a lead line to one source unit, and a statement part is one,
+// so a number changed in both the statement and the lead (R02's 12 days to
+// 42, pre-push round 16) still passes it. So each entry is pinned here by a
+// hash of its whole content: any edit fails 'every entry matches the hash of
+// its reviewed content' until someone re-reads that entry against its quotes
+// and records the new hash.
+const canonicalJson = (v) => (Array.isArray(v) ? `[${v.map(canonicalJson).join(',')}]`
+  : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(v[k])}`).join(',')}}`
+    : JSON.stringify(v));
+const reviewHash = (fact) => crypto.createHash('sha256').update(canonicalJson(fact)).digest('hex').slice(0, 16);
+const REVIEWED_HASHES = {
+  L01: '0443374805e0a37a', L02: 'eb65cc66bf973bb4', L03: '6bf52f0dd9215801', L04: '3e80c9b5c5f30858',
+  L05: '71c78c8c46f848e8', L06: '9bb3c05e479849f0', L07: '7ce0ed9167a63ffa', L08: '0b61c3e38ba1a928',
+  L09: 'f347bb2a6e0dfdf6', L10: '08cbc987d612a37b', L11: '8d1fb221a6d7b884', L12: '1299593dc7c71142',
+  O01: '85a67a6c201596a5', O02: '3331a185800c6d6f', O03: '099df9c2695b1fbb', O04: '236371ee1ff3fd38',
+  P01: '2c26c35172a9eb27', P02: 'db9248517d1d2581', P03: '36acfc62f0ffca79', P04: 'a2e45cb6e7cc6042',
+  P05: 'ae20ff04ac9ead00', P06: 'ab2846db3a830bc7', M01: '098922ea0b050950', M02: 'b743a1fc12158d94',
+  M03: '89a2eca65f1116b5', M04: '456066f83313a8c5', T01: '6ac42f09c95473b5', T02: '38288b7d3c330d4c',
+  T03: '06f4c9f340c3978c', T04: 'fc383a094bbedd07', A01: 'ff2d76ddd5cfeb74', A02: '5f49cdcb70a09555',
+  R01: 'e4c0aabc5d07d6c2', R02: '36ad3cd51a0d9358', R03: '8659e5c2b3163792', D01: '5d5189b5d13aca40',
+  D02: '118e4a41dee14132', D03: '6481660e05756908', S01: '98799458fc47a0e0', S02: '2bab2ea15d8037f1',
+  X01: 'd03e3a91e8df2df3', X02: '071b02310132d221', X03: '0102e1cf5917f772', X04: '6f864c0a8959d708',
+  X05: 'bfa5e45c106ee7af', X06: '66472b0218a2592a', X07: '97c3009c452be7c0', X08: '38d0190c37ff3733',
+  X09: '64369a03083c8533', X10: '4961da3c7100e875', X11: '57b7bb98b9a5100f',
+};
 
 describe('fact bank', () => {
   const main = bank.facts.filter((f) => !f.reserve);
@@ -44,12 +73,27 @@ describe('fact bank', () => {
     }
   });
 
-  test('the six send-time rechecks, the O04 expiry and the O02 scope note are set', () => {
+  test('the seven send-time rechecks, the O04 expiry and the O02 scope note are set', () => {
     const flagged = bank.facts.filter((f) => f.recheck_before_send).map((f) => f.id).sort();
-    expect(flagged).toEqual(['D02', 'D03', 'L04', 'M01', 'M02', 'O04']);
+    // L02 and L04 quote the water district page for their local-rules line
+    expect(flagged).toEqual(['D02', 'D03', 'L02', 'L04', 'M01', 'M02', 'O04']);
     expect(bank.facts.find((f) => f.id === 'O04').expires_on).toBe('2027-03-31');
     expect(bank.facts.filter((f) => f.expires_on)).toHaveLength(1);
     expect(bank.facts.find((f) => f.id === 'O02').scope_note).toMatch(/Sarasota County/);
+  });
+
+  test('every entry matches the hash of its reviewed content', () => {
+    expect(Object.keys(REVIEWED_HASHES).sort()).toEqual(bank.facts.map((f) => f.id).sort());
+    const changed = bank.facts.filter((f) => reviewHash(f) !== REVIEWED_HASHES[f.id]).map((f) => f.id);
+    expect(changed).toEqual([]);
+  });
+
+  test('a number swapped in both the statement and the lead fails the pin (pre-push round 16)', () => {
+    const r02 = bank.facts.find((f) => f.id === 'R02');
+    const swap = (t) => t.replace('only 12 days', 'only 42 days');
+    const edited = { ...r02, statement: swap(r02.statement), lead: r02.lead.map(swap) };
+    expect(edited.statement).not.toBe(r02.statement);
+    expect(reviewHash(edited)).not.toBe(REVIEWED_HASHES.R02);
   });
 
   test('every quote is a verbatim line from the source notes when the notes are on this machine', () => {

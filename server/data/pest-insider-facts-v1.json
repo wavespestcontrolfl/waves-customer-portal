@@ -59,19 +59,20 @@
     {
       "id": "L02",
       "title": "Water when the grass asks",
-      "statement": "UF says water only when the grass shows thirst: blades fold in half, color turns blue-gray, and footprints stay visible.",
+      "statement": "UF says water only when the grass shows thirst: blades fold in half, color turns blue-gray, and footprints stay visible; water only on the days and at the times your city or county allows.",
       "lead": [
         "University of Florida guidelines call for watering lawns only as needed, when the grass shows signs of thirst.",
         "Leaf blades are folded in half lengthwise in an attempt to conserve water.",
-        "The grass takes on a blue-gray tint rather than maintaining a green color.",
-        "Footprints or tire tracks remain visible on the grass long after they are made."
+        "The grass turns blue-gray, and footprints or tire tracks stay visible long after they are made.",
+        "Water only on the days and at the times your city or county allows."
       ],
       "quotes": [
         "Ideally, University of Florida guidelines call for watering lawns on an \"as-needed\" basis.",
         "Leaf blades are folded in half lengthwise in an attempt to conserve water",
         "The grass takes on a blue-gray tint rather than maintaining a green color.",
         "Footprints or tire tracks remain visible on the grass long after they are made.",
-        "Light, frequent watering is inefficient and encourages shallow root systems."
+        "Light, frequent watering is inefficient and encourages shallow root systems.",
+        "Residents should check with their city or county for their allowable day and times"
       ],
       "sources": [
         {
@@ -80,6 +81,13 @@
           "pub_id": "LH025 (ENH9)",
           "url": "https://edis.ifas.ufl.edu/publication/LH025/pdf",
           "date_text": "Revised April 2013; reviewed 10/2025"
+        },
+        {
+          "publisher": "SWFWMD",
+          "title": "Modified Phase III 'Extreme' Water Shortage Restrictions",
+          "pub_id": null,
+          "url": "https://www.swfwmd.state.fl.us/conservation/restrictions/swfwmd.php",
+          "date_text": "read 2026-11-19"
         }
       ],
       "months": [
@@ -96,12 +104,14 @@
       "kind": "plant",
       "confidence": "high",
       "notes": "",
+      "recheck_before_send": true,
       "quote_sources": [
         0,
         0,
         0,
         0,
-        0
+        0,
+        1
       ]
     },
     {
@@ -151,15 +161,17 @@
     {
       "id": "L04",
       "title": "Water inside the dew window",
-      "statement": "Watering in the evening before dew forms, or in the morning after it dries, keeps grass wet longer; watering while dew is already on the grass lowers the risk of disease.",
+      "statement": "Watering in the evening before dew forms, or in the morning after it dries, keeps grass wet longer; watering while dew is already on the grass lowers the risk of disease; dew is usually present in the predawn hours; water only on the days and at the times your city or county allows.",
       "lead": [
         "UF/IFAS says watering in the evening before dew forms, or in the morning after it dries, keeps grass wet longer.",
         "To lower the risk of lawn disease, UF/IFAS suggests watering while dew is already on the grass.",
-        "Dew is usually present in the predawn hours, between 2 and 8 a.m."
+        "Dew is usually present in the predawn hours.",
+        "Water only on the days and at the times your city or county allows."
       ],
       "quotes": [
         "Irrigating in the evening before dew forms or in the morning after dew evaporates extends the dew period. One strategy to reduce the risk of disease development is to irrigate when dew is already present. Dew is usually present in the predawn hours, between 2 and 8 a.m.",
-        "Properties one acre or larger may only water before 4 a.m. and after 8 p.m."
+        "Properties one acre or larger may only water before 4 a.m. and after 8 p.m.",
+        "Residents should check with their city or county for their allowable day and times"
       ],
       "sources": [
         {
@@ -191,6 +203,7 @@
       "recheck_before_send": true,
       "quote_sources": [
         0,
+        1,
         1
       ]
     },
