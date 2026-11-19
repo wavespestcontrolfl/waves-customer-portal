@@ -60,7 +60,18 @@ const NOTICE_PURPOSES = ['appointment_confirmation', 'appointment_reminder_72h',
 // covered by the LIKE 'rain_out_moved%' clause; 'manual' call-requested
 // acks, prep-info texts, the recurring welcome text, and recipient-optin
 // requests never quote a specific arrival slot and must stay excluded).
+// Quick Move's "let the customer pick a day" text (rain-out.js
+// handOffToCustomer, PICK_TEMPLATE_KEY rain_out_customer_pick_v1, added
+// after that grep) supersedes too: it tells the customer the visit is moved
+// and parks the row windowless until they pick. It quotes no slot, so it is
+// read as an unknown window (PICK_HANDOFF_MESSAGE_TYPE_PREFIX below), and its
+// event carries `withdrawn: true`: the old time is taken back and no new one
+// is told. The night told-lock does not count a withdrawn latest promise
+// (auto-dispatch/told-visits.js loadToldVisitIds), because the text tells the
+// customer the night run books the visit if they do not pick.
 const LEGACY_SCHEDULING_MESSAGE_TYPES = ['reschedule_series_confirmation', 'confirmation'];
+// Every version of the pick template (the key carries a _vN suffix).
+const PICK_HANDOFF_MESSAGE_TYPE_PREFIX = 'rain_out_customer_pick';
 // email_messages.status values that mean the recipient actually got it —
 // webhooks-sendgrid.js's own vocabulary. 'processed'/'sent' are SendGrid's
 // accept states, 'delivered' its confirmation, and the last three are
@@ -251,10 +262,13 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // the other predicates fetch it. Left unread, the reader would fall back to an OLDER known window (the trap
       // the LEGACY_SCHEDULING_MESSAGE_TYPES note describes) and keep enforcing a window the visit no longer holds.
       // Only the day-only senders write the marker (services/time-promise.js DAY_PROMISE_META).
+      // The pick hand-off text is the same trap: left unread, the 24-hour reminder's old window stayed the latest
+      // promise and the office got a critical "promised arrival" card for a visit the customer was told had moved.
       .whereRaw(`(a.purpose = ANY(?::text[]) OR (a.purpose = 'appointment' AND
         (a.metadata->>'rendered_slot_ms' IS NOT NULL OR a.metadata->>'original_message_type' LIKE 'rain_out_moved%'
           OR a.metadata->>'original_message_type' = ANY(?::text[])
-          OR a.metadata->>'promise_level' = 'day')))`, [NOTICE_PURPOSES, LEGACY_SCHEDULING_MESSAGE_TYPES])
+          OR a.metadata->>'original_message_type' LIKE ?
+          OR a.metadata->>'promise_level' = 'day')))`, [NOTICE_PURPOSES, LEGACY_SCHEDULING_MESSAGE_TYPES, `${PICK_HANDOFF_MESSAGE_TYPE_PREFIX}%`])
       .where('a.sent_at', '<=', now).whereNull('a.blocked_code').whereNull('a.provider_error')
       // Live delivery state comes from the sms_log row Twilio's status
       // callback updates. A LINKED row must currently read sent/delivered/
@@ -642,9 +656,13 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   // day promise like an unknown window: no no-show alert until the 24-hour text records the real window. An
   // unmarked row gets no `level` key at all, so every existing event keeps its exact shape.
   const levelOf = (metadata) => (metadata?.promise_level === 'day' ? { level: 'day' } : {});
+  // The pick hand-off text (PICK_HANDOFF_MESSAGE_TYPE_PREFIX): `withdrawn: true`. Every other event keeps its exact shape.
+  const withdrawnOf = (metadata) => (String(metadata?.original_message_type || '').startsWith(PICK_HANDOFF_MESSAGE_TYPE_PREFIX)
+    ? { withdrawn: true } : {});
   const noticeEvents = [
     ...messages.map((r) => ({ visit_id: r.appointment_id || r.metadata?.scheduled_service_id,
-      start_at: slotOf(r.metadata), ...levelOf(r.metadata), tier: reminderTier(r.purpose || r.metadata?.original_message_type),
+      start_at: slotOf(r.metadata), ...levelOf(r.metadata), ...withdrawnOf(r.metadata),
+      tier: reminderTier(r.purpose || r.metadata?.original_message_type),
       // notificationEventKey is the visit-effect claim the GROUPED send was
       // made under (appointment-reminders.js): it marks copy that speaks for
       // the whole stop, not just this member's own service.
@@ -1109,8 +1127,17 @@ function stopPromise(members = [], eventsByVisit = new Map(), now = new Date()) 
   // that copy spoke for the whole stop.
   const awaited = members.filter((member) => LIVE_STATUSES.includes(member.status)
     || ATTENDED_STATUSES.includes(member.status));
-  const held = awaited.map((member) => latestPromises(eventsOf(member), now).get(String(member.id)))
+  const latestHeld = awaited.map((member) => latestPromises(eventsOf(member), now).get(String(member.id)))
     .filter(Boolean);
+  // A withdrawn promise (the pick hand-off text, `withdrawn: true`) speaks for the one service it named: a service
+  // that joins a stop after its hand-off never takes back a sibling's time. It stands for the stop only when no
+  // candidate is left but withdrawals (still an unknown window there: no card, and the levels reader fails closed).
+  // It still REPLACES a grouped send for its own service below: that member no longer holds the grouped window.
+  const withoutWithdrawn = (list) => {
+    const kept = list.filter((promise) => promise.withdrawn !== true);
+    return kept.length ? kept : list;
+  };
+  const held = withoutWithdrawn(latestHeld);
   // Anything communicated BEFORE the newest grouped send is gone: that send
   // quoted one window for every member, so a member's older per-service
   // confirmation no longer stands even if another member's confirmation came
@@ -1129,10 +1156,10 @@ function stopPromise(members = [], eventsByVisit = new Map(), now = new Date()) 
   // round 24, fifth and sixth passes).
   if (!held.length && !newestGrouped) return null;
   const after = newestGrouped
-    ? held.filter((promise) => instant(promise.communicated_at) > instant(newestGrouped.communicated_at)) : [];
+    ? latestHeld.filter((promise) => instant(promise.communicated_at) > instant(newestGrouped.communicated_at)) : [];
   const replaced = new Set(after.map((promise) => String(promise.visit_id)));
   const stillHolding = newestGrouped && awaited.some((member) => !replaced.has(String(member.id)));
-  const own = newestGrouped ? [...(stillHolding ? [newestGrouped] : []), ...after] : held;
+  const own = newestGrouped ? withoutWithdrawn([...(stillHolding ? [newestGrouped] : []), ...after]) : held;
   if (!own.length) return null;
   // An UNKNOWN window still wins when it is the newest thing the customer
   // heard: that is the legacy move-notice rule — coverage became unknown and
