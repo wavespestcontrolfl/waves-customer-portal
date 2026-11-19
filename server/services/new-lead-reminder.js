@@ -18,11 +18,13 @@
  * - Bells of the last 48 hours only (a 6 PM Saturday bell is due Monday morning).
  * - "Reached" (reachedLeads) is judged on the lead, whatever the close gates of admin-alert-relevance.js say, and NOT
  *   only after the bell: a "New call lead" bell is written minutes after a call a person already answered. Reached =
- *   the lead is deleted or in a settled status (won, lost, ... or an estimate sent); the call that made the lead was
+ *   the lead is deleted, not open or already converted (lead-statuses.js isOpenLeadRow: spam, cancelled, won, lost and the like
+ *   are out), or has an estimate sent or viewed; the call that made the lead was
  *   answered by a person (only for the bell raised with the lead itself, within 15 minutes of its creation: a later bell,
  *   such as a form sent again on an old call lead, is a fresh inquiry); a person's text or call, or a Gmail send, or a visit
  *   booked, reached the lead's customer or phone since 5 minutes before that bell's inquiry began (for a bell raised with
- *   the lead: the earlier of the bell and the lead's first_contact_at, else created_at; for a later bell: the bell itself);
+ *   the lead: the earlier of the bell and the lead's first_contact_at, else created_at; for a later bell: the bell itself; a bell that
+ *   names an email, metadata.emailId, counts from that message's received_at; the push deadline stays on the bell);
  *   a person's email to the lead's own address since the same moment; or an estimate was sent to the lead (sent_at, as the
  *   new-lead class of admin-alert-relevance.js reads it) or handed off to the customer. A lead needs a customer, a 10-digit
  *   phone or an email address to be judged: an email-only lead is judged on email and estimate evidence. A lead row that is
@@ -38,6 +40,7 @@ const db = require('../models/db');
 const { etParts } = require('../utils/datetime-et');
 const logger = require('./logger');
 const sweep = require('./lead-reminder-sweep');
+const { isOpenLeadRow } = require('./lead-statuses');
 
 const LABEL = 'new-lead-reminder';
 const PUSH_STAMP = 'newLeadRealertAt';
@@ -56,7 +59,10 @@ const OFFICE = Object.freeze({
   end: '18:00',
   closed: { has: (date) => new Date(`${date}T12:00:00Z`).getUTCDay() === 0 },
 });
-const SETTLED_STATUSES = new Set(['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled', 'estimate_sent', 'estimate_viewed']);
+// A lead the shared open-lead predicate admits (lead-statuses.js: new, contacted, estimate_sent, estimate_viewed, and not
+// converted) but that already has a quote: this reminder is for a lead nobody has answered, so these two are out.
+const ESTIMATE_STATUSES = new Set(['estimate_sent', 'estimate_viewed']);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const relevance = () => require('./admin-alert-relevance');
 
@@ -100,28 +106,42 @@ const lastTen = (value) => String(value || '').replace(/\D/g, '').slice(-10);
 // The lead's own email address as a mailbox address, or '' (the shared parser the Gmail linkage uses).
 const leadEmail = (lead) => require('./email/email-customer-link').extractEmailAddresses(lead.email)[0] || '';
 
+// When each email bell's message came in: { emailId -> Date }, one batched read. An email bell written for a follow-up on a
+// lead already on file (email-actions.js) comes after classification and drafting, so staff may have replied before the
+// bell; the message's own received_at is where their reply counts from.
+async function emailReceivedAt(items) {
+  const ids = [...new Set(items.map(({ meta }) => String(meta.emailId || '').toLowerCase()).filter((id) => UUID_RE.test(id)))];
+  const rows = ids.length ? await db('emails').whereIn('id', ids).select('id', 'received_at') : [];
+  return new Map(rows.filter((r) => r.received_at).map((r) => [String(r.id).toLowerCase(), new Date(r.received_at)]));
+}
+
 // When the inquiry this bell reports began, and whether the bell was raised with the lead itself. The bell for the lead's
 // own intake looks back to the lead's first contact (an email lead's first_contact_at is the message's receipt time, before
 // the classification that created the lead), and the call that made the lead counts only for that bell. A later bell (a form
-// sent again on a lead already on file) is a fresh inquiry: evidence counts only from the bell itself.
-function inquiryOf({ askedAt, lead }) {
+// sent again on a lead already on file) is a fresh inquiry: evidence counts only from the bell itself, or, for a bell that
+// names an email (`emailAt`, the message's received_at), from the message. The push deadline stays on the bell.
+function inquiryOf({ askedAt, lead }, emailAt = null) {
   const intake = askedAt.getTime() - new Date(lead.created_at).getTime() <= INTAKE_BELL_MS;
-  const from = intake ? Math.min(askedAt.getTime(), new Date(lead.first_contact_at || lead.created_at).getTime()) : askedAt.getTime();
-  return { intake, anchor: new Date(from - WITNESS_SLACK_MS) };
+  const starts = [askedAt.getTime()];
+  if (intake) starts.push(new Date(lead.first_contact_at || lead.created_at).getTime());
+  if (emailAt) starts.push(emailAt.getTime());
+  return { intake, anchor: new Date(Math.min(...starts) - WITNESS_SLACK_MS) };
 }
 
 // The leads that still wait on a person, each item with `lead` and `customerId`. Throws when a read fails: no verdict.
 async function reachedLeads(items) {
   const leadIds = [...new Set(items.map((item) => item.leadId))];
   const leads = new Map((await db('leads').whereIn('id', leadIds)
-    .select('id', 'customer_id', 'phone', 'first_name', 'last_name', 'status', 'deleted_at', 'created_at', 'first_contact_at', 'twilio_call_sid', 'estimate_id', 'email'))
+    .select('id', 'customer_id', 'phone', 'first_name', 'last_name', 'status', 'deleted_at', 'created_at', 'first_contact_at', 'converted_at', 'twilio_call_sid', 'estimate_id', 'email'))
     .map((lead) => [String(lead.id).toLowerCase(), lead]));
-  // A lead is judged when it has a customer, a phone or an email address: an email-only lead has the address alone.
+  const received = await emailReceivedAt(items);
+  // A lead is judged when it is open and unconverted (the shared predicate: spam, cancelled, won, lost and the rest are out),
+  // has no quote yet, and has a customer, a phone or an email address (an email-only lead has the address alone).
   const open = items
     .map((item) => ({ ...item, lead: leads.get(item.leadId) }))
-    .filter(({ lead }) => lead && !lead.deleted_at && !SETTLED_STATUSES.has(String(lead.status || ''))
+    .filter(({ lead }) => lead && !lead.deleted_at && isOpenLeadRow(lead) && !ESTIMATE_STATUSES.has(String(lead.status))
       && (lead.customer_id || lastTen(lead.phone).length === 10 || leadEmail(lead)))
-    .map((item) => ({ ...item, ...inquiryOf(item) }));
+    .map((item) => ({ ...item, ...inquiryOf(item, received.get(String(item.meta.emailId || '').toLowerCase())) }));
   if (!open.length) return [];
   // The call that made the lead, when a person answered it: its bell is written after that call, so the witnesses below
   // (judged after the lead came in) cannot see it. It says nothing about a later bell on the same lead.
@@ -189,9 +209,9 @@ async function estimatesSent(items) {
  * One pass. Returns { skipped, reason } or { skipped: false, due, pushed, sends }; `sends` are the push sends, never
  * awaited here (tests await them). Throws only when a page cannot be read; the sweep catches it.
  */
-async function runNewLeadReminder({ now = new Date(), pageSize } = {}) {
+async function runNewLeadReminder({ now = new Date(), pageSize, clock } = {}) {
   if (!inBusinessHours(now)) return { skipped: true, reason: 'quiet_hours' };
-  const out = await sweep.runSweep({ ...KIND, label: LABEL, windowMs: WINDOW_MS, dueItems, waiting: reachedLeads }, { now, pageSize });
+  const out = await sweep.runSweep({ ...KIND, label: LABEL, windowMs: WINDOW_MS, dueItems, waiting: reachedLeads, inHours: inBusinessHours }, { now, pageSize, clock });
   if (out.sent) logger.info(`[${LABEL}] queued ${out.sent} push(es): a new lead nobody has reached`);
   return { skipped: false, due: out.due, pushed: out.sent, sends: out.sends };
 }
@@ -199,5 +219,5 @@ async function runNewLeadReminder({ now = new Date(), pageSize } = {}) {
 module.exports = {
   runNewLeadReminder,
   PUSH_STAMP,
-  __private: { inBusinessHours, businessDueAt, dueNow, dueItems, reachedLeads, inquiryOf, candidateQuery, SETTLED_STATUSES },
+  __private: { inBusinessHours, businessDueAt, dueNow, dueItems, reachedLeads, inquiryOf, emailReceivedAt, candidateQuery, ESTIMATE_STATUSES },
 };

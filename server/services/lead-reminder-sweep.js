@@ -67,8 +67,10 @@ async function rowStillOpen(id, label) {
   }
 }
 
-// The push, with the row's own words. alertRowId gives it its own push tag per bell row. Never throws.
-async function sendPush({ row, customerId }, label) {
+// The push, with the row's own words. alertRowId gives it its own push tag per bell row. `ready` (optional) is asked once
+// more just before dispatch, with a fresh clock: false means the reminder's hours have closed since the sweep began.
+// Never throws.
+async function sendPush({ row, customerId }, label, ready = () => true) {
   try {
     const { triggerNotification } = require('./notification-triggers');
     return await triggerNotification(TRIGGER_KEY, {
@@ -78,7 +80,7 @@ async function sendPush({ row, customerId }, label) {
       // bellAuthorized: the bell row's writer rang it (bell: true), so the push keeps that answer. pushOnly: the row is
       // not rewritten. adminOnly: nothing goes to a lead, a customer or a technician.
       pushOnly: true, adminOnly: true, bellAuthorized: true,
-      beforePush: () => rowStillOpen(row.id, label),
+      beforePush: async () => ready() && rowStillOpen(row.id, label),
     });
   } catch (err) {
     logger.warn(`[${label}] push failed for notification ${row.id}: ${safeError(err)}`);
@@ -88,14 +90,19 @@ async function sendPush({ row, customerId }, label) {
 
 /**
  * One scan for a reminder `kind`: { label, category, stamp, keyPrefixes?, windowMs, dueItems(rows, now),
- * waiting(items) }. dueItems picks the rows due now; waiting(items) returns those that still wait on a person and
- * throws when a read fails (no verdict: nothing is sent on that page). Returns { due, sent, sends }; `sends` are the
+ * waiting(items), inHours?(date) }. dueItems picks the rows due now; waiting(items) returns those that still wait on a
+ * person and throws when a read fails (no verdict: nothing is sent on that page). `inHours(date)` is the reminder's own
+ * hours rule, asked with a fresh clock (`clock`, default the real time) before each item is stamped and again just before
+ * each push goes: the parent sweep's `now` can be old by the time its closes and the reads above have finished. When the
+ * hours have closed the sweep stops with the rest unstamped, for the next open sweep while they are still inside their
+ * late window. Returns { due, sent, sends }; `sends` are the
  * pushes, never awaited here. Throws only when a page cannot be read.
  */
-async function runSweep(kind, { now, pageSize = PAGE_SIZE }) {
+async function runSweep(kind, { now, pageSize = PAGE_SIZE, clock = () => new Date() }) {
   const { label, stamp } = kind;
   const since = new Date(now.getTime() - kind.windowMs);
   const total = { due: 0, sent: 0 };
+  const ready = () => !kind.inHours || kind.inHours(clock());
   const sends = [];
   let cursor = resumeAfter.get(stamp) || null;
   resumeAfter.delete(stamp);
@@ -113,10 +120,14 @@ async function runSweep(kind, { now, pageSize = PAGE_SIZE }) {
       logger.warn(`[${label}] contact witnesses failed to load, nothing sent on this page: ${safeError(err)}`);
     }
     for (const item of waiting) {
+      if (!ready()) {
+        logger.info(`[${label}] hours closed while the sweep ran: the rest waits for the next open sweep`);
+        return { ...total, sends };
+      }
       try {
         if (!(await stampOnce(stamp, item, now))) continue;
         total.sent += 1;
-        sends.push(sendPush(item, label));
+        sends.push(sendPush(item, label, ready));
       } catch (err) {
         logger.warn(`[${label}] notification ${item.row.id} not stamped: ${safeError(err)}`);
       }

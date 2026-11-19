@@ -6,7 +6,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const mockState = {};
 const resetState = () => Object.assign(mockState, {
-  rows: [], leads: [], answered: [], estimates: [], emails: [], handedOff: null, customer: null, stampResults: [], open: {}, calls: [], failLeads: false, failOpen: false, pages: null,
+  rows: [], leads: [], answered: [], estimates: [], emails: [], emailRows: [], handedOff: null, customer: null, stampResults: [], open: {}, calls: [], failLeads: false, failOpen: false, pages: null,
 });
 resetState();
 jest.mock('../models/db', () => {
@@ -19,6 +19,7 @@ jest.mock('../models/db', () => {
     if (state.table === 'call_log') return mockState.answered;
     if (state.table === 'estimates') return state.verb === 'first' ? mockState.handedOff : mockState.estimates;
     if (state.table === 'emails as er') return mockState.emails;
+    if (state.table === 'emails') return mockState.emailRows;
     if (state.table === 'customers') return state.verb === 'first' ? mockState.customer : [];
     if (state.table !== 'notifications') return [];
     if (state.verb === 'update') return mockState.stampResults.length ? mockState.stampResults.shift() : 1;
@@ -72,7 +73,9 @@ jest.mock('../services/notification-triggers', () => ({ triggerNotification: jes
 const { triggerNotification } = require('../services/notification-triggers');
 const { loadContactBundles } = require('../services/admin-alert-contact-witnesses');
 const sweepShared = require('../services/lead-reminder-sweep');
-const { runNewLeadReminder, PUSH_STAMP, __private: { inBusinessHours, businessDueAt } } = require('../services/new-lead-reminder');
+const { runNewLeadReminder: runReminder, PUSH_STAMP, __private: { inBusinessHours, businessDueAt } } = require('../services/new-lead-reminder');
+// The dispatch-time clock is the sweep's `now` unless a test sets one: the real clock is not part of these cases.
+const runNewLeadReminder = (opts = {}) => runReminder({ clock: () => opts.now, ...opts });
 
 // Eastern wall-clock times in November 2026 (EST, UTC-5). Mon Nov 9, Sat Nov 7, Sun Nov 8.
 const est = (day, hhmm) => new Date(`2026-11-${day}T${hhmm}:00-05:00`);
@@ -163,6 +166,26 @@ describe('the clock: Monday to Saturday, 8 AM to 6 PM ET', () => {
     expect(await run(PUSH_NOW)).toMatchObject({ due: 0 });
     mockState.rows = [row('n-1', { createdAt: est('09', '08:30'), metadata: { rungAt: est('09', '10:00').toISOString() } })];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
+  });
+});
+
+describe('business hours are asked again at dispatch', () => {
+  test('a sweep whose hours closed before an item was stamped sends and stamps nothing', async () => {
+    mockState.rows = [row('n-1', { createdAt: est('09', '17:40') })];
+    const result = await runNewLeadReminder({ now: est('09', '17:59'), clock: () => est('09', '18:01') });
+    expect(result).toMatchObject({ skipped: false, due: 1, pushed: 0 });
+    expect(updates()).toEqual([]);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('a push stamped inside the hours is refused by its beforePush check once the hours have closed', async () => {
+    mockState.rows = [row('n-1', { createdAt: est('09', '17:40') })];
+    let calls = 0;
+    const clock = () => (calls++ === 0 ? est('09', '17:59') : est('09', '18:01'));
+    const result = await runNewLeadReminder({ now: est('09', '17:59'), clock });
+    await Promise.all(result.sends);
+    expect(pushes()).toHaveLength(1);
+    expect(await pushes()[0][2].beforePush()).toBe(false);
   });
 });
 
@@ -264,9 +287,20 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     expect(triggerNotification).not.toHaveBeenCalled();
   });
 
-  test.each([['new'], ['contacted'], ['open']])('status %s alone is not contact: it still pages', async (status) => {
+  test.each([['new'], ['contacted']])('status %s alone is not contact: it still pages', async (status) => {
     mockState.leads = [lead({ status })];
     expect(await run(PUSH_NOW)).toMatchObject({ pushed: 1 });
+  });
+
+  test.each(['spam', 'cancelled', 'qualified', 'abandoned'])('a lead in status %s is outside the open-lead predicate: nothing is sent', async (status) => {
+    mockState.leads = [lead({ status })];
+    expect(await run(PUSH_NOW)).toMatchObject({ pushed: 0 });
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('a converted lead (converted_at set) is never paged, whatever its status', async () => {
+    mockState.leads = [lead({ status: 'new', converted_at: est('09', '09:00') })];
+    expect(await run(PUSH_NOW)).toMatchObject({ pushed: 0 });
   });
 
   test('a deleted lead, or a lead row that is gone (unknown, never judged), sends nothing', async () => {
@@ -348,6 +382,25 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     const [[items]] = loadContactBundles.mock.calls;
     expect(items[0].bellAt).toEqual(est('09', '09:55'));
     expect(mockState.calls.filter((c) => c.table === 'call_log')).toEqual([]);
+  });
+
+  test('a follow-up email bell on an old lead counts staff replies from the message, not from the bell', async () => {
+    const EMAIL = '66666666-6666-4666-8666-666666666666';
+    mockState.rows = [row('n-1', { createdAt: est('09', '10:00'), metadata: { emailId: EMAIL, leadId: LEAD } })];
+    mockState.leads = [lead({ created_at: est('06', '10:00'), customer_id: null, phone: null })];
+    mockState.emailRows = [{ id: EMAIL, received_at: est('09', '09:20') }];
+    mockState.emails = [{ to_address: 'pat@example.invalid', cc_address: null, bcc_address: null, received_at: est('09', '09:40') }];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
+    const [[items]] = loadContactBundles.mock.calls;
+    expect(items[0].bellAt).toEqual(est('09', '09:15'));
+    // One batched read of the messages, whatever the batch size; the push clock stays on the bell.
+    expect(mockState.calls.filter((c) => c.table === 'emails')).toHaveLength(1);
+  });
+
+  test('a bell naming no usable email id reads no message and anchors to the bell', async () => {
+    mockState.rows = [row('n-1', { metadata: { emailId: 'not-a-uuid' } })];
+    await run(PUSH_NOW);
+    expect(mockState.calls.filter((c) => c.table === 'emails')).toEqual([]);
   });
 
   test('the email read starts at the earliest anchor of the batch, not a fixed cutoff', async () => {
