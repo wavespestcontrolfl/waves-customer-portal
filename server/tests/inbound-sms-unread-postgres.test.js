@@ -7,10 +7,10 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ warn: jest.fn() }));
-jest.mock('../services/notification-service', () => ({}));
+jest.mock('../services/notification-service', () => ({ markInboundSmsReadAdmin: async () => 0, markApplicantRepliesReadAdmin: async () => 0 }));
 const { randomUUID } = require('node:crypto');
 const { createSmsResponseTables } = require('./fixtures/sms-response-postgres');
-const { countUnreadInboundSms } = require('../services/inbound-sms-read');
+const { countUnreadInboundSms, markAllInboundSmsRead } = require('../services/inbound-sms-read');
 const connection = process.env.UNREAD_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 let database;
@@ -127,5 +127,37 @@ postgres('public SMS needs-response count (PostgreSQL)', () => {
     await mockPg('messages').where({ conversation_id: second }).update({ is_read: true });
     expect(await countUnreadInboundSms({ unreadOnly: true })).toEqual({ conversations: 1, messages: 1 });
     expect(await countUnreadInboundSms()).toEqual({ conversations: 2, messages: 3 });
+  });
+
+  // Owner 2026-11-19 ("Mark Texts Read" A): Mark all read on real SQL.
+  test('Mark all read covers the shown time to the microsecond and an opt-out shown earlier, never later texts, internal phones or recruiting replies', async () => {
+    await mockPg.raw(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_at timestamptz,
+      ADD COLUMN IF NOT EXISTS read_by_admin_user_id uuid, ADD COLUMN IF NOT EXISTS updated_at timestamptz;
+      ALTER TABLE sms_log ADD COLUMN IF NOT EXISTS is_read boolean;
+      CREATE TABLE IF NOT EXISTS notifications (id uuid PRIMARY KEY, recipient_type text, category text, link text,
+        read_at timestamptz, metadata jsonb)`);
+    const text = async (key, { phone = '+19415550100', ours = '+19415550190', createdAt, type = 'inbound', sid = null }) => {
+      const conversationId = randomUUID();
+      await mockPg('conversations').insert({ id: conversationId, contact_phone: phone, our_endpoint_id: ours, channel: 'sms' });
+      const id = randomUUID();
+      await mockPg('messages').insert({
+        id, conversation_id: conversationId, channel: 'sms', direction: 'inbound', is_read: false, body: key,
+        message_type: type, delivery_status: 'received', twilio_sid: sid, created_at: createdAt,
+      });
+      return id;
+    };
+    const shown = await text('newest shown', { createdAt: '2026-11-19T12:00:00.123456Z' });
+    const optOut = await text('opt-out shown earlier', { phone: '+19415550101', createdAt: '2026-11-19T12:05:00Z', sid: 'SM-optout' });
+    await mockPg('inbound_sms_optout_receipts').insert({ message_sid: 'SM-optout', phone: '+19415550101', applied_at: '2026-11-19T11:59:00Z' });
+    const later = await text('arrived after the list loaded', { phone: '+19415550102', createdAt: '2026-11-19T12:00:00.124001Z' });
+    const internal = await text('internal phone', { phone: '+19415550199', createdAt: '2026-11-19T11:00:00Z' });
+    const recruiting = await text('applicant reply', { phone: '+19415550103', createdAt: '2026-11-19T11:00:00Z', type: 'job_applicant_reply' });
+    // The client shows the newest text at millisecond precision.
+    const result = await markAllInboundSmsRead({ readBefore: new Date('2026-11-19T12:00:00.123Z'), role: 'admin', excludePhones: ['+19415550199'] });
+    expect(result.updated).toBe(2);
+    // Every query in the writer ran: a failed one would abort this transaction.
+    expect(require('../services/logger').warn.mock.calls.filter(([, meta]) => /^[0-9A-Z]{5}$/.test(meta?.code || ''))).toEqual([]);
+    const read = new Set(await mockPg('messages').where({ is_read: true }).pluck('id'));
+    expect([shown, optOut, later, internal, recruiting].map((id) => read.has(id))).toEqual([true, true, false, false, false]);
   });
 });

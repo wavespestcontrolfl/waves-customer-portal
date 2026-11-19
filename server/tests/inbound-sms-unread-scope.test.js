@@ -87,8 +87,10 @@ test('Mark all read selects unread inbound texts up to the boundary, never recru
   const readBefore = new Date('2026-11-19T12:00:00Z');
   await markAllInboundSmsRead({ readBefore, role: 'admin', adminUserId: 'admin-1', excludePhones: ['+19415550199'] });
   const select = mockQueries.find((q) => q.method === 'pluck' && q.sql.includes('"messages" as "m"'));
-  // The client stamp is millisecond-rounded: the cutoff takes the whole millisecond.
-  expect(select.sql).toContain('"m"."created_at" < ?');
+  // The client stamp is millisecond-rounded: the cutoff takes the whole millisecond. It compares the time the inbox
+  // shows (an opt-out receipt can date a text earlier than its row).
+  expect(select.sql).toContain('LEFT JOIN inbound_sms_optout_receipts r');
+  expect(select.sql).toMatch(/THEN LEAST\(m\.created_at, r\.applied_at\)\s+ELSE m\.created_at END\) < \?/);
   expect(select.bindings).toContainEqual(new Date(readBefore.getTime() + 1));
   expect(select.sql).toContain('"m"."message_type" not like ?');
   expect(select.sql).not.toContain('"c"."customer_id" in');
@@ -100,6 +102,14 @@ test('Mark all read selects unread inbound texts up to the boundary, never recru
   const read = mockQueries.find((q) => q.method === 'update' && q.sql.includes('"read_by_admin_user_id" = ?'));
   expect(read.sql).toContain('"id" in (?, ?)');
   expect(read.bindings).toEqual(expect.arrayContaining(['m-1', 'm-2', 'admin-1']));
+});
+
+test('Mark all read sends a long backlog to the writer in batches of 500', async () => {
+  const ids = Array.from({ length: 1201 }, (_, i) => `m-${i}`);
+  mockPluck = (compiled) => (compiled.sql.includes('"messages" as "m"') ? ids : []);
+  await markAllInboundSmsRead({ readBefore: new Date('2026-11-19T12:00:00Z'), role: 'admin' });
+  const reads = mockQueries.filter((q) => q.method === 'update' && q.sql.includes('"read_by_admin_user_id" = ?'));
+  expect(reads.map((q) => q.bindings.filter((b) => typeof b === 'string' && b.startsWith('m-')).length)).toEqual([500, 500, 201]);
 });
 
 test('Mark all read never reaches past now, and a technician scope reads only its own customers', async () => {

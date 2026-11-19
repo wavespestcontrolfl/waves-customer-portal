@@ -424,4 +424,4 @@ async function countPendingSmsConversations({
   return result;
 }
 
-module.exports = { loadPendingSmsConversations, countPendingSmsConversations, withoutReadRows, callEndedAtSql, callStartedAtSql, NEEDS_REPLY_SINCE };
+module.exports = { loadPendingSmsConversations, countPendingSmsConversations, callEndedAtSql, callStartedAtSql, NEEDS_REPLY_SINCE };

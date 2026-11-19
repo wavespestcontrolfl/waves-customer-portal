@@ -18,6 +18,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
+const { inboundSmsReceiptProjectionSql } = require('./sms-response-policy');
 
 const LEGACY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -297,13 +298,17 @@ async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, cus
     throw new Error('readBefore required when marking every text read');
   }
   const cutoff = nextMillisecondBoundary(new Date(Math.min(readBefore.getTime(), Date.now())));
+  // The inbox shows a text at its effective time (an opt-out receipt can date
+  // it earlier than the row), so the cutoff compares that same time.
+  const receipt = inboundSmsReceiptProjectionSql({ messageAlias: 'm', legacyAlias: 'm', receiptAlias: 'r' });
   const ids = await db('messages as m')
     .join('conversations as c', 'c.id', 'm.conversation_id')
     .leftJoin('customers as cu', 'cu.id', 'c.customer_id')
+    .joinRaw(receipt.joinSql)
     .modify((q) => { if (customerIds) q.whereIn('c.customer_id', customerIds); })
     .where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
     .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
-    .where('m.created_at', '<', cutoff)
+    .whereRaw(`${receipt.effectiveCreatedAtSql} < ?`, [cutoff])
     .modify((q) => excludeRecruitingSmsLog(q, 'm.message_type'))
     .modify((q) => {
       for (const phone of excludePhones) {
@@ -313,9 +318,17 @@ async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, cus
       }
     })
     .pluck('m.id');
-  if (!ids.length) return { updated: 0, notificationsCleared: 0 };
-  return markInboundSmsRead({ messageIds: ids, adminUserId, role });
+  // The writer binds each id (and its SIDs); batches keep a long backlog
+  // under PostgreSQL's bind-parameter limit.
+  const total = { updated: 0, notificationsCleared: 0 };
+  for (let i = 0; i < ids.length; i += MARK_ALL_BATCH) {
+    const done = await markInboundSmsRead({ messageIds: ids.slice(i, i + MARK_ALL_BATCH), adminUserId, role });
+    total.updated += done.updated;
+    total.notificationsCleared += done.notificationsCleared;
+  }
+  return total;
 }
+const MARK_ALL_BATCH = 500;
 
 // 3b. Customer-thread cross-clear: threads with nothing left unread
 // (unified AND recent legacy-only rows), through the notification service.

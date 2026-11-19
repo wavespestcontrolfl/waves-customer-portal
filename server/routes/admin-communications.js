@@ -2636,14 +2636,20 @@ router.post('/messages/read-all', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// A technician's Messages badge: the same unread needs-a-reply count, over texts from the customers on its own route
-// only. A text from a number that matches no customer is office work and never counts.
+// A technician's Messages badge: the same unread needs-a-reply count, over the texts its inbox shows: threads whose
+// conversation belongs to a customer on its own route (as /log scopes it), so Mark all read can clear every one. A
+// text in a thread with no customer is office work and never counts.
 async function technicianUnreadCount(req, customerId) {
-  const { loadPendingSmsConversations, withoutReadRows } = require('../services/sms-pending-conversations');
-  const owned = new Set((await technicianCustomerIdsSubquery(req, db)).map((row) => row.customer_id));
-  const rows = await withoutReadRows((await loadPendingSmsConversations({
-    excludePhones: ADMIN_PHONES, customerId, since: NEEDS_REPLY_SINCE,
-  })).filter((row) => row.customer_id && owned.has(row.customer_id)));
+  const { loadPendingSmsConversations } = require('../services/sms-pending-conversations');
+  const pending = await loadPendingSmsConversations({ excludePhones: ADMIN_PHONES, customerId, since: NEEDS_REPLY_SINCE });
+  const ids = pending.map((row) => row.id).filter(Boolean);
+  const visible = new Set(ids.length ? await db('messages as m')
+    .join('conversations as c', 'c.id', 'm.conversation_id')
+    .whereIn('m.id', ids)
+    .whereIn('c.customer_id', technicianCustomerIdsSubquery(req, db))
+    .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
+    .pluck('m.id') : []);
+  const rows = pending.filter((row) => visible.has(row.id));
   return { conversations: new Set(rows.map((row) => row.peer)).size, messages: rows.length };
 }
 

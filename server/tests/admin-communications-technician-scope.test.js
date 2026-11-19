@@ -171,36 +171,45 @@ describe('routes', () => {
       { id: 'c', peer: '9415550102', customer_id: CUSTOMER },
       { id: 'd', peer: '9415550103', customer_id: null },
     ];
-    function ownedRows(rows) {
-      const q = chain();
-      q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
-      return q;
-    }
-    // The read-state lookup the badge makes over the pending rows' message ids.
-    function readLookup(readIds) {
+    // The lookup the badge makes over the pending rows: unread texts in threads the technician's inbox shows.
+    let lookup;
+    function visibleLookup(visibleIds) {
       db.mockImplementation((table) => {
-        if (table !== 'messages') throw new Error(`unexpected table ${table}`);
-        const q = { whereIn: jest.fn(() => q), where: jest.fn(() => q) };
-        q.pluck = jest.fn(async () => readIds);
+        if (table !== 'messages as m') throw new Error(`unexpected table ${table}`);
+        const q = { join: jest.fn(() => q), whereIn: jest.fn(() => q), andWhere: jest.fn(() => q) };
+        q.pluck = jest.fn(async () => visibleIds);
+        lookup = q;
         return q;
       });
     }
     beforeEach(() => {
       mockLoadPending.mockResolvedValue(pendingRows);
-      scope.technicianCustomerIdsSubquery.mockImplementation(() => ownedRows([{ customer_id: OWN }]));
-      readLookup([]);
+      scope.technicianCustomerIdsSubquery.mockImplementation(() => 'SCOPED_CUSTOMER_IDS');
+      visibleLookup(['a', 'b']);
     });
 
-    test('a technician counts only texts from its own customers; unknown senders and other customers stay out', async () => {
+    test('a technician counts only unread texts in threads its inbox shows (its own customers\' conversations)', async () => {
       const res = await call('GET', '/api/admin/communications/unread-count', 'tech');
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ conversations: 1, messages: 2 });
+      // Same ownership rule as /log: the conversation's customer, not a phone match.
+      expect(lookup.join).toHaveBeenCalledWith('conversations as c', 'c.id', 'm.conversation_id');
+      expect(lookup.whereIn).toHaveBeenCalledWith('m.id', ['a', 'b', 'c', 'd']);
+      expect(lookup.whereIn).toHaveBeenCalledWith('c.customer_id', 'SCOPED_CUSTOMER_IDS');
+      expect(lookup.andWhere).toHaveBeenCalledTimes(1);
     });
 
     test('a technician count drops a text somebody already read (owner 2026-11-19)', async () => {
-      readLookup(['a']);
+      visibleLookup(['b']);
       const res = await call('GET', '/api/admin/communications/unread-count', 'tech');
       expect(res.body).toEqual({ conversations: 1, messages: 1 });
+    });
+
+    test('no pending texts: a zero count and no lookup', async () => {
+      mockLoadPending.mockResolvedValue([]);
+      const res = await call('GET', '/api/admin/communications/unread-count', 'tech');
+      expect(res.body).toEqual({ conversations: 0, messages: 0 });
+      expect(db).not.toHaveBeenCalledWith('messages as m');
     });
 
     test('a technician asking for a customer off its route gets 404 and no count', async () => {

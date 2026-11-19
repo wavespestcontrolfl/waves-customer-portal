@@ -1291,3 +1291,22 @@ it("Mark all read stays on the whole list when the loaded rows are all read (old
   expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Mark all read" })).toBeInTheDocument();
 });
+
+it("Mark all read waits for the whole list to load after a search is cleared, so its cutoff never comes from search results", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  setup(); await tick();
+  fireEvent.change(screen.getByPlaceholderText(/Search all SMS/), { target: { value: "gate" } });
+  await tick();
+  let release;
+  const okFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, init) => (String(url).includes("/communications/log?") && !String(url).includes("search=")
+    ? new Promise((resolve) => { release = () => resolve(okFetch(url, init)); })
+    : okFetch(url, init)));
+  fireEvent.change(screen.getByPlaceholderText(/Search all SMS/), { target: { value: "" } });
+  await tick();
+  expect(release).toBeDefined();
+  expect(screen.queryByRole("button", { name: "Mark all read" })).not.toBeInTheDocument();
+  await act(async () => { release(); });
+  await tick(0);
+  expect(screen.getByRole("button", { name: "Mark all read" })).toBeInTheDocument();
+});

@@ -1435,6 +1435,8 @@ export function SmsTab({
   const routeLocationKeyRef = useRef(location.key);
   const [selected360Id, setSelected360Id] = useState(null);
   const [smsPage, setSmsPage] = useState(1);
+  // What the shown messages were loaded for: Mark all read waits for the whole list to load.
+  const [smsLoadedScope, setSmsLoadedScope] = useState(null);
   const [smsHasMore, setSmsHasMore] = useState(false);
   const [smsLoadingMore, setSmsLoadingMore] = useState(false);
   const smsSearchRef = useRef("");
@@ -1661,6 +1663,7 @@ export function SmsTab({
         setSmsHasMore(!!logData.hasMore);
         smsLoadedSearchRef.current = normalizedSearch;
         smsLoadedStatusFilterRef.current = requestedStatusFilter;
+        setSmsLoadedScope({ search: normalizedSearch, statusFilter: requestedStatusFilter });
         setSmsLoadError("");
       } else {
         setSmsLoadError("Messages could not be refreshed. Any messages shown are from the last successful load.");
@@ -1818,6 +1821,8 @@ export function SmsTab({
     startListRead({ messageIds: unreadIds, label: "Marked read" });
   };
   const markAllReadFromList = () => {
+    // The cutoff comes from the whole list only, never from search or Unanswered results still on screen.
+    if (smsLoadedSearchRef.current !== "" || smsLoadedStatusFilterRef.current === "unanswered") return;
     const readBefore = newestCreatedAt(messages);
     if (!readBefore) return;
     startListRead({ all: true, readBefore, label: "Marked all texts read" });
@@ -4269,7 +4274,8 @@ export function SmsTab({
             </div>{" "}
             {/* Mark all read covers every text, including older ones not loaded yet, so it
                 shows on the whole list only, whatever the loaded rows hold. */}
-            {messages.length > 0 && !smsSearch.trim() && smsFilter === "all" && (statusFilter === "all" || statusFilter === "unread") && (
+            {messages.length > 0 && !smsSearch.trim() && smsFilter === "all" && (statusFilter === "all" || statusFilter === "unread")
+              && smsLoadedScope?.search === "" && smsLoadedScope.statusFilter !== "unanswered" && (
               <button
                 type="button"
                 onClick={markAllReadFromList}
