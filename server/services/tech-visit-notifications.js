@@ -87,12 +87,14 @@ const ENDED_LABELS = Object.freeze({ cancelled: 'cancelled', completed: 'complet
 // True when the caller's committed snapshot no longer matches the row — a
 // later change moved the visit on. Only the fields the caller supplied are
 // compared (an assignment hook may know the date alone).
+// 'HH:MM' of a TIME value ('09:00:00' → '09:00'), or null.
+const clockHHMM = (v) => (v ? String(v).slice(0, 5) : null);
+
 function snapshotSuperseded(snapshot, row) {
   if (!snapshot) return false;
-  const hhmm = (v) => (v ? String(v).slice(0, 5) : null);
   if (snapshot.date !== undefined && dateOnly(snapshot.date) !== dateOnly(row.scheduled_date)) return true;
-  if (snapshot.windowStart !== undefined && hhmm(snapshot.windowStart) !== hhmm(row.window_start)) return true;
-  if (snapshot.windowEnd !== undefined && hhmm(snapshot.windowEnd) !== hhmm(row.window_end)) return true;
+  if (snapshot.windowStart !== undefined && clockHHMM(snapshot.windowStart) !== clockHHMM(row.window_start)) return true;
+  if (snapshot.windowEnd !== undefined && clockHHMM(snapshot.windowEnd) !== clockHHMM(row.window_end)) return true;
   return false;
 }
 
@@ -259,7 +261,7 @@ function partsFromVisit(visit, kind, previousWhen = null) {
     previousWhen: kind === 'rescheduled' ? previousWhen : null,
     street: streetLine(visit),
     date: dateOnly(visit.scheduled_date),
-    start: visit.window_start ? String(visit.window_start).slice(0, 5) : null,
+    start: clockHHMM(visit.window_start),
   };
 }
 
@@ -272,7 +274,7 @@ function partsFromCard(payload, kind) {
     previousWhen: kind === 'rescheduled' ? payload.previous_when || null : null,
     street: payload.street || null,
     date: payload.date || null,
-    start: null,
+    start: payload.window_start || null,
   };
 }
 
@@ -349,9 +351,10 @@ function composeCard({ kind, visit, actorText, previous, newTechnicianName, ende
       address: where,
       // The visit push's own words, as written (partsFromCard): a push that
       // must not read the visit as it is now still names the customer in full
-      // and the street.
+      // and the street, and sorts by its start among other visits.
       customer_full_name: customerFullName(visit),
       street: streetLine(visit),
+      window_start: clockHHMM(visit.window_start),
       now_with: kind === 'unassigned' && !ended ? (newTechnicianName || null) : null,
       ended: kind === 'unassigned' ? (ended || null) : null,
       actor: actorText,
@@ -1021,8 +1024,6 @@ async function bundlePlan(technicianId, rows, conn) {
   return plan;
 }
 
-const planSignature = (plan) => plan.map((notice) => `${notice.visitId}:${notice.kind}`).sort().join('|');
-
 // Several visits under one count line: one line each, soonest first, at most
 // BUNDLE_LISTED, then "+N more". A mixed bundle says what happened to each.
 const BUNDLE_LISTED = 3;
@@ -1052,6 +1053,10 @@ function bundlePush(plan) {
     priority: 'high',
   };
 }
+
+// What a device shows for a plan. Two plans that read the same are the same
+// push; an empty plan shows nothing.
+const pushCopy = (plan) => (plan.length ? JSON.stringify(bundlePush(plan)) : null);
 
 // A held push to send again on the next tick, composed afresh.
 class BundleChanged extends Error {}
@@ -1099,17 +1104,21 @@ async function heldOutsideBundle(technicianId, ids) {
 // ONE push for one tech's claimed cards. Resolves true when a device got it,
 // false when nothing is left to say (the bundle closes). Throws when it must
 // be tried again: the provider failed, every device refused, or the bundle
-// changed before ANY device accepted the push — a visit went stale or was
-// cleared, or a new change for the tech landed (unless the bundle is past its
-// longest wait, which goes out as it is) — so the count or the kind would be
-// wrong (Codex #6459 r1, r3; a device that failed is not one that has it).
-// Each device's handoff first renews the claim, so a long fan-out keeps it,
-// and stops if a later sweep took the cards over (BundleLost). Once a device
-// has it, a later device is skipped only when nothing at all still stands,
-// as for any per-visit push: a retry would push the first device twice.
+// changed before ANY device accepted the push — a visit went stale, was
+// cleared or now reads differently, or a new change for the tech landed
+// (unless the bundle is past its longest wait, which goes out as it is) — so
+// the count, the kind or a visit's line would be wrong (Codex #6459 r1, r3; a
+// device that failed is not one that has it). Each device's handoff first
+// renews the claim, so a long fan-out keeps it, and stops if a later sweep
+// took the cards over (BundleLost). Once a device has it, a later device gets
+// it only while the fresh plan still reads the same: the push names each
+// visit, so a changed copy would show a stale line, and a retry would push
+// the first device twice; the rest are skipped, as for a per-visit push.
 async function sendBundle(technicianId, rows, token, { pastLongestWait }) {
   const plan = await bundlePlan(technicianId, rows, db);
   if (!plan.length) return false;
+  const push = bundlePush(plan);
+  const copy = pushCopy(plan);
   const ids = rows.map((row) => row.id);
   let delivered = 0;
   let changed = false;
@@ -1120,20 +1129,19 @@ async function sendBundle(technicianId, rows, token, { pastLongestWait }) {
         lost = true;
         return false;
       }
-      const now = await bundlePlan(technicianId, rows, db);
-      if (delivered === 0 && (planSignature(now) !== planSignature(plan)
-        || (!pastLongestWait && await heldOutsideBundle(technicianId, ids)))) {
+      const same = pushCopy(await bundlePlan(technicianId, rows, db)) === copy;
+      if (delivered === 0 && (!same || (!pastLongestWait && await heldOutsideBundle(technicianId, ids)))) {
         changed = true;
         return false;
       }
-      return now.length > 0;
+      return same;
     } catch (err) {
       logger.warn(`[tech-visit-notifications] bundle push recheck failed for tech ${technicianId} (${errorTag(err)}); sending`);
       return true;
     }
   };
   const PushService = require('./push-notifications');
-  const result = await PushService.sendToAdminUser(technicianId, bundlePush(plan), {
+  const result = await PushService.sendToAdminUser(technicianId, push, {
     beforeHandoff,
     onDelivered: () => { delivered += 1; },
   });

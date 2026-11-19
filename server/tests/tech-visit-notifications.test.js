@@ -1007,28 +1007,51 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'You have a new visit on your route', tag: 'visit-v-2' }));
   });
 
-  test('once a device has it, a change before the next device keeps that copy (no second push to the first device)', async () => {
+  test('once a device has it, a change to its copy before the next device skips the rest: no stale line, no second push to the first', async () => {
     await officeMove('v-1');
     await officeMove('v-2');
     mockLegs = [{ id: 'd1', sent: true }, { id: 'd2', sent: true }];
+    // The push names v-1, which completes before d2: d2 would show a stale line.
     mockBeforeLeg = async (leg) => { if (leg.id === 'd2') visitRows['v-1'].status = 'completed'; };
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
-    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: '2 visits on your route moved' }));
+    expect(mockLegsSent).toEqual(['d1']);
     for (const r of cardRows) expect(r.payload).not.toHaveProperty('push_bundle');
   });
 
-  test('after the first device got the push, a later device is skipped only once nothing stands (no second push to the first)', async () => {
+  test('a later device gets the same push while its copy still holds; nothing is retried', async () => {
     await officeMove('v-1');
     await officeMove('v-2');
     mockLegs = [{ id: 'd1', sent: true }, { id: 'd2', sent: true }, { id: 'd3', sent: true }];
-    mockBeforeLeg = async (leg) => {
-      if (leg.id === 'd2') visitRows['v-1'].status = 'completed';
-      if (leg.id === 'd3') visitRows['v-2'].status = 'completed';
-    };
+    mockBeforeLeg = async (leg) => { if (leg.id === 'd3') visitRows['v-2'].status = 'completed'; };
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
-    // d2 still gets it (v-2 stands); d3 is skipped (nothing stands); nothing is retried.
     expect(mockLegsSent).toEqual(['d1', 'd2']);
     for (const r of cardRows) expect(r.payload).not.toHaveProperty('push_bundle');
+  });
+
+  test('a visit that reads differently before the first handoff: nothing is sent, and the next tick sends the new words (pre-push audit P1)', async () => {
+    await officeMove('v-1');
+    // A move the card never heard of lands as the push is handed off.
+    mockBeforeLeg = async () => { Object.assign(visitRows['v-1'], { window_start: '13:00:00', window_end: '15:00:00' }); mockBeforeLeg = null; };
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 0 });
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    expect(cardRows[0].payload.push_bundle).toBeTruthy();
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
+      body: 'Ana Ruiz · Pest Control · Was Wed Sep 9, 1–3 PM → Now Thu Sep 10, 1–3 PM · 4312 Cortez Rd W',
+    }));
+  });
+
+  test('a cancelled visit sorts by the start its card was written with: an early cancel is listed, not folded into "+N more" (pre-push audit P1)', async () => {
+    for (const id of ['v-1', 'v-2', 'v-3']) await officeMove(id, { kind: 'assigned' });
+    visitRows['v-4'] = { ...VISIT, id: 'v-4', status: 'cancelled', window_start: '07:00:00', window_end: '08:00:00' };
+    await notices.notifyTechVisitChange({ visitId: 'v-4', kind: 'cancelled', technicianId: 'tech-1', actorId: 'admin' });
+    expect(cardRows[3].payload).toMatchObject({ window_start: '07:00' });
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    const added = 'New: Ana Ruiz · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W';
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
+      title: '4 visits on your route changed',
+      body: ['Cancelled: Ana Ruiz · Thu Sep 10, 7–8 AM · 4312 Cortez Rd W', added, added, '+1 more'].join('\n'),
+    }));
   });
 
   test('with the run summary off, an auto-dispatch move still pushes on its own and is never bundled (Codex #6459 r1 P2)', async () => {
