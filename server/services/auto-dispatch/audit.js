@@ -238,6 +238,7 @@ const DUE_DATE_KEY = 'recurring-dispatch:';
 // The due-date notice's title before its words changed (2026-11-02): a standing
 // notice still carrying it takes the new words without ringing again.
 const DUE_DATE_OLD_TITLE = 'Recurring visit still needs a time';
+const DUE_DATE_RESOLVED_TITLE = 'Recurring placement alert resolved';
 // The move-check-down notice (check-down-notice.js) is counted and NOT capped
 // either: one ring per outage, for a tool that has stopped moving visits.
 const CHECK_DOWN_KEY = 'auto-dispatch-check-down';
@@ -472,9 +473,12 @@ async function prepareNoWindowNotices(nowDate, today, to) {
 // the alert instead of making dispatch infer it from the occurrence alone.
 async function noWindowSeriesDetail(trx, row) {
   try {
-    const root = await trx('scheduled_services')
+    // This context is helpful but not required to raise the alert. Keep its
+    // SELECT in a savepoint so a schema/read failure rolls back only this
+    // lookup instead of leaving the alert transaction aborted.
+    const root = await trx.transaction((savepoint) => savepoint('scheduled_services')
       .where({ id: row.recurring_parent_id, customer_id: row.customer_id })
-      .first('scheduled_date', 'recurring_pattern');
+      .first('scheduled_date', 'recurring_pattern'));
     const started = root?.scheduled_date ? toDateStr(root.scheduled_date) : null;
     const series = started
       ? `Series started ${started}${root.recurring_pattern ? ` (${root.recurring_pattern})` : ''}.`
@@ -511,7 +515,7 @@ async function flagNoWindowVisits(candidates, today, to, soonEnd) {
       // The plan may have lapsed since actionableNoWindowRows read it; the
       // visit's row lock does not hold recurring_plan_alerts (Codex #6208 r9 P2).
       if (!(await require('./eligibility').isRecurringPlanActive(row, trx)).active) return null;
-      const inserted = await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
+      const alert = {
         area: 'Schedule',
         action: await namedVisitAction(row.customer_id,
           [(who) => `set an arrival time for ${who}'s visit`, (who) => `set a time for ${who}'s visit`],
@@ -522,10 +526,16 @@ async function flagNoWindowVisits(candidates, today, to, soonEnd) {
         subject: { type: 'visit', id: String(row.id) },
         doneWhen: 'visit_has_arrival_time',
         who: 'person',
-      }, {
+      };
+      const inserted = await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', alert, {
         bell: true,
         dedupeKey: noWindowKey(row),
         refreshOnDedupe: true,
+        // Copy, link or newly available series context updates a standing
+        // card without spending another ring or clearing its acknowledgment.
+        // The once-per-visit urgency wording change and a resolved card that
+        // becomes actionable again remain real rings.
+        ringOnRefresh: (existing) => existing.title === NO_WINDOW_RESOLVED_TITLE || existing.body !== alert.why,
         detail: await noWindowSeriesDetail(trx, current),
         metadata: { scheduledServiceId: row.id, customerId: row.customer_id, scheduledDate: date },
         trx,
@@ -605,7 +615,7 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
       .whereRaw("s.recurring_dispatch_due_date::text = notifications.metadata->>'dueDate'")
       .whereNull('s.window_start')
       .whereIn('s.status', ['pending', 'confirmed']),
-    resolvedTitle: 'Recurring placement alert resolved',
+    resolvedTitle: DUE_DATE_RESOLVED_TITLE,
     resolution: 'The visit is no longer awaiting placement',
     body: 'This visit is no longer awaiting placement for the recorded due date.',
   }, nowDate);
@@ -647,30 +657,34 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
         .whereIn('s.status', ['pending', 'confirmed'])
         .where(pickWindowClosed)
         .forNoKeyUpdate('s')
-        .first('s.id');
+        .first('s.id', 's.scheduled_date');
       if (!current) return null;
+      const scheduledDate = toDateStr(current.scheduled_date);
       // The words name the due date and nothing else: the notice fires from the
       // cutoff above, so "within three days" misread as how soon it was due.
-      const inserted = await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
+      const alert = {
         area: 'Schedule',
         action: await namedVisitAction(row.customer_id,
           [(who) => `find a time for ${who}'s recurring visit`, (who) => `find a time for ${who}'s visit`],
           'find a time for a recurring visit', trx),
         why: `The visit is due ${shortDateET(`${due}T12:00:00Z`)} and has no time yet; check availability and customer preferences in dispatch.`,
         severity: 'needs-you',
-        link: `/admin/dispatch?tab=schedule&date=${due}&appointment=${encodeURIComponent(row.id)}`,
+        link: `/admin/dispatch?tab=schedule&date=${scheduledDate}&appointment=${encodeURIComponent(row.id)}`,
         subject: { type: 'visit', id: String(row.id) },
         doneWhen: 'visit_has_time',
         who: 'person',
-      }, {
+      };
+      const inserted = await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', alert, {
         bell: true,
         dedupeKey: `recurring-dispatch:${row.id}:${due}`,
         // Reopen a previously resolved card if this due date becomes unplaced
         // again; the shared deduper leaves acknowledged, unchanged cards alone.
         refreshOnDedupe: true,
-        // A card still in the old words changed only its words: no ring, and its
-        // read and done stay as they are.
-        ringOnRefresh: (existing) => existing.title !== DUE_DATE_OLD_TITLE,
+        // Old copy, a safer title or an appointment-focused/corrected link is
+        // a quiet upgrade. A resolved card reopening or genuinely changed
+        // instruction remains news.
+        ringOnRefresh: (existing) => existing.title === DUE_DATE_RESOLVED_TITLE
+          || (existing.title !== DUE_DATE_OLD_TITLE && existing.body !== alert.why),
         metadata: { scheduledServiceId: row.id, customerId: row.customer_id, dueDate: due },
         trx,
       });
