@@ -2557,9 +2557,9 @@ function initScheduledJobs() {
       const lockRes = await runExclusive('near-stops-weekly', async () => {
         const { runNearStopsWeeklyCheck } = require('./near-stops-weekly-check');
         const result = await runNearStopsWeeklyCheck();
-        logger.info(`[near-stops-weekly] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, pairs: result.pairs ?? null })}`);
+        logger.info(`[near-stops-weekly] cron run: ${JSON.stringify({ outcome: result.outcome || null, skipped: result.skipped || null, pairs: result.pairs ?? null })}`);
         if (result?.skipped === 'query_failed' || result?.error) {
-          throw new Error(`near-stops weekly check did not complete (${result.skipped || 'send_failed'})`);
+          throw new Error(`near-stops weekly check did not complete (${result.skipped || 'write_failed'})`);
         }
       });
       if (lockRes?.skipped && lockRes.reason !== 'lease_held') {

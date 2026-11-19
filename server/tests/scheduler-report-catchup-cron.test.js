@@ -51,7 +51,7 @@ jest.mock('../services/call-booking-link-weekly-check', () => ({
 }));
 jest.mock('../services/near-stops-weekly-check', () => ({
   weekIsMissing: jest.fn(),
-  runNearStopsWeeklyCheck: jest.fn().mockResolvedValue({ sent: true, pairs: 1 }),
+  runNearStopsWeeklyCheck: jest.fn().mockResolvedValue({ sent: true, outcome: 'raised', pairs: 1 }),
 }));
 jest.mock('../services/kpi-snapshot', () => ({
   snapshotMissing: jest.fn(),

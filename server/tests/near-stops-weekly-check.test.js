@@ -1,15 +1,27 @@
 /**
  * Weekly near-stops check (owner 2026-11-19, "check"): one read-only owner
  * notification each Monday. These tests pin what the owner reads:
- *   1. which next-door stops count as booked apart (and which do not),
- *   2. the truck GPS count: one drive per stop, a combined visit too,
- *   3. the notification's size limits, wording and weekly dedupe,
+ *   1. which next-door stops count as booked apart (and which do not), and what
+ *      holds each visit: the night run's reason, or the day re-plan's for one day,
+ *   2. the truck GPS count: one drive per stop, a combined visit too, all so far,
+ *   3. the one standing admin row: the admin notification rule, a ring only when a
+ *      split joins, a close when none is left, a throw (so no stamp) on a failure,
  *   4. the run's marker: one run a week, a catch-up only while it is missing.
  * Names here are synthetic. Drive minutes are the plain model (no calibration).
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/ops-digest', () => ({ deliverOpsDigest: jest.fn(async () => ({ ok: true, channel: 'in_app', id: 'n-1' })) }));
-jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => 0) }));
+jest.mock('../services/admin-alert-episodes', () => ({
+  raiseAdminAlertWithReopen: jest.fn(async () => ({ id: 'n-1', deduped: false })),
+  closeAdminAlertKeys: jest.fn(async () => 1),
+}));
+jest.mock('../services/admin-alert-compose', () => ({
+  ...jest.requireActual('../services/admin-alert-compose'),
+  raiseAdminAlert: jest.fn(async () => ({ id: 'n-1', deduped: false })),
+}));
+jest.mock('../config/feature-gates', () => ({
+  ...jest.requireActual('../config/feature-gates'),
+  alertEpisodesLive: jest.fn(() => true),
+}));
 const mockFirst = jest.fn();
 jest.mock('../models/db', () => {
   const chain = { where: jest.fn(() => chain), first: (...args) => mockFirst(...args) };
@@ -21,16 +33,33 @@ jest.mock('../models/db', () => {
 
 delete process.env.GATE_DRIVE_TIME_CALIBRATION;
 
-const { deliverOpsDigest } = require('../services/ops-digest');
-const { retireIfClean } = require('../services/ops-digest-fall-off');
+const { raiseAdminAlertWithReopen, closeAdminAlertKeys } = require('../services/admin-alert-episodes');
+const { composeAdminAlert, raiseAdminAlert } = require('../services/admin-alert-compose');
+const { alertEpisodesLive } = require('../config/feature-gates');
+const { INTERNAL_TEST_CUSTOMER_IDS } = require('../services/internal-test-customers');
 const { HQ } = require('../services/auto-dispatch/geo');
 const {
   runNearStopsWeeklyCheck,
   weekIsMissing,
+  DEDUPE_KEY,
   _private: {
-    buildPlaces, findApartPairs, holdFor, physicalLegs, shortDriveSummary, composeWeeklyCheck, sentRecently, noEmail, OPS_KEY,
+    buildPlaces, findApartPairs, holdFor, replanHoldFor, loadReplanFixed, loadUpcomingStops, physicalLegs,
+    shortDriveSummary, composeWeeklyCheck, ringOnNewPair, writeAlert, sentRecently,
   },
 } = require('../services/near-stops-weekly-check');
+
+// A knex stand-in that records each call and resolves to `rows` when awaited.
+function recorder(rows) {
+  const calls = [];
+  const chain = new Proxy({}, {
+    get(_target, prop) {
+      if (prop === 'then') return (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+      return (...args) => { calls.push([prop, ...args]); return chain; };
+    },
+  });
+  const conn = jest.fn((table) => { calls.push(['table', table]); return chain; });
+  return { conn, calls };
+}
 
 const MILES_PER_DEGREE = (3959 * Math.PI) / 180; // route-optimizer haversine's radius
 const north = (miles, from = HQ) => ({ lat: from.lat + miles / MILES_PER_DEGREE, lng: from.lng });
@@ -91,13 +120,18 @@ describe('part 1: next-door stops booked apart', () => {
     expect(findApartPairs(rows)).toEqual([]);
   });
 
-  test("two customers on one day with a stop between are the 4:40 re-plan's to order, not reported", () => {
+  test("two customers on one day with a stop between are reported, with the re-plan's reason for each hour", () => {
     const rows = [
       stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '09:00' }),
       stop({ customer: 'c-x', at: north(8), date: '2027-03-01', start: '10:00' }),
-      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-01', start: '11:00' }),
+      stop({ customer: 'c-b', first: 'Blake', last: 'Example', at: NEXT_DOOR, date: '2027-03-01', start: '11:00' }),
     ];
-    expect(findApartPairs(rows)).toEqual([]);
+    const pairs = findApartPairs(rows);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]).toMatchObject({ sameCustomer: false, between: 1 });
+    const replan = new Map([['2027-03-01|tech-1', new Map([[pairs[0].first.id, 'time_told']])]]);
+    const { detail } = composeWeeklyCheck({ apart: pairs, nightLog: new Map(), replan, weekStart: '2027-03-01' });
+    expect(detail).toMatch(/- Avery S\. and Blake E\. \(Lakewood Ranch\), about 260 ft apart: Mon, Mar 1 9:00\sAM \(customer already told the time\) and 11:00\sAM \(the re-plan could move it\), same day, 1 stop between\./);
   });
 
   test("one customer's two homes on one day with a stop between are reported: the re-plan keeps their hours", () => {
@@ -110,8 +144,11 @@ describe('part 1: next-door stops booked apart', () => {
     const pairs = findApartPairs(rows);
     expect(pairs).toHaveLength(1);
     expect(pairs[0]).toMatchObject({ sameCustomer: true, between: 1 });
-    const { detail } = composeWeeklyCheck({ apart: pairs, nightLog: new Map(), weekStart: '2027-03-01' });
-    expect(detail).toMatch(/- Avery S\.'s two homes \(Lakewood Ranch\), 0\.3 mi apart: Mon, Mar 1 9:00\sAM and 11:00\sAM, same day, 1 stop between; the 4:40 AM re-plan keeps one customer's own hours\./);
+    const replan = new Map([['2027-03-01|tech-1', new Map([[pairs[0].first.id, 'same_customer'], [pairs[0].second.id, 'same_customer']])]]);
+    const { detail } = composeWeeklyCheck({ apart: pairs, nightLog: new Map(), replan, weekStart: '2027-03-01' });
+    expect(detail).toMatch(/- Avery S\.'s two homes \(Lakewood Ranch\), 0\.3 mi apart: Mon, Mar 1 9:00\sAM \(same customer twice that day\) and 11:00\sAM \(same customer twice that day\), same day, 1 stop between\./);
+    const noPlan = composeWeeklyCheck({ apart: pairs, nightLog: new Map(), replan: new Map(), weekStart: '2027-03-01' });
+    expect(noPlan.detail).toMatch(/9:00\sAM \(the re-plan did not plan this day\) and 11:00\sAM \(the re-plan did not plan this day\)/);
   });
 
   test("a stop with no map pin between one customer's two homes still splits them", () => {
@@ -210,6 +247,52 @@ describe('what holds each visit, in plain words', () => {
     expect(holdFor(planVisit, new Map())).toBe('not in the night run');
     expect(holdFor(planVisit, null)).toBe('no night run to read');
   });
+
+  test("a same-day visit: the re-plan's own reason, free to move, or no plan for that day and route", () => {
+    const p = { first: { id: 'svc-1', date: '2027-03-01', tech: 'tech-1' }, second: { id: 'svc-2', date: '2027-03-01', tech: null } };
+    const replan = new Map([['2027-03-01|tech-1', new Map([['svc-1', 'within_24h'], ['svc-2', 'new_reason']])]]);
+    expect(replanHoldFor(p.first, p, replan)).toBe('less than 24 hours away');
+    expect(replanHoldFor(p.second, p, replan)).toBe('new reason');
+    expect(replanHoldFor({ id: 'svc-3', date: '2027-03-01' }, p, replan)).toBe('the re-plan could move it');
+    expect(replanHoldFor(p.first, p, new Map())).toBe('the re-plan did not plan this day');
+    const unassigned = { first: { ...p.first, tech: null }, second: p.second };
+    expect(replanHoldFor(unassigned.first, unassigned, replan)).toBe('the re-plan did not plan this day');
+  });
+});
+
+describe('what the check reads', () => {
+  const NOW = new Date('2027-03-01T11:17:00.000Z');
+
+  test('only live visits count: never a done, cancelled or skipped visit, a held slot or the demo account', async () => {
+    const { conn, calls } = recorder([{ id: 'v1', customer_id: 'c-1' }, { id: 'v2', customer_id: INTERNAL_TEST_CUSTOMER_IDS[0] }]);
+    const rows = await loadUpcomingStops('2027-03-01', '2027-03-31', conn);
+    expect(rows.map((r) => r.id)).toEqual(['v1']);
+    const statuses = calls.find((c) => c[0] === 'whereIn' && c[1] === 's.status')[2];
+    expect(statuses).toEqual(expect.arrayContaining(['pending', 'confirmed']));
+    for (const done of ['completed', 'cancelled', 'rescheduled', 'skipped', 'no_show']) expect(statuses).not.toContain(done);
+    expect(calls).toContainEqual(['whereNull', 's.reservation_expires_at']);
+  });
+
+  test("the re-plan's newest plan for each day and route wins; only same-day pairs are read", async () => {
+    const sameDay = { between: 1, first: { id: 'svc-1', date: '2027-03-01', tech: 'tech-1' }, second: { id: 'svc-2', date: '2027-03-01', tech: 'tech-1' } };
+    const twoDays = { gap: 3, first: { id: 'svc-3', date: '2027-03-02', tech: 'tech-1' }, second: { id: 'svc-4', date: '2027-03-05', tech: 'tech-1' } };
+    const { conn, calls } = recorder([
+      { service_date: '2027-03-01', technician_id: 'tech-1', fixed: [{ id: 'svc-1', why: 'time_told' }] },
+      { service_date: '2027-03-01', technician_id: 'tech-1', fixed: [{ id: 'svc-1', why: 'within_24h' }, { id: 'svc-2', why: 'person_placed' }] },
+    ]);
+    const plans = await loadReplanFixed([sameDay, twoDays], NOW, conn);
+    expect(plans).toEqual(new Map([['2027-03-01|tech-1', new Map([['svc-1', 'time_told']])]]));
+    expect(calls).toContainEqual(['table', 'day_replan_plans']);
+    expect(calls).toContainEqual(['whereIn', 'service_date', ['2027-03-01']]);
+    expect(calls).toContainEqual(['orderBy', 'created_at', 'desc']);
+  });
+
+  test('no same-day pair: the re-plan is not read', async () => {
+    const { conn } = recorder([]);
+    const twoDays = { gap: 2, first: { date: '2027-03-01', tech: 'tech-1' }, second: { date: '2027-03-03', tech: 'tech-1' } };
+    await expect(loadReplanFixed([twoDays], NOW, conn)).resolves.toEqual(new Map());
+    expect(conn).not.toHaveBeenCalled();
+  });
 });
 
 // ------------------------------------------------------------- the message
@@ -225,25 +308,68 @@ function manyPairs(n) {
 }
 
 describe('the notification', () => {
-  test('no next-door split: nothing to post', () => {
+  test('no next-door split: nothing to raise', () => {
     expect(composeWeeklyCheck({ apart: [], weekStart: '2027-03-01' })).toEqual({ items: 0 });
   });
 
-  test('headline, summary and detail stay inside the admin-notification limits', () => {
+  test('the row passes the admin notification rule and stays inside its limits', () => {
+    const apart = manyPairs(12);
+    const longest = { reason_code: 'NO_SLOT_MATCHING_PREFERENCE' };
+    const nightLog = new Map(apart.flatMap((p) => [[p.first.id, longest], [p.second.id, longest]]));
     const out = composeWeeklyCheck({
-      apart: manyPairs(12), nightLog: new Map(), weekStart: '2027-03-01',
-      drives: { week: [{ drive_miles: 0.4, drive_minutes: 1.9 }], total: 1, median: 1.9, since: '2026-08-27' },
+      apart,
+      nightLog,
+      weekStart: '2027-03-01',
+      drives: {
+        total: 3,
+        median: 1.9,
+        since: '2026-08-27',
+        newest: [
+          { service_date: '2027-02-26', drive_miles: 0.4, drive_minutes: 1.9 },
+          { service_date: '2027-02-19', drive_miles: 0.3, drive_minutes: 1.5 },
+          { service_date: '2027-02-12', drive_miles: 0.45, drive_minutes: 2.4 },
+        ],
+      },
     });
-    expect(out.items).toBe(12);
-    expect(out.headline).toBe('Schedule — review 12 next-door splits');
-    expect(out.headline.length).toBeLessThanOrEqual(60);
-    expect(out.summary.length).toBeLessThanOrEqual(110);
+    const alert = composeAdminAlert(out.spec); // throws under NODE_ENV=test when a rule is broken
+    expect(alert.headline).toBe('Schedule — review 12 next-door splits');
+    expect(alert.link).toBe('/admin/schedule?date=2027-03-01');
+    expect(alert.metadata).toMatchObject({
+      area: 'Schedule', severity: 'needs-you', doneWhen: 'count_zero', who: 'person', subject: { type: 'check', id: DEDUPE_KEY },
+    });
+    expect(alert.why.length).toBeLessThanOrEqual(110);
     expect(out.detail.length).toBeLessThanOrEqual(2000);
     expect(out.detail).not.toContain('…');
-    for (const text of [out.headline, out.summary]) expect(text).not.toMatch(/\d{4}-\d{2}-\d{2}/);
-    expect(out.detail.match(/- and 9 more/g)).toHaveLength(1);
-    expect(out.detail).toContain('Truck GPS, drives under half a mile from one visit to the next: last week 0.4 mi in 1.9 min. All since Thu, Aug 27: 1, median 1.9 min.');
-    expect(out.metadata).toEqual({ weekOf: '2027-03-01', pairsApart: 12, shortDrivesWeek: 1, shortDrivesTotal: 1 });
+    expect(out.detail.match(/- and 7 more/g)).toHaveLength(1);
+    expect(out.detail).toContain('Truck GPS, drives under half a mile from one visit to the next: 3 since Thu, Aug 27, median 1.9 min. Newest: Fri, Feb 26: 0.4 mi in 1.9 min; Fri, Feb 19: 0.3 mi in 1.5 min; Fri, Feb 12: 0.5 mi in 2.4 min.');
+    expect(out.itemKeys).toHaveLength(12);
+    expect(out.metadata).toEqual({ weekOf: '2027-03-01', pairsApart: 12, shortDrivesTotal: 3 });
+  });
+
+  test('the why leads with the easiest pair to join, and the link opens its day', () => {
+    const rows = [
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', plan: true }),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', plan: true }),
+    ];
+    const pairs = findApartPairs(rows);
+    const out = composeWeeklyCheck({ apart: pairs, nightLog: new Map(), weekStart: '2027-03-01' });
+    const alert = composeAdminAlert(out.spec);
+    expect(alert.headline).toBe('Schedule — review 1 next-door split');
+    expect(alert.why).toBe('Easiest to join: two stops about 260 ft apart, Mon, Mar 1 and Thu, Mar 4.');
+    expect(alert.link).toBe('/admin/schedule?date=2027-03-01');
+    expect(out.itemKeys).toEqual([[pairs[0].first.id, pairs[0].second.id].sort().join('|')]);
+  });
+
+  test('no short drive yet: the GPS line says none, never a blank', () => {
+    const rows = [
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', plan: true }),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', plan: true }),
+    ];
+    const out = composeWeeklyCheck({
+      apart: findApartPairs(rows), nightLog: new Map(), weekStart: '2027-03-01',
+      drives: { total: 0, median: null, since: '2026-08-27', newest: [] },
+    });
+    expect(out.detail).toContain('Truck GPS, drives under half a mile from one visit to the next: none since Thu, Aug 27. ');
   });
 
   test("a combined visit's inbound drive, written on each of its service rows, counts once", () => {
@@ -258,20 +384,19 @@ describe('the notification', () => {
     expect(physicalLegs(noArrival).map((r) => r.scheduled_service_id)).toEqual(['svc-d', 'svc-f']);
   });
 
-  test('the GPS median of an even count is the mean of the middle two', () => {
-    const legs = [{ service_date: '2027-03-02', drive_minutes: 1 }, { service_date: '2027-02-01', drive_minutes: 5 }];
-    expect(shortDriveSummary(legs, '2027-03-01', '2027-03-08')).toMatchObject({ total: 2, median: 3 });
-    expect(shortDriveSummary(legs, '2027-03-01', '2027-03-08').week).toHaveLength(1);
+  test('the GPS count is every drive so far: an even count takes the mean of the middle two, newest first', () => {
+    const legs = [{ service_date: '2027-02-01', drive_minutes: 5 }, { service_date: '2027-03-02', drive_minutes: 1 }];
+    const summary = shortDriveSummary(legs);
+    expect(summary).toMatchObject({ total: 2, median: 3 });
+    expect(summary.newest.map((l) => l.service_date)).toEqual(['2027-03-02', '2027-02-01']);
   });
 
-  test('the summary leads with the easiest pair to join', () => {
-    const rows = [
-      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', plan: true }),
-      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', plan: true }),
-    ];
-    const out = composeWeeklyCheck({ apart: findApartPairs(rows), nightLog: new Map(), weekStart: '2027-03-01' });
-    expect(out.headline).toBe('Schedule — review 1 next-door split');
-    expect(out.summary).toBe('Easiest to join: two stops about 260 ft apart, Mon, Mar 1 and Thu, Mar 4.');
+  test('a refresh rings only when a split joins the set', () => {
+    const ring = ringOnNewPair(['svc-1|svc-2', 'svc-3|svc-4']);
+    expect(ring(null, { itemKeys: ['svc-1|svc-2', 'svc-3|svc-4'] })).toBe(false);
+    expect(ring(null, { itemKeys: ['svc-1|svc-2', 'svc-3|svc-4', 'svc-5|svc-6'] })).toBe(false);
+    expect(ring(null, { itemKeys: ['svc-1|svc-2'] })).toBe(true);
+    expect(ring(null, null)).toBe(true);
   });
 });
 
@@ -279,79 +404,122 @@ describe('the notification', () => {
 
 const MONDAY = new Date('2027-03-08T11:17:00.000Z'); // Monday 6:17 AM EST
 
-function deps(data) {
-  return {
-    now: MONDAY,
-    sentRecently: jest.fn(async () => false),
-    loadWeek: jest.fn(async () => data),
-    stampSendMarker: jest.fn(async () => {}),
-  };
-}
-
 const oneSplit = () => {
   const rows = [
     stop({ customer: 'c-a', at: HOME_A, date: '2027-03-10', plan: true }),
     stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-12', plan: true }),
   ];
-  return { weekStart: '2027-03-08', apart: findApartPairs(rows), nightLog: new Map(), drives: null };
+  return { weekStart: '2027-03-08', apart: findApartPairs(rows), nightLog: new Map(), replan: new Map(), drives: null };
 };
+
+describe('the admin row', () => {
+  const trx = { raw: jest.fn(async () => ({ rows: [] })) };
+  const conn = { transaction: jest.fn(async (work) => work(trx)) };
+  const composedOne = () => composeWeeklyCheck(oneSplit());
+  beforeEach(() => jest.clearAllMocks());
+
+  test('a split raises one Schedule row under the lock, tagged to ring, carrying its set for the next refresh', async () => {
+    await expect(writeAlert(composedOne(), MONDAY, conn)).resolves.toBe('raised');
+    expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['admin:near-stops-weekly']);
+    expect(raiseAdminAlertWithReopen).toHaveBeenCalledTimes(1);
+    const [category, headline, why, opts] = raiseAdminAlertWithReopen.mock.calls[0];
+    expect(category).toBe('alert');
+    expect(headline).toBe('Schedule — review 1 next-door split');
+    expect(why).toMatch(/^Easiest to join: /);
+    expect(opts).toMatchObject({
+      dedupeKey: 'near-stops-weekly',
+      trx,
+      bell: true,
+      refreshOnDedupe: true,
+      bumpOnRefresh: true,
+      link: '/admin/schedule?date=2027-03-10',
+      metadata: { count: 1, pairsApart: 1, area: 'Schedule', severity: 'needs-you', doneWhen: 'count_zero' },
+    });
+    expect(opts.metadata.itemKeys).toHaveLength(1);
+    expect(opts.ringOnRefresh(null, { itemKeys: opts.metadata.itemKeys })).toBe(false);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('a quiet refresh, a ringing refresh, an unchanged row and a muted row each read as such', async () => {
+    raiseAdminAlertWithReopen.mockResolvedValueOnce({ deduped: true, refreshed: true, rung: false });
+    await expect(writeAlert(composedOne(), MONDAY, conn)).resolves.toBe('refreshed');
+    raiseAdminAlertWithReopen.mockResolvedValueOnce({ deduped: true, refreshed: true, rung: true });
+    await expect(writeAlert(composedOne(), MONDAY, conn)).resolves.toBe('raised');
+    raiseAdminAlertWithReopen.mockResolvedValueOnce({ deduped: true });
+    await expect(writeAlert(composedOne(), MONDAY, conn)).resolves.toBe('unchanged');
+    raiseAdminAlertWithReopen.mockResolvedValueOnce({ suppressed: true });
+    await expect(writeAlert(composedOne(), MONDAY, conn)).resolves.toBe('suppressed');
+  });
+
+  test('with alert episodes off, the same spec goes through raiseAdminAlert', async () => {
+    alertEpisodesLive.mockReturnValueOnce(false);
+    const composed = composedOne();
+    await expect(writeAlert(composed, MONDAY, conn)).resolves.toBe('raised');
+    expect(raiseAdminAlert).toHaveBeenCalledWith('alert', composed.spec, expect.objectContaining({ dedupeKey: 'near-stops-weekly', bell: true, trx }));
+    expect(raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+  });
+
+  test('no split left: the open row closes, done at a zero count', async () => {
+    await expect(writeAlert({ items: 0 }, MONDAY, conn)).resolves.toBe('closed');
+    expect(closeAdminAlertKeys).toHaveBeenCalledWith(trx, ['near-stops-weekly'], 'count_zero', expect.objectContaining({ now: MONDAY }));
+    closeAdminAlertKeys.mockResolvedValueOnce(0);
+    await expect(writeAlert({ items: 0 }, MONDAY, conn)).resolves.toBe('clear');
+    expect(raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+  });
+
+  test('a close or a write that fails throws, so the run never stamps the week', async () => {
+    closeAdminAlertKeys.mockRejectedValueOnce(new Error('pool closed'));
+    await expect(writeAlert({ items: 0 }, MONDAY, conn)).rejects.toThrow('pool closed');
+    raiseAdminAlertWithReopen.mockResolvedValueOnce(null);
+    await expect(writeAlert(composedOne(), MONDAY, conn)).rejects.toThrow('near-stops row was not written');
+  });
+});
+
+function deps(data) {
+  return {
+    now: MONDAY,
+    sentRecently: jest.fn(async () => false),
+    loadWeek: jest.fn(async () => data),
+    writeAlert: jest.fn(async () => 'raised'),
+    stampSendMarker: jest.fn(async () => {}),
+  };
+}
 
 describe('runNearStopsWeeklyCheck', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  test("this week's check already ran: nothing is read or posted", async () => {
+  test("this week's check already ran: nothing is read or written", async () => {
     const opts = { ...deps(oneSplit()), sentRecently: jest.fn(async () => true) };
     await expect(runNearStopsWeeklyCheck(opts)).resolves.toEqual({ skipped: 'recent_send' });
     expect(opts.loadWeek).not.toHaveBeenCalled();
-    expect(deliverOpsDigest).not.toHaveBeenCalled();
+    expect(opts.writeAlert).not.toHaveBeenCalled();
   });
 
-  test('a finding posts one owner row a week, rung once, closing last week\'s row, never by email', async () => {
+  test('a split writes the one row and stamps the week', async () => {
     const opts = deps(oneSplit());
-    await expect(runNearStopsWeeklyCheck(opts)).resolves.toEqual({ sent: true, pairs: 1 });
-    expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
-    const call = deliverOpsDigest.mock.calls[0][0];
-    expect(call).toMatchObject({
-      key: OPS_KEY,
-      subject: 'ACT: Schedule — review 1 next-door split',
-      link: '/admin/schedule',
-      audience: 'owner',
-      dedupeKey: 'near-stops-weekly:2027-03-08',
-      itemKeys: ['2027-03-08'],
-      ringOnFirstIdentity: true,
-      supersedePrior: true,
-      count: 1,
-    });
-    await expect(call.sendEmail()).resolves.toEqual({ ok: false, error: 'bell_only' });
-    expect(opts.stampSendMarker).toHaveBeenCalledTimes(1);
-    expect(retireIfClean).not.toHaveBeenCalled();
-  });
-
-  test('a clean week posts nothing, closes the open row and stamps the week', async () => {
-    const opts = deps({ weekStart: '2027-03-08', apart: [], nightLog: new Map(), drives: null });
-    await expect(runNearStopsWeeklyCheck(opts)).resolves.toEqual({ sent: false, empty: true, pairs: 0 });
-    expect(deliverOpsDigest).not.toHaveBeenCalled();
-    expect(retireIfClean).toHaveBeenCalledWith(OPS_KEY);
+    await expect(runNearStopsWeeklyCheck(opts)).resolves.toEqual({ sent: true, outcome: 'raised', pairs: 1 });
+    expect(opts.writeAlert).toHaveBeenCalledWith(expect.objectContaining({ items: 1 }), MONDAY);
     expect(opts.stampSendMarker).toHaveBeenCalledTimes(1);
   });
 
-  test('unreadable data: no post, no stamp, so the catch-up tries again', async () => {
+  test('a clean week closes the open row and stamps the week', async () => {
+    const opts = { ...deps({ weekStart: '2027-03-08', apart: [], nightLog: new Map(), replan: new Map(), drives: null }), writeAlert: jest.fn(async () => 'closed') };
+    await expect(runNearStopsWeeklyCheck(opts)).resolves.toEqual({ sent: false, outcome: 'closed', pairs: 0 });
+    expect(opts.writeAlert).toHaveBeenCalledWith({ items: 0 }, MONDAY);
+    expect(opts.stampSendMarker).toHaveBeenCalledTimes(1);
+  });
+
+  test('unreadable data: nothing written, no stamp, so the catch-up tries again', async () => {
     const opts = { ...deps(null), loadWeek: jest.fn(async () => { throw new Error('read timeout'); }) };
     await expect(runNearStopsWeeklyCheck(opts)).resolves.toEqual({ skipped: 'query_failed' });
+    expect(opts.writeAlert).not.toHaveBeenCalled();
     expect(opts.stampSendMarker).not.toHaveBeenCalled();
   });
 
-  test('a bell row that could not be written leaves the week unstamped', async () => {
-    deliverOpsDigest.mockResolvedValueOnce({ ok: false, error: 'bell_only', fallback: true });
-    const opts = deps(oneSplit());
-    await expect(runNearStopsWeeklyCheck(opts)).resolves.toMatchObject({ sent: false, error: true });
+  test('a row that could not be written or closed leaves the week unstamped', async () => {
+    const opts = { ...deps(oneSplit()), writeAlert: jest.fn(async () => { throw new Error('pool closed'); }) };
+    await expect(runNearStopsWeeklyCheck(opts)).resolves.toEqual({ sent: false, error: true, pairs: 1 });
     expect(opts.stampSendMarker).not.toHaveBeenCalled();
-    deliverOpsDigest.mockRejectedValueOnce(new Error('pool closed'));
-    await expect(runNearStopsWeeklyCheck(deps(oneSplit()))).resolves.toMatchObject({ sent: false, error: true });
-  });
-
-  test('the email stand-in sends nothing', async () => {
-    await expect(noEmail()).resolves.toEqual({ ok: false, error: 'bell_only' });
   });
 });
 

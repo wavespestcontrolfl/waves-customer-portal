@@ -7,22 +7,29 @@
  *
  *   1. Next-door stops booked apart in the next 30 days: two stops 0.1 mile or
  *      closer (any customers), or one customer's two homes half a mile or
- *      closer. Each line says what holds each visit where it is, read from
- *      the night run's own log line for that visit (auto_dispatch_audit_logs).
+ *      closer. Each line says what holds each visit where it is: for two days,
+ *      the night run's own log line for that visit (auto_dispatch_audit_logs);
+ *      for one day, the 4:40 AM day re-plan's own reason the visit keeps its
+ *      hour (day_replan_plans.fixed).
  *   3. Truck GPS minutes for visit-to-visit drives under half a mile
- *      (visit_gps_legs), one drive per stop: the evidence a short-hop drive
- *      price would need.
+ *      (visit_gps_legs), one drive per stop, every drive since the first
+ *      matched leg: the evidence a short-hop drive price would need.
  *
  * Part 2 of the page (last week's bookings that took a costlier hour) is not
  * built here. It needs the calendar as it stood at each booking, and the app
  * keeps no history of a visit's fields (window edits, status restores, holds the
  * sweep deleted, closed-day edits), so a replay from the logs is never exact.
  *
+ * Delivery (docs/admin-notifications.md): a standing condition, one Schedule row
+ * for the whole set, raised through raiseAdminAlert under category 'alert' with
+ * bell: true (as the unassigned-visits check). It rings when a split joins the
+ * set, refreshes quietly when one leaves, and closes itself (count_zero) when none
+ * is left. A GPS reading alone is an FYI and writes no row; the next row's GPS
+ * line counts every drive since the first, so no week's drive is lost.
+ *
  * It moves no visit, texts nobody and calls no paid API: its one drive price is
  * the app's model (auto-dispatch/geo.js milesToDriveMinutes), never a road lookup.
- * Writes: its own bell row (deliverOpsDigest, owner audience, one a week; the
- * next week's row replaces it) and the weekly marker in ops_email_send_state.
- * No email: the owner asked for one admin notification.
+ * Writes: the one admin row and the weekly marker in ops_email_send_state.
  *
  * Cron: Monday 6:17am ET in scheduler.js inside runExclusive, plus a Monday and
  * Tuesday 11:17am catch-up that runs only while this week's marker is missing.
@@ -30,20 +37,21 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { deliverOpsDigest } = require('./ops-digest');
-const { retireIfClean } = require('./ops-digest-fall-off');
+const { alertEpisodesLive } = require('../config/feature-gates');
+const { composeAdminAlert, raiseAdminAlert, cutAtWord, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { haversine, resolveGeo, milesToDriveMinutes } = require('./auto-dispatch/geo');
 const { daysBetween } = require('./auto-dispatch/route-tiers');
-const { shiftDateStr } = require('./auto-dispatch/dates');
 const { FLEX_TIER_RADIUS_DAYS } = require('./auto-dispatch/flex-tier');
 const { NIGHT_TRIGGERS, FINISHED_STATUSES } = require('./auto-dispatch/catch-up');
-const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
+const { NONTERMINAL_SCHEDULED_SERVICE_STATUSES } = require('./scheduled-service-statuses');
 const {
   etDateString, etWeekStart, addETDays, parseETDateTime, formatETDayDate, formatETTime,
 } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 
-const OPS_KEY = 'near-stops-weekly';
+const DEDUPE_KEY = 'near-stops-weekly'; // the admin row's key and the weekly marker's email_key
+const CATEGORY = 'alert'; // the schedule checks' own category (bell: true below)
+const DONE_WHEN = 'count_zero';
 const LINK = '/admin/schedule';
 const AREA = 'Schedule';
 const LOOKAHEAD_DAYS = 30;
@@ -52,8 +60,8 @@ const OWN_HOMES_MILES = 0.5; // one customer's two homes
 const SAME_PLACE_MILES = 0.003; // about 16 feet: one customer's stops at one home
 const SHORT_DRIVE_MILES = 0.5;
 const NIGHT_LOG_HOURS = 36;
-const MAX_LINES = 3;
-const SUMMARY_MAX = 110;
+const MAX_LINES = 5;
+const NEWEST_DRIVES = 3;
 const DETAIL_MAX = 2000;
 
 // The night run's skip and keep reasons (auto_dispatch_audit_logs.reason_code), in
@@ -84,6 +92,26 @@ const HOLD_WORDS = {
   MANUALLY_LOCKED: 'locked by staff',
   AUTO_DISPATCH_EXCLUDED: 'excluded by staff',
   CHANGE_APPLIED: 'the night run moved it there',
+};
+
+// The 4:40 AM day re-plan's reasons a visit keeps its hour (day-replan fixedReason
+// and attachPrefs, stored in day_replan_plans.fixed), in the owner's words. An
+// unknown reason falls back to its own words.
+const REPLAN_HOLD_WORDS = {
+  status: 'already under way',
+  hold: 'a held estimate slot',
+  staff_lock: 'locked by staff',
+  office_review_pending: 'waiting for office review',
+  grouped: 'part of a combined visit',
+  same_customer: 'same customer twice that day',
+  within_24h: 'less than 24 hours away',
+  reminder_24h_sent: '24-hour reminder sent',
+  reminder_24h_off: '24-hour reminder off',
+  customer_confirmed: 'customer confirmed',
+  first_or_one_time: 'first or one-time visit',
+  person_placed: 'staff picked the time',
+  time_told: 'customer already told the time',
+  pref_unknown: "customer's wishes unreadable",
 };
 
 // ---------------------------------------------------------------- formatting
@@ -235,16 +263,16 @@ function stopsByDayOf(rows) {
 }
 
 // How one matched pair sits on the calendar. Null = not a split to report: together
-// (one day, one technician, back to back), not judged (a visit has no time yet), or
-// the 4:40 AM day re-plan's to order (two customers' stops on one day; the re-plan
-// re-times those, and holds only one customer's own stops at their hours).
+// (one day, one technician, back to back) or not judged (a visit has no time yet).
+// A same-day split is reported for any two customers: the 4:40 AM day re-plan keeps
+// most stops at their hours (a told time, a first visit, a staff pick, 24 hours out),
+// so it cannot be left to join them.
 function splitOf(first, second, pair, stopsByDay) {
   if (first.date !== second.date) return { gap: daysBetween(first.date, second.date) };
   if (!first.windowStart || !second.windowStart) return null;
   if (first.tech && second.tech && first.tech !== second.tech) return { twoTechs: true };
   const between = stopsBetween(stopsByDay.get(first.date) || [], first, second, pair);
-  if (between === 0 || !pair.sameCustomer) return null;
-  return { between };
+  return between === 0 ? null : { between };
 }
 
 const gapOf = (p) => p.gap ?? 0;
@@ -272,6 +300,20 @@ function holdFor(visit, nightLog) {
   return HOLD_WORDS[code] || code.toLowerCase().replace(/_/g, ' ');
 }
 
+// Same-day pairs: the re-plan's newest plan for that day and route says why each
+// visit keeps its hour. No plan: the re-plan did not plan the day (past its reach,
+// no technician, too few stops, or a day it skipped).
+const routeTechOf = (p) => p.first.tech || p.second.tech;
+const replanKey = (date, tech) => `${date}|${tech}`;
+
+function replanHoldFor(visit, p, replan) {
+  const plan = replan && routeTechOf(p) ? replan.get(replanKey(visit.date, routeTechOf(p))) : null;
+  if (!plan) return 'the re-plan did not plan this day';
+  const why = plan.get(visit.id);
+  if (!why) return 'the re-plan could move it';
+  return REPLAN_HOLD_WORDS[why] || String(why).replace(/_/g, ' ');
+}
+
 function splitLabel(p) {
   if (p.twoTechs) return 'same day, two technicians';
   if (p.between != null) return `same day, ${plural(p.between, 'stop')} between`;
@@ -285,12 +327,12 @@ function visitWords(visit, nightLog, withDay) {
   return `${when} (${holdFor(visit, nightLog)})`;
 }
 
-function pairLine(p, nightLog) {
+function pairLine(p, nightLog, replan) {
   const who = p.sameCustomer ? `${p.first.placeName}'s two homes` : `${p.first.placeName} and ${p.second.placeName}`;
   const lead = `- ${who}${p.first.city ? ` (${p.first.city})` : ''}, ${distanceLabel(p.miles)} apart: `;
   if (p.between != null) {
-    return `${lead}${whenLabel(p.first.date, p.first.windowStart)} and ${timeLabel(p.second.date, p.second.windowStart)}, `
-      + `${splitLabel(p)}; the 4:40 AM re-plan keeps one customer's own hours.`;
+    return `${lead}${whenLabel(p.first.date, p.first.windowStart)} (${replanHoldFor(p.first, p, replan)}) and `
+      + `${timeLabel(p.second.date, p.second.windowStart)} (${replanHoldFor(p.second, p, replan)}), ${splitLabel(p)}.`;
   }
   const sameDay = p.first.date === p.second.date;
   return `${lead}${visitWords(p.first, nightLog, true)} and ${visitWords(p.second, nightLog, !sameDay)}, ${splitLabel(p)}.`;
@@ -312,30 +354,31 @@ function physicalLegs(rows) {
   });
 }
 
-function shortDriveSummary(legs, fromDay, toDay) {
-  const week = legs.filter((l) => {
-    const day = dateOnlyString(l.service_date);
-    return day >= fromDay && day < toDay;
-  });
+// Every short drive so far: the count, the median minutes and the newest few.
+function shortDriveSummary(legs) {
   const minutes = legs.map((l) => Number(l.drive_minutes)).filter(Number.isFinite).sort((a, b) => a - b);
   const mid = Math.floor(minutes.length / 2);
   const median = minutes.length % 2 ? minutes[mid] : (minutes.length ? (minutes[mid - 1] + minutes[mid]) / 2 : null);
-  return { week, total: legs.length, median };
+  const newest = [...legs]
+    .sort((a, b) => dateOnlyString(b.service_date).localeCompare(dateOnlyString(a.service_date)))
+    .slice(0, NEWEST_DRIVES);
+  return { total: legs.length, median, newest };
 }
 
 const legWords = (l) => `${Number(l.drive_miles).toFixed(1)} mi in ${Number(l.drive_minutes).toFixed(1)} min`;
 
 function gpsLine(drives) {
-  const week = drives.week.length ? drives.week.map(legWords).join(', ') : 'none';
   const since = drives.since ? ` since ${dayLabel(drives.since)}` : '';
+  const price = `The app prices such a drive at about ${milesToDriveMinutes(0.1)} min.`;
+  const lead = 'Truck GPS, drives under half a mile from one visit to the next:';
+  if (!drives.total) return `${lead} none${since}. ${price}`;
   const median = drives.median != null ? `, median ${Number(drives.median).toFixed(1)} min` : '';
-  return `Truck GPS, drives under half a mile from one visit to the next: last week ${week}. `
-    + `All${since}: ${drives.total}${median}. The app prices such a drive at about ${milesToDriveMinutes(0.1)} min.`;
+  const newest = drives.newest.map((l) => `${dayLabel(dateOnlyString(l.service_date))}: ${legWords(l)}`).join('; ');
+  return `${lead} ${drives.total}${since}${median}. Newest: ${newest}. ${price}`;
 }
 
 // ------------------------------------------------------------------- compose
 
-const headlineFor = (pairs) => `${AREA} — review ${plural(pairs, 'next-door split')}`;
 
 function pairLead(p) {
   const what = p.sameCustomer ? "one customer's two homes" : `two stops ${distanceLabel(p.miles)} apart`;
@@ -343,53 +386,116 @@ function pairLead(p) {
   return `Easiest to join: ${what}, ${dayLabel(p.first.date)} and ${dayLabel(p.second.date)}`;
 }
 
-const summaryFor = (apart) => `${pairLead(apart[0])}.`.slice(0, SUMMARY_MAX);
+// One stable key per split: its two visits.
+const pairKey = (p) => [p.first.id, p.second.id].sort().join('|');
 
 function capped(lines) {
   if (lines.length <= MAX_LINES) return lines;
   return [...lines.slice(0, MAX_LINES), `- and ${lines.length - MAX_LINES} more`];
 }
 
-// Three pair lines keep the detail near 1,000 characters; the cut is a last
+// Five pair lines keep the detail under 2,000 characters; the cut is a last
 // resort for very long names and cities.
 function fitDetail(lines) {
   const text = lines.join('\n');
   return text.length <= DETAIL_MAX ? text : `${text.slice(0, DETAIL_MAX - 1)}…`;
 }
 
+// The row for the week: `items` 0 = nothing to raise (the open row closes).
 function composeWeeklyCheck(data) {
-  const { apart = [], nightLog = null, weekStart } = data;
-  const drives = data.drives || { week: [], total: 0, median: null, since: null };
+  const { apart = [], nightLog = null, replan = null, weekStart } = data;
+  const drives = data.drives || { total: 0, median: null, since: null, newest: [] };
   if (!apart.length) return { items: 0 };
   const lines = [
     `Week of ${dayLabel(weekStart)}. Read-only: this check moved nothing and texted nobody.`,
     '',
     `Next-door stops apart in the next ${LOOKAHEAD_DAYS} days: ${apart.length}`,
-    ...capped(apart.map((p) => pairLine(p, nightLog))),
+    ...capped(apart.map((p) => pairLine(p, nightLog, replan))),
     '',
     gpsLine(drives),
   ];
+  const easiest = apart[0];
   return {
     items: apart.length,
-    headline: headlineFor(apart.length),
-    summary: summaryFor(apart),
-    detail: fitDetail(lines),
-    metadata: {
-      weekOf: weekStart,
-      pairsApart: apart.length,
-      shortDrivesWeek: drives.week.length,
-      shortDrivesTotal: drives.total,
+    itemKeys: apart.map(pairKey).sort(),
+    spec: {
+      area: AREA,
+      action: `review ${plural(apart.length, 'next-door split')}`,
+      why: cutAtWord(`${pairLead(easiest)}.`, MAX_WHY_CHARS),
+      severity: 'needs-you',
+      link: `${LINK}?date=${easiest.first.date}`,
+      subject: { type: 'check', id: DEDUPE_KEY },
+      doneWhen: DONE_WHEN,
+      who: 'person',
     },
+    detail: fitDetail(lines),
+    metadata: { weekOf: weekStart, pairsApart: apart.length, shortDrivesTotal: drives.total },
   };
+}
+
+// A refresh rings only when a split joins the set. (A comeback after the row closed
+// rings through raiseAdminAlertWithReopen, which ignores this.)
+function ringOnNewPair(itemKeys) {
+  return (_existing, existingMeta) => {
+    const prior = new Set(Array.isArray(existingMeta?.itemKeys) ? existingMeta.itemKeys.map(String) : []);
+    return itemKeys.some((key) => !prior.has(key));
+  };
+}
+
+async function raisePairs(trx, composed) {
+  const opts = {
+    dedupeKey: DEDUPE_KEY,
+    trx,
+    // Under GATE_ADMIN_BELL_POLICY the 'alert' category is denied unless the call site tags it.
+    bell: true,
+    refreshOnDedupe: true,
+    ringOnRefresh: ringOnNewPair(composed.itemKeys),
+    // A refresh that rings moves the row to the top of the newest-first bell.
+    bumpOnRefresh: true,
+    detail: composed.detail,
+    metadata: { ...composed.metadata, itemKeys: composed.itemKeys, count: composed.items },
+  };
+  if (!alertEpisodesLive()) return raiseAdminAlert(CATEGORY, composed.spec, opts);
+  const alert = composeAdminAlert(composed.spec);
+  return require('./admin-alert-episodes').raiseAdminAlertWithReopen(CATEGORY, alert.headline, alert.why, {
+    ...opts, link: alert.link, metadata: { ...opts.metadata, ...alert.metadata },
+  });
+}
+
+// Writes the week's row, or closes the open one when no split is left. One run at a
+// time across instances (the advisory lock notifyAdmin takes for this row). A read or
+// write failure throws and never closes the row, so the week stays unstamped.
+async function writeAlert(composed, now, conn = db) {
+  return conn.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${DEDUPE_KEY}`]);
+    if (!composed.items) {
+      const closed = alertEpisodesLive()
+        ? Number(await require('./admin-alert-episodes').closeAdminAlertKeys(trx, [DEDUPE_KEY], DONE_WHEN, {
+          now, resolution: 'Cleared: no next-door stops are booked apart in the next 30 days',
+        })) || 0
+        : 0;
+      return closed ? 'closed' : 'clear';
+    }
+    const result = await raisePairs(trx, composed);
+    if (!result) throw new Error('near-stops row was not written');
+    if (result.suppressed) return 'suppressed';
+    if (!result.deduped) return 'raised';
+    if (result.refreshed) return result.rung === false ? 'refreshed' : 'raised';
+    return 'unchanged';
+  });
 }
 
 // -------------------------------------------------------------------- loaders
 
+// Live visits only (not done, cancelled or skipped), no estimate-slot holds and no
+// internal test customers.
 async function loadUpcomingStops(today, until, conn = db) {
-  return conn('scheduled_services as s')
+  const { isInternalTestCustomerId } = require('./internal-test-customers');
+  const rows = await conn('scheduled_services as s')
     .join('customers as c', 'c.id', 's.customer_id')
     .whereBetween('s.scheduled_date', [today, until])
-    .whereNotIn('s.status', NOT_A_ROUTE_STOP_STATUSES)
+    .whereIn('s.status', NONTERMINAL_SCHEDULED_SERVICE_STATUSES)
+    .whereNull('s.reservation_expires_at')
     .select(
       's.id', 's.customer_id', 's.scheduled_date', 's.window_start', 's.technician_id',
       's.is_recurring', 's.recurring_parent_id', 's.lat', 's.lng',
@@ -397,6 +503,7 @@ async function loadUpcomingStops(today, until, conn = db) {
       'c.first_name', 'c.last_name', 'c.address_line1 as customer_address_line1', 'c.zip as customer_zip',
       'c.city as customer_city', 'c.latitude as customer_latitude', 'c.longitude as customer_longitude',
     );
+  return rows.filter((row) => !isInternalTestCustomerId(row.customer_id));
 }
 
 // The newest completed nightly run's line for each visit (last line wins). Null
@@ -421,17 +528,35 @@ async function loadNightLog(visitIds, now = new Date(), conn = db) {
   return new Map(rows.map((r) => [String(r.scheduled_service_id), r]));
 }
 
-async function loadShortDrives(weekStart, conn = db) {
+// The newest day re-plan plan (last NIGHT_LOG_HOURS) for each same-day pair's day
+// and route: a map of `date|tech` to a map of visit id to the reason it keeps its hour.
+async function loadReplanFixed(apart, now = new Date(), conn = db) {
+  const days = apart.filter((p) => p.between != null && routeTechOf(p));
+  if (!days.length) return new Map();
+  const rows = await conn('day_replan_plans')
+    .whereIn('service_date', [...new Set(days.map((p) => p.first.date))])
+    .whereIn('technician_id', [...new Set(days.map(routeTechOf))])
+    .where('created_at', '>=', new Date(now.getTime() - NIGHT_LOG_HOURS * 3600000))
+    .orderBy('created_at', 'desc')
+    .select('service_date', 'technician_id', 'fixed');
+  const plans = new Map();
+  for (const row of rows) {
+    const key = replanKey(dateOnlyString(row.service_date), String(row.technician_id));
+    if (plans.has(key)) continue; // newest first: the first row per day and route wins
+    const fixed = Array.isArray(row.fixed) ? row.fixed : [];
+    plans.set(key, new Map(fixed.filter((f) => f && f.id != null).map((f) => [String(f.id), f.why])));
+  }
+  return plans;
+}
+
+async function loadShortDrives(conn = db) {
   const rows = await conn('visit_gps_legs')
     .where({ status: 'matched', drive_from_kind: 'visit' })
     .where('drive_miles', '<', SHORT_DRIVE_MILES)
     .select('technician_id', 'service_date', 'gps_arrived_at', 'leg_group_key', 'drive_miles', 'drive_minutes');
   const legs = physicalLegs(rows);
   const first = await conn('visit_gps_legs').where({ status: 'matched' }).min('service_date as first').first();
-  return {
-    ...shortDriveSummary(legs, shiftDateStr(weekStart, -7), weekStart),
-    since: first?.first ? dateOnlyString(first.first) : null,
-  };
+  return { ...shortDriveSummary(legs), since: first?.first ? dateOnlyString(first.first) : null };
 }
 
 async function loadWeek(now = new Date(), conn = db) {
@@ -439,8 +564,9 @@ async function loadWeek(now = new Date(), conn = db) {
   const stops = await loadUpcomingStops(etDateString(now), etDateString(addETDays(now, LOOKAHEAD_DAYS)), conn);
   const apart = findApartPairs(stops);
   const nightLog = await loadNightLog(apart.flatMap((p) => [p.first.id, p.second.id]), now, conn);
-  const drives = await loadShortDrives(weekStart, conn);
-  return { weekStart, apart, nightLog, drives };
+  const replan = await loadReplanFixed(apart, now, conn);
+  const drives = await loadShortDrives(conn);
+  return { weekStart, apart, nightLog, replan, drives };
 }
 
 // ------------------------------------------------------------- run + marker
@@ -448,13 +574,13 @@ async function loadWeek(now = new Date(), conn = db) {
 const weekStartMs = (now) => parseETDateTime(`${etWeekStart(now)}T00:00`).getTime();
 
 async function markerAt(conn = db) {
-  const row = await conn('ops_email_send_state').where({ email_key: OPS_KEY }).first('last_sent_at');
+  const row = await conn('ops_email_send_state').where({ email_key: DEDUPE_KEY }).first('last_sent_at');
   return row?.last_sent_at ? ms(row.last_sent_at) : null;
 }
 
 // True once this ET week's check has run (the marker is stamped at or after its
-// Monday 00:00). A read failure runs anyway: a rare second row beats a lost week,
-// and the week's dedupe key keeps that second row from ringing.
+// Monday 00:00). A read failure runs anyway: a rerun refreshes the one row, and a
+// refresh rings only when a split joined since.
 async function sentRecently(now = new Date()) {
   try {
     const at = await markerAt();
@@ -469,7 +595,7 @@ async function stampSendMarker() {
   try {
     const now = new Date();
     await db('ops_email_send_state')
-      .insert({ email_key: OPS_KEY, last_sent_at: now, updated_at: now })
+      .insert({ email_key: DEDUPE_KEY, last_sent_at: now, updated_at: now })
       .onConflict('email_key')
       .merge({ last_sent_at: now, updated_at: now });
   } catch (err) {
@@ -489,13 +615,6 @@ async function weekIsMissing(now = new Date()) {
   }
 }
 
-// The owner asked for an admin notification, not an email. deliverOpsDigest calls
-// this only when the bell row cannot be written: it sends nothing and reports not
-// ok, so the week stays unstamped and the 11:17 catch-up tries again.
-async function noEmail() {
-  return { ok: false, error: 'bell_only' };
-}
-
 async function runNearStopsWeeklyCheck(opts = {}) {
   const now = opts.now || new Date();
   if (await (opts.sentRecently || sentRecently)(now)) return { skipped: 'recent_send' };
@@ -506,63 +625,38 @@ async function runNearStopsWeeklyCheck(opts = {}) {
     logger.error(`[near-stops-weekly] query failed: ${err.message}`);
     return { skipped: 'query_failed' };
   }
-  const counts = { pairs: data.apart.length };
-  const composed = composeWeeklyCheck(data);
-  const stamp = opts.stampSendMarker || stampSendMarker;
-  if (!composed.items) {
-    // Nothing to review: last week's open row closes (the clean-run fall-off).
-    await (opts.retireIfClean || retireIfClean)(OPS_KEY);
-    await stamp();
-    return { sent: false, empty: true, ...counts };
-  }
-  let delivered;
+  const pairs = data.apart.length;
+  let outcome;
   try {
-    delivered = await (opts.deliver || deliverOpsDigest)({
-      key: OPS_KEY,
-      subject: `ACT: ${composed.headline}`,
-      headline: composed.headline,
-      summary: composed.summary,
-      text: composed.detail,
-      link: LINK,
-      metadata: composed.metadata,
-      audience: 'owner',
-      // One row per ET week: a rerun the same week hits the key, each new week
-      // rings once, and the new row closes last week's open one.
-      dedupeKey: `${OPS_KEY}:${data.weekStart}`,
-      count: composed.items,
-      itemKeys: [data.weekStart],
-      ringOnFirstIdentity: true,
-      supersedePrior: true,
-      sendEmail: noEmail,
-    });
+    outcome = await (opts.writeAlert || writeAlert)(composeWeeklyCheck(data), now);
   } catch (err) {
-    logger.error(`[near-stops-weekly] delivery failed (${err.code || err.name || 'error'})`);
-    return { sent: false, error: true, ...counts };
+    logger.error(`[near-stops-weekly] alert write failed (${err.code || err.name || 'error'})`);
+    return { sent: false, error: true, pairs };
   }
-  if (delivered?.ok === false) {
-    logger.error('[near-stops-weekly] delivery reported not ok');
-    return { sent: false, error: true, ...counts };
-  }
-  await stamp();
-  return { sent: true, ...counts };
+  await (opts.stampSendMarker || stampSendMarker)();
+  return { sent: outcome === 'raised', outcome, pairs };
 }
 
 module.exports = {
   runNearStopsWeeklyCheck,
   weekIsMissing,
+  DEDUPE_KEY,
   _private: {
     buildPlaces,
     nearPairs,
     matchVisits,
     findApartPairs,
     holdFor,
+    replanHoldFor,
+    loadReplanFixed,
+    loadUpcomingStops,
     physicalLegs,
     shortDriveSummary,
     composeWeeklyCheck,
+    ringOnNewPair,
+    writeAlert,
     loadWeek,
     sentRecently,
-    noEmail,
-    OPS_KEY,
     HOLD_WORDS,
   },
 };
