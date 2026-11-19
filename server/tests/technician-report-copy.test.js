@@ -278,56 +278,6 @@ describe('summaryCopySignature — PDF cache-key component', () => {
   });
 });
 
-// The browser that renders a PDF fetches its own /data, so the render names
-// the writer-rules state its key was computed under, and /data refuses the
-// other state (pre-push P1 on e73ee6952d and 0e897d73d1: a rolling restart).
-describe('the render precondition: the writer-rules state a PDF was keyed under', () => {
-  const gate = process.env.GATE_REPORT_WRITER_RULES;
-  afterEach(() => {
-    if (gate === undefined) delete process.env.GATE_REPORT_WRITER_RULES;
-    else process.env.GATE_REPORT_WRITER_RULES = gate;
-  });
-
-  test('the render URL carries the state the key is computed under; the SMS preview image URL carries none', () => {
-    const { serviceReportViewerUrl } = require('../services/service-report/pdf-puppeteer');
-    process.env.GATE_REPORT_WRITER_RULES = 'true';
-    expect(new URL(serviceReportViewerUrl('tok-1', null, 'pdf')).searchParams.get('wr')).toBe('on');
-    process.env.GATE_REPORT_WRITER_RULES = 'false';
-    expect(new URL(serviceReportViewerUrl('tok-1', null, 'pdf')).searchParams.get('wr')).toBe('off');
-    expect(new URL(serviceReportViewerUrl('tok-1', null, 'sms_preview')).searchParams.has('wr')).toBe(false);
-  });
-
-  test('a process in the other state refuses the render; a request that names none is never refused', () => {
-    const { renderWriterRulesMismatch } = require('../services/service-report/technician-report-copy');
-    process.env.GATE_REPORT_WRITER_RULES = 'true';
-    expect(renderWriterRulesMismatch('on')).toBe(false);
-    expect(renderWriterRulesMismatch('off')).toBe(true);
-    process.env.GATE_REPORT_WRITER_RULES = 'false';
-    expect(renderWriterRulesMismatch('off')).toBe(false);
-    expect(renderWriterRulesMismatch('on')).toBe(true);
-    [undefined, '', 'yes', ['on']].forEach((value) => expect(renderWriterRulesMismatch(value)).toBe(false));
-  });
-
-  test('the data route refuses it before it builds the report, and the page forwards it', () => {
-    const fs = require('fs');
-    const path = require('path');
-    const route = fs.readFileSync(path.join(__dirname, '../routes/reports-public.js'), 'utf8');
-    const dataRoute = route.indexOf("router.get('/:token/data',");
-    // The handler's closing line: the first top-level `});` after its start.
-    const routeEnd = route.indexOf('\n});', dataRoute);
-    const v1Branch = route.indexOf("if (service.report_template_version === 'service_report_v1') {", dataRoute);
-    const refusal = route.indexOf('if (refusedOtherWriterRulesRender(req, res, serviceRecordId)) return;', v1Branch);
-    expect(dataRoute).toBeGreaterThan(-1);
-    expect(v1Branch).toBeGreaterThan(dataRoute);
-    expect(refusal).toBeGreaterThan(v1Branch);
-    expect(refusal).toBeLessThan(route.indexOf('buildServiceReportV1ResponseData(service', v1Branch));
-    expect(refusal).toBeLessThan(routeEnd);
-    const page = fs.readFileSync(path.join(__dirname, '../../client/src/pages/ReportViewPage.jsx'), 'utf8');
-    expect(page).toContain("`&wr=${encodeURIComponent(renderWriterRules)}`");
-    expect(page).toContain('reportDataUrl(token, mode, pinnedAssessment, renderWriterRules)');
-  });
-});
-
 describe('typed snapshot — technician report body in the generic tail compositions', () => {
   test('one-time pest default branch: body is the reviewed report alone, headline stays deterministic', () => {
     const snapshot = buildTypedReportSnapshot({

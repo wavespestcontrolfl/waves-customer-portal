@@ -2862,7 +2862,7 @@ describe('service report v1', () => {
   });
 
   test('v1 PDF renderer has no compact fallback and viewer URL points to the report page', () => {
-    expect(serviceReportViewerUrl('token-1')).toBe('http://localhost:5173/report/token-1?mode=pdf&wr=off');
+    expect(serviceReportViewerUrl('token-1')).toBe('http://localhost:5173/report/token-1?mode=pdf');
     expect(require('../services/service-report/pdf').renderFallbackPdf).toBeUndefined();
   });
 

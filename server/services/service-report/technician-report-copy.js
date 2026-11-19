@@ -369,21 +369,16 @@ function darkFourSectionCardSuffix(serviceData = {}) {
   return reportWriterRulesLive() ? '-fson' : '-fsoff';
 }
 
-// The writer-rules state a server render's PDF key is computed under. The
-// browser that renders a PDF fetches its own /data from the web process, so
-// the render URL carries this state as `wr` (pdf-puppeteer
-// serviceReportViewerUrl), the report page forwards it, and /data refuses a
-// render on a process in the other state (renderWriterRulesMismatch): in a
-// rolling restart's overlap the render fails, and no PDF lands under the key
-// of a state it was not rendered in.
+// The writer-rules state, as a PDF key and a PDF payload name it. The browser
+// that renders a PDF fetches its own /data from the web process, so /data in
+// PDF mode names the state it built the payload in (`writerRules`), the
+// report page shows it on its root element (data-writer-rules), and the
+// renderer prints only once the page shows the state the key was computed
+// under (pdf.js reportPdfReadySelector). A page built in the other state (a
+// rolling restart's overlap), or by a page bundle or server from before this
+// rule, never shows it: the render times out and nothing is stored.
 function renderWriterRulesState() {
   return reportWriterRulesLive() ? 'on' : 'off';
-}
-
-// True when a render asked for the other writer-rules state. A request that
-// names none (a customer's own page) is never refused.
-function renderWriterRulesMismatch(requested) {
-  return (requested === 'on' || requested === 'off') && requested !== renderWriterRulesState();
 }
 
 function summaryCopySignature(service = {}) {
@@ -434,7 +429,6 @@ function customerCopyViolations(text) {
 module.exports = {
   technicianReportCustomerCopy,
   renderWriterRulesState,
-  renderWriterRulesMismatch,
   fourSectionReport,
   containsReportAccessCode,
   customerCopyViolations,

@@ -40,6 +40,9 @@ jest.mock('../services/pest-pressure/store', () => ({
 }));
 jest.mock('../services/service-report/report-data', () => ({
   buildReportV1Data: jest.fn(),
+  // The pdf / static modes strip live-only fields in place.
+  stripLiveOnlyScheduleFields: jest.fn(),
+  stripLiveOnlyReportProductCopy: jest.fn(),
 }));
 jest.mock('../services/service-report/dynamic-context', () => ({
   buildServiceReportDynamicContext: jest.fn().mockResolvedValue({}),
@@ -232,14 +235,13 @@ describe('GET /reports/:token/data view tracking', () => {
   });
 });
 
-// The PDF renderer names the writer-rules state its key was computed under
-// (wr=on|off, pdf-puppeteer serviceReportViewerUrl); the page forwards it.
-// Same harness as above (an auto_send report, so no staff login).
-describe('GET /reports/:token/data: a PDF render for the other writer-rules state', () => {
+// The PDF payload names the writer-rules state it was built in: the report
+// page shows it on its root, and the PDF renderer prints only once it matches
+// the state the PDF key was computed under (pdf.js reportPdfReadySelector).
+describe('GET /reports/:token/data: the writer-rules state of a PDF payload', () => {
   const gate = process.env.GATE_REPORT_WRITER_RULES;
   beforeEach(() => {
     jest.clearAllMocks();
-    process.env.GATE_REPORT_WRITER_RULES = 'true';
     buildReportV1Data.mockResolvedValue({
       typedReport: { headline: 'Rodent activity was high today.' },
       pestPressure: null,
@@ -251,25 +253,21 @@ describe('GET /reports/:token/data: a PDF render for the other writer-rules stat
     else process.env.GATE_REPORT_WRITER_RULES = gate;
   });
 
-  test('is refused with 409 before the report is built', async () => {
-    mockDb({ deliveryMode: 'auto_send' });
-    await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data?mode=pdf&wr=off`);
-      expect(res.status).toBe(409);
-      expect(buildReportV1Data).not.toHaveBeenCalled();
-    });
-  });
-
-  // The check reads only wr, never the mode; this harness serves the live
-  // payload (the PDF mode reads tables it does not mock).
-  test('a request for this state, and one that names none, build the report', async () => {
-    for (const query of ['?wr=on', '']) {
+  test('a PDF payload names the state it was built in; a live payload names none', async () => {
+    for (const [value, state] of [['true', 'on'], ['false', 'off']]) {
+      process.env.GATE_REPORT_WRITER_RULES = value;
       mockDb({ deliveryMode: 'auto_send' });
       await withServer(async (baseUrl) => {
-        const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data${query}`);
+        const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data?mode=pdf`);
         expect(res.status).toBe(200);
+        expect((await res.json()).writerRules).toBe(state);
       });
     }
-    expect(buildReportV1Data).toHaveBeenCalledTimes(2);
+    mockDb({ deliveryMode: 'auto_send' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).writerRules).toBeUndefined();
+    });
   });
 });

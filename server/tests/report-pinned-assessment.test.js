@@ -452,10 +452,7 @@ describe('#3168 pinned assessment — the render URL carries the pin', () => {
   });
 
   test('no pin renders the URL unchanged', () => {
-    // wr: the writer-rules state the PDF key is computed under, not a pin
-    // (technician-report-copy renderWriterRulesState).
-    const { renderWriterRulesState } = require('../services/service-report/technician-report-copy');
-    expect(serviceReportViewerUrl('tok-1')).toBe(`https://portal.example/report/tok-1?mode=pdf&wr=${renderWriterRulesState()}`);
+    expect(serviceReportViewerUrl('tok-1')).toBe('https://portal.example/report/tok-1?mode=pdf');
   });
 
   test('a pin is appended and URL-encoded', () => {

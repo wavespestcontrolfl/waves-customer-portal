@@ -61,11 +61,6 @@ function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessment
     params.push(`aexp=${encodeURIComponent(signed.expiresAt)}`);
     if (planPin) params.push(`plan=${encodeURIComponent(planPin)}`);
   }
-  // A PDF render names the writer-rules state its PDF key is computed under:
-  // /data refuses the render on a process in the other state
-  // (technician-report-copy renderWriterRulesMismatch). Other modes (the SMS
-  // preview image) key nothing on it and send none.
-  if (mode === 'pdf') params.push(`wr=${require('./technician-report-copy').renderWriterRulesState()}`);
   const query = params.length ? `?${params.join('&')}` : '';
   return `${base}/report/${encodeURIComponent(token)}${query}`;
 }
@@ -94,14 +89,14 @@ async function launchBrowser() {
   }
 }
 
-async function renderReportPdfWithBrowser(url) {
+async function renderReportPdfWithBrowser(url, { readySelector = '.service-report-v1' } = {}) {
   if (!chromium) throw new Error('Playwright is not installed');
   const browser = await launchBrowser();
   let page = null;
   try {
     page = await browser.newPage({ viewport: { width: 1120, height: 1440 } });
     await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForSelector('.service-report-v1', { timeout: 10000 });
+    await page.waitForSelector(readySelector, { timeout: 10000 });
     await page.emulateMedia({ media: 'print', colorScheme: 'light' });
     const pdf = await page.pdf({
       format: 'Letter',

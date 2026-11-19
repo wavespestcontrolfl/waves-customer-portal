@@ -48,7 +48,14 @@ function assertPdfBuffer(buf, provider) {
   throw err;
 }
 
-async function renderReportPdfWithCloudflare(url, { serviceRecordId } = {}) {
+// The element both PDF providers wait for before printing a service report:
+// its root showing the writer-rules state this render's key is computed under
+// (technician-report-copy renderWriterRulesState; /data names it in PDF mode).
+function reportPdfReadySelector() {
+  return `.service-report-v1[data-writer-rules="${require('./technician-report-copy').renderWriterRulesState()}"]`;
+}
+
+async function renderReportPdfWithCloudflare(url, { serviceRecordId, readySelector = '.service-report-v1' } = {}) {
   const accountId = process.env.CF_ACCOUNT_ID;
   const token = process.env.CF_BROWSER_RENDERING_TOKEN;
 
@@ -69,7 +76,7 @@ async function renderReportPdfWithCloudflare(url, { serviceRecordId } = {}) {
         url,
         viewport: { width: 816, height: 1056 },
         gotoOptions: { waitUntil: 'networkidle0', timeout: 30000 },
-        waitForSelector: { selector: '.service-report-v1', visible: true, timeout: 10000 },
+        waitForSelector: { selector: readySelector, visible: true, timeout: 10000 },
         emulateMediaType: 'print',
         pdfOptions: {
           format: 'letter',
@@ -150,12 +157,12 @@ async function countUnreachableReportPhotos(data, { timeoutMs = 2500 } = {}) {
 // page's own count of image-load fallbacks (Playwright reads it after
 // page.pdf()); null = unknown — the Cloudflare renderer returns only bytes,
 // so callers fall back to the server-side URL probe there.
-async function renderReportPdf(url, { serviceRecordId } = {}) {
+async function renderReportPdf(url, { serviceRecordId, readySelector } = {}) {
   const provider = selectedPdfRenderer();
   if (provider === 'cloudflare_browser_rendering') {
-    return { pdf: await renderReportPdfWithCloudflare(url, { serviceRecordId }), imageFailures: null };
+    return { pdf: await renderReportPdfWithCloudflare(url, { serviceRecordId, readySelector }), imageFailures: null };
   }
-  return renderReportPdfWithBrowser(url);
+  return renderReportPdfWithBrowser(url, { readySelector });
 }
 
 async function renderServiceReportV1Pdf(data, {
@@ -170,7 +177,7 @@ async function renderServiceReportV1Pdf(data, {
   const started = Date.now();
 
   try {
-    const rendered = await renderReportPdf(url, { serviceRecordId: recordId });
+    const rendered = await renderReportPdf(url, { serviceRecordId: recordId, readySelector: reportPdfReadySelector() });
     const pdf = assertPdfBuffer(rendered.pdf, provider);
     const elapsedMs = Date.now() - started;
     emitPdfRenderSuccess({
@@ -209,6 +216,7 @@ module.exports = {
   renderReportPdfWithBrowser,
   renderReportPdfWithCloudflare,
   renderServiceReportV1Pdf,
+  reportPdfReadySelector,
   selectedPdfRenderer,
   serviceReportViewerUrl,
 };

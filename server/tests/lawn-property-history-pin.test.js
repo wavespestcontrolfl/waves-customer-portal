@@ -31,9 +31,7 @@ describe('history fingerprint through the existing signed assessment transport',
 
   test('the browser URL needs no new client-forwarded parameter', () => {
     const url = new URL(serviceReportViewerUrl('token-a', null, 'pdf', { pinnedLawnAssessmentId: 'assessment-a', pinnedLawnHistoryIdentity: history }));
-    // wr is the writer-rules state of the PDF key (technician-report-copy
-    // renderWriterRulesState), not part of the history transport.
-    expect([...url.searchParams.keys()].sort()).toEqual(['aexp', 'asig', 'assessment', 'mode', 'wr']);
+    expect([...url.searchParams.keys()].sort()).toEqual(['aexp', 'asig', 'assessment', 'mode']);
     expect(assessmentPinHistory(url.searchParams.get('asig'))).toBe(history);
     expect(verifyAssessmentPin('token-a', 'assessment-a', url.searchParams.get('asig'), url.searchParams.get('aexp'))).toBe(true);
   });
