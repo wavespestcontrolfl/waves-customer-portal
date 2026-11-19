@@ -21,7 +21,7 @@ const {
   loadFailedPaymentFacts,
   standaloneFailedRows,
   standaloneFailedTotal,
-  isNeverAttemptedDeferral,
+  excludeNeverAttemptedDeferrals,
   metadataInvoiceId,
 } = require('../services/failed-payments');
 const { isEnabled } = require('../config/feature-gates');
@@ -672,13 +672,12 @@ router.get('/balance', async (req, res, next) => {
     // payment failure would show as the homeowner's own balance / failure).
     const payerLinkage = await loadLivePayerLinkage(req.customerId, balanceDb);
     const { failed: payerLookupFailed, isPayerLinked, liveOwnedIds = new Set() } = payerLinkage;
-    if (payerLookupFailed) {
-      throw Object.assign(new Error('Billing details are temporarily unavailable. Please try again.'), {
-        isOperational: true,
-        statusCode: 503,
-        code: 'BILLING_OWNERSHIP_UNAVAILABLE',
-      });
-    }
+    const unavailable = () => Object.assign(new Error('Billing details are temporarily unavailable. Please try again.'), {
+      isOperational: true,
+      statusCode: 503,
+      code: 'BILLING_OWNERSHIP_UNAVAILABLE',
+    });
+    if (payerLookupFailed) throw unavailable();
     const liveOwnedInvoiceIds = [...liveOwnedIds].map(String);
 
     // Failed attempts whose retry later collected are superseded — the
@@ -711,6 +710,20 @@ router.get('/balance', async (req, res, next) => {
     // (isNeverAttemptedDeferral and the canonical unsuperseded-failed query live in services/failed-payments.js — the SMS
     // grounding balance reads the same code; Codex round-35 P1.)
     const failedFacts = await loadFailedPaymentFacts(req.customerId, balanceDb);
+    // A failed status lookup cannot tell whether an invoice-linked homeowner
+    // attempt is a draft (the attempt carries the debt) or a non-draft (the
+    // invoice carries it). Returning zero in that state would publish
+    // "Account current" while money may still be owed. Payer rows and
+    // never-attempted placeholders are provably not homeowner debt, so they do
+    // not make the response unavailable.
+    const unresolvedHomeownerDebt = failedFacts.invoiceLookupFailed
+      && standaloneFailedRows({ ...failedFacts, unresolvedInvoiceIds: new Set() }, isPayerLinked)
+        .some((row) => {
+          const invoiceId = metadataInvoiceId(row)?.toLowerCase();
+          return invoiceId && failedFacts.unresolvedInvoiceIds.has(invoiceId)
+            && parseFloat(row.amount || 0) > 0;
+        });
+    if (unresolvedHomeownerDebt) throw unavailable();
     const eligibleFailedRows = standaloneFailedRows(failedFacts, isPayerLinked);
     const failedTotal = standaloneFailedTotal(failedFacts, isPayerLinked);
 
@@ -750,42 +763,24 @@ router.get('/balance', async (req, res, next) => {
     // completed attempt failed — not when there's any failed row in history.
     // Skip payer-linked attempts so an AP failure doesn't flip the homeowner's
     // banner.
-    // Bounded keyset pages: advance past payer rows and never-attempted
-    // deferrals until a homeowner attempt or actual ledger exhaustion. The
-    // cursor uses PostgreSQL's full-precision timestamp text; a JS Date would
-    // round microseconds away and could skip an attempt at a page boundary.
-    // A never-attempted deferral (see isNeverAttemptedDeferral) is not an
-    // attempt either — it must not raise the "last payment failed" banner.
-    const isRealAttempt = (p) => !isPayerLinked(p) && !isNeverAttemptedDeferral(p);
-    const recentAttemptsQuery = (cursor) => {
-      const query = excludeLiveOwnedPayerPayments(excludeDirectPayerPayments(balanceDb('payments')
-        .where({ customer_id: req.customerId })
-        .whereIn('status', ['paid', 'failed', 'refunded'])
-        .whereNull('superseded_by_payment_id')), payerLinkage);
-      if (cursor) {
-        query.whereRaw(
-          '(payments.payment_date, payments.created_at, payments.id) < (?::date, ?::timestamptz, ?::uuid)',
-          [cursor.paymentDate, cursor.createdAt, cursor.id],
-        );
-      }
+    // Apply the complete payer/placeholder eligibility filter in SQL BEFORE
+    // ordering and taking one row. This stays one bounded query even when an
+    // account has years of payer-owned attempts or never-attempted deferrals.
+    const recentAttemptsQuery = () => {
+      const query = excludeNeverAttemptedDeferrals(
+        excludeLiveOwnedPayerPayments(excludeDirectPayerPayments(balanceDb('payments')
+          .where({ customer_id: req.customerId })
+          .whereIn('status', ['paid', 'failed', 'refunded'])
+          .whereNull('superseded_by_payment_id')), payerLinkage),
+        'payments',
+      );
       return query.orderBy('payment_date', 'desc')
         .orderBy('created_at', 'desc')
         .orderBy('id', 'desc')
-        .select('id', 'status', 'metadata', 'payer_id', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'retry_count', 'next_retry_at',
-          balanceDb.raw('payments.payment_date::text AS payment_date_cursor'),
-          balanceDb.raw('payments.created_at::text AS created_at_cursor'));
+        .select('id', 'status')
+        .first();
     };
-    let mostRecentAttempt = null;
-    let cursor = null;
-    const PAGE = 50;
-    for (;;) {
-      const batch = await recentAttemptsQuery(cursor).limit(PAGE);
-      if (!batch.length) break;
-      mostRecentAttempt = batch.find(isRealAttempt) || null;
-      if (mostRecentAttempt || batch.length < PAGE) break;
-      const last = batch[batch.length - 1];
-      cursor = { paymentDate: last.payment_date_cursor, createdAt: last.created_at_cursor, id: last.id };
-    }
+    const mostRecentAttempt = await recentAttemptsQuery();
 
     // Portal "Pay now" (GATE_PORTAL_PAY_NOW, audit S2-1): the customer's own
     // open invoices with their existing tokenized /pay links, oldest first,

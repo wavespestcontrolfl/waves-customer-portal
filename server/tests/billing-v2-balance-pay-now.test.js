@@ -315,7 +315,7 @@ describe('GET /balance — Pay-now open-invoice links (GATE_PORTAL_PAY_NOW)', ()
     expect(body.openInvoices).toEqual([]);
   });
 
-  test('an unresolved failed-invoice status cannot mint a shortcut for a retired invoice; ordinary open rows remain', async () => {
+  test('an unresolved failed-invoice status makes a possibly owed homeowner balance unavailable', async () => {
     const failedId = 'ab36f51e-4441-4cc8-bbf7-c41ffad50152';
     tableResults.failedRows = [{ amount: '89.00', metadata: { invoice_id: failedId.toUpperCase() } }];
     tableResults.linkedInvoiceLookupError = new Error('status lookup unavailable');
@@ -324,15 +324,32 @@ describe('GET /balance — Pay-now open-invoice links (GATE_PORTAL_PAY_NOW)', ()
       { id: 'de27b36a-3054-4c64-93e4-0d15b785bb34', status: 'sent', token: 'open-token', invoice_number: 'INV-OPEN', total: '31.00' },
     ];
 
+    await expect(getBalance()).rejects.toMatchObject({
+      isOperational: true,
+      statusCode: 503,
+      code: 'BILLING_OWNERSHIP_UNAVAILABLE',
+    });
+    expect(tableResults.lastOpenInvoicesCalls).toBeNull();
+  });
+
+  test('an unresolved payer/never-attempted draft lookup does not invent homeowner uncertainty', async () => {
+    const payerDraftId = '22222222-2222-4222-8222-222222222222';
+    const deferredDraftId = '33333333-3333-4333-8333-333333333333';
+    tableResults.failedRows = [
+      { amount: '89.00', payer_id: 'payer-1', metadata: { invoice_id: payerDraftId } },
+      {
+        amount: '55.00', stripe_payment_intent_id: null, retry_count: 0,
+        next_retry_at: '2026-11-20T15:00:00Z',
+        metadata: { invoice_id: deferredDraftId, deferred_reason: 'lock_contention' },
+      },
+    ];
+    tableResults.linkedInvoiceLookupError = new Error('status lookup unavailable');
+    tableResults.unpaidTotal = '31.00';
+
     const body = await getBalance();
 
-    expect(body.currentBalance).toBe(0);
-    expect(tableResults.lastOpenInvoicesCalls).not.toEqual(expect.arrayContaining([
-      ['whereIn', ['id', [failedId.toUpperCase()]]],
-    ]));
-    expect(body.openInvoices).toEqual([
-      { payUrl: '/pay/open-token', amountDue: 31, invoiceNumber: 'INV-OPEN', dueDate: undefined },
-    ]);
+    expect(body.currentBalance).toBe(31);
+    expect(body.openInvoices).toEqual([]);
   });
 
   test('gate off: field absent, rest of the payload unchanged (dark-ship contract)', async () => {

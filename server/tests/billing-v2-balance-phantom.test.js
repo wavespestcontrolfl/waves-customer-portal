@@ -111,16 +111,14 @@ jest.mock('../models/db', () => {
       if (whereArg.status === 'failed') return project(tableResults.failedRows);
       if (whereArg.status === 'upcoming') return project(tableResults.upcomingRows);
       // recent-attempts scan (whereIn statuses)
-      if (wantFirst) return tableResults.recentAttempts[0] || null;
       recentAttemptQueryCalls.push(calls);
-      const limit = (calls.find(([method]) => method === 'limit') || [null, [tableResults.recentAttempts.length]])[1][0];
-      const keyset = calls.find(([method, args]) => method === 'whereRaw'
-        && String(args[0]).includes('(payments.payment_date, payments.created_at, payments.id) <'));
-      const start = keyset
-        ? tableResults.recentAttempts.findIndex((row) => row.payment_date_cursor === keyset[1][1][0]
-          && row.created_at_cursor === keyset[1][1][1] && row.id === keyset[1][1][2]) + 1
-        : 0;
-      return project(tableResults.recentAttempts.slice(start, start + limit));
+      if (wantFirst) {
+        const { buildPayerLinkage } = jest.requireActual('../services/payer-linkage');
+        const { isNeverAttemptedDeferral } = jest.requireActual('../services/failed-payments');
+        const linked = buildPayerLinkage([...tableResults.payerInvoices, ...tableResults.liveOwnedInvoices]);
+        return tableResults.recentAttempts.find((row) => !linked.isPayerLinked(row) && !isNeverAttemptedDeferral(row)) || null;
+      }
+      return project(tableResults.recentAttempts);
     }
     throw new Error(`Unexpected table ${table}`);
   }));
@@ -236,7 +234,7 @@ describe('GET /balance — phantom failed-row exclusion', () => {
     expect(await getBalance()).toMatchObject({ lastPaymentFailed: true, lastPaymentAttemptId: 'own' });
   });
 
-  test('the latest-attempt scan pages through every ineligible payer row before the homeowner attempt', async () => {
+  test('the latest-attempt lookup filters long payer/deferral history in SQL before selecting one homeowner attempt', async () => {
     const payerInvoiceId = 'ab36f51e-4441-4cc8-bbf7-c41ffad50152';
     tableResults.payerInvoices = [{ id: payerInvoiceId }];
     const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
@@ -245,14 +243,13 @@ describe('GET /balance — phantom failed-row exclusion', () => {
         id: uuid(1000 - index),
         status: 'failed',
         metadata: { waves_invoice_id: payerInvoiceId },
-        payment_date_cursor: '2026-11-19',
-        // The first page shares one JS millisecond but keeps distinct
-        // microseconds, proving the cursor does not round through Date.
-        created_at_cursor: `2026-11-19 12:00:00.${String(999999 - index).padStart(6, '0')}+00`,
       })),
       {
+        id: uuid(2), status: 'failed', stripe_payment_intent_id: null, retry_count: 0,
+        next_retry_at: '2026-11-20T15:00:00Z', metadata: { deferred_reason: 'lock_contention' },
+      },
+      {
         id: uuid(1), status: 'failed', metadata: null,
-        payment_date_cursor: '2026-11-19', created_at_cursor: '2026-11-19 12:00:00.999449+00',
       },
     ];
 
@@ -262,27 +259,20 @@ describe('GET /balance — phantom failed-row exclusion', () => {
       lastPaymentFailed: true,
       lastPaymentAttemptId: uuid(1),
     });
-    expect(recentAttemptQueryCalls).toHaveLength(12);
+    expect(recentAttemptQueryCalls).toHaveLength(1);
     expect(recentAttemptQueryCalls[0]).toEqual(expect.arrayContaining([
       ['orderBy', ['payment_date', 'desc']],
       ['orderBy', ['created_at', 'desc']],
       ['orderBy', ['id', 'desc']],
-      ['limit', [50]],
     ]));
     expect(recentAttemptQueryCalls[0].some(([method]) => method === 'offset')).toBe(false);
-    expect(recentAttemptQueryCalls[1]).toEqual(expect.arrayContaining([[
-      'whereRaw', [
-        '(payments.payment_date, payments.created_at, payments.id) < (?::date, ?::timestamptz, ?::uuid)',
-        ['2026-11-19', '2026-11-19 12:00:00.999950+00', uuid(951)],
-      ],
-    ]]));
-    expect(recentAttemptQueryCalls[11]).toEqual(expect.arrayContaining([
-      ['limit', [50]],
-      ['whereRaw', [
-        '(payments.payment_date, payments.created_at, payments.id) < (?::date, ?::timestamptz, ?::uuid)',
-        ['2026-11-19', '2026-11-19 12:00:00.999450+00', uuid(451)],
-      ]],
-    ]));
+    const sql = recentAttemptQueryCalls[0]
+      .filter(([method]) => method === 'whereRaw')
+      .map(([, args]) => args[0])
+      .join('\n');
+    expect(sql).toContain("metadata->>'waves_invoice_id'");
+    expect(sql).toContain("metadata->>'deferred_reason'");
+    expect(sql).toContain('stripe_payment_intent_id IS NULL');
   });
 
   test('live default/visit payer ownership is excluded from failed, upcoming, balance, next-charge, and Pay now surfaces', async () => {

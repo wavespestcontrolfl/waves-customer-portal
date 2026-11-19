@@ -10,7 +10,9 @@ jest.mock('../models/db', () => jest.fn());
 // the LIVE linkage (loadLivePayerLinkage — round-41/42) also asks the shared live-ownership verdict; these cases have no live-owned invoices
 jest.mock('../services/invoice-payer-ownership', () => ({ liveInvoiceOwnership: jest.fn(async () => ({ ownedIds: new Set(), unverifiable: false })) }));
 jest.mock('../services/visit-completion-packets', () => ({ liveThirdPartyPayerForPacket: jest.fn(async () => null) }));
-const { buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage } = require('../services/payer-linkage');
+const {
+  buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage, excludeLiveOwnedPayerPayments,
+} = require('../services/payer-linkage');
 const { liveInvoiceOwnership } = require('../services/invoice-payer-ownership');
 const { liveThirdPartyPayerForPacket } = require('../services/visit-completion-packets');
 
@@ -53,6 +55,26 @@ describe('isPayerLinked recognizes every linkage', () => {
         waves_invoice_id: '70a2c70d-bbd9-451a-a258-14e73473db08',
       },
     })).toBe(true);
+  });
+});
+
+describe('payer-linked SQL exclusion matches the in-memory linkage', () => {
+  test('filters every invoice alias, processor id and invoice-number description before a row cap', () => {
+    const calls = [];
+    const qb = { whereRaw: (...args) => { calls.push(args); return qb; } };
+
+    expect(excludeLiveOwnedPayerPayments(qb, linkage)).toBe(qb);
+
+    const sql = calls.map(([text]) => text).join('\n');
+    expect(sql).toContain("metadata->>'invoice_id'");
+    expect(sql).toContain("metadata->>'dispute_invoice_id'");
+    expect(sql).toContain("metadata->>'waves_invoice_id'");
+    expect(sql).toContain('stripe_payment_intent_id NOT IN');
+    expect(sql).toContain('stripe_charge_id NOT IN');
+    expect(sql).toContain("substring(payments.description from '^Invoice\\s+([A-Za-z0-9-]+)\\s+—')");
+    expect(calls.flatMap(([, bindings]) => bindings)).toEqual(expect.arrayContaining([
+      PAYER_INV.id, 'pi_ap', 'ch_ap', PAYER_INV.invoice_number,
+    ]));
   });
 });
 
@@ -174,11 +196,34 @@ describe('loadLivePayerLinkage is bounded', () => {
     const out = await loadLivePayerLinkage('c1', dbh);
 
     expect(scan.select).toHaveBeenCalledWith(expect.stringMatching(/^id$/), expect.anything(), expect.anything(), expect.anything(),
-      'visit_completion_packet_id', expect.anything(), expect.anything(), expect.anything());
+      'visit_completion_packet_id', expect.anything(), expect.anything(), expect.anything(), expect.anything());
     expect(liveThirdPartyPayerForPacket).toHaveBeenCalledWith(packetId, dbh);
     expect(out.failed).toBe(false);
     expect(out.liveOwnedIds).toEqual(new Set([row.id]));
     expect(out.isPayerLinked({ metadata: { invoice_id: row.id } })).toBe(true);
+  });
+
+  test('an inverse-linked annual prepay invoice ignores a visit-only payer', async () => {
+    const row = { ...invoices(1)[0], service_record_id: 'record-with-payer', annual_prepay_linked: true };
+    const scan = chain([[row]]);
+    const dbh = jest.fn()
+      .mockReturnValueOnce(chain([[]]))
+      .mockReturnValueOnce(scan);
+    liveInvoiceOwnership.mockImplementationOnce(async (_customerId, judgedRows) => ({
+      ownedIds: new Set(judgedRows.filter((invoice) => invoice.scheduled_service_id || invoice.service_record_id).map((invoice) => String(invoice.id))),
+      unverifiable: false,
+    }));
+
+    const out = await loadLivePayerLinkage('c1', dbh);
+
+    const { LIVE_ANNUAL_PREPAY_MARKER_SQL } = require('../services/payer-linkage');
+    expect(scan.select).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.anything(), expect.anything(),
+      expect.anything(), expect.anything(), expect.anything(), expect.anything(), LIVE_ANNUAL_PREPAY_MARKER_SQL);
+    expect(liveInvoiceOwnership).toHaveBeenCalledWith('c1', [expect.objectContaining({
+      id: row.id, scheduled_service_id: null, service_record_id: null,
+    })], dbh, { maxResolutions: 30, byCandidatePayer: true });
+    expect(out.failed).toBe(false);
+    expect(out.liveOwnedIds).toEqual(new Set());
   });
 
   test('packet ownership lookup errors and an over-bound packet set fail closed', async () => {
