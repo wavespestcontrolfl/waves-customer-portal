@@ -2004,7 +2004,7 @@ router.get('/:id/treatment-zone', async (req, res, next) => {
 // Fast Complete voice fill (services/dictation-upload.js).
 // The paid-transcription limiter is one budget shared with server dictation
 // (tech-dictation.js): services/dictation-upload.js.
-const { dictationAudioUpload, dictationClipType, dictationLimiter } = require('../services/dictation-upload');
+const { dictationAudioUpload, dictationClipType, dictationLimiter, transcribeClipOnce } = require('../services/dictation-upload');
 const DICTATION_TRANSCRIPTION_PROMPT = `Transcribe a pest control technician's dictated field notes for Waves Pest Control (Southwest Florida): areas treated, pests found, products and application rates, follow-up recommendations. Keep product names, numbers, and units exactly as spoken. Do not summarize or add commentary.`;
 
 function dictationUploadGateOn() {
@@ -2036,12 +2036,13 @@ router.post('/:id/dictation', async (req, res, next) => {
     }
 
     const { transcribeWithOpenAI, isImplausibleTranscript } = require('../services/call-recording-processor');
-    const result = await transcribeWithOpenAI(req.file.buffer, {
+    // A resent clip (the first answer never reached the phone) shares the first transcription.
+    const result = await transcribeClipOnce(`visit|${req.technicianId}|${req.params.id}`, req.file.buffer, () => transcribeWithOpenAI(req.file.buffer, {
       model: process.env.OPENAI_DICTATION_MODEL || 'gpt-4o-transcribe',
       prompt: DICTATION_TRANSCRIPTION_PROMPT,
       mimeType: baseType,
       filename,
-    });
+    }));
     const text = String(result?.text || '').trim();
     // Audit line carries who/what/size only — never the transcript.
     logger.info(`[tech-dictation] service=${req.params.id} tech=${req.technicianId} bytes=${req.file.buffer.length} type=${baseType} ok=${Boolean(result)} chars=${text.length}`);

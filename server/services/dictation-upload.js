@@ -88,5 +88,36 @@ function takeLiveSessionBudget(key) {
   return admitted;
 }
 
+// The browser sends a clip again when no answer reached it (fetchWithNetworkRetry on iOS "Load failed", client
+// hooks/serverDictation.js). When the first answer was lost on the way back, the transcriber already ran: the same
+// login, route context and audio bytes within RECENT_CLIP_MS share that first call (or the call still running)
+// instead of paying for it twice. A miss (null) or a throw is not kept, so a later send tries again.
+const crypto = require('crypto');
+const RECENT_CLIP_MS = 2 * 60 * 1000;
+const RECENT_CLIP_MAX = 100;
+const recentClips = new Map();
+
+function forgetClip(key, result) {
+  if (recentClips.get(key)?.result === result) recentClips.delete(key);
+}
+
+/** `transcribe()` once per (scope, audio bytes) in RECENT_CLIP_MS; returns its promise. */
+function transcribeClipOnce(scope, buffer, transcribe) {
+  const now = Date.now();
+  // Oldest first (Map keeps insertion order): drop expired entries and keep room for one more.
+  for (const [key, entry] of recentClips) {
+    if (now - entry.at < RECENT_CLIP_MS && recentClips.size < RECENT_CLIP_MAX) break;
+    recentClips.delete(key);
+  }
+  const key = `${scope}|${crypto.createHash('sha256').update(buffer).digest('hex')}`;
+  const hit = recentClips.get(key);
+  if (hit) return hit.result;
+  const result = Promise.resolve().then(transcribe);
+  recentClips.set(key, { at: now, result });
+  result.then((value) => { if (!value) forgetClip(key, result); }, () => forgetClip(key, result));
+  return result;
+}
+
 module.exports = {
+  transcribeClipOnce, __resetRecentClips: () => recentClips.clear(),
   takeLiveSessionBudget, DICTATION_AUDIO_TYPES, DICTATION_MAX_BYTES, DICTATION_TOO_LARGE, dictationBaseType, dictationAudioUpload, dictationClipType, dictationLimiter };

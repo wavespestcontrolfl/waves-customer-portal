@@ -80,6 +80,7 @@ describe('tech dictation upload', () => {
   const original = process.env.GATE_TECH_DICTATION_UPLOAD;
   beforeEach(() => {
     jest.clearAllMocks();
+    require('../services/dictation-upload').__resetRecentClips();
     process.env.GATE_TECH_DICTATION_UPLOAD = 'true';
     process.env.OPENAI_API_KEY = 'test-key';
     mockFirst.mockResolvedValue({ id: 'svc-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: require('../utils/datetime-et').etDateString(new Date()) });
@@ -131,6 +132,19 @@ describe('tech dictation upload', () => {
       expect(opts.filename).toBe('clip.webm');
       expect(opts.model).toBe('gpt-4o-transcribe');
       expect(opts.prompt).toMatch(/field notes/);
+    });
+  });
+
+  test('a resent clip (the phone never got the first answer) shares one transcription; other bytes are heard again', async () => {
+    await withServer(async (baseUrl) => {
+      const [first, again] = await Promise.all([clip(baseUrl), clip(baseUrl)]);
+      for (const res of [first, again]) {
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ text: 'Treated the exterior perimeter.' });
+      }
+      expect(mockTranscribe).toHaveBeenCalledTimes(1);
+      expect((await clip(baseUrl, { bytes: 'other-opus-bytes' })).status).toBe(200);
+      expect(mockTranscribe).toHaveBeenCalledTimes(2);
     });
   });
 
