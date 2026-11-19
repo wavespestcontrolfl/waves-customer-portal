@@ -167,6 +167,7 @@ function contextLoader({ arrivalRoute, conn, target, now }) {
         conn, date, technicianId, now,
         ...(target.prospective ? { prospective: target.prospective } : { serviceId: target.serviceId }),
         excludeServiceIds: target.excludeServiceIds || [],
+        ...(target.cacheLocation ? { cacheLocation: true } : {}),
         ...(target.excludeEstimateId ? { excludeEstimateId: target.excludeEstimateId } : {}),
       }).then((context) => ({ context, firstStopHour: firstStopHourOf(context, technicianId) }),
         () => ({ context: null, failed: true, firstStopHour: null }));

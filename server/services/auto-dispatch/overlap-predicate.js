@@ -15,6 +15,7 @@
  * no_show row must be invisible to them, not just to occupancy checks).
  */
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
+const { isHoldStop } = require('../scheduling/travel-gap');
 
 // Same status set the writer's occupancy WHERE excludes (NOT_A_ROUTE_STOP_STATUSES
 // plus 'completed' — a finished morning visit must not block an afternoon move).
@@ -25,7 +26,7 @@ const OVERLAP_EXCLUDED_STATUSES = new Set([...NOT_A_ROUTE_STOP_STATUSES, 'comple
 function isActiveRouteStop(row) {
   if (!row) return false;
   if (OVERLAP_EXCLUDED_STATUSES.has(String(row.status))) return false;
-  if (row.reservation_expires_at) {
+  if (isHoldStop(row)) {
     const expires = new Date(row.reservation_expires_at).getTime();
     if (Number.isFinite(expires) && expires <= Date.now()) return false;
   }

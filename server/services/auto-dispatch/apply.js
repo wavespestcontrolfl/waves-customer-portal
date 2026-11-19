@@ -911,6 +911,8 @@ async function stampMovedRow({ id, slot, previousStatus, landedStatus, runId, la
 async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config) {
   const newWindow = { start: best.start_time, end: best.end_time };
   const options = {};
+  const position = best[require('./route-position').ROUTE_POSITION];
+  if (position) options.dispatchRoutePosition = position;
   // Remaining per-run change budget (orchestrator): a grouped visit whose
   // LOCKED member count exceeds it is refused inside the unit move before
   // any write (VISIT_UNIT_OVER_CAP) — the pre-read reservation is advisory.
@@ -944,6 +946,7 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config)
   options.expect = {
     auto_dispatch_locked: false,
     auto_dispatch_excluded: false,
+    ...(position ? { visit_id: null } : {}),
     status: fresh.status, // original status too — a flip to 'rescheduled' fails the match → 409
     scheduled_date: toDateStr(fresh.scheduled_date),
     // Full original placement too, so a same-date window/tech edit by an operator

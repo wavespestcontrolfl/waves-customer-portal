@@ -108,6 +108,12 @@ describe('findConflictingVisits — travel option (GATE_SLOT_TRAVEL_GAP)', () =>
     expect(q.whereNotIn).toHaveBeenCalledWith('scheduled_services.status', ['cancelled', 'skipped', 'no_show', 'rescheduled']);
     expect(q.whereNotIn).toHaveBeenCalledWith('scheduled_services.id', ['x']);
     expect(q.whereNotNull).toHaveBeenCalledWith('scheduled_services.window_start');
+    // includeHolds:false keeps committed rows (linked even with a stale
+    // stamp, or legacy customer-NULL with no stamp) and drops every stamped
+    // customer-NULL estimate hold, live or expired.
+    expect(q.whereNotNull).toHaveBeenCalledWith('scheduled_services.customer_id');
+    expect(q.orWhereNull).toHaveBeenCalledWith('scheduled_services.reservation_expires_at');
+    expect(q.orWhereRaw).not.toHaveBeenCalledWith('scheduled_services.reservation_expires_at > NOW()');
     expect(q.orWhereNot).toHaveBeenCalledWith('scheduled_services.customer_id', 'c1');
     expect(db.raw.mock.calls.some(([sql]) => /COALESCE\(scheduled_services\.lat/.test(sql))).toBe(true);
     // No overlap SQL on this path — the predicate runs in JS.
@@ -145,6 +151,11 @@ describe('findConflictingVisits — travel option (GATE_SLOT_TRAVEL_GAP)', () =>
     // 'touching' now needs only 15 minutes and has 0 → still a violation;
     // 'far' and 'coordless-ok' stay clear.
     expect(found.map((r) => r.id)).toEqual(['touching', 'overlap', 'coordless-near']);
+    // Default includeHolds:true: linked committed rows survive any expiry
+    // stamp, while a customer-NULL hold must be unstamped or still live.
+    expect(q.whereNotNull).toHaveBeenCalledWith('scheduled_services.customer_id');
+    expect(q.orWhereNull).toHaveBeenCalledWith('scheduled_services.reservation_expires_at');
+    expect(q.orWhereRaw).toHaveBeenCalledWith('scheduled_services.reservation_expires_at > NOW()');
   });
 });
 
@@ -173,8 +184,10 @@ describe('findConflictingVisits', () => {
     // Default status set mirrors createSelfBooking's commit gate exactly.
     expect(q.whereNotIn).toHaveBeenCalledWith('status', ['cancelled', 'skipped', 'no_show', 'rescheduled']);
     expect(DEFAULT_EXCLUDE_STATUSES).toEqual(['cancelled', 'skipped', 'no_show', 'rescheduled']);
-    // Expired holds never block; live ones do.
-    expect(q.whereNull).toHaveBeenCalledWith('reservation_expires_at');
+    // A customer-linked row is committed even with an expired leftover
+    // stamp. A customer-NULL hold blocks only while unstamped or still live.
+    expect(q.whereNotNull).toHaveBeenCalledWith('customer_id');
+    expect(q.orWhereNull).toHaveBeenCalledWith('reservation_expires_at');
     expect(q.orWhereRaw).toHaveBeenCalledWith('reservation_expires_at > NOW()');
     // Same COALESCE(window_end, start + duration-or-60) overlap predicate as
     // the existing gates — window_start NULL rows evaluate NULL and stay
@@ -250,7 +263,7 @@ describe('findConflictingVisits', () => {
     expect(q.orWhereNot).toHaveBeenCalledWith('customer_id', 'cust-1');
   });
 
-  test('includeHolds:false filters live estimate-hold rows out', async () => {
+  test('includeHolds:false filters every stamped customer-NULL estimate hold, but not committed rows', async () => {
     const q = makeQuery([]);
     db.mockReturnValue(q);
     await findConflictingVisits({
@@ -259,6 +272,7 @@ describe('findConflictingVisits', () => {
     });
     expect(q.whereNotNull).toHaveBeenCalledWith('customer_id');
     expect(q.orWhereNull).toHaveBeenCalledWith('reservation_expires_at');
+    expect(q.orWhereRaw).not.toHaveBeenCalledWith('reservation_expires_at > NOW()');
   });
 });
 
@@ -277,6 +291,25 @@ describe('listOccupiedWindows', () => {
     expect(q.whereBetween).toHaveBeenCalledWith('scheduled_date', ['2099-01-01', '2099-01-14']);
     expect(q.whereNotNull).toHaveBeenCalledWith('window_start');
     expect(q.whereNotIn).toHaveBeenCalledWith('status', ['cancelled', 'skipped', 'no_show', 'rescheduled']);
+  });
+
+  test.each([
+    [false, 'customer_id', 'reservation_expires_at'],
+    [true, 'scheduled_services.customer_id', 'scheduled_services.reservation_expires_at'],
+  ])('committed customer-linked rows survive stale expiry stamps (withCoords=%s)', async (withCoords, customerColumn, expiryColumn) => {
+    const q = makeQuery([]);
+    db.mockReturnValue(q);
+    db.raw = jest.fn((sql) => sql);
+
+    await listOccupiedWindows({
+      db, dateFrom: '2099-01-01', dateTo: '2099-01-14', withCoords,
+    });
+
+    // customer-linked (committed) OR unstamped OR a still-live hold. Only a
+    // customer-NULL row with a past stamp is dropped by the SQL predicate.
+    expect(q.whereNotNull).toHaveBeenCalledWith(customerColumn);
+    expect(q.orWhereNull).toHaveBeenCalledWith(expiryColumn);
+    expect(q.orWhereRaw).toHaveBeenCalledWith(`${expiryColumn} > NOW()`);
   });
 
   test('normalizes dates and derives endMin with the duration-or-60 fallback', async () => {

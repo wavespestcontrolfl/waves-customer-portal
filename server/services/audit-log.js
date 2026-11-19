@@ -663,7 +663,7 @@ async function auditEstimateExpiredOpen({ estimateId, expiresAt = null, extensio
  *   estimate_hold_started  { scheduled_service_id, date, window_start, expires_at }
  *   estimate_hold_ended    { scheduled_service_id, how: 'released' | 'expired', date, window_start }
  */
-const ESTIMATE_BOOKING_STEPS = Object.freeze(['estimate_slot_search', 'estimate_hold_started', 'estimate_hold_ended']);
+const ESTIMATE_BOOKING_STEPS = Object.freeze(['estimate_slot_search', 'estimate_slot_offers', 'estimate_hold_started', 'estimate_hold_ended']);
 
 async function auditEstimateBookingStep({ action, estimateId, customerId = null, metadata = {} }) {
   if (!ESTIMATE_BOOKING_STEPS.includes(action)) return null;

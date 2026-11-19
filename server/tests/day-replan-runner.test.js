@@ -19,7 +19,10 @@ jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60
 jest.mock('../services/route-reorder', () => ({ _internals: { LIVE_HOLD_SQL: '(live-hold)' }, CUSTOMER_PREMISE_ALIASES: [{ customer_address_line1: 'customers.address_line1' }] }));
 jest.mock('../services/auto-dispatch/preferences', () => ({ getCustomerSchedulingPreferences: jest.fn() }));
 // The night told-lock's reads (its own suite: night-told-lock-day-replan.test.js): nobody was told anything, no person placed any visit.
-jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn(async () => new Set()) }));
+jest.mock('../services/auto-dispatch/told-visits', () => ({
+  loadToldVisitIds: jest.fn(async () => new Set()),
+  loadPromiseLevels: jest.fn(async () => new Map()),
+}));
 jest.mock('../services/auto-dispatch/eligibility', () => ({
   ...jest.requireActual('../services/auto-dispatch/eligibility'),
   isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
@@ -117,6 +120,7 @@ const savedEnv = { ...process.env };
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.GATE_DAY_REPLAN;
+  delete process.env.GATE_DAY_ONLY_PROMISE;
   delete process.env.DAY_REPLAN_DAYS_AHEAD;
   delete process.env.GATE_TECH_START_POINTS;
   delete process.env.GATE_AUTO_DISPATCH_DAY_RULES;
@@ -528,12 +532,14 @@ describe('close-gaps measurement (owner 2026-11-18): measured on every plan row,
   test('a packed plan at the same drive is rejected by the drive rule, and the packed-day rule would take it', async () => {
     // Three stops side by side at 8 AM, 11 AM and 3 PM: the same drive in any hour order, so only the hours move.
     const rows = [row('a', 0.020, 8), row('b', 0.021, 11), row('c', 0.022, 15)];
+    process.env.GATE_DAY_ONLY_PROMISE = 'true';
+    require('../services/auto-dispatch/told-visits').loadPromiseLevels.mockResolvedValueOnce(new Map([['b', 'day'], ['c', 'day']]));
     const { conn, inserts, calls } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });
     await runDayReplanIfEnabled({ now: NOW, conn });
     expect(inserts).toHaveLength(1);
     expect(inserts[0].row).toMatchObject({ accepted: false, reason: 'saving_below_floor', changes: '[]' });
     const rec = record(inserts[0]);
-    expect(rec.v).toBe(2);
+    expect(rec.v).toBe(3);
     // P1's plan is the pack plan (ends earliest at no extra drive), not the drive-best one.
     expect(rec.p1).toMatchObject({ plan: 'pack', wouldAccept: true, reason: 'bigger_block', lunchLost: false });
     expect(rec.p1.packed.driveMin).toBeLessThanOrEqual(rec.now.driveMin);
@@ -541,11 +547,19 @@ describe('close-gaps measurement (owner 2026-11-18): measured on every plan row,
     expect(rec.p1.packed.biggestMin).toBeGreaterThanOrEqual(rec.now.biggestMin + 30);
     expect(rec.p1.packed.slots).toBeGreaterThan(rec.now.slots);
     expect(rec.p1.changes.map((c) => c.id).sort()).toEqual(['b', 'c']);
+    expect(rec.p1.changes.every(c => c.to < c.from)).toBe(true);
     expect(rec.gaps.map((g) => [g.before, g.why])).toEqual([['b', null], ['c', null]]);
     expect(rec).not.toHaveProperty('p2');
     expect(rec.s1).toEqual([]);
     // Measuring only: the run never wrote a visit.
     expect(calls.filter(([table, op]) => table === 'scheduled_services' && ['update', 'insert', 'del'].includes(op))).toEqual([]);
+  });
+
+  test('unknown promises remain fixed even if their hour could create more open time', async () => {
+    const rows = [row('a', 0.020, 8), row('b', 0.021, 11), row('c', 0.022, 15)];
+    const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });
+    await runDayReplanIfEnabled({ now: NOW, conn });
+    expect(record(inserts[0]).p1).toMatchObject({ wouldAccept: false, changes: [], missingDayPromise: 3 });
   });
 
   test('the pack plan is simulated with the day\'s schedule blocks, as the drive-best plan is (Codex #7935)', async () => {

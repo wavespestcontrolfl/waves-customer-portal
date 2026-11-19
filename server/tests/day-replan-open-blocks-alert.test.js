@@ -3,6 +3,7 @@
  * morning from the latest re-plan run's close-gaps numbers, the copy passes the notification rule, and an earlier
  * morning's row closes. Fake knex, synthetic ids only.
  */
+jest.mock('../routes/estimate-slots-public', () => ({ _internals: { offerableEstimateSlots: jest.fn() } }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/admin-alert-compose', () => {
@@ -13,7 +14,12 @@ jest.mock('../services/technician-eligibility', () => ({
   applyAssignable: jest.fn((q) => q), absentTechDays: jest.fn(async () => new Set()),
 }));
 jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: jest.fn(async () => new Set()) }));
-jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false) }));
+jest.mock('../services/scheduling/occupancy', () => ({
+  DEFAULT_EXCLUDE_STATUSES: ['cancelled', 'skipped', 'no_show', 'rescheduled'],
+  techScopedConfirmActive: jest.fn(() => false), listOccupiedWindows: jest.fn(async () => []),
+  findInterviewConflicts: jest.fn(async () => []),
+  occupiedRows: jest.requireActual('../services/scheduling/occupancy').occupiedRows,
+}));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60 }));
 jest.mock('../services/admin-alert-episodes', () => ({
   openAdminAlertKeys: jest.fn(async () => []), closeAdminAlertKeys: jest.fn(async (_c, keys) => keys.length),
@@ -39,20 +45,28 @@ const wait = (start, min) => ({ kind: 'wait', start, min, before: 'v1' });
 
 // `assignable`: the technicians the hour-grid count covers (none unless a test says so); `services` and `blocks`: that
 // count's schedule rows and schedule blocks.
-function fakeConn({ run = { run_id: 'run-1' }, rows = [], techs = [{ id: TECH, name: 'Pat Tester' }], assignable = [], services = [], blocks = [] } = {}) {
+function fakeConn({ run = { run_id: 'run-1' }, rows = [], techs = [{ id: TECH, name: 'Pat Tester' }], assignable = [], services = [], blocks = [], estimates = [] } = {}) {
   const calls = [];
+  let estimateRows = estimates;
   const conn = (table) => {
     const q = {
       where(...args) { calls.push([table, 'where', args]); return q; },
       whereNotNull() { return q; },
+      whereNull() { return q; },
+      limit(...args) { calls.push([table, 'limit', args]); return q; },
       whereIn() { return q; },
-      whereNotIn() { return q; },
+      whereNotIn(...args) {
+        calls.push([table, 'whereNotIn', args]);
+        if (table === 'estimates' && args[0] === 'customer_id') estimateRows = estimateRows.filter((r) => !args[1].includes(String(r.customer_id)));
+        return q;
+      },
       whereNot() { return q; },
       whereBetween(...args) { calls.push([table, 'whereBetween', args]); return q; },
-      orderBy() { return q; },
+      orderBy(...args) { calls.push([table, 'orderBy', args]); return q; },
       first: async () => run,
       select: async (first) => {
         if (table === 'technicians') return first === 'technicians.id' ? assignable : techs;
+        if (table === 'estimates') return estimateRows;
         if (table === 'scheduled_services') return services;
         if (table === 'tech_schedule_blocks') return blocks;
         return rows;
@@ -141,7 +155,196 @@ describe('the copy', () => {
   });
 });
 
+test('a matching estimate needs its two-hour arrival promise, stored window and simulated finish inside the opening', () => {
+  const block = { day: '2026-11-20', tech: 'Pat', techId: 't1', start: 600, min: 120 };
+  const offer = { date: block.day, techId: 't1', start: '10:00', end: '11:00', finishMin: 675, driveMin: 42, addedDriveMin: 5, proposed: 1 };
+  const fits = (diff, blocks = [block]) => _internals.matchingHour([{ ...offer, ...diff }], blocks);
+  expect(fits({})).toMatchObject({ tech: 'Pat', start: 600 });
+  expect(fits({}, [{ ...block, min: 119 }])).toBeNull(); // customer sees 10 AM to noon
+  for (const diff of [{ techId: 'other' }, { finishMin: 721 }, { end: '12:01' }, { driveMin: null }]) expect(fits(diff)).toBeNull();
+});
+
+test('booking fit removes only the trusted estimate\'s hold; absent and unknown ids remove nothing', () => {
+  const { _internals: fit } = require('../services/day-replan/booking-fit');
+  const own = { id: 'hold-own', customer_id: null, source_estimate_id: 'estimate-own', reservation_expires_at: '2097-01-01' };
+  const rival = { id: 'hold-rival', customer_id: null, source_estimate_id: 'estimate-rival', reservation_expires_at: '2097-01-01' };
+  const unscoped = { id: 'hold-unscoped', customer_id: null, source_estimate_id: null, reservation_expires_at: '2097-01-01' };
+  const committed = { id: 'visit-own', source_estimate_id: 'estimate-own', reservation_expires_at: null };
+  const linkedWithExpiry = { id: 'visit-linked', customer_id: 'customer-1', source_estimate_id: 'estimate-own', reservation_expires_at: '2097-01-01' };
+  const rows = [own, rival, unscoped, committed, linkedWithExpiry];
+  expect(fit.withoutOwnEstimateHold(rows, 'estimate-own')).toEqual([rival, unscoped, committed, linkedWithExpiry]);
+  expect(fit.withoutOwnEstimateHold(rows, 'estimate-unknown')).toEqual(rows);
+  expect(fit.withoutOwnEstimateHold(rows, null)).toBe(rows);
+});
+
+test('booking fit blocks live make-room destinations from the writer reader with its technician scope', async () => {
+  const occupancy = require('../services/scheduling/occupancy');
+  const { assessOfferedHours } = require('../services/day-replan/booking-fit');
+  const RouteOptimizer = require('../services/route-optimizer');
+  const date = '2026-11-20';
+  const tech = 'tech-1';
+  const slot = { date, techId: tech, windowStart: '10:00', windowEnd: '11:00' };
+  const target = { id: 'target-1', lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
+  const destination = (technicianId) => ({
+    id: 'make-room-hold', customer_id: null, technician_id: technicianId, date,
+    window_start: '10:00:00', window_end: '11:00:00', estimated_duration_minutes: 60,
+    reservation_expires_at: '2097-01-01', source_estimate_id: 'estimate-rival',
+    conflict_reason: 'make_room_destination',
+  });
+  const calendar = () => new Map([
+    ['homes', new Map()], ['departure', 8 * 60], [date, []], [`${date}|${tech}`, []],
+  ]);
+
+  occupancy.listOccupiedWindows.mockResolvedValueOnce([{ ...destination(tech), startMin: 600, endMin: 660 }]);
+  await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar: calendar() })).resolves.toEqual([]);
+  expect(occupancy.listOccupiedWindows).toHaveBeenLastCalledWith({
+    db: expect.any(Function), dateFrom: date, dateTo: date, excludeServiceIds: ['target-1'],
+    excludeStatuses: occupancy.DEFAULT_EXCLUDE_STATUSES,
+  });
+
+  occupancy.techScopedConfirmActive.mockReturnValueOnce(true);
+  occupancy.listOccupiedWindows.mockResolvedValueOnce([{ ...destination('tech-2'), startMin: 600, endMin: 660 }]);
+  await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar: calendar() }))
+    .resolves.toEqual([expect.objectContaining({ slot })]);
+});
+
+test('booking fit filters only this estimate\'s genuine hold after the shared occupancy read', async () => {
+  const occupancy = require('../services/scheduling/occupancy');
+  const { assessOfferedHours } = require('../services/day-replan/booking-fit');
+  const RouteOptimizer = require('../services/route-optimizer');
+  const date = '2026-11-20';
+  const tech = 'tech-1';
+  const own = { id: 'hold-own', customer_id: null, technician_id: tech, source_estimate_id: 'estimate-own',
+    reservation_expires_at: '2097-01-01', window_start: '10:00', window_end: '11:00' };
+  const linked = { id: 'visit-linked', customer_id: 'customer-1', technician_id: tech, source_estimate_id: 'estimate-own',
+    reservation_expires_at: '2097-01-01', status: 'confirmed', window_start: '09:00', window_end: '10:00',
+    estimated_duration_minutes: 60, lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng };
+  const calendar = new Map([
+    ['homes', new Map()], ['departure', 8 * 60], [date, [own, linked]], [`${date}|${tech}`, []],
+  ]);
+  occupancy.listOccupiedWindows.mockResolvedValueOnce([
+    { ...own, scheduled_date: date, startMin: 600, endMin: 660 },
+    { ...linked, scheduled_date: date, startMin: 540, endMin: 600 },
+  ]);
+  const slot = { date, techId: tech, windowStart: '10:00', windowEnd: '11:00' };
+  const target = { lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
+  await expect(assessOfferedHours(jest.fn(), [slot], target, {
+    now: NOW, calendar, ownEstimateId: 'estimate-own',
+  })).resolves.toEqual([expect.objectContaining({ slot })]);
+  expect(occupancy.listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({ excludeServiceIds: [] }));
+  await expect(assessOfferedHours(jest.fn(), [slot], target, {
+    now: NOW, calendar, ownEstimateId: 'estimate-other',
+  })).resolves.toEqual([]);
+  expect(occupancy.listOccupiedWindows).toHaveBeenCalledTimes(1);
+});
+
+test('booking fit holds the full summed span of a version-2 allocation before scoring an offer', async () => {
+  const occupancy = require('../services/scheduling/occupancy');
+  const { assessOfferedHours } = require('../services/day-replan/booking-fit');
+  const RouteOptimizer = require('../services/route-optimizer');
+  const date = '2026-11-20';
+  const tech = 'tech-1';
+  const ids = ['allocation-a', 'allocation-b'];
+  const mix = { version: 2, allocatedServiceIds: ids };
+  const routeRows = ids.map((id, route_order) => ({
+    id, customer_id: 'customer-1', technician_id: tech, status: 'confirmed', scheduled_date: date,
+    window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60,
+    lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, route_order,
+  }));
+  occupancy.listOccupiedWindows.mockResolvedValueOnce(routeRows.map(row => ({
+    ...row, reservation_service_mix: mix, startMin: 540, endMin: 600,
+  })));
+  const calendar = new Map([
+    ['homes', new Map()], ['departure', 8 * 60], [date, routeRows], [`${date}|${tech}`, []],
+  ]);
+  const slot = { date, techId: tech, windowStart: '10:00', windowEnd: '11:00' };
+  const target = { lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
+
+  await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar })).resolves.toEqual([]);
+});
+
+test('booking fit caches the writer buffered interviews once per day and blocks every technician', async () => {
+  const occupancy = require('../services/scheduling/occupancy');
+  const { assessOfferedHours } = require('../services/day-replan/booking-fit');
+  const RouteOptimizer = require('../services/route-optimizer');
+  const date = '2026-11-20';
+  const conn = jest.fn();
+  const slots = ['tech-1', 'tech-2'].map(techId => ({ date, techId, windowStart: '10:00', windowEnd: '11:00' }));
+  const target = { lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
+  const calendar = new Map([
+    ['homes', new Map()], ['departure', 8 * 60], [date, []],
+    [`${date}|tech-1`, []], [`${date}|tech-2`, []],
+  ]);
+  occupancy.techScopedConfirmActive.mockReturnValueOnce(true).mockReturnValueOnce(true);
+  occupancy.findInterviewConflicts.mockResolvedValueOnce([{
+    id: 'interview:application-1', scheduled_date: date,
+    window_start: '09:45', window_end: '10:45', estimated_duration_minutes: 60,
+    status: 'interview', conflict_reason: 'interview', technician_id: null,
+  }]);
+
+  await expect(assessOfferedHours(conn, slots, target, { now: NOW, calendar })).resolves.toEqual([]);
+  await expect(assessOfferedHours(conn, slots, target, { now: NOW, calendar })).resolves.toEqual([]);
+
+  expect(occupancy.findInterviewConflicts).toHaveBeenCalledTimes(1);
+  expect(occupancy.findInterviewConflicts).toHaveBeenCalledWith({
+    db: conn, date, windowStart: '00:00', windowEnd: '24:00',
+  });
+  expect(occupancy.listOccupiedWindows).toHaveBeenCalledTimes(1);
+});
+
+test('a route-aware alternate preserves the first card, technician, day, rain priority and five-minute driving limit', () => {
+  const { rankOfferedHours } = require('../services/day-replan/booking-fit');
+  const base = { date: '2026-11-20', techId: 't1' };
+  const slots = ['09', '10', '11', '12', '13', '14', '15'].map(h => ({ ...base, windowStart: h + ':00' }));
+  slots[3].date = '2026-11-21';
+  slots[4].techId = 't2';
+  slots[5].wet = true;
+  const fits = slots.map((slot, i) => ({ slot, driveMin: [8, 20, 25, 15, 6, 5, 26][i], slots: i, waitMin: 0, startMin: 540 + i * 60 }));
+  const ranked = rankOfferedHours(slots, fits, { pinned: 1, rainTierOf: s => Number(!!s.wet) });
+  expect(ranked.map(s => s.windowStart)).toEqual(['09:00', '11:00', '10:00', '12:00', '13:00', '14:00', '15:00']);
+});
+
 describe('runOpenBlocksAlert', () => {
+  test('the same morning notice contains a fresh matching estimate without contacting the customer', async () => {
+    const { offerableEstimateSlots } = require('../routes/estimate-slots-public')._internals;
+    const { OFFER_RANK } = require('../services/day-replan/booking-fit');
+    const day = '2026-11-19';
+    const estimate = { id: 'estimate123', customer_id: 'customer', customer_name: 'Test Customer' };
+    const { conn } = fakeConn({ rows: [{ day, technician_id: TECH, close_gaps: rec([tail(600, 120)]) }], assignable: [{ id: TECH }], estimates: [estimate] });
+    offerableEstimateSlots.mockResolvedValueOnce({ [OFFER_RANK]: async () => [
+      { date: day, techId: TECH, start: '10:00', end: '11:00', finishMin: 670, driveMin: 25, addedDriveMin: 3, proposed: 1 },
+    ] });
+    await runOpenBlocksAlert({ conn, now: NOW });
+    const notice = raiseAdminAlert.mock.calls.at(-1)[2];
+    expect(notice.detail).toContain('Test Customer (#estimate), Thu Nov 19 at 10:00 AM with Pat');
+    expect(notice.metadata.estimateMatches).toEqual([{ id: estimate.id, date: day, start: 600, techId: TECH }]);
+  });
+
+  test('internal test customer estimates are excluded before the newest-20 candidate limit', async () => {
+    const { offerableEstimateSlots } = require('../routes/estimate-slots-public')._internals;
+    const { INTERNAL_TEST_CUSTOMER_IDS } = require('../services/internal-test-customers');
+    const day = '2026-11-19';
+    const internal = { id: 'estimate-demo', customer_id: INTERNAL_TEST_CUSTOMER_IDS[0], customer_name: 'Demo' };
+    const real = { id: 'estimate-real', customer_id: '00000000-0000-4000-8000-000000000099', customer_name: 'Real Customer' };
+    const { conn, calls } = fakeConn({
+      rows: [{ day, technician_id: TECH, close_gaps: rec([tail(600, 120)]) }],
+      assignable: [{ id: TECH }],
+      estimates: [internal, real],
+    });
+    offerableEstimateSlots.mockResolvedValue({});
+
+    await runOpenBlocksAlert({ conn, now: NOW });
+
+    expect(offerableEstimateSlots).toHaveBeenCalledTimes(1);
+    expect(offerableEstimateSlots).toHaveBeenCalledWith(real.id, real.customer_id, expect.any(Object));
+    const estimateCalls = calls.filter(([table]) => table === 'estimates');
+    expect(estimateCalls).toContainEqual(['estimates', 'whereNotIn', ['customer_id', INTERNAL_TEST_CUSTOMER_IDS]]);
+    expect(estimateCalls.findIndex(([, method]) => method === 'whereNotIn'))
+      .toBeLessThan(estimateCalls.findIndex(([, method]) => method === 'orderBy'));
+    expect(estimateCalls.findIndex(([, method]) => method === 'whereNotIn'))
+      .toBeLessThan(estimateCalls.findIndex(([, method]) => method === 'limit'));
+  });
+
   test('a morning row that is not written fails the tick and leaves the earlier rows open', async () => {
     openAdminAlertKeys.mockResolvedValueOnce(['open-blocks:2026-11-17']);
     raiseAdminAlert.mockResolvedValueOnce(null);
