@@ -6,6 +6,7 @@ const logger = require('../services/logger');
 const { recoverAddressUnverified, nextAddressUnverified, flagCoversAddress, buildAddressVerdict, contactPairLockKey, cleanVerdictCovers, cachedAuditSuperseded, auditEvidenceAt, samePremiseDisplay, countyRollAnswered } = require('../services/lead-address-unverified');
 const { performPropertyLookup, VACANT_SQFT_FLAG_COPY } = require('./property-lookup-v2');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
+const { firstSourceEvidenceObjectSql, sourceEvidenceFromAttribution } = require('../services/lead-source-evidence');
 const { normalizeLeadAddress, formatAddress } = require('../utils/address-normalizer');
 const { normalizeWebAdditionalProperties } = require('../utils/intake-normalize');
 const { zipToCity } = require('../utils/zip-to-city');
@@ -40,6 +41,14 @@ const prefillLimiter = rateLimit({
 });
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+const CALL_ATTACH_EXTRACTED_SQL = "COALESCE(extracted_data, '{}'::jsonb) || (?::jsonb - 'source_evidence')";
+const PROPERTY_FIRST_SOURCE_EVIDENCE_SQL = firstSourceEvidenceObjectSql({ incomingDataSql: 'source_stage.incoming' });
+const PROPERTY_COMPLETE_EXTRACTED_SQL = `(SELECT CASE
+  WHEN lead_type = 'quote_wizard'
+    THEN (source_stage.incoming - 'source_evidence') || ${PROPERTY_FIRST_SOURCE_EVIDENCE_SQL}
+  ELSE COALESCE(extracted_data, '{}'::jsonb) || (source_stage.incoming - 'source_evidence')
+END FROM (SELECT ?::jsonb AS incoming) AS source_stage)`;
 
 // PII responses on a public token route are never cached, indexed, or leaked
 // via referrer — same contract as prep-public.js / lawn-diagnostic.
@@ -367,6 +376,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     // (like the click ids above) so later extracted_data rewrites can't drop it.
     const anonId = sanitizeAnonUnitId(attr?.anon_id);
     const sourceMeta = await resolveLeadSource(attr);
+    const sourceEvidence = sourceEvidenceFromAttribution(attr);
     const serviceInterest = normalizeServiceInterest(req.body || {});
     // Declared "when do you want this handled?" (quote-form tile). Persisted
     // verbatim in extracted_data and mapped onto leads.urgency; null when the
@@ -386,6 +396,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       clickIds: { gclid, wbraid, gbraid, fbclid, fbc, fbp },
       referrer: attr?.referrer || null,
       landing_url: attr?.landing_url || null,
+      ...(sourceEvidence ? { source_evidence: sourceEvidence } : {}),
       address: normalizedAddress,
       ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
     };
@@ -429,7 +440,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
             // re-engaged prospect stays hidden. Other statuses are untouched.
             status: db.raw("CASE WHEN status = 'unresponsive' THEN 'new' ELSE status END"),
             extracted_data: db.raw(
-              "COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb",
+              CALL_ATTACH_EXTRACTED_SQL,
               [JSON.stringify(startedStage)]
             ),
             updated_at: new Date(),
@@ -568,6 +579,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         clickIds: { gclid, wbraid, gbraid, fbclid, fbc, fbp },
         referrer: attr?.referrer || null,
         landing_url: attr?.landing_url || null,
+        ...(sourceEvidence ? { source_evidence: sourceEvidence } : {}),
         address: normalizedAddress,
         ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
         // County roll could not vouch for the typed house number (see
@@ -576,9 +588,10 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         // re-derives it (or recovers this one when its cache read misses).
       };
       await db('leads').where({ id: lead.id }).update({
-        extracted_data: attachedToExistingLead
-          ? db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(completeStage)])
-          : JSON.stringify(completeStage),
+        // Call-led token attaches never acquire browser evidence. A genuine
+        // quote-wizard row keeps its first valid evidence, or fills it once
+        // when a later stage is the first one that can prove a source.
+        extracted_data: db.raw(PROPERTY_COMPLETE_EXTRACTED_SQL, [JSON.stringify(completeStage)]),
         updated_at: new Date(),
       });
     } catch (e) {
@@ -767,4 +780,6 @@ module.exports._test = {
   publicEnrichedProfile,
   normalizeServiceInterest,
   formatServiceInterestForFrequency,
+  CALL_ATTACH_EXTRACTED_SQL,
+  PROPERTY_COMPLETE_EXTRACTED_SQL,
 };

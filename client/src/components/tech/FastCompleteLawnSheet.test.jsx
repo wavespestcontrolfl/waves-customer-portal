@@ -295,6 +295,38 @@ describe('opening the sheet', () => {
     await waitFor(() => expect(request.mock.calls.filter(([path]) => path.split('?')[0].endsWith('/lawn-fast/context'))).toHaveLength(2));
   });
 
+  // The Today page opens the sheet at the tap and reads the catalog meanwhile
+  // (null until it arrives): the form, whose planned rows take units and stock
+  // from it, waits for it.
+  test('a catalog still being read holds the form, which opens once the catalog arrives', async () => {
+    const request = makeRequest();
+    const { rerender } = render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={null} onClose={() => {}} />);
+    await screen.findByText('Loading the product list…');
+    expect(screen.queryByRole('heading', { name: 'Lawn assessment' })).toBeNull();
+    rerender(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} />);
+    await screen.findByRole('heading', { name: 'Lawn assessment' });
+  });
+
+  test('a catalog that never came shows the parent\'s reason in place of the form', async () => {
+    render(<FastCompleteLawnSheet service={SERVICE} request={makeRequest()} catalog={null} catalogError="Could not load the product list." onClose={() => {}} />);
+    await screen.findByText('Could not load the product list.');
+    expect(screen.queryByRole('heading', { name: 'Lawn assessment' })).toBeNull();
+  });
+
+  // Today's off-route saved attempt: its row holds only the visit id and the
+  // attempt's summary, so with no attempt left there is no fresh form to build.
+  test('an off-route saved attempt\'s row with no attempt left shows a notice, never the form or the hand-off', async () => {
+    const onFullForm = vi.fn();
+    render(<FastCompleteLawnSheet service={{ id: 'svc-lawn', customerName: 'Saved completion', serviceType: 'Lawn visit', recoveryOnly: true }}
+      request={makeRequest()} catalog={CATALOG} onClose={() => {}} onFullForm={onFullForm} />);
+    await screen.findByText(/No saved completion is left for this visit/);
+    // The eligible context arrives and changes nothing.
+    await waitFor(() => expect(requests.some(({ path }) => path.split('?')[0].endsWith('/lawn-fast/context'))).toBe(true));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(screen.queryByRole('heading', { name: 'Lawn assessment' })).toBeNull();
+    expect(onFullForm).not.toHaveBeenCalled();
+  });
+
   test('a visit that changed since the schedule loaded is named, not completed', async () => {
     const request = makeRequest({ ctx: context({ service: { ...VISIT, propertyId: 'prop-other' } }) });
     render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} />);

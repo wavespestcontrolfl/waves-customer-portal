@@ -62,6 +62,7 @@ const { NOT_EXPLICITLY_UNLINKED_SQL } = require('../../utils/call-link-override'
 const SOURCE_TYPE_ATTRIBUTION = {
   google_ads:      { leadSource: 'google_ads',      isPaid: true },
   facebook:        { leadSource: 'facebook',        isPaid: true },
+  facebook_organic:{ leadSource: 'facebook_organic',isPaid: false },
   spoke_site:      { leadSource: 'domain_website',  isPaid: false },
   main_site:       { leadSource: 'waves_website',   isPaid: false },
   gbp:             { leadSource: 'google_business', isPaid: false },

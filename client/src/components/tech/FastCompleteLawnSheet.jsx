@@ -102,8 +102,9 @@
 // context): `expectedVisit` is the context's WHOLE `service` object,
 // `lawnFast.visitType` its visit type, `lawnAssessmentId` the confirmed
 // assessment. A visit the server calls ineligible (or 404/409 on the context)
-// is handed to the parent once through `onFullForm`; the sheet itself never
-// shows a Full form button.
+// is handed to the parent once through `onFullForm`; the sheet shows a Full
+// form button only when the server refused a saved attempt's retry there
+// (HandoffHeldView).
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
@@ -123,10 +124,10 @@ import {
 import { isMlUnit, submittedAmount } from '../../lib/measure-units';
 import {
   AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton,
-  RecoveredCompletion, SavedView, SheetAccessCodes, TimeOnSite, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, startMethodFor, submissionHolds,
+  RecoveredCompletion, RecoveryOnlyView, SavedView, SheetAccessCodes, TimeOnSite, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, startMethodFor, submissionHolds,
   methodLabel, techTipsOf, unitLabel, useDictationSources, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
-import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
+import { BlogPostSection, CollectPayment, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import { KnownTroubleAreas, PlaceAddButtons, PlaceControl } from './LawnSpotPlace';
 import { HeldLines, SodBanner } from './LawnSodParts';
@@ -183,6 +184,10 @@ const PROPERTY_CHECK_MESSAGE = 'We could not check this lawn assessment against 
 const STOCK_LOCKOUT_MESSAGE = 'A product is out of stock. Update inventory, tap Check stock, then complete again.';
 const PROPERTY_SCOPE_MESSAGE = 'This lawn check was made for a different property than this visit. Retake the photos, then analyze and confirm again.';
 const NOT_ON_THIS_SHEET_MESSAGE = 'This visit cannot be completed on this sheet. Close it and tell the office.';
+// A rejected copy this device could not clear (RefusalBlock), on a view with
+// no form, and on a visit the sheet hands to the full form (HandoffHeldView).
+const KEPT_REJECTED_COPY_NOTICE = 'This device could not clear its saved copy of this completion. Discard it here.';
+const HANDOFF_REJECTED_COPY_NOTICE = 'This device could not clear its saved copy of this completion. Discard it here. The full form opens next.';
 const REFUSAL_MESSAGES = {
   lawn_fast_disabled: 'The quick lawn sheet is off right now. Close it and tell the office.',
   lawn_fast_not_eligible: NOT_ON_THIS_SHEET_MESSAGE,
@@ -1400,7 +1405,14 @@ function CustomerContact({ service, visit, request }) {
   );
 }
 
-export default function FastCompleteLawnSheet({ service, request, operatorId, catalog = [], onClose, onCompleted, onFullForm, onViewDetails, suspended = false }) {
+// `catalog` null: the parent is still reading it (the Today page reads it at the
+// tap); the form waits for it, and `catalogError` says why it never came. Admin
+// Dispatch passes the array it read with the route.
+// `collectOnSheet`: the saved view offers Take payment now (CollectPayment) for a bill
+// the completion says is owed and whose pay link did not go out, as the report
+// sheet does. For a page that opens no payment prompt of its own (the Today
+// page); admin Dispatch's prompt takes the completion response instead.
+export default function FastCompleteLawnSheet({ service, request, operatorId, catalog = [], catalogError = '', onClose, onCompleted, onFullForm, onViewDetails, suspended = false, collectOnSheet = false }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   const dialogRef = useModalFocus(!suspended, () => closeRef.current?.());
@@ -1416,7 +1428,7 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   const refreshPlaces = useRef(null);
   const submitRequest = useMemo(() => plainErrors(request, reloadAreas, refreshPlaces), [request]);
   // `sheet` tags a saved attempt as this sheet's: its findings type matches the
-  // lawn re-service sheet's, and Tech Home cannot open this one.
+  // lawn re-service sheet's, and Tech Home reopens this sheet by the tag.
   const submission = useFastCompleteSubmit({ base, request: submitRequest, serviceId: service?.id, operatorId, sheet: 'lawn_visit', invoiceFields: completionInvoiceFields(service) });
   const { submitting, done } = submission;
   // A recorded dictation clip is still being taken or transcribed. "+ Other
@@ -1428,16 +1440,21 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   const [wrapChecking, setWrapChecking] = useState(false);
 
   // The server says this visit does not use this sheet: the parent opens the
-  // full form, once. (No button on the sheet leads there.) Not while a saved
-  // attempt is checked for or shown: a fresh full-form completion would race it.
+  // full form, once. Not while a saved attempt is checked for or shown: a
+  // fresh full-form completion would race it. Not while the server's refusal
+  // of that attempt's retry is shown, or its copy this device could not clear
+  // waits to be discarded (HandoffHeldView): the hand-off would hide them.
+  // Never for an off-route saved attempt's row (`recoveryOnly`): it holds no
+  // day or premise to open the full form on.
   const handedOff = useRef(false);
   const holdsSaved = submission.recovering || submission.restored;
+  const holdsRefusal = !!submission.error || submission.rejectedCopy;
   useEffect(() => {
-    if (ctx.handoff && !handedOff.current && !holdsSaved) {
+    if (ctx.handoff && !handedOff.current && !holdsSaved && !holdsRefusal && !service?.recoveryOnly) {
       handedOff.current = true;
       onFullForm?.();
     }
-  }, [ctx.handoff, holdsSaved, onFullForm]);
+  }, [ctx.handoff, holdsSaved, holdsRefusal, service?.recoveryOnly, onFullForm]);
 
   // Any dismissal the schedule may be stale for asks the parent to refresh: a
   // sheet blocked on a stale or changed visit, or an attempt whose outcome is
@@ -1456,30 +1473,102 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay} suspended={suspended}>
       <LawnSheetHeader titleId={titleId} title={done ? 'Service complete' : 'Complete service'} showDetails={!done && !!onViewDetails} detailsDisabled={submitting || wrapChecking || dictationPending} onDetails={() => onViewDetails?.()} backDisabled={submitting || wrapChecking} onBack={close} />
-      <SheetBody service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} onWrapChecking={setWrapChecking} />
+      <SheetBody service={service} request={request} catalog={catalog} catalogError={catalogError} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} onWrapChecking={setWrapChecking} collectOnSheet={collectOnSheet} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile, refreshPlaces, onWrapChecking }) {
-  if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
+// A visit the sheet hands to the full form (`ctx.handoff`) whose saved retry
+// the server refused: the refusal stays here instead of the hand-off hiding
+// it. A rejected copy this device could not clear is discarded first, and the
+// hand-off then runs. A correctable rejection with no copy left opens the full
+// form on a tap, to fix it there. A request refused for good offers no form.
+function HandoffHeldView({ submission, onFullForm }) {
+  const fixable = !submission.rejectedCopy && submission.failure !== 'terminal';
+  return (
+    <div className="tech-visit-body">
+      <RefusalBlock submission={submission} keptNotice={HANDOFF_REJECTED_COPY_NOTICE} />
+      {fixable && (
+        <div className="tech-visit-actions">
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={() => onFullForm?.()}>Full form</Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The server's refusal of a saved attempt's retry, kept on a view that has no
+// form (whose footer would carry it), with Discard for a rejected copy this
+// device could not clear (`rejectedCopy`: never a retry).
+function RefusalBlock({ submission, keptNotice }) {
+  return (
+    <>
+      {submission.error && <ActionFeedback error className="tech-visit-feedback">{submission.error}</ActionFeedback>}
+      {submission.rejectedCopy && <ActionFeedback className="tech-visit-feedback">{keptNotice}</ActionFeedback>}
+      {submission.rejectedCopy && (
+        <div className="tech-visit-actions">
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={submission.submitting} onClick={submission.discard}>
+            Discard saved retry
+          </Button>
+        </div>
+      )}
+    </>
+  );
+}
+
+// The view in place of the form while the visit's context loads, cannot be
+// read or is blocked, or the product list is missing (the planned rows take
+// their units and stock from it); null once the form can show. A saved
+// attempt above needs none of it. `framed`: the unreadable view sits in the
+// sheet's body frame.
+function waitingView(ctx, catalog, catalogError) {
+  const message = (text, error = false) => <ActionFeedback error={error} className="tech-visit-feedback tech-visit-loading">{text}</ActionFeedback>;
+  if (ctx.loading) return { content: message('Loading…') };
+  if (ctx.loadError) {
+    return {
+      framed: true,
+      content: (
+        <>
+          {message(ctx.loadError, true)}
+          <div className="tech-visit-actions">
+            <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={ctx.retry}>Try again</Button>
+          </div>
+        </>
+      ),
+    };
+  }
+  if (ctx.blockedReason) return { content: message(ctx.blockedReason) };
+  if (!catalog) return { content: message(catalogError || 'Loading the product list…', !!catalogError) };
+  return null;
+}
+
+function SheetBody({ service, request, catalog, catalogError, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile, refreshPlaces, onWrapChecking, collectOnSheet }) {
+  if (submission.done) {
+    return (
+      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)}>
+        {collectOnSheet && <CollectPayment result={submission.done.response} />}
+      </SavedView>
+    );
+  }
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;
+  if (service.recoveryOnly) return <RecoveryOnlyView submission={submission} />;
   const refusal = refusalWithoutContext(submission, ctx);
   if (refusal) return refusal;
-  if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
+  const held = !!submission.error || submission.rejectedCopy;
+  if (ctx.handoff && held) return <HandoffHeldView submission={submission} onFullForm={onFullForm} />;
   if (ctx.handoff) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Opening the full form…</ActionFeedback>;
-  if (ctx.loadError) {
+  const waiting = waitingView(ctx, catalog, catalogError);
+  // With no form to carry it, a refused retry stays above the view (RefusalBlock).
+  if (waiting && held) {
     return (
       <div className="tech-visit-body">
-        <ActionFeedback error className="tech-visit-feedback tech-visit-loading">{ctx.loadError}</ActionFeedback>
-        <div className="tech-visit-actions">
-          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={ctx.retry}>Try again</Button>
-        </div>
+        <RefusalBlock submission={submission} keptNotice={KEPT_REJECTED_COPY_NOTICE} />
+        {waiting.content}
       </div>
     );
   }
-  if (ctx.blockedReason) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">{ctx.blockedReason}</ActionFeedback>;
+  if (waiting) return waiting.framed ? <div className="tech-visit-body">{waiting.content}</div> : waiting.content;
   return <LawnFastForm service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onOverlay={onOverlay} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces}  onWrapChecking={onWrapChecking} />;
 }
 

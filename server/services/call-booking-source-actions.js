@@ -89,8 +89,25 @@ function isUnreviewedDispatchOwned(svc) {
 // SQL twin for the customer list reads (see routes/schedule.js): the rows a customer may NOT see.
 const UNREVIEWED_VOICE_MOVED_SQL = "(scheduled_services.source_action = 'voice_agent' AND scheduled_services.status = 'confirmed' AND COALESCE(scheduled_services.customer_confirmed, false) = false)";
 
+/**
+ * Knex WHERE-group callback for customer-visible scheduled bookings. This is
+ * the SQL twin of isUnreviewedDispatchOwned, including NULL-safe source rows
+ * and the confirmed-but-unreviewed voice-agent move shape. Pass directly to
+ * `.where(customerVisibleBookingWhere)` so the whole OR expression is grouped.
+ */
+function customerVisibleBookingWhere(qb) {
+  return qb
+    .whereNull('scheduled_services.source_action')
+    .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
+    .orWhere((q2) => q2
+      .whereNot('scheduled_services.status', 'pending')
+      .whereRaw(`NOT ${UNREVIEWED_VOICE_MOVED_SQL}`))
+    .orWhere('scheduled_services.customer_confirmed', true);
+}
+
 module.exports = {
   isUnreviewedDispatchOwned,
+  customerVisibleBookingWhere,
   UNREVIEWED_VOICE_MOVED_SQL,
   CALL_FOLLOWUP_SOURCE_ACTION,
   CALL_OUTBOUND_REVIEW_SOURCE_ACTION,

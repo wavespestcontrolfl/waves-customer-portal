@@ -11,7 +11,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), alertRingOnceLive: jest.fn(() => false) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 
-const mockState = { calls: [], booked: [], triage: [], customers: [], alertedKeys: new Set(), rung: [], open: [] };
+const mockState = { calls: [], booked: [], triage: [], customers: [], alertedKeys: new Set(), rung: [], open: [], callLogSelects: [] };
 
 // Minimal chainable stand-in for the knex builder: resolves rows per table.
 jest.mock('../models/db', () => {
@@ -35,7 +35,8 @@ jest.mock('../models/db', () => {
       whereNotIn: () => b,
       groupByRaw: () => b,
       orderBy: () => b,
-      select: () => b,
+      // The columns each call_log read asks for (the held-call test checks what the scan reads).
+      select: (...cols) => { if (table === 'call_log') mockState.callLogSelects.push(cols); return b; },
       first: () => Promise.resolve(
         table === 'notifications' && ctx.rawArgs.some((k) => mockState.alertedKeys.has(k)) ? { id: 'n-old' } : undefined,
       ),
@@ -66,6 +67,7 @@ function missCall(over = {}) {
     id: CALL_ID, twilio_call_sid: 'CAsynthetic900', customer_id: 'cust-9',
     direction: 'inbound', created_at: '2026-09-28T21:30:00Z',
     from_phone: '+19415550199', to_phone: '+19415550100',
+    processing_status: 'processed',
     ai_extraction_enriched: {
       caller: { name_full: 'Robin Example' },
       service_request: { specific_service_name: 'Wasp Nest Removal' },
@@ -83,6 +85,7 @@ beforeEach(() => {
   mockState.alertedKeys = new Set();
   mockState.rung = [];
   mockState.open = [];
+  mockState.callLogSelects = [];
   NotificationService.notifyAdmin.mockReset();
   require('../config/feature-gates').alertRingOnceLive.mockReturnValue(false);
   NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-new', deduped: false });
@@ -119,6 +122,41 @@ describe('first bell', () => {
 
   test('a booked call-linked row clears the miss: nothing rings', async () => {
     mockState.booked = [{ customer_id: 'cust-9', sched_date: '2026-10-04', window_start: '11:00:00', source_call_log_id: CALL_ID, notes: null }];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result.misses).toBe(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+});
+
+// Owner 2026-11-18 (option A of the call booking holds scope): a visit the call agent
+// held rang 1.5 to 2.5 hours after the call and never said why.
+describe('a visit the call agent held', () => {
+  // The call agent's live decision on the call's last pass: routing held it on the address.
+  const HELD = { final_action_taken: 'triage_review', blocked_reasons: ['address_unverified'], created_at: NOW.toISOString() };
+  const minutesAgo = (n) => new Date(NOW.getTime() - n * 60 * 1000).toISOString();
+
+  test('rings 15 minutes after the call and names why; the scan reads the hold and call-end inputs', async () => {
+    mockState.calls = [missCall({ created_at: minutesAgo(15), live_decision: HELD })];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result).toMatchObject({ misses: 1, alerted: 1 });
+    const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toBe("Schedule — review Robin Example's Wasp Nest Removal");
+    expect(why).toBe('Confirmed Sun Oct 4 at 11:00 AM on a call; held because the address is not confirmed.');
+    expect(opts.bell).toBe(true);
+    // callHoldReason's inputs (the pass's status and claim time) and heldWaitStart's (where a
+    // held call's wait starts).
+    const needed = ['processing_status', 'processing_started_at', 'metadata', 'duration_seconds', 'recording_duration_seconds', 'bridged_at'];
+    const scan = mockState.callLogSelects.find((cols) => needed.every((col) => cols.includes(col)));
+    expect(scan).toBeDefined();
+    // Pre-push P1 (2026-11-18): the live decision comes back in the same statement as the call
+    // row (one snapshot), and only an enforce-mode row for the call's own recording counts: the
+    // newest rows of any mode are shadow rows, and a reprocess of a new recording keys a new row.
+    const live = scan.find((col) => typeof col === 'string' && col.includes('AS live_decision'));
+    expect(live).toMatch(/FROM route_decisions rd\s+WHERE rd\.call_log_id = call_log\.id AND rd\.mode = 'enforce' AND rd\.recording_sid = COALESCE\(call_log\.recording_sid, ''\)\s+ORDER BY rd\.created_at DESC LIMIT 1/);
+  });
+
+  test('an unheld call of the same age still waits out GRACE_MINUTES', async () => {
+    mockState.calls = [missCall({ created_at: minutesAgo(15) })];
     const result = await runCallBookingMissWatchdog({ now: NOW });
     expect(result.misses).toBe(0);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
@@ -284,6 +322,19 @@ describe('a later visit on another day', () => {
     expect(opts.detail).toMatch(/agreed Wasp Nest Removal for Sun Oct 4 at 11:00 AM on a inbound call at .* ET\. The visit on the calendar is Sun Oct 11 at 4:00 PM\. Move it to the agreed day, or confirm the new day with the customer, then tap Done\./);
     expect(opts.dedupeKey).toBe(`call-booking-miss:${CALL_ID}`);
     expect(opts.metadata).toMatchObject({ doneWhen: 'visit_booked', subject: { type: 'call', id: CALL_ID }, mismatch: { visit_id: 'visit-7', date: '2026-10-11', time: '16:00' } });
+  });
+
+  // Pre-push P1 (2026-11-18): a held call's first date check says why the call agent held it and
+  // asks staff to check the call before they move the visit or contact anyone.
+  test('a held call\'s date check names the hold and asks to check the call first', async () => {
+    mockState.calls = [missCall({ live_decision: { final_action_taken: 'triage_review', blocked_reasons: ['do_not_contact_requested'], created_at: NOW.toISOString() } })];
+    mockState.booked = [otherDay()];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result).toMatchObject({ misses: 1, alerted: 1 });
+    const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toBe("Schedule — check Robin Example's visit date");
+    expect(why).toBe('Booked Sun Oct 11 at 4:00 PM; the call agreed Sun Oct 4 at 11:00 AM.');
+    expect(opts.detail).toMatch(/The visit on the calendar is Sun Oct 11 at 4:00 PM\. The call agent held this visit and did not book it, because the caller asked not to be contacted\. Review the call before you move the visit or contact the caller\.$/);
   });
 
   test('the same-day visit outside the window tolerance also rings the date check', async () => {

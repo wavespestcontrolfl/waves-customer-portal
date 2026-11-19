@@ -419,6 +419,16 @@ describe('government senders are never auto-blocked (outside review 2026-10-25)'
     jest.clearAllMocks();
   });
 
+  test('blockSpamSender returns before any lookup or Gmail filter for a feed the SiteOne deals digest reads (owner 2026-11-18)', async () => {
+    await blockSpamSender({ id: 1, from_address: 'marketing@grow.siteone.com' });
+    await blockSpamSender({ id: 2, from_address: 'SiteOne <noreply@ec.siteone.com>' });
+    await blockSpamSender({ id: 3, from_address: 'News@Mail.BASF.com' });
+    expect(db).not.toHaveBeenCalled();
+    // A look-alike is not a digest sender: it reaches the ordinary lookups.
+    db.mockImplementation(() => { throw new Error('lookup reached'); });
+    await expect(blockSpamSender({ id: 4, from_address: 'srep@siteone.com.evil.example' })).rejects.toThrow('lookup reached');
+  });
+
   test('blockSpamSender returns before any lookup or Gmail filter for a government sender', async () => {
     await blockSpamSender({ id: 1, from_address: 'licensing@fdacs.gov' });
     await blockSpamSender({ id: 2, from_address: 'News@FreshFromFlorida.com' });

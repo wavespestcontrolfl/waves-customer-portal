@@ -17,6 +17,7 @@ const {
   validateEstimateOwnershipUnderLock,
 } = require('../services/customer-account-ownership');
 const logger = require('../services/logger');
+const { attributionWithSourceEvidence } = require('../services/lead-source-evidence');
 const { bookPreferredTimeLive } = require('../config/feature-gates');
 const { noStore } = require('../middleware/no-store');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
@@ -4478,7 +4479,7 @@ async function createSelfBooking(payload = {}) {
         // for EVERY booking — raw record; classification happens at read time
         // (attributeSelfBooking below only persisted the paid-click slice).
         attribution: (attribution && typeof attribution === 'object')
-          ? JSON.stringify(attribution) : null,
+          ? JSON.stringify(attributionWithSourceEvidence(attribution)) : null,
         service_type: resolvedServiceType,
       }).returning('*');
 
@@ -6993,7 +6994,7 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       slot_start: str(b.slot_start, 10),
       slot_end: str(b.slot_end, 10),
       source: str(b.source, 60),
-      attribution: b.attribution ? JSON.stringify(b.attribution) : null,
+      attribution: b.attribution ? JSON.stringify(attributionWithSourceEvidence(b.attribution)) : null,
       last_activity_at: db.fn.now(),
       updated_at: db.fn.now(),
       ...(linkedEstablished ? { suppressed: true } : {}),

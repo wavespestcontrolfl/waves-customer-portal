@@ -5704,6 +5704,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // HOURLY :50, 9 AM to 7 PM ET — Paid-at-the-visit receipt check (owner 2026-11-18). One
+  // Billing bell per invoice paid at its visit that still has no receipt after 2
+  // hours (a tender sheet recorded the payment and no receipt went out); it closes
+  // itself once the receipt goes out. Read-only: sends nothing to a customer,
+  // writes only admin notification rows. No GATE_* (owner rule 2026-11-05).
+  // The plain hour range is deliberate: node-cron 3 reads a stepped range oddly.
+  // =========================================================================
+  cron.schedule('0 50 9-19 * * *', async () => {
+    try {
+      await runExclusive('paid-visit-receipt-check', async () => {
+        const result = await require('./paid-visit-receipt-check').runPaidVisitReceiptCheck();
+        logger.info(`Paid-visit receipt check: ${result.raised} raised, ${result.closed} closed`);
+      });
+    } catch (err) {
+      logger.error(`Paid-visit receipt check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // MONDAYS 9:20AM — Monday review bell. Owner 2026-11-02 ("build all", B2): one needs-you bell a
   // week for the work that sits: needs-you alerts unread 14+ days, overdue
   // promises, completed visits with only a draft invoice, open past visits. The
@@ -10343,14 +10362,18 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // Call booking-miss watchdog — every 30 min (offset from the ingest
-  // watchdog), ring an admin bell for any call whose V2 extraction confirmed
-  // a concrete appointment slot that never became a scheduled_services row
+  // Call booking-miss watchdog — every 10 min (owner 2026-11-18: a visit the
+  // call agent held rings about 15 minutes after the call, not 1.5-2 hours
+  // later). Its minutes stay 4 min off the ingest watchdog's :07/:37 and off
+  // the nightly checks' own minutes (23:20-23:32, the #3208 rule in
+  // failing-jobs-check.test.js). It rings an admin bell for any call whose V2
+  // extraction confirmed a concrete appointment slot that never became a
+  // scheduled_services row
   // (outbound skip / v2 routing block / missing fields all park silently in
   // triage otherwise). Dark behind GATE_CALL_BOOKING_MISS_WATCHDOG.
   // See server/services/call-booking-miss-watchdog.js.
   // =========================================================================
-  cron.schedule('22,52 * * * *', async () => {
+  cron.schedule('3,13,23,33,43,53 * * * *', async () => {
     try {
       const { runCallBookingMissWatchdog } = require('./call-booking-miss-watchdog');
       const result = await runCallBookingMissWatchdog();

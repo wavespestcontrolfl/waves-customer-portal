@@ -7,6 +7,9 @@ jest.mock('../config/locations', () => ({
 const db = require('../models/db');
 const { isGbpUtmCampaign, findGbpLocationByUtmContent } = require('../config/locations');
 const { resolveLeadSource, MAIN_SITE_NAME, GOOGLE_ADS_WEB_FORM_NAME } = require('../services/lead-source-resolver');
+// Vendored snapshot of astro/src/lib/paid-source-fixtures.json; root integration
+// byte-compares the two repos, while portal CI remains standalone.
+const paidSourceFixtures = require('./fixtures/paid-source-fixtures.json');
 
 // Mock lead_sources lookups: the resolver hits exactly one of
 //   .whereRaw("LOWER(name) LIKE '%facebook%'").first()   (meta)
@@ -24,6 +27,29 @@ function mockLeadSources({ facebook = null, google = null, byName = {} } = {}) {
     }),
   }));
 }
+
+function backendKindFromResolved(result) {
+  if (result.sourceType === 'google_ads') return 'google_ads';
+  if (result.sourceType === 'facebook') return 'meta_ads';
+  if (result.sourceType === 'facebook_organic') return 'organic_social';
+  if (/^(GBP website link|Google Maps referral)/.test(result.leadSourceDetail || '')) return 'google_business';
+  if (/organic search$/.test(result.leadSourceDetail || '')) return 'organic_search';
+  if (/^Referral host:/.test(result.leadSourceDetail || '')) return 'referral';
+  return null;
+}
+
+describe('resolveLeadSource consumes the shared attribution matrix', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    findGbpLocationByUtmContent.mockReturnValue(null);
+    mockLeadSources();
+  });
+
+  test.each(paidSourceFixtures)('$name', async ({ attribution, expected_backend_kind: expected }) => {
+    const result = await resolveLeadSource(attribution);
+    expect(backendKindFromResolved(result)).toBe(expected);
+  });
+});
 
 describe('resolveLeadSource', () => {
   beforeEach(() => {
@@ -99,6 +125,36 @@ describe('resolveLeadSource', () => {
     expect(res.leadSourceId).toBe('ls-google');
   });
 
+  test('classifies utm_source=google&utm_medium=ppc as Google Ads without a click id', async () => {
+    mockLeadSources({ google: { id: 'ls-google', source_type: 'google_ads' } });
+    const res = await resolveLeadSource({ utm: { source: 'google', medium: 'ppc' } });
+    expect(res).toMatchObject({ leadSourceId: 'ls-google', sourceType: 'google_ads', isPaidClick: true });
+  });
+
+  test('facebook + organic does not resolve to the paid Facebook source row', async () => {
+    mockLeadSources({ facebook: { id: 'ls-fb-paid', name: 'Facebook Ads — Pest (call-extension)', source_type: 'facebook' } });
+    const res = await resolveLeadSource({ utm: { source: 'facebook', medium: 'organic' } });
+    expect(res).toMatchObject({
+      leadSourceId: null,
+      leadSourceName: 'Facebook (organic)',
+      sourceType: 'facebook_organic',
+      isPaidClick: false,
+    });
+  });
+
+  test('Nextdoor resolves its existing row; LinkedIn never becomes facebook_organic', async () => {
+    mockLeadSources({
+      byName: { Nextdoor: { id: 'ls-nextdoor', name: 'Nextdoor', source_type: 'marketplace' } },
+    });
+    await expect(resolveLeadSource({ utm: { source: 'nextdoor', medium: 'organic' } })).resolves.toMatchObject({
+      leadSourceId: 'ls-nextdoor', sourceType: 'marketplace', isPaidClick: false,
+    });
+    mockLeadSources();
+    await expect(resolveLeadSource({ utm: { source: 'linkedin', medium: 'organic' } })).resolves.toMatchObject({
+      leadSourceId: null, sourceType: null, isPaidClick: false,
+    });
+  });
+
   test('still classifies a Meta click as Facebook', async () => {
     mockLeadSources({ facebook: { id: 'ls-fb', name: 'Facebook Ads — Pest (call-extension)' } });
 
@@ -112,6 +168,14 @@ describe('resolveLeadSource', () => {
 
     const res = await resolveLeadSource({ referrer: 'https://duckduckgo.com/' });
     expect(res.leadSourceId).toBe('ls-main');
+  });
+
+  test('Google Maps referral resolves the generic Google Business source before search fallback', async () => {
+    mockLeadSources({
+      byName: { 'Google Business Profile': { id: 'ls-gbp', name: 'Google Business Profile', source_type: 'website_organic' } },
+    });
+    const res = await resolveLeadSource({ referrer: 'https://www.google.com/maps' });
+    expect(res).toMatchObject({ leadSourceId: 'ls-gbp', leadSourceDetail: 'Google Maps referral' });
   });
 
   test('GBP utm campaign still wins over a stray click id', async () => {
@@ -284,7 +348,7 @@ describe('resolveLeadSource isPaidClick', () => {
 
   test('FALSE for organic facebook utm — channel facebook, but not paid', async () => {
     const res = await resolveLeadSource({ utm: { source: 'facebook', medium: 'social' } });
-    expect(res.sourceType).toBe('facebook'); // still the Facebook channel
+    expect(res.sourceType).toBe('facebook_organic');
     expect(res.isPaidClick).toBe(false);     // but no paid evidence
   });
 

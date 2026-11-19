@@ -4385,7 +4385,17 @@ DELIBERATELY SEPARATE from
 `leads.lead_source_id` / the classified `lead_source` — self-reported, never
 merged into technically-observed attribution, and "unknown" (the field
 omitted or invalid) stores NULL rather than a guess. Separately and
-independently of `heard_about`, the SAME technically-observed attribution
+independently of `heard_about`, website forms, quotes and self-booking can
+send the optional boolean `attribution.observed`. Only literal `true` with
+an empty referrer and no campaign signal can classify an entry as Direct.
+Older payloads may omit the marker. The server derives the staff-facing
+`source_evidence` from the submitted first-touch signals and ignores any
+client-supplied source label. Explicit GBP tags or a Google Maps referrer
+take precedence, followed by Google and Meta click IDs or matching paid
+campaign tags. Under the existing Meta routing rule an `fbclid` or `fbc`
+selects the Meta line. An unpaid social tag alone stays organic.
+
+The same technically-observed attribution
 pipeline both endpoints already run (UTM/click-id/referrer →
 `server/services/lead-source-classify.js`) now also classifies an
 AI-assistant referral: a visitor who asked ChatGPT, Perplexity, Gemini,
@@ -6726,13 +6736,49 @@ A non-null token fans out to `/prep/:token`. `en_route` additionally returns liv
 from Bouncie. The `complete` summary additionally hands out secondary bearer
 tokens — `serviceReportToken` (`report_view_token`), `invoiceToken`, a
 `/rate/:token` review URL, and TTL-presigned service-photo URLs — fanning out
-to the report / receipt / rate surfaces. Treat the track token and any change
+to the report / receipt / rate surfaces. The top-level `visitChange` is null
+for an ordinary visit. A Quick Move customer-pick handoff returns only its
+approved rain reason, original slot, pick deadline, and whether the customer
+still acts or a replacement is proven booked. The parked handoff date is never
+returned as a booked current slot. A replacement Auto-Dispatch placed follows
+the canonical day-only promise verdict: when its hour is still hidden, both
+`visitChange.current.windowStart` and the top-level `window.start` /
+`window.end` are null, while top-level `window.date` carries the proven placed
+calendar date independently of the optional handoff narrative. Parked and
+office-rebooking rows return `window.date = null`; a customer-selected hour
+remains visible. The durable marker-plus-window row
+shape triggers this verdict even if the optional handoff narrative cannot be
+read; `last_auto_dispatch_at` is best-effort bookkeeping, not display
+authority. Its only action opens signed-in Visits at
+`/?tab=schedule`, where the current schedule response can supply a
+write-capable reschedule link; the tracker also keeps call/text office fallback
+visible. When the durable `customer_pick_by` plus missing-window shape proves
+the visit is still unplaced but its narrative history is missing, unreadable or
+not approved for customer copy, the payload instead uses neutral
+`pending_rebook` office recovery with no reason or picker action. That unplaced
+shape returns no stops count, route progress, approximate vehicle or scheduled
+polling, and the stops-ahead POST does not compute or persist a count for it.
+The track payload never returns or mints a reschedule token. A
+cancelled or missed visit returns only that the office is the next actor. An
+operational `rescheduled` row adds `visitChange.kind = pending_rebook`; its
+public state is `scheduled` with a null window, no vehicle, no stops count and
+no polling while the office chooses a time. The tracker gives office call/text
+actions. An intentional plan skip preserves the existing top-level `cancelled` state for
+older clients and adds `visitChange.kind = skipped`, with the next regular
+date only when the same service and property can be proven; it returns no
+picker action and no make-up promise. The bounded public lookup also floors
+the candidate date at the current ET day, so an overdue open occurrence is
+never announced as the next visit.
+Treat the track token and any change
 to its payload, in any state, as security-critical. The GET stays strictly
 read-only; it has exactly TWO write companions, both bounded.
 `POST /api/public/track/:token/stops-ahead` — same token gate + rate limit,
 ignores its body, and only persists the stops-ahead display-clamp floor
 (monotone LEAST, skip-unchanged) via `computeStopsAhead` before returning the
-displayable count. `POST /api/public/track/:token/view` — same token format
+displayable count. The floor write and its no-op reread are bound to the exact
+technician/date/window used for the count and recheck that the visit is still
+placed and eligible, so a concurrent Quick Move cannot stamp its parked row.
+`POST /api/public/track/:token/view` — same token format
 gate, expiry fence (unknown / malformed / expired = the same generic 404, no
 write), privacy headers and router rate limit; ignores its body; records ONE
 `customer_page_views` row (`page: 'track'`, subject = the visit, bots / staff

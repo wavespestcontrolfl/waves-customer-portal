@@ -576,6 +576,9 @@ service.appFirstStaleFloor = appFirstStaleFloor;
 service.customerPushContext = customerPushContext;
 // Exposed for unit tests (platform routing); not part of the public API.
 service._sendSubscription = sendSubscription;
+// The staff push lookup's two-step filter, for a caller that rereads a staff
+// member's devices at a handoff (tech-visit-notifications namedDevices).
+service.staffMfaPushFilter = staffMfaPushFilter;
 // The saved property a push is ABOUT (uncapped codex r1s P1 — the producer
 // half of the lane's push item, pulled forward from PR 3): a composer that
 // knows the house passes notification.propertyId; one that only knows the

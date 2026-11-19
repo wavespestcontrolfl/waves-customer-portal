@@ -10,8 +10,11 @@
  *
  * Delivery = one `tech_notifications` row (the tech home feed polls it and
  * keeps the card until the tech clears it) + one best-effort push through
- * PushService. Push copy is a single line (owner ruling 2026-09-05: "You have
- * a new visit on your route"); the details wait in the app.
+ * PushService. The push's first line is generic ("You have a new visit on
+ * your route"); the lines below it name the visit: the customer's first and
+ * last name and the service, then the day and time and the street on a line
+ * of their own (owner 2026-11-18, replacing the one-line ruling of
+ * 2026-09-05; two lines for easy reading, owner 2026-11-19; pushDetail below).
  *
  * Silent by design:
  *   - GATE_TECH_VISIT_NOTIFICATIONS is not exactly on → nothing (dark; unset
@@ -85,12 +88,14 @@ const ENDED_LABELS = Object.freeze({ cancelled: 'cancelled', completed: 'complet
 // True when the caller's committed snapshot no longer matches the row — a
 // later change moved the visit on. Only the fields the caller supplied are
 // compared (an assignment hook may know the date alone).
+// 'HH:MM' of a TIME value ('09:00:00' → '09:00'), or null.
+const clockHHMM = (v) => (v ? String(v).slice(0, 5) : null);
+
 function snapshotSuperseded(snapshot, row) {
   if (!snapshot) return false;
-  const hhmm = (v) => (v ? String(v).slice(0, 5) : null);
   if (snapshot.date !== undefined && dateOnly(snapshot.date) !== dateOnly(row.scheduled_date)) return true;
-  if (snapshot.windowStart !== undefined && hhmm(snapshot.windowStart) !== hhmm(row.window_start)) return true;
-  if (snapshot.windowEnd !== undefined && hhmm(snapshot.windowEnd) !== hhmm(row.window_end)) return true;
+  if (snapshot.windowStart !== undefined && clockHHMM(snapshot.windowStart) !== clockHHMM(row.window_start)) return true;
+  if (snapshot.windowEnd !== undefined && clockHHMM(snapshot.windowEnd) !== clockHHMM(row.window_end)) return true;
   return false;
 }
 
@@ -101,7 +106,7 @@ const TYPE_BY_KIND = Object.freeze({
   cancelled: 'visit_cancelled',
 });
 
-// Push copy: one line each, no customer details on the lock screen.
+// The push's first line. The second names the visit (pushDetail).
 const PUSH_TITLE_BY_KIND = Object.freeze({
   assigned: 'You have a new visit on your route',
   unassigned: 'A visit was moved off your route',
@@ -233,6 +238,126 @@ function placeLabel(visit) {
   return stamped.join(', ') || null;
 }
 
+// The customer as a visit push names them: first and last name (owner
+// 2026-11-18, "first and last name"). The card keeps its own short label.
+function customerFullName(visit) {
+  return [visit.cust_first_name, visit.cust_last_name]
+    .map((part) => String(part || '').trim()).filter(Boolean).join(' ') || null;
+}
+
+// The street a visit push shows (owner 2026-11-18, "every visit push"): line 1
+// of the address the truck goes to, by placeLabel's stamped-address-first rule.
+function streetLine(visit) {
+  return String(visit.service_address_line1 || visit.cust_address || '').trim() || null;
+}
+
+// What a visit push's detail lines say, from one of two sources: the visit
+// row as it is now, or the card as it was written. A move keeps the slot it
+// left (previousWhen) for its "Was …" line.
+function partsFromVisit(visit, kind, previousWhen = null) {
+  return {
+    name: customerFullName(visit),
+    service: visit.service_type || null,
+    when: visitWhen(visit),
+    previousWhen: kind === 'rescheduled' ? previousWhen : null,
+    street: streetLine(visit),
+    date: dateOnly(visit.scheduled_date),
+    start: clockHHMM(visit.window_start),
+  };
+}
+
+function partsFromCard(payload, kind) {
+  return {
+    // A card written before the full name was stored names the last name only.
+    name: payload.customer_full_name || payload.customer_name || null,
+    service: payload.service_type || null,
+    when: payload.when || null,
+    previousWhen: kind === 'rescheduled' ? payload.previous_when || null : null,
+    street: payload.street || null,
+    date: payload.date || null,
+    start: payload.window_start || null,
+  };
+}
+
+// "the customer picks a day by …" opens the line it starts.
+const capitalized = (text) => (text ? `${text.charAt(0).toUpperCase()}${text.slice(1)}` : null);
+
+// A visit's detail lines: who, then when and where on a line of their own
+// (owner 2026-11-19, "easily readable"). A move adds the slot it left below.
+//   Ana Ruiz · Pest Control
+//   Thu Sep 10, 9–11 AM · 4312 Cortez Rd W
+//   Was Wed Sep 9, 1–3 PM
+const whoLine = (parts) => [parts.name, parts.service].filter(Boolean).join(' · ');
+const whenWhereLine = (parts) => [capitalized(parts.when), parts.street].filter(Boolean).join(' · ');
+function pushDetail(parts) {
+  const was = parts.previousWhen && parts.when ? `Was ${parts.previousWhen}` : null;
+  return [whoLine(parts), whenWhereLine(parts), was].filter(Boolean).join('\n');
+}
+
+// A push's detail lines stay well inside the providers' 4 KB payload (APNs,
+// FCM) with its title and keys: past the budget it is cut, with "…".
+const BODY_BYTE_BUDGET = 1500;
+function fitBody(text) {
+  if (!text || Buffer.byteLength(text, 'utf8') <= BODY_BYTE_BUDGET) return text;
+  let out = '';
+  let bytes = 0;
+  for (const ch of text) {
+    const size = Buffer.byteLength(ch, 'utf8');
+    if (bytes + size > BODY_BYTE_BUDGET - 3) break;
+    out += ch;
+    bytes += size;
+  }
+  return `${out}…`;
+}
+
+// The devices that may show this tech's visit details right now: the staff
+// app's own sign-ups (an active iOS row with the staff app's topic and no
+// customer on it, under the tech's current sign-in), as id → device token.
+// A native token sits in one row only (a unique index), re-pointed whole to
+// whoever signs in and released at sign-out; read at each device's own
+// handoff, a phone a newer sign-in took over is no longer in it. A browser's
+// web-push endpoint can stay active under two staff accounts on a shared
+// browser, and its page shows a push whoever is signed in, so it is never in
+// it; nor is a token a customer registration re-pointed. That index compares
+// letter case, so a token another row holds in any case, active or not, is
+// ambiguous and is not in it either (a sign-out of one row must not make the
+// other count). The sender's two-step filter (staffMfaPushFilter) applies
+// again here, as on its own lookup, and the sign-in that registered the
+// phone must still stand (session_exp, stored at sign-up by admin-push). Each
+// entry keeps the row's route data, so a device the sender routes by an
+// older read of its row never counts.
+const SIGN_IN_STANDS_SQL = "CASE WHEN jsonb_typeof(ps.subscription_data::jsonb->'session_exp') = 'number' "
+  + "THEN (ps.subscription_data::jsonb->>'session_exp')::numeric > extract(epoch FROM now()) ELSE false END";
+const routeData = (value) => (typeof value === 'string' ? value : JSON.stringify(value ?? null));
+async function namedDevices(technicianId, conn) {
+  const { STAFF_APP_BUNDLE_ID } = require('./apns');
+  const { staffMfaPushFilter } = require('./push-notifications');
+  const rows = await staffMfaPushFilter(conn('push_subscriptions as ps')
+    .join('technicians as t', 'ps.admin_user_id', 't.id')
+    .where({ 'ps.admin_user_id': technicianId, 'ps.active': true, 'ps.platform': 'ios', 't.active': true })
+    .whereIn('t.role', ['admin', 'technician'])
+    .whereNull('ps.customer_id')
+    .whereRaw('ps.staff_token_version = t.auth_token_version')
+    .whereRaw("ps.subscription_data::jsonb->>'topic' = ?", [STAFF_APP_BUNDLE_ID])
+    .whereRaw('NOT EXISTS (SELECT 1 FROM push_subscriptions o WHERE o.id <> ps.id AND lower(o.device_token) = lower(ps.device_token))')
+    .whereRaw(SIGN_IN_STANDS_SQL))
+    .select('ps.id', 'ps.device_token', 'ps.subscription_data');
+  return new Map(rows.map((row) => [String(row.id), { token: row.device_token, data: routeData(row.subscription_data) }]));
+}
+
+// What one device shows (sendToAdminUsers' per-device form, which the sender
+// calls right after that device's recheck): the visit's details only on a
+// device namedDevices verified at that recheck, with the same token and the
+// same route data the sender sends by; any other, the first line only. A
+// verified device gets `push` itself, so a recheck that clears its second
+// line still reaches it.
+const forDevice = (push, verifiedNow) => (_adminUserId, sub) => {
+  const seen = sub && sub.platform === 'ios' && sub.device_token ? verifiedNow().get(String(sub.id)) : null;
+  return seen && seen.token === sub.device_token && seen.data === routeData(sub.subscription_data)
+    ? push
+    : { ...push, body: '' };
+};
+
 /**
  * Compose the card's headline / message / payload for one kind. Pure.
  * `previous` is { date, windowStart, windowEnd } for rescheduled;
@@ -293,6 +418,12 @@ function composeCard({ kind, visit, actorText, previous, newTechnicianName, ende
         ? formatWhen(previous.date, previous.windowStart, previous.windowEnd)
         : null,
       address: where,
+      // The visit push's own words, as written (partsFromCard): a push that
+      // must not read the visit as it is now still names the customer in full
+      // and the street, and sorts by its start among other visits.
+      customer_full_name: customerFullName(visit),
+      street: streetLine(visit),
+      window_start: clockHHMM(visit.window_start),
       now_with: kind === 'unassigned' && !ended ? (newTechnicianName || null) : null,
       ended: kind === 'unassigned' ? (ended || null) : null,
       actor: actorText,
@@ -452,18 +583,23 @@ async function writeCard(notice) {
       payload: JSON.stringify(heldPayload(notice, card.payload)),
     }).returning('id');
     // The inserted row's id: the push recheck asks whether a NEWER card for
-    // the same tech and visit exists (pushStillCurrent).
-    return { id: inserted && typeof inserted === 'object' ? inserted.id : inserted };
+    // the same tech and visit exists (pushStillCurrent). The payload is what
+    // the card's own push says.
+    return { id: inserted && typeof inserted === 'object' ? inserted.id : inserted, payload: card.payload };
   });
 }
 
-// Does the visit row still satisfy cardStands for this visit_* notice (the
-// same rules that admitted the card — reused, not forked)? Read plainly,
-// never FOR SHARE: a push in flight must not block a schedule write. Rejects
-// on a DB error (pushCard then sends anyway).
-async function pushStillCurrent(notice, conn) {
+// The visit row while it still satisfies cardStands for this visit_* notice
+// (the same rules that admitted the card — reused, not forked), else null.
+// Read plainly, never FOR SHARE: a push in flight must not block a schedule
+// write. Rejects on a DB error (pushCard then sends anyway).
+async function standingRow(notice, conn) {
   const row = await loadVisit(notice.visitId, conn);
-  return !!row && !!cardStands(notice, row);
+  return row && cardStands(notice, row) ? row : null;
+}
+
+async function pushStillCurrent(notice, conn) {
+  return !!(await standingRow(notice, conn));
 }
 
 // Every card type whose push shares the `visit-<id>` collapse tag: a newer
@@ -494,28 +630,46 @@ async function newerCardExists(notice, conn) {
 // visit_* card, the detector's still-overdue read for a tracking notice —
 // and, for either, no newer card for this tech and visit. A clean "stale"
 // skips the push; a recheck ERROR sends anyway (owner steer: a missed alert
-// is worse than a rare misordered one).
-async function pushCard(notice, { checkCurrent = null } = {}) {
+// is worse than a rare misordered one), as its first line only: the visit's
+// details go only to a device whose recheck passed, and only to one the
+// same recheck verified as this tech's staff app (namedDevices). The sender
+// builds each device's payload right after that device's recheck, so
+// clearing the details there reaches that device and every later one.
+// A tech who left field work since the card hears nothing (stillAssignable).
+// `liveBody()`, when given, is the details as the visit reads at this
+// recheck (the row checkCurrent just read), or null to keep the written one.
+async function pushCard(notice, { checkCurrent = null, liveBody = null } = {}) {
   try {
     const PushService = require('./push-notifications');
     let stale = false;
+    const push = {
+      title: notice.pushTitle,
+      // A tracking notice carries no detail: its push stays one line.
+      body: notice.pushBody || '',
+      url: '/tech',
+      tag: `visit-${notice.visitId}`,
+      priority: 'high',
+    };
+    let verified = new Map();
     const beforeHandoff = async () => {
+      verified = new Map();
       try {
         if (checkCurrent && (await checkCurrent(db)) === false) stale = true;
         else if (notice.cardId && await newerCardExists(notice, db)) stale = true;
+        else if (!(await stillAssignable(notice.technicianId, db))) stale = true;
+        else if (push.body) {
+          const live = liveBody ? liveBody() : null;
+          if (live) push.body = live;
+          verified = await namedDevices(notice.technicianId, db);
+        }
       } catch (err) {
-        logger.warn(`[tech-visit-notifications] push recheck failed for visit ${notice.visitId} (${errorTag(err)}); sending`);
+        push.body = '';
+        logger.warn(`[tech-visit-notifications] push recheck failed for visit ${notice.visitId} (${errorTag(err)}); sending the first line only`);
         return true;
       }
       return !stale;
     };
-    await PushService.sendToAdminUser(notice.technicianId, {
-      title: notice.pushTitle,
-      body: '',
-      url: '/tech',
-      tag: `visit-${notice.visitId}`,
-      priority: 'high',
-    }, { beforeHandoff });
+    await PushService.sendToAdminUser(notice.technicianId, forDevice(push, () => verified), { beforeHandoff });
     if (stale) logger.info(`[tech-visit-notifications] stale ${notice.kind || 'tracking'} push skipped for visit ${notice.visitId} (newer state)`);
   } catch (pushErr) {
     logger.warn(`[tech-visit-notifications] push failed for tech ${notice.technicianId} (card already written): ${pushErr.message}`);
@@ -546,7 +700,11 @@ async function deliver(notices) {
     else if (raw.actorText !== AUTO_DISPATCH_ACTOR_TEXT) n = { ...raw, holdForBundle: true };
     try {
       const card = await writeCard(n);
-      if (card) written.push({ ...n, cardId: card.id || null });
+      // A push that goes out now says what its card was just written with.
+      if (card) {
+        written.push({ ...n, cardId: card.id || null, pushBody: fitBody(pushDetail(partsFromCard(card.payload, n.kind))),
+          previousWhen: card.payload.previous_when || null });
+      }
       else dropped += 1;
     } catch (err) {
       logger.error(`[tech-visit-notifications] ${n.kind} card not written for visit ${n.visitId} (${errorTag(err)})`);
@@ -554,7 +712,14 @@ async function deliver(notices) {
   }
   for (const n of written) {
     if (n.holdForRun || n.holdForBundle) continue;
-    await pushCard(n, { checkCurrent: (conn) => pushStillCurrent(n, conn) });
+    // A stop still on the route reads as the visit is at each handoff (the
+    // row its recheck just read), as a bundled push does; a moved-off or
+    // cancelled stop keeps what its card was written with (#7569).
+    let row = null;
+    await pushCard(n, {
+      checkCurrent: async (conn) => { row = await standingRow(n, conn); return !!row; },
+      liveBody: () => (row && ON_ROUTE_KINDS.has(n.kind) ? fitBody(pushDetail(partsFromVisit(row, n.kind, n.previousWhen))) : null),
+    });
   }
   return { written: written.length, dropped };
 }
@@ -861,7 +1026,7 @@ async function pushAutoDispatchSummary({ runId } = {}) {
   }
 }
 
-// One line, no customer details on the lock screen (PUSH_TITLE_BY_KIND).
+// The count line; bundleDetail lists the visits under it.
 function bundleTitle(kinds) {
   const n = kinds.length;
   const only = new Set(kinds).size === 1 ? kinds[0] : null;
@@ -883,12 +1048,17 @@ function bundledNotice(technicianId, row) {
     previousStatus: held.previous_status || null,
     cardId: row.id,
     pushTitle: PUSH_TITLE_BY_KIND[held.kind],
+    parts: partsFromCard(row.payload, held.kind),
   };
 }
 
 // When two cards of one visit both still stand (a new visit, then a time
 // change on it), the push names the one that matters most to the tech.
 const KIND_RANK = Object.freeze({ assigned: 0, unassigned: 1, cancelled: 2, rescheduled: 3 });
+
+// The kinds cardStands admits only while the visit is on the recipient's
+// route: their push reads the visit as it is now (visitNotice).
+const ON_ROUTE_KINDS = new Set(['assigned', 'rescheduled']);
 
 // What a bundle may still say about ONE visit, read fresh each time it is
 // asked (when the push is composed, and again at each device's provider
@@ -913,7 +1083,16 @@ async function visitNotice(technicianId, visitId, cards, conn) {
   for (const card of cards) {
     if (!open.has(String(card.id))) continue;
     const notice = bundledNotice(technicianId, card);
-    if (await pushStillCurrent(notice, conn)) standing.push(notice);
+    const row = await standingRow(notice, conn);
+    if (!row) continue;
+    // A held push can wait minutes, so a stop still on this tech's route
+    // reads as the visit is now (a pick-a-day deadline, a time a snapshot did
+    // not carry). A moved-off or cancelled stop keeps what its card was
+    // written with: its former holder reads nothing of the visit as it is
+    // now (#7569).
+    standing.push(ON_ROUTE_KINDS.has(notice.kind)
+      ? { ...notice, parts: partsFromVisit(row, notice.kind, card.payload.previous_when || null) }
+      : notice);
   }
   standing.sort((a, b) => (KIND_RANK[a.kind] ?? 9) - (KIND_RANK[b.kind] ?? 9));
   return standing[0] || null;
@@ -921,7 +1100,7 @@ async function visitNotice(technicianId, visitId, cards, conn) {
 
 // The bundle as it stands now: one notice per visit still worth a push. A
 // visit whose recheck ERRORS stays in (owner steer: a missed alert is worse
-// than a rare stale one).
+// than a rare stale one), unverified: the push then names no visit.
 async function bundlePlan(technicianId, rows, conn) {
   const byVisit = new Map();
   for (const row of rows) {
@@ -934,28 +1113,51 @@ async function bundlePlan(technicianId, rows, conn) {
       const notice = await visitNotice(technicianId, visitId, cards, conn);
       if (notice) plan.push(notice);
     } catch (err) {
-      logger.warn(`[tech-visit-notifications] bundle recheck failed for visit ${visitId} (${errorTag(err)}); keeping it`);
-      plan.push(bundledNotice(technicianId, cards[cards.length - 1]));
+      logger.warn(`[tech-visit-notifications] bundle recheck failed for visit ${visitId} (${errorTag(err)}); keeping it, unnamed`);
+      plan.push({ ...bundledNotice(technicianId, cards[cards.length - 1]), unverified: true });
     }
   }
   return plan;
 }
 
-const planSignature = (plan) => plan.map((notice) => `${notice.visitId}:${notice.kind}`).sort().join('|');
+// Several visits under one count line: two lines each (who, then when and
+// where, as pushDetail), soonest first, at most BUNDLE_LISTED, then "+N more".
+// A mixed bundle says what happened to each.
+const BUNDLE_LISTED = 3;
+const KIND_WORD = Object.freeze({ assigned: 'New', unassigned: 'Moved off', rescheduled: 'Moved', cancelled: 'Cancelled' });
+const slotKey = ({ parts }) => `${parts.date || '9999-12-31'} ${parts.start || '99:99'}`;
+function bundleDetail(plan) {
+  const mixed = new Set(plan.map((notice) => notice.kind)).size > 1;
+  const sorted = [...plan].sort((a, b) => slotKey(a).localeCompare(slotKey(b)));
+  const lines = sorted.slice(0, BUNDLE_LISTED).map(({ kind, parts }) => {
+    const who = mixed ? [`${KIND_WORD[kind]}:`, whoLine(parts)].filter(Boolean).join(' ') : whoLine(parts);
+    return [who, whenWhereLine(parts)].filter(Boolean).join('\n');
+  });
+  if (sorted.length > BUNDLE_LISTED) lines.push(`+${sorted.length - BUNDLE_LISTED} more`);
+  return lines.join('\n');
+}
 
-// The push for a plan: one visit = exactly its own per-visit push; more = one count.
+// The push for a plan: one visit = exactly its own per-visit push; more = one
+// count. A plan with an unverified visit names none: its first line only.
 function bundlePush(plan) {
+  const named = plan.every((notice) => !notice.unverified);
   if (plan.length === 1) {
-    return { title: plan[0].pushTitle, body: '', url: '/tech', tag: `visit-${plan[0].visitId}`, priority: 'high' };
+    return { title: plan[0].pushTitle, body: named ? fitBody(pushDetail(plan[0].parts)) : '', url: '/tech', tag: `visit-${plan[0].visitId}`, priority: 'high' };
   }
   return {
     title: bundleTitle(plan.map((notice) => notice.kind)),
-    body: '',
+    body: named ? fitBody(bundleDetail(plan)) : '',
     url: '/admin/today',
     tag: `route-changes-${[...plan].map((notice) => String(notice.cardId)).sort()[0]}`,
     priority: 'high',
   };
 }
+
+// What a device shows for a plan. Two plans that read the same are the same
+// push; an empty plan shows nothing.
+const pushCopy = (plan) => (plan.length ? JSON.stringify(bundlePush(plan)) : null);
+// The same visits with the same kinds: the same first line.
+const planSignature = (plan) => plan.map((notice) => `${notice.visitId}:${notice.kind}`).sort().join('|');
 
 // A held push to send again on the next tick, composed afresh.
 class BundleChanged extends Error {}
@@ -1000,48 +1202,76 @@ async function heldOutsideBundle(technicianId, ids) {
     .first('id'));
 }
 
+// A held push can wait minutes: its tech may have left field work since the
+// card was written (office-only, inactive). Such a tech hears nothing, as at
+// card time (isAssignable).
+async function stillAssignable(technicianId, conn) {
+  return isAssignable(await conn('technicians').where({ id: technicianId }).first('id', 'employment_status', 'field_dispatchable'));
+}
+
 // ONE push for one tech's claimed cards. Resolves true when a device got it,
 // false when nothing is left to say (the bundle closes). Throws when it must
 // be tried again: the provider failed, every device refused, or the bundle
-// changed before ANY device accepted the push — a visit went stale or was
-// cleared, or a new change for the tech landed (unless the bundle is past its
-// longest wait, which goes out as it is) — so the count or the kind would be
-// wrong (Codex #6459 r1, r3; a device that failed is not one that has it).
-// Each device's handoff first renews the claim, so a long fan-out keeps it,
-// and stops if a later sweep took the cards over (BundleLost). Once a device
-// has it, a later device is skipped only when nothing at all still stands,
-// as for any per-visit push: a retry would push the first device twice.
+// changed before ANY device accepted the push — a visit went stale, was
+// cleared or now reads differently, or a new change for the tech landed
+// (unless the bundle is past its longest wait, which goes out as it is) — so
+// the count, the kind or a visit's line would be wrong (Codex #6459 r1, r3; a
+// device that failed is not one that has it). Each device's handoff first
+// renews the claim, so a long fan-out keeps it, and stops if a later sweep
+// took the cards over (BundleLost). Once a device has it, a later device gets
+// it only while the fresh plan still reads the same: the push names each
+// visit, so a changed copy would show a stale line, and a retry would push
+// the first device twice; the rest are skipped, as for a per-visit push. A
+// recheck ERROR, or a visit read that fails, sends, as the first line only
+// (see pushCard).
 async function sendBundle(technicianId, rows, token, { pastLongestWait }) {
   const plan = await bundlePlan(technicianId, rows, db);
   if (!plan.length) return false;
+  const push = bundlePush(plan);
+  const copy = pushCopy(plan);
   const ids = rows.map((row) => row.id);
   let delivered = 0;
   let changed = false;
   let lost = false;
+  let dropped = false;
+  let verified = new Map();
   const beforeHandoff = async () => {
+    verified = new Map();
     try {
       if (!(await renewHeld(ids, token))) {
         lost = true;
         return false;
       }
-      const now = await bundlePlan(technicianId, rows, db);
-      if (delivered === 0 && (planSignature(now) !== planSignature(plan)
-        || (!pastLongestWait && await heldOutsideBundle(technicianId, ids)))) {
+      if (!(await stillAssignable(technicianId, db))) {
+        dropped = true;
+        return false;
+      }
+      const fresh = await bundlePlan(technicianId, rows, db);
+      // A visit read failed (bundlePlan keeps the visit, unnamed): the push
+      // still goes, as its first line only. A push showing its first line
+      // only needs the same visits and kinds; one naming visits, the same words.
+      if (fresh.some((notice) => notice.unverified)) push.body = '';
+      const same = push.body ? pushCopy(fresh) === copy : planSignature(fresh) === planSignature(plan);
+      if (delivered === 0 && (!same || (!pastLongestWait && await heldOutsideBundle(technicianId, ids)))) {
         changed = true;
         return false;
       }
-      return now.length > 0;
+      if (same && push.body) verified = await namedDevices(technicianId, db);
+      return same;
     } catch (err) {
-      logger.warn(`[tech-visit-notifications] bundle push recheck failed for tech ${technicianId} (${errorTag(err)}); sending`);
+      push.body = '';
+      logger.warn(`[tech-visit-notifications] bundle push recheck failed for tech ${technicianId} (${errorTag(err)}); sending the first line only`);
       return true;
     }
   };
   const PushService = require('./push-notifications');
-  const result = await PushService.sendToAdminUser(technicianId, bundlePush(plan), {
+  const result = await PushService.sendToAdminUser(technicianId, forDevice(push, () => verified), {
     beforeHandoff,
     onDelivered: () => { delivered += 1; },
   });
   if (lost) throw new BundleLost('a later sweep took the cards over');
+  // No longer a field tech: nothing is left to say, and the bundle closes.
+  if (dropped) return delivered > 0;
   if (changed) throw new BundleChanged('the bundle changed before any device had it');
   // Stopped part-way: done either way, and pushed when a device has it.
   if (result?.superseded) return delivered > 0;
@@ -1148,14 +1378,14 @@ async function recordTrackingNotice(trx, { visitId, technicianId, stage, dedupeK
       .returning('id');
     row = revived;
   }
-  // GENERIC on the push, like every PUSH_TITLE_BY_KIND line above: a push
-  // lands on a lock screen, and this module's owner ruling (see the header)
-  // keeps identifying detail out of it — the tech opens the app for the who
-  // and when. The customer name and promised window ride on the durable card
-  // instead (payload.customer_name / payload.when, rendered by the feed), so
-  // a tech with more than one open stop still knows which visit this is as
-  // soon as they are authenticated (codex P1 round 5, correcting the round-1
-  // fix that put the name in the push title).
+  // GENERIC on the push, unlike the visit-change pushes above: the owner's
+  // 2026-11-18 ruling put the customer, the time and the street on those
+  // pushes only and left this one as it was. The customer name and promised
+  // window ride on the durable card instead (payload.customer_name /
+  // payload.when, rendered by the feed), so a tech with more than one open
+  // stop still knows which visit this is as soon as they are authenticated
+  // (codex P1 round 5, correcting the round-1 fix that put the name in the
+  // push title).
   const pushTitle = stage === 2 ? 'A visit needs an arrival check' : 'A visit window is underway';
   // cardId: the push recheck's newer-card comparison (newerCardExists).
   return row ? { technicianId, visitId, pushTitle, cardId: (row && typeof row === 'object' ? row.id : row) || null } : null;
@@ -1480,5 +1710,5 @@ module.exports = {
   staleVisitCardSql,
   rankedVisitCards,
   refreshVisitCards,
-  _test: { setCurrentAutoDispatchRun: (id) => { currentAutoDispatchRun = id; }, formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists, liveCard, moverText },
+  _test: { setCurrentAutoDispatchRun: (id) => { currentAutoDispatchRun = id; }, formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists, liveCard, moverText, pushDetail, partsFromVisit, fitBody, BODY_BYTE_BUDGET },
 };
