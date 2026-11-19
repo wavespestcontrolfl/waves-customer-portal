@@ -100,8 +100,9 @@ const KEPT_HEAD = `
           -- predates the promise plus a suppressed later attempt (which
           -- advances sent_at but not this stamp) must not keep it.
           -- plan_restart mints share the shape (C4 restart taps publish
-          -- without delivery too — codex GH #3671 r8 P1).
-          AND (COALESCE(e.source, '') NOT IN ('service_report_cta', 'plan_restart')
+          -- without delivery too — codex GH #3671 r8 P1), and so do
+          -- plan_start mints (portal pricing card, GATE_PORTAL_PLAN_START).
+          AND (COALESCE(e.source, '') NOT IN ('service_report_cta', 'plan_restart', 'plan_start')
                OR (COALESCE(e.estimate_data #>> '{deliveryState,lastDeliveredAt}', '') <> ''
                    AND (e.estimate_data #>> '{deliveryState,lastDeliveredAt}')::timestamptz > CASE
                      WHEN c.bridged_at IS NOT NULL THEN c.bridged_at + make_interval(secs => COALESCE(c.duration_seconds, 0))

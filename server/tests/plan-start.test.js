@@ -502,7 +502,7 @@ describe('assertPlanStartAcceptEligible', () => {
     }];
   });
 
-  test('a still-plain account owning none of the quoted families accepts', async () => {
+  test('a still-plain account owning no recurring service accepts', async () => {
     await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).resolves.toBeUndefined();
   });
 
@@ -511,9 +511,9 @@ describe('assertPlanStartAcceptEligible', () => {
     await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
   });
 
-  test('a family OUTSIDE the quote does not block the accept', async () => {
+  test('a family OUTSIDE the quote refuses too: the mint priced the option standalone, and a member\'s price differs', async () => {
     tables.scheduled_services = [{ id: 'live-1', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, scheduled_date: '2099-01-01', service_type: 'Lawn Care Program' }];
-    await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).resolves.toBeUndefined();
+    await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
   });
 
   test('a churned, inactive-flagged, deleted or missing customer refuses', async () => {

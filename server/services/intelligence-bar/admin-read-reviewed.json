@@ -988,14 +988,14 @@
     },
     {
       "endpoint": "/admin/estimates/source-performance",
-      "reviewed": "Handler + sourcePerformance (estimate-source-performance.js): estimates cohort (explicit columns) and estimate_learning_events, bucketed by source in memory, no customer fields returned; read end to end.",
+      "reviewed": "Handler + sourcePerformance (estimate-source-performance.js): estimates cohort (explicit columns) and estimate_learning_events, bucketed by source in memory, no customer fields returned; read end to end. Re-reviewed 2026-11-19 (GATE_PORTAL_PLAN_START): KNOWN_SOURCES gains 'plan_start' and the real-delivery branch covers it; still a read of the same columns, no new fields.",
       "scope": "broad",
       "query": [
         "days"
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "6175e7ea103824452658cd90912d42b6"
+      "hash": "8713ff0483b7bb4015c5c531c0cea3f9"
     },
     {
       "endpoint": "/admin/health/scores/:customerId",

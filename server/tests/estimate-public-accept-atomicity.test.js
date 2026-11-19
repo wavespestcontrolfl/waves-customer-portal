@@ -4739,7 +4739,7 @@ describe('accept — lawn limits attestation (GATE_ESTIMATE_LAWN_LIMITS)', () =>
 describe('GATE_PORTAL_PLAN_START — plan-start accept revalidation runs inside the accept txn', () => {
   // A plan_start estimate (the portal pricing card's first-plan quote) accepts through the SAME public path;
   // the revalidation re-checks under the estimate row lock that the account is still active, not cancelled,
-  // and owns none of the quoted families. Refusal shapes are pinned in plan-start.test.js; this pins the WIRING.
+  // and owns no live recurring service. Refusal shapes are pinned in plan-start.test.js; this pins the WIRING.
   const planStartEstimate = (overrides = {}) => recurringPestEstimate({
     id: 'est-plan-start-1',
     token: 'tok-plan-start-1-x012345',

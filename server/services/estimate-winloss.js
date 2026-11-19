@@ -201,8 +201,9 @@ function sentCohorts(rows, { days, nowMs }) {
     // signals BEFORE any real delivery — for that source only a view at or
     // after the delivery anchor counts as an opened send (GH codex P2).
     // plan_restart shares the publish-without-delivery shape (C4): its
-    // self-serve redirect stamps view signals at mint too.
-    const isCtaMint = ['service_report_cta', 'plan_restart'].includes(String(row.source || ''));
+    // self-serve redirect stamps view signals at mint too. So does plan_start
+    // (portal pricing card, GATE_PORTAL_PLAN_START).
+    const isCtaMint = ['service_report_cta', 'plan_restart', 'plan_start'].includes(String(row.source || ''));
     const viewCandidates = [ms(row.viewed_at), ms(row.last_viewed_at)]
       .filter((ts) => ts != null && (!isCtaMint || ts >= sentAt));
     const firstView = viewCandidates.length ? Math.min(...viewCandidates) : null;
@@ -260,7 +261,7 @@ function sentAnchorMs(row) {
   // deliveryState.firstDeliveredAt — the one witness a resend can't move
   // (GH codex P1: an unopened resend must keep its original cohort age).
   const firstDelivered = ms(data?.deliveryState?.firstDeliveredAt);
-  if (['service_report_cta', 'plan_restart'].includes(String(row.source || ''))) return firstDelivered;
+  if (['service_report_cta', 'plan_restart', 'plan_start'].includes(String(row.source || ''))) return firstDelivered;
   const candidates = [firstDelivered, ms(row.sent_at), ms(row.viewed_at), ms(row.accepted_at)]
     .filter((ts) => ts != null);
   return candidates.length ? Math.min(...candidates) : null;

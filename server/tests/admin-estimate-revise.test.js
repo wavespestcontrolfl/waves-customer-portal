@@ -691,6 +691,26 @@ describe('reviseAdminEstimate', () => {
     expect(updates).toHaveLength(0);
   });
 
+  test('a plan_start quote refuses in-place revision too — the rewrite drops planStart and the next card tap archives the row (GATE_PORTAL_PLAN_START)', async () => {
+    const planStartRow = {
+      ...sentEstimate,
+      source: 'plan_start',
+      estimate_data: JSON.stringify({
+        ...JSON.parse(sentEstimate.estimate_data),
+        planStart: { families: ['pest_control'], serviceKey: 'pest_control', optionId: 'pest-quarterly' },
+      }),
+    };
+    const { database, updates } = makeReviseDatabase({ estimate: planStartRow });
+    await expect(reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: reviseBody,
+      recompute: noRecompute,
+      now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
+  });
+
   test('carries the lead_id mirror and schedule-stitch pointer across the rewrite', async () => {
     const withLinkage = {
       ...sentEstimate,

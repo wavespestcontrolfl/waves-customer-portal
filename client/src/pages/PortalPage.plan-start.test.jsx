@@ -49,26 +49,15 @@ it('swaps the primary button for "See my price and book" when the server offers 
   expect(screen.queryByRole('button', { name: 'Request This' })).toBeNull();
 });
 
-it('keeps today\'s button when there is no hint, when there is no monthly price, or when the option needs review', async () => {
-  for (const [result, label] of [
-    [priced(), 'no hint'],
-    [priced({ planStart: { available: true } }, { monthly: null }), 'no monthly'],
-    [priced({ planStart: { available: true } }, { manualReview: true }), 'manual review'],
-  ]) {
-    cleanup();
-    vi.clearAllMocks();
-    api.getNextService.mockResolvedValue({ next: null });
-    api.getSchedule.mockResolvedValue({ upcoming: [] });
-    api.getServices.mockResolvedValue({ services: [] });
-    api.getAutopay.mockResolvedValue({ state: 'disabled' });
-    api.getStationMap.mockResolvedValue({ available: false });
-    api.getLawnHealth.mockResolvedValue({ available: false });
-     
-    await priceIt(result);
-     
-    expect(await screen.findByRole('button', { name: 'Request This' }), label).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'See my price and book' })).toBeNull();
-  }
+// One render per case: the portal page is large, and three renders in one test outran the 5 s limit under load.
+it.each([
+  ['no plan-start hint', priced()],
+  ['no monthly price', priced({ planStart: { available: true } }, { monthly: null })],
+  ['an option that needs review', priced({ planStart: { available: true } }, { manualReview: true })],
+])('keeps today\'s button when there is %s', async (_label, result) => {
+  await priceIt(result);
+  expect(await screen.findByRole('button', { name: 'Request This' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'See my price and book' })).toBeNull();
 });
 
 it('posts the selected option and the shown monthly, then hands off to the estimate URL', async () => {

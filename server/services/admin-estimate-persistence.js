@@ -2978,6 +2978,15 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
   if (String(estimate?.source || '') === 'plan_restart') {
     return { message: 'This is a customer plan-restart quote — its scope is fixed by the cancellation and it always prices at the current mint. It cannot be edited in place; the customer re-taps "Restart my plan" for a fresh quote.', statusCode: 409 };
   }
+  // Portal plan-start quotes (GATE_PORTAL_PLAN_START) share the restart mint
+  // core and its rules: the customer's next card tap archives every
+  // unaccepted plan_start row, and the accept re-check reads the mint's
+  // planStart block, which this rewrite drops (it keeps only
+  // REVISE_PRESERVED_ESTIMATE_DATA_KEYS). An edited copy would either die on
+  // that tap or never accept, so a different offer is a new estimate.
+  if (String(estimate?.source || '') === 'plan_start') {
+    return { message: 'This is a customer portal plan quote — it always prices at the current mint. It cannot be edited in place; create a new estimate for a different offer.', statusCode: 409 };
+  }
   const status = String(estimate?.status || '');
   if (status === 'sending') {
     return { message: 'This estimate is being sent right now. Wait for the send to finish, then retry.', statusCode: 409 };

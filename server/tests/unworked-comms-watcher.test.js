@@ -103,7 +103,7 @@ describe('composeUnworkedCommsDigest', () => {
     );
     const block = src.split('fe.customer_id = t.customer_id')[1].slice(0, 900);
     // plan_restart joined the publish-without-delivery set (C4, #3671 r8).
-    expect(block).toMatch(/COALESCE\(fe\.source, ''\) NOT IN \('service_report_cta', 'plan_restart'\)/);
+    expect(block).toMatch(/COALESCE\(fe\.source, ''\) NOT IN \('service_report_cta', 'plan_restart', 'plan_start'\)/);
     // …but a mint an operator LATER actually delivered fulfills the task
     // (GitHub #3391 round P2). The witness is deliveryState.firstDeliveredAt
     // — stamped only for REAL deliveries, durable across resends, merged

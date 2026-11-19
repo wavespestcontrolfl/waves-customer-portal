@@ -1410,7 +1410,8 @@ async function buildCustomerPricingResponse({
 }
 
 function planStartHint(customer, currentServiceKeys, ownedServiceKeys) {
-  if (!require('../config/feature-gates').portalPlanStartLive()) return false;
+  // Optional call: hundreds of suites mock feature-gates whole; a bare mock reads as off.
+  if (require('../config/feature-gates').portalPlanStartLive?.() !== true) return false;
   if (customer.active === false || customer.pipeline_stage === 'churned') return false;
   return currentServiceKeys.length === 0 && ownedServiceKeys.length === 0;
 }

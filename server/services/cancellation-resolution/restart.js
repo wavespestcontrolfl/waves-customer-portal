@@ -1161,11 +1161,13 @@ async function assertRestartAcceptEligible(trx, estimate) {
 
 // Plan-start accept revalidation (GATE_PORTAL_PLAN_START) — same call point and
 // locks as assertRestartAcceptEligible. The published estimate stays
-// acceptable until expiry, so under the estimate row lock re-check that the
-// account is still a plain active customer (not churned, not deleted) and owns
-// none of the quoted families (a plan added since the mint would be re-priced
-// beside its live rate). FAIL CLOSED: drift or an unreadable state is the
-// 409 the estimate page renders.
+// acceptable until expiry, so under the estimate row lock re-run the mint's
+// own eligibility: the account is still a plain active customer (not churned,
+// not deleted) and owns NO live recurring family. ANY family refuses, not only
+// a quoted one: the mint priced the option standalone (no WaveGuard
+// qualifiers), so a plan added since, of any family, changes the price this
+// estimate froze (members keep the request flow). FAIL CLOSED: drift or an
+// unreadable state is the 409 the estimate page renders.
 async function assertPlanStartAcceptEligible(trx, estimate) {
   const refuse = (message) => {
     const err = new Error(message);
@@ -1195,8 +1197,7 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
   // A plan_start estimate without its quoted families (or its customer) is malformed — never accept it.
   if (!quoted || !quoted.length || !fresh) throw changed();
   if (fresh.active === false || fresh.pipeline_stage === 'churned') throw changed();
-  const owned = new Set(ownedFamilies.map(pricingKeyFor));
-  if (quoted.some((f) => owned.has(pricingKeyFor(f)))) throw changed();
+  if (ownedFamilies.length) throw changed();
 }
 
 module.exports = {

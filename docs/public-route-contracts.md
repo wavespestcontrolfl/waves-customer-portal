@@ -2064,6 +2064,15 @@ bait service; legacy supplements use the converter's physical-program rules.
 Unsupported families/cadences, recurring foam and commercial programs return
 409 `COMBINED_VISIT_UNAVAILABLE` before offering or holding combined work.
 
+`PUT /api/estimates/:token/accept` on an estimate with `source = 'plan_start'` (the portal
+pricing card's first-plan quote, `GATE_PORTAL_PLAN_START`) re-runs the mint's eligibility inside
+the accept transaction, at the same point and under the same locks as the plan-restart re-check
+(comms advisory lock, then the customers row `FOR UPDATE`): the customer must still be active, not
+churned, not deleted, and own no live recurring service, since the mint priced the option with no
+WaveGuard qualifiers. Otherwise it answers 409 `{ error, code: 'PLAN_START_STATE_CHANGED' }` (the
+error reads "This account changed since this estimate was created — please go back to your portal
+for a current price.", or a retry line when the state cannot be read) and writes nothing. Estimates of every other source are unchanged.
+
 `PUT /api/estimates/:token/accept` answers 409
 `{ error, reason: 'retired_lawn_cadence_selection' }` when a recurring lawn
 row still resolves to a retired lawn cadence — any tier hidden via

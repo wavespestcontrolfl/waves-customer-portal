@@ -1152,7 +1152,8 @@ const startPlanSchema = Joi.object({
 
 router.post('/start-plan', authenticate, cancelResolutionLimiter, async (req, res, next) => {
   try {
-    if (!require('../config/feature-gates').portalPlanStartLive()) return res.status(404).json({ error: 'Not found' });
+    // Optional call: a whole-module feature-gates mock reads as off (dark).
+    if (require('../config/feature-gates').portalPlanStartLive?.() !== true) return res.status(404).json({ error: 'Not found' });
     const { value, error } = startPlanSchema.validate(req.body, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
     const { mintPlanStartEstimate } = require('../services/cancellation-resolution/restart');

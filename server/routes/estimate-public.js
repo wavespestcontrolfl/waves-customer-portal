@@ -12493,8 +12493,9 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         await assertRestartAcceptEligible(trx, estimate);
       }
       // Plan-start accept revalidation (GATE_PORTAL_PLAN_START): same point, same
-      // lock — the account must still be active, not cancelled, and own none of
-      // the quoted families. Drift refuses with a 409 the estimate page renders.
+      // lock — the account must still be active, not cancelled, and own no live
+      // recurring service (the mint priced it standalone). Drift refuses with a
+      // 409 the estimate page renders.
       if (estimate.source === 'plan_start') {
         const { assertPlanStartAcceptEligible } = require('../services/cancellation-resolution/restart');
         await assertPlanStartAcceptEligible(trx, estimate);
