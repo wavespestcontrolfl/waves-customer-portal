@@ -5145,9 +5145,6 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const contactCardEntries = perPropertyTexts
     ? propertyPrefs.filter((p) => p.id === activePropertyId)
     : propertyPrefs.length > 1 ? propertyPrefs.filter((p) => p.id === customer?.id) : propertyPrefs;
-  // The card's header copy promises the report text once the card has an entry.
-  const contactTexts = contactCardEntries.length > 0 ? CONTACT_TEXTS_COPY : 'appointment texts';
-  const contactReportException = contactCardEntries.length > 0 ? CONTACT_REPORT_EXCEPTION_COPY : '';
 
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
   const [confirmingIds, setConfirmingIds] = useState({});
@@ -6153,8 +6150,8 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     // One profile, several saved houses: contacts and texts are
                     // stored per PROFILE, so a tenant added here hears about
                     // every house — say so (codex #4207 r1c).
-                    ? `Add anyone who should get ${contactTexts} — a spouse, partner, tenant, or property manager.${contactReportException} These contacts and settings apply to every property on this profile.`
-                    : `Add anyone who should get ${contactTexts} for this property — a spouse, partner, tenant, or property manager.${contactReportException}`}
+                    ? `Add up to ${MAX_PROPERTY_CONTACTS} people — a spouse, tenant, or property manager — to get appointment texts. They apply to every property on this profile.`
+                    : `Add up to ${MAX_PROPERTY_CONTACTS} people — a spouse, tenant, or property manager — to get appointment texts for this property.`}
                 </div>
               </>
             )}
@@ -6333,12 +6330,18 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                         style={{ width: 20, height: 20, marginTop: 2, accentColor: B.glassNavy, flexShrink: 0 }}
                       />
                       <span style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
-                        Each person listed with a phone number has agreed to receive automated service and appointment text messages from Waves Pest Control at that number. Message frequency varies and message &amp; data rates may apply. They can reply STOP to any text to opt out, or HELP for help.
+                        Everyone listed with a phone number agreed to get automated service and appointment texts from Waves Pest Control. Msg frequency varies; msg &amp; data rates may apply. Reply STOP to opt out, HELP for help.
                       </span>
                     </label>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                       <div style={{ fontSize: 14, color: muted, lineHeight: 1.4, flex: compact ? '1 1 100%' : 1, minWidth: 0 }}>
-                        These people receive {CONTACT_TEXTS_COPY} for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}).{CONTACT_REPORT_EXCEPTION_COPY} {multiProperty ? 'Turn on “Send me appointment alerts” to receive alerts using your Service notification settings.' : 'You’ll keep getting them too.'}
+                        {multiProperty ? 'Want these alerts too? Turn on “Send me appointment alerts.”' : 'You’ll keep getting them too.'}
+                        <details style={{ marginTop: 6 }}>
+                          <summary data-glass="chip" style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, minHeight: 44, alignContent: 'center', width: 'fit-content', padding: '0 10px', borderRadius: 8, color: B.glassNavy, position: 'relative' }}>What they’ll get</summary>
+                          <p style={{ margin: '4px 0 0' }}>
+                            They get {CONTACT_TEXTS_COPY}.{CONTACT_REPORT_EXCEPTION_COPY}
+                          </p>
+                        </details>
                       </div>
                       <button
                         type="button"
