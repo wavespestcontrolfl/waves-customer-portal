@@ -93,6 +93,28 @@ describe('buildBookingAvailability rain rank', () => {
     expect(JSON.stringify(out)).not.toContain('rain_tier');
   });
 
+  test('a restored capacity route can share an existing forecast with an unaffected route', async () => {
+    process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
+    const prior = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    const results = [gapSlot('14:00')];
+    findAvailableSlots.mockImplementation(async options => {
+      expect(options.includeClaimedReservations).toBe(true);
+      options.onRestoredBooking(D1, 'tech-1');
+      return { slots: results, total_feasible: results.length };
+    });
+    try {
+      expect(bestFit(await build())).toBe('14:00');
+      expect(getHourlyRainOutlook).not.toHaveBeenCalled();
+      results.push(gapSlot('10:00', { technician: { id: 'tech-2' }, score: 40 }));
+      expect(bestFit(await build())).toBe('10:00');
+      expect(getHourlyRainOutlook).toHaveBeenCalledTimes(1);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = prior;
+    }
+  });
+
   test('gate on: a wet recommendation carries display_tier for the picker; a dry one does not', async () => {
     process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
     const D2 = dayOffset(2);

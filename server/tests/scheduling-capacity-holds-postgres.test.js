@@ -1,4 +1,5 @@
 /** Real offer/hold queries and lock ordering in a synthetic private schema. */
+const { randomUUID } = require('node:crypto');
 const { createCapacityDbFixture, describeDb } = require('./helpers/scheduling-capacity-db');
 const { reserveSlot } = require('../services/slot-reservation');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
@@ -69,6 +70,161 @@ describeDb('scheduling capacity holds on PostgreSQL', () => {
     } finally {
       await f.db('technicians').where({ id: f.ids.technician }).update({ field_dispatchable: true });
     }
+  });
+
+  describe.each([
+    ['fixed-hour', 'false'], ['arrival-window', 'true'],
+  ])('%s reservations at 10 a.m.', (_, gate) => {
+    test.each([true, false])('expiry releases the last opening only if staff left it unclaimed (claimed: %s)', async claimed => {
+      process.env.GATE_SCHEDULING_CAPACITY = gate;
+      const [firstEstimate, secondEstimate] = f.ids.estimates;
+      const estimate = await f.db('estimates').where({ id: firstEstimate }).first();
+      const { durationMinutes } = await require('../services/estimate-slot-availability').resolveCatalogSlotProfile(estimate, {}, f.db);
+      await f.db('tech_schedule_blocks').insert({ id: randomUUID(), date: f.date,
+        technician_id: f.ids.technician, block_type: 'blocked', start_time: '11:00', end_time: '18:00' });
+      const first = await reserveSlot({ estimateId: firstEstimate, slotId: f.signedSlot(firstEstimate, durationMinutes) });
+      const bookedCustomer = randomUUID();
+      if (claimed) {
+        await f.db('customers').insert({ id: bookedCustomer, first_name: 'Office', last_name: 'Booking', phone: '+19415550112' });
+        await f.db('scheduled_services').where({ id: first.scheduledServiceId })
+          .update({ customer_id: bookedCustomer, status: 'confirmed' });
+      }
+      await f.db('scheduled_services').where({ id: first.scheduledServiceId }).update({ reservation_expires_at: f.db.fn.now() });
+      const offered = await findAvailableSlots({ ...f.PIN, dateFrom: f.date, dateTo: f.date, technicianId: f.ids.technician,
+        excludeEstimateId: secondEstimate, includeClaimedReservations: true, customerFacing: true, earliestStartMin: 600,
+        serviceType: 'Pest Control', durationMinutes, includeWeekends: true, topN: 99, providerTravel: false });
+      expect(offered.slots.some(slot => slot.start_time === '10:00')).toBe(!claimed);
+      const second = reserveSlot({ estimateId: secondEstimate, slotId: f.signedSlot(secondEstimate, durationMinutes) });
+      if (claimed) {
+        await expect(second).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+        expect(await f.db('scheduled_services').where({ source_estimate_id: secondEstimate })).toHaveLength(0);
+        expect(await f.db('scheduled_services').where({ id: first.scheduledServiceId }).first('customer_id', 'window_start'))
+          .toEqual({ customer_id: bookedCustomer, window_start: '10:00:00' });
+      } else {
+        await expect(second).resolves.toHaveProperty('scheduledServiceId');
+      }
+    });
+  });
+
+  test.each(['true', 'false'])('a restored stop is attributed only to the route it affects (capacity %s)', async gate => {
+    process.env.GATE_SCHEDULING_CAPACITY = gate;
+    const onRestoredBooking = jest.fn();
+    const options = { ...f.PIN, dateFrom: f.date, dateTo: f.date, technicianId: f.ids.technician,
+      includeClaimedReservations: true, packEnds: true, includeWeekends: true, durationMinutes: 30,
+      onRestoredBooking, providerTravel: false };
+    const stop = f.baseStop({ technician_id: f.ids.otherTech, reservation_expires_at: f.db.fn.now() });
+    await f.db('scheduled_services').insert(stop);
+    expect((await findAvailableSlots(options)).restored_booking_used).toBe(false);
+    expect(onRestoredBooking).not.toHaveBeenCalled();
+    await f.db('scheduled_services').where({ id: stop.id }).update({ technician_id: null });
+    expect((await findAvailableSlots(options)).restored_booking_used).toBe(true);
+    expect(onRestoredBooking).toHaveBeenCalledWith(f.date, f.ids.technician);
+  });
+
+  test('capacity offers use the original road requests when an unassigned office booking occupies the hour', async () => {
+    const optimizer = require('../services/route-optimizer');
+    const travel = optimizer.createSchedulingTravel({ maxRequests: 0 });
+    const requests = [];
+    const preload = async legs => requests.push(legs.map(({ date, departureMin, from, to }) =>
+      [date, Math.ceil(departureMin), from.lat, from.lng, to.lat, to.lng]));
+    const factory = jest.spyOn(optimizer, 'createSchedulingTravel').mockReturnValue({ ...travel, preload });
+    try {
+      await f.db('scheduled_services').insert(f.baseStop({ window_start: '08:00', window_end: '08:30', route_order: 1 }));
+      const options = { lat: Number(f.PIN.lat) + 0.01, lng: f.PIN.lng, dateFrom: f.date, dateTo: f.date, technicianId: f.ids.technician,
+        excludeEstimateId: f.ids.estimates[0], includeClaimedReservations: true, customerFacing: true, serviceType: 'Pest Control',
+        durationMinutes: 30, includeWeekends: true, topN: 99 };
+      expect((await findAvailableSlots(options)).slots.some(slot => slot.start_time === '10:00')).toBe(true);
+      const before = requests.splice(0);
+      expect(before.some(pass => pass.length)).toBe(true);
+      await f.db('scheduled_services').insert(f.baseStop({ technician_id: null, window_start: '10:00', window_end: '11:00',
+        source_estimate_id: f.ids.estimates[0], reservation_expires_at: f.db.raw("NOW() + interval '15 minutes'") }));
+      expect((await findAvailableSlots(options)).slots.some(slot => slot.start_time === '10:00')).toBe(false);
+      expect(requests).toEqual(before);
+    } finally {
+      factory.mockRestore();
+    }
+  });
+
+  test('the cached estimate page checks a competing hold after an expiry-only extension', async () => {
+    const { getAvailableSlots, invalidateEstimate } = require('../services/estimate-slot-availability');
+    const [estimateId, competitor] = f.ids.estimates;
+    const options = { dateFrom: f.date, dateTo: f.date, includeWeekends: true, maxResults: 50,
+      expanderMaxResults: 0, minimumLeadMinutes: 0, paidCalls: false };
+    const atTen = result => [...result.primary, ...result.expander].some(slot => slot.windowStart === '10:00');
+    await f.db('tech_schedule_blocks').insert([
+      { date: f.date, block_type: 'blocked', start_time: '08:00', end_time: '10:00' },
+      { date: f.date, block_type: 'blocked', start_time: '11:00', end_time: '18:00' },
+    ]);
+    const old = f.db.raw("NOW() - INTERVAL '5 minutes'");
+    const hold = f.baseStop({ status: 'pending', customer_id: null, technician_id: null, window_start: '10:00', window_end: '11:00',
+      source_estimate_id: competitor, reservation_expires_at: old, updated_at: old });
+    await f.db('scheduled_services').insert(hold);
+    const search = () => getAvailableSlots(estimateId, options);
+    try {
+      invalidateEstimate(estimateId);
+      expect(atTen(await search())).toBe(true);
+      await f.db('scheduled_services').where({ id: hold.id })
+        .update({ reservation_expires_at: f.db.raw("NOW() + INTERVAL '5 minutes'") });
+      const occupied = await search();
+      expect(occupied.metadata.cacheHit).toBe(true);
+      expect(atTen(occupied)).toBe(false);
+      await f.db('scheduled_services').where({ id: hold.id }).update({ reservation_expires_at: old });
+      expect(atTen(await search())).toBe(true);
+    } finally { invalidateEstimate(estimateId); }
+  });
+
+  test.each([false, true])('the estimate page drops a staff-booked opening on refresh and on a fresh search (swept: %s)', async swept => {
+    const { getAvailableSlots, invalidateEstimate } = require('../services/estimate-slot-availability');
+    const id = f.ids.estimates[0];
+    const options = { dateFrom: f.date, dateTo: f.date, includeWeekends: true,
+      maxResults: 50, expanderMaxResults: 0, minimumLeadMinutes: 0, paidCalls: false };
+    const shown = result => [...result.primary, ...result.expander].map(slot => slot.windowStart);
+    await f.db('tech_schedule_blocks').insert([
+      { date: f.date, block_type: 'blocked', start_time: '08:00', end_time: '10:00' },
+      { date: f.date, block_type: 'blocked', start_time: '11:00', end_time: '18:00' },
+    ]);
+    try {
+      invalidateEstimate(id);
+      expect(shown(await getAvailableSlots(id, options))).toContain('10:00');
+      const booked = f.baseStop({ technician_id: null, window_start: '10:00', window_end: '11:00',
+        source_estimate_id: f.ids.estimates[1], reservation_expires_at: f.db.fn.now() });
+      await f.db('scheduled_services').insert(booked);
+      if (swept) await f.db('scheduled_services').where({ id: booked.id }).update({ reservation_expires_at: null, updated_at: f.db.fn.now() });
+      const refresh = await getAvailableSlots(id, options);
+      expect(refresh.metadata.cacheHit).toBe(true);
+      expect(shown(refresh)).not.toContain('10:00');
+      expect(shown(await getAvailableSlots(id, { ...options, bypassCache: true }))).not.toContain('10:00');
+    } finally {
+      invalidateEstimate(id);
+    }
+  });
+
+  test.each([
+    ['another estimate after expiry', 0, -1],
+    ['the requesting estimate before expiry', 1, 1],
+  ])('a staff booking from %s enters the capacity proof without adding road requests', async (_, estimateIndex, ttl) => {
+    const { prepareArrivalCapacity, verifyArrivalCapacity } = require('../services/scheduling/arrival-route');
+    await f.db('scheduled_services').insert(f.baseStop({ window_start: '08:00', window_end: '08:30', route_order: 1 }));
+    const travel = require('../services/route-optimizer').createSchedulingTravel({ maxRequests: 0 });
+    const preload = jest.fn(async () => {});
+    const options = { conn: f.db, now: new Date(), date: f.date, technicianId: f.ids.technician, excludeEstimateId: f.ids.estimates[1],
+      prospective: { lat: Number(f.PIN.lat) + 0.01, lng: f.PIN.lng, service_type: 'Pest Control', estimated_duration_minutes: 30 },
+      windowStart: '10:00', windowEnd: '10:30', durationMinutes: 30, travel: { ...travel, preload } };
+    const before = await prepareArrivalCapacity(options);
+    const roadRequests = preload.mock.calls.slice();
+    expect(roadRequests.some(([legs]) => legs.length)).toBe(true);
+    preload.mockClear();
+
+    await f.db('scheduled_services').insert(f.baseStop({ technician_id: null, window_start: '10:00', window_end: '11:00',
+      estimated_duration_minutes: 60, source_estimate_id: f.ids.estimates[estimateIndex],
+      reservation_expires_at: f.db.raw('NOW() + make_interval(mins => ?)', [ttl]) }));
+    const after = await prepareArrivalCapacity(options);
+    expect(preload.mock.calls).toEqual(roadRequests);
+    expect(after.fingerprint).not.toBe(before.fingerprint);
+    await expect(f.db.transaction(conn => verifyArrivalCapacity(before, { conn })))
+      .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'route_changed' });
+    await expect(f.db.transaction(conn => verifyArrivalCapacity(after, { conn })))
+      .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
   });
 
   // The placed visit plans the owner table now (owner 2026-10-30: this fixture's uncadenced

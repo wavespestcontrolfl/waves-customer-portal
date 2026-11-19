@@ -1774,10 +1774,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // db call at all) with the gate off; the phone agent (selfServeNotice
   // false) never asks.
   const zoneSlug = selfServeNotice ? await resolveZoneRouteDaySlug({ lat, lng, conn: db }) : null;
+  const restoredRoutes = new Set();
   const result = await findAvailableSlots({
     lat,
     lng,
     zoneSlug,
+    includeClaimedReservations: true,
+    onRestoredBooking: (date, techId) => restoredRoutes.add(`${date}|${techId}`),
     durationMinutes: duration,
     serviceTypes: serviceLabels,
     // This booking's own expected-minutes credit — the same number the
@@ -1891,6 +1894,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
         // never carries, so every anchor here (Codex push-audit P1 on r6)
         // silently read as a full committed block instead.
         hold: anchor.hold,
+        restoredBooking: anchor.restoredBooking,
       };
       if (!occupiedByDate.has(row.date)) occupiedByDate.set(row.date, []);
       occupiedByDate.get(row.date).push(row);
@@ -1976,7 +1980,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       const candidateEntity = {
         startMin, endMin, lat, lng, windowMinutes: duration, expectedMinutes: candidateExpectedMinutes,
       };
-      if (dayOccupied && travelGapMirrorRefuses({ graceBuild, slot, slotGrace, candidateEntity, dayOccupied })) return;
+      const gap = { graceBuild, slot, slotGrace, candidateEntity };
+      if (travelGapMirrorRefuses({ ...gap, dayOccupied })) return;
+      // A newly counted near stop can hide an older, distant travel conflict.
+      // This repair only removes offers, so it cannot start a weather lookup
+      // for an hour that was previously ineligible.
+      if (dayOccupied.some(stop => stop.restoredBooking)
+        && travelGapMirrorRefuses({ ...gap, dayOccupied: dayOccupied.filter(stop => !stop.restoredBooking) })) return;
       idleMinutes = idleMinutesAgainst(dayOccupied, startMin, endMin, {
         lat, lng, durationMinutes: duration, expectedMinutes: candidateExpectedMinutes,
       });
@@ -2099,7 +2109,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       }
     }
   }
-  const stampedCandidates = (await rainRank.stamp([...candidateMap.values()])).sort(compareRankedSlots);
+  const offers = [...candidateMap.values()];
+  // A newly counted stop can change the packed positions. Start an hourly
+  // lookup only if an unaffected route still has a near-term offer to rank.
+  const forecastOffers = restoredRoutes.size
+    ? offers.filter(slot => !restoredRoutes.has(`${slot.date}|${slot.technician_id}`))
+    : offers;
+  const stampedCandidates = (await rainRank.stamp(offers, forecastOffers)).sort(compareRankedSlots);
   // GATE_CUSTOMER_ROUTE_CHECK (customer-route-check.js): null with the gate
   // off or no surface named, and nothing below runs.
   const routeCheck = routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today });
@@ -3762,6 +3778,7 @@ async function createSelfBooking(payload = {}) {
       // pass their check and commit an overlapping visit on top of it. Taken
       // before the customer/tech/zone/day-cap locks below so every writer in
       // the family acquires the same rungs in the same order.
+      const { bookedVisitOrLiveHold } = require('../services/scheduling/reservation-occupancy');
       const { acquireOccupancyLock, findConflictingVisits } = require('../services/scheduling/occupancy');
       await acquireOccupancyLock(trx, slotDateStr);
       await trx.raw(
@@ -4329,10 +4346,7 @@ async function createSelfBooking(payload = {}) {
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .where('scheduled_services.scheduled_date', slotDateStr)
         .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-        .where((q) => {
-          q.whereNull('scheduled_services.reservation_expires_at')
-            .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-        })
+        .where(bookedVisitOrLiveHold)
         // COALESCE the nullable window_end (admin edits can leave a start
         // with no end) — same predicate as slot-reservation/rebooker.
         .whereRaw(

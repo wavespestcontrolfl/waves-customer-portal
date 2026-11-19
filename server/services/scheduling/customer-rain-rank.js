@@ -88,8 +88,8 @@ function forecastAllowed(lat, lng) {
 function startCustomerRainRank({ today, lat, lng, ...rest } = {}) {
   const todayYmd = etDateString(today || new Date());
   return {
-    async stamp(candidates) {
-      const needed = candidates.some((c) => inRainHorizon(c.date, todayYmd));
+    async stamp(candidates, forecastCandidates = candidates) {
+      const needed = forecastCandidates.some((c) => inRainHorizon(c.date, todayYmd));
       return stampRainTiers(candidates, needed ? await customerRainTierOf({ today, lat, lng, ...rest }) : null);
     },
   };

@@ -83,6 +83,7 @@ async function loadPackingAnchors({ db, dateFrom, dateTo, excludeServiceIds = []
       lat: row.lat ?? null,
       lng: row.lng ?? null,
       hold: row.hold === true,
+      ...(row.reservation_lapsed ? { restoredBooking: true } : {}),
     };
   });
 }

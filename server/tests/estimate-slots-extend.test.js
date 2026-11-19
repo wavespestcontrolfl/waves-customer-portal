@@ -463,7 +463,7 @@ describe('availability excludes the estimate\'s own hold', () => {
   const fs = require('fs');
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-slot-availability.js'), 'utf8');
-  const fn = src.slice(src.indexOf('async function filterCollidingSlots'), src.indexOf('async function filterCollidingSlots') + 3000);
+  const fn = src.slice(src.indexOf('async function filterCollidingSlots'), src.indexOf('async function dropLiveMakeRoomDestinations'));
 
   test('the collision query skips this estimate\'s uncommitted hold only', () => {
     expect(fn).toContain('ownEstimateId = null');
@@ -575,8 +575,9 @@ describe('capacity slot generation excludes the own hold', () => {
   const findTime = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduling', 'find-time.js'), 'utf8');
 
   test('both findAvailableSlots call sites pass excludeEstimateId', () => {
-    const calls = availability.match(/excludeEstimateId: estimateId,/g) || [];
+    const calls = [...availability.matchAll(/\bfindAvailableSlots\(\{([\s\S]*?)\}\)/g)];
     expect(calls).toHaveLength(2);
+    for (const [, options] of calls) expect(options).toContain('excludeEstimateId: estimateId,');
   });
 
   test('findCapacitySlots threads it into the route context', () => {
