@@ -41,15 +41,17 @@ const OWED_READ_HOURS = 2;
 // A call that still owes a read: one not in a final state whose row changed in the last OWED_READ_HOURS. Final: read
 // ('processed'), judged not a conversation ('voicemail', 'spam'), or failed at its retry cap (the exhaustedExtractionSql
 // rule in call-commitments; its 7-day window never applies inside 2 hours). The row's last change is its insert, a
-// claim's heartbeat, or replaced audio (the recording webhook sets the status back to NULL and bumps updated_at), so
-// an old call with new audio waits for its re-read too. Bounded in time on purpose, so no processor path is copied
-// here: a row no pass will finish (a missed call with nothing to read, a dead claim) delays a card by at most
-// OWED_READ_HOURS after its last change and never blocks it. Never NULL, so NOT owed is exact.
+// claim, the heartbeat a running pass writes every minute (processing_heartbeat_at only), or replaced audio (the
+// recording webhook sets the status back to NULL and bumps updated_at), so a long read and an old call with new audio
+// are waited for too. Bounded in time on purpose, so no processor path is copied here: a row no pass will finish (a
+// missed call with nothing to read, a dead claim) delays a card by at most OWED_READ_HOURS after its last change and
+// never blocks it. Never NULL, so NOT owed is exact.
 function owedReadSql(t) {
   const atCap = `COALESCE(${t}.extraction_attempts, 0) >= ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)}`;
   const final = `(${t}.processing_status IN ('processed', 'voicemail', 'spam')`
     + ` OR (${t}.processing_status IN ('extraction_failed', 'no_transcription') AND ${atCap}))`;
-  const changed = `GREATEST(${t}.created_at, COALESCE(${t}.updated_at, ${t}.created_at))`;
+  // GREATEST skips NULLs: a row with no update or no heartbeat counts from its insert.
+  const changed = `GREATEST(${t}.created_at, ${t}.updated_at, ${t}.processing_heartbeat_at)`;
   return `COALESCE(((${t}.processing_status IS NULL OR NOT ${final})`
     + ` AND ${changed} > now() - interval '${OWED_READ_HOURS} hours'), false)`;
 }

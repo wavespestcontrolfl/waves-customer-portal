@@ -107,6 +107,10 @@ describeDb("the caller's word (PostgreSQL)", () => {
       // still waiting for a claim (the recording webhook set the status back to NULL and bumped updated_at).
       [{ processing_status: 'processing', created_at: old, updated_at: recent }, true],
       [{ processing_status: null, created_at: old, updated_at: recent }, true],
+      // A long pass writes only its heartbeat (every minute): a recent beat keeps the call owed; a beat that stopped
+      // long ago (a dead claim) does not.
+      [{ processing_status: 'processing', created_at: old, updated_at: old, processing_heartbeat_at: recent }, true],
+      [{ processing_status: 'processing', created_at: old, updated_at: old, processing_heartbeat_at: old }, false],
       // A final row is never owed, however recently it changed.
       [{ processing_status: 'processed', created_at: old, updated_at: recent }, false],
     ];
