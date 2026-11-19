@@ -53,12 +53,16 @@ describe('editorial review coverage validation', () => {
     '*Last updated: November 2026.*',
     'Last updated: November 2026',
     '_Updated: March 2027._',
+    '**Last updated:** November 2026',
   ])('allows the date-stamp line as non-external: %s', (passage) => {
     expect(validateClaim(passage, NON_EXTERNAL)).toBeNull();
   });
 
-  test('allows a document code that names a source', () => {
-    expect(validateClaim('Here is what EENY-514 says about the spray:', NON_EXTERNAL)).toBeNull();
+  test.each([
+    'Here is what EENY-514 says about the spray:',
+    'UF/IFAS fact sheets ENH5 and LH010 cover St. Augustine grass.',
+  ])('allows a UF/IFAS publication number that names a source: %s', (passage) => {
+    expect(validateClaim(passage, NON_EXTERNAL)).toBeNull();
   });
 
   test.each([
@@ -68,6 +72,8 @@ describe('editorial review coverage validation', () => {
     'Termites cause [$5 billion in damage](/termite-control/) annually.',
     'Read the [8 Florida species](//example.org/species) list.',
     'EENY-514 says the roach is 1.5 inches long.',
+    '**Last updated:** November 2026. Most homes have roaches.',
+    'Homes need a MERV-13 filter.',
   ])('still rejects a figure outside those cases as non-external: %s', (passage) => {
     expect(validateClaim(passage, NON_EXTERNAL)).toBe('claim_kind_mismatch:C1');
   });

@@ -44,9 +44,10 @@ function validateChecks(checks, document, title, sources) {
   return null;
 }
 
-// Document codes (UF/IFAS EENY-514, ENH5, LH010) name a source; their digits are not figures. They are
-// removed for the figure test only: an attributed quote is detected on the passage as written.
-const DOCUMENT_CODE_RE = /\b[A-Z]{2,}-?\d+[A-Z]?\b/g;
+// UF/IFAS EDIS publication numbers (EENY-514, ENY-228, ENH5, LH010, SL21, IN917, CIR1234) name a source;
+// their digits are not figures. Only these prefixes: a rating such as MERV-13 or SEER-16 is a figure. They
+// are removed for the figure test only: an attributed quote is detected on the passage as written.
+const DOCUMENT_CODE_RE = /\b(?:EENY|ENY|ENH|LH|SL|IN|CIR)-?\d+[A-Z]?\b/g;
 const FIGURE_RE = /(?:\$|%|\b\d+(?:[.,]\d+)?\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b)/i;
 function deterministicClaimKind(passage) {
   const text = String(passage || '');
@@ -69,7 +70,7 @@ function isTrivialNumericInstruction(passage) {
 // A non_external passage may carry a number only where the number makes no outside claim: a trivial
 // instruction, or the visible "Last updated: Month Year" line every brief asks for (content-brief-builder).
 // Any other figure, link text included, is held to the deterministic kind.
-const DATE_STAMP_RE = /^[*_\s]*(?:last\s+)?(?:updated|reviewed)\s*:?\s*(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{4}[.\s*_]*$/i;
+const DATE_STAMP_RE = /^[*_\s]*(?:last\s+)?(?:updated|reviewed)\s*:?[*_\s]*(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{4}[.\s*_]*$/i;
 function numericNonExternalAllowed(passage) {
   const text = String(passage || '').trim();
   return isTrivialNumericInstruction(text) || DATE_STAMP_RE.test(text);
