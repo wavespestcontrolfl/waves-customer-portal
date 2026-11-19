@@ -277,6 +277,49 @@ describe("useSpeechDictation with server dictation on", () => {
     await waitFor(() => expect(result.current.mode).toBe("speech"));
   });
 
+  it("a clip POST that dies with no response (iOS 'Load failed') is sent again and the words still land", async () => {
+    // Owner 2026-11-06 10:49: the server got the headers and no audio, and the IB mic showed "Load failed".
+    const onTranscript = vi.fn();
+    const fetchMock = stubServer();
+    const answer = fetchMock.getMockImplementation();
+    let posts = 0;
+    fetchMock.mockImplementation(async (url, opts) => {
+      if (opts?.method === "POST" && ++posts === 1) throw new TypeError("Load failed");
+      return answer(url, opts);
+    });
+    const { result } = renderHook(() => useSpeechDictation(onTranscript));
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(result.current.listening).toBe(true));
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("Treated the lanai for roaches."), { timeout: 3000 });
+    expect(postsTo(fetchMock)).toHaveLength(2);
+    expect(onTranscript).toHaveBeenCalledTimes(1);
+    expect(alert).not.toHaveBeenCalled();
+  });
+
+  it("no connection after the retries: a plain message, not the browser's bare 'Load failed'", async () => {
+    const onTranscript = vi.fn();
+    const fetchMock = stubServer();
+    const answer = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation(async (url, opts) => {
+      if (opts?.method === "POST") throw new TypeError("Load failed");
+      return answer(url, opts);
+    });
+    const { result } = renderHook(() => useSpeechDictation(onTranscript));
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(result.current.listening).toBe(true));
+    await act(async () => { result.current.toggle(); });
+    await waitFor(
+      () => expect(alert).toHaveBeenCalledWith("Dictation error: No connection. The recording did not send; try again."),
+      { timeout: 4000 },
+    );
+    expect(postsTo(fetchMock)).toHaveLength(3);
+    expect(onTranscript).not.toHaveBeenCalled();
+    await waitFor(() => expect(result.current.uploading).toBe(false));
+  });
+
   it("a speech session started before the server answered is stopped by its own tap", async () => {
     let answer;
     stubServer({ available: () => new Promise((r) => { answer = r; }) });

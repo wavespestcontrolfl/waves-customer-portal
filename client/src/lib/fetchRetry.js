@@ -7,7 +7,8 @@
 // 2026-07-28 and 2026-08-25. Retry only when fetch() itself rejects, i.e. no
 // HTTP response was ever received, so the server can't have half-processed
 // anything ambiguous. Reserved for calls that are idempotent server-side
-// (/update-amount, /quote, /setup, the invoice GET) — never money-moving ones
+// (/update-amount, /quote, /setup, the invoice GET, the dictation clip POSTs,
+// which only transcribe) — never money-moving ones
 // (/finalize, /setup-complete), where a lost response could hide a completed
 // charge. An AbortError is the CALLER cancelling (unmount/token change), not
 // a network failure — rethrow it immediately, or a retry would refetch after

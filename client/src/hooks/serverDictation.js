@@ -2,6 +2,8 @@
 // our server transcribes it (POST /api/tech/dictation) instead of the browser's
 // speech recognition. This module is the client half of that endpoint: the
 // per-session availability answer and the clip upload. See useSpeechDictation.js.
+import { fetchWithNetworkRetry } from "../lib/fetchRetry";
+
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 // One answer per session (per login token): { token, value, liveWords } once the server has
@@ -78,8 +80,18 @@ function clipForm(blob, durationSeconds) {
   return form;
 }
 
+// iOS 18 sends a POST on a connection the server already closed and never resends it: the clip
+// failed with a bare "Load failed" (owner 2026-11-06 10:49, the IB mic; the server got the
+// headers and no audio). fetchWithNetworkRetry repeats only when no response came back, and
+// both routes only transcribe (no writes), so a repeat costs at most one more transcription.
 async function postClip(url, blob, durationSeconds, token) {
-  const r = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: clipForm(blob, durationSeconds) });
+  let r;
+  try {
+    r = await fetchWithNetworkRetry(url, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: clipForm(blob, durationSeconds) });
+  } catch (e) {
+    if (e?.name === "AbortError") throw e;
+    throw new Error("No connection. The recording did not send; try again.");
+  }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
     const err = new Error(data?.error || `Transcription failed (HTTP ${r.status})`);
