@@ -1853,6 +1853,9 @@ const FLOWS = {
     payload: ({ slot, details, address }) => ({
       date: slot.date,
       time: slot.start_time,
+      // The offered slot's technician. The server only compares it: SLOT_TAKEN when that far-south zone-day
+      // truck can no longer serve the hour (GATE_MULTI_TECH_CONFIRM). It never picks who is booked.
+      ...(slot.technician_id ? { technician_id: slot.technician_id } : {}),
       notes: details.trim() || undefined,
       // Only set when the address gate collected one (needs_address) — the
       // server ignores it (and requires nothing) when the lead already has

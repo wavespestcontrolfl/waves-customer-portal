@@ -2288,7 +2288,30 @@ function parseCommitBody(body) {
   const addressInput = typeof body?.address === 'string' ? body.address.trim() : '';
   const notes = typeof body?.notes === 'string' ? body.notes.trim().slice(0, MAX_NOTES_LENGTH) : '';
   const invalid = !/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^([01]\d|2[0-3]):00$/.test(time);
-  return { date, time, addressInput, notes, invalid };
+  // The offered slot's technician (optional: a page loaded before 2026-11-19 sends none). Only compared
+  // (zoneTruckGone), never booked: the booked technician is always the rebuild's.
+  const rawTech = typeof body?.technician_id === 'string' ? body.technician_id.trim() : '';
+  const offeredTechnicianId = rawTech && rawTech.length <= 64 ? rawTech : null;
+  return { date, time, addressInput, notes, invalid, offeredTechnicianId };
+}
+
+// Per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19): true when the list offered this hour on its technician's
+// own far-south zone day, and the commit's rebuild now names a truck that is not on its own zone day there. The
+// rebuild claims each start for a zone-day truck first, so that means no zone-day truck can serve the hour any more:
+// answer SLOT_TAKEN rather than book the other truck. False with the gate off, no offered technician, the same
+// technician, an offer that was not on a zone day (a seeded day), or any lookup failure (logged, fail open).
+async function zoneTruckGone({ date, offeredTechnicianId, slot, address }) {
+  const funnel = require('../services/scheduling/zone-day-funnel');
+  if (!funnel.perTruckLive() || !offeredTechnicianId || !slot || String(slot.technician_id) === String(offeredTechnicianId)) return false;
+  try {
+    const view = await funnel.offerFunnelDays({ address: zoneFunnelText(address), dateFrom: date, dateTo: date, conn: db });
+    if (!view || !view.techDays || !view.days.has(date)) return false;
+    return funnel.onZoneDay(date, offeredTechnicianId, view.days, view.techDays)
+      && !funnel.onZoneDay(date, slot.technician_id, view.days, view.techDays);
+  } catch (err) {
+    logger.warn(`[inspection-public] zone-day truck check failed (failing open): ${err.message}`);
+    return false;
+  }
 }
 
 // Phase 2 — createSelfBooking with the assessment's internal callbackVisit
@@ -2588,7 +2611,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
   const verified = verifyLeadConsultationToken(req.params.token);
   if (!verified) return res.status(404).json({ error: 'not_found' });
 
-  const { date, time, addressInput, notes, invalid } = parseCommitBody(req.body);
+  const { date, time, addressInput, notes, invalid, offeredTechnicianId } = parseCommitBody(req.body);
   if (invalid) return res.status(400).json({ error: 'date (YYYY-MM-DD) and time (HH:00) required' });
 
   try {
@@ -2624,7 +2647,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, truckAddress: resolved.address,
     });
     const slot = findSlotIn(dayAvailability, date, time);
-    if (!slot) return sendSlotTaken(res, { location: resolved.location, address: resolved.address, range, config, catalog, leadId: lead.id });
+    if (!slot || await zoneTruckGone({ date, offeredTechnicianId, slot, address: resolved.address })) {
+      return sendSlotTaken(res, { location: resolved.location, address: resolved.address, range, config, catalog, leadId: lead.id });
+    }
 
     // Phase 1 — lock, re-read the lead's customer_id FRESH (a concurrent
     // commit's phase 1 may have just linked one), re-run eligibility, then
@@ -2681,7 +2706,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const bookingSlot = locationMoved
       ? await revalidateSlotAt(bookingLocation, { date, time, config, catalog, leadId: lead.id, address: customerAddressFields(custRow) })
       : slot;
-    if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: customerAddressFields(custRow), range, config, catalog, leadId: lead.id });
+    if (!bookingSlot || (locationMoved && await zoneTruckGone({ date, offeredTechnicianId, slot: bookingSlot, address: customerAddressFields(custRow) }))) {
+      return sendSlotTaken(res, { location: bookingLocation, address: customerAddressFields(custRow), range, config, catalog, leadId: lead.id });
+    }
 
     // Phase 2 — createSelfBooking's OWN atomic per-customer lane dedupe
     // (dedupeLane, left at its true default — no transaction of ours wraps
@@ -2847,6 +2874,7 @@ router._internals = {
 };
 
 router._test = {
+  zoneTruckGone,
   tokenMayUseProfile,
   outrightProspect,
   loadTrustedCustomer,

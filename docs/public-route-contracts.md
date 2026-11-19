@@ -7553,8 +7553,13 @@ technician per date and start, so the truck whose zone day it is claims a start
 both trucks have before the funnel runs (`routes/booking.js` `truckRankOf`, ahead
 of the line-map rank); the commit build and the re-validation pass the address
 as `zoneTruckAddress` (the same claim, no funnel), so the commit books the truck
-the list offered. Gate off: no zone read before the claims. No
-field, status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search
+the list offered. The page also sends the offered slot's `technician_id`
+(optional; compared only, never booked). When that technician had a far-south
+zone day there and the rebuild now names a truck that does not, the commit
+answers the existing 409 `SLOT_TAKEN` with fresh times instead of booking the
+other truck (`zoneTruckGone`); a request with no `technician_id` books as
+before. Gate off: no zone read before the claims and no check. One optional
+request field (`technician_id`); no status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search
 reservice uses, READ-ONLY, same booking-window clamp on both ends, and
 (same P1) is likewise routed through `finalizeBookingLocation` rather than
 a raw `resolveServiceAddress` — a directly supplied out-of-area address

@@ -198,5 +198,40 @@ describe('buildAvailabilityForLead — south-zone day funnel', () => {
     expect(rebuilds).toHaveLength(2);
     expect(rebuilds.every((c) => /rangeFrom: date, rangeTo: date/.test(c))).toBe(true);
     expect(rebuilds.some((c) => /\baddress\b/.test(c.replace(/truckAddress:\s*[\w.]+/g, '')))).toBe(false);
+    // Both the commit's slot and a moved location's re-validated slot pass the offered-truck check.
+    expect(src.match(/await zoneTruckGone\(\{ date, offeredTechnicianId, slot/g) || []).toHaveLength(2);
+  });
+
+  // Per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19): the commit answers SLOT_TAKEN when the truck the list
+  // offered on its own far-south zone day lost the hour, rather than book a truck that is not on its zone day.
+  test('zoneTruckGone: true only when the offered zone-day truck lost the hour to a truck off its zone day', async () => {
+    const { zoneTruckGone } = require('../routes/inspection-public')._test;
+    const { parseCommitBody } = require('../routes/inspection-public')._internals;
+    const saved = process.env.GATE_MULTI_TECH_CONFIRM;
+    const zoneStop = (technicianId) => [{ scheduled_date: D1, zone: 'venice', service_city: 'Venice', customer_city: null, technician_id: technicianId }];
+    const check = (offered, slotTech, { date = D1, address = VENICE } = {}) => zoneTruckGone({
+      date, offeredTechnicianId: offered, slot: { technician_id: slotTech }, address,
+    });
+    process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+    try {
+      stopRows = zoneStop('tech-2');
+      expect(await check('tech-2', 'tech-1')).toBe(true);
+      expect(await check('tech-2', 'tech-2')).toBe(false); // the same truck still holds it
+      expect(await check('tech-1', 'tech-3')).toBe(false); // the offer was not on a zone day (a seeded day)
+      expect(await check(null, 'tech-1')).toBe(false); // a page from before this change sends no technician
+      expect(await check('tech-2', 'tech-1', { date: D })).toBe(false); // no zone stop that day
+      expect(await check('tech-2', 'tech-1', { address: SARASOTA })).toBe(false); // outside the funneled zones
+      stopRows = zoneStop(null);
+      expect(await check('tech-2', 'tech-1')).toBe(false); // an unassigned zone stop: every truck's zone day
+      stopRows = zoneStop('tech-2');
+      delete process.env.GATE_MULTI_TECH_CONFIRM;
+      expect(await check('tech-2', 'tech-1')).toBe(false); // gate off: today's commit
+    } finally {
+      if (saved === undefined) delete process.env.GATE_MULTI_TECH_CONFIRM; else process.env.GATE_MULTI_TECH_CONFIRM = saved;
+    }
+    // The commit body carries the offered technician as a plain string, compared only.
+    expect(parseCommitBody({ date: D, time: '10:00', technician_id: ' tech-2 ' }).offeredTechnicianId).toBe('tech-2');
+    expect(parseCommitBody({ date: D, time: '10:00' }).offeredTechnicianId).toBeNull();
+    expect(parseCommitBody({ date: D, time: '10:00', technician_id: 'x'.repeat(65) }).offeredTechnicianId).toBeNull();
   });
 });
