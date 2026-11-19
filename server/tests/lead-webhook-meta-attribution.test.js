@@ -227,6 +227,37 @@ describe('determineLeadSource — spoke fleet (single-sourced from SPOKE_SITES)'
     expect(r).toMatchObject({ source: 'domain_website', detail: 'bradentonflpestcontrol.com', area: 'Bradenton' });
   });
 
+  test.each([
+    ['Google search', { referrer: 'https://www.google.com/search?q=pest' }, 'organic_search', 'Google'],
+    ['an organic campaign', { utm: { source: 'google', medium: 'organic' } }, 'organic_search', 'Google'],
+    ['a local directory', { referrer: 'https://directory.example/listing' }, 'referral', 'directory.example'],
+  ])('a Parrish form keeps its registered site and the evidence from %s', (_name, signals, kind, detail) => {
+    const intake = buildLeadWebhookIntake({
+      attribution: { landing_url: 'https://www.parrishpestcontrol.com/quote/', ...signals },
+    });
+    expect(intake.leadSource).toMatchObject({
+      source: 'domain_website', detail: 'parrishpestcontrol.com', area: 'Parrish',
+    });
+    expect(intake.sourceEvidence).toMatchObject({ kind, detail });
+  });
+
+  test('a hub city form keeps its location and its separate referral evidence', () => {
+    const intake = buildLeadWebhookIntake({ attribution: {
+      landing_url: 'https://wavespestcontrol.com/quote-venice-fl/',
+      referrer: 'https://directory.example/listing',
+    } });
+    expect(intake.leadSource).toMatchObject({ source: 'waves_website', area: 'Venice' });
+    expect(intake.sourceEvidence).toMatchObject({ kind: 'referral', detail: 'directory.example' });
+  });
+
+  test.each([
+    'https://external.example/?next=parrishpestcontrol.com',
+    'https://parrishpestcontrol.com.external.example/',
+  ])('a mention of the spoke outside the registered host keeps its external referral', (landing_url) => {
+    const result = determineFromAttribution({ landing_url, referrer: 'https://directory.example/listing' });
+    expect(result).toMatchObject({ source: 'website', channel: 'referral', detail: 'Referral: directory.example' });
+  });
+
   test('the brand-wide lawn spoke maps to the SW Florida area', () => {
     const r = determineLeadSource('https://www.waveslawncare.com/', '', '', '', '', '');
     expect(r).toMatchObject({ source: 'domain_website', detail: 'waveslawncare.com', area: 'SW Florida' });

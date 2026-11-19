@@ -27,6 +27,8 @@ const { classifyAttributionSignals } = require('./lead-source-evidence');
 // location resolution + stored on the lead); a spoke absent from SPOKE_AREA still
 // attributes correctly as domain_website, just with a null area.
 const SPOKE_DOMAIN_KEYS = SPOKE_SITES.filter((s) => s.group !== 'Hub').map((s) => s.key);
+const HUB_DOMAIN = 'wavespestcontrol.com';
+const LANDING_DOMAINS = [HUB_DOMAIN, ...SPOKE_DOMAIN_KEYS];
 const SPOKE_AREA = {
   'bradentonflexterminator.com': 'Bradenton', 'bradentonflpestcontrol.com': 'Bradenton', 'bradentonfllawncare.com': 'Bradenton',
   'palmettoexterminator.com': 'Palmetto', 'palmettoflpestcontrol.com': 'Palmetto',
@@ -38,8 +40,7 @@ const SPOKE_AREA = {
 };
 
 // Hub city detection for a wavespestcontrol.com landing path — hoisted to
-// module scope so both the hub branch below and the AI-assistant area lookup
-// (areaForLandingUrl) read the exact same table. Anchor single-word cities to
+// module scope so every acquisition channel uses the same table. Anchor single-word cities to
 // the "-fl" city/quote-page suffix so an incidental mention in a slug isn't
 // read as a city — most importantly "palmetto-bug" (a FL cockroach) must NOT
 // resolve to Palmetto and skew office routing. Compound names (north-port,
@@ -50,30 +51,30 @@ const HUB_CITIES = [
   [/venice-fl/i, 'Venice'], [/palmetto-fl/i, 'Palmetto'], [/ellenton-fl/i, 'Ellenton'],
 ];
 
-// Area for a landing URL using the SAME domain/hub detection the
-// domain_website / waves_website branches use below — reused by the
-// AI-assistant branch so an AI-referred visitor still gets office-routing
-// area enrichment instead of a bare null. Read-only lookup; never classifies
-// a source itself.
-function areaForLandingUrl(url) {
-  const spokeDomain = SPOKE_DOMAIN_KEYS.find((domain) => url.includes(domain));
-  if (spokeDomain) return SPOKE_AREA[spokeDomain] || null;
-  if (url.includes('wavespestcontrol.com')) {
-    const path = String(url).replace(/^https?:\/\/[^/]+/i, '').split(/[?#]/)[0].replace(/\/+$/, '');
-    const hit = HUB_CITIES.find(([re]) => re.test(path));
-    return hit ? hit[1] : null;
+// Older webforms may submit a bare domain. Only the hostname identifies a
+// registered site: a link to the site inside another page's query does not.
+function registeredLanding(rawUrl) {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return null;
+  let url = rawUrl.trim();
+  if (url.startsWith('//')) url = `https:${url}`;
+  else if (/^[\w-]+(?:\.[\w-]+)+(?=[:/?#]|$)/.test(url)) url = `https://${url}`;
+  try {
+    const parsed = new URL(url);
+    if (!['https:', 'http:'].includes(parsed.protocol)) return null;
+    const domain = LANDING_DOMAINS.find((name) => parsed.hostname === name || parsed.hostname.endsWith(`.${name}`));
+    if (!domain) return null;
+    const path = parsed.pathname;
+    const area = domain === HUB_DOMAIN
+      ? HUB_CITIES.find(([pattern]) => pattern.test(path))?.[1]
+      : SPOKE_AREA[domain];
+    return { domain, path, area };
+  } catch {
+    return null;
   }
-  return null;
 }
 
-// findAiAssistant/hostnameOf/AI_ASSISTANT_SOURCES now live in
-// ./ai-referral-sources.js, SHARED with lead-source-resolver.js (the
-// quote-wizard's property-lookup/quote-calculate path) so the two
-// resolution paths can never judge the same AI referral differently
-// (codex pre-push P1, AGENTS.md "extend the existing mechanism").
-
 function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampaign, utmContent, fbclid, fbc, gclid, wbraid, gbraid, referrer) {
-  const url = landingUrl || pageUrl || '';
+  const landing = registeredLanding(landingUrl || pageUrl);
   const classified = classifyAttributionSignals({
     referrer, landing_url: landingUrl || pageUrl,
     utm: { source: utmSource, medium: utmMedium, campaign: utmCampaign, content: utmContent },
@@ -90,7 +91,7 @@ function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampa
     };
   }
   if (classified.bucket === 'google_business') {
-    return { source: 'google_business', detail: 'Google Maps referral', channel: 'organic', area: areaForLandingUrl(url) };
+    return { source: 'google_business', detail: 'Google Maps referral', channel: 'organic', area: landing?.area || null };
   }
   if (classified.bucket === 'google_ads') {
     const clickLabel = classified.reason === 'paid_tags' ? 'Google paid campaign' : `Google Ads click (${classified.reason})`;
@@ -110,39 +111,22 @@ function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampa
     return { source: 'website', detail: `${classified.socialName} organic social`, channel: 'social' };
   }
   if (classified.bucket === 'ai') {
-    return { source: 'ai_assistant', detail: classified.ai.detail, channel: 'organic', area: areaForLandingUrl(url) };
+    return { source: 'ai_assistant', detail: classified.ai.detail, channel: 'organic', area: landing?.area || null };
+  }
+  // CRM source rows identify the site that received the inquiry. The intake's
+  // source_evidence independently records the search engine or referring site.
+  if (landing && landing.domain !== HUB_DOMAIN) {
+    return { source: 'domain_website', detail: landing.domain, channel: 'organic', area: landing.area || null };
+  }
+  if (landing) {
+    const slug = landing.path.split('/').filter(Boolean).pop();
+    return { source: 'waves_website', detail: slug ? `${slug} page` : 'Main site', channel: 'organic', area: landing.area };
   }
   if (classified.bucket === 'organic_search') {
-    return { source: 'waves_website', detail: `${classified.searchName} organic search`, channel: 'organic', area: areaForLandingUrl(url) };
+    return { source: 'waves_website', detail: `${classified.searchName} organic search`, channel: 'organic', area: null };
   }
   if (classified.bucket === 'referral') {
-    return { source: 'website', detail: `Referral: ${classified.referrerHost}`, channel: 'referral', area: areaForLandingUrl(url) };
-  }
-
-  // Domain-based attribution. The spoke fleet is single-sourced from SPOKE_SITES
-  // (see SPOKE_DOMAIN_KEYS / SPOKE_AREA above) so it can't drift from the Astro
-  // build's domain list — a spoke added there attributes here automatically. A
-  // domain not in the fleet falls through to the 'website' fallback below, which
-  // the dashboard surfaces as "Unattributed (web)" — a visible signal to map it,
-  // not a silent miss (the class of bug PR #264 fixed piecemeal).
-  const spokeDomain = SPOKE_DOMAIN_KEYS.find((domain) => url.includes(domain));
-  if (spokeDomain) return { source: 'domain_website', detail: spokeDomain, channel: 'organic', area: SPOKE_AREA[spokeDomain] || null };
-
-  // Waves main site (hub) pages. Detect the CITY anywhere in the URL path — not just
-  // a fixed /pest-control-<city> list — so quote pages (/pest-control-quote-parrish-fl/),
-  // lawn/mosquito city pages, etc. get the right area instead of falling to a generic
-  // "Main site". Channel is always waves_website (organic hub); the page slug is the
-  // detail so it stays specific for any page type.
-  if (url.includes('wavespestcontrol.com')) {
-    const path = String(url).replace(/^https?:\/\/[^/]+/i, '').split(/[?#]/)[0].replace(/\/+$/, '');
-    const seg = path.split('/').filter(Boolean).pop() || '';
-    // HUB_CITIES (module scope, above) anchors single-word cities to the
-    // "-fl" city/quote-page suffix so an incidental mention in a slug isn't
-    // read as a city — most importantly "palmetto-bug" (a FL cockroach) must
-    // NOT resolve to Palmetto and skew office routing. Compound names
-    // (north-port, lakewood-ranch) are unambiguous on their own and need no anchor.
-    const hit = HUB_CITIES.find(([re]) => re.test(path));
-    return { source: 'waves_website', detail: seg ? `${seg} page` : 'Main site', channel: 'organic', area: hit ? hit[1] : undefined };
+    return { source: 'website', detail: `Referral: ${classified.referrerHost}`, channel: 'referral', area: null };
   }
 
   return { source: utmSource || 'website', detail: utmMedium || '', channel: 'unknown' };
