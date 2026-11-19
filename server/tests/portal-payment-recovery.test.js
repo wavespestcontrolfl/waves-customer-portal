@@ -16,12 +16,16 @@ jest.mock('../services/visit-completion-packets', () => ({
 jest.mock('../services/invoice', () => ({
   linkedScheduledServiceId: jest.fn(async () => null),
 }));
+jest.mock('../services/termite-annual-renewal-charge', () => ({
+  renewalPaymentRefusal: jest.fn(async () => null),
+}));
 
 const { recoveryInvoiceIndexFor } = require('../services/portal-payment-history');
 const { liveInvoiceOwnership, invoicePayerOwnership } = require('../services/invoice-payer-ownership');
 const { memberCollectionPending } = require('../services/pay-combined');
 const { invoicePayerOwnedNow } = require('../services/visit-completion-packets');
 const { linkedScheduledServiceId } = require('../services/invoice');
+const { renewalPaymentRefusal } = require('../services/termite-annual-renewal-charge');
 
 const INV_A = '11111111-1111-4111-8111-111111111111';
 const INV_B = '22222222-2222-4222-8222-222222222222';
@@ -53,6 +57,7 @@ beforeEach(() => {
   memberCollectionPending.mockImplementation(async (current) => ({ row: current }));
   invoicePayerOwnedNow.mockResolvedValue(false);
   linkedScheduledServiceId.mockResolvedValue(null);
+  renewalPaymentRefusal.mockResolvedValue(null);
 });
 
 function reader(rows, resolvedAttempts = [], supplementalRows = rows, { attemptError = null, visitStatus = null } = {}) {
@@ -197,6 +202,24 @@ test('a saved-card authentication_required row with no PI id cannot open a secon
 
   expect(recovery.has('pay-sca')).toBe(false);
   expect(memberCollectionPending).not.toHaveBeenCalled();
+});
+
+test('a legacy invoice-number failure still sees its invoice authentication_required fence', async () => {
+  const recovery = await recoveryInvoiceIndexFor('cust-1', [{
+    id: 'pay-sca-legacy',
+    status: 'failed',
+    stripe_payment_intent_id: null,
+    metadata: null,
+    description: 'Invoice WPC-100 — card on file (FAILED)',
+  }], reader([invoice()], [{
+    invoice_id: INV_A,
+    stripe_payment_intent_id: null,
+    status: 'failed',
+    decline_code: 'authentication_required',
+    resolved_at: new Date(),
+  }]));
+
+  expect(recovery.has('pay-sca-legacy')).toBe(false);
 });
 
 test('a terminal saved-card decline still offers its verified invoice checkout', async () => {
@@ -424,6 +447,19 @@ test('the recovery link and amount come from the verified current invoice row', 
   expect(recovery.get('pay-a')).toEqual({
     payUrl: '/pay/tok-current', amountDue: 75, invoiceNumber: 'WPC-CURRENT',
   });
+});
+
+test('a renewal checkout refusal withholds the otherwise payable recovery link', async () => {
+  const current = invoice({ annual_prepay_term_id: 'term-1' });
+  memberCollectionPending.mockResolvedValueOnce({ row: current });
+  renewalPaymentRefusal.mockResolvedValueOnce({ reason: 'parent_cancelled' });
+  const database = reader([current]);
+  const recovery = await recoveryInvoiceIndexFor('cust-1', [{
+    id: 'pay-renewal', status: 'failed', metadata: { invoice_id: INV_A },
+  }], database);
+
+  expect(recovery.has('pay-renewal')).toBe(false);
+  expect(renewalPaymentRefusal).toHaveBeenCalledWith(current, database);
 });
 
 test('a fresh draft still requires the payment canonical invoice id', async () => {
