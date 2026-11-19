@@ -116,4 +116,16 @@ postgres('public SMS needs-response count (PostgreSQL)', () => {
     await seed();
     expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
   });
+
+  // Owner 2026-11-19 ("Mark Texts Read" A): the Messages badge passes unreadOnly.
+  test('the unread-only count drops a read text; a thread with one unread text still counts; the full list keeps both', async () => {
+    const first = await seed();
+    const second = await seed({ phone: '+19415550101' });
+    await seed({ phone: '+19415550101', ours: '+19415550191', read: null });
+    expect(await countUnreadInboundSms({ unreadOnly: true })).toEqual({ conversations: 2, messages: 3 });
+    await mockPg('messages').where({ conversation_id: first }).update({ is_read: true });
+    await mockPg('messages').where({ conversation_id: second }).update({ is_read: true });
+    expect(await countUnreadInboundSms({ unreadOnly: true })).toEqual({ conversations: 1, messages: 1 });
+    expect(await countUnreadInboundSms()).toEqual({ conversations: 2, messages: 3 });
+  });
 });

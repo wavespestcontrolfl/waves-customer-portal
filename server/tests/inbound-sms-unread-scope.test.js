@@ -1,6 +1,7 @@
 // Query compilation only; no database connection or provider credentials.
 const mockQueries = [];
 let mockCountRows = [];
+let mockPluck = () => [];
 jest.mock('../models/db', () => {
   const knex = require('knex')({ client: 'pg' });
   const db = (table) => {
@@ -9,7 +10,8 @@ jest.mock('../models/db', () => {
       const compiled = query.toSQL();
       mockQueries.push(compiled);
       const result = compiled.method === 'update' ? 0
-        : (compiled.method === 'pluck' || compiled.sql.startsWith('select distinct') ? [] : { conversations: 2, messages: 5 });
+        : compiled.method === 'pluck' ? mockPluck(compiled)
+          : (compiled.sql.startsWith('select distinct') ? [] : { conversations: 2, messages: 5 });
       return Promise.resolve(result).then(resolve, reject);
     };
     return query;
@@ -24,8 +26,8 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ warn: jest.fn() }));
-const { countUnreadInboundSms, markInboundSmsRead } = require('../services/inbound-sms-read');
-beforeEach(() => { mockQueries.length = 0; mockCountRows = []; });
+const { countUnreadInboundSms, markInboundSmsRead, markAllInboundSmsRead } = require('../services/inbound-sms-read');
+beforeEach(() => { mockQueries.length = 0; mockCountRows = []; mockPluck = () => []; });
 test('global count dedupes actionable endpoint threads by peer and ignores read state', async () => {
   mockCountRows = [
     { peer: '9415550100', endpoint: '9415550190', message_body: 'Can you call me?' },
@@ -64,4 +66,45 @@ test('a read request matching no inbound SIDs cannot update any bell or legacy r
   expect(mirror.bindings).toContain(0);
   expect(mockQueries.some(query => query.sql.includes('"notifications"'))).toBe(false);
   expect(mockQueries.some(query => query.sql.includes('"messages" as "m"'))).toBe(false);
+});
+
+// Owner 2026-11-19 ("Mark Texts Read" A): the badge counts a needs-a-reply text only while nobody has read it.
+test('the badge count drops needs-a-reply texts somebody already read; a thread with one unread text still counts', async () => {
+  mockCountRows = [
+    { id: 'read-1', peer: '9415550100', message_body: 'Can you call me?' },
+    { id: 'unread-1', peer: '9415550101', message_body: 'The gate is locked' },
+    { id: 'read-2', peer: '9415550101', message_body: 'Also the side yard' },
+  ];
+  mockPluck = (compiled) => (compiled.sql.includes('"is_read" = ?') ? ['read-1', 'read-2'] : []);
+  expect(await countUnreadInboundSms({ role: 'admin', unreadOnly: true })).toEqual({ conversations: 1, messages: 1 });
+  const readLookup = mockQueries.find((q) => q.method === 'pluck');
+  expect(readLookup.sql).toContain('from "messages" where "id" in');
+  expect(readLookup.bindings).toEqual(expect.arrayContaining(['read-1', 'unread-1', 'read-2', true]));
+});
+
+test('Mark all read selects unread inbound texts up to the boundary, never recruiting replies, then reads them through the one writer', async () => {
+  mockPluck = (compiled) => (compiled.sql.includes('"messages" as "m"') ? ['m-1', 'm-2'] : []);
+  const readBefore = new Date('2026-11-19T12:00:00Z');
+  await markAllInboundSmsRead({ readBefore, role: 'admin', adminUserId: 'admin-1' });
+  const select = mockQueries.find((q) => q.method === 'pluck' && q.sql.includes('"messages" as "m"'));
+  expect(select.sql).toContain('"m"."created_at" <= ?');
+  expect(select.sql).toContain('"m"."message_type" not like ?');
+  expect(select.sql).not.toContain('join "conversations"');
+  expect(select.bindings).toEqual(expect.arrayContaining(['sms', 'inbound', readBefore, 'job\\_%']));
+  const read = mockQueries.find((q) => q.method === 'update' && q.sql.includes('"read_by_admin_user_id" = ?'));
+  expect(read.sql).toContain('"id" in (?, ?)');
+  expect(read.bindings).toEqual(expect.arrayContaining(['m-1', 'm-2', 'admin-1']));
+});
+
+test('Mark all read never reaches past now, and a technician scope reads only its own customers', async () => {
+  const future = new Date(Date.now() + 86400000);
+  await markAllInboundSmsRead({ readBefore: future, role: 'technician', customerIds: ['owned-customer'] });
+  const select = mockQueries.find((q) => q.method === 'pluck' && q.sql.includes('"messages" as "m"'));
+  expect(select.sql).toContain('inner join "conversations" as "c" on "c"."id" = "m"."conversation_id"');
+  expect(select.sql).toContain('"c"."customer_id" in (?)');
+  const boundary = select.bindings.find((b) => b instanceof Date);
+  expect(boundary.getTime()).toBeLessThanOrEqual(Date.now());
+  // Nothing unread: no write at all.
+  expect(mockQueries.some((q) => q.method === 'update')).toBe(false);
+  await expect(markAllInboundSmsRead({ readBefore: new Date('nope'), role: 'admin' })).rejects.toThrow('readBefore required');
 });

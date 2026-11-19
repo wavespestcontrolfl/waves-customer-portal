@@ -2616,19 +2616,37 @@ router.post('/messages/read', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// A technician's Messages badge: the same needs-a-reply count, over texts from the customers on its own route
+// POST /api/admin/communications/messages/read-all — the inbox's Mark all read (owner 2026-11-19): every unread
+// inbound text up to readBefore (the newest text the caller's list showed), through the one read writer. A
+// technician reads only texts from the customers on its own route.
+router.post('/messages/read-all', async (req, res, next) => {
+  try {
+    const readBefore = req.body?.readBefore ? new Date(req.body.readBefore) : null;
+    if (!readBefore || Number.isNaN(readBefore.getTime())) return res.status(400).json({ error: 'readBefore required' });
+    const { markAllInboundSmsRead } = require('../services/inbound-sms-read');
+    const { updated, notificationsCleared } = await markAllInboundSmsRead({
+      readBefore,
+      adminUserId: req.technicianId || null,
+      role: req.techRole,
+      customerIds: isTechnicianRequest(req) ? technicianCustomerIdsSubquery(req, db) : null,
+    });
+    res.json({ success: true, updated, notificationsCleared });
+  } catch (err) { next(err); }
+});
+
+// A technician's Messages badge: the same unread needs-a-reply count, over texts from the customers on its own route
 // only. A text from a number that matches no customer is office work and never counts.
 async function technicianUnreadCount(req, customerId) {
-  const { loadPendingSmsConversations } = require('../services/sms-pending-conversations');
+  const { loadPendingSmsConversations, withoutReadRows } = require('../services/sms-pending-conversations');
   const owned = new Set((await technicianCustomerIdsSubquery(req, db)).map((row) => row.customer_id));
-  const rows = (await loadPendingSmsConversations({
+  const rows = await withoutReadRows((await loadPendingSmsConversations({
     excludePhones: ADMIN_PHONES, customerId, since: NEEDS_REPLY_SINCE,
-  })).filter((row) => row.customer_id && owned.has(row.customer_id));
+  })).filter((row) => row.customer_id && owned.has(row.customer_id)));
   return { conversations: new Set(rows.map((row) => row.peer)).size, messages: rows.length };
 }
 
-// Shared inbox count; Customer 360 may scope it to the selected customer. A technician gets the count for its own
-// customers only (Messages badge).
+// Shared inbox count: needs-a-reply texts nobody has read (owner 2026-11-19); Customer 360 may scope it to the
+// selected customer. A technician gets the count for its own customers only (Messages badge).
 router.get('/unread-count', async (req, res, next) => {
   try {
     const { customerId } = req.query;
@@ -2641,7 +2659,7 @@ router.get('/unread-count', async (req, res, next) => {
     }
     const { countUnreadInboundSms } = require('../services/inbound-sms-read');
     return res.json(await countUnreadInboundSms({
-      excludePhones: ADMIN_PHONES, customerId, role: req.techRole, since: NEEDS_REPLY_SINCE,
+      excludePhones: ADMIN_PHONES, customerId, role: req.techRole, since: NEEDS_REPLY_SINCE, unreadOnly: true,
     }));
   } catch (err) { return next(err); }
 });

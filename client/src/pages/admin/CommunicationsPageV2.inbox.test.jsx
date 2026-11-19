@@ -1172,3 +1172,85 @@ it("opens the thread that holds the alerted message when the customer texts from
   expect(scrolled).toEqual(["sms-message-v-b"]);
   expect(logRequests().some(([url]) => String(url).includes("twilioSid="))).toBe(false);
 });
+
+// Owner 2026-11-19 ("Mark Texts Read" A): read a text from the list without opening it.
+const readPosts = (path) => fetch.mock.calls.filter(([url, init]) => String(url).endsWith(path) && init?.method === "POST");
+
+it("Mark read on a row clears the dot at once, writes 5 s later, and Undo takes it back", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false, conversationId: "conv-a" }];
+  setup(); await tick();
+  expect(screen.getByLabelText("Unread")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent("Marked read");
+  expect(screen.queryByText("Back")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+  expect(screen.getByLabelText("Unread")).toBeInTheDocument();
+  await tick(6000);
+  expect(readPosts("/messages/read")).toHaveLength(0);
+
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  await tick(4900);
+  expect(readPosts("/messages/read")).toHaveLength(0);
+  await tick(200);
+  const [[, init]] = readPosts("/messages/read");
+  expect(JSON.parse(init.body)).toEqual({ messageIds: ["a"], conversationIds: ["conv-a"], readBefore: "2024-07-01T12:00:00Z" });
+  expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+});
+
+it("a second Mark read sends the first one at once", async () => {
+  messages = [
+    { ...inbound("a", "Please check the gate"), isRead: false },
+    { ...inbound("b", "Another request", "+19415550101"), isRead: false },
+  ];
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550101 read" }));
+  await tick(0);
+  expect(readPosts("/messages/read").map(([, init]) => JSON.parse(init.body).messageIds)).toEqual([["a"]]);
+  await tick(5000);
+  expect(readPosts("/messages/read").map(([, init]) => JSON.parse(init.body).messageIds)).toEqual([["a"], ["b"]]);
+});
+
+it("Mark all read reads every text up to the newest loaded one, and only shows on the whole list", async () => {
+  messages = [
+    { ...inbound("a", "Please check the gate"), isRead: false },
+    { ...inbound("b", "Another request", "+19415550101"), isRead: false, createdAt: "2024-07-02T09:30:00Z" },
+  ];
+  setup(); await tick();
+  fireEvent.change(screen.getByPlaceholderText(/Search all SMS/), { target: { value: "gate" } });
+  expect(screen.queryByRole("button", { name: "Mark all read" })).not.toBeInTheDocument();
+  fireEvent.change(screen.getByPlaceholderText(/Search all SMS/), { target: { value: "" } });
+  await tick();
+
+  fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+  expect(screen.queryAllByLabelText("Unread")).toHaveLength(0);
+  expect(screen.getByRole("status")).toHaveTextContent("Marked all texts read");
+  await tick(5000);
+  const [[, init]] = readPosts("/messages/read-all");
+  expect(JSON.parse(init.body)).toEqual({ readBefore: "2024-07-02T09:30:00Z" });
+  expect(readPosts("/messages/read")).toHaveLength(0);
+});
+
+it("a failed list read says so and the text stays unread", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  const okFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, init) => (String(url).endsWith("/messages/read") && init?.method === "POST"
+    ? response({ error: "Unavailable" }, 503)
+    : okFetch(url, init)));
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  await tick(5000); await tick();
+  expect(screen.getByRole("alert")).toHaveTextContent("The texts were not marked read");
+  expect(screen.getByLabelText("Unread")).toBeInTheDocument();
+});
+
+it("leaving the inbox inside the 5 s sends the read instead of dropping it", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  const view = setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  view.unmount(); await tick(0);
+  expect(readPosts("/messages/read")).toHaveLength(1);
+});

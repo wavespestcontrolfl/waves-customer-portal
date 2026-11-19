@@ -219,6 +219,44 @@ function phoneKey(value) {
   return String(value || "").replace(/\D/g, "").slice(-10);
 }
 
+// What reading a thread covers: its unread inbound texts, its conversations,
+// and the newest loaded text as the boundary, so a text that lands after it
+// stays unread.
+function threadReadScope(thread) {
+  const threadMessages = Array.isArray(thread?.messages)
+    ? thread.messages
+    : Array.isArray(thread?.messagesList)
+      ? thread.messagesList
+      : [];
+  const unreadIds = threadMessages
+    .filter((m) => m.direction === "inbound" && !m.isRead)
+    .map((m) => m.id)
+    .filter(Boolean);
+  const conversationIds = [
+    ...new Set([...(thread?.conversationIds || []), ...threadMessages.map((m) => m.conversationId)].filter(Boolean)),
+  ];
+  const readBefore = thread?.lastTimestamp || newestCreatedAt(threadMessages);
+  return { unreadIds, conversationIds, readBefore };
+}
+
+function newestCreatedAt(list) {
+  return list.reduce(
+    (latest, m) => (!latest || new Date(m.createdAt) > new Date(latest) ? m.createdAt : latest),
+    null,
+  );
+}
+
+// A list Mark read waits this long so its Undo can take it back.
+const LIST_READ_UNDO_MS = 5000;
+
+// Does a pending list read cover this loaded text? Mark all read covers every
+// inbound text up to its boundary; a row's Mark read covers that row's texts.
+function pendingReadCovers(pending, m) {
+  if (!pending || m.direction !== "inbound") return false;
+  if (pending.all) return new Date(m.createdAt) <= new Date(pending.readBefore);
+  return pending.messageIds.includes(m.id);
+}
+
 function getInitials(nameOrPhone) {
   if (!nameOrPhone) return "?";
   const trimmed = String(nameOrPhone).trim();
@@ -1680,27 +1718,7 @@ export function SmsTab({
 
   const markMessagesRead = useCallback(
     async (thread) => {
-      const threadMessages = Array.isArray(thread?.messages)
-        ? thread.messages
-        : Array.isArray(thread?.messagesList)
-          ? thread.messagesList
-          : [];
-      const unreadIds = threadMessages
-        .filter((m) => m.direction === "inbound" && !m.isRead)
-        .map((m) => m.id)
-        .filter(Boolean);
-      const conversationIds = [
-        ...new Set([...(thread?.conversationIds || []), ...threadMessages.map((m) => m.conversationId)].filter(Boolean)),
-      ];
-      const readBefore =
-        thread?.lastTimestamp ||
-        threadMessages.reduce(
-          (latest, m) =>
-            !latest || new Date(m.createdAt) > new Date(latest)
-              ? m.createdAt
-              : latest,
-          null,
-        );
+      const { unreadIds, conversationIds, readBefore } = threadReadScope(thread);
       if (!unreadIds.length && !conversationIds.length) return;
 
       const readAt = new Date().toISOString();
@@ -1735,6 +1753,66 @@ export function SmsTab({
     },
     [loadData, smsSearch],
   );
+
+  // Mark read from the list (owner 2026-11-19): the dot clears at once and the
+  // write waits LIST_READ_UNDO_MS so Undo can take it back. One list read waits
+  // at a time; a second tap, leaving the page or the timer sends it.
+  const [pendingRead, setPendingRead] = useState(null);
+  const [listReadError, setListReadError] = useState("");
+  const pendingReadRef = useRef(null);
+  const pendingReadTimerRef = useRef(null);
+  const commitPendingRead = useCallback(async () => {
+    const pending = pendingReadRef.current;
+    window.clearTimeout(pendingReadTimerRef.current);
+    pendingReadRef.current = null;
+    if (!pending) return;
+    try {
+      if (pending.all) {
+        await adminFetch("/admin/communications/messages/read-all", {
+          method: "POST",
+          body: JSON.stringify({ readBefore: pending.readBefore }),
+        });
+      } else {
+        await adminFetch("/admin/communications/messages/read", {
+          method: "POST",
+          body: JSON.stringify({ messageIds: pending.messageIds, conversationIds: pending.conversationIds, readBefore: pending.readBefore }),
+        });
+      }
+      const readAt = new Date().toISOString();
+      setMessages((prev) => prev.map((m) => (!m.isRead && pendingReadCovers(pending, m) ? { ...m, isRead: true, readAt } : m)));
+      notifyUnreadChanged();
+    } catch {
+      setListReadError("The texts were not marked read. Try again.");
+      loadData(smsSearchRef.current, { refresh: true });
+    } finally {
+      setPendingRead((current) => (current === pending ? null : current));
+    }
+  }, [loadData]);
+  const commitPendingReadRef = useRef(commitPendingRead);
+  commitPendingReadRef.current = commitPendingRead;
+  useEffect(() => () => { void commitPendingReadRef.current(); }, []);
+  const startListRead = (next) => {
+    if (pendingReadRef.current) void commitPendingRead();
+    setListReadError("");
+    pendingReadRef.current = next;
+    setPendingRead(next);
+    pendingReadTimerRef.current = window.setTimeout(() => { void commitPendingRead(); }, LIST_READ_UNDO_MS);
+  };
+  const undoListRead = () => {
+    window.clearTimeout(pendingReadTimerRef.current);
+    pendingReadRef.current = null;
+    setPendingRead(null);
+  };
+  const markThreadReadFromList = (thread) => {
+    const { unreadIds, conversationIds, readBefore } = threadReadScope(thread);
+    if (!unreadIds.length) return;
+    startListRead({ messageIds: unreadIds, conversationIds, readBefore, label: "Marked read" });
+  };
+  const markAllReadFromList = () => {
+    const readBefore = newestCreatedAt(messages);
+    if (!readBefore) return;
+    startListRead({ all: true, readBefore, label: "Marked all texts read" });
+  };
 
   useEffect(() => {
     if (!active || !customer) return;
@@ -3127,7 +3205,7 @@ export function SmsTab({
       if (unansweredReply) {
         t.ourNumber = unansweredReply.businessLine;
       }
-      t.unread = t.messages.some((m) => m.direction === "inbound" && !m.isRead);
+      t.unread = t.messages.some((m) => m.direction === "inbound" && !m.isRead && !pendingReadCovers(pendingRead, m));
       return t;
     });
     threadList.sort(
@@ -3136,7 +3214,7 @@ export function SmsTab({
     return blocked.size
       ? threadList.filter((t) => !blocked.has(smsThreadKey(t.contactPhone)))
       : threadList;
-  }, [messages, blocked]);
+  }, [messages, blocked, pendingRead]);
 
   useEffect(() => {
     if (!activeThread) return;
@@ -4136,6 +4214,17 @@ export function SmsTab({
           className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 min-h-[44px] md:min-h-0 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
         />{" "}
       </div>
+      {pendingRead && (
+        <div
+          role="status"
+          className="fixed z-[300] left-4 right-4 md:left-auto md:right-6 md:w-80 bottom-[calc(80px+env(safe-area-inset-bottom))] md:bottom-6 flex items-center justify-between gap-3 rounded-sm bg-zinc-900 px-4 py-2 text-14 text-white shadow-lg"
+        >
+          <span>{pendingRead.label}</span>
+          <button type="button" onClick={undoListRead} className="u-focus-ring min-h-[44px] md:min-h-[32px] border-0 bg-transparent px-2 font-medium text-white underline">
+            Undo
+          </button>
+        </div>
+      )}
       {/* Thread list / conversation / log */}
       {smsView === "conversation" && activeThread ? (
         <Card className="p-5">
@@ -4169,7 +4258,18 @@ export function SmsTab({
                 ({filteredThreads.length})
               </span>{" "}
             </div>{" "}
+            {/* Mark all read covers every text, so it shows only on the whole list. */}
+            {chipCounts.unread > 0 && !smsSearch.trim() && smsFilter === "all" && (statusFilter === "all" || statusFilter === "unread") && (
+              <button
+                type="button"
+                onClick={markAllReadFromList}
+                className="u-focus-ring rounded-sm border-hairline border-zinc-300 bg-white px-3 min-h-[44px] md:min-h-[32px] text-14 text-zinc-900 hover:bg-zinc-50"
+              >
+                Mark all read
+              </button>
+            )}
           </div>
+          {listReadError && <ActionFeedback error className="mb-3">{listReadError}</ActionFeedback>}
           {/* Status filter — one dropdown instead of a pill row so it
               costs a single line on phones; counts ride in the labels. */}
           <div className="mb-3">
@@ -4276,16 +4376,32 @@ export function SmsTab({
                           {timeAgo(t.lastTimestamp)}
                         </span>{" "}
                       </div>{" "}
-                      <div
-                        className={cn(
-                          "text-16 md:text-12 truncate leading-snug",
-                          hasUnseen ? "text-zinc-900" : "text-ink-secondary",
-                        )}
-                      >
-                        {preview || (
-                          <span className="text-ink-tertiary italic">
-                            No messages
-                          </span>
+                      <div className="flex items-center gap-2">
+                        <div
+                          className={cn(
+                            "flex-1 min-w-0 text-16 md:text-12 truncate leading-snug",
+                            hasUnseen ? "text-zinc-900" : "text-ink-secondary",
+                          )}
+                        >
+                          {preview || (
+                            <span className="text-ink-tertiary italic">
+                              No messages
+                            </span>
+                          )}
+                        </div>
+                        {/* Mark read sits on the text line so a phone keeps the name and time whole. */}
+                        {hasUnseen && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              markThreadReadFromList(t);
+                            }}
+                            aria-label={`Mark ${displayName} read`}
+                            className="flex-shrink-0 u-focus-ring rounded-sm border-hairline border-zinc-300 bg-white px-3 min-h-[44px] md:min-h-[32px] text-14 text-zinc-900 hover:bg-zinc-100"
+                          >
+                            Mark read
+                          </button>
                         )}
                       </div>{" "}
                     </div>{" "}

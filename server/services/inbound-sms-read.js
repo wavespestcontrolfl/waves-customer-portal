@@ -281,6 +281,31 @@ async function markInboundSmsRead({
   return { updated, notificationsCleared };
 }
 
+// The inbox's Mark all read (owner 2026-11-19): every unread inbound text
+// created at or before readBefore (never later than now), through the one
+// writer above, so the legacy mirror, backlog-marker strip and bell clear are
+// the same as a thread read. `customerIds` (a subquery of customer ids) limits
+// a technician to its own customers; a text with no customer is office work and
+// stays unread for them. Recruiting replies are read on the Recruiting page,
+// never by an inbox-wide read.
+async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, customerIds = null } = {}) {
+  if (!(readBefore instanceof Date) || Number.isNaN(readBefore.getTime())) {
+    throw new Error('readBefore required when marking every text read');
+  }
+  const before = new Date(Math.min(readBefore.getTime(), Date.now()));
+  const ids = await db('messages as m')
+    .modify((q) => {
+      if (customerIds) q.join('conversations as c', 'c.id', 'm.conversation_id').whereIn('c.customer_id', customerIds);
+    })
+    .where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
+    .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
+    .where('m.created_at', '<=', before)
+    .modify((q) => excludeRecruitingSmsLog(q, 'm.message_type'))
+    .pluck('m.id');
+  if (!ids.length) return { updated: 0, notificationsCleared: 0 };
+  return markInboundSmsRead({ messageIds: ids, adminUserId, role });
+}
+
 // 3b. Customer-thread cross-clear: threads with nothing left unread
 // (unified AND recent legacy-only rows), through the notification service.
 // Separated from the by-SID clear above — this scope is every conversation
@@ -335,4 +360,4 @@ async function customerIdsInScope(ids, convs) {
   return db('conversations').whereIn('id', [...convIds]).whereNotNull('customer_id').distinct('customer_id').pluck('customer_id');
 }
 
-module.exports = { markInboundSmsRead, countUnreadInboundSms, retargetOrClearUnknownSenderBell };
+module.exports = { markInboundSmsRead, markAllInboundSmsRead, countUnreadInboundSms, retargetOrClearUnknownSenderBell };
