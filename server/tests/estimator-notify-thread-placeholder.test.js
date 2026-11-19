@@ -148,13 +148,11 @@ describe('notify() with a thread key', () => {
     expect(meta.estimateId).toBeNull();
   });
 
-  test('a blocked outcome replaces the placeholder and links to the open estimate (estimateId stays null)', async () => {
+  test('a blocked outcome replaces the placeholder and links to the MESSAGE, never an estimate (estimateId stays null)', async () => {
     mockRow = bellRow();
-    const link = _private.blockedThreadLink(
-      { threadKey: THREAD_KEY, bellLink: SENDER_LINK },
-      { blocked: true, duplicateBlock: { existingEstimateId: 'est-77' } },
-    );
-    expect(link).toBe('/admin/estimates?estimateId=est-77');
+    // The duplicate guard matches on the last 10 digits, so its estimate can belong to another sender.
+    const link = _private.threadBellLink({ threadKey: THREAD_KEY, bellLink: SENDER_LINK });
+    expect(link).toBe(SENDER_LINK);
     await notify(outcomeCall({
       title: 'Quote asked by text — estimate already open',
       body: 'Jane Doe: a text thread asked for a quote, but an automated estimate is already open for this phone number. Review and send the existing one.',
@@ -162,7 +160,8 @@ describe('notify() with a thread key', () => {
     }));
     expect(mockUpdates).toHaveLength(1);
     expect(mockUpdates[0].title).toBe('Quote asked by text — estimate already open');
-    expect(mockUpdates[0].link).toBe('/admin/estimates?estimateId=est-77');
+    expect(mockUpdates[0].link).toBe(SENDER_LINK);
+    expect(mockUpdates[0].link).not.toMatch(/estimates/);
     const meta = JSON.parse(mockUpdates[0].metadata);
     expect(meta.estimateId).toBeNull();
     expect(meta.placeholder).toBe(false);
@@ -218,76 +217,21 @@ describe('notify() with a thread key', () => {
   });
 });
 
-describe('sender identity rides on text-origin bells only', () => {
-  test('a placeholder insert carries metadata.senderIdentity', async () => {
-    await notify(placeholderCall({ senderIdentity: '9415550123' }));
-    expect(mockNotifyAdmin.mock.calls[0][3].metadata.senderIdentity).toBe('9415550123');
-  });
-
-  test('an international identity is stored as +digits', async () => {
-    await notify(placeholderCall({ senderIdentity: '+447700900123' }));
-    expect(mockNotifyAdmin.mock.calls[0][3].metadata.senderIdentity).toBe('+447700900123');
-  });
-
-  test('the identity survives the placeholder-gives-way rewrite, even when the outcome passes none', async () => {
-    mockRow = bellRow({ senderIdentity: '9415550123' });
-    await notify(outcomeCall({ senderIdentity: null }));
-    expect(JSON.parse(mockUpdates[0].metadata).senderIdentity).toBe('9415550123');
-    mockUpdates.length = 0;
-    mockRow = bellRow({ senderIdentity: '9415550123' });
-    await notify(outcomeCall({ senderIdentity: '9415550123' }));
-    expect(JSON.parse(mockUpdates[0].metadata).senderIdentity).toBe('9415550123');
-  });
-
-  test('the identity survives a draft upgrade', async () => {
-    mockRow = bellRow({ senderIdentity: '+447700900123' });
-    await notify(outcomeCall({ estimateId: 'est-5', link: undefined, senderIdentity: undefined }));
-    expect(JSON.parse(mockUpdates[0].metadata).senderIdentity).toBe('+447700900123');
-  });
-
-  test('a fresh text-origin outcome insert carries it', async () => {
-    mockRow = bellRow({ placeholder: false, estimateId: 'est-1' });
-    await notify(outcomeCall({ estimateId: 'est-2', senderIdentity: '9415550123' }));
-    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
-    expect(mockNotifyAdmin.mock.calls[0][3].metadata.senderIdentity).toBe('9415550123');
-  });
-
-  test('call-origin bells never carry the key (no identity, null or empty)', async () => {
-    for (const senderIdentity of [undefined, null, '']) {
-      mockNotifyAdmin.mockClear();
-      await notify({
-        call: { twilio_call_sid: 'CA-id-1' }, context: null, lane: 'red', quotePromised: true,
-        title: 'Quote promised on call — send it', body: 'x', senderIdentity,
-      });
-      expect(mockNotifyAdmin.mock.calls[0][3].metadata).not.toHaveProperty('senderIdentity');
-    }
-  });
-});
-
-describe('a new ask after a CLOSED thread bell gets its own row', () => {
+describe('open and closed bells stand exactly as on main', () => {
   const CLOSED = new Date('2026-11-18T12:00:00Z');
 
-  test('a closed newest bell plus a placeholder inserts a fresh placeholder bell and never touches the closed row', async () => {
-    mockRow = bellRow({ placeholder: false }, { done_at: CLOSED });
-    expect(await notify(placeholderCall({ senderIdentity: '9415550123' }))).toBe(true);
-    expect(mockUpdates).toHaveLength(0);
-    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
-    const meta = mockNotifyAdmin.mock.calls[0][3].metadata;
-    expect(meta.placeholder).toBe(true);
-    expect(meta.smsThreadKey).toBe(THREAD_KEY);
-    expect(meta.senderIdentity).toBe('9415550123');
-  });
-
-  test('a closed PLACEHOLDER plus a new placeholder also gets a fresh row', async () => {
-    mockRow = bellRow({}, { done_at: CLOSED });
-    await notify(placeholderCall());
-    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
-    expect(mockUpdates).toHaveLength(0);
-  });
-
-  test('an OPEN bell plus a placeholder still stands: no insert, no write', async () => {
+  test('an OPEN bell plus a placeholder stands: no insert, no write', async () => {
     for (const meta of [{ placeholder: false }, {}]) {
       mockRow = bellRow(meta);
+      expect(await notify(placeholderCall())).toBe(true);
+    }
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockUpdates).toHaveLength(0);
+  });
+
+  test('a CLOSED bell plus a placeholder stands too (no fresh row, no write)', async () => {
+    for (const meta of [{ placeholder: false }, {}]) {
+      mockRow = bellRow(meta, { done_at: CLOSED });
       expect(await notify(placeholderCall())).toBe(true);
     }
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
@@ -300,41 +244,24 @@ describe('a new ask after a CLOSED thread bell gets its own row', () => {
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
     expect(mockUpdates).toHaveLength(0);
   });
+
+  test('no sender identity is stored on any bell, and the dedupe read has no identity condition', async () => {
+    await notify(placeholderCall());
+    expect(mockNotifyAdmin.mock.calls[0][3].metadata).not.toHaveProperty('senderIdentity');
+    const sql = mockFirstWheres[0].filter((w) => w.m === 'whereRaw').map((w) => String(w.args[0])).join(' | ');
+    expect(sql).not.toMatch(/senderIdentity/);
+  });
 });
 
-describe('dedupe is by sender identity', () => {
-  const dedupeSql = () => mockFirstWheres[0].filter((w) => w.m === 'whereRaw').map((w) => `${w.args[0]} ${JSON.stringify(w.args[1] || '')}`).join(' | ');
-
-  test('the dedupe read requires the same sender identity when one is given', async () => {
-    mockRow = bellRow({ senderIdentity: '9415550123' });
-    await notify(placeholderCall({ senderIdentity: '9415550123' }));
-    expect(dedupeSql()).toContain("metadata->>'senderIdentity' = ? [\"9415550123\"]");
-  });
-
-  test('a legacy row with no identity is never reused: a new ask gets a fresh insert, and the legacy row is untouched', async () => {
-    mockRow = bellRow({ senderIdentity: undefined });
-    await notify(placeholderCall({ senderIdentity: '9415550123' }));
-    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
-    expect(mockUpdates).toHaveLength(0);
-  });
-
-  test('another sender with the same last 10 digits (a different identity) never reuses or rewrites the bell', async () => {
-    mockRow = bellRow({ senderIdentity: '9415550123' });
-    await notify(outcomeCall({ senderIdentity: '+19415550123x' }));
-    expect(mockUpdates).toHaveLength(0);
-    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
-  });
-
-  test('without an identity the read has no identity condition (call path and identity-less callers unchanged)', async () => {
-    mockRow = bellRow();
-    await notify(placeholderCall());
-    expect(dedupeSql()).not.toContain('senderIdentity');
-    mockFirstWheres.length = 0;
-    await notify({
-      call: { twilio_call_sid: 'CA-id-9' }, context: null, lane: 'red', quotePromised: true, title: 'Quote promised on call — send it', body: 'x', senderIdentity: '9415550123',
-    });
-    expect(dedupeSql()).not.toContain('senderIdentity');
-    expect(dedupeSql()).toContain("metadata->>'callSid' = ?");
+describe('notify() failure log carries no phone digits', () => {
+  test('a failed insert logs a code-only summary (the error message holds the bound digits) and returns false', async () => {
+    const logger = require('../services/logger');
+    mockNotifyAdmin.mockRejectedValueOnce(new Error("insert into notifications ... values ('9415550123') failed"));
+    expect(await notify(placeholderCall())).toBe(false);
+    const warned = logger.warn.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(warned).toMatch(/admin notify failed/);
+    expect(warned).not.toMatch(/9415550123/);
+    expect(warned).not.toMatch(/insert into/);
   });
 });
 
@@ -398,15 +325,9 @@ describe('notify() call origin is unchanged', () => {
 });
 
 describe('thread link helpers', () => {
-  test('threadBellLink is the sender link for a thread origin, null for call origin or unset', () => {
+  test('threadBellLink is the message link for a thread origin, null for call origin or unset', () => {
     expect(_private.threadBellLink({ threadKey: THREAD_KEY, bellLink: SENDER_LINK })).toBe(SENDER_LINK);
     expect(_private.threadBellLink({ threadKey: THREAD_KEY })).toBeNull();
     expect(_private.threadBellLink(_private.CALL_ORIGIN)).toBeNull();
-  });
-
-  test('blockedThreadLink ignores the estimate for call origin and falls back to the sender link without one', () => {
-    const draft = { duplicateBlock: { existingEstimateId: 'est-1' } };
-    expect(_private.blockedThreadLink(_private.CALL_ORIGIN, draft)).toBeNull();
-    expect(_private.blockedThreadLink({ threadKey: THREAD_KEY, bellLink: SENDER_LINK }, { duplicateBlock: {} })).toBe(SENDER_LINK);
   });
 });

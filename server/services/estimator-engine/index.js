@@ -22,6 +22,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { safeErrorText } = require('../safe-error-text');
 const { deliveryClaimFresh } = require('../admin-estimate-persistence');
 const contextBuilder = require('./context-builder');
 const { buildCallContext, existingDraftForCall } = contextBuilder;
@@ -639,7 +640,7 @@ function placeholderClearPatch(existingMeta, placeholder) {
 // instead of adding a second one; when no bell exists (request-only calls,
 // or the generic path failed) it inserts fresh. Re-runs dedupe on the
 // estimator_engine marker.
-async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null, link = null, forceUpdate = false, updateOnly = false, retiredByReason = null, placeholder = false, senderIdentity = null }) {
+async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null, link = null, forceUpdate = false, updateOnly = false, retiredByReason = null, placeholder = false }) {
   const callSid = call?.twilio_call_sid ? String(call.twilio_call_sid) : null;
   // Callers may pass a specific link (the proposal builder deep-link);
   // otherwise derive the historical default from what the bell references.
@@ -659,11 +660,6 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
     // The durable "drafting now" bell written before the detached run. An
     // outcome with no estimate (red, blocked, error) replaces it in place.
     ...(placeholder === true ? { placeholder: true } : {}),
-    // The sender's canonical phone identity (utils/phone phoneIdentityKey):
-    // smsThreadKey keeps only the last 10 digits, so an international sender
-    // could read as a US customer. Text-origin bells only; call bells never
-    // carry the key. A rewrite that passes none keeps the stored one.
-    ...(typeof senderIdentity === 'string' && senderIdentity ? { senderIdentity } : {}),
     // A quote we promised is a promise we owe the customer; a quote the customer asked
     // for is the customer reaching us. Either one rings once the gate is on (muted by the bell policy before).
     ...(quotePromised === true ? { promise: true } : { contact: true }),
@@ -678,15 +674,7 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
   const dedupe = callSid
     ? { clause: "metadata->>'callSid' = ?", value: callSid, since: null }
     : (threadKey
-      ? {
-        clause: "metadata->>'smsThreadKey' = ?",
-        value: threadKey,
-        since: new Date(Date.now() - SMS_BELL_DEDUPE_MS),
-        // smsThreadKey keeps only the last 10 digits, so two senders can share
-        // it. A bell is reused only by the SAME sender identity; a legacy row
-        // with no identity is never reused (a new ask gets a fresh row).
-        identity: typeof senderIdentity === 'string' && senderIdentity ? senderIdentity : null,
-      }
+      ? { clause: "metadata->>'smsThreadKey' = ?", value: threadKey, since: new Date(Date.now() - SMS_BELL_DEDUPE_MS) }
       : null);
   // Returns true only when a bell durably exists for this event (fresh
   // insert, in-place upgrade, or a standing prior bell) — callers that
@@ -732,7 +720,6 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
         .whereRaw("(metadata->>'quote_promised' = 'true' OR metadata->>'estimator_engine' = 'true')")
         .orderBy('created_at', 'desc');
       if (dedupe.since) existingQuery = existingQuery.where('created_at', '>=', dedupe.since);
-      if (dedupe.identity) existingQuery = existingQuery.whereRaw("metadata->>'senderIdentity' = ?", [dedupe.identity]);
       const existing = await existingQuery.first();
       if (existing) {
         let existingMeta = {};
@@ -771,12 +758,7 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
             const placeholderGivesWay = openPlaceholderGivesWay(existing, existingMeta, { placeholder, estimateId });
             yieldingPlaceholder = placeholderGivesWay;
             const bothOpen = !estimateId && !existingMeta.estimateId && !placeholderGivesWay;
-            // A NEW ask (placeholder) after the newest thread bell was closed
-            // gets its own row: standing would hide the ask, and a later
-            // draft upgrading the old row would carry its old created_at.
-            const newAskAfterClosed = placeholder === true && !!existing.done_at;
-            if (!newAskAfterClosed && (sameDraft || bothOpen)) return true;
-            if (newAskAfterClosed) insertFresh = true;
+            if (sameDraft || bothOpen) return true;
             if (existingMeta.estimateId && existingMeta.estimateId !== estimateId) insertFresh = true;
           }
         }
@@ -819,7 +801,7 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
     const created = await require('../notification-service').notifyAdmin('lead', title, body, { link, metadata });
     return !!created;
   } catch (err) {
-    logger.warn(`[estimator-engine] admin notify failed: ${err.message}`);
+    logger.warn(`[estimator-engine] admin notify failed: ${safeErrorText(err)}`);
     return false;
   }
 }
@@ -883,17 +865,9 @@ async function retiredDraftBellsForCall(callSid, { reason }) {
 }
 
 // Text-origin outcome bells open the same place the placeholder did (the
-// sender's thread, or a compose link on the number), looked up once when the
-// placeholder was written. Call-origin and unset: null keeps the default link.
+// message that asked), looked up once when the placeholder was written. Call-origin and unset: null keeps the default link.
 function threadBellLink(origin) {
   return origin?.threadKey && origin.bellLink ? origin.bellLink : null;
-}
-
-// A blocked text-origin draft opens the open estimate that blocked it (the
-// bell's estimateId stays null: it drives the completed-draft dedupe).
-function blockedThreadLink(origin, draft) {
-  const existingId = draft?.duplicateBlock?.existingEstimateId;
-  return origin?.threadKey && existingId ? `/admin/estimates?estimateId=${existingId}` : threadBellLink(origin);
 }
 
 function callerLabel(intent, context) {
@@ -2477,7 +2451,6 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           lane: LANES.RED,
           quotePromised,
           threadKey,
-          senderIdentity: origin?.senderIdentity || null,
           title: S.redTitle,
           body: S.composerFailBody(callerLabel(null, context)),
           link: threadBellLink(origin),
@@ -3128,7 +3101,6 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
               lane,
               quotePromised,
               threadKey,
-              senderIdentity: origin?.senderIdentity || null,
               estimateId: proposalOutcome.estimateId,
               link: `/admin/estimates/${proposalOutcome.estimateId}/proposal`,
               title: S.proposalTitle,
@@ -3165,7 +3137,6 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
                   lane: LANES.RED,
                   quotePromised,
                   threadKey,
-                  senderIdentity: origin?.senderIdentity || null,
                   title: 'Quote promised — review the existing draft',
                   body: 'A draft blocks this proposal but its lead linkage could not be verified '
                     + '(reconciliation unavailable). Review the call and the draft in admin/estimates before sending.',
@@ -3195,7 +3166,6 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
                   lane,
                   quotePromised,
                   threadKey,
-                  senderIdentity: origin?.senderIdentity || null,
                   estimateId: commercialOutcome.estimateId,
                   link: `/admin/estimates/${commercialOutcome.estimateId}/proposal`,
                   title: S.proposalTitle,
@@ -3217,7 +3187,6 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
                 lane,
                 quotePromised,
                 threadKey,
-                senderIdentity: origin?.senderIdentity || null,
                 estimateId: commercialOutcome.existingEstimateId || null,
                 title: S.blockedTitle,
                 body: S.blockedBody(callerLabel(intent, context)),
@@ -3237,7 +3206,6 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           lane,
           quotePromised,
           threadKey,
-          senderIdentity: origin?.senderIdentity || null,
           title: redCopy.title,
           body: redCopy.body,
           link: threadBellLink(origin),
@@ -3334,7 +3302,6 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
               lane: LANES.RED,
               quotePromised,
               threadKey,
-              senderIdentity: origin?.senderIdentity || null,
               title: 'Quote promised — review the existing draft',
               body: 'A draft blocks this quote but its lead linkage could not be verified '
                 + '(reconciliation unavailable). Review the call and the draft in admin/estimates before sending.',
@@ -3367,12 +3334,11 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           lane,
           quotePromised,
           threadKey,
-          senderIdentity: origin?.senderIdentity || null,
           title: S.blockedTitle,
           body: S.blockedBody(callerLabel(intent, context)),
-          // Text origin only: open the estimate that blocked this draft. The
-          // estimateId stays null (it drives the completed-draft dedupe).
-          link: blockedThreadLink(origin, draft),
+          // Text origin: the message link (never an estimate id: the duplicate
+          // guard matches on the last 10 digits, so it can name another sender's).
+          link: threadBellLink(origin),
         });
       }
       return result;
@@ -3421,7 +3387,6 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       lane,
       quotePromised,
       threadKey,
-      senderIdentity: origin?.senderIdentity || null,
       estimateId: draft.estimate.id,
       title: `AI estimate draft ${lane === LANES.GREEN ? 'ready' : 'needs review'} — ${draftAmountLabel(totals)}`,
       body: `${callerLabel(intent, context)}: ${intent.service_interest_label || 'estimate'} drafted from the ${origin.noun} (${lane.toUpperCase()} — ${laneWord}). `
@@ -3443,7 +3408,6 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         lane: LANES.RED,
         quotePromised,
         threadKey,
-        senderIdentity: origin?.senderIdentity || null,
         title: S.redTitle,
         body: S.errorBody,
         link: threadBellLink(origin),
@@ -3630,6 +3594,6 @@ module.exports = {
     classifyListingSuiteByLicense,
     addressFromContext, ownStreetForUnitAdoption, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality,
     parcelSignalsDescribeGatheredAddress, resolveAgreedPriceForCall, supersedeRowScopedDraftBlock,
-    clearDraftBlockOnCall, redBellCopy, CALL_ORIGIN, threadBellLink, blockedThreadLink,
+    clearDraftBlockOnCall, redBellCopy, CALL_ORIGIN, threadBellLink,
   },
 };
