@@ -39,7 +39,8 @@ export function fieldViewLanding(pathname) {
 // Field view opens on Today, so an open with no signal needs Today's code on
 // the phone, and the service worker keeps a file only once the app asked for
 // it. This asks the worker for each of Today's files that this build listed
-// (fieldViewAssets.js), then checks that the worker stored every one. It asks
+// (fieldViewAssets.js), and those the worker's saved shell lists, then
+// checks that the worker stored every one. It asks
 // for the stored files too: the worker answers those from storage and claims
 // each for this build as it does, or its prune drops a file once the builds
 // that stored it are two deploys old. It fetches the files and never imports
@@ -57,6 +58,8 @@ const DOWNLOAD_MS = 60000;
 const RETRY_MS = 5 * 60 * 1000;
 let pageWarm = null;
 let failedAt = 0;
+// The saved shell's list (JSON) that the page's try found ready.
+let readyShell = null;
 
 async function unstored(files) {
   const stored = await Promise.all(files.map((file) => caches.match(file).then(Boolean, () => false)));
@@ -75,8 +78,30 @@ async function downloadAll(files) {
   abort?.abort();
 }
 
-async function warmTodayFiles(files) {
-  if (typeof caches === 'undefined' || !navigator.serviceWorker?.controller) return false;
+// An open with no signal gets the shell the worker saved last ('/'), and it
+// can be another build than this page: a tab that loaded a newer deploy
+// replaced it, or the worker has not saved this page's build yet (or could
+// not). So Today is ready only when the phone holds that shell's Today files
+// as well as this page's. With no readable list there (none saved, a build
+// from before Field view), Today is not ready; a try still asks for this
+// page's files, which the next saved shell may list. This returns the saved
+// shell's list, or null.
+async function savedShellFiles() {
+  try {
+    const shell = await caches.match('/');
+    return shell ? readFieldViewAssets(new DOMParser().parseFromString(await shell.text(), 'text/html')) : null;
+  } catch {
+    return null;
+  }
+}
+const bothLists = (pageFiles, shellFiles) => [...new Set([...pageFiles, ...(shellFiles || [])])];
+
+// Resolves the saved shell's list as JSON when the phone holds every file of
+// both lists, and null when it does not.
+async function warmTodayFiles(pageFiles) {
+  if (typeof caches === 'undefined' || !navigator.serviceWorker?.controller) return null;
+  const shellFiles = await savedShellFiles();
+  const files = bothLists(pageFiles, shellFiles);
   await downloadAll(files);
   // The worker stores a file after it answered the request.
   let missing = await unstored(files);
@@ -84,14 +109,15 @@ async function warmTodayFiles(files) {
     await new Promise((resolve) => { setTimeout(resolve, STORE_CHECK_MS); });
     missing = await unstored(missing);
   }
-  return missing.length === 0;
+  return shellFiles && !missing.length ? JSON.stringify(shellFiles) : null;
 }
 
 // With no signal nothing can download, so the answer is whether the phone
-// already holds every file.
-async function storedAlready(files) {
+// already holds every file of both lists.
+async function storedAlready(pageFiles) {
   if (typeof caches === 'undefined') return false;
-  return (await unstored(files)).length === 0;
+  const shellFiles = await savedShellFiles();
+  return Boolean(shellFiles) && (await unstored(bothLists(pageFiles, shellFiles))).length === 0;
 }
 
 // The newest try's answer, for the Settings row: true, false, or null (a try
@@ -113,14 +139,19 @@ export function subscribeFieldViewReadiness(listener) {
 }
 
 // Resolves true when the phone holds every file, false when it does not (no
-// worker in control yet, full storage, a stalled download, a file a newer
-// deploy removed, or a build with no list), and null on the dev server,
-// which has no list. With no signal it answers from storage alone, asks for
-// nothing and keeps nothing. A call reuses the page's try while it runs,
-// after it worked, or for 5 minutes after it failed. The switch's own tap,
-// a new worker and the signal returning (`again`) always try anew.
+// worker in control yet, no readable saved shell, full storage, a stalled
+// download, a file a newer deploy removed, or a build with no list), and
+// null on the dev server, which has no list. With no signal it answers from
+// storage alone, asks for nothing and keeps nothing. A call reuses the
+// page's try while it runs, for 5 minutes after it failed, and after it
+// worked while the saved shell is still the one it checked: another tab can
+// save a newer deploy's shell without a new worker. The switch's own tap, a
+// new worker and the signal returning (`again`) always try anew.
 export function warmFieldViewLanding({ again = false } = {}) {
-  if (!again && pageWarm && (!failedAt || Date.now() - failedAt < RETRY_MS)) return pageWarm;
+  if (!again && pageWarm) {
+    if (readyShell) return savedShellFiles().then((shellFiles) => JSON.stringify(shellFiles) === readyShell || warmFieldViewLanding({ again: true }));
+    if (!failedAt || Date.now() - failedAt < RETRY_MS) return pageWarm;
+  }
   const tryId = ++newestTry;
   const answer = (ready) => {
     if (tryId === newestTry) setReadiness(ready);
@@ -131,9 +162,13 @@ export function warmFieldViewLanding({ again = false } = {}) {
   if (!files) return Promise.resolve(answer(import.meta.env.DEV ? null : false));
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return storedAlready(files).then(answer);
   failedAt = 0;
-  const warm = warmTodayFiles(files).catch(() => false).then((ready) => {
-    if (!ready && pageWarm === warm) failedAt = Date.now();
-    return answer(ready);
+  readyShell = null;
+  const warm = warmTodayFiles(files).catch(() => null).then((shell) => {
+    if (pageWarm === warm) {
+      if (shell) readyShell = shell;
+      else failedAt = Date.now();
+    }
+    return answer(Boolean(shell));
   });
   pageWarm = warm;
   return warm;

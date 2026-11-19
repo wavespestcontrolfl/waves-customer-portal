@@ -41,6 +41,7 @@
 
 const crypto = require('crypto');
 const { findBannedCustomerCopy } = require('./activity-indicators');
+const { formatTechnicianForCustomer, isGenericTechnicianLabel } = require('../../utils/technician-name');
 
 // Code-noun anchored credential detector (shared with the generate-report
 // output gate): a token counts as a credential only beside an actual
@@ -334,6 +335,108 @@ function technicianReportCustomerCopy(notes) {
   };
 }
 
+// The technician's own note (owner 2026-11-19): a report whose summary is the
+// note the technician gave, cleaned up, in place of the titled report. The
+// completion will write it to structured_notes.reportNote = { v: 1, text,
+// source } after its own screens; technician_notes then holds the raw note,
+// which is internal. `source` is 'cleaned' (the technician's words: the
+// report signs it with their first name) or 'fixed' (the standard sentence
+// code wrote: no signature). Read from the record alone, never from a gate:
+// a report that went out keeps its note. The customer-copy screens run again
+// on every read.
+const REPORT_NOTE_VERSION = 1;
+const REPORT_NOTE_SOURCES = Object.freeze(['cleaned', 'fixed']);
+const MAX_REPORT_NOTE_CHARS = 900;
+
+// Stored notes that cannot be read (a string that does not parse, or any
+// value but an object: a number or boolean as pg decodes a JSONB scalar, an
+// array) may hold a note: they count as one, so the raw column beside them
+// is never customer copy.
+const UNREADABLE_NOTES = Symbol('unreadable structured_notes');
+
+// The record's stored note, in whatever shape: undefined = it carries none
+// (no notes, blank notes, JSON null, or an object without the key).
+function storedReportNote(structuredNotes) {
+  let notes = structuredNotes;
+  if (typeof notes === 'string') {
+    if (!notes.trim()) return undefined;
+    try { notes = JSON.parse(notes); } catch { return UNREADABLE_NOTES; }
+  }
+  if (notes === null || notes === undefined) return undefined;
+  if (typeof notes !== 'object' || Array.isArray(notes)) return UNREADABLE_NOTES;
+  return notes.reportNote;
+}
+
+// A record that carries a note (in any shape), or notes that cannot be read,
+// keeps the technician's raw note in technician_notes: no line of that
+// column is customer copy.
+function carriesReportNote(structuredNotes) {
+  return storedReportNote(structuredNotes) !== undefined;
+}
+
+// Any line or paragraph break: a note is one paragraph, and the text after a
+// break is not part of it.
+const REPORT_NOTE_LINE_BREAK = /[\n\v\f\r\u0085\u2028\u2029]/;
+
+// null = the record carries no note, so the titled report may stand. A record
+// that carries one gets that note or nothing: a note in any other shape, or
+// one the screens refuse, reads as { body: null }, because the raw notes
+// column beside it holds the technician's raw note.
+function reportNoteCustomerCopy(structuredNotes) {
+  const note = storedReportNote(structuredNotes);
+  if (note === undefined) return null;
+  if (note === UNREADABLE_NOTES) return { body: null, violations: ['report_note_unreadable'], source: null };
+  // One paragraph: a note is never titled, and a second line is not part of it.
+  const valid = Boolean(note) && note.v === REPORT_NOTE_VERSION && REPORT_NOTE_SOURCES.includes(note.source)
+    && typeof note.text === 'string' && !REPORT_NOTE_LINE_BREAK.test(note.text.trim());
+  const text = valid ? note.text.replace(/\s+/g, ' ').trim() : '';
+  if (!text || text.length > MAX_REPORT_NOTE_CHARS) return { body: null, violations: ['report_note_shape'], source: null };
+  const violations = customerCopyViolations(text);
+  return { body: violations.length ? null : text, violations, source: note.source };
+}
+
+// The words of the generic technician labels (utils/technician-name): a
+// signature that is one of them names no technician.
+const GENERIC_SIGNER_WORDS = new Set(['your', 'waves', 'technician', 'tech', 'team']);
+
+// The first name a report prints for its technician (the signature on a
+// technician's own note): the record's technician row as its identity
+// snapshot froze it. A generic label in any name field signs nothing: the
+// first name alone, the first and last name together, the name column, or
+// one word of a label.
+function reportTechnicianFirstName(service = {}) {
+  // Required here: the identity snapshot loads the address helpers and the
+  // db module, which the copy rules do not need.
+  const { applyReportIdentitySnapshot } = require('./report-identity-snapshot');
+  const row = applyReportIdentitySnapshot(service || {});
+  const first = String(row.technician_first_name || '').trim();
+  const last = String(row.technician_last_name || '').trim();
+  const full = first ? `${first} ${last}`.trim() : formatTechnicianForCustomer({ name: row.technician_name });
+  if (isGenericTechnicianLabel(first) || isGenericTechnicianLabel(full)) return null;
+  const signer = first || full.split(/\s+/)[0];
+  return GENERIC_SIGNER_WORDS.has(signer.toLowerCase()) ? null : signer;
+}
+
+// The summary a visit's report text prints as: a note in the technician's
+// own words ('cleaned') signed " — <first name>" when the record names its
+// technician; the standard sentence ('fixed') and the titled report as they
+// are.
+function printedReportSummary(parsed, service = {}) {
+  if (!parsed?.body) return null;
+  const signer = parsed.source === 'cleaned' ? reportTechnicianFirstName(service) : null;
+  return signer ? `${parsed.body} — ${signer}` : parsed.body;
+}
+
+// The customer copy of a visit record's report text: the technician's own
+// note when the record carries one (a refused or malformed note shows
+// nothing: the raw notes column is never the fallback), else the titled
+// report parsed from technician_notes. One rule for every reader that holds
+// the record.
+function visitReportCustomerCopy(record) {
+  return reportNoteCustomerCopy(record?.structured_notes)
+    || technicianReportCustomerCopy(record?.technician_notes);
+}
+
 /**
  * PDF cache-key component. Stored report PDFs are keyed on the Pest
  * Pressure visibility signature only, so a summary now driven by the
@@ -428,6 +531,14 @@ function customerCopyViolations(text) {
 
 module.exports = {
   technicianReportCustomerCopy,
+  reportNoteCustomerCopy,
+  visitReportCustomerCopy,
+  carriesReportNote,
+  printedReportSummary,
+  reportTechnicianFirstName,
+  REPORT_NOTE_VERSION,
+  REPORT_NOTE_SOURCES,
+  MAX_REPORT_NOTE_CHARS,
   fourSectionReport,
   containsReportAccessCode,
   customerCopyViolations,

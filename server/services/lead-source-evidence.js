@@ -426,6 +426,8 @@ function attributionWithSourceEvidence(attribution) {
 
 module.exports = {
   EVIDENCE_KINDS,
+  SEARCH_HOSTS,
+  SOCIAL_HOSTS,
   PAID_MEDIA,
   sourceEvidenceFromAttribution,
   sourceEvidenceForLead,
