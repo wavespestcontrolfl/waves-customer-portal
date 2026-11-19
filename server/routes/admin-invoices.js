@@ -3209,7 +3209,20 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     // ── Cancel any open collection session (pre-lock Stripe triage) ──
     // openPiId is re-checked under the row lock below (a PI stamped between
     // this triage and the lock means a concurrent /setup won the seam).
+    async function paymentHold(connection) {
+      try {
+        await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(id, connection, { checkout: true });
+        return null;
+      } catch (err) {
+        if (!['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(err.code)) throw err;
+        return `${err.message} — resolve it before applying credit`;
+      }
+    }
     const openPiId = invoice.stripe_payment_intent_id || null;
+    if (openPiId) {
+      const hold = await paymentHold(db);
+      if (hold) return res.status(409).json({ error: hold });
+    }
     const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'applying credit' });
     if (openPi) return res.status(openPi.status).json({ error: openPi.error });
 
@@ -3269,14 +3282,8 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         // recordManualPayment's chargeReconciliationPending) so the
         // transaction COMMITS — the promotion sticks — and map it to 409
         // outside, after commit.
-        try {
-          await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(id, trx, { checkout: true });
-        } catch (fenceErr) {
-          if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(fenceErr.code)) {
-            return { chargeReconciliationPending: `${fenceErr.message} — resolve it before applying credit` };
-          }
-          throw fenceErr;
-        }
+        const hold = await paymentHold(trx);
+        if (hold) return { chargeReconciliationPending: hold };
         // A customer could have opened /pay/:token/setup between our pre-lock
         // PI triage and this row lock, minting a NEW PaymentIntent (its own
         // lock released by now). If the invoice's PI changed from the one we

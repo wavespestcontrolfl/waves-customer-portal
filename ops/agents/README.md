@@ -128,6 +128,8 @@ node ops/agents/verify-saved-card-cancellation.js --attempt <attempt-uuid> --int
 
 A preview returning `cancellation_verified` leaves the hold in place. After approval, repeat with `--execute` to retrieve the payment again and record the evidence on that attempt. The command requires a canceled PaymentIntent with the matching source, attempt, invoice, customer and payment method. When Stripe omits the method, the attempt must already name that PaymentIntent. Missing or conflicting proof leaves the hold in place. Other attempts on the invoice are checked independently. [Stripe webhook resend windows](https://docs.stripe.com/webhooks#manual-retries)
 
+If a customer merge changed the invoice owner, each transfer from the original owner to the current owner must identify that invoice in the active merge journal. An undone merge, counts without row IDs, or a conflicting transfer leaves the hold in place. Use the same preview for older cancellations skipped by the original migration.
+
 ### Build and alert evidence
 
 `node ops/agents/agents-report.js --build-evidence=/path/to/evidence.json`

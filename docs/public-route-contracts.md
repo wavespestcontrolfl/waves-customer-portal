@@ -819,6 +819,16 @@ old invoice pointer only with that attempt's recorded Stripe cancellation
 for the exact prior PaymentIntent.
 The `/confirm` endpoint can still record money the processor has already accepted.
 
+After a customer merge, the journal must identify this invoice on every
+transfer from its original owner to its current owner.
+
+While verification is pending, full and partial manual postings return HTTP
+409 and annual-prepay coverage stays in place. Staff can record cash or a
+check already received under **Customer 360 → Issue credit → Prepayment
+(money received)**. Apply the credit only if an amount is still owed once
+the card outcome is known. An imported Zelle notice stays in its review
+queue so the office can resolve that same receipt once.
+
 Off-Stripe tender block (2026-08-29; ZELLE-ONLY since 2026-09-02 — owner
 ruling, Venmo and PayPal retired over their fees): the GET payload carries
 an OPTIONAL `manualPayOptions` = `{ zelle: { recipient }, amountDue,

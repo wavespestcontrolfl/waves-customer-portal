@@ -13,6 +13,35 @@ function whereAwaitingAuthentication(query, table) {
   });
 }
 
+// Stripe records the owner at submission. Follow a different owner only when
+// every active merge names this invoice and has exactly one successor.
+function whereProvenInvoiceOwner(query, { invoiceAlias, invoiceId, metadataCustomerId }) {
+  query.where(function currentOrMergedOwner() {
+    this.where(`${invoiceAlias}.customer_id`, metadataCustomerId).orWhereRaw(`(
+      WITH RECURSIVE transfers AS NOT MATERIALIZED (
+        SELECT loser_customer_id, winner_customer_id FROM customer_merge_journal
+         WHERE undone_at IS NULL
+           AND repointed_ids ->> 'version' = '1'
+           AND (repointed_ids -> 'tables' -> 'invoices.customer_id') @> jsonb_build_array(?::text)
+      ), ownership_chain(customer_id, path) AS (
+        SELECT ?::uuid, ARRAY[?::uuid]
+        UNION ALL
+        SELECT next.winner_customer_id, chain.path || next.winner_customer_id
+          FROM ownership_chain chain
+          JOIN LATERAL (
+            SELECT winner_customer_id, count(*) OVER () AS successors
+              FROM transfers WHERE loser_customer_id = chain.customer_id
+          ) next ON next.successors = 1
+         WHERE NOT next.winner_customer_id = ANY(chain.path)
+      )
+      SELECT EXISTS (
+        SELECT 1 FROM ownership_chain chain WHERE chain.customer_id = ??
+           AND NOT EXISTS (SELECT 1 FROM transfers WHERE loser_customer_id = chain.customer_id)
+      )
+    )`, [invoiceId, metadataCustomerId, metadataCustomerId, `${invoiceAlias}.customer_id`]);
+  });
+}
+
 // Both the signed webhook and the operator's server-side Stripe retrieval
 // must identify the same saved-card attempt, invoice, owner and tender.
 function matchingSavedCardIntent(intent, database, { lockInvoice = false, settled = false } = {}) {
@@ -36,13 +65,30 @@ function matchingSavedCardIntent(intent, database, { lockInvoice = false, settle
 }
 
 function matchingCancellation(intent, database, lockInvoice = false) {
-  if (intent.status !== 'canceled') return;
-  const match = matchingSavedCardIntent(intent, database, { lockInvoice });
-  if (!match) return;
-  const { query, methodId } = match;
-  query.where(function relevantAttempt() {
-    this.whereIn('status', ['claimed', 'ambiguous']).orWhere({ status: 'failed', decline_code: 'authentication_required' });
+  const meta = intent.metadata || {};
+  if (intent.status !== 'canceled' || !intent.id || meta.source !== 'admin_card_on_file') return;
+  if (![meta.waves_invoice_id, meta.waves_customer_id, meta.saved_card_attempt_id].every(isUuid)) return;
+  const methodId = (typeof intent.payment_method === 'string' ? intent.payment_method : intent.payment_method?.id)
+    || intent.last_payment_error?.payment_method?.id || null;
+  const invoiceAlias = 'cancellation_invoice';
+  const invoice = database(`invoices as ${invoiceAlias}`).select(`${invoiceAlias}.id`)
+    .where(`${invoiceAlias}.id`, meta.waves_invoice_id);
+  whereProvenInvoiceOwner(invoice, {
+    invoiceAlias,
+    invoiceId: meta.waves_invoice_id,
+    metadataCustomerId: meta.waves_customer_id,
   });
+  if (lockInvoice) invoice.forShare();
+  const query = database('stripe_invoice_charge_attempts')
+    .where({ id: meta.saved_card_attempt_id, invoice_id: meta.waves_invoice_id })
+    .whereIn('invoice_id', invoice)
+    .where(function relevantAttempt() {
+      this.whereIn('status', ['claimed', 'ambiguous']).orWhere({ status: 'failed', decline_code: 'authentication_required' });
+    })
+    .where(function compatibleIntent() {
+      this.whereNull('stripe_payment_intent_id').orWhere('stripe_payment_intent_id', intent.id);
+    });
+  if (methodId) query.where({ stripe_payment_method_id: methodId });
   const evidence = {
     authentication_canceled_intent_id: intent.id,
     ...(methodId ? { stripe_payment_intent_id: intent.id } : {}),

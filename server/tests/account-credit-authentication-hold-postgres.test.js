@@ -60,6 +60,14 @@ postgres('account credit authentication hold (PostgreSQL)', () => {
       table.timestamp('paid_at');
       table.timestamp('updated_at');
     });
+    await app.schema.createTable('customer_merge_journal', (table) => {
+      table.uuid('id').primary().defaultTo(app.raw('gen_random_uuid()'));
+      table.uuid('winner_customer_id').notNullable();
+      table.uuid('loser_customer_id').notNullable();
+      table.jsonb('repointed').notNullable().defaultTo('{}');
+      table.jsonb('repointed_ids');
+      table.timestamp('undone_at');
+    });
     await app.schema.createTable('stripe_invoice_charge_attempts', (table) => {
       table.uuid('id').primary();
       table.uuid('invoice_id').notNullable();

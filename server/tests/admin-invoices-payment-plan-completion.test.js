@@ -214,6 +214,33 @@ describe('active payment plans auto-complete when the invoice settles', () => {
     });
   });
 
+  test('credit application preserves a stamped checkout when the saved card is still awaiting verification', async () => {
+    const original = db.getMockImplementation();
+    const stamped = makeRecorder({ first: jest.fn(async () => ({ ...INVOICE, stripe_payment_intent_id: 'pi_stamped' })) });
+    const pending = makeRecorder({ first: jest.fn(async () => ({ id: 'attempt-auth', status: 'failed' })) });
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return stamped;
+      if (table === 'stripe_invoice_charge_attempts') return pending;
+      return original(table);
+    });
+    const stripe = require('../services/stripe');
+    const lookup = jest.spyOn(stripe, 'retrievePaymentIntent');
+    try {
+      await withServer(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/admin/invoices/inv-1/apply-credit`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        expect(response.status).toBe(409);
+        expect((await response.json()).error).toMatch(/awaiting verification/);
+      });
+      expect(lookup).not.toHaveBeenCalled();
+      expect(db.transaction).not.toHaveBeenCalled();
+      expect(require('../services/customer-credit').postCreditMovement).not.toHaveBeenCalled();
+    } finally {
+      lookup.mockRestore();
+    }
+  });
+
   test('apply-credit returns 409 when a potentially settling card payment is found under the invoice lock', async () => {
     trxChargeAttempts.first.mockResolvedValueOnce({
       id: 'attempt-auth-1',
