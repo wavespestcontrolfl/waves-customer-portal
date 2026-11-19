@@ -55,6 +55,11 @@ const RETENTION_DAYS = 30;
 // Exception thresholds. Volumes are per ET day per policy.
 const FALLBACK_RATE_THRESHOLD = 0.2; // fallback on >=20% of a policy's calls
 const FALLBACK_MIN_VOLUME = 5;       // ...but only with enough calls to mean it
+// ...and at least two fallbacks. On a low-volume policy one slow primary
+// answer is already 20% (estimateVision 1 of 5 on 11-05, 11-12 and 11-18,
+// each a single Gemini timeout that OpenAI answered). One event is not a
+// degraded route; a dead primary still shows every call falling back.
+const FALLBACK_MIN_COUNT = 2;
 const SILENT_MIN_WEEKLY = 10;        // policy had >=10 calls in prior 7 days...
                                      // ...and ZERO yesterday => "gone silent"
 
@@ -944,6 +949,13 @@ function etDayWindow(daysAgo) {
   return { start, end };
 }
 
+/** A policy-day whose fallback share means a degraded primary, not one slow answer. */
+function fallbackRateTripped(s) {
+  return s.total >= FALLBACK_MIN_VOLUME
+    && s.fallbacks >= FALLBACK_MIN_COUNT
+    && s.fallbacks / s.total >= FALLBACK_RATE_THRESHOLD;
+}
+
 /**
  * Compute yesterday's exceptions. Exported for tests; takes rows already
  * aggregated per policy: { policy, total, fallbacks, failed } plus the
@@ -982,7 +994,7 @@ function detectExceptions(yesterdayStats, priorWeekStats, recorderIssue = null, 
           : `${s.failed} of ${s.total} calls failed on BOTH providers (callers fell back to safe copy or errored)`,
       });
     }
-    if (s.total >= FALLBACK_MIN_VOLUME && s.fallbacks / s.total >= FALLBACK_RATE_THRESHOLD) {
+    if (fallbackRateTripped(s)) {
       exceptions.push({
         policy: s.policy,
         kind: 'fallback_rate',
@@ -1356,6 +1368,7 @@ module.exports = {
   HEARTBEAT_POLICY,
   FALLBACK_RATE_THRESHOLD,
   FALLBACK_MIN_VOLUME,
+  FALLBACK_MIN_COUNT,
   SILENT_MIN_WEEKLY,
   DAILY_CADENCE_MIN_DAYS,
   DAILY_CADENCE_MIN_CALLS_PER_DAY,
