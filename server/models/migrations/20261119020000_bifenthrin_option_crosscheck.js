@@ -8,27 +8,28 @@
  *  1. onetime_preslab.products.{talstar_p,bifen_it}: Talak 96 fl oz at 41.57 -> Crosscheck Plus 128 fl oz at 30.90, plus label,
  *     catalog link, package label and warnings. margin_divisor, product_oz_per_10_sqft and positioning are kept.
  *  2. onetime_trenching.products.{talstar_p,bifen_it}: the same bottle, label and warnings; the rate fields are kept.
- * A product is rewritten only while it still holds the Talak values. One already on Crosscheck is left alone silently (re-run);
- * one an admin changed is left alone with a warning. A missing table, row or key is never an error.
+ * A product is rewritten only while it still holds the Talak values, or is exactly the admin seed's Talak product (41.57 / 96 with
+ * its rate fields and nothing else: what ensureTable in routes/admin-pricing-config.js inserted from 2026-10-25 until this change,
+ * when it creates the table). One already on Crosscheck is left alone silently (re-run); one an admin changed is left alone with a
+ * warning. A missing table, row or key is never an error.
  *
  * Step P (first, same transaction): production holds a stale SiteOne price for LESCO Crosscheck Plus ($58.42 per 1 gal, entered
  * 2026-09-30; the owner pays $30.90). db-bridge's pre-slab link takes a catalog price within [0.5x, 2x] of the config, and 58.42 is
- * 1.89x of 30.90, so linking pre-slab to that row would RAISE slab quotes. Step P writes $30.90 on the product's one vendor row and
- * the catalog best price exactly the way the inventory price handler does (PUT /:productId/pricing + recalcBestPriceLocked: previous
- * price, price, price_amount, landed cost, per-oz figures, last_checked_at, a price_history row holding the OLD price, and the catalog
- * best_price / best_price_amount_cached / best_price_updated_at). It acts only when the rows still look exactly as read on 2026-11-18;
- * anything else is left alone with a warning. It does not import the route.
- *
- * LINK GUARD: onetime_preslab takes catalog_product_name 'LESCO Crosscheck Plus' only when the catalog cannot raise the quote (row
- * missing, inactive, needs pricing, no positive price or size, or per-oz at most 1.05x of 30.90 / 128). When a higher price is still
- * there, onetime_preslab is NOT rewritten (both keys stay on Talak, with a loud warning); onetime_trenching has no catalog link and
- * follows its own rule.
+ * 1.89x of 30.90, so a pre-slab link to that row unfixed would RAISE slab quotes. Step P writes $30.90 on the product's one vendor
+ * row and the catalog best price exactly the way the inventory price handler does for a manual entry with no shipping or tax
+ * (PUT /:productId/pricing + recalcBestPriceLocked: previous price, price, price_amount, landed cost, per-oz figures, last_checked_at,
+ * a price_history row holding the OLD price, and the catalog best_price / best_price_amount_cached / best_price_updated_at). It acts
+ * only when the rows still look exactly as read on 2026-11-18; anything else (a vendor row carrying shipping or tax included: its
+ * landed cost would need them) is left alone with a warning. It does not import the route. Pre-slab links to the Crosscheck Plus
+ * catalog row either way: a price Step P leaves alone is a later entry, and the quote follows the catalog price (owner 2026-07-10)
+ * inside the bridge's band.
  *
  * db-bridge reads `catalogProductName ?? catalog_product_name`, `containerCost ?? container_cost ?? bottleCost ?? bottle_cost`, and so
  * on, so a camelCase or bottle alias would win over the snake_case value written here: the rewrite drops those aliases.
  *
  * Ownership: up() writes one pricing_config_audit row (changed_by TAG) for each pricing_config row it rewrote, one for Step P, and one
- * pricing_changelog row when it changed anything. down() restores a product only when this migration's audit row for its row exists
+ * pricing_changelog row when it changed anything; with no pricing_config_audit table it writes nothing (down() could not find its
+ * writes). down() restores a product only when this migration's audit row for its row exists
  * AND the product still deep-equals what up() wrote (an admin edit since then is kept); it restores the catalog price only when its
  * audit row exists AND the vendor row and catalog row still hold exactly what up() wrote; then it deletes this migration's price_history
  * row, audit rows and changelog row.
@@ -58,7 +59,6 @@ const STALE_PRICE = 58.42;
 const STALE_SIZE_OZ = 128;
 const NEW_PRICE = 30.9;
 const NEW_PER_OZ = Math.round((NEW_PRICE / STALE_SIZE_OZ) * 10000) / 10000; // 0.2414, rounded as the price handler does
-const LINK_CEILING_PER_OZ = (NEW_PRICE / STALE_SIZE_OZ) * 1.05;
 
 const PRODUCT_WARNING = 'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120).';
 const CROSSCHECK_PRESLAB = {
@@ -107,13 +107,19 @@ const TALAK_TRENCH = {
     'Do not attach long repair-and-retreat warranty without admin approval.',
   ],
 };
+// The admin seed's Talak product (ensureTable, 2026-10-25 until this change), matched whole: no label, so db-bridge would put the
+// code's Crosscheck label on the Talak cost.
+const SEED_PRESLAB = { container_cost: 41.57, container_oz: 96, product_oz_per_10_sqft: 1, margin_divisor: 0.5294 };
+const SEED_TRENCH = {
+  container_cost: 41.57, container_oz: 96, product_oz_per_finished_gallon_at_standard_rate: 1, product_oz_per_finished_gallon_at_high_rate: 2,
+};
 const OPTION_KEYS = ['talstar_p', 'bifen_it'];
 // Aliases db-bridge prefers over the snake_case keys written above.
 const SHADOWING_ALIASES = ['catalogProductName', 'packageLabel', 'containerCost', 'containerOz', 'bottleCost', 'bottle_cost', 'bottleOz', 'bottle_oz'];
 
 const PLANS = {
-  onetime_preslab: { from: TALAK_PRESLAB, to: CROSSCHECK_PRESLAB, linked: true },
-  onetime_trenching: { from: TALAK_TRENCH, to: CROSSCHECK_TRENCH, linked: false },
+  onetime_preslab: { from: TALAK_PRESLAB, seed: SEED_PRESLAB, to: CROSSCHECK_PRESLAB },
+  onetime_trenching: { from: TALAK_TRENCH, seed: SEED_TRENCH, to: CROSSCHECK_TRENCH },
 };
 
 const VENDOR_COLUMNS = ['previous_price', 'price', 'price_amount', 'landed_cost', 'price_per_oz', 'normalized_unit_price', 'landed_unit_price', 'last_checked_at'];
@@ -147,13 +153,15 @@ async function lockProduct(knex, productId) {
 
 // ── Step P: the catalog price ────────────────────────────────────────────────
 
+// A shipping or tax amount on the row: the handler would fold it into the landed cost, and Step P writes the bare price.
+const carries = (v) => v !== null && v !== undefined && v !== '' && Number(v) !== 0;
+
 // Returns null when Step P may act, 'done' when the price is already right, or the reason it must leave the rows alone.
-async function catalogBlocker(knex, product, rows, hasAudit) {
+async function catalogBlocker(knex, product, rows) {
   if (rows.length === 1 && same(rows[0].price, NEW_PRICE)) return 'done';
   const missing = [
     ...(await existingColumns(knex, 'vendor_pricing', REQUIRED_VENDOR_COLUMNS)).length === REQUIRED_VENDOR_COLUMNS.length ? [] : ['vendor_pricing columns'],
     ...(await existingColumns(knex, 'products_catalog', REQUIRED_CATALOG_COLUMNS)).length === REQUIRED_CATALOG_COLUMNS.length ? [] : ['products_catalog columns'],
-    ...(hasAudit ? [] : ['pricing_config_audit table']),
   ];
   if (missing.length) return `a required ${missing.join(' and ')} is missing`;
   if (product.active !== true) return 'the product is not active';
@@ -161,6 +169,9 @@ async function catalogBlocker(knex, product, rows, hasAudit) {
   const row = rows[0];
   if (row.is_active !== true || row.approval_status !== 'approved' || !same(row.price, STALE_PRICE)) {
     return `the vendor row is not the active, approved $${STALE_PRICE} row (price ${row.price}) - an admin changed it`;
+  }
+  if (carries(row.shipping_cost) || carries(row.tax_rate)) {
+    return `the vendor row carries shipping (${row.shipping_cost}) or tax (${row.tax_rate}) - enter the price in the app`;
   }
   if (product.best_vendor_pricing_id !== row.id) return 'the catalog best price is not backed by that vendor row';
   if (!same(product.best_price, STALE_PRICE) || !same(product.unit_size_oz, STALE_SIZE_OZ)) {
@@ -179,7 +190,7 @@ async function insertPriceHistory(knex, productId, row) {
 }
 
 // Mirrors PUT /:productId/pricing (existing row) + recalcBestPriceLocked for a manual $30.90 entry. True when it changed the rows.
-async function fixCatalogPrice(knex, hasAudit) {
+async function fixCatalogPrice(knex) {
   if (!(await knex.schema.hasTable('products_catalog')) || !(await knex.schema.hasTable('vendor_pricing'))) return false;
   const found = await knex('products_catalog').where({ name: CATALOG_NAME });
   if (found.length === 0) return false;
@@ -191,7 +202,7 @@ async function fixCatalogPrice(knex, hasAudit) {
   await lockProduct(knex, productId);
   const product = await knex('products_catalog').where({ id: productId }).forUpdate().first();
   const rows = await knex('vendor_pricing').where({ product_id: productId }).forUpdate();
-  const blocker = await catalogBlocker(knex, product, rows, hasAudit);
+  const blocker = await catalogBlocker(knex, product, rows);
   if (blocker === 'done') return false;
   if (blocker) {
     console.warn(`${LOG} ${CATALOG_NAME} price left alone: ${blocker}`);
@@ -249,29 +260,11 @@ async function restoreCatalogPrice(knex) {
   }
 }
 
-// ── Link guard ───────────────────────────────────────────────────────────────
-
-// True when the catalog cannot raise a pre-slab quote above the $30.90 config.
-async function catalogLinkIsSafe(knex) {
-  if (!(await knex.schema.hasTable('products_catalog'))) return true;
-  const rows = await knex('products_catalog').where({ name: CATALOG_NAME });
-  for (const row of rows) {
-    if (row.active !== true || row.needs_pricing !== false) continue; // the engine ignores it
-    const price = num(row.best_price);
-    const oz = num(row.unit_size_oz);
-    if (!(price > 0) || !(oz > 0)) continue;
-    if (price / oz > LINK_CEILING_PER_OZ) {
-      console.warn(`${LOG} LINK GUARD: ${CATALOG_NAME} still carries $${(price / oz).toFixed(4)}/oz (best_price ${price} for ${oz} oz); config is $${(NEW_PRICE / STALE_SIZE_OZ).toFixed(4)}/oz. NOT rewriting onetime_preslab - both keys stay on Talak.`);
-      return false;
-    }
-  }
-  return true;
-}
-
 // ── pricing_config rows ──────────────────────────────────────────────────────
 
 const holds = (product, values) => Object.entries(values).every(([k, v]) => isDeepStrictEqual(product[k], v))
   && SHADOWING_ALIASES.every((alias) => product[alias] === undefined);
+const isTalak = (product, plan) => holds(product, plan.from) || isDeepStrictEqual(product, plan.seed);
 
 function toCrosscheck(product, values) {
   const next = { ...product };
@@ -289,7 +282,7 @@ function rewriteRow(configKey, data, plan) {
       console.warn(`${LOG} ${configKey} has no products.${key} - the code default (Crosscheck Plus) applies; leaving it alone`);
     } else if (holds(product, plan.to)) {
       // already Crosscheck (a re-run): not ours
-    } else if (!holds(product, plan.from)) {
+    } else if (!isTalak(product, plan)) {
       console.warn(`${LOG} ${configKey}.products.${key} was edited since the Talak swap - leaving the admin's values alone`);
     } else {
       products[key] = toCrosscheck(product, plan.to);
@@ -299,7 +292,7 @@ function rewriteRow(configKey, data, plan) {
   return changed ? { ...data, products } : null;
 }
 
-async function rewriteConfigRows(knex, hasAudit, linkSafe) {
+async function rewriteConfigRows(knex) {
   const rewritten = [];
   for (const [key, plan] of Object.entries(PLANS)) {
     const row = await knex('pricing_config').where({ config_key: key }).forUpdate().first('data');
@@ -307,17 +300,14 @@ async function rewriteConfigRows(knex, hasAudit, linkSafe) {
     if (!data || !data.products || typeof data.products !== 'object') continue;
     const next = rewriteRow(key, data, plan);
     if (!next) continue;
-    if (plan.linked && !linkSafe) continue; // the guard has already warned
     await knex('pricing_config').where({ config_key: key }).update({ data: JSON.stringify(next), updated_at: knex.fn.now() });
-    if (hasAudit) {
-      await knex('pricing_config_audit').insert({
-        config_key: key,
-        old_value: JSON.stringify(data),
-        new_value: JSON.stringify(next),
-        changed_by: TAG,
-        reason: REASON,
-      });
-    }
+    await knex('pricing_config_audit').insert({
+      config_key: key,
+      old_value: JSON.stringify(data),
+      new_value: JSON.stringify(next),
+      changed_by: TAG,
+      reason: REASON,
+    });
     rewritten.push(key);
   }
   return rewritten;
@@ -357,13 +347,12 @@ exports.CATALOG_REASON = CATALOG_REASON;
 exports.CATALOG_AUDIT_KEY = CATALOG_AUDIT_KEY;
 
 exports.up = async function up(knex) {
-  const hasAudit = await knex.schema.hasTable('pricing_config_audit');
-  const priceFixed = await fixCatalogPrice(knex, hasAudit);
-  let rewritten = [];
-  if (await knex.schema.hasTable('pricing_config')) {
-    const linkSafe = await catalogLinkIsSafe(knex);
-    rewritten = await rewriteConfigRows(knex, hasAudit, linkSafe);
+  if (!(await knex.schema.hasTable('pricing_config_audit'))) {
+    console.warn(`${LOG} no pricing_config_audit table - nothing rewritten (down() could not find its writes)`);
+    return;
   }
+  const priceFixed = await fixCatalogPrice(knex);
+  const rewritten = await knex.schema.hasTable('pricing_config') ? await rewriteConfigRows(knex) : [];
   if ((rewritten.length || priceFixed) && await knex.schema.hasTable('pricing_changelog')
     && !(await knex('pricing_changelog').where(CHANGELOG).first('id'))) {
     await knex('pricing_changelog').insert({

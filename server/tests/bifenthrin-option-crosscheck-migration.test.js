@@ -1,7 +1,8 @@
 /**
  * 20261119020000: the pre-slab and trenching talstar_p / bifen_it options become LESCO Crosscheck Plus (1 gal = 128 fl oz,
  * $30.90, EPA 10404-120) in the persisted pricing_config rows, and the stale $58.42 SiteOne catalog price for that product is
- * set to $30.90 first, so the pre-slab catalog link cannot raise slab quotes. Fixtures are what production held on 2026-11-18.
+ * set to $30.90 first, so the pre-slab catalog link cannot raise slab quotes. Fixtures are what production held on 2026-11-18, plus the
+ * admin seed's bare Talak product (routes/admin-pricing-config.js ensureTable, 2026-10-25 until this change).
  */
 const migration = require('../models/migrations/20261119020000_bifenthrin_option_crosscheck');
 const constants = require('../services/pricing-engine/constants');
@@ -112,14 +113,15 @@ beforeEach(() => {
 afterEach(() => jest.restoreAllMocks());
 
 const snapshot = (db) => JSON.stringify(db);
-const preslabStaysTalak = (db) => {
-  expect(productOf(db, 'onetime_preslab', 'talstar_p')).toEqual(PROD_PRESLAB_PRODUCT);
-  expect(productOf(db, 'onetime_preslab', 'bifen_it')).toEqual(PROD_PRESLAB_PRODUCT);
+const bothRowsRewritten = (db) => {
+  for (const option of ['talstar_p', 'bifen_it']) {
+    expect(productOf(db, 'onetime_preslab', option)).toEqual(PRESLAB_REWRITTEN);
+    expect(productOf(db, 'onetime_trenching', option)).toEqual(TRENCH_REWRITTEN);
+  }
 };
-const trenchIsCrosscheck = (db) => {
-  expect(productOf(db, 'onetime_trenching', 'talstar_p')).toEqual(TRENCH_REWRITTEN);
-  expect(productOf(db, 'onetime_trenching', 'bifen_it')).toEqual(TRENCH_REWRITTEN);
-};
+// The admin seed's Talak products (ensureTable until this change): no label, no catalog link.
+const SEED_PRESLAB = { container_cost: 41.57, container_oz: 96, product_oz_per_10_sqft: 1, margin_divisor: 0.5294 };
+const SEED_TRENCH = { container_cost: 41.57, container_oz: 96, product_oz_per_finished_gallon_at_standard_rate: 1, product_oz_per_finished_gallon_at_high_rate: 2 };
 
 describe('bifenthrin option is Crosscheck Plus migration', () => {
   test('the inlined Crosscheck values match both option products in constants.js', () => {
@@ -222,39 +224,26 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(warn).not.toHaveBeenCalled();
     });
 
-    test('a price an admin edited upward is left alone with a warning, and the guard then keeps pre-slab on Talak', async () => {
+    test.each([['45.00'], ['30.50']])('a price an admin edited (%s) is left alone with a warning; both rows are still rewritten', async (price) => {
       const db = world({
-        vendors: [vendorRow({ price: '45.00' })],
-        catalog: [catalogRow({ best_price: '45.00' })],
+        vendors: [vendorRow({ price })],
+        catalog: [catalogRow({ best_price: price })],
       });
       await migration.up(fakeKnex(db));
-      expect(db.vendor_pricing[0].price).toBe('45.00');
+      expect(db.vendor_pricing[0].price).toBe(price);
       expect(db.price_history).toEqual([]);
       expect(warn.mock.calls.map((c) => c[0]).join('\n')).toMatch(/price left alone/);
-      expect(warn.mock.calls.map((c) => c[0]).join('\n')).toMatch(/LINK GUARD/);
-      preslabStaysTalak(db);
-      trenchIsCrosscheck(db);
-      expect(db.pricing_config_audit.map((r) => r.config_key)).toEqual(['onetime_trenching']);
+      // The pre-slab link then follows that later catalog entry inside the bridge's band.
+      bothRowsRewritten(db);
+      expect(db.pricing_config_audit.map((r) => r.config_key).sort()).toEqual(['onetime_preslab', 'onetime_trenching']);
     });
 
-    test('a price an admin edited down to the owner price lets the guard pass', async () => {
-      const db = world({
-        vendors: [vendorRow({ price: '30.50' })],
-        catalog: [catalogRow({ best_price: '30.50' })],
-      });
-      await migration.up(fakeKnex(db));
-      expect(db.vendor_pricing[0].price).toBe('30.50');
-      expect(warn.mock.calls.map((c) => c[0]).join('\n')).toMatch(/price left alone/);
-      expect(productOf(db, 'onetime_preslab', 'talstar_p')).toEqual(PRESLAB_REWRITTEN);
-    });
-
-    test('two vendor rows: the price is skipped, and the stale catalog price keeps pre-slab on Talak', async () => {
+    test('two vendor rows: the price is left alone with a warning; both rows are still rewritten', async () => {
       const db = world({ vendors: [vendorRow(), vendorRow({ id: 'v2', vendor_id: 'ven2', vendor_sku: 'X1', price: '40.00' })] });
       await migration.up(fakeKnex(db));
       expect(db.vendor_pricing.map((v) => v.price)).toEqual(['58.42', '40.00']);
       expect(warn.mock.calls.map((c) => c[0]).join('\n')).toMatch(/exactly one vendor row/);
-      preslabStaysTalak(db);
-      trenchIsCrosscheck(db);
+      bothRowsRewritten(db);
     });
 
     test.each([
@@ -264,6 +253,8 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       ['a winner that is not the vendor row', { catalog: [catalogRow({ best_vendor_pricing_id: 'other' })] }],
       ['a catalog size that is not 128 oz', { catalog: [catalogRow({ unit_size_oz: '96.00' })] }],
       ['an inactive product', { catalog: [catalogRow({ active: false })] }],
+      ['a vendor row with shipping (the landed cost would need it)', { vendors: [vendorRow({ shipping_cost: '5.00' })] }],
+      ['a vendor row with tax (the landed cost would need it)', { vendors: [vendorRow({ tax_rate: '0.07' })] }],
     ])('%s: the price is left alone with a warning', async (_name, overrides) => {
       const db = world(overrides);
       const before = JSON.stringify([db.vendor_pricing, db.price_history]);
@@ -282,28 +273,52 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(warn).not.toHaveBeenCalled();
     });
 
-    test.each([
-      ['inactive', { active: false }],
-      ['needs pricing', { needs_pricing: true }],
-      ['no best price', { best_price: null }],
-      ['no unit size', { unit_size_oz: null }],
-      ['a per-oz price within 1.05x of 30.90 / 128', { best_price: '32.40' }],
-    ])('link guard passes when the catalog row is %s (the price step may not apply)', async (_name, extra) => {
-      // A vendor row that Step P will not touch, so the guard reads the catalog row as found.
-      const db = world({ catalog: [catalogRow({ best_vendor_pricing_id: 'other', ...extra })] });
-      await migration.up(fakeKnex(db));
-      expect(productOf(db, 'onetime_preslab', 'talstar_p')).toEqual(PRESLAB_REWRITTEN);
+    test('the admin seed\'s bare Talak products are rewritten like the Talak rows, and down() puts the seed back', async () => {
+      const db = world({ preslab: preslabRow(SEED_PRESLAB, SEED_PRESLAB), trench: trenchRow(SEED_TRENCH, SEED_TRENCH), catalog: [], vendors: [] });
+      const original = JSON.stringify(db.pricing_config);
+      const knex = fakeKnex(db);
+      await migration.up(knex);
+      bothRowsRewritten(db);
+      expect(warn).not.toHaveBeenCalled();
+      const after = snapshot(db);
+      await migration.up(knex);
+      expect(snapshot(db)).toBe(after); // a re-run is a no-op
+      await migration.down(knex);
+      expect(db.pricing_config.map((r) => JSON.parse(r.data))).toEqual(JSON.parse(original).map((r) => JSON.parse(r.data)));
     });
 
-    test('link guard fails on a per-oz price above 1.05x: pre-slab untouched and unrecorded, trenching rewritten', async () => {
-      const db = world({ catalog: [catalogRow({ best_vendor_pricing_id: 'other', best_price: '32.50' })] });
+    test('a seed-shaped product with anything added or changed is an admin edit and is left alone', async () => {
+      const db = world({
+        preslab: preslabRow({ ...SEED_PRESLAB, container_cost: 40 }, { ...SEED_PRESLAB, positioning: 'premium' }),
+        trench: trenchRow({ ...SEED_TRENCH, label: 'Mine' }, SEED_TRENCH),
+        catalog: [],
+        vendors: [],
+      });
       await migration.up(fakeKnex(db));
-      preslabStaysTalak(db);
-      trenchIsCrosscheck(db);
-      expect(db.pricing_config_audit.map((r) => r.config_key)).toEqual(['onetime_trenching']);
-      const loud = warn.mock.calls.map((c) => c[0]).join('\n');
-      expect(loud).toMatch(/LINK GUARD/);
-      expect(loud).toMatch(/\/oz/);
+      expect(productOf(db, 'onetime_preslab', 'talstar_p')).toEqual({ ...SEED_PRESLAB, container_cost: 40 });
+      expect(productOf(db, 'onetime_preslab', 'bifen_it')).toEqual({ ...SEED_PRESLAB, positioning: 'premium' });
+      expect(productOf(db, 'onetime_trenching', 'talstar_p')).toEqual({ ...SEED_TRENCH, label: 'Mine' });
+      expect(productOf(db, 'onetime_trenching', 'bifen_it')).toEqual(TRENCH_REWRITTEN);
+    });
+
+    test('through the bridge: the seed row prices a 6,832 sq ft slab at $993 before up() and $743 after (no catalog row)', async () => {
+      const price = async (data) => {
+        let bridge;
+        let pricing;
+        jest.isolateModules(() => {
+          bridge = require('../services/pricing-engine/db-bridge');
+          pricing = require('../services/pricing-engine/service-pricing');
+        });
+        const bridgeDb = (table) => ({ select: async () => (table === 'pricing_config' ? [{ config_key: 'onetime_preslab', data }] : []) });
+        bridgeDb.schema = { hasTable: async (table) => table === 'pricing_config' };
+        jest.spyOn(console, 'log').mockImplementation(() => {});
+        expect(await bridge.syncConstantsFromDB(bridgeDb)).toBe(true);
+        return ['talstar_p', 'bifen_it'].map((productKey) => pricing.pricePreSlabTermiticide({ slabSqFt: 6832 }, { productKey }).price);
+      };
+      const db = world({ preslab: preslabRow(SEED_PRESLAB, SEED_PRESLAB), catalog: [], vendors: [] });
+      expect(await price(rowOf(db, 'onetime_preslab'))).toEqual([993, 993]);
+      await migration.up(fakeKnex(db));
+      expect(await price(rowOf(db, 'onetime_preslab'))).toEqual([743, 743]);
     });
 
     test('rows already on Crosscheck are left alone and get no record', async () => {
@@ -359,10 +374,15 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       await expect(migration.up(fakeKnex({ pricing_config: [] }))).resolves.toBeUndefined();
       await expect(migration.up(fakeKnex({ pricing_config: [{ config_key: 'onetime_preslab', data: '{}' }] }))).resolves.toBeUndefined();
       await expect(migration.up(fakeKnex({ pricing_config: [{ config_key: 'onetime_preslab', data: JSON.stringify({ products: { taurus_sc: {} } }) }] }))).resolves.toBeUndefined();
-      const noAudit = world();
-      delete noAudit.pricing_config_audit;
-      await migration.up(fakeKnex(noAudit));
-      expect(noAudit.vendor_pricing[0].price).toBe('58.42'); // no way to record it, so no price write
+    });
+
+    test('with no pricing_config_audit table up() writes nothing: down() could not find its writes', async () => {
+      const db = world();
+      delete db.pricing_config_audit;
+      const before = snapshot(db);
+      await migration.up(fakeKnex(db));
+      expect(snapshot(db)).toBe(before);
+      expect(warn.mock.calls.map((c) => c[0]).join('\n')).toMatch(/no pricing_config_audit table/);
     });
   });
 
@@ -427,13 +447,15 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(productOf(db, 'onetime_preslab', 'bifen_it')).toEqual(PROD_PRESLAB_PRODUCT);
     });
 
-    test('after a guard-failed up(), down() restores trenching and leaves the untouched pre-slab and price rows alone', async () => {
+    test('after an up() that left an edited price alone, down() restores both rows and leaves the price alone', async () => {
       const db = world({ vendors: [vendorRow({ price: '45.00' })], catalog: [catalogRow({ best_price: '45.00' })] });
       const knex = fakeKnex(db);
       await migration.up(knex);
       await migration.down(knex);
-      preslabStaysTalak(db);
-      expect(productOf(db, 'onetime_trenching', 'talstar_p')).toEqual(PROD_TRENCH_PRODUCT);
+      for (const option of ['talstar_p', 'bifen_it']) {
+        expect(productOf(db, 'onetime_preslab', option)).toEqual(PROD_PRESLAB_PRODUCT);
+        expect(productOf(db, 'onetime_trenching', option)).toEqual(PROD_TRENCH_PRODUCT);
+      }
       expect(db.vendor_pricing[0].price).toBe('45.00');
       expect(db.pricing_config_audit).toEqual([]);
     });
