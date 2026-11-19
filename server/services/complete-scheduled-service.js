@@ -5905,6 +5905,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // ledger never records actuals for a visit nobody attested.
     const lawnLedgerVisit = lawnActualsLedgerEnabled() && detectServiceLine(svc?.service_type) === 'lawn' && !issuedInvoiceCloseout;
     const waveguardCloseout = !isIncompleteVisit && isWaveGuardLawnCompletion(svc) && !issuedInvoiceCloseout;
+    const normalizedTetrinoScout = require('./lawn-fast-complete').normalizedTetrinoScout(lawnFast?.tetrinoScout);
+    const hasTetrinoScoutInput = normalizedTetrinoScout.tetrinoApplied
+      || ['tetrinoTarget', 'tetrinoCurrentObservations', 'tetrinoPressure', 'grubTimingEvidence']
+        .some((key) => normalizedTetrinoScout[key]);
+    const tetrinoPlannerOptions = hasTetrinoScoutInput ? {
+      ...normalizedTetrinoScout,
+      ...(normalizedTetrinoScout.tetrinoApplied ? { selectedConditionalProductNames: ['Tetrino Insecticide'] } : {}),
+    } : {};
     if (claim.action === 'proceed' && (waveguardCloseout || lawnLedgerVisit)) {
       try {
         // Under a packet closeout `db` is the packet's outer transaction: a
@@ -5938,8 +5946,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // P2), and the lane recheck under the customer lock compares the
           // same column under the same probe (a failed probe aborted above).
           billingModeColumnExists: billingModeColumnsExist,
-          ...require('./lawn-fast-complete').normalizedTetrinoScout(lawnFast?.tetrinoScout),
-          ...(lawnFast?.tetrinoScout?.tetrinoApplied === true ? { selectedConditionalProductNames: ['Tetrino Insecticide'] } : {}),
+          ...tetrinoPlannerOptions,
         }));
       } catch (planErr) {
         if (waveguardCloseout) throw planErr;

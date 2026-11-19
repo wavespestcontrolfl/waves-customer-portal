@@ -13,6 +13,10 @@ const { validateRule } = require('../services/service-report/lawn-watering-rule'
 const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
 
 const ALL = [...migration.FILL, ...migration.REPLACE];
+const productNamesOf = (text) => String(text || '').split('\n')
+  .filter((line) => line.includes(' — '))
+  .map((line) => line.split(' — ')[0].trim())
+  .filter(Boolean);
 
 describe('the v13 watering rules', () => {
   test.each(ALL.map((item) => [item.name, item.rule]))('%s is a valid rule', (_name, rule) => {
@@ -33,14 +37,13 @@ describe('the v13 watering rules', () => {
         // ... and every add-on step (addOns.bermudaRemoval, PR #6035).
         for (const source of [visit, ...Object.values(visit.cadenceVariants || {}), ...Object.values(visit.addOns || {})]) {
           for (const field of ['primary', 'secondary']) {
-            for (const line of String(source[field] || '').split('\n')) {
-              const name = line.split(' — ')[0].trim();
-              if (name && !/^Scout visit/.test(name)) names.add(name);
-            }
+            for (const name of productNamesOf(source[field])) names.add(name);
           }
         }
       }
     }
+    expect(names).toContain('Tetrino Insecticide');
+    expect([...names].some((name) => name.startsWith('Scout May'))).toBe(false);
     // Stored on main by earlier label reads (20260930000001 seed).
     const matrix = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
     const storedOnMain = new Set(['Arena 50 WDG', 'Celsius WG', 'Atticus Talak 7.9 F']);

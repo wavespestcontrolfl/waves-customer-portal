@@ -2709,7 +2709,7 @@ async function buildPlanForService(serviceId, options = {}) {
     // product, rate scope and gates; the plan warns).
     const substitution = !v13Active && item.product ? substitutions.get(String(item.product.id)) : null;
     const plannedProduct = substitution ? substitutedProduct(substitution) : item.product;
-    const mix = plannedProduct && (!line || line.state === 'calculate') && !(applyAloneBlocks.length && item.selected) ? calculateProductAmount({
+    const mix = plannedProduct && !item.fieldHold && (!line || line.state === 'calculate') && !(applyAloneBlocks.length && item.selected) ? calculateProductAmount({
       product: plannedProduct,
       lawnSqft,
       // The catch-up is a hose pass at its own row's carrier (1 gal per 1,000 sq ft), whatever rig the round's spreader visit names.

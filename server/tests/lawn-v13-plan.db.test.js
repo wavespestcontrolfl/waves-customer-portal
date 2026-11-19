@@ -84,7 +84,12 @@ describeDb('the v13 plan through PostgreSQL', () => {
     await knex('customer_turf_profiles').insert({ customer_id: f.customerId, active: true, ...turf, lawn_sqft: 10000 });
     return f.visit(0, { scheduled_date: '2026-05-12', ...changes });
   }
-  const plan = (visit) => buildPlanForService(visit.id, { db: knex, includeCompletionDefaults: true });
+  const plan = (visit, options = {}) => buildPlanForService(visit.id, { db: knex, includeCompletionDefaults: true, ...options });
+  const planChinchTreatment = (visit, otherProducts = []) => plan(visit, {
+    tetrinoTarget: 'chinch',
+    tetrinoCurrentObservations: 'Live chinch bugs in four counts at the edge of declining turf.',
+    selectedConditionalProductNames: ['Tetrino Insecticide', ...otherProducts],
+  });
   const codes = (result) => result.propertyGate.blocks.map((b) => b.code);
   const tetrinoItem = (result) => result.mixCalculator.items.find((item) => item.product?.name === 'Tetrino Insecticide');
 
@@ -93,7 +98,12 @@ describeDb('the v13 plan through PostgreSQL', () => {
 
     test('unpinned: the staged v13 protocol, its stated rate and its sunny-turf half (1.835 fl oz on 10,000 sq ft)', async () => {
       gates();
-      const result = await plan(await plannedVisit());
+      const visit = await plannedVisit();
+      const scoutOnly = await plan(visit, { conditionFlags: ['chinch'] });
+      expect(tetrinoItem(scoutOnly)).toBeUndefined();
+      expect(scoutOnly.mixCalculator.conditionalOptions.find(item => item.product?.id === tetrino.id))
+        .toMatchObject({ selected: false, fieldHold: 'tetrino_scout_evidence_required', mix: null });
+      const result = await planChinchTreatment(visit);
       expect(result.protocol.structured.version).toBe(LAWN_V13_VERSION);
       expect(codes(result)).not.toContain('lawn_v13_protocol_missing');
       expect(tetrinoItem(result).mix).toMatchObject({ rateSource: 'protocol_rate', amount: 1.835 });
@@ -101,7 +111,7 @@ describeDb('the v13 plan through PostgreSQL', () => {
 
     test('pinned to the staged v13 version: resolved and planned the same way', async () => {
       gates();
-      const result = await plan(await plannedVisit({ lawn_protocol_key: KEY, lawn_protocol_version: LAWN_V13_VERSION, lawn_protocol_window_key: 'may_v13' }));
+      const result = await planChinchTreatment(await plannedVisit({ lawn_protocol_key: KEY, lawn_protocol_version: LAWN_V13_VERSION, lawn_protocol_window_key: 'may_v13' }));
       expect(result.protocol.structured.version).toBe(LAWN_V13_VERSION);
       expect(tetrinoItem(result).mix.amount).toBe(1.835);
     });
@@ -335,7 +345,7 @@ describeDb('the v13 plan through PostgreSQL', () => {
   describe('restored Tetrino gates on the plan item', () => {
     test('the item carries its gates, a required water-distance warning shows on the plan, and alone there is no apply-alone block', async () => {
       setGates();
-      const result = await plan(await plannedVisit());
+      const result = await planChinchTreatment(await plannedVisit());
       const item = tetrinoItem(result);
       expect(item.gates).toEqual({ sunnyTurfOnly: true, minDistanceFromWaterFt: 25, applyAlone: true });
       expect(item.gateNotes.map((n) => `${n.severity}:${n.key}`)).toEqual(['required:minDistanceFromWaterFt', 'note:applyAlone', 'note:sunnyTurfOnly']);
@@ -348,14 +358,15 @@ describeDb('the v13 plan through PostgreSQL', () => {
     test('another selected product beside the apply-alone Tetrino holds the mix: block, no combined mixing order', async () => {
       setGates();
       const visit = await plannedVisit();
-      const result = await buildPlanForService(visit.id, { db: knex, selectedConditionalProductNames: ['Arena 50 WDG'] });
-      expect(result.mixCalculator.items.map((i) => i.product.name).sort()).toEqual(['Arena 50 WDG', 'Tetrino Insecticide']);
+      const result = await planChinchTreatment(visit, ['Arena 50 WDG']);
+      const selectedProducts = result.mixCalculator.items.filter(item => item.product);
+      expect(selectedProducts.map(item => item.product.name).sort()).toEqual(['Arena 50 WDG', 'Tetrino Insecticide']);
       expect(codes(result)).toContain('lawn_v13_apply_alone');
       expect(result.status).toBe('blocked');
       expect(result.mixingOrder).toEqual([]);
       // The hold withholds the selection's quantities in the plan, as on the tank sheet.
-      expect(result.mixCalculator.items.map((i) => i.mix)).toEqual([null, null]);
-      expect(result.mixCalculator.items.every((i) => i.product.inventory.plannedAmount == null)).toBe(true);
+      expect(selectedProducts.map(item => item.mix)).toEqual([null, null]);
+      expect(selectedProducts.every(item => item.product.inventory.plannedAmount == null)).toBe(true);
       expect(result.mixCalculator.materialCostSummary.pricedLineCount ?? 0).toBe(0);
       expect(JSON.stringify(result.mixCalculator.nutrientProjection)).not.toMatch(/"amount":\s*[1-9]/);
     });
@@ -412,14 +423,14 @@ describeDb('the v13 plan through PostgreSQL', () => {
       }
       expect(result.mixCalculator.items.find((i) => i.product?.name === 'Celsius WG').spot.reference).toBe('Label rate 0.085 oz per 1,000 sq ft');
       expect(result.mixCalculator.items.find((i) => i.product?.name === 'LESCO 90/10 Nonionic Surfactant').spot.reference).toBe('Label concentration 0.25% v/v');
-      // Tetrino is apply-alone and these are selected beside it: the hold withholds its amount too.
-      expect(codes(result)).toContain('lawn_v13_apply_alone');
-      expect(tetrinoItem(result).mix).toBeNull();
+      // Selecting only spot products leaves May's optional whole-lawn treatment out of the mix.
+      expect(codes(result)).not.toContain('lawn_v13_apply_alone');
+      expect(tetrinoItem(result)).toBeUndefined();
     });
 
     test('the whole-lawn Tetrino still computes beside UNSELECTED spot options: 1.835 fl oz on the sunny half of 10,000 sq ft', async () => {
       setGates();
-      const result = await plan(await plannedVisit());
+      const result = await planChinchTreatment(await plannedVisit());
       expect(codes(result)).not.toContain('lawn_v13_apply_alone');
       expect(tetrinoItem(result).mix.amount).toBe(1.835);
     });
@@ -435,7 +446,7 @@ describeDb('the v13 plan through PostgreSQL', () => {
     test('completion defaults offer the spot products as options and prefill none of them', async () => {
       setGates({ completion: 'on', history: 'on' });
       const result = await buildPlanForService((await plannedVisit()).id, { db: knex, includeCompletionDefaults: true, ...select });
-      expect(result.completionDefaults.items.map((i) => i.product.name)).toEqual(['Tetrino Insecticide']);
+      expect(result.completionDefaults.items).toEqual([]);
       expect(result.completionDefaults.options.map((o) => o.product.name)).toEqual(expect.arrayContaining(SPOTS));
       expect(result.completionDefaults.items.every((i) => !SPOTS.includes(i.product.name))).toBe(true);
     });
@@ -449,7 +460,7 @@ describeDb('the v13 plan through PostgreSQL', () => {
     try {
       const result = await plan(await plannedVisit());
       expect(result.mixCalculator.items.some((i) => i.product?.name === 'Tetrino Insecticide')).toBe(false);
-      const line = result.protocol.base.find((i) => /^Tetrino/.test(i.raw));
+      const line = result.protocol.conditional.find((i) => /^Tetrino/.test(i.raw));
       expect(line).toMatchObject({ matched: false, product: null, mix: null });
       expect(result.mixCalculator.items.every((i) => !i.product || i.product.name !== 'Acelepryn Insecticide')).toBe(true);
     } finally {
@@ -467,7 +478,7 @@ describeDb('the v13 plan through PostgreSQL', () => {
       const [substitute] = await knex('products_catalog').insert({ name: 'Substitute Insecticide', category: 'insecticide', default_rate_per_1000: 2, rate_unit: 'fl oz', label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'fl oz', active: true }).returning('*');
       await knex('lawn_protocol_product_substitutions').insert({ scheduled_service_id: visit.id, original_product_id: tetrino.id, substitute_product_id: substitute.id, rate_per_1000: 2, rate_unit: 'fl oz', reason: 'out of stock' });
       try {
-        const result = await buildPlanForService(visit.id, { db: knex });
+        const result = await planChinchTreatment(visit);
         const tet = tetrinoItem(result);
         expect(tet.substitution).toBeNull();
         expect(tet.product.name).toBe('Tetrino Insecticide');
@@ -488,7 +499,7 @@ describeDb('the v13 plan through PostgreSQL', () => {
       const arena = await knex('products_catalog').where({ name: 'Arena 50 WDG' }).first();
       await knex('lawn_protocol_products').where({ id: stagedRow.id }).update({ product_id: link === 'arena' ? arena.id : null });
       try {
-        const result = await plan(await plannedVisit());
+        const result = await planChinchTreatment(await plannedVisit());
         const tet = tetrinoItem(result);
         expect(tet.mix).toBeNull();
         expect(tet.unavailable.reason).toMatch(/No protocol row is linked/);
@@ -528,7 +539,7 @@ describeDb('the v13 plan through PostgreSQL', () => {
       test('a whole-lawn row at an annual application cap computes nothing; unselected, the same product is not blocked', async () => {
         setGates();
         await withLimit({ product: tetrino, limit: { limit_type: 'annual_max_apps', limit_value: 1 }, history: [{ application_rate: 0.367 }] }, async (visit) => {
-          const result = await buildPlanForService(visit.id, { db: knex });
+          const result = await planChinchTreatment(visit);
           expect(result.propertyGate.blocks.find((b) => b.code === 'lawn_v13_annual_limit').message).toMatch(/1\/1 applications this year — LIMIT REACHED/);
           expect(tetrinoItem(result).mix).toBeNull();
         });
@@ -563,7 +574,7 @@ describeDb('the v13 plan through PostgreSQL', () => {
         // reach 1.468: a warning (approaching the yearly amount), not a block.
         const earlier = { application_rate: 0.367, rate_unit: 'fl oz' };
         await withLimit({ product: tetrino, limit: { limit_type: 'annual_max_apps', limit_value: 99, severity: 'warning' }, history: [{ ...earlier, application_date: '2026-01-05' }, { ...earlier, application_date: '2026-02-09' }, { ...earlier, application_date: '2026-03-16' }] }, async (visit) => {
-          const result = await buildPlanForService(visit.id, { db: knex });
+          const result = await planChinchTreatment(visit);
           expect(result.propertyGate.warnings.find((w) => w.code === 'lawn_v13_limit_warning')).toMatchObject({ productName: 'Tetrino Insecticide', limitType: 'annual_max_rate' });
           expect(result.propertyGate.blocks.map((b) => b.code)).not.toContain('lawn_v13_annual_limit');
           expect(tetrinoItem(result).mix.amount).toBe(1.835);
