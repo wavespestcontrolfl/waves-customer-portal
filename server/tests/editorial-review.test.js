@@ -143,6 +143,8 @@ describe('editorial review', () => {
     expect(result.checks.every((check) => check.status === 'error')).toBe(true);
     expect(result.checks[0].findings[0].detail).toContain('frontmatter is invalid');
     expect(mockDispatch).not.toHaveBeenCalled();
+    // A document the review refuses as input is not an outage: a retry of the same text fails the same way.
+    expect(result.transient).toBe(false);
   });
 
   test('fails closed when dispatch is unavailable', async () => {
@@ -151,6 +153,7 @@ describe('editorial review', () => {
     expect(result.pass).toBe(false);
     expect(result.checks).toHaveLength(5);
     expect(result.checks.every((check) => check.status === 'error')).toBe(true);
+    expect(result.transient).toBe(true);
   });
 
   test('rejects a supported claim whose quote is not exact fetched evidence', async () => {

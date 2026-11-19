@@ -493,3 +493,14 @@ test('source extraction preserves a balanced parenthesis inside a URL and trims 
   expect(evidence.sourceUrls('(see https://a.org/x)')).toEqual(['https://a.org/x']);
   expect(evidence.sourceUrls('[x](https://a.org/b_(c))')).toEqual(['https://a.org/b_(c)']);
 });
+
+describe('reviewError: only a review that could not run is transient', () => {
+  const errored = (transient) => ({ checks: [{ name: 'source_support', status: 'error', findings: [{ action: 'Retry.' }] }], model: null, transient });
+  test('an outage result is transient; an input refusal, a failed review and an unknown error are not', () => {
+    expect(evidence.reviewError(errored(true))).toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE', transient: true });
+    expect(evidence.reviewError(errored(false))).toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE', transient: false });
+    expect(evidence.reviewError(null)).toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE', transient: false });
+    expect(evidence.reviewError({ checks: [{ name: 'source_support', status: 'fail', findings: [{ action: 'Cite it.' }] }], transient: true }))
+      .toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_FAILED', transient: false });
+  });
+});

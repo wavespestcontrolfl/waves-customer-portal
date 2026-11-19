@@ -142,6 +142,8 @@ function reviewError(result) {
     ? 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' : 'BLOG_EDITORIAL_REVIEW_FAILED';
   error.findings = findings.length ? findings : [{ severity: 'P0', code: 'EDITORIAL_UNAVAILABLE', message: error.message }];
   error.editorialResult = result;
+  // Only a review that could not run is worth waiting for (the Mac job keeps the draft then).
+  error.transient = error.code === 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' && result?.transient === true;
   return error;
 }
 

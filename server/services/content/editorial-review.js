@@ -37,7 +37,9 @@ function finding(passage, detail, action, extra = {}) {
   return { passage, detail, action, sourceIndexes: [], sourceQuote: '', ...extra };
 }
 
-function errorResult(document, title, detail, action, sources = [], reviewedAt = new Date().toISOString()) {
+// `transient`: the review could not run (sources, the model, its answer), so the same document may pass
+// a retry; false for a document the review refuses as input (prepareReview).
+function errorResult(document, title, detail, action, sources = [], reviewedAt = new Date().toISOString(), transient = true) {
   const passage = firstPassage(document, title);
   return {
     pass: false,
@@ -45,6 +47,7 @@ function errorResult(document, title, detail, action, sources = [], reviewedAt =
     sources,
     model: null,
     reviewedAt,
+    transient,
   };
 }
 
@@ -128,7 +131,7 @@ async function review({ document, title, domain, sourceUrls = [], factsPack = nu
   document = typeof document === 'string' ? document : '';
   title = typeof title === 'string' ? title.trim() : '';
   const prepared = prepareReview(document, title);
-  if (prepared.error) return errorResult(document, title, prepared.error[0], prepared.error[1], [], reviewedAt);
+  if (prepared.error) return errorResult(document, title, prepared.error[0], prepared.error[1], [], reviewedAt, false);
   const { analysis } = prepared;
 
   let evidence;

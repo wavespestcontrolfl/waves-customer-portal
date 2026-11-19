@@ -807,9 +807,7 @@ class AutonomousRunner {
       }
       // The Mac job: a reviewer that could not run (a claude -p limit or timeout) is no verdict on the
       // terminal draft. Keep the draft on its branch and wait on the same brief, as a plan-review outage does.
-      if (err.code === 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' && run.terminal_draft_revision && terminalWriter.runningOnMac()) {
-        return this._awaitTerminalReviewer({ queue, opp, run, t0, finalize, claimToken, reason: err.message });
-      }
+      if (macReviewOutage(err, run)) return this._awaitTerminalReviewer({ queue, opp, run, t0, finalize, claimToken, reason: err.message });
       return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
         claimToken, skipReason: 'editorial_review_failed', notes: err.message, blocking: err.findings,
       });
@@ -1573,6 +1571,8 @@ class AutonomousRunner {
       if (err.code === 'BLOG_OWNER_LIST_BLOCKED' || err.code === 'BLOG_OWNER_LIST_UNVERIFIED') {
         return this._ownerListCommitRefused(queue, opp, run, t0, finalize, { claimToken, err, unattendedBlog });
       }
+      // The publish-time review (final evidence) on the Mac: an outage keeps the draft, as before the gates.
+      if (macReviewOutage(err, run)) return this._awaitTerminalReviewer({ queue, opp, run, t0, finalize, claimToken, reason: err.message });
       if (['BLOG_EDITORIAL_REVIEW_FAILED', 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE'].includes(err.code)) {
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
           claimToken, skipReason: 'editorial_review_failed', notes: err.message, blocking: err.findings,
@@ -2309,6 +2309,8 @@ class AutonomousRunner {
     const terminalWriter = require('./terminal-writer');
     if (await terminalWriter.blogDraftRequested()) return;
     if (await terminalWriter.macHoldsBlogDraft()) return;
+    // Mac mode: the Mac job publishes blogs outside this batch, so read the day's record, not only these runs.
+    if (terminalWriter.editorialReviewOnMac() && await this._blogStartedToday().catch(() => false)) return;
     // the caller's own arguments, unchanged
     await this._sendBlogDroughtSms(...args).catch((err) => {
       logger.warn(`[autonomous-runner] blog drought alert failed: ${err.message}`);
@@ -5434,6 +5436,13 @@ function isDeterministicPublishError(err) {
     /^autonomous draft canonical points off-site /,
     /^autonomous draft canonical must match slug /,
   ].some((pattern) => pattern.test(message));
+}
+
+// The Mac job: an editorial review of a terminal draft that could not run (sources, the model or its
+// answer; not a document the review refuses as input) is no verdict on the draft.
+function macReviewOutage(err, run) {
+  return err?.code === 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' && err.transient === true
+    && Boolean(run?.terminal_draft_revision) && require('./terminal-writer').runningOnMac();
 }
 
 // The Mac pass counts a reviewer that could not run (the draft is kept and the row

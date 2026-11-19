@@ -5817,8 +5817,8 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     const saved = { ...process.env };
     afterEach(() => { process.env = { ...saved }; });
     const read = { ok: true, draft, brief_id: 'brief_handed', revision: 'sha_read', duration_ms: 5, agent_id: 'terminal-writer', session_id: null };
-    const reviewFails = (code) => jest.doMock('../services/content/editorial-evidence', () => ({
-      prepareDraft: jest.fn().mockRejectedValue(Object.assign(new Error('claude -p timed out'), { code, findings: [] })),
+    const reviewFails = (code, transient = code === 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE') => jest.doMock('../services/content/editorial-evidence', () => ({
+      prepareDraft: jest.fn().mockRejectedValue(Object.assign(new Error('claude -p timed out'), { code, transient, findings: [] })),
       reviewError: jest.fn(),
     }));
 
@@ -5839,11 +5839,12 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     test.each([
       ['a review that failed on the Mac', { runner: 'mac', code: 'BLOG_EDITORIAL_REVIEW_FAILED' }],
       ['an outage off the Mac', { runner: null, code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' }],
-    ])('%s still takes the bounded gate retry', async (_label, { runner: onMac, code }) => {
+      ['a document the review refuses as input, on the Mac', { runner: 'mac', code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE', transient: false }],
+    ])('%s still takes the bounded gate retry', async (_label, { runner: onMac, code, transient }) => {
       process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
       if (onMac) process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = onMac; else delete process.env.CONTENT_EDITORIAL_REVIEW_RUNNER;
       const { runner } = setup({ source: read, handed: city('brief_handed') });
-      reviewFails(code);
+      reviewFails(code, transient);
       const retry = jest.spyOn(runner, '_gateFailRetryOrSkip').mockResolvedValue({ outcome: 'gate_retry' });
       await expect(runner.runNext()).resolves.toEqual({ outcome: 'gate_retry' });
       expect(retry.mock.calls[0][5]).toMatchObject({ skipReason: 'editorial_review_failed' });
@@ -5980,7 +5981,18 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     await runner._reportBlogDrought([], { haltBeforeBlog: null });
     expect(send).not.toHaveBeenCalled();
     terminalWriter.macHoldsBlogDraft.mockResolvedValue(false);
+    // Mac mode: a blog the Mac job already published today (outside this batch's runs) is not a drought.
+    terminalWriter.editorialReviewOnMac = () => true;
+    const started = jest.spyOn(runner, '_blogStartedToday').mockResolvedValue(true);
     await runner._reportBlogDrought([], { haltBeforeBlog: null });
-    expect(send).toHaveBeenCalledWith([], { haltBeforeBlog: null });
+    expect(send).not.toHaveBeenCalled();
+    started.mockRejectedValueOnce(new Error('db down')); // doubt keeps the alert
+    await runner._reportBlogDrought([], { haltBeforeBlog: null });
+    expect(send).toHaveBeenCalledTimes(1);
+    started.mockResolvedValue(false);
+    terminalWriter.editorialReviewOnMac = () => false;
+    await runner._reportBlogDrought([], { haltBeforeBlog: null });
+    expect(send).toHaveBeenLastCalledWith([], { haltBeforeBlog: null });
+    expect(started).toHaveBeenCalledTimes(2); // not read outside Mac mode
   });
 });
