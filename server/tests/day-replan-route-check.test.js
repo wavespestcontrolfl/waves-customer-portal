@@ -29,56 +29,97 @@ const stop = (id, start, end, extra = {}) => ({
   id, technician_id: TECH, status: 'confirmed', window_start: start, window_end: end, estimated_duration_minutes: 45,
   lat: 27.41, lng: -82.46, created_at: '2026-11-01T12:00:00Z', ...extra,
 });
-const open = { blocks: [], held: [], origin: HQ, departureMin: 480, openMin: 480, closeMin: 1020, onlineDay: true };
+// A Monday well ahead: only the customer window rule decides (the booking notice is far behind).
+const MONDAY = '2026-11-23';
+const AHEAD = new Date('2026-11-20T12:00:00Z');
+const open = { blocks: [], held: [], origin: HQ, departureMin: 480, openMin: 480, closeMin: 1020, admit: null };
 
-const savedGate = process.env.GATE_CUSTOMER_LAST_START_16;
+const savedEnv = { gate: process.env.GATE_CUSTOMER_LAST_START_16, notice: process.env.SELF_SERVE_NOTICE_HOURS };
+const restore = (key, value) => { if (value === undefined) delete process.env[key]; else process.env[key] = value; };
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.GATE_CUSTOMER_LAST_START_16 = 'true';
+  process.env.SELF_SERVE_NOTICE_HOURS = '1';
+  open.admit = rc.onlineAdmit(MONDAY, AHEAD);
 });
 afterAll(() => {
-  if (savedGate === undefined) delete process.env.GATE_CUSTOMER_LAST_START_16;
-  else process.env.GATE_CUSTOMER_LAST_START_16 = savedGate;
+  restore('GATE_CUSTOMER_LAST_START_16', savedEnv.gate);
+  restore('SELF_SERVE_NOTICE_HOURS', savedEnv.notice);
 });
 
-describe('online count: the customer hour grid and the customer last start', () => {
+describe('online count: the customer booking rules', () => {
   test('an opening holds an online job only on the hour grid, with a full job slot inside it', () => {
-    expect(rc.onlineSlots({ startMin: 560, min: 80 }, true)).toBe(0); // 9:20-10:40: dispatch fits one, no hourly start does
-    expect(rc.onlineSlots({ startMin: 540, min: 480 }, true)).toBe(4); // 9:00, 11:00, 1:00 and 3:00 PM
-    expect(rc.onlineSlots({ startMin: 540, min: 480 }, false)).toBe(0); // a Sunday: the picker offers no day
+    const admit = rc.onlineAdmit(MONDAY, AHEAD);
+    expect(rc.onlineStarts({ startMin: 560, min: 80 }, admit)).toEqual([]); // 9:20-10:40: dispatch fits one, no hourly start does
+    expect(rc.onlineStarts({ startMin: 540, min: 480 }, admit)).toEqual([540, 660, 780, 900]); // 9, 11, 1 and 3
+    expect(rc.onlineAdmit('2026-11-22', AHEAD)).toBeNull(); // a Sunday: the picker offers no day
   });
 
   test('a 5 PM start counts only while GATE_CUSTOMER_LAST_START_16 is off', () => {
-    expect(rc.onlineSlots({ startMin: 1020, min: 80 }, true)).toBe(0);
+    expect(rc.onlineStarts({ startMin: 1020, min: 80 }, rc.onlineAdmit(MONDAY, AHEAD))).toEqual([]);
     process.env.GATE_CUSTOMER_LAST_START_16 = 'false';
-    expect(rc.onlineSlots({ startMin: 1020, min: 80 }, true)).toBe(1);
+    expect(rc.onlineStarts({ startMin: 1020, min: 80 }, rc.onlineAdmit(MONDAY, AHEAD))).toEqual([1020]);
+  });
+
+  test('a start inside the self-serve booking notice is not online room, but stays dispatch room', () => {
+    const now = new Date('2026-11-23T15:30:00Z'); // Monday 10:30 AM ET, notice 1 h: the first online start is noon
+    const fig = rc.measureTechDay({ ...open, rows: [], departureMin: 630, openMin: 630, admit: rc.onlineAdmit(MONDAY, now) });
+    // 4 PM would need the job slot to 5:20; the opening ends at 5.
+    expect(fig.openings).toEqual([{ kind: 'tail', start: 630, min: 390, slots: 4, online: 2, starts: [720, 840] }]);
+    process.env.SELF_SERVE_NOTICE_HOURS = '24';
+    expect(rc.measureTechDay({ ...open, rows: [], departureMin: 630, openMin: 630, admit: rc.onlineAdmit(MONDAY, now) })).toMatchObject({ slots: 4, online: 0 });
+  });
+
+  test("booking_config's day end bounds the customer's visit", async () => {
+    const late = { startMin: 900, min: 120 }; // 3:00-5:00 PM
+    expect(rc.onlineStarts(late, rc.onlineAdmit(MONDAY, AHEAD))).toEqual([900]); // default close 6 PM
+    // A fresh module copy, so the booking-window cache this sets never reaches the other tests.
+    let fresh;
+    let windows;
+    jest.isolateModules(() => {
+      fresh = require('../services/day-replan/route-check')._internals;
+      windows = require('../services/scheduling/customer-windows');
+    });
+    await windows.refreshCustomerBookingWindowConfig(() => ({ first: async () => ({ lunch_start: '12:00:00', lunch_end: '12:00:00', day_end: '15:00:00' }) }));
+    expect(windows.currentDayEndMinutes()).toBe(900);
+    // A 3 PM close: a 3 PM visit would run to 4.
+    expect(fresh.onlineStarts(late, fresh.onlineAdmit(MONDAY, AHEAD))).toEqual([]);
   });
 });
 
 describe('where the van is now (today)', () => {
   const day = '2026-11-19';
   const home = HQ;
+  const sibling = (id) => ({
+    id, visit_id: null, customer_id: 'cust-1', status: 'on_site', window_start: '09:00:00', window_end: null, estimated_duration_minutes: 45,
+    lat: 27.5, lng: -82.4, service_address_line1: '1 Test St', created_at: '2026-11-01T12:00:00Z',
+  });
+
   test('the latest completed stop sets the place and the clock', () => {
     const van = rc.vanNow({
-      day, home, departureMin: 480, nowMin: 630,
-      progress: [
-        { status: 'completed', completed_at: '2026-11-19T13:50:00Z', lat: 27.3, lng: -82.5 }, // 8:50 ET
-        { status: 'completed', completed_at: '2026-11-19T14:45:00Z', lat: 27.5, lng: -82.4 }, // 9:45 ET
+      day, home, departureMin: 480, nowMin: 630, onSite: [],
+      completed: [
+        { completed_at: '2026-11-19T13:50:00Z', lat: 27.3, lng: -82.5 }, // 8:50 ET
+        { completed_at: '2026-11-19T14:45:00Z', lat: 27.5, lng: -82.4 }, // 9:45 ET
       ],
     });
     expect(van).toEqual({ origin: { lat: 27.5, lng: -82.4 }, clockMin: 585, source: 'completed' });
   });
 
-  test('a job on site that runs past its estimate keeps the van there until now', () => {
-    const van = rc.vanNow({
-      day, home, departureMin: 480, nowMin: 660,
-      progress: [{ status: 'on_site', arrived_at: '2026-11-19T14:00:00Z', estimated_duration_minutes: 45, lat: 27.5, lng: -82.4 }], // 9:00 + 45
-    });
-    expect(van.clockMin).toBe(660);
+  test('a job on site that runs past its stay keeps the van there until now', () => {
+    const onSite = rc.onSiteStays([sibling('s1')], new Map([['s1', '2026-11-19T14:00:00Z']])); // 9:00 + 45
+    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 660, completed: [], onSite }).clockMin).toBe(660);
   });
 
-  test('nothing done yet: the start point at the departure minute; a row with no place is ignored', () => {
-    const van = rc.vanNow({ day, home, departureMin: 480, nowMin: 450, progress: [{ status: 'completed', completed_at: '2026-11-19T13:00:00Z', lat: null, lng: null }] });
+  test('co-visit siblings on site together are charged their combined stay, as the simulator charges them', () => {
+    const arrived = new Map([['s1', '2026-11-19T14:00:00Z'], ['s2', '2026-11-19T14:00:00Z']]);
+    const onSite = rc.onSiteStays([sibling('s1'), sibling('s2')], arrived);
+    expect(onSite).toHaveLength(1);
+    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 560, completed: [], onSite })).toMatchObject({ clockMin: 630, source: 'on_site' });
+  });
+
+  test('nothing done yet: the start point at the departure minute; a completed row with no place is ignored', () => {
+    const van = rc.vanNow({ day, home, departureMin: 480, nowMin: 450, onSite: [], completed: [{ completed_at: '2026-11-19T13:00:00Z', lat: null, lng: null }] });
     expect(van).toEqual({ origin: home, clockMin: 480, source: 'start_point' });
   });
 });
@@ -87,14 +128,14 @@ describe('one tech-day', () => {
   test('counts each opening of a job slot or more, for dispatch and for online booking', () => {
     const fig = rc.measureTechDay({ ...open, rows: [stop('a', '09:00:00', '10:00:00'), stop('b', '13:00:00', '14:00:00', { lat: 27.45, lng: -82.4 })] });
     expect(fig.openings.map((o) => o.kind)).toEqual(['wait', 'tail']);
-    expect(fig.openings.find((o) => o.kind === 'tail')).toMatchObject({ start: 840, min: 180, slots: 2, online: 1 });
+    expect(fig.openings.find((o) => o.kind === 'tail')).toMatchObject({ start: 840, min: 180, slots: 2, online: 1, starts: [840] });
     expect(fig).toMatchObject({ stops: 2, slots: 4, online: 2 });
   });
 
   test('a schedule block takes its time out of the openings', () => {
     const fig = rc.measureTechDay({ ...open, rows: [], blocks: [{ startMin: 720, endMin: 1020 }] });
     // 8 AM is not on the customer grid: online fits 9:00 only (11:00 would run past noon).
-    expect(fig.openings).toEqual([{ kind: 'tail', start: 480, min: 240, slots: 3, online: 1 }]);
+    expect(fig.openings).toEqual([{ kind: 'tail', start: 480, min: 240, slots: 3, online: 1, starts: [540] }]);
   });
 
   test('a stop with no time or no place leaves the day unmeasured', () => {
@@ -136,7 +177,15 @@ describe('the totals and the ad rule shadow', () => {
     ], '2026-11-19');
     expect(totals.next).toEqual({ dates: ['2026-11-20', '2026-11-21', '2026-11-23'], slots: 1, online: 1 });
     expect(totals.week).toMatchObject({ through: '2026-11-26', slots: 4, online: 3 });
-    expect(ad).toEqual({ decision: 'full', onlineAhead: 1, slotsAhead: 2, unmeasured: 0 });
+    expect(ad).toEqual({ decision: 'full', onlineAhead: 1, slotsAhead: 2, techBlind: false, unmeasured: 0 });
+  });
+
+  test('tech-blind: two technicians free at the same hours count that room once', () => {
+    const TECH2 = '00000000-0000-4000-8000-000000000002';
+    const free = { openings: [{ kind: 'start', start: 540, min: 160, slots: 2, online: 1, starts: [540] }], slots: 2, online: 1 };
+    const days = [day('2026-11-20', free), { ...day('2026-11-20', free), technician_id: TECH2 }];
+    expect(rc.summarize(days, '2026-11-19').totals.next).toMatchObject({ slots: 4, online: 2 });
+    expect(rc.summarize(days, '2026-11-19', { techBlind: true }).totals.next).toMatchObject({ slots: 2, online: 1 });
   });
 
   test('the 1% floor when no online opening exists; an unmeasured day is counted, never as room', () => {
@@ -144,7 +193,7 @@ describe('the totals and the ad rule shadow', () => {
       day('2026-11-19', { slots: 2 }), day('2026-11-20', { skip: 'UNTIMED_STOP', online: 0 }), day('2026-11-21'), day('2026-11-23'),
       day('2026-11-24', { online: 4 }),
     ], '2026-11-19');
-    expect(ad).toEqual({ decision: 'floor', onlineAhead: 0, slotsAhead: 2, unmeasured: 1 });
+    expect(ad).toEqual({ decision: 'floor', onlineAhead: 0, slotsAhead: 2, techBlind: false, unmeasured: 1 });
   });
 });
 
@@ -213,5 +262,21 @@ describe('runRouteCheck', () => {
     const days = JSON.parse(writes[0][1].days);
     expect(days.find((d) => d.date === '2026-11-20')).toMatchObject({ skip: 'FAILED' });
     replan.loadBlocks.mockResolvedValue([]);
+  });
+
+  test('a stop on site with no place leaves today unmeasured, never free time from the start point', async () => {
+    replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-19' ? [stop('t1', '10:00:00', null, { status: 'on_site', lat: null, lng: null })] : []));
+    const { conn, writes } = fakeConn({ progress: [{ id: 't1', technician_id: TECH, status: 'on_site', arrived_at: '2026-11-19T15:00:00Z', lat: null, lng: null }] });
+    await runRouteCheck({ conn, now: NOW });
+    expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ date: '2026-11-19', skip: 'ON_SITE_WITHOUT_COORDINATES' });
+  });
+
+  test("a Sunday stays staffed after its last stop is done", async () => {
+    replan.loadDayStops.mockResolvedValue([]);
+    const { conn, writes } = fakeConn({ progress: [{ id: 'd1', technician_id: TECH, status: 'completed', completed_at: '2026-11-22T16:00:00Z', lat: 27.5, lng: -82.4 }] });
+    await runRouteCheck({ conn, now: new Date('2026-11-22T17:00:00Z') }); // Sunday noon ET, the only stop done at 11
+    const today = JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-22');
+    expect(today).toMatchObject({ van: 'completed' });
+    expect(today.slots).toBeGreaterThan(0);
   });
 });
