@@ -56,6 +56,12 @@ const phoneVisit = {
   windowStart: '09:00',
   status: 'confirmed',
 };
+const defaultCustomer = {
+  id: 'customer-a',
+  firstName: 'Pat',
+  lastName: 'Sampleton',
+  address: '10 Account Way, Bradenton, FL 34200',
+};
 
 function futureDate(days = 30) {
   const date = new Date();
@@ -63,7 +69,12 @@ function futureDate(days = 30) {
   return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-');
 }
 
-function mount({ scheduleReply, catalog = defaultCatalog } = {}) {
+function mount({
+  scheduleReply,
+  catalog = defaultCatalog,
+  customer = defaultCustomer,
+  propertyResponse = { properties: [], canChangeAppointmentAddress: false },
+} = {}) {
   const posts = [];
   const fetcher = vi.fn(async (input, options = {}) => {
     const url = String(input);
@@ -85,7 +96,7 @@ function mount({ scheduleReply, catalog = defaultCatalog } = {}) {
     }
     if (url.includes('/admin/triage?')) return json({ items: [] });
     if (url.includes('/cancel-call-notice')) return json({ enabled: false, call: null });
-    if (url.includes('/properties?context=appointment_address')) return json({ properties: [], canChangeAppointmentAddress: false });
+    if (url.includes('/properties?context=appointment_address')) return json(propertyResponse);
     if (url.includes('/schedule-estimates')) return json({ estimates: [] });
     if (url.endsWith('/admin/technicians')) return json({ technicians: [] });
     if (url.endsWith('/admin/discounts')) return json([]);
@@ -102,7 +113,7 @@ function mount({ scheduleReply, catalog = defaultCatalog } = {}) {
   vi.stubGlobal('fetch', fetcher);
   const onCreated = vi.fn();
   render(<CreateAppointmentModal
-    defaultCustomer={{ id: 'customer-a', firstName: 'Pat', lastName: 'Sampleton' }}
+    defaultCustomer={customer}
     defaultDate={futureDate()}
     defaultWindowStart="09:00"
     onClose={vi.fn()}
@@ -123,10 +134,16 @@ it('requires an explicit choice and retries the exact new-booking payload with t
   const reviewDialog = await screen.findByRole('dialog', { name: 'Choose how to handle this setup fee' });
   expect(reviewDialog).toHaveTextContent('$55.00');
   expect(reviewDialog).toHaveTextContent('$73.00');
+  const bookingRegion = screen.getByRole('region', { name: 'Booking being reviewed' });
+  expect(bookingRegion).toHaveTextContent('Commercial Rodent Bait Stations');
+  expect(bookingRegion).toHaveTextContent('One-time');
+  expect(bookingRegion).toHaveTextContent('9:00 AM–10:00 AM');
+  expect(bookingRegion).toHaveTextContent('Account/default service address');
+  expect(bookingRegion).toHaveTextContent('10 Account Way, Bradenton, FL 34200');
   expect(posts).toHaveLength(1);
   expect(onCreated).not.toHaveBeenCalled();
   expect(posts[0]).not.toHaveProperty('commercialSetupDecision');
-  fireEvent.click(screen.getByRole('button', { name: 'Apply $55.00 prepayment to this booking' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Use the $55.00 setup on the source invoice for this visit' }));
 
   await waitFor(() => expect(posts).toHaveLength(2));
   expect(posts[1]).toEqual({
@@ -134,6 +151,51 @@ it('requires an explicit choice and retries the exact new-booking payload with t
     commercialSetupDecision: { ...setupFeeReview, resolution: 'covered' },
   });
   await waitFor(() => expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: 'appointment-1' })), { timeout: 3000 });
+});
+
+it('identifies the selected property and exact first group when a split booking reviews before any group saves', async () => {
+  const date = futureDate();
+  const propertyResponse = {
+    canChangeAppointmentAddress: true,
+    properties: [
+      { id: 'property-primary', label: 'Primary', is_primary: true, address_line1: '10 Account Way', city: 'Bradenton', state: 'FL', zip: '34200' },
+      { id: 'property-warehouse', label: 'Warehouse', is_primary: false, address_line1: '200 Commerce Way', city: 'Palmetto', state: 'FL', zip: '34221' },
+    ],
+  };
+  const catalog = [...quarterlyCatalog, {
+    id: 'svc-seasonal', service_key: 'mosquito_seasonal', name: 'Seasonal Mosquito Control',
+    billing_type: 'recurring', frequency: 'seasonal_feb_oct', visits_per_year: 9, base_price: 80, default_duration_minutes: 30,
+  }];
+  const { posts } = mount({
+    catalog,
+    propertyResponse,
+    scheduleReply: () => json({
+      code: 'COMMERCIAL_SETUP_VISIT_REVIEW',
+      error: 'Choose which setup this source invoice covers.',
+      setupFeeReview,
+    }, { ok: false, status: 409 }),
+  });
+  fireEvent.click(await screen.findByRole('radio', { name: 'Service address 200 Commerce Way' }));
+  fireEvent.change(screen.getByPlaceholderText('Search services'), { target: { value: 'Quarterly' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Quarterly Pest Control/ }));
+  fireEvent.click(screen.getByRole('button', { name: /Add service/ }));
+  fireEvent.change(screen.getByPlaceholderText('Search to add service'), { target: { value: 'Seasonal' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Seasonal Mosquito Control/ }));
+  const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+  await waitFor(() => expect(submit).toBeEnabled());
+  fireEvent.click(submit);
+
+  await screen.findByRole('dialog', { name: 'Choose how to handle this setup fee' });
+  expect(posts).toHaveLength(1);
+  const bookingRegion = screen.getByRole('region', { name: 'Booking being reviewed' });
+  expect(bookingRegion).toHaveTextContent('Quarterly Pest Control');
+  expect(bookingRegion).not.toHaveTextContent('Seasonal Mosquito Control');
+  expect(bookingRegion).toHaveTextContent('Quarterly');
+  expect(bookingRegion).toHaveTextContent('9:00 AM–9:30 AM');
+  expect(bookingRegion).toHaveTextContent('Warehouse');
+  expect(bookingRegion).toHaveTextContent('200 Commerce Way, Palmetto, FL 34221');
+  expect(posts[0]).toMatchObject({ scheduledDate: date, propertyId: 'property-warehouse' });
+  expect(screen.queryByText(/These appointments are already booked/)).not.toBeInTheDocument();
 });
 
 it('stops a stale choice without writing, then obtains fresh review after staff save the changed form', async () => {
@@ -169,7 +231,7 @@ it('stops a stale choice without writing, then obtains fresh review after staff 
     }, { ok: false, status: 409 }));
   });
   await screen.findByRole('dialog', { name: 'Choose how to handle this setup fee' });
-  fireEvent.click(screen.getByRole('button', { name: 'Apply $55.00 prepayment to this booking' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Use the $55.00 setup on the source invoice for this visit' }));
 
   await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Choose how to handle this setup fee' })).not.toBeInTheDocument());
   expect(posts).toHaveLength(1);
@@ -181,8 +243,8 @@ it('stops a stale choice without writing, then obtains fresh review after staff 
   expect(posts[1].scheduledDate).toBe(changedDate);
   expect(posts[1]).not.toHaveProperty('commercialSetupDecision');
   await screen.findByRole('dialog', { name: 'Choose how to handle this setup fee' });
-  expect(screen.getByRole('button', { name: 'Apply $89.00 prepayment to this booking' })).toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button', { name: 'Apply $89.00 prepayment to this booking' }));
+  expect(screen.getByRole('button', { name: 'Use the $89.00 setup on the source invoice for this visit' })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Use the $89.00 setup on the source invoice for this visit' }));
 
   await waitFor(() => expect(posts).toHaveLength(3));
   expect(posts[2]).toEqual({
@@ -217,7 +279,7 @@ it('stops before any retry POST when a pending review group changed cadence and 
     }, { ok: false, status: 409 }));
   });
   await screen.findByRole('dialog', { name: 'Choose how to handle this setup fee' });
-  fireEvent.click(screen.getByRole('button', { name: 'Apply $55.00 prepayment to this booking' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Use the $55.00 setup on the source invoice for this visit' }));
 
   await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Choose how to handle this setup fee' })).not.toBeInTheDocument());
   expect(posts).toHaveLength(1);
@@ -257,7 +319,7 @@ it('preserves the exact approved phone-booking ids through setup review for the 
     allowCallBookingDuplicate: true,
     callBookingReviewedIds: ['phone-visit-1'],
   });
-  fireEvent.click(screen.getByRole('button', { name: 'Apply $55.00 prepayment to this booking' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Use the $55.00 setup on the source invoice for this visit' }));
 
   await waitFor(() => expect(posts).toHaveLength(3));
   expect(posts[2]).toEqual({
@@ -305,7 +367,7 @@ it('keeps only the reviewed phone ids on setup retry so a newly found conflict p
   fireEvent.click(submit);
   fireEvent.click(await screen.findByRole('button', { name: 'Book another anyway' }));
   await screen.findByRole('dialog', { name: 'Choose how to handle this setup fee' });
-  fireEvent.click(screen.getByRole('button', { name: 'Apply $55.00 prepayment to this booking' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Use the $55.00 setup on the source invoice for this visit' }));
 
   await waitFor(() => expect(posts).toHaveLength(3));
   expect(posts[2].callBookingReviewedIds).toEqual(['phone-visit-1']);
@@ -349,6 +411,12 @@ it('names groups already booked and scopes stopping to the remaining split booki
   expect(reviewDialog).toHaveTextContent('These appointments are already booked: Quarterly: Quarterly Pest Control');
   expect(reviewDialog).toHaveTextContent('Remaining booking: Seasonal (Feb–Oct, monthly): Seasonal Mosquito Control');
   expect(reviewDialog).toHaveTextContent('Stopping here leaves the remaining booking unsaved');
+  const bookingRegion = screen.getByRole('region', { name: 'Booking being reviewed' });
+  expect(bookingRegion).toHaveTextContent('Seasonal Mosquito Control');
+  expect(bookingRegion).not.toHaveTextContent('Quarterly Pest Control');
+  expect(bookingRegion).toHaveTextContent('Seasonal (Feb–Oct, monthly)');
+  expect(bookingRegion).toHaveTextContent('9:00 AM–9:30 AM');
+  expect(bookingRegion).toHaveTextContent('Account/default service address');
   expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: 'appointment-quarterly' }), { background: true });
   fireEvent.click(screen.getByRole('button', { name: 'Stop — leave remaining booking unsaved' }));
   expect(screen.queryByRole('dialog', { name: 'Choose how to handle this setup fee' })).not.toBeInTheDocument();

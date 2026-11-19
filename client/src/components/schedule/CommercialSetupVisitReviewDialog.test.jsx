@@ -6,12 +6,22 @@ import { afterEach, expect, it, vi } from 'vitest';
 import CommercialSetupVisitReviewDialog, {
   commercialSetupDecision,
   commercialSetupPayloadUnchanged,
+  commercialSetupPropertySnapshot,
   commercialSetupReviewFromError,
 } from './CommercialSetupVisitReviewDialog';
 
 afterEach(cleanup);
 
 const review = { invoiceId: 'invoice/source 1', visitKey: 'opaque-visit-property-time-token', prepaidAmountCents: 5500, visitFeeCents: 7300 };
+const booking = {
+  serviceNames: ['Commercial Rodent Bait Stations'],
+  cadence: 'Quarterly',
+  scheduledDate: '2035-01-02',
+  windowStart: '09:00',
+  windowEnd: '10:00',
+  propertyLabel: 'Warehouse',
+  propertyAddress: '200 Commerce Way, Bradenton, FL 34200',
+};
 
 it('normalizes only the structured 409 review and binds either explicit decision to its amounts', () => {
   const error = Object.assign(new Error('review'), {
@@ -50,18 +60,38 @@ it('compares the request body as it will be serialized on the wire', () => {
   )).toBe(false);
 });
 
-it('shows exact amounts, source invoice, both choices, and cancellation without a default', () => {
+it('snapshots a validated property address and uses an honest id/default fallback', () => {
+  expect(commercialSetupPropertySnapshot({
+    property: { id: 'p-2', label: 'Warehouse', address_line1: '200 Commerce Way', city: 'Bradenton', state: 'FL', zip: '34200' },
+  })).toEqual({ propertyLabel: 'Warehouse', propertyAddress: '200 Commerce Way, Bradenton, FL 34200' });
+  expect(commercialSetupPropertySnapshot({ propertyId: 'p-missing' })).toEqual({
+    propertyLabel: 'Property p-missing',
+    propertyAddress: 'Address not available for property p-missing',
+  });
+  expect(commercialSetupPropertySnapshot()).toEqual({
+    propertyLabel: 'Account/default service address',
+    propertyAddress: 'Address not available in this booking',
+  });
+});
+
+it('shows the exact booking snapshot, neutral source-invoice amounts, both choices, and cancellation without a default', () => {
   const onResolve = vi.fn();
   const onCancel = vi.fn();
-  render(<CommercialSetupVisitReviewDialog review={review} onResolve={onResolve} onCancel={onCancel} />);
+  render(<CommercialSetupVisitReviewDialog review={review} booking={booking} onResolve={onResolve} onCancel={onCancel} />);
   expect(screen.getByRole('dialog', { name: 'Choose how to handle this setup fee' })).toBeInTheDocument();
-  expect(screen.getByText(/already carries a/)).toHaveTextContent('$55.00');
-  expect(screen.getByText(/independent setup/)).toHaveTextContent('$73.00');
+  const bookingRegion = screen.getByRole('region', { name: 'Booking being reviewed' });
+  expect(bookingRegion).toHaveTextContent('Commercial Rodent Bait Stations');
+  expect(bookingRegion).toHaveTextContent('Quarterly');
+  expect(bookingRegion).toHaveTextContent('Tue, Jan 2, 2035 · 9:00 AM–10:00 AM');
+  expect(bookingRegion).toHaveTextContent('Warehouse');
+  expect(bookingRegion).toHaveTextContent('200 Commerce Way, Bradenton, FL 34200');
+  expect(screen.getByText(/source invoice includes/)).toHaveTextContent('$55.00');
+  expect(screen.getByText(/visit's setup/)).toHaveTextContent('$73.00');
   expect(screen.getByRole('link', { name: 'Open source invoice' })).toHaveAttribute('href', '/admin/invoices?invoice=invoice%2Fsource%201');
   expect(onResolve).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: "Bill this booking's $73.00 setup separately" }));
   expect(onResolve).toHaveBeenLastCalledWith('separate');
-  fireEvent.click(screen.getByRole('button', { name: 'Apply $55.00 prepayment to this booking' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Use the $55.00 setup on the source invoice for this visit' }));
   expect(onResolve).toHaveBeenLastCalledWith('covered');
   fireEvent.click(screen.getByRole('button', { name: 'Cancel without saving' }));
   expect(onCancel).toHaveBeenCalledOnce();

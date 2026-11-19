@@ -60,6 +60,7 @@ import CommercialSetupVisitReviewDialog, {
   COMMERCIAL_SETUP_BOOKING_CHANGED_NOTICE,
   commercialSetupDecision,
   commercialSetupPayloadUnchanged,
+  commercialSetupPropertySnapshot,
   commercialSetupReviewFromError,
 } from './CommercialSetupVisitReviewDialog';
 
@@ -4665,12 +4666,25 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           if (setupReview) {
             const originalPayload = { ...(submittedSetupPayload || {}) };
             delete originalPayload.commercialSetupDecision;
+            const booking = setupRetryForGroup?.booking || {
+              serviceNames: group.lines.map((line) => line.name).filter(Boolean),
+              cadence: groupLabel(group),
+              scheduledDate: originalPayload.scheduledDate,
+              windowStart: originalPayload.windowStart,
+              windowEnd: originalPayload.windowEnd,
+              ...commercialSetupPropertySnapshot({
+                property: selectedBookingProperty,
+                propertyId: originalPayload.propertyId,
+                fallback: selectedCustomer,
+              }),
+            };
             setCommercialSetupReview({
               review: setupReview,
               changed: !!setupRetryForGroup,
               key,
               body: originalPayload,
               separateProgram,
+              booking,
               bookedGroups: groups
                 .filter((candidate) => createdGroupKeysRef.current.has(groupKey(candidate)) || groupAlreadyCommitted(candidate))
                 .map((candidate) => `${groupLabel(candidate)}: ${candidate.lines.map((line) => line.name).filter(Boolean).join(', ')}`),
@@ -5475,6 +5489,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         <CommercialSetupVisitReviewDialog
           review={commercialSetupReview?.review}
           changed={commercialSetupReview?.changed}
+          booking={commercialSetupReview?.booking}
           bookedGroups={commercialSetupReview?.bookedGroups}
           remainingGroups={commercialSetupReview?.remainingGroups}
           busy={saving}

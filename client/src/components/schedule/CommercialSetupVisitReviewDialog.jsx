@@ -10,6 +10,54 @@ const cents = (value) => {
 
 const money = (value) => `$${(value / 100).toFixed(2)}`;
 
+const addressText = (value) => {
+  if (!value) return '';
+  const nested = value.address && typeof value.address === 'object' ? value.address : {};
+  const directAddress = typeof value.address === 'string' ? value.address.trim() : '';
+  const street = directAddress || [
+      value.address_line1 ?? value.line1 ?? nested.line1,
+      value.address_line2 ?? value.line2 ?? nested.line2,
+    ].filter(Boolean).join(', ');
+  const locality = [
+    value.city ?? nested.city,
+    [value.state ?? nested.state, value.zip ?? value.postalCode ?? nested.zip ?? nested.postalCode].filter(Boolean).join(' '),
+  ].filter(Boolean).join(', ');
+  return [street, locality].filter(Boolean).join(', ');
+};
+
+export function commercialSetupPropertySnapshot({
+  property = null,
+  propertyId = null,
+  fallback = null,
+  fallbackLabel = 'Account/default service address',
+} = {}) {
+  const id = property?.id ?? propertyId;
+  const label = String(property?.label || '').trim()
+    || (property?.is_primary === true ? 'Primary property' : '')
+    || (id != null && String(id) ? `Property ${id}` : fallbackLabel);
+  const address = addressText(property) || addressText(fallback);
+  return {
+    propertyLabel: label,
+    propertyAddress: address || (id != null && String(id)
+      ? `Address not available for property ${id}`
+      : 'Address not available in this booking'),
+  };
+}
+
+const bookingDate = (value) => {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value || ''));
+  if (!match) return value || 'Date not available';
+  return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])))
+    .toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+};
+
+const bookingTime = (value) => {
+  const match = /^(\d{1,2}):(\d{2})/.exec(String(value || ''));
+  if (!match) return value || '';
+  const hour = Number(match[1]);
+  return `${hour % 12 || 12}:${match[2]} ${hour < 12 ? 'AM' : 'PM'}`;
+};
+
 export function commercialSetupReviewFromError(error) {
   const code = error?.code || error?.body?.code;
   const raw = error?.setupFeeReview || error?.body?.setupFeeReview;
@@ -45,6 +93,7 @@ export default function CommercialSetupVisitReviewDialog({
   review,
   changed = false,
   busy = false,
+  booking = null,
   bookedGroups = [],
   remainingGroups = [],
   onResolve,
@@ -55,6 +104,10 @@ export default function CommercialSetupVisitReviewDialog({
   const visitFee = money(review.visitFeeCents);
   const partialSave = bookedGroups.length > 0;
   const remainingNoun = remainingGroups.length === 1 ? 'booking' : 'bookings';
+  const services = Array.isArray(booking?.serviceNames) && booking.serviceNames.length
+    ? booking.serviceNames.join(' + ')
+    : 'Service details not available';
+  const time = [bookingTime(booking?.windowStart), bookingTime(booking?.windowEnd)].filter(Boolean).join('–') || 'Time not available';
   return (
     <Dialog open onClose={busy ? undefined : onCancel} size="sm" layer={1400}>
       <DialogHeader>
@@ -76,11 +129,21 @@ export default function CommercialSetupVisitReviewDialog({
             </p>
           </div>
         )}
+        <section aria-labelledby="commercial-setup-booking-heading" className="rounded border border-zinc-200 bg-zinc-50 p-3">
+          <h3 id="commercial-setup-booking-heading" className="font-medium">Booking being reviewed</h3>
+          <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+            <dt className="text-zinc-600">Service</dt><dd>{services}</dd>
+            <dt className="text-zinc-600">Cadence</dt><dd>{booking?.cadence || 'Cadence not available'}</dd>
+            <dt className="text-zinc-600">Scheduled</dt><dd>{bookingDate(booking?.scheduledDate)} · {time}</dd>
+            <dt className="text-zinc-600">Service property</dt><dd>{booking?.propertyLabel || 'Account/default service address'}</dd>
+            <dt className="text-zinc-600">Service address</dt><dd>{booking?.propertyAddress || 'Address not available in this booking'}</dd>
+          </dl>
+        </section>
         <p>
-          The source invoice already carries a <strong>{prepaidAmount}</strong> commercial rodent setup. This booking's independent setup is <strong>{visitFee}</strong>.
+          The source invoice includes a <strong>{prepaidAmount}</strong> commercial rodent setup. This visit's setup is <strong>{visitFee}</strong>.
         </p>
         <p className="text-zinc-600">
-          Confirm whether that prepayment belongs to this booking. Choosing a separate setup keeps the source invoice available for the visit it belongs to.
+          Choose whether to use that setup on the source invoice for this visit. Choosing a separate setup keeps it available for the visit it belongs to.
         </p>
         <a
           className={buttonStyles({ variant: 'secondary', className: 'w-full' })}
@@ -99,7 +162,7 @@ export default function CommercialSetupVisitReviewDialog({
           Bill this booking's {visitFee} setup separately
         </Button>
         <Button className="w-full sm:w-auto" onClick={() => onResolve('covered')} loading={busy}>
-          Apply {prepaidAmount} prepayment to this booking
+          Use the {prepaidAmount} setup on the source invoice for this visit
         </Button>
       </DialogFooter>
     </Dialog>

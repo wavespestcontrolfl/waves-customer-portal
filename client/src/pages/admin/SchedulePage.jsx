@@ -65,6 +65,7 @@ import CommercialSetupVisitReviewDialog, {
   COMMERCIAL_SETUP_BOOKING_CHANGED_NOTICE,
   commercialSetupDecision,
   commercialSetupPayloadUnchanged,
+  commercialSetupPropertySnapshot,
   commercialSetupReviewFromError,
 } from "../../components/schedule/CommercialSetupVisitReviewDialog";
 
@@ -1554,6 +1555,16 @@ function editFrequenciesFor(storedPattern) {
   if (storedPattern !== LAWN_ROUNDS_FREQUENCY.value) return EDIT_FREQUENCIES;
   const customAt = EDIT_FREQUENCIES.findIndex((f) => f.value === "custom");
   return [...EDIT_FREQUENCIES.slice(0, customAt), LAWN_ROUNDS_FREQUENCY, ...EDIT_FREQUENCIES.slice(customAt)];
+}
+function editSetupReviewCadence(pattern, { intervalDays, nth, weekday } = {}) {
+  if (!pattern || pattern === "one_time") return "One-time";
+  if (pattern === "custom") return `Every ${intervalDays || "custom"} days`;
+  if (pattern === "monthly_nth_weekday") {
+    const nthLabel = EDIT_NTH_OPTIONS.find((option) => option.value === Number(nth))?.label || nth;
+    const weekdayLabel = EDIT_WEEKDAY_OPTIONS.find((option) => option.value === Number(weekday))?.label || weekday;
+    return [nthLabel, weekdayLabel, "monthly"].filter(Boolean).join(" ");
+  }
+  return editFrequenciesFor(pattern).find((option) => option.value === pattern)?.label || pattern;
 }
 const EDIT_NTH_OPTIONS = [
   { value: 1, label: "1st" },
@@ -3879,11 +3890,38 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       if (setupReview) {
         const originalPayload = { ...(submittedSetupPayload || {}) };
         delete originalPayload.commercialSetupDecision;
+        const reviewPattern = originalPayload.recurringPattern
+          || service.recurringPattern
+          || service.recurring_pattern
+          || (originalPayload.isRecurring ? recurringFreq : "one_time");
+        const booking = commercialSetupRetry?.booking || {
+          serviceNames: editServices.map((item) => item.name),
+          cadence: editSetupReviewCadence(reviewPattern, {
+            intervalDays: originalPayload.recurringIntervalDays ?? recurringIntervalDays,
+            nth: originalPayload.recurringNth ?? recurringNth,
+            weekday: originalPayload.recurringWeekday ?? recurringWeekday,
+          }),
+          scheduledDate: originalPayload.scheduledDate,
+          windowStart: originalPayload.windowStart,
+          windowEnd: originalPayload.windowEnd,
+          ...commercialSetupPropertySnapshot({
+            property: selectedProperty,
+            propertyId: selectedPropertyId || service.propertyId || service.property_id,
+            fallback: {
+              address: service.address || customer.address?.line1 || "",
+              city: service.city || customer.address?.city || "",
+              state: service.state || customer.address?.state || "",
+              zip: service.zip || customer.address?.zip || "",
+            },
+            fallbackLabel: "Current appointment address",
+          }),
+        };
         setCommercialSetupReview({
           review: setupReview,
           body: originalPayload,
           takePayment,
           changed: !!commercialSetupRetry,
+          booking,
         });
         savingRef.current = false;
         setSaving(false);
@@ -4908,6 +4946,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       <CommercialSetupVisitReviewDialog
         review={commercialSetupReview?.review}
         changed={commercialSetupReview?.changed}
+        booking={commercialSetupReview?.booking}
         busy={saving}
         onResolve={resolveCommercialSetupReview}
         onCancel={() => setCommercialSetupReview(null)}

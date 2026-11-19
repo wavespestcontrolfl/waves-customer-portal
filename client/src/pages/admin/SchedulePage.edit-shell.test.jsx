@@ -18,7 +18,12 @@ vi.mock('../../components/schedule/ScheduleSaveNotice', async (importOriginal) =
   ...(await importOriginal()),
   showScheduleSaveNotice: (message) => { saveNotice.shown.push(message); },
 }));
-const service = { id: 'fixture-visit', customerId: 'fixture-account', customerName: 'Fixture account', serviceType: 'Pest Control', scheduledDate: '2035-01-02', windowStart: '08:00', windowEnd: '09:00', status: 'confirmed', notes: 'Existing note' };
+const service = {
+  id: 'fixture-visit', customerId: 'fixture-account', customerName: 'Fixture account',
+  serviceType: 'Pest Control', scheduledDate: '2035-01-02', windowStart: '08:00', windowEnd: '09:00',
+  status: 'confirmed', notes: 'Existing note', propertyId: 'fixture-property',
+  address: '400 Existing Service Rd', city: 'Bradenton', state: 'FL', zip: '34200',
+};
 // Structural round 3 on #4657: the debounced money preview is a
 // non-GET call too (POST .../update-details/preview) but never
 // persists anything — excluded so "a write happened" still means the
@@ -139,11 +144,24 @@ it('requires an explicit commercial setup choice and retries the exact recurring
       }
       return { ok: true, json: async () => ({ success: true }) };
     }
+    if (String(url).includes('/properties?context=appointment_address')) {
+      return {
+        ok: true,
+        json: async () => ({
+          canChangeAppointmentAddress: true,
+          properties: [{
+            id: 'warehouse-property', label: 'Warehouse', address_line1: '800 Warehouse Blvd',
+            city: 'Palmetto', state: 'FL', zip: '34221',
+          }],
+        }),
+      };
+    }
     return okJson(url);
   });
   const onSaved = vi.fn();
   render(<Harness onSaved={onSaved} />);
   fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: 'warehouse-property' } });
   const repeatText = screen.getByText('Repeat');
   const repeatCheckbox = repeatText.parentElement.parentElement.querySelector('input[type="checkbox"]');
   fireEvent.click(repeatCheckbox);
@@ -152,6 +170,12 @@ it('requires an explicit commercial setup choice and retries the exact recurring
   const reviewDialog = await screen.findByRole('dialog', { name: 'Choose how to handle this setup fee' });
   expect(reviewDialog).toHaveTextContent('$55.00');
   expect(reviewDialog).toHaveTextContent('$73.00');
+  const bookingRegion = within(reviewDialog).getByRole('region', { name: 'Booking being reviewed' });
+  expect(bookingRegion).toHaveTextContent('Pest Control');
+  expect(bookingRegion).toHaveTextContent('Quarterly');
+  expect(bookingRegion).toHaveTextContent('Tue, Jan 2, 2035 · 8:00 AM–9:00 AM');
+  expect(bookingRegion).toHaveTextContent('Warehouse');
+  expect(bookingRegion).toHaveTextContent('800 Warehouse Blvd, Palmetto, FL 34221');
   expect(screen.getByRole('link', { name: 'Open source invoice' })).toHaveAttribute('href', '/admin/invoices?invoice=invoice-source-55');
   expect(writes()).toHaveLength(1);
   const firstBody = body(0);
@@ -208,7 +232,7 @@ it('stops a stale setup choice without writing, then requests fresh review after
 
   fireEvent.change(screen.getByDisplayValue('Existing note'), { target: { value: 'Note changed during review' } });
   await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled(), { timeout: 2000 });
-  fireEvent.click(screen.getByRole('button', { name: 'Apply $55.00 prepayment to this booking' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Use the $55.00 setup on the source invoice for this visit' }));
 
   await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Choose how to handle this setup fee' })).not.toBeInTheDocument());
   expect(writes()).toHaveLength(1);
@@ -221,7 +245,7 @@ it('stops a stale setup choice without writing, then requests fresh review after
   expect(body(1)).not.toEqual(firstBody);
   const refreshedDialog = await screen.findByRole('dialog', { name: 'Choose how to handle this setup fee' });
   expect(refreshedDialog).toHaveTextContent('$89.00');
-  fireEvent.click(screen.getByRole('button', { name: 'Apply $89.00 prepayment to this booking' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Use the $89.00 setup on the source invoice for this visit' }));
 
   await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
   expect(writes()).toHaveLength(3);
