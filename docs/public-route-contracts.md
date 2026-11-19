@@ -6340,11 +6340,13 @@ That `POST /reserve` carries one OPTIONAL body field, `rehold: true` (only the l
 the service refuses, under the estimate lock and before any delete, when the estimate has a live hold other than one
 for the same time: the page's own hold is gone, so such a hold is newer (another tab or device took it), and an
 ordinary reserve would delete it. The refusal is `409 { error: 'another time is held for this estimate', code:
-'OTHER_LIVE_HOLD' }`, and the page then shows the plain expiry recovery. A reserve without the field keeps the
-supersede-on-reselect semantics above. When a signed offer has lapsed, the page reads the picked day
-(`GET /available-slots?date=`) for a fresh signed id for the same time and reserves that once; it says the time was
-taken only when that second reserve is refused as `slot no longer available`. A day list that does not name the time
-is no proof it is gone (the list is ranked and capped), so that case also gets the plain expiry recovery.
+'OTHER_LIVE_HOLD' }`. The page then reloads in its normal step, so `GET /data` offers that newer hold as
+`existing_appointment` (the card says the time is held), and a notice says a different time is held from another
+window or device. A reserve without the field keeps the supersede-on-reselect semantics above. When a signed offer has
+lapsed, the page reads the picked day (`GET /available-slots?date=`) for a fresh signed id for the same time and
+reserves that once. The re-hold never says the time was taken: `/reserve` gives the same `slot no longer available` for
+a taken time, a lapsed offer, a closed notice window, a blackout or a technician check, and a day list that does not
+name the time is no proof either (it is ranked and capped). Every such case gets the plain expiry recovery.
 
 "How your price was built" facts (`intelligence.metrics` on `GET /:token/data`, owner 2026-10-20; not gated). The list holds at most 6 entries when the estimate's recognized recurring services number one or two (unchanged), and at most 8 when they number three or more. When the candidate facts exceed the cap, each present service's primary fact is kept first (pest: Pool/Lanai; lawn: Treatable lawn; mosquito: Mosquito treatment area, else Near water; tree & shrub: Ornamental beds; termite: Termite perimeter), then the remaining facts fill the open places in their usual order; entries are always returned in the usual display order (Home, Lot, mosquito facts, Pool/Lanai, beds, trees/shrubs, Treatable lawn, Grass type, Termite perimeter, Complexity). Entry shape is unchanged (`{ label, value }`). One- and two-service lists are byte-identical to before.
 

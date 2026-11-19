@@ -4788,17 +4788,19 @@ export function EstimateErrorBanner({ error }) {
 // The accept said the 15-minute hold ran out. The customer already chose this
 // time and confirmed it, so hold it again if it is still free (the server
 // re-checks every conflict, so a time someone else took still refuses). Answers
-// { held } with the new hold, { taken } when the time is shown gone, { review } when the
-// office parked the estimate, { noBooking } when staff reshaped the estimate meanwhile
-// so it books nothing online, or { failed } for anything else (the caller then shows the
-// plain expiry recovery and reopens the time list). Never throws.
+// { held } with the new hold, { otherHold } when another window or device holds a
+// different time for this estimate (the server kept it), { review } when the office
+// parked the estimate, { noBooking } when staff reshaped the estimate meanwhile so it
+// books nothing online, or { failed } for anything else (the caller then shows the plain
+// expiry recovery and reopens the time list). Never throws. It never says the time was
+// taken: reserve gives the same "slot no longer available" for a taken time, a lapsed
+// offer, a closed notice window, a blackout or a technician check, so no refusal proves
+// the time is gone.
 // A signed time offer lapses 45 minutes after its list was built, and reserve then
 // refuses even a free time. So read the picked day for a fresh signed offer
-// (freshOfferForSameTime) and hold it once more with its new id. "Taken" needs proof:
-// that fresh offer was refused too. A day list without the time is no proof (the list
-// is ranked and capped), and neither is an unreadable one: both are { failed }. The page
-// keeps its own id: accept finds the hold by date, time and technician, not by the
-// signature.
+// (freshOfferForSameTime) and hold it once more with its new id. A day list without the
+// time (it is ranked and capped) or an unreadable one is { failed }. The page keeps its
+// own id: accept finds the hold by date, time and technician, not by the signature.
 export async function holdSameTimeAgain(args) {
   const { token, slotId } = args || {};
   if (!token || !slotId) return { failed: true };
@@ -4807,9 +4809,9 @@ export async function holdSameTimeAgain(args) {
     if (!first.lapsedOrTaken) return first.answer;
     const fresh = await freshOfferForSameTime(args);
     if (!fresh.slotId) return fresh.answer;
-    // One retry only: a second "no longer available" means the time is gone.
+    // One retry only. A second "no longer available" is still no proof the time is gone.
     const second = await reserveForRehold(args, fresh.slotId);
-    return second.lapsedOrTaken ? { taken: true } : second.answer;
+    return second.lapsedOrTaken ? { failed: true } : second.answer;
   } catch {
     return { failed: true };
   }
@@ -4837,8 +4839,8 @@ async function reserveForRehold({ token, serviceMode, selectedFrequency, service
   // Parked for the office (B18): the caller takes it through the one transition.
   if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') return { answer: { review: body } };
   if (isNoBookingRefusal(body)) return { answer: { noBooking: true } };
-  // Another tab holds a newer time: keep it, and show the plain expiry recovery here.
-  if (r.status === 409 && body.code === 'OTHER_LIVE_HOLD') return { answer: { failed: true } };
+  // Another window or device holds a newer time: the server kept it, and the caller shows it.
+  if (r.status === 409 && body.code === 'OTHER_LIVE_HOLD') return { answer: { otherHold: true } };
   if (r.status === 409 && /slot no longer available/i.test(body.error || '')) return { lapsedOrTaken: true };
   return { answer: { failed: true } };
 }
@@ -4890,6 +4892,9 @@ export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
   // needs a time, and a bare scroll back to the times read as the page
   // starting over (a customer gave up and phoned in).
   const pickTime = kind === 'pick_time';
+  // 'other_hold': the hold ran out, and another window or device holds a different time for this
+  // estimate (the server kept it). The page shows that hold below; nothing is booked yet.
+  const otherHold = kind === 'other_hold';
   // 'reheld': the 15-minute hold ran out while the customer was confirming and
   // the same time was still free, so it was held again. Nothing is booked yet,
   // and the banner has to say so (a customer once left believing she was done).
@@ -4912,13 +4917,18 @@ export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
             <strong>Your time ran out, so we held it again.</strong>{' '}
             Your visit is not booked yet. Tap the confirm button below to finish.
           </>
+        ) : otherHold ? (
+          <>
+            <strong>Your time ran out, and a different time is held for you.</strong>{' '}
+            It was picked in another window or on another device. Nothing is booked yet. Check the time below, then confirm.
+          </>
         ) : staleHold
           ? "We couldn't release your earlier time hold, so your options may be out of date. Tap refresh to try again."
           : expired
             ? 'Your held time ran out and nothing was booked. Pick a time below to finish signing up.'
             : note || "That slot was just taken. We've refreshed the options below — pick another."}
       </div>
-      {onRetry && !reheld ? (
+      {onRetry && !reheld && !otherHold ? (
         <button
           type="button"
           onClick={onRetry}
@@ -6537,6 +6547,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // The server's reason for a slot_conflict recovery that is not a taken
   // slot (a visit before the move-in date); null keeps the default copy.
   const [deadHoldNote, setDeadHoldNote] = useState(null);
+  // Set when the re-hold after an expired accept found another window's newer hold (OTHER_LIVE_HOLD): the reload shows
+  // that hold, and the configure step says why. Cleared by the next recovery and when the page leaves configure.
+  const [otherHoldNotice, setOtherHoldNotice] = useState(false);
   // Recovery releases the hold and re-reads the contract. Until BOTH land,
   // `data.estimate.acceptance` still describes the dead hold, so leaving the
   // payment buttons live let a customer re-adopt the very hold being deleted
@@ -7244,6 +7257,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // reason `acceptInFlightRef` is not here: the accept's own 409 handler
     // recovers while that latch is still set.
     if (inlineConfirmBusyRef.current) return;
+    setOtherHoldNotice(false);
     // Captured before the reset: an accept-time SLOT_UNAVAILABLE rolls its
     // transaction back and leaves the hold row LIVE (codex r3 P1), so a bare
     // refresh would hand that same row straight back as
@@ -8136,8 +8150,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(null);
       return true;
     }
-    if (again.taken) {
-      recoverFromDeadHold('slot_conflict', 'That time was just taken. Pick another time below.');
+    if (again.otherHold) {
+      // The server kept another window's newer hold. Reload in the normal phase, so the page adopts that hold (its card
+      // says the time is held), and say why. Only this page's own expired hold is released.
+      recoverFromDeadHold('configure');
+      setOtherHoldNotice(true);
       return true;
     }
     if (again.review) {
@@ -8152,6 +8169,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     }
     return false;
   }, [token, selectedSlotId, existingAppointment, serviceMode, selectedFrequency, serviceCadences, recoverFromDeadHold]);
+
+  // The other-window notice belongs to the configure step it explains: going on to review (or anywhere else) ends it.
+  useEffect(() => {
+    if (ctaPhase !== 'configure') setOtherHoldNotice(false);
+  }, [ctaPhase]);
 
   const performAccept = useCallback(async () => {
     // Defense in depth for the draft preview — handlePaymentChoice already
@@ -11076,6 +11098,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               })
             : null}
 
+          {/* After the re-hold found another window's hold, the reloaded page shows that hold here; if it is gone too,
+              the plain expiry copy (the picker is back). */}
+          {otherHoldNotice && ctaPhase === 'configure'
+            ? <SlotIssueBanner kind={existingAppointment?.isHold ? 'other_hold' : 'expired'} /> : null}
           {existingAppointment ? (
             <ExistingAppointmentCard
                 appointment={existingAppointment}

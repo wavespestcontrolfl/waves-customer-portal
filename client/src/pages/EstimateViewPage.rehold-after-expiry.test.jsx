@@ -221,7 +221,7 @@ describe('the accept says the hold expired', () => {
     expect(screen.queryByText(/just taken/i)).toBeNull();
   }, TEST_TIMEOUT_MS);
 
-  it('says the time was taken, in plain words, and reopens the time list when the time is gone', async () => {
+  it('a fresh offer refused too still gets the plain expiry copy (a refusal is no proof the time is gone), and the time list reopens', async () => {
     stubLocalStorage();
     const fetchMock = makeFetchMock({
       reserveImpl: (n) => (n === 1 ? jsonResponse({ scheduledServiceId: 'ss-1', expiresAt: inFifteenMinutes() }) : LAPSED_409()),
@@ -234,7 +234,8 @@ describe('the accept says the hold expired', () => {
 
     await pickTimeAndConfirm();
 
-    expect(await screen.findByText('That time was just taken. Pick another time below.', {}, SLOW)).toBeInTheDocument();
+    expect(await screen.findByText(/Your held time ran out and nothing was booked/, {}, SLOW)).toBeInTheDocument();
+    expect(screen.queryByText(/just taken/i)).toBeNull();
     expect(screen.queryByText(REHELD)).toBeNull();
     expect(reserveCalls(fetchMock).map(([, init]) => JSON.parse(init.body).slotId)).toEqual([OLD_ID, OLD_ID, FRESH_ID]);
     // The picker is back, with the list read again.
@@ -260,24 +261,42 @@ describe('the accept says the hold expired', () => {
     expect(reserveCalls(fetchMock)).toHaveLength(2);
   }, TEST_TIMEOUT_MS);
 
-  it('another tab holds a newer time: the re-hold asks the server to keep it, and the page shows the plain expiry copy', async () => {
+  it('another tab holds a newer time: the server keeps it, and the page shows that hold with a notice', async () => {
     stubLocalStorage();
+    let otherTabHeld = false;
+    // After the refusal, /data offers the other tab's hold (a reload lands on the estimate's live hold).
+    const heldElsewhere = () => {
+      const payload = recurringPayload();
+      payload.estimate = { ...payload.estimate, acceptance: { mode: 'existing_appointment', appointment: {
+        id: 'ss-other-tab', scheduledDate: '2026-07-16', windowStart: '13:00', windowEnd: '15:00', windowDisplay: '1:00 PM - 3:00 PM',
+        serviceType: 'Pest Control', status: 'pending', isHold: true, reservationExpiresAt: inFifteenMinutes(),
+      } } };
+      return payload;
+    };
     const fetchMock = makeFetchMock({
-      reserveImpl: (n) => (n === 1
-        ? jsonResponse({ scheduledServiceId: 'ss-1', expiresAt: inFifteenMinutes() })
-        : jsonResponse({ error: 'another time is held for this estimate', code: 'OTHER_LIVE_HOLD' }, { ok: false, status: 409 })),
+      reserveImpl: (n) => {
+        if (n === 1) return jsonResponse({ scheduledServiceId: 'ss-1', expiresAt: inFifteenMinutes() });
+        otherTabHeld = true;
+        return jsonResponse({ error: 'another time is held for this estimate', code: 'OTHER_LIVE_HOLD' }, { ok: false, status: 409 });
+      },
       acceptImpl: () => EXPIRED_409(),
+      data: () => (otherTabHeld ? heldElsewhere() : recurringPayload()),
     });
     vi.stubGlobal('fetch', fetchMock);
     render(<EstimateViewPage />);
 
     await pickTimeAndConfirm();
 
-    expect(await screen.findByText(/Your held time ran out and nothing was booked/, {}, SLOW)).toBeInTheDocument();
+    expect(await screen.findByText(/a different time is held for you/, {}, SLOW)).toBeInTheDocument();
+    expect(await screen.findByText('Time held for you', {}, SLOW)).toBeInTheDocument();
+    expect(screen.queryByText(/Pick a time below/)).toBeNull();
     expect(screen.queryByText(REHELD)).toBeNull();
     expect(screen.queryByText(/just taken/i)).toBeNull();
     // Only the automatic re-hold says so; the customer's own pick is an ordinary reserve.
     expect(reserveCalls(fetchMock).map(([, init]) => JSON.parse(init.body).rehold)).toEqual([undefined, true]);
+    // The page released only its own expired hold, never the other tab's.
+    const released = fetchMock.mock.calls.filter(([url, init]) => String(url).includes('/reserve/') && init?.method === 'DELETE').map(([url]) => String(url));
+    expect(released.some((u) => u.includes('ss-other-tab'))).toBe(false);
   }, TEST_TIMEOUT_MS);
 
   it('never says "taken" when the fresh availability cannot be read: the plain expiry copy', async () => {
@@ -361,7 +380,7 @@ describe('holdSameTimeAgain', () => {
     ['a guarantee-only renewal', () => jsonResponse({ error: 'x', invoiceOnlyAcceptance: true }, { ok: false, status: 409 }), { noBooking: true }],
     ['an add-on limit, whatever the status', () => jsonResponse({ error: 'x', code: 'AREA_ADDON_YEARLY_LIMIT_REACHED' }, { ok: false, status: 422 }), { noBooking: true }],
     ['an estimate the office parked', () => jsonResponse({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', error: 'x' }, { ok: false, status: 409 }), { review: { code: 'ACCEPT_NEEDS_OFFICE_REVIEW', error: 'x' } }],
-    ['another tab\'s newer hold (OTHER_LIVE_HOLD)', () => jsonResponse({ error: 'another time is held for this estimate', code: 'OTHER_LIVE_HOLD' }, { ok: false, status: 409 }), { failed: true }],
+    ['another tab\'s newer hold (OTHER_LIVE_HOLD)', () => jsonResponse({ error: 'another time is held for this estimate', code: 'OTHER_LIVE_HOLD' }, { ok: false, status: 409 }), { otherHold: true }],
     ['another 409', () => jsonResponse({ error: 'something else' }, { ok: false, status: 409 }), { failed: true }],
     ['a server error', () => jsonResponse({}, { ok: false, status: 500 }), { failed: true }],
     ['a hold with no id', () => jsonResponse({}), { failed: true }],
@@ -439,10 +458,10 @@ describe('holdSameTimeAgain', () => {
     expect(await holdSameTimeAgain({ ...base, slotId: OLD })).toEqual({ failed: true });
   });
 
-  it('retries only once: a second refusal is taken', async () => {
+  it('retries only once, and a second refusal is still failed, never taken', async () => {
     const fetchMock = routed({ reserve: () => refusal([]), day: () => jsonResponse({ primary: [{ slotId: FRESH }], expander: [] }) });
     vi.stubGlobal('fetch', fetchMock);
-    expect(await holdSameTimeAgain({ ...base, slotId: OLD })).toEqual({ taken: true });
+    expect(await holdSameTimeAgain({ ...base, slotId: OLD })).toEqual({ failed: true });
     // reserve, the day read, the one retry.
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
