@@ -214,12 +214,17 @@ function heldSpans(occupancy, techId, techBlind) {
 }
 
 /**
- * Every span holding booked time on a date: the offer side's own read (completed rows in, expired holds out), and
+ * Every span holding booked time on a date: the offer side's own read (completed rows in) with every visit staff have
+ * booked, also one that keeps an old hold timestamp (an unclaimed hold counts until it expires), and
  * the owner's booked interviews with their buffers (interview-slots.js), which dispatch also refuses to book over;
  * an interview holds every technician's time (no technician_id). A failed read throws: the caller marks the date.
  */
 async function loadOccupancy(conn, day) {
-  const visits = await require('../scheduling/occupancy').listOccupiedWindows({ db: conn, dateFrom: day, dateTo: day });
+  // Every visit staff have booked, as the stops read counts them (pre-push audit round 34): an unassigned one that keeps
+  // an old hold timestamp still holds every technician's time, and an assigned one keeps its version-2 allocation.
+  const visits = await require('../scheduling/occupancy').listOccupiedWindows({
+    db: conn, dateFrom: day, dateTo: day, includeClaimedReservations: true,
+  });
   const interviews = await require('../interview-slots').bookedInterviewWindowsForDate(day, { conn });
   return [
     ...visits,

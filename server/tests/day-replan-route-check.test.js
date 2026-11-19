@@ -426,7 +426,7 @@ describe('runRouteCheck', () => {
     replan.loadBlocks.mockResolvedValue([]);
   });
 
-  test("the check reads every visit staff have booked and every block, as dispatch's commit-time checks do (round 33)", async () => {
+  test("the check reads every visit staff have booked and every block, as dispatch's commit-time checks do (rounds 33, 34)", async () => {
     replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-20' ? [stop('s1', '10:00:00', null)] : []));
     const { conn } = fakeConn();
     await runRouteCheck({ conn, now: NOW });
@@ -434,6 +434,9 @@ describe('runRouteCheck', () => {
     expect(replan.loadDayStops.mock.calls.every(([, , booked]) => booked === true)).toBe(true);
     expect(replan.loadBlocks.mock.calls.length).toBeGreaterThan(0);
     expect(replan.loadBlocks.mock.calls.every(([, , , options]) => options?.keepInvalid === true)).toBe(true);
+    // Held time and version-2 allocations come from the same booked-visit rule as the stops (round 34).
+    expect(listOccupiedWindows.mock.calls.length).toBeGreaterThan(0);
+    expect(listOccupiedWindows.mock.calls.every(([options]) => options.includeClaimedReservations === true)).toBe(true);
     replan.loadDayStops.mockResolvedValue([]);
   });
 
