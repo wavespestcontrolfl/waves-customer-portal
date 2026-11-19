@@ -5505,10 +5505,23 @@ const StripeService = {
           // Stable-owner lock (codex r37 P1) — same contract as setup.
           await require('./pay-combined').lockCombinedCustomerStable(finalizeTrx, invoiceId, invoice.customer_id);
         }
-        const lockedInvoice = await finalizeTrx('invoices')
-          .where({ id: invoiceId })
-          .forUpdate()
-          .first();
+        // Lock every row still stamped
+        // with this PI in ascending id order BEFORE taking a target-only
+        // lock. This is required even after the combined gate turns off:
+        // anchor-only finalize clears stale sibling stamps below, and used to
+        // deadlock against a staff settlement that held one of those siblings
+        // before trying to clear the anchor.
+        const { lockInvoicePaymentIntentAllocation } = require('./invoice-payment-intent-allocation');
+        const lockedInvoice = await lockInvoicePaymentIntentAllocation(finalizeTrx, {
+          id: invoiceId,
+          piId: invoice.stripe_payment_intent_id,
+          customerId: invoice.customer_id,
+          // Combined finalize already holds the stable reservation above;
+          // gate-off anchor-only finalize cannot grow a combined allocation,
+          // but must still lock the stale stamped members canonically.
+          combinedCustomerLocked: true,
+          targetForUpdate: true,
+        });
         if (!lockedInvoice) throw new Error('Invoice not found');
         assertInvoiceCollectible(lockedInvoice);
         if (String(lockedInvoice.stripe_payment_intent_id || '')

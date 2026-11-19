@@ -852,6 +852,8 @@ describe('StripeService.finalizeInvoicePayment saved-card serialization', () => 
     };
     const invoiceQuery = {
       where: jest.fn(() => invoiceQuery),
+      whereRaw: jest.fn(() => invoiceQuery),
+      orderBy: jest.fn(() => invoiceQuery),
       forUpdate: jest.fn(() => invoiceQuery),
       // Combined-stamp cleanup (clearPaymentIntentStamps) chains
       // where→whereNotIn→whereNotIn→update on the trx invoices table.
@@ -859,6 +861,7 @@ describe('StripeService.finalizeInvoicePayment saved-card serialization', () => 
       update: jest.fn().mockResolvedValue(0),
       first: jest.fn().mockResolvedValue(invoice),
     };
+    invoiceQuery.then = (resolve, reject) => Promise.resolve([invoice]).then(resolve, reject);
     const attemptQuery = {
       orderByRaw: jest.fn(() => attemptQuery),
       where: jest.fn(() => attemptQuery),
@@ -927,6 +930,7 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
   let originalJwtSecret;
   let invoice;
   let stripeClient;
+  let invoiceQuery;
 
   const quoteTokenFor = () => {
     const payload = JSON.stringify({
@@ -964,8 +968,10 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
         confirm: jest.fn().mockResolvedValue({ id: 'pi-public', status: 'succeeded', client_secret: 'pi-public_secret' }),
       },
     };
-    const invoiceQuery = {
+    invoiceQuery = {
       where: jest.fn(() => invoiceQuery),
+      whereRaw: jest.fn(() => invoiceQuery),
+      orderBy: jest.fn(() => invoiceQuery),
       forUpdate: jest.fn(() => invoiceQuery),
       // Combined-stamp cleanup (clearPaymentIntentStamps) chains
       // where→whereNotIn→whereNotIn→update on the trx invoices table.
@@ -973,6 +979,7 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
       update: jest.fn().mockResolvedValue(0),
       first: jest.fn().mockResolvedValue(invoice),
     };
+    invoiceQuery.then = (resolve, reject) => Promise.resolve([invoice]).then(resolve, reject);
     const attemptQuery = {
       orderByRaw: jest.fn(() => attemptQuery),
       where: jest.fn(() => attemptQuery),
@@ -1058,6 +1065,28 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
     expect(updateOpts).toEqual({ apiVersion: expect.any(String) });
     const [, , confirmOpts] = stripeClient.paymentIntents.confirm.mock.calls[0];
     expect(confirmOpts).toEqual({ apiVersion: expect.any(String) });
+  });
+
+  test('gate-off finalize locks the original stamped allocation in canonical order before stale-sibling cleanup', async () => {
+    const StripeService = require('../services/stripe');
+    const clearStamps = jest.spyOn(require('../services/pay-combined'), 'clearPaymentIntentStamps');
+    try {
+      await StripeService.finalizeInvoicePayment(invoice.id, quoteTokenFor());
+
+      const allocationLock = invoiceQuery.whereRaw.mock.invocationCallOrder[0];
+      expect(invoiceQuery.whereRaw).toHaveBeenCalledWith(
+        'id = ? OR (stripe_payment_intent_id = ? AND status NOT IN (?, ?, ?))',
+        [invoice.id, invoice.stripe_payment_intent_id, 'paid', 'processing', 'prepaid'],
+      );
+      expect(invoiceQuery.orderBy).toHaveBeenCalledWith('id', 'asc');
+      expect(allocationLock).toBeLessThan(invoiceQuery.forUpdate.mock.invocationCallOrder[0]);
+      expect(invoiceQuery.forUpdate.mock.invocationCallOrder[0])
+        .toBeLessThan(clearStamps.mock.invocationCallOrder[0]);
+      expect(invoiceQuery.forUpdate.mock.invocationCallOrder[0])
+        .toBeLessThan(stripeClient.paymentIntents.confirm.mock.invocationCallOrder[0]);
+    } finally {
+      clearStamps.mockRestore();
+    }
   });
 
   test('finalize refuses (409, reload) when the live consent stamp differs from the one it would write — never a re-stamp in place', async () => {

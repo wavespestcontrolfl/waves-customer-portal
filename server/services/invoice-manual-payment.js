@@ -386,8 +386,21 @@ async function recordManualPayment(id, {
     // after the locked fence and before the paid flip.
     const PayCombined = require('./pay-combined');
     await PayCombined.lockCombinedCustomerStable(trx, id, invoice.customer_id);
-    const locked = await trx('invoices').where({ id }).forUpdate().first();
+    // Match the other customer-money writers: advisory reservation →
+    // customer row → complete PI allocation. Locking only this target first
+    // let a gate-off checkout finalize hold its anchor while this path held a
+    // sibling; each then waited for the other during stale-stamp cleanup.
+    const lockedCustomer = await trx('customers').where({ id: invoice.customer_id })
+      .forUpdate().first('id', 'payer_id');
+    const locked = await InvoiceService.lockInvoicePaymentIntentAllocation(trx, {
+      id,
+      piId: observedPiId,
+      customerId: invoice.customer_id,
+      combinedCustomerLocked: true,
+      targetForUpdate: true,
+    });
     if (!locked) return null;
+    if (!lockedCustomer || locked.customer_id !== invoice.customer_id) return { ownerChanged: true };
     const lockedPiId = locked.stripe_payment_intent_id || null;
     if (lockedPiId && lockedPiId !== observedPiId) return { racedNewPaymentIntent: lockedPiId };
     // The collectibility gate re-run UNDER THE LOCK (audit P0): the unlocked
@@ -440,11 +453,10 @@ async function recordManualPayment(id, {
       // The visit lock is NOWAIT (Codex #3882 r4 P2): this is the first
       // visit acquisition on the self-pay path, so a blocking wait here
       // would recreate the invoice↔visit cycle the fence below avoids.
-      const cust = await trx('customers').where({ id: locked.customer_id }).forUpdate().first('id', 'payer_id');
       const visit = locked.scheduled_service_id
         ? await lockVisitForSettlement(trx, locked.scheduled_service_id, ['id', 'payer_id'])
         : null;
-      const payerIds = [...new Set([cust?.payer_id, visit?.payer_id].filter(Boolean))];
+      const payerIds = [...new Set([lockedCustomer.payer_id, visit?.payer_id].filter(Boolean))];
       if (payerIds.length) await trx('payers').whereIn('id', payerIds).orderBy('id', 'asc').forUpdate().select('id');
       const { rowIsSelfPayDue } = require('./open-balance');
       const selfPay = !locked.payer_id && !locked.payer_statement_id && await rowIsSelfPayDue(locked.customer_id, locked, { database: trx });
@@ -632,6 +644,9 @@ async function recordManualPayment(id, {
 
   if (updatedInvoice?.racedNewPaymentIntent) {
     throw refusal(409, 'A new payment session started for this invoice — retry recording the payment');
+  }
+  if (updatedInvoice?.ownerChanged) {
+    throw refusal(409, 'This invoice\'s owner changed — retry recording the payment', { drift: true });
   }
   if (updatedInvoice?.amountMismatch) {
     const { expectedCents, actualCents } = updatedInvoice.amountMismatch;

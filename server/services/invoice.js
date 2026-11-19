@@ -20,6 +20,7 @@ const { etDateString, addETDays, etCalendarDayOf } = require("../utils/datetime-
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 const { publicPortalUrl } = require("../utils/portal-url");
 const { loadInvoiceAnnualPrepay, buildPrepayCoverageSummary } = require("./invoice-prepay");
+const { lockInvoicePaymentIntentAllocation } = require("./invoice-payment-intent-allocation");
 const { explicitBillingChannels } = require("./billing-delivery-channels");
 const PhotoService = require("./photos");
 const config = require("../config");
@@ -841,37 +842,21 @@ function assertVoidPiStatus(pi, expected) {
   if (!expected || pi.status === "canceled" || pi.status === expected.paymentIntentStatus) return;
   throw new Error("Invoice status changed while voiding — re-check and retry");
 }
-// Lock the target plus every collectible sibling that the same PaymentIntent
-// can mutate, in the ascending invoice-id order used by combined checkout.
-// The stable-owner advisory lock freezes combined allocation changes before
-// the set is selected, so cancel + sibling-stamp cleanup cannot deadlock after
-// Stripe has already accepted the cancellation.
-async function lockVoidInvoiceAllocation(trx, { id, piId, customerId, combinedCustomerLocked = false }) {
-  if (!piId) return trx("invoices").where({ id }).forNoKeyUpdate().first();
-  const PayCombined = require("./pay-combined");
-  if (!combinedCustomerLocked) {
-    await PayCombined.lockCombinedCustomerStable(trx, id, customerId);
-  }
-  const rows = await trx("invoices")
-    .whereRaw(
-      "id = ? OR (stripe_payment_intent_id = ? AND status NOT IN (?, ?, ?))",
-      [id, piId, "paid", "processing", "prepaid"],
-    )
-    .orderBy("id", "asc")
-    .forUpdate();
-  return rows.find((row) => String(row.id) === String(id)) || null;
-}
-
 // Inside every void transaction: lock the canonical PI allocation (or the
 // target alone), assert the bar card's version when supplied, then check the
 // saved-card fence before any Stripe cancel. A known conflict is returned so
 // the caller can commit a stale-claim promotion before raising its 409.
-async function voidLockAndGuard(trx, { id, piId, customerId, expected }) {
-  const locked = await lockVoidInvoiceAllocation(trx, { id, piId, customerId });
+async function voidLockAndGuard(trx, { id, piId, customerId, status, expected }) {
+  const locked = await lockInvoicePaymentIntentAllocation(trx, { id, piId, customerId });
   if (!locked) throw new Error("Invoice not found");
   if (expected) assertVoidExpected(locked, expected);
-  else if ((locked.stripe_payment_intent_id || null) !== (piId || null)) {
-    throw new Error("A new payment session started for this invoice — re-check and retry the void");
+  else {
+    if (locked.status !== status) {
+      throw new Error("Invoice status changed while voiding — re-check and retry");
+    }
+    if ((locked.stripe_payment_intent_id || null) !== (piId || null)) {
+      throw new Error("A new payment session started for this invoice — re-check and retry the void");
+    }
   }
   // The durable saved-card charge fence and the payment-plan fence, now that this transaction holds the row and BEFORE
   // the one effect that cannot roll back (the Stripe cancel): a claim or plan that started after the card refuses the
@@ -6238,7 +6223,7 @@ async function recheckAndVoidCancelledServiceCandidate(candidate, triagedPiId, c
         return { skipped: "on a finalized payer statement; needs a credit on the next statement", invoice: candidate };
       }
     }
-    const locked = await lockVoidInvoiceAllocation(trx, {
+    const locked = await lockInvoicePaymentIntentAllocation(trx, {
       id: candidate.id,
       piId: triagedPiId,
       customerId: candidate.customer_id,
@@ -11905,6 +11890,7 @@ const InvoiceService = {
         id,
         piId: current.stripe_payment_intent_id || null,
         customerId: current.customer_id,
+        status: current.status,
         expected,
       }));
       if (repairGuard.chargeConflict) throw repairGuard.chargeConflict;
@@ -11994,11 +11980,24 @@ const InvoiceService = {
         id,
         piId: triagedVoidPiId,
         customerId: current.customer_id,
+        status: current.status,
         expected,
       });
       if (guard.chargeConflict) return { chargeConflict: guard.chargeConflict };
       const lockedVoidInvoice = guard.locked;
       if (requireUnsettled) await assertInvoiceGenuinelyUnsettledLocked(trx, id);
+      // Re-check applied money while the invoice allocation is locked and
+      // BEFORE triage can cancel a customer checkout. A payment can land
+      // after the outer snapshot without changing the status or PI stamp;
+      // refusing it after Stripe cancellation would leave an otherwise
+      // usable checkout destroyed even though the void rolls back.
+      const voidAppliedPaymentLocked = await trx("payments")
+        .whereIn("status", ["paid", "processing"])
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [lockedVoidInvoice.id])
+        .first("id");
+      if (lockedVoidInvoice.payment_recorded_at || voidAppliedPaymentLocked) {
+        throw new Error("A payment was applied to this invoice while voiding — issue a refund instead");
+      }
       await triageVoidPaymentIntent({
         id,
         piId: lockedVoidInvoice.stripe_payment_intent_id || null,
@@ -12021,18 +12020,6 @@ const InvoiceService = {
       // this transaction ever start changing the stamp before credit is restored.
       if ((updated.stripe_payment_intent_id || null) !== triagedVoidPiId) {
         throw new Error("A new payment session started for this invoice — re-check and retry the void");
-      }
-      // Re-check the money guard under the row lock: a cash payment could have
-      // recorded between the pre-transaction check and this update (a webhook can
-      // set payment_recorded_at / insert a paid payment row without flipping the
-      // status the conditional update keys on). Rolling back beats voiding away
-      // freshly-collected money.
-      const voidAppliedPaymentLocked = await trx("payments")
-        .whereIn("status", ["paid", "processing"])
-        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [updated.id])
-        .first("id");
-      if (updated.payment_recorded_at || voidAppliedPaymentLocked) {
-        throw new Error("A payment was applied to this invoice while voiding — issue a refund instead");
       }
       // A void is a terminal exit for the invoice's collection path — an
       // ACTIVE payment plan must not survive it (it blocks edits/credit
@@ -14368,6 +14355,11 @@ module.exports.explicitBillingAppSelected = explicitBillingAppSelected;
 module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
 module.exports._cancelVoidInvoiceAmounts = cancelVoidInvoiceAmounts;
 module.exports._cancelVoidAmountsMatch = cancelVoidAmountsMatch;
+// Shared by every path that may retire a stamped customer checkout. It
+// freezes the per-customer combined-session owner, then locks the complete
+// mutable PI allocation in canonical invoice-id order before any caller
+// takes a target-only lock or performs an irreversible provider cancel.
+module.exports.lockInvoicePaymentIntentAllocation = lockInvoicePaymentIntentAllocation;
 
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
 module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;

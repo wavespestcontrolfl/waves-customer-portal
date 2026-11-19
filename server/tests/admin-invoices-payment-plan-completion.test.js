@@ -85,6 +85,8 @@ function makeRecorder(overrides = {}) {
     });
   });
   qb.first = jest.fn(async () => null);
+  qb.then = (resolve, reject) => qb.first()
+    .then((value) => resolve(value ? [value] : []), reject);
   qb.insert = jest.fn(() => Promise.resolve(1));
   qb.update = jest.fn(async () => 1);
   qb.returning = jest.fn(async () => []);

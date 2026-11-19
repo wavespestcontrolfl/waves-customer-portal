@@ -35,7 +35,10 @@ jest.mock('../services/pay-combined', () => ({
   lockCombinedCustomerStable: jest.fn(async (_trx, _invoiceId, customerId) => customerId),
   releaseCombinedSessionBeforeCollection: jest.fn(async () => undefined),
 }));
-jest.mock('../services/invoice', () => ({ sendReceipt: jest.fn(async () => ({ sent: true })) }));
+jest.mock('../services/invoice', () => ({
+  sendReceipt: jest.fn(async () => ({ sent: true })),
+  lockInvoicePaymentIntentAllocation: jest.fn(async (trx, { id }) => trx('invoices').where({ id }).forUpdate().first()),
+}));
 jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../services/invoice-followups', () => ({ stopOnPayment: jest.fn(async () => undefined) }));
 jest.mock('../services/billing-pause', () => ({ maybeResumeBillingPauseOnPayment: jest.fn(async () => undefined) }));
@@ -112,6 +115,7 @@ function heldManualPosting(overrides = {}) {
   });
   const trx = jest.fn((table) => {
     if (table === 'invoices') return invoice;
+    if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
     if (table === 'payments') return payments;
     throw new Error(`unexpected trx table ${table}`);
   });
@@ -224,6 +228,7 @@ describe('recordManualPayment — refusal contract', () => {
           invoiceUpdate = r.update;
           return r;
         }
+        if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
         if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
         throw new Error(`unexpected trx table ${table}`);
       });
@@ -245,6 +250,7 @@ describe('recordManualPayment — refusal contract', () => {
     db.transaction.mockImplementation(async (fn) => {
       const trx = jest.fn((table) => {
         if (table === 'invoices') { const r = recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }), returning: [] }); invoiceUpdate = r.update; return r; }
+        if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
         if (table === 'scheduled_services') { const r = recorder({ first: { id: 'svc-1', status: visitStatus } }); r.forUpdate = jest.fn(() => { visitLocked = true; return r; }); return r; }
         if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
         throw new Error(`unexpected trx table ${table}`);
@@ -269,6 +275,7 @@ describe('recordManualPayment — refusal contract', () => {
     db.transaction.mockImplementation(async (fn) => {
       const trx = jest.fn((table) => {
         if (table === 'invoices') { const r = recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }), returning: [] }); invoiceUpdate = r.update; return r; }
+        if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
         if (table === 'scheduled_services') {
           const r = recorder();
           r.noWait = jest.fn(() => { noWaitUsed = true; return r; });
@@ -295,6 +302,7 @@ describe('recordManualPayment — refusal contract', () => {
     db.transaction.mockImplementation(async (fn) => {
       const trx = jest.fn((table) => {
         if (table === 'invoices') { const r = recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }), returning: [openInvoice({ scheduled_service_id: 'svc-1', status: 'paid' })] }); invoiceUpdate = r.update; return r; }
+        if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
         if (table === 'scheduled_services') return recorder({ first: { id: 'svc-1', status: 'rescheduled' } });
         if (table === 'payments') return recorder();
         throw new Error(`unexpected trx table ${table}`);
@@ -395,6 +403,7 @@ describe('recordManualPayment — refusal contract', () => {
     db.transaction.mockImplementation(async (fn) => {
       const trx = jest.fn((table) => {
         if (table === 'invoices') return recorder({ first: openInvoice({ total: '120.00' }), returning: [] }); // amount moved under the lock
+        if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
         if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
         throw new Error(`unexpected trx table ${table}`);
       });
@@ -519,6 +528,7 @@ describe('recordManualPayment — settlement', () => {
     db.transaction.mockImplementation(async (fn) => {
       const trx = jest.fn((table) => {
         if (table === 'invoices') return recorder({ first: row, returning: [paid] });
+        if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
         if (table === 'payments') return recorder();
         throw new Error(`unexpected trx table ${table}`);
       });
@@ -564,6 +574,7 @@ describe('recordManualPayment — settlement', () => {
     db.transaction.mockImplementation(async (fn) => {
       const trx = jest.fn((table) => {
         if (table === 'invoices') return recorder({ first: openInvoice(), returning: [] });
+        if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
         if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
         throw new Error(`unexpected trx table ${table}`);
       });
@@ -698,6 +709,7 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
           calls.update = r.update;
           return r;
         }
+        if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
         if (table === 'payments') { const r = recorder(); calls.paymentsInsert = r.insert; return r; }
         if (table === 'scheduled_services') return recorder({ first: visit });
         if (table === 'time_entries') return recorder({ first: timer });

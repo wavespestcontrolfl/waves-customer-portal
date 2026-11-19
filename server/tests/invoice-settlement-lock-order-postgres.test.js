@@ -300,8 +300,8 @@ test('every production caller of postCreditMovement that locks an invoice first 
     {
       file: 'routes/admin-invoices.js', label: 'POST /:id/apply-credit',
       anchor: "outcome = await db.transaction(async (trx) => {",
-      customerLock: "await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');",
-      invoiceLock: "const locked = await trx('invoices').where({ id }).forUpdate().first();",
+      customerLock: "const lockedCustomer = await trx('customers').where({ id: invoice.customer_id })",
+      invoiceLock: 'const locked = await InvoiceService.lockInvoicePaymentIntentAllocation(trx, {',
     },
     {
       file: 'routes/admin-invoices.js', label: 'POST /:id/reverse-prepaid',

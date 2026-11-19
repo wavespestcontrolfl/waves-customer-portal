@@ -2684,9 +2684,17 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       }
       // Customer before invoice — the order reverse-prepaid and apply-credit
       // take, and the cancel below locks the customer too — then re-read the
-      // invoice under its own lock: a payment landing on it waits for us.
+      // invoice's complete PI allocation in canonical order: a payment
+      // landing on any member waits for us, and stale-stamp cleanup cannot
+      // deadlock against a checkout finalize holding the original anchor.
       await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
-      const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first(INVOICE_FIELDS);
+      const locked = await InvoiceService.lockInvoicePaymentIntentAllocation(trx, {
+        id: invoice.id,
+        piId: openPiId,
+        customerId: invoice.customer_id,
+        combinedCustomerLocked: true,
+        targetForUpdate: true,
+      });
       if (!locked || locked.customer_id !== invoice.customer_id
         || locked.annual_prepay_term_id !== invoice.annual_prepay_term_id) {
         throw refuse('This invoice changed while the annual prepay flag was being removed — retry.');
@@ -3226,7 +3234,13 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         // pre-transaction `invoice` read above already carries customer_id.
         const lockedCustomer = await trx('customers').where({ id: invoice.customer_id })
           .forUpdate().first('id', 'account_credits');
-        const locked = await trx('invoices').where({ id }).forUpdate().first();
+        const locked = await InvoiceService.lockInvoicePaymentIntentAllocation(trx, {
+          id,
+          piId: openPiId,
+          customerId: invoice.customer_id,
+          combinedCustomerLocked: true,
+          targetForUpdate: true,
+        });
         if (!locked) {
           const err = new Error('Invoice not found'); err.statusCode = 404; err.isOperational = true; throw err;
         }
