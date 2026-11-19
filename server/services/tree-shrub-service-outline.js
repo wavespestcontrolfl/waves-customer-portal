@@ -17,13 +17,14 @@ const {
   currentMonthNumber,
   estimateSnapshot,
   estimateViewPath,
+  fertilizerSetbackTiles,
   firstNonEmpty,
   isRestrictedSeason,
   loadFertilizerRule,
   makeSection,
   parseJsonMaybe,
   renderOutlineHtml,
-  resolveJurisdictionId,
+  resolveOutlineJurisdictionId,
   resolveSeasonBand,
   validateContent,
 } = require('./lawn-service-outline');
@@ -127,8 +128,8 @@ const TS_COPY = Object.freeze({
     2: { visit: 'A spray visit for scale, mites and whitefly where found; spring shrub feeding only where a need is documented and history says it is due.', atHome: 'Leave yellowing lower palm fronds on; the palm pulls nutrients from them, and cutting them speeds the decline.' },
     3: { visit: 'A spray visit aimed at whitefly and scale before summer, where found.', atHome: 'Rinsing dusty shrubs with plain water during dry spells helps keep mites from building up.' },
     4: { visit: 'Palm feeding when due; shrub feeding only for a documented need. Scale crawlers and young whitefly are checked for.', atHome: 'Whitefly and scale live on the underside of leaves, so that’s the best place to look between visits.' },
-    5: { visit: 'The last allowed nitrogen window before summer; established shrubs with no documented need are not fed.', atHome: 'When fronds are trimmed, keep everything above the 9-to-3 o’clock line on the palm.' },
-    6: { visit: 'Summer limits: palms may get a feeding with no nitrogen or phosphorus; heat-stressed plants are noted, not sprayed.', atHome: 'Beds that stay soggy for days are where root rot starts; check for a stuck zone or a broken head.' },
+    5: { visit: 'We check established shrubs for a documented need before their last spring feeding opportunity.', atHome: 'When fronds are trimmed, keep everything above the 9-to-3 o’clock line on the palm.' },
+    6: { visit: 'We use a summer palm fertilizer with no nitrogen or phosphorus when a feeding is due. We hold sprays on heat-stressed plants.', atHome: 'Beds that stay soggy for days are where root rot starts; check for a stuck zone or a broken head.' },
     7: { visit: 'A scouting visit: bed weeds, whitefly, scale crawlers, palm symptoms and heat stress; treatment only where found.', atHome: 'Fresh chewing on new growth is often caterpillars; a quick look at dusk can spot them.' },
     8: { visit: 'Lightest on products, heaviest on looking; whitefly treated by life stage where found.', atHome: 'New trees and shrubs need extra water at first. UF/IFAS says a small new tree needs daily water for its first 2 weeks, and full establishment takes 3 to 4 months per inch of trunk thickness. The watering rules allow new plants extra days for their first 60.' },
     9: { visit: 'Late-summer scale and whitefly treated where found.', atHome: 'After saltwater flooding, UF/IFAS says to flush the soil thoroughly with fresh water to move the salt down through it, and not to rush to prune or pull plants that look burned. Text us a photo.' },
@@ -252,7 +253,7 @@ function monthsVisual(jurisdictionRule, month) {
       label,
       name: FULL_MONTHS[index],
       ...monthSteps(card),
-      limited: isRestrictedSeason(jurisdictionRule, number),
+      limited: isRestrictedSeason(jurisdictionRule, number, 'landscape'),
       visit: TS_COPY.months[number].visit,
       atHome: TS_COPY.months[number].atHome,
       open: open.has(number),
@@ -272,12 +273,19 @@ function yourPartTiles(jurisdictionId, now) {
   return [TS_COPY.keepDryTile, ...(orderLive ? [{ ...TS_COPY.wateringOrderTile, until: WATERING_ORDER.until }] : []), ...TS_COPY.yourPartTiles];
 }
 
-// The rule area and its summary come from the rule the outline resolved, as on the lawn outline; no dates.
+function landscapeRuleSummary(rule) {
+  return rule?.jurisdiction_id === 'north_port_fl'
+    ? 'North Port allows fertilizer on landscape plants during the turf restriction. At least 50% of the nitrogen in fertilizer for landscape plants must be slow-release.'
+    : rule?.public_summary || null;
+}
+
 function ruleTiles(jurisdictionRule) {
+  const northPort = jurisdictionRule?.jurisdiction_id === 'north_port_fl';
   return [
     { icon: 'area', title: 'Your rule area', text: jurisdictionRule?.jurisdiction_name || 'To be confirmed' },
-    { icon: 'calendar', title: 'What it limits', text: jurisdictionRule?.public_summary || 'Local fertilizer rules may affect what nutrient products can be used.' },
-    { icon: 'micros', title: 'What we do instead', text: TS_COPY.rulesInstead },
+    { icon: 'calendar', title: 'What it limits', text: landscapeRuleSummary(jurisdictionRule) || 'Local fertilizer rules may affect what nutrient products can be used.' },
+    { icon: 'micros', title: 'Our summer program', text: northPort ? TS_COPY.months[6].visit : TS_COPY.rulesInstead },
+    ...fertilizerSetbackTiles(jurisdictionRule),
   ];
 }
 
@@ -305,9 +313,9 @@ async function buildTreeShrubOutline({ db, estimate, input = {}, now = new Date(
   const estimateData = parseJsonMaybe(estimate.estimate_data || estimate.estimateData) || {};
   const month = Number(input.month || currentMonthNumber(now));
   const seasonBand = resolveSeasonBand(month);
-  const jurisdictionId = input.jurisdictionId || resolveJurisdictionId(estimate.address);
+  const jurisdictionId = resolveOutlineJurisdictionId(input, estimate, estimateData);
   const jurisdictionRule = await loadFertilizerRule(db, jurisdictionId);
-  const restrictedSeasonActive = isRestrictedSeason(jurisdictionRule, month);
+  const restrictedSeasonActive = isRestrictedSeason(jurisdictionRule, month, 'landscape');
   const ruleJurisdictionId = jurisdictionRule?.jurisdiction_id || jurisdictionId;
   const snapshot = estimateSnapshot(estimate, estimateData);
   const customerName = firstNonEmpty(snapshot.customerName, 'your property');
@@ -337,7 +345,7 @@ async function buildTreeShrubOutline({ db, estimate, input = {}, now = new Date(
       jurisdictionId: ruleJurisdictionId,
       jurisdictionName: jurisdictionRule?.jurisdiction_name || null,
       version: jurisdictionRule?.version || null,
-      summary: jurisdictionRule?.public_summary || null,
+      summary: landscapeRuleSummary(jurisdictionRule),
       restrictedSeasonActive,
     },
     sections: treeShrubSections({ month, jurisdictionRule, now }),

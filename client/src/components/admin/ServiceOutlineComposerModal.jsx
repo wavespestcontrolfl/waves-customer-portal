@@ -127,6 +127,9 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
   const [events, setEvents] = useState([]);
   const [eventsLoading, setEventsLoading] = useState(false);
   const [revokeOldOnRegenerate, setRevokeOldOnRegenerate] = useState(true);
+  const [jurisdictionChoice, setJurisdictionChoice] = useState(null);
+  const confirmJurisdiction = packet?.legacySarasotaRule && preview?.summary?.jurisdictionId === "north_port_fl";
+  const selectedJurisdiction = jurisdictionChoice?.packetId === packet?.id ? jurisdictionChoice?.value : "";
 
   const requestBody = useMemo(() => ({
     estimateId: estimate?.id,
@@ -282,7 +285,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
   }
 
   async function regenerate() {
-    if (!packet?.id) return;
+    if (!packet?.id || (confirmJurisdiction && !selectedJurisdiction)) return;
     if (!window.confirm("Regenerate this outline from the latest approved content and product facts?")) return;
     setSaving(true);
     setError("");
@@ -290,11 +293,19 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
     try {
       const data = await adminFetch(`/admin/service-outlines/${packet.id}/regenerate`, {
         method: "POST",
-        body: JSON.stringify({ ...requestBody, revokeOld: revokeOldOnRegenerate }),
+        body: JSON.stringify({
+          ...requestBody, revokeOld: revokeOldOnRegenerate,
+          ...(confirmJurisdiction && { jurisdictionId: selectedJurisdiction }),
+        }),
       });
       setPacket(data.packet);
       setPublicUrl(data.publicUrl || data.packet?.publicUrl || "");
-      setPreview((current) => current ? { ...current, validation: data.validation || current.validation } : current);
+      setPreview((current) => ({
+        ...current,
+        outline: data.packet?.content || current?.outline,
+        summary: data.packet?.summary || current?.summary,
+        validation: data.validation || current?.validation,
+      }));
       loadEvents(data.packet?.id);
       setNotice(revokeOldOnRegenerate ? "New outline generated. Previous link revoked." : "New outline generated. Previous link remains active.");
     } catch (err) {
@@ -402,11 +413,22 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
                 <div className="rounded-xs border border-zinc-200 bg-white p-3">
                   <div className="text-xs font-medium uppercase tracking-wide text-zinc-500">Regeneration</div>
                   <p className="mt-1 text-xs leading-5 text-zinc-500">Creates a new packet from current approved modules, facts, protocol, and local rules.</p>
+                  {confirmJurisdiction && (
+                    <label className="mt-2 block text-sm text-zinc-700">
+                      Which fertilizer rule applies to this service address?
+                      <select value={selectedJurisdiction || ""} onChange={event => setJurisdictionChoice({ packetId: packet.id, value: event.target.value })}
+                        className="mt-1 h-10 w-full rounded-xs border border-zinc-300 bg-white px-3 text-sm text-zinc-900">
+                        <option value="">Select the verified jurisdiction</option>
+                        <option value="north_port_fl">City of North Port (current estimate)</option>
+                        <option value="sarasota_county_fl">Sarasota County (saved outline)</option>
+                      </select>
+                    </label>
+                  )}
                   <label className="mt-2 flex items-start gap-2 text-sm text-zinc-700">
                     <input type="checkbox" checked={revokeOldOnRegenerate} onChange={(event) => setRevokeOldOnRegenerate(event.target.checked)} className="mt-1" />
                     <span>Revoke previous link after regenerating</span>
                   </label>
-                  <Button type="button" variant="secondary" className="mt-3 w-full justify-center" onClick={regenerate} disabled={saving || loading}>
+                  <Button type="button" variant="secondary" className="mt-3 w-full justify-center" onClick={regenerate} disabled={saving || loading || (confirmJurisdiction && !selectedJurisdiction)}>
                     <RefreshCw size={14} strokeWidth={1.75} className="mr-2" />
                     Regenerate
                   </Button>

@@ -200,10 +200,12 @@ describe('a 9-visit rounds estimate', () => {
       const northPort = await build({ line, jurisdictionId: 'north_port_fl' });
       const northPortBar = section(northPort, 'year_bar').visual;
       expect(northPort.inputSnapshot.jurisdictionId).toBe('north_port_fl');
+      expect(northPortBar.caption).toMatch(/10 ft.*top of bank.*25 ft buffer.*swale/);
+      expect(northPort.contentHtml).toContain('25 ft buffer');
       expect(northPort.content.localRule).toMatchObject({ jurisdictionId: 'north_port_fl', jurisdictionName: 'City of North Port, FL' });
       expect(northPort.content.property.planLabel).toBe(planLabel);
       expect(northPortBar.limit).toEqual({ offset, days: 183, label: 'No nitrogen or phosphorus (local summer rule)' });
-      expect(northPortBar.caption).toBe('Your rule area: City of North Port, FL. No nitrogen or phosphorus on turf from April 1 to September 30; micronutrients keep the color instead.');
+      expect(northPortBar.caption).toContain('City of North Port, FL. No nitrogen or phosphorus on turf from April 1 to September 30');
 
       const sarasota = await build({ line, jurisdictionId: 'sarasota_county_fl' });
       expect(sarasota.inputSnapshot.jurisdictionId).toBe('sarasota_county_fl');

@@ -12,6 +12,7 @@ const PROTOCOLS = require('../config/protocols.json');
 const ts = require('../services/tree-shrub-service-outline');
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
 const { validateCustomerCopy } = require('../services/service-report/premium-experience');
+const { NORTH_PORT_RULE } = require('../models/migrations/20261118190000_north_port_outline_fertilizer_rule');
 
 const OCT_26 = new Date('2026-10-26T12:00:00Z');
 const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
@@ -19,7 +20,7 @@ const RULE_NAMES = { sarasota_county_fl: 'Sarasota County, FL', manatee_county_f
 const ADDRESSES = { sarasota_county_fl: '1 Palm Way, Sarasota, FL', manatee_county_fl: '1 Palm Way, Bradenton, FL', charlotte_county_fl: '1 Palm Way, Punta Gorda, FL' };
 
 function makeDb(jurisdictionId) {
-  const rule = {
+  const rule = jurisdictionId === 'north_port_fl' ? NORTH_PORT_RULE : {
     jurisdiction_id: jurisdictionId,
     jurisdiction_name: RULE_NAMES[jurisdictionId],
     version: '2026-05-30',
@@ -96,6 +97,30 @@ describe('the Tree & Shrub packet', () => {
 });
 
 describe('the month list', () => {
+  test('North Port landscape beds retain the formulation and setback rules across the turf restriction', async () => {
+    const result = await ts.buildTreeShrubOutline({
+      db: makeDb('north_port_fl'),
+      estimate: {
+        address: '100 Test Way', service_address_city: 'North Port', city: 'Venice',
+        estimate_data: { county: 'Sarasota', inputs: { svcTs: true } },
+      },
+      input: { month: 4 },
+      now: OCT_26,
+    });
+    expect(result.inputSnapshot.jurisdictionId).toBe('north_port_fl');
+    expect(result.content.season.restrictedSeasonActive).toBe(false);
+    expect(result.content.localRule).toMatchObject({
+      restrictedSeasonActive: false,
+      summary: expect.stringMatching(/50% of the nitrogen.*slow-release/),
+    });
+    const year = section(result, 'program_year').visual;
+    expect(year.months.filter((m) => m.limited)).toEqual([]);
+    expect(year.limitLabel).toBeNull();
+    expect(result.contentHtml).toContain('25 ft buffer');
+    expect(result.contentHtml).not.toContain('last allowed nitrogen window');
+    expect(result.validation.status).toBe('passed');
+  });
+
   test('each month’s steps come from its protocol card', () => {
     // A protocol edit that changes a month's steps shows up here first.
     const expected = {

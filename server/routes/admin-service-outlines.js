@@ -17,6 +17,8 @@ const {
   createPublicToken,
   hashToken,
   regenerationTurfType,
+  resolveOutlineJurisdictionId,
+  parseJsonMaybe,
 } = require('../services/lawn-service-outline');
 const { outlineProgram } = require('../services/service-outline-programs');
 
@@ -78,6 +80,16 @@ function publicUrlForToken(token) {
   return `${publicPortalUrl()}/service-outlines/${encodeURIComponent(token)}`;
 }
 
+function isFertilizerOutline(packet) {
+  return !outlineProgram(packet?.service_line) || packet.service_line === 'tree_shrub';
+}
+
+function legacySarasotaRule(packet) {
+  const snapshot = packet?.input_snapshot_json || {};
+  return isFertilizerOutline(packet) && !snapshot.jurisdictionSource
+    && (packet?.jurisdiction_id || snapshot.jurisdictionId) === 'sarasota_county_fl';
+}
+
 function safePacket(row, rawToken = null) {
   if (!row) return null;
   return {
@@ -96,6 +108,7 @@ function safePacket(row, rawToken = null) {
     month: row.month,
     seasonBand: row.season_band,
     jurisdictionId: row.jurisdiction_id,
+    ...(legacySarasotaRule(row) && { legacySarasotaRule: true }),
     validationStatus: row.validation_status,
     validationErrors: row.validation_errors_json || [],
     adminWarnings: row.admin_warnings_json || [],
@@ -149,7 +162,10 @@ function coerceInput(body = {}, { partial = false } = {}) {
     if (hasOwn(body, 'includeExclusions')) input.includeExclusions = body.includeExclusions !== false;
     if (hasOwn(body, 'serviceTier')) input.serviceTier = body.serviceTier || null;
     if (hasOwn(body, 'month')) input.month = body.month || null;
-    if (hasOwn(body, 'jurisdictionId')) input.jurisdictionId = body.jurisdictionId || null;
+    if (hasOwn(body, 'jurisdictionId')) {
+      input.jurisdictionId = body.jurisdictionId || null;
+      input.jurisdictionSource = input.jurisdictionId ? 'staff' : 'estimate';
+    }
     if (hasOwn(body, 'customerNote')) input.customerNote = body.customerNote || '';
     return input;
   }
@@ -168,6 +184,7 @@ function coerceInput(body = {}, { partial = false } = {}) {
     serviceTier: body.serviceTier || null,
     month: body.month || null,
     jurisdictionId: body.jurisdictionId || null,
+    jurisdictionSource: body.jurisdictionId ? 'staff' : 'estimate',
     customerNote: body.customerNote || '',
   };
 }
@@ -269,7 +286,9 @@ function inputFromPacket(packet) {
     includeExclusions: true,
     serviceTier: packet?.service_tier || snapshot.serviceTier || null,
     month: packet?.month || snapshot.month || null,
-    jurisdictionId: packet?.jurisdiction_id || snapshot.jurisdictionId || null,
+    jurisdictionId: isFertilizerOutline(packet) && snapshot.jurisdictionSource === 'estimate'
+      ? null : packet?.jurisdiction_id || snapshot.jurisdictionId || null,
+    ...(snapshot.jurisdictionSource && { jurisdictionSource: snapshot.jurisdictionSource }),
     customerNote: snapshot.customerNote || '',
   };
 }
@@ -454,6 +473,17 @@ router.post('/:id/regenerate', async (req, res, next) => {
     const input = { ...inputFromPacket(sourcePacket), ...coerceInput(req.body || {}, { partial: true }) };
     const offError = programOffError(input.serviceLine);
     if (offError) return res.status(409).json({ error: offError });
+    // Older packets stored the result but did not record whether staff selected the county.
+    // Resolve the conflict before the transaction can revoke the previous customer link.
+    if (legacySarasotaRule(sourcePacket) && !req.body?.jurisdictionId) {
+      const data = parseJsonMaybe(estimate.estimate_data || estimate.estimateData) || {};
+      if (resolveOutlineJurisdictionId({}, estimate, data) === 'north_port_fl') {
+        return res.status(409).json({
+          code: 'outline_jurisdiction_confirmation_required',
+          error: 'The saved outline uses Sarasota County and the service address indicates North Port. Confirm the property’s fertilizer jurisdiction before regenerating.',
+        });
+      }
+    }
     const outline = await buildServiceOutline({ estimate, input });
     const rawToken = createPublicToken();
     const revokeOld = req.body.revokeOld !== false;

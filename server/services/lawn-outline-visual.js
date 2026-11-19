@@ -11,6 +11,7 @@
 // Customer words: the reviewed copy of the scope page (two Fable rounds). Product names appear only in the product list.
 const lawnRounds = require('./lawn-rounds');
 const { visitForRound } = require('./lawn-program');
+const { NORTH_PORT_FERTILIZER_SETBACKS } = require('./lawn-fertilizer-safety');
 const { etDateString } = require('../utils/datetime-et');
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -489,10 +490,12 @@ function limitBand(rule, barStart, year) {
   const start = ymd(year, startMonth, startDay);
   const end = ymd(year, endMonth, endDay);
   const area = rule.jurisdiction_name ? `Your rule area: ${rule.jurisdiction_name}. ` : '';
-  const scope = rule.jurisdiction_id === 'north_port_fl' ? ' on turf' : '';
+  const northPort = rule.jurisdiction_id === 'north_port_fl';
+  const scope = northPort ? ' on turf' : '';
+  const caption = `${area}No nitrogen or phosphorus${scope} from ${MONTH_FULL[startMonth - 1]} ${startDay} to ${MONTH_FULL[endMonth - 1]} ${endDay}; micronutrients keep the color instead.`;
   return {
     limit: { offset: dayDiff(barStart, start), days: dayDiff(start, end) + 1, label: LIMIT_LABEL },
-    caption: `${area}No nitrogen or phosphorus${scope} from ${MONTH_FULL[startMonth - 1]} ${startDay} to ${MONTH_FULL[endMonth - 1]} ${endDay}; micronutrients keep the color instead.`,
+    caption: northPort ? [caption, ...NORTH_PORT_FERTILIZER_SETBACKS].join(' ') : caption,
   };
 }
 

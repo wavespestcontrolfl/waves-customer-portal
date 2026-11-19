@@ -129,6 +129,11 @@ describe('lawn service outline composer', () => {
     expect(resolveJurisdictionId({ city: 'North Port', county: 'Sarasota' })).toBe('north_port_fl');
     expect(resolveJurisdictionId({ city: 'Venice', address: '100 North Port Drive, Venice, FL 34285' })).toBe('sarasota_county_fl');
     expect(resolveJurisdictionId({ resolvedJurisdictionId: 'north_port_fl', city: 'Venice' })).toBe('north_port_fl');
+    for (const address of ['100 Test Way, North Port', '100 Test Way, North Port FL 34286', '100 Test Way North Port FL 34286']) {
+      expect(resolveJurisdictionId({ county: 'Sarasota', address })).toBe('north_port_fl');
+    }
+    expect(resolveJurisdictionId({ county: 'Sarasota', address: '100 North Port Drive, FL 34286' })).toBe('generic_swfl');
+    expect(resolveJurisdictionId('100 Test Way, North Port, NY 10001')).toBe('generic_swfl');
   });
 
   test('an ambiguous service address asks for city or county confirmation instead of guessing a date', async () => {

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ServiceOutlineComposerModal from './ServiceOutlineComposerModal';
 
@@ -34,6 +34,27 @@ afterEach(() => {
 });
 
 describe('ServiceOutlineComposerModal', () => {
+  it.each(['north_port_fl', 'sarasota_county_fl'])('regenerates a conflicting old outline with the verified %s jurisdiction', async (jurisdictionId) => {
+    const adminFetch = vi.fn(async (path) => {
+      if (path.endsWith('/preview')) return { summary: { jurisdictionId: 'north_port_fl' }, validation: {} };
+      if (path.endsWith('/lawn-packet')) return { packet: { id: 'lawn-packet', legacySarasotaRule: true } };
+      if (path.endsWith('/regenerate')) return { packet: { id: 'new-packet', summary: { jurisdictionId } } };
+      return { events: [] };
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<ServiceOutlineComposerModal estimate={ESTIMATE} adminFetch={adminFetch} onClose={() => {}} />);
+    const choice = await screen.findByRole('combobox', { name: /which fertilizer rule/i });
+    const regenerate = screen.getByRole('button', { name: 'Regenerate' });
+    expect(regenerate).toBeDisabled();
+    fireEvent.change(choice, { target: { value: jurisdictionId } });
+    fireEvent.click(regenerate);
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/service-outlines/lawn-packet/regenerate', expect.anything()));
+    const [, request] = adminFetch.mock.calls.find(([path]) => path.endsWith('/regenerate'));
+    expect(JSON.parse(request.body)).toMatchObject({ jurisdictionId, revokeOld: true });
+    await waitFor(() => expect(choice).not.toBeInTheDocument());
+    expect(screen.getByText(jurisdictionId)).toBeInTheDocument();
+  });
+
   it('a Tree & Shrub open asks for the Tree & Shrub outline, with no grass and no product cards', async () => {
     const adminFetch = fakeAdminFetch();
     render(<ServiceOutlineComposerModal estimate={{ ...ESTIMATE, outlineServiceLine: 'tree_shrub' }} adminFetch={adminFetch} onClose={() => {}} />);

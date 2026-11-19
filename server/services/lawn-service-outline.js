@@ -9,6 +9,8 @@ const { PROGRAM_DETAIL_V13 } = require('./service-report/lawn-program-line');
 const { estimateHasBahiaLawn, estimateLawnGrassValues } = require('./estimate-bahia-review');
 const featureGates = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
+const { parseRawAddress } = require('../utils/address-normalizer');
+const { NORTH_PORT_FERTILIZER_SETBACKS } = require('./lawn-fertilizer-safety');
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const TEMPLATE_VERSION = 'mvp-1';
@@ -231,7 +233,7 @@ function v13TrackKey(turfType) {
 }
 
 function jurisdictionForPlace(value) {
-  const place = String(value || '').toLowerCase().replace(/[^a-z]+/g, ' ').replace(/\b(?:city of|county)\b/g, ' ').replace(/\s+/g, ' ').trim();
+  const place = String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\b(?:city of|county)\b/g, ' ').replace(/\s+/g, ' ').trim();
   if (place === 'north port') return 'north_port_fl';
   if (['sarasota', 'venice', 'nokomis', 'osprey', 'englewood'].includes(place)) return 'sarasota_county_fl';
   if (['manatee', 'bradenton', 'palmetto', 'parrish', 'lakewood ranch', 'ellenton', 'anna maria'].includes(place)) return 'manatee_county_fl';
@@ -239,39 +241,36 @@ function jurisdictionForPlace(value) {
   return null;
 }
 
-function addressJurisdictionParts(address) {
-  if (address && typeof address === 'object') {
-    const jurisdictionId = firstNonEmpty(address.jurisdictionId, address.jurisdiction_id, address.resolvedJurisdictionId, address.resolved_jurisdiction_id);
-    if (jurisdictionId) return { jurisdictionId };
-    const municipality = firstNonEmpty(address.municipality, address.city, address.locality, address.address_city);
-    const county = firstNonEmpty(address.county, address.address_county);
-    if (municipality || county) return { municipality, county };
-    return addressJurisdictionParts(firstNonEmpty(address.formattedAddress, address.formatted_address, address.address));
-  }
-  const parts = String(address || '').split(',').map((part) => part.trim()).filter(Boolean);
-  const stateIndex = parts.findIndex((part) => /^(?:fl|florida)(?:\s+\d{5}(?:-\d{4})?)?$/i.test(part));
-  return stateIndex > 0 ? { municipality: parts[stateIndex - 1] } : {};
-}
-
 function resolveJurisdictionId(address) {
-  const { jurisdictionId, municipality, county } = addressJurisdictionParts(address);
+  const place = typeof address === 'string' ? { address } : (address || {});
+  const jurisdictionId = firstNonEmpty(place.jurisdictionId, place.jurisdiction_id, place.resolvedJurisdictionId, place.resolved_jurisdiction_id);
   if (jurisdictionId) return jurisdictionId;
-  const resolved = jurisdictionForPlace(municipality) || jurisdictionForPlace(county);
-  if (resolved) return resolved;
-  return 'generic_swfl';
+  const formatted = firstNonEmpty(place.formattedAddress, place.formatted_address, place.address);
+  const parsed = parseRawAddress(formatted);
+  if (parsed.state && parsed.state !== 'FL') return 'generic_swfl';
+  // A street name alone cannot establish a city. Keep supported "City, FL" inputs too.
+  const addressCity = formatted.includes(',') || parsed.state || parsed.zip ? parsed.city : '';
+  const municipality = firstNonEmpty(place.municipality, place.city, place.locality, place.address_city, addressCity);
+  const cityRule = jurisdictionForPlace(municipality || (parsed.state === 'FL' && parsed.line1));
+  if (cityRule) return cityRule;
+  const countyRule = jurisdictionForPlace(firstNonEmpty(place.county, place.address_county));
+  // Sarasota County alone cannot distinguish North Port's April start from the county's June start.
+  if (!municipality && countyRule === 'sarasota_county_fl') return 'generic_swfl';
+  return countyRule || 'generic_swfl';
 }
 
 function resolveOutlineJurisdictionId(input, estimate, estimateData) {
   if (input.jurisdictionId) return input.jurisdictionId;
   const property = estimateData.property || {};
   return resolveJurisdictionId({
-    municipality: firstNonEmpty(input.municipality, input.city, estimate.municipality, estimate.city, estimate.service_address_city, estimateData.municipality, estimateData.city, property.city),
-    county: firstNonEmpty(input.county, estimate.county, estimate.service_address_county, estimateData.county, property.county),
+    municipality: firstNonEmpty(input.municipality, input.city, estimate.service_address_city, property.municipality, property.city, estimate.municipality, estimate.city, estimateData.municipality, estimateData.city),
+    county: firstNonEmpty(input.county, estimate.service_address_county, property.county, estimate.county, estimateData.county),
     formattedAddress: estimate.address,
   });
 }
 
-function isRestrictedSeason(rule, month) {
+function isRestrictedSeason(rule, month, footprint = 'turf') {
+  if (footprint === 'landscape' && rule?.jurisdiction_id === 'north_port_fl') return false;
   if (!rule?.restricted_start_month || !rule?.restricted_end_month) return false;
   const start = Number(rule.restricted_start_month);
   const end = Number(rule.restricted_end_month);
@@ -614,11 +613,18 @@ const V13_TREATMENT_CATEGORIES = Object.freeze([
 
 // The local-rule tiles: the rule area and its summary come from the jurisdiction rule the outline
 // resolved. North Port resolves to its own April 1 rule row, never Sarasota County's June 1 row.
+function fertilizerSetbackTiles(rule) {
+  return rule?.jurisdiction_id === 'north_port_fl'
+    ? [{ icon: 'area', title: 'Fertilizer-free areas', text: NORTH_PORT_FERTILIZER_SETBACKS.join(' ') }]
+    : [];
+}
+
 function v13RuleTiles(jurisdictionRule) {
   return [
     { icon: 'area', title: 'Your rule area', text: jurisdictionRule?.jurisdiction_name || 'To be confirmed' },
     { icon: 'calendar', title: 'What it limits', text: fertilizerRuleWindowText(jurisdictionRule) },
     { icon: 'micros', title: 'What we do instead', text: V13_COPY.rulesInstead },
+    ...fertilizerSetbackTiles(jurisdictionRule),
   ];
 }
 
@@ -867,6 +873,7 @@ function legacySections({ modules, snapshot, tier, turf, turfText, month, season
         jurisdictionRule?.jurisdiction_name ? `Rule area: ${jurisdictionRule.jurisdiction_name}` : 'Rule area: to be confirmed',
         restrictedSeasonActive ? 'Restricted-season logic is active for this month.' : 'Restricted-season logic is not active for this month.',
         jurisdictionRule?.public_summary || 'Local fertilizer rules may affect what nutrient products can be used.',
+        ...fertilizerSetbackTiles(jurisdictionRule).map((tile) => tile.text),
       ],
     ),
     makeSection(
@@ -1364,6 +1371,7 @@ module.exports = {
   regenerationTurfType,
   renderOutlineHtml,
   resolveJurisdictionId,
+  resolveOutlineJurisdictionId,
   resolveSeasonBand,
   validateContent,
   // Shared with the Tree & Shrub, Pest Control and Mosquito outlines (tree-shrub-, pest- and mosquito-service-outline.js).
@@ -1375,6 +1383,7 @@ module.exports = {
   estimateSnapshot,
   estimateViewPath,
   firstNonEmpty,
+  fertilizerSetbackTiles,
   isRestrictedSeason,
   loadFertilizerRule,
   makeSection,

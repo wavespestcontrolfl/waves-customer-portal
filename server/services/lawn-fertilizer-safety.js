@@ -29,11 +29,14 @@ const SARASOTA_FERTILIZER_SAFETY_RULES = [
 
 // City of North Port fertilizer fact sheet, revised May 10, 2023:
 // https://www.northportfl.gov/files/assets/main/v/1/city-services-amp-safety/public-works/fertilizer-fact-sheet-updated.pdf
+const NORTH_PORT_FERTILIZER_SETBACKS = [
+  'Keep fertilizer at least 10 ft from a pond, stream, canal or top of a seawall. If a pond\'s water edge is more than 10 ft from the top of bank, stop at the top of bank.',
+  'Do not apply fertilizer in a wetland, within the wetland\'s 25 ft buffer, or in the flow channel of any swale.',
+];
 const NORTH_PORT_FERTILIZER_SAFETY_RULES = [
   'Use the deflector shield on the rotary spreader.',
   'North Port rule: do not apply fertilizer containing nitrogen or phosphorus to turf from April 1 through September 30; landscape plants are outside this seasonal turf restriction.',
-  'Keep fertilizer at least 10 ft from a pond, stream, canal or top of a seawall; if a pond\'s water edge is more than 10 ft from the top of bank, stop at the top of bank.',
-  'Do not apply fertilizer in a wetland, within the wetland\'s 25 ft buffer, or in the flow channel of any swale.',
+  ...NORTH_PORT_FERTILIZER_SETBACKS,
   'Do not fertilize when a severe thunderstorm, flood or tropical watch or warning is forecast.',
   'Sweep fertilizer off driveways, sidewalks and streets back onto the lawn.',
   PRE_APPLICATION_MAP_RULE,
@@ -62,6 +65,7 @@ function fertilizerSafetyRules(rows, area = {}) {
 }
 
 module.exports = {
+  NORTH_PORT_FERTILIZER_SETBACKS,
   FERTILIZER_SAFETY_GATE,
   FERTILIZER_SAFETY_RULES,
   NORTH_PORT_FERTILIZER_SAFETY_RULES,
