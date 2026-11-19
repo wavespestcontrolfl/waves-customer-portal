@@ -863,7 +863,8 @@ async function movingUnitIds(service, ctx) {
 //     Lawn Care Service unit never lands on or next to a mowing day.
 //   south_day_kept (GATE_SOUTH_ZONE_DAY_FUNNEL, south-day-kept.js): a visit outside the
 //     funneled far-south zones never moves onto another DATE that holds a far-south stop
-//     (with GATE_MULTI_TECH_CONFIRM: a stop of the slot's technician, or an unassigned one).
+//     (with GATE_MULTI_TECH_CONFIRM: a stop of the slot's technician, of a grouped visit's member's current
+//     technician, or an unassigned one).
 //   other_tech (GATE_AUTO_DISPATCH_KEEP_TECH, ctx.keepTech): a visit that has
 //     a technician stays with that technician. An unassigned visit is not
 //     filtered.
@@ -1237,7 +1238,15 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // or null — gate off, nothing is read.
   const mowing = await unitMowingRule(service, prefs, ctx);
   // Far-south days stay far-south: null (rule off, a far-south visit, zone unresolved) = no filter.
-  const south = await southDayKept.ruleFor(service, ctx);
+  let south = await southDayKept.ruleFor(service, ctx);
+  // Per truck, a grouped visit moves as a unit: each member's date commits on its current technician, and the unit
+  // mover re-points it after (visit-groups alignMember). The apply guard checks those technicians too (apply.js
+  // makeMoveGuard), so their far-south days hold the date here as well. Else the guard refuses a ranked move (not
+  // SLOT_TAKEN), and the run skips this visit's lower-ranked dates.
+  if (south?.techDays && service.visit_id) {
+    const { siblings } = await groupContextFor(service, ctx);
+    if (siblings.length) south = { ...south, alsoTechIds: [service, ...siblings].map((row) => row.technician_id ?? null) };
+  }
 
   const { dateFrom, dateTo } = searchWindow(service, ctx);
   if (dateFrom > dateTo) {

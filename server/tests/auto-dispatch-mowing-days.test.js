@@ -587,6 +587,30 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
       expect(out.drops.south_day_kept).toBe(1);
     });
 
+    test('on: a grouped visit is also held by each member\'s current technician, where the unit move commits first', async () => {
+      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      findAvailableSlots.mockResolvedValue({ slots: [slot(WED, '10:00', 't2')] });
+      const offered = async (stops, primaryTech, siblingTech) => {
+        const grouped = siblingTech !== undefined;
+        const out = await findValidCandidateSlots({ ...NORTH, visit_id: grouped ? 'v1' : null, technician_id: primaryTech }, plain(), ctx({
+          db: southDb({ stops }),
+          ...(grouped ? { groupContext: { excludeIds: new Set(['s1', 's2']), siblings: [{ id: 's2', technician_id: siblingTech }], visitWindowStart: null } } : {}),
+        }));
+        return out.candidates.map((c) => `${c.date} ${c.technician_id}`);
+      };
+      // Alone, the visit may take t2's slot: the far-south stop is not t2's.
+      expect(await offered(stopOf('t1'), 't1')).toEqual([`${WED} t2`]);
+      expect(await offered(stopOf('t3'), null)).toEqual([`${WED} t2`]);
+      // Grouped, each member's date commits on its current technician before the re-point to t2 (visit-groups
+      // alignMember): that technician's far-south stop holds the date, the primary's or a sibling's, and any far-south
+      // stop holds an unassigned member's.
+      expect(await offered(stopOf('t1'), 't1', 't1')).toEqual([]);
+      expect(await offered(stopOf('t3'), 't1', 't3')).toEqual([]);
+      expect(await offered(stopOf('t3'), null, null)).toEqual([]);
+      // A stop of no member's technician leaves the date open.
+      expect(await offered(stopOf('t3'), 't1', 't1')).toEqual([`${WED} t2`]);
+    });
+
     test('off: any far-south stop holds the date for the whole fleet, whoever drives it (one truck today)', async () => {
       delete process.env.GATE_MULTI_TECH_CONFIRM;
       const out = await runWith(stopOf('t2'));

@@ -14,9 +14,10 @@
  * fails OPEN (today's behavior), logged.
  *
  * Per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19 "build south"): a far-south stop holds its date only for
- * its own technician, and an unassigned far-south stop holds it for every technician. The slot's technician
- * decides at candidate time; at apply time, each technician the visit can sit with on that date (the receiving
- * one, and the one the move transaction writes). Off, the date is the fleet's (one truck).
+ * its own technician, and an unassigned far-south stop holds it for every technician. At candidate time the
+ * slot's technician decides, and for a grouped visit each member's current technician too (the unit move commits
+ * there first); at apply time, the receiving technician and the one the move transaction writes. Off, the date is
+ * the fleet's (one truck).
  * The per-truck view comes from the same funnel read (getZoneFunnelDays techDays, zone-day-funnel.js onZoneDay).
  *
  * Two places enforce it, so a date move of any kind is covered:
@@ -97,9 +98,10 @@ async function ruleFor(service, ctx) {
 }
 
 // HARD filter test: the candidate date is another day that holds a far-south stop for the slot's technician
-// (`techId`; per truck only with GATE_MULTI_TECH_CONFIRM on, else any far-south stop holds the date).
+// (`techId`; per truck only with GATE_MULTI_TECH_CONFIRM on, else any far-south stop holds the date), or for one of
+// the rule's `alsoTechIds` (a grouped visit's members' current technicians, set in candidate-slots.js).
 const blocks = (dateStr, rule, techId = null) => !!rule && dateStr !== rule.ownDate
-  && funnel().onZoneDay(dateStr, techId, rule.dates, rule.techDays);
+  && [techId, ...(rule.alsoTechIds || [])].some((id) => funnel().onZoneDay(dateStr, id, rule.dates, rule.techDays));
 
 // Apply time, inside the move transaction: the destination date's far-south stops as stored now, for each technician
 // the visit can sit with on that date (`techIds`; null = unassigned, which any far-south stop holds). Same fail-open
