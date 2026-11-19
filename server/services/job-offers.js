@@ -366,7 +366,8 @@ function publicStateOf(offer, { now = new Date(), applicationStatus = null } = {
     case 'expired': return 'expired';
     case 'sent':
     case 'date_requested': {
-      if (CLOSED_APPLICATION_STATUSES.includes(applicationStatus)) return 'withdrawn';
+      // A live offer belongs to an application sitting at 'offer': closed, or moved back to review or interview, it is dead.
+      if (applicationStatus && applicationStatus !== 'offer') return 'withdrawn';
       if (offer.status === 'date_requested') return 'date_requested';
       return offer.expires_at && now.getTime() > new Date(offer.expires_at).getTime() ? 'expired' : 'open';
     }
@@ -558,7 +559,13 @@ async function adminPanel(applicationId, actor, now = new Date()) {
     terms: terms ? { templateId: terms.templateId, versionId: terms.versionId, title: terms.title, issuedAt: terms.issuedAt } : null,
     termsBlockers: blockers,
     defaults,
-    letterPreview: { markdown: renderLetterMarkdown(view) },
+    // The preview names the offer its letter belongs to (the open draft, else the frozen letter of the current offer, else
+    // none: the defaults) and that draft's hash, so a Save, Send or Discard can be tied to what was read.
+    letterPreview: {
+      offerId: draft ? draft.id : (frozen ? current.id : null),
+      draftHash: draft ? draftHashOf(draft, hashCtx) : null,
+      markdown: renderLetterMarkdown(view),
+    },
     current: present(current),
     draft: present(revision),
     history: rows.filter((r) => !current || (r.id !== current.id && !(revision && r.id === revision.id))).map(present),
@@ -633,14 +640,41 @@ async function loadOffer(conn, applicationId, offerId, { lock = false } = {}) {
   return offer;
 }
 
-/** POST /:id/offer/:offerId/revise — a new draft copied from a sent / date_requested offer. */
+// The status the caller saw, checked under the row lock: a stale tab must not act on an offer that moved on.
+function assertExpectedStatus(offer, expectedStatus, allowed) {
+  if (!allowed.includes(expectedStatus)) {
+    throw new OfferError(400, 'EXPECTED_STATUS_REQUIRED', 'Say which state of the offer you are acting on.');
+  }
+  if (offer.status !== expectedStatus) {
+    throw new OfferError(409, 'OFFER_CHANGED', 'This offer changed after you opened it. Review it again.', { status: offer.status });
+  }
+}
+
+// Revise ALWAYS yields an editable draft: a start date that no longer works (passed, or not Monday to Thursday) falls back
+// to the suggested start, and the raise date follows the start date. Save and Send validate dates; Revise never refuses.
+function reviseInput(offer, requested, now) {
+  const base = inputOfRow(offer);
+  const wanted = requested || base.startDate;
+  const checks = [];
+  checkStartDate(checks, wanted, now);
+  const startDate = checks.length ? suggestStartDate(now) : wanted;
+  if (startDate === base.startDate) return base;
+  return { ...base, startDate, stepEffectiveOn: base.stepRate === null ? null : stepDateFor(startDate) };
+}
+
+/** POST /:id/offer/:offerId/revise — a new draft copied from a sent / date_requested offer. Needs { expectedStatus }. */
 async function reviseOffer(applicationId, offerId, input, actor, now = new Date()) {
+  const request = input && typeof input === 'object' ? input : {};
+  if (!OUT_STATUSES.includes(request.expectedStatus)) {
+    throw new OfferError(400, 'EXPECTED_STATUS_REQUIRED', 'Say which state of the offer you are acting on.');
+  }
   return db.transaction(async (trx) => {
     const application = await loadApplication(trx, applicationId, { lock: true });
     assertOfferable(application);
     const offer = await loadOffer(trx, applicationId, offerId, { lock: true });
-    if (!OUT_STATUSES.includes(offer.status) || expiredByClock(offer, now)) {
-      throw new OfferError(409, 'OFFER_NOT_REVISABLE', 'Only an offer that is out can be revised.', { status: expiredByClock(offer, now) ? 'expired' : offer.status });
+    assertExpectedStatus(offer, request.expectedStatus, OUT_STATUSES);
+    if (expiredByClock(offer, now)) {
+      throw new OfferError(409, 'OFFER_NOT_REVISABLE', 'Only an offer that is out can be revised.', { status: 'expired' });
     }
     const existing = await trx('job_offers').where({ application_id: applicationId, status: 'draft' }).forUpdate().first();
     if (existing && existing.supersedes_id !== offer.id) {
@@ -650,26 +684,38 @@ async function reviseOffer(applicationId, offerId, input, actor, now = new Date(
     // A retry (or a second tab) gets the draft that is already there, untouched: it may hold newer edits.
     if (existing) return presentDraft(trx, existing, ownerName, now);
 
-    const requested = (input && input.startDate) || (offer.requested_start_date ? ymdOf(offer.requested_start_date) : null);
-    const base = inputOfRow(offer);
-    // The copied raise date is kept unless the start date really changes.
-    const { value, errors } = validateOffer(mergeOfferInput(base, requested && requested !== base.startDate ? { startDate: requested } : {}), now);
-    if (errors.length) throw new OfferError(400, 'INVALID_OFFER', errors[0].message, { errors });
+    const requested = request.startDate || (offer.requested_start_date ? ymdOf(offer.requested_start_date) : null);
     const [row] = await trx('job_offers').insert({
-      application_id: applicationId, status: 'draft', created_by: actor.id, supersedes_id: offer.id, ...columnsOf(value, ownerReportTo(ownerName)),
+      application_id: applicationId, status: 'draft', created_by: actor.id, supersedes_id: offer.id,
+      ...columnsOf(reviseInput(offer, requested, now), ownerReportTo(ownerName)),
     }).returning('*');
     return presentDraft(trx, row, ownerName, now);
   });
 }
 
-/** POST /:id/offer/:offerId/withdraw — sends nothing; the application status stays as it is. */
-async function withdrawOffer(applicationId, offerId, actor, now = new Date()) {
+/**
+ * POST /:id/offer/:offerId/withdraw — sends nothing; the application status stays as it is. Needs { expectedStatus } (the
+ * state the owner saw: 'draft', 'sent' or 'date_requested') and, for a draft, the { draftHash } of the preview he read.
+ */
+async function withdrawOffer(applicationId, offerId, actor, precondition = {}, now = new Date()) {
+  const { expectedStatus, draftHash } = precondition || {};
+  if (!LIVE_STATUSES.includes(expectedStatus)) {
+    throw new OfferError(400, 'EXPECTED_STATUS_REQUIRED', 'Say which state of the offer you are acting on.');
+  }
+  if (expectedStatus === 'draft' && (typeof draftHash !== 'string' || !draftHash)) {
+    throw new OfferError(400, 'DRAFT_HASH_REQUIRED', 'Discarding a draft needs the hash of the preview you reviewed.');
+  }
   return db.transaction(async (trx) => {
     await loadApplication(trx, applicationId, { lock: true });
     const offer = await loadOffer(trx, applicationId, offerId, { lock: true });
-    if (offer.status === 'withdrawn') return presentOffer(offer);
-    if (!LIVE_STATUSES.includes(offer.status) || expiredByClock(offer, now)) {
-      throw new OfferError(409, 'OFFER_NOT_WITHDRAWABLE', 'This offer can no longer be withdrawn.', { status: expiredByClock(offer, now) ? 'expired' : offer.status });
+    assertExpectedStatus(offer, expectedStatus, LIVE_STATUSES);
+    if (expectedStatus === 'draft') {
+      const { terms, payDayLine } = await loadIssuedTerms(trx, now);
+      const current = draftHashOf(offer, { terms, payDayLine, ownerName: await actorName(trx, actor), now });
+      if (current !== draftHash) throw new OfferError(409, 'DRAFT_CHANGED', 'This draft changed after you opened it. Review the new preview, then discard it.');
+    }
+    if (expiredByClock(offer, now)) {
+      throw new OfferError(409, 'OFFER_NOT_WITHDRAWABLE', 'This offer can no longer be withdrawn.', { status: 'expired' });
     }
     const [row] = await trx('job_offers').where({ id: offer.id }).update({
       status: 'withdrawn', withdrawn_at: now, withdrawn_by: actor.id, updated_at: new Date(),

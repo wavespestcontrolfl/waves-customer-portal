@@ -84,6 +84,19 @@ describe('the offer text', () => {
   });
 });
 
+describe('an edited offer text that lost its link', () => {
+  test('is skipped, never reported as sent', async () => {
+    mockIsEnabled.mockImplementation((gate) => gate === 'jobOffers');
+    mockRenderSmsTemplate.mockResolvedValue('Hi Jordan, your job offer is ready. Reply STOP to opt out.');
+    const db = require('../models/db');
+    db.mockImplementation(() => ({ where: () => ({ update: async () => 1 }) }));
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const result = await RC.sendStageComms(app, 'offer_sent', { sms: true, email: false, by: 'staff-1', vars, stillEligible: async () => true });
+    expect(result.sms).toBe('skipped');
+    expect(require('../services/messaging/send-customer-message').sendCustomerMessage).not.toHaveBeenCalled();
+  });
+});
+
 describe('the gate', () => {
   const opts = { sms: true, email: true, stillEligible: async () => false, vars };
 

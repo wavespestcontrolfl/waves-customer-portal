@@ -446,9 +446,12 @@ async function applyStatusTransition(trx, applicationId, technicianId, plan) {
     .where({ id: applicationId })
     .update(updatePayload)
     .returning('*');
-  // Closing an application (rejected, withdrawn, hired) withdraws its outstanding job offers in the same transaction, so
-  // moving it back later cannot revive an old link (the offer flow, GATE_JOB_OFFERS).
-  if (['rejected', 'withdrawn', 'hired'].includes(plan.status) && row.status !== plan.status) {
+  // Leaving the offer stage (back to review or interview, or closed: rejected, withdrawn, hired) withdraws the application's
+  // outstanding job offers in the same transaction, so an old link cannot sign over the owner's newer decision or revive
+  // when the application is moved back (the offer flow, GATE_JOB_OFFERS).
+  if (row.status === 'offer' && plan.status !== 'offer') {
+    await JobOffers.closeOffersWithApplication(trx, applicationId, technicianId);
+  } else if (['rejected', 'withdrawn', 'hired'].includes(plan.status) && row.status !== plan.status) {
     await JobOffers.closeOffersWithApplication(trx, applicationId, technicianId);
   }
 
@@ -624,7 +627,9 @@ router.post('/:id/offer', offerHandler('save', async (req) => ({
 router.post('/:id/offer/:offerId/send', requireOwnerAccount, offerHandler('send', (req) => JobOffers.sendOffer(req.params.id, req.params.offerId, offerActor(req), req.body && req.body.draftHash)));
 
 router.post('/:id/offer/:offerId/withdraw', requireOwnerAccount, offerHandler('withdraw', async (req) => ({
-  offer: await JobOffers.withdrawOffer(req.params.id, req.params.offerId, offerActor(req)),
+  offer: await JobOffers.withdrawOffer(req.params.id, req.params.offerId, offerActor(req), {
+    expectedStatus: req.body && req.body.expectedStatus, draftHash: req.body && req.body.draftHash,
+  }),
 })));
 
 router.post('/:id/offer/:offerId/revise', requireOwnerAccount, offerHandler('revise', async (req) => ({

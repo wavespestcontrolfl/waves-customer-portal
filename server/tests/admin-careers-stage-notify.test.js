@@ -737,6 +737,13 @@ describe('PATCH /:id/status — closing an application withdraws its outstanding
     })]);
   });
 
+  test.each(['reviewed', 'interview'])('moving back from offer to %s withdraws the live offers, so an old link cannot sign over the new decision', async (status) => {
+    mockDb.__setRows([appRow({ status: 'offer' })]);
+    const res = await patch(APP_ID, { status });
+    expect(res.status).toBe(200);
+    expect(mockDb.__closedOffers()).toEqual([expect.objectContaining({ where: { application_id: APP_ID }, payload: expect.objectContaining({ status: 'withdrawn' }) })]);
+  });
+
   test('a stage that keeps the application open, a note with no change, and an unchanged stage touch no offer', async () => {
     mockDb.__setRows([appRow({ status: 'reviewed' })]);
     await patch(APP_ID, { status: 'interview' });

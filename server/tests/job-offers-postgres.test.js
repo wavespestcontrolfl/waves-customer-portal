@@ -218,10 +218,10 @@ jest.setTimeout(120000);
       const oldToken = (await root('job_offers').where({ id: draft.id }).first()).token;
 
       await expect(JobOffers.saveDraft(app.id, {}, actor())).rejects.toMatchObject({ status: 409, code: 'OFFER_ALREADY_OPEN' });
-      const revised = await JobOffers.reviseOffer(app.id, sent.offer.id, { startDate: JobOffers.addDays(JobOffers.suggestStartDate(), 7) }, actor());
+      const revised = await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'sent', startDate: JobOffers.addDays(JobOffers.suggestStartDate(), 7) }, actor());
       expect(revised).toMatchObject({ status: 'draft', supersedesId: sent.offer.id });
       expect((await root('job_offers').where({ id: draft.id }).first()).status).toBe('sent');
-      expect((await JobOffers.reviseOffer(app.id, sent.offer.id, {}, actor())).id).toBe(revised.id);
+      expect((await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'sent' }, actor())).id).toBe(revised.id);
 
       const resent = await JobOffers.sendOffer(app.id, revised.id, actor(), revised.draftHash);
       expect(resent.offer.status).toBe('sent');
@@ -241,7 +241,7 @@ jest.setTimeout(120000);
       const wanted = JobOffers.addDays(JobOffers.suggestStartDate(), 14);
       const result = await JobOffers.requestDate(token, { requestedStartDate: wanted, note: 'Need two more weeks' });
       expect(result.body).toEqual({ state: 'date_requested' });
-      const revised = await JobOffers.reviseOffer(app.id, sent.offer.id, {}, actor());
+      const revised = await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'date_requested' }, actor());
       expect(revised.startDate).toBe(wanted);
       expect(revised.stepEffectiveOn).toBe(JobOffers.stepDateFor(wanted));
       const resent = await JobOffers.sendOffer(app.id, revised.id, actor(), revised.draftHash);
@@ -254,9 +254,9 @@ jest.setTimeout(120000);
       const sent = await sendNew(app);
       mockSendStageComms.mockClear();
       const token = (await root('job_offers').where({ id: sent.offer.id }).first()).token;
-      const out = await JobOffers.withdrawOffer(app.id, sent.offer.id, actor());
+      const out = await JobOffers.withdrawOffer(app.id, sent.offer.id, actor(), { expectedStatus: 'sent' });
       expect(out.status).toBe('withdrawn');
-      expect(await JobOffers.withdrawOffer(app.id, sent.offer.id, actor())).toMatchObject({ status: 'withdrawn' });
+      await expect(JobOffers.withdrawOffer(app.id, sent.offer.id, actor(), { expectedStatus: 'sent' })).rejects.toMatchObject({ status: 409, code: 'OFFER_CHANGED' }); // a second press: nothing written
       expect(mockSendStageComms).not.toHaveBeenCalled();
       expect((await root('job_applications').where({ id: app.id }).first()).status).toBe('offer');
       expect(await JobOffers.publicView(token)).toMatchObject({ state: 'withdrawn', contactPhone: '(941) 297-5749' });
@@ -418,7 +418,7 @@ jest.setTimeout(120000);
       // The saver's old preview no longer matches the new draft.
       await expect(JobOffers.saveDraft(app.id, { hourlyRate: 24.5, draftId: draft.id, draftHash: draft.draftHash }, actor())).rejects.toMatchObject({ code: 'DRAFT_CHANGED' });
       // A save that names a draft which was withdrawn meanwhile does not start a new one.
-      await JobOffers.withdrawOffer(app.id, draft.id, actor());
+      await JobOffers.withdrawOffer(app.id, draft.id, actor(), { expectedStatus: 'draft', draftHash: saved.draftHash });
       await expect(JobOffers.saveDraft(app.id, { hourlyRate: 24, draftId: draft.id, draftHash: saved.draftHash }, actor())).rejects.toMatchObject({ code: 'DRAFT_CHANGED' });
       expect(await root('job_offers').where({ application_id: app.id }).count('* as n').first()).toEqual({ n: '1' });
     });
@@ -431,7 +431,7 @@ jest.setTimeout(120000);
       expect((await JobOffers.adminPanel(app.id, { ...actor(), ownerAccount: false })).current.offerUrl).toBeNull();
       expect((await JobOffers.adminPanel(app.id, actor())).current.offerUrl).toBeNull();
       // The owner (a different name today) reads the frozen letter after the offer closes, not a new one.
-      await JobOffers.withdrawOffer(app.id, sent.id, actor());
+      await JobOffers.withdrawOffer(app.id, sent.id, actor(), { expectedStatus: 'sent' });
       const frozen = await root('job_offers').where({ id: sent.id }).first();
       const panel = await JobOffers.adminPanel(app.id, { id: owner.id, name: 'Someone Else' });
       expect(panel.current.status).toBe('withdrawn');
@@ -445,7 +445,7 @@ jest.setTimeout(120000);
       const empty = await JobOffers.adminPanel(app.id, actor());
       expect(empty).toMatchObject({ enabled: true, termsIssued: true, current: null, draft: null, history: [] });
       const sent = (await sendNew(app)).offer;
-      const revised = await JobOffers.reviseOffer(app.id, sent.id, {}, actor());
+      const revised = await JobOffers.reviseOffer(app.id, sent.id, { expectedStatus: 'sent' }, actor());
       const panel = await JobOffers.adminPanel(app.id, actor());
       expect(panel.current.id).toBe(sent.id);
       expect(panel.draft.id).toBe(revised.id);
@@ -453,8 +453,8 @@ jest.setTimeout(120000);
       expect(panel.history).toEqual([]);
       expect(panel.letterPreview.markdown).toContain('# Your job offer');
       expect(panel.letterPreview.markdown).not.toContain('{#');
-      await JobOffers.withdrawOffer(app.id, revised.id, actor());
-      await JobOffers.withdrawOffer(app.id, sent.id, actor());
+      await JobOffers.withdrawOffer(app.id, revised.id, actor(), { expectedStatus: 'draft', draftHash: revised.draftHash });
+      await JobOffers.withdrawOffer(app.id, sent.id, actor(), { expectedStatus: 'sent' });
       const after = await JobOffers.adminPanel(app.id, actor());
       expect(after.draft).toBeNull();
       expect(after.current.status).toBe('withdrawn');
@@ -464,7 +464,7 @@ jest.setTimeout(120000);
     test('after a withdraw or a clock expiry (application still at offer) a fresh draft can be made and sent', async () => {
       const app = await newApplication();
       const first = (await sendNew(app)).offer;
-      await JobOffers.withdrawOffer(app.id, first.id, actor());
+      await JobOffers.withdrawOffer(app.id, first.id, actor(), { expectedStatus: 'sent' });
       const second = await JobOffers.saveDraft(app.id, {}, actor());
       expect(second).toMatchObject({ status: 'draft', supersedesId: null });
       expect((await JobOffers.sendOffer(app.id, second.id, actor(), second.draftHash)).offer.status).toBe('sent');
@@ -504,7 +504,7 @@ jest.setTimeout(120000);
         const app = await newApplication();
         const sent = (await sendNew(app)).offer;
         const token = (await root('job_offers').where({ id: sent.id }).first()).token;
-        const revision = await JobOffers.reviseOffer(app.id, sent.id, {}, actor());
+        const revision = await JobOffers.reviseOffer(app.id, sent.id, { expectedStatus: 'sent' }, actor());
         if (answer === 'accept') await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera' });
         else await JobOffers.declineOffer(token, {});
         expect((await root('job_offers').where({ id: revision.id }).first()).status).toBe('withdrawn');
@@ -541,10 +541,10 @@ jest.setTimeout(120000);
       const sent = (await JobOffers.sendOffer(app.id, first.id, actor(), first.draftHash)).offer;
       const token = (await root('job_offers').where({ id: sent.id }).first()).token;
       await JobOffers.requestDate(token, { requestedStartDate: sent.startDate }); // asks for the very same day
-      const revised = await JobOffers.reviseOffer(app.id, sent.id, { startDate: sent.startDate }, actor());
+      const revised = await JobOffers.reviseOffer(app.id, sent.id, { expectedStatus: 'date_requested', startDate: sent.startDate }, actor());
       expect(revised.stepEffectiveOn).toBe(sent.stepEffectiveOn);
       const edited = await JobOffers.saveDraft(app.id, { hoursLine: 'Four 10-hour days', draftId: revised.id, draftHash: revised.draftHash }, actor());
-      const again = await JobOffers.reviseOffer(app.id, sent.id, { startDate: JobOffers.addDays(sent.startDate, 7) }, actor());
+      const again = await JobOffers.reviseOffer(app.id, sent.id, { expectedStatus: 'date_requested', startDate: JobOffers.addDays(sent.startDate, 7) }, actor());
       expect(again.id).toBe(revised.id);
       expect(again.hoursLine).toBe('Four 10-hour days');
       expect(again.startDate).toBe(sent.startDate);
@@ -557,12 +557,57 @@ jest.setTimeout(120000);
       await root('job_offers').where({ id: sent.id }).update({ expires_at: new Date(Date.now() - 60000) });
       const panel = await JobOffers.adminPanel(app.id, actor());
       expect(panel.current.status).toBe('expired');
-      await expect(JobOffers.withdrawOffer(app.id, sent.id, actor())).rejects.toMatchObject({ status: 409, code: 'OFFER_NOT_WITHDRAWABLE' });
-      await expect(JobOffers.reviseOffer(app.id, sent.id, {}, actor())).rejects.toMatchObject({ status: 409, code: 'OFFER_NOT_REVISABLE' });
+      await expect(JobOffers.withdrawOffer(app.id, sent.id, actor(), { expectedStatus: 'sent' })).rejects.toMatchObject({ status: 409, code: 'OFFER_NOT_WITHDRAWABLE' });
+      await expect(JobOffers.reviseOffer(app.id, sent.id, { expectedStatus: 'sent' }, actor())).rejects.toMatchObject({ status: 409, code: 'OFFER_NOT_REVISABLE' });
       const draft = await JobOffers.saveDraft(app.id, {}, actor());
       const panel2 = await JobOffers.adminPanel(app.id, actor());
       expect(panel2.current.id).toBe(draft.id);
       expect(panel2.history.map((o) => o.status)).toEqual(['expired']);
+    });
+
+    test('Discard (withdraw) is tied to the state the owner saw: a stale one writes nothing', async () => {
+      const app = await newApplication();
+      const draft = await JobOffers.saveDraft(app.id, {}, actor());
+      const refuse = (id, precondition, code, status) => expect(JobOffers.withdrawOffer(app.id, id, actor(), precondition))
+        .rejects.toMatchObject({ status, code });
+      await refuse(draft.id, {}, 'EXPECTED_STATUS_REQUIRED', 400);
+      await refuse(draft.id, { expectedStatus: 'bogus' }, 'EXPECTED_STATUS_REQUIRED', 400);
+      await refuse(draft.id, { expectedStatus: 'draft' }, 'DRAFT_HASH_REQUIRED', 400);
+      await refuse(draft.id, { expectedStatus: 'sent' }, 'OFFER_CHANGED', 409); // the tab thinks it is out; it is a draft
+      await refuse(draft.id, { expectedStatus: 'draft', draftHash: 'f'.repeat(64) }, 'DRAFT_CHANGED', 409);
+      expect((await root('job_offers').where({ id: draft.id }).first()).status).toBe('draft');
+      // The stale "Discard draft": the draft was sent meanwhile, so the live offer must NOT be withdrawn.
+      await JobOffers.sendOffer(app.id, draft.id, actor(), draft.draftHash);
+      await refuse(draft.id, { expectedStatus: 'draft', draftHash: draft.draftHash }, 'OFFER_CHANGED', 409);
+      expect((await root('job_offers').where({ id: draft.id }).first()).status).toBe('sent');
+      expect((await JobOffers.withdrawOffer(app.id, draft.id, actor(), { expectedStatus: 'sent' })).status).toBe('withdrawn');
+    });
+
+    test('Revise needs the state the owner saw, and always yields an editable draft', async () => {
+      const app = await newApplication();
+      const sent = (await sendNew(app)).offer;
+      const refuse = (input, code, status) => expect(JobOffers.reviseOffer(app.id, sent.id, input, actor())).rejects.toMatchObject({ status, code });
+      await refuse({}, 'EXPECTED_STATUS_REQUIRED', 400);
+      await refuse({ expectedStatus: 'draft' }, 'EXPECTED_STATUS_REQUIRED', 400);
+      await refuse({ expectedStatus: 'date_requested' }, 'OFFER_CHANGED', 409);
+      expect(await root('job_offers').where({ application_id: app.id }).count('* as n').first()).toEqual({ n: '1' });
+      // The copied start date has passed: no refusal, the suggested start and a recomputed raise date.
+      await root('job_offers').where({ id: sent.id }).update({ start_date: '2020-01-06', step_effective_on: '2020-04-13' });
+      const revised = await JobOffers.reviseOffer(app.id, sent.id, { expectedStatus: 'sent' }, actor());
+      expect(revised).toMatchObject({ status: 'draft', startDate: JobOffers.suggestStartDate(), stepEffectiveOn: JobOffers.stepDateFor(JobOffers.suggestStartDate()) });
+      expect(revised.draftHash).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    test('the letter preview names its offer and draft hash', async () => {
+      const app = await newApplication();
+      const none = await JobOffers.adminPanel(app.id, actor());
+      expect(none.letterPreview).toMatchObject({ offerId: null, draftHash: null, markdown: expect.stringContaining('# Your job offer') });
+      const draft = await JobOffers.saveDraft(app.id, {}, actor());
+      const withDraft = await JobOffers.adminPanel(app.id, actor());
+      expect(withDraft.letterPreview).toMatchObject({ offerId: draft.id, draftHash: draft.draftHash });
+      const sent = (await JobOffers.sendOffer(app.id, draft.id, actor(), draft.draftHash)).offer;
+      const out = await JobOffers.adminPanel(app.id, actor());
+      expect(out.letterPreview).toMatchObject({ offerId: sent.id, draftHash: null });
     });
 
     test('the database allows one draft and one offer out per application, and no more', async () => {

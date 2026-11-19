@@ -158,9 +158,14 @@ describe('owner-only actions', () => {
     expect(mockService.sendOffer).toHaveBeenCalledWith(APP, OFFER, expect.objectContaining({ name: 'Test Owner' }), 'abc123');
   });
 
-  test('revise passes the optional start date', async () => {
-    await call(base(`/${OFFER}/revise`), 'POST', { startDate: '2027-02-01' });
-    expect(mockService.reviseOffer).toHaveBeenCalledWith(APP, OFFER, { startDate: '2027-02-01' }, expect.any(Object));
+  test('revise passes the expected status and the optional start date', async () => {
+    await call(base(`/${OFFER}/revise`), 'POST', { expectedStatus: 'sent', startDate: '2027-02-01' });
+    expect(mockService.reviseOffer).toHaveBeenCalledWith(APP, OFFER, { expectedStatus: 'sent', startDate: '2027-02-01' }, expect.any(Object));
+  });
+
+  test('withdraw passes the expected status and the draft hash', async () => {
+    await call(base(`/${OFFER}/withdraw`), 'POST', { expectedStatus: 'draft', draftHash: 'abc' });
+    expect(mockService.withdrawOffer).toHaveBeenCalledWith(APP, OFFER, expect.objectContaining({ name: 'Test Owner' }), { expectedStatus: 'draft', draftHash: 'abc' });
   });
 });
 
@@ -169,6 +174,8 @@ describe('service refusals', () => {
     [new OfferError(409, 'TERMS_NOT_ISSUED', 'The Technician Terms are not issued.', { blockers: ['The Technician Terms have no issued version.'] }), 409],
     [new OfferError(409, 'DRAFT_CHANGED', 'This draft changed after you opened it. Review the new preview, then send.'), 409],
     [new OfferError(400, 'DRAFT_HASH_REQUIRED', 'Send needs the hash of the preview you reviewed.'), 400],
+    [new OfferError(400, 'EXPECTED_STATUS_REQUIRED', 'Say which state of the offer you are acting on.'), 400],
+    [new OfferError(409, 'OFFER_CHANGED', 'This offer changed after you opened it. Review it again.', { status: 'sent' }), 409],
     [new OfferError(400, 'INVALID_OFFER', 'The start date must be in the future.', { errors: [{ field: 'startDate', message: 'x' }] }), 400],
     [new OfferError(404, 'NOT_FOUND', 'Not found'), 404],
   ])('%s keeps its status, a one-sentence error and a code', async (err, status) => {

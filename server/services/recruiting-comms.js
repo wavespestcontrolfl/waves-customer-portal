@@ -1041,6 +1041,11 @@ async function runSmsLeg(ctx) {
     entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'skipped', code: 'template_disabled', body: '', by }));
     return 'skipped';
   }
+  // An edited or variant offer text that dropped {offer_link} would report "sent" while the applicant has nothing to open.
+  if (stage === 'offer_sent' && !(vars.offer_link && body.includes(vars.offer_link))) {
+    entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'skipped', code: 'offer_link_missing', body: '', by }));
+    return 'skipped';
+  }
 
   // Written as 'pending' (NOT delivery evidence) before the pipeline; moved
   // to 'handoff' inside the pipeline's preSendCheck — right before Twilio,

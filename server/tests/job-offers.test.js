@@ -228,8 +228,8 @@ describe('the public state', () => {
     expect(J.publicStateOf(sent, at('2026-11-27T05:00:00Z'))).toBe('expired');
   });
 
-  test('an application the owner closed makes a live offer read withdrawn', () => {
-    for (const applicationStatus of ['hired', 'rejected', 'withdrawn']) {
+  test('an application that left the offer stage (closed, or moved back to review or interview) makes a live offer read withdrawn', () => {
+    for (const applicationStatus of ['hired', 'rejected', 'withdrawn', 'new', 'reviewed', 'interview']) {
       expect(J.publicStateOf(sent, { ...at('2026-11-20T00:00:00Z'), applicationStatus })).toBe('withdrawn');
       expect(J.publicStateOf({ status: 'date_requested' }, { ...at('2026-11-20T00:00:00Z'), applicationStatus })).toBe('withdrawn');
     }
