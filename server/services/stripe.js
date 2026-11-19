@@ -546,7 +546,20 @@ async function resolveNoFundsSavedCardChargeAttempt({
       .whereNull('resolved_at')
       .forUpdate()
       .first('id', 'status');
-    if (!attempt) return false;
+    if (!attempt) {
+      // A signed failure can resolve this claim while the create request is
+      // still returning. Only the original worker has that response's PI.
+      if (declineCode !== 'authentication_required' || !authenticationIntentId) return false;
+      const bound = await trx('stripe_invoice_charge_attempts')
+        .where({
+          id: attemptId, invoice_id: invoiceId, status: 'failed', decline_code: 'authentication_required',
+          stripe_payment_intent_id: authenticationIntentId,
+        })
+        .whereNotNull('resolved_at')
+        .whereNull('stripe_payment_intent_bound_at')
+        .update({ stripe_payment_intent_bound_at: new Date(), updated_at: new Date() });
+      return bound ? { resolved: true, reopened: false } : false;
+    }
 
     // A second request can promote a five-minute claim and park the invoice
     // while the original is still blocked in Stripe. Once that owner proves no
@@ -574,7 +587,10 @@ async function resolveNoFundsSavedCardChargeAttempt({
         status: 'failed',
         error_message: String(failureMessage || 'Pre-charge setup failed').slice(0, 1000),
         decline_code: declineCode,
-        ...(authenticationIntentId ? { stripe_payment_intent_id: authenticationIntentId } : {}),
+        ...(authenticationIntentId ? {
+          stripe_payment_intent_id: authenticationIntentId,
+          stripe_payment_intent_bound_at: new Date(),
+        } : {}),
         resolved_at: new Date(),
         updated_at: new Date(),
       });

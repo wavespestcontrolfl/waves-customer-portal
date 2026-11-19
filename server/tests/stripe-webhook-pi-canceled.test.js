@@ -156,7 +156,7 @@ test('a saved-card cancellation records its exact attempt even when the invoice 
   const evidence = mockState.updates.filter((entry) => entry.table === 'stripe_invoice_charge_attempts');
   expect(evidence).toHaveLength(1);
   expect(evidence[0].wheres).toContainEqual({ id: metadata.saved_card_attempt_id, invoice_id: metadata.waves_invoice_id });
-  expect(evidence[0].patch).toEqual({ authentication_canceled_intent_id: 'pi_auth', stripe_payment_intent_id: 'pi_auth' });
+  expect(evidence[0].patch).toEqual({ authentication_canceled_intent_id: 'pi_auth' });
   expect(invoiceReverts()).toHaveLength(0);
   expect(sendCustomerMessage).not.toHaveBeenCalled();
 });

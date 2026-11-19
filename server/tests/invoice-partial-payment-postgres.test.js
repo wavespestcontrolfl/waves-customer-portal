@@ -165,6 +165,7 @@ postgres('Partial payments against migrated PostgreSQL', () => {
       status: 'failed',
       decline_code: 'authentication_required',
       stripe_payment_intent_id: intentId,
+      stripe_payment_intent_bound_at: new Date(),
       authentication_canceled_intent_id: wrongIntentId,
       resolved_at: new Date(),
     });
@@ -223,6 +224,7 @@ postgres('Partial payments against migrated PostgreSQL', () => {
     await database('stripe_invoice_charge_attempts').insert({
       id: attemptId, invoice_id: invoice.id, idempotency_key: `synthetic-rest-${attemptId}`,
       stripe_payment_method_id: intent.payment_method, stripe_payment_intent_id: intent.id,
+      stripe_payment_intent_bound_at: new Date(),
       status: 'failed', decline_code: 'authentication_required', resolved_at: new Date(),
     });
 

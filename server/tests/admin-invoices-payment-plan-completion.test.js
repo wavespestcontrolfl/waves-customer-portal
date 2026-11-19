@@ -57,7 +57,7 @@ jest.mock('../services/customer-credit', () => ({
   round2: (v) => Math.round((Number(v) || 0) * 100) / 100,
   getBalance: jest.fn(async () => 100),
   accountCreditSnapshotForInvoice: jest.fn(async () => ({ spendable: 500 })),
-  spendableAccountCreditForInvoice: jest.fn(async ({ balance }) => balance),
+  spendableAccountCreditForInvoice: jest.fn(async ({ balance }) => Number(balance)),
   postCreditMovement: jest.fn(async () => ({ balanceAfter: 400 })),
 }));
 
@@ -282,6 +282,40 @@ describe('active payment plans auto-complete when the invoice settles', () => {
         .toBeLessThan(trxInvoices.forUpdate.mock.invocationCallOrder[0]);
       expect(trxInvoices.forUpdate.mock.invocationCallOrder[0])
         .toBeLessThan(trxChargeAttempts.where.mock.invocationCallOrder[0]);
+      expect(retrieve).not.toHaveBeenCalled();
+      expect(cancel).not.toHaveBeenCalled();
+      expect(require('../services/pay-combined').releaseCombinedSessionBeforeCollection).not.toHaveBeenCalled();
+      expect(require('../services/customer-credit').postCreditMovement).not.toHaveBeenCalled();
+      expect(trxInvoices.update).not.toHaveBeenCalled();
+    } finally {
+      retrieve.mockRestore();
+      cancel.mockRestore();
+    }
+  });
+
+  test('credit spent after preflight leaves the customer checkout available', async () => {
+    const stampedInvoice = { ...INVOICE, stripe_payment_intent_id: 'pi_customer_checkout' };
+    const original = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return makeRecorder({ first: jest.fn(async () => stampedInvoice) });
+      if (['stripe_invoice_charge_attempts', 'stripe_orphan_charges', 'payments'].includes(table)) return makeRecorder();
+      return original(table);
+    });
+    trxInvoices.first.mockResolvedValue(stampedInvoice);
+    trxCustomers.first.mockResolvedValue({ id: INVOICE.customer_id, account_credits: '25.00' });
+    const stripe = require('../services/stripe');
+    const retrieve = jest.spyOn(stripe, 'retrievePaymentIntent').mockResolvedValue({ status: 'requires_payment_method' });
+    const cancel = jest.spyOn(stripe, 'cancelPaymentIntent').mockResolvedValue({ status: 'canceled' });
+    try {
+      await withServer(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/admin/invoices/inv-1/apply-credit`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        expect(response.status).toBe(400);
+        expect((await response.json()).error).toMatch(/Insufficient account credit.*\$25\.00.*\$100\.00/i);
+      });
+      expect(trxCustomers.forUpdate).toHaveBeenCalled();
+      expect(trxCustomers.first).toHaveBeenCalledWith('id', 'account_credits');
       expect(retrieve).not.toHaveBeenCalled();
       expect(cancel).not.toHaveBeenCalled();
       expect(require('../services/pay-combined').releaseCombinedSessionBeforeCollection).not.toHaveBeenCalled();

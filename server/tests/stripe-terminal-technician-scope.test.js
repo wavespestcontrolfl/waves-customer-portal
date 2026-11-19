@@ -80,9 +80,9 @@ async function withServer(fn) {
   }
 }
 
-function setupHandoffDb({ assigned = true, transactionState = null } = {}) {
+function setupHandoffDb({ assigned = true, transactionState = null, invoiceStatus = 'sent' } = {}) {
   const invoice = {
-    id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: '100.00',
+    id: 'inv-1', customer_id: 'cust-1', status: invoiceStatus, total: '100.00',
     credit_applied: '0.00', stripe_payment_intent_id: null,
   };
   const tableReads = [];
@@ -147,6 +147,35 @@ describe('technicianMayCollectInvoice', () => {
 });
 
 describe('POST /handoff checkout reconciliation fence', () => {
+  test('a processing invoice parked by saved-card evidence returns that hold', async () => {
+    const state = setupHandoffDb({ invoiceStatus: 'processing' });
+    mockServices.mockResolvedValue(true);
+    mockChargeFence.mockRejectedValueOnce(Object.assign(new Error('received payment has no local posting'), {
+      code: 'STRIPE_CHARGED_DB_FAILED', reconciliationRequired: true,
+    }));
+
+    const { status, body } = await postHandoff();
+
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ code: 'payment_reconciliation_pending', reconciliationRequired: true });
+    expect(mockChargeFence).toHaveBeenCalledWith('inv-1', db, { readOnly: true, checkout: true });
+    expect(mockAutoApplyCredit).not.toHaveBeenCalled();
+    expect(state.tableReads).not.toContain('terminal_handoff_tokens');
+  });
+
+  test('an ordinary processing invoice keeps the generic bank-processing refusal', async () => {
+    const state = setupHandoffDb({ invoiceStatus: 'processing' });
+    mockServices.mockResolvedValue(true);
+
+    const { status, body } = await postHandoff();
+
+    expect(status).toBe(409);
+    expect(body).toEqual({ error: 'Bank payment is already processing' });
+    expect(mockChargeFence).toHaveBeenCalledWith('inv-1', db, { readOnly: true, checkout: true });
+    expect(mockAutoApplyCredit).not.toHaveBeenCalled();
+    expect(state.tableReads).not.toContain('terminal_handoff_tokens');
+  });
+
   test.each([
     ['active or authenticating claim', 'STRIPE_CHARGE_IN_PROGRESS', false, 'payment_charge_in_progress'],
     ['submitted or ambiguous claim', 'STRIPE_AMBIGUOUS_OUTCOME', true, 'payment_reconciliation_pending'],

@@ -81,6 +81,7 @@ postgres('account credit authentication hold (PostgreSQL)', () => {
       table.decimal('credit_applied_total', 12, 2).notNullable().defaultTo(0);
       table.string('decline_code');
       table.string('authentication_canceled_intent_id');
+      table.timestamp('stripe_payment_intent_bound_at');
       table.timestamp('submitted_at');
       table.timestamp('resolved_at');
       table.timestamp('created_at');
@@ -172,6 +173,7 @@ postgres('account credit authentication hold (PostgreSQL)', () => {
         status: 'failed',
         decline_code: 'authentication_required',
         stripe_payment_intent_id: intentId,
+        stripe_payment_intent_bound_at: new Date(),
         resolved_at: new Date(),
       });
 
@@ -385,6 +387,7 @@ postgres('account credit authentication hold (PostgreSQL)', () => {
       status: 'failed',
       decline_code: 'authentication_required',
       stripe_payment_intent_id: intentId,
+      stripe_payment_intent_bound_at: new Date(),
       resolved_at: new Date(),
     });
     await expect(reservedForOther()).resolves.toBe(25);
@@ -655,6 +658,7 @@ postgres('account credit authentication hold (PostgreSQL)', () => {
       await challengeWriter('invoices').where({ id: invoiceId }).forUpdate().first();
       await challengeWriter('stripe_invoice_charge_attempts').where({ id: attemptId }).update({
         stripe_payment_intent_id: intentId,
+        stripe_payment_intent_bound_at: new Date(),
         status: 'failed',
         decline_code: 'authentication_required',
         amount: 75,

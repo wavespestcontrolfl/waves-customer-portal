@@ -97,6 +97,7 @@ postgres('InvoiceService.update authentication hold (PostgreSQL)', () => {
       status: 'failed',
       decline_code: 'authentication_required',
       stripe_payment_intent_id: intentId,
+      stripe_payment_intent_bound_at: new Date(),
       stripe_payment_method_id: 'pm_synthetic_invoice_edit',
       idempotency_key: `edit-auth-${attemptId}`,
       submitted_at: new Date(),

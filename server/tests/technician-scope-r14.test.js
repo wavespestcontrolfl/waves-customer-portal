@@ -413,6 +413,27 @@ describe('mint transaction lock order (pre-push P1)', () => {
   });
 });
 
+describe('Terminal checkout bind lock order', () => {
+  test('the combined reservation and canonical allocation locks precede the hold and every checkout retirement', () => {
+    const s = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes/stripe-terminal.js'), 'utf8');
+    const handler = s.slice(s.indexOf("router.post('/payment-intent'"), s.indexOf("router.post('/apply-surcharge'"));
+    const bind = handler.indexOf('bound = await db.transaction(async (trx) => {');
+    const reservation = handler.indexOf('await PayCombined.lockCombinedCustomerStable(trx, invoice.id, invoice.customer_id);', bind);
+    const allocationLocks = handler.indexOf('await PayCombined.verifyAllocationLocked(trx, allocation, {', reservation);
+    const standaloneLock = handler.indexOf("trx('invoices').where({ id: invoice.id }).forUpdate().first()", allocationLocks);
+    const hold = handler.indexOf('await assertNoInvoiceChargeReconciliationPending(invoice.id, trx, { checkout: true });', allocationLocks);
+    const sharedRetirement = handler.indexOf('await PayCombined.releaseCombinedSessionBeforeCollection(trx, locked,', hold);
+    const standaloneRetirement = handler.indexOf("guardOpenPaymentIntentForPrepaid(locked)", sharedRetirement);
+    expect(bind).toBeGreaterThan(-1);
+    expect(reservation).toBeGreaterThan(bind);
+    expect(allocationLocks).toBeGreaterThan(reservation);
+    expect(standaloneLock).toBeGreaterThan(allocationLocks);
+    expect(hold).toBeGreaterThan(standaloneLock);
+    expect(sharedRetirement).toBeGreaterThan(hold);
+    expect(standaloneRetirement).toBeGreaterThan(sharedRetirement);
+  });
+});
+
 describe('codex #5568 r17', () => {
   const fs = require('fs');
   const path = require('path');

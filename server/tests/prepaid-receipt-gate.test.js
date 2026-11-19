@@ -8,9 +8,13 @@ jest.mock('../services/estimate-first-application-invoice', () => ({
   findFirstApplicationInvoiceForEstimateService: jest.fn(),
 }));
 
+const fs = require('fs');
+const path = require('path');
+
 const {
   shouldAttemptPrepaidReceipt,
   resolveScheduledServiceCharge,
+  schedulePrepaidAmountRefusal,
 } = require('../routes/admin-schedule')._test;
 const { findFirstApplicationInvoiceForEstimateService } = require('../services/estimate-first-application-invoice');
 const { predictCompletionBilling } = require('../services/billing-lane');
@@ -59,6 +63,62 @@ describe('shouldAttemptPrepaidReceipt', () => {
       .toEqual({ attempt: false, reason: 'no_prepaid_amount' });
     expect(shouldAttemptPrepaidReceipt({ ...ok, prepaidAmount: NaN }))
       .toEqual({ attempt: false, reason: 'no_prepaid_amount' });
+  });
+});
+
+describe('Schedule prepaid invoice writers share the locked saved-card fence', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+  const receiptStart = source.indexOf('async function generatePrepaidReceiptForService(');
+  const receipt = source.slice(receiptStart, source.indexOf('// POST /api/admin/schedule/:id/prepaid', receiptStart));
+  const applyStart = source.indexOf('const applyPrepaidCredit = async (invoice');
+  const apply = source.slice(applyStart, source.indexOf('// Callbacks (re-services)', applyStart));
+
+  function expectInOrder(body, needles) {
+    let cursor = -1;
+    for (const needle of needles) {
+      const next = body.indexOf(needle, cursor + 1);
+      expect(next).toBeGreaterThan(cursor);
+      cursor = next;
+    }
+  }
+
+  test('direct receipt posting locks, fences null-PI authentication, then retires checkout and writes invoice + ledger atomically', () => {
+    expectInOrder(receipt, [
+      'lockCombinedCustomerStable(',
+      ".forUpdate().first()",
+      'schedulePrepaidCollectionFence(locked.id, trx)',
+      'guardOpenPaymentIntentForPrepaid(locked)',
+      "trx('invoices')",
+      ".update({",
+      "trx('payments').insert({",
+    ]);
+    expect(receipt).toContain("if (collectionHold) return collectionHold;");
+    expect(receipt).toContain('reason: outcome.reason,');
+  });
+
+  test('Charge Now applying an earlier visit prepayment fences before checkout release, amount change, or ledger insert and maps the committed hold to 409', () => {
+    expectInOrder(apply, [
+      'lockCombinedCustomerStable(trx, invoice.id, invoice.customer_id)',
+      '.forUpdate()',
+      'schedulePrepaidCollectionFence(lockedInvoice.id, trx)',
+      'releaseCombinedSessionBeforeCollection(',
+      ".update({",
+      "trx('payments').insert({",
+      'if (outcome.collectionHold)',
+      'throw httpError(409',
+    ]);
+    expect(apply).toContain('return { invoice: lockedInvoice, prepaidCredit: 0, collectionHold };');
+  });
+
+  test.each([
+    [{ dueCents: 10000, amountPaidCents: 0, prepaidCents: 9000 }, 'not_paid_in_full'],
+    [{ dueCents: 10000, amountPaidCents: 2500, prepaidCents: 10000 }, 'part_payment'],
+    [{ dueCents: 0, amountPaidCents: 0 }, 'nothing_due'],
+    [{ dueCents: 10000, amountPaidCents: 2500 }, 'part_payment'],
+    [{ dueCents: 10000, amountPaidCents: 0, existingCredit: { id: 'pay-1' } }, 'already_applied'],
+    [{ dueCents: 10000, amountPaidCents: 0, prepaidCents: 10000 }, null],
+  ])('preserves the no-write amount decision for %p', (input, reason) => {
+    expect(schedulePrepaidAmountRefusal(input)).toBe(reason);
   });
 });
 

@@ -829,6 +829,11 @@ check already received under **Customer 360 → Issue credit → Prepayment
 the card outcome is known. An imported Zelle notice stays in its review
 queue so the office can resolve that same receipt once.
 
+While a saved card can still settle, staff payment posting, credit application,
+annual-prepay removal, and invoice voids recheck the hold under the invoice
+lock. A refused posting preserves the customer's existing checkout. Applying
+credit also rechecks the available balance under the customer lock.
+
 Off-Stripe tender block (2026-08-29; ZELLE-ONLY since 2026-09-02 — owner
 ruling, Venmo and PayPal retired over their fees): the GET payload carries
 an OPTIONAL `manualPayOptions` = `{ zelle: { recipient }, amountDue,
@@ -6563,8 +6568,13 @@ an expired claim with no sign of submission. An unknown outcome or a payment
 received by Stripe that still needs local posting returns HTTP 409 with
 `code: payment_reconciliation_pending` and `reconciliationRequired: true`.
 Terminal checks again before creating the card-present intent and under the invoice
-lock before returning its client secret. If the hold appears during creation, the handoff must be reissued
-and the response includes `newHandoffRequired: true`. The post-tap
+lock before returning its client secret. At that final bind it first reserves
+the customer's combined-checkout namespace and, for a shared intent, locks the
+canonical allocation. It checks the hold before canceling either that shared
+checkout or a standalone pay-page intent. A reconciliation hold preserves the
+existing checkout pointer; the attempt/orphan remains the collection fence.
+If the hold appears during creation, the handoff must be reissued and the
+response includes `newHandoffRequired: true`. The post-tap
 `/apply-surcharge` request also checks the hold under lock before the
 device can continue. A surcharge-disabled session that already holds a
 client secret confirms directly with Stripe.

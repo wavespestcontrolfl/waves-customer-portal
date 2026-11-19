@@ -581,6 +581,22 @@ function preChargeFailureDb({ attemptStatus = 'ambiguous', paymentIntentId = nul
 }
 
 describe('saved-card pre-charge failure release', () => {
+  test('records charge-worker provenance with an authentication-required PI', async () => {
+    const { database, state } = preChargeFailureDb({ attemptStatus: 'claimed' });
+    await expect(resolveNoFundsSavedCardChargeAttempt({
+      attemptId: 'attempt-1',
+      invoiceId: 'inv-1',
+      failureMessage: 'authentication required',
+      declineCode: 'authentication_required',
+      authenticationIntentId: 'pi_authentication',
+      database,
+    })).resolves.toEqual({ resolved: true, reopened: false });
+    expect(state.attempt).toEqual(expect.objectContaining({
+      stripe_payment_intent_id: 'pi_authentication',
+      stripe_payment_intent_bound_at: expect.any(Date),
+    }));
+  });
+
   test('reopens a parked invoice when the stale ambiguous owner proves no charge was submitted', async () => {
     const { database, state } = preChargeFailureDb();
     await expect(resolveNoFundsSavedCardChargeAttempt({

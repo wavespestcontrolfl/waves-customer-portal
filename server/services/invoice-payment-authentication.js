@@ -9,6 +9,7 @@ function whereAwaitingAuthentication(query, table) {
   }).whereNotNull(`${table}.resolved_at`).where(function withoutMatchingCancellation() {
     this.whereNull(`${table}.authentication_canceled_intent_id`)
       .orWhereNull(`${table}.stripe_payment_intent_id`)
+      .orWhereNull(`${table}.stripe_payment_intent_bound_at`)
       .orWhereColumn(`${table}.authentication_canceled_intent_id`, '<>', `${table}.stripe_payment_intent_id`);
   });
 }
@@ -79,7 +80,6 @@ function cancellationIdentity(intent) {
     methodId,
     evidence: {
       authentication_canceled_intent_id: intent.id,
-      ...(methodId ? { stripe_payment_intent_id: intent.id } : {}),
     },
   };
 }
@@ -219,9 +219,9 @@ async function verifySavedCardCancellation({ attemptId, intentId, stripe, databa
     // Historical recovery is for a finished authentication decline only. The
     // UPDATE repeats every identity check, including any intervening binding.
     const match = matchingCancellation(identity, conn);
-    const { query, evidence } = match;
+    const { query } = match;
     query.where({ status: 'failed', decline_code: 'authentication_required' }).whereNotNull('resolved_at');
-    if (!evidence.stripe_payment_intent_id) query.where({ stripe_payment_intent_id: intentId });
+    query.where({ stripe_payment_intent_id: intentId }).whereNotNull('stripe_payment_intent_bound_at');
     return match;
   };
 
