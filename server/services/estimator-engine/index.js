@@ -772,12 +772,18 @@ async function notifyBell({ call, context, title, body, lane, estimateId = null,
                   .where({ id: existing.id })
                   .whereNull('done_at')
                   .update({ metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ observedAt: new Date().toISOString() })]) });
-                if (stamped) return landed(existing.id);
+                if (stamped) return { ...landed(existing.id), merged: true };
                 insertFresh = true;
               } else if (sameDraft || bothOpen) {
                 return landed(existing.id);
               }
               if (existingMeta.estimateId && existingMeta.estimateId !== estimateId) insertFresh = true;
+              // A later ask that merged into this bell (origin.mergedAsk, set by
+              // startSmsThreadDraft) may be about another property, and the
+              // bell may already hold the earlier ask's "send it" task: its
+              // draft gets its own bell instead of replacing that task. A
+              // clarify resume is no merge: its draft still upgrades the row.
+              if (askBellId && estimateId && !existingMeta.estimateId && context?.origin?.mergedAsk === true) insertFresh = true;
             }
           }
           if (!insertFresh) {

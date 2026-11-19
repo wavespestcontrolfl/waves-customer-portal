@@ -434,9 +434,14 @@ async function startSmsThreadDraft({
     if (!dryRun && !skipCooldown && !scopeCheckOnly) {
       const SMS_DRAFT_COOLDOWN_MS = 10 * 60 * 1000;
       const db = require('../../models/db');
+      const cooldownSince = new Date(Date.now() - SMS_DRAFT_COOLDOWN_MS);
       const recentRun = await db('notifications')
         .whereRaw("metadata->>'smsThreadKey' = ?", [`sms:${digits}`])
-        .where('created_at', '>=', new Date(Date.now() - SMS_DRAFT_COOLDOWN_MS))
+        // A new ask that merged into the number's bell stamps observedAt
+        // (notifyBell in ./index): it starts the window as a new bell does.
+        // Both sides are toISOString() text, so text order is time order.
+        .where((q) => q.where('created_at', '>=', cooldownSince)
+          .orWhereRaw("metadata->>'observedAt' >= ?", [cooldownSince.toISOString()]))
         .first();
       if (recentRun) {
         result.skipped = 'cooldown';
@@ -559,6 +564,8 @@ async function startSmsThreadDraft({
       }
       // The run's outcome updates the row this ask landed on, open or done.
       origin.bellId = bell.bellId;
+      // A merged ask's draft gets its own bell (notifyBell in ./index).
+      if (bell.merged) origin.mergedAsk = true;
     }
     result.started = true;
     result.draftPromise = runThreadDraft({

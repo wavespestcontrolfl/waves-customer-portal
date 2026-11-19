@@ -13,6 +13,8 @@
 // Chainable stub for the cooldown lookup (notifications table); tests set
 // mockRecentBell to simulate a run inside the cooldown window.
 let mockRecentBell = null;
+// The grouped where() the cooldown builds, as [method, ...args].
+const mockCooldownClauses = [];
 // sms_log row (the triggering text's Twilio SID) for the placeholder link anchor.
 let mockSmsLogRow = null;
 let mockSmsLogThrows = false;
@@ -21,7 +23,16 @@ jest.mock('../models/db', () => {
   let table = null;
   const chain = {
     whereRaw: () => chain,
-    where: () => chain,
+    where: (arg) => {
+      if (typeof arg === 'function') {
+        const group = {
+          where: (...args) => { mockCooldownClauses.push(['where', ...args]); return group; },
+          orWhereRaw: (...args) => { mockCooldownClauses.push(['orWhereRaw', ...args]); return group; },
+        };
+        arg(group);
+      }
+      return chain;
+    },
     orderBy: () => chain,
     select: () => chain,
     timeout: () => chain,
@@ -56,13 +67,14 @@ jest.mock('../config/models', () => ({
 const mockRunDraftPipeline = jest.fn();
 const mockNotify = jest.fn();
 const mockEngineEnabled = jest.fn();
+let mockBellMerged = false;
 jest.mock('../services/estimator-engine/index', () => ({
   runDraftPipeline: (...args) => mockRunDraftPipeline(...args),
   notify: (...args) => mockNotify(...args),
   // The placeholder's call: the same recorder, plus the row id it landed on.
   notifyBell: async (...args) => {
     const ok = await mockNotify(...args);
-    return { ok: !!ok, bellId: ok ? 'bell-ask-1' : null };
+    return { ok: !!ok, bellId: ok ? 'bell-ask-1' : null, ...(ok && mockBellMerged ? { merged: true } : {}) };
   },
   estimatorEngineEnabled: () => mockEngineEnabled(),
 }));
@@ -105,6 +117,8 @@ const PHONE = '+19415550123';
 beforeEach(() => {
   jest.clearAllMocks();
   mockRecentBell = null;
+  mockCooldownClauses.length = 0;
+  mockBellMerged = false;
   mockSmsLogRow = null;
   mockSmsLogThrows = false;
   mockSmsLogHangs = false;
@@ -190,6 +204,17 @@ describe('startSmsThreadDraft', () => {
     // The run's outcome updates the row this ask landed on (notifyBell reads
     // context.origin.bellId), open or done.
     expect(args.origin.bellId).toBe('bell-ask-1');
+    // It inserted its own bell, so it is no merged ask.
+    expect(args.origin.mergedAsk).toBeUndefined();
+  });
+
+  test('an ask that merged into the number\'s open bell marks its run, so its draft gets its own bell', async () => {
+    mockBellMerged = true;
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'quote for pest control please' });
+    await result.draftPromise;
+    const args = mockRunDraftPipeline.mock.calls[0][0];
+    expect(args.origin.bellId).toBe('bell-ask-1');
+    expect(args.origin.mergedAsk).toBe(true);
   });
 
   describe('the placeholder names who texted and links to the message', () => {
@@ -334,6 +359,17 @@ describe('startSmsThreadDraft', () => {
     expect(mockDispatch).not.toHaveBeenCalled();
     expect(mockNotify).not.toHaveBeenCalled();
     expect(mockRunDraftPipeline).not.toHaveBeenCalled();
+  });
+
+  test('the cooldown window also starts at a merged ask\'s observedAt stamp, not only at a new bell', async () => {
+    await startSmsThreadDraft({ phone: PHONE, triggerBody: 'quote for pest control please' });
+    const [created, stamped] = mockCooldownClauses;
+    expect(created.slice(0, 3)).toEqual(['where', 'created_at', '>=']);
+    expect(stamped[0]).toBe('orWhereRaw');
+    expect(stamped[1]).toBe("metadata->>'observedAt' >= ?");
+    // The same instant as the created_at bound, as ISO text.
+    expect(stamped[2]).toEqual([created[3].toISOString()]);
+    expect(Date.now() - created[3].getTime()).toBeGreaterThanOrEqual(10 * 60 * 1000);
   });
 
   test('a bell a person already closed still holds the cooldown: no bell, no paid call', async () => {

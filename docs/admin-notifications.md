@@ -340,8 +340,9 @@ customer's message by this rule.
    `server/services/estimator-engine/index.js`): an ask after that bell is done (a person's Done, the
    quiet fall-off) gets a fresh bell, except inside the 10-minute per-number cooldown
    (`startSmsThreadDraft`, before any paid call), which raises none. An ask that merges stamps the bell's
-   `observedAt`, so its 72 quiet hours count from that ask. The draft run's outcome updates the
-   row its own ask landed on, open or done. A clarify reply keeps the number's newest bell, open or done.
+   `observedAt`, so its 72 quiet hours and the cooldown count from that ask. The draft run's outcome
+   updates the row its own ask landed on, open or done, except that a merged ask's draft gets its own
+   bell: the bell it merged into may hold an earlier ask's task. A clarify reply keeps the number's newest bell, open or done.
    Every text-bell write holds one lock per number.
    A new text from the same sender rings a fresh bell: the thread row is rewritten, rung and
    re-opened. The sweep never contacts a customer.
