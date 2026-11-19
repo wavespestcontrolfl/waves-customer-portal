@@ -1009,13 +1009,21 @@ jest.setTimeout(30000);
       ['a call with a key no silent call carries', { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', author_type: 'customer', metadata: { domain: 'x', voicemail_note: 'asked for a quote' } }, {}],
       ['a call another lane mirrored', { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', author_type: 'customer', metadata: { source: 'voice_agent' } }, {}],
       ['a call mirror that names the caller', { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', author_type: 'customer', metadata: { domain: 'x', screen_caller_name: 'Pat Example' } }, {}],
+      // The sync copies the call's metadata (pre-push audit r19).
+      ['a call mirror whose text-back found contact', { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', author_type: 'customer', metadata: { domain: 'x', missed_call_text_outcome: 'skipped:already_contacted' } }, {}],
+      // A mirror counts only as the copy of a silent call that still exists (pre-push audit r19).
+      ['a silent-shaped mirror whose call is gone', { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', author_type: 'customer', twilio_sid: 'CA00000000000000000000000000000619' }, {}],
       ['a conversation linked to a customer', null, { customer_id: LINKED_CUSTOMER }],
-    ])('a number with %s only in the unified inbox is never a repeat (pre-push audit r14, r15)', async (label, message, conversation) => {
-      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+    ])('a number with %s only in the unified inbox is never a repeat (pre-push audit r14, r15, r18, r19)', async (label, message, conversation) => {
+      const earlier = prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE });
+      await database('call_log').insert(earlier);
       const row = judged();
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(true);
-      await inbox(CALLER, message, conversation);
+      // A voice message is the mirror of the number's silent call unless the case
+      // names another sid, so only the case's own difference can count.
+      const ofCall = message?.channel === 'voice' ? { twilio_sid: earlier.twilio_call_sid } : {};
+      await inbox(CALLER, message && { ...ofCall, ...message }, conversation);
       expect(await repeat(row)).toBe(false);
     });
 
@@ -1076,6 +1084,28 @@ jest.setTimeout(30000);
         { id: randomUUID(), conversation_id: id, channel: 'sms', direction: 'inbound', body: 'an old thread', created_at: ago(60 * 24 * 15) },
       ]);
       expect(await repeat(row)).toBe(true);
+    });
+
+    // The sync copies the call's length (or its recording's) onto the mirror
+    // (pre-push audit r19).
+    test('a mirror length counts only as the length of its own silent call (pre-push audit r19)', async () => {
+      const earlier = prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE });
+      // The number's recorded call from before the window: the call reads of the record never see it.
+      const recorded = call(CALLER, 60 * 24 * 20, { recording_sid: 'RE00000000000000000000000000000619', recording_duration_seconds: 40, duration_seconds: 40 });
+      await database('call_log').insert([earlier, recorded]);
+      const row = judged();
+      await database('call_log').insert(row);
+      const mirrorOf = (sid, seconds) => inbox(CALLER, { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', author_type: 'customer', twilio_sid: sid, duration_seconds: seconds });
+      await mirrorOf(earlier.twilio_call_sid, earlier.duration_seconds);
+      expect(await repeat(row)).toBe(true);
+      // A length its call does not have.
+      await database('messages').where({ twilio_sid: earlier.twilio_call_sid }).update({ duration_seconds: earlier.duration_seconds + 7 });
+      expect(await repeat(row)).toBe(false);
+      await database('messages').where({ twilio_sid: earlier.twilio_call_sid }).update({ duration_seconds: earlier.duration_seconds });
+      expect(await repeat(row)).toBe(true);
+      // The length of a recorded call, on a mirror a late sync wrote in the window.
+      await mirrorOf(recorded.twilio_call_sid, 40);
+      expect(await repeat(row)).toBe(false);
     });
 
     test('one of our own lines or a staff forward is never a repeat (pre-push audit r11)', async () => {

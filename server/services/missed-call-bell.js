@@ -346,17 +346,26 @@ const SILENT_METADATA_KEYS = [
 // a failed press-1 screen comes with the screen's own key, which the shape
 // refuses already (pre-push audit r11).
 const SILENT_TEXT_BACK_OUTCOMES = ['sent', 'skipped:NON_MOBILE_SMS_RECIPIENT', 'skipped:SUPPRESSED_NON_MOBILE', 'skipped:already_sent_to_phone'];
-// The caller name the voice webhook saves for the press-1 announcement
-// (spokenCallerName) is set only when the call matched a customer as it came
-// in, so a name is a sign of a known caller even after the call's customer
-// link is gone. On production's unlinked inbound calls of the 90 days to
-// 2026-11-19 the key is JSON null (531 calls); 5 hold a name. A silent call,
-// and a silent call's mirror, hold none (pre-push audit r18).
-const NO_CALLER_NAME_SQL = (table) => `COALESCE(${table}.metadata->>'screen_caller_name', '') = ''`;
 const sqlNames = (names) => names.map((name) => {
   if (!/^[A-Za-z_:]+$/.test(name)) throw new Error(`not a plain name: ${name}`);
   return `'${name}'`;
 }).join(', ');
+// The metadata of a silent call: an object or none, only SILENT_METADATA_KEYS
+// (and `extraKeys`), and those keys' values as a silent call holds them. The
+// text-back outcome is unset or one of SILENT_TEXT_BACK_OUTCOMES (pre-push
+// audit r11). The caller name the voice webhook saves for the press-1
+// announcement (spokenCallerName) is set only when the call matched a
+// customer as it came in, so a name is a known caller even after the call's
+// customer link is gone; on production's unlinked inbound calls of the 90
+// days to 2026-11-19 the key is JSON null on 531 and set on 5 (pre-push audit
+// r18). The voice sync copies a call's metadata onto its unified-inbox
+// mirror, so a mirror's metadata takes the same test (pre-push audit r19).
+// Names `<table>.metadata`.
+const SILENT_METADATA_SQL = (table, extraKeys = []) => `COALESCE(jsonb_typeof(${table}.metadata), 'null') IN ('null', 'object')`
+  + ` AND NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(${table}.metadata) = 'object' THEN ${table}.metadata ELSE '{}'::jsonb END) mk`
+  + ` WHERE mk NOT IN (${sqlNames([...SILENT_METADATA_KEYS, ...extraKeys])}))`
+  + ` AND COALESCE(${table}.metadata->>'screen_caller_name', '') = ''`
+  + ` AND COALESCE(${table}.metadata->>'missed_call_text_outcome', 'sent') IN (${sqlNames(SILENT_TEXT_BACK_OUTCOMES)})`;
 // Every other column NULL, and the counters 0: a recorded length of 0 is a
 // value too, from a recording callback (pre-push audit r9). Production's
 // silent calls hold no other value, not even '' or false; a column added
@@ -367,11 +376,7 @@ const sqlNames = (names) => names.map((name) => {
 const SILENT_SHAPE_SQL = `(NOT EXISTS (SELECT 1 FROM jsonb_each(to_jsonb(call_log) - ARRAY[${sqlNames([...SILENT_COLUMNS, ...ZERO_COUNTER_COLUMNS])}]::text[]) col`
   + " WHERE col.value <> 'null'::jsonb)"
   + ZERO_COUNTER_COLUMNS.map((column) => ` AND COALESCE(call_log.${column}, 0) = 0`).join('')
-  + " AND COALESCE(jsonb_typeof(call_log.metadata), 'null') IN ('null', 'object')"
-  + " AND NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(call_log.metadata) = 'object' THEN call_log.metadata ELSE '{}'::jsonb END) mk"
-  + ` WHERE mk NOT IN (${sqlNames(SILENT_METADATA_KEYS)}))`
-  + ` AND ${NO_CALLER_NAME_SQL('call_log')}`
-  + ` AND COALESCE(call_log.metadata->>'missed_call_text_outcome', 'sent') IN (${sqlNames(SILENT_TEXT_BACK_OUTCOMES)}))`;
+  + ` AND ${SILENT_METADATA_SQL('call_log')})`;
 
 // A silent call: inbound, over, with the silent shape, and who answered and
 // the outcome both the voicemail or not yet written: the only values on
@@ -452,30 +457,46 @@ function otherGbpLineSql(row) {
 //    exists: the calls by created_at, their mirrors by twilio_sid (pre-push
 //    audit r17). A mirror of a silent call holds only the columns
 //    the matched numbers' mirrors of the 90 days to 2026-11-19 hold
-//    (SILENT_MIRROR_COLUMNS; body, recording, duration and the rest NULL), no
-//    media, the voicemail or no answer, a customer author, and only a silent
-//    call's metadata keys: a transcript in the body or audio in the media is
-//    a message (pre-push audit r15). And no thread with the number's phone is
-//    linked to a customer, at any time;
+//    (SILENT_MIRROR_COLUMNS; body, recording and the rest NULL), no media,
+//    the voicemail or no answer, a customer author, and a silent call's
+//    metadata (SILENT_METADATA_SQL, keys and values): a transcript in the body
+//    or audio in the media is a message (pre-push audit r15). A mirror is the
+//    voice sync's copy of a call, so it counts only when the call with its
+//    sid still exists and is a silent call, a length only as that call's own
+//    (on production all 267 mirrors of unlinked calls that hold a length are
+//    of recorded calls, and every mirror has its call; pre-push audit r19).
+//    And no thread with the number's phone is linked to a customer, at any
+//    time;
 //  - the number is on no customer slot and no live lead, as in the history
 //    read: staff can save the caller between the check and the stamp
 //    (pre-push audit r15).
 // The inner reads name call_log without an alias: inside them it is the inner
 // table, and the judged call is excluded by its id.
 const SILENT_MIRROR_COLUMNS = ['id', 'conversation_id', 'channel', 'direction', 'author_type', 'twilio_sid', 'answered_by',
-  'delivery_status', 'metadata', 'media', 'is_read', 'read_at', 'read_by_admin_user_id', 'created_at', 'updated_at'];
-const INBOX_SILENT_SQL = "((m.channel = 'voice' AND m.direction = 'inbound'"
-  + ` AND NOT EXISTS (SELECT 1 FROM jsonb_each(to_jsonb(m) - ARRAY[${sqlNames(SILENT_MIRROR_COLUMNS)}]::text[]) col WHERE col.value <> 'null'::jsonb)`
-  + " AND COALESCE(m.author_type, 'customer') = 'customer'"
-  + " AND COALESCE(m.answered_by, 'voicemail') = 'voicemail'"
-  + " AND COALESCE(m.media, '[]'::jsonb) = '[]'::jsonb"
-  + " AND COALESCE(jsonb_typeof(m.metadata), 'null') IN ('null', 'object')"
-  + " AND COALESCE(m.metadata->>'source', 'voice_message_sync') = 'voice_message_sync'"
-  + ` AND ${NO_CALLER_NAME_SQL('m')}`
-  + " AND NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(m.metadata) = 'object' THEN m.metadata ELSE '{}'::jsonb END) mk"
-  + ` WHERE mk NOT IN (${sqlNames([...SILENT_METADATA_KEYS, 'source'])})))`
-  + " OR (m.channel = 'sms' AND m.direction = 'outbound' AND m.message_type = 'missed_call_text_back'"
-  + " AND COALESCE(m.author_type, 'system') = 'system'))";
+  'delivery_status', 'metadata', 'media', 'is_read', 'read_at', 'read_by_admin_user_id', 'created_at', 'updated_at', 'duration_seconds'];
+// A mirror of a silent call, or our text-back, as one condition on a
+// unified-inbox message (alias m): [sql, bindings]. Built per call, like
+// silentCallSql, which it uses.
+function inboxSilentSql() {
+  const [silentCall, bindings] = silentCallSql();
+  return ["((m.channel = 'voice' AND m.direction = 'inbound'"
+    + ` AND NOT EXISTS (SELECT 1 FROM jsonb_each(to_jsonb(m) - ARRAY[${sqlNames(SILENT_MIRROR_COLUMNS)}]::text[]) col WHERE col.value <> 'null'::jsonb)`
+    + " AND COALESCE(m.author_type, 'customer') = 'customer'"
+    + " AND COALESCE(m.answered_by, 'voicemail') = 'voicemail'"
+    + " AND COALESCE(m.media, '[]'::jsonb) = '[]'::jsonb"
+    + ` AND ${SILENT_METADATA_SQL('m', ['source'])}`
+    + " AND COALESCE(m.metadata->>'source', 'voice_message_sync') = 'voice_message_sync'"
+    // A voice mirror is the voice sync's copy of a call (its transcript,
+    // recording, length, answer, status, media and metadata), so it counts
+    // only as the mirror of a call that still exists and is a silent call,
+    // and holds no more than that copy: a length only as the call's own (the
+    // sync copies it, or the recording's when the call has none). A mirror
+    // whose call is gone is contact (pre-push audit r19).
+    + ' AND EXISTS (SELECT 1 FROM call_log WHERE call_log.twilio_call_sid = m.twilio_sid'
+    + ` AND ${silentCall} AND (m.duration_seconds IS NULL OR m.duration_seconds = call_log.duration_seconds)))`
+    + " OR (m.channel = 'sms' AND m.direction = 'outbound' AND m.message_type = 'missed_call_text_back'"
+    + " AND COALESCE(m.author_type, 'system') = 'system'))", bindings];
+}
 // The phone a unified-inbox message (alias m, its thread c) is with: its own SMS
 // address first, then its thread's, as admin-alert-contact-witnesses.js and
 // sms-response-policy.js read it.
@@ -484,6 +505,7 @@ function silentRecordClauses(row, key, at, checkedAt) {
   const since = new Date(at.getTime() - REPEAT_DAYS * 86400 * 1000);
   const [settledSql, settledBindings] = settledSilentSql(checkedAt);
   const [otherLineSql, otherLines] = otherGbpLineSql(row);
+  const [inboxSilent, inboxBindings] = inboxSilentSql();
   const priorSilent = (qb) => wherePriorSilentHangup(qb.select(1).from('call_log'), row, key, at, checkedAt);
   return (qb) => qb
     .whereRaw(...silentCallSql())
@@ -516,7 +538,7 @@ function silentRecordClauses(row, key, at, checkedAt) {
       this.select(1).from('messages as m').join('conversations as c', 'c.id', 'm.conversation_id')
         .where('m.created_at', '>=', since)
         .whereRaw(`${MESSAGE_PEER_SQL} = ?`, [key])
-        .whereRaw(`(${INBOX_SILENT_SQL} AND c.customer_id IS NULL) IS NOT TRUE`);
+        .whereRaw(`(${inboxSilent} AND c.customer_id IS NULL) IS NOT TRUE`, inboxBindings);
     })
     .whereNotExists(function callMirror() {
       this.select(1).from('call_log as vc')
@@ -526,7 +548,7 @@ function silentRecordClauses(row, key, at, checkedAt) {
         .where((number) => number
           .whereRaw(`${phoneKeySql('vc.from_phone')} = ?`, [key])
           .orWhereRaw(`${phoneKeySql('vc.to_phone')} = ?`, [key]))
-        .whereRaw(`(${INBOX_SILENT_SQL} AND c.customer_id IS NULL) IS NOT TRUE`);
+        .whereRaw(`(${inboxSilent} AND c.customer_id IS NULL) IS NOT TRUE`, inboxBindings);
     })
     .whereNotExists(function linkedConversation() {
       this.select(1).from('conversations as c')
