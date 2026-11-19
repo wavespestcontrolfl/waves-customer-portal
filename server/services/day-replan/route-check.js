@@ -20,8 +20,8 @@
  * Today: the van's place and clock come from the day's progress. The latest stop done (completed_at) or the stop on
  * site now (arrived_at plus its stay as the simulator charges it, a whole physical stop together, never earlier than
  * now: a job running long) sets them; with neither, the technician's start point at the day's departure minute. The
- * stop the technician is driving to (en_route) comes first. A stop on site with no place, or two stops en route,
- * leave the day unmeasured. Only the stops not yet done are simulated, from the later of now and that clock, back to
+ * stop the technician is driving to (en_route) comes first. A stop on site with no place, or two stops on site or en
+ * route at once, leave the day unmeasured. Only the stops not yet done are simulated, from the later of now and that clock, back to
  * the start point, so a cancellation, an expired hold or a long job shows at the next hour.
  * Future days: the day as booked, from the start point at the departure minute, the way the 04:40 re-plan measures it
  * (close-gaps openTime). Drive minutes come from the scheduling drive clock (no paid map call).
@@ -246,12 +246,13 @@ function summarize(days, today, { techBlind = false } = {}) {
   const lastDemand = dayAfter(today, DEMAND_DAYS);
   const week = pick((d) => d.date > today && d.date <= lastDemand);
   const ahead = todayFig.slots + next.slots;
-  // A staffed day in the rule's window (today and the next staffed days) that could not be measured: with no room
-  // found elsewhere, the room is unknown, never a measured floor.
+  // A staffed day in the rule's window (today and the next staffed days) that could not be measured, or a scan that
+  // found fewer than STAFFED_DAYS staffed days (a long closure): with no room found, the room is unknown, never a
+  // measured floor.
   const unmeasured = days.filter((d) => d.staffed && d.skip && (d.date === today || staffedDates.includes(d.date))).length;
   let decision = 'floor';
   if (ahead > 0) decision = 'full';
-  else if (unmeasured) decision = 'unknown';
+  else if (unmeasured || staffedDates.length < STAFFED_DAYS) decision = 'unknown';
   return {
     totals: { today: todayFig, next: { dates: staffedDates, ...next }, week: { through: lastDemand, ...week } },
     ad: { decision, slotsAhead: ahead, techBlind, unmeasured },
@@ -343,6 +344,7 @@ async function measureOne(conn, env, { day, techId, rows, progress, occupancy })
     const { live, onSite, enRoute, rest } = todaysStops(own, mine);
     // The van is at the stop on site, so one with no place leaves the day unmeasured (never free time from home).
     if (onSite.flat(2).some((r) => !hasCoords(r))) return { stops: live.length, skip: 'ON_SITE_WITHOUT_COORDINATES' };
+    if (onSite.length > 1) return { stops: live.length, skip: 'SEVERAL_ON_SITE' };
     if (enRoute.length > 1) return { stops: live.length, skip: 'SEVERAL_EN_ROUTE' };
     const van = vanNow({
       completed: mine.filter((p) => p.status === 'completed'),
@@ -384,7 +386,15 @@ async function runRouteCheck({ conn = db, now = new Date() } = {}) {
     const rows = await rowsOn(day);
     const withStops = await withStopsOn(day);
     const working = elig.techIds.filter((techId) => staffed(elig, day, techId, withStops.has(techId)));
-    const occupancy = working.length ? await loadOccupancy(conn, day) : [];
+    let occupancy = [];
+    try {
+      if (working.length) occupancy = await loadOccupancy(conn, day);
+    } catch (err) {
+      // One date's read failing marks that date, never loses the hour's row.
+      logger.warn(`[route-check] ${day}: occupancy read failed (${err.message})`);
+      for (const techId of working) days.push({ date: day, technician_id: techId, staffed: true, skip: 'FAILED' });
+      continue;
+    }
     for (const techId of working) {
       days.push({ date: day, technician_id: techId, staffed: true, ...(await measureOne(conn, env, { day, techId, rows, progress, occupancy })) });
     }

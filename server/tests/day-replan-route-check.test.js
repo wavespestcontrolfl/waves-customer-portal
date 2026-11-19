@@ -223,6 +223,8 @@ describe('the totals and the ad rule shadow', () => {
       day('2026-11-19'), day('2026-11-20', { skip: 'UNTIMED_STOP', slots: 3 }), day('2026-11-21'), day('2026-11-23'),
     ], '2026-11-19');
     expect(ad).toEqual({ decision: 'unknown', slotsAhead: 0, techBlind: false, unmeasured: 1 });
+    // A long closure: the scan found only 2 staffed days, so no room is not a measured floor.
+    expect(rc.summarize([day('2026-11-19'), day('2026-11-20'), day('2026-11-21')], '2026-11-19').ad.decision).toBe('unknown');
     // Room found elsewhere: full, with the unmeasured day named.
     expect(rc.summarize([day('2026-11-19', { slots: 1 }), day('2026-11-20', { skip: 'FAILED' })], '2026-11-19').ad)
       .toMatchObject({ decision: 'full', unmeasured: 1 });
@@ -363,6 +365,29 @@ describe('runRouteCheck', () => {
     const today = JSON.parse(writes[0][1].days)[0];
     expect(today.openings[0].start).toBeGreaterThanOrEqual(720);
     expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({ db: conn, dateFrom: '2026-11-19', dateTo: '2026-11-19' }));
+    listOccupiedWindows.mockResolvedValue([]);
+  });
+
+  test('two stops on site at once leave today unmeasured', async () => {
+    replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-19'
+      ? [stop('o1', '09:00:00', null, { status: 'on_site' }), stop('o2', '13:00:00', null, { status: 'on_site', customer_id: 'cust-2', lat: 27.45, lng: -82.4 })]
+      : []));
+    const { conn, writes } = fakeConn();
+    await runRouteCheck({ conn, now: NOW });
+    expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ date: '2026-11-19', skip: 'SEVERAL_ON_SITE' });
+  });
+
+  test("one date's occupancy read failing marks that date and the row is still written", async () => {
+    listOccupiedWindows.mockImplementation(async ({ dateFrom }) => {
+      if (dateFrom === '2026-11-24') throw new Error('timeout');
+      return [];
+    });
+    const { conn, writes } = fakeConn();
+    const result = await runRouteCheck({ conn, now: NOW });
+    expect(result.status).toBe('completed_with_errors');
+    const days = JSON.parse(writes[0][1].days);
+    expect(days.find((d) => d.date === '2026-11-24')).toMatchObject({ skip: 'FAILED' });
+    expect(days.find((d) => d.date === '2026-11-23').skip).toBeUndefined();
     listOccupiedWindows.mockResolvedValue([]);
   });
 
