@@ -465,6 +465,8 @@ export function CallPrepayEvidence({ payload, callPrepay, isOpenView, isAdmin, b
 // when the card was filed.
 export function PhoneYesEvidence({ payload }) {
   const p = parsePayload(payload) || {};
+  // The card's one estimate, or (with more than one open) each estimate sent before the call.
+  const estimateIds = p.estimate_id ? [p.estimate_id] : (Array.isArray(p.estimate_ids) ? p.estimate_ids.filter(Boolean) : []);
   const saidAt = p.yes_at
     ? `${new Date(p.yes_at).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} ET`
     : null;
@@ -483,8 +485,14 @@ export function PhoneYesEvidence({ payload }) {
           <span className="text-ink-tertiary">{label}:</span> {value}
         </div>
       ))}
-      {p.estimate_id && (
-        <a href={`/admin/estimates?estimateId=${encodeURIComponent(p.estimate_id)}`} className="inline-block mt-1 text-14 font-medium text-zinc-900 underline">Open the estimate</a>
+      {estimateIds.length > 0 && (
+        <div className="mt-1 flex flex-wrap gap-x-3">
+          {estimateIds.map((id, n) => (
+            <a key={id} href={`/admin/estimates?estimateId=${encodeURIComponent(id)}`} className="inline-block text-14 font-medium text-zinc-900 underline">
+              {estimateIds.length === 1 ? "Open the estimate" : `Open estimate ${n + 1}`}
+            </a>
+          ))}
+        </div>
       )}
     </div>
   );

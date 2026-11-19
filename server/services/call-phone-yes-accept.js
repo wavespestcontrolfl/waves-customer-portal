@@ -19,10 +19,11 @@
  *
  * No card when the customer's latest word since the send is annual prepay (the prepay card owns it,
  * call-prepay-choice.js), a cancellation or a one-time visit; and none while a call since the send still owes a read
- * (call-phone-yes-word.js owedReadSql). Only an estimate already sent when the call began counts. The card stays
- * open while an unlinked pest visit the call booked is on the calendar, also after the estimate expires. It closes
- * itself once none of its estimates is open or lapsed (each accepted or declined), no unlinked pest visit of the call
- * is left on the calendar, the call moves to another customer, or a later call takes the yes back.
+ * (call-phone-yes-word.js owedReadSql). Only an estimate already sent when the call began counts, and never an
+ * archived one. The card stays open while an unlinked pest visit the call booked is on the calendar, also after the
+ * estimate expires. It closes itself once none of its estimates is open or lapsed (each accepted, declined or
+ * archived), no unlinked pest visit of the call is left on the calendar, the call moves to another customer, or a later
+ * call takes the yes back.
  *
  * Dark behind GATE_CALL_PHONE_YES_ACCEPT; off = nothing here runs.
  */
@@ -100,10 +101,12 @@ function sentAnchorOf(estimate) {
 }
 const earliestSentAnchor = (estimates) => new Date(Math.min(...estimates.map((e) => sentAnchorOf(e).getTime())));
 
+// An archived estimate keeps its status but is closed to the customer (the public routes refuse it): never open here.
 async function openEstimatesOf(conn, customerId, now) {
   return conn('estimates')
     .where({ customer_id: customerId })
     .whereIn('status', OPEN_ESTIMATE_STATUSES)
+    .whereNull('archived_at')
     .where((qb) => qb.whereNull('expires_at').orWhere('expires_at', '>', now))
     .orderBy('created_at', 'desc')
     .select('*');
@@ -316,7 +319,7 @@ const MOOT_NOTES = {
   no_pest_visit: 'No longer applies: no pest visit the call booked is left on the calendar.',
   visit_linked: 'No longer applies: the visit the call booked is linked to an estimate now.',
   estimate_accepted: 'No longer applies: the estimate was accepted.',
-  estimate_closed: 'No longer applies: the estimate was declined or is gone.',
+  estimate_closed: 'No longer applies: the estimate was declined, archived or is gone.',
   took_back: 'No longer applies: the customer asked to cancel or for a one-time visit on a later call.',
   chose_annual_prepay: 'No longer applies: the customer chose annual prepay on a later call.',
 };
@@ -346,9 +349,9 @@ async function cardState(card) {
   }
   const ids = cardEstimateIds(card);
   const estimates = ids.length
-    ? await db('estimates').whereIn('id', ids).where({ customer_id: customerId }).select('id', 'status', 'sent_at', 'created_at')
+    ? await db('estimates').whereIn('id', ids).where({ customer_id: customerId }).select('id', 'status', 'sent_at', 'created_at', 'archived_at')
     : [];
-  const kept = estimates.filter((e) => CARD_ESTIMATE_STATUSES.includes(e.status));
+  const kept = estimates.filter((e) => CARD_ESTIMATE_STATUSES.includes(e.status) && !e.archived_at);
   if (!kept.length) return { close: estimates.some((e) => e.status === 'accepted') ? MOOT_NOTES.estimate_accepted : MOOT_NOTES.estimate_closed };
   const since = earliestSentAnchor(kept);
   // The yes the card shows, checked first, also while other calls are read: never words that no longer hold.
@@ -410,18 +413,57 @@ async function closeMootCards() {
 
 /**
  * Files the cards and closes the ones that stopped being true. Dark behind GATE_CALL_PHONE_YES_ACCEPT.
+ * Reads every candidate in the lookback, newest first, in pages of `pageSize`: a call that gets no card (a lawn visit,
+ * a taken-back yes) is read again next run, so it must never fill the scan and keep an older booking from its card.
  * @returns {{skipped?:true, scanned:number, filed:number, closed:number}}
  */
-async function runCallPhoneYesSweep({ now = new Date() } = {}) {
+async function runCallPhoneYesSweep({ now = new Date(), pageSize = SCAN_LIMIT } = {}) {
   if (!live()) return { skipped: true, scanned: 0, filed: 0, closed: 0 };
   const { parseExtraction } = require('./call-held-visits');
+  let filed = 0;
+  let scanned = 0;
+  for (let after = null; filed < MAX_CARDS_PER_RUN;) {
+    const calls = await sweepCandidates({ now, after, pageSize });
+    scanned += calls.length;
+    for (const call of calls) {
+      if (filed >= MAX_CARDS_PER_RUN) break;
+      if (await fileFor(call, now, parseExtraction)) filed += 1;
+    }
+    if (calls.length < pageSize) break;
+    after = calls[calls.length - 1];
+  }
+  let closed = 0;
+  try {
+    closed = await closeMootCards();
+  } catch (e) {
+    logger.warn(`[call-phone-yes] moot close pass failed: ${e.code || e.name || 'error'}`);
+  }
+  return { scanned, filed, closed };
+}
+
+// One call's card, filed when the call earns one. True when a card was filed.
+async function fileFor(call, now, parseExtraction) {
+  try {
+    const evaluation = await evaluatePhoneYes({ callLogId: call.id, customerId: call.customer_id, now });
+    if (!evaluation.card || !(await fileCard({ call, extraction: parseExtraction(call.ai_extraction_enriched), evaluation }))) return false;
+    logger.info(`[call-phone-yes] card for call ${call.id}: ${evaluation.yes ? 'yes heard' : 'no yes heard'}, auto would accept: ${evaluation.autoProblem ? `no (${evaluation.autoProblem})` : 'yes'}`);
+    return true;
+  } catch (e) {
+    logger.warn(`[call-phone-yes] skipped call ${call.id}: ${e.code || e.name || 'error'}`);
+    return false;
+  }
+}
+
+// One page of candidate calls, newest first, after the call `after` (keyset on the exact created_at text and id: a
+// JS Date drops microseconds).
+async function sweepCandidates({ now, after, pageSize }) {
   const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
   const { callCreatedSourceActions } = require('./call-prepay-choice');
   const since = new Date(now.getTime() - LOOKBACK_DAYS * 86400 * 1000);
-  const calls = await db('call_log')
+  return db('call_log')
     .where('created_at', '>=', since)
     .whereNotNull('customer_id')
-    .whereNotNull('processing_status')
+    // Read, or past its bounded wait (owedReadSql): a booking call no pass reads still files, as booking_call_unread.
     .whereRaw(`NOT ${Word.owedReadSql()}`)
     .modify((qb) => whereNotSandboxCall(qb))
     // A live, still-unlinked visit this call booked.
@@ -437,6 +479,7 @@ async function runCallPhoneYesSweep({ now = new Date() } = {}) {
       this.select(db.raw('1')).from('estimates')
         .whereRaw('estimates.customer_id = call_log.customer_id')
         .whereIn('estimates.status', OPEN_ESTIMATE_STATUSES)
+        .whereNull('estimates.archived_at')
         // Sent by the time the call began (callStartedAtSql's default alias is this call_log row).
         .whereRaw(`COALESCE(estimates.sent_at, estimates.created_at) <= ${require('./sms-pending-conversations').callStartedAtSql()}`)
         .where((qb) => qb.whereNull('estimates.expires_at').orWhere('estimates.expires_at', '>', now));
@@ -446,29 +489,10 @@ async function runCallPhoneYesSweep({ now = new Date() } = {}) {
         .whereRaw('triage_items.call_log_id = call_log.id')
         .where('triage_items.reason_code', REASON_CODE);
     })
-    .orderBy('created_at', 'desc')
-    .limit(SCAN_LIMIT)
-    .select('id', 'customer_id', 'ai_extraction_enriched');
-  let filed = 0;
-  for (const call of calls) {
-    if (filed >= MAX_CARDS_PER_RUN) break;
-    try {
-      const evaluation = await evaluatePhoneYes({ callLogId: call.id, customerId: call.customer_id, now });
-      if (evaluation.card && await fileCard({ call, extraction: parseExtraction(call.ai_extraction_enriched), evaluation })) {
-        filed += 1;
-        logger.info(`[call-phone-yes] card for call ${call.id}: ${evaluation.yes ? 'yes heard' : 'no yes heard'}, auto would accept: ${evaluation.autoProblem ? `no (${evaluation.autoProblem})` : 'yes'}`);
-      }
-    } catch (e) {
-      logger.warn(`[call-phone-yes] skipped call ${call.id}: ${e.code || e.name || 'error'}`);
-    }
-  }
-  let closed = 0;
-  try {
-    closed = await closeMootCards();
-  } catch (e) {
-    logger.warn(`[call-phone-yes] moot close pass failed: ${e.code || e.name || 'error'}`);
-  }
-  return { scanned: calls.length, filed, closed };
+    .modify((qb) => { if (after) qb.whereRaw('(call_log.created_at, call_log.id) < (?::timestamptz, ?::uuid)', [after.created_key, after.id]); })
+    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+    .limit(pageSize)
+    .select('id', 'customer_id', 'ai_extraction_enriched', db.raw('created_at::text AS created_key'));
 }
 
 module.exports = {

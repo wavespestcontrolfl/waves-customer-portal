@@ -235,6 +235,8 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     ['the yes call itself also asked for a one-time visit', { yesIntent: 'preventative_one_time' }, 'took_back'],
     ['the call booked a lawn visit, not a pest visit', { visitOver: { service_type: 'Lawn Care' } }, 'no_pest_visit'],
     ['the estimate lapsed', { estimateOver: { expires_at: new Date(Date.now() - 3600000) } }, 'no_open_estimate'],
+    // Archiving keeps the status, but the estimate is closed to the customer.
+    ['the estimate is archived', { estimateOver: { archived_at: new Date(Date.now() - 3600000) } }, 'no_open_estimate'],
     ['the estimate was first sent after the booking call', { estimateOver: { sent_at: new Date(Date.now() - 3600000), created_at: new Date(Date.now() - 3600000) } },
       'no_open_estimate'],
     ['the booking call still has an extraction retry left', {
@@ -405,6 +407,39 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     expect(payloadOf(card)).toMatchObject({ estimate_ids: [est.id], auto_would_accept: false, auto_reason: 'more_than_one_estimate' });
   });
 
+  // A call that gets no card is read again every run; a full page of them must not keep an older booking from its card.
+  test('calls with no card never fill the scan: an older booking past a full page still gets its card', async () => {
+    const { bookingCallId } = await phoneYes({ bookingOver: { created_at: new Date(Date.now() - 5 * 3600000) } });
+    for (let n = 1; n <= 3; n += 1) {
+      await phoneYes({ visitOver: { service_type: 'Lawn Care' }, bookingOver: { created_at: new Date(Date.now() - n * 3600000) } });
+    }
+    await expect(runCallPhoneYesSweep({ pageSize: 2 })).resolves.toMatchObject({ scanned: 4, filed: 1 });
+    expect(await cards(bookingCallId)).toHaveLength(1);
+  });
+
+  test('an archived estimate is not open: it never makes two', async () => {
+    const { customerId, est, bookingCallId } = await phoneYes();
+    await estimate(customerId, { archived_at: new Date(Date.now() - DAY) });
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(card.related_estimate_id).toBe(est.id);
+    expect(payloadOf(card)).toMatchObject({ estimate_ids: [est.id], auto_would_accept: true });
+  });
+
+  // A booking call no pass reads (a voice-agent booking whose recording never arrives) waits out its bounded hold,
+  // then files with its own reason; it never ages out of the lookback with no card.
+  test('a booking call no pass reads holds the card for its bounded wait, then files as booking_call_unread', async () => {
+    const recent = await phoneYes({ bookingOver: { processing_status: null, created_at: new Date(Date.now() - 3600000) } });
+    await expect(evaluatePhoneYes({ callLogId: recent.bookingCallId, customerId: recent.customerId }))
+      .resolves.toEqual({ card: false, reason: 'call_still_processing' });
+    const threeHoursAgo = new Date(Date.now() - 3 * 3600000);
+    const quiet = await phoneYes({ bookingOver: { processing_status: null, created_at: threeHoursAgo, updated_at: threeHoursAgo } });
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(quiet.bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ yes_heard: true, auto_would_accept: false, auto_reason: 'booking_call_unread' });
+    expect(await cards(recent.bookingCallId)).toEqual([]);
+  });
+
   test('two open estimates: the card names both and stays until neither is open or lapsed', async () => {
     const { customerId, est, bookingCallId } = await phoneYes();
     const other = await estimate(customerId);
@@ -497,6 +532,7 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     ['the customer chooses annual prepay on a later call', ({ customerId }) => call(customerId, 'annual_prepay', { created_at: new Date() }), 'annual prepay'],
     ['the customer asks to cancel on a later call', ({ customerId }) => call(customerId, null, { created_at: new Date() }, 'cancellation_request'),
       'asked to cancel'],
+    ['the estimate is archived', ({ est }) => trx('estimates').where({ id: est.id }).update({ archived_at: new Date() }), 'archived'],
     ['the call moves to another customer', async ({ bookingCallId }) => {
       await trx('call_log').where({ id: bookingCallId }).update({ customer_id: await customer() });
     }, 'no longer linked'],

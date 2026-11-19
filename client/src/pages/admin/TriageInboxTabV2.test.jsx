@@ -1391,6 +1391,18 @@ describe('call_phone_yes card', () => {
     expect(within(el).getByText(/No\. No yes was heard on the call\./)).toBeInTheDocument();
   });
 
+  it('more than one open estimate: a link for each estimate sent before the call', async () => {
+    load(card({
+      yes_heard: false, estimate_id: null, estimate_ids: ['est-7', 'est-8'],
+      auto_would_accept: false, auto_reason: 'more_than_one_estimate', auto_message: 'The customer has more than one open estimate.',
+    }));
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    expect(within(el).getByRole('link', { name: 'Open estimate 1' })).toHaveAttribute('href', '/admin/estimates?estimateId=est-7');
+    expect(within(el).getByRole('link', { name: 'Open estimate 2' })).toHaveAttribute('href', '/admin/estimates?estimateId=est-8');
+    expect(within(el).queryByRole('link', { name: 'Open the estimate' })).toBeNull();
+  });
+
   it('a yes call being read again: says so, with no words', async () => {
     load(card({
       yes_heard: false, yes_rechecking: true, yes_call_log_id: 'call-10', caller_words: null, estimate_id: 'est-7',
