@@ -246,7 +246,7 @@ describe('a visit the call agent held', () => {
       call({ id: 'unheld', created_at: minutesAgo(HELD_GRACE_MINUTES + 1) }),
       call({ id: 'held-too-recent', created_at: minutesAgo(HELD_GRACE_MINUTES - 1), ai_validation: held() }),
     ], [], { now: NOW });
-    expect(misses.map((m) => [m.call.id, m.holdReason])).toEqual([['held', 'Google could not confirm the address']]);
+    expect(misses.map((m) => [m.call.id, m.holdReason])).toEqual([['held', 'the address is not confirmed']]);
     // A booking still clears a held call.
     const booked = computeBookingMisses([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ai_validation: held() })],
       [bookedRow({ source_call_log_id: 'call-1' })], { now: NOW });
@@ -254,16 +254,19 @@ describe('a visit the call agent held', () => {
   });
 
   test('only an enforce-mode routing decision that blocked the booking counts as held', () => {
-    expect(agentHoldReason(held())).toBe('Google could not confirm the address');
+    expect(agentHoldReason(held())).toBe('the address is not confirmed');
     expect(agentHoldReason(held(['address_unverified'], { mode: 'shadow' }))).toBeNull();
     expect(agentHoldReason({ mode: 'enforce', routing: { allowed: true, appointment_blocking_flags: [] } })).toBeNull();
     expect(agentHoldReason({ mode: 'enforce', routing: null })).toBeNull();
     expect(agentHoldReason(null)).toBeNull();
+    // A decision stored as JSON text reads the same; unreadable text is not a hold.
+    expect(agentHoldReason(JSON.stringify(held()))).toBe('the address is not confirmed');
+    expect(agentHoldReason('{not json')).toBeNull();
   });
 
   test('the reason is the first blocking flag in HOLD_REASONS order, else the fallback', () => {
     expect(agentHoldReason(held(['address_unverified', 'commercial_requires_quote']))).toBe('a commercial job needs a quote first');
-    expect(agentHoldReason(held(['address_unverifiable', 'address_unverified']))).toBe('Google could not confirm the address');
+    expect(agentHoldReason(held(['address_unverifiable', 'address_unverified']))).toBe('the address is not confirmed');
     expect(agentHoldReason(held(['a_flag_with_no_phrase']))).toBe(HOLD_REASON_FALLBACK);
     expect(agentHoldReason(held([]))).toBe(HOLD_REASON_FALLBACK);
   });
@@ -271,8 +274,8 @@ describe('a visit the call agent held', () => {
   test('the bell says why it was held; an unheld miss keeps "nothing is on the calendar"', () => {
     const [miss] = computeBookingMisses([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ai_validation: held() })], [], { now: NOW });
     const text = bookItAlert(miss, false);
-    expect(text.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because Google could not confirm the address.');
-    expect(text.detail).toContain('The call agent held this visit and did not book it, because Google could not confirm the address.');
+    expect(text.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because the address is not confirmed.');
+    expect(text.detail).toContain('The call agent held this visit and did not book it, because the address is not confirmed.');
     const [plain] = computeBookingMisses([call()], [], { now: NOW });
     expect(bookItAlert(plain, false).why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; nothing is on the calendar.');
     expect(bookItAlert(plain, false).detail).not.toContain('The call agent held');

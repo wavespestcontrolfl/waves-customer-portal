@@ -95,15 +95,18 @@ const HELD_GRACE_MINUTES = 10;
 // in this order (the flags seen on held confirmed calls, 90 days to 2026-11-18), else
 // the fallback. Each phrase fits the why's 110 characters behind the longest prefix and
 // slot ("Still unbooked: confirmed Wed Sep 30 at 12:00 PM on a call; held because ").
+// A phrase says what the flag means wherever it is raised: address_unverified comes from
+// the address check's verdict, from two readings of the call that disagree on where, or
+// from a stated address that conflicts with the one on file, so it names no provider.
 const HOLD_REASONS = [
   ['commercial_requires_quote', 'a commercial job needs a quote first'],
   ['caller_not_authorized', 'the caller is not the account holder'],
   ['missing_service_address', 'the call gave no service address'],
-  ['address_unverified', 'Google could not confirm the address'],
+  ['address_unverified', 'the address is not confirmed'],
   ['address_unverifiable', 'the address could not be checked'],
   ['low_confidence_address', 'the address was hard to hear'],
   ['ambiguous_pest_or_service', 'the service is not clear'],
-  ['low_extraction_confidence', 'the call was hard to read'],
+  ['low_extraction_confidence', 'the call details are unclear'],
 ];
 const HOLD_REASON_FALLBACK = 'the call needs a review';
 // A first enable scans the whole window; cap the bells per run so a backlog
@@ -207,7 +210,11 @@ function extractConfirmedSlot(extractionRaw) {
 // Did the call agent hold the booking? Its stored V2 validation (call_log.ai_validation)
 // says so when the routing decision, made in enforce mode (the mode that decides
 // bookings), was not allowed. Returns the HOLD_REASONS phrase, or null when it did not.
-function agentHoldReason(validation) {
+function agentHoldReason(validationRaw) {
+  let validation = validationRaw;
+  if (typeof validation === 'string') {
+    try { validation = JSON.parse(validation); } catch { return null; }
+  }
   const routing = validation && validation.mode === 'enforce' ? validation.routing : null;
   if (!routing || routing.allowed !== false) return null;
   const flags = new Set(Array.isArray(routing.appointment_blocking_flags) ? routing.appointment_blocking_flags : []);
@@ -697,7 +704,7 @@ async function planOpenBookingMissBells({ now = new Date() } = {}) {
 
   const calls = await db('call_log')
     .whereIn('id', [...byCall.keys()])
-    .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched',
+    .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched', 'ai_validation',
       db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
   // The slot comes from the call's extraction. When a reprocessed extraction no
   // longer confirms one, the newest stamped bell stands in: its date and time,
@@ -761,7 +768,9 @@ async function closeResolvedBookingMissBells({ now = new Date() } = {}) {
       // it, a plan that needs a new bell waits for the next tick with its old bells open;
       // plain closes still run.
       if (raised >= MAX_ALERTS_PER_RUN) { waiting += 1; continue; }
-      const outcome = await ringMiss({ call, slot, mismatch: plan.ring.mismatch }, { dedupeKey: plan.ring.dedupeKey, repeat: false })
+      // A replacement "book it" bell for a call the call agent held says why, as its first bell did.
+      const miss = { call, slot, mismatch: plan.ring.mismatch, holdReason: agentHoldReason(call.ai_validation) };
+      const outcome = await ringMiss(miss, { dedupeKey: plan.ring.dedupeKey, repeat: false })
         .catch((err) => { logger.warn(`[call-booking-miss] failed to raise the replacement bell for call ${call.id}: ${err.message}`); return 'failed'; });
       // Close the old bells only once the replacement stands ('rung' or an
       // existing row under the same key). A suppressed or failed raise keeps them.

@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), alertRingOnceLive: jest.fn(() => true) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 
-const mockState = { calls: [], booked: [], customers: [], open: [], updates: [], inserts: [], failClose: false, notificationFilters: [] };
+const mockState = { calls: [], booked: [], customers: [], open: [], updates: [], inserts: [], failClose: false, notificationFilters: [], callLogSelects: [] };
 
 jest.mock('../models/db', () => {
   const makeBuilder = (table) => {
@@ -32,7 +32,8 @@ jest.mock('../models/db', () => {
       },
       groupByRaw: () => b,
       orderBy: () => b,
-      select: () => b,
+      // The columns each call_log read asks for (the held-call test checks the close pass reads ai_validation).
+      select: (...cols) => { if (table === 'call_log') mockState.callLogSelects.push(cols); return b; },
       first: () => Promise.resolve(undefined),
       pluck: (col) => Promise.resolve(rows().map((r) => r[col])),
       insert: (payload) => { mockState.inserts.push({ table, payload }); return Promise.resolve([]); },
@@ -273,6 +274,7 @@ describe('close pass', () => {
     mockState.updates = [];
     mockState.inserts = [];
     mockState.failClose = false;
+    mockState.callLogSelects = [];
     NotificationService.notifyAdmin.mockReset();
     NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-date', deduped: false });
     logger.warn.mockClear();
@@ -358,6 +360,23 @@ describe('close pass', () => {
     expect(opts.metadata).toMatchObject({ confirmed_service: 'Waves Assessment' });
     expect(opts.metadata).not.toHaveProperty('mismatch');
     expect(mockState.updates).toEqual([{ table: 'notifications', ids: ['d1'], payload: { done_by: 'call-booking-miss', resolution: 'The booked visit is gone; replaced by a new alert to book it' } }]);
+  });
+
+  // Pre-push P1 (2026-11-18): the replacement "book it" bell of a call the call agent held
+  // names why it was held, as the call's first bell does.
+  test('a held call: the replacement "book it" bell says why it was held; the close pass reads ai_validation', async () => {
+    const held = { mode: 'enforce', routing: { allowed: false, reason: 'triage_flags', appointment_blocking_flags: ['address_unverified'] } };
+    mockState.calls = [call({ ai_validation: held })];
+    mockState.open = [open('d1', '40', { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00' })];
+    mockState.booked = [visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })];
+    await planOpenBookingMissBells({ now: NOW });
+    expect(mockState.callLogSelects[0]).toContain('ai_validation');
+    const result = await tick();
+    expect(result).toMatchObject({ closed: 1, raised: 1 });
+    const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toBe("Schedule — book Sam Sample's Waves Assessment");
+    expect(why).toBe('Confirmed Wed Nov 4 at 4:00 PM on a call; held because the address is not confirmed.');
+    expect(opts.dedupeKey).toBe(`call-booking-miss-rebook:${CALL_ID}:d1`);
   });
 
   test('second pass after the replacement: with the call reprocessed, the date check still closes when its visit is done', async () => {

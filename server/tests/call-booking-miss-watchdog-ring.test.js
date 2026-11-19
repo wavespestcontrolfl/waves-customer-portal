@@ -139,7 +139,7 @@ describe('a visit the call agent held', () => {
     expect(result).toMatchObject({ misses: 1, alerted: 1 });
     const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(title).toBe("Schedule — book Robin Example's Wasp Nest Removal");
-    expect(why).toBe('Confirmed Sun Oct 4 at 11:00 AM on a call; held because Google could not confirm the address.');
+    expect(why).toBe('Confirmed Sun Oct 4 at 11:00 AM on a call; held because the address is not confirmed.');
     expect(opts.bell).toBe(true);
     expect(mockState.callLogSelects.some((cols) => cols.includes('ai_validation'))).toBe(true);
   });
