@@ -393,7 +393,7 @@ describe('POST /api/requests cancellation guard', () => {
   }));
 
   test('a clean SCOPED wind-down completed on retry closes the original row too — dedupe and inactive-account paths', () => withServer(async (baseUrl) => {
-    const scopedOk = { ok: true, churned: false, scopedWoundDown: true, scope: ['mosquito'], cancelledCount: 1, recurrenceStopped: 1, errors: [] };
+    const scopedOk = { ok: true, churned: false, scopedWoundDown: true, scope: ['mosquito'], remaining: ['pest_control'], cancelledCount: 1, recurrenceStopped: 1, errors: [] };
     mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
 
     // Short-window dedupe: the original row is 10s old, its committed scope recoverable.
@@ -410,6 +410,26 @@ describe('POST /api/requests cancellation guard', () => {
     expect(body.request.status).toBe('resolved');
     expect(mockState.service_requests[0].status).toBe('resolved');
     expect(mockState.service_requests[0].resolved_at).toBeInstanceOf(Date);
+    // The retry reply names what stopped and what stays, like the first reply,
+    // so the screen shows the scoped copy, not "your plan is cancelled".
+    expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, scope: ['mosquito'], remaining: ['pest_control'] }));
+
+    // A scoped retry whose only error is an earlier-day stuck visit: the screen
+    // still gets the scope; the ticket stays open for the office.
+    mockState.service_requests = [{
+      id: 'req-portal-stale', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal-stale', scope: ['mosquito'] }];
+    processCancellationRequest.mockResolvedValueOnce({
+      ...scopedOk, ok: false, errors: ['in_progress_visit:svc-old'], staleInProgressVisitIds: ['svc-old'],
+    });
+    res = await postCancellation(baseUrl);
+    body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, scope: ['mosquito'], remaining: ['pest_control'] }));
+    expect(body.request.status).toBe('new');
+    expect(mockState.service_requests[0].status).toBe('new');
 
     // Inactive-account repair: the row is hours old and the account is churned.
     mockAuthInactive = true;

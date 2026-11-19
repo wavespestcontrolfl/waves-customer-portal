@@ -97,6 +97,12 @@ function cancellationOutcome(result, confirmation, effectiveAt, confirmationChan
     confirmation: confirmation || null,
     confirmationChannels: Array.isArray(confirmationChannels) ? confirmationChannels.filter(Boolean) : [],
     effectiveDate,
+    // Scoped cancels report exactly what stopped and what stays, on every
+    // reply (retries included): without them a processed scoped retry reads
+    // as a whole-plan cancel on the CancelFlow screen.
+    scope: Array.isArray(result?.scope) ? result.scope : [],
+    remaining: Array.isArray(result?.remaining) ? result.remaining : [],
+    ...(result?.tierAfter !== undefined ? { tierBefore: result.tierBefore, tierAfter: result.tierAfter } : {}),
   };
 }
 const {
@@ -964,18 +970,12 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       // account is already churned when `processed` is true.
       ...(isCancellation
         ? {
-            cancellation: {
-              ...cancellationOutcome(
-                cancellationResult,
-                confirmationSmsSent ? 'sms' : (confirmationEmailSent ? 'email' : null),
-                request.created_at,
-                [confirmationSmsSent ? 'sms' : null, confirmationEmailSent ? 'email' : null]
-              ),
-              // Scoped cancels report exactly what stopped and what stays.
-              scope: Array.isArray(cancellationResult?.scope) ? cancellationResult.scope : [],
-              remaining: Array.isArray(cancellationResult?.remaining) ? cancellationResult.remaining : [],
-              ...(cancellationResult?.tierAfter !== undefined ? { tierBefore: cancellationResult.tierBefore, tierAfter: cancellationResult.tierAfter } : {}),
-            },
+            cancellation: cancellationOutcome(
+              cancellationResult,
+              confirmationSmsSent ? 'sms' : (confirmationEmailSent ? 'email' : null),
+              request.created_at,
+              [confirmationSmsSent ? 'sms' : null, confirmationEmailSent ? 'email' : null]
+            ),
           }
         : {}),
     });
