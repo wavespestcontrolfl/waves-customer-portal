@@ -375,12 +375,13 @@ describe('Screen 2 — reason and resolution', () => {
     expect(refreshCustomer).not.toHaveBeenCalled();
   });
 
-  it('a scoped reply on an inactive account (inactive-account retry) gets the whole-plan copy and refreshes', async () => {
+  it('a scoped reply on an inactive account says only what the cancelled-plan page says, and refreshes', async () => {
     const refreshCustomer = vi.fn().mockResolvedValue(undefined);
     renderFlow({ refreshCustomer });
     await submitScopedCancel({ processed: true, churned: true, confirmation: null, confirmationChannels: [], effectiveDate: '2026-08-31', scope: ['pest_control'], remaining: [], tierBefore: null, tierAfter: null });
-    await screen.findByText(/your plan is cancelled/i);
-    expect(screen.queryByText(/continue/i)).not.toBeInTheDocument();
+    await screen.findByText(/your waveguard plan is cancelled\. recurring visits and plan billing have stopped/i);
+    // The replayed scoped run proves neither the closing date nor the visit/autopay state.
+    expect(screen.queryByText(/as of|autopay is off|continue/i)).not.toBeInTheDocument();
     await waitFor(() => expect(refreshCustomer).toHaveBeenCalledTimes(1));
   });
 

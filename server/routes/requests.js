@@ -429,7 +429,9 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         // A retry is still a truthful outcome (H0): the sweep above is the
         // authority on whether the plan is closed. No confirmation is sent
         // from this branch — the original request's already went out.
-        ...(category === 'cancellation' ? { cancellation: cancellationOutcome(retryOutcome, null, dupe.created_at) } : {}),
+        // An account that went inactive since the original submit says so
+        // (accountInactive), like the inactive-account branch below.
+        ...(category === 'cancellation' ? { cancellation: cancellationOutcome(retryOutcome, null, dupe.created_at, [], { accountInactive: !!req.customerInactive }) } : {}),
       });
     }
 

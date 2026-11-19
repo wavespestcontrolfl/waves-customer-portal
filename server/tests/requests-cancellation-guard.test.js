@@ -414,10 +414,25 @@ describe('POST /api/requests cancellation guard', () => {
     // reply — without them the screen read a one-service cancel as whole-plan.
     expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, churned: false, scope: ['mosquito'], remaining: ['pest_control'] }));
 
+    // Same 60 s dedupe, but the account went inactive since the first submit:
+    // the reply says churned even though the replayed scoped run did not churn.
+    mockAuthInactive = true;
+    mockState.service_requests = [{
+      id: 'req-portal-dedupe-inactive', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal-dedupe-inactive', scope: ['mosquito'] }];
+    processCancellationRequest.mockResolvedValueOnce(scopedOk);
+    res = await postCancellation(baseUrl);
+    body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.deduped).toBe(true);
+    expect(body.cancellation).toEqual(expect.objectContaining({ churned: true, scope: ['mosquito'] }));
+    mockAuthInactive = false;
+
     // A SCOPED run whose only error is an earlier-day stuck visit is not
-    // promoted on the portal (the stale-visit rule is whole-plan only here):
-    // the retry reply carries no scope, so "processed" would read as a
-    // whole-plan cancel on the screen.
+    // promoted on the portal (the stale-visit rule is whole-plan only here,
+    // #7951): a repair-only retry cannot name the continuing families.
     mockState.service_requests = [{
       id: 'req-portal-stale', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
       source: null, created_at: new Date(Date.now() - 10 * 1000),
