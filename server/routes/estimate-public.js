@@ -20577,20 +20577,23 @@ function extractEngineInputs(estData) {
 }
 
 // Termiticide pins (owner 2026-11-18 bottle swap): savedFloorReplayOverrides below sets a slab or trench pin only from a stored
-// row, so an issued estimate with none (an engineInputs-only estimate keeps no stored row) cannot replay the product cost it was
-// quoted with. When its replayed one-time total no longer matches the issued one, the quote goes to review instead of selling a
-// moved price. A never-issued draft prices live (pre-push audit 13).
-const TERMITICIDE_PIN_KEYS = new Map([
-  ['pre_slab_termiticide', 'preSlabTermiticidePricingKnobs'],
-  ['trenching', 'trenchingTermiticidePricingKnobs'],
+// row: the pre-slab container cost and size, the trench product surcharge. A replayed line that did not price on its pin's figures
+// cannot replay the cost it was quoted with: an engineInputs-only estimate keeps no stored row, and the engine skips a pin for
+// another product, rate or product oz (a changed dilution, for one). When the replayed one-time total also no longer matches the
+// issued one, the quote goes to review instead of selling a moved price. A never-issued draft prices live (pre-push audits 13, 14).
+const TERMITICIDE_PINS = new Map([
+  ['pre_slab_termiticide', { knobs: 'preSlabTermiticidePricingKnobs', fields: ['containerCost', 'containerOz'] }],
+  ['trenching', { knobs: 'trenchingTermiticidePricingKnobs', fields: ['productSurcharge'] }],
 ]);
 function termiticideRequoteNeeded(estData, estimate, engineInputs, engineResult, replayedOneTimeTotal) {
   const issued = Number(estimate?.onetime_total);
   if (estData?.[UNISSUED_ESTIMATE] === true || !(issued > 0) || moneyMatches(replayedOneTimeTotal, issued)) return false;
   const lines = Array.isArray(engineResult?.lineItems) ? engineResult.lineItems : [];
   return lines.some((line) => {
-    const pinKey = TERMITICIDE_PIN_KEYS.get(line?.service);
-    return !!pinKey && !engineInputs?.[pinKey];
+    const pin = TERMITICIDE_PINS.get(line?.service);
+    if (!pin) return false;
+    const sent = engineInputs?.[pin.knobs];
+    return !sent || pin.fields.some((field) => !moneyMatches(line[field], sent[field]));
   });
 }
 

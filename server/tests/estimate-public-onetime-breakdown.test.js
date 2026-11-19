@@ -3042,6 +3042,45 @@ describe('public estimate one-time breakdown', () => {
     expect(resolveEstimateQuoteRequirement(kept, pinned.estimate_data).quoteRequired).toBe(false);
   });
 
+  // A stored pin prices the line only for the product, rate and product oz it was quoted with. A pin the engine skipped (another
+  // product, or a product oz a changed dilution moved) leaves the line at today's cost, so an issued quote whose total moved goes to
+  // review like a quote with no pin (pre-push audit 14).
+  test('an issued slab or trench quote whose stored pin the engine skipped goes to review', async () => {
+    const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
+    const property = {
+      propertyType: 'single_family', homeSqFt: 1800, lotSqFt: 7000, stories: 1, serviceZone: 'A', nearWater: 'NO', features: {},
+    };
+    const issued = (id, services, lineItems, onetimeTotal) => ({
+      id: `estimate-public-pin-skip-${id}`, status: 'sent', sent_at: '2026-11-10T15:00:00Z', viewed_at: null,
+      waveguard_tier: 'Bronze', onetime_total: onetimeTotal,
+      estimate_data: { engineInputs: { ...property, services }, engineResult: { lineItems } },
+    });
+
+    // Slab: the stored row quoted Termidor, the inputs price Crosscheck Plus ($30.90 / 128 oz), so the Termidor pin never applies.
+    // Either figure of the pin differing is enough: the cost, the size, or both.
+    const slab = { preSlabTermiticide: { slabSqFt: 6832, productKey: 'talstar_p' } };
+    for (const [containerCost, containerOz] of [[41.57, 96], [41.57, 128], [30.90, 96]]) {
+      const slabRow = { service: 'pre_slab_termiticide', productKey: 'termidor_sc', containerCost, containerOz, price: 993 };
+      const slabSkipped = await buildPricingBundle(issued(`slab-${containerCost}-${containerOz}`, slab, [slabRow], 993));
+      expect(slabSkipped.oneTimeBreakdown.total).toBe(743);
+      expect(slabSkipped.quoteRequiredReason).toBe('termiticide_price_changed_requote');
+    }
+
+    // Trench: the stored surcharge replays only for the product oz the engine prices today.
+    const trench = { trenching: { measurements: { perimeterLF: 240, concreteLF: 0 }, labelConfirmed: true } };
+    const live = generateEstimate({ ...property, services: trench }).lineItems.find((line) => line.service === 'trenching');
+    const trenchRow = (productOz) => [{
+      service: 'trenching', productKey: live.productKey, applicationRate: live.applicationRate, productOz,
+      productSurcharge: live.productSurcharge + 120, price: live.price + 120,
+    }];
+    const trenchKept = await buildPricingBundle(issued('trench-kept', trench, trenchRow(live.productOz), 1));
+    expect(trenchKept.quoteRequiredReason).not.toBe('termiticide_price_changed_requote');
+    const trenchSkipped = await buildPricingBundle(issued('trench-skipped', trench, trenchRow(live.productOz + 1),
+      trenchKept.oneTimeBreakdown.total));
+    expect(trenchSkipped.oneTimeBreakdown.total).toBeLessThan(trenchKept.oneTimeBreakdown.total);
+    expect(trenchSkipped.quoteRequiredReason).toBe('termiticide_price_changed_requote');
+  });
+
   test('detects nested legacy one-time-only estimates for acceptance flow', () => {
     const oneTimeOnly = {
       result: {

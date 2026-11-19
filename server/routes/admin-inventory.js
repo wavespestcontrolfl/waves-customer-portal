@@ -2728,7 +2728,7 @@ router.get('/protocol-health', async (req, res, next) => {
     const usage = await db('service_product_usage')
       .join('products_catalog', 'service_product_usage.product_id', 'products_catalog.id')
       .select('service_product_usage.*', 'products_catalog.name as product_name',
-        'products_catalog.best_price', 'products_catalog.cost_per_unit',
+        'products_catalog.best_price', 'products_catalog.needs_pricing', 'products_catalog.cost_per_unit',
         'products_catalog.cost_unit', 'products_catalog.unit_size_oz')
       .orderBy('service_type');
 
@@ -2797,7 +2797,7 @@ router.get('/service-usage', async (req, res, next) => {
     const usage = await db('service_product_usage')
       .join('products_catalog', 'service_product_usage.product_id', 'products_catalog.id')
       .select('service_product_usage.*', 'products_catalog.name as product_name',
-        'products_catalog.best_price', 'products_catalog.best_vendor',
+        'products_catalog.best_price', 'products_catalog.needs_pricing', 'products_catalog.best_vendor',
         'products_catalog.container_size', 'products_catalog.cost_per_unit',
         'products_catalog.cost_unit', 'products_catalog.unit_size_oz')
       .orderBy('service_type');

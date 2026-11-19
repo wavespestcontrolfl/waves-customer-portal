@@ -38,9 +38,9 @@
  * leave it) gets needs_pricing = true and best_price_status = 'stale', what recalcBestPriceLocked writes when it keeps a price it
  * cannot trust. Every engine catalog link (pre-slab, mosquito) reads only rows with needs_pricing false, so it then keeps the
  * config's or code's 30.90 / 128 for every config shape, the code default link included, until a price is entered in the app
- * (that entry recalculates the row and clears the mark), and job costing leaves the marked price uncosted (calculateInventoryCost
- * skips a needs_pricing package price). The 1.89x stale price sits inside the links' [0.5x, 2x] band, so unmarked it would RAISE
- * slab quotes. The deploy log says how to finish. A catalog price that is not the stale one is a later entry, and the
+ * (that entry recalculates the row and clears the mark), and job and service-usage costing leave the marked price uncosted
+ * (calculateInventoryCost and costLineFromUsage skip a needs_pricing package price). The 1.89x stale price sits inside the links'
+ * [0.5x, 2x] band, so unmarked it would RAISE slab quotes. The deploy log says how to finish. A catalog price that is not the stale one is a later entry, and the
  * quote follows it (owner 2026-07-10) inside the band. The config rows move either way.
  *
  * pest_service_costs (the admin Pricing Logic panel's Pest Service Cost Breakdown; display only, pestVisitCostModel prices the

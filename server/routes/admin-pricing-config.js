@@ -46,7 +46,7 @@ const ESTIMATE_COST_FALLBACKS = {
   pest_control: {
     serviceTypes: ['Quarterly Pest Control', 'Pest Control'],
     laborMin: 20,
-    materialPerVisit: 6.67,
+    materialPerVisit: 6.34,
     visitsPerYear: 4,
     areaField: 'homeSqFt',
   },
@@ -121,6 +121,7 @@ async function getInventoryCostEstimate(serviceKey, dimensions) {
         'products_catalog.cost_per_unit',
         'products_catalog.cost_unit',
         'products_catalog.best_price',
+        'products_catalog.needs_pricing',
         'products_catalog.unit_size_oz',
         'products_catalog.best_vendor',
       );

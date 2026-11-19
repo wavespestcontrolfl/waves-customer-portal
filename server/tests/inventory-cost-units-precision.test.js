@@ -21,6 +21,31 @@ describe('costLineFromUsage prices usage only in a unit its cost converts to', (
     expect(line.warning).toBe('Synthetic product: usage in lb cannot be priced per gal');
   });
 
+  // A package price the inventory marked needs_pricing is a price it cannot trust (the estimate links and calculateInventoryCost
+  // skip it too): the usage cost is unknown and says why, and a per-unit cost still prices it (pre-push audit 14).
+  test('a package price marked needs_pricing is an unknown cost; a per-unit cost still prices the usage', () => {
+    const pkg = { usage_amount: 16, usage_unit: 'fl_oz', best_price: 58.42, unit_size_oz: 128 };
+    expect(costLineFromUsage(row({ ...pkg, needs_pricing: false }))).toMatchObject({ source: 'best_price_unit_size', cost: 7.3025 });
+    const marked = costLineFromUsage(row({ ...pkg, needs_pricing: true }));
+    expect(marked).toMatchObject({ cost: 0, usageAmount: 16 });
+    expect(marked.source).toBeUndefined();
+    expect(marked.warning).toBe('Synthetic product: its package price is marked needs pricing');
+    expect(costLineFromUsage(row({ ...pkg, needs_pricing: true, cost_per_unit: 0.2414, cost_unit: 'fl_oz' })))
+      .toMatchObject({ source: 'cost_per_unit', cost: 3.8624 });
+  });
+
+  // Each service-usage cost query feeds costLineFromUsage, so each one reads the mark with the package price.
+  test('every service-usage cost query that reads the package price also reads its needs_pricing mark', () => {
+    const fs = require('fs');
+    const path = require('path');
+    for (const rel of ['../routes/admin-pricing-config.js', '../services/estimate-pricing-audit.js', '../routes/admin-inventory.js']) {
+      const source = fs.readFileSync(path.join(__dirname, rel), 'utf8');
+      const count = (needle) => source.split(needle).length - 1;
+      expect({ rel, mark: count("'products_catalog.needs_pricing'") })
+        .toEqual({ rel, mark: count("'products_catalog.best_price'") });
+    }
+  });
+
   test('a measured usage against a count cost falls back to the package price when it has one', () => {
     const line = costLineFromUsage(row({
       usage_amount: 16, usage_unit: 'fl_oz', cost_per_unit: 50, cost_unit: 'each', best_price: 64, unit_size_oz: 128,

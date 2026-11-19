@@ -799,11 +799,12 @@ describe('/margin-check — honors the requested tier, costs are fully allocated
       const res = await call(baseUrl, 'POST', '/margin-check', { role: 'admin', body: { waveguardTier: 'bronze' } });
       const pest = res.json.services.find((s) => /pest/i.test(s.service));
       expect(pest).toBeDefined();
-      // Fallback COGS for quarterly pest: (labor 20min + material 6.67 +
-      // drive 20min) × 4 visits, PLUS the per-service-line admin allocation.
+      // Fallback COGS for quarterly pest: (labor 20min + material 6.34, the
+      // engine's figure on the Crosscheck Plus bottle + drive 20min) × 4 visits,
+      // PLUS the per-service-line admin allocation.
       const laborPerVisit = (GLOBAL.LABOR_RATE * 20) / 60;
       const drivePerVisit = (GLOBAL.LABOR_RATE * GLOBAL.DRIVE_TIME) / 60;
-      const expected = Math.round((laborPerVisit + 6.67 + drivePerVisit) * 4 + GLOBAL.ADMIN_ANNUAL);
+      const expected = Math.round((laborPerVisit + 6.34 + drivePerVisit) * 4 + GLOBAL.ADMIN_ANNUAL);
       expect(pest.estimatedCost).toBe(expected);
     });
   });

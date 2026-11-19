@@ -288,7 +288,10 @@ function costLineFromUsage(row, areaSqFt = 0) {
     unitMismatch = `${row.product_name}: usage in ${usageUnit || 'no unit'} cannot be priced per ${costUnit || 'no unit'}`;
   }
 
-  const bestPrice = row.best_price != null ? Number(row.best_price) : null;
+  // A package price the inventory marked needs_pricing (a price it cannot trust, which the estimate links and
+  // calculateInventoryCost skip too) does not count: the cost is unknown, never the untrusted price.
+  const markedPrice = row.best_price != null && row.needs_pricing === true;
+  const bestPrice = row.best_price != null && !markedPrice ? Number(row.best_price) : null;
   const unitSizeOz = row.unit_size_oz != null ? Number(row.unit_size_oz) : null;
   const usageOz = convertToOz(usageAmount, usageUnit);
   if (
@@ -306,7 +309,8 @@ function costLineFromUsage(row, areaSqFt = 0) {
   return {
     cost: 0,
     usageAmount,
-    warning: unitMismatch || `No normalized cost data for ${row.product_name}`,
+    warning: unitMismatch
+      || (markedPrice ? `${row.product_name}: its package price is marked needs pricing` : `No normalized cost data for ${row.product_name}`),
   };
 }
 
