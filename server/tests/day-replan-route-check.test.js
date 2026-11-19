@@ -440,22 +440,35 @@ describe('runRouteCheck', () => {
     replan.loadDayStops.mockResolvedValue([]);
   });
 
-  test('an unassigned visit with only a legacy time window leaves its date unmeasured (round 35)', async () => {
-    const unassigned = (id, extra) => stop(id, null, null, { technician_id: null, scheduled_date: '2026-11-20', ...extra });
+  test('work the count must hold but cannot leaves its date unmeasured (rounds 35, 36)', () => {
+    const work = (id, technician_id, extra) => stop(id, null, null, { technician_id, ...extra });
+    const own = stop('s1', '10:00:00', null);
     const cases = [
-      [unassigned('u1', { time_window: '3 PM' }), 'UNASSIGNED_LEGACY_WINDOW'],
-      [unassigned('u2', { time_window: 'afternoon' }), 'UNASSIGNED_LEGACY_WINDOW'],
-      // A window start puts it in the occupancy read's held time; neither leaves it inert to every booking read.
-      [unassigned('u3', { window_start: '15:00:00', time_window: '3 PM' }), undefined],
-      [unassigned('u4', { time_window: '  ' }), undefined],
+      // Unassigned work: dispatch holds its whole promise plus its work, or blocks every route.
+      [work('u1', null, { time_window: '3 PM' }), true, 'UNASSIGNED_WORK'],
+      [work('u2', null, { time_window: 'afternoon' }), true, 'UNASSIGNED_WORK'],
+      [work('u3', null, { window_start: '09:00:00', window_end: '10:00:00' }), true, 'UNASSIGNED_WORK'],
+      [work('u4', null, { time_window: '  ' }), true, 'UNASSIGNED_WORK'],
+      [work('u5', null, { window_start: '09:00:00', status: 'completed' }), true, null],
+      [work('u6', null, { time_window: null }), true, null],
+      [work('u7', null, { time_window: '' }), true, null],
+      // Another technician's visit: only a legacy window, and only while tech-blind.
+      [work('x1', 'other-tech', { time_window: '3 PM' }), true, 'LEGACY_WINDOW_ELSEWHERE'],
+      [work('x2', 'other-tech', { time_window: '3 PM' }), false, null],
+      [work('x3', 'other-tech', { window_start: '15:00:00', time_window: '3 PM' }), true, null],
+      [stop('s2', null, null, { time_window: '3 PM' }), true, null],
     ];
-    for (const [row, skip] of cases) {
+    for (const [row, techBlind, skip] of cases) expect([row.id, rc.unheldWork([own, row], TECH, techBlind)]).toEqual([row.id, skip]);
+  });
+
+  test("a date with work the count cannot hold is unmeasured, its tech-days' stops still counted (rounds 35, 36)", async () => {
+    for (const [extra, skip] of [[{ time_window: '3 PM' }, 'UNASSIGNED_WORK'], [{ window_start: '09:00:00' }, 'UNASSIGNED_WORK'], [{}, undefined]]) {
+      const row = stop('u1', null, null, { technician_id: null, scheduled_date: '2026-11-20', ...extra });
       replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-20' ? [stop('s1', '10:00:00', null), row] : []));
       const { conn, writes } = fakeConn();
       await runRouteCheck({ conn, now: NOW });
       const day = JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-20');
-      expect(day.skip).toBe(skip);
-      expect(day.stops).toBe(1);
+      expect([extra, day.skip, day.stops]).toEqual([extra, skip, 1]);
       expect(JSON.parse(writes[0][1].totals).next.unmeasured.includes('2026-11-20')).toBe(skip != null);
     }
     replan.loadDayStops.mockResolvedValue([]);

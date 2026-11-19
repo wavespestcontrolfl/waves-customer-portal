@@ -407,13 +407,24 @@ function rowReader(conn) {
 const techsWithStops = (rows) => new Set(rows.filter((r) => r.technician_id).map((r) => String(r.technician_id)));
 
 /**
- * An unassigned visit whose only promise is a legacy time window (time_window, no window_start). Dispatch's capacity
- * model keeps it, and unassigned work holds every technician's time, but the occupancy read gives it no span
- * (listOccupiedWindows needs window_start). The check cannot hold its time, so its date is left unmeasured
- * (pre-push audit round 35). A row with neither is inert to every booking read, here too.
+ * Work this technician's count must hold but cannot, or null (pre-push audit rounds 35 and 36). Its date is left
+ * unmeasured.
+ * - UNASSIGNED_WORK: dispatch's capacity model keeps a row with a window start or a time window (loadArrivalRouteContext)
+ *   and holds unassigned work against every route: its whole arrival promise plus its work, and a promise it cannot
+ *   resolve blocks every route (arrival-route.js selectWinningOrder, fixed blocks; completed work excepted). The
+ *   occupancy read holds less: the booked window only, and nothing for a legacy time window. A row with neither field
+ *   is inert, there and here.
+ * - LEGACY_WINDOW_ELSEWHERE: while tech-blind, every other technician's visit holds this technician's time, but one
+ *   with only a legacy time window has no span in the occupancy read (listOccupiedWindows needs window_start).
  */
-const unassignedLegacyPromise = (row) => row.technician_id == null && !row.window_start
-  && String(row.time_window || '').trim() !== '';
+function unheldWork(rows, techId, techBlind) {
+  if (rows.some((r) => r.technician_id == null && r.status !== 'completed' && (r.window_start || r.time_window))) {
+    return 'UNASSIGNED_WORK';
+  }
+  const elsewhere = (r) => r.technician_id != null && String(r.technician_id) !== String(techId);
+  if (techBlind && rows.some((r) => elsewhere(r) && !r.window_start && r.time_window)) return 'LEGACY_WINDOW_ELSEWHERE';
+  return null;
+}
 
 /** One technician on one date, as booked. Never throws. */
 async function measureOne(conn, env, { day, techId, rows, occupancy }) {
@@ -423,7 +434,8 @@ async function measureOne(conn, env, { day, techId, rows, occupancy }) {
     const mixById = new Map(occupancy.filter((r) => r.reservation_service_mix != null).map((r) => [String(r.id), r.reservation_service_mix]));
     const own = rows.filter((r) => String(r.technician_id) === techId)
       .map((r) => (r.reservation_service_mix == null && mixById.has(String(r.id)) ? { ...r, reservation_service_mix: mixById.get(String(r.id)) } : r));
-    if (rows.some(unassignedLegacyPromise)) return { stops: physicalStops(own).length, skip: 'UNASSIGNED_LEGACY_WINDOW' };
+    const unheld = unheldWork(rows, techId, env.techBlind);
+    if (unheld) return { stops: physicalStops(own).length, skip: unheld };
     // Every block, also one with no valid span: dispatch's simulation refuses such a day, so the check leaves it
     // unmeasured (pre-push audit round 33).
     const blocks = await recoverable(conn, (c) => replan.loadBlocks(c, day, techId, { keepInvalid: true }));
@@ -531,7 +543,7 @@ async function measureRun(conn, now) {
 module.exports = {
   runRouteCheck,
   _internals: {
-    recoverable, physicalStops, heldSpans, unassignedLegacyPromise, hourSlots, simulateBookedDay, latestHomeDeparture, measureTechDay, staffed,
+    recoverable, physicalStops, heldSpans, unheldWork, hourSlots, simulateBookedDay, latestHomeDeparture, measureTechDay, staffed,
     datesToMeasure, summarize, unmeasurable, DISPATCH_DAY_END,
     STAFFED_DAYS, DEMAND_DAYS,
   },
