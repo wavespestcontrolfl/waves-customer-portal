@@ -640,14 +640,16 @@ const REPEAT_TRIGGER = /\b(?:second|another|again|repeat\w*|twice|once\s+more|al
 // plus the December–February R. hageni; only drywood termites fly in the
 // fall. One sourced exception: UF/IFAS IN278 (EENY-059) gives the Formosan
 // window as "between early April and late June", so a clause whose termite
-// is Formosan (the common name, Coptotermes, or C. formosanus) may name June;
-// any later month, a season or a repeat word is still the claim. A non-drywood termite subject flying in any other month or season —
+// is Formosan (the common name, or the species: Coptotermes formosanus,
+// C. formosanus) may name June. The genus alone does not count: Coptotermes
+// gestroi, the Asian subterranean termite, flies from March, not to June.
+// Any later month, a season or a repeat word is still the claim. A non-drywood termite subject flying in any other month or season —
 // "swarm in fall", "take flight in October" — is the same false claim with
 // no "second" or "again" in it (codex round 12 P1). A clause saying the
 // swarmers are GONE or the season is OVER by then states the fact.
 const OUT_OF_SEASON = /\b(?:june|july|august|september|october|november|fall|autumn|late[-\s]?summer|summer(?:s|time)?|hurricane\s+season|rainy\s+season)\b/i;
 const SWARM_RECEDES = /\b(?:gone|over|done|ends?|ended|finished|past|behind\s+us|wrap(?:s|ped)?\s+up|wind(?:s|ing)?\s+down|taper(?:s|ed|ing)?(?:\s+off)?|stop(?:s|ped)?|no\s+longer|quiet|dormant)\b/i;
-const FORMOSAN = /\b(?:formosan|coptotermes|formosanus)\b/i;
+const FORMOSAN = /\b(?:formosan|formosanus)\b/i;
 
 // The text of the last termite mention in `text` ('' when there is none).
 function lastTermiteMention(text) {

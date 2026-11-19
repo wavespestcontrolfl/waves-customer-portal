@@ -433,6 +433,9 @@ describe('findUnverifiedClaims', () => {
       'Native subterranean termites swarm in June.',
       'Formosan termites swarm in spring. They swarm again in June.',
       'Formosan termites swarm April through June, and native termites fly in June.',
+      // the genus alone is not Formosan: C. gestroi, the Asian subterranean termite, also belongs to it
+      'Coptotermes gestroi swarms in June.',
+      'Coptotermes termites swarm in June.',
     ])('flags: %s', (sentence) => {
       expect(rule(sentence, 'termite_second_swarm')).toBe(true);
     });

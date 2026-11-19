@@ -1,95 +1,118 @@
-// Pest Insider buildIssue: plan -> write -> check -> render, with a fake writer.
+// Pest Insider buildIssue: plan -> copy check -> render -> send validator.
+// Every word comes from the fact bank's reviewed copy; no model is called.
 const { buildIssue } = require('../services/pest-insider');
-const { factById } = require('../services/pest-insider/facts');
-const { SPECIES } = require('../services/pest-insider/plan');
+const { FACTS, factById, factsForSend } = require('../services/pest-insider/facts');
+const { SPECIES, RECENT_WINDOW } = require('../services/pest-insider/plan');
 
+const A01 = factById('A01');
+const WFA = SPECIES.find((s) => s.slug === 'white-footed-ant');
 // A fixed plan: fact A01 (white-footed ants) and the White-footed Ant species,
-// so these cases test write -> check -> render, not the planner's rotation.
-const fixedPlan = () => ({ leadFact: factById('A01'), idItem: SPECIES.find((s) => s.slug === 'white-footed-ant') });
-const draft = (over = {}) => ({
-  subject: '🐜 The ants on the trail are a small part of the colony',
-  preview: 'Branches are the bridge.',
-  lead: {
-    headline: 'Most of the colony stays hidden',
-    sentences: [
-      { text: 'UF/IFAS says colony population estimates vary from 8,000 to 3 million individuals.', fact_id: 'A01' },
-      { text: 'Nearly half of the entire WFA colony is composed of fertile, reproductive females called intercastes.', fact_id: 'A01' },
-      { text: 'Ants can reach a house over branches that touch it, and the colony had 5 queens.', fact_id: 'A01' },
-    ],
-  },
-  id_item: { text: 'Colonies can hold a million-plus ants, and most workers never leave the nest.' },
-  ...over,
-});
-const writer = (d) => jest.fn().mockResolvedValue({ ok: true, draft: d, provider: 'anthropic', model: 'test-model' });
+// so these cases test check -> render -> validate, not the planner's rotation.
+const planOf = (leadFact, idItem = WFA) => jest.fn(() => ({ leadFact, idItem }));
 
 describe('buildIssue', () => {
-  test('builds an issue, cuts the failing sentence and reports it in diagnostics', async () => {
-    const write = writer(draft());
-    const r = await buildIssue({ sendDate: '2026-12-03', plan: fixedPlan, write, blogUrl: 'https://www.wavespestcontrol.com/blog/white-footed-ants/' });
+  test("builds the issue from the fact's reviewed lead, title and species entry", () => {
+    const plan = planOf(A01);
+    const r = buildIssue({ sendDate: '2026-12-03', plan, blogUrl: 'https://www.wavespestcontrol.com/blog/white-footed-ants/' });
     expect(r.ok).toBe(true);
-    expect(write).toHaveBeenCalledTimes(1);
-    expect(write.mock.calls[0][0]).toMatchObject({ sendDate: '2026-12-03', leadFact: { id: 'A01' }, idItem: { slug: 'white-footed-ant' } });
-    expect(r.issue.subject).toBe('🐜 The ants on the trail are a small part of the colony');
-    expect(r.issue.html_body).toContain('UF/IFAS says colony population estimates vary from 8,000 to 3 million individuals.');
-    expect(r.issue.html_body).not.toContain('5 queens');
-    expect(r.issue.html_body).toContain('Read the full story');
-    expect(r.diagnostics).toMatchObject({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', provider: 'anthropic', model: 'test-model' });
-    expect(r.diagnostics.cut).toEqual([{ text: expect.stringContaining('5 queens'), reason: expect.stringContaining('number not in the source: 5') }]);
-    expect(r.diagnostics.fallbacks).toEqual([]);
-  });
-
-  test('recent picks are passed to the plan', async () => {
-    const r = await buildIssue({ sendDate: '2026-12-03', recent: { factIds: ['A01'], speciesSlugs: ['white-footed-ant'] }, write: writer(draft()) });
-    expect(r.diagnostics.factId).not.toBe('A01');
-    expect(r.diagnostics.speciesSlug).not.toBe('white-footed-ant');
-  });
-
-  test('fails with the claim-check reason when fewer than two sentences survive', async () => {
-    const bad = draft({ lead: { headline: 'x', sentences: [{ text: 'Colonies hold 9 million ants.', fact_id: 'A01' }, { text: 'Bleach works.', fact_id: 'A01' }] } });
-    const r = await buildIssue({ sendDate: '2026-12-03', plan: fixedPlan, write: writer(bad) });
-    expect(r).toMatchObject({ ok: false, issue: null, reason: expect.stringContaining('only 0 lead sentence') });
-    expect(r.diagnostics.cut).toHaveLength(2);
-  });
-
-  test('fails when the identifier text states a number the species entry does not', async () => {
-    const r = await buildIssue({ sendDate: '2026-12-03', plan: fixedPlan, write: writer(draft({ id_item: { text: 'Colonies hold 12 million ants.' } })) });
-    expect(r).toMatchObject({ ok: false, reason: expect.stringContaining('id_item failed') });
-  });
-
-  test('a bad subject falls back to the fact title with its service emoji; a bad preview to the species name', async () => {
-    const r = await buildIssue({ sendDate: '2026-12-03', plan: fixedPlan, write: writer(draft({ subject: 'Plain subject', preview: 'Costs $5' })) });
-    expect(r.ok).toBe(true);
-    expect(r.issue.subject).toBe('🐜 White-footed ant colonies reach 3 million');
+    expect(plan).toHaveBeenCalledWith({ sendDate: '2026-12-03', recentFactIds: [], recentSpeciesSlugs: [] });
+    expect(r.issue.subject).toBe(`🐜 ${A01.title}`);
     expect(r.issue.preview).toBe("What's this? White-footed Ant");
-    expect(r.diagnostics.fallbacks).toEqual(['subject', 'preview']);
+    for (const line of A01.lead) {
+      expect(r.issue.html_body).toContain(line);
+      expect(r.issue.text_body).toContain(line);
+    }
+    expect(r.issue.text_body).toContain(WFA.fact);
+    expect(r.issue.html_body).toContain('Read the full story');
+    expect(r.diagnostics).toEqual({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', problems: [], fallbacks: [] });
   });
 
-  test('passes through writer failures and planning failures', async () => {
-    expect(await buildIssue({ sendDate: '2026-12-03', plan: fixedPlan, write: jest.fn().mockResolvedValue({ ok: false, reason: 'anthropic_timeout' }) }))
-      .toMatchObject({ ok: false, reason: 'writer_failed:anthropic_timeout' });
-    const { factsForSend } = require('../services/pest-insider/facts');
+  test('recent picks are passed to the plan', () => {
+    const r = buildIssue({ sendDate: '2026-12-03', recent: { factIds: ['T03'], speciesSlugs: ['house-centipede'] } });
+    expect(r.ok).toBe(true);
+    expect(r.diagnostics.factId).not.toBe('T03');
+    expect(r.diagnostics.speciesSlug).not.toBe('house-centipede');
+  });
+
+  test('a copy problem fails the issue and names every problem; nothing is cut', () => {
+    const bad = { ...A01, lead: [A01.lead[0], 'Colonies hold 9 million ants.', 'Bleach works on them.'] };
+    const r = buildIssue({ sendDate: '2026-12-03', plan: planOf(bad) });
+    expect(r).toMatchObject({ ok: false, issue: null, reason: expect.stringMatching(/^copy_check_failed: lead: number not in the source: 9; lead: pesticide or brand name/) });
+    expect(r.diagnostics.problems.map((p) => p.text)).toEqual(['Colonies hold 9 million ants.', 'Bleach works on them.']);
+  });
+
+  test('the send validator reads the whole rendered issue, where one sentence reads the one before it', () => {
+    // On its own "They swarm again in June." names no termite, so the copy
+    // check passes it; under the "Formosan Termite" heading the shared
+    // register reads it as the false second-swarm claim, as the send would.
+    const formosan = { ...SPECIES.find((s) => s.slug === 'formosan-termite'), fact: 'They swarm again in June.' };
+    const r = buildIssue({ sendDate: '2027-05-06', plan: planOf(factById('T02'), formosan) });
+    expect(r).toMatchObject({ ok: false, issue: null, reason: expect.stringMatching(/^send_validator_blocked: Unverified claim \(termite_second_swarm\)/) });
+    expect(r.diagnostics.problems[0]).toMatchObject({ part: 'send_validator' });
+  });
+
+  test('passes planning failures through', () => {
     const used = factsForSend('2026-12-03').map((f) => f.id);
-    const noFact = await buildIssue({ sendDate: '2026-12-03', recent: { factIds: used }, write: jest.fn() });
-    expect(noFact).toMatchObject({ ok: false, reason: 'no_fact_for_month' });
+    expect(buildIssue({ sendDate: '2026-12-03', recent: { factIds: used } })).toMatchObject({ ok: false, reason: 'no_fact_for_month', issue: null });
   });
 
-  test('optional blocks reach the renderer', async () => {
-    const r = await buildIssue({ sendDate: '2026-12-03', plan: fixedPlan, write: writer(draft()), areaLine: 'Sample area line.', home: { lastVisit: { date: '2026-11-04', areas: ['lanai'] } } });
+  test('optional blocks reach the renderer', () => {
+    const r = buildIssue({ sendDate: '2026-12-03', plan: planOf(A01), areaLine: 'Sample area line.', home: { lastVisit: { date: '2026-11-04', areas: ['lanai'] } } });
     expect(r.issue.html_body).toContain('Sample area line.');
     expect(r.issue.html_body).toContain('Your home');
   });
 
-  test('an impossible send date is refused before the writer is called', async () => {
-    const write = jest.fn();
-    await expect(buildIssue({ sendDate: '2027-02-30', write })).rejects.toThrow(/not a real calendar date/);
-    expect(write).not.toHaveBeenCalled();
+  test('an impossible send date is refused before any plan is made', () => {
+    const plan = jest.fn();
+    expect(() => buildIssue({ sendDate: '2027-02-30', plan })).toThrow(/not a real calendar date/);
+    expect(plan).not.toHaveBeenCalled();
   });
 
-  test('a tool with an affiliate link is dropped and reported', async () => {
+  test('a tool with an affiliate link is dropped and reported', () => {
     const tool = { name: 'Sample nozzle', why: 'Sample reason.', url: 'https://amzn.to/abc123' };
-    const r = await buildIssue({ sendDate: '2026-12-03', plan: fixedPlan, write: writer(draft()), tool });
+    const r = buildIssue({ sendDate: '2026-12-03', plan: planOf(A01), tool });
     expect(r.ok).toBe(true);
     expect(r.issue.html_body).not.toContain('amzn.to');
     expect(r.diagnostics.fallbacks).toContain('tool_dropped_affiliate');
+  });
+});
+
+describe('every issue the bank can make', () => {
+  test.each(FACTS.filter((f) => !f.reserve).map((f) => [f.id, f]))('%s builds an issue the send validator accepts', (_id, fact) => {
+    const r = buildIssue({ sendDate: '2026-12-03', plan: planOf(fact) });
+    expect({ reason: r.reason, problems: r.diagnostics.problems }).toEqual({ reason: null, problems: [] });
+  });
+
+  test('every identifier species builds an issue the send validator accepts', () => {
+    const failed = SPECIES
+      .map((species) => ({ slug: species.slug, r: buildIssue({ sendDate: '2026-12-03', plan: planOf(A01, species) }) }))
+      .filter(({ r }) => !r.ok)
+      .map(({ slug, r }) => `${slug}: ${r.reason}`);
+    expect(failed).toEqual([]);
+  });
+
+  test('the first and third Thursdays from December 2026 through 2027 all build, in order', () => {
+    const days = ['2026-12-03', '2026-12-17'];
+    for (let month = 0; month < 12; month += 1) {
+      const thursdays = [];
+      for (let day = 1; day <= 31; day += 1) {
+        const d = new Date(Date.UTC(2027, month, day));
+        if (d.getUTCMonth() === month && d.getUTCDay() === 4) thursdays.push(d.toISOString().slice(0, 10));
+      }
+      days.push(thursdays[0], thursdays[2]);
+    }
+    const recent = { factIds: [], speciesSlugs: [] };
+    const built = days.map((sendDate) => {
+      const r = buildIssue({ sendDate, recent: { factIds: recent.factIds.slice(-RECENT_WINDOW), speciesSlugs: recent.speciesSlugs.slice(-RECENT_WINDOW) } });
+      if (r.ok) {
+        recent.factIds.push(r.diagnostics.factId);
+        recent.speciesSlugs.push(r.diagnostics.speciesSlug);
+      }
+      return { sendDate, reason: r.reason };
+    });
+    expect(built).toHaveLength(26);
+    expect(built.filter((b) => b.reason)).toEqual([]);
+    // The two default sample dates (ops/agents/pest-insider-sample.js).
+    expect(recent.factIds.slice(0, 2)).toEqual(['T03', 'A02']);
   });
 });

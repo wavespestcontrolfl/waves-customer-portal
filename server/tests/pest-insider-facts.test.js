@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const bank = require('../data/pest-insider-facts-v1.json');
 const snapshot = require('../data/pest-identifier-species-v1.json');
-const { FACTS, factsForSend, validateBank } = require('../services/pest-insider/facts');
+const { FACTS, factsForSend, validateBank, sendDateET, LEAD_MIN, LEAD_MAX } = require('../services/pest-insider/facts');
 const { bannedReason } = require('../services/pest-insider/claim-check');
 const { SPECIES } = require('../services/pest-insider/plan');
 
@@ -70,6 +70,19 @@ describe('fact bank', () => {
     expect(() => validateBank({ facts: [{ ...good, quote_sources: good.quotes.map(() => good.sources.length) }] })).toThrow(/quote_sources/);
   });
 
+  test('a main fact carries 2 to 4 reviewed lead sentences; a reserve fact needs none', () => {
+    const good = main[0];
+    const { lead, ...noLead } = good;
+    expect([LEAD_MIN, LEAD_MAX]).toEqual([2, 4]);
+    expect(lead.length).toBeGreaterThanOrEqual(LEAD_MIN);
+    expect(() => validateBank({ facts: [noLead] })).toThrow(/lead must be 2 to 4 sentences/);
+    expect(() => validateBank({ facts: [{ ...good, lead: [lead[0]] }] })).toThrow(/lead must be/);
+    expect(() => validateBank({ facts: [{ ...good, lead: [...lead, ...lead] }] })).toThrow(/lead must be/);
+    expect(() => validateBank({ facts: [{ ...good, lead: [lead[0], ' '] }] })).toThrow(/lead must be/);
+    expect(() => validateBank({ facts: [reserve[0]] })).not.toThrow();
+    expect(() => validateBank({ facts: [{ ...reserve[0], lead: ['One line.'] }] })).toThrow(/lead must be/);
+  });
+
   test('every quote names the source it came from; two-publisher facts are split correctly', () => {
     const { attributedQuotes, factById } = require('../services/pest-insider/facts');
     for (const f of bank.facts) expect(f.quote_sources).toHaveLength(f.quotes.length);
@@ -102,6 +115,18 @@ describe('factsForSend', () => {
     expect(() => factsForSend('2027-02-30T12:00:00-05:00')).toThrow(/not a real calendar date/);
     expect(() => factsForSend('2026-13-01')).toThrow(/not a real calendar date/);
     expect(factsForSend('2028-02-29').length).toBeGreaterThan(0);
+  });
+
+  test('a timestamp with no offset is Eastern wall-clock time; Z or an offset is an instant', () => {
+    expect(sendDateET('2026-12-01T01:00:00')).toBe('2026-12-01');
+    expect(sendDateET('2026-12-01 23:30')).toBe('2026-12-01');
+    expect(sendDateET('2026-12-01T01:00:00Z')).toBe('2026-11-30');
+    expect(sendDateET('2026-12-01T01:00:00-05:00')).toBe('2026-12-01');
+    expect(sendDateET(' 2026-12-03 ')).toBe('2026-12-03');
+    for (const bad of ['December 3, 2026', '12/03/2026', '2026-12-03T25', '', null, 20261203]) {
+      expect(() => sendDateET(bad)).toThrow(/sendDate must be/);
+    }
+    expect(() => sendDateET(new Date('nope'))).toThrow(/not a valid date/);
   });
 
   test('uses the ET calendar date of a Date, not UTC', () => {

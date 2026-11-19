@@ -1,7 +1,10 @@
 /**
- * Pest Insider fact bank: the sourced facts the "Today I learned" lead may
- * restate. Loaded from server/data/pest-insider-facts-v1.json (converted from
- * the researched fact bank; every quote is copied verbatim from its source).
+ * Pest Insider fact bank: the sourced facts a "Today I learned" lead is made
+ * of. Loaded from server/data/pest-insider-facts-v1.json (converted from the
+ * researched fact bank; every quote is copied verbatim from its source).
+ * Each main fact carries its reviewed `lead`: the LEAD_MIN to LEAD_MAX
+ * sentences an issue prints as they are, checked against the quotes by
+ * claim-check.js.
  *
  * The bank is validated on load and throws on a malformed entry, so a bad
  * edit fails the first call instead of reaching a customer.
@@ -16,6 +19,14 @@ const SERVICES = new Set(['pest', 'lawn', 'tree_shrub', 'mosquito', 'termite', '
 const KINDS = new Set(['pest', 'plant', 'rule']);
 const CONFIDENCES = new Set(['high', 'medium']);
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+// An ISO timestamp with no offset is Eastern wall-clock time (the portal is
+// Eastern-only); one with Z or an offset is an instant.
+const LOCAL_TIMESTAMP = /^(\d{4}-\d{2}-\d{2})[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
+const OFFSET_TIMESTAMP = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i;
+
+/** How many reviewed lead sentences a main fact carries. */
+const LEAD_MIN = 2;
+const LEAD_MAX = 4;
 
 const isText = (v) => typeof v === 'string' && v.trim().length > 0;
 
@@ -38,6 +49,14 @@ function quotesProblem(f) {
   return null;
 }
 
+// A reserve fact never leads an issue (factsForSend drops it), so only a
+// main fact must carry its copy; a reserve fact that has one is checked too.
+function leadProblem(f) {
+  if (f.reserve && f.lead === undefined) return null;
+  const ok = Array.isArray(f.lead) && f.lead.length >= LEAD_MIN && f.lead.length <= LEAD_MAX && f.lead.every(isText);
+  return ok ? null : `lead must be ${LEAD_MIN} to ${LEAD_MAX} sentences of text`;
+}
+
 function factProblem(f) {
   if (!f || typeof f !== 'object') return 'entry is not an object';
   if (!/^[A-Z]\d{2}$/.test(String(f.id))) return 'id must look like P03';
@@ -49,7 +68,7 @@ function factProblem(f) {
   if (!KINDS.has(f.kind)) return `kind must be one of ${[...KINDS].join(', ')}`;
   if (!CONFIDENCES.has(f.confidence)) return 'confidence must be high or medium';
   if (f.expires_on !== undefined && !validDateOnly(String(f.expires_on))) return 'expires_on must be a real YYYY-MM-DD date';
-  return null;
+  return leadProblem(f);
 }
 
 function validateBank(data) {
@@ -66,18 +85,28 @@ function validateBank(data) {
 
 const FACTS = validateBank(bank);
 
-/** ET calendar date 'YYYY-MM-DD' for a 'YYYY-MM-DD' string or a Date. */
+/**
+ * ET calendar date 'YYYY-MM-DD' for a send date: a 'YYYY-MM-DD' string, an
+ * ISO timestamp (no offset = Eastern wall-clock time; Z or an offset = an
+ * instant) or a Date. Anything else, and a calendar day that does not exist
+ * (2027-02-30), is refused before any plan is made.
+ */
 function sendDateET(sendDate) {
-  if (typeof sendDate === 'string') {
-    // A calendar day that does not exist (2027-02-30) is refused before any
-    // plan or model call; Date() would roll a timestamp on it into March.
-    const day = sendDate.slice(0, 10);
-    if (DATE_ONLY.test(day) && !validDateOnly(day)) throw new Error(`pest-insider: ${day} is not a real calendar date`);
-    if (DATE_ONLY.test(sendDate)) return sendDate;
+  if (sendDate instanceof Date) {
+    if (Number.isNaN(sendDate.getTime())) throw new Error('pest-insider: sendDate is not a valid date');
+    return etDateString(sendDate);
   }
-  const d = sendDate instanceof Date ? sendDate : new Date(sendDate);
-  if (Number.isNaN(d.getTime())) throw new Error('pest-insider: sendDate is not a valid date');
-  return etDateString(d);
+  const text = typeof sendDate === 'string' ? sendDate.trim() : '';
+  const day = text.slice(0, 10);
+  if (DATE_ONLY.test(day) && !validDateOnly(day)) throw new Error(`pest-insider: ${day} is not a real calendar date`);
+  if (DATE_ONLY.test(text)) return text;
+  const local = LOCAL_TIMESTAMP.exec(text);
+  if (local) return local[1];
+  if (OFFSET_TIMESTAMP.test(text)) {
+    const d = new Date(text);
+    if (!Number.isNaN(d.getTime())) return etDateString(d);
+  }
+  throw new Error('pest-insider: sendDate must be YYYY-MM-DD, an ISO timestamp or a Date');
 }
 
 const monthOf = (dateET) => Number(dateET.slice(5, 7));
@@ -119,4 +148,4 @@ function sourceLabel(source) {
 /** Each quote with the label of the publisher it came from. */
 const attributedQuotes = (fact) => fact.quotes.map((text, i) => ({ text, label: sourceLabel(fact.sources[fact.quote_sources[i]]) }));
 
-module.exports = { FACTS, SERVICES, factsForSend, factById, sendDateET, validateBank, sourceLabel, attributedQuotes };
+module.exports = { FACTS, SERVICES, LEAD_MIN, LEAD_MAX, factsForSend, factById, sendDateET, validateBank, sourceLabel, attributedQuotes };

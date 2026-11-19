@@ -1,27 +1,30 @@
 /**
- * Pest Insider claim check. Deterministic, no model.
+ * Pest Insider copy check. Deterministic, no model.
  *
- * The writer may only restate the lead fact and the species entry it was
- * given. Every lead sentence is checked against that fact's own statement and
- * quotes: its numbers (with their units), month and season words, and proper
- * names must all appear there, and a publisher it names must be the one whose
- * quote it restates. A sentence that fails is CUT, never rewritten. The issue
- * passes only with at least MIN_LEAD_SENTENCES kept sentences and a passing
- * id_item.
+ * Every word an issue carries is fixed, reviewed text: the lead fact's
+ * `lead` sentences and title from the fact bank, and the species entry's
+ * `fact` from the identifier snapshot. Nothing is written per issue, so a
+ * sentence cannot say the opposite of its source (a deterministic check
+ * cannot judge free wording; codex pre-push round 3). This check runs on
+ * that copy before every render, and on the whole bank in the tests:
  *
- * Known limit: a Latin name that opens a sentence is not recognised as a name
- * (the first word of any sentence is capitalized anyway). The writer prompt
- * tells the model not to open a sentence with one.
+ * - numbers (with their units), month and season words, and proper names
+ *   must all appear in the fact's own statement or quotes;
+ * - a sentence that states a number or a month must copy one source unit
+ *   word for word (a quote sentence, the statement, or a part of it);
+ * - a publisher a sentence names must be the one whose quote it restates;
+ * - the banned words, the hallucination tripwires and the shared claim
+ *   register the send validator runs apply to every sentence.
+ *
+ * Nothing is cut or reworded: any problem fails the issue. The build then
+ * runs the send validator itself on the rendered issue (index.js).
  */
 'use strict';
 
 const { findHallucinatedClaims } = require('../newsletter-validator');
 const { findUnverifiedClaims } = require('../email-division/fact-register');
 const { getVoiceProfile } = require('../../config/voice-profiles');
-const { FACTS, sourceLabel, attributedQuotes } = require('./facts');
-
-const MIN_LEAD_SENTENCES = 2;
-const MAX_LEAD_SENTENCES = 4;
+const { FACTS, sourceLabel, attributedQuotes, LEAD_MIN: MIN_LEAD_SENTENCES, LEAD_MAX: MAX_LEAD_SENTENCES } = require('./facts');
 
 const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 const MONTH_ABBR = { jan: 'january', feb: 'february', mar: 'march', apr: 'april', jun: 'june', jul: 'july', aug: 'august', sep: 'september', sept: 'september', oct: 'october', nov: 'november', dec: 'december' };
@@ -36,7 +39,7 @@ const SCALE_WORDS = /\b(hundred|thousand|million|billion|dozen)s?\b/g;
 const ALLOWED_NAMES = new Set(['waves', 'florida', 'southwest', 'swfl', 'uf', 'ifas', 'uf/ifas', 'i', 'today', "what's", 'what']);
 
 // Pesticide actives, product and brand names, and DIY-ingredient words. The
-// writer is told to use none; a hit cuts the sentence.
+// copy uses none; a hit fails the issue.
 const BRAND_AND_PRODUCT = [
   'termidor', 'talstar', 'talak', 'sentricon', 'demand cs', 'taurus', 'fipronil', 'bifenthrin', 'permethrin', 'cypermethrin',
   'deltamethrin', 'cyhalothrin', 'imidacloprid', 'dinotefuran', 'chlorantraniliprole', 'acephate', 'carbaryl', 'malathion',
@@ -56,8 +59,7 @@ const BANNED_RULES = [
   { re: /\bguarantee[sd]?\b|\bwarrant(?:y|ies)\b/i, reason: 'guarantee' },
   { re: /\bpromis(?:e[sd]?|ing)\b/i, reason: 'promise' },
 ];
-// A Waves line explains; it never sells.
-const SELLING_RE = /\b(?:book|booking|schedule|call|contact|quote|estimate|free|offer|buy|hire|order|sign\s*up|subscribe|plans?|packages?)\b/i;
+// Lead copy restates its sources; it never speaks for Waves.
 const WAVES_RE = /\bwaves\b/i;
 
 // Words a sentence opens with that are not part of a name that follows them ("The CDC says ...").
@@ -72,7 +74,7 @@ function bannedReason(text) {
   const tripwire = findHallucinatedClaims(text)[0];
   if (tripwire) return `tripwire: ${/\(([^)]*)\)/.exec(tripwire)?.[1] || 'claim'}`;
   // The same shared register the send validator runs (newsletter-validator.js),
-  // so a draft that passes here is not blocked there.
+  // so copy that passes here is not blocked there.
   const unverified = findUnverifiedClaims(text)[0];
   if (unverified) return `tripwire: ${unverified.rule}`;
   return null;
@@ -203,7 +205,7 @@ function unknownName(sentence, namesCorpus) {
 // unit word for word: a sentence of a quote, the statement, or a part of the
 // statement between semicolons or either side of ", and" / ", but". It may wrap that copy in "<publisher> says" or
 // "According to <publisher>,". Case, punctuation, curly quotes and number
-// words ("eight" = "8") do not count as differences. Anything looser is cut.
+// words ("eight" = "8") do not count as differences. Anything looser fails.
 const NUMBER_WORD_RE = new RegExp(`\\b(${Object.keys(NUMBER_WORDS).join('|')})\\b`, 'g');
 const LEADING_CONNECTOR = /^(?:and|but|so|also|however|still|plus|in fact|did you (?:know|realize)(?: that)?)\s+/;
 const ATTRIBUTION_VERBS = '(?:says|said|notes|noted|reports|reported|explains|found|finds|writes|adds|points out|tells us|warns)';
@@ -340,89 +342,66 @@ const speciesSource = (species) => ({
   names: [species.name, species.category, species.fact, species.note].join(' '),
 });
 
-const joinSources = (...sources) => ({
-  units: new Map(sources.flatMap((s) => [...s.units])),
-  labels: [...new Set(sources.flatMap((s) => s.labels))],
-  facts: sources.map((s) => s.facts).join(' '),
-  names: sources.map((s) => s.names).join(' '),
-});
+// The subject is the fact's reviewed title behind its service emoji.
+const SERVICE_EMOJI = { pest: '🐜', lawn: '🌱', tree_shrub: '🌴', mosquito: '🦟', termite: '🪵', rodent: '🐀' };
 
-function leadSentenceProblem(sentence, leadFact, source, state) {
-  if (!sentence || typeof sentence.text !== 'string' || !sentence.text.trim()) return 'empty sentence';
-  if (sentence.fact_id !== leadFact.id) return `fact_id ${sentence.fact_id} is not the lead fact ${leadFact.id}`;
-  const problem = sentenceProblem(sentence.text, source) || creditProblem(sentence.text, leadFact);
-  if (problem) return problem;
-  if (WAVES_RE.test(sentence.text)) {
-    if (state.wavesLines >= 1) return 'more than one Waves line';
-    if (SELLING_RE.test(sentence.text)) return 'Waves line sells';
-    state.wavesLines += 1;
-  }
-  return null;
+function leadLineProblem(text, fact, source) {
+  if (!text) return 'empty sentence';
+  if (WAVES_RE.test(text)) return 'a lead sentence restates the source; it does not speak for Waves';
+  return sentenceProblem(text, source) || creditProblem(text, fact);
 }
 
-function checkLead(sentences, leadFact, source) {
-  const state = { wavesLines: 0 };
-  const lead = [];
-  const cut = [];
-  for (const s of sentences.slice(0, MAX_LEAD_SENTENCES + 2)) {
-    const reason = leadSentenceProblem(s, leadFact, source, state);
-    if (reason) cut.push({ text: String(s?.text ?? ''), reason });
-    else if (lead.length >= MAX_LEAD_SENTENCES) cut.push({ text: s.text, reason: `more than ${MAX_LEAD_SENTENCES} sentences` });
-    else lead.push({ text: tidy(s.text), fact_id: s.fact_id });
-  }
-  return { lead, cut };
+// A title is a reviewed summary of the whole fact, not a copy of one quote,
+// so it gets the pooled checks (numbers with their units, months, names,
+// credit) without the word-for-word rule, plus the subject format.
+function titleProblem(title, subject, fact, source) {
+  return subjectFormatProblem(subject) || sentenceProblem(title, { ...source, units: null }) || creditProblem(title, fact);
 }
 
-// Headline, subject and preview are short display strings: a failing one is
-// replaced by the bank's own title or left out (the caller supplies a stand-in),
-// never reworded.
-function checkDisplay(draft, leadFact, source, withSpecies) {
-  const fallbacks = [];
-  const headlineText = tidy(draft?.lead?.headline);
-  const headline = headlineText && !sentenceProblem(headlineText, source) && !creditProblem(headlineText, leadFact) ? headlineText : leadFact.title;
-  if (headline !== headlineText) fallbacks.push('headline');
-  const subjectText = tidy(draft?.subject);
-  // The subject speaks for the lead alone: a species number or name is not allowed in it.
-  const subject = subjectText && !subjectFormatProblem(subjectText) && !sentenceProblem(subjectText, source) && !creditProblem(subjectText, leadFact) ? subjectText : null;
-  if (!subject) fallbacks.push('subject');
-  const previewText = tidy(draft?.preview);
-  const preview = previewText && !sentenceProblem(previewText, withSpecies) ? previewText : null;
-  if (!preview) fallbacks.push('preview');
-  return { headline, subject, preview, fallbacks };
+// "What's this?" is the species entry's own fact, checked a sentence at a time.
+function idItemProblems(idText, species) {
+  const source = speciesSource(species);
+  const sentences = splitSentences(idText);
+  if (!sentences.length) return [{ part: 'id_item', text: '', reason: 'empty species fact' }];
+  return sentences
+    .map((text) => ({ part: 'id_item', text, reason: sentenceProblem(text, source) }))
+    .filter((p) => p.reason);
 }
 
 /**
- * Check a writer draft against the plan.
- * @param {{ draft: object, leadFact: object, idItem: object }} input
- * @returns {{ ok: boolean, lead: Array<{text:string,fact_id:string}>, cut: Array<{text:string,reason:string}>,
- *   headline: string, subject: string|null, preview: string|null, idItem: {ok:boolean,text:string,reason:string|null},
- *   fallbacks: string[] }}
+ * Check one issue's fixed copy before it renders.
+ * @param {{ leadFact: object, species: object }} input  the plan's lead fact and identifier species
+ * @returns {{ ok: boolean, problems: Array<{ part: 'lead'|'title'|'id_item'|'preview', text: string, reason: string }>,
+ *   subject: string, preview: string, headline: string, lead: string[], idText: string }}
  */
-// "What's this?" is checked a sentence at a time against the species entry:
-// a failing sentence is cut, and the item fails only when none is left.
-function checkIdItem(text, species) {
-  if (!text) return { ok: false, text: '', reason: 'empty id_item', cut: [] };
-  const source = speciesSource(species);
-  const kept = [];
-  const cut = [];
-  for (const sentence of splitSentences(text)) {
-    const reason = sentenceProblem(sentence, source);
-    if (reason) cut.push({ text: sentence, reason: `id_item: ${reason}` });
-    else kept.push(sentence);
-  }
-  const reason = kept.length ? null : (cut[0] ? cut[0].reason.replace(/^id_item: /, '') : 'empty id_item');
-  return { ok: kept.length > 0, text: kept.join(' '), reason, cut };
-}
-
-function checkClaims({ draft, leadFact, idItem }) {
+function checkIssueCopy({ leadFact, species }) {
   const source = factSource(leadFact);
-  const sentences = Array.isArray(draft?.lead?.sentences) ? draft.lead.sentences : [];
-  const { lead, cut } = checkLead(sentences, leadFact, source);
-  const display = checkDisplay(draft, leadFact, source, joinSources(source, speciesSource(idItem)));
-  const { cut: idCut, ...id } = checkIdItem(tidy(draft?.id_item?.text), idItem);
-  return { ok: lead.length >= MIN_LEAD_SENTENCES && id.ok, lead, cut: [...cut, ...idCut], ...display, idItem: id };
+  const problems = [];
+  const lead = Array.isArray(leadFact.lead) ? leadFact.lead.map(tidy) : [];
+  if (lead.length < MIN_LEAD_SENTENCES || lead.length > MAX_LEAD_SENTENCES) {
+    problems.push({ part: 'lead', text: '', reason: `needs ${MIN_LEAD_SENTENCES} to ${MAX_LEAD_SENTENCES} lead sentences, has ${lead.length}` });
+  }
+  for (const text of lead) {
+    const reason = leadLineProblem(text, leadFact, source);
+    if (reason) problems.push({ part: 'lead', text, reason });
+  }
+
+  const headline = tidy(leadFact.title);
+  const subject = `${SERVICE_EMOJI[leadFact.service]} ${headline}`;
+  const titleReason = titleProblem(headline, subject, leadFact, source);
+  if (titleReason) problems.push({ part: 'title', text: headline, reason: titleReason });
+
+  const idText = tidy(species.fact);
+  problems.push(...idItemProblems(idText, species));
+
+  const preview = `What's this? ${tidy(species.name)}`;
+  const previewReason = bannedReason(preview);
+  if (previewReason) problems.push({ part: 'preview', text: preview, reason: previewReason });
+
+  return { ok: problems.length === 0, problems, subject, preview, headline, lead, idText };
 }
 
 module.exports = {
-  checkClaims, sentenceProblem, creditProblem, quantityPairs, copyProblem, canonical, subjectFormatProblem, bannedReason, factSource, speciesSource, MIN_LEAD_SENTENCES, MAX_LEAD_SENTENCES,
+  checkIssueCopy, sentenceProblem, creditProblem, quantityPairs, copyProblem, canonical, subjectFormatProblem, bannedReason, factSource, speciesSource,
+  SERVICE_EMOJI, MIN_LEAD_SENTENCES, MAX_LEAD_SENTENCES,
 };

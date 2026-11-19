@@ -319,8 +319,6 @@ const LANE_RUNTIME = {
   // draft_for_human + M2 (Codex r21): optimizeExistingPost only stores optimization_suggestions; the operator applies them to the draft by hand.
   blog_optimize: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M2', ...LONG_BATCH },
   newsletter: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M2', ...LONG_BATCH },
-  // draft_for_human + M2: PR 1 of the Pest Insider rebuild only builds issues for review (ops/agents/pest-insider-sample.js); nothing sends or schedules from this lane.
-  pest_insider: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M2', ...LONG_BATCH },
   // irreversible_external + M3 (Codex r20): generateNewsletterSocialContent feeds publishToAll in the gated newsletter auto-share with no per-post
   // approval, outcome persisted on the newsletter row — the shared lane is classified by its worst-case path.
   content_misc: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M3' },
