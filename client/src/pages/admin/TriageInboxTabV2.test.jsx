@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { adminFetch } from '../../utils/admin-fetch';
-import TriageInboxTabV2, { CallPrepayEvidence, ConfirmEvidence, FamilyEvidence, NameSpellingEvidence } from './TriageInboxTabV2';
+import TriageInboxTabV2, { CallPrepayEvidence, ConfirmEvidence, FamilyEvidence, NameSpellingEvidence, PhoneYesEvidence } from './TriageInboxTabV2';
 
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn(), isRateLimitError: () => false }));
 
@@ -1401,6 +1401,16 @@ describe('call_phone_yes card', () => {
     expect(within(el).getByRole('link', { name: 'Open estimate 1' })).toHaveAttribute('href', '/admin/estimates?estimateId=est-7');
     expect(within(el).getByRole('link', { name: 'Open estimate 2' })).toHaveAttribute('href', '/admin/estimates?estimateId=est-8');
     expect(within(el).queryByRole('link', { name: 'Open the estimate' })).toBeNull();
+  });
+
+  it('a closed card shows its evidence as history, never as work still to do', () => {
+    const payload = JSON.stringify({ flag: 'call_phone_yes', yes_heard: false, estimate_id: 'est-7', auto_would_accept: false, auto_message: 'No yes was heard on the call.' });
+    render(<PhoneYesEvidence payload={payload} isOpenView={false} />);
+    expect(screen.getByText('Card closed. What it showed while open')).toBeInTheDocument();
+    expect(screen.queryByText('The estimate is not accepted yet')).toBeNull();
+    cleanup();
+    render(<PhoneYesEvidence payload={payload} isOpenView />);
+    expect(screen.getByText('The estimate is not accepted yet')).toBeInTheDocument();
   });
 
   it('a yes call being read again: says so, with no words', async () => {

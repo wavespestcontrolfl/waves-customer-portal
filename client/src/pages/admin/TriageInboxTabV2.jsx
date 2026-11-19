@@ -463,7 +463,7 @@ export function CallPrepayEvidence({ payload, callPrepay, isOpenView, isAdmin, b
 // estimate, and nothing accepted the estimate. The card says what the call reader heard: the caller's yes in their own
 // words, or "No yes heard" (the sweep keeps it current). The shadow line is what an automatic accept would have done
 // when the card was filed.
-export function PhoneYesEvidence({ payload }) {
+export function PhoneYesEvidence({ payload, isOpenView }) {
   const p = parsePayload(payload) || {};
   // The card's one estimate, or (with more than one open) each estimate sent before the call.
   const estimateIds = p.estimate_id ? [p.estimate_id] : (Array.isArray(p.estimate_ids) ? p.estimate_ids.filter(Boolean) : []);
@@ -479,7 +479,8 @@ export function PhoneYesEvidence({ payload }) {
   ].filter(([, value]) => value);
   return (
     <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
-      <div className="text-11 text-ink-tertiary font-medium mb-1">The estimate is not accepted yet</div>
+      {/* A closed card (resolved, or dismissed when the estimate was accepted) shows its evidence as history. */}
+      <div className="text-11 text-ink-tertiary font-medium mb-1">{isOpenView ? "The estimate is not accepted yet" : "Card closed. What it showed while open"}</div>
       {rows.map(([label, value]) => (
         <div key={label} className="text-14 text-ink-secondary">
           <span className="text-ink-tertiary">{label}:</span> {value}

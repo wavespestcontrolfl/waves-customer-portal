@@ -279,6 +279,12 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       estimateOver: { onetime_total: 85, estimate_data: JSON.stringify(planData({ result: { ...planData().result, oneTime: { items: [{ name: 'Wasp Nest Removal', price: 85 }], membershipFee: 0 } } })) },
     }, 'one_time_items'],
     ['the estimate has a one-time total no line itemizes', { estimateOver: { onetime_total: 85 } }, 'one_time_items'],
+    // Two separately priced pest lines read as one row once coalesced; the engine's own lines tell them apart.
+    ['the estimate has two pest lines', {
+      estimateOver: { estimate_data: JSON.stringify(planData({ result: { ...planData().result, lineItems: [
+        { service: 'pest_control', perApp: 45, annual: 180, visitsPerYear: 4 }, { service: 'pest_control', perApp: 60, annual: 240, visitsPerYear: 4 },
+      ] } })) },
+    }, 'not_pest_plan'],
     // The estimate's own manual accept refuses these (estimate-manual-acceptance.js), so an automatic one would too.
     ['the estimate still needs a manager approval', {
       estimateOver: { estimate_data: JSON.stringify(planData({ approvals: [{ requiresManagerApproval: true }] })) },
@@ -318,6 +324,10 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     ['two visits on the booking call', ({ customerId, bookingCallId }) => visit(customerId, bookingCallId, { scheduled_date: inDays(12) }), 'more_than_one_visit'],
     ['another live plan', ({ customerId }) => visit(customerId, null, {
       source_action: 'admin', is_recurring: true, recurring_pattern: 'quarterly', scheduled_date: inDays(30),
+    }), 'existing_plan'],
+    // The shared live-plan reader (loadLiveRecurringObligationRows): a plan visit in progress is the customer's plan.
+    ['a plan visit is in progress', ({ customerId }) => visit(customerId, null, {
+      source_action: 'admin', is_recurring: true, recurring_pattern: 'quarterly', scheduled_date: inDays(0), status: 'on_site',
     }), 'existing_plan'],
   ])('%s: ONE card whose shadow line names it', async (_name, change, reason) => {
     const fixture = await phoneYes();
@@ -425,9 +435,36 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     expect(await cards(bookingCallId)).toHaveLength(1);
   });
 
+  // A yes given while another estimate was open too may be about that one (a lawn quote accepted before the booking).
+  test('a yes given while another estimate was open: the shadow line says it may be about that one', async () => {
+    const { customerId, bookingCallId } = await phoneYes();
+    await estimate(customerId, { sent_at: new Date(Date.now() - 3 * DAY), status: 'accepted', accepted_at: new Date(Date.now() - 12 * 3600000) });
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ yes_heard: true, auto_would_accept: false, auto_reason: 'yes_maybe_other_estimate' });
+  });
+
+  test('an estimate settled before the yes call leaves the yes clear', async () => {
+    const { customerId, bookingCallId } = await phoneYes();
+    await estimate(customerId, { sent_at: new Date(Date.now() - 3 * DAY), status: 'accepted', accepted_at: new Date(Date.now() - 30 * 3600000) });
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ yes_heard: true, auto_would_accept: true });
+  });
+
+  // A past recurring row still marked pending is not a live plan (the shared reader's lifecycle rule).
+  test('a past recurring row still pending is no live plan: auto would accept', async () => {
+    const { customerId, bookingCallId } = await phoneYes();
+    await visit(customerId, null, { source_action: 'admin', is_recurring: true, recurring_pattern: 'quarterly', scheduled_date: inDays(-40), status: 'pending' });
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ auto_would_accept: true, auto_reason: null });
+  });
+
   test('an archived estimate is not open: it never makes two', async () => {
     const { customerId, est, bookingCallId } = await phoneYes();
-    await estimate(customerId, { archived_at: new Date(Date.now() - DAY) });
+    // Archived before the yes call (one archived after it was open when the caller spoke).
+    await estimate(customerId, { archived_at: new Date(Date.now() - 30 * 3600000) });
     await expect(sweep()).resolves.toMatchObject({ filed: 1 });
     const [card] = await cards(bookingCallId);
     expect(card.related_estimate_id).toBe(est.id);

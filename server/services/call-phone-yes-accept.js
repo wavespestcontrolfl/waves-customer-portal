@@ -69,6 +69,7 @@ const REASONS = {
   commercial_estimate: 'The estimate is not a known residential quote (commercial, or no residential category).',
   newer_call: 'The customer called again later. Read that call before you accept.',
   yes_after_booking: 'The caller said yes on a later call than the one that booked the visit.',
+  yes_maybe_other_estimate: 'When the caller said yes, the customer had another estimate open too, so the yes may be about that one.',
   booking_call_unread: 'The call that booked the visit could not be read, so its last word is unknown.',
   group_estimate: 'The estimate is part of an estimate group.',
   no_recurring_price: 'The estimate has no recurring price.',
@@ -103,6 +104,24 @@ function sentAnchorOf(estimate) {
   return Number.isNaN(at.getTime()) ? new Date(0) : at;
 }
 const earliestSentAnchor = (estimates) => new Date(Math.min(...estimates.map((e) => sentAnchorOf(e).getTime())));
+
+// True when, as the call began, the customer had another estimate open: sent by then and not yet accepted, declined,
+// archived or expired (a lawn quote accepted later still counts: it was open then). A yes on that call may be about
+// the other estimate, so the shadow verdict cannot count it (the card still shows the words).
+async function otherEstimateOpenAt(conn, { customerId, cardIds, callLogId }) {
+  const startOfCall = `(SELECT ${require('./sms-pending-conversations').callStartedAtSql('anchor')} FROM call_log anchor WHERE anchor.id = ?)`;
+  const openThen = (column) => (qb) => qb.whereNull(column).orWhereRaw(`${column} > ${startOfCall}`, [callLogId]);
+  return !!(await conn('estimates')
+    .where({ customer_id: customerId })
+    .whereNotIn('id', cardIds)
+    .whereNotNull('sent_at')
+    .whereRaw(`sent_at <= ${startOfCall}`, [callLogId])
+    .where(openThen('accepted_at'))
+    .where(openThen('declined_at'))
+    .where(openThen('archived_at'))
+    .where(openThen('expires_at'))
+    .first('id'));
+}
 
 // When the customer was first sent an estimate the card does not name after the booking call began (timestamptz as
 // text, or null). From then on a call may be about that newer estimate, so its word is not this card's: a yes to it
@@ -158,6 +177,11 @@ async function estimateProblem(conn, estimate) {
   const EstimateConverter = require('./estimate-converter');
   const lines = require('../routes/estimate-public').acceptanceServiceLists(data).recurringSvcList || [];
   if (lines.length !== 1 || EstimateConverter.recurringServiceKey(lines[0]) !== 'pest_control') return 'not_pest_plan';
+  // Two separately priced pest lines coalesce into that one row; the engine's own lines tell them apart (the duplicate
+  // rule acceptanceServiceLists applies with preserveDuplicates, read from its same source container).
+  const source = data.result || data.engineResult || data;
+  const pestLines = (Array.isArray(source.lineItems) ? source.lineItems : []).filter((row) => EstimateConverter.recurringServiceKey(row) === 'pest_control');
+  if (pestLines.length > 1) return 'not_pest_plan';
   const AcceptEffects = require('./estimate-accept-effects');
   const oneTime = AcceptEffects.oneTimeLineEffects(estimate, EstimateConverter, { billingTerm: 'standard' });
   if (oneTime.refusal || oneTime.lines.some((line) => line.name !== MEMBERSHIP_FEE_LINE_NAME)) return 'one_time_items';
@@ -203,14 +227,14 @@ async function visitProblem(conn, visit, estimate, now) {
 }
 
 // The customer already holds a plan: a WaveGuard membership (tier or legacy monthly rate; strict, so a failed read
-// throws instead of reading as "no plan") or another live recurring visit. The accept would replace that billing.
+// throws instead of reading as "no plan") or another live recurring obligation, by the shared reader
+// (loadLiveRecurringObligationRows: a visit en route or on site counts, a past phantom row, a callback or a one-time
+// booking does not; a failed catalog join throws). The accept would replace that billing.
 async function existingPlan(conn, customerId, visitId) {
-  if (await require('./waveguard-existing-services').isActivePlanCustomer(conn, customerId, { strict: true })) return true;
-  return !!(await conn('scheduled_services')
-    .where({ customer_id: customerId, is_recurring: true })
-    .whereIn('status', LIVE_VISIT_STATUSES)
-    .whereNot({ id: visitId })
-    .first('id'));
+  const Existing = require('./waveguard-existing-services');
+  if (await Existing.isActivePlanCustomer(conn, customerId, { strict: true })) return true;
+  const rows = await Existing.loadLiveRecurringObligationRows(conn, customerId);
+  return rows.some((row) => String(row.id) !== String(visitId));
 }
 
 // The first check an accept from this call fails, or null: one estimate, one booked visit, then the estimate, the
@@ -254,6 +278,8 @@ async function evaluatePhoneYes({ callLogId, customerId, conn = db, now = new Da
   if (heard.skip) return skip(heard.skip);
   const { yes } = heard;
   const later = await Word.laterWordProblem(conn, { customerId, yes, booking: call });
+  const shared = yes && (await otherEstimateOpenAt(conn, { customerId, cardIds: answerable.map((e) => e.id), callLogId: yes.callLogId }))
+    ? 'yes_maybe_other_estimate' : null;
   const estimate = open.length === 1 ? open[0] : null;
   const visit = visits.length === 1 ? visits[0] : null;
   const problem = await acceptProblem(conn, { estimate, visit, customerId, now });
@@ -264,7 +290,7 @@ async function evaluatePhoneYes({ callLogId, customerId, conn = db, now = new Da
     visit,
     estimateIds: answerable.map((e) => String(e.id)),
     acceptProblem: problem,
-    autoProblem: problem || later || heard.noYes,
+    autoProblem: problem || later || shared || heard.noYes,
   };
 }
 
