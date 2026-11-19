@@ -435,7 +435,11 @@ const isCombinedPiMetadata = (piMetadata) => !!piMetadata?.combined_allocation;
  * claim from a read path). tests/customer-dunning-member-fence-parity.test.js
  * pins this list against the verifier's own source.
  */
-async function memberCollectionPending(inv, { database = db, customerId = null } = {}) {
+async function memberCollectionPending(inv, {
+  database = db,
+  customerId = null,
+  allowStandaloneServiceRecordVisit = false,
+} = {}) {
   const { isCollectionPendingFenceError } = require('./invoice-helpers');
   if (!inv?.id) return { reason: 'not_collectible' };
   // Always vet the FULL, current invoice row: sibling rows from
@@ -453,12 +457,23 @@ async function memberCollectionPending(inv, { database = db, customerId = null }
   if (inv.payer_id || inv.payer_statement_id) return { reason: 'payer_billed' };
   if (invoiceWithdrawnFromCustomer(inv)) return { reason: 'withdrawn' };
   // LIVE payer re-resolution, fail closed (a lookup failure throws).
+  // Failed-payment recovery can reach a post-completion invoice through only
+  // service_record_id. Resolve that visit only for the standalone checkout:
+  // with combined-balance collection on, its setup seam still resolves the
+  // raw scheduled_service_id and would reject this same link as payer-owned.
+  // Keeping this opt-in both preserves every reminder/checkout caller and
+  // withholds a recovery action the eventual checkout could not complete.
+  let scheduledServiceId = inv.scheduled_service_id || null;
+  if (allowStandaloneServiceRecordVisit && !isEnabled('payIncludeBalance')
+    && !scheduledServiceId && inv.service_record_id) {
+    scheduledServiceId = await require('./invoice').linkedScheduledServiceId(inv, database);
+  }
   {
     let resolved;
     try {
       resolved = await require('./payer').resolveForInvoice({
         customerId: String(inv.customer_id),
-        ...(inv.scheduled_service_id ? { scheduledServiceId: String(inv.scheduled_service_id) } : {}),
+        ...(scheduledServiceId ? { scheduledServiceId: String(scheduledServiceId) } : {}),
         throwOnError: true,
         database,
       });

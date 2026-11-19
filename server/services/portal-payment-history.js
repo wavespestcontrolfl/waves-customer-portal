@@ -115,7 +115,16 @@ async function recoveryInvoiceAvailableNow(customerId, invoice, database) {
     // Re-read the full current row and apply checkout's shared ownership,
     // amount, deposit, and charge-reconciliation checks. customerId makes a
     // profile merge fail closed instead of returning the former owner's token.
-    const verdict = await require('./pay-combined').memberCollectionPending(invoice, { database, customerId });
+    const verdict = await require('./pay-combined').memberCollectionPending(invoice, {
+      database,
+      customerId,
+      // A service-record-only visit can override an account payer for the
+      // standalone pay page. The shared helper deliberately ignores this
+      // opt-in while combined collection is on because that checkout seam
+      // cannot yet honor the same indirection. Failed bank/card rows then
+      // keep Billing's safe open-invoice fallback instead of a link that 409s.
+      allowStandaloneServiceRecordVisit: true,
+    });
     if (!verdict?.row) return null;
     const current = verdict.row;
     // Resolve through service_record_id as well as a direct visit link. That

@@ -70,6 +70,8 @@ describe('failed payment recovery', () => {
     render(<BillingTab customer={customer} />);
 
     const row = paymentRow(await screen.findByText('November pest visit'));
+    expect(screen.getByText('Your last payment could not be processed. Review and pay your open invoices above. Update your saved payment method below for future payments.'))
+      .toBeInTheDocument();
     expect(within(row).getByRole('link', { name: 'Review invoice' })).toHaveAttribute('href', '/pay/tok-failed');
     expect(within(row).queryByRole('link', { name: /^Pay / })).not.toBeInTheDocument();
   });

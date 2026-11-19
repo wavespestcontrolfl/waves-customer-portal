@@ -7113,8 +7113,8 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           ? 'Your last payment could not be processed. Review your open invoices above.'
           : 'Your last payment could not be processed. Contact us to review your balance.')
         : primaryOpenInvoice
-          ? 'Your last payment could not be processed. Review your open invoices or update your saved payment method below.'
-          : 'Your last payment could not be processed. Update your saved card below.',
+          ? 'Your last payment could not be processed. Review and pay your open invoices above. Update your saved payment method below for future payments.'
+          : 'Your last payment could not be processed. Contact us to review the failed payment. Update your saved payment method below for future payments.',
     },
     expired: {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',

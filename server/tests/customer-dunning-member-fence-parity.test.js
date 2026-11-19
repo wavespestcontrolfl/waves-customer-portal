@@ -12,7 +12,11 @@ const path = require('path');
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
-jest.mock('../config/feature-gates', () => ({ isEnabled: () => true, gates: { autoApplyAccountCredit: false } }));
+const mockIsEnabled = jest.fn(() => true);
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: (...args) => mockIsEnabled(...args),
+  gates: { autoApplyAccountCredit: false },
+}));
 const mockResolveForInvoice = jest.fn();
 jest.mock('../services/payer', () => ({ resolveForInvoice: (...a) => mockResolveForInvoice(...a) }));
 const mockDeposit = jest.fn();
@@ -97,8 +101,15 @@ describe('memberCollectionPending mirrors the pay page\'s per-member checks', ()
   // is what that read returns (default: the row under test).
   let stored;
   let readError = null;
-  const database = jest.fn(() => ({
-    where: () => ({ first: async () => { if (readError) throw readError; return stored; } }),
+  let linkedVisitId = null;
+  const database = jest.fn((table) => ({
+    where: () => ({ first: async () => {
+      if (readError) throw readError;
+      if (table === 'service_records') {
+        return linkedVisitId ? { scheduled_service_id: linkedVisitId } : null;
+      }
+      return stored;
+    } }),
   }));
   const run = (inv) => { stored = inv; return PayCombined.memberCollectionPending(inv, { database }); };
   const pending = (code, extra = {}) => Object.assign(new Error(code), { code, ...extra });
@@ -106,6 +117,8 @@ describe('memberCollectionPending mirrors the pay page\'s per-member checks', ()
   beforeEach(() => {
     jest.clearAllMocks();
     readError = null;
+    linkedVisitId = null;
+    mockIsEnabled.mockReturnValue(true);
     mockResolveForInvoice.mockResolvedValue({ payerId: null });
     mockDeposit.mockResolvedValue(undefined);
     mockRecon.mockResolvedValue(undefined);
@@ -174,6 +187,42 @@ describe('memberCollectionPending mirrors the pay page\'s per-member checks', ()
   test('payer_billed from the LIVE resolve', async () => {
     mockResolveForInvoice.mockResolvedValue({ payerId: 'p9' });
     expect(await run(base())).toEqual({ reason: 'payer_billed' });
+  });
+
+  test('only the recovery opt-in resolves a service-record visit when standalone checkout can honor it', async () => {
+    stored = { ...base(), service_record_id: 'record-1' };
+    linkedVisitId = 'visit-self-pay';
+    mockResolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({
+      payerId: scheduledServiceId === 'visit-self-pay' ? null : 'account-payer',
+    }));
+
+    // Existing reminder and sibling callers remain account-scoped.
+    expect(await PayCombined.memberCollectionPending(stored, { database })).toEqual({ reason: 'payer_billed' });
+    expect(database).not.toHaveBeenCalledWith('service_records');
+
+    mockIsEnabled.mockReturnValue(false);
+    await expect(PayCombined.memberCollectionPending(stored, {
+      database,
+      allowStandaloneServiceRecordVisit: true,
+    })).resolves.toEqual({ row: stored });
+    expect(mockResolveForInvoice).toHaveBeenLastCalledWith(expect.objectContaining({
+      scheduledServiceId: 'visit-self-pay',
+    }));
+  });
+
+  test('the recovery opt-in withholds the service-record override while combined checkout cannot honor it', async () => {
+    stored = { ...base(), service_record_id: 'record-1' };
+    linkedVisitId = 'visit-self-pay';
+    mockResolveForInvoice.mockResolvedValue({ payerId: 'account-payer' });
+
+    await expect(PayCombined.memberCollectionPending(stored, {
+      database,
+      allowStandaloneServiceRecordVisit: true,
+    })).resolves.toEqual({ reason: 'payer_billed' });
+    expect(database).not.toHaveBeenCalledWith('service_records');
+    expect(mockResolveForInvoice).toHaveBeenLastCalledWith(expect.not.objectContaining({
+      scheduledServiceId: expect.anything(),
+    }));
   });
 
   test('a payer lookup failure THROWS (tagged), never reads as clear', async () => {

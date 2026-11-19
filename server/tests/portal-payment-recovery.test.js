@@ -318,7 +318,7 @@ test('the current-row verifier withholds an invoice reassigned to another custom
 
   expect(recovery.has('pay-a')).toBe(false);
   expect(memberCollectionPending).toHaveBeenCalledWith(expect.objectContaining({ id: INV_A }), {
-    database, customerId: 'cust-1',
+    database, customerId: 'cust-1', allowStandaloneServiceRecordVisit: true,
   });
 });
 
