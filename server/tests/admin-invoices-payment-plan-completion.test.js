@@ -323,6 +323,39 @@ describe('active payment plans auto-complete when the invoice settles', () => {
     }
   });
 
+  test.each(['payer_id', 'payer_statement_id'])('a Bill-To reassignment through %s after preflight preserves the homeowner credit and checkout', async (field) => {
+    const preflightInvoice = { ...INVOICE, stripe_payment_intent_id: 'pi_customer_checkout' };
+    const reassignedInvoice = { ...preflightInvoice, [field]: 'payer-9' };
+    const original = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return makeRecorder({ first: jest.fn(async () => preflightInvoice) });
+      if (['stripe_invoice_charge_attempts', 'stripe_orphan_charges', 'payments'].includes(table)) return makeRecorder();
+      return original(table);
+    });
+    trxInvoices.first.mockResolvedValue(reassignedInvoice);
+    const stripe = require('../services/stripe');
+    const retrieve = jest.spyOn(stripe, 'retrievePaymentIntent');
+    const cancel = jest.spyOn(stripe, 'cancelPaymentIntent');
+    try {
+      await withServer(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/admin/invoices/inv-1/apply-credit`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        expect(response.status).toBe(400);
+        expect((await response.json()).error).toMatch(/third-party payer.*account credit cannot be applied/i);
+      });
+      expect(trxInvoices.forUpdate).toHaveBeenCalled();
+      expect(retrieve).not.toHaveBeenCalled();
+      expect(cancel).not.toHaveBeenCalled();
+      expect(require('../services/pay-combined').clearPaymentIntentStamps).not.toHaveBeenCalled();
+      expect(require('../services/customer-credit').postCreditMovement).not.toHaveBeenCalled();
+      expect(trxInvoices.update).not.toHaveBeenCalled();
+    } finally {
+      retrieve.mockRestore();
+      cancel.mockRestore();
+    }
+  });
+
   test('apply-credit returns 409 when a potentially settling card payment is found under the invoice lock', async () => {
     trxChargeAttempts.first.mockResolvedValueOnce({
       id: 'attempt-auth-1',

@@ -14103,6 +14103,21 @@ const InvoiceService = {
         .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [candidate.id])
         .first("id");
       if (candidate.payment_recorded_at || appliedPayment) continue; // money already applied — needs manual refund/credit review
+      // Mirror the writer's checkout-aware fence without mutating claim
+      // state. A resolved authentication_required attempt can still settle
+      // even when this invoice has no PI stamp, so do not promise a void the
+      // commit path will refuse under its invoice lock.
+      const StripeService = require("./stripe");
+      try {
+        await StripeService.assertNoInvoiceChargeReconciliationPending(
+          candidate.id,
+          db,
+          { readOnly: true, checkout: true },
+        );
+      } catch (err) {
+        if (StripeService.savedCardChargeSuppressesAlternateCollection(err)) continue;
+        throw err;
+      }
       if (candidate.stripe_payment_intent_id) {
         // Opt-in piCache (the Intelligence Bar cancel check that runs under the visit lock): a PaymentIntent already
         // retrieved before the lock is read from the cache, and with piCacheOnly one that is NOT cached throws

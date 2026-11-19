@@ -156,10 +156,10 @@ async function retireOpenPaymentIntentBeforeSettlement(invoice, { action, connec
 // Call only after the caller holds the combined-customer reservation and the
 // invoice row lock, and after its saved-card/eligibility checks have passed.
 // The shared prepaid guard handles standalone AND combined provider sessions
-// and preserves its exact verdicts (including ACH microdeposit handling). A
-// caller that historically ran the combined cleanup may retain that second,
-// transactional stamp-cleanup pass without changing provider semantics.
-async function retireLockedPaymentSessionsBeforeSettlement(trx, invoice, { action, finishCombinedCleanup = false }) {
+// and preserves its exact verdicts (including ACH microdeposit handling).
+// Provider neutralization runs exactly once; sibling stamp cleanup then stays
+// on the caller transaction with the paid/prepaid transition.
+async function retireLockedPaymentSessionsBeforeSettlement(trx, invoice, { action }) {
   const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action, connection: trx });
   if (openPi) return openPi;
   if (invoice.stripe_payment_intent_id) {
@@ -169,13 +169,6 @@ async function retireLockedPaymentSessionsBeforeSettlement(trx, invoice, { actio
       trx,
       invoice.stripe_payment_intent_id,
       { keepInvoiceIds: [String(invoice.id)] },
-    );
-  }
-  if (finishCombinedCleanup) {
-    await require('./pay-combined').releaseCombinedSessionBeforeCollection(
-      trx,
-      invoice,
-      { context: action },
     );
   }
   return null;
@@ -483,7 +476,7 @@ async function recordManualPayment(id, {
     const openPi = await retireLockedPaymentSessionsBeforeSettlement(
       trx,
       locked,
-      { action: 'recording a manual payment', finishCombinedCleanup: true },
+      { action: 'recording a manual payment' },
     );
     if (openPi) throw refusal(openPi.status, openPi.error);
     if (partCents != null) {

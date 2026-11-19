@@ -283,9 +283,10 @@ describe('money received or in flight is refused as by_owner_rule (preview and C
     expect(await preview()).toMatchObject({ code: 'by_owner_rule', reason: `payment_intent_${status}` });
   });
 
-  test('a saved-card charge in progress or unresolved', async () => {
+  test('an unstamped saved-card authentication hold or unresolved charge suppresses the proposed void', async () => {
     mockAssertNoCharge.mockRejectedValue(Object.assign(new Error('in progress'), { code: 'STRIPE_CHARGE_IN_PROGRESS' }));
     expect(await preview()).toMatchObject({ code: 'by_owner_rule', reason: 'charge_in_progress' });
+    expect(mockAssertNoCharge).toHaveBeenLastCalledWith(INV, db, { readOnly: true, checkout: true });
     mockAssertNoCharge.mockRejectedValue(Object.assign(new Error('x'), { reconciliationRequired: true }));
     expect(await preview()).toMatchObject({ code: 'by_owner_rule' });
   });

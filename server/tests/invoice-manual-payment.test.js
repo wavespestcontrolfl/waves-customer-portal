@@ -120,7 +120,7 @@ function heldManualPosting(overrides = {}) {
 }
 
 describe('recordManualPayment — refusal contract', () => {
-  test('locked checkout retirement uses the caller transaction for combined sibling stamps', async () => {
+  test('locked checkout retirement reads the provider once and uses the caller transaction for combined sibling stamps', async () => {
     const trx = jest.fn();
     const invoice = openInvoice({ stripe_payment_intent_id: 'pi_combined' });
     StripeService.retrievePaymentIntent.mockResolvedValueOnce({
@@ -132,9 +132,10 @@ describe('recordManualPayment — refusal contract', () => {
     await expect(retireLockedPaymentSessionsBeforeSettlement(
       trx,
       invoice,
-      { action: 'recording a manual payment', finishCombinedCleanup: true },
+      { action: 'recording a manual payment' },
     )).resolves.toBeNull();
 
+    expect(StripeService.retrievePaymentIntent).toHaveBeenCalledTimes(1);
     expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith(
       'pi_combined',
       { cancellation_reason: 'abandoned' },
@@ -144,11 +145,7 @@ describe('recordManualPayment — refusal contract', () => {
       'pi_combined',
       { keepInvoiceIds: ['inv-1'] },
     );
-    expect(require('../services/pay-combined').releaseCombinedSessionBeforeCollection).toHaveBeenCalledWith(
-      trx,
-      invoice,
-      { context: 'recording a manual payment' },
-    );
+    expect(require('../services/pay-combined').releaseCombinedSessionBeforeCollection).not.toHaveBeenCalled();
   });
 
   test('unknown tender → 400 listing every accepted method, before any DB read', async () => {
@@ -676,7 +673,7 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
 
   // A settlement fixture over a mutable locked row. The combined-session release can rewrite the row, as clearPaymentIntentStamps does;
   // `terms` feed the fence's own lookups on the plain connection and on the trx.
-  function settle({ pre = card(), locked = card(), onReserve = null, onRelease = null, termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null } = {}) {
+  function settle({ pre = card(), locked = card(), onReserve = null, termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null } = {}) {
     const calls = { update: null, updateArgs: null, paymentsInsert: null };
     const answer = (table, row) => {
       if (table === 'annual_prepay_terms') return recorder({ first: termLinked ? { id: 'term-9' } : null });
@@ -714,7 +711,7 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
         if (onReserve) onReserve(locked);
         return locked.customer_id;
       });
-      PayCombined.releaseCombinedSessionBeforeCollection.mockReset().mockImplementation(async () => { if (onRelease) onRelease(locked); });
+      PayCombined.releaseCombinedSessionBeforeCollection.mockReset().mockResolvedValue(undefined);
       return fn(trx);
     });
     return calls;
@@ -820,11 +817,27 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       expect(calls.paymentsInsert).toBeNull();
     });
 
-    test('the release rewriting the invoice edit time is not drift: the approved payment records (Codex pre-push P1)', async () => {
-      const calls = settle({ onRelease: (row) => { row.updated_at = new Date('2099-01-01T12:00:30Z'); } });
-      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) });
+    test('a combined checkout is neutralized once under the advisory reservation, with sibling stamps cleared on the settlement transaction', async () => {
+      const stamped = card({ stripe_payment_intent_id: 'pi_combined' });
+      const calls = settle({ pre: stamped, locked: stamped });
+      StripeService.retrievePaymentIntent.mockResolvedValue({
+        id: 'pi_combined', status: 'requires_payment_method', metadata: { waves_combined_checkout: 'true' },
+      });
+      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: false });
       expect(out.invoice).toBeDefined();
       expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+      const PayCombined = require('../services/pay-combined');
+      expect(PayCombined.lockCombinedCustomerStable).toHaveBeenCalledWith(expect.any(Function), 'inv-1', 'cust-1');
+      const settlementTrx = PayCombined.lockCombinedCustomerStable.mock.calls[0][0];
+      expect(StripeService.retrievePaymentIntent).toHaveBeenCalledTimes(1);
+      expect(StripeService.cancelPaymentIntent).toHaveBeenCalledTimes(1);
+      expect(PayCombined.clearPaymentIntentStamps).toHaveBeenCalledWith(
+        settlementTrx,
+        'pi_combined',
+        { keepInvoiceIds: ['inv-1'] },
+      );
+      expect(PayCombined.releaseCombinedSessionBeforeCollection).not.toHaveBeenCalled();
+      expect(calls.updateArgs).toMatchObject({ stripe_payment_intent_id: null, processor: null });
     });
 
     test.each([

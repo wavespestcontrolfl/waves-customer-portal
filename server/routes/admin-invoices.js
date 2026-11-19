@@ -3166,7 +3166,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     // down the service customer's credit to mark the AP invoice prepaid would
     // consume the wrong party's money. Reject it before any state change (a
     // payer-facing credit flow is Phase 2).
-    if (invoice.payer_id) {
+    if (invoice.payer_id || invoice.payer_statement_id) {
       return res.status(400).json({ error: 'Invoice is billed to a third-party payer — account credit cannot be applied to payer invoices' });
     }
     try {
@@ -3244,6 +3244,14 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         if (locked.customer_id !== invoice.customer_id) {
           const err = new Error('This invoice\'s owner changed — retry applying credit');
           err.statusCode = 409; err.isOperational = true; throw err;
+        }
+        // Bill-To can be reassigned after the unlocked pre-check while this
+        // request waits for the invoice lock. The reassignment stamps the
+        // locked invoice with its payer; refuse before retiring the customer's
+        // checkout or drawing down the homeowner's account credit.
+        if (locked.payer_id || locked.payer_statement_id) {
+          const err = new Error('Invoice is billed to a third-party payer — account credit cannot be applied to payer invoices');
+          err.statusCode = 400; err.isOperational = true; throw err;
         }
         try {
           assertInvoiceCollectible(locked);
