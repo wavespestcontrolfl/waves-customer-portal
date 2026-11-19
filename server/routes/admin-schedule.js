@@ -5999,7 +5999,8 @@ function stopForecastZone(row) {
   if (ZONE_COORDS[row.zone]) return row.zone;
   const ownAddress = require('../services/stamped-address').stampedAddressDiverges(row);
   const city = ownAddress ? row.service_address_city : row.city;
-  const zip = ownAddress ? row.service_address_zip : row.zip;
+  // getZone matches 5-digit ZIPs exactly: '34211-1234' reads as '34211'.
+  const zip = require('../services/customer-properties').normalizeZip(ownAddress ? row.service_address_zip : row.zip);
   return getZone(city, zip, LOCATION_ZONE_FORECAST[row.zone] || null);
 }
 

@@ -15,6 +15,7 @@ describe('stopForecastZone', () => {
 
   it('reads a stored location id from the row city and ZIP', () => {
     expect(stopForecastZone(row('bradenton', 'Bradenton', '34211'))).toBe('lakewood_ranch');
+    expect(stopForecastZone(row('bradenton', 'Bradenton', '34211-1234'))).toBe('lakewood_ranch');
     expect(stopForecastZone(row('bradenton', 'Bradenton', '34205'))).toBe('bradenton_north');
     expect(stopForecastZone(row('venice', 'North Port', '34287'))).toBe('venice_north_port');
   });
