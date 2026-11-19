@@ -86,6 +86,9 @@ const CC_DIVISION = /^Charlotte County Purchasing\b/i;
 // notices and meetings are not.
 const MFMP_SOLICITATION = /^(?:invitations? to (?:bid|negotiate)|requests? for (?:proposals?|quotes?|quotations?))$/i;
 const PLAIN_ADDRESS = /^[^\s@<>,;()]+@[^\s@<>,;()]+\.[a-z]{2,}$/i;
+// MFMP's Close Date is a bare day ("Dec 3, 2026"). Any other shape (a time added, another format) is not read: a date
+// prefix with its time dropped would become a confirmed deadline hours late.
+const MFMP_CLOSE_DAY = /^[A-Z][a-z]{2,8}\.? \d{1,2}, \d{4}$/;
 
 const MONTH_INDEX = {
   jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
@@ -495,9 +498,10 @@ function parseMfmp(lines) {
   return out;
 }
 
-// "Close Date: Dec 3, 2026" (no time, so 23:59 ET); the Open Date line is never read.
+// "Close Date: Dec 3, 2026" (no time, so 23:59 ET); only that whole shape is read. The Open Date line is never read.
 function mfmpDue(lines) {
-  return mfmpNotice(lines) ? firstDate(labelledValues(lines, 'Close Date'), '23:59') : null;
+  if (!mfmpNotice(lines)) return null;
+  return firstDate(labelledValues(lines, 'Close Date').filter((match) => MFMP_CLOSE_DAY.test(match.value)), '23:59');
 }
 
 const normalizeTitle = (title) => String(title || '')
@@ -532,7 +536,8 @@ function templateFields(template, lines) {
   return {
     fields: TEMPLATE_PARSERS[template](lines),
     due: due ? due(lines) : firstDate(labelledValues(lines, 'Bid Due', { allowBare: template === 'procore' }), '23:59'),
-    jobWalk: firstDate(labelledValues(lines, 'Job Walk'), '23:59'),
+    // MFMP's notice has no job walk line, so none is read from it (a stray line in a changed template is not a date).
+    jobWalk: template === 'mfmp' ? null : firstDate(labelledValues(lines, 'Job Walk'), '23:59'),
   };
 }
 

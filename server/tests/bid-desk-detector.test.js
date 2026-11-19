@@ -525,6 +525,13 @@ describe('MyFloridaMarketPlace advertisement notices', () => {
     expect(detectBidEmail(mfmpNotice({ subject: 'Advertisement Posted - AD-17338' }, { type: 'Agency Decision', number: 'AD-17338' })).bid).toBe(false);
   });
 
+  test('only a bare Close Date day is read; a time or another shape leaves the due date unset', () => {
+    for (const close of ['Dec 3, 2026 14:00', 'Dec 3, 2026 2:00 PM', '12/03/2026', 'Dec 3 2026']) {
+      expect(parseBidEmail(mfmpNotice({}, { close }))).toMatchObject({ due_at: null, due_source_line: null });
+    }
+    expect(parseBidEmail(mfmpNotice({}, { close: 'December 3, 2026' })).due_at.toISOString()).toBe('2026-12-04T04:59:00.000Z');
+  });
+
   test('only one plain address is read as the buyer email', () => {
     expect(parseBidEmail(mfmpNotice({}, { email: 'a@fixture-agency.example, b@fixture-agency.example' })).buyer_email).toBeNull();
     expect(parseBidEmail(mfmpNotice({}, { email: 'Casey.Sample@Fixture-Agency.example' })).buyer_email).toBe('casey.sample@fixture-agency.example');
@@ -547,6 +554,10 @@ describe('MyFloridaMarketPlace advertisement notices', () => {
     });
     // The same fallback reads an unrelated subject as not a bid, as any government mail.
     expect(detectBidEmail({ ...changed, subject: 'Advertisement Posted - AD-1' })).toMatchObject({ bid: false, reason: 'not_bid' });
+    // A stray Job Walk line in a changed template is never read as a date.
+    const walk = mfmpNotice({ subject: 'Advertisement Posted - ITB-1', body_text: 'Job Walk: Dec 1, 2026' });
+    expect(parseBidEmail(walk)).toMatchObject({ source: 'gov_email', job_walk_at: null, due_at: null });
+    expect(parseBidEmail(mfmpNotice({ body_text: `${MFMP_BODY()}\n Job Walk: Dec 1, 2026` })).job_walk_at).toBeNull();
     // Missing the type line is also a changed template.
     expect(detectBidEmail(mfmpNotice({ body_text: MFMP_BODY().replace(/^ Advertisement Type:.*\n/m, '') })))
       .toMatchObject({ bid: true, source: 'gov_email' });
