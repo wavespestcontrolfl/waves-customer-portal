@@ -241,10 +241,11 @@ function SettingRow({ label, detail, checked, onChange }) {
   );
 }
 
-function ManageRow({ onZones, onDisconnect }) {
+function ManageRow({ onZones, onDisconnect, running }) {
+  if (running) return <p style={{ ...meta, margin: '12px 0 0' }}>You can change turf zones or disconnect after this run ends.</p>;
   return (
-    <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'center', marginTop: 12 }}>
-      {onZones ? <TextButton onClick={onZones}>Change turf zones</TextButton> : <span style={meta}>You can change turf zones after this run ends.</span>}
+    <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', marginTop: 12 }}>
+      <TextButton onClick={onZones}>Change turf zones</TextButton>
       <TextButton onClick={onDisconnect}>Disconnect</TextButton>
     </div>
   );
@@ -429,6 +430,7 @@ function RunCallout({ openSheet, turfCount, totalMinutes }) {
 }
 
 function PausedCallout({ go }) {
+  // "End the pause early" lifts the timer's pause only. The visit's instruction still stands, so Run stays unavailable (HoldCallout).
   return (
     <>
       <Callout>
@@ -437,6 +439,19 @@ function PausedCallout({ go }) {
         <div style={{ marginTop: 4 }}><TextButton onClick={() => go('connected')}>End the pause early</TextButton></div>
       </Callout>
       <p style={{ ...meta, margin: '0 0 16px' }}>You can run this week's plan once the pause ends.</p>
+    </>
+  );
+}
+
+// The customer ended the timer's pause early. The treatment's instruction has not ended, so there is no Run button yet.
+function HoldCallout() {
+  return (
+    <>
+      <Callout>
+        <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>The pause is off</div>
+        <div style={{ color: BODY }}>Your timer is back on its own schedule. Your service report still says to skip turf watering until {weekday(1)} at 10:14 AM.</div>
+      </Callout>
+      <p style={{ ...meta, margin: '0 0 16px' }}>You can run this week's plan from here after that time.</p>
     </>
   );
 }
@@ -493,7 +508,7 @@ function MissedCallout({ openSheet, schedule }) {
 }
 
 const LIVE_CALLOUT = {
-  connected: RunCallout, paused: PausedCallout, running: RunningCallout,
+  connected: RunCallout, paused: PausedCallout, running: RunningCallout, hold: HoldCallout,
   auto: AutoCallout, rainskip: RainSkipCallout, missed: MissedCallout,
 };
 const ACTIVITY = {
@@ -523,15 +538,17 @@ const ACTIVITY = {
 
 // The screen is the timer's status: connected | paused | running. The two settings are the
 // customer's own and live on the card, so a pause, a run or a zone edit never changes them.
-function LiveView({ view, go, openSheet, editZones, disconnect, turfZones, turfCount, totalMinutes, model, schedule, auto, setAuto, autoPause, setAutoPause }) {
-  // A pause or a run in progress always shows. Automatic runs only replace the Run button of a normal week.
-  const callout = view === 'connected' && auto.on ? (auto.lastRun || 'auto') : view;
+function LiveView({ view, go, openSheet, editZones, disconnect, turfZones, turfCount, totalMinutes, model, schedule, auto, setAuto, autoPause, setAutoPause, hold }) {
+  // A pause or a run in progress always shows, then a treatment's instruction that still stands.
+  // Automatic runs only replace the Run button of a normal week.
+  const normalWeek = auto.on ? (auto.lastRun || 'auto') : 'connected';
+  const callout = view !== 'connected' ? view : (hold ? 'hold' : normalWeek);
   const LiveCallout = LIVE_CALLOUT[callout];
   return (
     <>
       <StatusLine tone="ok" label="Connected" detail={`${model} · ${zoneCount(turfCount, 'turf ')}`} />
       <LiveCallout go={go} openSheet={openSheet} turfZones={turfZones} turfCount={turfCount} totalMinutes={totalMinutes} schedule={schedule} />
-      {auto.on && view !== 'connected' && (
+      {auto.on && callout !== normalWeek && (
         <p style={{ ...meta, margin: '0 0 16px' }}>Automatic runs are on: {schedule.days.map((day) => DAY_NAMES[day]).join(' and ')} at {clock(schedule.time)}.</p>
       )}
       <div style={{ display: 'grid', gap: 10 }}>
@@ -541,7 +558,7 @@ function LiveView({ view, go, openSheet, editZones, disconnect, turfZones, turfC
           detail="Each week we start your turf zones for that week's minutes, on the days and time you pick." />
       </div>
       <ActivityList rows={(ACTIVITY[callout] || ACTIVITY.usual)()} />
-      <ManageRow onZones={view === 'running' ? null : editZones} onDisconnect={disconnect} />
+      <ManageRow onZones={editZones} onDisconnect={disconnect} running={view === 'running'} />
     </>
   );
 }
@@ -629,6 +646,8 @@ export default function SprinklerTimerCard({ initialView = 'pick', wateringDays 
   const [schedule, setSchedule] = useState(firstSchedule);
   const [auto, setAuto] = useState(start.auto || AUTO_OFF);
   const [autoPause, setAutoPause] = useState(true);
+  // The visit's "skip turf watering until" instruction. It outlasts the timer's pause when the customer ends that early.
+  const hold = start.view === 'paused';
   // Editing turf zones returns to the screen it was opened from, so a pause or an offline warning is not lost.
   const [zonesReturn, setZonesReturn] = useState('connected');
   const turfZones = zones.filter((zone) => zone.turf);
@@ -648,7 +667,7 @@ export default function SprinklerTimerCard({ initialView = 'pick', wateringDays 
         <h2 style={title}>Your sprinkler timer</h2>
         <View view={view} go={setView} openSheet={setSheet} zones={zones} setZones={setZones} turfZones={turfZones} turfCount={turfCount}
           totalMinutes={totalMinutes} model={model} schedule={schedule} pickModel={pickModel} editZones={editZones} saveZones={saveZones}
-          auto={auto} setAuto={setAuto} autoPause={autoPause} setAutoPause={setAutoPause} disconnect={disconnect} />
+          auto={auto} setAuto={setAuto} autoPause={autoPause} setAutoPause={setAutoPause} disconnect={disconnect} hold={hold} />
       </section>
 
       {(sheet === 'consent' || sheet === 'request') && (

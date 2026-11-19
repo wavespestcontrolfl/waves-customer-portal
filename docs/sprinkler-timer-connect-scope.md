@@ -449,9 +449,18 @@ and 3.
   automatic runs are on, the slot is still a chosen day and time, the
   zones are the current turf zones, and the plan is the current one. A run
   that fails any check is discarded and never sent.
-- **Zone edits wait for a run to end.** While a run is in progress the
-  card keeps Stop and does not offer the zone screen. A run finishes on
-  the zones it started with; an edit applies to later runs.
+- **One allowance, checked once.** A plan week prescribes a number of
+  runs. A tap and an automatic run draw on the same number. The check and
+  the ledger write happen in one transaction on the home's link row, used
+  by both paths, so a tap on Tuesday uses up the week's only run and the
+  queued Saturday run is discarded. A start recorded as unknown holds its
+  place in the count until the worker settles it.
+- **Zone edits and disconnect wait for a run to end.** While a run is in
+  progress the card keeps Stop and offers neither. A run finishes on the
+  zones it started with; an edit applies to later runs.
+- **Ending a pause early does not end the instruction.** The customer may
+  lift the timer's pause; it is their timer. Run and automatic runs still
+  wait for the time in the visit's instruction.
 - **The connect sheet changes** for a customer who switches this on: "never
   starts watering on its own" becomes "starts watering only at the day and
   time you set".
