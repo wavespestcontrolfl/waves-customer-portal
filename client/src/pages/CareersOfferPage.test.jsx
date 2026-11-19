@@ -133,6 +133,26 @@ describe('CareersOfferPage — open state', () => {
     expect(box).toBeChecked();
   });
 
+  it('re-reads the offer when the consent save answers 409', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not open', code: 'NOT_OPEN' }, 409))
+      .mockResolvedValueOnce(jsonResponse({ state: 'withdrawn', message: 'This offer is no longer open. Please call Sam.', contactPhone: '(941) 297-5749' }));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.click(await screen.findByLabelText('Text me about this offer'));
+    expect(await screen.findByText(/This offer is no longer open/)).toBeInTheDocument();
+  });
+
+  it('shows the not-valid page when the consent save answers 404', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404));
+    renderPage();
+    fireEvent.click(await screen.findByLabelText('Text me about this offer'));
+    expect(await screen.findByRole('heading', { name: 'This link is not valid.' })).toBeInTheDocument();
+  });
+
   it('re-reads the stored consent when a consent reply is lost, and keeps signing locked until it can', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))

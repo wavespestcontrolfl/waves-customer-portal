@@ -298,7 +298,7 @@ function TermsSection({ terms }) {
   );
 }
 
-function TextConsent({ token, initial, onPending, onStale, locked }) {
+function TextConsent({ token, initial, onPending, onStale, onInvalid, locked }) {
   const [checked, setChecked] = useState(Boolean(initial));
   const [saving, setSaving] = useState(false);
   const [unconfirmed, setUnconfirmed] = useState(false);
@@ -338,7 +338,9 @@ function TextConsent({ token, initial, onPending, onStale, locked }) {
     if (res.ok) setChecked(Boolean(res.body.textConsent));
     else {
       setChecked(!next);
-      setError(res.body?.error || CONNECTION_ERROR);
+      if (res.status === 404) onInvalid();
+      else if (res.status === 409) onStale();
+      else setError(res.body?.error || CONNECTION_ERROR);
     }
     setSaving(false);
     onPending(false);
@@ -515,7 +517,7 @@ function OpenOffer({ token, data, onApplied, onReload, onInvalid }) {
         <p style={{ ...BODY_STYLE, borderTop: '1px solid var(--border, #E2E8F0)', paddingTop: 12 }}>
           Please don&rsquo;t give notice at your current job until you have signed this offer.
         </p>
-        <TextConsent token={token} initial={data.textConsent} onPending={setConsentPending} onStale={onReload} locked={accept.busy || dateReq.busy || decline.busy} />
+        <TextConsent token={token} initial={data.textConsent} onPending={setConsentPending} onStale={onReload} onInvalid={onInvalid} locked={accept.busy || dateReq.busy || decline.busy} />
         <SignBlock
           name={name}
           onName={setName}
@@ -578,8 +580,13 @@ async function readOffer(token) {
   return res.json();
 }
 
+// Keyed by token so a pending write for one link can never land on another.
 export default function CareersOfferPage() {
   const { token } = useParams();
+  return <OfferPage key={token} token={token} />;
+}
+
+function OfferPage({ token }) {
   useGlassSurface(true);
   usePrivatePage();
 
