@@ -171,7 +171,7 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
 
   test.each([
     ['no billing choice on any call', { yesChoice: null }],
-    ['the yes came before the estimate was (re)sent', { estimateOver: { sent_at: new Date(Date.now() - 3600000) } }],
+    ['the yes came before the estimate was (re)sent', { estimateOver: { sent_at: new Date(Date.now() - 5 * 3600000) } }],
   ])('no yes heard (%s): ONE card that says so, with no words', async (_name, setup) => {
     const { bookingCallId } = await phoneYes(setup);
     await expect(sweep()).resolves.toMatchObject({ filed: 1 });
@@ -180,6 +180,18 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     expect(payloadOf(card)).toMatchObject({
       yes_heard: false, billing_choice: null, yes_call_log_id: null, caller_words: null,
       auto_would_accept: false, auto_reason: 'no_yes_heard', auto_message: REASONS.no_yes_heard,
+    });
+  });
+
+  test("a pay-per-application choice without the caller's own words is no yes the card shows", async () => {
+    const { yesCallId, bookingCallId } = await phoneYes();
+    const unquoted = { ...extractionWith('per_application'), evidence: [{ field_path: '/service_request/billing_choice', quote: 'We can bill each time.', speaker: 'agent' }] };
+    await trx('call_log').where({ id: yesCallId }).update({ ai_extraction_enriched: JSON.stringify(unquoted) });
+    await sweep();
+    const [card] = await cards(bookingCallId);
+    expect(card.summary).toMatch(/No yes heard/);
+    expect(payloadOf(card)).toMatchObject({
+      yes_heard: false, billing_choice: null, caller_words: null, auto_would_accept: false, auto_reason: 'yes_without_words',
     });
   });
 
@@ -197,11 +209,21 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     ['the yes call itself also asked for a one-time visit', { yesIntent: 'preventative_one_time' }, 'took_back'],
     ['the call booked a lawn visit, not a pest visit', { visitOver: { service_type: 'Lawn Care' } }, 'no_pest_visit'],
     ['the estimate lapsed', { estimateOver: { expires_at: new Date(Date.now() - 3600000) } }, 'no_open_estimate'],
+    ['the estimate was first sent after the booking call', { estimateOver: { sent_at: new Date(Date.now() - 3600000), created_at: new Date(Date.now() - 3600000) } },
+      'no_open_estimate'],
   ])('no card when %s', async (_name, setup, reason) => {
     const { customerId, bookingCallId } = await phoneYes(setup);
     await expect(evaluatePhoneYes({ callLogId: bookingCallId, customerId })).resolves.toEqual({ card: false, reason });
     await expect(sweep()).resolves.toMatchObject({ filed: 0 });
     expect(await cards(bookingCallId)).toEqual([]);
+  });
+
+  test('no card when the pest visit is linked and only a lawn visit is unlinked', async () => {
+    const { customerId, est, bookingCallId, visitId } = await phoneYes();
+    await trx('scheduled_services').where({ id: visitId }).update({ source_estimate_id: est.id });
+    await visit(customerId, bookingCallId, { service_type: 'Lawn Care', scheduled_date: inDays(12) });
+    await expect(evaluatePhoneYes({ callLogId: bookingCallId, customerId })).resolves.toEqual({ card: false, reason: 'no_pest_visit' });
+    await expect(sweep()).resolves.toMatchObject({ filed: 0 });
   });
 
   test('a yes on a sandbox call is not heard', async () => {
@@ -257,14 +279,23 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     expect(payloadOf(card)).toMatchObject({ auto_would_accept: false, auto_reason: reason });
   });
 
-  test('a call from the customer still being read waits; once read, the card files', async () => {
-    const { customerId, bookingCallId } = await phoneYes();
-    const laterCallId = await call(customerId, null, { created_at: new Date(Date.now() - 3600000), processing_status: 'processing' });
+  test.each([
+    ['being read, after the yes', { hoursAgo: 1, status: 'processing' }, {}, 'newer_call'],
+    ['queued for a retry, after the yes', { hoursAgo: 1, status: 'pending' }, {}, 'newer_call'],
+    ['not started, after the yes', { hoursAgo: 1, status: null }, {}, 'newer_call'],
+    ['being read, between the send and the booking, with no yes yet', { hoursAgo: 5, status: 'processing' }, { yesChoice: null }, 'no_yes_heard'],
+    ['being read, after a booking call that could not be read', { hoursAgo: 1, status: 'processing' }, {}, 'booking_call_unread', true],
+  ])('a call from the customer %s waits; once read, the card files', async (_name, unread, setup, reason, bookingUnread = false) => {
+    const fixture = await phoneYes(setup);
+    if (bookingUnread) await trx('call_log').where({ id: fixture.bookingCallId }).update({ v2_extraction_status: 'failed' });
+    const unreadCallId = await call(fixture.customerId, null, { created_at: new Date(Date.now() - unread.hoursAgo * 3600000), processing_status: unread.status });
+    await expect(evaluatePhoneYes({ callLogId: fixture.bookingCallId, customerId: fixture.customerId }))
+      .resolves.toEqual({ card: false, reason: 'call_still_processing' });
     await expect(sweep()).resolves.toMatchObject({ filed: 0 });
-    await trx('call_log').where({ id: laterCallId }).update({ processing_status: 'processed' });
+    await trx('call_log').where({ id: unreadCallId }).update({ processing_status: 'processed' });
     await expect(sweep()).resolves.toMatchObject({ filed: 1 });
-    const [card] = await cards(bookingCallId);
-    expect(payloadOf(card).auto_reason).toBe('newer_call');
+    const [card] = await cards(fixture.bookingCallId);
+    expect(payloadOf(card).auto_reason).toBe(reason);
   });
 
   test('two open estimates: the card names both and stays until neither is open or lapsed', async () => {
@@ -282,6 +313,21 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     await expect(sweep()).resolves.toMatchObject({ closed: 1 });
     [card] = await cards(bookingCallId);
     expect(card).toMatchObject({ status: 'dismissed', resolution_source: 'auto', resolution_rule: 'call_phone_yes_moot' });
+  });
+
+  test("two open estimates: another estimate's accept keeps the card; linking the booked visit closes it", async () => {
+    const { customerId, est, bookingCallId, visitId } = await phoneYes();
+    const lawn = await estimate(customerId);
+    await sweep();
+    await trx('estimates').where({ id: lawn.id }).update({ status: 'accepted', accepted_at: new Date() });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    let [card] = await cards(bookingCallId);
+    expect(card.status).toBe('open');
+    await trx('scheduled_services').where({ id: visitId }).update({ source_estimate_id: est.id });
+    await expect(sweep()).resolves.toMatchObject({ closed: 1 });
+    [card] = await cards(bookingCallId);
+    expect(card).toMatchObject({ status: 'dismissed', resolution_rule: 'call_phone_yes_moot' });
+    expect(card.resolution_note).toContain('linked to an estimate');
   });
 
   test('the card stays open after the estimate expires and after the visit is done', async () => {
