@@ -15,25 +15,34 @@ function whereAwaitingAuthentication(query, table) {
 
 // Both the signed webhook and the operator's server-side Stripe retrieval
 // must identify the same saved-card attempt, invoice, owner and tender.
-function matchingCancellation(intent, database, lockInvoice = false) {
+function matchingSavedCardIntent(intent, database, { lockInvoice = false, settled = false } = {}) {
   const meta = intent.metadata || {};
-  if (intent.status !== 'canceled' || !intent.id || meta.source !== 'admin_card_on_file') return;
+  if (!intent.id || meta.source !== 'admin_card_on_file') return;
   if (![meta.waves_invoice_id, meta.waves_customer_id, meta.saved_card_attempt_id].every(isUuid)) return;
   const methodId = (typeof intent.payment_method === 'string' ? intent.payment_method : intent.payment_method?.id)
     || intent.last_payment_error?.payment_method?.id || null;
   const invoice = database('invoices').select('id')
     .where({ id: meta.waves_invoice_id, customer_id: meta.waves_customer_id });
+  if (settled) invoice.where({ status: 'paid', stripe_payment_intent_id: intent.id });
   if (lockInvoice) invoice.forShare();
   const query = database('stripe_invoice_charge_attempts')
     .where({ id: meta.saved_card_attempt_id, invoice_id: meta.waves_invoice_id })
     .whereIn('invoice_id', invoice)
-    .where(function relevantAttempt() {
-      this.whereIn('status', ['claimed', 'ambiguous']).orWhere({ status: 'failed', decline_code: 'authentication_required' });
-    })
     .where(function compatibleIntent() {
       this.whereNull('stripe_payment_intent_id').orWhere('stripe_payment_intent_id', intent.id);
     });
   if (methodId) query.where({ stripe_payment_method_id: methodId });
+  return { query, methodId };
+}
+
+function matchingCancellation(intent, database, lockInvoice = false) {
+  if (intent.status !== 'canceled') return;
+  const match = matchingSavedCardIntent(intent, database, { lockInvoice });
+  if (!match) return;
+  const { query, methodId } = match;
+  query.where(function relevantAttempt() {
+    this.whereIn('status', ['claimed', 'ambiguous']).orWhere({ status: 'failed', decline_code: 'authentication_required' });
+  });
   const evidence = {
     authentication_canceled_intent_id: intent.id,
     ...(methodId ? { stripe_payment_intent_id: intent.id } : {}),
@@ -46,6 +55,24 @@ function matchingCancellation(intent, database, lockInvoice = false) {
 async function recordAuthenticationCancellation(intent, database) {
   const match = matchingCancellation(intent, database);
   if (match) await match.query.update(match.evidence);
+}
+
+// Run inside the transaction that pays the invoice. A signed success alone
+// cannot release a hold when the payment was quarantined or linked elsewhere.
+async function recordAuthenticationSettlement(intent, trx) {
+  if (intent.status !== 'succeeded') return;
+  const match = matchingSavedCardIntent(intent, trx, { settled: true });
+  if (!match) return;
+  const { query, methodId } = match;
+  if (!methodId) query.where({ stripe_payment_intent_id: intent.id });
+  await query.where({ status: 'failed', decline_code: 'authentication_required' }).whereNotNull('resolved_at')
+    .whereExists(trx('payments').select('id').where({
+      customer_id: intent.metadata.waves_customer_id, stripe_payment_intent_id: intent.id, status: 'paid',
+    }))
+    .update({
+      status: 'succeeded', stripe_payment_intent_id: intent.id, decline_code: null, error_message: null,
+      resolved_at: trx.fn.now(), updated_at: trx.fn.now(),
+    });
 }
 
 async function verifySavedCardCancellation({ attemptId, intentId, stripe, database, execute = false }) {
@@ -73,4 +100,4 @@ async function verifySavedCardCancellation({ attemptId, intentId, stripe, databa
   return { attemptId, intentId, result: execute ? 'cancellation_recorded' : 'cancellation_verified' };
 }
 
-module.exports = { whereAwaitingAuthentication, recordAuthenticationCancellation, verifySavedCardCancellation };
+module.exports = { whereAwaitingAuthentication, recordAuthenticationCancellation, recordAuthenticationSettlement, verifySavedCardCancellation };

@@ -9,7 +9,7 @@
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 const migration = require('../models/migrations/20261119081500_saved_card_authentication_cancellation');
-const { recordAuthenticationCancellation, verifySavedCardCancellation } = require('../services/invoice-payment-authentication');
+const { recordAuthenticationCancellation, recordAuthenticationSettlement, verifySavedCardCancellation } = require('../services/invoice-payment-authentication');
 jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => null) }));
 jest.mock('../services/completion-balance-sweep', () => ({ dunningStoppedInvoiceIds: jest.fn(async () => new Set()) }));
 jest.mock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn(async () => {}) }));
@@ -61,6 +61,7 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     });
     await app.schema.createTable('payments', (t) => {
       t.uuid('id').primary();
+      t.uuid('customer_id');
       t.string('status');
       t.string('stripe_payment_intent_id');
       t.jsonb('metadata');
@@ -284,6 +285,33 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     }
     expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ chargeAttemptId: attemptId });
   }, 15000);
+
+  test('only the locally settled authentication challenge stays resolved when a dispute reopens its invoice', async () => {
+    const { invoiceId, attemptId, intent, customerId } = await authenticationFixture(app);
+    const paid = { ...intent, status: 'succeeded' };
+    const invoice = () => app('invoices').where({ id: invoiceId });
+    const attempt = () => app('stripe_invoice_charge_attempts').where({ id: attemptId }).first();
+    const settle = (pi = paid) => app.transaction((trx) => recordAuthenticationSettlement(pi, trx));
+    await invoice().update({ status: 'paid', stripe_payment_intent_id: paid.id });
+    await settle();
+    expect((await attempt()).status).toBe('failed');
+    await app('payments').insert({ id: randomUUID(), customer_id: customerId, status: 'paid', stripe_payment_intent_id: paid.id });
+    await settle({ ...paid, payment_method: 'pm_wrong' });
+    await settle({ ...paid, metadata: { ...paid.metadata, saved_card_attempt_id: randomUUID() } });
+    await settle({ ...paid, status: 'processing' });
+    expect((await attempt()).status).toBe('failed');
+    await expect(app.transaction(async (trx) => {
+      await recordAuthenticationSettlement(paid, trx);
+      throw new Error('settlement rolled back');
+    })).rejects.toThrow('settlement rolled back');
+    expect((await attempt()).status).toBe('failed');
+    await settle();
+    await settle();
+    expect(await attempt()).toMatchObject({ status: 'succeeded', stripe_payment_intent_id: paid.id, decline_code: null });
+    await invoice().update({ status: 'sent', stripe_payment_intent_id: null });
+    await app('payments').where({ stripe_payment_intent_id: paid.id }).update({ status: 'disputed' });
+    expect(await verdict(invoiceId, app, { checkout: true })).toBeNull();
+  });
 
   test('combined checkout waiting for a sibling lock sees the new authentication decline before collection', async () => {
     const { verifyAllocationLocked } = require('../services/pay-combined');

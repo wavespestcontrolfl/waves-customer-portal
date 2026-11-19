@@ -5743,8 +5743,11 @@ async function assertInvoiceGenuinelyUnsettledLocked(trx, id) {
   }
   // Same reconciliation guard the termite-annual-renewal grace lapse used
   // to run in its OWN separate transaction — folded in here so it runs
-  // under this SAME row lock too.
-  await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
+  // under this SAME row lock too. Voiding is a new collection decision, so
+  // a resolved authentication_required attempt still blocks until its exact
+  // PaymentIntent cancellation is recorded. Keep the writing mode here so
+  // ordinary stale-claim release/promotion still runs at the actual mutation.
+  await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx, { checkout: true });
 }
 
 // The money a cancel's void moves for one invoice, as the confirmation card

@@ -580,7 +580,22 @@ function whereAttemptPresented(attempts) {
   // Same chain shape as whereAttemptSubmitted (where → callback), so every
   // query-builder stub built for that predicate answers this one too.
   return attempts.where(function providerEvidence() {
-    this.whereNotNull('a.stripe_payment_intent_id');
+    this.whereNotNull('a.stripe_payment_intent_id')
+      // An off-session authentication_required decline owns a real PI, but
+      // the customer has not completed (or canceled) that challenge yet and
+      // the PI can still settle. It is payment-in-motion evidence, not fresh
+      // proof that an otherwise-undelivered renewal was presented for grace
+      // lapse. Share the exact predicate used by checkout/credit collection
+      // so cancellation identity cannot drift between the two fences.
+      .where(function notAwaitingAuthentication() {
+        // Preserve legacy PI-backed attempts whose nullable decline_code was
+        // never populated. Without the explicit NULL arm, SQL evaluates
+        // NOT(decline_code = 'authentication_required' AND ...) as UNKNOWN
+        // and silently drops valid historical presentation evidence.
+        this.whereNull('a.decline_code').orWhereNot(function unresolvedAuthenticationChallenge() {
+          require('./invoice-payment-authentication').whereAwaitingAuthentication(this, 'a');
+        });
+      });
   });
 }
 
@@ -3417,7 +3432,14 @@ async function parentStillDecidableForLapse(trx, fresh) {
 async function reconciliationStatusForVoid(trx, invoiceId) {
   if (!invoiceId) return { ok: true };
   try {
-    await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoiceId, trx);
+    // Lapsing is a new collection decision: unlike settlement recording, it
+    // must also honor a resolved authentication_required attempt whose exact
+    // PI cancellation has not been recorded. This is the executing lapse path,
+    // so keep the fence's normal stale-claim release/promotion behavior; only
+    // read-only previews opt out of those recovery writes.
+    await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoiceId, trx, {
+      checkout: true,
+    });
     return { ok: true };
   } catch (reconErr) {
     return { ok: false, reason: reconErr.message };

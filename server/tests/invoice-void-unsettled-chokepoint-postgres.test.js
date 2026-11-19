@@ -167,6 +167,34 @@ postgres('voidInvoice({ requireUnsettled: true }) — real Postgres chokepoint',
     expect(fresh.status).toBe('sent');
   });
 
+  test('an authentication challenge committed after grace preflight is caught by the final locked void guard', async () => {
+    const { invoiceId } = await insertInvoice({ status: 'sent' });
+    const StripeService = require('../services/stripe');
+
+    // The grace preflight completed while the invoice was still clear. The
+    // saved-card worker then commits authentication_required in the gap before
+    // voidInvoice opens its own transaction and takes the invoice row lock.
+    await expect(StripeService.assertNoInvoiceChargeReconciliationPending(invoiceId, db, { checkout: true }))
+      .resolves.toBeUndefined();
+    const attemptId = randomUUID();
+    await db('stripe_invoice_charge_attempts').insert({
+      id: attemptId,
+      invoice_id: invoiceId,
+      stripe_payment_method_id: 'pm_test_auth_chokepoint',
+      stripe_payment_intent_id: `pi_${attemptId.replaceAll('-', '')}`,
+      status: 'failed',
+      decline_code: 'authentication_required',
+      idempotency_key: randomUUID(),
+      submitted_at: new Date(),
+      resolved_at: new Date(),
+    });
+
+    await expect(InvoiceService.voidInvoice(invoiceId, { requireUnsettled: true }))
+      .rejects.toMatchObject({ code: 'STRIPE_CHARGE_IN_PROGRESS', chargeAttemptId: attemptId });
+    await expect(db('invoices').where({ id: invoiceId }).first('status'))
+      .resolves.toMatchObject({ status: 'sent' });
+  });
+
   // Every EXISTING caller (requireUnsettled defaults off) stays
   // byte-identical — a credit-settled 'prepaid' invoice is deliberately
   // voidable for them (e.g. an operator's own un-prepay action), per

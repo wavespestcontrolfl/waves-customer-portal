@@ -65,6 +65,10 @@ jest.mock('../services/receipt-delivery-queue', () => ({
   scheduleReceiptDeliveryDrain: jest.fn(),
 }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
+jest.mock('../services/invoice-payment-authentication', () => ({
+  ...jest.requireActual('../services/invoice-payment-authentication'),
+  recordAuthenticationSettlement: jest.fn(),
+}));
 jest.mock('../services/estimate-deposits', () => ({
   handleDepositChargeReversed: jest.fn(async () => ({ handled: false })),
   handleDepositIntentSucceeded: jest.fn(async () => {}),
@@ -139,6 +143,7 @@ function mockMakeBuilder(table, { inTrx } = {}) {
     // there is never a pre-existing row — that is the path under test.
     if (table === 'payments') {
       if (inTrx && b._forUpdate && mockState.fallbackPayment) return mockState.fallbackPayment;
+      if (b._wheres.some((where) => where.status === 'disputed')) return null;
       return (!inTrx && mockState.processingPaymentsUpdated > 0) ? { id: 'pay-processing' } : null;
     }
     return null;
@@ -196,6 +201,22 @@ function succeededPI(overrides = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   resetMockState();
+});
+
+test.each([0, 1])('saved-card settlement closes its authentication attempt in the invoice transaction (%i existing payments)', async (existing) => {
+  mockState.processingPaymentsUpdated = existing;
+  const finish = require('../services/invoice-payment-authentication').recordAuthenticationSettlement;
+  const pi = succeededPI({ status: 'succeeded', metadata: { source: 'admin_card_on_file', base_amount: '100' } });
+  finish.mockImplementationOnce((_intent, trx) => {
+    expect(trx).not.toBe(require('../models/db'));
+    expect(trx).toHaveBeenCalledWith('invoices');
+    expect(mockState.updates).toContainEqual(expect.objectContaining({
+      table: 'invoices', inTrx: true, payload: expect.objectContaining({ status: 'paid' }),
+    }));
+  });
+  await handlePaymentIntentSucceeded(pi);
+  expect(finish).toHaveBeenCalledTimes(1);
+  expect(finish).toHaveBeenCalledWith(pi, expect.any(Function));
 });
 
 describe('payment settlement takes ownership from the LOCKED invoice row', () => {

@@ -78,7 +78,7 @@ async function withServer(fn) {
   }
 }
 
-function setupHandoffDb({ assigned = true } = {}) {
+function setupHandoffDb({ assigned = true, transactionState = null } = {}) {
   const invoice = {
     id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: '100.00',
     credit_applied: '0.00', stripe_payment_intent_id: null,
@@ -102,7 +102,15 @@ function setupHandoffDb({ assigned = true } = {}) {
     if (table === 'terminal_handoff_tokens') return queryFor(table, null);
     throw new Error(`unexpected table ${table}`);
   });
-  db.transaction = jest.fn(async (callback) => callback(db));
+  db.transaction = jest.fn(async (callback) => {
+    const snapshot = transactionState ? { ...transactionState } : null;
+    try {
+      return await callback(db);
+    } catch (err) {
+      if (snapshot) Object.assign(transactionState, snapshot);
+      throw err;
+    }
+  });
   return { invoice, tableReads, tokenInserts };
 }
 
@@ -136,7 +144,8 @@ describe('technicianMayCollectInvoice', () => {
 
 describe('POST /handoff checkout reconciliation fence', () => {
   test.each([
-    ['authentication hold', 'STRIPE_CHARGE_IN_PROGRESS', false, 'payment_charge_in_progress'],
+    ['active or authenticating claim', 'STRIPE_CHARGE_IN_PROGRESS', false, 'payment_charge_in_progress'],
+    ['submitted or ambiguous claim', 'STRIPE_AMBIGUOUS_OUTCOME', true, 'payment_reconciliation_pending'],
     ['received funds', 'STRIPE_CHARGED_DB_FAILED', true, 'payment_reconciliation_pending'],
   ])('returns the established 409 for a locked %s before credit or token work', async (
     _label,
@@ -155,7 +164,7 @@ describe('POST /handoff checkout reconciliation fence', () => {
 
     expect(status).toBe(409);
     expect(body).toMatchObject({ code: responseCode, reconciliationRequired });
-    expect(mockChargeFence).toHaveBeenCalledWith('inv-1', db, { readOnly: true, checkout: true });
+    expect(mockChargeFence).toHaveBeenCalledWith('inv-1', db, { checkout: true });
     expect(mockAutoApplyCredit).not.toHaveBeenCalled();
     expect(state.tableReads).not.toContain('terminal_handoff_tokens');
     expect(state.tokenInserts).toEqual([]);
@@ -191,9 +200,14 @@ describe('POST /handoff checkout reconciliation fence', () => {
     expect(mockJwtSign).not.toHaveBeenCalled();
   });
 
-  test('continues into ordinary automatic-credit handling after a clear fence', async () => {
-    const state = setupHandoffDb();
+  test('commits an eligible stale pre-submit release before automatic-credit handling', async () => {
+    const transactionState = { attemptStatus: 'claimed' };
+    const state = setupHandoffDb({ transactionState });
     mockServices.mockResolvedValue(true);
+    mockChargeFence.mockImplementationOnce(async (_invoiceId, _trx, options) => {
+      expect(options).toEqual({ checkout: true });
+      transactionState.attemptStatus = 'failed';
+    });
     mockAutoApplyCredit.mockImplementationOnce(async () => {
       state.invoice.status = 'prepaid';
       return { applied: 100, fullyCovered: true };
@@ -203,10 +217,35 @@ describe('POST /handoff checkout reconciliation fence', () => {
 
     expect(status).toBe(400);
     expect(body).toEqual({ error: 'Invoice is now covered by account credit — no in-person collection needed' });
-    expect(mockChargeFence).toHaveBeenCalledWith('inv-1', db, { readOnly: true, checkout: true });
+    expect(transactionState.attemptStatus).toBe('failed');
+    expect(mockChargeFence).toHaveBeenCalledWith('inv-1', db, { checkout: true });
     expect(mockAutoApplyCredit).toHaveBeenCalledWith('inv-1', { trx: db, deferFullCoverageSideEffects: true });
     expect(mockChargeFence.mock.invocationCallOrder[0]).toBeLessThan(mockAutoApplyCredit.mock.invocationCallOrder[0]);
     expect(mockPostCoverage).toHaveBeenCalledWith('inv-1');
     expect(state.tableReads).not.toContain('terminal_handoff_tokens');
+  });
+
+  test('commits stale submitted-claim promotion while refusing credit and token minting', async () => {
+    const transactionState = { attemptStatus: 'claimed' };
+    const state = setupHandoffDb({ transactionState });
+    mockServices.mockResolvedValue(true);
+    mockChargeFence.mockImplementationOnce(async () => {
+      transactionState.attemptStatus = 'ambiguous';
+      throw Object.assign(new Error('submitted outcome is unresolved'), {
+        code: 'STRIPE_AMBIGUOUS_OUTCOME',
+        reconciliationRequired: true,
+      });
+    });
+
+    const { status, body } = await postHandoff();
+
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ code: 'payment_reconciliation_pending', reconciliationRequired: true });
+    expect(transactionState.attemptStatus).toBe('ambiguous');
+    expect(mockAutoApplyCredit).not.toHaveBeenCalled();
+    expect(state.tableReads).not.toContain('terminal_handoff_tokens');
+    expect(state.tokenInserts).toEqual([]);
+    expect(mockJwtSign).not.toHaveBeenCalled();
+    expect(Stripe).not.toHaveBeenCalled();
   });
 });

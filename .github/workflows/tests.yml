@@ -219,7 +219,8 @@ jobs:
             tests/sms-lead-extraction-postgres.test.js \
             tests/sms-reply-outcomes-postgres.test.js \
             tests/supplies-consumption.test.js \
-            tests/termite-renewal-bill-to-fence-postgres.test.js
+            tests/termite-renewal-bill-to-fence-postgres.test.js \
+            tests/termite-renewal-presentation-authentication-postgres.test.js
       # The sweep's commands (sweep #7246 B1, 2026-10-31) run suites whose
       # own variable no step set. Every suite that reads REPAIR_TEST_DATABASE_URL
       # builds its own throwaway schema, so its grep lane picks up a new one by

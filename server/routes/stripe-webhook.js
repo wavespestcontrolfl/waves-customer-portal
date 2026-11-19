@@ -8,6 +8,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { insertHealthAlert, lockAlertCustomers } = require('../services/health-alert-insert');
 const { isBankMethodType } = require('../services/autopay-eligibility');
+const { recordAuthenticationSettlement } = require('../services/invoice-payment-authentication');
 const stripeConfig = require('../config/stripe-config');
 const {
   classifyExistingWebhookEvent,
@@ -2150,6 +2151,8 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
           throw new Error(`Ambiguous saved-card attempt ${matchingAmbiguousAttempt.id} no longer owns invoice ${invoice.id}`);
         }
         logger.info(`[stripe-webhook] Bound ambiguous saved-card attempt ${matchingAmbiguousAttempt.id} to succeeded PI ${piId}`);
+      } else {
+        await recordAuthenticationSettlement(paymentIntent, trx);
       }
       logger.info(`[stripe-webhook] Inserted missing paid payment row for PI: ${piId}`);
       return null;
@@ -2189,10 +2192,19 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   if (details.cardBrand) invoiceUpdates.card_brand = details.cardBrand;
   if (details.cardLastFour) invoiceUpdates.card_last_four = details.cardLastFour;
   if (details.receiptUrl) invoiceUpdates.receipt_url = details.receiptUrl;
-  let invoiceUpdated = await db('invoices')
+  const markInvoicePaid = (database) => database('invoices')
     .where({ stripe_payment_intent_id: piId })
     .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES)
     .update(invoiceUpdates);
+  // The fallback committed new payment rows and their holds together. A
+  // pre-existing payment row finishes settlement with this invoice update.
+  let invoiceUpdated = !fallbackLinkedInvoiceId && paymentIntent.metadata?.source === 'admin_card_on_file'
+    ? await db.transaction(async (trx) => {
+      const count = await markInvoicePaid(trx);
+      await recordAuthenticationSettlement(paymentIntent, trx);
+      return count;
+    })
+    : await markInvoicePaid(db);
   if (fallbackLinkedInvoiceId && invoiceUpdated === 0) {
     invoiceUpdated = 1;
   }

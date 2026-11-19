@@ -308,19 +308,32 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     // annual-prepay term sync) are deferred and run after commit.
     const { autoApplyAccountCreditIfEnabled, runPostFullCoverageSideEffects } = require('../services/customer-credit');
     let handoffCreditResult = null;
-    const ownershipHeld = await db.transaction(async (trx) => {
+    const handoffRefusal = await db.transaction(async (trx) => {
       // Billing lock order (invoice → customer → visit), the order the credit
       // apply and saved-card collection take, so a concurrent collection
       // cannot deadlock against this ownership check (pre-push P1). The
       // credit apply below re-locks the same rows within this transaction.
       await trx('invoices').where({ id: invoice_id }).forUpdate().first('id');
       if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
-      if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) return false;
-      await assertNoInvoiceChargeReconciliationPending(invoice_id, trx, { readOnly: true, checkout: true });
+      if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) {
+        return { status: 404, body: { error: 'Invoice not found' } };
+      }
+      // This is intentionally the writing checkout fence under the invoice
+      // lock. A saved-card owner must cross the same lock before it can mark a
+      // claim submitted, so an expired pre-submit claim is safe to release.
+      // Keep an established conflict inside this transaction so a stale
+      // submitted claim's promotion to ambiguous commits, but never reach the
+      // credit draw when any competing-payment evidence remains.
+      try {
+        await assertNoInvoiceChargeReconciliationPending(invoice_id, trx, { checkout: true });
+      } catch (err) {
+        if (!savedCardChargeSuppressesAlternateCollection(err)) throw err;
+        return { status: 409, body: terminalChargeFenceResponse(err) };
+      }
       handoffCreditResult = await autoApplyAccountCreditIfEnabled(invoice_id, { trx, deferFullCoverageSideEffects: true });
-      return true;
+      return null;
     });
-    if (!ownershipHeld) return res.status(404).json({ error: 'Invoice not found' });
+    if (handoffRefusal) return res.status(handoffRefusal.status).json(handoffRefusal.body);
     handoffAppliedCredit = handoffCreditResult?.applied || 0;
     if (handoffCreditResult?.fullyCovered) {
       try {

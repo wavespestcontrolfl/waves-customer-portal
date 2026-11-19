@@ -215,7 +215,7 @@ describe('codex #5568 r15', () => {
 
   test('the handoff locks ownership and applies credit in one transaction, before the prepaid exit (superseded by r16)', () => {
     const s = src('routes/stripe-terminal.js');
-    const lock = s.indexOf('if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) return false;');
+    const lock = s.indexOf('if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice)))');
     const apply = s.indexOf('autoApplyAccountCreditIfEnabled(invoice_id, { trx, deferFullCoverageSideEffects: true })', lock);
     const prepaidExit = s.indexOf("if (invoice.status === 'prepaid') {", apply);
     expect(lock).toBeGreaterThan(-1);
@@ -241,13 +241,15 @@ describe('codex #5568 r16', () => {
 
     test('the locked ownership check runs first inside the transaction, and credit only after it passes', () => {
       const h = handler();
-      const txn = h.indexOf('const ownershipHeld = await db.transaction(async (trx) => {');
-      const lock = h.indexOf('if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) return false;');
+      const txn = h.indexOf('const handoffRefusal = await db.transaction(async (trx) => {');
+      const lock = h.indexOf('if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice)))');
+      const denied = h.indexOf("return { status: 404, body: { error: 'Invoice not found' } };", lock);
       const apply = h.indexOf('autoApplyAccountCreditIfEnabled(invoice_id, { trx, deferFullCoverageSideEffects: true })');
-      const miss = h.indexOf("if (!ownershipHeld) return res.status(404).json({ error: 'Invoice not found' });");
+      const miss = h.indexOf('if (handoffRefusal) return res.status(handoffRefusal.status).json(handoffRefusal.body);');
       expect(txn).toBeGreaterThan(0);
       expect(lock).toBeGreaterThan(txn);
-      expect(apply).toBeGreaterThan(lock);
+      expect(denied).toBeGreaterThan(lock);
+      expect(apply).toBeGreaterThan(denied);
       expect(miss).toBeGreaterThan(apply);
     });
 
@@ -262,7 +264,7 @@ describe('codex #5568 r16', () => {
 
     test('deferred full-coverage side effects run after commit, the invoice is re-read, then the prepaid exit', () => {
       const h = handler();
-      const commit = h.indexOf("if (!ownershipHeld) return res.status(404)");
+      const commit = h.indexOf('if (handoffRefusal) return res.status(handoffRefusal.status)');
       const effects = h.indexOf('await runPostFullCoverageSideEffects(invoice_id);');
       const reread = h.indexOf("invoice = (await db('invoices').where({ id: invoice_id }).first()) || invoice;");
       const prepaid = h.indexOf("if (invoice.status === 'prepaid') {");
@@ -386,7 +388,7 @@ describe('codex #5568 r16', () => {
 describe('handoff lock order (pre-push P1)', () => {
   test('invoice then customer are locked before the visit ownership check', () => {
     const s = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes/stripe-terminal.js'), 'utf8');
-    const trxAt = s.indexOf('const ownershipHeld = await db.transaction(async (trx) => {');
+    const trxAt = s.indexOf('const handoffRefusal = await db.transaction(async (trx) => {');
     const inv = s.indexOf("await trx('invoices').where({ id: invoice_id }).forUpdate().first('id');", trxAt);
     const cust = s.indexOf("await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');", trxAt);
     const visit = s.indexOf('technicianMayCollectInvoiceLocked(trx, req, invoice)', trxAt);

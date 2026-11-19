@@ -807,8 +807,10 @@ leaves the balance available.
 A verified cancellation for the same attempt and PaymentIntent clears that
 attempt's authentication hold. After webhook history expires, an operator can
 verify the PaymentIntent directly using the saved-card cancellation command
-in `ops/agents/README.md`. The `/confirm` endpoint can still record money
-the processor has already accepted.
+in `ops/agents/README.md`. A successful challenge closes its attempt when
+the matching Stripe payment and paid invoice are recorded. A later dispute
+can reopen that invoice without restoring the old authentication hold.
+The `/confirm` endpoint can still record money the processor has already accepted.
 
 Off-Stripe tender block (2026-08-29; ZELLE-ONLY since 2026-09-02 — owner
 ruling, Venmo and PayPal retired over their fees): the GET payload carries
@@ -6505,7 +6507,9 @@ contact field, address, note or other invoice rides this reply.
 For an invoice with a saved-card payment awaiting bank verification, both
 `POST /api/stripe/terminal/handoff` and `/payment-intent` return HTTP 409
 with `code: payment_charge_in_progress`. Handoff creation checks under the
-invoice lock before applying account credit or issuing the token. Terminal
+invoice lock before applying account credit or issuing the token. It can release
+an expired claim with no sign of submission. A submitted claim with an unknown
+outcome stays blocked for reconciliation. Terminal
 checks again before creating the card-present intent and under the invoice
 lock before returning its client secret. If the hold appears during creation, the handoff must be reissued
 and the response includes `newHandoffRequired: true`. The post-tap
