@@ -33,6 +33,7 @@ jest.mock('../services/rebooker', () => ({
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { openMembers } = require('../services/visit-groups');
 const { probeMoveConflicts } = require('../services/rebooker');
+const { ROAD_LEGS } = require('../services/auto-dispatch/road-check');
 const {
   findValidCandidateSlots,
   computeCurrentPlacement,
@@ -643,7 +644,9 @@ describe('visit-group exclusion (Codex pre-push P1)', () => {
       return c;
     };
     await computeCurrentPlacement(grouped, prefs, { ...ctxBase(), db: withVisit(db) });
-    expect(new Set(capturedExcludeIds)).toEqual(new Set(['s1', 'sib1']));
+    // The source snapshot includes the mover so its fresh coordinates and
+    // sequence fields are read with its neighbours. Its sibling stays out.
+    expect(new Set(capturedExcludeIds)).toEqual(new Set(['sib1']));
   });
 });
 
@@ -822,9 +825,9 @@ test('openMembers is read exactly once per evaluation; the current placement and
 
   await findValidCandidateSlots(grouped, prefs, { ...ctxBase(), db });
   expect(openMembers).toHaveBeenCalledTimes(1);
-  // Both sides' day-stop reads (the candidates' batch and the current day)
-  // exclude the same unit.
-  expect(dayStopExcludes).toEqual([['s1', 'sib1'], ['s1', 'sib1']]);
+  // The source snapshot includes the mover and excludes its sibling. The
+  // candidate-day read excludes the complete moving unit.
+  expect(dayStopExcludes).toEqual([['sib1'], ['s1', 'sib1']]);
   expect([...probeMoveConflicts.mock.calls[0][0].excludeServiceIds].sort()).toEqual(['s1', 'sib1']);
 
   // A later evaluation (the retry re-evaluation) reads the group afresh, once.
@@ -952,6 +955,66 @@ test('day-stop rows carry route_order/created_at and the co-visit inputs — a l
   const [single] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand, { db: dbWith([coVisit('p')]) }, {});
   expect(pair.route_minutes).toBeCloseTo(single.route_minutes, 5);
   expect(pair.detour_minutes).toBeCloseTo(single.detour_minutes, 5);
+});
+
+test('version-2 allocation members keep one drive stop and additive work in candidate scoring', async () => {
+  const mix = { version: 2, allocatedServiceIds: ['p', 'l'] };
+  const allocated = (id) => ({
+    id, visit_id: null, customer_id: 'c9', status: 'confirmed',
+    window_start: '10:00', window_end: '11:00', estimated_duration_minutes: null,
+    route_order: 1, created_at: '2026-07-01T12:00:00Z', svc_lat: 27.45, svc_lng: -82.45,
+    reservation_service_mix: mix, reservation_policy_version: 2,
+    service_address_line1: '12 Palm Way', service_address_line2: null,
+    service_address_city: 'Bradenton', service_address_zip: '34203', ...SLOT_KEY,
+  });
+  const dbWith = (rows) => () => {
+    const c = {};
+    ['where', 'whereIn', 'whereNotIn', 'whereNotNull', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+    c.select = async () => rows;
+    return c;
+  };
+  const cand = [{ technician_id: 't1', date: '2026-08-06', start_time: '08:00', end_time: '09:00' }];
+  const service = { id: 's1', estimated_duration_minutes: 60 };
+  const [allocation] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand,
+    { db: dbWith([allocated('p'), allocated('l')]) }, {});
+  const [single] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand,
+    { db: dbWith([allocated('p')]) }, {});
+  expect(allocation.detour_minutes).toBeCloseTo(single.detour_minutes, 5);
+  expect(allocation.route_minutes - single.route_minutes).toBe(60);
+});
+
+test('current and candidate scoring share the mover coordinates from the source-day snapshot', async () => {
+  process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+  const stale = { ...SERVICE, scheduled_date: '2026-08-04', lat: 10, lng: 10 };
+  const fresh = { lat: 27.4, lng: -82.5 };
+  const rows = [{
+    ...stale,
+    status: 'confirmed', window_end: '10:00', svc_lat: fresh.lat, svc_lng: fresh.lng,
+    lat: null, lng: null,
+  }, {
+    id: 'neighbor', customer_id: 'c2', scheduled_date: '2026-08-04', technician_id: 't1',
+    status: 'confirmed', window_start: '11:00', window_end: '12:00', estimated_duration_minutes: 60,
+    svc_lat: 27.45, svc_lng: -82.45,
+  }];
+  const db = () => {
+    const c = {};
+    let excluded = new Set();
+    ['where', 'whereIn', 'whereNot', 'whereNotNull', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+    c.whereNotIn = (field, ids) => {
+      if (field === 'scheduled_services.id') excluded = new Set(ids.map(String));
+      return c;
+    };
+    c.select = async () => rows.filter((row) => !excluded.has(String(row.id)));
+    return c;
+  };
+  const ctx = { ...ctxBase(), db };
+  const current = await computeCurrentPlacement(stale, prefs, ctx);
+  const [candidate] = await filterAndScoreSharedModelCandidates(stale, { lat: stale.lat, lng: stale.lng }, [{
+    technician_id: 't1', date: '2026-08-04', start_time: '09:00', end_time: '10:00',
+  }], ctx, {});
+  expect(current[ROAD_LEGS].stop).toEqual(fresh);
+  expect(candidate[ROAD_LEGS].stop).toEqual(fresh);
+  expect(candidate.detour_minutes).toBeCloseTo(current.detour_minutes, 5);
 });
 
 // Codex r1 (PRRT_kwDOR3YQi86mPzgn): the owner planning minutes of the day's

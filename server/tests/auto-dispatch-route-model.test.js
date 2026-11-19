@@ -303,6 +303,16 @@ describe('routeCost: co-visits vs visit groups', () => {
     expect(cost.driveWithoutMinutes).toBeCloseTo(chainDriveMinutes([FAR]), 5);
     expect(cost.routeTimeWithoutMinutes - cost.driveWithoutMinutes).toBe(120);
   });
+
+  test('a version-2 allocation is one drive stop with additive member work', () => {
+    const mix = { version: 2, allocatedServiceIds: ['p', 'l'] };
+    const allocation = ['p', 'l'].map((id) => coVisitRow(id, {
+      scheduled_date: '2026-08-06', technician_id: 't1', reservation_service_mix: mix,
+    }));
+    const cost = routeCost(allocation, null);
+    expect(cost.driveWithoutMinutes).toBeCloseTo(chainDriveMinutes([FAR]), 5);
+    expect(cost.routeTimeWithoutMinutes - cost.driveWithoutMinutes).toBe(120);
+  });
 });
 
 describe('clusterShare', () => {

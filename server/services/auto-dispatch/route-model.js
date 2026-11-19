@@ -25,6 +25,7 @@
 const {
   workDuration, currentOrder, effectiveWindowRange, isCoVisitPair, startCoVisitChain, advanceCoVisit,
 } = require('../route-reorder-window-fit');
+const { allocationKey } = require('../scheduling/visit-capacity');
 const { driveMin, haversine, HQ } = require('./geo');
 
 const DEFAULT_DURATION_MINUTES = 60;
@@ -100,7 +101,7 @@ function groupUnit(members) {
  * (route-reorder-window-fit.js currentOrder — Codex r4). Each carries
  * `minutes`, its on-site time. Rows collapse into one physical stop two
  * ways, each with the canonical duration rule:
- *   - a visit_id group (combo lawn+pest, etc.) — groupUnit;
+ *   - a visit_id group or version-2 capacity allocation — groupUnit;
  *   - a legacy null-visit_id co-visit — a row adjacent to the previous row
  *     that isCoVisitPair accepts (same customer, promised window, premise and
  *     coordinates) — merged with the co-visit duration rule
@@ -112,8 +113,8 @@ function physicalStops(stops) {
   const units = [];
   const groups = new Map();
   for (const row of (stops || []).filter(Boolean).map(withSequenceKeys)) {
-    if (row.visit_id == null) { units.push(row); continue; }
-    const key = String(row.visit_id);
+    const key = row.visit_id != null ? `visit:${row.visit_id}` : allocationKey(row);
+    if (!key) { units.push(row); continue; }
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(row);
   }
