@@ -589,6 +589,25 @@ describe("a short stop at the pin, then the long stop at another customer's", ()
       } finally { close.mockRestore(); load.mockRestore(); }
     });
 
+    test('a suggestion from before a tracker remap never widens the read of the current tracker', async () => {
+      const load = jest.spyOn(truckStops, 'loadTruckStops').mockResolvedValue([]);
+      try {
+        const remapped = { ...TECH, bouncie_imei_changed_at: new Date('2026-10-08T18:00:00Z') }; // during Oct 8
+        const openByCustomer = new Map([
+          ['customer-1', openRow()], // Oct 8 began before the remap: not read
+          ['customer-2', openRow({ id: 's-2', customer_id: 'customer-2', stop_started_at: new Date('2026-10-09T14:25:00Z') })],
+        ]);
+        expect(await p.recheckOpenSuggestions(recheckConn({ technicians: [remapped] }), openByCustomer, { radius: RADIUS, now: LATER })).toBe(0);
+        expect(load).toHaveBeenCalledTimes(1);
+        expect(load.mock.calls[0][2].fromMs).toBe(p.etDayBounds('2026-10-09').startMs);
+        // Only days before the remap: the tracker is not read at all.
+        load.mockClear();
+        await p.recheckOpenSuggestions(recheckConn({ technicians: [remapped] }), new Map([['customer-1', openRow()]]), { radius: RADIUS, now: LATER });
+        expect(load).not.toHaveBeenCalled();
+        expect([...p.firstReadDays([openRow()], new Map([['tech-1', remapped]]))]).toEqual([]);
+      } finally { load.mockRestore(); }
+    });
+
     test('nothing explained closes nothing; a failed read or close never throws and leaves the suggestion open', async () => {
       const store = require('../services/customer-pin-suggestions');
       const close = jest.spyOn(store, 'closeSuggestion').mockImplementation(async (id) => ({ id }));

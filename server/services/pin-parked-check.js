@@ -590,6 +590,24 @@ async function suggestionExplained(conn, row, technician, { radius, now, vehicle
 }
 
 /**
+ * The first ET day each current tracker must be read from: the earliest stop day of its open suggestions. A day before
+ * the tracker was remapped is never read (suggestionExplained skips it; the visit scan does not load it either), so it
+ * never widens the read.
+ */
+function firstReadDays(rows, technicians) {
+  const firstDay = new Map();
+  for (const row of rows) {
+    const tech = technicians.get(String(row.technician_id));
+    const imei = String((tech && tech.bouncie_imei) || '').trim();
+    const day = suggestionDay(row);
+    if (!imei || dayBeforeMapping(day, tech.bouncie_imei_changed_at)) continue;
+    const known = firstDay.get(imei);
+    if (!known || day < known) firstDay.set(imei, day);
+  }
+  return firstDay;
+}
+
+/**
  * Every open suggestion the two-fact rule now explains is closed (superseded, with its bell) BEFORE any visit is
  * decided: insertSuggestion keeps an open suggestion for the same pin ("already_open"), so a newer visit's suggestion
  * could not replace it. A closed one leaves `openByCustomer`. Every open suggestion whose stop is inside the lookback
@@ -611,13 +629,7 @@ async function recheckOpenSuggestions(conn, openByCustomer, { radius, now }) {
     logger.warn(`${LOG} could not read the technicians of open suggestions`, { error: err.code || err.name });
     return 0;
   }
-  const firstDay = new Map();
-  for (const row of rows) {
-    const tech = technicians.get(String(row.technician_id));
-    const imei = String((tech && tech.bouncie_imei) || '').trim();
-    const known = firstDay.get(imei);
-    if (imei && (!known || suggestionDay(row) < known)) firstDay.set(imei, suggestionDay(row));
-  }
+  const firstDay = firstReadDays(rows, technicians);
   const reads = new Map();
   const vehicleStops = (imei, day) => {
     if (!reads.has(imei)) {
@@ -700,7 +712,7 @@ module.exports = {
   _private: {
     judgeVisit, destinationOf, homeBaseFrom, visitDays, etDayBounds, oneRowPerVisit, excludedStopReason, alertSpec,
     alertDetail, settledReason, visitUnchanged, homeSince, loadNeighbourVisits, usablePin, isWithin, nearestPinDistance, retireAllOpen, requiredDays, judgeVisits, loadVehicles, neighbourPins, effectivePinColumns, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
-    clearStopsAtOtherCustomers, otherCustomerPinNear, briefStopNear, suggestionDay, suggestionExplained, recheckOpenSuggestions, withinSql, BRIEF_STOP_MIN_MINUTES,
+    clearStopsAtOtherCustomers, otherCustomerPinNear, briefStopNear, suggestionDay, suggestionExplained, firstReadDays, recheckOpenSuggestions, withinSql, BRIEF_STOP_MIN_MINUTES,
     REPORT_MIN_STOP_MINUTES, MAX_STOP_DISTANCE_M,
   },
 };
