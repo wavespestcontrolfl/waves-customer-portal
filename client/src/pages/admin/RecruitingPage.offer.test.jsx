@@ -114,12 +114,17 @@ async function openDetail() {
 }
 
 beforeEach(() => {
+  // The fixtures use fixed dates (a Jan 4, 2027 start); freeze only Date so they stay in the future and the
+  // Testing Library timers stay real.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-11-19T15:00:00Z'));
   localStorage.clear();
   localStorage.setItem('waves_admin_token', 'admin-token');
 });
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -183,6 +188,8 @@ describe('RecruitingPage offer flow: form', () => {
     await openForm();
     expect(screen.getByText('Save the draft to see the letter.')).toBeInTheDocument();
     expect(screen.queryByText('Your job offer')).toBeNull();
+    // ...and Send stays off: the owner can only send a letter he has on screen.
+    expect(screen.getByRole('button', { name: 'Send offer' })).toBeDisabled();
   });
 
   it('recomputes the step date when the start date changes and refuses Friday to Sunday', async () => {
@@ -968,6 +975,9 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2027-01-11' } });
     expect(screen.queryByText('Pick a date in the future.')).toBeNull();
     expect(screen.getByRole('button', { name: 'Save draft' })).not.toBeDisabled();
+    // Today (Eastern) is not in the future: the server refuses it, so the form does too (the clock is frozen on Nov 19).
+    fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2026-11-19' } });
+    expect(screen.getByText('Pick a date in the future.')).toBeInTheDocument();
   });
 
   it.each(['hired', 'rejected', 'withdrawn'])('a %s application does not open the Offer form', async (status) => {

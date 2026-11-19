@@ -172,12 +172,12 @@ function letterFor(data, pinned) {
   return pinned && letter && letter.offerId === pinned.id && letter.draftHash === pinned.draftHash ? letter.markdown : null;
 }
 
-// A start date that cannot be formed, has passed, falls on Friday to Sunday, or would push
+// A start date that cannot be formed, is today or earlier (the server's rule), falls on Friday to Sunday, or would push
 // the pay step date past year 9999 gets a plain message (and no step date).
 function startDateError({ startDate, stepRate }) {
   if (!startDate) return null;
   if (!isValidDay(startDate)) return "Enter a valid date.";
-  if (startDate < todayET()) return "Pick a date in the future.";
+  if (startDate <= todayET()) return "Pick a date in the future.";
   if (!isStartWeekday(startDate)) return "Pick a Monday to Thursday.";
   return stepRate !== "" && !stepDateFor(startDate) ? "That start date is too far out for a pay step date." : null;
 }
@@ -221,7 +221,8 @@ function formView({ edits, pinned, data, contact, busy, locked }) {
     startError,
     fieldsOk,
     dirty,
-    canSend: data.viewer?.ownerActions === true && Boolean(pinned?.draftHash) && !dirty && fieldsOk && data.termsIssued && !busy && !locked,
+    // Send needs the letter preview of this exact draft on screen: what the owner reads is what goes out.
+    canSend: data.viewer?.ownerActions === true && Boolean(pinned?.draftHash) && Boolean(letterFor(data, pinned)) && !dirty && fieldsOk && data.termsIssued && !busy && !locked,
   };
 }
 
