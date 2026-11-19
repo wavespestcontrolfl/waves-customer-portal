@@ -66,9 +66,8 @@ describe('buildIssue', () => {
   });
 
   test('optional blocks reach the renderer', () => {
-    const r = buildIssue({ sendDate: '2026-12-03', plan: planOf(A01), areaLine: 'Sample area line.', home: { lastVisit: { date: '2026-11-04', areas: ['lanai'] } } });
+    const r = buildIssue({ sendDate: '2026-12-03', plan: planOf(A01), areaLine: 'Sample area line.' });
     expect(r.issue.html_body).toContain('Sample area line.');
-    expect(r.issue.html_body).toContain('Your home');
   });
 
   test('caller text that fails the customer-copy screen is left out and reported', () => {
@@ -76,13 +75,7 @@ describe('buildIssue', () => {
     expect(area.ok).toBe(true);
     expect(area.issue.text_body).not.toContain('4512');
     expect(area.diagnostics.fallbacks).toEqual(['area_line_dropped']);
-    const home = { lastVisit: { date: '2026-11-04', areas: ['lanai', 'gate code 4512'] }, nextVisit: { date: '2027-01-06', service: 'pest control' } };
-    const r = buildIssue({ sendDate: '2026-12-03', plan: planOf(A01), home });
-    expect(r.ok).toBe(true);
-    expect(r.issue.text_body).toContain('We covered lanai.');
-    expect(r.issue.text_body).not.toContain('4512');
-    expect(r.diagnostics.fallbacks).toEqual(['home_detail_dropped']);
-    const clean = buildIssue({ sendDate: '2026-12-03', plan: planOf(A01), home: { ...home, lastVisit: { date: '2026-11-04', areas: ['lanai'] } } });
+    const clean = buildIssue({ sendDate: '2026-12-03', plan: planOf(A01), areaLine: 'Sample area line.' });
     expect(clean.diagnostics.fallbacks).toEqual([]);
   });
 

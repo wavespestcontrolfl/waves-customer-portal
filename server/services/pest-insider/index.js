@@ -3,7 +3,7 @@
  *
  * Content core only. Nothing here sends, schedules, calls a model or touches
  * the database; the caller supplies recent picks and the optional blocks (blog
- * link, area line, tool, per-recipient home block). Every word of the lead
+ * link, area line, tool). Every word of the lead
  * and of "What's this?" is fixed, reviewed copy: the fact bank's `lead`
  * sentences and title, and the identifier species entry's fact. A fact
  * marked recheck_before_send leads only when the caller names it in
@@ -42,9 +42,11 @@ function sendGateErrors(issue) {
 /**
  * @param {{ sendDate: string|Date, recent?: { factIds?: string[], speciesSlugs?: string[] },
  *   recheckedFactIds?: string[], blogUrl?: string|null, areaLine?: string|null, tool?: object|null,
- *   home?: object|null, plan?: Function }} input   `plan` is the planner (injectable for tests).
+ *   plan?: Function }} input   `plan` is the planner (injectable for tests). The issue is one
+ *   email for every subscriber, so it takes no household's details ("Your home" is PR 4's,
+ *   rendered per recipient at delivery).
  */
-function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], blogUrl, areaLine, tool, home, plan = planIssue }) {
+function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], blogUrl, areaLine, tool, plan = planIssue }) {
   const dateET = sendDateET(sendDate);
   const diagnostics = { sendDate: dateET, factId: null, speciesSlug: null, problems: [], fallbacks: [] };
 
@@ -65,7 +67,7 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], blogUrl, are
   diagnostics.problems = copy.problems;
   if (!copy.ok) return { ok: false, reason: copyFailReason(copy), issue: null, diagnostics };
 
-  diagnostics.fallbacks.push(...droppedBlocks({ areaLine, tool, home }));
+  diagnostics.fallbacks.push(...droppedBlocks({ areaLine, tool }));
   const issue = renderIssue({
     subject: copy.subject,
     preview: copy.preview,
@@ -74,7 +76,6 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], blogUrl, are
     blogUrl,
     areaLine,
     tool,
-    home,
   });
 
   const errors = sendGateErrors(issue);

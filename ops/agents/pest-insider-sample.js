@@ -11,7 +11,7 @@
  *
  *     <outDir>        where the files go (created if missing)
  *     dates           send dates (ET); default 2026-12-03 and 2026-12-17
- *     --demo-blocks   fill the optional blocks (area line, tool, home) with synthetic text
+ *     --demo-blocks   fill the optional blocks (area line, tool) with synthetic text
  *
  * Dates run in order: each issue's fact and species count as "recent" for the
  * next one, the way the real schedule will. No recheck is recorded here, so a
@@ -67,7 +67,6 @@ const { RECENT_WINDOW } = require('../../server/services/pest-insider/plan');
 const DEMO = {
   areaLine: 'Sample line: crews are seeing more of this near the canals this week.',
   tool: { name: 'Sample garden hose nozzle', why: 'Sample line explaining why a crew keeps one in the truck.', url: 'https://www.example.com/sample-tool', disclosure: 'Sample disclosure line.' },
-  home: { lastVisit: { date: '2026-11-04', areas: ['front beds', 'lanai'] }, nextVisit: { date: '2027-01-06', service: 'pest control' }, sinceDate: '2024-03-12', visitCount: 9 },
 };
 
 function saveIssue(sendDate, issue) {

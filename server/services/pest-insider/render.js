@@ -7,14 +7,18 @@
  * dm-* hooks the dark-mode stylesheet keys on, so bodyIsDarkAware() is true.
  *
  * Every piece of text is escaped. Links are absolute https URLs on
- * www.wavespestcontrol.com (a blogUrl or tool url that is not https, or a
- * blog link off that host, is dropped); the tool link is the one allowed
- * off-site https link.
+ * www.wavespestcontrol.com (a blogUrl or tool url that is not https, that
+ * carries a {{...}} merge tag, or a blog link off that host, is dropped); the
+ * tool link is the one allowed off-site https link.
+ *
+ * The body is one email for every subscriber, and the public archive serves
+ * it as stored, so it holds no household's details. "Your home" (a
+ * customer's own visits) is rendered per recipient at delivery, in PR 4
+ * (pre-push round 8).
  */
 'use strict';
 
 const { newsletterPalette, newsletterSectionTheme, wrapNewsletter, bodyIsDarkAware } = require('../email-template');
-const { formatDisplayDate, validDateOnly } = require('../../utils/date-only');
 const { containsAffiliateMaterial } = require('../content/content-guardrails');
 
 const SITE = 'https://www.wavespestcontrol.com';
@@ -25,7 +29,14 @@ const escapeHtml = (text) => String(text ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
+// The sender fills {{...}} merge tags per recipient, in both parts
+// (newsletter-draft.js), so caller text or a link that carries one could put
+// a subscriber's own value, such as an unsubscribe link, into the copy or
+// into a link to another site (pre-push round 8). Such input is left out.
+const MERGE_TAG = /\{\{|\}\}|%7b%7b|%7d%7d/i;
+
 function httpsUrl(url, { host } = {}) {
+  if (MERGE_TAG.test(String(url))) return null;
   try {
     const u = new URL(String(url));
     if (u.protocol !== 'https:' || (host && u.hostname !== host)) return null;
@@ -35,8 +46,6 @@ function httpsUrl(url, { host } = {}) {
 
 const siteUrl = (url) => httpsUrl(url, { host: 'www.wavespestcontrol.com' });
 const speciesUrl = (slug) => (/^[a-z0-9-]+$/.test(String(slug)) ? `${IDENTIFIER_URL}${slug}/` : null);
-// An impossible day (2027-02-30) is left out, never shown as the day it rolls over to.
-const dateText = (value) => (validDateOnly(String(value)) ? formatDisplayDate(value) : '');
 
 function headingHtml(index, label) {
   const palette = newsletterPalette();
@@ -78,7 +87,7 @@ function identifierBlock({ idItem }) {
   return { html, text };
 }
 
-// Caller-supplied text (the area line, a tool's words, a visit detail) is
+// Caller-supplied text (the area line, a tool's words) is
 // not reviewed copy, so it runs the complete customer-copy screen
 // (AGENTS.md) before it renders, and text that fails is left out
 // (pre-push rounds 5 and 6). The screen loads the report-copy modules, so it
@@ -94,7 +103,7 @@ const CODE_SHAPED_NUMBER = /#\s*\d|\d{3}|\b\d(?:[\s-]+\d){2,}\b/;
 function screenedText(value) {
   if (typeof value !== 'string') return '';
   const text = value.replace(/\s+/g, ' ').trim();
-  if (!text || CODE_SHAPED_NUMBER.test(text)) return '';
+  if (!text || CODE_SHAPED_NUMBER.test(text) || MERGE_TAG.test(text)) return '';
   const { customerCopyViolations } = require('../service-report/technician-report-copy');
   return customerCopyViolations(text).length ? '' : text;
 }
@@ -135,61 +144,23 @@ function toolBlock({ tool }) {
   return { html, text };
 }
 
-// A visit detail (an area covered, the next service) also may not hold a
-// digit: an area or a service name needs none, and an access code the
-// screen can miss ("gate #1234") always has one.
-function homeDetail(value) {
-  const text = screenedText(value);
-  return /\d/.test(text) ? '' : text;
-}
-
 // What renderIssue leaves out of the optional inputs a caller gave it, as
 // fallback names for the build's diagnostics.
-function droppedBlocks({ areaLine, tool, home }) {
-  const areas = home && home.lastVisit && Array.isArray(home.lastVisit.areas) ? home.lastVisit.areas : [];
-  const service = home && home.nextVisit ? [home.nextVisit.service] : [];
+function droppedBlocks({ areaLine, tool }) {
   return [
     given(areaLine) && !screenedText(areaLine) && 'area_line_dropped',
     tool && !toolAllowed(tool) && 'tool_dropped_affiliate',
     tool && toolAllowed(tool) && !toolTextPasses(tool) && 'tool_dropped_copy',
-    [...areas, ...service].some((v) => given(v) && !homeDetail(v)) && 'home_detail_dropped',
   ].filter(Boolean);
-}
-
-// home: { lastVisit: { date, areas: [] }, nextVisit: { date, service }, sinceDate, visitCount }
-function homeLines(home) {
-  const lines = [];
-  const last = home.lastVisit;
-  if (last && dateText(last.date)) {
-    const areas = (Array.isArray(last.areas) ? last.areas : []).map(homeDetail).filter(Boolean);
-    lines.push(`Last visit: ${dateText(last.date)}${areas.length ? `. We covered ${areas.join(', ')}.` : '.'}`);
-  }
-  const next = home.nextVisit;
-  const service = next ? homeDetail(next.service) : '';
-  if (next && dateText(next.date)) lines.push(`Next visit: ${dateText(next.date)}${service ? ` (${service})` : ''}.`);
-  const count = Number(home.visitCount);
-  if (dateText(home.sinceDate)) {
-    lines.push(`With us since ${dateText(home.sinceDate)}${Number.isInteger(count) && count > 0 ? `, ${count} visit${count === 1 ? '' : 's'} so far` : ''}.`);
-  }
-  return lines;
-}
-
-function homeBlock({ home }) {
-  const lines = home && typeof home === 'object' ? homeLines(home) : [];
-  if (!lines.length) return null;
-  return {
-    html: [headingHtml(0, 'Your home'), box(lines.map(escapeHtml).join('<br/>'))].join('\n'),
-    text: ['YOUR HOME', ...lines].join('\n'),
-  };
 }
 
 /**
  * @param {{ subject: string, preview: string, lead: { headline: string, sentences: {text:string}[] },
  *   idItem: { text: string, species: { slug: string, name: string } },
- *   blogUrl?: string|null, areaLine?: string|null, tool?: object|null, home?: object|null }} issue
+ *   blogUrl?: string|null, areaLine?: string|null, tool?: object|null }} issue
  */
 function renderIssue(issue) {
-  const blocks = [leadBlock(issue), identifierBlock(issue), areaBlock(issue), toolBlock(issue), homeBlock(issue)].filter(Boolean);
+  const blocks = [leadBlock(issue), identifierBlock(issue), areaBlock(issue), toolBlock(issue)].filter(Boolean);
   const html = [
     ...blocks.map((b) => `<div class="dm-text">\n${b.html}\n</div>`),
     `<p class="dm-muted" style="margin:18px 0 0 0;font-size:14px;line-height:1.5;text-align:center;color:${newsletterPalette().muted};">${escapeHtml(FORWARD_LINE)}</p>`,

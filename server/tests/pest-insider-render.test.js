@@ -11,7 +11,6 @@ const BASE = {
 const DEMO = {
   areaLine: 'Sample line near the canals.',
   tool: { name: 'Sample nozzle', why: 'Sample reason.', url: 'https://www.example.com/tool', disclosure: 'Sample disclosure.' },
-  home: { lastVisit: { date: '2026-11-04', areas: ['front beds', 'lanai'] }, nextVisit: { date: '2027-01-06', service: 'pest control' }, sinceDate: '2024-03-12', visitCount: 9 },
 };
 
 describe('renderIssue', () => {
@@ -34,25 +33,13 @@ describe('renderIssue', () => {
   });
 
   test('every optional block is omitted cleanly when its input is missing or empty', () => {
-    const r = renderIssue({ ...BASE, blogUrl: null, areaLine: '  ', tool: null, home: null });
-    for (const label of ['Read the full story', 'Active near you', "A tool we&#39;d use", 'Your home']) expect(r.html_body).not.toContain(label);
-    expect(r.text_body).not.toMatch(/ACTIVE NEAR YOU|TOOL|YOUR HOME|Read the full story/);
+    const r = renderIssue({ ...BASE, blogUrl: null, areaLine: '  ', tool: null });
+    for (const label of ['Read the full story', 'Active near you', "A tool we&#39;d use"]) expect(r.html_body).not.toContain(label);
+    expect(r.text_body).not.toMatch(/ACTIVE NEAR YOU|TOOL|Read the full story/);
     // an unusable blog link (wrong host, or not https) is dropped, not rendered
     for (const blogUrl of ['https://evil.example.com/post/', 'http://www.wavespestcontrol.com/blog/x/', 'javascript:alert(1)']) {
       expect(renderIssue({ ...BASE, blogUrl }).html_body).not.toContain('Read the full story');
     }
-    expect(renderIssue({ ...BASE, home: { lastVisit: { date: 'not a date' } } }).html_body).not.toContain('Your home');
-    // an impossible day (2027-02-30) is left out, never shown as March 2
-    const rolled = renderIssue({ ...BASE, home: { nextVisit: { date: '2027-02-30', service: 'pest control' }, sinceDate: '2024-03-12' } });
-    expect(rolled.text_body).not.toMatch(/Next visit|March 2/);
-    expect(rolled.text_body).toContain('With us since March 12, 2024');
-    // a visit detail runs the complete customer-copy screen; an access code or a banned word is left out (pre-push round 5)
-    const screened = renderIssue({ ...BASE, home: { lastVisit: { date: '2026-11-04', areas: ['front beds', 'gate code 4512', 'gate #1234', 'pet-safe barrier', 42] }, nextVisit: { date: '2027-01-06', service: 'infestation treatment' } } });
-    const homeText = screened.text_body.split('YOUR HOME')[1];
-    const homeHtml = screened.html_body.split('Your home')[1];
-    expect(homeText).toContain('Last visit: November 4, 2026. We covered front beds.');
-    expect(homeText).toContain('Next visit: January 6, 2027.');
-    for (const part of [homeText, homeHtml]) expect(part).not.toMatch(/4512|1234|safe|infestation|42/);
     expect(renderIssue({ ...BASE, tool: { name: 'No link', why: 'x', url: 'http://insecure.example.com' } }).html_body).not.toContain('No link');
   });
 
@@ -68,10 +55,25 @@ describe('renderIssue', () => {
     }
     // a count is not an access code
     expect(renderIssue({ ...BASE, areaLine: '12 homes near you reported ants this month.' }).text_body).toContain('ACTIVE NEAR YOU\n12 homes near you reported ants this month.');
-    expect(droppedBlocks({ ...bad, home: DEMO.home })).toEqual(['area_line_dropped', 'tool_dropped_copy']);
+    expect(droppedBlocks(bad)).toEqual(['area_line_dropped', 'tool_dropped_copy']);
     expect(droppedBlocks({ tool: { ...DEMO.tool, url: 'https://amzn.to/abc123' } })).toEqual(['tool_dropped_affiliate']);
     expect(droppedBlocks(DEMO)).toEqual([]);
-    expect(droppedBlocks({ areaLine: '  ', tool: null, home: null })).toEqual([]);
+    expect(droppedBlocks({ areaLine: '  ', tool: null })).toEqual([]);
+  });
+
+  test('a {{...}} merge tag in caller text or a link is left out, since the sender fills it per recipient', () => {
+    for (const url of ['https://www.example.com/tool?u={{unsubscribe_url}}', 'https://www.example.com/tool?u=%7B%7Bunsubscribe_url%7D%7D']) {
+      expect(renderIssue({ ...BASE, tool: { ...DEMO.tool, url } }).html_body).not.toContain('A tool we&#39;d use');
+    }
+    expect(renderIssue({ ...BASE, blogUrl: 'https://www.wavespestcontrol.com/blog/x/?u={{unsubscribe_url}}' }).html_body).not.toContain('Read the full story');
+    expect(renderIssue({ ...BASE, areaLine: 'Ants are busy in {{city}} this month.' }).html_body).not.toContain('Active near you');
+    expect(renderIssue({ ...BASE, tool: { ...DEMO.tool, why: 'Hi{{greeting-name}}, it works.' } }).html_body).not.toContain('A tool we&#39;d use');
+  });
+
+  test("a household's visit details never enter the shared body", () => {
+    const r = renderIssue({ ...BASE, home: { lastVisit: { date: '2026-11-04', areas: ['lanai'] }, nextVisit: { date: '2027-01-06', service: 'pest control' } } });
+    expect(r.html_body).not.toMatch(/Your home|lanai|Next visit/);
+    expect(r.text_body).not.toMatch(/YOUR HOME|lanai|Next visit/);
   });
 
   test('optional blocks render when given', () => {
@@ -81,10 +83,6 @@ describe('renderIssue', () => {
     expect(r.html_body).toContain('A tool we&#39;d use');
     expect(r.html_body).toContain('href="https://www.example.com/tool"');
     expect(r.html_body).toContain('Sample disclosure.');
-    expect(r.html_body).toContain('Last visit: November 4, 2026. We covered front beds, lanai.');
-    expect(r.html_body).toContain('Next visit: January 6, 2027 (pest control).');
-    expect(r.html_body).toContain('With us since March 12, 2024, 9 visits so far.');
-    expect(r.text_body).toMatch(/YOUR HOME\nLast visit: November 4, 2026/);
   });
 
   test('all text is escaped', () => {
@@ -95,7 +93,6 @@ describe('renderIssue', () => {
       idItem: { text: hostile, species: { slug: 'aedes-mosquito', name: hostile } },
       areaLine: hostile,
       tool: { name: hostile, why: hostile, url: 'https://www.example.com/t', disclosure: hostile },
-      home: { lastVisit: { date: '2026-11-04', areas: [hostile] } },
     });
     expect(r.html_body).not.toContain('<script');
     expect(r.html_body).not.toContain('<img src=x');
