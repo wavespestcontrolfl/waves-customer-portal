@@ -351,9 +351,10 @@ async function loadGroupContext(db, service) {
 // current placement for one unit against candidates for another. Gate on,
 // findValidCandidateSlots reads the group once into an evaluation-scoped
 // copy of ctx (never the caller's ctx, which a later re-evaluation reuses
-// and must read afresh); gate off, nothing is read and ctx passes through.
+// and must read afresh). A grouped visit needs that read even on legacy
+// scoring to keep cross-date moves out of the candidate list.
 async function withGroupContext(service, ctx) {
-  if (!autoDispatchSharedModelLive()) return ctx;
+  if (!autoDispatchSharedModelLive() && (!service.visit_id || ctx.groupContext)) return ctx;
   return { ...ctx, groupContext: await loadGroupContext(ctx.db, service) };
 }
 
@@ -876,6 +877,7 @@ const slotTechId = (slot) => slot.technician && slot.technician.id;
 const isTerritoryHolder = (techId, h) => String(techId) === String(h.territoryTechId)
   || (!!h.territoryCoverId && String(techId) === String(h.territoryCoverId));
 const HARD_FILTERS = [
+  ['group_cross_date', (slot, h) => h.ctx.groupContext?.siblings?.length > 0 && slot.date !== toDateStr(h.service.scheduled_date)],
   ['after_hours', (slot) => hhmmToMin(slot.end_time) > DAY_CLOSE],
   ['blackout', (slot, h) => inBlackout(slot.date, h.prefs.blackout)],
   ['sibling', (slot, h) => h.siblingDates.has(slot.date)],
@@ -1057,6 +1059,12 @@ function searchWindow(service, ctx) {
       if (dateFrom < round.start) dateFrom = round.start;
       if (dateTo > round.end) dateTo = round.end;
     }
+  }
+  // The move writer commits a group's members separately. Search only dates
+  // on which the automatic writer can keep this group together.
+  if (ctx.groupContext?.siblings?.length) {
+    if (dateFrom < origDate) dateFrom = origDate;
+    if (dateTo > origDate) dateTo = origDate;
   }
   return { dateFrom, dateTo };
 }
@@ -1308,6 +1316,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // writer-agreement overlap pre-filter (rankSurvivorsForSharedModel below).
   const { territoryTechId } = ctx;
   const drops = {
+    ...(ctx.groupContext?.siblings?.length ? { group_cross_date: 0 } : {}),
     blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0, flex_frozen: 0, flex_floor: 0,
     ...(ctx.keepTech === true ? { other_tech: 0 } : {}),
     ...(territoryTechId ? { other_territory: 0 } : {}),

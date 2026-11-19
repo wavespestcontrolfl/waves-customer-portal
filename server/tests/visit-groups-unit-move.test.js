@@ -508,6 +508,17 @@ describe('moveVisitAsUnit', () => {
     expect(db.__calls.some((call) => call.op === 'update')).toBe(false);
   });
 
+  test('rejecting a clear-end-only move does not count the unchanged end as a landed move', async () => {
+    const before = member('a', { window_start: '09:00', window_end: '10:00' });
+    db.__script = script({ members: [before, member('b')], landed: [before, member('b')] });
+    const rebooker = fakeRebooker({ a: 'throw' });
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE,
+      newDate: before.scheduled_date, newWindow: { start: '09:00', end: null },
+      initiatedBy: 'admin', options: { clearWindowEnd: true },
+    })).rejects.toThrow('member a boom');
+    expect(rebooker.reschedule).toHaveBeenCalledTimes(1);
+  });
+
   test('null-end preflight honors the writer rollback switch and clearWindowEnd reaches the primary write', async () => {
     process.env.REBOOKER_NULL_END_OCCUPANCY = 'off';
     try {

@@ -2461,16 +2461,16 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   const landedContract = {};
   // Landed tuple = what the rebooker actually writes (codex r11): a
   // date-only move keeps BOTH bounds; a start-only window normally leaves the
-  // end out of the public landed tuple. The stricter sibling-write contract
-  // below adds deterministic clearWindowEnd and the allocation stamp.
+  // end unspecified unless clearWindowEnd explicitly writes NULL. Both landing
+  // verification and subsequent sibling writes must check that explicit end.
   const targetTuple = (t) => {
     if (!t.window) return { scheduled_date: newDateStr, window_start: t.expect.window_start || null, window_end: t.expect.window_end || null };
     if (typeof t.window === 'string') { const [ts, te] = t.window.split('-'); return { scheduled_date: newDateStr, window_start: ts, window_end: te }; }
-    return { scheduled_date: newDateStr, window_start: t.window.start || null };
+    return { scheduled_date: newDateStr, window_start: t.window.start || null,
+      ...(options.clearWindowEnd === true ? { window_end: null } : {}) };
   };
   const contractTuple = (t) => ({
     ...targetTuple(t),
-    ...(t.window && typeof t.window !== 'string' && options.clearWindowEnd === true ? { window_end: null } : {}),
     reservation_service_mix: t.expect.reservation_service_mix ?? null,
   });
   for (const t of plan.targets.filter((x) => x.alreadyAtTarget)) {

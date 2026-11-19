@@ -806,7 +806,10 @@ describe('SLOT_TAKEN parity with the writer (Codex r1)', () => {
 test('openMembers is read exactly once per evaluation; the current placement and the candidates share its excludeIds', async () => {
   process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
   findAvailableSlots.mockResolvedValue({
-    slots: [{ date: '2026-08-06', technician: { id: 't1', name: 'A' }, start_time: '13:00', end_time: '14:00', detour_minutes: 1, total_drive_minutes: 5, stops_that_day: 0, score: 1 }],
+    slots: [
+      { date: '2026-08-06', technician: { id: 't1', name: 'A' }, start_time: '13:00', end_time: '14:00', detour_minutes: 1, total_drive_minutes: 5, stops_that_day: 0, score: 1 },
+      { date: '2026-08-04', technician: { id: 't1', name: 'A' }, start_time: '13:00', end_time: '14:00', detour_minutes: 1, total_drive_minutes: 5, stops_that_day: 0, score: 1 },
+    ],
   });
   // A second read would see a different unit (sib2 joined).
   openMembers.mockResolvedValueOnce([{ id: 's1' }, { id: 'sib1' }]).mockResolvedValue([{ id: 's1' }, { id: 'sib1' }, { id: 'sib2' }]);
@@ -820,7 +823,10 @@ test('openMembers is read exactly once per evaluation; the current placement and
   });
   const grouped = { ...SERVICE, visit_id: 'v1', window_start: '09:00', window_end: '10:00' };
 
-  await findValidCandidateSlots(grouped, prefs, { ...ctxBase(), db });
+  const result = await findValidCandidateSlots(grouped, prefs, { ...ctxBase(), db });
+  expect(result.candidates.map(slot => slot.date)).toEqual(['2026-08-04']);
+  expect(result.drops.group_cross_date).toBe(1);
+  expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ dateFrom: '2026-08-04', dateTo: '2026-08-04' }));
   expect(openMembers).toHaveBeenCalledTimes(1);
   // Both sides' day-stop reads (the candidates' batch and the current day)
   // exclude the same unit.
