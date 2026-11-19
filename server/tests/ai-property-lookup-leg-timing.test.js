@@ -58,6 +58,16 @@ describe.each(LEGS)('%s web-search leg', (name, lookup, responseBody) => {
     expect(JSON.stringify(line[1])).not.toMatch(/Example Plaza|2100|example\.com/);
   });
 
+  test('a confidence that is not one of the three labels is not logged', async () => {
+    const facts = JSON.stringify({ ...JSON.parse(FACTS), confidence: 'High: listing for 120 Example Plaza Dr matches' });
+    global.fetch = jest.fn(async () => ({ ok: true, json: async () => responseBody(facts) }));
+
+    expect(await lookup(ADDRESS)).toBeTruthy();
+    const line = successLine(name);
+    expect(line[1].confidence).toBeNull();
+    expect(JSON.stringify(line[1])).not.toMatch(/Example Plaza/i);
+  });
+
   test('a reply with no usable facts keeps its own line and logs no success', async () => {
     global.fetch = jest.fn(async () => ({ ok: true, json: async () => responseBody(NO_FACTS) }));
 

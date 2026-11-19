@@ -1782,7 +1782,7 @@ async function lookupPropertyFromOpenAI(address) {
     // adds to a lookup cannot be read from the logs (owner 2026-11-19).
     logger.info('[ai-property] OpenAI got facts', {
       elapsedMs: Date.now() - t0,
-      confidence: parsed.confidence,
+      confidence: confidenceLabel(parsed),
       fields: factFieldNames(parsed),
     });
     return record;
@@ -1858,7 +1858,7 @@ async function lookupPropertyFromGemini(address) {
     // Success time: see the OpenAI leg.
     logger.info('[ai-property] Gemini got facts', {
       elapsedMs: Date.now() - t0,
-      confidence: parsed.confidence,
+      confidence: confidenceLabel(parsed),
       fields: factFieldNames(parsed),
     });
     return shapeAsPropertyRecord(parsed, address, 'gemini');
@@ -5480,6 +5480,13 @@ function normalizeLookupPropertyType(raw) {
 // Names only: no value and no address goes to the log.
 function factFieldNames(parsed) {
   return Object.keys(parsed).filter((k) => parsed[k] != null && k !== 'source' && k !== 'confidence');
+}
+
+// A provider's confidence, for a log line: one of the three labels the
+// prompt asks for, else null. The parsed value is the provider's own string
+// (lowercased), so anything else could carry text about the property.
+function confidenceLabel(parsed) {
+  return ['high', 'medium', 'low'].includes(parsed?.confidence) ? parsed.confidence : null;
 }
 
 function hasAnyPropertyFact(parsed) {
