@@ -319,6 +319,7 @@
  *   GATE_ESTIMATE_LAWN_CALENDAR=true ("Your program" block under the lawn price card — annual application count + four plain season rows behind a toggle; count from the scheduling catalog on /data; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
  *   GATE_ESTIMATE_PROMO_CODE=true (owner 2026-11-18: a "Have a promo code?" field on the customer estimate page + POST /:token/promo-code; a valid fixed-dollar code from admin Discounts is saved on the estimate and posts a one-time account credit when the estimate is accepted, counting one use; the estimate price never changes; dev-open, prod dark; off = no field, the route answers 404 and no accepted estimate posts a credit)
+ *   GATE_PAY_PROMO_CODE=true (owner 2026-11-18: a "Have a promo code?" field on the invoice pay page + POST /api/pay/:token/promo-code; a valid fixed-dollar code from admin Discounts is saved on the invoice, and the payment setup that follows posts its one-time account credit, counts one use, applies that amount to the invoice and re-prices the payment; not offered on payer-billed or statement-billed invoices or ones that must save a payment method first; dev-open, prod dark; off = no field, the route answers 404 and no entered code is redeemed)
  *   GATE_ESTIMATE_REFERRAL_CODE=true (owner 2026-11-18: the estimate page's code field also takes a referrer's code, saved on the estimate as referral evidence; once the estimate is accepted and the customer is on a plan, the code's owner is confirmed as the referrer through the Queue's deferred-only confirm, so nothing is sent and both rewards wait for the first recurring service as for any referral; a card that confirm refuses waits in Referrals → Queue; dev-open, prod dark; off = the field takes no referral code and no typed code is confirmed)
  *   GATE_REFERRAL_INBOUND_BELL=true (owner 2026-10-29 "ok go": one admin bell row for each card waiting in Referrals → Queue, with server-set buttons that run the Queue's own steps: Confirm <referrer>, only for one sure referrer, while rewards wait for the first visit, before the friend's first plan visit and not at a milestone (checked again under the confirm's locks), and Not a referral; the row closes when the card is answered in the bell or the Queue. Read at call time via referralInboundBellLive(), strict 'true', dark by default; off = no row is raised, and no button is served or run.)
  *   GATE_ALERT_CALL_BUTTON=true (owner 2026-11-02 "cant we add a call button, where we can call them from the admin notification": a Call button the server sets on admin bell rows about one caller (missed call, voicemail, promise chaser, repeat caller, Sandy hand-offs, landline, lead CALL replies, text call-back follow-ups); a tap reads the call or customer again and runs POST /api/admin/communications/call in-process with the body the linked page's own Call button sends, so the owner's phone rings first and press 1 connects; the row stays open until the caller is reached, Called back / Handled or Done. Read at call time via alertCallButtonLive(), strict 'true', dark by default; off = no Call button is served and a tap answers 409. A row's Called back / Handled button is always served.)
@@ -3202,6 +3203,12 @@ const gates = {
   // its row and posts nothing. Dev-open, prod dark.
   // Enable with GATE_ESTIMATE_PROMO_CODE=true.
   estimatePromoCode: isProd ? process.env.GATE_ESTIMATE_PROMO_CODE === 'true' : true,
+  // Promo code on the invoice pay page (owner 2026-11-18): gates the
+  // `promoCode` block of GET /api/pay/:token, POST /api/pay/:token/promo-code
+  // and the redemption inside the pay page's payment setup
+  // (services/invoice-promo-code.js). Dev-open, prod dark.
+  // Enable with GATE_PAY_PROMO_CODE=true.
+  payPromoCode: isProd ? process.env.GATE_PAY_PROMO_CODE === 'true' : true,
   // Referral code in the same field (owner 2026-11-18): gates referral
   // codes on POST /:token/promo-code and in the `promoCode` block, and the
   // referrer confirm that follows an accepted estimate

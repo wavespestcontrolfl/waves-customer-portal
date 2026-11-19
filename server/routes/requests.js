@@ -14,6 +14,7 @@ const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { processCancellationRequest, PORTAL_CANCEL_REASON_PREFIX } = require('../services/cancellation-processor');
 const { sendCancellationConfirmations } = require('../services/cancellation-confirmations');
+const { onlyStaleVisitErrorsLeft } = require('../services/cancellation-stale-visit-verdict');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
 const { isSecondarySelection, resolveSessionScope } = require('../services/account-properties');
 const CancellationResolution = require('../services/cancellation-resolution');
@@ -52,11 +53,25 @@ async function committedScopeFor(serviceRequestId) {
 
 // The ONE definition of "this cancellation is done": the processor reported
 // ok and either churned the account or wound down the selected families.
-// Every writer that depends on completion (portal outcome, case promotion,
-// ticket close) reads this — a churn-only reading in one place let a clean
+// Every writer that depends on completion (case promotion, ticket close, the
+// office alert) reads this, and the customer verdict below builds on it — a
+// churn-only reading in one place let a clean
 // scoped retry close its ticket while its case stayed 'open' (codex P1).
 function cancellationCompleted(result) {
   return !!(result && result.ok && (result.churned || result.scopedWoundDown));
+}
+
+// What the CUSTOMER is told (the confirmation text + email and the post-submit
+// screen): done when the cancel completed, and also when a WHOLE-PLAN cancel
+// churned the account and the only errors are visits stuck "on site" from an
+// earlier day (owner 2026-10-30, the rule the admin Cancel plan path uses).
+// Whole-plan only here: a scoped cancel never churns, and its retry replies
+// cannot always name the families that stopped and stay, so a scoped run with
+// a stale visit keeps the by-hand copy. The office side still reads
+// cancellationCompleted: the ticket stays 'new', the case stays open and the
+// review alert still fires, so the stuck visit gets closed out.
+function cancellationConfirmedToCustomer(result) {
+  return cancellationCompleted(result) || !!(result && result.churned && onlyStaleVisitErrorsLeft(result));
 }
 
 function cancellationOutcome(result, confirmation, effectiveAt, confirmationChannels = []) {
@@ -71,7 +86,9 @@ function cancellationOutcome(result, confirmation, effectiveAt, confirmationChan
     // Scoped cancels never churn — "processed" means the selected families'
     // visits are pulled AND the remaining plan repriced (codex r1 P2: the
     // portal showed the manual-closeout copy while the scoped SMS said done).
-    processed: cancellationCompleted(result),
+    // Same customer verdict as the confirmation text, so the screen and the
+    // text agree on a run whose only errors are stale stuck visits.
+    processed: cancellationConfirmedToCustomer(result),
     // The server's ACTUAL churn state, independent of `processed` (codex GH
     // #3671 r28 P1): the churn write runs FIRST, so a later best-effort
     // step failing (an in-progress visit needing manual handling) returns
@@ -882,7 +899,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         customer: req.customer,
         request,
         result: cancellationResult,
-        processed: cancellationProcessed,
+        processed: cancellationConfirmedToCustomer(cancellationResult),
         urgency: validUrgency,
       });
       confirmationSmsSent = confirmations.smsSent;
