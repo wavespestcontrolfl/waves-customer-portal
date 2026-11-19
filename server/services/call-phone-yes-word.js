@@ -279,9 +279,21 @@ async function callerWord(conn, { customerId, since, until = null }) {
   return { yes: { callLogId: word.callLogId, at: word.at, quote: word.quote }, noYes: null };
 }
 
+// Whether a call's own last read names annual prepay as the billing choice, on the prepay card's own filing rule
+// (call-prepay-choice.js files its card for a booked call whose extraction, a real conversation, names it). It reads the
+// call alone, not the customer's latest word: a later call (a cancel, a one-time ask) never hides that the booking call
+// itself belongs to the prepay card. row: CALL_COLUMNS.
+function choseAnnualPrepay(row) {
+  const { parseExtraction, isRealConversation } = require('./call-held-visits');
+  const extraction = row && parseExtraction(row.ai_extraction_enriched);
+  return !!extraction && isRealConversation(row, extraction)
+    && require('./call-prepay-choice').billingChoiceOf(extraction) === 'annual_prepay';
+}
+
 module.exports = {
   CALL_COLUMNS,
   WORD_COLUMNS,
+  choseAnnualPrepay,
   owedReadSql,
   callerWordsOf,
   wordOfCall,

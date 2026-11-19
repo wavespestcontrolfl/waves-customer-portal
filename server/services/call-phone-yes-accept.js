@@ -175,6 +175,13 @@ async function newerEstimateSentAt(conn, { customerId, cardIds, bookingCallId })
 }
 
 // An archived estimate keeps its status but is closed to the customer (the public routes refuse it): never open here.
+// One of the customer's estimates is being sent now: a 'sending' claim younger than SEND_SETTLE_MS (an older one is a
+// send that died mid-flight).
+function estimateBeingSent(conn, customerId, now) {
+  return conn('estimates').where({ customer_id: customerId, status: 'sending' }).whereNull('archived_at')
+    .where('updated_at', '>', new Date(now.getTime() - SEND_SETTLE_MS)).first('id');
+}
+
 async function openEstimatesOf(conn, customerId, now) {
   return conn('estimates')
     .where({ customer_id: customerId })
@@ -323,8 +330,7 @@ async function evaluatePhoneYes({ callLogId, customerId, conn = db, now = new Da
   // A send in flight claims 'sending' and then restores the status (admin-estimates.js): which estimates are open is
   // known only once it settles, so the card waits (a send takes seconds). A claim older than SEND_SETTLE_MS is a send
   // that died mid-flight (nothing restores it): the card no longer waits on it.
-  if (await conn('estimates').where({ customer_id: customerId, status: 'sending' }).whereNull('archived_at')
-    .where('updated_at', '>', new Date(now.getTime() - SEND_SETTLE_MS)).first('id')) return skip('estimate_being_sent');
+  if (await estimateBeingSent(conn, customerId, now)) return skip('estimate_being_sent');
   const since = earliestSentAnchor(answerable);
   // Every call since the send, the booking call included, is read first: an unread one may hold the yes or take it back.
   if (await Word.unreadCallSince(conn, { customerId, since })) return skip('call_still_processing');
@@ -712,6 +718,7 @@ const TAP_UNAVAILABLE = {
   card_out_of_date: "The card's details changed since it was last updated. It updates within 10 minutes. Reload then.",
   card_changed: 'The card changed or was closed since it loaded. Reload and look again.',
   word_changed: "The caller's word changed since the card loaded. Reload and look again.",
+  word_not_current: "The caller's words on the card are not the latest word about this estimate. Reload in 10 minutes, or accept it from the estimate.",
   accept_failed: 'The accept failed. Try again, or accept it from the estimate.',
 };
 const whyNot = (reason) => TAP_UNAVAILABLE[reason] || REASONS[reason] || TAP_UNAVAILABLE.accept_failed;
@@ -766,6 +773,16 @@ async function tapCheck(shown, { now }) {
   if (!cardEstimateIds(card).includes(String(evaluation.estimate.id))) {
     return { ok: false, reason: 'estimate_not_on_card', note: note(TAP_UNAVAILABLE.estimate_not_on_card) };
   }
+  // The booking call's own billing choice, read from that call alone: annual prepay leaves it to the prepay card, also
+  // when a later call (a cancel, a one-time ask) is the customer's latest word.
+  const booking = await db('call_log').where({ id: card.call_log_id, customer_id: customerId }).first(Word.CALL_COLUMNS);
+  if (!booking) return { ok: false, reason: 'customer_changed', note: note(whyNot('customer_changed')) };
+  if (Word.choseAnnualPrepay(booking)) return { ok: false, reason: 'chose_annual_prepay', note: note(whyNot('chose_annual_prepay')) };
+  // The words the card shows must be the latest word about THIS estimate (read in its window): a card that names a
+  // lapsed estimate too can show a yes given before this estimate was sent.
+  if (wordKeyOf(parseJson(card.payload)) !== tapWordOf(evaluation).key) {
+    return { ok: false, reason: 'word_not_current', note: note(TAP_UNAVAILABLE.word_not_current) };
+  }
   // The card must show what the sweep would show now (cardState: nothing to rewrite or close): the caller's word, the
   // estimate links and the accepted state as they stand. A tap never acts on words the card no longer holds.
   if (await cardState(card)) return { ok: false, reason: 'card_out_of_date', note: note(TAP_UNAVAILABLE.card_out_of_date) };
@@ -799,24 +816,34 @@ function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdat
   const Manual = require('./estimate-manual-acceptance');
   const pin = Manual.bookedVisitsPinOf([visit]);
   return async (trx, { estimate }) => {
-    // The call's triage lock first, the order every card writer takes (advisory call lock, then rows): no sweep rewrites
-    // or closes the card, and no other action settles it, until this accept commits or rolls back.
-    await lockTriageCall(trx, bookingCallId);
+    // The global lock order: property-preferences advisory, then customer-comms (the accept holds both already: they
+    // are reentrant), then the customers row, then the call's triage lock (admin-triage.js: the customer row before the
+    // call lock). The converter takes property-preferences again later in this transaction, so the row must not come
+    // before it. Under the triage lock no sweep rewrites or closes the card, and no other action settles it, until
+    // this accept commits or rolls back.
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+    await require('../utils/customer-comms-lock').lockCustomerComms(trx, customerId);
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
+    await lockTriageCall(trx, bookingCallId);
     // FOR UPDATE, as the sweep's filing takes it: no read of the call changes until the commit, and the card's Resolve
     // (transitionCore, same transaction) needs no lock upgrade.
-    if (!(await trx('call_log').where({ id: bookingCallId, customer_id: customerId }).forUpdate().first('id'))) throw stop('customer_changed');
+    const booking = await trx('call_log').where({ id: bookingCallId, customer_id: customerId }).forUpdate().first(Word.CALL_COLUMNS);
+    if (!booking) throw stop('customer_changed');
+    if (Word.choseAnnualPrepay(booking)) throw stop('chose_annual_prepay');
     // The card, locked: still open, the version the office saw, and naming this estimate.
     const card = await trx('triage_items').where({ id: cardId }).forUpdate().first('status', 'updated_at', 'related_estimate_id', 'payload');
     if (!card || !['open', 'in_progress'].includes(card.status) || !expectedUpdatedAt
       || new Date(card.updated_at).getTime() !== new Date(expectedUpdatedAt).getTime()) throw stop('card_changed');
     if (!cardEstimateIds(card).includes(String(estimate.id))) throw stop('estimate_not_on_card');
-    // The caller's word, read again under the lock in the same window: a call still being read, an annual prepay choice
-    // now on the booking call (the prepay card's), or any other change since the check refuses.
+    // The words the locked card shows are still the ones checked (the latest word about this estimate).
+    if (wordKeyOf(parseJson(card.payload)) !== word.key) throw stop('word_changed');
+    // The caller's word, read again under the lock in the same window: a call still being read, or any change since
+    // the check (a later cancel, a re-read) refuses.
     if (await Word.unreadCallSince(trx, { customerId, since: word.since })) throw stop('call_still_processing');
     const heard = await Word.callerWord(trx, { customerId, since: word.since, until: word.until });
-    if (heard.noYes === 'caller_chose_annual_prepay' && String(heard.callLogId) === String(bookingCallId)) throw stop('chose_annual_prepay');
     if (wordKeyOf(heardFields(heard.yes, { noYes: heard.noYes })) !== word.key) throw stop('word_changed');
+    // A send that started since the check: which estimates are open is known only once it settles.
+    if (await estimateBeingSent(trx, customerId, new Date())) throw stop('estimate_being_sent');
     // The locked visit passes the evaluation's own visit checks again (family, property, price, add-ons, series and
     // assessment flags), not only the pin.
     const row = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first();

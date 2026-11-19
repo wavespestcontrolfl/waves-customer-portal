@@ -805,6 +805,12 @@ async function lockCommsOwner(trx, estimateId, estimate) {
   const heldOwners = new Set();
   let current = estimate;
   while (current.customer_id && !heldOwners.has(String(current.customer_id))) {
+    // The property-preferences advisory lock FIRST, then customer-comms: the global order (property-preferences
+    // advisory, customer-comms, customers row) that the converter (inside this transaction), the triage property
+    // update and the address saves take. This accept takes property-preferences later anyway (convertEstimate, the
+    // card's customer pins, the annual prepay guard); taking comms first made it comms then property-preferences,
+    // the AB-BA of those writers. Reentrant, so the later acquisitions are no-ops.
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(current.customer_id)]);
     await lockCustomerComms(trx, current.customer_id);
     heldOwners.add(String(current.customer_id));
     const fresh = await trx('estimates').where({ id: estimateId }).first();
