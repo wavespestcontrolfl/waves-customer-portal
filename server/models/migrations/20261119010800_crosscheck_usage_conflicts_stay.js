@@ -13,9 +13,10 @@
  * Nothing is done without exactly one Crosscheck catalog row or without audit_log. Production has one Talak usage row and no
  * removal (read 2026-11-19), so nothing changes.
  *
- * down() deletes a row it put back while the row still holds what up() wrote and its own product still exists, and appends a
+ * down() deletes a row it put back while every column still holds what up() wrote and its own product still exists, and appends a
  * :rollback event (audit_log is append-only); the removing migration's down() then puts the row back as it was. A row the office
- * changed since, or one whose own product is gone (no down() could put it back), stays on Crosscheck.
+ * changed since (its cost, notes or is_primary), or one whose own product is gone (no down() could put it back), stays on
+ * Crosscheck.
  */
 const MIGRATION = '20261119010800_crosscheck_usage_conflicts_stay';
 const LOG = '[crosscheck-usage-conflicts-stay]';
@@ -28,9 +29,6 @@ const REMOVERS = [
   'migration:20261119010400_legacy_bifenthrin_links:usage',
   'migration:20261119010600_crosscheck_usage_one_per_type:usage',
 ];
-// What a usage row costs: its amount, unit and rate per 1,000 sq ft (pg hands decimals back as strings).
-const COSTING = ['usage_amount', 'usage_unit', 'usage_per_1000sf'];
-
 const asObject = (value) => {
   if (value && typeof value === 'object') return value;
   if (typeof value !== 'string') return {};
@@ -111,10 +109,11 @@ exports.up = async function up(knex) {
   for (const removal of removals) await restoreRemoval(knex, named[0], costsOf(removal.row.service_type), removal);
 };
 
-// The row as up() wrote it: its id, service type, product and cost. A NULL matches only NULL.
+// The row as up() wrote it, column by column, so an edit since to any of them (its cost, notes or is_primary) keeps it. A NULL
+// matches only NULL.
 function writtenRow(knex, row) {
-  let query = knex('service_product_usage').where({ id: row.id, service_type: row.service_type, product_id: row.product_id });
-  for (const column of COSTING) query = row[column] == null ? query.whereNull(column) : query.where({ [column]: row[column] });
+  let query = knex('service_product_usage');
+  for (const [column, value] of Object.entries(row)) query = value == null ? query.whereNull(column) : query.where({ [column]: value });
   return query;
 }
 

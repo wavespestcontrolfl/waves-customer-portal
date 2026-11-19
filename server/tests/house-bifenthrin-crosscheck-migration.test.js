@@ -1176,7 +1176,8 @@ describe('follow-up 20261119010800: a removed usage row with another cost comes 
       { id: 'u11', product_id: BIFEN, service_type: 'Barrier', usage_amount: 3 }, // 20261119010400 moves it
       // 20261119010400 removes it before u12 (table order); its cost is new too, and u12 has the lower id, so u12 comes back.
       { id: 'u15', product_id: TALSTAR, service_type: 'Barrier', usage_amount: 1 },
-      { id: 'u12', product_id: TALSTAR, service_type: 'Barrier', usage_amount: 1 }, // 20261119010400 removes it: not u11's amount
+      // 20261119010400 removes it: not u11's amount. It carries every column a production row has, as its snapshot does.
+      { id: 'u12', product_id: TALSTAR, service_type: 'Barrier', usage_amount: 1, usage_unit: null, usage_per_1000sf: null, is_primary: false, notes: null },
       { id: 'u13', product_id: TALSTAR, service_type: 'Already Mapped', usage_amount: 2 }, // 20261119010400 removes it: repeats u3
       { id: 'u14', product_id: TALSTAR, service_type: 'Already Mapped', usage_amount: '2.0000', usage_per_1000sf: '0.5000' }, // not u3's rate
     );
@@ -1247,17 +1248,21 @@ describe('follow-up 20261119010800: a removed usage row with another cost comes 
 
   test.each([
     ['the office changed its amount since up()', (knex) => { usage(knex, 'u12').usage_amount = 2; }, ['u12']],
+    ['the office changed only its notes', (knex) => { usage(knex, 'u12').notes = 'Office: both rows stay'; }, ['u12']],
+    ['the office made it the primary row', (knex) => { usage(knex, 'u12').is_primary = true; }, ['u12']],
     ['its own product, Talstar P, is gone (no down() could put it back)', (knex) => {
       knex.tables.products_catalog = knex.tables.products_catalog.filter((row) => row.id !== TALSTAR);
     }, ['u12', 'u14']],
-  ])('down keeps a row it put back when %s: it stays on Crosscheck, and the earlier down() leaves it be', async (_label, edit, keptIds) => {
+  ])('down keeps a row it put back when %s: it stays on Crosscheck, as edited, through the full rollback', async (_label, edit, keptIds) => {
     const knex = makeKnex(conflictTables());
     await removersUp(knex);
     await conflicts.up(knex);
     edit(knex);
     const kept = keptIds.map((id) => ({ ...usage(knex, id) }));
     await conflicts.down(knex);
+    await onePerType.down(knex);
     await legacy.down(knex);
+    await migration.down(knex);
     expect(keptIds.map((id) => knex.tables.service_product_usage.filter((row) => row.id === id))).toEqual(kept.map((row) => [row]));
     expect(eventsOf(knex, conflicts.ROLLBACK_ACTION).map((event) => event.resource_id)).toEqual(RESTORED.filter((id) => !keptIds.includes(id)));
     for (const id of keptIds) expect(logged()).toContain(`usage row ${id} is no longer as up() wrote it, or its own product is gone: kept`);
@@ -1358,6 +1363,113 @@ describe('follow-up 20261119010900: the Crosscheck low-stock threshold is set in
     edit(knex);
     const before = snapshot(knex);
     await threshold.up(knex);
+    expect(snapshot(knex)).toEqual(before);
+  });
+});
+
+// Follow-up 20261119011000: the plan applies a substitution to the line keyed on its original product, and the lines now name Crosscheck.
+describe('follow-up 20261119011000: an approved substitution on an open visit follows to Crosscheck', () => {
+  const follow = require('../models/migrations/20261119011000_crosscheck_substitutions_follow');
+  const BIFEN = 'dddddddd-0000-4000-8000-000000000004';
+  const TALSTAR = 'eeeeeeee-0000-4000-8000-000000000005';
+  const sub = (id, visit, original, extra = {}) => ({ id, scheduled_service_id: visit, original_product_id: original, substitute_product_id: OTHER, rate_per_1000: null, rate_unit: null, reason: 'out of stock', active: true, ...extra });
+  const subTables = () => {
+    const tables = baseTables();
+    tables.products_catalog.push({ id: BIFEN, name: 'Bifen I/T', active: true }, { id: TALSTAR, name: 'Talstar P', active: false });
+    tables.scheduled_services = [
+      { id: 'v1', status: 'confirmed' }, { id: 'v2', status: 'pending' }, { id: 'v3', status: 'completed' },
+      { id: 'v4', status: 'confirmed' }, { id: 'v5', status: 'on_site' }, { id: 'v6', status: 'en_route' },
+    ];
+    tables.lawn_protocol_product_substitutions = [
+      sub('s1', 'v1', TALAK, { rate_per_1000: '0.4000', rate_unit: 'fl_oz' }),
+      sub('s2', 'v2', BIFEN),
+      sub('s3', 'v3', TALAK), // a completed visit keeps its record
+      sub('s4', 'v4', TALAK, { substitute_product_id: CROSS, rate_per_1000: '0.2500', rate_unit: 'fl_oz' }), // Talak to Crosscheck, at an approved rate
+      sub('s5', 'v5', TALAK), // v5 already has s6 keyed on Crosscheck (inactive, still one per visit and original)
+      sub('s6', 'v5', CROSS, { active: false }),
+      sub('s7', 'v6', TALSTAR), // v6 has two: Talak (s8) goes first, Talstar P stays
+      sub('s8', 'v6', TALAK),
+      sub('s9', 'v2', TALAK, { active: false }), // inactive
+    ];
+    return tables;
+  };
+  const originals = (knex) => Object.fromEntries(knex.tables.lawn_protocol_product_substitutions.map((row) => [row.id, row.original_product_id]));
+  const logged = () => logSpy.mock.calls.flat().join('\n');
+  let logSpy;
+  beforeEach(() => { logSpy = jest.spyOn(console, 'log').mockImplementation(() => {}); });
+  afterEach(() => logSpy.mockRestore());
+
+  test('up: each active substitution on an open visit keyed on a replaced product is keyed on Crosscheck, the first one a visit allows; the rest stay and are logged; a re-run changes nothing', async () => {
+    const knex = makeKnex(subTables());
+    const start = snapshot(knex);
+    await migration.up(knex);
+    knex.locks.length = 0;
+    await follow.up(knex);
+    expect(originals(knex)).toEqual({ s1: CROSS, s2: CROSS, s3: TALAK, s4: CROSS, s5: TALAK, s6: CROSS, s7: TALSTAR, s8: CROSS, s9: TALAK });
+    // Nothing but the key changes: the substitute, rate, reason and approval stay.
+    const byIdOf = (tables) => Object.fromEntries(tables.lawn_protocol_product_substitutions.map(({ original_product_id: _key, ...rest }) => [rest.id, rest]));
+    expect(byIdOf(knex.tables)).toEqual(byIdOf(start));
+    const keys = knex.tables.lawn_protocol_product_substitutions.map((row) => `${row.scheduled_service_id}:${row.original_product_id}`);
+    expect(keys).toHaveLength(new Set(keys).size);
+    expect(eventsOf(knex, follow.ACTION).map((event) => [event.resource_id, meta(event)])).toEqual([
+      ['s1', expect.objectContaining({ scheduled_service_id: 'v1', from: TALAK, to: CROSS, substitute: OTHER })],
+      ['s4', expect.objectContaining({ scheduled_service_id: 'v4', from: TALAK, to: CROSS, substitute: CROSS })],
+      ['s8', expect.objectContaining({ scheduled_service_id: 'v6', from: TALAK, to: CROSS })],
+      ['s2', expect.objectContaining({ scheduled_service_id: 'v2', from: BIFEN, to: CROSS })],
+    ]);
+    expect(knex.locks.map(([table]) => table)).toEqual(['lawn_protocol_product_substitutions']);
+    expect(logged()).toContain('visit v5: substitution s5 stays keyed on its old product; the visit has one keyed on LESCO Crosscheck Plus');
+    expect(logged()).toContain('visit v6: substitution s7 stays keyed on its old product');
+    expect(follow.REPLACED).toEqual(expect.arrayContaining(['Atticus Talak 7.9 F', 'Talstar P', 'Bifen I/T']));
+    expect(follow.ROLLBACK_ACTION.length).toBeLessThanOrEqual(96);
+    const after = snapshot(knex);
+    await follow.up(knex);
+    expect(snapshot(knex)).toEqual(after);
+  });
+
+  test('down: every row goes back to its old product; a second down() changes nothing; audit_log is only appended to', async () => {
+    const knex = makeKnex(subTables());
+    await migration.up(knex);
+    const before = originals(knex);
+    await follow.up(knex);
+    const beforeDown = snapshot(knex).audit_log;
+    await follow.down(knex);
+    expect(originals(knex)).toEqual(before);
+    expect(eventsOf(knex, follow.ROLLBACK_ACTION)).toHaveLength(4);
+    expect(knex.tables.audit_log.slice(0, beforeDown.length)).toEqual(beforeDown);
+    await follow.down(knex);
+    expect(eventsOf(knex, follow.ROLLBACK_ACTION)).toHaveLength(4);
+    // A rolled-back event is done: a row the office keys on Crosscheck again stays there.
+    byId(knex, 'lawn_protocol_product_substitutions', 's1').original_product_id = CROSS;
+    await follow.down(knex);
+    expect(byId(knex, 'lawn_protocol_product_substitutions', 's1').original_product_id).toBe(CROSS);
+  });
+
+  test.each([
+    ['the office keyed it on another product since', (knex) => { byId(knex, 'lawn_protocol_product_substitutions', 's1').original_product_id = OTHER; }, 's1', OTHER],
+    ['the visit has a new row keyed on its old product', (knex) => { knex.tables.lawn_protocol_product_substitutions.push(sub('s10', 'v1', TALAK)); }, 's1', CROSS],
+    ['its old product is gone', (knex) => { knex.tables.products_catalog = knex.tables.products_catalog.filter((row) => row.id !== BIFEN); }, 's2', CROSS],
+  ])('down keeps a row when %s', async (_label, edit, id, key) => {
+    const knex = makeKnex(subTables());
+    await migration.up(knex);
+    await follow.up(knex);
+    edit(knex);
+    await follow.down(knex);
+    expect(byId(knex, 'lawn_protocol_product_substitutions', id).original_product_id).toBe(key);
+    expect(eventsOf(knex, follow.ROLLBACK_ACTION).map((event) => event.resource_id)).not.toContain(id);
+    expect(eventsOf(knex, follow.ROLLBACK_ACTION)).toHaveLength(3);
+    expect(logged()).toContain(`substitution ${id} is no longer keyed on LESCO Crosscheck Plus, or its old product is gone or keyed again on its visit: kept`);
+  });
+
+  test.each([
+    ['production: no substitution rows', (tables) => { tables.lawn_protocol_product_substitutions = []; return tables; }],
+    ['no substitutions table', (tables) => { delete tables.lawn_protocol_product_substitutions; return tables; }],
+    ['no audit_log table', (tables) => { delete tables.audit_log; return tables; }],
+    ['two catalog rows named Crosscheck', (tables) => { tables.products_catalog.push({ id: 'cross-2', name: 'LESCO Crosscheck Plus' }); return tables; }],
+  ])('%s: nothing changes', async (_label, shape) => {
+    const knex = makeKnex(shape(subTables()));
+    const before = snapshot(knex);
+    await follow.up(knex);
     expect(snapshot(knex)).toEqual(before);
   });
 });
