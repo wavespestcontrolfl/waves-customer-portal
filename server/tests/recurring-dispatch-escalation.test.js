@@ -36,6 +36,7 @@ const notifications = require('../services/notification-service');
 const rebooker = require('../services/rebooker');
 const replan = require('../services/day-replan')._internals;
 const bookingFit = require('../services/day-replan/booking-fit');
+const seriesDatesInWindow = jest.spyOn(require('../services/auto-dispatch/candidate-slots')._internals, 'seriesDatesInWindow');
 const { flagUnplacedVisits } = require('../services/auto-dispatch/audit');
 const knex = require('knex')({ client: 'pg' });
 
@@ -73,6 +74,7 @@ beforeEach(() => {
   replan.loadToldLevels.mockResolvedValue({ told: new Map() });
   replan.loadDayStops.mockResolvedValue([]);
   bookingFit.assessOfferedHours.mockResolvedValue([]);
+  seriesDatesInWindow.mockResolvedValue(new Set());
   db.raw = jest.fn((sql) => sql);
   for (const method of ['join', 'whereNotNull', 'whereNull', 'whereIn', 'where', 'whereRaw', 'whereNotExists', 'forNoKeyUpdate']) {
     query[method] = jest.fn(() => query);
@@ -265,6 +267,26 @@ describe('recurring visit with no arrival time and no due date', () => {
       options: {},
     });
     expect(notifications.notifyAdmin.mock.calls[0][3].metadata.suggestedStarts).toEqual(['10:00']);
+  });
+
+  test('another occurrence on the same date keeps the basic notice without suggesting a duplicate visit', async () => {
+    const date = '2026-08-10';
+    const candidate = { ...windowless, scheduled_date: date };
+    const current = { ...candidate, technician_id: 'tech-1', estimated_duration_minutes: 60 };
+    query.select = jest.fn().mockResolvedValueOnce([candidate]).mockResolvedValue([]);
+    query.first = jest.fn()
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce({ scheduled_date: '2026-01-10', recurring_pattern: 'quarterly' })
+      .mockResolvedValueOnce(null);
+    notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
+    seriesDatesInWindow.mockResolvedValueOnce(new Set([date]));
+
+    expect(await flagUnplacedVisits({ lockWindowDays: 14 }, new Date('2026-08-01T16:00:00Z'))).toBe(1);
+    const opts = notifications.notifyAdmin.mock.calls[0][3];
+    expect(opts.detail).toBe('Series started 2026-01-10 (quarterly). The dispatch due date is missing.');
+    expect(opts.metadata.suggestedStarts).toEqual([]);
+    expect(bookingFit.assessOfferedHours).not.toHaveBeenCalled();
+    expect(seriesDatesInWindow).toHaveBeenCalledWith(current, { db }, date, date);
   });
 
   test('re-checks the row under its lock: a visit given a time meanwhile raises nothing', async () => {

@@ -238,6 +238,41 @@ test('booking fit filters only this estimate\'s genuine hold after the shared oc
   expect(occupancy.listOccupiedWindows).toHaveBeenCalledTimes(1);
 });
 
+test('booking fit checks delayed service against exact rival occupancy with writer scope and boundary handoffs', async () => {
+  const occupancy = require('../services/scheduling/occupancy');
+  const { assessOfferedHours } = require('../services/day-replan/booking-fit');
+  const RouteOptimizer = require('../services/route-optimizer');
+  const date = '2026-11-20';
+  const tech = 'tech-1';
+  const slot = { date, techId: tech, windowStart: '10:00', windowEnd: '11:00' };
+  const target = { lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
+  const rival = (technicianId, reason) => ({
+    id: `rival-${technicianId || 'unassigned'}-${reason || 'hold'}`, customer_id: null, technician_id: technicianId,
+    status: 'pending', scheduled_date: date, window_start: '11:00', window_end: '12:00',
+    estimated_duration_minutes: 60, reservation_expires_at: '2097-01-01', source_estimate_id: 'estimate-rival',
+    startMin: 660, endMin: 720, ...(reason ? { conflict_reason: reason } : {}),
+  });
+  const run = async (row, { duration = 90, scoped = false } = {}) => {
+    const earlier = {
+      id: 'earlier-visit', customer_id: 'customer-1', technician_id: tech, status: 'confirmed', scheduled_date: date,
+      window_start: '09:00', window_end: '10:00', estimated_duration_minutes: duration,
+      lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, route_order: 1,
+    };
+    const calendar = new Map([
+      ['homes', new Map()], ['departure', 8 * 60], [date, [earlier]], [`${date}|${tech}`, []],
+    ]);
+    occupancy.techScopedConfirmActive.mockReturnValueOnce(scoped);
+    occupancy.listOccupiedWindows.mockResolvedValueOnce([row]);
+    return assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar });
+  };
+
+  await expect(run(rival(tech))).resolves.toEqual([]); // delayed until 11:30, through the rival hold
+  await expect(run(rival(tech), { duration: 60 })).resolves.toEqual([expect.objectContaining({ slot })]); // ends at 11:00
+  await expect(run(rival('tech-2'))).resolves.toEqual([]); // tech-blind writer scope
+  await expect(run(rival('tech-2'), { scoped: true })).resolves.toEqual([expect.objectContaining({ slot })]);
+  await expect(run(rival(null, 'make_room_destination'), { scoped: true })).resolves.toEqual([]);
+});
+
 test('booking fit holds the full summed span of a version-2 allocation before scoring an offer', async () => {
   const occupancy = require('../services/scheduling/occupancy');
   const { assessOfferedHours } = require('../services/day-replan/booking-fit');

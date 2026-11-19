@@ -64,15 +64,17 @@ function routeRowHours(row, byId, fallback) {
 
 // The booking writer scopes occupancy to unassigned rows plus this technician when multi-tech confirmation is on;
 // with the gate off, every other technician blocks too. A same-tech committed route row is handled by `groups`, but
-// a hold, completed row or destination that is not in that route must still block its canonical occupied span.
-function occupiedBlockedHours(rows, techId, techBlind, routeIds) {
-  const hours = new Set();
-  for (const row of rows) {
+// a hold, completed row or make-room destination that is not in that route remains an exact unavailable interval.
+function scopedOccupancy(rows, techId, techBlind, routeIds) {
+  return rows.filter((row) => {
     const own = sameTech(row, techId);
-    if (own && routeIds.has(String(row.id)) && !isHoldStop(row)) continue;
-    if (!own && row.technician_id != null && !techBlind) continue;
-    for (const hour of spanHours(row)) hours.add(hour);
-  }
+    if (own && routeIds.has(String(row.id)) && !isHoldStop(row)) return false;
+    return !(!own && row.technician_id != null && !techBlind);
+  });
+}
+
+function occupiedBlockedHours(rows) {
+  const hours = new Set(rows.flatMap(spanHours));
   return [...hours].sort((a, b) => a - b);
 }
 
@@ -136,9 +138,14 @@ async function assessOfferedHours(conn, offered, target, {
       const groups = coVisitGroups(ordered);
       const blocks = await read(`${date}|${techId}`, () => replan.loadBlocks(conn, date, techId));
       const routeIds = new Set(own.map(row => String(row.id)));
-      const blockedHours = occupiedBlockedHours(occupancyRows, techId, techBlind, routeIds);
+      const blocked = scopedOccupancy(occupancyRows, techId, techBlind, routeIds);
+      const blockedHours = occupiedBlockedHours(blocked);
       const rowHours = row => routeRowHours(row, occupiedById, replan.rowHours);
-      const routeBlocks = [...blocks, ...interviewBlocks];
+      // The whole-hour set mirrors the writer for nominal offered windows. Exact spans additionally protect a
+      // route-delayed service: a 10 AM card that actually runs until 11:30 may not cross an 11 AM rival hold.
+      // The simulator's strict overlap rule preserves a handoff exactly at either interval boundary.
+      const occupancyBlocks = blocked.map(({ startMin, endMin }) => ({ startMin, endMin }));
+      const routeBlocks = [...blocks, ...interviewBlocks, ...occupancyBlocks];
       const unavailable = [...routeBlocks, ...blockedHours.map(h => ({ startMin: h * 60, endMin: h * 60 + 60 }))];
       const origin = homeFromMap(homes, techId);
       const before = simulate(ordered, { origin, departureMin });

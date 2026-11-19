@@ -64,7 +64,7 @@ const IN_PROGRESS_STATUSES = ['en_route', 'on_site'];
 const PLAN_TABLE = 'day_replan_plans';
 // Canonical booking occupancy: only a customer-NULL row can be an expiring hold. A customer-linked committed visit
 // remains live even when a stale reservation_expires_at stamp is non-null or already past.
-const LIVE_OCCUPANCY_SQL = '(scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at IS NULL OR scheduled_services.reservation_expires_at > NOW())';
+const { LIVE_SERVICE_OR_HOLD_SQL } = require('../scheduling/reservation-occupancy');
 
 function daysAhead() {
   const raw = Number.parseInt(process.env.DAY_REPLAN_DAYS_AHEAD, 10);
@@ -143,7 +143,7 @@ async function loadDayStops(conn, dateStr) {
       ...guardedCoordSelects(conn),
       ...TOLD_LOCK_SELECT,
     ],
-  }).whereRaw(LIVE_OCCUPANCY_SQL);
+  }).whereRaw(LIVE_SERVICE_OR_HOLD_SQL);
 }
 
 /** Ids whose 24-hour reminder is recorded as sent. Throws when the read fails (the caller skips the day). */
@@ -801,7 +801,7 @@ async function lockDayRows(conn, dateStr) {
   return conn('scheduled_services')
     .where('scheduled_date', dateStr)
     .whereNotIn('status', EXCLUDED_STATUSES)
-    .whereRaw(LIVE_OCCUPANCY_SQL)
+    .whereRaw(LIVE_SERVICE_OR_HOLD_SQL)
     .orderBy('id')
     .forUpdate()
     .select('id');

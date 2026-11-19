@@ -72,7 +72,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
     if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
     database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
-    for (const key of ['GATE_DAY_REPLAN', 'DAY_REPLAN_DAYS_AHEAD', 'GATE_MULTI_TECH_CONFIRM', 'GATE_SCHEDULING_CAPACITY', 'GATE_BOOKING_MAKE_ROOM']) saved[key] = process.env[key];
+    for (const key of ['GATE_DAY_REPLAN', 'DAY_REPLAN_DAYS_AHEAD', 'GATE_MULTI_TECH_CONFIRM', 'GATE_SCHEDULING_CAPACITY']) saved[key] = process.env[key];
     ({ runDayReplanIfEnabled } = require('../services/day-replan'));
     rebooker = require('../services/rebooker');
   });
@@ -89,7 +89,6 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     process.env.DAY_REPLAN_DAYS_AHEAD = '1';
     delete process.env.GATE_MULTI_TECH_CONFIRM;
     delete process.env.GATE_SCHEDULING_CAPACITY;
-    delete process.env.GATE_BOOKING_MAKE_ROOM;
     mockConn = await database.transaction();
 
     techId = randomUUID();
@@ -169,6 +168,14 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     return { date, mover, left, right };
   }
 
+  async function withOfficeEnv(key, value, run) {
+    const before = process.env[key];
+    if (value == null) delete process.env[key]; else process.env[key] = value;
+    try { return await run(); } finally {
+      if (before == null) delete process.env[key]; else process.env[key] = before;
+    }
+  }
+
   test('booking-time measurement tests existing cards against the committed route, holds and end of day', async () => {
     const { date, mover } = await officeRoute();
     const { observeOffers } = require('../services/day-replan/booking-fit');
@@ -192,21 +199,79 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     const customer = visits[0].customerId;
     await mockConn('estimates').insert([own, other].map(id => ({ id, customer_id: customer, status: 'sent' })));
     const cards = ['09', '11', '13', '15'].map(h => ({ date, techId, windowStart: h + ':00', windowEnd: String(Number(h) + 1) + ':00' }));
-    process.env.GATE_BOOKING_MAKE_ROOM = 'true';
-    for (const [index, id] of [own, other].entries()) {
-      await mockConn('scheduled_services').insert({ customer_id: null, technician_id: techId, scheduled_date: date,
-        service_type: 'Quarterly Pest Control Service', status: 'pending', source_estimate_id: id,
-        make_room_moves: index === 0 ? null : { v: 1, date, techId, moves: [{ id: visits[1].id, from: '14:00', to: '15:00', widthMin: 60 }] },
-        reservation_expires_at: date + 'T22:00Z', window_start: cards[index].windowStart, window_end: cards[index].windowEnd });
-    }
-    await mockConn('scheduled_services').insert({ customer_id: customer, technician_id: techId, scheduled_date: date,
-      service_type: 'Quarterly Pest Control Service', status: 'pending', source_estimate_id: own, lat: HQ.lat, lng: HQ.lng,
-      reservation_expires_at: '2001-01-01T00:00Z', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 60 });
+    await withOfficeEnv('GATE_BOOKING_MAKE_ROOM', 'true', async () => {
+      for (const [index, id] of [own, other].entries()) {
+        await mockConn('scheduled_services').insert({ customer_id: null, technician_id: techId, scheduled_date: date,
+          service_type: 'Quarterly Pest Control Service', status: 'pending', source_estimate_id: id,
+          make_room_moves: index === 0 ? null : { v: 1, date, techId, moves: [{ id: visits[1].id, from: '14:00', to: '15:00', widthMin: 60 }] },
+          reservation_expires_at: date + 'T22:00Z', window_start: cards[index].windowStart, window_end: cards[index].windowEnd });
+      }
+      await mockConn('scheduled_services').insert({ customer_id: customer, technician_id: techId, scheduled_date: date,
+        service_type: 'Quarterly Pest Control Service', status: 'pending', source_estimate_id: own, lat: HQ.lat, lng: HQ.lng,
+        reservation_expires_at: '2001-01-01T00:00Z', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 60 });
+      const target = { lat: HQ.lat, lng: HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
+      const measure = ownEstimateId => observeOffers(mockConn, cards, target, { now: NOW, ownEstimateId })();
+      expect((await measure(own)).map(m => Number.isFinite(m.driveMin))).toEqual([true, false, false, false]);
+      expect((await measure()).map(m => Number.isFinite(m.driveMin))).toEqual([false, false, false, false]);
+      expect((await measure(randomUUID())).map(m => Number.isFinite(m.driveMin))).toEqual([false, false, false, false]);
+    });
+  });
+
+  test('stale-stamped booked stops remain exact occupancy in tech-blind and tech-scoped measurement', async () => {
+    const { assessOfferedHours } = require('../services/day-replan/booking-fit');
+    const date = '2097-06-11';
+    const [earlier, booked] = visits;
+    const otherTech = randomUUID();
+    await mockConn('technicians').insert({ id: otherTech, name: 'Other synthetic tech', employment_status: 'active', field_dispatchable: true });
+    await mockConn('scheduled_services').where({ id: earlier.id }).update({
+      scheduled_date: date, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 90,
+      route_order: 1, lat: HQ.lat, lng: HQ.lng,
+    });
+    await mockConn('scheduled_services').where({ id: booked.id }).update({
+      scheduled_date: date, window_start: '11:00', window_end: '12:00', estimated_duration_minutes: 60,
+      technician_id: otherTech, reservation_expires_at: '2001-01-01T00:00Z', route_order: 1,
+    });
+    const slot = { date, techId, windowStart: '10:00', windowEnd: '11:00' };
     const target = { lat: HQ.lat, lng: HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
-    const measure = ownEstimateId => observeOffers(mockConn, cards, target, { now: NOW, ownEstimateId })();
-    expect((await measure(own)).map(m => Number.isFinite(m.driveMin))).toEqual([true, false, false, false]);
-    expect((await measure()).map(m => Number.isFinite(m.driveMin))).toEqual([false, false, false, false]);
-    expect((await measure(randomUUID())).map(m => Number.isFinite(m.driveMin))).toEqual([false, false, false, false]);
+    const assess = () => assessOfferedHours(mockConn, [slot], target, { now: NOW });
+
+    await expect(assess()).resolves.toEqual([]); // tech-blind: the other technician still occupies the office
+    await withOfficeEnv('GATE_MULTI_TECH_CONFIRM', 'true', async () => {
+      await expect(assess()).resolves.toEqual([expect.objectContaining({ slot })]);
+      await mockConn('scheduled_services').where({ id: booked.id }).update({ technician_id: null });
+      await expect(assess()).resolves.toEqual([]); // unassigned blocks every technician
+      await mockConn('scheduled_services').where({ id: earlier.id }).update({ estimated_duration_minutes: 60 });
+      await expect(assess()).resolves.toEqual([expect.objectContaining({ slot })]); // exact 11:00 handoff
+    });
+  });
+
+  test('live make-room destinations block delayed work under the writer technician scope', async () => {
+    const { assessOfferedHours } = require('../services/day-replan/booking-fit');
+    const date = '2097-06-11';
+    const [earlier] = visits;
+    const otherTech = randomUUID();
+    await mockConn('technicians').insert({ id: otherTech, name: 'Make-room synthetic tech', employment_status: 'active', field_dispatchable: true });
+    await mockConn('scheduled_services').where({ id: earlier.id }).update({
+      scheduled_date: date, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 90,
+      route_order: 1, lat: HQ.lat, lng: HQ.lng,
+    });
+    const [hold] = await mockConn('scheduled_services').insert({ customer_id: null, technician_id: otherTech, scheduled_date: date,
+      service_type: 'Quarterly Pest Control Service', status: 'pending', reservation_expires_at: date + 'T22:00Z',
+      window_start: '14:00', window_end: '15:00', make_room_moves: {
+        v: 1, date, techId: otherTech, moves: [{ id: visits[1].id, from: '12:00', to: '11:00', widthMin: 60 }],
+      } }).returning('id');
+    const slot = { date, techId, windowStart: '10:00', windowEnd: '11:00' };
+    const target = { lat: HQ.lat, lng: HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
+    const assess = () => assessOfferedHours(mockConn, [slot], target, { now: NOW });
+
+    await withOfficeEnv('GATE_BOOKING_MAKE_ROOM', 'true', async () => {
+      await expect(assess()).resolves.toEqual([]); // tech-blind sees another technician's destination
+      await withOfficeEnv('GATE_MULTI_TECH_CONFIRM', 'true', async () => {
+        await expect(assess()).resolves.toEqual([expect.objectContaining({ slot })]);
+        await mockConn('scheduled_services').where({ id: hold.id }).update({ technician_id: null });
+        await expect(assess()).resolves.toEqual([]); // unassigned destination blocks everyone
+      });
+    });
   });
 
   test('two simultaneous allocation members reserve their full combined duration before ranking a new hour', async () => {
@@ -275,6 +340,15 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     const updated = capture.mock.calls.map(c => c[2]).find(n => n?.metadata?.scheduledServiceId === target.id);
     expect(updated.metadata.suggestedStarts).not.toContain(blockedStart);
     expect((await mockConn('scheduled_services').where({ id: target.id }).first('window_start')).window_start).toBeNull();
+
+    await mockConn('scheduled_services').insert({ customer_id: target.customerId, technician_id: techId,
+      recurring_parent_id: root.id, scheduled_date: DAY, window_start: '15:00', window_end: '16:00',
+      estimated_duration_minutes: 60, service_type: 'Quarterly Pest Control Service', status: 'pending', lat: HQ.lat, lng: HQ.lng });
+    capture.mockClear();
+    await flagUnplacedVisits({ lockWindowDays: 14 }, NOW);
+    const duplicateDay = capture.mock.calls.map(c => c[2]).find(n => n?.metadata?.scheduledServiceId === target.id);
+    expect(duplicateDay.detail).toBe(`Series started ${start} (quarterly). The dispatch due date is missing.`);
+    expect(duplicateDay.metadata.suggestedStarts).toEqual([]);
   });
 
   const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;

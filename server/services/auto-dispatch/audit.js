@@ -482,6 +482,8 @@ async function noWindowDetail(trx, row, date, now = new Date()) {
   if (date <= etDateString(now) || !row.technician_id || row.visit_id || row.customer_confirmed
       || row.reservation_expires_at || row.auto_dispatch_locked || row.auto_dispatch_excluded
       || (row.skip_weekends === true && isWeekendDay(date))) return { detail: detail.join(' '), hours: [] };
+  const { seriesDatesInWindow } = require('./candidate-slots')._internals;
+  if ((await seriesDatesInWindow(row, { db: trx }, date, date)).has(date)) return { detail: detail.join(' '), hours: [] };
   const { _internals: replan } = require('../day-replan');
   const { applyAssignable, absentTechDays } = require('../technician-eligibility');
   const { getBlackoutDates } = require('../scheduling/blackout-dates');

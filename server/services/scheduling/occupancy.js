@@ -70,6 +70,7 @@
  */
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const defaultDb = require('../../models/db');
+const { liveServiceOrHold } = require('./reservation-occupancy');
 const { guardedCoordSelects } = require('./day-stops');
 const { travelGapEnabled, travelGapConflicts } = require('./travel-gap');
 const { multiTechConfirmLive } = require('../../config/feature-gates');
@@ -971,10 +972,7 @@ async function listOccupiedWindows({
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
       .whereNotIn('scheduled_services.status', excludeStatuses)
-      .where((q) => {
-        q.whereNull('scheduled_services.reservation_expires_at')
-          .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-      })
+      .where(liveServiceOrHold)
       .whereNotNull('scheduled_services.window_start');
     if (excludeIds.length) query.whereNotIn('scheduled_services.id', excludeIds);
     rows = await query.select(...CONFLICT_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(db));
@@ -982,10 +980,7 @@ async function listOccupiedWindows({
     const query = db('scheduled_services')
       .whereBetween('scheduled_date', [dateFrom, dateTo])
       .whereNotIn('status', excludeStatuses)
-      .where((q) => {
-        q.whereNull('reservation_expires_at')
-          .orWhereRaw('reservation_expires_at > NOW()');
-      })
+      .where(liveServiceOrHold)
       // Windowless placeholder rows are inert to conflicts (see header).
       .whereNotNull('window_start');
     if (excludeIds.length) query.whereNotIn('id', excludeIds);
