@@ -751,6 +751,25 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
 });
 
 describe('FIX 2 — already-accepted retry returns the full success payload', () => {
+  test.each([
+    ['estimate_promo_codes', { code: 'QA25', credit_amount: '25.00', status: 'redeemed' },
+      { code: 'QA25', creditAmount: 25, credited: true }],
+    ['estimate_referral_codes', { code: 'QA-REF', status: 'confirmed' },
+      { code: 'QA-REF', referral: true, note: 'You’ll get a $12.00 account credit after your first recurring service.' }],
+  ])('the receipt includes the saved code from %s', async (table, persisted, applied) => {
+    const accepted = recurringPestEstimate({
+      id: 'est-code-receipt', token: 'tok-code-receipt-0123456789', status: 'accepted', customer_id: 'cust-9',
+    });
+    resetStore(accepted);
+    db.__state.tables[table] = [{ estimate_id: accepted.id, ...persisted }];
+    db.__state.tables.referral_program_settings = [{ id: 1, program_active: true, referee_discount_cents: 1200 }];
+    const receipt = await putAccept(accepted.token);
+    expect(receipt.status).toBe(200);
+    expect(receipt.data).toMatchObject({ alreadyAccepted: true, promoCode: { canEnter: false, applied } });
+    expect(db.__state.tables[table]).toEqual([{ estimate_id: accepted.id, ...persisted }]);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
   test('recurring accept retry rebuilds nextStep/invoice fields from persisted state with no side effects', async () => {
     const accepted = recurringPestEstimate({
       id: 'est-already-1',
@@ -785,6 +804,7 @@ describe('FIX 2 — already-accepted retry returns the full success payload', ()
     expect(res.status).toBe(200);
     expect(res.data.success).toBe(true);
     expect(res.data.alreadyAccepted).toBe(true);
+    expect(res.data).not.toHaveProperty('promoCode');
     // The full first-time payload shape, not the bare legacy one.
     expect(res.data.nextStep).toBe('pay_invoice');
     expect(res.data.serviceMode).toBe('recurring');

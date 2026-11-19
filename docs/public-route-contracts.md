@@ -2146,7 +2146,9 @@ of `customer_name` as before. The linked customer's name fields are never return
 When two confirmations overlap on `PUT /api/estimates/:token/accept`, the second
 can find that the first already graduated the hold or accepted the estimate. Once
 the first acceptance has committed, the second returns the persisted receipt
-for that same estimate and token, with `alreadyAccepted: true`. A missing or
+for that same estimate and token, with `alreadyAccepted: true`. A saved
+promo or referral code appears in the same `promoCode` field as on the
+first confirmation when its feature is enabled. A missing or
 expired hold on an estimate that is still awaiting acceptance returns HTTP 409
 with `RESERVATION_EXPIRED`.
 

@@ -23042,8 +23042,10 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   }
 
   const retryReferral = await estimateReferralCardFor(estimate);
+  const retryPromoCode = await estimatePromoCodeViewFor(estimate);
   return {
     ...(retryReferral ? { referral: retryReferral } : {}),
+    ...(retryPromoCode ? { promoCode: retryPromoCode } : {}),
     ...buildAcceptSuccessPayload({
       // A settled invoice is not an open payable — invoiceMode stays false so
       // no consumer (including the client's legacy invoiceMode fallback) can
