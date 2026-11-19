@@ -169,7 +169,7 @@ describe('tsp on the pest house seed', () => {
 
     // A bare oz may be a dry weight, so 4 oz does not become 24 tsp: the
     // seed is withdrawn for the tech to enter, never kept as "4 tsp".
-    expect(row('Taurus SC').total.value).toBe('4');
+    expect(row('Taurus SC').total.value).toBe('1.6');
     set(row('Taurus SC').amountUnit, 'tsp');
     expect(row('Taurus SC').total.value).toBe('');
     set(row('Taurus SC').amountUnit, 'oz');

@@ -60,7 +60,7 @@ describe('FastCompleteSheet', () => {
     const request = makeRequest();
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
 
-    expect(await screen.findByRole('button', { name: /Taurus SC — 4 fl oz/ })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /Taurus SC — 1.6 fl oz/ })).toBeTruthy();
     // A liquid's bare "oz" is a fluid ounce, and a dose under 1 fl oz reads in
     // measuring spoons (0.25 fl oz = 1½ tsp) — never in mL.
     expect(screen.getByRole('button', { name: /LESCO Crosscheck Plus — 4 fl oz/ })).toBeTruthy();
@@ -182,7 +182,7 @@ describe('FastCompleteSheet', () => {
     const taurus = body.products.find((p) => p.productId === 'taurus');
     // The unit follows the method, as the full form's resolver seeds it: at
     // spot treatment Taurus's per-basis label (fl oz/gal) records fl oz.
-    expect(taurus).toMatchObject({ totalAmount: 4, amountUnit: 'fl_oz', applicationMethod: 'spot_treatment' });
+    expect(taurus).toMatchObject({ totalAmount: 1.6, amountUnit: 'fl_oz', applicationMethod: 'spot_treatment' });
     // The rate is resolved at the method actually sent: spot treatment
     // takes the catalog label band's low end in its own unit.
     expect(taurus).toMatchObject({ rate: 0.2, rateUnit: 'fl_oz/gal' });

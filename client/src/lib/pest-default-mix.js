@@ -10,7 +10,14 @@
 // row it matched no longer exists as such), and (c) extends coverage to
 // the one-time pest control visit, which the 2026-08-29 list deliberately
 // left off. The visit STARTS with all three recorded, at the house
-// totals — 4 oz of each concentrate, 0.25 oz of surfactant.
+// totals — 4 oz of Crosscheck, 1.6 fl oz of Taurus SC (see below), 0.25 oz of
+// surfactant.
+//
+// Owner ruling 2026-11-19: Taurus SC is 1.6 fl oz per 4-gal tank = 0.03%, the
+// label's 0.4 fl oz/gal rate (EPA 53883-279: 0.03% up to 4 times a calendar
+// year). Crosscheck (4) and the surfactant (0.25) are unchanged. Counting
+// Taurus applications per home, to leave it out of the prefill after 4 in a
+// calendar year, is a later change.
 //
 // Owner ruling 2026-11-18: the house bifenthrin is now LESCO Crosscheck Plus
 // (EPA 10404-120) instead of Atticus Talak 7.9 F. Talak stays a valid catalog
@@ -28,7 +35,7 @@
 // broad /surfactant/ fallback could silently auto-record the LESCO lawn
 // surfactant as the applied chemical at the pest total).
 export const PEST_DEFAULT_MIX = [
-  { pattern: /^taurus\s*sc\b/i, totalAmount: 4 },
+  { pattern: /^taurus\s*sc\b/i, totalAmount: 1.6 },
   { pattern: /^lesco\s*cross-?check\s*plus\b/i, totalAmount: 4 },
   { pattern: /^lesco\s*90\s*\/?\s*10\s*non-?ionic\s+surfactant$/i, totalAmount: 0.25 },
 ];

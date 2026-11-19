@@ -250,7 +250,7 @@ describe('waveguard-plan-engine helpers', () => {
       const resolve = (raw) => matchCatalogProduct({ raw, catalogProductHints: lineMeta[raw].catalogProductHints }, catalog);
       expect(resolve('Treated exterior perimeter band').name).toBe('LESCO Crosscheck Plus');
       expect(resolve('Applied repellent solution with surfactant to perimeter').name).toBe('LESCO Crosscheck Plus');
-      expect(resolve('Applied non-repellent solution to perimeter (6-ft band + crack & crevice)').name).toBe('Taurus SC');
+      expect(resolve('Applied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 18-in band at openings) + crack & crevice').name).toBe('Taurus SC');
       // Left on Atticus Antapex WSG on purpose: roach activity on a regular visit is an open owner question.
       expect(resolve('Treated interior cracks & crevices (activity present)').name).toBe('Atticus Antapex WSG');
       expect(lineMeta['Treated exterior perimeter band']).toMatchObject({ scope: 'exterior', treatmentApplied: true });
@@ -260,7 +260,7 @@ describe('waveguard-plan-engine helpers', () => {
       const hints = (raw) => protocols.pest.visits[0].lineMeta[raw].catalogProductHints;
       expect(hints('Treated exterior perimeter band')).toEqual(['LESCO Crosscheck Plus']);
       expect(hints('Applied repellent solution with surfactant to perimeter')).toEqual(['LESCO Crosscheck Plus']);
-      expect(hints('Applied non-repellent solution to perimeter (6-ft band + crack & crevice)')).toEqual(['Taurus SC']);
+      expect(hints('Applied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 18-in band at openings) + crack & crevice')).toEqual(['Taurus SC']);
       expect(hints('Treated interior cracks & crevices (activity present)')).toEqual(['Atticus Antapex WSG']);
       // Visits 2 to 6 are unchanged: still no Crosscheck or Taurus hint there that this ruling did not set.
       for (const visit of protocols.pest.visits.slice(1)) {

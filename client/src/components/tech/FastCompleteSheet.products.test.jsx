@@ -274,7 +274,7 @@ describe('FastCompleteSheet + Other product picker', () => {
     await waitFor(() => expect(submit.disabled).toBe(false));
     expect(screen.queryByText(/shows 0 in stock/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Check stock' })).toBeNull();
-    expect(screen.getByRole('button', { name: 'Taurus SC — 4 fl oz' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Taurus SC — 1.6 fl oz' })).toBeTruthy();
     // Only the sheet's first read asks for the most-used aggregate; the stock
     // re-read (and the recap modal, which shares the endpoint) never does.
     const contextReads = request.calls.map((c) => c.path).filter((p) => p.includes('/pest-recap/context'));
@@ -284,7 +284,7 @@ describe('FastCompleteSheet + Other product picker', () => {
     ]);
 
     const body = await completeBody(request);
-    expect(productIn(body, 'taurus')).toMatchObject({ totalAmount: 4, amountUnit: 'fl_oz', targets: ['Ants'] });
+    expect(productIn(body, 'taurus')).toMatchObject({ totalAmount: 1.6, amountUnit: 'fl_oz', targets: ['Ants'] });
   });
 
   // Owner 2026-10-20, "dont block": /complete takes the stock below zero instead.
@@ -296,7 +296,7 @@ describe('FastCompleteSheet + Other product picker', () => {
     expect(screen.queryByText(/Update inventory or remove it/)).toBeNull();
     expect(screen.getByRole('button', { name: 'Check stock' })).toBeTruthy();
     const body = await completeBody(request);
-    expect(productIn(body, 'taurus')).toMatchObject({ totalAmount: 4, amountUnit: 'fl_oz' });
+    expect(productIn(body, 'taurus')).toMatchObject({ totalAmount: 1.6, amountUnit: 'fl_oz' });
   });
 
   test('a stock the amount can\'t be counted against is flagged but never holds Complete', async () => {
@@ -391,9 +391,9 @@ describe('FastCompleteSheet added product amounts', () => {
   });
 
   test('the house mix keeps its own units: a usual unit never relabels a house total', async () => {
-    // Taurus usually logged in gal: its house 4 fl oz must not open as 4 gal.
+    // Taurus usually logged in gal: its house 1.6 fl oz must not open as 1.6 gal.
     const request = await openSheet(makeRequest({ commonProducts: [{ productId: 'taurus', visits: 120, usualUnit: 'gal', usualAmount: 1 }] }));
-    expect(screen.getByRole('button', { name: 'Taurus SC — 4 fl oz' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Taurus SC — 1.6 fl oz' })).toBeTruthy();
     // The surfactant's 0.25 fl oz is 1½ tsp on its tile and in Edit amounts.
     fireEvent.click(screen.getByRole('button', { name: 'Edit amounts' }));
     expect(screen.getByLabelText('LESCO 90/10 Nonionic Surfactant').value).toBe('1.5');
@@ -401,7 +401,7 @@ describe('FastCompleteSheet added product amounts', () => {
 
     fillVisit();
     const body = await completeBody(request);
-    expect(productIn(body, 'taurus')).toMatchObject({ totalAmount: 4, amountUnit: 'fl_oz' });
+    expect(productIn(body, 'taurus')).toMatchObject({ totalAmount: 1.6, amountUnit: 'fl_oz' });
     expect(productIn(body, 'lesco')).toMatchObject({ totalAmount: 0.25, amountUnit: 'fl_oz' });
   });
 
@@ -487,7 +487,7 @@ describe('FastCompleteSheet added product amounts', () => {
     expect(screen.queryByLabelText('Taurus SC rate')).toBeNull();
     fillVisit();
     const taurus = productIn(await completeBody(request), 'taurus');
-    expect(taurus).toMatchObject({ totalAmount: 4, amountUnit: 'fl_oz' });
+    expect(taurus).toMatchObject({ totalAmount: 1.6, amountUnit: 'fl_oz' });
     expectNoRate(taurus);
   });
 
