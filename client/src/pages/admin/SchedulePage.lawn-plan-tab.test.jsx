@@ -22,6 +22,7 @@ let blocked = false;
 let serverIgnores = [];
 let hold = null;
 let jobCardOff = false;
+let jobCardDown = false;
 const idsOf = (url) => (new URL(url, "http://x").searchParams.get("selectedConditionalProductIds") || "").split(",").filter(Boolean);
 
 // The server's resolved selection for a read: the ids asked for, less any it refuses; a bermuda step is all or none.
@@ -86,8 +87,11 @@ beforeEach(() => {
   serverIgnores = [];
   hold = null;
   jobCardOff = false;
+  jobCardDown = false;
   vi.stubGlobal("fetch", vi.fn((url) => {
     const u = String(url);
+    // A safety-data outage: the visit's job card read answers 503.
+    if (jobCardDown && u.includes(`/protocols/job-card/${service.id}`)) return reply({ error: "Safety data unavailable" }, 503);
     // A held read of the job card or the plan with ticks: the panel waits on it, as on a slow network.
     if (hold && /\/(protocols\/job-card|treatment-plans)\/[^/?]+\?/.test(u)) return hold.promise.then(() => reply(fixture(u)));
     return reply(fixture(u));
@@ -166,6 +170,18 @@ describe("the legacy Lawn tab", () => {
     jobCardOff = true;
     await openLawnTab();
     expect(await screen.findByText("Legacy mix product")).toBeInTheDocument();
+    expect(screen.queryByText("Amounts show on the Job tab.")).toBeNull();
+  });
+
+  it("with no job card answer (a failed read), the Lawn tab shows no mix amounts and the Plan tab does not send the tech there", async () => {
+    jobCardDown = true;
+    await openLawnTab();
+    expect(await screen.findByText("Amounts show once the job card loads.")).toBeInTheDocument();
+    expect(screen.queryByText("Legacy mix product")).toBeNull();
+    expect(screen.queryByText(/7 fl oz|14 fl oz/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Plan" }));
+    expect(await screen.findByText("Protocol lines")).toBeInTheDocument();
+    expect(screen.queryByText("The Job tab is off. Mix amounts show on the Lawn tab.")).toBeNull();
     expect(screen.queryByText("Amounts show on the Job tab.")).toBeNull();
   });
 

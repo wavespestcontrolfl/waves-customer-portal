@@ -72,6 +72,14 @@ describe('LawnPlanTab', () => {
     expect(container.textContent).not.toMatch(/0\.5|3\.51|per 1,000|\$|2 oz|15\.00/);
   });
 
+  it('shows a notice by its description when the server gives one: a stock block with no planned quantity', () => {
+    const stock = { code: 'inventory_insufficient_stock', message: 'Fixture kelp requires 12.5 gal, but only 4 gal is on hand.', description: 'Fixture kelp: not enough on hand for this visit.' };
+    render(<LawnPlanTab plan={{ ...plan, propertyGate: { ...plan.propertyGate, blocks: [stock] } }} loading={false} error="" onRefresh={() => {}} />);
+    expect(screen.getByText('Fixture kelp: not enough on hand for this visit.')).toBeTruthy();
+    expect(screen.queryByText(/12\.5 gal/)).toBeNull();
+    expect(screen.getByText('Fixture repeat.')).toBeTruthy();
+  });
+
   it('shows the plan objective by its description: the real June lawn note, with its Advion rate, shows no dose', () => {
     const note = JSON.stringify(protocols).match(/"notes":"([^"]*Advion Insect Granule bait, 3 lb per 1,000 sq ft[^"]*)"/)?.[1];
     expect(note).toBeTruthy();

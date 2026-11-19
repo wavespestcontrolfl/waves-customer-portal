@@ -608,6 +608,44 @@ describe('resolveVisitProducts reuses the appointment plan for lawn visits (Code
     expect(cards.find((c) => c.id === 'opt')).toMatchObject({ planOption: true, selectionId: 'opt' });
   });
 
+  test('a primary "if" line (November St. Augustine) takes a Use tick on the Job tab; a soil-P branch line does not, picked or not', async () => {
+    const engine = require('../services/waveguard-plan-engine');
+    const nov = require('../config/protocols.json').lawn.st_augustine.visits.find((v) => v.month === 'Nov').primary;
+    const cat = ['atz:Atrazine 4L', 'twy:Three-Way', 'l242:LESCO 24-2-11', 'l240:LESCO 24-0-11']
+      .map((pair) => pair.split(':')).map(([id, name]) => ({ id, name, rate_unit: 'fl oz', label_verified_at: '2026-08-01' }));
+    const mix = { amount: 1, amountUnit: 'fl oz' };
+    // The plan as the engine shapes it: selected lines in mixCalculator.items, conditional-role options beside them, and
+    // every primary line under protocol.base (an unticked "if" line is there only).
+    const planFor = (ids) => {
+      const lines = engine.parseProtocolLines(`${nov}\n★ IF P index <80: LESCO 24-2-11\n★ IF P index ≥80: LESCO 24-0-11`, 'base');
+      const planItems = engine.resolveProtocolItems(lines, cat, { selectedConditionalProductIds: ids })
+        .filter((i) => i.product).map((i) => ({ ...i, product: { id: i.product.id }, mix }));
+      return {
+        propertyGate: { month: 'Nov', visit: 11, blocks: [] },
+        protocol: { base: planItems.filter((i) => i.role === 'base'), conditional: [] },
+        mixCalculator: { items: planItems.filter((i) => i.selected), conditionalOptions: planItems.filter((i) => i.role === 'conditional' && !i.selected) },
+      };
+    };
+    const cardsFor = async (ids) => {
+      const out = await jobCard.resolveVisitLines({ facts, protocols: {}, catalog: cat, dbh: () => ({}), deps: { buildPlan: jest.fn().mockResolvedValue(planFor(ids)) } });
+      const cards = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-11-20' }, lines: out.lines, verdicts: [], packSizes: {} });
+      return Object.fromEntries(cards.map((c) => [c.id, { box: c.planOption === true, checked: !c.conditional, amount: c.planned != null }]));
+    };
+    // Unticked: both weather-gated herbicides get an unchecked box and no amount; the soil-P branch the engine
+    // picked (24-0-11, no soil test) is a plain card, and the branch it did not pick gets no card.
+    expect(await cardsFor([])).toEqual({
+      l240: { box: false, checked: true, amount: true },
+      atz: { box: true, checked: false, amount: false },
+      twy: { box: true, checked: false, amount: false },
+    });
+    // Ticked: Atrazine's box shows checked with its amount; Three-Way stays an unchecked option.
+    expect(await cardsFor(['atz'])).toEqual({
+      atz: { box: true, checked: true, amount: true },
+      l240: { box: false, checked: true, amount: true },
+      twy: { box: true, checked: false, amount: false },
+    });
+  });
+
   test('a plan failure yields no lines instead of a crash', async () => {
     const buildPlan = jest.fn().mockRejectedValue(new Error('Scheduled service not found'));
     const out = await jobCard.resolveVisitProducts({ facts, protocols: {}, catalog, dbh: () => ({}), deps: { buildPlan } });
@@ -1352,19 +1390,22 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
 
     test('no step instruction carries a price or a rate, for a technician card or an owner card', async () => {
       const raw = 'Stonewall 4FL 0.5 fl oz per 1,000 ($3.51)';
+      // The August bermuda protocol's compound price tag: an instruction falls back to this raw line.
+      const compound = require('../config/protocols.json').lawn.bermuda.visits.find((v) => v.month === 'Aug').primary.split('\n').find((l) => /\+\s*\$/.test(l));
+      expect(compound).toBe('Premium: Primo Maxx + Anuew EZ ($1.91+$21.79)');
       const plan = planWith({
-        mixingOrder: [{ step: 1, productId: 'a', productName: 'Alpha', instruction: raw }],
-        bermudaMixingOrder: [{ step: 1, productId: null, productName: 'Water', instruction: 'Half fill.' }, { step: 2, productId: 'a', productName: 'Alpha', instruction: raw }],
+        mixingOrder: [{ step: 1, productId: 'a', productName: 'Alpha', instruction: raw }, { step: 2, productId: 'b', productName: 'Bravo', instruction: compound }],
+        bermudaMixingOrder: [{ step: 1, productId: null, productName: 'Water', instruction: 'Half fill.' }, { step: 2, productId: 'a', productName: 'Alpha', instruction: raw }, { step: 3, productId: 'b', productName: 'Bravo', instruction: compound }],
       });
       for (const includePricing of [false, true]) {
         const base = factsDb({ 'scheduled_services as ss': lawn, products_catalog: rows, property_preferences: prefs });
         const dbh = Object.assign((table) => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
         const out = await jobCard.buildJobCard('svc1', { dbh, includePricing, deps: { buildPlan: jest.fn().mockResolvedValue(plan), getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] } }, now: new Date('2026-09-04T12:00:00Z') });
         for (const step of [...out.mixingOrder, ...out.bermudaMixingOrder]) {
-          expect(step.instruction).not.toMatch(/\$|3\.51|0\.5|fl oz|1,000/);
+          expect(step.instruction).not.toMatch(/\$|3\.51|1\.91|21\.79|0\.5|fl oz|1,000/);
         }
-        expect(out.mixingOrder.map((s) => s.instruction)).toEqual(['Stonewall 4FL']);
-        expect(out.bermudaMixingOrder).toHaveLength(2);
+        expect(out.mixingOrder.map((s) => s.instruction)).toEqual(['Stonewall 4FL', 'Premium: Primo Maxx + Anuew EZ']);
+        expect(out.bermudaMixingOrder).toHaveLength(3);
       }
     });
 

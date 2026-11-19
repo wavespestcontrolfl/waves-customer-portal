@@ -8133,7 +8133,7 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
           />
         ) : activeSection === "lawn_plan" && isLawn ? (
           <LawnPlanTab
-            jobTab={jobCardLoading ? null : jobCardEnabled}
+            jobTab={jobCard ? jobCardEnabled : null}
             plan={lawnPlanQuery === selectedQuery ? lawnPlan : null}
             loading={lawnPlanLoading || (Boolean(lawnPlan) && lawnPlanQuery !== selectedQuery)}
             error={lawnPlanError}
@@ -8245,8 +8245,12 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
                         lawn sqft before using product amounts.
                       </div>
                     )}
-                    {lawnMix && (jobCardEnabled ? (
-                      <div style={{ fontSize: 14, color: D.muted, marginBottom: 12 }}>Amounts show on the Job tab.</div>
+                    {/* Mix amounts only on the server's word that the Job tab is off ({ enabled: false }): while the
+                        card loads, or after a failed read (503, a failed tick re-read), its checks are not there. */}
+                    {lawnMix && (jobCard?.enabled !== false ? (
+                      <div style={{ fontSize: 14, color: D.muted, marginBottom: 12 }}>
+                        {jobCardEnabled ? "Amounts show on the Job tab." : "Amounts show once the job card loads."}
+                      </div>
                     ) : (
                       <div
                         style={{

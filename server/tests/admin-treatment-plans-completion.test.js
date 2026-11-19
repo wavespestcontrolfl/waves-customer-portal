@@ -146,6 +146,21 @@ test.each([true, false])('every protocol line carries a description with no rate
   expect(protocol.base[0].raw).toBe(tech ? 'Stonewall 4FL 0.5 fl oz per 1,000' : raw);
 });
 
+// The Plan tab's notice text: a stock block names no planned quantity and an unmatched line is described, not raw.
+// `message` stays as the engine writes it (summarizeInventoryStatus) for the completion form, which reads these lists.
+test.each([true, false])('a stock block and an unmatched line carry a description with no planned amount, rate or price (technician=%s); message stays', async tech => {
+  const stock = { productId: 'p1', productName: 'Fixture Granule', code: 'inventory_insufficient_stock', severity: 'block', message: 'Fixture Granule requires 12.5 lb, but only 4 lb is on hand.' };
+  const unmatched = { code: 'inventory_product_unmatched', severity: 'warning', message: 'Protocol line is not mapped to inventory: Fixture Liquid 0.5 fl oz per 1,000 ($1.91+$21.79)' };
+  const blackout = { code: 'nitrogen_blackout', severity: 'block', message: 'Fixture County restricts nitrogen during this visit window.' };
+  buildPlanForService.mockResolvedValue({ propertyGate: { service: 'Lawn Care', blocks: [stock, blackout], warnings: [unmatched] }, protocol: { base: [], conditional: [] } });
+  const { propertyGate } = (await run({ tech })).body.plan;
+  expect(propertyGate.blocks[0].description).toBe('Fixture Granule: not enough on hand for this visit.');
+  expect(propertyGate.warnings[0].description).toBe('Protocol line is not mapped to inventory: Fixture Liquid');
+  expect(propertyGate.blocks[1]).not.toHaveProperty('description');
+  expect(propertyGate.blocks[0].message).toBe(stock.message);
+  expect(propertyGate.warnings[0].message).toContain('Fixture Liquid 0.5 fl oz per 1,000');
+});
+
 // The engine copies the visit's notes into protocol.objective, and a June lawn note names an Advion rate and a price can ride in a note too.
 test.each([true, false])('the plan objective carries a description with no rate and no price, from the real June lawn note (technician=%s)', async tech => {
   const protocols = require('../config/protocols.json');

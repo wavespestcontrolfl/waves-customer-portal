@@ -38,6 +38,7 @@ const { awayWatchCardLines } = require('./away-watch');
 
 const { redactAccessCodes } = contextAggregator;
 const { matchServiceProtocol, monthVisit } = require('./protocol-matcher');
+const { stripPriceTokensFromText } = require('./protocol-reader');
 const { isMistingDesignConsultation, isMistingSystemServiceUnconfigured } = require('../utils/mosquito-misting-system');
 const {
   buildPlanForService, matchCatalogProduct, buildProductInventorySnapshot, summarizeCalibration, getActiveCalibrations,
@@ -1308,6 +1309,13 @@ function productBlocksUnderPlan({ plan }, product) {
 // visit stamped elsewhere gets no plan and no amounts.
 const ALTERNATE_ADDRESS_BLOCK = { code: 'alternate_address', message: 'Visit is at a non-primary address — the lawn plan on file is the primary home\'s, amounts withheld' };
 
+// A lawn plan line the engine selects by a Use tick: every "if needed" (conditional-role) line, and a primary line written
+// "if …" (protocols.json November St. Augustine: Atrazine "IF <85°F", Three-Way "if too warm") while the tick alone decides
+// it (the engine's reasons for "not ticked" and "ticked"). A fertilizer branch line (soil P), a premium line or a held line
+// is the engine's own pick: no box.
+const TICK_SELECTION_REASONS = new Set(['conditional_not_selected', 'base_or_explicit_selection']);
+const takesUseTick = (item) => item.role === 'conditional' || (item.conditional === true && TICK_SELECTION_REASONS.has(item.selectionReason));
+
 async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps = {}, now = new Date(), selectedConditionalProductIds = [] }) {
   // Identity gates the primary line before any branch — a catalog
   // inspection or assessment resolves no treatment products even when its
@@ -1321,7 +1329,11 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
     const loaded = await loadLawnPlan(facts.serviceId, { dbh, deps, now, selectedConditionalProductIds });
     const plan = loaded.plan;
     if (!plan) return { visit: null, lines: [], blocks: planBlocksOf(loaded) };
-    const items = [...(plan?.mixCalculator?.items || []), ...(plan?.mixCalculator?.conditionalOptions || [])];
+    const items = [
+      ...(plan?.mixCalculator?.items || []), ...(plan?.mixCalculator?.conditionalOptions || []),
+      // Unticked, a primary "if" line sits in protocol.base only: the engine lists conditional-role lines alone as options.
+      ...(plan.protocol?.base || []).filter((item) => item.selected === false && takesUseTick(item)),
+    ];
     const lines = [];
     for (const item of items) {
       const product = item.product ? catalog.find((p) => p.id === item.product.id) : null;
@@ -1334,7 +1346,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
         planMix: item.mix || null,
         substitutedFor: item.substitution?.originalProductName || null,
         // Only the primary lawn plan's lines take the "Use" tick: the ids ride to the plan engine, never to an add-on's protocol.
-        ...(item.role === 'conditional' || item.conditional === true ? { planOption: true } : {}),
+        ...(takesUseTick(item) ? { planOption: true } : {}),
         // The id the engine matches a Use tick against: the original product's when an approved substitution swaps it.
         selectionId: item.substitution?.originalProductId || item.product.id,
         ...(item.bermudaStep ? { bermudaStep: true } : {}),
@@ -1630,19 +1642,18 @@ function linesFromProtocolText(visit, catalog) {
 // would survive every withhold (unverified, held, blocked). Rates come only
 // from the resolved, permitted mix (`planned`).
 const RATE_TOKEN_RE = /\b\d+(?:[.,]\d+)?(?:\s*[-–]\s*\d+(?:[.,]\d+)?)?\s*(?:%|(?:fl\.?\s?oz|oz|lbs?|pounds?|gal(?:lons?)?|ml|l|g|kg|pts?|qts?|tsp|tbsp|cc)\b\.?)(?:\s*(?:\/|per)\s*(?:\d[\d,]*\s*)?(?:sq\.?\s?ft|k|m|gal(?:lons?)?|acre|1,?000|100)\b)?/gi;
-// Owner-only unit prices the protocol text carries ("($6.08)") never reach a
-// technician's card either.
-const PRICE_TOKEN_RE = /\(\s*\$\s*\d[\d.,]*\s*\)/g;
+// Owner-only unit prices the protocol text carries ("($6.08)", a compound "($1.91+$21.79)", a bare "— $15") never
+// reach a technician's card either: the Protocols page's own strip (protocol-reader.js). The card route sends this
+// text as built, with no whole-payload strip after it.
 function describeLine(raw) {
-  return String(raw || '')
-    .replace(PRICE_TOKEN_RE, ' ')
+  return stripPriceTokensFromText(String(raw || ''))
     .replace(RATE_TOKEN_RE, ' ')
     .replace(/\(\s*\)/g, ' ')
     .replace(/\s+\)/g, ')')
     .replace(/:\s*,/g, ':')
     .replace(/,\s*,/g, ',')
     .replace(/\s+([,;.)])/g, '$1')
-    .replace(/[,;:]\s*$/g, '')
+    .replace(/[,;:—–]\s*$/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }

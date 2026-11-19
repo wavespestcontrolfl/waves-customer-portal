@@ -50,7 +50,7 @@ function NoticeList({ title, items, tone }) {
       <div className="space-y-2">
         {items.map((item, idx) => (
           <div key={`${item.code || idx}-${idx}`} className={cn('text-14 leading-snug', tone === 'alert' ? 'text-red-800' : 'text-amber-800')}>
-            <span className="font-medium">{item.code ? item.code.replace(/_/g, ' ') : 'Notice'}:</span> {item.message}
+            <span className="font-medium">{item.code ? item.code.replace(/_/g, ' ') : 'Notice'}:</span> {item.description || item.message}
           </div>
         ))}
       </div>

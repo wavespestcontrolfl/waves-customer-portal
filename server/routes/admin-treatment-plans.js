@@ -52,10 +52,22 @@ const TECHNICIAN_PLAN_OWNER_ONLY_KEYS = new Set([
   'materialCost', 'materialCostSource', 'materialCostDetail', 'materialCostSummary',
 ]);
 
+// The Plan tab's text (`description`) for a notice whose engine message carries what that tab never shows: a stock
+// block's planned quantity, an unmatched line's raw text (rates, prices). `message` stays for the completion form,
+// which reads these same lists.
+const NOTICE_DESCRIPTIONS = {
+  inventory_insufficient_stock: (notice) => `${notice.productName || 'A product'}: not enough on hand for this visit.`,
+  inventory_product_unmatched: (notice) => describeLine(notice.message),
+};
+const describeNotices = (notices) => (Array.isArray(notices)
+  ? notices.map((notice) => (NOTICE_DESCRIPTIONS[notice?.code] ? { ...notice, description: NOTICE_DESCRIPTIONS[notice.code](notice) } : notice))
+  : notices);
+
 function projectPlanResponse(plan, { technician = false } = {}) {
   let projected = plan;
   if (plan && typeof plan === 'object' && plan.propertyGate && typeof plan.propertyGate === 'object') {
-    const { billingMode: _billingMode, ...propertyGate } = plan.propertyGate;
+    const { billingMode: _billingMode, ...gate } = plan.propertyGate;
+    const propertyGate = { ...gate, blocks: describeNotices(gate.blocks), warnings: describeNotices(gate.warnings) };
     const stockAdvisory = require('../services/stock-advisory').isLawnTsStockAdvisoryCompletion({ service_type: propertyGate.service });
     projected = { ...plan, propertyGate, ...(stockAdvisory ? { stockAdvisory: true } : {}) };
   }
