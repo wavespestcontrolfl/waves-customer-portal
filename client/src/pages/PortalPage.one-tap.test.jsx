@@ -229,6 +229,32 @@ describe('one-tap purchase CTA gating', () => {
     expect(api.oneTapReserve).toHaveBeenCalledTimes(1);
     expect(api.oneTapRelease).not.toHaveBeenCalled();
     expect(api.oneTapSlots).not.toHaveBeenCalled();
+
+    // Closing the parked office-review state must preserve the hold and
+    // purchase for staff; it is not ordinary abandonment.
+    fireEvent.click(screen.getByLabelText('Close purchase'));
+    expect(screen.queryByRole('dialog', { name: /Add Lawn Care/ })).not.toBeInTheDocument();
+    expect(api.oneTapRelease).not.toHaveBeenCalled();
+  });
+
+  it('ordinary close still releases an incomplete purchase', async () => {
+    api.getPropertyRecommendations.mockResolvedValue(recommendations());
+    api.oneTapInit.mockResolvedValue({
+      purchaseId: 'p-1', estimateId: 'est-1', serviceKey: 'lawn_care', label: 'Lawn Care',
+      perVisit: 84, cadenceLabel: '9 applications/yr', visitsPerYear: 9,
+      terms: { version: 'v1', text: 'Server terms text.' },
+      hasCardOnFile: true, holdMinutes: 15,
+      slots: { primary: [], expander: [], nearby: false },
+    });
+    api.oneTapRelease.mockResolvedValue({ released: true });
+
+    renderDashboard();
+    fireEvent.click(await screen.findByText('Add now — $84.00 per application'));
+    expect(await screen.findByText('Server terms text.')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('Close purchase'));
+    expect(screen.queryByRole('dialog', { name: /Add Lawn Care/ })).not.toBeInTheDocument();
+    await vi.waitFor(() => expect(api.oneTapRelease).toHaveBeenCalledWith('p-1'));
   });
 
   // Owner 2026-11-11: the purchase screens show the discount on the service

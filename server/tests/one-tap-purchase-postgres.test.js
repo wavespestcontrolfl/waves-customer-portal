@@ -322,6 +322,66 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
       .toEqual({ customer_id: null });
   });
 
+  test('a staff booking committed between the advisory booking and ownership reads preserves the purchase', async () => {
+    await seedOwnedService('pest_control');
+    const init = await openPurchase('lawn_care');
+    const purchase = await trx('one_tap_purchases').where({ id: init.purchaseId }).first();
+    const lawn = await trx('services').where({ service_key: 'lawn_care_6week' }).first('id');
+    const ownership = require('../services/waveguard-existing-services');
+    const loadOwned = ownership.loadOwnedRecurringServiceKeys;
+    const competitorId = randomUUID();
+    const ownershipSpy = jest.spyOn(ownership, 'loadOwnedRecurringServiceKeys')
+      .mockImplementationOnce(async (...args) => {
+        // The unlocked booking scan has returned. Commit the staff write in
+        // its own PostgreSQL savepoint before the unlocked ownership query;
+        // this is the exact interleaving that previously voided the draft.
+        await trx.transaction(async (staffTrx) => {
+          await staffTrx('scheduled_services').insert({
+            id: competitorId,
+            source_estimate_id: init.estimateId,
+            customer_id: ids.customer,
+            technician_id: ids.technician,
+            service_id: lawn.id,
+            service_type: 'Every 6 Weeks Lawn Care Service',
+            scheduled_date: openDay(18),
+            window_start: '13:00',
+            window_end: '14:00',
+            status: 'confirmed',
+            is_recurring: true,
+            recurring_pattern: 'every_6_weeks',
+            estimated_price: 73,
+            reservation_expires_at: null,
+          });
+        });
+        const keys = await loadOwned(...args);
+        expect(keys).toContain('lawn_care');
+        return keys;
+      });
+
+    try {
+      await expect(oneTap.confirm({
+        customerId: ids.customer,
+        purchaseId: init.purchaseId,
+        termsAccepted: true,
+      })).rejects.toMatchObject({
+        status: 422,
+        code: 'APPOINTMENT_OFFICE_REVIEW_REQUIRED',
+      });
+
+      expect(await trx('one_tap_purchases').where({ id: init.purchaseId }).first('status', 'scheduled_service_id'))
+        .toEqual({ status: 'reserved', scheduled_service_id: purchase.scheduled_service_id });
+      expect(await trx('estimates').where({ id: init.estimateId }).first('status', 'price_locked_at', 'archived_at'))
+        .toEqual({ status: 'draft', price_locked_at: null, archived_at: null });
+      expect(Number((await trx('scheduled_services').where({ id: competitorId }).first('estimated_price')).estimated_price))
+        .toBe(73);
+      expect(await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).first('customer_id'))
+        .toEqual({ customer_id: null });
+      expect(await trx('invoices').where({ customer_id: ids.customer })).toHaveLength(0);
+    } finally {
+      ownershipSpy.mockRestore();
+    }
+  });
+
   test.each([
     ['before reservation preparation', 'prepare'],
     ['after reservation preparation, before the transaction', 'transaction'],

@@ -746,10 +746,104 @@ describe('confirm', () => {
   });
 
   test('target family owned in the meantime → 409, purchase voided, hold released', async () => {
+    db.__state.tables.estimates[0].source = 'one_tap_purchase';
+    db.__state.tables.estimates[0].archived_at = null;
     loadOwnedRecurringServiceKeys.mockResolvedValue(['pest_control', 'lawn_care']);
+    slotReservation.releaseReservation.mockImplementationOnce(async () => {
+      // The locked reconciliation must commit the terminal ledger state
+      // before it frees the physical hold; otherwise a concurrent confirm
+      // can still graduate this reserved purchase in the release gap.
+      expect(db.__state.tables.one_tap_purchases[0].status).toBe('voided');
+      return { released: true };
+    });
     await expect(oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true }))
       .rejects.toMatchObject({ status: 409 });
     expect(db.__state.tables.one_tap_purchases[0].status).toBe('voided');
+    expect(db.__state.tables.estimates[0].archived_at).toBeTruthy();
+    expect(slotReservation.releaseReservation).toHaveBeenCalledWith({
+      scheduledServiceId: 'ss-1', estimateId: 'est-1',
+    });
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a staff booking committed between advisory scans is reconciled to office review without voiding', async () => {
+    loadOwnedRecurringServiceKeys.mockImplementationOnce(async () => {
+      // The unlocked competing-booking scan already ran. Staff now commits
+      // a source-linked recurring booking, so the advisory ownership probe
+      // sees lawn as owned; locked reconciliation must classify the booking
+      // before making the irreversible void decision.
+      db.__state.tables.scheduled_services.push({
+        id: 'ss-staff', source_estimate_id: 'est-1', customer_id: 'cust-1',
+        scheduled_date: futureIso(), status: 'confirmed', is_callback: false,
+        estimated_price: 73, reservation_expires_at: null,
+      });
+      return ['pest_control', 'lawn_care'];
+    });
+
+    await expect(oneTap.confirm({
+      customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true,
+    })).rejects.toMatchObject({
+      status: 422,
+      code: 'APPOINTMENT_OFFICE_REVIEW_REQUIRED',
+    });
+
+    expect(db.__state.tables.one_tap_purchases[0]).toMatchObject({
+      status: 'reserved', scheduled_service_id: 'ss-1',
+    });
+    expect(db.__state.tables.estimates[0]).toMatchObject({ status: 'draft', price_locked_at: null });
+    expect(slotReservation.releaseReservation).not.toHaveBeenCalled();
+    expect(slotReservation.prepareReservationCommit).not.toHaveBeenCalled();
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a staff booking committed after the transaction scan is rechecked before voiding', async () => {
+    loadOwnedRecurringServiceKeys
+      .mockImplementationOnce(async () => ['pest_control'])
+      .mockImplementationOnce(async () => {
+        // The authoritative booking scan already ran. A staff source-link
+        // now makes the ownership reader report lawn; the transaction rolls
+        // back and its OWNED_MEANWHILE catch must scan again before voiding.
+        db.__state.tables.scheduled_services.push({
+          id: 'ss-staff', source_estimate_id: 'est-1', customer_id: 'cust-1',
+          scheduled_date: futureIso(), status: 'confirmed', is_callback: false,
+          estimated_price: 73, reservation_expires_at: null,
+        });
+        return ['pest_control', 'lawn_care'];
+      });
+
+    await expect(oneTap.confirm({
+      customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true,
+    })).rejects.toMatchObject({
+      status: 422,
+      code: 'APPOINTMENT_OFFICE_REVIEW_REQUIRED',
+    });
+
+    expect(db.__state.tables.one_tap_purchases[0]).toMatchObject({
+      status: 'reserved', scheduled_service_id: 'ss-1',
+    });
+    expect(db.__state.tables.estimates[0]).toMatchObject({ status: 'draft', price_locked_at: null });
+    expect(slotReservation.releaseReservation).not.toHaveBeenCalled();
+    expect(slotReservation.commitReservation).not.toHaveBeenCalled();
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('genuine ownership found by the transaction is locked-voided before hold release', async () => {
+    db.__state.tables.estimates[0].source = 'one_tap_purchase';
+    db.__state.tables.estimates[0].archived_at = null;
+    loadOwnedRecurringServiceKeys
+      .mockImplementationOnce(async () => ['pest_control'])
+      .mockResolvedValue(['pest_control', 'lawn_care']);
+    slotReservation.releaseReservation.mockImplementationOnce(async () => {
+      expect(db.__state.tables.one_tap_purchases[0].status).toBe('voided');
+      return { released: true };
+    });
+
+    await expect(oneTap.confirm({
+      customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true,
+    })).rejects.toMatchObject({ status: 409, code: 'OWNED_MEANWHILE' });
+
+    expect(db.__state.tables.one_tap_purchases[0].status).toBe('voided');
+    expect(db.__state.tables.estimates[0].archived_at).toBeTruthy();
     expect(slotReservation.releaseReservation).toHaveBeenCalledWith({
       scheduledServiceId: 'ss-1', estimateId: 'est-1',
     });
@@ -917,6 +1011,24 @@ describe('confirm', () => {
       id: competitor.id, estimateId: 'est-1', customerId: 'cust-1',
     })).resolves.toBe(false);
   });
+
+  test.each(['en_route', 'on_site', 'in_progress'])(
+    'a yesterday %s visit remains reviewable across Eastern midnight',
+    (status) => {
+      expect(oneTap._private.oneTapBookedVisitIsCurrent({
+        status, scheduled_date: '2026-11-18',
+      }, '2026-11-19')).toBe(true);
+    },
+  );
+
+  test.each(['pending', 'confirmed'])(
+    'a yesterday %s visit is not reviewable after Eastern midnight',
+    (status) => {
+      expect(oneTap._private.oneTapBookedVisitIsCurrent({
+        status, scheduled_date: '2026-11-18',
+      }, '2026-11-19')).toBe(false);
+    },
+  );
 
   test('a pre-existing staff competitor preserves the hold, office price and draft for 422 review', async () => {
     db.__state.tables.scheduled_services.push({

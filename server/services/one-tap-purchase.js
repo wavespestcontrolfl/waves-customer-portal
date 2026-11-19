@@ -1020,13 +1020,27 @@ async function completedPurchaseAfterConflict(customerId, purchase) {
     : null;
 }
 
+const ONE_TAP_BOOKED_PENDING_STATUSES = new Set(['pending', 'confirmed']);
+const ONE_TAP_BOOKED_IN_PROGRESS_STATUSES = new Set(['en_route', 'on_site', 'in_progress']);
+
+function oneTapBookedVisitIsCurrent(row, today = etDateString()) {
+  const status = String(row?.status || '').toLowerCase();
+  if (ONE_TAP_BOOKED_IN_PROGRESS_STATUSES.has(status)) return true;
+  return ONE_TAP_BOOKED_PENDING_STATUSES.has(status)
+    && dateOnly(row?.scheduled_date) >= today;
+}
+
 async function reviewableOneTapBookedVisits(trx, { estimateId, customerId }) {
   const rows = await trx('scheduled_services')
     .where({ source_estimate_id: estimateId, customer_id: customerId })
-    .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
-    .where('scheduled_date', '>=', etDateString())
-    .select('id', 'service_id', 'service_type', 'is_callback');
-  return (await withoutAssessmentVisits(rows, trx)).filter((row) => row.is_callback !== true);
+    .whereIn('status', [
+      ...ONE_TAP_BOOKED_PENDING_STATUSES,
+      ...ONE_TAP_BOOKED_IN_PROGRESS_STATUSES,
+    ])
+    .select('id', 'service_id', 'service_type', 'is_callback', 'status', 'scheduled_date');
+  const today = etDateString();
+  return (await withoutAssessmentVisits(rows, trx))
+    .filter((row) => row.is_callback !== true && oneTapBookedVisitIsCurrent(row, today));
 }
 
 async function assertNoCompetingOneTapBooking(trx, {
@@ -1054,7 +1068,107 @@ async function isReviewableOneTapBookedVisit(trx, {
   return rows.some((row) => String(row.id) === String(id));
 }
 
+// The unlocked ownership probe is advisory. If it reports the target family
+// as newly owned, reconcile while holding the same comms -> purchase ->
+// customer locks the confirm writer uses before doing the irreversible void.
+// The customer row lock also fences a staff scheduled_services claim through
+// its FK: a source-linked booking is classified as office review (or a
+// selected-hold refusal), a completed confirm replays, and only genuinely
+// independent ownership reaches the void path.
+async function reconcileOwnedMeanwhile({ purchase, customerId }) {
+  return db.transaction(async (trx) => {
+    await lockCustomerComms(trx, customerId);
+    const purchaseRow = await trx('one_tap_purchases')
+      .where({ id: purchase.id, customer_id: customerId })
+      .forUpdate()
+      .first();
+    if (purchaseRow?.status === 'completed') return { completed: purchaseRow };
+    if (!purchaseRow
+      || purchaseRow.status !== 'reserved'
+      || String(purchaseRow.scheduled_service_id || '') !== String(purchase.scheduled_service_id || '')) {
+      return { stale: true };
+    }
+
+    const freshCustomer = await trx('customers').where({ id: customerId }).forUpdate().first();
+    const bookedRows = await reviewableOneTapBookedVisits(trx, {
+      estimateId: purchase.estimate_id,
+      customerId,
+    });
+    if (bookedRows.some((row) => String(row.id) !== String(purchase.scheduled_service_id))) {
+      throw appointmentOfficeReviewRequired();
+    }
+    if (bookedRows.some((row) => String(row.id) === String(purchase.scheduled_service_id))) {
+      return { selectedClaimed: true };
+    }
+
+    try {
+      await assertTargetStillPurchasable(trx, freshCustomer, purchase.service_key);
+      return { ownershipCleared: true };
+    } catch (err) {
+      if (err?.code === 'OWNED_MEANWHILE') {
+        // Persist the terminal state while the purchase + customer locks
+        // still fence confirms and source-linked staff bookings. Releasing
+        // the physical hold happens only after this transaction commits, so
+        // no winner can graduate a still-reserved purchase in that gap.
+        const voided = await trx('one_tap_purchases')
+          .where({
+            id: purchase.id,
+            customer_id: customerId,
+            status: 'reserved',
+            scheduled_service_id: purchase.scheduled_service_id,
+          })
+          .update({
+            status: 'voided',
+            scheduled_service_id: null,
+            updated_at: trx.fn.now(),
+          });
+        if (!voided) return { stale: true };
+        await trx('estimates')
+          .where({ id: purchase.estimate_id, status: 'draft', source: 'one_tap_purchase' })
+          .whereNull('archived_at')
+          .update({ archived_at: trx.fn.now() });
+        return { voided: true, ownedError: err };
+      }
+      throw err;
+    }
+  });
+}
+
 // ── confirm ──────────────────────────────────────────────────────────────
+async function resolveOwnedMeanwhileConflict({ purchase, customerId, originalError }) {
+  const reconciled = await reconcileOwnedMeanwhile({ purchase, customerId });
+  if (reconciled.completed) {
+    return { response: await completedRetryResponse(customerId, reconciled.completed) };
+  }
+  if (reconciled.selectedClaimed) {
+    return {
+      response: await recoverReservationFailure({
+        error: httpError(409, 'That time is no longer available — pick a slot again.', { code: 'SLOT_UNAVAILABLE' }),
+        purchase,
+        customerId,
+      }),
+    };
+  }
+  if (reconciled.stale) {
+    const completed = await completedPurchaseAfterConflict(customerId, purchase);
+    if (completed) return { response: completed };
+    throw httpError(409, OFFER_CHANGED);
+  }
+  if (reconciled.ownershipCleared) return { ownershipCleared: true };
+  if (reconciled.voided) {
+    try {
+      await slotReservation.releaseReservation({
+        scheduledServiceId: purchase.scheduled_service_id,
+        estimateId: purchase.estimate_id,
+      });
+    } catch (releaseErr) {
+      logger.warn(`[one-tap-purchase] void-time hold release failed (code=${releaseErr?.code || 'none'})`);
+    }
+    throw reconciled.ownedError || originalError;
+  }
+  throw httpError(409, OFFER_CHANGED);
+}
+
 async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent }) {
   if (termsAccepted !== true) throw httpError(400, 'You must agree to the terms to confirm.');
   // The moment of the customer's authorization (terms + card consent). The
@@ -1122,14 +1236,21 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
   try {
     await assertTargetStillPurchasable(db, customer, purchase.service_key);
   } catch (err) {
-    await voidPurchase(purchase);
-    // The initial purchase read can lose to a confirmation that commits
-    // before this advisory ownership check. Its new series looks like
-    // OWNED_MEANWHILE; the void CAS cannot overwrite `completed`, and the
-    // loser must return that frozen receipt instead of reporting a false 409.
-    const completed = await completedPurchaseAfterConflict(customerId, purchase);
-    if (completed) return completed;
-    throw err.status ? err : httpError(409, OFFER_CHANGED);
+    if (err?.code === 'OWNED_MEANWHILE') {
+      const resolved = await resolveOwnedMeanwhileConflict({
+        purchase, customerId, originalError: err,
+      });
+      if (Object.hasOwn(resolved, 'response')) return resolved.response;
+      if (resolved.ownershipCleared) {
+        // The advisory read lost to a transient/uncommitted state. Continue;
+        // the main transaction repeats the authoritative ownership check.
+      }
+    } else {
+      await voidPurchase(purchase);
+      const completed = await completedPurchaseAfterConflict(customerId, purchase);
+      if (completed) return completed;
+      throw err.status ? err : httpError(409, OFFER_CHANGED);
+    }
   }
 
   // Consented chargeable card — REQUIRED, no fallback, never proceed
@@ -1393,12 +1514,18 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
     });
   } catch (err) {
     // Owned-in-the-meantime discovered under the lock: the conversion rolled
-    // back; void the purchase (releases the hold) so it cannot be retried.
+    // back. Reconcile the booking scan and ownership evidence together again
+    // under locks before voiding: a staff source-link can land after this
+    // transaction's scan, and it must preserve the purchase for office review.
     if (err && err.code === 'OWNED_MEANWHILE') {
-      await voidPurchase(purchase);
-      const completed = await completedPurchaseAfterConflict(customerId, purchase);
-      if (completed) return completed;
-      throw err;
+      const resolved = await resolveOwnedMeanwhileConflict({
+        purchase, customerId, originalError: err,
+      });
+      if (Object.hasOwn(resolved, 'response')) return resolved.response;
+      // Ownership disappeared while the failed transaction rolled back. Do
+      // not destroy the still-valid hold; a retry reruns the authoritative
+      // transaction from the customer's frozen offer.
+      throw httpError(409, OFFER_CHANGED);
     }
     // Re-pick recovery, or canonical success if another confirm completed.
     return recoverReservationFailure({ error: err, purchase, customerId });
@@ -1680,6 +1807,7 @@ module.exports = {
     oneTapVariantStillOffered,
     rejectRetiredOneTapVariant,
     voidPurchase,
+    oneTapBookedVisitIsCurrent,
     isReviewableOneTapBookedVisit,
   },
 };

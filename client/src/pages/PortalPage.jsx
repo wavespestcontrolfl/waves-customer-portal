@@ -1382,6 +1382,11 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
   confirmingRef.current = confirming;
   const [stepError, setStepError] = useState('');
   const [officeReviewMessage, setOfficeReviewMessage] = useState('');
+  // An office-review refusal parks the purchase for staff: closing or
+  // unmounting the overlay must not release its held visit or draft.
+  // Keep this in a ref so the unmount cleanup observes it even if close is
+  // triggered immediately after the refusal response settles.
+  const preserveOfficeReviewRef = useRef(false);
   const [needsCard, setNeedsCard] = useState(false);
   const [cardSaved, setCardSaved] = useState(false);
   const [cardBusy, setCardBusy] = useState(false);
@@ -1406,6 +1411,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
     setSelectedSlot(null);
     setStepError('');
     setOfficeReviewMessage('');
+    preserveOfficeReviewRef.current = false;
     setNeedsCard(false);
     setCardSaved(false);
     setResult(null);
@@ -1481,7 +1487,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
     return () => {
       closedRef.current = true;
       const { purchaseId, done } = releaseRef.current;
-      if (purchaseId && !done) api.oneTapRelease(purchaseId).catch(() => {});
+      if (purchaseId && !done && !preserveOfficeReviewRef.current) api.oneTapRelease(purchaseId).catch(() => {});
       paymentElementRef.current = null;
       elementsRef.current = null;
       stripeRef.current = null;
@@ -1622,6 +1628,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
         // Preserve the exact hold and frozen price on screen. This terminal
         // state has no retry, refresh, re-reserve, release or change-time
         // control; office review must resolve the competing booking.
+        preserveOfficeReviewRef.current = true;
         setOfficeReviewMessage(err?.message || 'Call Waves so we can confirm the right appointment before you continue.');
       } else if (err?.status === 402) {
         setNeedsCard(true);

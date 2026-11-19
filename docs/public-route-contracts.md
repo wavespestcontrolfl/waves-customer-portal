@@ -2061,8 +2061,9 @@ belongs to its synthesized estimate. The ownership check runs before capacity
 preparation and again on the locked reservation row. Conversion is pinned to
 that exact graduated visit; a second current staff booking returns HTTP 422
 `APPOINTMENT_OFFICE_REVIEW_REQUIRED` without changing the hold, office-entered
-price, draft estimate or invoices. The Portal keeps the frozen visit and price
-visible and offers no automatic retry or re-reserve. A competing confirmation
+price, draft estimate or invoices. A visit already en route or on site continues
+to count after Eastern midnight. The Portal displays the frozen visit, price
+and office number. Closing this review keeps the purchase for staff. A competing confirmation
 that already completed returns the existing frozen purchase receipt; ordinary
 expired/unavailable holds retain the compare-and-swap pick-a-time recovery.
 
