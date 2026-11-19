@@ -45,7 +45,7 @@ function plannerOptions(req) {
 // A3): the plan repeats each product under protocol.base / conditional and
 // mixCalculator.conditionalOptions, so the owner-only keys are removed at every
 // depth, and priced protocol lines ("($2.18)") lose their dollar tokens as on the
-// Protocols page. TreatmentPlanPanel reads none of these fields.
+// Protocols page. The Plan tab (LawnPlanTab) reads none of these fields.
 const TECHNICIAN_PLAN_OWNER_ONLY_KEYS = new Set([
   'bestPrice', 'costPerUnit', 'costUnit', 'needsPricing',
   'materialCost', 'materialCostSource', 'materialCostDetail', 'materialCostSummary',

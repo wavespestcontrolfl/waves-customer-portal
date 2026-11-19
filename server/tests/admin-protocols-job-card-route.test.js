@@ -179,16 +179,30 @@ describe('job-card routes', () => {
     jobCard.mixForProduct.mockResolvedValue({ amount: 1 });
     db.ownedRow = { id: SERVICE_ID };
     await run('/job-card/:serviceId', { serviceId: SERVICE_ID, __tech: true });
-    expect(jobCard.buildJobCard).toHaveBeenLastCalledWith(SERVICE_ID, { includePricing: false });
+    expect(jobCard.buildJobCard).toHaveBeenLastCalledWith(SERVICE_ID, { includePricing: false, selectedConditionalProductIds: [] });
     await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, gallons: '1', __tech: true });
     expect(jobCard.mixForProduct).toHaveBeenLastCalledWith(SERVICE_ID, 1, { serviceId: SERVICE_ID, includePricing: false });
     await run('/job-card/:serviceId', { serviceId: SERVICE_ID });
-    expect(jobCard.buildJobCard).toHaveBeenLastCalledWith(SERVICE_ID, { includePricing: true });
+    expect(jobCard.buildJobCard).toHaveBeenLastCalledWith(SERVICE_ID, { includePricing: true, selectedConditionalProductIds: [] });
     const outage = Object.assign(new Error('Product catalog unavailable'), { statusCode: 503 });
     jobCard.mixForProduct.mockRejectedValue(outage);
     jobCard.buildJobCard.mockRejectedValue(outage);
     expect((await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, gallons: '1' })).statusCode).toBe(503);
     expect((await run('/job-card/:serviceId', { serviceId: SERVICE_ID })).statusCode).toBe(503);
+  });
+
+  test('the Plan tab ticks ride in as a product id list; anything else is a 400 before any read', async () => {
+    process.env.GATE_JOB_CARD = 'true';
+    jobCard.buildJobCard.mockResolvedValue({ enabled: true, strip: { access: { codes: [] } } });
+    db.ownedRow = { id: SERVICE_ID };
+    const other = '99999999-2222-4333-8444-555555555555';
+    await run('/job-card/:serviceId', { serviceId: SERVICE_ID, selectedConditionalProductIds: `${SERVICE_ID}, ${other}` });
+    expect(jobCard.buildJobCard).toHaveBeenLastCalledWith(SERVICE_ID, { includePricing: true, selectedConditionalProductIds: [SERVICE_ID, other] });
+    jobCard.buildJobCard.mockClear();
+    for (const bad of ['nope', `${SERVICE_ID},nope`, { a: SERVICE_ID }, Array(51).fill(SERVICE_ID).join(',')]) {
+      expect((await run('/job-card/:serviceId', { serviceId: SERVICE_ID, selectedConditionalProductIds: bad })).statusCode).toBe(400);
+    }
+    expect(jobCard.buildJobCard).not.toHaveBeenCalled();
   });
 
   test('mix validates gallons and productId', async () => {

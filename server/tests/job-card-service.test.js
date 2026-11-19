@@ -530,6 +530,31 @@ describe('resolveVisitProducts reuses the appointment plan for lawn visits (Code
     ]);
   });
 
+  test('a ticked "if needed" product reaches the plan and its card shows the amount under the Job rules', async () => {
+    const verified = catalog.map((p) => ({ ...p, label_verified_at: '2026-08-01' }));
+    // The engine moves a ticked conditional option into the planned items, as isConditionalSelected does.
+    const buildPlan = jest.fn(async (id, opts) => {
+      const ticked = (opts.selectedConditionalProductIds || []).includes('hyd');
+      return ticked
+        ? { ...plan, mixCalculator: { items: [...plan.mixCalculator.items, { ...plan.mixCalculator.conditionalOptions[0], selected: true }], conditionalOptions: [] } }
+        : plan;
+    });
+    const cards = async (ids) => {
+      const out = await jobCard.resolveVisitLines({ facts, protocols: {}, catalog: verified, dbh: () => ({}), deps: { buildPlan }, ...(ids ? { selectedConditionalProductIds: ids } : {}) });
+      return jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, verdicts: [], packSizes: {}, blocked: false });
+    };
+    const base = await cards();
+    expect(buildPlan).toHaveBeenLastCalledWith('svc1', { db: expect.any(Function), now: expect.any(Date), strict: true });
+    expect(base.find((c) => c.id === 'hyd')).toMatchObject({ conditional: true, planned: null });
+    const ticked = await cards(['hyd']);
+    expect(buildPlan).toHaveBeenLastCalledWith('svc1', expect.objectContaining({ selectedConditionalProductIds: ['hyd'] }));
+    expect(ticked.find((c) => c.id === 'hyd')).toMatchObject({ conditional: false, planned: { amount: 6, unit: 'fl oz' } });
+    // The Job rules still hold: an unverified label withholds the ticked product's amount.
+    const unverified = await jobCard.resolveVisitLines({ facts, protocols: {}, catalog, dbh: () => ({}), deps: { buildPlan }, selectedConditionalProductIds: ['hyd'] });
+    const [, hyd] = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: unverified.lines, verdicts: [], packSizes: {} });
+    expect(hyd).toMatchObject({ planned: null, amountNote: 'Label rate not yet verified — amount withheld' });
+  });
+
   test('a plan failure yields no lines instead of a crash', async () => {
     const buildPlan = jest.fn().mockRejectedValue(new Error('Scheduled service not found'));
     const out = await jobCard.resolveVisitProducts({ facts, protocols: {}, catalog, dbh: () => ({}), deps: { buildPlan } });

@@ -57,6 +57,7 @@ import CompletionPricingCard from "../../components/schedule/CompletionPricingCa
 import PromiseCheck, { currentMark, promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
 import BlogPostPicker from "../../components/schedule/BlogPostPicker";
 import NoteBoxPhotos from "../../components/schedule/NoteBoxPhotos";
+import LawnPlanTab, { toggleConditionalIds } from "../../components/schedule/LawnPlanTab";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
@@ -6902,10 +6903,10 @@ function JobCardChip({ tone = "unknown", label, D }) {
   );
 }
 
-function JobCardCollapsible({ title, right = null, defaultOpen = false, children, D, domId = undefined }) {
+// `aside` sits beside the header button, not inside it (a control cannot nest in a button).
+function JobCardCollapsible({ title, right = null, aside = null, defaultOpen = false, children, D, domId = undefined }) {
   const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, marginBottom: 8 }}>
+  const header = (
       <button
         type="button"
         id={domId}
@@ -6934,6 +6935,10 @@ function JobCardCollapsible({ title, right = null, defaultOpen = false, children
         </span>
         {right && <span style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>{right}</span>}
       </button>
+  );
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, marginBottom: 8 }}>
+      {aside ? <div style={{ display: "flex", alignItems: "center" }}>{header}{aside}</div> : header}
       {open && <div style={{ padding: "0 14px 14px", borderTop: `1px solid ${D.border}` }}>{children}</div>}
     </div>
   );
@@ -7124,7 +7129,37 @@ export function JobCardGoverned({ governed, D }) {
   );
 }
 
-function JobCardProduct({ p, serviceId, D }) {
+// The "Use" tick on an "if needed" lawn product: asks the job card to plan it. Not saved to the visit.
+function JobCardUse({ name, use, D }) {
+  return (
+    <label style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 14px 0 4px", minHeight: 44, fontSize: 14, color: D.text, cursor: "pointer", flexShrink: 0 }}>
+      <input type="checkbox" checked={use.checked} onChange={use.onToggle} aria-label={`Use ${name}`} style={{ width: 18, height: 18, accentColor: D.heading }} />
+      Use
+    </label>
+  );
+}
+
+// A numbered mixing order (the plan's own steps: no amounts).
+function JobCardMixingOrder({ title, steps, D }) {
+  if (!steps?.length) return null;
+  return (
+    <JobCardCollapsible title={title} D={D}>
+      <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+        {steps.map((step) => (
+          <div key={`${step.step}-${step.productId}`} style={{ display: "flex", gap: 10, fontSize: 14, color: D.text }}>
+            <span style={{ width: 22, height: 22, borderRadius: 2, background: D.heading, color: D.white, fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{step.step}</span>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 500 }}>{step.productName}</div>
+              <div style={{ color: D.muted }}>{step.instruction}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </JobCardCollapsible>
+  );
+}
+
+function JobCardProduct({ p, serviceId, D, use = null }) {
   const amount = fmtAmount(p.planned?.amount, p.planned?.unit);
   // The shortage line names the plan's requirement even while the dose is withheld.
   const demand = fmtAmount(p.demand?.amount, p.demand?.unit) || amount;
@@ -7137,7 +7172,7 @@ function JobCardProduct({ p, serviceId, D }) {
     </>
   );
   return (
-    <JobCardCollapsible title={jobCardProductTitle(p)} right={right} defaultOpen={Boolean(p.governed)} D={D} domId={`job-card-product-${jobCardRowId(p)}`}>
+    <JobCardCollapsible title={jobCardProductTitle(p)} right={right} aside={use && <JobCardUse name={p.name} use={use} D={D} />} defaultOpen={Boolean(p.governed)} D={D} domId={`job-card-product-${jobCardRowId(p)}`}>
       <div style={{ fontSize: 13, color: D.text, marginTop: 10, display: "grid", gap: 8 }}>
         {p.line && <div style={{ color: D.muted }}>{p.line}</div>}
         <JobCardGoverned governed={p.governed} D={D} />
@@ -7455,7 +7490,9 @@ export function JobCardAwayWatch({ lines, D }) {
   ));
 }
 
-export function JobCardTab({ card, loading, error, D }) {
+// `lawn` (lawn visits): { plan, selectedIds, onToggle(productId), onOpenPlan() } from the panel, which holds the
+// Plan tab's data and the "Use" ticks. A card gets a Use tick while it is an "if needed" line or ticked.
+export function JobCardTab({ card, loading, error, D, lawn = null }) {
   if (loading) {
     return <div style={{ padding: 40, textAlign: "center", color: D.muted }}>Loading job card...</div>;
   }
@@ -7487,10 +7524,21 @@ export function JobCardTab({ card, loading, error, D }) {
       )}
       <JobCardSprayCheck sprayCheck={card.sprayCheck} products={products} D={D} />
       <JobCardTank tank={card.tank} serviceId={card.serviceId} D={D} />
+      {lawn && <JobCardMixingOrder title="Mixing order" steps={lawn.plan?.mixingOrder} D={D} />}
+      {lawn && <JobCardMixingOrder title="Bermuda backpack mix" steps={lawn.plan?.bermudaMixingOrder} D={D} />}
       {card.planBlocks?.length > 0 && (
         <div style={{ border: "1px solid #C8312F", borderRadius: 2, padding: "10px 12px", margin: "14px 0 0", fontSize: 14, color: D.text }}>
           <div style={{ fontWeight: 500, color: "#C8312F", marginBottom: 4 }}>Lawn plan blocked — amounts withheld</div>
           {card.planBlocks.map((b, i) => <div key={b.code || i}>{b.message}</div>)}
+          {lawn?.onOpenPlan && (
+            <button
+              type="button"
+              onClick={lawn.onOpenPlan}
+              style={{ marginTop: 8, minHeight: 44, padding: "0 12px", border: `1px solid ${D.inputBorder}`, borderRadius: 2, background: D.card, color: D.heading, fontSize: 14, fontWeight: 500, cursor: "pointer" }}
+            >
+              See Plan tab
+            </button>
+          )}
         </div>
       )}
       {products.length > 0 && (
@@ -7501,7 +7549,11 @@ export function JobCardTab({ card, loading, error, D }) {
       {(card.addons || []).filter((a) => a.note).map((a) => (
         <div key={a.name} style={{ fontSize: 13, color: D.muted, marginBottom: 6 }}>{a.name}: {a.note}</div>
       ))}
-      {products.map((p) => <JobCardProduct key={jobCardRowId(p)} p={p} serviceId={card.serviceId} D={D} />)}
+      {products.map((p) => {
+        const ticked = lawn?.selectedIds.includes(String(p.id));
+        const use = lawn && (p.conditional || ticked) ? { checked: Boolean(ticked), onToggle: () => lawn.onToggle(p.id) } : null;
+        return <JobCardProduct key={jobCardRowId(p)} p={p} serviceId={card.serviceId} D={D} use={use} />;
+      })}
       {products.length === 0 && (
         <div style={{ fontSize: 13, color: D.muted }}>{card.lineNote || "No protocol products matched this visit."}</div>
       )}
@@ -7519,7 +7571,10 @@ function protocolMonthForService(service) {
   );
 }
 
-export function ProtocolPanel({ service, onClose }) {
+const NO_TICKS = [];
+
+// `initialSection`: the tab to open on ("lawn_plan" from the Plan entry points); lawn visits only.
+export function ProtocolPanel({ service, onClose, initialSection = null }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
   const panelRef = useModalFocus(true, onClose);
@@ -7564,6 +7619,18 @@ export function ProtocolPanel({ service, onClose }) {
   const [jobCard, setJobCard] = useState(null);
   const [jobCardLoading, setJobCardLoading] = useState(true);
   const [jobCardError, setJobCardError] = useState(false);
+  // "Use" ticks on "if needed" lawn lines: product ids for this visit. Not saved to the visit; a new visit starts clean.
+  const [useTicks, setUseTicks] = useState({ serviceId: null, ids: [] });
+  const selectedConditionalIds = useTicks.serviceId === service?.id ? useTicks.ids : NO_TICKS;
+  const selectedQuery = selectedConditionalIds.length
+    ? `?selectedConditionalProductIds=${encodeURIComponent(selectedConditionalIds.join(","))}`
+    : "";
+  // The lawn plan (GET /admin/treatment-plans), read with the same ticks: the Plan tab, the Mixing order and the bermuda step.
+  const [lawnPlan, setLawnPlan] = useState(null);
+  const [lawnPlanLoading, setLawnPlanLoading] = useState(false);
+  const [lawnPlanError, setLawnPlanError] = useState("");
+  const [lawnPlanRefresh, setLawnPlanRefresh] = useState(0);
+  const jobCardShownFor = useRef(null);
   const [loadErrors, setLoadErrors] = useState([]);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const payGrowthAvailable = usePayGrowthAvailable();
@@ -7604,11 +7671,12 @@ export function ProtocolPanel({ service, onClose }) {
   // ask bar. A failed request is shown as a notice under the header instead.
   const jobCardEnabled = Boolean(jobCard?.enabled);
   const protocolEnabled = Boolean(jobCard?.protocol?.enabled);
-  const defaultSection = jobCardEnabled
+  const wantedSection = initialSection === "lawn_plan" && !isLawn ? null : initialSection;
+  const defaultSection = wantedSection || (jobCardEnabled
     ? "job_card"
     : isLawn
       ? "lawn_protocol"
-      : "overview";
+      : "overview");
   const [requestedSection, setActiveSection] = useState(defaultSection);
 
   useEffect(() => {
@@ -7617,17 +7685,19 @@ export function ProtocolPanel({ service, onClose }) {
 
   useEffect(() => {
     let cancelled = false;
-    setJobCard(null);
+    // A "Use" tick re-reads the card in place; only another visit blanks it.
+    const sameVisit = jobCardShownFor.current === service?.id;
+    if (!sameVisit) setJobCard(null);
     setJobCardError(false);
     if (!service?.id) {
       setJobCardLoading(false);
       return undefined;
     }
-    setJobCardLoading(true);
-    setJobCardError(false);
-    adminFetch(`/admin/protocols/job-card/${service.id}`)
+    setJobCardLoading(!sameVisit);
+    adminFetch(`/admin/protocols/job-card/${service.id}${selectedQuery}`)
       .then((data) => {
         if (cancelled) return;
+        jobCardShownFor.current = service.id;
         setJobCard(data && data.enabled ? data : { enabled: false });
       })
       .catch(() => {
@@ -7635,6 +7705,7 @@ export function ProtocolPanel({ service, onClose }) {
         // A failed request (503 safety-data outage, network) keeps the tab
         // and shows its unavailable state — never a silent fall-back to
         // the legacy view. Only a successful { enabled: false } hides it.
+        jobCardShownFor.current = null;
         setJobCard(null);
         setJobCardError(true);
       })
@@ -7644,7 +7715,31 @@ export function ProtocolPanel({ service, onClose }) {
     return () => {
       cancelled = true;
     };
+  }, [service?.id, selectedQuery]);
+
+  useEffect(() => {
+    setLawnPlan(null);
   }, [service?.id]);
+
+  useEffect(() => {
+    if (!isLawn || !service?.id) return undefined;
+    let cancelled = false;
+    setLawnPlanLoading(true);
+    setLawnPlanError("");
+    adminFetch(`/admin/treatment-plans/${service.id}${selectedQuery}`)
+      .then((data) => {
+        if (!cancelled) setLawnPlan(data?.plan || null);
+      })
+      .catch((err) => {
+        if (!cancelled) setLawnPlanError(err?.message || "Failed to load treatment plan");
+      })
+      .finally(() => {
+        if (!cancelled) setLawnPlanLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isLawn, service?.id, selectedQuery, lawnPlanRefresh]);
 
   useEffect(() => {
     let cancelled = false;
@@ -7778,6 +7873,7 @@ export function ProtocolPanel({ service, onClose }) {
 
   const SECTIONS = [
     ...(jobCardEnabled ? [{ id: "job_card", label: "Job", count: null }] : []),
+    ...(isLawn ? [{ id: "lawn_plan", label: "Plan", count: null }] : []),
     ...(protocolEnabled ? [{ id: "visit_protocol", label: " Protocol", count: null }] : []),
     ...(!protocolEnabled && isLawn
       ? [
@@ -7972,7 +8068,7 @@ export function ProtocolPanel({ service, onClose }) {
       </div>
       {/* Content */}
       <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
-        {loadErrors.length > 0 && activeSection !== "job_card" && activeSection !== "visit_protocol" && (
+        {loadErrors.length > 0 && activeSection !== "job_card" && activeSection !== "visit_protocol" && activeSection !== "lawn_plan" && (
           <div role="alert" style={{ border: `1px solid ${D.border}`, padding: 12, marginBottom: 16, fontSize: 14, color: D.text }}>
             <div>Could not load: {loadErrors.join(", ")}.</div>
             <div style={{ marginTop: 4 }}>Available guidance is shown below.</div>
@@ -7988,7 +8084,28 @@ export function ProtocolPanel({ service, onClose }) {
         {activeSection === "score" && canScore ? (
           <ServiceScore key={service.id} serviceId={service.id} manage={isAdmin} initialData={participantScore || null} />
         ) : activeSection === "job_card" && jobCardEnabled ? (
-          <JobCardTab card={jobCard} loading={jobCardLoading} error={jobCardError} D={D} />
+          <JobCardTab
+            card={jobCard}
+            loading={jobCardLoading}
+            error={jobCardError}
+            D={D}
+            lawn={isLawn ? {
+              plan: lawnPlan,
+              selectedIds: selectedConditionalIds,
+              onToggle: (productId) => setUseTicks({
+                serviceId: service.id,
+                ids: toggleConditionalIds(selectedConditionalIds, productId, lawnPlan),
+              }),
+              onOpenPlan: () => setActiveSection("lawn_plan"),
+            } : null}
+          />
+        ) : activeSection === "lawn_plan" && isLawn ? (
+          <LawnPlanTab
+            plan={lawnPlan}
+            loading={lawnPlanLoading}
+            error={lawnPlanError}
+            onRefresh={() => setLawnPlanRefresh((k) => k + 1)}
+          />
         ) : activeSection === "visit_protocol" && protocolEnabled ? (
           <VisitProtocol key={jobCard.serviceId} card={jobCard} D={D} onJobCard={() => setActiveSection("job_card")} />
         ) : loading ? (

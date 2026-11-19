@@ -1265,12 +1265,13 @@ const PLAN_UNAVAILABLE = { code: 'plan_unavailable', message: 'Lawn plan unavail
 const APPROVALS_UNAVAILABLE = { code: 'approvals_unavailable', message: 'Approval checks unavailable right now.' };
 
 /** { plan } or { plan: null, error } — a failed build is its own block. */
-async function loadLawnPlan(serviceId, { dbh = db, deps = {}, now = new Date() } = {}) {
+async function loadLawnPlan(serviceId, { dbh = db, deps = {}, now = new Date(), selectedConditionalProductIds = [] } = {}) {
   try {
     // strict: the plan engine's own catalog read throws instead of reading
     // as an empty catalog, so an outage is a visible plan block, never
-    // "no products matched".
-    return { plan: await (deps.buildPlan || buildPlanForService)(serviceId, { db: dbh, now, strict: true }) };
+    // "no products matched". The "Use" ticks on "if needed" lines ride in as
+    // selectedConditionalProductIds, as on the plan route; none = the base plan.
+    return { plan: await (deps.buildPlan || buildPlanForService)(serviceId, { db: dbh, now, strict: true, ...(selectedConditionalProductIds.length ? { selectedConditionalProductIds } : {}) }) };
   } catch (err) {
     logger.warn(`[job-card] plan unavailable for ${serviceId}: ${err.message}`);
     return { plan: null, error: err };
@@ -1307,7 +1308,7 @@ function productBlocksUnderPlan({ plan }, product) {
 // visit stamped elsewhere gets no plan and no amounts.
 const ALTERNATE_ADDRESS_BLOCK = { code: 'alternate_address', message: 'Visit is at a non-primary address — the lawn plan on file is the primary home\'s, amounts withheld' };
 
-async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps = {}, now = new Date() }) {
+async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps = {}, now = new Date(), selectedConditionalProductIds = [] }) {
   // Identity gates the primary line before any branch — a catalog
   // inspection or assessment resolves no treatment products even when its
   // name reads as lawn or pest. A legacy row without identity keeps the
@@ -1317,7 +1318,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
   const isLawn = identityKey === undefined ? facts.isLawn : identityKey === 'lawn';
   if (isLawn) {
     if (facts.facts?.alternateAddress) return { visit: null, lines: [], blocks: [ALTERNATE_ADDRESS_BLOCK] };
-    const loaded = await loadLawnPlan(facts.serviceId, { dbh, deps, now });
+    const loaded = await loadLawnPlan(facts.serviceId, { dbh, deps, now, selectedConditionalProductIds });
     const plan = loaded.plan;
     if (!plan) return { visit: null, lines: [], blocks: planBlocksOf(loaded) };
     const items = [...(plan?.mixCalculator?.items || []), ...(plan?.mixCalculator?.conditionalOptions || [])];
@@ -1472,8 +1473,8 @@ const noProductNote = (addOnKey, lines) => (addOnKey && !lines.length && governe
  * has no per-appointment plan of its own (the plan engine keys on the
  * appointment's service type), so it is reported, never dosed.
  */
-async function resolveVisitLines({ facts, protocols, catalog, dbh = db, deps = {}, now = new Date() }) {
-  const primary = await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now });
+async function resolveVisitLines({ facts, protocols, catalog, dbh = db, deps = {}, now = new Date(), selectedConditionalProductIds = [] }) {
+  const primary = await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now, selectedConditionalProductIds });
   const ownKey = ownAddOnKey(facts);
   const lines = primary.lines.map((line) => ownVisitLine(line, ownKey, facts.areaAddOnScope));
   const addons = [];
@@ -1914,7 +1915,7 @@ function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, no
   return { serviceId: facts.serviceId, checkedAt: now.toISOString(), issues };
 }
 
-async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), includePricing = false, readinessOnly = false } = {}) {
+async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), includePricing = false, readinessOnly = false, selectedConditionalProductIds = [] } = {}) {
   const facts = await loadJobCardFacts(serviceId, dbh, deps, { displayContext: !readinessOnly });
   if (!facts) return null;
   const protocols = deps.protocols || require('../config/protocols.json');
@@ -1930,7 +1931,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     loadRigSystems(dbh),
     forecastAt({ coords: facts.coords, scheduledDate: facts.scheduledDate, now, deps }),
   ]);
-  const { visit, lines, blocks, addons, note, procedure, carrierGalPer1000 } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now });
+  const { visit, lines, blocks, addons, note, procedure, carrierGalPer1000 } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now, selectedConditionalProductIds });
   const tank = tankFromCalibrations(rigRows(calibrations, facts.rig), carrierGalPer1000);
   // One entry per catalog product: a host's line and an add-on's line of the same product are two cards, one spray check.
   const products = [...new Map(lines.map((l) => [l.product.id, l.product])).values()];

@@ -72,7 +72,6 @@ import { accessSheetFields } from "../../lib/schedule-access";
 import MobileCheckoutSheet from "../../components/schedule/MobileCheckoutSheet";
 import MobilePaymentSheet from "../../components/schedule/MobilePaymentSheet";
 import MobileServiceEditModal from "../../components/schedule/MobileServiceEditModal";
-import TreatmentPlanPanel from "../../components/schedule/TreatmentPlanPanel";
 import MarkPrepaidModal from "../../components/schedule/MarkPrepaidModal";
 import RecurringAlertsBannerV2 from "../../components/schedule/RecurringAlertsBannerV2";
 import CreateAppointmentModal from "../../components/schedule/CreateAppointmentModal";
@@ -686,7 +685,12 @@ export default function DispatchPageV2({
   // straight to CompletionPanel like the completion-flow entry does.
   const [prepaidEntryContext, setPrepaidEntryContext] = useState(null);
   const [protocolService, setProtocolService] = useState(null);
-  const [treatmentPlanService, setTreatmentPlanService] = useState(null);
+  // The Protocol panel opens on its Plan tab from the Plan entry points (Details sheet, time grid).
+  const [protocolSection, setProtocolSection] = useState(null);
+  const openTreatmentPlan = (svc) => {
+    setProtocolSection("lawn_plan");
+    setProtocolService(svc);
+  };
   const [auditContext, setAuditContext] = useState(null);
   const [selectedScheduleService, setSelectedScheduleService] = useState(null);
   const ibSelectedService = detailService || selectedScheduleService || editingService || rescheduleService || completingService || treeShrubFastService || lawnReserviceFastService || lawnFastService || pestFastService || continueProjectService;
@@ -1673,7 +1677,6 @@ export default function DispatchPageV2({
             }
           }}
           onEnRoute={handleEnRoute}
-          onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
           // Open-hour rows book; POST /admin/schedule is admin-only.
           onCreateSlot={getAdminUser()?.role === "admin" ? ({ date: slotDate, windowStart, techId }) => {
             setNewApptDefaults({ date: slotDate, windowStart, techId });
@@ -1698,7 +1701,7 @@ export default function DispatchPageV2({
               openVisitEditor(svc);
             }
           }}
-          onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
+          onTreatmentPlan={openTreatmentPlan}
           onViewCustomer={openCustomerSidebar}
           onChange={() => fetchSchedule(date, { silent: true })}
           onStatsChange={handleGridStatsChange}
@@ -1731,7 +1734,7 @@ export default function DispatchPageV2({
               openVisitEditor(svc);
             }
           }}
-          onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
+          onTreatmentPlan={openTreatmentPlan}
           onViewCustomer={openCustomerSidebar}
           onChange={() => fetchSchedule(date, { silent: true })}
           onStatsChange={handleGridStatsChange}
@@ -1979,7 +1982,7 @@ export default function DispatchPageV2({
                 }
               }}
               onProtocol={(svc) => setProtocolService(svc)}
-              onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
+              onTreatmentPlan={openTreatmentPlan}
               onViewCustomer={openCustomerSidebar}
               onViewAudit={(svc) =>
                 setAuditContext({
@@ -2022,7 +2025,6 @@ export default function DispatchPageV2({
               }}
               onEnRoute={handleEnRoute}
               onProtocol={(svc) => setProtocolService(svc)}
-              onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
               onViewAudit={(svc) =>
                 setAuditContext({
                   customerId: svc.customerId || svc.customer_id,
@@ -2527,7 +2529,11 @@ export default function DispatchPageV2({
       {protocolService && (
         <ProtocolPanel
           service={protocolService}
-          onClose={() => setProtocolService(null)}
+          initialSection={protocolSection}
+          onClose={() => {
+            setProtocolService(null);
+            setProtocolSection(null);
+          }}
         />
       )}
       {detailService && (
@@ -2544,13 +2550,12 @@ export default function DispatchPageV2({
           }}
           onTreatmentPlan={(svc) => {
             closeFastSheetsBehindDetails();
-            // Same trap as onReviewCheckout: TreatmentPlanPanel renders inline
-            // (fixed z-1000) and would mount behind this body-level portaled
-            // detail sheet. Close the detail sheet first. (Only this in-detail
-            // entry point needs it — the list/grid onTreatmentPlan handlers
-            // fire with no detail sheet open.)
+            // Same trap as onReviewCheckout: close the detail sheet before the
+            // panel opens so it never stacks under the body-level portaled
+            // sheet. (Only this in-detail entry point needs it — the grid
+            // onTreatmentPlan handlers fire with no detail sheet open.)
             setDetailService(null);
-            setTreatmentPlanService(svc);
+            openTreatmentPlan(svc);
           }}
           onReviewCheckout={(svc) => {
             closeFastSheetsBehindDetails();
@@ -2906,12 +2911,6 @@ export default function DispatchPageV2({
               setProjectReloadKey((k) => k + 1);
             }
           }}
-        />
-      )}
-      {treatmentPlanService && (
-        <TreatmentPlanPanel
-          service={treatmentPlanService}
-          onClose={() => setTreatmentPlanService(null)}
         />
       )}
       {auditContext?.customerId && (
