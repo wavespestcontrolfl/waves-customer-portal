@@ -321,6 +321,54 @@ describe('POST /api/requests cancellation guard', () => {
     expect(sendCancellationReceived).toHaveBeenCalledTimes(1);
   }));
 
+  test('a visit stuck on site from an EARLIER day: the customer is told "cancelled"; the ticket and the alert stay for the office (owner 2026-10-30)', () => withServer(async (baseUrl) => {
+    const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCancellationReceived } = require('../services/account-membership-email');
+    const { notifyAdmin } = require('../services/notification-service');
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+
+    // The 2026-11-17 case: 9 future visits pulled, the Nov 15 visit still "on_site".
+    processCancellationRequest.mockResolvedValueOnce({
+      ok: false, churned: true, cancelledCount: 9, recurrenceStopped: 1,
+      errors: ['in_progress_visit:svc-old'], staleInProgressVisitIds: ['svc-old'],
+    });
+    renderRequiredSmsTemplate.mockClear();
+    sendCancellationReceived.mockClear();
+    let res = await postCancellation(baseUrl, { subject: 'Cancel — stale visit' });
+    let body = await res.json();
+    expect(res.status).toBe(201);
+    expect(renderRequiredSmsTemplate.mock.calls[0][0]).toBe('service_cancellation_confirmation');
+    expect(sendCancellationReceived).toHaveBeenLastCalledWith(expect.objectContaining({ processed: true }));
+    // The screen says the same thing as the text.
+    expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, churned: true, visitsPulled: 9 }));
+    // The office still owns the stuck visit: ticket open, review alert says so.
+    expect(body.request.status).toBe('new');
+    expect(mockState.service_requests_inserted.find((r) => r.subject === 'Cancel — stale visit').status).toBe('new');
+    expect(JSON.stringify(notifyAdmin.mock.calls.at(-1))).toContain('in_progress_visit:svc-old');
+
+    // A visit live TODAY next to the stale one keeps the by-hand copy.
+    processCancellationRequest.mockResolvedValueOnce({
+      ok: false, churned: true, cancelledCount: 9, recurrenceStopped: 1,
+      errors: ['in_progress_visit:svc-old', 'in_progress_visit:svc-today'], staleInProgressVisitIds: ['svc-old'],
+    });
+    renderRequiredSmsTemplate.mockClear();
+    res = await postCancellation(baseUrl, { subject: 'Cancel — live visit' });
+    body = await res.json();
+    expect(renderRequiredSmsTemplate.mock.calls[0][0]).toBe('service_cancellation_received');
+    expect(body.cancellation.processed).toBe(false);
+
+    // So does any other error beside the stale visit.
+    processCancellationRequest.mockResolvedValueOnce({
+      ok: false, churned: true, cancelledCount: 9, recurrenceStopped: 1,
+      errors: ['in_progress_visit:svc-old', 'void_invoice:inv-1'], staleInProgressVisitIds: ['svc-old'],
+    });
+    renderRequiredSmsTemplate.mockClear();
+    res = await postCancellation(baseUrl, { subject: 'Cancel — other error' });
+    body = await res.json();
+    expect(renderRequiredSmsTemplate.mock.calls[0][0]).toBe('service_cancellation_received');
+    expect(body.cancellation.processed).toBe(false);
+  }));
+
   test('a cleanly processed cancel closes its own ticket; a partial one stays new for the office', () => withServer(async (baseUrl) => {
     mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
 
@@ -362,6 +410,24 @@ describe('POST /api/requests cancellation guard', () => {
     expect(body.request.status).toBe('resolved');
     expect(mockState.service_requests[0].status).toBe('resolved');
     expect(mockState.service_requests[0].resolved_at).toBeInstanceOf(Date);
+
+    // A SCOPED run whose only error is an earlier-day stuck visit is not
+    // promoted on the portal (the stale-visit rule is whole-plan only here):
+    // the retry reply carries no scope, so "processed" would read as a
+    // whole-plan cancel on the screen.
+    mockState.service_requests = [{
+      id: 'req-portal-stale', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal-stale', scope: ['mosquito'] }];
+    processCancellationRequest.mockResolvedValueOnce({
+      ...scopedOk, ok: false, errors: ['in_progress_visit:svc-old'], staleInProgressVisitIds: ['svc-old'],
+    });
+    res = await postCancellation(baseUrl);
+    body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.cancellation.processed).toBe(false);
+    expect(body.request.status).toBe('new');
 
     // Inactive-account repair: the row is hours old and the account is churned.
     mockAuthInactive = true;
