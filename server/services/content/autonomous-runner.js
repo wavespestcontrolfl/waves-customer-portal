@@ -2177,6 +2177,9 @@ class AutonomousRunner {
       subject: { type: 'check', id: 'content-daily-digest' },
       text: body,
       dedupeKey: `owner-alert:content-daily-digest:${etDateString()}`,
+      // Today's summary closes the open rows earlier days wrote: one open summary, not one per day
+      // (owner 2026-11-19, admin notification faults check, fault 5).
+      supersedePrior: true,
     });
     logger.info(`[autonomous-runner] daily digest recorded: ${body}`);
   }

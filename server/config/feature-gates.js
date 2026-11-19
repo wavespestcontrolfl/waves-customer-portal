@@ -37,6 +37,7 @@
  *   GATE_NEWSLETTER_AUTO_SEND=true (owner 2026-10-30, option A: the weekly issue sends itself Tuesday at 6:00 AM ET once the automatic checks pass. The Monday proof step queues it and emails the owner an FYI copy; a HOLD reply or Cancel schedule in History skips that week. The inactive-reader check-in email also queues itself. Needs GATE_NEWSLETTER_PROOF_APPROVAL on. Read at call time via newsletterAutoSendLive(), strict 'true', dark by default; off = the issue waits for an APPROVED reply, as before. Emails the list.)
  *   GATE_ESTIMATE_LAWN_LIMITS=true (owner 2026-10-22: a recurring lawn estimate says in writing what the program can and can't fix, and the office can flag other grasses (carpetgrass, bahiagrass, bermudagrass, torpedograss, dallisgrass) and suspected virus streaks on the lawn's turf profile; each flag adds one line to the estimate page, the estimate PDF and the pdfkit fallback. The tech sheet warns when Celsius WG is picked on a carpetgrass lawn. Read at call time via estimateLawnLimitsLive(), strict 'true', dark by default; off = every estimate, turf profile and tech sheet output exactly as before. Sends nothing and prints no prices.)
  *   GATE_CAGE_START_MEDIUM=true (owner 2026-11-17 "both", draft price study: the two office tools start a county-measured pool cage of 601 to 2,000 sq ft at Medium instead of the lookup's Large or Oversized. It covers the call-agent draft and the estimate tool's first fill after a property lookup. With it on, the call-agent draft also drops a cage on a home with no decided pool, as the estimate tool already does. Small, Large and Oversized stay in the estimate tool's list for hand use; a cage over 2,000 sq ft stays Oversized. Not changed: the lookup's own cage size, so the website quote, the website-lead draft and the customer price assistant are as before; the price of each size; any saved estimate. It has a gate because it changes a starting price in the estimate tool. Read at call time via cageStartMediumLive(), strict 'true', dark by default; off or unset = both tools start exactly as before.)
+ *   GATE_CAGE_TWO_SIZES=true (owner 2026-11-19, reply "cage 1000": the pool cage size has two sizes, Medium for a cage up to 1,000 sq ft and Large above, in place of Small, Medium, Large and Oversized. The property lookup sizes a county-measured cage that way, the satellite answer maps Small, Medium and Large to Medium and Oversized to Large, and the estimate tool offers only Medium and Large. The 2,000 sq ft Medium start of GATE_CAGE_START_MEDIUM no longer applies while this is on. Not changed: any saved estimate keeps its saved size and price; the price of each size; the satellite prompt; every automatic customer price (website quote, service-report offer card, restart offer) keeps today's manual-quote hold for a cage that today's four sizes call Large or Oversized. It has a gate because it changes a starting price. Read at call time via cageTwoSizesLive(), strict 'true', dark by default; off or unset = four sizes exactly as before.)
  *   GATE_CALL_BOOKING_LINK_REACH=shadow|true (owner 2026-11-17 "link", page "Call Agent Improvements" idea 3: the booking-link text after a call gets two wider rules. Rule A: a caller who was promised a quote is no longer stopped at once. The text waits its 2 hours (8 AM after a 6 PM call) and then goes only to a caller with no estimate in any state and no visit. Rule B: a caller with an earlier lead record is no longer read as a current customer. The text stops only for a caller whose record is past the lead stages, or who has a visit, an invoice or an estimate. A caller who asked for a WDO report, a rodent inspection or exclusion work is left out (reason fee_visit): those visits carry a fee and the text says free. shadow = RECORDS ONLY: no text goes to these callers, and the call ends with the reason reach_shadow_would_send. true = the text is SENT to them, through the same send path, locks and last-moment checks as every other booking-link text; that flip is the owner's because it texts customers. Every caller today's rules text gets the text exactly as before, in every mode. It has a gate because it decides who gets a customer text. Off = today's rules. Kill = unset, read at call time)
  *   GATE_ACH_FAILURE_EMAIL=true (owner 2026-11-16: a customer whose bank (ACH) payment fails gets one email for the stage the failure reached: the retry notice, the switch to the card on file, or the bank suspension with a link to update the bank account. The three bank-failure texts stay off (owner 2026-09-28) and get no text fallback. One email per payment intent and Stripe event; a replayed event sends it only when it is missing. Strict `=== 'true'`, read at call time via achFailureEmailLive(); dark by default. Off = no email, nothing else changes. Kill: unset)
  *   GATE_SMS_ANY_LANGUAGE_TRIAL=true (test answers to customer texts in another language: the text is translated to English, the normal SMS drafter answers it with every English check, and the reply is translated back and double-checked (numbers, times, prices, links unchanged; a back-translation must say the same thing). Stored in sms_translation_trials for the owner to read; NOTHING is sent and the real reply path for these texts is unchanged. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js; dark by default. Sends nothing to a customer.)
@@ -152,7 +153,6 @@
  *   GATE_KB_CUSTOMER_AUDIENCE=true (knowledge Q&A — customer-facing callers such as the portal AI assistant and the lead agent — read only knowledge_base categories on the customer-safe allowlist, currently empty, instead of every active row; staff callers (tech_field, admin_manual) are unchanged; strict opt-in, read at call time via kbCustomerAudienceLive(), dark by default)
  *   GATE_LAWN_WIKI_PAUSE=true (owner 2026-10-30: pause the lawn wiki pages (agronomic wiki, knowledge_entries). The AI writes no page after a confirmed lawn visit or in the weekly refresh; the pages a visit feeds are flagged stale instead, so the refresh after a resume rewrites them. The weekly review digest stops and its open bell is retired. Treatment outcomes, weather, the wiki to Library sync and the admin Regenerate buttons keep working. Read at call time via lawnWikiPauseLive(), strict 'true'; unset = unchanged. Sends nothing to a customer.)
  *   GATE_PORTAL_ACTIVITY=true (customer activity in the logged-in portal and mobile app — strict opt-in, read at call time via portalActivityLive(), dark in dev AND prod: stamps customers.last_seen_at (throttled, 5 min) ONLY from the three foreground beacons — never from ordinary authenticated API traffic or background polling — and accepts POST /api/customer/activity/page-view + /push-open beacons that record portal tab views (`portal:<tab>`) and app opens from a push notification (`push:open`) into customer_page_views, plus POST /heartbeat (visible + recently-interacted sessions, at most every 5 minutes) which only stamps last_seen_at and writes no row. Staff browsers and bots are never recorded. Off = no stamp, no row, and the endpoints answer {enabled:false} so the client stops beaconing for the session. Sends nothing to a customer.)
- *   GATE_EMAIL_RECLASSIFY_PICK=true (email Reclassify lets staff PICK the right label from the classifier's list, and a pick that differs from the AI's label is saved as a confirmed mistake in ai_incidents for the correction loop; read at call time via emailReclassifyPickLive(), dark: unset = Reclassify only re-runs the AI)
  *   GATE_BILLING_NOTIFICATION_CHANNELS=true (portal Email/Text/App billing-channel arrays; strict opt-in, stored choices remain enforced while dark)
  *   GATE_AGENT_SESSION_GUARD=true (Managed Agents cost guards, strict opt-in, read at call time via agentSessionGuardLive(): each blog, backlink, briefing and lead agent session is created with a hard spend cap, and a session its runner gave up on gets a user.interrupt. Off = sessions are created and left as before. Sends nothing to a customer.)
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
@@ -525,6 +525,8 @@ const gates = {
   // GATE_CAGE_START_MEDIUM: read at CALL time via cageStartMediumLive(); this entry is for logGateStatus, so the
   // boot log shows the flip.
   cageStartMedium: process.env.GATE_CAGE_START_MEDIUM === 'true',
+  // GATE_CAGE_TWO_SIZES: read at CALL time via cageTwoSizesLive(); this entry is for logGateStatus.
+  cageTwoSizes: process.env.GATE_CAGE_TWO_SIZES === 'true',
   mosquitoMisting: gateEnvValue('GATE_MOSQUITO_MISTING'),
   // Registered for startup logging; the completion writer reads it at call time (strict 'true').
   lawnActualsLedger: process.env.GATE_LAWN_ACTUALS_LEDGER === 'true',
@@ -574,8 +576,6 @@ const gates = {
   // Registered for logGateStatus only; consumers read portalActivityLive() at
   // call time below so a flip needs no redeploy.
   portalActivity: process.env.GATE_PORTAL_ACTIVITY === 'true',
-  // Staff-picked label on the email Reclassify button (read live via emailReclassifyPickLive()).
-  emailReclassifyPick: process.env.GATE_EMAIL_RECLASSIFY_PICK === 'true',
   // Managed Agents session spend cap + interrupt of abandoned sessions (dark).
   // Registered for logGateStatus only; services/agent-control/session-guard.js
   // reads agentSessionGuardLive() at call time below.
@@ -5417,13 +5417,6 @@ function portalActivityLive() {
   return process.env.GATE_PORTAL_ACTIVITY === 'true';
 }
 
-// GATE_EMAIL_RECLASSIFY_PICK read at CALL time — strict `=== 'true'`, dark.
-// Owner 2026-11-04 (email learning loop, step 1). Read by routes/admin-email.js
-// (the reclassify route and GET /reclassify-options). Unset is the kill.
-function emailReclassifyPickLive() {
-  return process.env.GATE_EMAIL_RECLASSIFY_PICK === 'true';
-}
-
 // GATE_SMS_VOICE_PROFILE_PIN read at CALL time. Owner 2026-10-24: a voice_profiles.version (positive whole number).
 // Anything else (unset, empty, 'true', '5.5', '0', '-3') reads as NO PIN, so a typo can never pin a wrong profile.
 // Returns the version number or null. Read by sms-shadow-drafter.js (resolveEffectiveVoiceProfile, prompt version).
@@ -6107,6 +6100,16 @@ function estimateLawnLimitsLive() {
 // price in the estimate tool. Off = both tools start exactly as before. Kill = unset.
 function cageStartMediumLive() {
   return process.env.GATE_CAGE_START_MEDIUM === 'true';
+}
+
+// GATE_CAGE_TWO_SIZES read at CALL time — strict `=== 'true'`, dark by default
+// (owner 2026-11-19, "cage 1000"). The pool cage has two sizes: Medium up to
+// 1,000 sq ft and Large above. Writers (the property lookup, the estimate tool's
+// box) emit Medium or Large only; the pricing engine keeps all four sizes so a
+// saved estimate keeps its saved price. It has a gate because it changes a
+// starting price. Off = four sizes exactly as before. Kill = unset.
+function cageTwoSizesLive() {
+  return process.env.GATE_CAGE_TWO_SIZES === 'true';
 }
 
 // GATE_CALL_BOOKING_LINK_REACH read at CALL time: 'shadow', 'true' or 'off' (owner 2026-11-17, "link").
@@ -8582,7 +8585,6 @@ module.exports.homeLineLive = homeLineLive;
 // Exported on its own line (not in the shared list above) so concurrent
 // gate PRs appending to that one-line list never conflict with this one.
 module.exports.portalActivityLive = portalActivityLive;
-module.exports.emailReclassifyPickLive = emailReclassifyPickLive;
 module.exports.smsVoiceProfilePinVersion = smsVoiceProfilePinVersion;
 module.exports.smsPromptB1Live = smsPromptB1Live;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
@@ -9249,6 +9251,8 @@ module.exports.invoiceNotOnSparkLive = invoiceNotOnSparkLive;
 module.exports.estimateLawnLimitsLive = estimateLawnLimitsLive;
 // GATE_CAGE_START_MEDIUM reader, on its own line so gate PRs never conflict.
 module.exports.cageStartMediumLive = cageStartMediumLive;
+// GATE_CAGE_TWO_SIZES reader, on its own line so gate PRs never conflict.
+module.exports.cageTwoSizesLive = cageTwoSizesLive;
 // GATE_CALL_BOOKING_LINK_REACH reader, on its own line so gate PRs never conflict.
 module.exports.callBookingLinkReachMode = callBookingLinkReachMode;
 // GATE_LAWN_RECLAIMED_HALF_N reader, on its own line so gate PRs never conflict.

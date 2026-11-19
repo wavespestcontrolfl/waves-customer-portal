@@ -118,7 +118,14 @@ import {
   normalizeApplicationMethod,
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
+import FERTILIZER_EVIDENCE from "../../../../shared/tree-shrub-fertilizer-evidence.json";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
+import {
+  TYPED_INSECT_EVIDENCE_KEYS,
+  missingTypedPesticideCompliance,
+  typedInsectEvidencePath,
+  typedPesticideFieldApplies,
+} from "../../lib/tree-shrub-pest-check";
 import { AREA_ADDONS_LOOKUP_FAILED_MESSAGE, addOnActualsProblem, addOnRecordMissingProblem, areaAddOnRowServiceType, isAreaAddOnVisit, withGovernedAddOnRate } from "../../lib/areaAddOns";
 import AreaAddOnFields from "../../components/admin/AreaAddOnFields";
 import { productDimension } from "../../lib/fast-complete-products";
@@ -9923,6 +9930,9 @@ export function TypedFindingsSection({
   recommendations,
   onRecommendationsChange,
   pesticideProductPresent = true,
+  pesticideComplianceScope = null,
+  insectEvidencePath: controlledInsectEvidencePath,
+  onInsectEvidencePathChange,
   frozen = false,
   // Typed voice fill (GATE_TYPED_VOICE_FILL): the words each filled field
   // came from ({ key: { value, quotes } }) and the fields the notes left
@@ -9955,6 +9965,42 @@ export function TypedFindingsSection({
   const accent = mobile ? CP_M.ink : D.teal;
   const accentFg = mobile ? CP_M.actionFg : D.teal;
   const requiredColor = mobile ? "#C2410C" : D.red;
+  const complianceScope = pesticideComplianceScope || {
+    pesticideProductPresent,
+    insectProductPresent: pesticideProductPresent,
+    insectProductUnknown: false,
+    rotationProductPresent: pesticideProductPresent,
+  };
+  const storedInsectEvidencePath = typedInsectEvidencePath(values);
+  const [localInsectEvidencePath, setLocalInsectEvidencePath] = useState(storedInsectEvidencePath);
+  const insectEvidencePath = storedInsectEvidencePath
+    || controlledInsectEvidencePath
+    || localInsectEvidencePath;
+  useEffect(() => {
+    if (storedInsectEvidencePath) setLocalInsectEvidencePath(storedInsectEvidencePath);
+  }, [storedInsectEvidencePath]);
+  const insectEvidenceFieldsServed = (schema.fields || []).some((field) =>
+    ['insect_live', 'insect_preventive'].includes(field.pesticideComplianceWhen),
+  );
+  const showInsectEvidenceChoice = insectEvidenceFieldsServed
+    && complianceScope.pesticideProductPresent === true && (
+    complianceScope.insectProductPresent === true
+    || complianceScope.insectProductUnknown === true
+    || storedInsectEvidencePath != null
+  );
+  const setInsectEvidencePath = (nextPath) => {
+    const normalized = nextPath === "live" || nextPath === "preventive" ? nextPath : null;
+    setLocalInsectEvidencePath(normalized);
+    onInsectEvidencePathChange?.(normalized);
+    const clear = normalized === "live"
+      ? TYPED_INSECT_EVIDENCE_KEYS.preventive
+      : normalized === "preventive"
+        ? TYPED_INSECT_EVIDENCE_KEYS.live
+        : [...TYPED_INSECT_EVIDENCE_KEYS.live, ...TYPED_INSECT_EVIDENCE_KEYS.preventive];
+    for (const key of clear) {
+      if (String(values?.[key] ?? "").trim()) onFieldChange(key, "");
+    }
+  };
   const scoreLabels = schema.activity?.techScoreLabels || {};
   const fieldLabelStyle = {
     fontSize: 14,
@@ -9976,13 +10022,20 @@ export function TypedFindingsSection({
   // products) and never rendered — companion schema slices clear the flag
   // for fields the companion must collect (shared products list can't be
   // attributed per service line), so this filter is schema-driven for both
-  // contexts. pesticideOnly compliance fields appear once a pesticide
-  // product is recorded (the server 422s them if missed, so hiding them
-  // can't skip enforcement). detail fields collapse behind one optional
+  // contexts. pesticideOnly compliance fields follow the served schema's
+  // product/evidence predicate: rotations for pesticide families,
+  // pollinator status for insect products, and exactly one insect evidence
+  // path. The server remains authoritative. detail fields collapse behind one optional
   // expander so routine visits stay a short form (owner directive
   // 2026-07-21).
   const visibleFields = (schema.fields || []).filter(
-    (f) => !f.autoFilled && (!f.pesticideOnly || pesticideProductPresent),
+    (f) => !f.autoFilled && (
+      !f.pesticideOnly
+      || typedPesticideFieldApplies(f, values, complianceScope, insectEvidencePath)
+      // Never hide a restored contradictory value: keep it visible so the
+      // tech can clear it or use the evidence-path choice to reconcile it.
+      || String(values?.[f.key] ?? "").trim() !== ""
+    ),
   );
   // A detail field that is REQUIRED for the current values (requiredUnless /
   // conditional cores — flea evidence, roach follow-up window, rodent
@@ -10020,11 +10073,8 @@ export function TypedFindingsSection({
       )}
       <div style={fieldLabelStyle}>
         {typedFieldLabel(schema.type, field, values)}
-        {/* pesticideOnly compliance fields only render when a pesticide
-            product is recorded — and then the server REQUIRES them
-            (validateTreeShrubTypedCompliance), so they carry the required
-            marker whenever visible (codex P2 r13). */}
-        {(typedFieldRequiredNow(field, values) || field.pesticideOnly) && (
+        {(typedFieldRequiredNow(field, values)
+          || (field.pesticideOnly && typedPesticideFieldApplies(field, values, complianceScope, insectEvidencePath))) && (
           <span style={{ color: requiredColor }}> *</span>
         )}
       </div>
@@ -10074,6 +10124,31 @@ export function TypedFindingsSection({
         aria-disabled={frozen || undefined}
         style={{ border: "none", margin: 0, padding: 0, minWidth: 0, opacity: frozen ? 0.55 : 1 }}
       >
+      {showInsectEvidenceChoice && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={fieldLabelStyle}>
+            {complianceScope.insectProductPresent
+              ? "Evidence for this insect treatment"
+              : "If this was an insect treatment, choose its evidence"}
+            {complianceScope.insectProductPresent && <span style={{ color: requiredColor }}> *</span>}
+          </div>
+          <select
+            aria-label="Insect treatment evidence path"
+            value={insectEvidencePath === "conflict" ? "" : (insectEvidencePath || "")}
+            onChange={(event) => setInsectEvidencePath(event.target.value)}
+            style={{ width: "100%", boxSizing: "border-box" }}
+          >
+            <option value="">{complianceScope.insectProductPresent ? "Choose evidence path" : "No insect treatment recorded"}</option>
+            <option value="live">Current live target and life stage</option>
+            <option value="preventive">Documented label-supported preventive use</option>
+          </select>
+          {storedInsectEvidencePath === "conflict" && (
+            <div role="alert" style={{ fontSize: 14, color: requiredColor, marginTop: 4 }}>
+              Choose one evidence path; current live evidence and preventive use cannot both be recorded.
+            </div>
+          )}
+        </div>
+      )}
       {primaryFields.map(renderField)}
       {detailFields.length > 0 && (
         <details style={{ marginBottom: 12 }}>
@@ -10463,31 +10538,12 @@ const TREE_SHRUB_LIFE_STAGE_OPTIONS = [
   { value: "unknown", label: "Unknown" },
 ];
 
-function treeShrubLocationText(service = {}) {
-  return [
-    service.city,
-    service.address,
-    service.serviceAddress,
-    service.propertyAddress,
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-}
+const { soilTestBasis, alreadyAppliedBasis, namePattern } = FERTILIZER_EVIDENCE.nutriRoot;
+const NUTRIROOT_NAME = new RegExp(namePattern, "i");
 
-function inferTreeShrubOrdinanceZoneClient(service = {}) {
-  const location = treeShrubLocationText(service);
-  if (/\bnorth\s*port\b/.test(location)) return "north_port";
-  if (/\b(parrish|manatee|bradenton|palmetto|ellenton|lakewood\s*ranch)\b/.test(location)) {
-    return "manatee_parrish";
-  }
-  if (/\b(sarasota|venice|nokomis|osprey|englewood)\b/.test(location)) return "sarasota_venice";
-  return "other_unknown";
-}
-
-function defaultTreeShrubCloseout(service = {}) {
+function defaultTreeShrubCloseout() {
   return {
-    ordinanceZone: inferTreeShrubOrdinanceZoneClient(service),
+    ordinanceZone: "",
     bedSqft: "",
     palmCount: "",
     palmRootZoneSqft: "",
@@ -10512,8 +10568,8 @@ function defaultTreeShrubCloseout(service = {}) {
   };
 }
 
-function normalizeTreeShrubCloseoutDraft(value = {}, service = {}) {
-  const defaults = defaultTreeShrubCloseout(service);
+function normalizeTreeShrubCloseoutDraft(value = {}) {
+  const defaults = defaultTreeShrubCloseout();
   return {
     ...defaults,
     ...(value || {}),
@@ -10571,7 +10627,13 @@ function treeShrubProductFlagsClient(selectedProducts = [], catalog = []) {
     /\b(herbicide|pre[\s-]?emergent|post[\s-]?emergent|weeds?|glyphosate|prodiamine|dithiopyr|isoxaben|oxadiazon|pendimethalin|indaziflam|barricade|dimension|gallery|ronstar|snapshot|specticle|marengo|freehand|roundup|finale|reward|sedgehammer)\b/.test(productsText(product)),
   );
   const hasSnapshot = selectedProducts.some((product) => /\bsnapshot\b/.test(productsText(product)));
+  const isNutriRoot = (product) => {
+    const catalogRow = catalog.find((row) => String(row.id) === String(product.productId));
+    return NUTRIROOT_NAME.test(catalogRow?.name || product.name || "");
+  };
+  const hasNutriRoot = selectedProducts.some(isNutriRoot);
   const hasNpFertilizer = selectedProducts.some((product) => {
+    if (isNutriRoot(product)) return false; // Its evidence rule permits recording an already-applied exception.
     const textValue = productsText(product);
     const analysis = textValue.match(/\b(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\b/);
     if (analysis) return Number(analysis[1]) > 0 || Number(analysis[2]) > 0;
@@ -10594,10 +10656,36 @@ function treeShrubProductFlagsClient(selectedProducts = [], catalog = []) {
     hasHerbicideProduct,
     needsIracFracLog: hasInsectProduct || hasFungicideProduct || hasHerbicideProduct,
     hasSnapshot,
+    hasNutriRoot,
     hasNpFertilizer,
     hasInjectionProduct,
     injectionRows,
     missingActuals,
+  };
+}
+
+export function treeShrubTypedPesticideScopeClient(selectedProducts = []) {
+  const flags = treeShrubProductFlagsClient(selectedProducts);
+  const unclassifiedPesticideProductPresent = selectedProducts.some((product) => {
+    const category = String(product.category || product.product_category || "");
+    if (/pesticid|termitic|systemic|hort/i.test(`${product.name || ""} ${category}`)) return true;
+    return !category.trim() || /uncategor|unknown|\bother\b|\bmisc\b|n\/a/i.test(category);
+  });
+  const pesticideProductPresent = flags.hasInsectProduct
+    || flags.hasFungicideProduct
+    || flags.hasHerbicideProduct
+    || unclassifiedPesticideProductPresent;
+  return {
+    pesticideProductPresent,
+    insectProductPresent: flags.hasInsectProduct,
+    insectProductUnknown: unclassifiedPesticideProductPresent
+      && !flags.hasInsectProduct
+      && !flags.hasFungicideProduct
+      && !flags.hasHerbicideProduct,
+    // Preserve the conservative pre-submit rotation prompt for a catalog row
+    // whose family is unknown; unlike insect evidence, it makes no claim
+    // about what target was treated.
+    rotationProductPresent: pesticideProductPresent,
   };
 }
 
@@ -10621,6 +10709,7 @@ function isNoneLikeTreeShrubValue(value = "") {
 export function treeShrubCloseoutBlocksClient({
   closeout,
   productFlags,
+  fertilizerContext,
   injectionProducts = [],
   servicePhotos,
   service,
@@ -10637,6 +10726,16 @@ export function treeShrubCloseoutBlocksClient({
   const snapshotYtd = treeShrubNumber(closeout.snapshotAppliedYtd);
 
   if (!closeout.ordinanceZone) push("Select ordinance zone.", "ordinanceZone");
+  if (productFlags.hasNutriRoot) {
+    const basis = closeout.nutriroot_application_basis;
+    if (basis === soilTestBasis && fertilizerContext?.nutriRootSoilTestEligible) {
+      if (!String(closeout.nutriroot_soil_test_reference || "").trim()) {
+        push("Enter the phosphorus-deficiency soil-test report date or file reference.", "nutriroot_soil_test_reference");
+      }
+    } else if (basis !== alreadyAppliedBasis) {
+      push("Record an eligible NutriRoot application basis or remove the product.", "nutriroot_application_basis");
+    }
+  }
   if (!bedSqft || bedSqft <= 0) push("Enter bed square footage.", "bedSqft");
   if (palmCount === null || palmCount < 0 || !Number.isInteger(palmCount)) push("Enter palm count, even if it is 0.", "palmCount");
   if (palmCount > 0 && (!palmRootZoneSqft || palmRootZoneSqft <= 0)) push("Enter palm canopy/root-zone square footage.", "palmRootZoneSqft");
@@ -10676,7 +10775,8 @@ export function treeShrubCloseoutBlocksClient({
       "products",
     );
   }
-  if (productFlags.hasNpFertilizer && treeShrubDateInBlackout(service, closeout.ordinanceZone)) {
+  if (productFlags.hasNpFertilizer && (treeShrubDateInBlackout(service, closeout.ordinanceZone)
+    || (productFlags.hasNutriRoot && treeShrubDateInBlackout(service, fertilizerContext?.ordinanceZone || "other_unknown")))) {
     push("N/P fertilizer is blocked for this ordinance zone from June 1 through September 30.", "ordinanceZone");
   }
 
@@ -11020,6 +11120,7 @@ export function TreeShrubCloseoutBlock({
   onChange,
   blocks,
   productFlags,
+  fertilizerContext,
   injectionProducts = [],
   inputStyle: baseInputStyle,
   selectStyle,
@@ -11063,7 +11164,7 @@ export function TreeShrubCloseoutBlock({
         Closeout is locked until ordinance, plant inventory, pollinator status, pest/life stage, YTD Snapshot/fertilizer, product actuals, and photos are recorded.
       </div>
       <select
-        value={value.ordinanceZone || ""}
+        value={value.ordinanceZone || fertilizerContext?.ordinanceZone || "other_unknown"}
         onChange={(e) => setField("ordinanceZone", e.target.value)}
         style={select}
       >
@@ -11073,6 +11174,31 @@ export function TreeShrubCloseoutBlock({
           </option>
         ))}
       </select>
+      {productFlags.hasNutriRoot && (
+        <fieldset style={{ minWidth: 0, margin: 0, padding: "8px 12px", border: `1px solid ${colors.border}`, borderRadius: 10, fontSize: 14, lineHeight: 1.4 }}>
+          <legend style={{ padding: "0 4px", fontWeight: 600 }}>NutriRoot application</legend>
+          <p style={{ margin: "0 0 10px" }}>{fertilizerContext?.nutriRootHoldReason || "Confirm the service property's fertilizer rules before applying NutriRoot."}</p>
+          <label>
+            Application basis
+            <select
+              value={value.nutriroot_application_basis === soilTestBasis && !fertilizerContext?.nutriRootSoilTestEligible ? "" : value.nutriroot_application_basis || ""}
+              onChange={(event) => setField("nutriroot_application_basis", event.target.value)}
+              style={select}
+            >
+              <option value="">Choose a basis</option>
+              {fertilizerContext?.nutriRootSoilTestEligible && <option value={soilTestBasis}>{soilTestBasis}</option>}
+              <option value={alreadyAppliedBasis}>{alreadyAppliedBasis}</option>
+            </select>
+          </label>
+          {fertilizerContext?.nutriRootSoilTestEligible && value.nutriroot_application_basis === soilTestBasis && (
+            <label>
+              Soil-test report date or file reference
+              <input value={value.nutriroot_soil_test_reference || ""} maxLength={240} style={input}
+                onChange={(event) => setField("nutriroot_soil_test_reference", event.target.value)} />
+            </label>
+          )}
+        </fieldset>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
         <input
           type="number"
@@ -12447,19 +12573,13 @@ export function CompletionPanel({
   // for surfaces the fields here; a category-word-only test hid them for
   // brand-named pre-emergents and left the tech no way to satisfy the
   // server 400 (codex P1 r5).
-  const tsPesticideFlags = treeShrubProductFlagsClient(selectedProducts);
-  const pesticideProductPresent =
-    tsPesticideFlags.hasInsectProduct ||
-    tsPesticideFlags.hasFungicideProduct ||
-    tsPesticideFlags.hasHerbicideProduct ||
-    selectedProducts.some((p) => {
-      const category = String(p.category || p.product_category || "");
-      if (/pesticid|termitic|systemic|hort/i.test(`${p.name || ""} ${category}`)) return true;
-      // "Uncategorized"/"other" style categories are non-blank but carry no
-      // signal (prod has Bifen XTS filed as Uncategorized) — they must stay
-      // on the conservative show-the-fields path, same as a missing category.
-      return !category.trim() || /uncategor|unknown|\bother\b|\bmisc\b|n\/a/i.test(category);
-    });
+  // Unknown catalog categories keep the rotation prompt available, but do
+  // not assert that an insect treatment occurred. The tech can explicitly
+  // choose a live-evidence or preventive path if the unknown product was in
+  // fact an insecticide; known fungicide/herbicide rows never ask for insect
+  // evidence or pollinator status.
+  const typedPesticideComplianceScope = treeShrubTypedPesticideScopeClient(selectedProducts);
+  const { pesticideProductPresent } = typedPesticideComplianceScope;
   const [productSearch, setProductSearch] = useState("");
   const [sendSms, setSendSms] = useState(true);
   const [includePayLink, setIncludePayLink] = useState(true);
@@ -12608,7 +12728,7 @@ export function CompletionPanel({
   const { enabled: pestRecapFlag, ready: pestRecapReady } = useFeatureFlagReady("pest-recap-v1");
   const [turfHeight, setTurfHeight] = useState({ heightIn: null });
   const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
-    defaultTreeShrubCloseout(service),
+    defaultTreeShrubCloseout(),
   );
   const lawnDefaultAreas = completionImprovements && visitServiceLine(service, service.serviceType || service.service_type) === "lawn" && !service.findingsSchema
     ? LAWN_DEFAULT_AREAS : [];
@@ -13067,6 +13187,12 @@ export function CompletionPanel({
     ),
   );
   const [findingsValues, setFindingsValues] = useState({});
+  // UI-only branch choice for the mutually exclusive typed insect evidence
+  // fields. Once a field is entered the persisted values themselves recover
+  // the path; keeping the empty selection here lets pre-submit still require
+  // the branch's fields before the first value is chosen.
+  const [typedInsectEvidencePath, setTypedInsectEvidencePath] = useState(null);
+  const [companionInsectEvidencePaths, setCompanionInsectEvidencePaths] = useState({});
   // Invalidate an untouched generated report only when the station autofill
   // ACTUALLY wrote a count (flag set by its applyCounts) — never on a
   // discarded auto candidate against a hand-overridden field (codex r70).
@@ -13860,7 +13986,7 @@ export function CompletionPanel({
   }, [isRegularPestVisit, areasServiced, selectedProducts]);
   // Default pest tank mix (owner ruling 2026-09-26, supersedes 2026-08-29):
   // recurring general-pest, one-time pest, and pest re-service completions
-  // open with Taurus SC + Atticus Talak 7.9 F + the LESCO 90/10 Nonionic
+  // open with Taurus SC + LESCO Crosscheck Plus + the LESCO 90/10 Nonionic
   // Surfactant already on the Products list, totals prefilled
   // (4 oz / 4 oz / 0.25 oz, marked manual so a rate/area edit can't
   // recompute them). Seeds ONCE per panel open, only into an empty list —
@@ -13869,7 +13995,7 @@ export function CompletionPanel({
   // ignore the untouched seed (merely opening the panel must not mint a
   // restore-prompt draft). "Completed" only, and each row is flagged
   // pestDefaultMixProduct (Codex r3 P1, PR #5049) — picking inspection_only
-  // / customer_declined after this seeds must not leave Taurus/Talak/LESCO
+  // / customer_declined after this seeds must not leave Taurus/Crosscheck/LESCO
   // selected: the outcome-driven clearing effect below removes rows this
   // flag names and re-arms the seed for a return to "completed", exactly
   // like protocolDefaultProduct's own clearing.
@@ -14653,10 +14779,16 @@ export function CompletionPanel({
       rate: injectionLabelRate({ ...(catalogRow || {}), name: catalogRow?.name || row.name }),
     };
   });
+  const treeShrubFertilizer = protocolCompletionDefaults?.serviceId === service.id ? protocolCompletionDefaults?.treeShrubFertilizer : null;
+  const effectiveTreeShrubCloseout = {
+    ...treeShrubCloseout,
+    ordinanceZone: treeShrubCloseout.ordinanceZone || treeShrubFertilizer?.ordinanceZone || "other_unknown",
+  };
   const treeShrubCloseoutBlocks = treeShrubCloseoutRequired
     ? treeShrubCloseoutBlocksClient({
-        closeout: treeShrubCloseout,
+        closeout: effectiveTreeShrubCloseout,
         productFlags: treeShrubProductFlags,
+        fertilizerContext: treeShrubFertilizer,
         injectionProducts,
         servicePhotos,
         service,
@@ -15157,7 +15289,7 @@ export function CompletionPanel({
   }, [completionFlagReady, calibrationRequired, completionImprovements, isLawn, service.id, lawnAssessmentRevision, lawnPlanArea, lawnPlanReloadKey]);
 
   useEffect(() => {
-    setTreeShrubCloseout(defaultTreeShrubCloseout(service));
+    setTreeShrubCloseout(defaultTreeShrubCloseout());
   }, [service.id]);
 
   function saveDraftSnapshot(draft) {
@@ -15326,7 +15458,7 @@ export function CompletionPanel({
       oneTimeRecapOnly ||
       reviewTiming !== REVIEW_TIMING_DEFAULT ||
       reviewCustomAt.trim() ||
-      JSON.stringify(treeShrubCloseout) !== JSON.stringify(defaultTreeShrubCloseout(service)) ||
+      JSON.stringify(treeShrubCloseout) !== JSON.stringify(defaultTreeShrubCloseout()) ||
       Object.keys(findingsValues).length ||
       typedActivityScore != null ||
       typedRecommendations.trim() ||
@@ -15954,7 +16086,7 @@ export function CompletionPanel({
     setNextVisitNote(savedDraft.nextVisitNote || "");
     setShowNextVisitNote(!!savedDraft.showNextVisitNote);
     setTreeShrubCloseout(
-      normalizeTreeShrubCloseoutDraft(savedDraft.treeShrubCloseout, service),
+      normalizeTreeShrubCloseoutDraft(savedDraft.treeShrubCloseout),
     );
     // Type-aware pruning against the CURRENT schema — see
     // pruneRestoredFindingsValues for why key presence alone isn't enough.
@@ -18171,20 +18303,12 @@ export function CompletionPanel({
             String(findingsValues[f.key] ?? "").trim() === "",
         )
         .map((f) => f.label);
-      // Pesticide compliance answers: the server blocks completion without
-      // pollinator_status and irac_frac_logged = Yes whenever a pesticide
-      // product is recorded — mirror that pre-submit so the tech is guided
-      // to the field instead of a generic server failure (codex P2 r13).
-      if (pesticideProductPresent) {
-        for (const f of typedFindingsSchema.fields || []) {
-          if (!f.pesticideOnly) continue;
-          const value = String(findingsValues[f.key] ?? "").trim();
-          if (!value) missingTypedRequired.push(f.label);
-          else if (f.key === "irac_frac_logged" && value !== "Yes") {
-            missingTypedRequired.push(`${f.label} (must be confirmed Yes)`);
-          }
-        }
-      }
+      missingTypedRequired.push(...missingTypedPesticideCompliance(
+        typedFindingsSchema.fields || [],
+        findingsValues,
+        typedPesticideComplianceScope,
+        typedInsectEvidencePath,
+      ));
       // Tech-set-only gauge types (no derive field) still require a score
       // on any completed-side outcome — the server 422s
       // (activity_score_required) the same way. A derive-mapped type has
@@ -18273,19 +18397,12 @@ export function CompletionPanel({
               String(entry.values[f.key] ?? "").trim() === "",
           )
           .map((f) => f.label);
-        // Pesticide compliance mirror for companions (codex P2 r15): same
-        // gate as the primary form — the server requires these whenever a
-        // pesticide product is on the (shared) products list.
-        if (pesticideProductPresent) {
-          for (const f of schema.fields || []) {
-            if (!f.pesticideOnly) continue;
-            const value = String(entry.values[f.key] ?? "").trim();
-            if (!value) missingCompanionRequired.push(f.label);
-            else if (f.key === "irac_frac_logged" && value !== "Yes") {
-              missingCompanionRequired.push(`${f.label} (must be confirmed Yes)`);
-            }
-          }
-        }
+        missingCompanionRequired.push(...missingTypedPesticideCompliance(
+          schema.fields || [],
+          entry.values,
+          typedPesticideComplianceScope,
+          companionInsectEvidencePaths[schema.type] || null,
+        ));
         // Same derive-mapped exemption as the primary (owner ruling
         // 2026-09-26): a companion gauge with a findings-derived score is
         // never blocked here, only a tech-set-only one.
@@ -18570,7 +18687,7 @@ export function CompletionPanel({
             } : null,
         treeShrubCompletion: treeShrubCloseoutRequired
           ? {
-              ...treeShrubCloseout,
+              ...effectiveTreeShrubCloseout,
               // Don't fall back to the hidden customerRecap state (auto-generated /
               // restored, never reviewed) — use the tech's note or the typed notes.
               customerNote:
@@ -20227,9 +20344,10 @@ export function CompletionPanel({
               <Field label="Tree & Shrub protocol closeout">
                 <TreeShrubCloseoutBlock
                   value={treeShrubCloseout}
+                  fertilizerContext={treeShrubFertilizer}
                   onChange={(next) =>
                     setTreeShrubCloseout(
-                      normalizeTreeShrubCloseoutDraft(next, service),
+                      normalizeTreeShrubCloseoutDraft(next),
                     )
                   }
                   blocks={treeShrubCloseoutBlocks}
@@ -21025,6 +21143,9 @@ export function CompletionPanel({
                 variant="mobile"
                 frozen={generating}
                 pesticideProductPresent={pesticideProductPresent}
+                pesticideComplianceScope={typedPesticideComplianceScope}
+                insectEvidencePath={typedInsectEvidencePath}
+                onInsectEvidencePathChange={setTypedInsectEvidencePath}
                 schema={findingsDisplaySchema}
                 values={findingsValues}
                 onFieldChange={handleTypedFindingChange}
@@ -21053,6 +21174,9 @@ export function CompletionPanel({
                   variant="mobile"
                   frozen={generating}
                   pesticideProductPresent={pesticideProductPresent}
+                  pesticideComplianceScope={typedPesticideComplianceScope}
+                  insectEvidencePath={companionInsectEvidencePaths[schema.type] || null}
+                  onInsectEvidencePathChange={(path) => setCompanionInsectEvidencePaths((current) => ({ ...current, [schema.type]: path }))}
                   schema={schema}
                   values={entry.values}
                   onFieldChange={(key, value) =>
@@ -22634,9 +22758,10 @@ export function CompletionPanel({
               <label style={labelStyle}>Tree & Shrub Protocol Closeout</label>
               <TreeShrubCloseoutBlock
                 value={treeShrubCloseout}
+                fertilizerContext={treeShrubFertilizer}
                 onChange={(next) =>
                   setTreeShrubCloseout(
-                    normalizeTreeShrubCloseoutDraft(next, service),
+                    normalizeTreeShrubCloseoutDraft(next),
                   )
                 }
                 blocks={treeShrubCloseoutBlocks}
@@ -23505,6 +23630,9 @@ export function CompletionPanel({
               variant="desktop"
               frozen={generating}
               pesticideProductPresent={pesticideProductPresent}
+              pesticideComplianceScope={typedPesticideComplianceScope}
+              insectEvidencePath={typedInsectEvidencePath}
+              onInsectEvidencePathChange={setTypedInsectEvidencePath}
               schema={findingsDisplaySchema}
               values={findingsValues}
               onFieldChange={handleTypedFindingChange}
@@ -23533,6 +23661,9 @@ export function CompletionPanel({
                 variant="desktop"
                 frozen={generating}
                 pesticideProductPresent={pesticideProductPresent}
+                pesticideComplianceScope={typedPesticideComplianceScope}
+                insectEvidencePath={companionInsectEvidencePaths[schema.type] || null}
+                onInsectEvidencePathChange={(path) => setCompanionInsectEvidencePaths((current) => ({ ...current, [schema.type]: path }))}
                 schema={schema}
                 values={entry.values}
                 onFieldChange={(key, value) =>

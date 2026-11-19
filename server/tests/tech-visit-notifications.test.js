@@ -349,7 +349,7 @@ describe('notifyTechVisitChange', () => {
     await flushNow();
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
       title: 'You have a new visit on your route',
-      body: 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+      body: 'Ana Ruiz · Pest Control\nThu Sep 10, 9–11 AM · 4312 Cortez Rd W',
       url: '/tech', tag: 'visit-visit-1',
     }));
   });
@@ -386,7 +386,7 @@ describe('notifyTechVisitChange', () => {
     });
     await flushNow();
     expect(mockSendToAdminUser).toHaveBeenLastCalledWith('tech-1', expect.objectContaining({
-      title: 'A visit on your route was cancelled', body: 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+      title: 'A visit on your route was cancelled', body: 'Ana Ruiz · Pest Control\nThu Sep 10, 9–11 AM · 4312 Cortez Rd W',
     }));
   });
 
@@ -687,7 +687,7 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
     // A push sent at once says what its card was just written with.
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
       title: 'A visit on your route moved',
-      body: 'Ana Ruiz · Pest Control · Was Wed Sep 9, 1–3 PM → Now Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+      body: 'Ana Ruiz · Pest Control\nThu Sep 10, 9–11 AM · 4312 Cortez Rd W\nWas Wed Sep 9, 1–3 PM',
     }));
   });
 
@@ -842,8 +842,8 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
     expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
-    // Three visits listed, one line each, then the rest as a count.
-    const line = 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W';
+    // Three visits listed, two lines each, then the rest as a count.
+    const line = 'Ana Ruiz · Pest Control\nThu Sep 10, 9–11 AM · 4312 Cortez Rd W';
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', {
       title: '17 visits on your route moved', body: [line, line, line, '+14 more'].join('\n'),
       url: '/admin/today', tag: `route-changes-${cardRows[0].id}`, priority: 'high',
@@ -860,7 +860,7 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', {
       title: 'A visit on your route moved',
-      body: 'Ana Ruiz · Pest Control · Was Wed Sep 9, 1–3 PM → Now Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+      body: 'Ana Ruiz · Pest Control\nThu Sep 10, 9–11 AM · 4312 Cortez Rd W\nWas Wed Sep 9, 1–3 PM',
       url: '/tech', tag: 'visit-v-1', priority: 'high',
     });
     expect(mockSendOpts[mockSendOpts.length - 1]).toEqual(expect.objectContaining({ beforeHandoff: expect.any(Function) }));
@@ -877,12 +877,12 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 2 });
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
       title: 'A visit on your route moved',
-      body: 'Ana Ruiz · Pest Control · Was Wed Sep 9, 1–3 PM → Now Thu Sep 10, 1–3 PM · 4312 Cortez Rd W',
+      body: 'Ana Ruiz · Pest Control\nThu Sep 10, 1–3 PM · 4312 Cortez Rd W\nWas Wed Sep 9, 1–3 PM',
     }));
     // The former holder never reads the visit's new day or address.
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-2', expect.objectContaining({
       title: 'A visit was moved off your route',
-      body: 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+      body: 'Ana Ruiz · Pest Control\nThu Sep 10, 9–11 AM · 4312 Cortez Rd W',
     }));
   });
 
@@ -913,11 +913,11 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 2 });
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
       title: '2 visits on your route changed',
-      body: 'Moved: Ana Ruiz · Pest Control · Thu Sep 10, 7–8 AM · 4312 Cortez Rd W\nNew: Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+      body: 'Moved: Ana Ruiz · Pest Control\nThu Sep 10, 7–8 AM · 4312 Cortez Rd W\nNew: Ana Ruiz · Pest Control\nThu Sep 10, 9–11 AM · 4312 Cortez Rd W',
     }));
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-2', expect.objectContaining({
       title: 'You have 2 new visits on your route',
-      body: 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W\nAna Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+      body: 'Ana Ruiz · Pest Control\nThu Sep 10, 9–11 AM · 4312 Cortez Rd W\nAna Ruiz · Pest Control\nThu Sep 10, 9–11 AM · 4312 Cortez Rd W',
     }));
   });
 
@@ -1093,7 +1093,7 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     expect(cardRows[0].payload.push_bundle).toBeTruthy();
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
-      body: 'Ana Ruiz · Pest Control · Was Wed Sep 9, 1–3 PM → Now Thu Sep 10, 1–3 PM · 4312 Cortez Rd W',
+      body: 'Ana Ruiz · Pest Control\nThu Sep 10, 1–3 PM · 4312 Cortez Rd W\nWas Wed Sep 9, 1–3 PM',
     }));
   });
 
@@ -1123,7 +1123,7 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     };
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
     expect(mockLegsSent).toEqual(['d1', 'd2']);
-    expect(mockLegBodies[0]).toMatch(/^Ana Ruiz · Pest Control · /);
+    expect(mockLegBodies[0]).toMatch(/^Ana Ruiz · Pest Control\n/);
     expect(mockLegBodies[1]).toBe('');
   });
 
@@ -1141,7 +1141,7 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
   test('a browser gets the first line only; the staff app gets the visit\'s details (pre-push audit P0: a shared browser)', async () => {
     mockLegs = [{ id: 'phone', sent: true, platform: 'ios' }, { id: 'browser', sent: true, platform: null }];
     await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
-    expect(mockLegBodies).toEqual(['Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W', '']);
+    expect(mockLegBodies).toEqual(['Ana Ruiz · Pest Control\nThu Sep 10, 9–11 AM · 4312 Cortez Rd W', '']);
   });
 
   test('a bundled push names its visits on the staff app only; a browser gets the count line', async () => {
@@ -1149,7 +1149,7 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     await officeMove('v-2');
     mockLegs = [{ id: 'browser', sent: true, platform: 'web' }, { id: 'phone', sent: true, platform: 'ios' }];
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
-    const line = 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W';
+    const line = 'Ana Ruiz · Pest Control\nThu Sep 10, 9–11 AM · 4312 Cortez Rd W';
     expect(mockLegBodies).toEqual(['', [line, line].join('\n')]);
   });
 
@@ -1158,7 +1158,7 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     // d2's token was re-pointed to another sign-in after the sender read the rows.
     mockBeforeLeg = async (leg) => { if (leg.id === 'd2') mockStaffAppRows = [{ id: 'd1', device_token: 'tok-d1', subscription_data: mockRouteData }]; };
     await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
-    expect(mockLegBodies).toEqual(['Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W', '']);
+    expect(mockLegBodies).toEqual(['Ana Ruiz · Pest Control\nThu Sep 10, 9–11 AM · 4312 Cortez Rd W', '']);
   });
 
   test('only a staff-app sign-up of this tech is read as one: no customer on the row, the staff topic, the current sign-in (pre-push audit P0)', async () => {
@@ -1194,7 +1194,7 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     mockStaffAppRows = [{ id: 'd2', device_token: 'tok-d2', subscription_data: mockRouteData }];
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
     expect(mockLegBodies[0]).toBe('');
-    expect(mockLegBodies[1]).toMatch(/^Ana Ruiz · Pest Control · /);
+    expect(mockLegBodies[1]).toMatch(/^Ana Ruiz · Pest Control\n/);
   });
 
   test('a tech who left field work before the held push goes hears nothing, and the bundle closes (pre-push audit P1)', async () => {
@@ -1229,7 +1229,7 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
     expect(cardRows[0].payload).toMatchObject({ street: '4312 Cortez Rd W' });
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
-      body: 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 9 Example Ln',
+      body: 'Ana Ruiz · Pest Control\nThu Sep 10, 9–11 AM · 9 Example Ln',
     }));
   });
 
@@ -1239,7 +1239,7 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     await notices.notifyTechVisitChange({ visitId: 'v-1', kind: 'unassigned', technicianId: 'tech-1', actorId: 'auto_dispatch' });
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
       title: 'A visit was moved off your route',
-      body: 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+      body: 'Ana Ruiz · Pest Control\nThu Sep 10, 9–11 AM · 4312 Cortez Rd W',
     }));
   });
 
@@ -1270,10 +1270,10 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     await notices.notifyTechVisitChange({ visitId: 'v-4', kind: 'cancelled', technicianId: 'tech-1', actorId: 'admin' });
     expect(cardRows[3].payload).toMatchObject({ window_start: '07:00' });
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
-    const added = 'New: Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W';
+    const added = 'New: Ana Ruiz · Pest Control\nThu Sep 10, 9–11 AM · 4312 Cortez Rd W';
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
       title: '4 visits on your route changed',
-      body: ['Cancelled: Ana Ruiz · Pest Control · Thu Sep 10, 7–8 AM · 4312 Cortez Rd W', added, added, '+1 more'].join('\n'),
+      body: ['Cancelled: Ana Ruiz · Pest Control\nThu Sep 10, 7–8 AM · 4312 Cortez Rd W', added, added, '+1 more'].join('\n'),
     }));
   });
 
@@ -1689,9 +1689,9 @@ describe('a visit handed to the customer to pick a day (Quick Move)', () => {
   test('its push says the customer is picking, and names the stamped street when the booking has one', () => {
     const { pushDetail, partsFromVisit } = notices._test;
     expect(pushDetail(partsFromVisit(visit(), 'assigned')))
-      .toBe('Pat Sample · Quarterly Pest Control Service · The customer picks a day by Wed 8 PM · 100 Example St');
+      .toBe('Pat Sample · Quarterly Pest Control Service\nThe customer picks a day by Wed 8 PM · 100 Example St');
     expect(pushDetail(partsFromVisit(visit({ service_address_line1: '7 Sample Ct' }), 'rescheduled', 'Tue Nov 3, 9–10 AM')))
-      .toBe('Pat Sample · Quarterly Pest Control Service · Was Tue Nov 3, 9–10 AM → Now the customer picks a day by Wed 8 PM · 7 Sample Ct');
+      .toBe('Pat Sample · Quarterly Pest Control Service\nThe customer picks a day by Wed 8 PM · 7 Sample Ct\nWas Tue Nov 3, 9–10 AM');
   });
 });
 

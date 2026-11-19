@@ -1,6 +1,6 @@
 /**
- * Staff label picks on the email Reclassify button (GATE_EMAIL_RECLASSIFY_PICK,
- * owner 2026-11-04, email learning loop step 1).
+ * Staff label picks on the email Reclassify button (owner 2026-11-04, email
+ * learning loop step 1).
  *
  * A pick that differs from the AI's label is a human-confirmed mistake: one
  * ai_incidents row (area 'email'), the same table the call and SMS correction
@@ -129,8 +129,6 @@ const envNum = (name, def) => {
  * unversioned cohort, made fresh by the proposal watermark. No model call.
  */
 async function proposeEmailFixes({ dbi = null, now = new Date() } = {}) {
-  const { emailReclassifyPickLive } = require('../../config/feature-gates');
-  if (!emailReclassifyPickLive()) return { skipped: 'gate_off' };
   const { proposeFromIncidents } = require('../ai-incidents/fix-proposals');
   return proposeFromIncidents({
     dbi: dbi || require('../../models/db'),

@@ -73,6 +73,25 @@ function recordedPartOfComposite(text) {
   const m = t.match(/\n\n\[(?:Staff|Voicemail) segment\]\n([\s\S]*)$/);
   return m && m[1].trim() ? m[1] : null;
 }
+
+const isUsableFallback = (t) => t && t !== TRANSCRIPTION_REJECTED_SENTINEL;
+// PR 2A, provider-aware (hook P1): a transferred call's cached column
+// may be the relay's OWN played-text transcript (provider
+// conversation_relay — never the recording's), or a composite a prior
+// pass stored. Only the RECORDED part is a usable fallback for the
+// recording; the AI segment is re-attached from the row by composeRelay.
+// Also the only text call-phone-yes-word.js grounds a caller's words in.
+function recordedFallbackOf(row) {
+  if (!row || !isUsableFallback(row.transcription)) return null;
+  if (row.transcription_provider === RELAY_TRANSCRIPTION_PROVIDER) return null;
+  // The live-text backup is not recorded evidence: a retry re-reads the live text through its own
+  // branch (provenance kept), and a recording attached before the backup ran gets its own transcription.
+  if (row.transcription_provider === LIVE_TRANSCRIPTION_PROVIDER) return null;
+  // The sentinel check runs on the RECORDED part: a composite whose
+  // recorded leg was already rejected carries the sentinel there.
+  const recorded = recordedPartOfComposite(row.transcription);
+  return isUsableFallback(recorded) ? recorded : null;
+}
 const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts, sameDayWindowElapsed } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
@@ -11894,23 +11913,6 @@ const CallRecordingProcessor = {
     let primaryTranscriptRejected = false;
     let rejectedPrimaryChars = 0; // provenance for the discarded primary (audit/tuning)
     let recordedSegmentText = null; // PR 2A: the recorded leg of a composite (AI + recorded) transcript
-    const isUsableFallback = (t) => t && t !== TRANSCRIPTION_REJECTED_SENTINEL;
-    // PR 2A, provider-aware (hook P1): a transferred call's cached column
-    // may be the relay's OWN played-text transcript (provider
-    // conversation_relay — never the recording's), or a composite a prior
-    // pass stored. Only the RECORDED part is a usable fallback for the
-    // recording; the AI segment is re-attached from the row by composeRelay.
-    const recordedFallbackOf = (row) => {
-      if (!row || !isUsableFallback(row.transcription)) return null;
-      if (row.transcription_provider === RELAY_TRANSCRIPTION_PROVIDER) return null;
-      // The live-text backup is not recorded evidence: a retry re-reads the live text through its own
-      // branch (provenance kept), and a recording attached before the backup ran gets its own transcription.
-      if (row.transcription_provider === LIVE_TRANSCRIPTION_PROVIDER) return null;
-      // The sentinel check runs on the RECORDED part: a composite whose
-      // recorded leg was already rejected carries the sentinel there.
-      const recorded = recordedPartOfComposite(row.transcription);
-      return isUsableFallback(recorded) ? recorded : null;
-    };
     // The row's CURRENT relay state, not the claim-time snapshot (hook P1):
     // end()'s relay_transcript stash can land during the minutes-long
     // transcription — the stash side prepends the AI segment only onto a
@@ -26215,6 +26217,9 @@ CallRecordingProcessor.CONTACT_MATCH_PHONE_COLS = CONTACT_MATCH_PHONE_COLS;
 // The one service-contact slot writer, for the family-account card's Attach as contact action (routes/admin-triage.js).
 CallRecordingProcessor.persistCallSecondaryContact = persistCallSecondaryContact;
 CallRecordingProcessor.summarizePriorCall = summarizePriorCall;
+// Shared with call-phone-yes-word.js: the outbound test, and a stored row's recorded transcript.
+CallRecordingProcessor.isOutboundCall = isOutboundCall;
+CallRecordingProcessor.recordedFallbackOf = recordedFallbackOf;
 
 /**
  * leads.address is ONE free-text varchar(255), so the unit/suite from

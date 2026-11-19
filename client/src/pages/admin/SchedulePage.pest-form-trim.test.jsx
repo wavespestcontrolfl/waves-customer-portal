@@ -21,7 +21,7 @@ vi.mock('../../hooks/useFeatureFlag', () => ({
 
 const pestCatalog = [
   { id: 'p1', name: 'Taurus SC', category: 'Insecticide' },
-  { id: 'p2', name: 'Atticus Talak 7.9 F', category: 'Insecticide' },
+  { id: 'p2', name: 'LESCO Crosscheck Plus', category: 'Insecticide' },
   { id: 'p3', name: 'LESCO 90/10 Nonionic Surfactant', category: 'Adjuvant' },
 ];
 
@@ -217,14 +217,14 @@ describe.each([['desktop', 1024], ['phone', 390]])('the Complete Service form, %
 
   // Owner 2026-10-05: the house mix and its surfactant start on Perimeter, so
   // the report's exterior re-entry line has an area without a tap.
-  it('opens the Taurus, Talak and LESCO rows on Perimeter and sends it as the visit\'s area', async () => {
+  it('opens the Taurus, Crosscheck and LESCO rows on Perimeter and sends it as the visit\'s area', async () => {
     const onSubmit = await mount(regularPest());
     await screen.findByText('Taurus SC');
     fillLinearFeet();
     await act(async () => { fireEvent.click(submitButton()); });
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     const body = onSubmit.mock.calls[0][1];
-    // p1 Taurus SC, p2 Atticus Talak 7.9 F, p3 LESCO 90/10 surfactant.
+    // p1 Taurus SC, p2 LESCO Crosscheck Plus, p3 LESCO 90/10 surfactant.
     expect(body.products.map((p) => [p.productId, p.applicationArea])).toEqual([
       ['p1', 'Perimeter'], ['p2', 'Perimeter'], ['p3', 'Perimeter'],
     ]);
@@ -327,7 +327,7 @@ describe('restoring a saved draft on a regular pest visit', () => {
       serviceId: service.id,
       notes: 'Saved note',
       areasServiced: ['Kitchen', 'Perimeter'],
-      selectedProducts: [row('p1', 'Taurus SC', ''), row('p2', 'Atticus Talak 7.9 F', 'Yard')],
+      selectedProducts: [row('p1', 'Taurus SC', ''), row('p2', 'LESCO Crosscheck Plus', 'Yard')],
     }));
     await mount(service, { onSubmit });
     fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
@@ -356,7 +356,7 @@ describe('restoring a saved draft on a regular pest visit', () => {
       serviceId: service.id,
       notes: 'Saved note',
       areasServiced: ['Kitchen', 'Garage'],
-      selectedProducts: [row('p1', 'Taurus SC'), row('p2', 'Atticus Talak 7.9 F')],
+      selectedProducts: [row('p1', 'Taurus SC'), row('p2', 'LESCO Crosscheck Plus')],
     }));
     await mount(service, { onSubmit });
     fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
@@ -382,7 +382,7 @@ describe('restoring a saved draft on a regular pest visit', () => {
       serviceId: service.id,
       notes: 'Saved note',
       areasServiced: ['Kitchen', 'Perimeter', 'Yard'],
-      selectedProducts: [row('p1', 'Taurus SC', 'Perimeter'), row('p2', 'Atticus Talak 7.9 F', 'Yard')],
+      selectedProducts: [row('p1', 'Taurus SC', 'Perimeter'), row('p2', 'LESCO Crosscheck Plus', 'Yard')],
     }));
     await mount(service, { onSubmit });
     fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
@@ -407,7 +407,7 @@ describe('restoring a saved draft on a regular pest visit', () => {
     localStorage.setItem(draftKey(service), JSON.stringify({
       serviceId: service.id,
       notes: 'Saved note',
-      selectedProducts: [row('p1', 'Taurus SC', 'Yard'), row('p2', 'Atticus Talak 7.9 F', '')],
+      selectedProducts: [row('p1', 'Taurus SC', 'Yard'), row('p2', 'LESCO Crosscheck Plus', '')],
     }));
     await mount(service, { onSubmit });
     fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));

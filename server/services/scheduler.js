@@ -4463,7 +4463,7 @@ function initScheduledJobs() {
   // =========================================================================
   // WEEKLY SUN 4:55AM ET — Correction-loop fix proposals for email labels
   // (owner 2026-11-04, email learning loop), same rules as calls. No model
-  // call. Gate read inside the job (GATE_EMAIL_RECLASSIFY_PICK).
+  // call.
   // =========================================================================
   cron.schedule('55 4 * * 0', async () => {
     try {

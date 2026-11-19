@@ -102,8 +102,9 @@
 // context): `expectedVisit` is the context's WHOLE `service` object,
 // `lawnFast.visitType` its visit type, `lawnAssessmentId` the confirmed
 // assessment. A visit the server calls ineligible (or 404/409 on the context)
-// is handed to the parent once through `onFullForm`; the sheet itself never
-// shows a Full form button.
+// is handed to the parent once through `onFullForm`; the sheet shows a Full
+// form button only when the server refused a saved attempt's retry there
+// (HandoffHeldView).
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
@@ -123,10 +124,10 @@ import {
 import { isMlUnit, submittedAmount } from '../../lib/measure-units';
 import {
   AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton,
-  RecoveredCompletion, SavedView, SheetAccessCodes, TimeOnSite, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, startMethodFor, submissionHolds,
+  RecoveredCompletion, RecoveryOnlyView, SavedView, SheetAccessCodes, TimeOnSite, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, startMethodFor, submissionHolds,
   methodLabel, techTipsOf, unitLabel, useDictationSources, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
-import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
+import { BlogPostSection, CollectPayment, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import { KnownTroubleAreas, PlaceAddButtons, PlaceControl } from './LawnSpotPlace';
 import { HeldLines, SodBanner } from './LawnSodParts';
@@ -183,6 +184,10 @@ const PROPERTY_CHECK_MESSAGE = 'We could not check this lawn assessment against 
 const STOCK_LOCKOUT_MESSAGE = 'A product is out of stock. Update inventory, tap Check stock, then complete again.';
 const PROPERTY_SCOPE_MESSAGE = 'This lawn check was made for a different property than this visit. Retake the photos, then analyze and confirm again.';
 const NOT_ON_THIS_SHEET_MESSAGE = 'This visit cannot be completed on this sheet. Close it and tell the office.';
+// A rejected copy this device could not clear (RefusalBlock), on a view with
+// no form, and on a visit the sheet hands to the full form (HandoffHeldView).
+const KEPT_REJECTED_COPY_NOTICE = 'This device could not clear its saved copy of this completion. Discard it here.';
+const HANDOFF_REJECTED_COPY_NOTICE = 'This device could not clear its saved copy of this completion. Discard it here. The full form opens next.';
 const REFUSAL_MESSAGES = {
   lawn_fast_disabled: 'The quick lawn sheet is off right now. Close it and tell the office.',
   lawn_fast_not_eligible: NOT_ON_THIS_SHEET_MESSAGE,
@@ -197,6 +202,8 @@ const REFUSAL_MESSAGES = {
   area_sqft_required: 'The lawn area is missing for a sprayed or spread product. Tell the office.',
   property_service_area_changed: 'This property\u2019s lawn area changed. We reloaded it. Tap Complete again.',
   waveguard_inventory_lockout: STOCK_LOCKOUT_MESSAGE,
+  tetrino_scout_evidence_required: 'Record the May target and current observations before using Tetrino.',
+  tetrino_high_pressure_required: 'Record high current chinch pressure before using the high Tetrino rate.',
 };
 
 export function plainRefusalMessage(err) {
@@ -235,7 +242,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
   visitType: null, turfHeightCapture: false, planned: [], addOns: [], addOnsMonth: null, plannedUnavailable: null, assessment: null, methods: [],
-  findingsType: null, stockAdvisory: undefined, wrapUp: false, carpetgrassCelsiusWarning: '', spotRules: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, guidedProductIds: [], takeAllProductIds: [], group11HeldProductIds: [], troubleAreas: null, newSod: null,
+  findingsType: null, stockAdvisory: undefined, wrapUp: false, carpetgrassCelsiusWarning: '', spotRules: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, tetrinoScout: null, guidedProductIds: [], takeAllProductIds: [], group11HeldProductIds: [], troubleAreas: null, newSod: null,
 };
 
 // Why the live context can't be completed here, or '' when it can.
@@ -284,6 +291,7 @@ const chinchShape = (chinch) => {
   return item || chinch?.note ? { item, note: chinch.note || null, rungIds, unreadableIds, blockedIds, ...limited, ...messages, ...(byPlace ? { byPlace } : {}), ...(chinchOnlyIds ? { chinchOnlyIds } : {}) } : null;
 };
 const chinchOf = (data) => chinchShape(data?.treatmentGuide === true ? data?.plannedProducts?.chinch : null);
+const tetrinoScoutOf = (data) => data?.plannedProducts?.tetrinoScout?.offered === true ? data.plannedProducts.tetrinoScout : null;
 const assessmentOf = (data) => (data?.assessment && typeof data.assessment === 'object' ? data.assessment : { exists: false, id: null, confirmed: false });
 
 const LOAD_ERROR = 'Couldn’t load this visit. Try again.';
@@ -297,7 +305,7 @@ const SOD_RECORD_STALE_CODES = ['sod_record_changed', 'sod_not_this_home'];
 const SOD_UNSURE_MESSAGE = 'The sheet could not confirm the save. Tap the box again.';
 const SOD_REOPEN_MESSAGE = 'Saved. The sheet could not reload the holds. Close this visit and open it again.';
 // The parts of the context that come from the visit's plan: the re-read after the rooted tick replaces them together.
-const PLAN_CONTEXT_FIELDS = ['planned', 'addOns', 'addOnsMonth', 'plannedUnavailable', 'weedMix', 'chinch', 'guidedProductIds', 'takeAllProductIds', 'group11HeldProductIds', 'troubleAreas'];
+const PLAN_CONTEXT_FIELDS = ['planned', 'addOns', 'addOnsMonth', 'plannedUnavailable', 'weedMix', 'chinch', 'tetrinoScout', 'guidedProductIds', 'takeAllProductIds', 'group11HeldProductIds', 'troubleAreas'];
 // A context re-read the sheet can rebuild from: the visit still takes this sheet, the plan was read, the sod record was checked.
 const sodRereadUsable = (next) => !!next && !next.loadError && !next.handoff && !next.blockedReason && !next.plannedUnavailable && !next.newSod?.unavailable;
 const SOD_REREAD_MESSAGE = 'Saved. The sheet could not reload the holds. Tap the box again.';
@@ -348,6 +356,7 @@ const optionalContextFields = (data) => ({
   // The report facts are live: the spot rows whose area the technician recorded are named on the submit.
   lawnReportFacts: data?.lawnReportFacts === true,
   chinch: chinchOf(data),
+  tetrinoScout: tetrinoScoutOf(data),
   // The add-ons a guide card may own: their taps wait for the fresh guide.
   guidedProductIds: data?.treatmentGuide === true && Array.isArray(data?.plannedProducts?.guidedProductIds) ? data.plannedProducts.guidedProductIds : [],
   // GATE_LAWN_TROUBLE_AREAS: the closed list of places, the known trouble areas and what a limit closes where; null otherwise.
@@ -1118,11 +1127,22 @@ function useProductRows(ctx, catalog) {
     });
   }, [ctx, catalog]);
   const removeRows = useCallback((ids) => setRows((prev) => prev.filter((row) => !ids.includes(row.productId))), []);
+  // May Tetrino is recalculated by the server after the technician records the
+  // scouting evidence. Replace only that server-owned row; preserve every
+  // other product edit on the sheet.
+  const applyScoutPlan = useCallback((planned) => {
+    const tetrinoId = String(planned?.productId || ctx.tetrinoScout?.productId || '').toLowerCase();
+    if (!tetrinoId) return;
+    setRows((prev) => {
+      const without = prev.filter((row) => String(row.productId).toLowerCase() !== tetrinoId);
+      return planned ? [...without, ...rowsForPlanned([planned], ctx, catalog)] : without;
+    });
+  }, [ctx, catalog]);
   // A fresh stock read changes each row's stock on hand, nothing the tech set.
   const applyStock = useCallback((fresh) => {
     setRows((prev) => prev.map((row) => ({ ...row, product: withFreshStock(row.product, fresh) })));
   }, []);
-  return { rows, updateRow, addProduct, removeRow, removeRows, applyStock, reconcilePlanned };
+  return { rows, updateRow, addProduct, removeRow, removeRows, applyStock, reconcilePlanned, applyScoutPlan };
 }
 
 // ── what is missing, and the body ───────────────────────────────────────────
@@ -1202,7 +1222,7 @@ const noProductNoteJoined = (note, rows, newSod) => {
   return text.includes(newSod.noProductNote) ? text : [text, newSod.noProductNote].filter(Boolean).join(' ');
 };
 
-function missingRequirement({ sodWait = '', noProductOk = false, form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
+function missingRequirement({ sodWait = '', noProductOk = false, form, rows, guideHold, tetrinoHold = '', lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
   // A method that needs an area needs a positive one, from the plan.
   // Linear feet are optional (owner 2026-10-22): only a square-foot requirement holds the sheet.
   const missingArea = rows.find((row) => requirementOf(row)?.unit === 'sqft' && !(areaOf(row, lawnSqft) > 0));
@@ -1221,6 +1241,7 @@ function missingRequirement({ sodWait = '', noProductOk = false, form, rows, gui
     [!assessmentId && !assessed && photos === 0, ADD_PHOTO],
     [!assessmentId && !assessed, ANALYZE_PHOTOS],
     [!assessmentId, CONFIRM_ASSESSMENT],
+    [tetrinoHold, tetrinoHold],
     // The server says the new sod holds every planned product, so an empty list is honest.
     [!rows.length && !noProductOk, ADD_PRODUCTS],
     // The guide is still reading, or a row on the sheet is not offered for this lawn right now.
@@ -1267,7 +1288,7 @@ function submittedVisitArea({ propertyAreas, lawnSqft, ctx }) {
   return propertyAreas?.version && propertyAreas.propertyId && lawnSqft > 0 && detectServiceCategory(ctx.visit?.serviceType) === 'lawn' ? lawnSqft : null;
 }
 
-function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas, explicitArea, typed, tipsAvailable, guideCards = null, guideChecks = {}, chinchTap = null, customerText }) {
+function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas, explicitArea, typed, tipsAvailable, guideCards = null, guideChecks = {}, chinchTap = null, tetrinoScout = null, customerText }) {
   // Plan defaults the tech removed: the lawn actuals ledger records them as
   // skipped (id and name only, no reason asked).
   // The server wants each product once (ids lower-case), a uuid, and a name of
@@ -1295,6 +1316,13 @@ function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHei
       visitType: ctx.visitType,
       ...(recordCards ? { treatmentGuide: { v: 1, cards: recordCards } } : {}),
       ...(spotAreas ? { spotAreas } : {}),
+      ...(tetrinoScout ? { tetrinoScout: {
+        target: tetrinoScout.target,
+        currentObservations: tetrinoScout.currentObservations,
+        pressure: tetrinoScout.pressure || '',
+        grubTimingEvidence: tetrinoScout.grubTimingEvidence || '',
+        tetrinoApplied: tetrinoScout.applied === true,
+      } } : {}),
       ...sodEcho(newSod),
     },
     lawnAssessmentId: assessmentId,
@@ -1400,7 +1428,14 @@ function CustomerContact({ service, visit, request }) {
   );
 }
 
-export default function FastCompleteLawnSheet({ service, request, operatorId, catalog = [], onClose, onCompleted, onFullForm, onViewDetails, suspended = false }) {
+// `catalog` null: the parent is still reading it (the Today page reads it at the
+// tap); the form waits for it, and `catalogError` says why it never came. Admin
+// Dispatch passes the array it read with the route.
+// `collectOnSheet`: the saved view offers Take payment now (CollectPayment) for a bill
+// the completion says is owed and whose pay link did not go out, as the report
+// sheet does. For a page that opens no payment prompt of its own (the Today
+// page); admin Dispatch's prompt takes the completion response instead.
+export default function FastCompleteLawnSheet({ service, request, operatorId, catalog = [], catalogError = '', onClose, onCompleted, onFullForm, onViewDetails, suspended = false, collectOnSheet = false }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   const dialogRef = useModalFocus(!suspended, () => closeRef.current?.());
@@ -1416,7 +1451,7 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   const refreshPlaces = useRef(null);
   const submitRequest = useMemo(() => plainErrors(request, reloadAreas, refreshPlaces), [request]);
   // `sheet` tags a saved attempt as this sheet's: its findings type matches the
-  // lawn re-service sheet's, and Tech Home cannot open this one.
+  // lawn re-service sheet's, and Tech Home reopens this sheet by the tag.
   const submission = useFastCompleteSubmit({ base, request: submitRequest, serviceId: service?.id, operatorId, sheet: 'lawn_visit', invoiceFields: completionInvoiceFields(service) });
   const { submitting, done } = submission;
   // A recorded dictation clip is still being taken or transcribed. "+ Other
@@ -1428,16 +1463,21 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   const [wrapChecking, setWrapChecking] = useState(false);
 
   // The server says this visit does not use this sheet: the parent opens the
-  // full form, once. (No button on the sheet leads there.) Not while a saved
-  // attempt is checked for or shown: a fresh full-form completion would race it.
+  // full form, once. Not while a saved attempt is checked for or shown: a
+  // fresh full-form completion would race it. Not while the server's refusal
+  // of that attempt's retry is shown, or its copy this device could not clear
+  // waits to be discarded (HandoffHeldView): the hand-off would hide them.
+  // Never for an off-route saved attempt's row (`recoveryOnly`): it holds no
+  // day or premise to open the full form on.
   const handedOff = useRef(false);
   const holdsSaved = submission.recovering || submission.restored;
+  const holdsRefusal = !!submission.error || submission.rejectedCopy;
   useEffect(() => {
-    if (ctx.handoff && !handedOff.current && !holdsSaved) {
+    if (ctx.handoff && !handedOff.current && !holdsSaved && !holdsRefusal && !service?.recoveryOnly) {
       handedOff.current = true;
       onFullForm?.();
     }
-  }, [ctx.handoff, holdsSaved, onFullForm]);
+  }, [ctx.handoff, holdsSaved, holdsRefusal, service?.recoveryOnly, onFullForm]);
 
   // Any dismissal the schedule may be stale for asks the parent to refresh: a
   // sheet blocked on a stale or changed visit, or an attempt whose outcome is
@@ -1456,30 +1496,102 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay} suspended={suspended}>
       <LawnSheetHeader titleId={titleId} title={done ? 'Service complete' : 'Complete service'} showDetails={!done && !!onViewDetails} detailsDisabled={submitting || wrapChecking || dictationPending} onDetails={() => onViewDetails?.()} backDisabled={submitting || wrapChecking} onBack={close} />
-      <SheetBody service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} onWrapChecking={setWrapChecking} />
+      <SheetBody service={service} request={request} catalog={catalog} catalogError={catalogError} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} onWrapChecking={setWrapChecking} collectOnSheet={collectOnSheet} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile, refreshPlaces, onWrapChecking }) {
-  if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
+// A visit the sheet hands to the full form (`ctx.handoff`) whose saved retry
+// the server refused: the refusal stays here instead of the hand-off hiding
+// it. A rejected copy this device could not clear is discarded first, and the
+// hand-off then runs. A correctable rejection with no copy left opens the full
+// form on a tap, to fix it there. A request refused for good offers no form.
+function HandoffHeldView({ submission, onFullForm }) {
+  const fixable = !submission.rejectedCopy && submission.failure !== 'terminal';
+  return (
+    <div className="tech-visit-body">
+      <RefusalBlock submission={submission} keptNotice={HANDOFF_REJECTED_COPY_NOTICE} />
+      {fixable && (
+        <div className="tech-visit-actions">
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={() => onFullForm?.()}>Full form</Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The server's refusal of a saved attempt's retry, kept on a view that has no
+// form (whose footer would carry it), with Discard for a rejected copy this
+// device could not clear (`rejectedCopy`: never a retry).
+function RefusalBlock({ submission, keptNotice }) {
+  return (
+    <>
+      {submission.error && <ActionFeedback error className="tech-visit-feedback">{submission.error}</ActionFeedback>}
+      {submission.rejectedCopy && <ActionFeedback className="tech-visit-feedback">{keptNotice}</ActionFeedback>}
+      {submission.rejectedCopy && (
+        <div className="tech-visit-actions">
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={submission.submitting} onClick={submission.discard}>
+            Discard saved retry
+          </Button>
+        </div>
+      )}
+    </>
+  );
+}
+
+// The view in place of the form while the visit's context loads, cannot be
+// read or is blocked, or the product list is missing (the planned rows take
+// their units and stock from it); null once the form can show. A saved
+// attempt above needs none of it. `framed`: the unreadable view sits in the
+// sheet's body frame.
+function waitingView(ctx, catalog, catalogError) {
+  const message = (text, error = false) => <ActionFeedback error={error} className="tech-visit-feedback tech-visit-loading">{text}</ActionFeedback>;
+  if (ctx.loading) return { content: message('Loading…') };
+  if (ctx.loadError) {
+    return {
+      framed: true,
+      content: (
+        <>
+          {message(ctx.loadError, true)}
+          <div className="tech-visit-actions">
+            <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={ctx.retry}>Try again</Button>
+          </div>
+        </>
+      ),
+    };
+  }
+  if (ctx.blockedReason) return { content: message(ctx.blockedReason) };
+  if (!catalog) return { content: message(catalogError || 'Loading the product list…', !!catalogError) };
+  return null;
+}
+
+function SheetBody({ service, request, catalog, catalogError, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile, refreshPlaces, onWrapChecking, collectOnSheet }) {
+  if (submission.done) {
+    return (
+      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)}>
+        {collectOnSheet && <CollectPayment result={submission.done.response} />}
+      </SavedView>
+    );
+  }
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;
+  if (service.recoveryOnly) return <RecoveryOnlyView submission={submission} />;
   const refusal = refusalWithoutContext(submission, ctx);
   if (refusal) return refusal;
-  if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
+  const held = !!submission.error || submission.rejectedCopy;
+  if (ctx.handoff && held) return <HandoffHeldView submission={submission} onFullForm={onFullForm} />;
   if (ctx.handoff) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Opening the full form…</ActionFeedback>;
-  if (ctx.loadError) {
+  const waiting = waitingView(ctx, catalog, catalogError);
+  // With no form to carry it, a refused retry stays above the view (RefusalBlock).
+  if (waiting && held) {
     return (
       <div className="tech-visit-body">
-        <ActionFeedback error className="tech-visit-feedback tech-visit-loading">{ctx.loadError}</ActionFeedback>
-        <div className="tech-visit-actions">
-          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={ctx.retry}>Try again</Button>
-        </div>
+        <RefusalBlock submission={submission} keptNotice={KEPT_REJECTED_COPY_NOTICE} />
+        {waiting.content}
       </div>
     );
   }
-  if (ctx.blockedReason) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">{ctx.blockedReason}</ActionFeedback>;
+  if (waiting) return waiting.framed ? <div className="tech-visit-body">{waiting.content}</div> : waiting.content;
   return <LawnFastForm service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onOverlay={onOverlay} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces}  onWrapChecking={onWrapChecking} />;
 }
 
@@ -1661,6 +1773,56 @@ function useSodHolds({ ctx, service, request, base, reconcilePlanned }) {
   return { newSod: sodFresh !== undefined ? sodFresh : ctx.newSod, liveCtx, rereads, confirmSodRooted, sodWait: sodBusy ? SOD_BUSY_MESSAGE : sodStale };
 }
 
+function TetrinoScoutSection({ value, onChange, onSave, busy, error, saved, locked }) {
+  const treating = value.target === 'chinch' || value.target === 'grubs';
+  const eligible = !!value.target && !!value.currentObservations.trim()
+    && (value.target !== 'grubs' || !!value.grubTimingEvidence.trim());
+  return (
+    <section className="tech-visit-choice-section" aria-label="May insect scouting">
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title">May insect scouting</h3>
+        {saved && <span className="tech-visit-muted">Recorded</span>}
+      </div>
+      <p className="tech-visit-muted">Sunlight and an old or resolved map do not select Tetrino. Record what you found today; a scout-only visit is valid.</p>
+      <ChoiceSection title="Decision" columns={3}>
+        {[['none', 'Scout only'], ['chinch', 'Chinch bugs'], ['grubs', 'Grubs']].map(([key, label]) => (
+          <Chip key={key} label={label} pressed={value.target === key} disabled={locked || busy} onClick={() => onChange({ target: key })} />
+        ))}
+      </ChoiceSection>
+      {!!value.target && (
+        <label className="tech-product-editor-label">
+          Current observations
+          <textarea
+            className="tech-visit-control mt-2 min-h-20 w-full"
+            maxLength={1000}
+            disabled={locked || busy}
+            value={value.currentObservations}
+            onChange={(event) => onChange({ currentObservations: event.target.value })}
+            placeholder={value.target === 'chinch' ? 'Counts at the damaged edge and where you checked' : value.target === 'grubs' ? 'Current grub signs and where you checked' : 'What you checked and why no treatment was needed'}
+          />
+        </label>
+      )}
+      {value.target === 'chinch' && (
+        <ChoiceSection title="Current pressure" columns={2}>
+          {[['ordinary', 'Ordinary'], ['high', 'High']].map(([key, label]) => (
+            <Chip key={key} label={label} pressed={value.pressure === key} disabled={locked || busy} onClick={() => onChange({ pressure: key })} />
+          ))}
+        </ChoiceSection>
+      )}
+      {value.target === 'grubs' && (
+        <label className="tech-product-editor-label">
+          Local peak-flight or egg-hatch evidence
+          <Input className="tech-visit-control mt-2" maxLength={1000} disabled={locked || busy} value={value.grubTimingEvidence} onChange={(event) => onChange({ grubTimingEvidence: event.target.value })} />
+        </label>
+      )}
+      {error && <p className="tech-visit-muted text-red-700" role="alert">{error}</p>}
+      <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={busy} disabled={locked || !eligible} onClick={onSave}>
+        {treating ? 'Use this decision in the plan' : 'Record scout-only decision'}
+      </Button>
+    </section>
+  );
+}
+
 function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile, refreshPlaces, onWrapChecking }) {
   const base = `/admin/dispatch/${service?.id}`;
   // From the context's findingsType only (the live profile), never the schedule row.
@@ -1669,6 +1831,56 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // The holds as the server last said them. The rooted tick reads the plan and the holds again;
   // `sheetCtx` is the context with the plan parts of that last read (the opening context until then).
   const { newSod, liveCtx: sheetCtx, rereads: sodRereads, confirmSodRooted, sodWait } = useSodHolds({ ctx, service, request, base, reconcilePlanned: products.reconcilePlanned });
+  const [tetrinoScout, setTetrinoScout] = useState({ target: '', currentObservations: '', pressure: '', grubTimingEvidence: '', applied: false });
+  const [tetrinoScoutBusy, setTetrinoScoutBusy] = useState(false);
+  const [tetrinoScoutError, setTetrinoScoutError] = useState('');
+  const [tetrinoScoutSaved, setTetrinoScoutSaved] = useState('');
+  const tetrinoScoutSignature = JSON.stringify({
+    target: tetrinoScout.target,
+    currentObservations: tetrinoScout.currentObservations.trim(),
+    pressure: tetrinoScout.target === 'chinch' ? tetrinoScout.pressure : '',
+    grubTimingEvidence: tetrinoScout.target === 'grubs' ? tetrinoScout.grubTimingEvidence.trim() : '',
+  });
+  const changeTetrinoScout = useCallback((patch) => {
+    setTetrinoScout((current) => ({
+      ...current,
+      ...patch,
+      applied: false,
+      ...('target' in patch && patch.target !== 'chinch' ? { pressure: '' } : {}),
+      ...('target' in patch && patch.target !== 'grubs' ? { grubTimingEvidence: '' } : {}),
+    }));
+    setTetrinoScoutError('');
+  }, []);
+  const saveTetrinoScout = useCallback(async () => {
+    const signature = tetrinoScoutSignature;
+    setTetrinoScoutBusy(true);
+    setTetrinoScoutError('');
+    try {
+      if (tetrinoScout.target === 'none') {
+        products.applyScoutPlan(null);
+        setTetrinoScout((current) => ({ ...current, applied: false }));
+        setTetrinoScoutSaved(signature);
+        return;
+      }
+      const params = new URLSearchParams({
+        sodAware: '1',
+        tetrinoTarget: tetrinoScout.target,
+        tetrinoCurrentObservations: tetrinoScout.currentObservations.trim(),
+        ...(tetrinoScout.pressure ? { tetrinoPressure: tetrinoScout.pressure } : {}),
+        ...(tetrinoScout.grubTimingEvidence.trim() ? { grubTimingEvidence: tetrinoScout.grubTimingEvidence.trim() } : {}),
+      });
+      const next = await request(`${base}/lawn-fast/context?${params.toString()}`).then((data) => contextFrom(data, service));
+      const item = (next.planned || []).find((entry) => String(entry.productId).toLowerCase() === String(sheetCtx.tetrinoScout?.productId || '').toLowerCase());
+      if (!item) throw new Error(next.tetrinoScout?.warning || 'Tetrino could not be added to this plan. Review the field evidence and product limits.');
+      products.applyScoutPlan(item);
+      setTetrinoScout((current) => ({ ...current, applied: true }));
+      setTetrinoScoutSaved(signature);
+    } catch (err) {
+      setTetrinoScoutError(err?.message || 'Could not update the Tetrino decision. Try again.');
+    } finally {
+      setTetrinoScoutBusy(false);
+    }
+  }, [base, products, request, service, sheetCtx.tetrinoScout?.productId, tetrinoScout, tetrinoScoutSignature]);
   // The place maps, read again when /complete refuses a place (the context aside, and the guide below).
   const searchedIds = useRef([]);
   const dosesRef = useRef({});
@@ -1796,11 +2008,17 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   });
 
   const guideHold = guideHoldReason({ gov, status: guideStatus, rows });
+  const tetrinoRecorded = !sheetCtx.tetrinoScout || tetrinoScoutSaved === tetrinoScoutSignature;
+  const tetrinoOnSheet = !sheetCtx.tetrinoScout || rows.some((row) => sameId(row.productId, sheetCtx.tetrinoScout.productId));
+  const tetrinoScoutOnly = tetrinoRecorded && tetrinoScout.target === 'none';
+  const tetrinoHold = !sheetCtx.tetrinoScout ? ''
+    : !tetrinoRecorded ? 'Record the May insect scouting decision.'
+      : tetrinoScout.target !== 'none' && !tetrinoOnSheet ? 'Update the plan with the recorded Tetrino decision.' : '';
   // While the rooted tick is saved and the holds are read again, the sheet waits (a released line is not yet back).
-  const missingReason = missingRequirement({ sodWait, noProductOk: noProductOkOf(newSod), form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
+  const missingReason = missingRequirement({ sodWait, noProductOk: noProductOkOf(newSod) || tetrinoScoutOnly, form, rows, guideHold, tetrinoHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
   const limitWarnings = limitWarningsOf(rows);
-  const buildBody = () => completionBody({ newSod, form, rows, ctx: sheetCtx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) });
+  const buildBody = () => completionBody({ newSod, form, rows, ctx: sheetCtx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap, tetrinoScout: sheetCtx.tetrinoScout && tetrinoRecorded ? tetrinoScout : null, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) });
   const submit = async () => {
     if (missingReason && !submission.hasPendingBody()) return;
     // The Wrap-up's review checks (the full form's); a stored attempt replays its body unchanged, so they skip it.
@@ -1855,6 +2073,17 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               closeUpPrompt={!!ctx.treatmentGuide}
             />
           </section>
+          {sheetCtx.tetrinoScout && (
+            <TetrinoScoutSection
+              value={tetrinoScout}
+              onChange={changeTetrinoScout}
+              onSave={saveTetrinoScout}
+              busy={tetrinoScoutBusy}
+              error={tetrinoScoutError}
+              saved={tetrinoRecorded}
+              locked={locked || dictationPending}
+            />
+          )}
           <ProductsSection ctx={sheetCtx} newSod={newSod} weedMix={weedMix} chinch={chinchDecision} areas={areas} onClearArea={clearArea} onWeedPlace={(placeId) => setWeedPlaces([placeId])} onWeedPlaces={setWeedPlaces} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} chinchTap={chinchTap} onChinchTap={onChinchTap} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           <PropertyServiceAreas
             request={request}

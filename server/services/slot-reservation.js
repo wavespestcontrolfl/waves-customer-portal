@@ -43,6 +43,7 @@ const { violatesSelfServeNotice, visitInsideNoticeWindow } = require('./scheduli
 // scheduling/occupancy.js for why both write paths here take it first, and
 // why each also runs the tech-blind global probe (findConflictingVisits)
 // under it before committing.
+const { bookedVisitOrLiveHold } = require('./scheduling/reservation-occupancy');
 const { acquireOccupancyLock, findConflictingVisits, findInterviewConflicts, techScopedConfirmActive, applyTechScope } = require('./scheduling/occupancy');
 const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
 
@@ -1764,7 +1765,7 @@ async function reserveSlot({
       }
 
       // Conflict check + insert in the same txn so a concurrent reserve that
-      // overlaps this tech/date window can't slip past us. Expired
+      // overlaps this tech/date window can't slip past us. Expired, unclaimed
       // reservations are harmless cruft — releaseExpiredReservations()
       // reclaims them, and the new reservation can overlap safely. Use
       // NOW() server-side instead of a JS-side `new Date()` to keep the
@@ -1773,10 +1774,7 @@ async function reserveSlot({
         .where({ scheduled_date: date })
         .modify((q) => { if (techId) q.where('technician_id', techId); })
         .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
-        .andWhere((q) => {
-          q.whereNull('reservation_expires_at')
-            .orWhereRaw('reservation_expires_at > NOW()');
-        })
+        .andWhere(bookedVisitOrLiveHold)
         .modify((q) => { if (makeRoom) q.whereNotIn('id', makeRoom.moveIds); })
         .modify((q) => applyWindowOverlapFilter(q, windowStart, windowEnd))
         .first('id');
@@ -1800,10 +1798,7 @@ async function reserveSlot({
           .where('scheduled_services.scheduled_date', date)
           .whereNull('scheduled_services.technician_id')
           .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-          .where((q) => {
-            q.whereNull('scheduled_services.reservation_expires_at')
-              .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-          })
+          .where(bookedVisitOrLiveHold)
           .modify((q) => { if (makeRoom) q.whereNotIn('scheduled_services.id', makeRoom.moveIds); })
           .where((q) => {
             if (zoneSlug) q.orWhere('scheduled_services.zone', zoneSlug);

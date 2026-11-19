@@ -35,7 +35,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 const CATALOG = [
   { id: 'taurus', name: 'Taurus SC', category: 'Insecticide', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' },
-  { id: 'talstar', name: 'Atticus Talak 7.9 F', category: 'Insecticide' },
+  { id: 'talstar', name: 'LESCO Crosscheck Plus', category: 'Insecticide' },
   { id: 'surfactant', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant' },
 ];
 const REGULAR = {
@@ -193,7 +193,7 @@ describe('the visit step', () => {
     expect(within(tracker).getAllByRole('button').map((button) => button.textContent)).toEqual(['1', '2', '3', '4', '5']);
     expect(screen.getByText('1 = very low · 2 = low · 3 = moderate · 4 = elevated · 5 = high')).toBeTruthy();
     // The products as one line, opened on Edit.
-    expect(screen.getByText(/Taurus SC 4 fl oz · Atticus Talak 7\.9 F 4 fl oz/)).toBeTruthy();
+    expect(screen.getByText(/Taurus SC 4 fl oz · LESCO Crosscheck Plus 4 fl oz/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
     expect(screen.getByRole('button', { name: /Taurus SC — 4 fl oz/ })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Hide' }));
@@ -205,7 +205,7 @@ describe('the visit step', () => {
     render(<FastCompleteSheet service={{ ...SERVICE, serviceType: 'Initial Pest Cleanout' }} request={request} onClose={() => {}} onCompleted={() => {}} />);
     await screen.findByRole('button', { name: 'Generate AI report' });
     expect(screen.queryByText(/Taurus SC 4 fl oz/)).toBeNull();
-    expect(screen.queryByText(/Atticus Talak/)).toBeNull();
+    expect(screen.queryByText(/LESCO Crosscheck/)).toBeNull();
   });
 
   test('the tracker holds the report until a rating is picked', async () => {
@@ -310,7 +310,7 @@ describe('generate and read', () => {
     // Two places stay on the visit; no product is said to have gone everywhere.
     expect(payload.products.map((product) => [product.name, product.applicationMethod, product.applicationArea, product.targets])).toEqual([
       ['Taurus SC', 'spot_treatment', undefined, ['ghost ants']],
-      ['Atticus Talak 7.9 F', 'spot_treatment', undefined, ['ghost ants']],
+      ['LESCO Crosscheck Plus', 'spot_treatment', undefined, ['ghost ants']],
       ['LESCO 90/10 Nonionic Surfactant', 'spot_treatment', undefined, ['ghost ants']],
     ]);
     // The four parts, titled, and what was heard.

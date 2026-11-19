@@ -2113,3 +2113,173 @@ describe('r9: field-confident tree counts, story evidence, authoritative types, 
     expect(result.code).toBe('PROPERTY_DETAILS_NEEDED');
   });
 });
+
+// GATE_CAGE_TWO_SIZES (owner 2026-11-19, "hold"): the lookup now sizes a cage
+// Medium or Large, but an automatic customer price keeps today's manual-quote
+// hold for a cage the four sizes call Large or Oversized (poolCageLegacySize).
+describe('GATE_CAGE_TWO_SIZES keeps the manual-quote hold in the customer price assistant', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const TWO_SIZES = 'GATE_CAGE_TWO_SIZES';
+  let prior;
+  beforeAll(() => { prior = process.env[TWO_SIZES]; });
+  afterAll(() => {
+    if (prior === undefined) delete process.env[TWO_SIZES];
+    else process.env[TWO_SIZES] = prior;
+  });
+  beforeEach(() => { delete process.env[TWO_SIZES]; });
+
+  const lookupWith = (cage) => async () => ({
+    enriched: {
+      homeSqFt: 2200, lotSqFt: 8000, stories: 1,
+      pool: 'YES', poolSource: 'county', poolCage: 'YES',
+      ...cage,
+    },
+    propertyRecord: {},
+  });
+  const features = async (cage, propertySeed = null) => (await _private.resolvePropertyContext({
+    customer: propertyCustomer({ id: 'cust-cage-hold' }),
+    turfProfile: null,
+    propertyLookup: lookupWith(cage),
+    propertySeed,
+  })).propertyInput.features;
+
+  test('gate on: a trusted Medium cage whose four-size answer is Large is held', async () => {
+    process.env[TWO_SIZES] = 'true';
+    const f = await features({ poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' });
+    expect(f).toMatchObject({ poolCage: true, poolCageSize: 'medium', poolCageReview: true });
+    // The county area is the first evidence: 750 sq ft is Large in four sizes.
+    const byArea = await features({ poolCageSqft: 750, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' });
+    expect(byArea.poolCageReview).toBe(true);
+    const oversized = await features({ poolCageSize: 'LARGE', poolCageLegacySize: 'OVERSIZED' });
+    expect(oversized).toMatchObject({ poolCageSize: 'large', poolCageReview: true });
+  });
+
+  test('gate on: a four-size answer of Medium or less, or no answer, is not held', async () => {
+    process.env[TWO_SIZES] = 'true';
+    expect((await features({ poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' })).poolCageReview).toBeUndefined();
+    expect((await features({ poolCageSize: 'MEDIUM' })).poolCageReview).toBeUndefined();
+  });
+
+  test('gate off: no flag, even with a four-size answer on the profile', async () => {
+    const f = await features({ poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' });
+    expect(f.poolCageReview).toBeUndefined();
+  });
+
+  test('gate on: a seed-backed size with no cage evidence is held (a person quotes); the lookup\'s size does not back it', async () => {
+    process.env[TWO_SIZES] = 'true';
+    // The lookup is silent on the cage size here, so the seed fills it.
+    const f = await features(
+      { poolCage: 'YES', poolCageSize: undefined, poolCageLegacySize: 'LARGE', pool: 'NO' },
+      { homeSqFt: 2200, lotSqFt: 8000, stories: 1, storiesSource: 'lookup', features: { poolCage: true, poolCageSize: 'small' } },
+    );
+    expect(f).toMatchObject({ poolCageSize: 'small', poolCageReview: true });
+    // An undecided cage (POSSIBLE) is not lookup-backed: the seed's size prices, and with no
+    // evidence of its own it is held.
+    const undecided = await features(
+      { poolCage: 'POSSIBLE', poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE', pool: 'NO' },
+      { homeSqFt: 2200, lotSqFt: 8000, stories: 1, storiesSource: 'lookup', features: { poolCage: true, poolCageSize: 'medium' } },
+    );
+    expect(undecided).toMatchObject({ poolCage: true, poolCageSize: 'medium', poolCageReview: true });
+  });
+
+  // The flag follows the same evidence as the size: a current lookup decides it, and a
+  // seed's own flag travels only with a size the seed supplied.
+  const seedWith = (seedFeatures) => ({
+    homeSqFt: 2200, lotSqFt: 8000, stories: 1, storiesSource: 'lookup', features: seedFeatures,
+  });
+
+  test('gate on: a current lookup-backed Medium cage removes a stale seeded flag, and the offer is priced', async () => {
+    process.env[TWO_SIZES] = 'true';
+    const seed = seedWith({ poolCage: true, poolCageSize: 'large', poolCageReview: true });
+    const f = await features({ poolCageSqft: 500, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' }, seed);
+    expect(f).toMatchObject({ poolCage: true, poolCageSize: 'medium' });
+    expect(f.poolCageReview).toBeUndefined();
+    const offer = await buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: lookupWith({ poolCageSqft: 500, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-cage-hold-seed' }),
+      propertySeed: seed,
+    });
+    expect(offer.options[0].manualReview).toBe(false);
+  });
+
+  test('gate on: a lookup-backed held cage sets the flag whether or not the seed carried one', async () => {
+    process.env[TWO_SIZES] = 'true';
+    const held = { poolCageSqft: 750, poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' };
+    expect((await features(held, seedWith({ poolCage: true, poolCageSize: 'large' }))).poolCageReview).toBe(true);
+    expect((await features(held, seedWith({ poolCage: true, poolCageSize: 'medium', poolCageReview: true }))).poolCageReview).toBe(true);
+  });
+
+  test('a seed-backed size keeps the seed\'s own flag (the lookup did not decide the size)', async () => {
+    process.env[TWO_SIZES] = 'true';
+    const undecided = { poolCage: 'POSSIBLE', poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM', pool: 'NO' };
+    const kept = await features(undecided, seedWith({ poolCage: true, poolCageSize: 'large', poolCageReview: true }));
+    expect(kept).toMatchObject({ poolCageSize: 'large', poolCageReview: true });
+    // With no flag of its own and no evidence, the one resolver still holds it.
+    const noFlag = await features(undecided, seedWith({ poolCage: true, poolCageSize: 'large' }));
+    expect(noFlag.poolCageReview).toBe(true);
+  });
+
+  // A seeded size is held on the seed's OWN cage evidence (a lawn-only estimate never priced the cage).
+  describe('a seeded cage on a lookup miss', () => {
+    const seedFeaturesFor = async (cageEvidence, size = 'medium') => (await _private.resolvePropertyContext({
+      customer: propertyCustomer({ id: 'cust-cage-seed-evidence' }),
+      turfProfile: null,
+      propertyLookup: async () => null,
+      propertySeed: {
+        homeSqFt: 2200, lotSqFt: 8000, stories: 1, storiesSource: 'lookup',
+        features: { poolCage: true, poolCageSize: size },
+        ...(cageEvidence ? { cageEvidence } : {}),
+      },
+    })).propertyInput.features;
+
+    test('gate on: a seeded Medium with a stored area of 750 sq ft, or a stored four-size Large, is held', async () => {
+      process.env[TWO_SIZES] = 'true';
+      expect((await seedFeaturesFor({ poolCageSqft: 750 })).poolCageReview).toBe(true);
+      expect((await seedFeaturesFor({ poolCageLegacySize: 'OVERSIZED' })).poolCageReview).toBe(true);
+    });
+
+    test('gate on: a stored area of 500 sq ft is not held; no evidence at all is held', async () => {
+      process.env[TWO_SIZES] = 'true';
+      expect((await seedFeaturesFor({ poolCageSqft: 500 })).poolCageReview).toBeUndefined();
+      expect((await seedFeaturesFor(null)).poolCageReview).toBe(true);
+    });
+
+    test('gate off: the same evidence gives no flag', async () => {
+      expect((await seedFeaturesFor({ poolCageSqft: 750 })).poolCageReview).toBeUndefined();
+    });
+
+    test('the lookup still decides when it backs the size (a current Medium cage clears the seed evidence)', async () => {
+      process.env[TWO_SIZES] = 'true';
+      const f = (await _private.resolvePropertyContext({
+        customer: propertyCustomer({ id: 'cust-cage-seed-evidence-lookup' }),
+        turfProfile: null,
+        propertyLookup: lookupWith({ poolCageSqft: 500, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' }),
+        propertySeed: {
+          homeSqFt: 2200, lotSqFt: 8000, stories: 1, storiesSource: 'lookup',
+          features: { poolCage: true, poolCageSize: 'medium' }, cageEvidence: { poolCageSqft: 750 },
+        },
+      })).propertyInput.features;
+      expect(f.poolCageReview).toBeUndefined();
+    });
+  });
+
+  test('gate on: the flag reaches the pest option as manual review', async () => {
+    process.env[TWO_SIZES] = 'true';
+    const run = (cage) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: lookupWith(cage),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-cage-hold-opt' }),
+    });
+    const held = await run({ poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' });
+    const plain = await run({ poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' });
+    expect(held.options[0].manualReview).toBe(true);
+    expect(plain.options[0].manualReview).toBe(false);
+    expect(held.options[0].perVisit).toBe(plain.options[0].perVisit);
+    delete process.env[TWO_SIZES];
+    const off = await run({ poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' });
+    expect(off.options[0].manualReview).toBe(false);
+  });
+});

@@ -206,6 +206,24 @@ describe('editorial review', () => {
     expect(result.checks.find((check) => check.name === 'source_support').status).toBe('fail');
   });
 
+  // Mac test 2026-11-19: one figure labeled non_external rejected a complete answer. It is now an
+  // unsupported claim the repair step can fix, and the review still fails.
+  test('holds a figure labeled non_external as unsupported instead of rejecting the answer', async () => {
+    const reply = modelReview();
+    const dated = reply.claims.find((claim) => /June 5, 2026/.test(claim.passage));
+    Object.assign(dated, { verdict: 'non_external', claimKind: 'non_external', sourceSuitability: 'not_applicable', sourceIndex: -1, sourceQuote: '' });
+    mockDispatch.mockResolvedValue({ ok: true, json: reply, model: 'test-model' });
+    const result = await editorial.review({ document: DOCUMENT, title: 'Stop Mosquito Breeding', sourceUrls: ['https://health.example.gov/mosquitoes'] });
+    expect(result.pass).toBe(false);
+    expect(result.model).toBe('test-model');
+    const sourceCheck = result.checks.find((check) => check.name === 'source_support');
+    expect(sourceCheck.status).toBe('fail');
+    expect(sourceCheck.findings).toEqual([expect.objectContaining({ passage: dated.passage, action: expect.stringContaining('Cite a fetched source') })]);
+    expect(result.checks.filter((check) => check.name !== 'source_support').every((check) => check.status === 'pass')).toBe(true);
+    const validate = mockDispatch.mock.calls[0][2].validate;
+    expect(validate(reply)).toBeNull();
+  });
+
   test('requires primary or authoritative evidence for quantitative claims', async () => {
     const reply = modelReview();
     const quantitative = reply.claims.find((claim) => claim.claimKind === 'quantitative');
