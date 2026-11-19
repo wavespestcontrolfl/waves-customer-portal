@@ -253,7 +253,9 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
     const candidate = result.days[0].byTech.find(tech => tech.technicianId === technicianId).candidateAnalysis;
     expect(candidate).toMatchObject({ workdayVerified: true, automaticMoveAuthorized: false, reason: 'route_fit_requires_staff_review' });
     expect(candidate.routeFits.length).toBeGreaterThan(0);
-    expect(candidate.routeFits.map(fit => fit.windowStart)).not.toEqual(expect.arrayContaining(['15:00', '16:00']));
+    const offeredHours = candidate.routeFits.map(fit => fit.windowStart);
+    expect(offeredHours).not.toContain('15:00');
+    expect(offeredHours).not.toContain('16:00');
     expect(result.days[0].byTech.find(tech => tech.technicianId === technicianId)).toMatchObject({
       insertionStatus: candidate.reason, feasibleInsertionWindows: candidate.feasibleInsertionWindows,
     });

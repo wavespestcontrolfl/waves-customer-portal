@@ -91,6 +91,7 @@ const {
 } = require('../services/pricing-engine/discount-engine');
 const slotReservation = require('../services/slot-reservation');
 const { liveServiceOrHold } = require('../services/scheduling/reservation-occupancy');
+const { RETAINED_HISTORY_STATUSES } = require('../services/visit-context/statuses');
 // Rung 1 of the global scheduling lock order (ORDERING CONTRACT,
 // services/scheduling/occupancy.js): the accept transaction pre-acquires the
 // held slot's date key ahead of its estimate/customer row locks.
@@ -13748,6 +13749,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         const reservedStartRow = await trx('scheduled_services')
           .where({ source_estimate_id: estimate.id })
           .whereNotNull('customer_id')
+          .whereNotIn('status', RETAINED_HISTORY_STATUSES)
           .orderBy('scheduled_date', 'asc')
           .first('scheduled_date');
         const overlapTermStart = dateOnly(reservedStartRow?.scheduled_date) || etDateString();
@@ -22853,6 +22855,7 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   const committedAppointment = await db('scheduled_services')
     .where({ source_estimate_id: estimate.id })
     .whereNotNull('customer_id')
+    .whereNotIn('status', RETAINED_HISTORY_STATUSES)
     .orderBy('scheduled_date', 'asc')
     .first('id');
   const reservationCommitted = !!committedAppointment;

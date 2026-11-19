@@ -14,6 +14,7 @@ const { ANNUAL_PREPAY_COVERAGE_LINE_KIND } = require('../utils/annual-prepay-lin
 const logger = require('./logger');
 const { isAssignable } = require('./technician-eligibility');
 const VisitCapacity = require('./combined-visit-capacity');
+const { RETAINED_HISTORY_STATUSES } = require('./visit-context/statuses');
 const { serviceDurationMinutes } = require('./service-library');
 const AvailabilityEngine = require('./availability');
 const { withoutAssessmentVisits } = require('./assessment-booking');
@@ -6633,6 +6634,7 @@ const EstimateConverter = {
       ? await withoutAssessmentVisits(await database('scheduled_services')
         .where({ source_estimate_id: estimateId })
         .whereNotNull('customer_id')
+        .whereNotIn('status', RETAINED_HISTORY_STATUSES)
         .orderBy('scheduled_date', 'asc'), database)
       : [];
     const reservationRowsExist = reservedRows.length > 0;

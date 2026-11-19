@@ -363,6 +363,23 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     const EstimateConverter = () => require('../services/estimate-converter');
     const convertOpts = { skipSetupInvoice: true, autoSendInvoice: false, skipMembershipEmail: true };
 
+    test.each(['cancelled', 'rescheduled', 'skipped', 'no_show'])('a %s visit with an old hold stamp cannot become the plan start', async (status) => {
+      const { customerId, estimateId } = await fixture(mockTransaction);
+      const earlier = await visit(mockTransaction, {
+        customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: ASSESSMENT_DATE,
+        extra: { status, source_estimate_id: estimateId, reservation_expires_at: mockTransaction.raw("NOW() - INTERVAL '1 day'") },
+      });
+      const chosen = await visit(mockTransaction, {
+        customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+        extra: { source_estimate_id: estimateId, estimated_price: 55 },
+      });
+      await mockTransaction('estimates').where({ id: estimateId }).update({ status: 'accepted', accepted_at: new Date() });
+      const result = await EstimateConverter().convertEstimate(estimateId, { database: mockTransaction, ...convertOpts });
+      expect(result.firstScheduledServiceId).toBe(chosen);
+      expect(dateOnly(result.membershipEmail.effectiveDate)).toBe(CHOSEN_DATE);
+      expect(await mockTransaction('scheduled_services').where({ id: earlier }).first('status')).toEqual({ status });
+    });
+
     test('an assessment stamped to the estimate (older build) does not become the plan start', async () => {
       const { customerId, estimateId } = await fixture(mockTransaction);
       // The earlier-dated assessment carries the estimate's stamp, as the
