@@ -141,10 +141,9 @@ const recheckMs = () => (editorialReviewOnMac() ? MAC_RECHECK_MS : RECHECK_MS);
 // A rejected plan stays on its run so the listing does not offer the same commit again.
 const REJECTED_AT_RE = /\s*\[terminal revision ([^\]\s]+)\]$/;
 
-// The model lanes of the fact check the Mac job runs: the editorial review (editorial-review.js) and
-// the publish-time fact check (fact-check-gate.js). The owner's spend line (2026-11-19, "A"): each
-// must be answered by the Max plan.
-const MAC_MODEL_LANES = Object.freeze(['editorial_review', 'editorial_repair', 'editorial_plan_review', 'fact_check_gate']);
+// The model lanes of the fact check the Mac job runs (one list: llm/max-plan-lanes.js, which also
+// keeps them on the Anthropic route there). The owner's spend line (2026-11-19, "A").
+const { MAC_MODEL_LANES } = require('../llm/max-plan-lanes');
 
 // ANTHROPIC_BASE_URL unset, or naming api.anthropic.com itself.
 function anthropicHostIsDefault(baseUrl) {
@@ -332,6 +331,11 @@ async function checkAnswerPlan(brief, fetched) {
   } catch (err) {
     return waitResult(PLAN_UNAVAILABLE, `the answer-plan review could not run: ${err.message}`);
   }
+  // The reviewer answered, but not with a valid review of this plan: rejected at this commit, so the
+  // same revision does not stop every Mac pass.
+  if (review?.invalidResponse) {
+    return invalidPlan(`the answer-plan reviewer could not give a valid review of this plan (${planFindingsText(review.findings)}). Check that each section has one heading, one reader question and one direct answer, then push the draft again`, fetched.revision);
+  }
   // reviewPlan fails closed with no model when it could not reach one.
   if (review?.pass !== true && !review?.model) return waitResult(PLAN_UNAVAILABLE, 'the answer-plan reviewer was unavailable; the row looks again later');
   if (review?.pass !== true) return invalidPlan(`the answer plan failed review: ${planFindingsText(review?.findings)}`, fetched.revision);
@@ -439,7 +443,9 @@ async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
     SELECT latest.*,
            (SELECT x.reviewer_notes FROM autonomous_runs x
              WHERE x.opportunity_id = latest.opportunity_id AND x.brief_id = latest.brief_id AND x.skip_reason = ?
-             ORDER BY x.created_at DESC LIMIT 1) AS rejected_notes
+             ORDER BY x.created_at DESC LIMIT 1) AS rejected_notes,
+           (SELECT max(c.created_at) FROM autonomous_runs c
+             WHERE c.opportunity_id = latest.opportunity_id AND c.outcome = ? AND c.agent_id IS NULL) AS capped_at
       FROM (
       SELECT DISTINCT ON (r.opportunity_id)
              r.opportunity_id, r.brief_id, r.action_type, r.outcome, r.agent_id, r.skip_reason, r.reviewer_notes, r.created_at,
@@ -453,7 +459,7 @@ async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
        ORDER BY r.opportunity_id, r.created_at DESC
     ) latest
     WHERE outcome = ? OR (outcome = ? AND agent_id = ?)
-    ORDER BY score DESC`, [INVALID, AWAITING_WINDOW_DAYS, PRE_DRAFT_CAP_OUTCOME, AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID]);
+    ORDER BY score DESC`, [INVALID, PRE_DRAFT_CAP_OUTCOME, AWAITING_WINDOW_DAYS, PRE_DRAFT_CAP_OUTCOME, AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID]);
   const due = [];
   const written = [];
   const held = [];
@@ -471,11 +477,20 @@ async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
     // with the reviewer's reason, until the branch tip changes.
     const rejected = fetched.ok && plansReviewed ? rejectedPlanProblem(row, fetched.revision) : null;
     if (rejected) due.push({ ...item, problem: rejected });
-    else if (fetched.ok) written.push(item);
+    else if (fetched.ok) written.push({ ...item, handoff: handoffWait(row) });
     else if (fetched.code === HELD) held.push({ ...item, hold: fetched.hold });
     else due.push({ ...item, problem: fetched.code === INVALID ? fetched.reason : null });
   }
   return { due, written, held, rebrief };
+}
+
+// The waits that only stood for "no usable draft yet" (a server handoff in Mac mode, no file, a
+// rejected file): once a draft is written, the Mac pass may take it before the recheck time. A
+// publish-cap deferral after that wait, or a reviewer outage, keeps its time.
+const HANDOFF_WAITS = new Set([AWAITS_MAC, MISSING, INVALID]);
+function handoffWait(row) {
+  if (!HANDOFF_WAITS.has(row.skip_reason)) return false;
+  return !(row.capped_at && new Date(row.capped_at) > new Date(row.created_at));
 }
 
 /**

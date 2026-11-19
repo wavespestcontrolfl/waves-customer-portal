@@ -247,7 +247,7 @@ class AutonomousRunner {
    * Returns the autonomous_runs row that was written (or would have
    * been written in dryRun).
    */
-  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [], actionType = null, bucket = null, onlyIds = null, terminalHoldPass = false } = {}) {
+  async runNext({ minScore = DEFAULT_MIN_SCORE, dryRun = false, excludeIds = [], actionType = null, bucket = null, onlyIds = null, availableNowIds = null, terminalHoldPass = false } = {}) {
     const t0 = Date.now();
     const run = {
       claimed_at: new Date(t0),
@@ -265,7 +265,7 @@ class AutonomousRunner {
     const t1 = Date.now();
     let opp;
     try {
-      opp = await queue.claimNext({ minScore, excludeIds, ...(actionType ? { actionType } : {}), ...(bucket ? { bucket } : {}), ...(onlyIds ? { onlyIds } : {}) });
+      opp = await queue.claimNext({ minScore, excludeIds, ...(actionType ? { actionType } : {}), ...(bucket ? { bucket } : {}), ...(onlyIds ? { onlyIds } : {}), ...(availableNowIds?.length ? { availableNowIds } : {}) });
     } catch (err) {
       logger.warn(`[autonomous-runner] claim failed: ${err.message}`);
       return finalize(run, t0, { outcome: 'failed', failure_message: `claim:${err.message}` });
@@ -338,10 +338,19 @@ class AutonomousRunner {
     // gates and the gates on the draft all read the brief the draft was
     // written from. Null (gate off, dry run, nothing waiting) = compose.
     const terminalWriter = require('./terminal-writer');
-    const handedBrief = await this._briefHandedToTerminal(opp.id, { dryRun });
+    const macJob = !dryRun && terminalWriter.runningOnMac();
+    let handedBrief;
+    try {
+      handedBrief = await this._briefHandedToTerminal(opp.id, { dryRun, throwOnError: macJob });
+    } catch (err) {
+      // The Mac job: a lookup that failed is no answer. No run is stored, so the row keeps its wait on
+      // the same brief and draft; it counts as a failure of the pass.
+      await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.recheckMs()), { claimToken });
+      return finalize(run, t0, { outcome: 'failed_terminal_brief_lookup', failure_message: err.message }, { persist: false });
+    }
     // The Mac job takes only a row whose brief was handed to the terminal: it composes none, since a new
     // brief can route the row to a paid agent. The server briefs the row again after the deferral.
-    if (!handedBrief && !dryRun && terminalWriter.runningOnMac()) {
+    if (!handedBrief && macJob) {
       const finalized = await finalize(run, t0, {
         outcome: 'skipped_mac_brief_missing', skip_reason: terminalWriter.MAC_BRIEF_MISSING,
         reviewer_notes: 'the brief this row was listed with could not be loaded; the server briefs it again',
@@ -1990,7 +1999,8 @@ class AutonomousRunner {
     try {
       const listing = await terminalWriter.awaitingTerminalDrafts();
       const ids = (rows) => (rows || []).filter((row) => !actionType || row.action_type === actionType).map((row) => row.opportunity_id);
-      return { written: ids(listing.written), held: ids(listing.held) };
+      const handoff = ids((listing.written || []).filter((row) => row.handoff));
+      return { written: ids(listing.written), held: ids(listing.held), ...(handoff.length ? { handoff } : {}) };
     } catch (err) {
       if (throwOnError) throw err;
       logger.warn(`[autonomous-runner] written terminal drafts could not be listed (${err.message}); the batch claims by score`);
@@ -2063,7 +2073,9 @@ class AutonomousRunner {
     for (let i = 0; i < batchLimit; i += 1) {
       const scope = terminalFirstScope(terminalFirst);
       if (!scope) break;
-      const run = await this.runNext({ excludeIds: [...failedOppIds], ...terminalScopeArgs(scope) });
+      // A draft written after a handoff wait is taken now, not at the wait's recheck time.
+      const handoff = scope.kind === 'written' ? scope.ids.filter((id) => terminalFirst.handoff?.includes(id)) : [];
+      const run = await this.runNext({ excludeIds: [...failedOppIds], ...terminalScopeArgs(scope), ...(handoff.length ? { availableNowIds: handoff } : {}) });
       takeFromTerminalScope(terminalFirst, scope, run);
       if (run.outcome === 'skipped_no_opportunity') { i -= 1; continue; }
       runs.push(run);
@@ -4668,7 +4680,7 @@ class AutonomousRunner {
    * wrote for gets a fresh brief). A lookup failure is null too: the row is
    * then briefed again, never blocked.
    */
-  async _briefHandedToTerminal(opportunityId, { dryRun = false } = {}) {
+  async _briefHandedToTerminal(opportunityId, { dryRun = false, throwOnError = false } = {}) {
     const terminalWriter = require('./terminal-writer');
     if (dryRun || !terminalWriter.terminalWriterLive()) return null;
     try {
@@ -4679,6 +4691,7 @@ class AutonomousRunner {
       return age <= terminalWriter.MAX_BRIEF_AGE_MS ? brief : null;
     } catch (err) {
       logger.warn(`[autonomous-runner] terminal brief lookup failed for ${opportunityId}: ${err.message}`);
+      if (throwOnError) throw err;
       return null;
     }
   }

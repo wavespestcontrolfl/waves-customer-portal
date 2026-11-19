@@ -137,6 +137,23 @@ describe('claimNext lifetime attempt budget', () => {
     expect(bindings[1]).toBe(5);
   });
 
+  test('availableNowIds lets only listed rows of onlyIds pass available_at; the budget binding moves one place', async () => {
+    db.mockImplementation(() => chain());
+    db.raw.mockResolvedValue({ rows: [] });
+    await queue.claimNext({ onlyIds: ['a', 'b'], availableNowIds: ['b', 'not-in-scope'] });
+    const [sql, bindings] = rawCallContaining('attempt_count = CASE');
+    expect(sql).toMatch(/AND \(available_at IS NULL OR available_at <= now\(\) OR id = ANY\(\?\)\)/);
+    expect(bindings[1]).toEqual(['b']);
+    expect(bindings[2]).toBe(5);
+    expect(bindings[bindings.length - 1]).toEqual(['a', 'b']);
+    // Without onlyIds the list is ignored: the window is the plain one.
+    db.raw.mockClear();
+    await queue.claimNext({ availableNowIds: ['b'] });
+    const [plain, plainBindings] = rawCallContaining('attempt_count = CASE');
+    expect(plain).toMatch(/AND \(available_at IS NULL OR available_at <= now\(\)\)\n/);
+    expect(plainBindings[1]).toBe(5);
+  });
+
   test('AUTONOMOUS_OPP_MAX_ATTEMPTS tunes the budget', async () => {
     process.env.AUTONOMOUS_OPP_MAX_ATTEMPTS = '3';
     db.mockImplementation(() => chain());

@@ -1596,7 +1596,7 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
   // runNext stands in for the claim: the best pending row by score among the
   // ids the call may take (onlyIds), minus the excluded ones. A row with
   // `claimable: false` is held by a claim rule (deferred, fenced).
-  function queueRunner(rows, { written = [], held = [], reserved = 0 } = {}) {
+  function queueRunner(rows, { written = [], held = [], handoff, reserved = 0 } = {}) {
     const { AutonomousRunner } = require('../services/content/autonomous-runner');
     const runner = new AutonomousRunner();
     const pending = new Map(rows.map((r) => [r.id, r]));
@@ -1614,7 +1614,7 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
     runner._appendToDailyDigest = jest.fn(async () => {});
     runner._withEngineLock = (label, fn) => fn();
     runner._claimableBackfillSlots = jest.fn(async () => reserved);
-    runner._terminalFirstIds = jest.fn(async () => ({ written, held }));
+    runner._terminalFirstIds = jest.fn(async () => ({ written, held, ...(handoff ? { handoff } : {}) }));
     runner._recoverStaleClaimsSoft = jest.fn(async () => {});
     runner.settleTerminalWork = jest.fn(async () => {});
     runner._sendBlogDroughtSms = jest.fn(async () => {});
@@ -1902,6 +1902,17 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
       expect(runner._appendToDailyDigest).not.toHaveBeenCalled();
       expect(runner.settleTerminalWork).toHaveBeenCalledWith(result.runs);
       expect(result).toMatchObject({ outcome: 'deferred_terminal_hold', count: 3, limit: 5, failures: 0 });
+    });
+
+    test('the Mac pass takes a draft written after a handoff wait before its recheck time; other written rows keep theirs', async () => {
+      mac({ runner: 'mac' });
+      const { runner } = queueRunner(rows(), { written: ['written_a', 'written_b'], handoff: ['written_b'] });
+      runner._withEngineLock = jest.fn((label, fn) => fn());
+      await runner.runTerminalDrafts({ limit: 5 });
+      expect(runner.runNext.mock.calls.map(([args]) => args)).toEqual([
+        { excludeIds: [], onlyIds: ['written_a', 'written_b'], availableNowIds: ['written_b'] },
+        { excludeIds: [], onlyIds: ['written_b'], availableNowIds: ['written_b'] },
+      ]);
     });
 
     test('runTerminalDrafts with nothing written still settles and reports no opportunity; the limit and the failure stop hold', async () => {
@@ -5827,6 +5838,26 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
       expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
       expect(queue.defer).toHaveBeenCalledWith('opp_tw', expect.any(Date), { claimToken: claimedAt });
     });
+    test('a brief lookup that failed stores no run: the row keeps its wait, and the pass counts a failure', async () => {
+      process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
+      process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = 'mac';
+      const { queue, dispatcher, briefBuilder, runner, terminalWriter } = setup({ handed: city('brief_handed') });
+      terminalWriter.waitingBriefId.mockRejectedValue(new Error('connection terminated'));
+      const result = await runner.runNext();
+      expect(result).toMatchObject({ outcome: 'failed_terminal_brief_lookup', failure_message: 'connection terminated' });
+      const inserts = require('../models/db').mock.results.flatMap((call) => call.value?.insert?.mock.calls || []);
+      expect(inserts.filter(([row]) => row?.outcome === 'failed_terminal_brief_lookup')).toEqual([]);
+      expect(briefBuilder.compose).not.toHaveBeenCalled();
+      expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+      expect(queue.defer).toHaveBeenCalledWith('opp_tw', expect.any(Date), { claimToken: claimedAt });
+      // Off the Mac the same failure still reads as "no handed brief" (compose), as before.
+      delete process.env.CONTENT_EDITORIAL_REVIEW_RUNNER;
+      const server = setup({ handed: city('brief_handed') });
+      server.terminalWriter.waitingBriefId.mockRejectedValue(new Error('connection terminated'));
+      await server.runner.runNext();
+      expect(server.briefBuilder.compose).toHaveBeenCalledTimes(1);
+    });
+
     test('a handed brief the terminal does not write waits instead of starting the agent', async () => {
       process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
       process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = 'mac';

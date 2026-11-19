@@ -269,12 +269,15 @@ async function reviewPlan({ sections, title = '' } = {}) {
   } catch (err) {
     response = { ok: false, reason: err.message || 'dispatch_error' };
   }
+  // invalidResponse: the model answered, but its review of this plan failed validation. Unlike an
+  // outage, a retry of the same plan may fail the same way.
   if (!response?.ok || !response.json || !String(response.model || '').trim()) {
     return {
       pass: false,
       findings: [{ sectionIndex: 0, passage: normalized[0].answer, detail: `Plan review failed closed (${response?.reason || 'invalid response'}).`, action: 'Retry the complete semantic plan review before drafting prose.' }],
       model: null,
       reviewedAt,
+      ...(validatorRejected(response) ? { invalidResponse: true } : {}),
     };
   }
   const validationError = validatePlanJson(response.json, normalized);
@@ -284,6 +287,7 @@ async function reviewPlan({ sections, title = '' } = {}) {
       findings: [{ sectionIndex: 0, passage: normalized[0].answer, detail: `Plan review response failed validation: ${validationError}.`, action: 'Retry the complete semantic plan review before drafting prose.' }],
       model: null,
       reviewedAt,
+      invalidResponse: true,
     };
   }
   return { pass: response.json.pass, findings: response.json.findings, model: response.model || null, reviewedAt };

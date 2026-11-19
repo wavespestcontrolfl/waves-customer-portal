@@ -321,7 +321,7 @@ test.each([
     action_type: 'refresh_existing_page',
     target_url: 'https://www.wavespestcontrol.com/pest-control/door/',
   });
-  expect(publisher.resolveExistingAstroFileForTarget).toHaveBeenCalledWith(expectedTarget);
+  expect(publisher.resolveExistingAstroFileForTarget).toHaveBeenCalledWith(expectedTarget, { rethrowLookupErrors: true });
   expect(result.body).toContain('Look for daylight');
   expect(result.frontmatter).toBe(frontmatter);
   expect(reviewer.review).toHaveBeenNthCalledWith(1, expect.objectContaining({ title: 'How to inspect a door' }));
@@ -387,7 +387,7 @@ test('resolves but skips editorial review for a non-blog refresh target', async 
     target_url: 'https://www.wavespestcontrol.com/pest-control-venice-fl/',
   });
   expect(result).toBe(draft);
-  expect(publisher.resolveExistingAstroFileForTarget).toHaveBeenCalledWith('https://www.wavespestcontrol.com/pest-control-venice-fl/');
+  expect(publisher.resolveExistingAstroFileForTarget).toHaveBeenCalledWith('https://www.wavespestcontrol.com/pest-control-venice-fl/', { rethrowLookupErrors: true });
   expect(reviewer.review).not.toHaveBeenCalled();
   expect(reviewer.repair).not.toHaveBeenCalled();
 });

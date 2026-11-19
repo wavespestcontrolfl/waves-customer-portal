@@ -290,6 +290,16 @@ Vague filler about {{brandName}}.
     await expect(editorial.repair({ document: repairDocument, findings: [] })).rejects.toMatchObject({ transient: false });
   });
 
+  test('a plan review the validator refused is an invalid response, not an outage', async () => {
+    const sections = [{ heading: 'Why mosquitoes breed', question: 'Where do they breed?', answer: 'In standing water around the yard.' }];
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed', failures: [{ provider: 'anthropic', reason: 'section_coverage', validator: true }] });
+    expect(await editorial.reviewPlan({ title: 'Stop Mosquito Breeding', sections })).toMatchObject({ pass: false, model: null, invalidResponse: true });
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed', failures: [{ provider: 'anthropic', reason: 'anthropic_timeout' }] });
+    const outage = await editorial.reviewPlan({ title: 'Stop Mosquito Breeding', sections });
+    expect(outage).toMatchObject({ pass: false, model: null });
+    expect(outage.invalidResponse).toBeUndefined();
+  });
+
   test('a review the validator refused is not transient; a model that did not answer is', async () => {
     mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed', failures: [{ provider: 'anthropic', reason: 'claim_kind_mismatch:C1', validator: true }] });
     expect(await editorial.review({ document: DOCUMENT, title: 'Stop Mosquito Breeding' })).toMatchObject({ pass: false, transient: false });

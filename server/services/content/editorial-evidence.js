@@ -177,7 +177,8 @@ async function refreshReviewFrontmatter(draft, brief) {
     // module for final evidence generation.
     const publisher = require('../content-astro/astro-publisher');
     if (typeof publisher.resolveExistingAstroFileForTarget !== 'function') throw new Error('refresh target resolver unavailable');
-    resolved = await publisher.resolveExistingAstroFileForTarget(target);
+    // rethrowLookupErrors: a content_registry read that failed is a failed read, not "no file".
+    resolved = await publisher.resolveExistingAstroFileForTarget(target, { rethrowLookupErrors: true });
   } catch {
     // A read that failed (GitHub, the resolver) may pass later; a target with no file below does not.
     throw reviewError({ checks: [{ name: 'source_support', status: 'error', findings: [{ action: 'The refresh target could not be read; retry the review.' }] }], transient: true });

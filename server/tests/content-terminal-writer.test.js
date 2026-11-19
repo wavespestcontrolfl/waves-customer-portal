@@ -395,6 +395,8 @@ describe('blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST / _RUNNER)',
       const lanes = (mod) => [...require('fs').readFileSync(require.resolve(mod), 'utf8').matchAll(/laneId: '([a-z_]+)'/g)].map((m) => m[1]);
       const used = [...lanes('../services/content/editorial-review'), ...lanes('../services/content/fact-check-gate')].sort();
       expect(used).toEqual([...tw.MAC_MODEL_LANES].sort());
+      // One list: the adapter check and the dispatcher's Anthropic-only rule read the same one.
+      expect(tw.MAC_MODEL_LANES).toBe(require('../services/llm/max-plan-lanes').MAC_MODEL_LANES);
     });
   });
 
@@ -406,6 +408,13 @@ describe('blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST / _RUNNER)',
     const out = await run(blog, withPlan());
     expect(out).toMatchObject({ wait: true, code: tw.PLAN_UNAVAILABLE });
     expect(out.code).not.toBe(tw.INVALID);
+  });
+
+  test('a reviewer answer that failed validation rejects the plan at this commit instead of waiting', async () => {
+    asMac();
+    reviewPlan.mockResolvedValue({ pass: false, model: null, invalidResponse: true, findings: [{ sectionIndex: 0, detail: 'Plan review response failed validation: findings do not cover every section.', action: 'Retry.' }] });
+    const out = await run(blog, withPlan());
+    expect(out).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/could not give a valid review of this plan/) });
   });
 
   test('a body whose H2 headings differ from the plan is INVALID with emit_draft\'s directives', async () => {
@@ -541,7 +550,7 @@ describe('waiting rows and the admin item', () => {
     expect(out.rebrief.map((r) => r.opportunity_id)).toEqual([R]);
     expect(out.due[0]).toMatchObject({ branch: `terminal-writer/${ID}`, draft_path: `terminal-drafts/${ID}.json`, brief_id: 'brief-aa' });
     // the latest run of each pending row: waiting ones, and gate retries of a terminal draft
-    expect(d.db.raw.mock.calls[0][1]).toEqual([tw.INVALID, 7, 'deferred_publish_cap', tw.AWAITING_OUTCOME, tw.GATE_RETRY_OUTCOME, tw.TERMINAL_AGENT_ID]);
+    expect(d.db.raw.mock.calls[0][1]).toEqual([tw.INVALID, 'deferred_publish_cap', 7, 'deferred_publish_cap', tw.AWAITING_OUTCOME, tw.GATE_RETRY_OUTCOME, tw.TERMINAL_AGENT_ID]);
 
     branches[C] = draftFor(C);
     expect((await tw.awaitingTerminalDrafts({ deps: d })).written.map((r) => r.opportunity_id)).toEqual([B, C]);
@@ -552,6 +561,21 @@ describe('waiting rows and the admin item', () => {
     expect(withHold.held.map((r) => [r.opportunity_id, r.hold.reason])).toEqual([[ID, 'brief_unusable']]);
     expect(withHold.due.map((r) => r.opportunity_id)).toEqual([]);
     expect(withHold.written.map((r) => r.opportunity_id)).toEqual([B, C]);
+  });
+
+  test('a written draft after a handoff wait is marked for the Mac pass; a reviewer outage or a later publish-cap deferral is not', async () => {
+    const [D, E] = ['00000000-0000-4000-8000-0000000000d1', '00000000-0000-4000-8000-0000000000e1'];
+    const t = new Date('2026-11-19T14:00:00Z');
+    const rows = [
+      waiting(ID, { skip_reason: tw.AWAITS_MAC, created_at: t }),
+      waiting(B, { skip_reason: tw.MISSING, created_at: t }),
+      waiting(C, { skip_reason: tw.REVIEW_UNAVAILABLE, created_at: t }),
+      waiting(D, { skip_reason: tw.PLAN_UNAVAILABLE, created_at: t }),
+      waiting(E, { skip_reason: tw.AWAITS_MAC, created_at: t, capped_at: new Date('2026-11-19T15:00:00Z') }),
+    ];
+    const branches = Object.fromEntries([ID, B, C, D, E].map((id) => [id, draftFor(id)]));
+    const out = await tw.awaitingTerminalDrafts({ deps: deps({ rows, branches }) });
+    expect(out.written.map((r) => [r.opportunity_id, r.handoff])).toEqual([[ID, true], [B, true], [C, false], [D, false], [E, false]]);
   });
 
   test('a waiting row whose brief is too old, or gone, is not offered for writing, nor listed written with its draft pushed: the next run briefs it again', async () => {
