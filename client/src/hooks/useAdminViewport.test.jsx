@@ -91,6 +91,32 @@ describe("useAdminViewport", () => {
     expect(document.documentElement.hasAttribute("data-keyboard-open")).toBe(false);
   });
 
+  it("keeps the full layout height while pinch-zoomed on iOS, where innerHeight shrinks with the zoom", () => {
+    // Owner 2026-11-06: zoomed into the estimator photos in the app, the
+    // shell was cut to the zoomed height and blank white covered the rest.
+    // iOS reports innerHeight as the zoomed visible height (800 / 2 = 400);
+    // the root element's clientHeight stays the layout height.
+    vi.stubGlobal("innerHeight", 400);
+    Object.defineProperty(document.documentElement, "clientHeight", { configurable: true, value: 800 });
+    vi.stubGlobal("visualViewport", {
+      height: 400,
+      offsetTop: 300,
+      scale: 2,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+    try {
+      syncAdminViewportVars();
+      const root = document.documentElement.style;
+      expect(root.getPropertyValue("--admin-vh")).toBe("800px");
+      expect(root.getPropertyValue("--admin-shell-vh")).toBe("800px");
+      expect(root.getPropertyValue("--keyboard-inset")).toBe("0px");
+      expect(document.documentElement.hasAttribute("data-keyboard-open")).toBe(false);
+    } finally {
+      delete document.documentElement.clientHeight;
+    }
+  });
+
   describe("document scroll from iOS revealing a focused field", () => {
     let shell;
     beforeEach(() => {
