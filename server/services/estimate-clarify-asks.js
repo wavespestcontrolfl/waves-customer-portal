@@ -26,6 +26,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
+const { SERVICE_TAIL_RE } = require('./service-pair-terms');
 
 const RECENT_SENT_WINDOW_MS = 7 * 86400000;
 
@@ -1004,14 +1005,9 @@ async function voiceOriginCallLogId(estimateId) {
   }
 }
 
-// Same pattern as lead-intake.js: a joined pair ("123 Main St, pest and
-// lawn") is one tail, so the service answer is "pest and lawn" and the
-// street line keeps no "pest and".
-const SERVICE_TAIL_WORD = '(?:quarterly\\s+|monthly\\s+|recurring\\s+|one[-\\s]?time\\s+)?(?:pest|lawn|mosquito(?:es)?|termites?|bed\\s?bugs?|fleas?|ticks?|rodents?|mice|rats?|ants?|roach(?:es)?|wasps?|spiders?)(?:\\s+(?:control|care|service|treatment|program|removal))?';
-const SERVICE_TAIL_RE = new RegExp(
-  `[,\\s]+(${SERVICE_TAIL_WORD}(?:\\s*(?:,\\s*)?(?:\\s(?:and|plus)\\s|[&+/])\\s*${SERVICE_TAIL_WORD})*)\\s*$`,
-  'i',
-);
+// SERVICE_TAIL_RE is the tail pattern lead-intake.js uses: the pest + lawn
+// pair ("123 Main St, pest and lawn") is one tail, so the service answer is
+// the whole pair and the street line keeps no half of it.
 function stripServiceTail(address) {
   let out = String(address || '').trim();
   let tailParts = [];

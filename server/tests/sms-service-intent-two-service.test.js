@@ -7,6 +7,7 @@ jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...args) => mo
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const { classifyServiceIntent } = require('../services/sms-service-intent');
+const { SERVICE_TAIL_RE } = require('../services/service-pair-terms');
 
 beforeEach(() => {
   mockDispatch.mockReset();
@@ -26,6 +27,9 @@ describe('a reply that is the pest + lawn pair classifies as both, with no model
     'Pest and lawn as per form I filled out',
     'Both pest and lawn',
     "I'd like pest and lawn.",
+    'I’d like pest and lawn',
+    'pest&lawn',
+    'Pest , and lawn',
   ])('%j => pest_lawn', async (body) => {
     await expect(classifyServiceIntent(body)).resolves.toEqual({ interest: 'pest_lawn', confidence: 0.9, method: 'regex' });
     expect(mockDispatch).not.toHaveBeenCalled();
@@ -37,6 +41,8 @@ describe('a pair inside other words, or both keyword sets without a pair, goes t
     // The pair inside a longer reply: only the context tells the request.
     ['I already have pest and lawn care. I only need mosquitoes.', 'pest'],
     ['100 Palm Ave, pest and lawn', 'pest_lawn'],
+    // A question goes to the model too.
+    ['pest and lawn? how much', 'pest_lawn'],
     // One service, worded with words from both lists.
     ['I have got bugs in my yard', 'pest'],
     ['chinch bugs in the lawn', 'lawn'],
@@ -75,3 +81,35 @@ describe('unchanged single-service and one-time answers', () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 });
+
+describe('a long reply cannot stall the event loop', () => {
+  test('a pair followed by many filler words and a stray word is read at once and goes to the model', async () => {
+    // Before, each separator had two ways to match and the regex tried them
+    // all: this 147-character reply took several seconds.
+    const body = `pest and lawn${' please both'.repeat(11)} x`;
+    const startedAt = Date.now();
+    await classifyServiceIntent(body);
+    expect(Date.now() - startedAt).toBeLessThan(250);
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the shared address-tail pattern drops the whole pair, and single-service tails as before', () => {
+  const strip = (address) => {
+    let out = address;
+    while (SERVICE_TAIL_RE.test(out)) out = out.replace(SERVICE_TAIL_RE, '').replace(/[,\s]+$/, '').trim();
+    return out;
+  };
+  test.each([
+    ['123 Main St, pest and lawn', '123 Main St'],
+    ['123 Main St, lawn fertilization and pest control', '123 Main St'],
+    ['123 Main St, Sarasota, quarterly pest & lawn care', '123 Main St, Sarasota'],
+    ['100 Palm Ave, Venice FL 34285, lawn/pest', '100 Palm Ave, Venice FL 34285'],
+    ['123 Main St, pest control', '123 Main St'],
+    ['123 Main St, pest service', '123 Main St'],
+    ['45 Lawn Ave', '45 Lawn Ave'],
+  ])('%j => %j', (address, street) => {
+    expect(strip(address)).toBe(street);
+  });
+});
+

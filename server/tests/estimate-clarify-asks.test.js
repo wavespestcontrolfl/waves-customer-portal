@@ -351,13 +351,16 @@ describe('handleClarifyReply', () => {
     expect(leadUpdates.some((u) => u.payload.service_interest === 'Quarterly pest control')).toBe(true);
   });
 
-  test('a combined reply ending in both services records the street without the pair, and both services', async () => {
+  test.each([
+    'pest and lawn',
+    'lawn fertilization and pest control',
+  ])('a combined reply ending in "%s" records the street without the pair, and the pair as the service', async (pair) => {
     mockState.existingDraft = AWAITING(['street_address', 'specific_service']);
-    const result = await handleClarifyReply({ phone: '9415550142', body: '123 Main St, Sarasota, pest and lawn' });
+    const result = await handleClarifyReply({ phone: '9415550142', body: `123 Main St, Sarasota, ${pair}` });
     expect(result.handled).toBe(true);
     const leadUpdates = mockState.updates.filter((u) => u.table === 'leads');
     expect(leadUpdates.some((u) => u.payload.address === '123 Main St, Sarasota')).toBe(true);
-    expect(leadUpdates.some((u) => u.payload.service_interest === 'pest and lawn')).toBe(true);
+    expect(leadUpdates.some((u) => u.payload.service_interest === pair)).toBe(true);
   });
 
   test('an unrecognizable reply is not handled — the normal inbox flow owns it', async () => {

@@ -333,13 +333,16 @@ describe('two-service reply (pest_lawn)', () => {
     expect(mockOwnerAlerts[0][1].why).toBe(`Texted for ${PEST_LAWN_LABEL}; the draft estimate needs a price.`);
   });
 
-  test('a combined reply "street, pest and lawn" saves the street without the pair and drafts both', async () => {
+  test.each([
+    'pest and lawn',
+    'lawn fertilization and pest control',
+  ])('a combined reply "street, %s" saves the street without the pair and drafts both', async (pair) => {
     mockClassify.mockResolvedValue({ interest: 'pest_lawn', confidence: 0.8, method: 'ai' });
     mockStartSmsThreadDraft.mockImplementation(async (args) => (args.scopeCheckOnly
       ? { started: false, skipped: 'scope_check_only' }
       : { started: false, skipped: 'gate_off' }));
 
-    const result = await handleIntakeReply({ ...CUSTOMER(), address_line1: '' }, '100 Palm Ave, Venice FL 34285, pest and lawn');
+    const result = await handleIntakeReply({ ...CUSTOMER(), address_line1: '' }, `100 Palm Ave, Venice FL 34285, ${pair}`);
 
     expect(result).toEqual({ handled: true, next: 'estimate_drafted' });
     expect(mockCustomerUpdates).toContainEqual({ address_line1: '100 Palm Ave, Venice FL 34285' });

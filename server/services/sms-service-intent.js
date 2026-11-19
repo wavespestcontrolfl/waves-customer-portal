@@ -41,6 +41,7 @@
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
+const { SERVICE_PAIR_PATTERN } = require('./service-pair-terms');
 
 // Tokens that unambiguously imply each branch.
 const PEST_KEYWORDS = [
@@ -71,16 +72,17 @@ const ONE_TIME_RE = /\b(one[\s-]?time|just once|one visit|single visit|one[\s-]?
 // context. So do "bugs in my yard", "chinch bugs in the lawn" and the
 // lawn-line "lawn pest control": they carry both keyword sets but ask for
 // one service.
-const PEST_SERVICE = 'pests?(?:\\s+control)?';
-const LAWN_SERVICE = '(?:lawn(?:\\s+(?:care|fertilization|treatments?|maintenance|service))?|fertilization)';
-const PAIR_JOIN = '\\s*(?:,\\s*)?(?:\\s(?:and|plus)\\s|[&+/])\\s*';
-const PAIR_LEAD = '(?:(?:residential|both|just|i(?:\'d|\\s+would)?\\s+(?:like|want|need)|need|want|looking\\s+for|interested\\s+in)\\s+)*';
-const PAIR_FILLER = '(?:\\s*,?\\s*(?:services?|please|pls|thanks|thank\\s+you|both))*';
-const PAIR_FORM = '(?:\\s*,?\\s*(?:as\\s+per|per|like\\s+on|like|on|from)\\s+(?:the\\s+|my\\s+)?form(?:\\s+i\\s+(?:filled(?:\\s+(?:out|in))?|sent|submitted))?)?';
-const SERVICE_PAIR_RE = new RegExp(
-  `^\\s*${PAIR_LEAD}(?:${PEST_SERVICE}${PAIR_JOIN}${LAWN_SERVICE}|${LAWN_SERVICE}${PAIR_JOIN}${PEST_SERVICE})${PAIR_FILLER}${PAIR_FORM}${PAIR_FILLER}[\\s.!]*$`,
-  'i',
-);
+// The pair itself is SERVICE_PAIR_PATTERN (./service-pair-terms), which the
+// address-tail strips share. The reply is normalized first (normalizePairReply:
+// lowercase, and each run of other characters is one space), so each word
+// below has exactly one space on its side: no two parts can take the same
+// characters, and a long reply cannot make the match backtrack.
+const PAIR_LEAD = "(?:(?:residential|both|just|i'd like|i would like|i want|i need|need|want|looking for|interested in) )*";
+const PAIR_FORM = '(?:as per|per|like on|like|on|from) (?:the |my )?form(?: i (?:filled(?: out| in)?|sent|submitted))?';
+const PAIR_TAIL = `(?: (?:services?|please|pls|thanks|thank you|both|${PAIR_FORM}))*`;
+const SERVICE_PAIR_RE = new RegExp(`^${PAIR_LEAD}${SERVICE_PAIR_PATTERN}${PAIR_TAIL}$`);
+// "?" stays, so a question ("pest and lawn? how much") never matches.
+const normalizePairReply = (lower) => lower.replace(/[’‘]/g, "'").replace(/[^a-z0-9&+/'?]+/g, ' ').trim();
 
 function tokenMatches(lower, tokens) {
   for (const t of tokens) {
@@ -107,7 +109,7 @@ function regexClassify(body) {
   // no service signal is still one_time.
   if (hasOneTime) return { interest: 'one_time', confidence: 0.9, method: 'regex' };
 
-  if (SERVICE_PAIR_RE.test(lower)) return { interest: 'pest_lawn', confidence: 0.9, method: 'regex' };
+  if (SERVICE_PAIR_RE.test(normalizePairReply(lower))) return { interest: 'pest_lawn', confidence: 0.9, method: 'regex' };
   // Both pest + lawn words but no explicit pair → ambiguous, let Claude decide.
   if (hasPest && hasLawn) return null;
   if (hasPest) return { interest: 'pest', confidence: 0.9, method: 'regex' };
