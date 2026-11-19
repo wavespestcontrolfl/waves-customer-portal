@@ -126,7 +126,7 @@ import {
   RecoveredCompletion, SavedView, SheetAccessCodes, TimeOnSite, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, startMethodFor, submissionHolds,
   methodLabel, techTipsOf, unitLabel, useDictationSources, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
-import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
+import { BlogPostSection, CollectPayment, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import { KnownTroubleAreas, PlaceAddButtons, PlaceControl } from './LawnSpotPlace';
 import { HeldLines, SodBanner } from './LawnSodParts';
@@ -1405,7 +1405,11 @@ function CustomerContact({ service, visit, request }) {
 // `catalog` null: the parent is still reading it (the Today page reads it at the
 // tap); the form waits for it, and `catalogError` says why it never came. Admin
 // Dispatch passes the array it read with the route.
-export default function FastCompleteLawnSheet({ service, request, operatorId, catalog = [], catalogError = '', onClose, onCompleted, onFullForm, onViewDetails, suspended = false }) {
+// `collectOnSheet`: the saved view offers Take payment now (CollectPayment) for a bill
+// the completion says is owed and whose pay link did not go out, as the report
+// sheet does. For a page that opens no payment prompt of its own (the Today
+// page); admin Dispatch's prompt takes the completion response instead.
+export default function FastCompleteLawnSheet({ service, request, operatorId, catalog = [], catalogError = '', onClose, onCompleted, onFullForm, onViewDetails, suspended = false, collectOnSheet = false }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   const dialogRef = useModalFocus(!suspended, () => closeRef.current?.());
@@ -1463,13 +1467,19 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay} suspended={suspended}>
       <LawnSheetHeader titleId={titleId} title={done ? 'Service complete' : 'Complete service'} showDetails={!done && !!onViewDetails} detailsDisabled={submitting || wrapChecking || dictationPending} onDetails={() => onViewDetails?.()} backDisabled={submitting || wrapChecking} onBack={close} />
-      <SheetBody service={service} request={request} catalog={catalog} catalogError={catalogError} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} onWrapChecking={setWrapChecking} />
+      <SheetBody service={service} request={request} catalog={catalog} catalogError={catalogError} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} onWrapChecking={setWrapChecking} collectOnSheet={collectOnSheet} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, catalog, catalogError, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile, refreshPlaces, onWrapChecking }) {
-  if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
+function SheetBody({ service, request, catalog, catalogError, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile, refreshPlaces, onWrapChecking, collectOnSheet }) {
+  if (submission.done) {
+    return (
+      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)}>
+        {collectOnSheet && <CollectPayment result={submission.done.response} />}
+      </SavedView>
+    );
+  }
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;
   // An off-route saved attempt's row holds only the visit id and the attempt's

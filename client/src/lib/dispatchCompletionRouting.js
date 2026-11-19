@@ -189,6 +189,15 @@ export function isProjectBackedCompletion(service) {
   return !!(profile?.projectBacked || profile?.requiresProject || service?.linkedProject?.id);
 }
 
+// A visit that completes through its project, whose report is sent or closed:
+// a delivered record, nothing left to complete. The Today page's Report entry
+// points ask it, so a service-report visit with a leftover legacy project
+// stays reachable, as on Dispatch (handleComplete asks a project's status only
+// for a project-backed visit).
+export function projectReportClosed(service) {
+  return isProjectBackedCompletion(service) && ["sent", "closed"].includes(service?.linkedProject?.status);
+}
+
 // Which one-screen sheet admin Dispatch opens for a visit, or null for the
 // full form. Order matters: a lawn re-service is a typed lawn visit, so it is
 // asked first (as on the technician home) and no later rule may claim it.

@@ -5,6 +5,7 @@ import {
   isProjectBackedCompletion,
   mergePostPaymentService,
   fastCompleteSheetFor,
+  projectReportClosed,
   shouldOpenLawnReserviceFastComplete,
   shouldOpenPestFastComplete,
   shouldOpenSpecialtyFastComplete,
@@ -366,5 +367,24 @@ describe("isProjectBackedCompletion", () => {
     expect(isProjectBackedCompletion({ completionProfile: null })).toBe(false);
     expect(isProjectBackedCompletion({})).toBe(false);
     expect(isProjectBackedCompletion(null)).toBe(false);
+  });
+});
+
+describe("projectReportClosed (the Today page's Report entry points)", () => {
+  it("ends a project-backed visit whose report is sent or closed, never a draft", () => {
+    for (const status of ["sent", "closed"]) {
+      expect(projectReportClosed({ completionProfile: { projectBacked: true }, linkedProject: { id: "p", status } })).toBe(true);
+      // No profile on the row: the linked project stands for one, as isProjectBackedCompletion reads it.
+      expect(projectReportClosed({ linkedProject: { id: "p", status } })).toBe(true);
+    }
+    expect(projectReportClosed({ completionProfile: { projectBacked: true }, linkedProject: { id: "p", status: "draft" } })).toBe(false);
+  });
+
+  it("leaves a service-report visit with a leftover legacy project open: its profile wins", () => {
+    for (const status of ["sent", "closed", "draft"]) {
+      expect(projectReportClosed({ completionProfile: { projectBacked: false }, linkedProject: { id: "p", status } })).toBe(false);
+    }
+    expect(projectReportClosed({})).toBe(false);
+    expect(projectReportClosed(null)).toBe(false);
   });
 });

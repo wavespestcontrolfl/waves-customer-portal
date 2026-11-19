@@ -31,10 +31,10 @@ vi.mock('../../components/tech/FastCompleteSheet', () => ({ default: ({ service 
 vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({ default: () => null }));
 vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({ default: () => null }));
 vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({
-  default: ({ service, request, catalog, catalogError, onClose, onCompleted, onFullForm, onViewDetails, suspended }) => {
+  default: ({ service, request, catalog, catalogError, onClose, onCompleted, onFullForm, onViewDetails, suspended, collectOnSheet }) => {
     mocks.lawnRequest = request;
     return (
-    <div data-testid="lawn-sheet" data-service={JSON.stringify(service)} data-catalog={JSON.stringify(catalog)} data-catalog-error={catalogError} data-suspended={String(suspended)}>
+    <div data-testid="lawn-sheet" data-service={JSON.stringify(service)} data-catalog={JSON.stringify(catalog)} data-catalog-error={catalogError} data-suspended={String(suspended)} data-collect={String(!!collectOnSheet)}>
       <button type="button" onClick={onFullForm}>Lawn full form</button>
       <button type="button" onClick={() => onClose({ refresh: true })}>Lawn close</button>
       <button type="button" onClick={() => onClose()}>Lawn dismiss</button>
@@ -191,8 +191,10 @@ it('a visit that completes through a project keeps the project editor', async ()
   expect(assign).not.toHaveBeenCalled();
 });
 
-it('a leftover linked project on a service-report lawn visit does not reopen the project: the profile wins, as on Dispatch', async () => {
-  rows = [row('svc-lawn-linked', { linkedProject: { id: 'project-fixture', status: 'draft' } })];
+// A sent or closed legacy project too: it ends only a project-backed visit
+// (projectReportClosed), so the Report picker still lists this one.
+it.each(['draft', 'sent', 'closed'])('a leftover %s linked project on a service-report lawn visit does not reopen the project: the profile wins, as on Dispatch', async (status) => {
+  rows = [row('svc-lawn-linked', { linkedProject: { id: 'project-fixture', status } })];
   mount();
   await openFromTools();
   expect((await lawnSheet()).service.id).toBe('svc-lawn-linked');
@@ -241,6 +243,15 @@ it('the lawn sheet\'s request: a 2xx it cannot read is no success, and a refusal
   // The sheet marks the refused product and place from err.details.
   await expect(mocks.lawnRequest('/admin/dispatch/svc-lawn/refused', { method: 'POST', body: '{}' }))
     .rejects.toMatchObject({ status: 422, code: 'lawn_product_limit', details: { productId: 'prod-fixture', place: 'front' } });
+});
+
+// This page opens no payment prompt of its own from the completion response, so
+// the sheet offers Take payment now on its saved view (CollectPayment).
+it('the lawn sheet offers Take payment now on its saved view here', async () => {
+  rows = [row('svc-lawn')];
+  mount();
+  await openFromTools();
+  expect(await screen.findByTestId('lawn-sheet')).toHaveAttribute('data-collect', 'true');
 });
 
 it('a typed one-time lawn treatment opens the lawn sheet too, as Dispatch opens it', async () => {

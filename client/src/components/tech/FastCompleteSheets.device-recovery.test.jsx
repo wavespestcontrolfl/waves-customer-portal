@@ -202,6 +202,31 @@ test('the lawn visit sheet holds its full-form hand-off while a saved attempt is
   expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(0);
 });
 
+// `collectOnSheet` (the Today page, which opens no payment prompt of its own):
+// the saved view offers Take payment now for a bill the completion says is
+// owed and whose pay link did not go out. Without it (admin Dispatch, whose
+// prompt takes the response) the view offers none.
+for (const [name, Sheet] of [['tree/shrub', FastCompleteTreeShrubSheet], ['lawn visit', FastCompleteLawnSheet]]) {
+  test.each([true, false])(`${name} saved view offers Take payment now for an owed bill only with collectOnSheet (%s)`, async (collectOnSheet) => {
+    const body = { idempotencyKey: 'owed-key', technicianNotes: 'Work done' };
+    await putFastCompletionAttempt('visit-owed', 'tech-a', { body, summary: 'Owed visit' });
+    const request = vi.fn(async (path) => {
+      if (!path.endsWith('/complete')) throw Object.assign(new Error('Context unavailable'), { status: 503 });
+      // The text with the pay link failed: the bill is still owed on the spot.
+      return {
+        success: true, invoiceId: 'inv-owed', invoiceToken: 'tok-owed', invoiceTotal: 120, invoiceStatus: 'sent',
+        invoicePaymentActionRequired: true, completionSmsStatus: 'failed', completionSmsType: 'service_complete_with_invoice',
+      };
+    });
+    render(<Sheet service={{ id: 'visit-owed' }} operatorId="tech-a" request={request} collectOnSheet={collectOnSheet}
+      onClose={vi.fn()} onCompleted={vi.fn()} onFullForm={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry', exact: true }));
+    await screen.findByRole('button', { name: 'Next stop' });
+    if (collectOnSheet) expect(screen.getByRole('button', { name: /Take payment now/ })).toBeInTheDocument();
+    else expect(screen.queryByRole('button', { name: /Take payment now/ })).not.toBeInTheDocument();
+  });
+}
+
 // Today's off-route saved attempt (`recoveryOnly`): the row holds only the
 // visit id and summary, so a discard leaves a notice: no fresh form, and no
 // full-form hand-off with no day or premise to open it on.

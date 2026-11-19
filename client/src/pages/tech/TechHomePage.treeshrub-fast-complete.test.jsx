@@ -22,8 +22,8 @@ vi.mock('../../components/tech/FieldLeadModal', () => ({ default: () => null }))
 vi.mock('../../components/ServiceRecapModal', () => ({ default: () => null }));
 vi.mock('../../components/tech/FastCompleteSheet', () => ({ default: () => null }));
 vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({
-  default: ({ service, onFullForm }) => (
-    <div>
+  default: ({ service, onFullForm, collectOnSheet }) => (
+    <div data-collect={String(!!collectOnSheet)}>
       Tree and shrub sheet for {service.id} <span data-testid="sheet-access">{(service.propertyAlerts || []).map((a) => a.text).join('|')}</span>
       <button type="button" onClick={onFullForm}>Sheet full form</button>
     </div>
@@ -78,6 +78,8 @@ it('opens the Tree & Shrub Fast Complete sheet when the flag rides the schedule 
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   expect(await screen.findByText('Tree and shrub sheet for svc-ts-on')).toBeInTheDocument();
   expect(assign).not.toHaveBeenCalled();
+  // This page opens no payment prompt of its own: the sheet offers Take payment now.
+  expect(screen.getByText('Tree and shrub sheet for svc-ts-on').closest('[data-collect]')).toHaveAttribute('data-collect', 'true');
 });
 
 it('keeps today\'s Dispatch deep link when the flag is false or absent', async () => {

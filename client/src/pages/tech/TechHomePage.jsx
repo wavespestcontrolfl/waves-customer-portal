@@ -58,7 +58,7 @@ import FastCompleteTreeShrubSheet from '../../components/tech/FastCompleteTreeSh
 import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
 import FastCompleteLawnSheet from '../../components/tech/FastCompleteLawnSheet';
 import {
-  isProjectBackedCompletion, shouldOpenLawnFastComplete, shouldOpenLawnReserviceFastComplete,
+  isProjectBackedCompletion, projectReportClosed, shouldOpenLawnFastComplete, shouldOpenLawnReserviceFastComplete,
   shouldOpenSpecialtyFastComplete, shouldOpenTreeShrubFastComplete,
 } from '../../lib/dispatchCompletionRouting';
 import { lawnSheetService } from './lawnSheetService';
@@ -896,11 +896,14 @@ export default function TechHomePage({ section = 'today' }) {
     else if (shouldOpenSpecialtyFastComplete(service, { stationMapOff, stationSheetOn })) setFastCompleteService(service);
     else openTypedCompletion(service);
   }, [stationMapOff, stationSheetOn, openProjectOrContinue, openLawnSheet]);
+  // A sent or closed linked report ends only a visit that completes through
+  // its project (isProjectBackedCompletion, as Dispatch asks it): a service-
+  // report visit with a leftover legacy project still opens its own sheet or
+  // form.
   const projectServices = withSavedCompletions((selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => (
     !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service)
     || saved.serviceIds.has(String(service.id))
-    || (!TERMINAL_STATUSES_VISIT.has(service.status)
-      && !['sent', 'closed'].includes(service.linkedProject?.status))
+    || (!TERMINAL_STATUSES_VISIT.has(service.status) && !projectReportClosed(service))
   )), { saved, myServices, scheduleError, selectedVisitKey });
   // Shared by every entry point that would otherwise call setRecapService
   // directly: a pest re-service under the gate opens the one-screen Fast
@@ -1257,6 +1260,9 @@ export default function TechHomePage({ section = 'today' }) {
             if (options?.refresh) fetchSchedule();
           }}
           onCompleted={() => { setTreeShrubFastService(null); fetchSchedule(); }}
+          // Take payment now on the saved view, as the report sheet offers it:
+          // this page opens no payment prompt of its own (Dispatch does).
+          collectOnSheet
           // "Full form" and "+ Other product" with no catalog go to the full
           // completion screen (the Dispatch typed-completion deep link).
           onFullForm={() => {
@@ -1324,6 +1330,8 @@ export default function TechHomePage({ section = 'today' }) {
           operatorId={staffIdForDevice}
           catalog={lawnFast.catalog}
           catalogError={lawnFast.catalogError}
+          // Take payment now on the saved view (as on the tree & shrub sheet above).
+          collectOnSheet
           onClose={(options) => {
             setLawnFast(null);
             if (options?.refresh) fetchSchedule();
