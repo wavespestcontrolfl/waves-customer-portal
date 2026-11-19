@@ -47,6 +47,27 @@ describe('Field view preference', () => {
     mount({ id: 'acct-1', role: 'admin' });
     expect(navigation.fieldView).toBe(false);
   });
+  // Pre-push P1: another tab on this phone can change the switch.
+  it("takes another tab's change at once, and ignores other keys", () => {
+    mount({ id: 'acct-1', role: 'admin' });
+    expect(navigation.fieldView).toBe(false);
+    localStorage.setItem('waves_admin_navigation:acct-1', JSON.stringify({ version: 2, fieldView: true }));
+    act(() => { window.dispatchEvent(new StorageEvent('storage', { key: 'waves_admin_navigation:acct-2' })); });
+    expect(navigation.fieldView).toBe(false);
+    act(() => { window.dispatchEvent(new StorageEvent('storage', { key: 'waves_admin_navigation:acct-1' })); });
+    expect(navigation.fieldView).toBe(true);
+    localStorage.clear();
+    act(() => { window.dispatchEvent(new StorageEvent('storage', { key: null })); });
+    expect(navigation.fieldView).toBe(false);
+  });
+  it("a menu change in a tab that missed another tab's switch keeps the newest saved value", () => {
+    mount({ id: 'acct-1', role: 'admin' });
+    // Another tab turned Field view on; this tab has had no event yet.
+    localStorage.setItem('waves_admin_navigation:acct-1', JSON.stringify({ version: 2, groups: {}, pins: [], fieldView: true }));
+    act(() => navigation.togglePin('today'));
+    expect(saved('acct-1')).toMatchObject({ fieldView: true, pins: ['today'] });
+    expect(navigation.fieldView).toBe(true);
+  });
   it('never applies to a login that is not an admin', () => {
     localStorage.setItem('waves_admin_navigation:acct-3', JSON.stringify({ version: 2, fieldView: true }));
     mount({ id: 'acct-3', role: 'technician' });

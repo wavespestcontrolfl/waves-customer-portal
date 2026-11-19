@@ -53,13 +53,29 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
     setAutoOpen(selection.groupId);
   }, [enabled, location.key, selection.groupId, selection.itemId]);
 
+  // Field view can change in another tab on this phone. A write here keeps
+  // the newest saved value unless this write changes it, so a tab that has
+  // not seen the other tab's switch never writes its old value back.
   const updatePreferences = (update) => setPreferences((current) => {
     const next = update(current);
-    if (user?.id) {
-      try { localStorage.setItem(preferenceKey(user.id), JSON.stringify({ ...next, version: PREFERENCE_VERSION })); } catch { /* optional preference */ }
-    }
-    return next;
+    if (!user?.id) return next;
+    const merged = next.fieldView === current.fieldView ? { ...next, fieldView: readFieldViewPreference(user.id) } : next;
+    try { localStorage.setItem(preferenceKey(user.id), JSON.stringify({ ...merged, version: PREFERENCE_VERSION })); } catch { /* optional preference */ }
+    return merged;
   });
+  // Another tab's write takes effect here at once: the tabs and the /admin
+  // landing read the switch. (A cleared storage reads as off.)
+  useEffect(() => {
+    if (!user?.id) return undefined;
+    const key = preferenceKey(user.id);
+    const onStorage = (event) => {
+      if (event.key !== null && event.key !== key) return;
+      const fieldView = readFieldViewPreference(user.id);
+      setPreferences((current) => (current.fieldView === fieldView ? current : { ...current, fieldView }));
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [user?.id]);
   const toggleGroup = (id) => {
     const open = Boolean(expanded[id]);
     if (open && id === autoOpen) setAutoOpen(null);

@@ -80,7 +80,7 @@ describe("App's /admin index and catch-all", () => {
     // Field view redirect in front of the admin shell.
     expect(adminRoutes).toContain('<Route index element={<AdminIndexRedirect />} />');
     expect(indexRedirect).toContain("<Navigate to={role === 'technician' || fieldView ? 'today' : 'dashboard'} replace />");
-    expect(fieldViewEntry).toContain("<Navigate to={landing} replace />");
+    expect(fieldViewEntry).toContain("<Navigate to={landing} replace state={FIELD_VIEW_LANDING_STATE} />");
     render(<MemoryRouter initialEntries={["/before", "/admin"]} initialIndex={1}>
       <Routes>
         <Route path="/admin">
