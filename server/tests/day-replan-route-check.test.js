@@ -440,6 +440,27 @@ describe('runRouteCheck', () => {
     replan.loadDayStops.mockResolvedValue([]);
   });
 
+  test('an unassigned visit with only a legacy time window leaves its date unmeasured (round 35)', async () => {
+    const unassigned = (id, extra) => stop(id, null, null, { technician_id: null, scheduled_date: '2026-11-20', ...extra });
+    const cases = [
+      [unassigned('u1', { time_window: '3 PM' }), 'UNASSIGNED_LEGACY_WINDOW'],
+      [unassigned('u2', { time_window: 'afternoon' }), 'UNASSIGNED_LEGACY_WINDOW'],
+      // A window start puts it in the occupancy read's held time; neither leaves it inert to every booking read.
+      [unassigned('u3', { window_start: '15:00:00', time_window: '3 PM' }), undefined],
+      [unassigned('u4', { time_window: '  ' }), undefined],
+    ];
+    for (const [row, skip] of cases) {
+      replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-20' ? [stop('s1', '10:00:00', null), row] : []));
+      const { conn, writes } = fakeConn();
+      await runRouteCheck({ conn, now: NOW });
+      const day = JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-20');
+      expect(day.skip).toBe(skip);
+      expect(day.stops).toBe(1);
+      expect(JSON.parse(writes[0][1].totals).next.unmeasured.includes('2026-11-20')).toBe(skip != null);
+    }
+    replan.loadDayStops.mockResolvedValue([]);
+  });
+
   test("a version-2 allocation's services are one stop: its allocation comes from the occupancy read", async () => {
     const mix = { version: 2, allocatedServiceIds: ['a1', 'a2'] };
     const member = (id) => stop(id, '09:00:00', null, {
