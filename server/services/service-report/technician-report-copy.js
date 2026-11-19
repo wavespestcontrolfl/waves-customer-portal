@@ -244,14 +244,19 @@ function contentLines(lines) {
 const SAFE_IDIOM_RE = /(?<![-\w])(?<!\b(?:pets?|kids?|child|children|family)\s)safe\s+(?:once|when|after|as\s+soon\s+as)\s+(?:it\s+is\s+|everything\s+is\s+|the\s+(?:product|application|treatment|area)\s+is\s+)?(?:fully\s+|completely\s+)?dry\b/gi;
 const TIMING_CONFIRM_RE = /\b(?:technician|tech)\b(?:(?!\b(?:not|never|no|didn['’]t|doesn['’]t|don['’]t|won['’]t|cannot|can['’]t|couldn['’]t|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|hasn['’]t|haven['’]t|hadn['’]t|shouldn['’]t|wouldn['’]t|fail(?:s|ed|ing)?|unable|without|refus(?:es|ed|ing)?|forg(?:ot|ets?|etting)|neglect(?:s|ed|ing)?|omit(?:s|ted|ting)?|declin(?:es|ed|ing)?|miss(?:es|ed|ing)?|need(?:s|ed|ing)?|yet|wait(?:s|ed|ing)?|await(?:s|ed|ing)?|pending|remain(?:s|ed|ing)?|plan(?:s|ned|ning)?|intend(?:s|ed|ing)?|expect(?:s|ed|ing)?|hop(?:es|ed|ing)?|tr(?:y|ies|ied|ying)|attempt(?:s|ed|ing)?|schedul(?:es|ed|ing)?|going|will|would|should|must|supposed)\b)[^.!?]){0,40}\bconfirm(?:s|ed|ing)?\b(?:(?!\b(?:not|nothing|neither|never|no)\b)[^.!?]){0,25}(?<!\b(?!(?:the|its|confirm(?:s|ed|ing)?|re-?entry|entry|reentry|drying|dry(?:ing)?|dry[-\s]?time|time|treatment)\b)[a-z][a-z'’-]*\s+)\btiming\b(?![^.!?]{0,30}\b(?:not|never|no|nothing|unavailable|unknown|unconfirmed|undetermined|pending|(?:wasn|weren|isn|aren|won|didn|doesn|hasn|haven|hadn|couldn|shouldn|wouldn)['’]t|cannot|can['’]t)\b)/i;
 
+// The four-section shape of the notes, whatever the switch: the sections, or
+// null. The PDF key reads it in both states (reportDependsOnWriterRules).
+function fourSectionShape(notes) {
+  const text = String(notes || '');
+  return text.trim() && text.length <= MAX_FOUR_SECTION_CHARS ? parseFourSections(text) : null;
+}
+
 // The four-section report's structure and its customer-copy violations,
 // whether or not it would publish (the edit heads-up names what an edit
 // added even when a refused word would drop the whole body). Null unless
 // the switch is live and the shape holds.
 function fourSectionReport(notes) {
-  const text = String(notes || '');
-  if (!text.trim() || !reportWriterRulesLive() || text.length > MAX_FOUR_SECTION_CHARS) return null;
-  const sections = parseFourSections(text);
+  const sections = reportWriterRulesLive() ? fourSectionShape(notes) : null;
   if (!sections) return null;
   const body = sections.map((section) => section.paragraphs.join(' ')).join(' ').trim();
   return { sections, body, violations: customerCopyViolations(body) };
@@ -437,6 +442,38 @@ function visitReportCustomerCopy(record) {
     || technicianReportCustomerCopy(record?.technician_notes);
 }
 
+// A record's service_data as an object ({} when absent or unreadable).
+function recordServiceData(service = {}) {
+  try {
+    const data = typeof service.service_data === 'string'
+      ? JSON.parse(service.service_data)
+      : service.service_data;
+    return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+// Whether a record's customer render depends on GATE_REPORT_WRITER_RULES.
+// The switch acts on a render in two places only: notes with the four-section
+// shape print as the summary only while it is on (fourSectionReport), and a
+// Today's Result card the render prints (the primary card and auto_send
+// companions) loses a four-section body while it is off (activity-indicators
+// withoutDarkFourSectionBody). Every other record renders the same in both
+// states. Read in both states: the shape, never the gated parse.
+function reportDependsOnWriterRules(service = {}) {
+  const serviceData = recordServiceData(service);
+  const cards = [
+    serviceData.typedReportSnapshot,
+    ...(Array.isArray(serviceData.companionReportSnapshots)
+      ? serviceData.companionReportSnapshots.filter((snap) => snap?.delivery === 'auto_send')
+      : []),
+  ];
+  return cards.some((snap) => snap && typeof snap === 'object' && snap.type
+    && snap.todaysResult?.bodyFormat === 'four_section')
+    || Boolean(fourSectionShape(service.technician_notes));
+}
+
 /**
  * PDF cache-key component. Stored report PDFs are keyed on the Pest
  * Pressure visibility signature only, so a summary now driven by the
@@ -446,49 +483,42 @@ function visitReportCustomerCopy(record) {
  *
  * Returns '' when the summary is recap/template-driven (keys unchanged, so
  * every existing cached PDF stays a valid hit) and a content-hashed suffix
- * when the technician report drives the rendered summary. Mirrors
- * report-data's summary-source decision: non-typed reports use the parsed
- * copy directly; typed reports only when the frozen snapshot's Today's
- * Result body came from the technician report.
+ * when the technician report drives the rendered summary, by the report's
+ * own rule (technicianReportDrivesSummary). A record whose render depends on
+ * GATE_REPORT_WRITER_RULES (reportDependsOnWriterRules) also gets '-fson' or
+ * '-fsoff': a flip changes its key both ways, and neither state matches a key
+ * stored before this suffix existed (that render's state is unknown, also
+ * when the parse is null in the state it was stored in). Every other record
+ * keeps its key.
  */
+
+// The writer-rules state, as a PDF key and a PDF payload name it. The browser
+// that renders a PDF fetches its own /data from the web process, so /data in
+// PDF mode names the state it built the payload in (`writerRules`), the
+// PDF document shows it on its root element (data-writer-rules), and for a
+// record whose render depends on the switch (reportDependsOnWriterRules) the
+// renderer prints only once the page shows the state the key was computed
+// under (pdf.js reportPdfReadySelector). A page built in the other state (a
+// rolling restart's overlap), or by a page bundle or server from before this
+// rule, never shows it: the render times out and nothing is stored. Every
+// other record renders the same in both states and waits for the root alone.
+function renderWriterRulesState() {
+  return reportWriterRulesLive() ? 'on' : 'off';
+}
+
 function summaryCopySignature(service = {}) {
-  let snapshot = null;
-  let companionSnapshots = [];
-  try {
-    const data = typeof service.service_data === 'string'
-      ? JSON.parse(service.service_data)
-      : service.service_data;
-    snapshot = data && typeof data === 'object' && !Array.isArray(data)
-      && data.typedReportSnapshot && typeof data.typedReportSnapshot === 'object'
-      && data.typedReportSnapshot.type
-      ? data.typedReportSnapshot
-      : null;
-    // Companion-only completions govern through their customer-visible
-    // companion snapshots (PDFs are customer-facing → auto_send only).
-    companionSnapshots = !snapshot && data && Array.isArray(data.companionReportSnapshots)
-      ? data.companionReportSnapshots.filter((snap) => snap
-        && typeof snap === 'object' && snap.delivery === 'auto_send')
-      : [];
-  } catch {
-    snapshot = null;
-    companionSnapshots = [];
-  }
+  const serviceData = recordServiceData(service);
   const parsed = technicianReportCustomerCopy(service.technician_notes);
-  // Mirrors report-data's promotion gate exactly (codex r35 #3420): the
-  // governing typed story must have ACCEPTED the body — bodySource stamped
-  // or a frozen reconcileConfirmed (the person's override) — else the PDF
-  // signature would diverge from the live summary and serve a stale cache.
-  const governing = [snapshot, ...(snapshot ? [] : companionSnapshots)]
-    .filter((snap) => snap?.todaysResult);
-  const typedStoryAcceptedBody = !governing.length
-    || governing.some((snap) => snap.todaysResult?.bodySource === 'technician_report'
-      // mirror report-data: a reconcile confirmation never accepts the body
-      // on a zero-state snapshot (codex r42)
-      || (snap.todaysResult?.reconcileConfirmed === true
-        && snap.activity?.score !== 0));
-  const drivesSummary = !!parsed?.body && typedStoryAcceptedBody;
-  if (!drivesSummary) return '';
-  return `-tr${crypto.createHash('sha256').update(parsed.body).digest('hex').slice(0, 8)}`;
+  // THE summary rule, as the report runs it for a customer (a PDF is
+  // customer-facing): technicianReportDrivesSummary on the frozen snapshots,
+  // through the dark four-section transform, with the completion's rejection
+  // and the trapping screens. The key then changes whenever the printed
+  // summary does, a gate flip included, and a cached PDF never keeps a
+  // summary the live report dropped (codex r35 #3420).
+  let state = '';
+  if (reportDependsOnWriterRules(service)) state = reportWriterRulesLive() ? '-fson' : '-fsoff';
+  if (!parsed?.body || !require('./activity-indicators').technicianReportDrivesSummary({ serviceData, body: parsed.body })) return state;
+  return `-tr${crypto.createHash('sha256').update(parsed.body).digest('hex').slice(0, 8)}${state}`;
 }
 
 // The full customer-copy screen the notes parser applies — shared banned
@@ -528,5 +558,7 @@ module.exports = {
   containsReportAccessCode,
   customerCopyViolations,
   summaryCopySignature,
+  renderWriterRulesState,
+  reportDependsOnWriterRules,
   MAX_REPORT_CHARS,
 };

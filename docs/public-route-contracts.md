@@ -3006,6 +3006,29 @@ report's own service line (same statuses as `nextAppointment`, no cross-line
 fallback), for the "What's next" line; `stripLiveOnlyScheduleFields` removes it
 from the PDF, static and sms_preview renders like `nextAppointment`. Both keys
 are absent for every other report.
+The gate is also the kill switch for what completion already froze: while it
+is off, a frozen Today's Result card whose body is four-section (`bodyFormat:
+'four_section'`) keeps its headline and carries no `body`, `bodySource`,
+`bodyFormat` or `reconcileConfirmed` (`withoutDarkFourSectionBody`,
+`activity-indicators.js`). The summary rule (`technicianReportDrivesSummary`)
+reads the cards through the same transform for every customer render: this
+payload, the PDF key (`summaryCopySignature`) and the visit notes on the other
+surfaces (`customerSafeVisitNotes`). A record's render depends on the gate
+(`reportDependsOnWriterRules`, `technician-report-copy.js`) when its notes have
+the four-section shape (they print as the summary only while it is on) or a
+card it prints (the primary card or an `auto_send` companion) has a
+four-section body. The PDF key of such a record also ends in `-fson` or
+`-fsoff`, by the gate, so a flip either way re-renders its cached PDF. The
+browser that renders a PDF fetches this payload itself, so in `mode=pdf` the
+payload carries `writerRules: 'on' | 'off'`, the state it was built in (no
+other mode carries the key). The PDF document shows it on its root element
+(`data-writer-rules`), and for such a record both PDF providers print only once
+that root shows the state the render's key was computed under
+(`reportPdfReadySelector` in `server/services/service-report/pdf.js`). A page
+built in the other state (a rolling restart's overlap), or by a page bundle or
+server from before this key, never matches: the render times out and nothing
+is stored. Every other record renders the same in both states and waits for
+the report root alone.
 
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
