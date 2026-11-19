@@ -109,6 +109,8 @@ describe('TrackPage changed-visit recovery', () => {
       visitChange: { kind: 'pending_rebook', nextActor: 'office' },
     }));
     expect(await screen.findByRole('heading', { name: /We're finding you a new time for your lawn care visit/i })).toBeInTheDocument();
+    expect(screen.getByText('This visit needs a new time. Call or text Waves for scheduling help.')).toBeInTheDocument();
+    expect(screen.queryByText(/your reschedule request/i)).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Call Waves' })).toHaveAttribute('href', 'tel:+19412975749');
     expect(screen.getByRole('link', { name: 'Text Waves' })).toHaveAttribute('href', 'sms:+19412975749');
     expect(screen.queryByText(/booked for/i)).not.toBeInTheDocument();

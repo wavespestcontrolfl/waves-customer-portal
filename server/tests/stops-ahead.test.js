@@ -85,6 +85,7 @@ function makeDb({
   });
   dbFn.countCall = () => dbFn.raw.mock.calls.find(([sql]) => /WITH target/.test(sql));
   dbFn.updateCalls = () => dbFn.raw.mock.calls.filter(([sql]) => /UPDATE scheduled_services/.test(sql));
+  dbFn.reReadCalls = () => dbFn.raw.mock.calls.filter(([sql]) => /SELECT MIN\(s\.stops_ahead_min_shown\)/.test(sql));
   dbFn.queries = queries;
   return dbFn;
 }
@@ -218,6 +219,27 @@ describe('computeStopsAhead', () => {
       ...NOT_A_STOP_STATUSES,
       3, TODAY, TODAY, TODAY,
     ]);
+  });
+
+  test('a parked NULL-window sibling is excluded from every floor read and write', async () => {
+    const target = baseSvc({ window_start: null });
+    const parked = baseSvc({
+      id: 'svc-parked', window_start: null,
+      customer_pick_by: '2026-08-14T22:00:00Z',
+    });
+    const db = makeDb({
+      svcRow: target, siblings: [parked], countN: 1,
+      rawFloor: null, reReadFloor: 1,
+    });
+
+    expect((await computeStopsAhead(db, target.id, { today: TODAY }))?.stopsAhead).toBe(1);
+    const [countSql] = db.countCall();
+    const [updateSql] = db.updateCalls()[0];
+    const [reReadSql] = db.reReadCalls()[0];
+    expect(countSql).toContain('(ss.customer_pick_by IS NULL OR ss.window_start IS NOT NULL)');
+    expect(updateSql).toContain('(s.customer_pick_by IS NULL OR s.window_start IS NOT NULL)');
+    expect(updateSql).toContain('(u.customer_pick_by IS NULL OR u.window_start IS NOT NULL)');
+    expect(reReadSql).toContain('(s.customer_pick_by IS NULL OR s.window_start IS NOT NULL)');
   });
 
   test('floor only lowers: stored 3, truth 1 → 1', async () => {

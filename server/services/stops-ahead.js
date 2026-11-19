@@ -212,6 +212,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
                     AND ss.scheduled_date = tr.scheduled_date
                     AND ss.customer_id = tr.customer_id
                     AND ss.window_start IS NOT DISTINCT FROM tr.window_start
+                    AND (ss.customer_pick_by IS NULL OR ss.window_start IS NOT NULL)
                     AND ss.stops_ahead_shown_date = ?::date) AS group_floor
            FROM target_row tr
            JOIN LATERAL (
@@ -405,6 +406,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
               AND s.scheduled_date = g.scheduled_date
               AND s.customer_id = g.customer_id
               AND s.window_start IS NOT DISTINCT FROM g.window_start
+              AND (s.customer_pick_by IS NULL OR s.window_start IS NOT NULL)
          )
          UPDATE scheduled_services u
             SET stops_ahead_min_shown = f.v,
@@ -414,6 +416,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
             AND u.scheduled_date = g.scheduled_date
             AND u.customer_id = g.customer_id
             AND u.window_start IS NOT DISTINCT FROM g.window_start
+            AND (u.customer_pick_by IS NULL OR u.window_start IS NOT NULL)
             AND (u.stops_ahead_shown_date IS DISTINCT FROM ?::date
                  OR u.stops_ahead_min_shown IS NULL
                  OR u.stops_ahead_min_shown > f.v)
@@ -449,6 +452,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
             AND s.scheduled_date = t.scheduled_date
             AND s.customer_id = t.customer_id
             AND s.window_start IS NOT DISTINCT FROM t.window_start
+            AND (s.customer_pick_by IS NULL OR s.window_start IS NOT NULL)
             AND s.stops_ahead_shown_date = ?::date`,
         [
           svc.id, svc.technician_id, svcDate, svc.window_start,

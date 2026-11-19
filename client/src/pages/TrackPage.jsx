@@ -641,7 +641,7 @@ function PendingRebookCard({ data }) {
         We're finding you a new time for your {data.service?.type?.toLowerCase() || 'service'} visit.
       </h1>
       <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
-        Your reschedule request is with our office. Call or text us if you need help.
+        This visit needs a new time. Call or text Waves for scheduling help.
       </div>
       <OfficeActions />
       <ClientMeta data={data} />
