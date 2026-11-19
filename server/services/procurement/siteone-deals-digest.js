@@ -44,8 +44,9 @@ const MAKER_DOMAINS = [
 ];
 const SENDER_DOMAINS = [SITEONE_DOMAIN, ...MAKER_DOMAINS];
 
-// Order, cart, account and auto-reply mail is never a deal, whatever words it carries.
-const TRANSACTIONAL_SUBJECT = /invoice|order summary|order has been submitted|order\b.*\bis ready|shopping cart|ewallet|automatic reply|out of office|statement|payment received|password|verify your/i;
+// Order, cart, account, support-case and auto-reply mail is never a deal, whatever words it
+// carries. A support case notice names its case number: "Case: CS0012345 has been updated."
+const TRANSACTIONAL_SUBJECT = /invoice|order summary|order has been submitted|order\b.*\bis ready|shopping cart|ewallet|automatic reply|out of office|statement|payment received|password|verify your|\bcase(?:\s+number)?\s*[:#]?\s*[a-z]{0,4}\d{5,}/i;
 
 // One entry per kind of deal word. promo/promotion share an entry, and "cash
 // discount" is not also counted as "discount", so "two different deal words"

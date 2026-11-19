@@ -43,6 +43,7 @@ describe('isDealEmail', () => {
     ['Price increase with attachment', { subject: 'Price increase', has_attachments: true, body_text: 'See the Early Order Program with cash discounts.' }],
     ['price-match reply with attachment', { subject: 'RE: Price-match request: 3 items (up to 16% per unit)', has_attachments: true }],
     ['maker domain subdomain', { from_address: 'news@mail.basf.com', subject: 'Fall rebate is open' }],
+    ['sold by the case, no case number', { subject: 'Buy 5 cases, get 1 case free: 10% off' }],
   ])('deal: %s', (_label, over) => {
     expect(isDealEmail(email(over))).toBe(true);
   });
@@ -54,6 +55,10 @@ describe('isDealEmail', () => {
     ['shopping cart', { subject: 'Your SiteOne shopping cart is ready to go.' }],
     ['eWallet', { subject: 'Important: A credit card has been deleted from your eWallet.' }],
     ['automatic reply', { subject: 'Automatic reply: SDS request' }],
+    // Nov 9, 2026 bell: a support reply about redeeming points, with four inline logo images.
+    ['SiteOne case notice', { from_address: 'customersupport@ec.siteone.com', subject: 'Case: CS0012345 has been updated.', has_attachments: true, body_text: 'You can redeem the points by logging into your siteone.com account.' }],
+    ['case number reply', { subject: 'RE: Case Number: CS0012345', body_text: 'Special pricing and a rebate are listed below.' }],
+    ['case # notice', { subject: 'Case #01234567 updated', has_attachments: true, body_text: 'Ask about the promo.' }],
     ['order is ready', { subject: 'Order 55555 is ready for pickup', body_text: 'promo special' }],
     ['deal words from an unlisted domain', { from_address: 'sales@example.com', subject: 'Big promo and rebate sale' }],
     ['lookalike domain', { from_address: 'srep@siteone.com.evil.example', subject: 'Pest Specials' }],
