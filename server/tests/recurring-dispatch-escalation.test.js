@@ -16,7 +16,7 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
 const db = require('../models/db');
 const eligibility = require('../services/auto-dispatch/eligibility');
 const notifications = require('../services/notification-service');
-const { flagUnplacedVisits } = require('../services/auto-dispatch/audit');
+const { flagUnplacedVisits, namedVisitAction } = require('../services/auto-dispatch/audit');
 const knex = require('knex')({ client: 'pg' });
 
 const retire = jest.fn();
@@ -103,7 +103,11 @@ test('unplaced visits are escalated before the lock window through the existing 
   expect(notifications.notifyAdmin).toHaveBeenCalledWith(
     'schedule_conflict', 'Schedule — find a time for a recurring visit',
     'The visit is due Aug 20 and has no time yet; check availability and customer preferences in dispatch.',
-    expect.objectContaining({ bell: true, dedupeKey: 'recurring-dispatch:s1:2026-08-20', refreshOnDedupe: true, trx: db }),
+    expect.objectContaining({
+      bell: true,
+      link: '/admin/dispatch?tab=schedule&date=2026-08-20&appointment=s1',
+      dedupeKey: 'recurring-dispatch:s1:2026-08-20', refreshOnDedupe: true, trx: db,
+    }),
   );
   // A card still in the old words takes the new ones quietly; any other change rings.
   const { ringOnRefresh } = notifications.notifyAdmin.mock.calls[0][3];
@@ -178,6 +182,29 @@ describe('recurring visit with no arrival time and no due date', () => {
         trx: db,
       }),
     );
+  });
+
+  test('shows the saved series choice and keeps the appointment-focused management link', async () => {
+    scanFindsOnlyWindowless();
+    query.first = jest.fn()
+      .mockResolvedValueOnce({ ...windowless, status: 'pending', window_start: null, recurring_dispatch_due_date: null })
+      .mockResolvedValueOnce({ first_name: 'Sample', last_name: 'Tester' })
+      .mockResolvedValueOnce({ scheduled_date: '2026-01-10', recurring_pattern: 'quarterly' });
+    notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
+
+    await flagUnplacedVisits({ lockWindowDays: 14 }, now);
+
+    const opts = notifications.notifyAdmin.mock.calls[0][3];
+    expect(opts.detail).toBe('Series started 2026-01-10 (quarterly). The dispatch due date is missing.');
+    expect(opts.link).toBe('/admin/dispatch?tab=schedule&date=2026-08-20&appointment=s9');
+  });
+
+  test('the no-due-date scan applies the same live customer-pick suppression as the due-date lane', async () => {
+    scanFindsOnlyWindowless();
+    notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
+    await flagUnplacedVisits({ lockWindowDays: 14 }, now);
+    const pickPredicates = query.where.mock.calls.filter(([arg]) => arg && arg.name === 'pickWindowClosed');
+    expect(pickPredicates.length).toBeGreaterThanOrEqual(2); // candidate scan + locked recheck
   });
 
   // Dispatch audit Fix 1 (owner 2026-11-08): the words change once, 7 days before the visit, so a
@@ -423,6 +450,20 @@ describe('recurring visit with no arrival time and no due date', () => {
     await flagUnplacedVisits({ lockWindowDays: 14 }, now);
     expect(retireStatements[1].bindings).toContain('s9');
   });
+});
+
+test.each(['Bracket [VIP]', 'Emoji 🐜 Name'])('an alert-rule-breaking customer name falls back to safe generic copy: %s', async (name) => {
+  const [first_name, ...last] = name.split(' ');
+  const conn = () => ({
+    where() { return this; },
+    first: async () => ({ first_name, last_name: last.join(' ') }),
+  });
+  await expect(namedVisitAction(
+    'customer-1',
+    [(who) => `set a time for ${who}'s visit`],
+    'set a time for a recurring visit',
+    conn,
+  )).resolves.toBe('set a time for a recurring visit');
 });
 
 describe('missing-geo notice close', () => {

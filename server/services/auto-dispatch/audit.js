@@ -285,7 +285,8 @@ const SEASONAL_ROUTING_HORIZON_DAYS = 14;
 async function namedVisitAction(customerId, templates, generic, conn = db) {
   const { lookupCustomerName, fitAction } = require('../admin-alert-names');
   const name = await lookupCustomerName(conn, customerId);
-  return name ? fitAction('Schedule', name, templates) : generic;
+  const action = name ? fitAction('Schedule', name, templates) : generic;
+  return require('../admin-alert-compose').breaksAlertRules(action) ? generic : action;
 }
 
 function noWindowVisits(conn, from, to) {
@@ -295,6 +296,7 @@ function noWindowVisits(conn, from, to) {
     .whereNotNull('s.recurring_parent_id')
     .whereNull('s.window_start')
     .whereNull('s.recurring_dispatch_due_date')
+    .where(pickWindowClosed)
     .whereIn('s.status', ['pending', 'confirmed'])
     .where('s.scheduled_date', '>=', from)
     .where('s.scheduled_date', '<=', to)
@@ -466,6 +468,24 @@ async function prepareNoWindowNotices(nowDate, today, to) {
   return rows;
 }
 
+// The office already chose this visit's series. Show that saved choice in
+// the alert instead of making dispatch infer it from the occurrence alone.
+async function noWindowSeriesDetail(trx, row) {
+  try {
+    const root = await trx('scheduled_services')
+      .where({ id: row.recurring_parent_id, customer_id: row.customer_id })
+      .first('scheduled_date', 'recurring_pattern');
+    const started = root?.scheduled_date ? toDateStr(root.scheduled_date) : null;
+    const series = started
+      ? `Series started ${started}${root.recurring_pattern ? ` (${root.recurring_pattern})` : ''}.`
+      : null;
+    return [series, 'The dispatch due date is missing.'].filter(Boolean).join(' ');
+  } catch (err) {
+    logger.warn(`[auto-dispatch] recurring series context unavailable (${err.message})`);
+    return 'The dispatch due date is missing.';
+  }
+}
+
 // One notice per windowless recurring visit. Same row lock + shared dedupe as
 // the due-date notice, so a staff placement that wins the lock makes this a no-op.
 // `soonEnd` (soonEndFor): a visit on or before it gets the SOON_DAYS words.
@@ -486,7 +506,7 @@ async function flagNoWindowVisits(candidates, today, to, soonEnd) {
       const current = await noWindowVisits(trx, today, to)
         .where({ 's.id': row.id, 's.customer_id': row.customer_id, 's.scheduled_date': date })
         .forNoKeyUpdate('s')
-        .first('s.id');
+        .first('s.*');
       if (!current) return null;
       // The plan may have lapsed since actionableNoWindowRows read it; the
       // visit's row lock does not hold recurring_plan_alerts (Codex #6208 r9 P2).
@@ -506,6 +526,7 @@ async function flagNoWindowVisits(candidates, today, to, soonEnd) {
         bell: true,
         dedupeKey: noWindowKey(row),
         refreshOnDedupe: true,
+        detail: await noWindowSeriesDetail(trx, current),
         metadata: { scheduledServiceId: row.id, customerId: row.customer_id, scheduledDate: date },
         trx,
       });
@@ -637,7 +658,7 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
           'find a time for a recurring visit', trx),
         why: `The visit is due ${shortDateET(`${due}T12:00:00Z`)} and has no time yet; check availability and customer preferences in dispatch.`,
         severity: 'needs-you',
-        link: `/admin/dispatch?tab=schedule&date=${due}`,
+        link: `/admin/dispatch?tab=schedule&date=${due}&appointment=${encodeURIComponent(row.id)}`,
         subject: { type: 'visit', id: String(row.id) },
         doneWhen: 'visit_has_time',
         who: 'person',
