@@ -2,6 +2,9 @@
 // Every word comes from the fact bank's reviewed copy; no model is called.
 // buildIssue takes no planner (pre-push round 17), so a case that needs a
 // fixed plan mocks the plan module; every other case runs the real planner.
+const { execFileSync } = require('child_process');
+const path = require('path');
+
 jest.mock('../services/pest-insider/plan', () => {
   const actual = jest.requireActual('../services/pest-insider/plan');
   return { ...actual, planIssue: jest.fn(actual.planIssue) };
@@ -84,6 +87,22 @@ describe('buildIssue', () => {
     expect(() => buildIssue({ sendDate: '2027-02-30' })).toThrow(/not a real calendar date/);
     expect(planIssue).not.toHaveBeenCalled();
   });
+
+  test('the builder loads and builds offline: no database module, under any NODE_ENV (pre-push round 21)', () => {
+    // models/db.js opens Knex and throws for a NODE_ENV the knexfile lacks.
+    // The send validator's fact register used to load it at import.
+    const probe = [
+      "const { buildIssue } = require('./services/pest-insider');",
+      "const r = buildIssue({ sendDate: '2026-12-03' });",
+      "const loaded = Object.keys(require.cache).filter((k) => /[\\\\/]models[\\\\/]db\\.js$|[\\\\/]node_modules[\\\\/]knex[\\\\/]/.test(k));",
+      "process.stdout.write('\\nRESULT ' + JSON.stringify({ ok: r.ok, factId: r.diagnostics.factId, loaded }) + '\\n');",
+    ].join('\n');
+    const out = execFileSync(process.execPath, ['-e', probe], {
+      cwd: path.join(__dirname, '..'), env: { ...process.env, NODE_ENV: 'offline-sample' }, encoding: 'utf8', timeout: 60000,
+    });
+    const line = out.split('\n').find((l) => l.startsWith('RESULT '));
+    expect(JSON.parse(line.slice('RESULT '.length))).toEqual({ ok: true, factId: 'T03', loaded: [] });
+  }, 60000);
 
   test('a planner passed by the caller is ignored (pre-push round 17)', () => {
     const plan = jest.fn(() => ({ leadFact: { ...A01, lead: ['Colonies hold 9 million ants.', 'They are everywhere.'] }, idItem: WFA }));
