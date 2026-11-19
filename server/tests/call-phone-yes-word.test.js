@@ -95,6 +95,21 @@ describe("the caller's words", () => {
     expect(callerWordsOf(evidence(choice('Just bill me each time.')), both)).toBeNull();
   });
 
+  test('on an inbound call too, a caller side that introduces itself as Waves staff may be staff: nothing is grounded', () => {
+    const swapped = 'Caller: Hi, this is Sam with Waves, how can I help?\nAgent: I have a quote from you.\nCaller: Just bill me each time.\nAgent: Okay.';
+    expect(callerWordsOf(evidence(choice('Just bill me each time.')), { transcript: swapped })).toBeNull();
+    expect(callerWordsOf(evidence(choice('Just bill me each time.')), { transcript: swapped.replace('Caller: Hi, this is Sam with Waves,', 'Caller: Hi,') }))
+      .toBe('Just bill me each time.');
+  });
+
+  test("one speaker's lines until the other speaks are one turn: a condition on the caller's next line is in front of the office", () => {
+    const split = 'Agent: How would you like to pay?\nCaller: Bill me each time\nCaller: but only if the price stays the same.\nAgent: Okay.';
+    expect(callerWordsOf(evidence(choice('Bill me each time')), { transcript: split })).toBe('Bill me each time but only if the price stays the same.');
+    // A short quote must still be the whole turn, with all of its lines.
+    const short = 'Agent: How would you like to pay?\nCaller: Per application.\nCaller: Only if the price stays the same.\nAgent: Okay.';
+    expect(callerWordsOf(evidence(choice('Per application')), { transcript: short })).toBeNull();
+  });
+
   test('none: null', () => {
     expect(callerWordsOf({}, talk('x'))).toBeNull();
     expect(callerWordsOf(null, talk('x'))).toBeNull();

@@ -59,21 +59,30 @@ const startedSql = () => require('./sms-pending-conversations').callStartedAtSql
 
 // The caller's own words for the plan choice (a string), or null. The shared grounding tools ground each billing_choice
 // evidence quote labeled the caller's in a recording transcript (a short quote must be a whole caller turn), with
-// outbound labels oriented the way the triage flags read them. Nothing is grounded in an unlabeled or one-speaker
-// transcript, or on an outbound call whose roles are not known: there the labels may be swapped unless the agent
-// side, and only it, introduces itself as Waves staff (the triage flags' test). The words are the caller's latest turn
-// that says a grounded quote at any length, found with the tools' own normalization ("9am" = "9 a.m."), and always the
-// whole turn: a later turn, or a later sentence, that takes the choice back is in front of the office.
+// outbound labels oriented the way the triage flags read them. A turn is all of one speaker's lines until the other
+// speaks: a condition on the caller's next line ("but only if the price stays the same") is part of the same answer.
+// Nothing is grounded in an unlabeled or one-speaker transcript, or where the labels may be swapped: on any call when
+// the caller side introduces itself as Waves staff (the triage flags' test, on each line), and on an outbound call
+// unless the agent side, and only it, does. The words are the caller's latest turn that says a grounded quote at any
+// length, found with the tools' own normalization ("9am" = "9 a.m."), and always the whole turn: a later turn, or a
+// later sentence, that takes the choice back is in front of the office.
 function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   const quotes = (Array.isArray(extraction?.evidence) ? extraction.evidence : [])
     .filter((e) => BILLING_CHOICE_PATHS.has(e?.field_path) && e.speaker === 'caller' && typeof e.quote === 'string' && e.quote.trim());
   if (!quotes.length) return null;
   const { parseTurns, turnsHolding, normalize } = require('./call-reschedule-agreement').groundingTools;
   const { orientTranscriptForOutbound, STAFF_INTRO_RE } = require('./call-triage-flags');
-  const turns = parseTurns(orientTranscriptForOutbound(transcript, outbound));
-  if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return null;
-  const introduces = (agent) => turns.some((t) => t.agent === agent && STAFF_INTRO_RE.test(t.raw));
-  if (outbound && (!introduces(true) || introduces(false))) return null;
+  const lines = parseTurns(orientTranscriptForOutbound(transcript, outbound));
+  if (!lines || new Set(lines.map((t) => t.agent)).size < 2) return null;
+  const introduces = (agent) => lines.some((t) => t.agent === agent && STAFF_INTRO_RE.test(t.raw));
+  if (introduces(false) || (outbound && !introduces(true))) return null;
+  const turns = [];
+  for (const line of lines) {
+    const last = turns[turns.length - 1];
+    if (last && last.agent === line.agent) last.raw = `${last.raw} ${line.raw}`;
+    else turns.push({ agent: line.agent, raw: line.raw });
+  }
+  for (const turn of turns) turn.ns = normalize(turn.raw);
   const grounded = quotes.filter((e) => turnsHolding(turns, e.quote, 'caller').length).map((e) => normalize(e.quote)).filter(Boolean);
   const turn = turns.filter((t) => !t.agent).reverse().find((t) => grounded.some((ns) => ` ${t.ns} `.includes(` ${ns} `)));
   return turn ? String(turn.raw || '').replace(/\s+/g, ' ').trim() : null;
