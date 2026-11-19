@@ -1161,6 +1161,11 @@ const PUBLIC_BODIES = [
   'United States Department of Agriculture', 'U.S. Department of Agriculture', 'USDA',
   'American Mosquito Control Association', 'Entomological Society of America', 'National Pesticide Information Center',
   'Florida Fish and Wildlife Conservation Commission', 'Florida Medical Entomology Laboratory', 'National Weather Service',
+  // Sources the 2026-11-18 customer-question briefs cite by name, and the
+  // building code they cite. Penn State is listed only under its full name:
+  // the "the <first word>" pairs below would otherwise clear "The Penn family".
+  'NC State Extension', 'North Carolina State University', 'Pennsylvania State University Extension',
+  'Federal Trade Commission', 'National Park Service', 'Florida Building Code',
 ];
 
 function approvedCompetitorNames() {

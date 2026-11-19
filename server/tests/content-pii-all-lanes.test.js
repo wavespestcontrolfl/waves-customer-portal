@@ -150,6 +150,9 @@ describe.each(LANES)('%s public-entity exemptions', (_lane, brief) => {
     'a cited trade association': 'Data from the National Pest Management Association shows termites cost homeowners billions each year.',
     'a university extension citation': 'The University of Florida IFAS Extension recommends inspecting mulch beds near the slab.',
     'a state agency citation': 'The Florida Department of Agriculture and Consumer Services licenses every pest control operator.',
+    'an out-of-state extension citation': 'NC State Extension and Pennsylvania State University Extension both say not to cut a hammerhead worm found in a Sarasota yard.',
+    'a federal agency citation': 'The Federal Trade Commission and the National Park Service both publish guidance for homeowners in Venice.',
+    'a building code citation': 'The Florida Building Code requires termite protection for every new home in Bradenton.',
   };
 
   test.each(Object.entries(PUBLIC))('live: %s passes the check', (_label, body) => {
@@ -199,6 +202,12 @@ describe.each(LANES)('%s public-entity exemptions', (_lane, brief) => {
   test('live: "The <surname> family" still holds the draft when the surname starts a competitor name', () => {
     process.env[GATE] = 'true';
     const r = evalLane(brief, 'The Massey family in Parrish had ants in the kitchen again.');
+    expect(r.checks.redaction_passed.ok).toBe(false);
+  });
+
+  test('live: "The Penn family" still holds the draft (Penn State is listed only by its full name)', () => {
+    process.env[GATE] = 'true';
+    const r = evalLane(brief, 'The Penn family in Parrish had ants in the kitchen again.');
     expect(r.checks.redaction_passed.ok).toBe(false);
   });
 

@@ -550,3 +550,100 @@ describe('regional service-diversity manifest', () => {
     expect(plan).toContain('How we put this list together');
   });
 });
+
+// ── customer-question manifest, 2026-11-18 (CQ01-CQ12) ───────────────
+// A separate manifest, like the regional one above. Seed it with
+// `--file=server/data/customer-question-briefs-20261118.json`.
+describe('customer-question manifest 2026-11-18', () => {
+  const manifest = seeder.loadManifest(path.join(__dirname, '../data/customer-question-briefs-20261118.json'));
+  const gate = require('../services/content/topic-targeting-gate');
+  const { checkHubLinkPresent, checkRedactionPassed } = require('../services/content/content-quality-gate')._internals;
+  const ids = manifest.briefs.map((b) => b.id);
+
+  test('loads twelve briefs whose ids, slugs and drip windows are unique, also against the other shipped manifests', () => {
+    expect(ids).toEqual(['CQ01', 'CQ02', 'CQ03', 'CQ04', 'CQ05', 'CQ06', 'CQ07', 'CQ08', 'CQ09', 'CQ10', 'CQ11', 'CQ12']);
+    const windows = manifest.briefs.map((b) => b.window);
+    expect(new Set(windows).size).toBe(windows.length);
+    // The queue key is catseed:v1:<id>, so an id shared with another manifest
+    // would overwrite that manifest's row at seed time.
+    const others = [
+      ...seeder.loadManifest().briefs,
+      ...seeder.loadManifest(path.join(__dirname, '../data/service-diversity-briefs-20260924.json')).briefs,
+    ];
+    expect(ids.filter((id) => others.some((b) => b.id === id))).toEqual([]);
+    const slugs = manifest.briefs.map((b) => b.slug);
+    expect(slugs.filter((slug) => others.some((b) => b.slug === slug))).toEqual([]);
+  });
+
+  test('every pinned title and slug passes the framing gate, and every title passes the publish name check', () => {
+    const failures = [];
+    for (const brief of manifest.briefs) {
+      for (const [where, text] of [['working_title', brief.working_title], ['slug', gate._internals.slugWords(brief.slug)]]) {
+        const reason = gate.geoBlockReason(String(text || ''));
+        if (reason) failures.push(`${brief.id} ${where}: ${reason} — ${text}`);
+      }
+      // The runner hands the working title to the writer as the title
+      // direction; a title the name check reads as a person holds the draft.
+      const named = checkRedactionPassed({ body: 'Plain text for the check. It names Sarasota once.', frontmatter: { title: brief.working_title } });
+      if (!named.ok) failures.push(`${brief.id} working_title: ${named.reason} — ${brief.working_title}`);
+    }
+    expect(failures).toEqual([]);
+  });
+
+  // A post that is not on a blocked pest can still mention one (CQ01 covers
+  // roaches after a treatment). faq_required is the operator FAQ mandate the
+  // quality gate and the runner's guardrails honor, so the curated FAQ is not
+  // read as an FAQ on a blocked topic.
+  test('an FAQ is asked for, and composes as required, only on the seven topics clear of the FAQ-blocked pests', () => {
+    const blocked = manifest.briefs.filter((b) => seeder._internals.blockedTopicIdFor(b)).map((b) => b.id);
+    expect(blocked).toEqual(['CQ02', 'CQ03', 'CQ05', 'CQ07', 'CQ10']);
+    const faq = manifest.briefs.filter((b) => (b.schema_types || []).includes('FAQPage')).map((b) => b.id);
+    expect(faq).toEqual(['CQ01', 'CQ04', 'CQ06', 'CQ08', 'CQ09', 'CQ11', 'CQ12']);
+    for (const id of ids) {
+      expect([id, composeSeedBrief(manifest, id).voice_constraints.operator_brief.faq_required]).toEqual([id, faq.includes(id)]);
+    }
+  });
+
+  // The manifest notes tell the writer to use each outline label (the words
+  // before its first colon) and each FAQ question word for word as a heading.
+  // The live publish name check reads two capitalized words in a heading as a
+  // person and holds the draft, so a label it flags would hold every draft.
+  test('every outline label and FAQ question passes the live publish name check as a heading', () => {
+    const { checkRedactionPassedAllLanes } = require('../services/content/content-quality-gate')._internals;
+    const prior = process.env.GATE_CONTENT_PII_ALL_LANES;
+    process.env.GATE_CONTENT_PII_ALL_LANES = 'true';
+    try {
+      const failures = [];
+      const headingFails = (heading) => !checkRedactionPassedAllLanes({ body: `## ${heading}\n\nGuidance for homes in Sarasota and Bradenton.`, frontmatter: {} }).ok;
+      for (const brief of manifest.briefs) {
+        for (const item of brief.outline) {
+          const colon = item.indexOf(':');
+          const label = (colon > 0 ? item.slice(0, colon) : item).trim();
+          const headings = /^faq$/i.test(label)
+            ? item.slice(colon + 1).split(';').map((q) => q.trim()).filter(Boolean).map((q) => `${q.charAt(0).toUpperCase()}${q.slice(1)}?`)
+            : [label];
+          for (const heading of headings) if (headingFails(heading)) failures.push(`${brief.id}: ${heading}`);
+        }
+      }
+      expect(failures).toEqual([]);
+      // The check is live in this test: a name in a heading still holds the draft.
+      expect(headingFails('What John Smith found')).toBe(true);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_CONTENT_PII_ALL_LANES;
+      else process.env.GATE_CONTENT_PII_ALL_LANES = prior;
+    }
+  });
+
+  test.each(['CQ01', 'CQ02', 'CQ03', 'CQ04', 'CQ05', 'CQ06', 'CQ07', 'CQ08', 'CQ09', 'CQ10', 'CQ11', 'CQ12'])('%s composes as a regional post with a hub link the gate accepts, a CTA route and the series rule', (id) => {
+    const brief = composeSeedBrief(manifest, id);
+    expect(brief.city).toBeNull();
+    const writerBody = brief.internal_links_to_add.map((href) => `[required link](${href})`).join('\n');
+    expect(checkHubLinkPresent({ body: writerBody }, brief)).toEqual({ ok: true });
+    const operatorBrief = brief.voice_constraints.operator_brief;
+    const binding = operatorBrief.binding_instructions.join(' ');
+    expect(binding).toContain('Southwest-Florida-regional');
+    expect(binding).toContain('CUSTOMER-QUESTION SERIES');
+    expect(operatorBrief.cta_directives.join(' ')).toMatch(/\/pest-control-quote\/|\/contact\//);
+    expect(operatorBrief.outline.join(' ')).toMatch(/what waves does and does not do/i);
+  });
+});
