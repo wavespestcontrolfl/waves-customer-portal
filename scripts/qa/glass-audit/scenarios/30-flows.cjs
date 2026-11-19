@@ -170,6 +170,61 @@ const rate = {
 };
 
 // ---------------------------------------------------------------------------
+// /careers/offer/:token  (CareersOfferPage.jsx ← server/routes/public-careers-offer.js)
+// Job offer link for an applicant. Fictional people only; the token is 64 hex
+// like the interview link. Dates are computed from today so the open state
+// never ages into an expired one.
+const OFFER_START = etDateString(addETDays(new Date(), 30));
+const OFFER_STEP = etDateString(addETDays(new Date(), 120));
+const OFFER_SENT = etDateString(addETDays(new Date(), -1));
+const OFFER_EXPIRES = addETDays(new Date(), 6).toISOString();
+const OFFER_SIGNED = addETDays(new Date(), 1).toISOString();
+// ---------------------------------------------------------------------------
+const OFFER_PAYLOAD = {
+  state: 'open',
+  firstName: 'Jordan',
+  jobTitle: 'Pest Control Technician',
+  startDate: OFFER_START,
+  hourlyRate: '23.00',
+  stepRate: '25.00',
+  stepEffectiveOn: OFFER_STEP,
+  hoursLine: '40 paid hours each full week, four 10-hour days, Monday to Thursday',
+  reportTo: 'Sam Carter, owner',
+  payDayLine: 'Every Friday, for the week before',
+  owner: { name: 'Sam Carter', title: 'owner', sentOn: OFFER_SENT },
+  expiresAt: OFFER_EXPIRES,
+  textConsent: false,
+  signedName: null,
+  signedAt: null,
+  terms: {
+    title: 'Technician Terms',
+    markdown: '## Hours\nFour 10-hour days, Monday to Thursday.\n\n## Pay\nPaid every Friday, for the week before.',
+  },
+};
+const offerHandle = (payload) => ({ method, path }) => {
+  if (method === 'GET' && path === `/api/public/careers/offer/${HEX64_A}`) return ok(payload);
+  return null;
+};
+const careersOffer = {
+  id: 'careers-offer', family: 'flow', surface: 'customer', role: 'public token', route: '/careers/offer/:token',
+  url: `/careers/offer/${HEX64_A}`, ready: 'Accept and sign', extraWidths: true, settle: 900,
+  handle: offerHandle(OFFER_PAYLOAD),
+  states: [
+    { name: 'open' },
+    {
+      name: 'signed', ready: 'Welcome to Waves',
+      handle: offerHandle({ ...OFFER_PAYLOAD, state: 'signed', signedName: 'Jordan Rivera', signedAt: OFFER_SIGNED }),
+    },
+    {
+      name: 'expired', ready: 'Please call',
+      handle: offerHandle({ state: 'expired', message: 'This offer closed last week. Please call Sam at (941) 555-0100 if you still want the job.', contactPhone: '(941) 555-0100' }),
+    },
+    { name: 'not-valid', ready: 'This link is not valid.', handle: () => ({ status: 404, body: { error: 'Not found' } }) },
+    { name: 'error', ready: 'load that offer link', handle: () => serverError() },
+  ],
+};
+
+// ---------------------------------------------------------------------------
 // /card/:token  (CardPage.jsx ← server/routes/card-public.js → services/customer-card.js)
 // ---------------------------------------------------------------------------
 const CARD_PAYLOAD = {
@@ -341,6 +396,7 @@ module.exports = [
   appointment,
   prepGuide,
   rate,
+  careersOffer,
   digitalCard,
   serviceOutline,
   newsletterArchive,
