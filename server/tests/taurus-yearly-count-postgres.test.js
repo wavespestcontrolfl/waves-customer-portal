@@ -5,8 +5,8 @@
  * and both product matches (catalog product_id, older product_name rows) are
  * the database's own answers.
  *
- * Self-skips without TAURUS_TEST_DATABASE_URL, e.g.:
- *   TAURUS_TEST_DATABASE_URL=postgresql://localhost:5432/waves_test \
+ * Self-skips without DATABASE_URL (CI runs it in the server-db job), e.g.:
+ *   DATABASE_URL=postgresql://localhost:5432/waves_test \
  *     ~/.claude/bin/jest-slot --runInBand tests/taurus-yearly-count-postgres.test.js
  */
 jest.mock('../models/db', () => jest.fn());
@@ -16,7 +16,7 @@ const knexLib = require('knex');
 const { randomUUID } = require('crypto');
 const { taurusYearlyCount } = require('../services/taurus-yearly-count');
 
-const SKIP = !process.env.TAURUS_TEST_DATABASE_URL;
+const SKIP = !process.env.DATABASE_URL;
 const describeOrSkip = SKIP ? describe.skip : describe;
 const NOW = new Date('2026-11-19T15:00:00Z');
 
@@ -42,7 +42,7 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
   }
 
   beforeAll(async () => {
-    const url = new URL(process.env.TAURUS_TEST_DATABASE_URL);
+    const url = new URL(process.env.DATABASE_URL);
     if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) || url.pathname !== '/waves_test') {
       throw new Error('This test requires a local waves_test database');
     }

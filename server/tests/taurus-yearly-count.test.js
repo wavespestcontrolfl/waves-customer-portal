@@ -20,6 +20,15 @@ describe('etYearBounds', () => {
     // 7 PM ET Dec 31 2026 (00:00Z Jan 1) is still 2026.
     expect(etYearBounds(new Date('2027-01-01T00:00:00Z')).year).toBe(2026);
   });
+
+  it("uses the visit's own scheduled date when it has one (a December visit closed out in January)", () => {
+    const jan2 = new Date('2027-01-02T15:00:00Z');
+    expect(etYearBounds(jan2, '2026-12-30')).toEqual({ year: 2026, yearStart: '2026-01-01', nextYearStart: '2027-01-01' });
+    // node-pg hands a DATE back as a Date at local midnight; the calendar day is what counts.
+    expect(etYearBounds(jan2, new Date('2026-12-30T05:00:00Z')).year).toBe(2026);
+    expect(etYearBounds(jan2, null).year).toBe(2027);
+    expect(etYearBounds(jan2, 'not a date').year).toBe(2027);
+  });
 });
 
 describe('taurusYearlyCount', () => {

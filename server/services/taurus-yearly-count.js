@@ -21,7 +21,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, dateOnlyString } = require('../utils/datetime-et');
 
 const TAURUS_YEARLY_LIMIT = 4;
 const TAURUS_PRODUCT_NAME = 'Taurus SC';
@@ -53,14 +53,19 @@ const COUNT_SQL = `
     )
 `;
 
-/** [first day of the ET calendar year, first day of the next], as YYYY-MM-DD. */
-function etYearBounds(now = new Date()) {
-  const year = Number(etDateString(now).slice(0, 4));
+/**
+ * [first day of the calendar year, first day of the next], as YYYY-MM-DD. The year is the visit's own
+ * scheduled date when it has one (a December visit closed out in January counts toward December's year),
+ * else today in ET.
+ */
+function etYearBounds(now = new Date(), scheduledDate = null) {
+  const day = scheduledDate ? dateOnlyString(scheduledDate) : null;
+  const year = /^\d{4}-\d{2}-\d{2}$/.test(day || '') ? Number(day.slice(0, 4)) : Number(etDateString(now).slice(0, 4));
   return { year, yearStart: `${year}-01-01`, nextYearStart: `${year + 1}-01-01` };
 }
 
 /**
- * @param {{ id?: string|null, customer_id?: string|null, property_id?: string|null }} visit
+ * @param {{ id?: string|null, customer_id?: string|null, property_id?: string|null, scheduled_date?: string|Date|null }} visit
  *   the scheduled_services row being completed
  * @returns {Promise<{ count: number, limit: number, year: number } | null>}
  *   null when the count is unknown (no customer, or the read failed): callers
@@ -69,7 +74,7 @@ function etYearBounds(now = new Date()) {
 async function taurusYearlyCount(visit, { knex = db, now = new Date() } = {}) {
   const customerId = visit?.customer_id || null;
   if (!customerId) return null;
-  const { year, yearStart, nextYearStart } = etYearBounds(now);
+  const { year, yearStart, nextYearStart } = etYearBounds(now, visit.scheduled_date || null);
   try {
     const result = await knex.raw(COUNT_SQL, {
       customerId,
