@@ -2,7 +2,9 @@
 // Every word comes from the fact bank's reviewed copy; no model is called.
 // buildIssue takes no planner (pre-push round 17), so a case that needs a
 // fixed plan mocks the plan module; every other case runs the real planner.
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 jest.mock('../services/pest-insider/plan', () => {
@@ -157,4 +159,32 @@ describe('every issue the bank can make', () => {
     // The two default sample dates (ops/agents/pest-insider-sample.js).
     expect(recent.factIds.slice(0, 2)).toEqual(['T03', 'A01']);
   });
+});
+
+describe('the sample script (ops/agents/pest-insider-sample.js)', () => {
+  const SCRIPT = path.join(__dirname, '..', '..', 'ops', 'agents', 'pest-insider-sample.js');
+  const run = (dates) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-insider-sample-'));
+    try {
+      const r = spawnSync(process.execPath, [SCRIPT, dir, ...dates], { encoding: 'utf8', timeout: 60000 });
+      return { status: r.status, stderr: r.stderr, files: fs.readdirSync(dir).sort() };
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test('checks every date before it writes a file: a repeated, earlier or impossible date writes nothing (pre-push round 23)', () => {
+    // A repeated date built a second issue (R03 after T03) over the first one's files.
+    for (const [dates, why] of [
+      [['2026-12-03', '2026-12-03'], /2026-12-03 does not come after 2026-12-03/],
+      [['2026-12-17', '2026-12-03'], /2026-12-03 does not come after 2026-12-17/],
+      [['2026-12-03', '2027-02-30'], /2027-02-30 is not a real calendar date/],
+    ]) {
+      expect(run(dates)).toEqual({ status: 2, stderr: expect.stringMatching(why), files: [] });
+    }
+    expect(run(['2026-12-03', '2026-12-17'])).toMatchObject({
+      status: 0,
+      files: ['pest-insider-2026-12-03.html', 'pest-insider-2026-12-03.txt', 'pest-insider-2026-12-17.html', 'pest-insider-2026-12-17.txt'],
+    });
+  }, 120000);
 });

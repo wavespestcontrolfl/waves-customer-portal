@@ -13,8 +13,11 @@
  *     dates           send dates (ET); default 2026-12-03 and 2026-12-17
  *
  * Dates run in order: each issue's fact and species count as "recent" for the
- * next one, the way the real schedule will. No recheck is recorded here, so a
- * fact marked recheck_before_send never leads a sample.
+ * next one, the way the real schedule will. So each date must be a real
+ * calendar day and later than the one before it (no repeats), and every date
+ * is checked before any file is written: a repeated date would write a second
+ * issue over the first one's files. No recheck is recorded here, so a fact
+ * marked recheck_before_send never leads a sample.
  *
  * Per date it writes pest-insider-<date>.html (the body inside the newsletter
  * chrome, for opening in a browser) and pest-insider-<date>.txt, and prints
@@ -32,10 +35,15 @@ const positional = args.filter((a) => !a.startsWith('--'));
 const [outDir, ...dateArgs] = positional;
 const dates = dateArgs.length ? dateArgs : ['2026-12-03', '2026-12-17'];
 
-if (!outDir || flags.size || dates.some((d) => !/^\d{4}-\d{2}-\d{2}$/.test(d))) {
-  console.error('usage: node ops/agents/pest-insider-sample.js <outDir> [YYYY-MM-DD ...]');
+const usage = (why) => {
+  if (why) console.error(`pest-insider-sample: ${why}`);
+  console.error('usage: node ops/agents/pest-insider-sample.js <outDir> [YYYY-MM-DD ...]  (each date once, in order)');
   process.exit(2);
-}
+};
+if (!outDir || flags.size || dates.some((d) => !/^\d{4}-\d{2}-\d{2}$/.test(d))) usage();
+// A repeated or earlier date would count its own issue as recent and write
+// over another issue's files (pre-push round 23).
+dates.forEach((d, i) => { if (i > 0 && d <= dates[i - 1]) usage(`${d} does not come after ${dates[i - 1]}`); });
 
 // No database for this process, so no write is possible:
 // 1. no credentials: every name knexfile.js can rebuild DATABASE_URL from is
@@ -58,8 +66,14 @@ const noDb = new Proxy(function noDatabase() {}, {
 require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: noDb };
 
 const { buildIssue } = require('../../server/services/pest-insider');
+const { sendDateET } = require('../../server/services/pest-insider/facts');
 const { wrapIssueHtml } = require('../../server/services/pest-insider/render');
 const { RECENT_WINDOW } = require('../../server/services/pest-insider/plan');
+
+// An impossible day (2027-02-30) is refused here too, before any file is written.
+for (const d of dates) {
+  try { sendDateET(d); } catch (err) { usage(err.message); }
+}
 
 function saveIssue(sendDate, issue) {
   const base = path.join(outDir, `pest-insider-${sendDate}`);
