@@ -39,7 +39,8 @@ export function fieldViewLanding(pathname) {
 // Field view opens on Today, so an open with no signal needs Today's code on
 // the phone, and the service worker keeps a file only once the app asked for
 // it. This asks the worker for each of Today's files that this build listed
-// (fieldViewAssets.js), then checks that the worker stored every one. It asks
+// (fieldViewAssets.js), and those the worker's saved shell lists, then
+// checks that the worker stored every one. It asks
 // for the stored files too: the worker answers those from storage and claims
 // each for this build as it does, or its prune drops a file once the builds
 // that stored it are two deploys old. It fetches the files and never imports
@@ -75,8 +76,24 @@ async function downloadAll(files) {
   abort?.abort();
 }
 
-async function warmTodayFiles(files) {
+// An open with no signal gets the shell the worker saved last ('/'), and it
+// can be another build than this page: a tab that loaded a newer deploy
+// replaced it, or the worker has not saved this page's build yet (or could
+// not). That shell's Today files count too. A shell with no list (a build
+// from before Field view) or none at all adds nothing.
+async function withOfflineShell(files) {
+  try {
+    const shell = await caches.match('/');
+    const shellFiles = shell ? readFieldViewAssets(new DOMParser().parseFromString(await shell.text(), 'text/html')) : null;
+    return shellFiles ? [...new Set([...files, ...shellFiles])] : files;
+  } catch {
+    return files;
+  }
+}
+
+async function warmTodayFiles(pageFiles) {
   if (typeof caches === 'undefined' || !navigator.serviceWorker?.controller) return false;
+  const files = await withOfflineShell(pageFiles);
   await downloadAll(files);
   // The worker stores a file after it answered the request.
   let missing = await unstored(files);
@@ -88,10 +105,10 @@ async function warmTodayFiles(files) {
 }
 
 // With no signal nothing can download, so the answer is whether the phone
-// already holds every file.
-async function storedAlready(files) {
+// already holds every file, the saved shell's included.
+async function storedAlready(pageFiles) {
   if (typeof caches === 'undefined') return false;
-  return (await unstored(files)).length === 0;
+  return (await unstored(await withOfflineShell(pageFiles))).length === 0;
 }
 
 // The newest try's answer, for the Settings row: true, false, or null (a try

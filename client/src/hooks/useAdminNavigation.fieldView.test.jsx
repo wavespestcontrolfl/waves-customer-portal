@@ -178,6 +178,27 @@ describe('Field view preference', () => {
     expect(navigation.fieldView).toBe(true);
     expect(saved('acct-1')).toMatchObject({ fieldView: true, pins: ['today'] });
   });
+  // Pre-push P1 (round 11): only what this tab changed stays unsaved, so the
+  // next change never writes back an old copy of another tab's settings.
+  it("an unsaved pin never writes back another tab's switch or groups", () => {
+    mount({ id: 'acct-1', role: 'admin' });
+    const [first, second] = navigation.groups.map(({ id }) => id).filter((id) => !navigation.expanded[id]);
+    act(() => navigation.toggleGroup(first));
+    withFullStorage(() => { act(() => navigation.togglePin('today')); });
+    // Another tab turned Field view on and closed that group; no event here yet.
+    otherTabSaved({ fieldView: true, groups: { [first]: false } });
+    act(() => navigation.toggleGroup(second));
+    expect(saved('acct-1')).toMatchObject({ fieldView: true, pins: ['today'], groups: { [first]: false, [second]: true } });
+    expect(navigation.fieldView).toBe(true);
+  });
+  it("an unsaved group saves with the next change and never writes back another tab's pins", () => {
+    mount({ id: 'acct-1', role: 'admin' });
+    const [first, second] = navigation.groups.map(({ id }) => id).filter((id) => !navigation.expanded[id]);
+    withFullStorage(() => { act(() => navigation.toggleGroup(first)); });
+    otherTabSaved({ pins: ['customers'] });
+    act(() => navigation.toggleGroup(second));
+    expect(saved('acct-1')).toMatchObject({ pins: ['customers'], groups: { [first]: true, [second]: true } });
+  });
   it("another tab's pins show here at once", () => {
     mount({ id: 'acct-1', role: 'admin' });
     otherTabSaved({ pins: ['today'] });

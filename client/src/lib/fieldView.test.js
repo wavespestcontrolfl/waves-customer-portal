@@ -114,9 +114,16 @@ describe('warmFieldViewLanding', () => {
 
   // A service worker in control of the page. It stores a file a moment after
   // it answered the request for it, unless `stores` says it cannot.
-  function controlledBy({ stored = [], stores = () => true } = {}) {
+  // `shell` is the page it saved for an open with no signal ('/'): its HTML,
+  // or an Error its read throws.
+  function controlledBy({ stored = [], stores = () => true, shell } = {}) {
     const cache = new Set(stored);
-    vi.stubGlobal('caches', { match: vi.fn(async (url) => (cache.has(url) ? {} : undefined)) });
+    vi.stubGlobal('caches', {
+      match: vi.fn(async (url) => {
+        if (url === '/') return shell === undefined ? undefined : { text: async () => { if (shell instanceof Error) throw shell; return shell; } };
+        return cache.has(url) ? {} : undefined;
+      }),
+    });
     vi.stubGlobal('fetch', vi.fn(async (url) => {
       if (stores(url)) setTimeout(() => cache.add(url), 100);
       return { arrayBuffer: async () => new ArrayBuffer(0) };
@@ -168,6 +175,48 @@ describe('warmFieldViewLanding', () => {
     const warm = await freshWarm();
     await expect(warm()).resolves.toBe(true);
     expect(fetch.mock.calls.map(([url]) => url)).toEqual(TODAY_FILES);
+  });
+
+  // Pre-push P1 (round 11): an open with no signal gets the shell the worker
+  // saved last, and a tab on a newer deploy can replace it. Its files count.
+  const NEWER_FILES = ['/assets/TodayShell-e5.js', '/assets/TechFieldShell-c3.css', '/assets/TechHomePage-f6.js'];
+  const savedShell = (files) => `<!doctype html><html><head><script type="application/json" id="${FIELD_VIEW_ASSETS_ID}">${JSON.stringify(files)}</script></head><body></body></html>`;
+  it("asks for the saved shell's files too, and reports false while one is not stored", async () => {
+    vi.useFakeTimers();
+    listTodayFiles();
+    controlledBy({ shell: savedShell(NEWER_FILES), stores: (url) => url !== NEWER_FILES[2] });
+    const warm = await freshWarm();
+    const ready = warm();
+    await vi.advanceTimersByTimeAsync(5000);
+    await expect(ready).resolves.toBe(false);
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual([...TODAY_FILES, NEWER_FILES[0], NEWER_FILES[2]]);
+  });
+  it("still needs this page's own files when the saved shell is another build", async () => {
+    vi.useFakeTimers();
+    listTodayFiles();
+    controlledBy({ shell: savedShell(NEWER_FILES), stored: NEWER_FILES, stores: (url) => url !== TODAY_FILES[0] });
+    const warm = await freshWarm();
+    const ready = warm();
+    await vi.advanceTimersByTimeAsync(5000);
+    await expect(ready).resolves.toBe(false);
+  });
+  it("with no signal counts the saved shell's files too", async () => {
+    listTodayFiles();
+    const cache = controlledBy({ shell: savedShell(NEWER_FILES), stored: TODAY_FILES });
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    const warm = await freshWarm();
+    await expect(warm()).resolves.toBe(false);
+    NEWER_FILES.forEach((file) => cache.add(file));
+    await expect(warm()).resolves.toBe(true);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("leaves this page's files to decide when the saved shell has no list, cannot be read, or is missing", async () => {
+    listTodayFiles();
+    for (const shell of ['<!doctype html><html><head></head><body></body></html>', new Error('read failed'), undefined]) {
+      controlledBy({ shell, stored: TODAY_FILES });
+      await expect((await freshWarm())()).resolves.toBe(true);
+      expect(fetch.mock.calls.map(([url]) => url)).toEqual(TODAY_FILES);
+    }
   });
 
   // Pre-push P1 (rounds 8 and 9): a try before the worker took control must
@@ -294,9 +343,9 @@ describe('warmFieldViewLanding', () => {
     const first = warm();
     expect(warm()).toBe(first);
     await expect(first).resolves.toBe(true);
-    expect(caches.match).toHaveBeenCalledTimes(TODAY_FILES.length);
+    expect(fetch).toHaveBeenCalledTimes(TODAY_FILES.length);
     await expect(warm({ again: true })).resolves.toBe(true);
-    expect(caches.match).toHaveBeenCalledTimes(TODAY_FILES.length * 2);
+    expect(fetch).toHaveBeenCalledTimes(TODAY_FILES.length * 2);
   });
 });
 
