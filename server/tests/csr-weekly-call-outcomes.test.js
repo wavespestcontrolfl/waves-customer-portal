@@ -54,10 +54,27 @@ describe('loadWeeklyCallOutcomes', () => {
     const [, sql, bindings] = qualification(conn);
     expect(sql).toBe("(cl.disposition IN (?, ?) OR (cl.v2_extraction_status = 'valid'"
       + " AND cl.ai_extraction_enriched->>'call_nature' = 'new_lead'"
+      + " AND cl.processing_status IS DISTINCT FROM 'spam'"
+      + " AND cl.metadata #> '{callback_verdict,spam}' IS DISTINCT FROM 'true'::jsonb"
       + ` AND (cl.disposition IS NULL OR cl.disposition NOT IN (${NO_PROSPECT_OUTCOMES.map(() => '?').join(', ')}))))`);
     expect(bindings).toEqual([...STAFF_NEW_LEAD_TAGS, ...NO_PROSPECT_OUTCOMES]);
     // No separate extraction filter remains to drop a staff-tagged call.
     expect(conn.calls).not.toContainEqual(['where', 'cl.v2_extraction_status', 'valid']);
+  });
+
+  // The processor can finalize a spam call with no spam disposition, and a callback can find a voicemail's caller was a
+  // solicitor while the voicemail keeps its disposition: either verdict keeps an extraction-qualified call out. The
+  // staff tag stays outside both (a person's verdict wins), and the checks are null-safe (NOT on a NULL comparison
+  // would drop every call with neither column set).
+  test('a spam verdict keeps an extraction-qualified call out; a staff tag still counts', async () => {
+    const conn = fakeConn({ total: 1, known: 1, booked: 1, estimates: 0 });
+    await loadWeeklyCallOutcomes({ now: new Date('2026-11-20T13:00:00Z'), conn });
+    const [, sql] = qualification(conn);
+    const [staffBranch, extractionBranch] = sql.split(' OR (cl.v2_extraction_status');
+    expect(staffBranch).toBe('(cl.disposition IN (?, ?)');
+    expect(extractionBranch).toContain("cl.processing_status IS DISTINCT FROM 'spam'");
+    expect(extractionBranch).toContain("cl.metadata #> '{callback_verdict,spam}' IS DISTINCT FROM 'true'::jsonb");
+    expect(sql).not.toMatch(/NOT \(cl\.processing_status = 'spam'/);
   });
 
   // Two prospects calling from one office line are two callers when the extraction says the number is not theirs.

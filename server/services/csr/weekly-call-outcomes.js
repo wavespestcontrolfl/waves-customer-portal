@@ -41,6 +41,12 @@ const NO_PROSPECT_OUTCOMES = Object.freeze([
 const STAFF_NEW_LEAD_TAGS = Object.freeze(['new_lead_booked', 'new_lead_no_booking']);
 // Only a valid extraction is evidence: a payload that failed validation can still carry call_nature and flags.
 const VALID_EXTRACTION_SQL = "cl.v2_extraction_status = 'valid'";
+// Neither spam verdict: the processor finalized the call as spam (processing_status 'spam', with or without a spam
+// disposition), or the office's callback to the voicemail reached a solicitor (metadata.callback_verdict.spam, written
+// by closeParentOnCallbackSpam, which keeps the voicemail's disposition). Null-safe: a call with neither column set
+// passes.
+const NO_SPAM_VERDICT_SQL = "cl.processing_status IS DISTINCT FROM 'spam'"
+  + " AND cl.metadata #> '{callback_verdict,spam}' IS DISTINCT FROM 'true'::jsonb";
 const placeholders = (list) => list.map(() => '?').join(', ');
 // The valid extraction's own quote flags, JSON true only (call-disposition.js tests `=== true`).
 const QUOTE_FLAGS_SQL = "cl.ai_extraction_enriched #> '{service_request,quote_requested}' = 'true'::jsonb"
@@ -82,10 +88,12 @@ async function loadWeeklyCallOutcomes({ now = new Date(), conn = db, completedDa
   const started = callStartedAtSql('cl');
   const callers = whereNotSandboxCall(conn('call_log as cl'), 'cl.source')
     .whereRaw("cl.direction LIKE 'inbound%'")
-    // Staff tagged it a new lead, or its valid extraction classes it new_lead and no outcome says it was no prospect.
+    // Staff tagged it a new lead (the tag decides on its own), or its valid extraction classes it new_lead, no spam
+    // verdict marks it, and no outcome says it was no prospect.
     .whereRaw(
       `(cl.disposition IN (${placeholders(STAFF_NEW_LEAD_TAGS)}) OR (${VALID_EXTRACTION_SQL}`
         + " AND cl.ai_extraction_enriched->>'call_nature' = 'new_lead'"
+        + ` AND ${NO_SPAM_VERDICT_SQL}`
         + ` AND (cl.disposition IS NULL OR cl.disposition NOT IN (${placeholders(NO_PROSPECT_OUTCOMES)}))))`,
       [...STAFF_NEW_LEAD_TAGS, ...NO_PROSPECT_OUTCOMES],
     )
