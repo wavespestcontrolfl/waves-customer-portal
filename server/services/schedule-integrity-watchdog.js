@@ -40,10 +40,12 @@
  *     its steps, leaving open visits on the books and a draft unvoided). One
  *     bell per customer; it clears once the work is cancelled or voided.
  *  5. SAME-START VISITS — one customer with two or more live visits on one
- *     upcoming day that start at the same time, for one technician (owner
- *     2026-11-19: they run back to back, one hour each). One bell per
- *     customer; it clears once no upcoming day has such a pair. The finder
- *     and the copy are in same-start-visits-check.js.
+ *     upcoming day that start at the same time, for one technician or with
+ *     one unassigned (owner 2026-11-19: split them so they run back to back;
+ *     a visit is one hour unless its booking says otherwise). One bell per
+ *     customer; it clears once no upcoming day has such a pair. It rings last,
+ *     within what the other classes and the combined-booking check left of
+ *     the budget. The finder and the copy are in same-start-visits-check.js.
  *
  * Accepted-plan gaps also start from the accepted estimate, covering missing
  * recurrence, applications, and matching cadence/property evidence.
@@ -941,8 +943,11 @@ async function standingBellDays(prefix) {
 // day is not shown yet and rings on a later run. A standing bell none of whose
 // days is still a finding closes (that episode is over; its new days ring as a
 // new one later). A finding with no standing bell, or an auto-cleared one (a
-// delivery would reopen it), waits. Killed: the given order, and past the
-// budget the rest wait. Returns the real rings and the bells closed.
+// delivery would reopen it), waits. Only a real wait (a new bell, a reopen, or
+// a day not shown yet) logs the cap hit: a standing bell that carries all its
+// days gets its whole update. Killed: the given order, and past the budget the
+// rest wait. Returns the real rings and the bells closed.
+const NO_NEW_DAY = '9999-12-31';
 async function ringWithinBudget(alerts, { episodes, now, budget, prefix }) {
   let rang = 0;
   let held = 0;
@@ -950,17 +955,18 @@ async function ringWithinBudget(alerts, { episodes, now, budget, prefix }) {
   const standing = episodes && alerts.length ? await standingBellDays(prefix) : new Map();
   const firstNewDay = (alert) => {
     const carried = standing.get(alert[0]) || [];
-    return (alert[3].itemKeys || []).filter((day) => !carried.includes(day))[0] || '9999-12-31';
+    // itemKeys run in date order, so the first one missing is the earliest.
+    return (alert[3].itemKeys || []).find((day) => !carried.includes(day)) || NO_NEW_DAY;
   };
   const ranked = alerts.map((alert) => ({ alert, day: firstNewDay(alert) }));
   // A stable sort: equal days keep the class's own order (earliest first day first).
-  const ordered = episodes ? ranked.sort((a, b) => (a.day < b.day ? -1 : (a.day > b.day ? 1 : 0))).map((r) => r.alert) : alerts;
-  for (const alert of ordered) {
+  if (episodes) ranked.sort((a, b) => (a.day < b.day ? -1 : (a.day > b.day ? 1 : 0)));
+  for (const { alert, day } of ranked) {
     let delivery = alert;
     if (rang >= budget) {
       if (!episodes) { held += 1; break; }
       const carried = standing.get(alert[0]);
-      held += 1;
+      if (!carried || day !== NO_NEW_DAY) held += 1;
       if (!carried) continue;
       const kept = typeof alert[4]?.forDays === 'function' ? alert[4].forDays(carried) : null;
       if (!kept) { over.push(alert[0]); continue; }
