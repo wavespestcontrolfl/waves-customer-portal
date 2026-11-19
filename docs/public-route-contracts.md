@@ -1365,6 +1365,11 @@ A zone/no-tech confirm (no technician bound) has no single route to re-check
 and keeps only the overlap gate, unchanged. Either gate off skips this
 whole-route capacity re-check.
 
+A confirmed visit keeps its place when staff book it from an estimate hold, even
+after the original hold expires. Confirmation counts that visit in the fixed-hour
+conflict check and in the locked arrival-window route check. An unclaimed hold
+frees its time at expiry.
+
 Tech-aware confirm conflict checks for a second field technician
 (`GATE_MULTI_TECH_CONFIRM`, owner-approved 2026-09-29, ships DARK; owner
 2026-10-30: it no longer needs `GATE_SCHEDULING_CAPACITY`, so two technicians can
@@ -1785,7 +1790,10 @@ last free card drops out when the list was full. `/reserve` takes the
 make-room path only for that signature, with the gate read inside the
 transaction, and re-proves the hour from current data under the date,
 tech-day and zone locks; any failure is the ordinary `SLOT_UNAVAILABLE` and
-no hold is written. The hold stores the stops that would move in
+no hold is written. This check includes staff-booked appointments at the
+proposed destinations even after their original estimate holds expire.
+An expired, unclaimed hold at a destination frees that time.
+The hold stores the stops that would move in
 `scheduled_services.make_room_moves`. While that hold is live its moves'
 destinations stay busy for every other offer, reserve, same-slot refresh,
 `/extend` and accept (the accepted window as resolved at accept, so a hold
@@ -2047,6 +2055,11 @@ allocation order at the certified anchor, using a nonblocking day fence for
 callers already holding rows. A busy reorder aborts allocation for recovery.
 Capacity stays off until the other booking/dispatch writers and parent traffic
 prerequisites integrate.
+
+An estimate can still show an hour after staff book its last opening. If the
+new reservation no longer fits, `/reserve` returns the existing 409
+`SLOT_UNAVAILABLE`, including when staff booked that estimate's original hold.
+
 Phone-booking primary and follow-up inserts (owner ruling 2026-09-11, option 1)
 try the shared day fence — rung 1 date occupancy plus the tech-day or
 unassigned-day rung — with a bounded non-blocking wait (`CALL_BOOKING_FENCE_WAIT_MS`,
