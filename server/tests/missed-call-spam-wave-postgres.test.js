@@ -706,7 +706,14 @@ jest.setTimeout(30000);
       ['a call that reached staff', { answered_by: 'human' }],
       ['a call Sandy answered', { answered_by: 'ai_agent' }],
       ['a call Sandy handed to a person', { answered_by: null, call_outcome: 'ai_transferred' }],
-      ['a 2-second recording', { recording_sid: 'RE6', recording_duration_seconds: 2, transcription: 'call me back' }],
+      ["Sandy's session on a call that fell back to voicemail", { metadata: { relay_session_claimed_at: '2026-11-14T15:00:00.000Z' } }],
+      ['a 2-second recording', { recording_sid: 'RE6', recording_duration_seconds: 2 }],
+      // Empty main recording columns (pre-push audit r6): the audio sits in a metadata list.
+      ['a recording parked on the row', { metadata: { additional_recordings: [{ recording_sid: 'RE7', recording_url: 'https://api.twilio.com/RE7' }] } }],
+      ['a recording a replacement superseded', { metadata: { superseded_recordings: [{ recording_sid: 'RE8' }] } }],
+      ['a recording length with no link yet', { recording_duration_seconds: 12 }],
+      ['a transcript with no recording', { transcription: 'call me back about a quote' }],
+      ["Sandy's transcript kept in metadata", { metadata: { relay_transcript: { text: 'caller: I need a quote' } } }],
       ['a call the voicemail lane rang for', { voicemail_callback_alerted_at: new Date() }],
       ['a press-1 pass', { metadata: { preconnect_screen: 'passed' } }],
       ['a challenge whose result was never saved', { metadata: { preconnect_screen: 'gated' } }],
@@ -716,6 +723,22 @@ jest.setTimeout(30000);
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(true);
       await database('call_log').insert(call(CALLER, 60 * 24 * 5, sign));
+      expect(await repeat(row)).toBe(false);
+    });
+
+    test('a staff callback that reached the caller before the hang-ups is a person; one that rang out is not (pre-push audit r6)', async () => {
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      const row = judged();
+      await database('call_log').insert(row);
+      expect(await repeat(row)).toBe(true);
+      // Before the counted hang-up, so "got through later" cannot see it.
+      const callback = (minutesAgo, leg) => {
+        const base = call(GBP_LINE, minutesAgo, { direction: 'outbound', to_phone: CALLER, answered_by: null, metadata: { customer_leg: leg } });
+        return { ...base, bridged_at: base.created_at };
+      };
+      await database('call_log').insert(callback(60 * 24 * 5, { status: 'no-answer', duration_seconds: 0 }));
+      expect(await repeat(row)).toBe(true);
+      await database('call_log').insert(callback(60 * 24 * 4, { status: 'completed', duration_seconds: 95 }));
       expect(await repeat(row)).toBe(false);
     });
 

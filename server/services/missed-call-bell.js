@@ -307,28 +307,51 @@ const REPEAT_DAYS = 14;
 const REPEAT_MIN_PRIOR = 2;
 const FULL_ATTESTATION = 'TN-Validation-Passed-A';
 
-// Five pre-push audit rounds each found one more sign of a person that the
+// Pre-push audit rounds 2 to 6 each found one more sign of a person that the
 // history still counted (a spoofed number, a press-1 pass, a short recording, a
-// pass whose stamp failed). So the rule also reads every sign at once, for the
-// whole number and not only the counted calls: an inbound call from it in the
-// window that reached staff or Sandy, left a recording, rang the voicemail lane,
-// or met the press-1 screen with a key press or a challenge whose result was
-// never saved; or a text from it in the window. Any one means a person uses the
-// number. Read only when the history matched, and bounded like the history.
+// pass whose stamp failed, a parked recording, a callback). So the rule reads
+// every sign at once, for the whole number and not only the counted calls. In
+// the window:
+//  - an inbound call from it that reached staff or Sandy (answered_by, an AI
+//    outcome, or Sandy's session claim, which stays when a relay falls back to
+//    voicemail); that holds a recording anywhere (its own, or one parked or
+//    superseded in metadata: call-recording-processor.js RECORDING_LISTS) or a
+//    transcript of any kind; that rang the voicemail lane; or that met the
+//    press-1 screen with a key press or a challenge whose result was never saved;
+//  - an outbound call to it whose customer leg answered (the callback proof,
+//    ANSWERED_LEG_PROOF_SQL): staff reached that caller;
+//  - a text from it.
+// Any one means a person uses the number. Read only when the history matched,
+// and bounded like the history.
+const LISTED_RECORDING_SQL = (list) => `(jsonb_typeof(later.metadata->'${list}') = 'array' AND jsonb_array_length(later.metadata->'${list}') > 0)`;
+
 async function numberShowsPerson(key, since) {
-  const call = await db('call_log')
-    .modify((qb) => whereNotSandboxCall(qb))
-    .where('direction', 'inbound')
-    .where('created_at', '>=', since)
-    .whereRaw(`${CALLER_KEY} = ?`, [key])
+  const call = await db('call_log as later')
+    .modify((qb) => whereNotSandboxCall(qb, 'later.source'))
+    .where('later.created_at', '>=', since)
     .where((sign) => sign
-      .whereIn('answered_by', ['human', 'ai_agent'])
-      .orWhereIn('call_outcome', [...AI_OUTCOMES])
-      .orWhereNotNull('recording_sid').orWhereNotNull('recording_url')
-      .orWhereNotNull('voicemail_callback_alerted_at')
-      .orWhereRaw("metadata->>'preconnect_screen' IN ('passed', 'gated')"))
+      .where((inbound) => inbound
+        .where('later.direction', 'inbound')
+        .whereRaw(`${LATER_KEY} = ?`, [key])
+        .where((person) => person
+          .whereIn('later.answered_by', ['human', 'ai_agent'])
+          .orWhereIn('later.call_outcome', [...AI_OUTCOMES])
+          .orWhereRaw("later.metadata->>'relay_session_claimed_at' IS NOT NULL")
+          .orWhereNotNull('later.recording_sid').orWhereNotNull('later.recording_url')
+          .orWhere('later.recording_duration_seconds', '>', 0)
+          .orWhereRaw(LISTED_RECORDING_SQL('additional_recordings'))
+          .orWhereRaw(LISTED_RECORDING_SQL('superseded_recordings'))
+          .orWhereNotNull('later.transcription')
+          .orWhereRaw("later.metadata->'relay_transcript' IS NOT NULL")
+          .orWhereNotNull('later.voicemail_callback_alerted_at')
+          .orWhereRaw("later.metadata->>'preconnect_screen' IN ('passed', 'gated')")))
+      .orWhere((outbound) => outbound
+        .where('later.direction', 'outbound')
+        .whereNotNull('later.bridged_at')
+        .whereRaw(`${phoneKeySql('later.to_phone')} = ?`, [key])
+        .whereRaw(ANSWERED_LEG_PROOF_SQL)))
     .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
-    .first('id');
+    .first('later.id');
   if (call) return true;
   const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
   const text = await excludeUnresolvedSendReservations(db('sms_log'))
@@ -527,9 +550,10 @@ const CALLED_BACK_SQL = buildCalledBackSql('');
 //    minutes. Capped at 15 minutes from the bridge.
 // No literal question mark: knex reads one as a binding.
 const CUSTOMER_LEG_SECONDS_SQL = "CASE WHEN later.metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (later.metadata->'customer_leg'->>'duration_seconds')::numeric > 0 ELSE FALSE END";
-const CALLED_BACK_ANSWERED_SQL = buildCalledBackSql(
-  " AND ((later.metadata->'customer_leg'->>'status' = 'completed' AND " + CUSTOMER_LEG_SECONDS_SQL + ')'
-  + " OR (later.metadata->'customer_leg' IS NULL AND later.recording_duration_seconds > 0 AND (later.recording_sid IS NOT NULL OR later.recording_url IS NOT NULL)))");
+// The proof alone, on a `later` row: the repeat rule's person check reads it too.
+const ANSWERED_LEG_PROOF_SQL = "((later.metadata->'customer_leg'->>'status' = 'completed' AND " + CUSTOMER_LEG_SECONDS_SQL + ')'
+  + " OR (later.metadata->'customer_leg' IS NULL AND later.recording_duration_seconds > 0 AND (later.recording_sid IS NOT NULL OR later.recording_url IS NOT NULL)))";
+const CALLED_BACK_ANSWERED_SQL = buildCalledBackSql(` AND ${ANSWERED_LEG_PROOF_SQL}`);
 // The same proof plus a bridged call still in flight. For the claim, the sweep
 // and the re-read before the push ONLY (do not ring during a live callback;
 // the sweep looks again in 2 minutes). Never for retiring a bell: a callback
