@@ -1,8 +1,12 @@
 // Pest Insider "A tool we'd use": the reviewed tool list, held to the
 // vendored affiliate registry (owner 2026-11-19: approved registry products
 // only, Amazon only, Amazon's exact sentence) and to the tool copy rule.
+const { execFileSync } = require('child_process');
+const os = require('os');
+const path = require('path');
 const registry = require('../../packages/affiliate-registry');
-const { TOOLS, TOOL_URLS, AMAZON_DISCLOSURE, toolById, toolLinkText, validateTools } = require('../services/pest-insider/tools');
+const data = require('../data/pest-insider-tools-v1.json');
+const { TOOLS, TOOL_PROBLEMS, AMAZON_DISCLOSURE, toolById, toolLinkText, checkTools } = require('../services/pest-insider/tools');
 const { toolLineProblem } = require('../services/pest-insider/claim-check');
 
 const index = registry.productIndex();
@@ -28,13 +32,17 @@ describe('the reviewed tool list', () => {
       expect(toolById(tool.productId)).toBe(tool);
       expect(toolLinkText(tool)).toBe(`${tool.name} on Amazon`);
     }
-    expect(TOOL_URLS).toEqual(TOOLS.map((t) => t.url));
     expect(toolById('ks-adjustable-door-sweep')).toBeNull(); // dead listing: not listed
   });
 
-  test('the list and the link allowlist cannot be changed by a caller', () => {
+  test('CI holds the shipped list strict: every listed item loads, with no problem', () => {
+    expect(TOOL_PROBLEMS).toEqual([]);
+    expect(TOOLS.map((t) => t.productId)).toEqual(data.tools.map((t) => t.product_id));
+  });
+
+  test('the list cannot be changed by a caller', () => {
     expect(Object.isFrozen(TOOLS) && TOOLS.every((t) => Object.isFrozen(t) && Object.isFrozen(t.lines))).toBe(true);
-    expect(() => TOOL_URLS.push('https://www.amazon.com/dp/B000000000?tag=wavespestcont-20')).toThrow(TypeError);
+    expect(() => TOOLS.push({ productId: 'x', url: 'https://www.amazon.com/dp/B000000000?tag=wavespestcont-20' })).toThrow(TypeError);
   });
 
   test("Amazon's sentence is the exact required wording", () => {
@@ -62,14 +70,43 @@ describe('the reviewed tool list', () => {
     ['a line that says a purchase helps us', { lines: ['Every roll helps us keep this email free.'] }, index, /sales word/],
     ['a line with a name', { lines: ['It is the roll Home Depot sells.'] }, index, /name not in the source/],
     ['a service the fact bank does not have', { services: ['pool'] }, index, /services must list/],
-  ])('refuses %s', (_label, over, idx, message) => {
-    expect(() => validateTools({ tools: [entry(over)] }, idx)).toThrow(message);
+  ])('leaves out %s', (_label, over, idx, message) => {
+    const { tools, problems } = checkTools({ tools: [entry(over)] }, idx);
+    expect(tools).toEqual([]);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(message);
   });
 
-  test('refuses a product listed twice, and a file with no tools list', () => {
-    expect(() => validateTools({ tools: [entry(), entry()] }, index)).toThrow(/listed twice/);
-    expect(() => validateTools({}, index)).toThrow(/no tools list/);
+  test('a bad item drops only itself; a product listed twice drops both copies', () => {
+    const gauge = data.tools.find((t) => t.product_id === 'acurite-glass-rain-gauge');
+    const mixed = checkTools({ tools: [entry({ lines: ['It is safe around pets.'] }), gauge] }, index);
+    expect(mixed.tools.map((t) => t.productId)).toEqual(['acurite-glass-rain-gauge']);
+    expect(mixed.problems).toEqual([expect.stringMatching(/^stuff-it-copper-mesh: line .*safe/)]);
+    expect(checkTools({ tools: [entry(), entry()] }, index)).toEqual({ tools: [], problems: [`${MESH}: is listed twice`, `${MESH}: is listed twice`] });
+    expect(checkTools({}, index)).toEqual({ tools: [], problems: ['the file has no tools list'] });
   });
+
+  test('a registry file that cannot be read drops every tool, and an issue still builds (pre-push PR 3 r2)', () => {
+    // The registry loads an unreadable file as empty (its dark posture). A
+    // fresh process, so the module-load path is the one under test.
+    const probe = [
+      "const { buildIssue } = require('./services/pest-insider');",
+      "const { POSTS } = require('./services/pest-insider/posts');",
+      "const { TOOLS, TOOL_PROBLEMS } = require('./services/pest-insider/tools');",
+      "const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: Object.keys(POSTS), liveToolIds: ['acurite-glass-rain-gauge', 'stuff-it-copper-mesh'] });",
+      "process.stdout.write('\\nRESULT ' + JSON.stringify({ ok: r.ok, toolId: r.toolId, tools: TOOLS.length, problems: TOOL_PROBLEMS }) + '\\n');",
+    ].join('\n');
+    const out = execFileSync(process.execPath, ['-e', probe], {
+      cwd: path.join(__dirname, '..'),
+      env: { ...process.env, NODE_ENV: 'offline-sample', AFFILIATE_REGISTRY_PATH: path.join(os.tmpdir(), `no-such-registry-${process.pid}.json`) },
+      encoding: 'utf8',
+      timeout: 60000,
+    });
+    const line = out.split('\n').find((l) => l.startsWith('RESULT '));
+    expect(JSON.parse(line.slice('RESULT '.length))).toEqual({
+      ok: true, toolId: null, tools: 0, problems: data.tools.map((t) => `${t.product_id}: is not in the affiliate registry`),
+    });
+  }, 60000);
 });
 
 describe('toolLineProblem', () => {

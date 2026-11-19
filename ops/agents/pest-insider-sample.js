@@ -7,11 +7,12 @@
  * the process before any portal module loads. The build itself calls no
  * model: every lead sentence is the fact bank's reviewed copy.
  *
- *   node ops/agents/pest-insider-sample.js <outDir> [YYYY-MM-DD ...] [--assume-live]
+ *   node ops/agents/pest-insider-sample.js <outDir> [YYYY-MM-DD ...] [--assume-live] [--assume-tools]
  *
  *     <outDir>        where the files go (created if missing)
  *     dates           send dates (ET); default 2026-12-03 and 2026-12-17
- *     --assume-live   count every reviewed blog post and tool as live (no web request)
+ *     --assume-live   count every reviewed blog post as live (no web request)
+ *     --assume-tools  count every reviewed tool as live (this script checks no Amazon page)
  *
  * Each issue links its lead fact's blog post, so a fact leads only when its
  * post is live. The script first asks the website for every reviewed post
@@ -20,9 +21,11 @@
  *
  * "A tool we'd use" shows only a tool whose Amazon page passed a live check.
  * Amazon refuses plain page requests, so this script checks no tool page:
- * without --assume-live the samples have no tool item. With a tool, it also
+ * without --assume-tools the samples have no tool. With a tool, it also
  * writes the opted-in reader's copy (<date>.optin.html and .txt); the shared
- * copy, which the archive serves, never has the tool.
+ * copy, which the archive serves, never has the tool. Each run replaces a
+ * date's earlier files: a date that now builds without a tool, or does not
+ * build, keeps no older copy (pre-push PR 3 r2).
  *
  * Dates run in order: each issue's fact and species count as "recent" for the
  * next one, the way the real schedule will. So each date must be a real
@@ -49,10 +52,11 @@ const dates = dateArgs.length ? dateArgs : ['2026-12-03', '2026-12-17'];
 
 const usage = (why) => {
   if (why) console.error(`pest-insider-sample: ${why}`);
-  console.error('usage: node ops/agents/pest-insider-sample.js <outDir> [YYYY-MM-DD ...] [--assume-live]  (each date once, in order)');
+  console.error('usage: node ops/agents/pest-insider-sample.js <outDir> [YYYY-MM-DD ...] [--assume-live] [--assume-tools]  (each date once, in order)');
   process.exit(2);
 };
 const assumeLive = flags.delete('--assume-live');
+const assumeTools = flags.delete('--assume-tools');
 if (!outDir || flags.size || dates.some((d) => !/^\d{4}-\d{2}-\d{2}$/.test(d))) usage();
 // A repeated or earlier date would count its own issue as recent and write
 // over another issue's files (pre-push round 23).
@@ -83,7 +87,7 @@ const { sendDateET } = require('../../server/services/pest-insider/facts');
 const { wrapIssueHtml, withToolBlock } = require('../../server/services/pest-insider/render');
 const { RECENT_WINDOW } = require('../../server/services/pest-insider/plan');
 const { POSTS, POST_URLS, postUrl, checkLivePosts } = require('../../server/services/pest-insider/posts');
-const { TOOLS } = require('../../server/services/pest-insider/tools');
+const { TOOLS, TOOL_PROBLEMS } = require('../../server/services/pest-insider/tools');
 
 // An impossible day (2027-02-30) is refused here too, before any file is written.
 for (const d of dates) {
@@ -104,11 +108,14 @@ async function main() {
   const livePosts = new Set(livePostFactIds.map(postUrl)).size;
   console.log(`blog posts: ${livePosts} of ${POST_URLS.length} reviewed posts ${assumeLive ? 'counted as live (--assume-live)' : 'answered as live'}; ${livePostFactIds.length} of ${Object.keys(POSTS).length} linked facts can lead`);
   fs.mkdirSync(outDir, { recursive: true });
-  const liveToolIds = assumeLive ? TOOLS.map((t) => t.productId) : [];
-  console.log(`tools: ${liveToolIds.length} of ${TOOLS.length} reviewed tools ${assumeLive ? 'counted as live (--assume-live)' : 'live (this script checks no Amazon page)'}`);
+  const liveToolIds = assumeTools ? TOOLS.map((t) => t.productId) : [];
+  console.log(`tools: ${liveToolIds.length} of ${TOOLS.length} reviewed tools ${assumeTools ? 'counted as live (--assume-tools)' : 'live (this script checks no Amazon page)'}`);
+  for (const p of TOOL_PROBLEMS) console.log(`tool left out: ${p}`);
   const recent = { factIds: [], speciesSlugs: [], toolIds: [] };
   let failed = 0;
   for (const sendDate of dates) {
+    // This run's files for the date replace any earlier run's (pre-push PR 3 r2).
+    for (const ext of ['.html', '.txt', '.optin.html', '.optin.txt']) fs.rmSync(path.join(outDir, `pest-insider-${sendDate}${ext}`), { force: true });
     const result = buildIssue({
       sendDate,
       livePostFactIds,

@@ -236,10 +236,24 @@ describe('the sample script (ops/agents/pest-insider-sample.js)', () => {
     ]) {
       expect(run(dates)).toEqual({ status: 2, stderr: expect.stringMatching(why), files: [] });
     }
-    // --assume-live counts every tool as live, so each date also gets the opted-in reader's copy
     expect(run(['2026-12-03', '2026-12-17'])).toMatchObject({
       status: 0,
-      files: ['2026-12-03', '2026-12-17'].flatMap((d) => ['.html', '.optin.html', '.optin.txt', '.txt'].map((ext) => `pest-insider-${d}${ext}`)),
+      files: ['pest-insider-2026-12-03.html', 'pest-insider-2026-12-03.txt', 'pest-insider-2026-12-17.html', 'pest-insider-2026-12-17.txt'],
     });
+  }, 120000);
+
+  test('--assume-tools adds the opted-in copy; a rerun without a tool removes it (pre-push PR 3 r2)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-insider-sample-'));
+    try {
+      const go = (...flags) => spawnSync(process.execPath, [SCRIPT, dir, '2026-12-03', '--assume-live', ...flags], { encoding: 'utf8', timeout: 60000 }).status;
+      expect(go('--assume-tools')).toBe(0);
+      expect(fs.readdirSync(dir).sort()).toEqual(['.html', '.optin.html', '.optin.txt', '.txt'].map((ext) => `pest-insider-2026-12-03${ext}`));
+      expect(fs.readFileSync(path.join(dir, 'pest-insider-2026-12-03.optin.txt'), 'utf8')).toContain(AMAZON_DISCLOSURE);
+      expect(go()).toBe(0);
+      expect(fs.readdirSync(dir).sort()).toEqual(['pest-insider-2026-12-03.html', 'pest-insider-2026-12-03.txt']);
+      for (const f of fs.readdirSync(dir)) expect(fs.readFileSync(path.join(dir, f), 'utf8')).not.toMatch(/amazon/i);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   }, 120000);
 });
