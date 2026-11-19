@@ -166,6 +166,28 @@ describeDb('booking commit whole-route dependency on real PostgreSQL', () => {
     });
   });
 
+  test('public availability removes a non-overlapping hour when staff claim the stop that makes the route late', async () => {
+    const { buildBookingAvailability } = require('../routes/booking')._internals;
+    const search = async () => {
+      const { days } = await buildBookingAvailability({
+        lat: CANDIDATE.lat, lng: CANDIDATE.lng, serviceKey: 'pest_control', duration: 60,
+        rangeFrom: DAY, rangeTo: DAY, technicianId: TECH, today: new Date(),
+        selfServeNotice: true, capacityPlacement: true,
+        config: { day_start: '08:00', day_end: '18:00', slot_duration_minutes: 60 },
+      });
+      return days.flatMap(day => day.slots.map(slot => slot.start_time));
+    };
+    await insertUnassignedMorningBlocker(mockConn);
+    await mockConn('scheduled_services').where({ id: UNASSIGNED })
+      .update({ reservation_expires_at: mockConn.raw("NOW() - INTERVAL '1 minute'"), customer_id: null });
+    expect(await search()).toContain('09:00');
+    await mockConn('scheduled_services').where({ id: UNASSIGNED }).update({ customer_id: CUSTOMER });
+    await expect(findConflictingVisits({ db: mockConn, date: DAY, windowStart: '09:00', windowEnd: '10:00' }))
+      .resolves.toEqual([]);
+    expect(await search()).not.toContain('09:00');
+    await expect(verify(await prepare())).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+  });
+
   test('an unchanged unassigned 08:00 stop can make the 09:00 candidate fail arrival capacity', async () => {
     await insertUnassignedMorningBlocker(mockConn);
     await expect(verify(await prepare())).rejects.toMatchObject({

@@ -2035,7 +2035,9 @@ still occupies its booked time after its original hold expires. An unclaimed
 hold releases that time at expiry. A checkout presenting another customer's
 booked reservation ID receives the existing missing-reservation response,
 including after cleanup clears the timestamp. Zone and estimate pickers remove
-the occupied hour. A cached estimate rechecks affected arrival windows locally.
+the occupied hour. Public booking also counts the visit when simulating travel
+to later stops. A cached estimate checks travel gaps and remaining capacity
+locally. A new booking can invalidate a proposed move on the same route.
 Fixed-hour writes check for overlap and arrival-window writes recheck the
 remaining route capacity under lock. A restored booking can affect the
 displayed times without starting another road or hourly forecast request.

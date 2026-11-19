@@ -361,7 +361,10 @@ async function findCapacitySlots(opts) {
       });
       if (!context) continue;
       const roadContext = opts.includeClaimedReservations === true ? reservationRoadContext(context, opts.excludeEstimateId) : context;
-      if (roadContext.rows.length !== context.rows.length) restoredBookingUsed = true;
+      if (roadContext.rows.length !== context.rows.length) {
+        restoredBookingUsed = true;
+        opts.onRestoredBooking?.(date, tech.id);
+      }
       if (opts.arrivalWindow?.serviceId && (await require('../technician-capabilities')
         // A whole visit carries every member's service: the technician must
         // be able to do all of them.

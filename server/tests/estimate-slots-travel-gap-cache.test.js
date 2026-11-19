@@ -41,6 +41,7 @@ const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { getHourlyRainOutlook } = require('../services/weather-forecast');
 const estimateSlotAvailability = require('../services/estimate-slot-availability');
 const { getAvailableSlots } = estimateSlotAvailability;
+const { filterUnchangedMakeRoomSlots } = estimateSlotAvailability._internals;
 let scheduledRows = [];
 
 /**
@@ -89,7 +90,28 @@ function mockDb() {
       };
     }
     if (table === 'scheduled_services') {
-      return {
+      const queryState = { dateRange: null, ids: null, changedSince: null };
+      const predicate = {
+        where(column, operator, value) {
+          if ((column === 'scheduled_services.updated_at' || column === 'scheduled_services.created_at')
+            && operator === '>=') queryState.changedSince = value;
+          return this;
+        },
+        orWhere(column, operator, value) {
+          if (typeof column === 'function') column(this);
+          else this.where(column, operator, value);
+          return this;
+        },
+        andWhere(callback) {
+          if (typeof callback === 'function') callback(this);
+          return this;
+        },
+        whereNull: jest.fn().mockReturnThis(),
+        whereNotNull: jest.fn().mockReturnThis(),
+        orWhereRaw: jest.fn().mockReturnThis(),
+        whereNot(callback) { callback(this); return this; },
+      };
+      const builder = {
         where: jest.fn().mockReturnThis(),
         whereNotNull: jest.fn().mockReturnThis(),
         whereNot: jest.fn().mockReturnThis(),
@@ -97,18 +119,40 @@ function mockDb() {
           pluck: jest.fn().mockResolvedValue([]),
         })),
         leftJoin: jest.fn().mockReturnThis(),
-        whereBetween: jest.fn().mockReturnThis(),
+        whereBetween: jest.fn((column, range) => {
+          if (column === 'scheduled_services.scheduled_date') queryState.dateRange = range;
+          return builder;
+        }),
         whereNotIn: jest.fn().mockReturnThis(),
-        andWhere: jest.fn().mockReturnThis(),
+        whereIn: jest.fn((column, ids) => {
+          if (column === 'scheduled_services.id') queryState.ids = new Set(ids.map(String));
+          return builder;
+        }),
+        andWhere: jest.fn((callback) => {
+          if (typeof callback === 'function') callback(predicate);
+          return builder;
+        }),
         select: jest.fn().mockImplementation(async (...columns) => {
           // The cached route query selects the technician/date pairs that passed its
           // stamped-or-recently-updated SQL predicate. The PostgreSQL suite exercises that predicate.
           if (columns.length === 2 && columns[0] === 'scheduled_services.technician_id') {
             return scheduledRows.filter(row => row.customer_id && (row.reservation_expires_at || row.updated_at));
           }
-          return scheduledRows;
+          return scheduledRows.filter((row) => {
+            const date = String(row.scheduled_date || '').slice(0, 10);
+            if (queryState.dateRange && (date < queryState.dateRange[0] || date > queryState.dateRange[1])) return false;
+            if (queryState.ids && !queryState.ids.has(String(row.id))) return false;
+            if (queryState.changedSince) {
+              const boundary = new Date(queryState.changedSince).getTime();
+              const updated = row.updated_at == null ? NaN : new Date(row.updated_at).getTime();
+              const created = row.created_at == null ? NaN : new Date(row.created_at).getTime();
+              if (!(updated >= boundary || created >= boundary)) return false;
+            }
+            return true;
+          });
         }),
       };
+      return builder;
     }
     if (table === 'service_zones') {
       return { select: jest.fn().mockResolvedValue([]) };
@@ -185,7 +229,56 @@ describe('getAvailableSlots — wrapper cache keyed by the travel policy', () =>
     const warm = await getAvailableSlots('est-rain-1', OPTS);
     expect(warm.metadata.cacheHit).toBe(true);
     expect([...warm.primary, ...warm.expander].some((slot) => slot.windowStart === '09:00')).toBe(false);
+    expect(warm.metadata.firstDayAvailability).toBeNull();
     expect(findAvailableSlots).toHaveBeenCalledTimes(1);
+  });
+
+  test('a warm fixed-hour list rechecks local travel gaps with the cached pin and duration', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    process.env.SLOT_TRAVEL_BUFFER_MINUTES = '15';
+    const first = await getAvailableSlots('est-rain-1', OPTS);
+    expect([...first.primary, ...first.expander].some((slot) => slot.windowStart === '09:00')).toBe(true);
+    scheduledRows = [{
+      id: 'new-remote-stop', technician_id: 'tech-1', scheduled_date: '2027-05-20',
+      window_start: '10:00:00', window_end: '11:00:00', estimated_duration_minutes: 60,
+      customer_id: 'cust-remote', reservation_expires_at: null, zone: null, customer_city: null,
+      lat: 27.75, lng: -82.15, service_type: 'Pest Control', service_key_snapshot: null,
+      is_recurring: false, is_callback: false,
+    }];
+    const warm = await getAvailableSlots('est-rain-1', OPTS);
+    expect(warm.metadata.cacheHit).toBe(true);
+    expect([...warm.primary, ...warm.expander].some((slot) => slot.windowStart === '09:00')).toBe(false);
+    expect(findAvailableSlots).toHaveBeenCalledTimes(1);
+  });
+
+  test('cached make-room proof survives only while its source and technician-day are unchanged', async () => {
+    process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+    const slot = { slotId: 'signed-make-room', date: '2027-05-20', windowStart: '09:00', windowEnd: '10:00', techId: 'tech-1' };
+    const proof = [{ slotId: slot.slotId, date: slot.date, techId: slot.techId, sourceIds: ['source-1'] }];
+    const old = '2027-05-14T14:00:00.000Z';
+    const boundary = '2027-05-14T15:00:00.000Z';
+    const source = { id: 'source-1', technician_id: 'tech-1', scheduled_date: slot.date, status: 'confirmed', created_at: old, updated_at: old };
+
+    scheduledRows = [source, { id: 'other-route', technician_id: 'tech-2', scheduled_date: slot.date, created_at: boundary, updated_at: boundary }];
+    await expect(filterUnchangedMakeRoomSlots([slot], proof, { dateFrom: slot.date, dateTo: slot.date, cachedAt: boundary }))
+      .resolves.toEqual([slot]);
+
+    scheduledRows.push({ id: 'new-destination-row', technician_id: 'tech-1', scheduled_date: slot.date, created_at: boundary, updated_at: boundary });
+    await expect(filterUnchangedMakeRoomSlots([slot], proof, { dateFrom: slot.date, dateTo: slot.date, cachedAt: boundary }))
+      .resolves.toEqual([]);
+
+    scheduledRows = [{ ...source, technician_id: 'tech-2' }];
+    await expect(filterUnchangedMakeRoomSlots([slot], proof, { dateFrom: slot.date, dateTo: slot.date, cachedAt: boundary }))
+      .resolves.toEqual([]);
+
+    scheduledRows = [{ ...source, reservation_expires_at: null, updated_at: boundary }];
+    await expect(filterUnchangedMakeRoomSlots([slot], proof, { dateFrom: slot.date, dateTo: slot.date, cachedAt: boundary }))
+      .resolves.toEqual([]);
+
+    const [signed] = estimateSlotAvailability._internals.signCustomerFacingSlots([{
+      ...slot, makeRoom: true, makeRoomSourceIds: ['source-1'], durationMinutes: 60,
+    }], 'est-rain-1');
+    expect(signed).not.toHaveProperty('makeRoomSourceIds');
   });
 
   test('capacity cache rechecks only a stamped affected technician-day and preserves a valid flexible overlap', async () => {
@@ -278,8 +371,23 @@ describe('getAvailableSlots — wrapper cache keyed by the travel policy', () =>
       total_feasible: 1,
       restored_booking_used: false,
     });
+    scheduledRows = [{
+      id: 'future-stamped-booking', technician_id: 'tech-1', scheduled_date: '2027-05-20',
+      window_start: '15:00:00', window_end: '16:00:00', estimated_duration_minutes: 60,
+      customer_id: 'office-customer', reservation_expires_at: '2027-05-18T16:00:00Z',
+      reservation_lapsed: false, zone: null, customer_city: null,
+    }];
     await getAvailableSlots('est-rain-1', OPTS);
     expect(getHourlyRainOutlook).toHaveBeenCalledTimes(1);
+
+    // The same collision-reader callback suppresses ranking only once the DB
+    // clock says the customer-linked stamp is actually lapsed.
+    estimateSlotAvailability._internals.clearCaches();
+    getHourlyRainOutlook.mockClear();
+    scheduledRows[0].reservation_expires_at = '2027-05-18T14:00:00Z';
+    scheduledRows[0].reservation_lapsed = true;
+    await getAvailableSlots('est-rain-1', OPTS);
+    expect(getHourlyRainOutlook).not.toHaveBeenCalled();
     delete process.env.GATE_CUSTOMER_RAIN_RANK;
   });
 

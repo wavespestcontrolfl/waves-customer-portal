@@ -1720,10 +1720,6 @@ async function filterCollidingSlots(slots, {
   // scheduled_services id -> minutes. Each row counts at its own window shifted
   // by those minutes (shiftMovedRows).
   shiftedServiceMinutes,
-  // A warm result has already passed route/capability/travel checks. Re-read
-  // only local occupancy so a newly staff-claimed hold cannot leave its hour
-  // displayed for the wrapper TTL; never regenerate or buy route data.
-  cachedOccupancyVeto = false,
   onStampedBooking,
   conn = db,
 } = {}) {
@@ -1766,7 +1762,7 @@ async function filterCollidingSlots(slots, {
   }
   // Mode on: a live make-room hold also holds each move's destination (see the loop below), so its moves ride along.
   const readMakeRoomMoves = makeRoomOffersOn(makeRoomModeNow());
-  const checkTravelGap = travelGapEnabled() && !cachedOccupancyVeto;
+  const checkTravelGap = travelGapEnabled();
   const rows = shiftMovedRows(await collisionQuery
     .select(
       'scheduled_services.id',
@@ -1788,8 +1784,9 @@ async function filterCollidingSlots(slots, {
           // Planning-minute inputs (stopExpectedMinutesSync), as the booking check's reader selects them.
           'scheduled_services.is_recurring', 'scheduled_services.is_callback']
         : []),
+      ...(onStampedBooking ? [conn.raw('scheduled_services.reservation_expires_at <= NOW() AS reservation_lapsed')] : []),
     ), shiftedServiceMinutes);
-  if (onStampedBooking && rows.some(row => row.customer_id != null && row.reservation_expires_at != null)) onStampedBooking();
+  if (onStampedBooking && rows.some(row => row.customer_id != null && row.reservation_lapsed === true)) onStampedBooking();
   const candidatePin = { lat: coords?.lat ?? null, lng: coords?.lng ?? null };
   if (checkTravelGap) await ensureCatalogLoaded(conn);
 
@@ -1895,7 +1892,6 @@ async function filterCollidingSlots(slots, {
     if (overlapsAny(committed, slotStart, slotEnd)) return false;
     if (overlapsAny(techBusy, slotStart, slotEnd)) return false;
     if (overlapsAny(zoneByDate.get(s.date) || [], slotStart, slotEnd)) return false;
-    if (cachedOccupancyVeto) return true;
     // Travel gap is tech-blind (one field tech) — every live row that day; with
     // GATE_MULTI_TECH_CONFIRM on, the slot technician's rows plus unassigned ones.
     // The candidate's own expected-minutes padding credit (owner ruling
@@ -1978,6 +1974,60 @@ async function recheckCachedCapacitySlots(slots, { dateFrom, dateTo, estimateId,
     if (fit?.feasible && !arrivalRoute._internals.arrivalExceedsGrace(fit, arrivalGrace)) kept.push(slot);
   }
   return kept;
+}
+
+function timestampAtOrAfter(value, boundary) {
+  const at = value == null ? NaN : new Date(value).getTime();
+  const since = boundary == null ? NaN : new Date(boundary).getTime();
+  return Number.isFinite(at) && Number.isFinite(since) && at >= since;
+}
+
+// A make-room card intentionally overlaps its original move source, so the
+// ordinary fixed-hour filter cannot judge it. Preserve it only while its
+// exact source rows and technician-day are unchanged since the cold proof.
+// Reads are local DB-only; any missing/moved/terminal source or newly changed
+// row on the destination route withholds the stale signed card.
+async function filterUnchangedMakeRoomSlots(slots, proofs, {
+  dateFrom, dateTo, cachedAt, conn = db,
+} = {}) {
+  if (!slots.length) return slots;
+  if (!cachedAt) return [];
+  const proofBySlot = new Map((proofs || []).map((proof) => [proof.slotId, proof]));
+  const sourceIds = [...new Set((proofs || []).flatMap((proof) => proof.sourceIds || []).map(String))];
+  const changedQuery = conn('scheduled_services')
+    .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
+    .andWhere((query) => query.where('scheduled_services.updated_at', '>=', cachedAt)
+      .orWhere('scheduled_services.created_at', '>=', cachedAt));
+  const [changedRows, sourceRows] = await Promise.all([
+    changedQuery.select('scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.scheduled_date',
+      'scheduled_services.updated_at', 'scheduled_services.created_at'),
+    sourceIds.length
+      ? conn('scheduled_services').whereIn('scheduled_services.id', sourceIds)
+        .select('scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.scheduled_date',
+          'scheduled_services.status', 'scheduled_services.updated_at', 'scheduled_services.created_at')
+      : Promise.resolve([]),
+  ]);
+  // Both result sets are already narrowed by SQL: changedRows by the two
+  // cache-boundary predicates above, and sourceRows by WHERE IN(sourceIds).
+  const changed = changedRows || [];
+  const sourcesById = new Map((sourceRows || []).map((row) => [String(row.id), row]));
+  const dateOf = (value) => (value instanceof Date ? value.toISOString().slice(0, 10) : String(value || '').slice(0, 10));
+  return slots.filter((slot) => {
+    const proof = proofBySlot.get(slot.slotId);
+    if (!proof) return false;
+    const changedDay = changed.filter((row) => dateOf(row.scheduled_date) === slot.date)
+      .map((row) => ({ technicianId: row.technician_id }));
+    if (scopeToTechnician(changedDay, slot.techId).length) return false;
+    return (proof.sourceIds || []).every((id) => {
+      const row = sourcesById.get(String(id));
+      return !!row
+        && !NOT_A_ROUTE_STOP_STATUSES.includes(row.status)
+        && dateOf(row.scheduled_date) === proof.date
+        && String(row.technician_id || '') === String(proof.techId || '')
+        && !timestampAtOrAfter(row.updated_at, cachedAt)
+        && !timestampAtOrAfter(row.created_at, cachedAt);
+    });
+  });
 }
 
 // GATE_BOOKING_MAKE_ROOM on, capacity mode (Codex #7796 P2): a make-room hold made in hour mode keeps its moved stops'
@@ -2192,6 +2242,7 @@ function signCustomerFacingSlots(slots, estimateId) {
     const publicSlot = { ...slot, slotId: appendOfferToSlotId(slot.slotId, { ...offer, arrivalGrace }) };
     delete publicSlot.routeMode;
     delete publicSlot.makeRoom;
+    delete publicSlot.makeRoomSourceIds;
     return publicSlot;
   });
 }
@@ -2347,6 +2398,10 @@ async function makeRoomOfferSlot(args, { durationMinutes }) {
       routeOptimal: false,
       nearbyJob: null,
       makeRoom: true,
+      // Private cache recheck provenance: if a source moves/changes after
+      // this offer, its make-room proof is stale even when the displayed
+      // destination hour itself still looks open.
+      makeRoomSourceIds: (hour.moves || []).map((move) => String(move.id)).filter(Boolean),
     };
   } catch (err) {
     logger.warn(`[booking-make-room] offer not built, serving the free list: ${err.message}`);
@@ -2584,16 +2639,26 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
             // policy moves; replaying the plain fixed-hour mirror would
             // erase it. Recheck ordinary cached hours and carry that signed
             // exception through unchanged for reserve-time verification.
-            const makeRoomIds = new Set(cached.occupancyContext?.makeRoomSlotIds || []);
+            const makeRoomProofs = cached.occupancyContext?.makeRoomProofs || [];
+            const makeRoomIds = new Set(makeRoomProofs.map((proof) => proof.slotId));
+            const makeRoom = cachedSlots.filter((slot) => makeRoomIds.has(slot.slotId));
             const ordinary = cachedSlots.filter((slot) => !makeRoomIds.has(slot.slotId));
-            const ordinaryKept = await filterCollidingSlots(ordinary, {
-              dateFrom: cachedDates[0],
-              dateTo: cachedDates[cachedDates.length - 1],
-              ownEstimateId: estimateId,
-              cachedOccupancyVeto: true,
-            });
-            const ordinaryIds = new Set(ordinaryKept.map((slot) => slot.slotId));
-            kept = cachedSlots.filter((slot) => makeRoomIds.has(slot.slotId) || ordinaryIds.has(slot.slotId));
+            const [ordinaryKept, makeRoomKept] = await Promise.all([
+              filterCollidingSlots(ordinary, {
+                dateFrom: cachedDates[0],
+                dateTo: cachedDates[cachedDates.length - 1],
+                coords: cached.occupancyContext?.coords,
+                candidateExpectedMinutes: cached.occupancyContext?.candidateExpectedMinutes,
+                ownEstimateId: estimateId,
+              }),
+              filterUnchangedMakeRoomSlots(makeRoom, makeRoomProofs, {
+                dateFrom: cachedDates[0],
+                dateTo: cachedDates[cachedDates.length - 1],
+                cachedAt: cached.occupancyContext?.readAt,
+              }),
+            ]);
+            const keptFixedIds = new Set([...ordinaryKept, ...makeRoomKept].map((slot) => slot.slotId));
+            kept = cachedSlots.filter((slot) => keptFixedIds.has(slot.slotId));
           }
           const keptIds = new Set(kept.map((slot) => slot.slotId));
           primary = primary.filter((slot) => keptIds.has(slot.slotId));
@@ -2608,7 +2673,11 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       const cacheMetadata = {
         ...cached.result.metadata,
         cacheHit: true,
-        ...(occupancyChanged ? { firstDayAvailability: firstDayAvailability([...primary, ...expander]) } : {}),
+        // The cache stores only the curated cards, not the full pool the
+        // scarcity badge counted. Once any card is removed, recomputing from
+        // this truncated subset can understate or overstate the real first
+        // day's openings. Suppress the uncertain claim until a cold rebuild.
+        ...(occupancyChanged ? { firstDayAvailability: null } : {}),
       };
       // Gate-off must win over a cache entry written while the rain-chip
       // gate was on: the gate resolves at process start and this cache is
@@ -2973,10 +3042,16 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
 
   const signedPrimary = signCustomerFacingSlots(primary, estimateId);
   const signedExpander = signCustomerFacingSlots(expander, estimateId);
-  const makeRoomSlotIds = [
-    ...primary.map((slot, i) => (slot.makeRoom === true ? signedPrimary[i]?.slotId : null)),
-    ...expander.map((slot, i) => (slot.makeRoom === true ? signedExpander[i]?.slotId : null)),
-  ].filter(Boolean);
+  const makeRoomProofs = [
+    ...primary.map((slot, i) => (slot.makeRoom === true ? {
+      slotId: signedPrimary[i]?.slotId, date: slot.date, techId: slot.techId,
+      sourceIds: slot.makeRoomSourceIds || [],
+    } : null)),
+    ...expander.map((slot, i) => (slot.makeRoom === true ? {
+      slotId: signedExpander[i]?.slotId, date: slot.date, techId: slot.techId,
+      sourceIds: slot.makeRoomSourceIds || [],
+    } : null)),
+  ].filter((proof) => proof?.slotId);
 
   const result = {
     // Signed at the edge; the 5-min wrapper cache stores the SIGNED result,
@@ -3026,11 +3101,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
         readAt: estimate.occupancy_read_at || readAt,
         coords: coords ? { lat: coords.lat, lng: coords.lng } : null,
         durationMinutes: serviceProfile.durationMinutes,
+        candidateExpectedMinutes,
         prospective: {
           service_type: serviceProfile.services.map(service => service.label || service.service).join(' '),
           ...(serviceProfile.services.length > 1 ? { combined_services: true } : {}),
         },
-        makeRoomSlotIds,
+        makeRoomProofs,
       },
     });
   }
@@ -3283,6 +3359,7 @@ module.exports = {
     slotWindowFitsDay,
     signCustomerFacingSlots,
     filterCollidingSlots,
+    filterUnchangedMakeRoomSlots,
     applyLineOfferRule,
     lineOfferRankingFor,
     heldVisitLines,

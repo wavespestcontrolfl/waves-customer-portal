@@ -1774,10 +1774,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // db call at all) with the gate off; the phone agent (selfServeNotice
   // false) never asks.
   const zoneSlug = selfServeNotice ? await resolveZoneRouteDaySlug({ lat, lng, conn: db }) : null;
+  const restoredRoutes = new Set();
   const result = await findAvailableSlots({
     lat,
     lng,
     zoneSlug,
+    includeClaimedReservations: capacityEnabled(),
+    onRestoredBooking: (date, techId) => restoredRoutes.add(`${date}|${techId}`),
     durationMinutes: duration,
     serviceTypes: serviceLabels,
     // This booking's own expected-minutes credit — the same number the
@@ -2106,7 +2109,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       }
     }
   }
-  const stampedCandidates = (await rainRank.stamp([...candidateMap.values()])).sort(compareRankedSlots);
+  const offers = [...candidateMap.values()];
+  // A newly counted stop can change the packed positions. Start an hourly
+  // lookup only if an unaffected route still has a near-term offer to rank.
+  const forecastOffers = restoredRoutes.size
+    ? offers.filter(slot => !restoredRoutes.has(`${slot.date}|${slot.technician_id}`))
+    : offers;
+  const stampedCandidates = (await rainRank.stamp(offers, forecastOffers)).sort(compareRankedSlots);
   // GATE_CUSTOMER_ROUTE_CHECK (customer-route-check.js): null with the gate
   // off or no surface named, and nothing below runs.
   const routeCheck = routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today });
