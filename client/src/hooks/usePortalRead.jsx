@@ -212,10 +212,15 @@ export default function usePortalRead(key, load) {
     else cache?.delete(key);
   }, [cache, key]);
 
+  const cacheEntryGuard = useCallback(() => {
+    const expected = cache?.get(key);
+    return () => cache?.get(key) === expected;
+  }, [cache, key]);
+
   const freshnessGuard = useCallback(() => {
     const expected = sequence.current;
     return () => sequence.current === expected;
   }, []);
 
-  return { ...state, refresh, update, invalidate, evict, freshnessGuard, saved: Boolean(cache && state.data !== undefined && (offline || state.error || !state.verified)), offline };
+  return { ...state, refresh, update, invalidate, evict, cacheEntryGuard, freshnessGuard, saved: Boolean(cache && state.data !== undefined && (offline || state.error || !state.verified)), offline };
 }

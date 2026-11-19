@@ -182,6 +182,34 @@ describe('Completed visits by property', () => {
     expect(api.getServices).toHaveBeenCalledTimes(2);
   });
 
+  it('evicts only the original scoped cache when a pagination 409 arrives after Completed unmounts', async () => {
+    let rejectPagination;
+    const refreshProperties = vi.fn();
+    api.getServices
+      .mockResolvedValueOnce({
+        historyProperty: 'pa', historyCustomerId: customer.id, total: 2,
+        services: [{ id: 'old', status: 'completed', date: '2026-01-10', type: 'Pest', propertyAddress: 'Cached conflicted house' }],
+      })
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectPagination = reject; }));
+    render(<RemountableCompleted visitsProps={{ onSavedScopeUnavailable: refreshProperties }} />);
+    expect(await screen.findByText('Cached conflicted house')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load More Visits' }));
+    await waitFor(() => expect(rejectPagination).toEqual(expect.any(Function)));
+    fireEvent.click(screen.getByRole('button', { name: 'Close completed visits' }));
+    await act(async () => {
+      rejectPagination(Object.assign(new Error('Your selected property changed.'), { status: 409 }));
+    });
+
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    fireEvent.click(screen.getByRole('button', { name: 'Reopen completed visits' }));
+
+    expect(screen.queryByText('Cached conflicted house')).not.toBeInTheDocument();
+    expect(api.getServices).toHaveBeenCalledTimes(2);
+    expect(refreshProperties).not.toHaveBeenCalled();
+  });
+
   it('rearms automatic picker recovery after wrong echo, matching verification, then another wrong echo', async () => {
     const refreshProperties = vi.fn();
     api.getServices

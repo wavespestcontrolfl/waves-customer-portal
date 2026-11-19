@@ -242,7 +242,7 @@ function formatScheduledTracker(service, tech, customer) {
 // shared history reader owns canonical-sibling selection, reviewed customer
 // notes, project-report handling and typed-report suppression. Contact
 // sessions then receive the same withheld/contact-safe projection as Visits.
-async function attachCompletionSummary(req, tracker, service) {
+async function attachCompletionSummary(req, tracker, service, scope) {
   if (!tracker || tracker.state !== 'complete' || tracker.currentStep !== 7) return tracker;
 
   // Resolve a contact's report permission before reading any report record.
@@ -275,6 +275,7 @@ async function attachCompletionSummary(req, tracker, service) {
       limit: 1,
       completedOnly: true,
       scheduledServiceId: service.id,
+      scope,
     });
     // Completion and report publication are separate commits. Keep a pending
     // state so Home can refresh instead of borrowing another visit's report.
@@ -487,7 +488,7 @@ router.get('/active', async (req, res, next) => {
       await attachTechPhoto(formatted, tech);
       await enrichScheduledWithTechStatus(formatted, canonical, locationCustomer);
       await attachRainChance(formatted, canonical, locationCustomer);
-      await attachCompletionSummary(req, formatted, canonical);
+      await attachCompletionSummary(req, formatted, canonical, scope);
       // "N stops before yours" (GATE_STOPS_AWAY) — bare counts only,
       // fail-soft null. routeProgress feeds the route-dots strip.
       const stops = await computeStopsAhead(db, canonical.id);
@@ -565,7 +566,7 @@ router.get('/today', async (req, res, next) => {
       await attachTechPhoto(formatted, tech);
       await enrichScheduledWithTechStatus(formatted, canonical, locationCustomer);
       await attachRainChance(formatted, canonical, locationCustomer);
-      await attachCompletionSummary(req, formatted, canonical);
+      await attachCompletionSummary(req, formatted, canonical, scope);
       // "N stops before yours" (GATE_STOPS_AWAY) — bare counts only,
       // fail-soft null. routeProgress feeds the route-dots strip.
       const stops = await computeStopsAhead(db, canonical.id);

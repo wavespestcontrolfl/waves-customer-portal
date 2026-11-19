@@ -3763,6 +3763,7 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
   const scopeRefreshRequestedRef = useRef(null);
   const invalidateHistoryScopeRef = useRef(() => {});
   const evictHistoryCacheRef = useRef(() => {});
+  const historyCacheEntryGuardRef = useRef(() => () => false);
   if (activeHistoryScopeRef.current !== historyScopeKey) {
     activeHistoryScopeRef.current = historyScopeKey;
     scopeRefreshRequestedRef.current = null;
@@ -3789,6 +3790,8 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
   };
   const readPage = async (pagination, { isCurrent = () => true } = {}) => {
     const requestedScopeKey = historyScopeKey;
+    const evictOriginalCache = evictHistoryCacheRef.current;
+    const originalCacheEntryIsCurrent = historyCacheEntryGuardRef.current();
     const requestIsCurrent = () => mountedRef.current
       && activeHistoryScopeRef.current === requestedScopeKey
       && isCurrent();
@@ -3802,8 +3805,15 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
       // Pagination bypasses usePortalRead.refresh. A denial that arrives after
       // Completed unmounts must still evict the provider cache, or an offline
       // remount can resurrect the previously authorized rows and actions.
-      if (authorizationDenied) evictHistoryCacheRef.current({ clearAll: true });
-      if (requestIsCurrent() && (authorizationDenied || propertyConflict)) {
+      if (authorizationDenied) evictOriginalCache({ clearAll: true });
+      const current = requestIsCurrent();
+      // A scope conflict invalidates the cache entry this request started
+      // from even after unmount. Preserve a replacement written by a newer
+      // verified request for the same key.
+      if (propertyConflict && !current && originalCacheEntryIsCurrent()) {
+        evictOriginalCache();
+      }
+      if (current && (authorizationDenied || propertyConflict)) {
         invalidateHistoryScopeRef.current(requestedScopeKey, error?.message, {
           clearAll: authorizationDenied,
           refreshPicker: propertyUnavailable || propertyConflict,
@@ -3827,6 +3837,7 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
   };
   const historyRead = usePortalRead(`service-history:${historyProperty || 'profile'}`, ({ isCurrent }) => readPage({ limit: 100 }, { isCurrent }));
   evictHistoryCacheRef.current = historyRead.evict;
+  historyCacheEntryGuardRef.current = historyRead.cacheEntryGuard;
   const { loading, error: loadError } = historyRead;
   const [expanded, setExpanded] = useState(null);
   const [typeFilter, setTypeFilter] = useState('All');
@@ -13570,6 +13581,10 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
       return Promise.resolve();
     }
     const displayedTrackerId = displayedTracker.id;
+    const reportWasVisible = Boolean(displayedTracker.serviceSummary
+      && !displayedTracker.serviceSummary.reportPending
+      && !displayedTracker.serviceSummary.reportWithheld
+      && displayedTracker.serviceSummary.reportAvailable !== false);
     const seq = ++trackerSeqRef.current;
     const busyAttempt = showBusy ? ++reportRefreshAttemptRef.current : null;
     if (showBusy) setReportRefreshing(true);
@@ -13577,7 +13592,11 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
     return Promise.race([
       api.getTodayTracker(),
       new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error('Report refresh timed out')), READ_TIMEOUT_MS);
+        timer = setTimeout(() => {
+          const timeout = new Error('Report refresh timed out');
+          timeout.code = 'REPORT_REVALIDATION_TIMEOUT';
+          reject(timeout);
+        }, READ_TIMEOUT_MS);
       }),
     ])
       .then(d => {
@@ -13597,7 +13616,10 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
       .catch(error => {
         if (seq !== trackerSeqRef.current) return;
         const denied = error?.status === 401 || error?.status === 403 || error?.sessionExpired;
-        if (denied) withdrawCompletionReport(displayedTrackerId);
+        const timedOut = error?.code === 'REPORT_REVALIDATION_TIMEOUT';
+        // A ready report cannot remain trusted after revalidation times out.
+        // Withdraw it immediately; the late request may no longer restore it.
+        if (denied || (timedOut && reportWasVisible)) withdrawCompletionReport(displayedTrackerId);
       })
       .finally(() => {
         clearTimeout(timer);

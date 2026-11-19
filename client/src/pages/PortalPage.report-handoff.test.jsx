@@ -136,6 +136,42 @@ describe('completed visit report handoff on Home', () => {
     expect(screen.queryByRole('link', { name: "View today's report" })).not.toBeInTheDocument();
   });
 
+  it('withdraws a ready tracker report when portal revalidation times out and ignores the late success', async () => {
+    nativeState.enabled = true;
+    nativeState.platform = 'ios';
+    todayTracker = completeTracker({
+      customerSummary: 'Time-sensitive closeout.',
+      reportUrl: '/report/timed-report', reportPdfUrl: null, reportPending: false,
+    });
+    render(<PortalReadProvider enabled><ServiceTracker /></PortalReadProvider>);
+    fireEvent.click(await screen.findByRole('button', { name: "View today's report" }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+
+    let finishLateRequest;
+    api.getTodayTracker.mockImplementationOnce(() => new Promise(resolve => { finishLateRequest = resolve; }));
+    vi.useFakeTimers();
+    try {
+      fireEvent(window, new Event('online'));
+      expect(api.getTodayTracker).toHaveBeenCalledTimes(2);
+      await act(async () => { await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS); });
+
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(screen.queryByText('Time-sensitive closeout.')).not.toBeInTheDocument();
+      expect(screen.queryByText('Service summary')).not.toBeInTheDocument();
+
+      await act(async () => {
+        finishLateRequest({ tracker: completeTracker({
+          customerSummary: 'Late success must stay hidden.',
+          reportUrl: '/report/late-success', reportPdfUrl: null, reportPending: false,
+        }) });
+      });
+      expect(screen.queryByText('Late success must stay hidden.')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: "View today's report" })).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('refreshes a completion whose report row has not committed yet', async () => {
     todayTracker = completeTracker({ reportPending: true });
     render(<ServiceTracker />);

@@ -54,6 +54,7 @@ test('scheduledServiceId fences both the canonical list and its count to one sto
   expect(records).toHaveLength(2);
   for (const builder of records) {
     expect(builder.where).toHaveBeenCalledWith('service_records.scheduled_service_id', 'visit-1');
+    expect(builder.where).toHaveBeenCalledWith('scheduled_services.customer_id', 'cust-1');
   }
   expect(siblingFilters(builders)).toEqual([1, 1]);
 });

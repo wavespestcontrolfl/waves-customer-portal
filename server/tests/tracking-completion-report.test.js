@@ -32,12 +32,14 @@ test('attaches the reviewed summary and report belonging to the exact completed 
     total: 1,
   });
 
-  const tracker = await attach({ customerId: 'customer-1' }, { ...completed }, service);
+  const scope = { enabled: true, scoped: true, property: { id: 'primary', is_primary: true } };
+  const tracker = await attach({ customerId: 'customer-1' }, { ...completed }, service, scope);
 
   expect(listPortalServiceHistory).toHaveBeenCalledWith('customer-1', {
     limit: 1,
     completedOnly: true,
     scheduledServiceId: 'visit-1',
+    scope,
   });
   expect(tracker.serviceSummary).toEqual({
     customerSummary: 'Reviewed customer closeout.',

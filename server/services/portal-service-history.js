@@ -120,16 +120,20 @@ async function listPortalServiceHistory(customerId, {
   if (type) {
     query = query.where('service_records.service_type', 'ilike', `%${type}%`);
   }
-  // The completion tracker asks for the report belonging to its exact stop.
-  // Keep this alongside customer_id and the canonical-sibling predicate so a
-  // same-day visit can never lend its report to another completed tracker.
-  if (scheduledServiceId) query = query.where('service_records.scheduled_service_id', scheduledServiceId);
   // The explicit Completed filter only accepts a stamped property ID. Home
   // and contact sessions retain their existing primary/legacy scope rules.
   const selectedHistory = historyProperty && historyProperty !== 'all';
-  const filterHistory = (q) => selectedHistory
-    ? q.where('scheduled_services.property_id', historyProperty).where('scheduled_services.customer_id', customerId)
-    : scopeRecordsToProperty(q, scope);
+  const filterHistory = (q) => {
+    // A tracker report must still belong to this stop, customer and property
+    // when the history query runs, including after a concurrent reassignment.
+    if (scheduledServiceId) {
+      q.where('service_records.scheduled_service_id', scheduledServiceId)
+        .where('scheduled_services.customer_id', customerId);
+    }
+    return selectedHistory
+      ? q.where('scheduled_services.property_id', historyProperty).where('scheduled_services.customer_id', customerId)
+      : scopeRecordsToProperty(q, scope);
+  };
   query = filterHistory(query);
   if (historyProperty) {
     query.leftJoin('customer_properties as visit_property', function () {
@@ -229,8 +233,7 @@ async function listPortalServiceHistory(customerId, {
   // Get total count for pagination
   let totalQuery = database('service_records')
     .where({ 'service_records.customer_id': customerId });
-  if (scheduledServiceId) totalQuery = totalQuery.where('service_records.scheduled_service_id', scheduledServiceId);
-  if (scope || selectedHistory) {
+  if (scheduledServiceId || scope || selectedHistory) {
     totalQuery = filterHistory(totalQuery.leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id'));
   }
   if (completedOnly) totalQuery = totalQuery.whereRaw(COMPLETED_RECORD).whereRaw(ONE_RECORD_PER_APPOINTMENT);
