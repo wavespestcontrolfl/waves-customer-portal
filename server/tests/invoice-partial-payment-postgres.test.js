@@ -19,6 +19,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const { randomUUID } = require('node:crypto');
+const { recordAuthenticationCancellation } = require('../services/invoice-payment-authentication');
 
 // The first test cold-loads the whole payment writer (invoice, Stripe, follow-up services).
 jest.setTimeout(60000);
@@ -58,6 +59,7 @@ postgres('Partial payments against migrated PostgreSQL', () => {
     const ids = customerIds.splice(0);
     if (!ids.length) return;
     const invoiceIds = (await database('invoices').whereIn('customer_id', ids).pluck('id'));
+    await database('stripe_invoice_charge_attempts').whereIn('invoice_id', invoiceIds).del();
     await database('audit_log').whereIn('resource_id', [...invoiceIds, ...ids]).del();
     await database('receipt_delivery_jobs').whereIn('invoice_id', invoiceIds).del();
     await database('invoice_followup_sequences').whereIn('invoice_id', invoiceIds).del();
@@ -132,6 +134,61 @@ postgres('Partial payments against migrated PostgreSQL', () => {
     expect(refused.reason.message).toMatch(/changed to \$60\.00/);
     expect(Number((await row(invoice.id)).amount_paid)).toBe(40);
     expect(await database('payments').where({ customer_id: invoice.customer_id })).toHaveLength(1);
+  });
+
+  it.each([
+    ['full', {}, 100, 'paid', 0],
+    ['partial', { amountCents: 4000 }, 40, 'viewed', 40],
+  ])('a resolved authentication_required attempt blocks %s manual posting until its exact PI cancellation is recorded', async (_kind, paymentOptions, ledgerAmount, finalStatus, finalAmountPaid) => {
+    const invoice = await makeInvoice();
+    const attemptId = randomUUID();
+    const suffix = attemptId.replaceAll('-', '');
+    const intentId = `pi_auth_${suffix}`;
+    const wrongIntentId = `pi_wrong_${suffix}`;
+    const stripePaymentMethodId = `pm_auth_${suffix}`;
+    const intent = {
+      id: intentId,
+      status: 'canceled',
+      payment_method: stripePaymentMethodId,
+      metadata: {
+        source: 'admin_card_on_file',
+        saved_card_attempt_id: attemptId,
+        waves_invoice_id: invoice.id,
+        waves_customer_id: invoice.customer_id,
+      },
+    };
+    await database('stripe_invoice_charge_attempts').insert({
+      id: attemptId,
+      invoice_id: invoice.id,
+      stripe_payment_method_id: stripePaymentMethodId,
+      idempotency_key: `synthetic-auth-${attemptId}`,
+      status: 'failed',
+      decline_code: 'authentication_required',
+      stripe_payment_intent_id: intentId,
+      authentication_canceled_intent_id: wrongIntentId,
+      resolved_at: new Date(),
+    });
+    expect((await row(invoice.id)).stripe_payment_intent_id).toBeNull();
+
+    const blocked = await refusalOf(record(invoice.id, paymentOptions));
+    expect(blocked).toMatchObject({ statusCode: 409 });
+    expect(blocked.message).toMatch(/awaiting verification/);
+    expect(await row(invoice.id)).toMatchObject({ status: 'viewed' });
+    expect(Number((await row(invoice.id)).amount_paid)).toBe(0);
+    expect(await database('payments').where({ customer_id: invoice.customer_id })).toHaveLength(0);
+
+    await recordAuthenticationCancellation(intent, database);
+    expect(await database('stripe_invoice_charge_attempts').where({ id: attemptId }).first())
+      .toMatchObject({ status: 'failed', decline_code: 'authentication_required', authentication_canceled_intent_id: intentId });
+
+    await record(invoice.id, paymentOptions);
+    const posted = await row(invoice.id);
+    expect(posted.status).toBe(finalStatus);
+    expect(Number(posted.amount_paid)).toBe(finalAmountPaid);
+    const payments = await database('payments').where({ customer_id: invoice.customer_id });
+    expect(payments).toHaveLength(1);
+    expect(payments[0].status).toBe('paid');
+    expect(Number(payments[0].amount)).toBe(ledgerAmount);
   });
 
   it('Undo of a part waits while a saved-card charge for the rest is unresolved (a crash can roll the invoice back but keep the claim)', async () => {
