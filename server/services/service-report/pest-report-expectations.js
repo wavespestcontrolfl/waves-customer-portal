@@ -239,6 +239,8 @@ const PRODUCT_EXPECTATION_CLASS = new Map([
   // product's classification with no error, so both spellings stay mapped.
   ['atticus talak', 'pyrethroid'],
   ['atticus talak 7.9 f', 'pyrethroid'],
+  // Owner ruling 2026-11-18: LESCO Crosscheck Plus (bifenthrin) is the house bifenthrin now; Talak stays mapped for old records.
+  ['lesco crosscheck plus', 'pyrethroid'],
   ['demand cs', 'pyrethroid'],
   ['onslaught fastcap', 'pyrethroid'],
   // Delta Dust is its own class, NOT 'pyrethroid' (owner ruling 2026-09-28,
@@ -282,6 +284,7 @@ const PRODUCT_ACTIVE_INGREDIENT = new Map([
   ['atticus antapex wsg', 'dinotefuran'],
   ['atticus talak', 'bifenthrin'],
   ['atticus talak 7.9 f', 'bifenthrin'],
+  ['lesco crosscheck plus', 'bifenthrin'],
   ['demand cs', 'lambda-cyhalothrin'],
   ['onslaught fastcap', 'esfenvalerate'],
   ['delta dust', 'deltamethrin'],

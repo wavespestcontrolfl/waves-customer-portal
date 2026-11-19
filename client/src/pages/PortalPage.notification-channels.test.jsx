@@ -17,7 +17,8 @@ const customer = { id: 'qa-app', firstName: 'QA', phone: '9415550142', email: 'q
 let prefs;
 const reminder72 = () => screen.getByRole('combobox', { name: 'Delivery method for 3-day reminder' });
 const reminder24 = () => screen.getByRole('combobox', { name: 'Delivery method for Day-before reminder' });
-const billingChannel = (groupName, channelName) => within(screen.getByRole('group', { name: groupName })).getByRole('checkbox', { name: new RegExp(`^${channelName}`) });
+const billingSelect = (label) => screen.getByRole('combobox', { name: `Delivery method for ${label.toLowerCase()}` });
+const billingOption = (label, choice) => within(billingSelect(label)).getByRole('option', { name: choice, exact: true });
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -153,15 +154,14 @@ it('scopes the visit App shortcut away from billing without enabling a muted cat
 
 it.each([
   ['Email', ['email']], ['Text', ['sms']], ['App', ['push']],
-  ['Email + Text', ['email', 'sms']], ['Email + App', ['email', 'push']],
+  ['Both', ['email', 'sms']], ['App + email', ['email', 'push']],
+  // Stored mixes outside the dropdown list stay shown as their own entry.
   ['Text + App', ['sms', 'push']], ['Email + Text + App', ['email', 'sms', 'push']],
-])('renders the %s billing channel combination', async (_label, channels) => {
+])('renders the %s billing channel choice', async (label, channels) => {
   prefs.invoiceChannels = channels;
   render(<BillingTab customer={customer} />);
-  await screen.findByRole('group', { name: 'Invoices' });
-  expect(billingChannel('Invoices', 'Email')).toHaveProperty('checked', channels.includes('email'));
-  expect(billingChannel('Invoices', 'Text')).toHaveProperty('checked', channels.includes('sms'));
-  expect(billingChannel('Invoices', 'App')).toHaveProperty('checked', channels.includes('push'));
+  await screen.findByRole('combobox', { name: 'Delivery method for invoices' });
+  expect(billingOption('Invoices', label).selected).toBe(true);
 });
 
 it('keeps the scalar delivery controls for an older server without the array capability', async () => {
@@ -169,7 +169,8 @@ it('keeps the scalar delivery controls for an older server without the array cap
   render(<BillingTab customer={customer} />);
   expect(await screen.findByRole('combobox', { name: 'Delivery method for invoices' })).toBeInTheDocument();
   expect(screen.getByRole('combobox', { name: 'Delivery method for billing reminders' })).toBeInTheDocument();
-  expect(screen.queryByRole('group', { name: 'Invoices' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('combobox', { name: 'Delivery method for payment receipts' })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Save billing preferences' })).toBeInTheDocument();
 });
 
 it('opens the payment methods section after loading an App action destination', async () => {
@@ -183,17 +184,14 @@ it('opens the payment methods section after loading an App action destination', 
   } finally { HTMLElement.prototype.scrollIntoView = previous; }
 });
 
-it('saves only changed billing categories and never changes the global text or email opt-outs', async () => {
+it('saves a billing category the moment it changes and never changes the global text or email opt-outs', async () => {
   render(<BillingTab customer={customer} />);
-  await screen.findByRole('group', { name: 'Invoices' });
-  const app = billingChannel('Invoices', 'App');
-  fireEvent.click(app);
-  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
-  await screen.findByRole('button', { name: 'Saved', exact: true });
-  expect(api.updateNotificationPrefs).toHaveBeenLastCalledWith({ billingEmail: '', invoiceChannels: ['sms', 'push'] });
-  expect(api.updateNotificationPrefs.mock.calls[0][0]).not.toHaveProperty('smsEnabled');
-  expect(api.updateNotificationPrefs.mock.calls[0][0]).not.toHaveProperty('emailEnabled');
-  expect(api.updateNotificationPrefs.mock.calls[0][0]).not.toHaveProperty('paymentConfirmationSms');
+  await screen.findByRole('combobox', { name: 'Delivery method for invoices' });
+  expect(screen.queryByRole('button', { name: /Save billing/ })).not.toBeInTheDocument();
+  fireEvent.change(billingSelect('Invoices'), { target: { value: 'push' } });
+  await waitFor(() => expect(api.updateNotificationPrefs).toHaveBeenCalledWith({ invoiceChannels: ['push'] }));
+  expect(api.updateNotificationPrefs).toHaveBeenCalledTimes(1);
+  expect(billingSelect('Invoices')).toHaveValue('push');
 });
 
 it('requires a usable alternative before clearing the only billing email destination', async () => {
@@ -201,88 +199,64 @@ it('requires a usable alternative before clearing the only billing email destina
   prefs = { ...prefs, billingEmail: 'billing@example.invalid', emailEnabled: true, smsEnabled: true,
     invoiceChannels: ['email'], paymentIssueChannels: ['email'], billingReminderChannels: ['email'], paymentConfirmationChannels: ['email'] };
   render(<BillingTab customer={noAccountEmail} />);
-  await screen.findByRole('group', { name: 'Invoices' });
+  await screen.findByRole('combobox', { name: 'Delivery method for invoices' });
   fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing email' }));
   expect(screen.getByRole('alert')).toHaveTextContent(/Add an available Text or App option/);
   expect(api.updateNotificationPrefs).not.toHaveBeenCalled();
-  for (const group of ['Invoices', 'Payment problems', 'Billing reminders', 'Payment receipts']) fireEvent.click(billingChannel(group, 'Text'));
-  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  // With the address cleared, an Email choice can't be newly picked.
+  expect(billingOption('Invoices', 'Both')).toBeDisabled();
+  const labels = ['Invoices', 'Payment problems', 'Billing reminders', 'Payment receipts'];
+  for (const label of labels) fireEvent.change(billingSelect(label), { target: { value: 'sms' } });
+  await waitFor(() => expect(api.updateNotificationPrefs).toHaveBeenCalledTimes(4));
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing email' }));
   await screen.findByRole('button', { name: 'Saved', exact: true });
-  expect(api.updateNotificationPrefs).toHaveBeenCalledWith(expect.objectContaining({
-    billingEmail: '', invoiceChannels: ['email', 'sms'], paymentIssueChannels: ['email', 'sms'], billingReminderChannels: ['email', 'sms'], paymentConfirmationChannels: ['email', 'sms'],
-  }));
+  expect(api.updateNotificationPrefs).toHaveBeenLastCalledWith({ billingEmail: '' });
+  expect(prefs).toMatchObject({ invoiceChannels: ['sms'], paymentIssueChannels: ['sms'], billingReminderChannels: ['sms'], paymentConfirmationChannels: ['sms'] });
 });
 
-it('prevents removing the final channel with mouse or keyboard activation', async () => {
-  prefs.smsEnabled = true;
+it('never saves a choice that needs an unavailable delivery method', async () => {
+  // smsEnabled: false makes Text unavailable.
   render(<BillingTab customer={customer} />);
-  await screen.findByRole('group', { name: 'Invoices' });
-  const text = billingChannel('Invoices', 'Text');
-  expect(text).toBeDisabled();
-  fireEvent.click(text);
-  fireEvent.keyDown(text, { key: ' ', code: 'Space' });
-  expect(text).toBeChecked();
+  await screen.findByRole('combobox', { name: 'Delivery method for invoices' });
+  expect(billingOption('Invoices', 'Both')).toBeDisabled();
+  expect(billingOption('Invoices', 'App')).toBeEnabled();
+  fireEvent.change(billingSelect('Invoices'), { target: { value: 'email+sms' } });
+  expect(api.updateNotificationPrefs).not.toHaveBeenCalled();
 });
 
-it.each([
-  ['Payment receipts', 'paymentConfirmationChannels', ['sms', 'push'], 'App', { paymentConfirmationSms: false }, customer],
-  // Owner ruling 2026-09-26: the portal-wide email switch no longer makes
-  // Email unavailable (hasBillingEmail no longer reads it) — only a missing
-  // address does, so Email is made unavailable here by clearing it instead.
-  ['Invoices', 'invoiceChannels', ['email', 'sms'], 'Text', {}, { ...customer, email: '' }],
-])('keeps the last usable channel in %s when another selected channel is unavailable', async (group, key, channels, usable, overrides, renderCustomer) => {
-  prefs = { ...prefs, smsEnabled: true, emailEnabled: true, [key]: channels, ...overrides };
-  render(<BillingTab customer={renderCustomer} />);
-  await screen.findByRole('group', { name: group });
-  const lastUsable = billingChannel(group, usable);
-  expect(lastUsable).toBeDisabled();
-  fireEvent.click(lastUsable);
-  expect(lastUsable).toBeChecked();
-  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
-  await screen.findByRole('button', { name: 'Saved', exact: true });
-  expect(api.updateNotificationPrefs.mock.calls[0][0]).not.toHaveProperty(key);
-});
-
-it('rolls billing choices back when saving fails', async () => {
+it('rolls a billing choice back when saving fails', async () => {
   prefs.smsEnabled = true;
   prefs.emailEnabled = true;
   render(<BillingTab customer={customer} />);
-  await screen.findByRole('group', { name: 'Invoices' });
-  const email = billingChannel('Invoices', 'Email');
-  fireEvent.click(email);
-  expect(email).toBeChecked();
+  await screen.findByRole('combobox', { name: 'Delivery method for invoices' });
   api.updateNotificationPrefs.mockRejectedValueOnce(new Error('offline'));
-  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  fireEvent.change(billingSelect('Invoices'), { target: { value: 'email' } });
   await screen.findByText(/Couldn.t save your billing preferences/);
-  expect(email).not.toBeChecked();
-  expect(screen.queryByRole('button', { name: 'Saved', exact: true })).not.toBeInTheDocument();
+  expect(billingSelect('Invoices')).toHaveValue('sms');
 });
 
-it('rejects an ignored array update and restores the server-confirmed choices', async () => {
+it('rejects an ignored array update and restores the server-confirmed choice', async () => {
   prefs.smsEnabled = true;
   prefs.emailEnabled = true;
   render(<BillingTab customer={customer} />);
-  await screen.findByRole('group', { name: 'Invoices' });
-  const email = billingChannel('Invoices', 'Email');
-  fireEvent.click(email);
+  await screen.findByRole('combobox', { name: 'Delivery method for invoices' });
   api.updateNotificationPrefs.mockResolvedValueOnce({ success: true, preferences: { ...prefs } });
-  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  fireEvent.change(billingSelect('Invoices'), { target: { value: 'email' } });
   await screen.findByText(/Couldn.t save your billing preferences/);
-  expect(email).not.toBeChecked();
+  expect(billingSelect('Invoices')).toHaveValue('sms');
 });
 
-it('shows a stored stale App choice, allows deselecting it when another remains, and blocks new App choices', async () => {
+it('keeps a stored stale App choice until changed and blocks new App choices', async () => {
   prefs.smsEnabled = true;
   prefs.invoiceChannels = ['sms', 'push'];
   api.getCustomerPushStatus.mockResolvedValue({ available: true, enabled: true, registered: true, fresh: false });
   render(<BillingTab customer={customer} />);
-  await screen.findByRole('group', { name: 'Invoices' });
-  const savedApp = billingChannel('Invoices', 'App');
-  expect(savedApp).toBeEnabled();
-  expect(billingChannel('Billing reminders', 'App')).toBeDisabled();
-  fireEvent.click(savedApp);
-  expect(savedApp).not.toBeChecked();
+  await screen.findByRole('combobox', { name: 'Delivery method for invoices' });
+  expect(billingOption('Invoices', 'Text + App').selected).toBe(true);
+  expect(billingOption('Billing reminders', 'App')).toBeDisabled();
+  fireEvent.change(billingSelect('Invoices'), { target: { value: 'sms' } });
+  await waitFor(() => expect(api.updateNotificationPrefs).toHaveBeenCalledWith({ invoiceChannels: ['sms'] }));
 });
 
 it('preserves the receipt-text opt-out until the customer explicitly turns it on', async () => {
@@ -290,16 +264,16 @@ it('preserves the receipt-text opt-out until the customer explicitly turns it on
   prefs.paymentConfirmationSms = false;
   prefs.paymentConfirmationChannels = ['push'];
   render(<BillingTab customer={customer} />);
-  await screen.findByRole('group', { name: 'Payment receipts' });
-  expect(billingChannel('Payment receipts', 'Text')).toBeDisabled();
-  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
-  await screen.findByRole('button', { name: 'Saved', exact: true });
+  await screen.findByRole('combobox', { name: 'Delivery method for payment receipts' });
+  expect(billingOption('Payment receipts', 'Text')).toBeDisabled();
+  fireEvent.change(billingSelect('Invoices'), { target: { value: 'push' } });
+  await waitFor(() => expect(api.updateNotificationPrefs).toHaveBeenCalledTimes(1));
   expect(prefs.paymentConfirmationSms).toBe(false);
   fireEvent.click(screen.getByRole('button', { name: 'Turn on receipt texts' }));
-  fireEvent.click(billingChannel('Payment receipts', 'Text'));
-  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
-  await screen.findByRole('button', { name: 'Saved', exact: true });
-  expect(prefs).toMatchObject({ paymentConfirmationSms: true, paymentConfirmationChannels: ['sms', 'push'] });
+  await waitFor(() => expect(api.updateNotificationPrefs).toHaveBeenLastCalledWith({ paymentConfirmationSms: true }));
+  await waitFor(() => expect(billingOption('Payment receipts', 'Text')).toBeEnabled());
+  fireEvent.change(billingSelect('Payment receipts'), { target: { value: 'sms' } });
+  await waitFor(() => expect(prefs).toMatchObject({ paymentConfirmationSms: true, paymentConfirmationChannels: ['sms'] }));
 });
 
 it('a rejected receipt-text opt-in leaves the existing opt-out visible', async () => {
@@ -307,11 +281,10 @@ it('a rejected receipt-text opt-in leaves the existing opt-out visible', async (
   prefs.paymentConfirmationSms = false;
   prefs.paymentConfirmationChannels = ['push'];
   render(<BillingTab customer={customer} />);
-  fireEvent.click(await screen.findByRole('button', { name: 'Turn on receipt texts' }));
   api.updateNotificationPrefs.mockRejectedValueOnce(new Error('offline'));
-  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Turn on receipt texts' }));
   await screen.findByRole('alert');
-  expect(billingChannel('Payment receipts', 'Text')).toBeDisabled();
+  expect(billingOption('Payment receipts', 'Text')).toBeDisabled();
   expect(screen.getByText('Text receipts are off.')).toBeInTheDocument();
 });
 
@@ -403,11 +376,11 @@ it('blocks invalid billing email before saving and accepts a corrected address',
   render(<BillingTab customer={customer} />);
   const field = await screen.findByRole('textbox', { name: 'Billing email', exact: true });
   fireEvent.change(field, { target: { value: 'invalid-email' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing email' }));
   expect(field.validity.typeMismatch).toBe(true);
   expect(api.updateNotificationPrefs).not.toHaveBeenCalled();
   fireEvent.change(field, { target: { value: 'corrected@example.com' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing email' }));
   await screen.findByRole('button', { name: 'Saved', exact: true });
   expect(api.updateNotificationPrefs).toHaveBeenCalledWith(expect.objectContaining({ billingEmail: 'corrected@example.com' }));
 });

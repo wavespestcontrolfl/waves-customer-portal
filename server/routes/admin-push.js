@@ -180,6 +180,10 @@ async function nativeSubscribe(req, res, next) {
     if (typeof reg !== 'string' || !SIGN_UP_ID.test(reg)) {
       return res.status(400).json({ error: 'sign-up id required' });
     }
+    // When this sign-in ends (its token's expiry, epoch seconds): a push names
+    // a visit on this iPhone only while it stands (tech-visit-notifications
+    // namedDevices). The next sign-up of the token replaces it.
+    const sessionExp = Number.isFinite(req.staffToken?.exp) ? req.staffToken.exp : null;
     const outcome = await db.transaction(async (trx) => {
       const technician = await lockCurrentStaff(trx, req);
       if (!technician) return { revoked: true };
@@ -191,7 +195,7 @@ async function nativeSubscribe(req, res, next) {
         role: technician.role,
         platform: 'ios',
         device_token: token,
-        subscription_data: JSON.stringify({ token, topic: STAFF_APP_BUNDLE_ID, environment, reg }),
+        subscription_data: JSON.stringify({ token, topic: STAFF_APP_BUNDLE_ID, environment, reg, ...(sessionExp ? { session_exp: sessionExp } : {}) }),
         device_info: 'Waves Admin (iPhone)',
         active: true,
         staff_token_version: Number(technician.auth_token_version),

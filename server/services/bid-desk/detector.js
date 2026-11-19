@@ -20,6 +20,9 @@
  *                       following opportunity:", then the title on the next line (no number, no dates)
  *   Charlotte County    "Addendum Notification for <Bid|Quote> <26-676>", "An addendum has been added to Charlotte County
  *                       Purchasing Request for <Bid|Quote>: <20260676> - <Title>", the division's address in the header
+ *   MyFloridaMarketPlace "Advertisement Posted - <ITB-17464>" from dms.myflorida.com, labelled lines: "Organization:",
+ *                       "Advertisement Number:", "Advertisement Type:", "Title:", "Close Date: <Mon d, yyyy>",
+ *                       "Agency Contact:", "Email:"
  * A Blue Book "Project Notification" (the network's own pick of a project, not a contractor's invite) is never a bid.
  * OpenGov sends both notices by the vendor's registered categories (a "direct invite" to build cemetery columbaria came
  * the day we registered), so an OpenGov notice is a bid only when its title names our trade (TRADE_WORDS). Charlotte
@@ -27,6 +30,10 @@
  * A VendorLink broadcast can come from any agency in the country, so one is a bid only when the agency's address is
  * in the Tampa Bay to Southwest Florida ZIP areas (the same ones the SAM.gov reader files). Its "Vendor Commodity
  * Code Changed" list (every open bid that loosely matches, sent when the codes change) is never a bid.
+ * MFMP sends statewide notices by commodity code, so only the Advertisement Type decides whether one is a bid
+ * (an invitation to bid or to negotiate, or a request for proposals or quotes, is read; an Agency Decision, a request
+ * for information or a meeting notice is not). Its "Address:" line is the agency's own office, not the work site, so it is never a location. A
+ * notice whose labels no longer parse falls back to bid words in the subject, so a real bid is never lost.
  * Every other email (a city RFQ, an HOA RFP, a portal notice) leaves the fields null: a date guessed out of free
  * text would become a deadline somebody trusts. A date we do read is stored with the exact line it came from.
  * Dates are America/New_York wall time; a date with no time is stored at 23:59 ET.
@@ -40,6 +47,7 @@ const VENDORLINK_DOMAIN = 'myvendorlink.com';
 const BLUEBOOK_DOMAIN = 'thebluebook.com';
 const OPENGOV_DOMAIN = 'opengov.com';
 const CHARLOTTE_DOMAIN = 'charlottecountyfl.gov';
+const MFMP_DOMAIN = 'dms.myflorida.com';
 const PORTAL_DOMAINS = ['bonfirehub.com', 'opengov.com', 'demandstar.com', 'bidnetdirect.com', 'internationaleprocurement.com', 'myflorida.com'];
 // The public agency portals the Bid Desk reads. spam-blocker treats each one as a government sender, so a model's spam
 // label never trashes or auto-blocks a bid notice (one VendorLink label blocked the portal, and its Gmail filter then
@@ -74,6 +82,15 @@ const TRADE_WORDS = /\b(?:pests?|termites?|mosquito(?:es)?|rodents?|rats?|exterm
 const CC_NOTICE = /^Addendum Notification for (?:Bid|Quote|Proposal|RFP|RFQ|ITB|ITN)\s+(\d{2}-\d{2,5})$/i;
 const CC_ADDED = /^An addendum has been added to Charlotte County Purchasing Request for (?:Bid|Quote|Proposal)s?\s*:\s*(?:\d{6,10}\s*-\s*)?(.+?)\.?$/i;
 const CC_DIVISION = /^Charlotte County Purchasing\b/i;
+// MFMP Advertisement Type values that are a solicitation we may bid on, as the state names them ("Invitation to Bid",
+// "State Term Contract Request for Quotes", "Request for Statement of Qualifications"). Agency Decision, Request for
+// Information, notices and meetings are not.
+// The whole value must be one of these: "Notice of Cancellation of Invitation to Bid" is not a solicitation.
+const MFMP_SOLICITATION = /^(?:state term contract )?(?:invitations? to (?:bid|negotiate)|requests? for (?:proposals?|quotes?|quotations?|(?:statements? of )?qualifications))$/i;
+const PLAIN_ADDRESS = /^[^\s@<>,;()]+@[^\s@<>,;()]+\.[a-z]{2,}$/i;
+// MFMP's Close Date is a bare day ("Dec 3, 2026"). Any other shape (a time added, another format) is not read: a date
+// prefix with its time dropped would become a confirmed deadline hours late.
+const MFMP_CLOSE_DAY = /^[A-Z][a-z]{2,8}\.? \d{1,2}, \d{4}$/;
 
 const MONTH_INDEX = {
   jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
@@ -182,6 +199,7 @@ function senderKind(email) {
   const strict = email.provider_verified_strict === true;
   if (strict && inDomain(domain, OPENGOV_DOMAIN)) return 'opengov';
   if (strict && inDomain(domain, CHARLOTTE_DOMAIN)) return 'charlotte_county';
+  if (strict && inDomain(domain, MFMP_DOMAIN)) return 'mfmp';
   if (PORTAL_DOMAINS.some((root) => inDomain(domain, root)) || GOV_SUFFIXES.some((suffix) => domain.endsWith(suffix))) {
     return 'gov_email';
   }
@@ -213,7 +231,16 @@ function detectBidEmail(email = {}) {
 }
 
 // Senders whose bid-word mail is government mail (Charlotte County keeps its source; the template adds only keys).
-const GOV_SENDERS = new Set(['gov_email', 'charlotte_county']);
+const GOV_SENDERS = new Set(['gov_email', 'charlotte_county', 'mfmp']);
+
+// The notice's own Advertisement Type decides, read on its own (the other labels are needed only for the fields). A
+// notice with no type line (the template changed) is read as plain government mail: bid words in the subject file
+// it, so a real bid is never lost.
+function mfmpSource(email, bidWords) {
+  const type = labelledValues(bodyLines(email), 'Advertisement Type')[0]?.value;
+  if (type) return MFMP_SOLICITATION.test(type) ? { source: 'gov_email' } : { reason: 'not_solicitation' };
+  return bidWords ? { source: 'gov_email' } : { reason: 'not_bid' };
+}
 
 // The source a bid from this sender would carry, or why the email is not a bid.
 function bidSource(email, sender, bidWords) {
@@ -244,6 +271,7 @@ function bidSource(email, sender, bidWords) {
     if (notice) return TRADE_WORDS.test(notice.title) ? { source: 'gov_email' } : { reason: 'outside_trade' };
     return { reason: 'provider_not_bid' };
   }
+  if (sender === 'mfmp') return mfmpSource(email, bidWords);
   if (bidWords) return { source: GOV_SENDERS.has(sender) ? 'gov_email' : 'email_subject' };
   return { reason: 'not_bid' };
 }
@@ -452,12 +480,61 @@ function parseCharlotteCounty(lines) {
   return out;
 }
 
+// The MFMP notice: labelled lines, one per line. Needs the organization, title, number and type, else null.
+function mfmpNotice(lines) {
+  const read = (label) => labelledValues(lines, label)[0]?.value || null;
+  const notice = {
+    org: read('Organization'), title: read('Title'), number: read('Advertisement Number'), type: read('Advertisement Type'),
+  };
+  return notice.org && notice.title && notice.number && notice.type ? notice : null;
+}
+
+// The Address line is the agency's office, so there is no location.
+function parseMfmp(lines) {
+  const notice = mfmpNotice(lines);
+  if (!notice) return {};
+  const out = { gc_or_agency: notice.org, project_title: notice.title, solicitation_number: notice.number, location: null };
+  const contact = labelledValues(lines, 'Agency Contact')[0];
+  if (contact) out.buyer_name = contact.value;
+  const address = labelledValues(lines, 'Email')[0];
+  if (address && PLAIN_ADDRESS.test(address.value)) out.buyer_email = address.value.toLowerCase();
+  return out;
+}
+
+// A notice names its solicitation when it carries the advertisement number and a solicitation type (the descriptive
+// Organization and Title lines are not needed for the date).
+function mfmpSolicitation(lines) {
+  const type = labelledValues(lines, 'Advertisement Type')[0]?.value;
+  return Boolean(labelledValues(lines, 'Advertisement Number')[0]?.value && type && MFMP_SOLICITATION.test(type));
+}
+
+// "Close Date: Dec 3, 2026" (no time, so 23:59 ET): read only when the notice names its solicitation and carries
+// exactly one Close Date line in that whole shape. The Open Date line is never read.
+function mfmpDue(lines) {
+  if (!mfmpSolicitation(lines)) return null;
+  const closes = labelledValues(lines, 'Close Date');
+  if (closes.length !== 1 || !MFMP_CLOSE_DAY.test(closes[0].value)) return null;
+  return firstDate(closes, '23:59');
+}
+
+// The Close Date line of a verified MFMP solicitation when one is there but not read (another shape such as
+// "Dec 2, 2026 2:00 PM", or two Close Date lines), else null. The caller flags the bid for the operator: the stored
+// date stays, but it can no longer be trusted.
+function mfmpUnreadCloseLine(email = {}) {
+  if (senderKind(email) !== 'mfmp') return null;
+  const lines = bodyLines(email);
+  if (!mfmpSolicitation(lines)) return null;
+  const closes = labelledValues(lines, 'Close Date');
+  if (!closes.length || mfmpDue(lines)) return null;
+  return closes[0].line;
+}
+
 const normalizeTitle = (title) => String(title || '')
   .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
 const TEMPLATE_PARSERS = {
   buildingconnected: parseBuildingConnected, procore: parseProcore, vendorlink: parseVendorLink, bluebook: parseBlueBook,
-  opengov: parseOpenGov, charlotte_county: parseCharlotteCounty,
+  opengov: parseOpenGov, charlotte_county: parseCharlotteCounty, mfmp: parseMfmp,
 };
 
 // The cross-thread identity of a bid. Only a provider template names the GC and the project (read only when the
@@ -478,13 +555,27 @@ function groupKeys(fields) {
   return { org, group_base: base, group_key: pkg ? `${base}#${keyPart(pkg)}` : base };
 }
 
+// MFMP's identity is the state's advertisement number alone: a re-sent notice may carry a corrected title or agency
+// name, and the number never names new work. Only a solicitation takes the key: a decision or other notice filed by
+// hand never holds the key a later solicitation of the same number would join.
+function mfmpKeys(fields, lines) {
+  const org = normalizeTitle(fields.gc_or_agency);
+  // Read from its own label: a notice missing the Organization or Title line still names its advertisement.
+  const number = normalizeTitle(labelledValues(lines, 'Advertisement Number')[0]?.value);
+  const type = labelledValues(lines, 'Advertisement Type')[0]?.value;
+  if (!number || !type || !MFMP_SOLICITATION.test(type)) return { org: org || null, group_base: null, group_key: null };
+  const key = `mfmp|${keyPart(number)}`;
+  return { org: org || null, group_base: key, group_key: key };
+}
+
 function templateFields(template, lines) {
   if (!template) return { fields: {}, due: null, jobWalk: null };
-  const due = { vendorlink: vendorlinkDue, bluebook: bluebookDue }[template];
+  const due = { vendorlink: vendorlinkDue, bluebook: bluebookDue, mfmp: mfmpDue }[template];
   return {
     fields: TEMPLATE_PARSERS[template](lines),
     due: due ? due(lines) : firstDate(labelledValues(lines, 'Bid Due', { allowBare: template === 'procore' }), '23:59'),
-    jobWalk: firstDate(labelledValues(lines, 'Job Walk'), '23:59'),
+    // MFMP's notice has no job walk line, so none is read from it (a stray line in a changed template is not a date).
+    jobWalk: template === 'mfmp' ? null : firstDate(labelledValues(lines, 'Job Walk'), '23:59'),
   };
 }
 
@@ -497,7 +588,8 @@ function parseBidEmail(email = {}) {
   const kindOfSender = senderKind(email);
   const template = TEMPLATE_PARSERS[kindOfSender] ? kindOfSender : null;
   const lines = { bluebook: bluebookLines }[template] || (template ? bodyLines : () => []);
-  const { fields, due, jobWalk } = templateFields(template, lines(email));
+  const bodyOf = lines(email);
+  const { fields, due, jobWalk } = templateFields(template, bodyOf);
   const pick = (key) => fields[key] || null;
   return {
     template,
@@ -514,7 +606,7 @@ function parseBidEmail(email = {}) {
     due_source_line: due?.line || null,
     job_walk_at: jobWalk?.at || null,
     questions_due_at: null,
-    ...groupKeys(fields),
+    ...(template === 'mfmp' ? mfmpKeys(fields, bodyOf) : groupKeys(fields)),
   };
 }
 
@@ -524,6 +616,6 @@ function parseBidEmail(email = {}) {
 const passesGmailSpam = (email = {}) => email.gmail_spam_verified === true && senderKind(email) === 'bluebook';
 
 module.exports = {
-  detectBidEmail, passesGmailSpam, parseBidEmail, parseDateET, htmlToText, normalizeTitle, classifyKind, domainOf,
+  detectBidEmail, passesGmailSpam, parseBidEmail, parseDateET, mfmpUnreadCloseLine, htmlToText, normalizeTitle, classifyKind, domainOf,
   BID_WORDS, ADDENDUM_WORDS, PUBLIC_PORTAL_DOMAINS,
 };

@@ -100,6 +100,7 @@ import {
   mergePostPaymentService,
   fastCompleteSheetFor,
   invoicedSheetResponse,
+  isProjectBackedCompletion,
   shouldReopenCompletionAfterPayment,
   TERMINAL_VISIT_STATUSES,
 } from "../../lib/dispatchCompletionRouting";
@@ -110,6 +111,7 @@ import FastCompleteLawnReserviceSheet from "../../components/tech/FastCompleteLa
 import FastCompleteSheet from "../../components/tech/FastCompleteSheet";
 import { shortAddress } from "../tech/visitBrief";
 import { serviceWindowLabel } from "../tech/routeStops";
+import { lawnSheetService } from "../tech/lawnSheetService";
 import { requestDispatchSync } from "../../lib/dispatchSync";
 
 const RevenuePanel = lazy(
@@ -169,27 +171,6 @@ function shouldOpenMobileCompletion(service) {
     completedVisitOwesCompletion(service)
   );
 }
-
-function isProjectBackedCompletion(service) {
-  // projectBacked covers BOTH special projects (WDO/pre-treat) and the
-  // still-project_required one-time types — those must keep routing to the
-  // Projects flow or the server 409s them out of /complete. Typed
-  // service_report profiles serialize projectBacked:false, so cut-over
-  // jobs fall through to CompletionPanel.
-  const profile = service?.completionProfile;
-  // An explicit profile is authoritative (house review on #2717): cut-over
-  // visits keep their legacy project linked via scheduled_service_id, but
-  // the server's /complete gate reads the PROFILE, not the link — treating
-  // the leftover link as project-backed dead-ended the post-payment punches
-  // (and the row button) on visits the server would happily complete. The
-  // link heuristic only backstops rows whose payload carries no profile
-  // (e.g. week-list rows).
-  if (profile && typeof profile.projectBacked === "boolean") {
-    return !!(profile.projectBacked || profile.requiresProject);
-  }
-  return !!(profile?.projectBacked || profile?.requiresProject || service?.linkedProject?.id);
-}
-
 
 function projectCompletionIsClosed(service) {
   return isProjectBackedCompletion(service)
@@ -870,14 +851,20 @@ export default function DispatchPageV2({
   // jobs here as ?completeService=<scheduledServiceId> instead of alert-
   // bouncing. The param is consumed once (deleted immediately, same shape
   // as ?customer below); the open itself happens after handleComplete is
-  // defined, keyed off this ref.
+  // defined, keyed off this ref. The link opens the full form (a Fast
+  // Complete sheet's "Full form" escape). With &completeSheet=1 (the Today
+  // page, for the sheet only this page has: the Waves Assessment) it opens
+  // the visit as the Complete button does.
   const pendingCompleteIdRef = useRef(null);
+  const pendingCompleteSheetRef = useRef(false);
   useEffect(() => {
     const id = searchParams.get("completeService");
     if (!id) return;
     pendingCompleteIdRef.current = id;
+    pendingCompleteSheetRef.current = searchParams.get("completeSheet") === "1";
     const next = new URLSearchParams(searchParams);
     next.delete("completeService");
+    next.delete("completeSheet");
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
@@ -1030,44 +1017,10 @@ export default function DispatchPageV2({
       void fetchSchedule(date, { silent: true });
     }
   };
-  // The props a Fast Complete sheet is opened with, for a schedule row: one builder per sheet.
+  // The props a Fast Complete sheet is opened with, for a schedule row: one builder per sheet
+  // (the lawn sheet's, lawnSheetService, is shared with the Today page).
   // `a || b` over a row's snake_case and camelCase spellings, as the sheets were always given them.
   const pickOf = (row, ...keys) => keys.reduce((found, key) => found || row[key], undefined);
-  const lawnSheetService = (row) => ({
-    // What the Wrap-up reads to know whether the visit invoices and who pays.
-    ...completionBillingFacts(row),
-    // The stop's gate and access codes for the sheet header.
-    ...accessSheetFields(row),
-    id: row.id,
-    customerName: pickOf(row, 'customer_name', 'customerName'),
-    serviceType: pickOf(row, 'service_type', 'serviceType'),
-    address: shortAddress(row.address) || row.address || "",
-    // The customer block under the title (name link, directions, call).
-    customerId: pickOf(row, 'customerId', 'customer_id') || null,
-    fullAddress: typeof row.address === "string" ? row.address : "",
-    customerPhone: pickOf(row, 'customerPhone', 'customer_phone') || "",
-    // The neighborhood's pinned gate, when the day feed carries one: the
-    // directions link routes through it before the house.
-    gateWaypoint: row.gateWaypoint || null,
-    // When the technician checked in (the Time on-site clock), by the full
-    // form's own rule: the on-site status-log entry, else checkInTime.
-    onSiteAt: onSiteTimeOf(row) || null,
-    timeLabel: serviceWindowLabel(row) || "",
-    // Server-computed (GATE_TRACE_ELIGIBILITY): false hides the
-    // treatment-zone row, since the save route would refuse the trace.
-    traceEligible: row.traceEligible,
-    // Decides whether a zero stock holds Complete (WaveGuard lawn visits may go negative).
-    waveguardTier: row.waveguardTier || null,
-    // The visit the user opened, checked against the live context.
-    routedCustomerId: pickOf(row, 'customerId', 'customer_id') || null,
-    routedScheduledDate: pickOf(row, 'scheduledDate', 'scheduled_date') || null,
-    routedPropertyId: "propertyId" in row ? row.propertyId : undefined,
-    routedAddress: typeof row.address === "string" ? row.address : null,
-    // Checked against the live visit: the office may have changed the service since.
-    routedServiceType: row.serviceTypeRaw || null,
-    routedCatalogServiceId: row.catalogServiceId || null,
-    completionInvoiceAlreadySent: !!row.completionInvoiceAlreadySent,
-  });
   const pestSheetService = (row) => ({
     // What the Wrap-up reads: billing facts, the customer, the check-in time.
     ...wrapUpSheetFields(row),
@@ -1154,6 +1107,8 @@ export default function DispatchPageV2({
     const id = pendingCompleteIdRef.current;
     if (!id || !data) return;
     pendingCompleteIdRef.current = null;
+    const asComplete = pendingCompleteSheetRef.current;
+    pendingCompleteSheetRef.current = false;
     const svc = (data.services || []).find((s) => String(s.id) === String(id));
     if (!svc) {
       alert("That appointment isn't on this dispatch date — find it on the schedule to complete it.");
@@ -1168,7 +1123,7 @@ export default function DispatchPageV2({
       // idempotency machinery replays it instead of double-submitting.
       alert(`That visit is already ${svc.status} — nothing to complete.`);
     } else {
-      handleComplete(svc, { fullForm: true });
+      handleComplete(svc, { fullForm: !asComplete });
     }
   }, [data, handleComplete]);
 

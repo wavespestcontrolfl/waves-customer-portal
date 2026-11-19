@@ -382,6 +382,8 @@ function moneyCommsIssues(facts) {
 }
 
 module.exports = {
+  // Read by paid-visit-receipt-check.js: while on, today's closeout item owns a completed visit's missing receipt.
+  moneyCommsAlertsEnabled,
   loadCloseoutStatuses,
   closeoutIssuesForVisit,
   factsFullyKnown,

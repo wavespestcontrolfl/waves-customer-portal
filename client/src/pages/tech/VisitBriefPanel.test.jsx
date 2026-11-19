@@ -687,6 +687,28 @@ describe('VisitBriefPanel', () => {
     expect(screen.getByRole('button', { name: /Photos/ })).toBeEnabled();
   });
 
+  // A leftover legacy project on a service-report visit (its profile says it
+  // is not project-backed) does not end the visit: Report opens it, as the
+  // page routes it (projectReportClosed).
+  it.each(['sent', 'closed'])('keeps Report open on a service-report visit with a %s legacy project', (status) => {
+    const onProject = vi.fn();
+    const service = {
+      ...BASE_SERVICE, id: 'svc-legacy', linkedProject: { id: 'p-legacy', status },
+      completionProfile: { category: 'lawn_care', serviceKey: 'lawn_care_6week', findingsType: null, projectBacked: false, requiresProject: false },
+    };
+    render(
+      <VisitBriefPanel
+        stop={stopOf(service)}
+        detail={detailFor({})}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={onProject} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    const report = screen.getByRole('button', { name: /^Report$/ });
+    expect(report).toBeEnabled();
+    fireEvent.click(report);
+    expect(onProject).toHaveBeenCalledWith(service);
+  });
+
   it('keeps terminal linked reports disabled and live member reports actionable', () => {
     const onProject = vi.fn();
     const onZone = vi.fn();

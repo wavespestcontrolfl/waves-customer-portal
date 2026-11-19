@@ -1,0 +1,152 @@
+[
+  {
+    "name": "explicit GBP suppresses conflicting Google and Meta ids",
+    "attribution": { "utm": { "source": "gbp", "medium": "organic" }, "gclid": "g1", "fbclid": "f1" },
+    "expected_dni": null,
+    "expected_backend_kind": "google_business"
+  },
+  {
+    "name": "legacy Google organic GBP campaign suppresses conflicting ids",
+    "attribution": { "utm": { "source": "google", "medium": "organic", "campaign": "gbp" }, "gclid": "g1", "fbclid": "f1" },
+    "expected_dni": null,
+    "expected_backend_kind": "google_business"
+  },
+  {
+    "name": "Google Maps referrer suppresses conflicting ids",
+    "attribution": { "referrer": "https://www.google.com/maps", "gclid": "g1", "fbclid": "f1" },
+    "expected_dni": null,
+    "expected_backend_kind": "google_business"
+  },
+  {
+    "name": "Google ppc without click id is paid Google",
+    "attribution": { "utm": { "source": "google", "medium": "ppc" } },
+    "expected_dni": "google",
+    "expected_backend_kind": "google_ads"
+  },
+  {
+    "name": "Google paid search spaces normalize",
+    "attribution": { "utm": { "source": " Google ", "medium": " Paid Search " } },
+    "expected_dni": "google",
+    "expected_backend_kind": "google_ads"
+  },
+  {
+    "name": "AdWords alias is paid Google",
+    "attribution": { "utm": { "source": "adwords", "medium": "cpc" } },
+    "expected_dni": "google",
+    "expected_backend_kind": "google_ads"
+  },
+  {
+    "name": "google-ads alias and paid-search normalize",
+    "attribution": { "utm": { "source": "google-ads", "medium": "paid-search" } },
+    "expected_dni": "google",
+    "expected_backend_kind": "google_ads"
+  },
+  {
+    "name": "google_ads alias is paid Google",
+    "attribution": { "utm": { "source": "google_ads", "medium": "paid_search" } },
+    "expected_dni": "google",
+    "expected_backend_kind": "google_ads"
+  },
+  {
+    "name": "googleads alias is paid Google",
+    "attribution": { "utm": { "source": "googleads", "medium": "paidsearch" } },
+    "expected_dni": "google",
+    "expected_backend_kind": "google_ads"
+  },
+  {
+    "name": "Google id wins conflicting Meta id",
+    "attribution": { "gclid": "g1", "fbclid": "f1" },
+    "expected_dni": "google",
+    "expected_backend_kind": "google_ads"
+  },
+  {
+    "name": "Google id wins tagged organic Facebook",
+    "attribution": { "utm": { "source": "facebook", "medium": "organic" }, "gclid": "g1" },
+    "expected_dni": "google",
+    "expected_backend_kind": "google_ads"
+  },
+  {
+    "name": "Facebook organic without id remains organic",
+    "attribution": { "utm": { "source": "facebook", "medium": "organic" } },
+    "expected_dni": null,
+    "expected_backend_kind": "organic_social"
+  },
+  {
+    "name": "owner rule routes fbclid with organic Facebook to Meta",
+    "attribution": { "utm": { "source": "facebook", "medium": "organic" }, "fbclid": "f1" },
+    "expected_dni": "facebook",
+    "expected_backend_kind": "meta_ads"
+  },
+  {
+    "name": "fbc with organic Instagram routes Meta",
+    "attribution": { "utm": { "source": "instagram", "medium": "organic" }, "fbc": "fb.1.1.click" },
+    "expected_dni": "facebook",
+    "expected_backend_kind": "meta_ads"
+  },
+  {
+    "name": "Meta alias paid-social normalizes",
+    "attribution": { "utm": { "source": "meta", "medium": "paid-social" } },
+    "expected_dni": "facebook",
+    "expected_backend_kind": "meta_ads"
+  },
+  {
+    "name": "IG alias paid social spaces normalize",
+    "attribution": { "utm": { "source": "ig", "medium": "paid social" } },
+    "expected_dni": "facebook",
+    "expected_backend_kind": "meta_ads"
+  },
+  {
+    "name": "IG alias without paid evidence remains organic social",
+    "attribution": { "utm": { "source": "ig", "medium": "organic" } },
+    "expected_dni": null,
+    "expected_backend_kind": "organic_social"
+  },
+  {
+    "name": "campaign name alone does not make unrelated source Google paid",
+    "attribution": { "utm": { "source": "newsletter", "medium": "ppc", "campaign": "google" } },
+    "expected_dni": null,
+    "expected_backend_kind": null
+  },
+  {
+    "name": "provider in medium and paid value in source are not interchangeable",
+    "attribution": { "utm": { "source": "ppc", "medium": "google", "campaign": "brand" } },
+    "expected_dni": null,
+    "expected_backend_kind": null
+  },
+  {
+    "name": "Meta in medium and paid social in source are not interchangeable",
+    "attribution": { "utm": { "source": "paid social", "medium": "facebook", "campaign": "brand" } },
+    "expected_dni": null,
+    "expected_backend_kind": null
+  },
+  {
+    "name": "paid campaign name does not override Google organic medium",
+    "attribution": { "utm": { "source": "google", "medium": "organic", "campaign": "paid-search" } },
+    "expected_dni": null,
+    "expected_backend_kind": "organic_search"
+  },
+  {
+    "name": "ordinary Google search referral is organic",
+    "attribution": { "referrer": "https://www.google.com" },
+    "expected_dni": null,
+    "expected_backend_kind": "organic_search"
+  },
+  {
+    "name": "ordinary external referral remains referral",
+    "attribution": { "referrer": "https://example.org" },
+    "expected_dni": null,
+    "expected_backend_kind": "referral"
+  },
+  {
+    "name": "fbclid on ordinary referral follows owner Meta rule",
+    "attribution": { "referrer": "https://example.org", "fbclid": "f1" },
+    "expected_dni": "facebook",
+    "expected_backend_kind": "meta_ads"
+  },
+  {
+    "name": "Facebook source without paid medium remains organic",
+    "attribution": { "utm": { "source": "fb", "medium": "social" } },
+    "expected_dni": null,
+    "expected_backend_kind": "organic_social"
+  }
+]

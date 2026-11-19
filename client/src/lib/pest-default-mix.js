@@ -12,6 +12,10 @@
 // left off. The visit STARTS with all three recorded, at the house
 // totals — 4 oz of each concentrate, 0.25 oz of surfactant.
 //
+// Owner ruling 2026-11-18: the house bifenthrin is now LESCO Crosscheck Plus
+// (EPA 10404-120) instead of Atticus Talak 7.9 F. Talak stays a valid catalog
+// product for old records and leftover stock; it is no longer pre-selected.
+//
 // Single source of truth for BOTH completion surfaces (codex P1 on
 // #3611): the full CompletionPanel (admin dispatch) seeds complete
 // product rows with the totals; ServiceRecapModal (the tech portal's
@@ -25,7 +29,7 @@
 // surfactant as the applied chemical at the pest total).
 export const PEST_DEFAULT_MIX = [
   { pattern: /^taurus\s*sc\b/i, totalAmount: 4 },
-  { pattern: /^atticus\s*talak\b/i, totalAmount: 4 },
+  { pattern: /^lesco\s*cross-?check\s*plus\b/i, totalAmount: 4 },
   { pattern: /^lesco\s*90\s*\/?\s*10\s*non-?ionic\s+surfactant$/i, totalAmount: 0.25 },
 ];
 

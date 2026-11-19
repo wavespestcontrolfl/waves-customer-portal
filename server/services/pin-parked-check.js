@@ -21,10 +21,17 @@
  *        - that stop is not the vehicle's home base (its usual first start of the day), not inside a business,
  *          personal or supplier geo-fence, and not inside the radius of another customer's visit the same
  *          technician completed that day (the truck was parked for the neighbour);
+ *        - these two are not BOTH true: the truck also parked at the saved pin on the ET day of that closest stop
+ *          (too briefly to count as a stop), and the closest stop stands inside the radius of another customer's
+ *          saved pin. Together they mean the technician did come to the pin and the long stop was the other
+ *          customer's (clearStopsAtOtherCustomers);
  *        - the stop is a pin verify_pin would accept (inside the service-area box);
  *        - staff have not dismissed a suggestion for this same pin.
  *   4. ONE open suggestion per customer (customer-pin-suggestions.js); a re-run never duplicates. A later visit
  *      with a stop inside the radius, a verified pin, a changed pin or a deleted customer closes it (superseded).
+ *      So does the two-fact rule of step 3, judged again on the suggestion's own stored facts (its pin, the truck's
+ *      spot, the day, that technician's truck that day; late data can show the truck at the pin after the bell),
+ *      whatever happened to its visit since: recheckOpenSuggestions, up to the lookback cap.
  *   5. ONE admin notification per new suggestion, keyed on the suggestion id.
  *
  * Needs GATE_GEOCODE_REVIEW on as well (verify_pin is the only way to apply a suggestion).
@@ -56,6 +63,10 @@ const PENDING_BELL_LIMIT = 50;
 const COMPLETED_WINDOW_DAYS = 3;
 const RETIRE_LIMIT = 500;
 const NEIGHBOUR_LIMIT = 2000;
+// The shortest parked gap read from the truck. A gap shorter than the stop rule's own floor (bouncie-truck-stops
+// MIN_STOP_MINUTES) is never a stop: it cannot settle a pin and cannot be suggested. It is read only as "the truck
+// came to the pin" (briefStopNear).
+const BRIEF_STOP_MIN_MINUTES = 1;
 
 // ---------- reads ----------
 
@@ -121,6 +132,9 @@ const nearestPinDistance = (pins, stop) => {
   const measured = pins.map((pin) => distanceMeters(pin.lat, pin.lng, stop.lat, stop.lng)).filter((d) => d != null);
   return measured.length ? Math.min(...measured) : null;
 };
+
+/** The ET day a stop began. */
+const stopDay = (stop) => etDateString(new Date(stop.startMs));
 
 /** Why a stop is not this job's stop: home base, a fence, or the neighbour's visit. Null when it could be. */
 function excludedStopReason(stop, { radius, home, fences, neighbours }) {
@@ -358,7 +372,9 @@ function settledReason(row, customer, review) {
 
 async function stopsFor(conn, imei, { fromMs, toMs, radius, now }) {
   try {
-    return await truckStops.loadTruckStops(conn, imei, { fromMs, toMs, maxGapMeters: radius, now: now.getTime() });
+    return await truckStops.loadTruckStops(conn, imei, {
+      fromMs, toMs, maxGapMeters: radius, now: now.getTime(), minMinutes: BRIEF_STOP_MIN_MINUTES,
+    });
   } catch (err) {
     logger.warn(`${LOG} could not read truck stops`, { error: err.code || err.name });
     return null;
@@ -432,6 +448,15 @@ async function loadVehicles(conn, visits, window) {
 }
 
 /**
+ * Did the truck park inside `radius` of one of these pins on this ET day? `stops` are parked gaps read with
+ * BRIEF_STOP_MIN_MINUTES: a visit's short ones (entry.briefStops, never a stop of their own: they cannot settle a pin
+ * and cannot be suggested), or one vehicle-day's (suggestionExplained). It only says "the truck did come to the pin
+ * that day", before or after the long stop.
+ */
+const briefStopNear = (stops, pins, day, radius) => (stops || [])
+  .some((stop) => stopDay(stop) === day && isWithin(nearestPinDistance(pins, stop), radius));
+
+/**
  * One verdict per visit, judged against its own technician's truck. A visit whose truck data could not be read, or
  * one of whose required days is before the lookback cap, is `unknown`: no suggestion, nothing closed from it.
  */
@@ -441,10 +466,79 @@ function judgeVisits(visits, vehicles, { radius, fences, now, pool = visits }) {
     const required = requiredDays(visit, now);
     if (required.unloadable) return { visit, verdict: { flag: false, reason: 'days_not_loaded', unknown: true } };
     if (!vehicle) return { visit, verdict: { flag: false, reason: 'stops_unreadable', unknown: true } };
-    const stops = vehicle.stops.filter((stop) => required.days.includes(etDateString(new Date(stop.startMs))));
+    const parked = vehicle.stops.filter((stop) => required.days.includes(stopDay(stop)));
+    // The stop rules see the same stops as before; a shorter parked gap is kept apart and can only clear a flag.
+    const isStop = (stop) => stop.minutes >= truckStops.MIN_STOP_MINUTES;
     const context = { home: vehicle.home, fences, neighbours: neighbourPins(visit, pool) };
-    return { visit, verdict: judgeVisit({ visit, stops, radius, context }) };
+    return {
+      visit,
+      verdict: judgeVisit({ visit, stops: parked.filter(isStop), radius, context }),
+      briefStops: parked.filter((stop) => !isStop(stop)),
+    };
   });
+}
+
+// The distance from a row's pin to a point, in metres, as distanceMeters measures it (same sphere). The column names
+// are fixed text from this file; the point and the radius are bindings.
+const withinSql = (lat, lng) => `2 * 6371000 * asin(least(1, sqrt(`
+  + `power(sin(radians(${lat}::float8 - ?) / 2), 2)`
+  + ` + cos(radians(?)) * cos(radians(${lat}::float8)) * power(sin(radians(${lng}::float8 - ?) / 2), 2)))) <= ?`;
+
+/**
+ * Is another customer's saved pin inside `radius` of this point? The customer row's coordinates and every active
+ * property's count (a rental, a second home), as generous as the neighbour rule. The query itself measures the
+ * distance, so one matching row answers it however many pins stand around the point; the box only spares the
+ * arithmetic for rows that are far away.
+ */
+async function otherCustomerPinNear(conn, customerId, point, radius) {
+  const latPad = (radius * 1.05) / 110000;
+  const lngPad = (radius * 1.05) / (110000 * Math.cos((point.lat * Math.PI) / 180));
+  const near = (query, lat, lng) => query
+    .whereBetween(lat, [point.lat - latPad, point.lat + latPad])
+    .whereBetween(lng, [point.lng - lngPad, point.lng + lngPad])
+    .whereRaw(withinSql(lat, lng), [point.lat, point.lat, point.lng, radius])
+    .first('c.id');
+  const [customer, property] = await Promise.all([
+    near(conn('customers as c').whereNull('c.deleted_at').whereNot('c.id', customerId), 'c.latitude', 'c.longitude'),
+    near(conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id')
+      .whereNull('c.deleted_at').whereNot('c.id', customerId).where('p.active', true), 'p.latitude', 'p.longitude'),
+  ]);
+  return Boolean(customer || property);
+}
+
+/**
+ * A flagged visit is not a wrong pin when BOTH hold: the truck also parked at this customer's saved pin on the ET day
+ * of the long stop, too briefly to be a stop (entry.briefStops), and the long stop stands inside the arrival radius of
+ * ANOTHER customer's saved pin. The technician did come to the pin; the long stop was the other customer's. The
+ * order of the two does not matter (the other customer's job first, then nobody home here, is the same day seen
+ * from the other end). Seen on 2026-11-16:
+ * nobody was home, the truck left after 3 minutes and stood 29 minutes at a customer 310 m away who had no
+ * completed visit that day, so the neighbour rule did not see them, and the bell offered to move a correct pin
+ * to the other customer's house.
+ *
+ * Either fact alone still flags. A brief stop at a wrong pin is how a technician who follows the map finds out the
+ * pin is wrong, and on a dense street the right house is often near another customer's.
+ *
+ * The short stop is measured from the saved pin only (verdict.pin), like everything that picks or limits the suggested
+ * stop: it is the pin the suggestion would replace, and the pin stored on it (pin_lat, pin_lng), so the recheck of an
+ * open suggestion (suggestionExplained) measures from the very same pin. The visit's own stamp does not count here.
+ *
+ * A read that fails leaves the visit unknown: no suggestion from evidence that was not read.
+ */
+async function clearStopsAtOtherCustomers(conn, judged, radius) {
+  for (const entry of judged) {
+    const { verdict } = entry;
+    if (!verdict.flag || !briefStopNear(entry.briefStops, [verdict.pin], etDateString(verdict.stopStartedAt), radius)) continue;
+    try {
+      if (await otherCustomerPinNear(conn, entry.visit.customer_id, verdict.parked, radius)) {
+        entry.verdict = { flag: false, reason: 'other_customer_stop' };
+      }
+    } catch (err) {
+      logger.warn(`${LOG} could not read other customers' pins`, { error: err.code || err.name });
+      entry.verdict = { flag: false, reason: 'other_pins_unreadable', unknown: true };
+    }
+  }
+  return judged;
 }
 
 /**
@@ -460,6 +554,105 @@ function decideCustomer(judged) {
   const flagged = judged.filter((j) => j.verdict.flag)
     .sort((a, b) => new Date(b.visit.completed_at) - new Date(a.visit.completed_at));
   return flagged.length ? { action: 'flag', visit: flagged[0].visit, verdict: flagged[0].verdict } : { action: 'none' };
+}
+
+/** The ET day the truck stood at a suggestion's parked spot (stop_started_at); null when it is missing or unreadable. */
+function suggestionDay(row) {
+  const ms = row.stop_started_at ? new Date(row.stop_started_at).getTime() : NaN;
+  return Number.isFinite(ms) ? etDateString(new Date(ms)) : null;
+}
+
+/**
+ * Does the two-fact rule (clearStopsAtOtherCustomers) explain this OPEN suggestion? Judged on the suggestion's own
+ * stored facts only, whatever happened to its visit since (moved, reassigned, rescheduled, re-stamped, out of the
+ * window): the pin it was made against (pin_lat, pin_lng), the truck's parked spot (parked_lat, parked_lng), the ET
+ * day the truck stood there (stop_started_at) and the truck of the technician who made it, read again for that one
+ * day (late data can show the truck at the pin after the bell). Any parked gap of BRIEF_STOP_MIN_MINUTES or more at
+ * the stored pin is "the truck came to the pin". A day past the lookback cap is not read, nor one that began before
+ * the technician's tracker was remapped (it may have been another vehicle: dayBeforeMapping). `vehicleStops(imei, day)`
+ * gives that vehicle's parked gaps over a read that covers the day (recheckOpenSuggestions: one read per vehicle); only
+ * the gaps that START on the day count. A read that fails answers no: the suggestion stays as it was.
+ */
+async function suggestionExplained(conn, row, technician, { radius, now, vehicleStops }) {
+  const pin = usablePin(row.pin_lat, row.pin_lng);
+  const spot = usablePin(row.parked_lat, row.parked_lng);
+  const imei = String((technician && technician.bouncie_imei) || '').trim();
+  const day = suggestionDay(row);
+  if (!pin || !spot || !imei || !day) return false;
+  if (day < etDateString(addETDays(now, -MAX_LOOKBACK_DAYS)) || dayBeforeMapping(day, technician.bouncie_imei_changed_at)) return false;
+  try {
+    if (!briefStopNear(await vehicleStops(imei, day), [pin], day, radius)) return false;
+    return await otherCustomerPinNear(conn, row.customer_id, spot, radius);
+  } catch (err) {
+    logger.warn(`${LOG} could not check an open suggestion again`, { error: err.code || err.name });
+    return false;
+  }
+}
+
+/**
+ * The first ET day each current tracker must be read from: the earliest stop day of its open suggestions. A day before
+ * the tracker was remapped is never read (suggestionExplained skips it; the visit scan does not load it either), so it
+ * never widens the read.
+ */
+function firstReadDays(rows, technicians) {
+  const firstDay = new Map();
+  for (const row of rows) {
+    const tech = technicians.get(String(row.technician_id));
+    const imei = String((tech && tech.bouncie_imei) || '').trim();
+    const day = suggestionDay(row);
+    if (!imei || dayBeforeMapping(day, tech.bouncie_imei_changed_at)) continue;
+    const known = firstDay.get(imei);
+    if (!known || day < known) firstDay.set(imei, day);
+  }
+  return firstDay;
+}
+
+/**
+ * Every open suggestion the two-fact rule now explains is closed (superseded, with its bell) BEFORE any visit is
+ * decided: insertSuggestion keeps an open suggestion for the same pin ("already_open"), so a newer visit's suggestion
+ * could not replace it. A closed one leaves `openByCustomer`. Every open suggestion whose stop is inside the lookback
+ * cap is checked on every run while it stays open. The reads are one technicians read, then ONE paged read per
+ * vehicle from the first day its suggestions need through today, as the visit scan reads its trucks (loadVehicles):
+ * every event received by now. So a parked gap that ends after midnight, or whose events arrive late, is seen here
+ * exactly as the visit scan sees it. Returns the count closed.
+ */
+async function recheckOpenSuggestions(conn, openByCustomer, { radius, now }) {
+  const cap = etDateString(addETDays(now, -MAX_LOOKBACK_DAYS));
+  const rows = [...openByCustomer.values()].filter((row) => row.technician_id && suggestionDay(row) && suggestionDay(row) >= cap);
+  if (!rows.length) return 0;
+  let technicians;
+  try {
+    const ids = [...new Set(rows.map((row) => String(row.technician_id)))];
+    technicians = new Map((await conn('technicians').whereIn('id', ids).select('id', 'bouncie_imei', 'bouncie_imei_changed_at'))
+      .map((tech) => [String(tech.id), tech]));
+  } catch (err) {
+    logger.warn(`${LOG} could not read the technicians of open suggestions`, { error: err.code || err.name });
+    return 0;
+  }
+  const firstDay = firstReadDays(rows, technicians);
+  const reads = new Map();
+  const vehicleStops = (imei, day) => {
+    if (!reads.has(imei)) {
+      reads.set(imei, truckStops.loadTruckStops(conn, imei, {
+        fromMs: etDayBounds(firstDay.get(imei) || day).startMs, toMs: etDayBounds(etDateString(now)).endMs,
+        maxGapMeters: radius, now: now.getTime(), minMinutes: BRIEF_STOP_MIN_MINUTES,
+      }));
+    }
+    return reads.get(imei);
+  };
+  let closed = 0;
+  for (const row of rows) {
+    if (!(await suggestionExplained(conn, row, technicians.get(String(row.technician_id)), { radius, now, vehicleStops }))) continue;
+    try {
+      const done = await store.closeSuggestion(row.id, 'superseded', {
+        reason: 'other_customer_stop', resolution: "Closed: the truck also came to the pin that day; the long stop was at another customer's", conn,
+      });
+      if (done) { closed += 1; openByCustomer.delete(String(row.customer_id)); }
+    } catch (err) {
+      logger.warn(`${LOG} could not close an explained suggestion`, { error: err.code || err.name });
+    }
+  }
+  return closed;
 }
 
 async function applyDecision(conn, customerId, decision, openByCustomer, tally) {
@@ -495,9 +688,10 @@ async function runPinParkedCheck({ now = new Date(), conn = db } = {}) {
   const visits = oneRowPerVisit(await loadCompletedVisits(conn, window));
   const openByCustomer = new Map((await conn('customer_pin_suggestions').where({ status: 'open' }).select(store.COLUMNS))
     .map((row) => [String(row.customer_id), row]));
+  tally.closed += await recheckOpenSuggestions(conn, openByCustomer, { radius, now });
   const vehicles = await loadVehicles(conn, visits, window);
   const pool = [...visits, ...await loadNeighbourVisits(conn, visits, now)];
-  const judged = judgeVisits(visits, vehicles, { radius, fences: await loadFences(conn), now, pool });
+  const judged = await clearStopsAtOtherCustomers(conn, judgeVisits(visits, vehicles, { radius, fences: await loadFences(conn), now, pool }), radius);
   for (const { verdict } of judged) tallyKey(tally, verdict.flag ? 'flagged' : verdict.reason);
   const byCustomer = new Map();
   for (const j of judged) byCustomer.set(String(j.visit.customer_id), [...(byCustomer.get(String(j.visit.customer_id)) || []), j]);
@@ -518,6 +712,7 @@ module.exports = {
   _private: {
     judgeVisit, destinationOf, homeBaseFrom, visitDays, etDayBounds, oneRowPerVisit, excludedStopReason, alertSpec,
     alertDetail, settledReason, visitUnchanged, homeSince, loadNeighbourVisits, usablePin, isWithin, nearestPinDistance, retireAllOpen, requiredDays, judgeVisits, loadVehicles, neighbourPins, effectivePinColumns, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
+    clearStopsAtOtherCustomers, otherCustomerPinNear, briefStopNear, suggestionDay, suggestionExplained, firstReadDays, recheckOpenSuggestions, withinSql, BRIEF_STOP_MIN_MINUTES,
     REPORT_MIN_STOP_MINUTES, MAX_STOP_DISTANCE_M,
   },
 };

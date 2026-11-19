@@ -11,6 +11,19 @@ const { stampLeadFunnelRow, bridgeLeadFunnelStage, LEAD_STATUS_TO_FUNNEL_STAGE }
 // 'duplicate' of the prior open lead instead of a second 'new' one.
 const WIZARD_LEAD_REUSE_DAYS = 30;
 
+const { firstSourceEvidenceObjectSql, sourceEvidenceFromAttribution } = require('../services/lead-source-evidence');
+const QUOTE_FIRST_SOURCE_EVIDENCE_SQL = firstSourceEvidenceObjectSql({ incomingDataSql: 'source_stage.incoming' });
+const QUOTE_CARRIED_KEYS_SQL = "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'duplicate_of_lead_id', COALESCE(extracted_data, '{}'::jsonb)->'duplicate_of_lead_id', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id', 'address_unverified', COALESCE(extracted_data, '{}'::jsonb)->'address_unverified', 'address_verdict', COALESCE(extracted_data, '{}'::jsonb)->'address_verdict'))";
+const QUOTE_SNAPSHOT_CARRIED_KEYS_SQL = "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id', 'address_unverified', COALESCE(extracted_data, '{}'::jsonb)->'address_unverified', 'address_verdict', COALESCE(extracted_data, '{}'::jsonb)->'address_verdict'))";
+const QUOTE_UPDATE_EXTRACTED_SQL = `(SELECT CASE
+  WHEN lead_type = 'quote_wizard'
+    THEN ${QUOTE_CARRIED_KEYS_SQL} || (source_stage.incoming - 'source_evidence') || ${QUOTE_FIRST_SOURCE_EVIDENCE_SQL}
+  ELSE COALESCE(extracted_data, '{}'::jsonb) || (source_stage.incoming - 'source_evidence')
+END FROM (SELECT ?::jsonb AS incoming) AS source_stage)`;
+const QUOTE_SNAPSHOT_EXTRACTED_SQL = `(SELECT ${QUOTE_SNAPSHOT_CARRIED_KEYS_SQL}
+  || (source_stage.incoming - 'source_evidence') || ${QUOTE_FIRST_SOURCE_EVIDENCE_SQL}
+  FROM (SELECT ?::jsonb AS incoming) AS source_stage)`;
+
 // The most recent OPEN quote_wizard lead (inside the reuse window) whose
 // email, phone AND quoted address all equal what this run typed — i.e. the
 // same inquiry (same catalog service) submitted again — or null. Used ONLY to label the new row
@@ -2210,12 +2223,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // click ids so extracted_data replacement can't drop it.
     const anonId = sanitizeAnonUnitId(attr?.anon_id);
     const sourceMeta = await resolveLeadSource(attr);
+    const sourceEvidence = sourceEvidenceFromAttribution(attr);
     const entryChannel = resolveEntryChannel(attr);
 
     const isOneTimeOnly = !monthly && !annual && oneTimeTotal > 0;
     const leadMonthlyValue = quoteRequired ? null : (monthly || null);
 
-    const extractedData = JSON.stringify({
+    const extractedDataObject = {
       stage: 'quote_calculated',
       // When the visitor last submitted THIS stage — the token path re-types
       // a lookup-minted row in place, so created_at is the mint, not the
@@ -2242,6 +2256,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       clickIds: { gclid, wbraid, gbraid, fbclid, fbc, fbp },
       referrer: attr?.referrer || null,
       landing_url: attr?.landing_url || null,
+      ...(sourceEvidence ? { source_evidence: sourceEvidence } : {}),
       address: normalizedAddress,
       ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
       // Always present: on the merge path (a lead the wizard attached to)
@@ -2251,7 +2266,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // address_unverified / address_verdict are NOT written here: the
       // locked publication after the lead write owns them, so no verdict
       // ever commits outside the contact-pair lock (pre-push audit P1).
-    });
+    };
+    const extractedData = JSON.stringify(extractedDataObject);
 
     // If the property-lookup step already captured a lead row, update it
     // in place so we don't double-count leads for a single conversion.
@@ -2326,8 +2342,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // (jsonb_strip_nulls drops a key the prior row never had); a value in
         // THIS stage's snapshot wins the merge.
         extracted_data: db.raw(
-          "CASE WHEN lead_type = 'quote_wizard' THEN jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'duplicate_of_lead_id', COALESCE(extracted_data, '{}'::jsonb)->'duplicate_of_lead_id', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id', 'address_unverified', COALESCE(extracted_data, '{}'::jsonb)->'address_unverified', 'address_verdict', COALESCE(extracted_data, '{}'::jsonb)->'address_verdict')) || ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
-          [extractedData, extractedData]
+          QUOTE_UPDATE_EXTRACTED_SQL,
+          [extractedData]
         ),
         updated_at: new Date(),
       });
@@ -2368,11 +2384,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // keeps the stored marker) and the label stays the row's own. 0 rows
       // leaves `lead` null.
       const land = async (claim, label) => {
+        const snapshotData = JSON.stringify({
+          ...extractedDataObject,
+          ...(label ? { duplicate_of_lead_id: label } : {}),
+        });
         const relabel = label === undefined ? {} : {
           status: label ? 'duplicate' : 'new',
           extracted_data: db.raw(
-            "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id', 'address_unverified', COALESCE(extracted_data, '{}'::jsonb)->'address_unverified', 'address_verdict', COALESCE(extracted_data, '{}'::jsonb)->'address_verdict')) || ?::jsonb || ?::jsonb",
-            [extractedData, JSON.stringify(label ? { duplicate_of_lead_id: label } : {})],
+            QUOTE_SNAPSHOT_EXTRACTED_SQL,
+            [snapshotData],
           ),
         };
         const rows = await claim(ownRow()).update({ ...updateFields, ...relabel }).returning(RETURNING);
@@ -4545,6 +4565,8 @@ module.exports._internals = {
   lotPricedServiceRequested,
   publicQuoteTreeShrubTierRejection,
   publicQuoteTreeShrubTierInput,
+  QUOTE_UPDATE_EXTRACTED_SQL,
+  QUOTE_SNAPSHOT_EXTRACTED_SQL,
 };
 module.exports.PUBLIC_QUOTE_SERVICE_KEYS = PUBLIC_QUOTE_SERVICE_KEYS;
 module.exports.KEYED_ONLY_SERVICE_KEYS = KEYED_ONLY_SERVICE_KEYS;

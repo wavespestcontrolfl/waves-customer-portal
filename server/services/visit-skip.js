@@ -22,6 +22,7 @@
 
 const db = require('../models/db');
 const { dateOnlyString } = require('../utils/date-only');
+const { etDateString } = require('../utils/datetime-et');
 
 const SKIPPABLE_FROM_STATUSES = ['pending', 'confirmed'];
 // A cancel may book a make-up visit; a skip never does, so this refusal is not about a skip.
@@ -90,16 +91,46 @@ async function assertSkippable(trx, serviceId, { isAdmin = false, actorId = null
 }
 
 // The plan's next open visit after `date`: what the office tells the customer ("see you on ...").
-async function nextPlanVisitDate(conn, row, date) {
+async function nextPlanVisitDate(conn, row, date, { requireServiceAndProperty = false } = {}) {
   const { isPlanSeriesRow } = require('./recurring-series-cancel-reseed');
+  // A public tracker must not name a different service or house as the next
+  // regular visit. Older rows without both durable keys fail closed and show
+  // no date; the office preview keeps its established series-only lookup.
+  if (requireServiceAndProperty && (!row.service_id || !row.property_id)) return null;
   const rootId = row.recurring_parent_id || row.id;
-  const later = await conn('scheduled_services')
+  const query = conn('scheduled_services')
     .where(function seriesRows() { this.where('recurring_parent_id', rootId).orWhere('id', rootId); })
     .whereIn('status', SKIPPABLE_FROM_STATUSES)
     .where('scheduled_date', '>', date)
+    // Both Quick Move and the recurring seeder park future rows without a
+    // window, identified by customer_pick_by and recurring_dispatch_due_date
+    // respectively. Filter those marked shapes before ordering/limiting so
+    // they cannot crowd out a real visit. A markerless legacy windowless row
+    // remains eligible: old date-only bookings are ambiguous, not proven
+    // unplaced.
+    .where(function placedOrLegacyDateOnly() {
+      this.whereNotNull('window_start')
+        .orWhere({ customer_pick_by: null, recurring_dispatch_due_date: null });
+    });
+  if (requireServiceAndProperty) query.where({ service_id: row.service_id, property_id: row.property_id });
+  const columns = [
+    'id', 'scheduled_date', 'status', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included',
+    'service_id', 'property_id', 'source_action', 'customer_confirmed',
+  ];
+  if (requireServiceAndProperty) {
+    // Public tracker lookup: the SAME SQL group signed-in Schedule uses,
+    // applied before order/limit so hidden dispatch-owned rows cannot consume
+    // the bounded scan. Plan-row classification stays a shared JS verdict
+    // after this bounded read; a batch containing only boosters/callbacks
+    // conservatively returns no date rather than issuing an unbounded query.
+    const { customerVisibleBookingWhere } = require('./call-booking-source-actions');
+    query.where(customerVisibleBookingWhere)
+      .where('scheduled_date', '>=', etDateString());
+  }
+  const later = await query
     .orderBy('scheduled_date', 'asc')
     .limit(NEXT_VISIT_SCAN)
-    .select('id', 'scheduled_date', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
+    .select(...columns);
   const next = (later || []).find((candidate) => String(candidate.id) !== String(row.id) && isPlanSeriesRow(candidate));
   return next ? dateOnlyString(next.scheduled_date) : null;
 }
@@ -132,6 +163,7 @@ module.exports = {
   skipVerdict,
   assertSkippable,
   skipPreview,
+  nextPlanVisitDate,
   SKIPPABLE_FROM_STATUSES,
   _private: { rowRefusal, nextPlanVisitDate, lawnRoundFor, MESSAGES },
 };

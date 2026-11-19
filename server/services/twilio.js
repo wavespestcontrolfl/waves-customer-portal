@@ -1016,6 +1016,9 @@ const TwilioService = {
         adminAttributed: Boolean(options.adminUserId),
         bundledReview: Boolean(options.bundledReviewRequestId),
       });
+      // GATE_APP_FIRST_STALE_TEXT: a holder whose app was not opened in 30 days gets the text and
+      // the app alert still goes, fired like the companion only after the text is accepted.
+      let staleAppCompanion = false;
       // Companion push starts only after the locked Twilio leg is accepted.
       if (typeof options.withSmsHandoff === 'function' && pushRoute === 'push_first') {
         return { success: false, preSendBlocked: true, code: 'UNSUPPORTED_SMS_HANDOFF',
@@ -1073,6 +1076,7 @@ const TwilioService = {
         }
         deliveryOutcome = pushed.deliveryOutcome === 'uncertain' ? 'uncertain' : 'not_sent';
         providerCoordination.recordProviderOutcome(providerHandoffReservation, { deliveryOutcome });
+        staleAppCompanion = pushed.staleAppCompanion === true;
         if (options.explicitPushOnly) {
           const bell = pushed.bellPersisted ? { bellPersisted: true } : {};
           if (pushed.blocked) return { success: false, guardBlocked: true, error: pushed.reason, ...bell };
@@ -1691,7 +1695,7 @@ const TwilioService = {
       logger.info(
         `SMS sent to ${maskPhone(to)} from ${maskPhone(fromNumber)}: ${message.sid}`,
       );
-      if (pushRoute === "push_and_sms") {
+      if (pushRoute === "push_and_sms" || staleAppCompanion) {
         // Companion push, best-effort and only now that Twilio accepted the
         // SMS — never awaited into the send path.
         void PushRouting.sendCompanionPush({
@@ -1701,6 +1705,7 @@ const TwilioService = {
           messageType: options.messageType,
           appointmentId: options.appointmentId || null,
           preSendCheck: options.preSendCheck,
+          ...(staleAppCompanion ? { staleApp: true, invoiceId: options.invoiceId, notificationEventKey: options.notificationEventKey } : {}),
         }).catch(() => {});
       }
 

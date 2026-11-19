@@ -468,6 +468,137 @@ describe('Charlotte County Purchasing notices', () => {
   });
 });
 
+// The SHAPE of an MFMP "Advertisement Posted" notice (the text part: labelled lines, some with a leading or trailing
+// space); invented agency, contact, phone and address.
+const MFMP_BODY = (over = {}) => {
+  const f = {
+    number: 'ITB-17200', type: 'Invitation to Bid', org: 'Sample Water Management District', title: 'ITB 99Z-001 Sample Site Preparation and Weed Control',
+    close: 'Dec 3, 2026', contact: 'Casey Sample', email: 'casey.sample@fixture-agency.example', ...over,
+  };
+  return [
+    'To: Fixture Vendor',
+    ' A bid advertisement was posted to the MyFloridaMarketPlace (MFMP) Vendor Information Portal (VIP) for goods or services matching your company\'s selected commodity codes(s). See below for additional information:',
+    ` Organization: ${f.org}`, ` Advertisement Number: ${f.number} `, ' Agency Advertisement Number: ITB 99Z-001',
+    ` Advertisement Type: ${f.type}`, ` Title: ${f.title}`, ' Commodity Code: 70141603: Weed control services',
+    ' Open Date: Nov 10, 2026', ` Close Date: ${f.close}`, ` Agency Contact: ${f.contact}`, ' Phone: (555) 010-0100',
+    ' Address: 1 Fixture Agency Way', ` Email: ${f.email}`,
+    ' You may view additional information by viewing this advertisement directly in VIP .',
+  ].join('\n');
+};
+const mfmpNotice = (over = {}, fields = {}) => email({
+  from_address: 'MFMP.NoReply@dms.myflorida.com', from_name: 'MFMP Notifications', subject: `Advertisement Posted - ${fields.number || 'ITB-17200'}`,
+  body_text: MFMP_BODY(fields), provider_verified_strict: true, ...over,
+});
+
+describe('MyFloridaMarketPlace advertisement notices', () => {
+  test('an Invitation to Bid is filed with the agency, number, title, contact and Close Date', () => {
+    expect(detectBidEmail(mfmpNotice())).toMatchObject({ bid: true, source: 'gov_email', kind: 'invite' });
+    const parsed = parseBidEmail(mfmpNotice());
+    expect(parsed).toMatchObject({
+      template: 'mfmp', source: 'gov_email', kind: 'invite',
+      gc_or_agency: 'Sample Water Management District', solicitation_number: 'ITB-17200',
+      project_title: 'ITB 99Z-001 Sample Site Preparation and Weed Control',
+      buyer_name: 'Casey Sample', buyer_email: 'casey.sample@fixture-agency.example',
+      location: null, package_name: null, job_walk_at: null,
+      due_source_line: 'Close Date: Dec 3, 2026',
+    });
+    expect(parsed.due_at.toISOString()).toBe('2026-12-04T04:59:00.000Z'); // 23:59 EST on Dec 3; Open Date is not read
+  });
+
+  test('the key is the advertisement number: copies in other threads or with a corrected title share it; another number does not', () => {
+    const first = parseBidEmail(mfmpNotice());
+    expect(first).toMatchObject({ group_key: 'mfmp|itb 17200', group_base: 'mfmp|itb 17200' });
+    expect(parseBidEmail(mfmpNotice({}, { title: 'ITB 99Z-001 Sample Site Preparation and Weed Control (Revised)', org: 'Sample Water Mgmt District' })).group_key)
+      .toBe(first.group_key);
+    expect(parseBidEmail(mfmpNotice({ gmail_thread_id: 't-2', received_at: new Date('2026-11-16T14:00:00Z') })).group_key).toBe(first.group_key);
+    expect(parseBidEmail(mfmpNotice({}, { number: 'ITB-17201' })).group_key).not.toBe(first.group_key);
+  });
+
+  test('every solicitation type is filed; an Agency Decision, an information request or a notice is not', () => {
+    for (const type of ['Invitation to Bid', 'Request for Proposals', 'Request for Proposal', 'Invitation to Negotiate', 'Request for Quote', 'Request for Quotation', 'invitation to bid',
+      'State Term Contract Request for Quotes', 'Request for Statement of Qualifications', 'Request for Qualifications']) {
+      expect(detectBidEmail(mfmpNotice({}, { type }))).toMatchObject({ bid: true, source: 'gov_email' });
+    }
+    for (const type of ['Agency Decision', 'Request for Information', 'Public Meeting', 'Notice of Intent', 'Notice of Cancellation of Invitation to Bid', 'Addendum to Request for Proposals']) {
+      expect(detectBidEmail(mfmpNotice({}, { type }))).toMatchObject({ bid: false, reason: 'not_solicitation' });
+    }
+    // A decision notice that carries a bid word in its subject is still not a bid.
+    expect(detectBidEmail(mfmpNotice({ subject: 'Advertisement Posted - ITB-17338' }, { type: 'Agency Decision' })))
+      .toMatchObject({ bid: false, reason: 'not_solicitation' });
+    expect(detectBidEmail(mfmpNotice({ subject: 'Advertisement Posted - AD-17338' }, { type: 'Agency Decision', number: 'AD-17338' })).bid).toBe(false);
+  });
+
+  test('only a bare Close Date day is read; a time or another shape leaves the due date unset', () => {
+    for (const close of ['Dec 3, 2026 14:00', 'Dec 3, 2026 2:00 PM', '12/03/2026', 'Dec 3 2026']) {
+      expect(parseBidEmail(mfmpNotice({}, { close }))).toMatchObject({ due_at: null, due_source_line: null });
+    }
+    expect(parseBidEmail(mfmpNotice({}, { close: 'December 3, 2026' })).due_at.toISOString()).toBe('2026-12-04T04:59:00.000Z');
+  });
+
+  test('the key reads the advertisement number from its own line, even with the Organization line missing', () => {
+    const noOrg = MFMP_BODY().replace(/^ Organization:.*\n/m, '');
+    expect(parseBidEmail(mfmpNotice({ body_text: noOrg }))).toMatchObject({ gc_or_agency: null, group_key: 'mfmp|itb 17200' });
+  });
+
+  test('only a solicitation takes the key; a decision notice keeps its fields but no key', () => {
+    const decision = parseBidEmail(mfmpNotice({}, { type: 'Agency Decision' }));
+    expect(decision).toMatchObject({ template: 'mfmp', solicitation_number: 'ITB-17200', group_key: null, group_base: null });
+  });
+
+  test('an unreadable Close Date line is told apart from a missing one', () => {
+    const { mfmpUnreadCloseLine } = require('../services/bid-desk/detector');
+    expect(mfmpUnreadCloseLine(mfmpNotice({}, { close: 'Dec 2, 2026 2:00 PM' }))).toBe('Close Date: Dec 2, 2026 2:00 PM');
+    expect(mfmpUnreadCloseLine(mfmpNotice())).toBeNull();
+    expect(mfmpUnreadCloseLine(mfmpNotice({ body_text: MFMP_BODY().replace(/^ Close Date:.*\n/m, '') }))).toBeNull();
+    expect(mfmpUnreadCloseLine(mfmpNotice({ provider_verified_strict: false }, { close: 'Dec 2, 2026 2:00 PM' }))).toBeNull();
+    // Two Close Date lines are never a date we trust: no date is read, and the line is flagged.
+    const two = MFMP_BODY({ close: 'Dec 7, 2026 2:00 PM' }).replace(' Agency Contact:', ' Close Date: Dec 3, 2026\n Agency Contact:');
+    expect(parseBidEmail(mfmpNotice({ body_text: two }))).toMatchObject({ due_at: null });
+    expect(mfmpUnreadCloseLine(mfmpNotice({ body_text: two }))).toBe('Close Date: Dec 7, 2026 2:00 PM');
+    // A notice missing its Organization or Title line still gives its Close Date.
+    const noTitle = MFMP_BODY().replace(/^ Title:.*\n/m, '');
+    expect(parseBidEmail(mfmpNotice({ body_text: noTitle })).due_at.toISOString()).toBe('2026-12-04T04:59:00.000Z');
+  });
+
+  test('only one plain address is read as the buyer email', () => {
+    expect(parseBidEmail(mfmpNotice({}, { email: 'a@fixture-agency.example, b@fixture-agency.example' })).buyer_email).toBeNull();
+    expect(parseBidEmail(mfmpNotice({}, { email: 'Casey.Sample@Fixture-Agency.example' })).buyer_email).toBe('casey.sample@fixture-agency.example');
+  });
+
+  test('without the strict sender check it is plain government mail: filed on its subject, no fields, no key', () => {
+    const plain = mfmpNotice({ provider_verified_strict: false });
+    expect(detectBidEmail(plain)).toMatchObject({ bid: true, source: 'gov_email' });
+    expect(parseBidEmail(plain)).toMatchObject({
+      template: null, source: 'gov_email', gc_or_agency: null, project_title: null, solicitation_number: null,
+      buyer_name: null, buyer_email: null, due_at: null, due_source_line: null, group_key: null,
+    });
+  });
+
+  test('a notice whose labels no longer parse falls back to the subject rule with no fields', () => {
+    const changed = mfmpNotice({ subject: 'Advertisement Posted - ITB-1', body_text: 'A new advertisement was posted. Log in to VIP to view it.' });
+    expect(detectBidEmail(changed)).toMatchObject({ bid: true, source: 'gov_email' });
+    expect(parseBidEmail(changed)).toMatchObject({
+      source: 'gov_email', gc_or_agency: null, project_title: null, solicitation_number: null, due_at: null, due_source_line: null, group_key: null,
+    });
+    // The same fallback reads an unrelated subject as not a bid, as any government mail.
+    expect(detectBidEmail({ ...changed, subject: 'Advertisement Posted - AD-1' })).toMatchObject({ bid: false, reason: 'not_bid' });
+    // A stray Job Walk line in a changed template is never read as a date.
+    const walk = mfmpNotice({ subject: 'Advertisement Posted - ITB-1', body_text: 'Job Walk: Dec 1, 2026' });
+    expect(parseBidEmail(walk)).toMatchObject({ source: 'gov_email', job_walk_at: null, due_at: null });
+    expect(parseBidEmail(mfmpNotice({ body_text: `${MFMP_BODY()}\n Job Walk: Dec 1, 2026` })).job_walk_at).toBeNull();
+    // The type decides on its own: an Agency Decision missing other labels is still not a bid, even with ITB in the subject.
+    const noOrg = MFMP_BODY({ type: 'Agency Decision' }).replace(/^ Organization:.*\n/m, '');
+    expect(detectBidEmail(mfmpNotice({ body_text: noOrg }))).toMatchObject({ bid: false, reason: 'not_solicitation' });
+    // Missing the type line is also a changed template.
+    expect(detectBidEmail(mfmpNotice({ body_text: MFMP_BODY().replace(/^ Advertisement Type:.*\n/m, '') })))
+      .toMatchObject({ bid: true, source: 'gov_email' });
+  });
+
+  test('another sender at myflorida.com stays plain government mail even when verified', () => {
+    expect(parseBidEmail(mfmpNotice({ from_address: 'purchasing@dos.myflorida.com' })).template).toBeNull();
+  });
+});
+
 // The SHAPE of a Blue Book Network ONETEAM invite (htmlToText of the delivered HTML); invented contractor and place.
 const BB_LINES = (due = 'Bid is due by 5:00 PM (Pacific) on September 14, 2026') => [
   '96', 'Invitation to Bid', due,
