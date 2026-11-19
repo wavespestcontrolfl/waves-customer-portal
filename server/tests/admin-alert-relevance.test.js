@@ -747,14 +747,16 @@ describe('class rules', () => {
     // The handoff witness reads estimates through raw SQL; the batch's own estimate load by id does not.
     const witnessQueries = () => asked('estimates').filter((q) => q.calls.some(([method]) => method === 'whereRaw'));
 
-    test('the class is a Leads bell the estimator wrote for a call: a text-origin bell, another Leads bell or a blank sid is not in it', () => {
+    test('the class is a Leads bell the estimator wrote for a call: a text-origin bell (its own class), another Leads bell or a blank sid is not in it', () => {
       expect(classify(callBell())?.key).toBe('call_quote_sent');
       expect(classify(callBell({ quote_promised: false, contact: true, promise: undefined }))?.key).toBe('call_quote_sent');
       for (const other of [
-        callBell({ callSid: undefined, smsThreadKey: 'sms-thread:+15555550100' }),
         callBell({ callSid: '  ' }), callBell({ callSid: 42 }), callBell({ estimator_engine: false }), callBell({ estimator_engine: 'true' }),
         { ...callBell(), category: 'alert' },
-      ]) expect(classify(other)).toBeNull();
+      ]) expect(classify(other)?.key).not.toBe('call_quote_sent');
+      for (const other of [callBell({ callSid: '  ' }), callBell({ callSid: 42 }), callBell({ estimator_engine: false }), { ...callBell(), category: 'alert' }]) {
+        expect(classify(other)).toBeNull();
+      }
     });
 
     test('a quote handed off after the call started closes it, even one handed off BEFORE the bell was written; the witness is asked from the call start', async () => {
@@ -880,6 +882,118 @@ describe('class rules', () => {
       const data = await loadSubjects([callBell()]);
       expect(subjectFor(callBell(), data, TODAY)).toMatchObject({ callQuoteReason: null, callQuoteUnknown: true });
       expect(judge(classify(callBell()), subjectFor(callBell(), data, TODAY))).toEqual({ reason: null, would: null });
+    });
+  });
+
+  // Estimator TEXT bells (owner 2026-11-19). Like the call bells above, the fake cannot run the handoff witness SQL or the
+  // phone identity SQL: these tests prove which customer the module judges, from which time, and what a failed read does;
+  // the SQL itself (sent_at alone, a quote before the ask, a shared phone) is proved in admin-alert-relevance-db.test.js.
+  describe('estimator text bells', () => {
+    const DIGITS = '5555550142';
+    const ASK = new Date('2026-09-27T12:00:00Z'); // note()'s created_at
+    const textBell = (over = {}) => note({
+      category: 'lead', link: '/admin/leads',
+      metadata: { smsThreadKey: `sms:${DIGITS}`, callSid: null, estimateId: null, estimator_engine: true, quote_promised: true, promise: true, lane: 'residential', ...over },
+    });
+    // The loader's customers read (id + the phone identity it matched) and its leads read.
+    const onPhone = (...ids) => { mockTables.customers = ids.map((id) => ({ id, peer: DIGITS, deleted_at: null })); };
+    const asked = (table) => mockQueries.filter((q) => q.table === table);
+
+    test('classification: a text bell is its own class; a call bell stays in the call class; a Leads bell without the estimator marker is in neither', () => {
+      expect(classify(textBell())?.key).toBe('text_quote_sent');
+      expect(classify(textBell({ callSid: undefined }))?.key).toBe('text_quote_sent');
+      expect(classify(textBell({ callSid: 'CA00000000000000000000000000000009' }))?.key).toBe('call_quote_sent');
+      for (const other of [textBell({ estimator_engine: false }), textBell({ estimator_engine: undefined }), textBell({ smsThreadKey: '' }), textBell({ smsThreadKey: undefined }),
+        textBell({ callSid: 42 }), { ...textBell(), category: 'alert' }]) {
+        expect(classify(other)?.key).not.toBe('text_quote_sent');
+      }
+      // The sibling Leads classes keep their bells: a bell with their markers and no estimator marker never lands here.
+      expect(classify(note({ category: 'lead', metadata: { doneWhen: 'lead_contacted', leadId: LEAD, smsThreadKey: `sms:${DIGITS}` } }))?.key).toBe('lead_contacted');
+      expect(classify(note({ category: 'lead', metadata: { dedupeKey: 'lead-repeat-form:x', smsThreadKey: `sms:${DIGITS}` } }))?.key).not.toBe('text_quote_sent');
+    });
+
+    test('a quote handed off after the ask closes it, asked from the ask (created_at) for the one customer on the phone; no estimate leaves it open', async () => {
+      const row = textBell();
+      onPhone(CUST);
+      expect(await reasonFor(row)).toEqual({ cls: 'text_quote_sent', reason: null });
+      mockTables.estimates = [{ id: uid(533), customer_id: CUST }];
+      const witness = jest.spyOn(require('../services/call-commitments'), 'handedOffWithin');
+      try {
+        expect((await reasonFor(row)).reason).toBe('Estimate was sent');
+        // Asked from the bell's created_at, never an earlier time (a quote BEFORE the ask is not counted), for that customer.
+        expect(witness.mock.calls.map(([, after]) => after.toISOString())).toEqual([ASK.toISOString()]);
+        const witnessQuery = asked('estimates').filter((q) => q.calls.some(([method]) => method === 'whereRaw')).pop();
+        expect(JSON.stringify(witnessQuery.calls)).toContain(CUST);
+      } finally {
+        witness.mockRestore();
+      }
+    });
+
+    test('the customer on the phone also counts through a live lead with that phone; a deleted lead or a deleted customer adds nobody', async () => {
+      const row = textBell();
+      mockTables.estimates = [{ id: uid(533), customer_id: CUST }];
+      // Lead only: its (live) customer is the subject.
+      mockTables.customers = [{ id: CUST, deleted_at: null }];
+      mockTables.leads = [{ customer_id: CUST, peer: DIGITS, deleted_at: null }];
+      expect((await reasonFor(row)).reason).toBe('Estimate was sent');
+      // The lead's customer is gone: nobody to judge.
+      mockTables.customers = [{ id: CUST, deleted_at: new Date() }];
+      expect((await reasonFor(row)).reason).toBeNull();
+      // A deleted lead adds nobody.
+      mockTables.customers = [{ id: CUST, deleted_at: null }];
+      mockTables.leads = [{ customer_id: CUST, peer: DIGITS, deleted_at: new Date() }];
+      expect((await reasonFor(row)).reason).toBeNull();
+      // The same customer by phone and by lead is ONE customer.
+      mockTables.customers = [{ id: CUST, peer: DIGITS, deleted_at: null }];
+      mockTables.leads = [{ customer_id: CUST, peer: DIGITS, deleted_at: null }];
+      expect((await reasonFor(row)).reason).toBe('Estimate was sent');
+    });
+
+    test('a live visit booked after the ask closes it; one booked before it does not, and the predicate is the live top-level one', async () => {
+      const row = textBell();
+      onPhone(CUST);
+      mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: new Date('2026-09-27T11:00:00Z') }];
+      expect((await reasonFor(row)).reason).toBeNull();
+      mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: new Date('2026-09-27T12:30:00Z') }];
+      expect((await reasonFor(row)).reason).toBe('A visit was booked');
+      expect(JSON.stringify(asked('scheduled_services').pop().calls)).toContain('recurring_parent_id');
+    });
+
+    test('no customer on the phone, or two (a shared phone), is no verdict even with a quote and a visit on file', async () => {
+      const row = textBell();
+      const OTHER = uid(98);
+      mockTables.estimates = [{ id: uid(533), customer_id: CUST }];
+      mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: AFTER_BELL }];
+      mockTables.customers = [];
+      expect((await reasonFor(row)).reason).toBeNull();
+      onPhone(CUST, OTHER);
+      expect((await reasonFor(row)).reason).toBeNull();
+      // A thread key that names no 10-digit phone is never judged, and reads nothing.
+      onPhone(CUST);
+      mockQueries = [];
+      expect((await reasonFor(textBell({ smsThreadKey: `sms-thread:${CUST}` }))).reason).toBeNull();
+      expect(asked('customers')).toEqual([]);
+    });
+
+    test('a failed read is no verdict and the re-arm pass does not put a retired bell back on it', async () => {
+      const row = textBell();
+      onPhone(CUST);
+      mockTables.estimates = [{ id: uid(533), customer_id: CUST }];
+      mockTables.notifications = [row];
+      expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 1, byClass: { text_quote_sent: 1 } });
+      expect(row).toMatchObject({ done_by: 'relevance', resolution: 'Estimate was sent' });
+      mockFailTable = 'customers';
+      const data = await loadSubjects([textBell()]);
+      expect(subjectFor(textBell(), data, TODAY)).toMatchObject({ textQuoteReason: null, textQuoteUnknown: true });
+      expect(judge(classify(textBell()), subjectFor(textBell(), data, TODAY))).toEqual({ reason: null, would: null });
+      // The failing read leaves the retirement standing.
+      expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 0, retired: 0 });
+      expect(row.done_by).toBe('relevance');
+      // The witness is readable again but the quote is gone: the bell comes back (re-arm, like the call class).
+      mockFailTable = null;
+      mockTables.estimates = [];
+      expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 1, retired: 0 });
+      expect([row.read_at, row.done_at, row.done_by, row.resolution]).toEqual([null, null, null, null]);
     });
   });
 

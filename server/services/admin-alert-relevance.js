@@ -150,9 +150,15 @@
  * the CALL STARTED (callStartedAtSql over the call's call_log row, not the bell's created_at: a quote can go out between
  * the call and the bell). The lead is the bell's own and the one the call is stamped with or that carries the call's
  * sid (`call_log.metadata` `lead_id` / `relay_lead_id`; `leads.twilio_call_sid`), since an estimator bell carries no leadId. No call row, or a call with no customer and
- * no lead, leaves the bell open. A text-origin bell
- * (`smsThreadKey`, no callSid) is not in the class. No gate: it is an internal alert change, and the sweep's own kill
- * switch covers it.
+ * no lead, leaves the bell open. No gate: it is an internal alert change, and the sweep's own kill switch covers it.
+ *
+ * The estimator's TEXT bells (owner 2026-11-19, admin notification faults check: "fix if you rec"; the same
+ * estimator-engine notify with an `smsThreadKey` of `sms:<10 digits>` and no callSid: "Quote asked by text", "estimate
+ * already open", "AI estimate draft needs review", the commercial scaffold) close by the same two facts, judged from
+ * the bell's created_at (the first ask; an in-place upgrade does not move it). The subject is the ONE live customer the
+ * thread's phone belongs to (a live customer by the shared phone identity, plus the customer of a live lead with
+ * that phone). No customer, or two or more (a shared phone), is no verdict and the bell stays open for the 72 hour
+ * fall-off. A failed read is no verdict and keeps the re-arm pass from putting one back.
  */
 
 const db = require('../models/db');
@@ -277,7 +283,7 @@ function resolveRefs(row, data) {
   return { refs, visit, lead, estimate, customer };
 }
 
-const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), quoteHandedOff: new Set(), bookingMovedOn: new Map(), callQuoteMovedOn: new Map(), callQuoteFailed: false, promises: new Map(), consents: new Map(), customers: new Map(), contacts: new Map(), contact: new Map(), noteVisits: new Map(), bounceRecords: new Map(), contactFailed: false });
+const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), quoteHandedOff: new Set(), bookingMovedOn: new Map(), callQuoteMovedOn: new Map(), callQuoteFailed: false, textQuoteMovedOn: new Map(), textQuoteFailed: false, promises: new Map(), consents: new Map(), customers: new Map(), contacts: new Map(), contact: new Map(), noteVisits: new Map(), bounceRecords: new Map(), contactFailed: false });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
 // The latest valid time per customer across rows (a bad time is skipped).
@@ -633,6 +639,62 @@ async function loadCallQuoteMovedOn(rows, data, conn) {
   }
 }
 
+// An estimator-engine TEXT bell (estimator-engine/index.js notify with a threadKey): category lead, `estimator_engine`,
+// an `smsThreadKey` and no callSid. Disjoint from the call class by the callSid test; the sibling Leads classes carry
+// no estimator marker. A blank callSid counts as none; a non-blank one of any type is a call's.
+const TEXT_QUOTE_CLASS = 'text_quote_sent';
+const hasText = (value) => value != null && String(value).trim() !== '';
+function isTextQuoteBell(meta, row) {
+  return row.category === 'lead' && meta.estimator_engine === true && typeof meta.smsThreadKey === 'string' && meta.smsThreadKey.trim() !== ''
+    && !hasText(meta.callSid);
+}
+// The thread's phone: `sms:<last 10 digits>`. Any other shape names no phone, so the bell is never judged.
+const textThreadDigits = (meta) => /^sms:(\d{10})$/.exec(String(meta.smsThreadKey).trim())?.[1] || null;
+
+// The live customers each thread phone belongs to (phone identity digits -> Set of customer ids): customers by the
+// shared phone identity SQL, plus the customer of a live lead with that phone (that customer must be live too).
+async function textQuotePeers(conn, digits) {
+  const { phoneIdentitySql } = require('./sms-response-policy');
+  const peers = new Map(digits.map((d) => [d, new Set()]));
+  const tie = (peer, id) => { if (id && peers.has(peer)) peers.get(peer).add(String(id)); };
+  for (const c of await conn('customers').whereNull('deleted_at').whereRaw(`${phoneIdentitySql('customers.phone')} = ANY(?)`, [digits])
+    .select('id', conn.raw(`${phoneIdentitySql('customers.phone')} as peer`))) tie(c.peer, c.id);
+  const leads = await conn('leads').whereNull('deleted_at').whereNotNull('customer_id').whereRaw(`${phoneIdentitySql('leads.phone')} = ANY(?)`, [digits])
+    .select('customer_id', conn.raw(`${phoneIdentitySql('leads.phone')} as peer`));
+  const leadCustomerIds = [...new Set(leads.map((l) => String(l.customer_id)))];
+  const live = new Set(leadCustomerIds.length
+    ? (await conn('customers').whereIn('id', leadCustomerIds).whereNull('deleted_at').select('id')).map((c) => String(c.id))
+    : []);
+  for (const l of leads) if (live.has(String(l.customer_id))) tie(l.peer, l.customer_id);
+  return peers;
+}
+
+// Each estimator text bell (owner 2026-11-19): did a quote reach the one customer the thread's phone belongs to, or a
+// visit get booked for them, AFTER THE ASK (the bell's created_at)? The same witnesses as the call class
+// (handedOffWithin inside the ownership fence, never sent_at; bookedVisitsByCustomer's live top-level visit). Loaded
+// into data.textQuoteMovedOn (bell id -> the reason in words). A failed read is no verdict: it leaves the bell open and
+// keeps the re-arm pass from putting one back (textQuoteFailed).
+async function loadTextQuoteMovedOn(rows, data, conn) {
+  const bells = rows.map((row) => ({ row, meta: parseMeta(row.metadata) })).filter(({ row, meta }) => isTextQuoteBell(meta, row))
+    .map(({ row, meta }) => ({ id: String(row.id), digits: textThreadDigits(meta), askedAt: row.created_at ? new Date(row.created_at) : null }))
+    .filter((b) => b.digits && b.askedAt && !Number.isNaN(b.askedAt.getTime()));
+  if (!bells.length) return;
+  try {
+    const peers = await textQuotePeers(conn, [...new Set(bells.map((b) => b.digits))]);
+    const subjects = bells.map((b) => ({ ...b, customerIds: [...peers.get(b.digits)] })).filter((b) => b.customerIds.length === 1);
+    const booked = await bookedVisitsByCustomer(conn, [...new Set(subjects.flatMap((b) => b.customerIds))]);
+    const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
+    for (const { id, askedAt, customerIds: [customerId] } of subjects) {
+      if (booked.get(customerId) && new Date(booked.get(customerId)).getTime() > askedAt.getTime()) data.textQuoteMovedOn.set(id, 'A visit was booked');
+      else if (await whereEstimateCustomerOwnership(handedOffWithin(conn('estimates'), askedAt), customerId).first('estimates.id')) data.textQuoteMovedOn.set(id, 'Estimate was sent');
+    }
+  } catch (err) {
+    data.textQuoteMovedOn.clear();
+    data.textQuoteFailed = true;
+    logger.warn(`[alert-relevance] estimator text-bell witnesses failed to load: ${errSummary(err)}`);
+  }
+}
+
 // The address a bounced-email alert is about, its owner and the field it bounced from, from the
 // alert's own metadata (email-bounce-rescue.js bounceAlertMetadata), else null. Only that class
 // names one, so no other bell loads an email.
@@ -710,6 +772,7 @@ async function loadSubjects(rows, conn = db) {
   await loadNoteVisits(rows, data, conn);
   await loadLeadHandoffs(rows, data, conn);
   await loadCallQuoteMovedOn(rows, data, conn);
+  await loadTextQuoteMovedOn(rows, data, conn);
   // The stale-consent bells' customers: when did each last record a consent
   // at a CURRENT recurring-card text version — the base text or the
   // after-visit variant's (local max-effort review on #5434: an after-visit
@@ -790,6 +853,9 @@ function subjectFor(row, data, todayET) {
     // Why an estimator call bell's quote is out or a visit is booked, after the call started (those bells only), else null.
     callQuoteReason: data.callQuoteMovedOn.get(String(row.id)) || null,
     callQuoteUnknown: data.callQuoteFailed,
+    // The same for an estimator text bell, judged from the ask (the bell's created_at).
+    textQuoteReason: data.textQuoteMovedOn.get(String(row.id)) || null,
+    textQuoteUnknown: data.textQuoteFailed,
     // Why an unfinished-booking bell's booking is finished (loaded for those bells only), else null.
     bookingMovedOn: data.bookingMovedOn.get(String(row.id)) || null,
     // The latest staff text that reached the bell's customer (loaded for
@@ -1211,6 +1277,11 @@ function leadContactedMovedOn(s) {
 // lead's status.
 const callQuoteSettled = (s) => (s.callQuoteUnknown ? null : s.callQuoteReason);
 
+// An estimator text bell (TEXT_QUOTE_CLASS): settled by the same two facts, after the ask (loadTextQuoteMovedOn).
+const textQuoteSettled = (s) => (s.textQuoteUnknown ? null : s.textQuoteReason);
+// Witnesses that failed to load for one of the two estimator classes: no verdict, so no put-back either.
+const quoteWitnessUnknown = (cls, s) => (cls.key === CALL_QUOTE_CLASS && s.callQuoteUnknown) || (cls.key === TEXT_QUOTE_CLASS && s.textQuoteUnknown);
+
 // A technician's held estimate (tech-estimate-office-bell.js, doneWhen `estimate_sent_or_closed`): the office had to check it
 // before it went out. The fact judged is the office's release, not delivery: the tool never sends a held estimate and no
 // automatic sender selects a tool draft, so only an office send finishes one. Done = that send finished (`sent_at`, or the
@@ -1310,6 +1381,12 @@ const CLASSES = [
     // Judged from the call's start; `narrow` keeps the candidate query off the other Leads bells.
     key: CALL_QUOTE_CLASS, categories: ['lead'], match: isCallQuoteBell, rule: callQuoteSettled,
     narrow: (cq) => cq.whereRaw("metadata->>'estimator_engine' = 'true'").whereRaw("COALESCE(metadata->>'callSid', '') <> ''"),
+  },
+  { // The same estimator-engine notify for a TEXT ask (smsThreadKey, no callSid; owner 2026-11-19): judged from the bell's
+    // created_at, for the one customer the thread's phone belongs to. After the call class (disjoint by callSid).
+    key: TEXT_QUOTE_CLASS, categories: ['lead'], match: isTextQuoteBell, rule: textQuoteSettled,
+    narrow: (cq) => cq.whereRaw("metadata->>'estimator_engine' = 'true'").whereRaw("COALESCE(metadata->>'smsThreadKey', '') <> ''")
+      .whereRaw("COALESCE(metadata->>'callSid', '') = ''"),
   },
   { // lead-webhook.js ringRepeatFormAlert — it dedupes on OPEN rows only, so a
     // retirement ends the episode and the lead's next form rings a fresh row.
@@ -1638,7 +1715,7 @@ async function rearmRelevantAgain(now, todayET) {
         const subject = subjectFor(bell, data, todayET);
         // Witnesses that failed to load are no verdict: leave the row as it is.
         if (cls.contact && subject.contactUnknown) continue;
-        if (cls.key === CALL_QUOTE_CLASS && subject.callQuoteUnknown) continue;
+        if (quoteWitnessUnknown(cls, subject)) continue;
         if (judge(cls, subject).reason) continue;
         rearmed += await putBack(row);
       } catch (err) {

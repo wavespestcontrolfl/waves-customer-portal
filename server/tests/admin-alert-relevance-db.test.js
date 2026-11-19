@@ -274,6 +274,64 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     expect([closedByVisit.done_by, closedByVisit.resolution]).toEqual(['relevance', 'A visit was booked']);
   });
 
+  test('an estimator TEXT bell closes on a real handoff or a live booking after the ask for the ONE customer on the thread phone; never before the ask, sent_at alone, or a shared phone; it comes back when the witness goes (owner 2026-11-19)', async () => {
+    const now = new Date();
+    const hour = 60 * 60 * 1000;
+    const askAt = new Date(now.getTime() - 3 * hour);
+    const quoteAt = new Date(askAt.getTime() + 10 * 60 * 1000);
+    const beforeAt = new Date(askAt.getTime() - hour);
+    const delivered = (at) => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } });
+    const textBell = (digits, over = {}) => bell({ category: 'lead', created_at: askAt, link: '/admin/leads',
+      metadata: { smsThreadKey: `sms:${digits}`, callSid: null, estimateId: null, estimator_engine: true, quote_promised: true, promise: true, lane: 'residential', ...over } });
+    const verdicts = async (...bells) => {
+      await relevance.runAdminAlertRelevanceSweep({ now });
+      return Promise.all(bells.map((b) => get(b.id)));
+    };
+
+    // One customer on the phone; a quote delivered after the ask closes it.
+    const quotedPerson = await insert('customers', { first_name: 'Textquote', phone: '+15555557041' });
+    const quotedBell = await textBell('5555557041');
+    // One customer; the only delivery is from BEFORE the ask, and a send that was never delivered (sent_at alone) after it.
+    const earlierPerson = await insert('customers', { first_name: 'Textearlier', phone: '(555) 555-7042' });
+    const earlierBell = await textBell('5555557042');
+    // Two customers share the phone: no verdict, even with a delivered quote.
+    const sharedA = await insert('customers', { first_name: 'Sharedone', phone: '+15555557043' });
+    await insert('customers', { first_name: 'Sharedtwo', phone: '5555557043' });
+    const sharedBell = await textBell('5555557043');
+    // Nobody on the phone.
+    const nobodyBell = await textBell('5555557049');
+    // The customer is only known through a live lead with the thread phone.
+    const viaLeadPerson = await insert('customers', { first_name: 'Textlead', phone: '+15555557050' });
+    await insert('leads', { first_name: 'Textlead', phone: '(555) 555-7044', status: 'new', customer_id: viaLeadPerson.id });
+    const viaLeadBell = await textBell('5555557044');
+
+    await insert('estimates', { status: 'sent', customer_id: quotedPerson.id, sent_at: quoteAt, estimate_data: delivered(quoteAt) });
+    await insert('estimates', { status: 'sent', customer_id: earlierPerson.id, sent_at: beforeAt, estimate_data: delivered(beforeAt) });
+    await insert('estimates', { status: 'sent', customer_id: earlierPerson.id, sent_at: quoteAt });
+    await insert('estimates', { status: 'sent', customer_id: sharedA.id, sent_at: quoteAt, estimate_data: delivered(quoteAt) });
+    await insert('estimates', { status: 'sent', customer_id: viaLeadPerson.id, sent_at: quoteAt, estimate_data: delivered(quoteAt) });
+    const rows = await verdicts(quotedBell, earlierBell, sharedBell, nobodyBell, viaLeadBell);
+    expect(rows.map((r) => r.done_at != null)).toEqual([true, false, false, false, true]);
+    expect([rows[0].done_by, rows[0].resolution]).toEqual(['relevance', 'Estimate was sent']);
+
+    // The witness goes (the delivery is wiped): the bell comes back unread.
+    await db('estimates').where({ customer_id: quotedPerson.id }).update({ estimate_data: JSON.stringify({}) });
+    const [back] = await verdicts(quotedBell);
+    expect([back.done_at, back.metadata.retired]).toEqual([null, undefined]);
+
+    // A live top-level visit booked after the ask closes it; one booked before it, and a cancelled one, do not; a cancel puts it back.
+    const visitPerson = await insert('customers', { first_name: 'Textvisit', phone: '+15555557045' });
+    const visitBell = await textBell('5555557045');
+    const bookedDay = etDateString(new Date(now.getTime() + 3 * DAY));
+    const visit = await insert('scheduled_services', { customer_id: visitPerson.id, scheduled_date: bookedDay, service_type: 'General Pest Control', status: 'confirmed', created_at: beforeAt });
+    expect((await verdicts(visitBell))[0].done_at).toBeNull();
+    await db('scheduled_services').where({ id: visit.id }).update({ created_at: quoteAt });
+    const [closed] = await verdicts(visitBell);
+    expect([closed.done_by, closed.resolution]).toEqual(['relevance', 'A visit was booked']);
+    await db('scheduled_services').where({ id: visit.id }).update({ status: 'cancelled' });
+    expect((await verdicts(visitBell))[0].done_at).toBeNull();
+  });
+
   test('an estimator call bell with no call customer and no lead of its own follows the lead the call is stamped with (metadata lead_id or relay_lead_id) or that carries the call\'s sid; a deleted one leaves it open', async () => {
     const now = new Date();
     const hour = 60 * 60 * 1000;
