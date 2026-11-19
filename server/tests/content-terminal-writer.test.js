@@ -372,6 +372,12 @@ describe('blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST / _RUNNER)',
     test('true for the live adapter that answers every review lane from this context module, or every call', () => {
       expect(tw.maxPlanAdapterCovers({ target: target({ answers: [...tw.MAC_MODEL_LANES, 'fact_check_gate'], contextModule: context }) })).toBe(true);
       expect(tw.maxPlanAdapterCovers({ target: target({ answers: 'all' }) })).toBe(true);
+      expect(tw.maxPlanAdapterCovers({ target: target({ answers: 'all' }), env: { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' } })).toBe(true);
+    });
+    test('false when an Anthropic base-URL override would send the calls past the adapter', () => {
+      for (const base of ['https://gateway.ai.cloudflare.com/v1/acct/anthropic', 'http://localhost:8080', 'not a url']) {
+        expect(tw.maxPlanAdapterCovers({ target: target({ answers: 'all' }), env: { ANTHROPIC_BASE_URL: base } })).toBe(false);
+      }
     });
     test('false with no adapter, a replaced fetch, a lane missing, or another copy of the portal', () => {
       expect(tw.maxPlanAdapterCovers({ target: target(null) })).toBe(false);

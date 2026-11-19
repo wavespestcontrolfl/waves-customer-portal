@@ -146,15 +146,23 @@ const REJECTED_AT_RE = /\s*\[terminal revision ([^\]\s]+)\]$/;
 // must be answered by the Max plan.
 const MAC_MODEL_LANES = Object.freeze(['editorial_review', 'editorial_repair', 'editorial_plan_review', 'fact_check_gate']);
 
+// ANTHROPIC_BASE_URL unset, or naming api.anthropic.com itself.
+function anthropicHostIsDefault(baseUrl) {
+  if (!baseUrl) return true;
+  try { return new URL(baseUrl).hostname === 'api.anthropic.com'; } catch { return false; }
+}
+
 /**
  * True when the Max-plan adapter (~/max-runner/claude-code-fetch.js) is the live fetch and answers
  * every lane in MAC_MODEL_LANES: in lane mode it lists them and reads the lane from this very
  * agent-control context module (a different copy of the portal reads another context, so its calls
  * would pass through to the paid API). The adapter marks itself on the global when it wraps fetch.
  */
-function maxPlanAdapterCovers({ target = globalThis, lanes = MAC_MODEL_LANES } = {}) {
+function maxPlanAdapterCovers({ target = globalThis, lanes = MAC_MODEL_LANES, env = process.env } = {}) {
   const adapter = target.__maxRunnerAdapter;
   if (!adapter || typeof target.fetch !== 'function' || adapter.fetch !== target.fetch) return false;
+  // The adapter answers only api.anthropic.com: an SDK base-URL override would send the calls past it.
+  if (!anthropicHostIsDefault(env.ANTHROPIC_BASE_URL)) return false;
   if (adapter.answers === 'all') return true;
   if (!Array.isArray(adapter.answers) || !lanes.every((lane) => adapter.answers.includes(lane))) return false;
   try {

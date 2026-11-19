@@ -535,6 +535,19 @@ describe('get_existing_page registry fallback', () => {
     expect(seen).toContainEqual(['live_url', '/lawn-care/fertilizer-blackout-sarasota-county/']);
     expect(seen).toContainEqual(['whereRaw', 'metadata::text ILIKE ?', ['%sarasotaflpestcontrol.com%']]);
   });
+
+  test('a registry read that failed is a failed page read, not "file not found"', async () => {
+    const query = registryQuery(null);
+    query.first = jest.fn(async () => { throw new Error('connection terminated'); });
+    query.then = undefined;
+    db.mockReturnValue(query);
+    gh.getFile.mockResolvedValue(null);
+    const r = await executeBriefTool('get_existing_page', {
+      page_url: 'https://www.wavespestcontrol.com/lawn-care/fertilizer-blackout-sarasota-county/',
+    }, { sessionId: 'sess-existing-page-db-down' });
+    expect(r.error).toMatch(/^get_existing_page failed: /);
+    expect(r.error).not.toContain('Astro file not found');
+  });
 });
 
 // ── check_existing_content autonomous-run city scoping ──────────────

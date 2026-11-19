@@ -370,7 +370,8 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
         if (!resolvedPath) return { error: `could not resolve page_url ${page_url} to Astro file` };
         let { filePath, file } = await readAstroFileCandidates(gh, resolvedPath);
         if (!file) {
-          const registryPath = await registryAstroPathForPage(page_url);
+          // strict: a registry read that failed is a failed page read, not "file not found".
+          const registryPath = await registryAstroPathForPage(page_url, { strict: true });
           if (registryPath && registryPath !== resolvedPath) {
             ({ filePath, file } = await readAstroFileCandidates(gh, registryPath));
           }
@@ -852,19 +853,20 @@ function missingAstroFileLabel(resolvedPath) {
   return isBlog ? `${base}.{mdx,md}` : String(resolvedPath);
 }
 
-async function registryAstroPathForPage(pageUrl) {
+// `strict`: a database error is thrown instead of read as "no registry path".
+async function registryAstroPathForPage(pageUrl, { strict = false } = {}) {
   const lookup = registryLookupValuesForUrl(pageUrl);
   if (!lookup.exact.length) return null;
-  const exact = await registryAstroPathForLiveUrl(lookup.exact);
+  const exact = await registryAstroPathForLiveUrl(lookup.exact, { strict });
   if (exact) return exact;
   if (lookup.host && lookup.pathOnly) {
-    const hostedPath = await registryAstroPathForLiveUrl([lookup.pathOnly], { requiredHost: lookup.host });
+    const hostedPath = await registryAstroPathForLiveUrl([lookup.pathOnly], { requiredHost: lookup.host, strict });
     if (hostedPath) return hostedPath;
   }
-  return registryAstroPathForCanonicalUrl(lookup.exact, { requiredHost: lookup.host });
+  return registryAstroPathForCanonicalUrl(lookup.exact, { requiredHost: lookup.host, strict });
 }
 
-async function registryAstroPathForLiveUrl(liveUrlValues, { requiredHost = null } = {}) {
+async function registryAstroPathForLiveUrl(liveUrlValues, { requiredHost = null, strict = false } = {}) {
   try {
     const query = db('content_registry');
     if (!query || typeof query.select !== 'function') return null;
@@ -886,7 +888,8 @@ async function registryAstroPathForLiveUrl(liveUrlValues, { requiredHost = null 
       .first();
     const sourcePath = row?.astro_source_path;
     return isSafeAstroContentPath(sourcePath) ? sourcePath : null;
-  } catch {
+  } catch (err) {
+    if (strict) throw err;
     return null;
   }
 }
@@ -921,7 +924,7 @@ function isSafeSlugPath(s) {
   return s.split('/').every((seg) => SLUG_SEGMENT.test(seg));
 }
 
-async function registryAstroPathForCanonicalUrl(urlValues, { requiredHost = null } = {}) {
+async function registryAstroPathForCanonicalUrl(urlValues, { requiredHost = null, strict = false } = {}) {
   try {
     const query = db('content_registry');
     if (!query || typeof query.select !== 'function') return null;
@@ -946,7 +949,8 @@ async function registryAstroPathForCanonicalUrl(urlValues, { requiredHost = null
     if (!Array.isArray(rows) || rows.length !== 1) return null;
     const sourcePath = rows[0]?.astro_source_path;
     return isSafeAstroContentPath(sourcePath) ? sourcePath : null;
-  } catch {
+  } catch (err) {
+    if (strict) throw err;
     return null;
   }
 }
