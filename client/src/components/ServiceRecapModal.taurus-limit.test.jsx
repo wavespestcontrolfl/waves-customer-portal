@@ -22,7 +22,7 @@ const CATALOG = [
   { id: 3, name: 'LESCO 90/10 Nonionic Surfactant', category: 'Adjuvant' },
 ];
 
-function makeRequest(taurusYearly) {
+function makeRequest(taurusYearly, existingRecord = null) {
   return vi.fn(async (path) => {
     if (path.endsWith('/context')) {
       return {
@@ -31,7 +31,7 @@ function makeRequest(taurusYearly) {
         service: { id: 'svc-1', customerName: 'Pat Jones', hasPhone: false, serviceType: 'General Pest Control (Quarterly)' },
         timeline: [],
         products: CATALOG,
-        existingRecord: null,
+        existingRecord,
         ...(taurusYearly === undefined ? {} : { taurusYearly }),
       };
     }
@@ -50,6 +50,21 @@ describe('ServiceRecapModal Taurus yearly limit', () => {
     expect(screen.getByRole('button', { name: 'Taurus SC', pressed: false })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeTruthy();
     expect(screen.getByText("Taurus left out: this home reached the label's yearly limit (4 this year).")).toBeTruthy();
+  });
+
+  test('a reopened recap reads the recorded amount: 3.2 fl oz of Taurus after three 0.03% visits warns', async () => {
+    const threeLow = { high: 0, low: 3, count: 3, eligible: true, eligibleHigh: false, year: 2026 };
+    const record = (totalAmount) => ({
+      id: 'rec-1',
+      products: [{ product_id: 1, product_name: 'Taurus SC', application_rate: '1.6', rate_unit: 'oz', total_amount: totalAmount, amount_unit: 'fl_oz' }],
+    });
+    render(<ServiceRecapModal service={{ id: 'svc-1', serviceType: 'General Pest Control (Quarterly)' }} request={makeRequest(threeLow, record('3.200'))} onClose={() => {}} />);
+    await screen.findByRole('button', { name: 'Taurus SC', pressed: true });
+    expect(screen.getByText("Over the label's yearly Taurus limit at this home.")).toBeTruthy();
+    cleanup();
+    render(<ServiceRecapModal service={{ id: 'svc-1', serviceType: 'General Pest Control (Quarterly)' }} request={makeRequest(threeLow, record('1.600'))} onClose={() => {}} />);
+    await screen.findByRole('button', { name: 'Taurus SC', pressed: true });
+    expect(screen.queryByText("Over the label's yearly Taurus limit at this home.")).toBeNull();
   });
 
   test('room under the label: Taurus stays on the mix and nothing is said', async () => {

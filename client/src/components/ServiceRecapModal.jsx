@@ -101,6 +101,9 @@ export default function ServiceRecapModal({
   const [selected, setSelected] = useState(() => new Set());
   // The house mix was pre-selected on open (so a Taurus left off it for the label limit is worth saying).
   const [houseMixSeeded, setHouseMixSeeded] = useState(false);
+  // Amounts recorded on a reopened recap, by catalog id: this lane edits no amounts, but the Taurus
+  // yearly-limit warning reads them as the ledger count does.
+  const [recordedAmounts, setRecordedAmounts] = useState(() => ({}));
   // productId -> { rate: string, unit: string }. Seeded from the rate
   // already recorded on the visit (reopen) or the catalog prefill
   // (fresh selection); the tech edits it before submit.
@@ -163,6 +166,7 @@ export default function ServiceRecapModal({
           );
           const preselect = new Set();
           const seededRates = {};
+          const seededAmounts = {};
           recorded.forEach((rp) => {
             const cat = (rp.product_id != null ? byId.get(String(rp.product_id)) : null)
               || byName.get(String(rp.product_name || '').trim().toLowerCase());
@@ -174,6 +178,10 @@ export default function ServiceRecapModal({
               return;
             }
             preselect.add(cat.id);
+            // Only an amount with its unit: the ledger count reads no amount without one.
+            if (Number(rp.total_amount) > 0 && rp.amount_unit) {
+              seededAmounts[cat.id] = { totalAmount: Number(rp.total_amount), amountUnit: rp.amount_unit };
+            }
             // The rate RECORDED on the visit outranks the catalog prefill —
             // reopening a recap must show (and re-submit) what was applied,
             // not rewrite it to the current catalog default.
@@ -205,6 +213,7 @@ export default function ServiceRecapModal({
           if (preselect.size) {
             setSelected(preselect);
             setRates(seededRates);
+            setRecordedAmounts(seededAmounts);
           }
         }
         // Default pest tank mix (shared with CompletionPanel via
@@ -272,7 +281,7 @@ export default function ServiceRecapModal({
 
   // Taurus SC's label limit: a warning (never a block) when it is selected over the limit, else the line
   // saying the house mix left it off (over the limit, or this year's count unavailable). Null when the count is under the limit.
-  const taurusNote = taurusYearlyNote(taurusYearlyOf(ctx?.taurusYearly), [...selected].map((id) => ({ ...productById.get(id), rate: rates[id]?.rate, rateUnit: rates[id]?.unit })), { mixVisit: houseMixSeeded });
+  const taurusNote = taurusYearlyNote(taurusYearlyOf(ctx?.taurusYearly), [...selected].map((id) => ({ ...productById.get(id), ...recordedAmounts[id], rate: rates[id]?.rate, rateUnit: rates[id]?.unit })), { mixVisit: houseMixSeeded });
 
   const [restoredNames, setRestoredNames] = useState({});
   const draft = useServiceRecapDraft({

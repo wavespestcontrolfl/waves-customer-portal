@@ -52,10 +52,17 @@ describe("taurusEligible for another 0.06% application ({ rate: 'high' })", () =
 });
 
 describe('applicationConcentration', () => {
-  it('counts every row before the 0.03% ruling as 0.06%, whatever the row says', () => {
+  it('counts a row before the 0.03% ruling as 0.06% when it records no concentration', () => {
     expect(TAURUS_LOW_RATE_SINCE).toBe('2026-11-20');
     expect(applicationConcentration(row({ application_date: '2026-11-19', rate_unit: 'oz', application_rate: '4' }))).toBe('high');
+    expect(applicationConcentration(row({ application_date: '2026-11-19', rate_unit: 'oz', application_rate: '1.6' }))).toBe('high');
     expect(applicationConcentration(row({ application_date: '2026-04-08' }))).toBe('high');
+  });
+
+  it('lets a recorded concentration decide before the ruling date too (the rollout day)', () => {
+    expect(applicationConcentration(row({ application_date: '2026-11-19', application_rate: '0.4', rate_unit: 'fl_oz/gal' }))).toBe('low');
+    expect(applicationConcentration(row({ application_date: '2026-11-19', dilution_rate: '0.03%' }))).toBe('low');
+    expect(applicationConcentration(row({ application_date: '2026-06-01', application_rate: '0.8', rate_unit: 'fl_oz/gal' }))).toBe('high');
   });
 
   it('counts a row from the ruling date on as 0.03% unless it says otherwise', () => {

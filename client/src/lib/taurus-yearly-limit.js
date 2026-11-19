@@ -34,12 +34,13 @@ const exhausted = (taurusYearly) => known(taurusYearly) && taurusYearly.eligible
 // (services/taurus-yearly-count.js applicationConcentration): a fl_oz/gal rate decides when the row has one
 // (above 0.4 = 0.06%; 1.6 fl oz per 4 gal is 0.4, 0.03%); with no such rate, a bare oz / fl oz rate or amount
 // above the 1.6 fl oz house mix reads as the old 0.06% tank (one 4-gal tank per home).
-const HOUSE_FL_OZ_PER_GAL = 0.4;
+// The house mix's Taurus concentration: 1.6 fl oz in the 4-gal FlowZone = 0.4 fl oz/gal (0.03%).
+export const HOUSE_FL_OZ_PER_GAL = 0.4;
 const HOUSE_TAURUS_FL_OZ = 1.6;
 const unitKey = (unit) => String(unit ?? '').trim().toLowerCase().replace(/[\s.]+/g, '_');
 const isFlOzUnit = (unit) => ['oz', 'fl_oz', 'floz'].includes(unitKey(unit));
 // A per-gallon rate in fl oz: the catalog's "fl_oz/gal" and the also-supported "oz/gal".
-const isFlOzPerGal = (unit) => ['fl_oz/gal', 'oz/gal', 'floz/gal'].includes(unitKey(unit));
+export const isFlOzPerGal = (unit) => ['fl_oz/gal', 'oz/gal', 'floz/gal'].includes(unitKey(unit));
 // An amount in fl oz: teaspoons (the sheet shows small amounts in tsp) are converted first.
 const flOzOf = (value, unit) => {
   const n = Number(value);
@@ -52,7 +53,7 @@ export const isHighTaurusRate = (row) => {
   if (isFlOzPerGal(row?.rateUnit) && Number.isFinite(rate) && rate > 0) return rate > HOUSE_FL_OZ_PER_GAL;
   const amounts = [
     row?.rateUnit == null ? 0 : flOzOf(rate, row.rateUnit),
-    flOzOf(row?.totalAmount ?? row?.amount, row?.amountUnit ?? row?.unit),
+    flOzOf(row?.totalAmount, row?.amountUnit),
   ];
   return amounts.some((n) => Number.isFinite(n) && n > HOUSE_TAURUS_FL_OZ);
 };

@@ -71,7 +71,7 @@ import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../../lib/pest-default-mix';
-import { applyTaurusYearlyLimit, taurusYearlyNote, taurusYearlyOf } from '../../lib/taurus-yearly-limit';
+import { HOUSE_FL_OZ_PER_GAL, applyTaurusYearlyLimit, isFlOzPerGal, isTaurusProduct, taurusYearlyNote, taurusYearlyOf } from '../../lib/taurus-yearly-limit';
 import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../../lib/product-rate-prefill';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import {
@@ -288,7 +288,12 @@ function rowRate(row, sprayMethod) {
   // for a catalog row that names no unit at all.
   const labelRate = !(row.added && (resolved.usePestSprayDefault || !row.labelUnit));
   const rateUnit = labelRate && isSendableRateUnit(resolved.rateUnit) ? resolved.rateUnit : '';
-  const prefill = !row.added && Number(resolved.rate) > 0 && rateUnit ? String(Number(resolved.rate)) : '';
+  // The house mix's Taurus row is mixed at the house concentration (1.6 fl oz in 4 gal = 0.4 fl oz/gal, 0.03%,
+  // owner ruling 2026-11-19): a per-gallon catalog rate (0.8, the 0.06% rate) would record a stronger mix than
+  // went out, and the yearly label count reads the recorded concentration.
+  const houseTaurus = !row.added && isTaurusProduct(row.product) && isFlOzPerGal(rateUnit);
+  const seedRate = houseTaurus ? HOUSE_FL_OZ_PER_GAL : Number(resolved.rate);
+  const prefill = !row.added && seedRate > 0 && rateUnit ? String(seedRate) : '';
   const max = prefillRateCeiling(resolved, row.product);
   // A rate typed for one way of spraying doesn't carry to another (its unit
   // is that way's): the report flow's way can change with the note's read.

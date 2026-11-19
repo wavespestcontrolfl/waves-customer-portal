@@ -458,6 +458,9 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
       .select([
         'product_name', 'product_category', 'active_ingredient', 'moa_group',
         'application_rate', 'rate_unit',
+        // The recorded amount, for the Taurus yearly-limit warning on a reopened recap (it reads the amount
+        // when the row records no concentration, as the ledger count does).
+        'total_amount', 'amount_unit',
         ...(hasProductIdCol ? ['product_id'] : []),
       ])
       .catch(() => {

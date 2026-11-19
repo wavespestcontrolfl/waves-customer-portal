@@ -28,11 +28,11 @@ const CONTEXT_SERVICE = {
 };
 const SERVICE = { id: 'svc-1', customerName: 'Pat Jones', serviceType: 'Pest Re-Service', address: '123 Main St', timeLabel: '2:00 PM' };
 
-function makeRequest(taurusYearly) {
+function makeRequest(taurusYearly, products = CATALOG) {
   return vi.fn(async (path) => {
     if (path.split('?')[0].endsWith('/pest-recap/context')) {
       return {
-        ok: true, eligible: true, service: CONTEXT_SERVICE, products: CATALOG, commonProducts: [], existingRecord: null,
+        ok: true, eligible: true, service: CONTEXT_SERVICE, products, commonProducts: [], existingRecord: null,
         ...(taurusYearly === undefined ? {} : { taurusYearly }),
       };
     }
@@ -43,8 +43,8 @@ function makeRequest(taurusYearly) {
   });
 }
 
-async function open(taurusYearly) {
-  render(<FastCompleteSheet service={SERVICE} request={makeRequest(taurusYearly)} onClose={() => {}} />);
+async function open(taurusYearly, products) {
+  render(<FastCompleteSheet service={SERVICE} request={makeRequest(taurusYearly, products)} onClose={() => {}} />);
   await screen.findByRole('button', { name: /LESCO Crosscheck Plus/ });
 }
 const taurusTile = () => screen.queryByRole('button', { name: /^Taurus SC/ });
@@ -55,6 +55,14 @@ describe('FastCompleteSheet Taurus yearly limit', () => {
     expect(taurusTile()).toBeNull();
     expect(screen.getByRole('button', { name: /LESCO 90\/10 Nonionic Surfactant/ })).toBeTruthy();
     expect(screen.getByText("Taurus left out: this home reached the label's yearly limit (4 this year).")).toBeTruthy();
+  });
+
+  test('the house Taurus row starts at the house mix (0.4 fl oz/gal), not a 0.8 catalog rate: no 0.06% warning after three 0.03% visits', async () => {
+    const threeLow = { high: 0, low: 3, count: 3, eligible: true, eligibleHigh: false, year: 2026 };
+    const catalog = CATALOG.map((p) => (p.id === 'taurus' ? { ...p, default_rate: '0.8' } : p));
+    await open(threeLow, catalog);
+    expect(taurusTile()).toBeTruthy();
+    expect(screen.queryByText(/yearly (Taurus )?limit/)).toBeNull();
   });
 
   test('room under the label: Taurus stays on the mix and nothing is said', async () => {
