@@ -12,13 +12,19 @@ jest.mock('express-rate-limit', () => () => (_req, _res, next) => next());
 // Per-test: the inactive-account retry branch (churned customer, unexpired
 // portal JWT) is entered by flipping this before the request.
 let mockAuthInactive = false;
+// An inactive account's pipeline stage: 'churned' = a processed cancellation.
+let mockAuthStage = 'churned';
 jest.mock('../middleware/auth', () => ({
+  isCancelledCustomerRow: jest.requireActual('../middleware/auth').isCancelledCustomerRow,
   authenticate: (req, _res, next) => {
     req.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Tester', phone: '+15550000000' };
     next();
   },
   authenticateAllowInactive: (req, _res, next) => {
-    req.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Tester', phone: '+15550000000' };
+    req.customer = {
+      id: 'cust-1', first_name: 'Pat', last_name: 'Tester', phone: '+15550000000',
+      ...(mockAuthInactive ? { active: false, pipeline_stage: mockAuthStage } : { active: true }),
+    };
     req.customerInactive = mockAuthInactive;
     next();
   },
@@ -160,6 +166,7 @@ function postCancellation(baseUrl, body = {}) {
 
 beforeEach(() => {
   mockAuthInactive = false;
+  mockAuthStage = 'churned';
   mockState = {
     // dupe check + prior-cancellation lookup both read service_requests.
     service_requests: [],
@@ -393,7 +400,7 @@ describe('POST /api/requests cancellation guard', () => {
   }));
 
   test('a clean SCOPED wind-down completed on retry closes the original row too — dedupe and inactive-account paths', () => withServer(async (baseUrl) => {
-    const scopedOk = { ok: true, churned: false, scopedWoundDown: true, scope: ['mosquito'], cancelledCount: 1, recurrenceStopped: 1, errors: [] };
+    const scopedOk = { ok: true, churned: false, scopedWoundDown: true, scope: ['mosquito'], remaining: ['pest_control'], cancelledCount: 1, recurrenceStopped: 1, errors: [] };
     mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
 
     // Short-window dedupe: the original row is 10s old, its committed scope recoverable.
@@ -410,11 +417,47 @@ describe('POST /api/requests cancellation guard', () => {
     expect(body.request.status).toBe('resolved');
     expect(mockState.service_requests[0].status).toBe('resolved');
     expect(mockState.service_requests[0].resolved_at).toBeInstanceOf(Date);
+    // The retry reply names what stopped and what stays, like the first
+    // reply — without them the screen read a one-service cancel as whole-plan.
+    expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, churned: false, scope: ['mosquito'], remaining: ['pest_control'] }));
+
+    // Same 60 s dedupe, but a whole-plan cancel committed after auth read the
+    // account (the snapshot still says active): the route re-reads the row,
+    // so the reply says churned though the replayed scoped run did not churn.
+    mockState.customers = [{ id: 'cust-1', active: false, pipeline_stage: 'churned' }];
+    mockState.service_requests = [{
+      id: 'req-portal-dedupe-inactive', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal-dedupe-inactive', scope: ['mosquito'] }];
+    processCancellationRequest.mockResolvedValueOnce(scopedOk);
+    res = await postCancellation(baseUrl);
+    body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.deduped).toBe(true);
+    expect(body.cancellation).toEqual(expect.objectContaining({ churned: true, scope: ['mosquito'] }));
+
+    // Inactive for another reason (not a processed cancellation): the reply
+    // keeps the run's own churn state and the scoped copy.
+    mockAuthInactive = true;
+    mockAuthStage = 'won';
+    mockState.customers = [{ id: 'cust-1', active: false, pipeline_stage: 'won' }];
+    mockState.service_requests = [{
+      id: 'req-portal-dedupe-inactive-other', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal-dedupe-inactive-other', scope: ['mosquito'] }];
+    processCancellationRequest.mockResolvedValueOnce(scopedOk);
+    res = await postCancellation(baseUrl);
+    body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.cancellation).toEqual(expect.objectContaining({ churned: false, scope: ['mosquito'] }));
+    mockAuthStage = 'churned';
+    mockAuthInactive = false;
 
     // A SCOPED run whose only error is an earlier-day stuck visit is not
-    // promoted on the portal (the stale-visit rule is whole-plan only here):
-    // the retry reply carries no scope, so "processed" would read as a
-    // whole-plan cancel on the screen.
+    // promoted on the portal (the stale-visit rule is whole-plan only here,
+    // #7951): a repair-only retry cannot name the continuing families.
     mockState.service_requests = [{
       id: 'req-portal-stale', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
       source: null, created_at: new Date(Date.now() - 10 * 1000),
@@ -431,6 +474,7 @@ describe('POST /api/requests cancellation guard', () => {
 
     // Inactive-account repair: the row is hours old and the account is churned.
     mockAuthInactive = true;
+    mockState.customers = [{ id: 'cust-1', active: false, pipeline_stage: 'churned' }];
     mockState.service_requests = [{
       id: 'req-portal-2', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
       source: null, created_at: new Date(Date.now() - 3 * 60 * 60 * 1000),
@@ -444,6 +488,10 @@ describe('POST /api/requests cancellation guard', () => {
     expect(body.request.status).toBe('resolved');
     expect(mockState.service_requests[0].status).toBe('resolved');
     expect(mockState.service_requests[0].resolved_at).toBeInstanceOf(Date);
+    // The account row says cancelled: the reply says so even though
+    // the replayed SCOPED run reports churned:false, so the screen refreshes
+    // and never claims other services continue.
+    expect(body.cancellation).toEqual(expect.objectContaining({ churned: true, scope: ['mosquito'] }));
   }));
 
   test('live membership dues alone → allowed', () => withServer(async (baseUrl) => {
