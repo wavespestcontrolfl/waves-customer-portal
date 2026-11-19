@@ -156,13 +156,20 @@ describe('extractDeadline', () => {
     expect(extractDeadline('Valid 11/1 - 11/30', received)).toBe('2026-11-30');
     expect(extractDeadline('Promotion runs Monday, Nov 2 through Friday, Nov 6', received)).toBe('2026-11-06');
     expect(extractDeadline('Valid Nov 1-30, 2026', received)).toBe('2026-11-30');
+    // The offer word can follow the range, as in a date-first subject.
+    expect(extractDeadline('Nov 1–30 sale', received)).toBe('2026-11-30');
+    expect(extractDeadline('Valid Nov 1-30 for Partners Program members', received)).toBe('2026-11-30');
+    expect(extractDeadline('Fall pricing Nov 1&nbsp;&#8211;&nbsp;Nov 30', received)).toBe('2026-11-30');
     expect(extractDeadline('Fall program Nov 2 to Dec 15; order by Nov 20', received)).toBe('2026-11-20');
   });
 
   test('a range outside an offer sentence, or a dash with no later date or day, keeps the first date', () => {
     expect(extractDeadline("I'll be on PTO Thursday Nov 19-Tuesday Nov 24.", received)).toBe('2026-11-19');
     expect(extractDeadline('Sale ends Nov 20 - 25% off select items', received)).toBe('2026-11-20');
-    expect(extractDeadline('Promo through Nov 20 - 2 free cases', received)).toBe('2026-11-20');
+    // A quantity after the dash is no day, even when it is higher than the date's day.
+    expect(extractDeadline('Promo through Nov 1 - 2 free cases', received)).toBe('2026-11-01');
+    expect(extractDeadline('Promo through Nov 1 - 10 bags', received)).toBe('2026-11-01');
+    expect(extractDeadline('Promo through Nov 1 - 2 for $50', received)).toBe('2026-11-01');
     expect(extractDeadline('Special pickup Nov 2 - 3 PM', received)).toBe('2026-11-02');
     expect(extractDeadline('Offer ends Nov 20 - order now', received)).toBe('2026-11-20');
   });
@@ -375,7 +382,7 @@ describe('runSiteOneDealsDigest', () => {
   // deal test's excerpt (SiteOne, Apr 15, 2026: "Offers valid March 1 – April 30, 2026" at char 8,608).
   const LINKS = 'Shop now https://click.example.test/track/abcdefghij\n'.repeat(200);
 
-  test('a deadline past the excerpt comes from one wider read of the cut, undated deals only', async () => {
+  test('a cut deal takes its deadline from one wider read; a short one keeps its excerpt', async () => {
     const { db, calls } = fakeDb({
       products: [],
       emails: [
@@ -383,8 +390,8 @@ describe('runSiteOneDealsDigest', () => {
         email({ id: 34, subject: 'Fall promo', received_at: new Date('2026-10-31T15:00:00Z'), body_html: `<p>${'<span>Shop now</span>'.repeat(1500)}</p><p>*Offer valid through Nov 25, 2026.</p>` }),
         // Sent before the offer opens: the range's end is the deadline, not its start.
         email({ id: 31, subject: 'Last Chance for 10% Off Select Items', received_at: new Date('2026-10-30T15:00:00Z'), body_text: `${LINKS}*Offers valid November 1 – November 30, 2026.` }),
-        // The excerpt names a date: it is kept, and the earlier footnote date is never read.
-        email({ id: 32, subject: 'Pest Specials', received_at: new Date('2026-10-29T15:00:00Z'), body_text: `On special through Nov 20.\n${LINKS}*Offer valid through November 5, 2026.` }),
+        // Cut, with a date in the excerpt too: the wider text holds both, and the earlier one wins.
+        email({ id: 32, subject: 'Pest Specials', received_at: new Date('2026-10-29T15:00:00Z'), body_text: `On special through Nov 20.\n${LINKS}*Offer valid through November 18, 2026.` }),
         // Short: nothing was cut, so nothing is read again.
         email({ id: 33, subject: 'FW: BASF Promo', received_at: new Date('2026-10-28T15:00:00Z'), body_text: 'Please see attached.' }),
       ],
@@ -395,10 +402,10 @@ describe('runSiteOneDealsDigest', () => {
     expect(notify.mock.calls[0][2].detail.split('\n')).toEqual([
       'Oct 31 · Sam Rep · Fall promo · deadline 2026-11-25 · your products: none named',
       'Oct 30 · Sam Rep · Last Chance for 10% Off Select Items · deadline 2026-11-30 · your products: none named',
-      'Oct 29 · Sam Rep · Pest Specials · deadline 2026-11-20 · your products: none named',
+      'Oct 29 · Sam Rep · Pest Specials · deadline 2026-11-18 · your products: none named',
       'Oct 28 · Sam Rep · FW: BASF Promo · deadline not stated · your products: none named',
     ]);
-    expect(calls.whereIns).toEqual([['emails', 'id', [34, 31]]]);
+    expect(calls.whereIns).toEqual([['emails', 'id', [34, 31, 32]]]);
     expect(calls.selects).toContainEqual([
       'id',
       { sql: 'left(body_text, ?) as body_text', bindings: [DEADLINE_TEXT_CHARS] },
@@ -415,15 +422,33 @@ describe('runSiteOneDealsDigest', () => {
     expect(calls.whereIns).toEqual([]);
   });
 
-  test('a failed wider read logs a warning, and the bell still goes out with the deadline not stated', async () => {
+  test('a range the excerpt cut in two is read whole: its end, not its opening day', async () => {
+    const tail = 'Offer valid Nov 1 – ';
+    const { db } = fakeDb({
+      products: [],
+      emails: [email({ id: 61, subject: 'Fall promo', received_at: new Date('2026-10-30T15:00:00Z'), body_text: `${'Shop now.\n'.repeat(600).slice(0, BODY_CHARS - tail.length)}${tail}Nov 30, 2026.` })],
+    });
+    const notify = jest.fn().mockResolvedValue({ id: 1 });
+    await runSiteOneDealsDigest({ now, db, notify });
+    expect(notify.mock.calls[0][2].detail).toBe('Oct 30 · Sam Rep · Fall promo · deadline 2026-11-30 · your products: none named');
+  });
+
+  test("a failed wider read logs a warning, and the bell still goes out with the excerpt's deadline", async () => {
     const { db } = fakeDb({
       rereadFail: true,
-      emails: [email({ id: 51, received_at: new Date('2026-10-30T15:00:00Z'), body_text: `${LINKS}*Offer valid through November 30, 2026.` })],
+      products: [],
+      emails: [
+        email({ id: 51, received_at: new Date('2026-10-30T15:00:00Z'), body_text: `Specials through Nov 20.\n${LINKS}*Offer valid through November 18, 2026.` }),
+        email({ id: 52, received_at: new Date('2026-10-29T15:00:00Z'), body_text: `${LINKS}*Offer valid through November 30, 2026.` }),
+      ],
     });
     const notify = jest.fn().mockResolvedValue({ id: 1 });
     logger.warn.mockClear();
-    expect(await runSiteOneDealsDigest({ now, db, notify })).toEqual({ scanned: 1, deals: 1, notified: true });
-    expect(notify.mock.calls[0][2].detail).toContain('deadline not stated');
+    expect(await runSiteOneDealsDigest({ now, db, notify })).toEqual({ scanned: 2, deals: 2, notified: true });
+    expect(notify.mock.calls[0][2].detail.split('\n')).toEqual([
+      'Oct 30 · Sam Rep · Pest Specials · deadline 2026-11-20 · your products: none named',
+      'Oct 29 · Sam Rep · Pest Specials · deadline not stated · your products: none named',
+    ]);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('wider deadline read failed'));
   });
 

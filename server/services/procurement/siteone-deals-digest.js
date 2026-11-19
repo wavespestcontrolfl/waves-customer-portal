@@ -34,9 +34,9 @@ const MAX_CANDIDATE_ROWS = 300;
 const DEADLINE_MAX_DAYS = 180;
 // An offer's end date often sits in the footnote at the bottom of a promo email, past the
 // excerpt above: SiteOne's promo text runs 8,000 to 23,000 chars, much of it tracking links.
-// So a deal whose excerpt was cut and names no date is read once more, wider, for its
-// deadline only. The wider text never feeds the deal test: widening the deal-test excerpt
-// raised false deals in a replay of old SiteOne promo mail.
+// So a deal whose excerpt was cut is read once more, wider, for its deadline only. The wider
+// text never feeds the deal test: widening the deal-test excerpt raised false deals in a
+// replay of old SiteOne promo mail.
 const DEADLINE_TEXT_CHARS = 30000;
 // SiteOne's promo HTML is 3 to 6 times the size of its text part.
 const DEADLINE_HTML_CHARS = DEADLINE_TEXT_CHARS * 6;
@@ -171,23 +171,32 @@ const NUMERIC_DATE = /(?<![\d/.])(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?(?![\d/
 // "Valid Nov 1-30"): its first date is when the offer opens, so only its end can be the deadline.
 // A range counts only in a sentence that names a validity period or holds a deal word. Any other
 // range keeps both dates: a rep's "on PTO May 21-May 26" is no offer, and the earlier date is the
-// safer one to show. RANGE_JOIN is the whole text between the two dates: a dash or
-// to/through/thru/until, maybe a weekday.
-const RANGE_JOIN = /^\s*(?:-|–|—|&ndash;|&mdash;|to|through|thru|until|till)\s*(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s*)?$/i;
-// "Nov 1-30, 2026": the range ends on a later day of the same month. Not "Nov 20 - 25% off",
-// a clock time ("3 PM", "3:00") or the start of a numeric date ("11/30").
-const SAME_MONTH_END = /\s*(?:-|–|—|&ndash;|&mdash;|to|through|thru|until|till)\s*(\d{1,2})(?:st|nd|rd|th)?\b(?![%/:.]\d|\s*(?:%|am\b|pm\b))(?:,?\s+(20\d{2})\b)?/iy;
+// safer one to show. RANGE_DASH joins the two dates: a dash (SiteOne's text part keeps the HTML
+// entity) or to/through/thru/until, with spaces or &nbsp; around it.
+const RANGE_DASH = String.raw`(?:\s|&nbsp;)*(?:-|–|—|&ndash;|&mdash;|&#821[12];|&#x201[34];|to|through|thru|until|till)(?:\s|&nbsp;)*`;
+// The whole text between a range's two dates: the dash, maybe a weekday after it.
+const RANGE_JOIN = new RegExp(String.raw`^${RANGE_DASH}(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?(?:\s|&nbsp;)*)?$`, 'i');
+// "Nov 1-30, 2026": the range ends on a later day of the same month. A number that a quantity
+// word follows is no day ("Nov 1 - 2 free cases", "Nov 20 - 25% off", "Nov 2 - 3 PM",
+// "Nov 1 - 2 for $50"), and neither is the start of a numeric date or a time ("11/30", "3:00").
+const QUANTITY_WORD = String.raw`(?:%|percent|am|pm|free|off|for\s*\$|each|per|x|or more|cases?|bags?|units?|items?|pcs|pieces?|packs?|boxes?|bottles?|jugs?|pails?|cans?|pallets?|gal|gallons?|lbs?|pounds?|oz|ounces?|qts?|quarts?|pts?|pints?|tons?|acres?)`;
+const SAME_MONTH_END = new RegExp(String.raw`${RANGE_DASH}(\d{1,2})(?:st|nd|rd|th)?\b(?![%/:.]\d|\s*${QUANTITY_WORD}(?![a-z]))(?:,?\s+(20\d{2})\b)?`, 'iy');
 const QUOTED_HISTORY = [
   /^[ \t]*From:/im,
   /^[ \t>]*-{2,}[ \t]*Original Message[ \t]*-{2,}/im,
   /^[ \t>]*On\s[\s\S]{0,250}?\swrote:/im,
 ];
 
-/** True when the sentence before `at` (80 chars at most) names a validity period or holds a deal word. */
-function inOfferSentence(text, at) {
-  const before = text.slice(Math.max(0, at - 80), at);
-  const sentence = before.slice(before.search(/[^.!?\n]*$/));
-  return /\b(?:valid|runs?|programs?|period)\b/i.test(sentence) || dealWordsIn(sentence) > 0;
+/**
+ * True when the sentence around text[start, end) names a validity period or holds a deal word,
+ * before the range ("Offers valid Nov 1 - Nov 30") or after it ("Nov 1-30 sale"). Each side
+ * reads to the sentence's edge, 80 chars at most.
+ */
+function inOfferSentence(text, start, end) {
+  const before = text.slice(Math.max(0, start - 80), start);
+  const after = text.slice(end, end + 80);
+  const sentence = `${before.slice(before.search(/[^.!?\n]*$/))} ${after.slice(0, after.search(/[.!?\n]|$/))}`;
+  return /\b(?:valid|runs?|programs?|period|prices?|pricing)\b/i.test(sentence) || dealWordsIn(sentence) > 0;
 }
 
 /** Drops quoted reply history: everything from its first marker line on. */
@@ -248,14 +257,18 @@ function extractDeadline(text, receivedAt) {
     ...Array.from(body.matchAll(NUMERIC_DATE), (m) => ({ m, named: false, month: Number(m[1]), day: Number(m[2]), year: m[3] })),
   ].sort((a, b) => a.m.index - b.m.index);
   dates.forEach((date, i) => {
-    const end = date.m.index + date.m[0].length;
-    const offer = inOfferSentence(body, date.m.index);
+    const start = date.m.index;
+    const end = start + date.m[0].length;
     const next = dates[i + 1];
-    if (offer && next && RANGE_JOIN.test(body.slice(end, next.m.index))) return; // the offer opens: its end counts on its own
+    // The offer opens on this date; the range's end date counts on its own.
+    if (next && RANGE_JOIN.test(body.slice(end, next.m.index)) && inOfferSentence(body, start, next.m.index + next.m[0].length)) return;
     SAME_MONTH_END.lastIndex = end;
-    const sameMonth = offer && date.named ? SAME_MONTH_END.exec(body) : null;
-    if (sameMonth && Number(sameMonth[1]) > date.day) consider(date.month, Number(sameMonth[1]), sameMonth[2] || date.year);
-    else consider(date.month, date.day, date.year);
+    const sameMonth = date.named ? SAME_MONTH_END.exec(body) : null;
+    if (sameMonth && Number(sameMonth[1]) > date.day && inOfferSentence(body, start, SAME_MONTH_END.lastIndex)) {
+      consider(date.month, Number(sameMonth[1]), sameMonth[2] || date.year);
+    } else {
+      consider(date.month, date.day, date.year);
+    }
   });
   return candidates.length ? candidates.sort()[0] : null;
 }
@@ -304,20 +317,16 @@ function shortDate(date) {
 }
 
 /**
- * Each deal's deadline by email id (no entry = not stated). The deal test's excerpt is read
- * first. Deals whose excerpt was cut and names no date get ONE more query: wider excerpts of
- * up to DEADLINE_REREAD_MAX of them, newest first, read for the deadline only. A failed
- * re-read logs a warning and leaves those deals "not stated"; the bell still goes out.
+ * Each deal's deadline by email id (null = not stated), from the excerpt the deal test read.
+ * A deal whose excerpt was cut takes its deadline from a wider excerpt instead, which holds
+ * the footnote and any range the cut split: ONE query for up to DEADLINE_REREAD_MAX of them,
+ * newest first. A failed re-read logs a warning and keeps the excerpt's deadlines.
  */
 async function dealDeadlines(conn, deals) {
-  const deadlines = new Map();
-  const reread = [];
-  for (const email of deals) {
-    const found = extractDeadline(`${email.subject || ''}\n${bodyPlainText(email)}`, new Date(email.received_at));
-    if (found) deadlines.set(email.id, found);
-    else if (excerptIsCut(email) && reread.length < DEADLINE_REREAD_MAX) reread.push(email);
-  }
-  if (!reread.length) return deadlines;
+  const fromText = (email, text) => extractDeadline(`${email.subject || ''}\n${text}`, new Date(email.received_at));
+  const deadlines = new Map(deals.map((email) => [email.id, fromText(email, bodyPlainText(email))]));
+  const reread = new Map(deals.filter(excerptIsCut).slice(0, DEADLINE_REREAD_MAX).map((email) => [email.id, email]));
+  if (!reread.size) return deadlines;
   try {
     const rows = await conn('emails')
       .select(
@@ -325,12 +334,10 @@ async function dealDeadlines(conn, deals) {
         conn.raw('left(body_text, ?) as body_text', [DEADLINE_TEXT_CHARS]),
         conn.raw('left(body_html, ?) as body_html', [DEADLINE_HTML_CHARS]),
       )
-      .whereIn('id', reread.map((email) => email.id));
-    const wider = new Map(rows.map((row) => [row.id, row]));
-    for (const email of reread) {
-      const row = wider.get(email.id);
-      const found = row && extractDeadline(`${email.subject || ''}\n${bodyPlainText(row, DEADLINE_TEXT_CHARS)}`, new Date(email.received_at));
-      if (found) deadlines.set(email.id, found);
+      .whereIn('id', [...reread.keys()]);
+    for (const row of rows) {
+      const email = reread.get(row.id);
+      if (email) deadlines.set(email.id, fromText(email, bodyPlainText(row, DEADLINE_TEXT_CHARS)));
     }
   } catch (err) {
     logger.warn(`[siteone-deals] wider deadline read failed: ${err.message}`);
