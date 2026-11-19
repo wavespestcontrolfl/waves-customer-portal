@@ -105,6 +105,13 @@ describe('a staff reply on a website-only line thread', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('a check that cannot read fails closed: an error answer, and nothing is sent', async () => {
+    mockWebsiteLineRefusal.mockRejectedValueOnce(Object.assign(new Error('The website-only line contact check could not read the message and call logs'), { code: 'WEBSITE_LINE_UNVERIFIED' }));
+    const res = await replyOnWebLineThread();
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('sends from the thread line when that number contacted it', async () => {
     const res = await replyOnWebLineThread();
     expect(res.status).toBe(200);

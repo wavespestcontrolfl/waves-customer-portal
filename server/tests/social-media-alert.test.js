@@ -29,6 +29,13 @@ describe('buildSocialFailureAlert (pure detection)', () => {
     expect(r).toEqual({ active: false, platforms: [] });
   });
 
+  test('a skipped compliance-judge rejection is no attempt, and never becomes the latest error either', () => {
+    const judged = { platform: 'linkedin', success: false, skipped: true, error: 'Compliance judge: guaranteed results' };
+    const r = buildSocialFailureAlert([post(judged), post(li(false, 'token expired')), post(li(false, 'token expired')), post(li(false, 'token expired'))]);
+    expect(r.platforms).toEqual([expect.objectContaining({ platform: 'linkedin', consecutive_failures: 3, latest_error: 'token expired' })]);
+    expect(r.message).not.toContain('Compliance judge');
+  });
+
   test('a refused post neither breaks nor joins a streak of real failures, and never becomes the latest error', () => {
     const rows = [post(li(false, REFUSED_OLD)), post(li(false, 'token expired')), post(li(false, REFUSED)), post(li(false, 'token expired')), post(li(false, 'token expired'))];
     const r = buildSocialFailureAlert(rows);

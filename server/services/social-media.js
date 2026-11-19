@@ -202,6 +202,11 @@ const VALIDATION_ERROR_PREFIX = 'Validation: ';
 // (a refused card is not a broken login). Rows stored before this rule carry
 // the same prefix.
 const refusedByContentCheck = (entry) => String(entry.error || '').startsWith(VALIDATION_ERROR_PREFIX);
+// A real request to the platform: not disabled or skipped (a compliance-judge
+// rejection is stored as skipped), not a dry run, not refused by the content
+// check. The streak and its latest error read the same entries.
+const isPlatformAttempt = (entry, platform) => !!entry && entry.platform === platform
+  && !entry.skipped && !entry.dryRun && !refusedByContentCheck(entry);
 
 function parsePlatformResults(value) {
   if (!value) return [];
@@ -216,7 +221,7 @@ function parsePlatformResults(value) {
 // ANY location succeeded (mirrors the post-level "any success" rule) and a
 // fail only if every attempted location failed.
 function platformOutcomeForPost(entries, platform) {
-  const attempts = entries.filter(e => e && e.platform === platform && !e.skipped && !e.dryRun && !refusedByContentCheck(e));
+  const attempts = entries.filter(e => isPlatformAttempt(e, platform));
   if (!attempts.length) return null;
   if (attempts.some(e => e.success === true)) return 'success';
   if (attempts.some(e => e.success === false)) return 'fail';
@@ -225,7 +230,7 @@ function platformOutcomeForPost(entries, platform) {
 
 function firstPlatformError(parsedPosts, platform) {
   for (const entries of parsedPosts) {
-    const e = entries.find(x => x && x.platform === platform && x.success === false && x.error && !refusedByContentCheck(x));
+    const e = entries.find(x => isPlatformAttempt(x, platform) && x.success === false && x.error);
     if (e) return String(e.error).slice(0, 120);
   }
   return null;

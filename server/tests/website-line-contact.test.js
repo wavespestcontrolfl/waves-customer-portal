@@ -127,7 +127,14 @@ test('a recipient with no phone digits is refused without a read', async () => {
   expect(database).not.toHaveBeenCalled();
 });
 
-test('a failed read throws, so the route answers an error and sends nothing', async () => {
-  const database = jest.fn(() => { throw new Error('read failed'); });
-  await expect(websiteLineRefusal(WEB_LINE, PERSON, { database })).rejects.toThrow('read failed');
+test('a failed read throws, so the route answers an error and sends nothing; the error names no phone number', async () => {
+  // A knex error message carries the bound values: here the person's last 10 digits.
+  const database = jest.fn(() => {
+    throw Object.assign(new Error(`select "id" from "sms_log" where right(...) = '${PERSON.slice(-10)}' - terminating connection`), { code: '57P01' });
+  });
+  const err = await websiteLineRefusal(WEB_LINE, PERSON, { database }).then(() => null, (e) => e);
+  expect(err).toBeInstanceOf(Error);
+  expect(err).toMatchObject({ code: 'WEBSITE_LINE_UNVERIFIED', pgCode: '57P01' });
+  expect(err.cause).toBeUndefined();
+  expect(`${err.message} ${JSON.stringify(err)}`).not.toContain(PERSON.slice(-7));
 });
