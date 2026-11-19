@@ -129,16 +129,20 @@ function addressesOf(value) {
 function belongsToConversation(row, email, mailboxAddress, customerId) {
   if (row.customer_id && String(row.customer_id) !== String(customerId)) return false;
   const sender = normalizeAddress(email.from_address);
-  if (labelsOf(row).includes('SENT') || ownMailboxAddress(row.from_address) === mailboxAddress) {
-    return ownMailboxAddress(row.from_address) === mailboxAddress && addressesOf(row.to_address).includes(sender);
+  const sent = labelsOf(row).includes('SENT');
+  // A tagged alias of the mailbox in From counts as ours only on a message
+  // Gmail labels SENT: anyone can write that header on a received copy.
+  const from = sent ? ownMailboxAddress(row.from_address) : normalizeAddress(row.from_address);
+  if (sent || from === mailboxAddress) {
+    return from === mailboxAddress && addressesOf(row.to_address).includes(sender);
   }
-  return normalizeAddress(row.from_address) === sender && addressesOf(row.to_address).includes(mailboxAddress);
+  return from === sender && addressesOf(row.to_address).includes(mailboxAddress);
 }
 
 function emailDirection(row, mailboxAddress, triggerId) {
   if (String(row.id) === String(triggerId)) return 'inbound';
   const labels = labelsOf(row);
-  return labels.includes('SENT') || ownMailboxAddress(row.from_address) === mailboxAddress ? 'outbound' : 'inbound';
+  return labels.includes('SENT') || normalizeAddress(row.from_address) === mailboxAddress ? 'outbound' : 'inbound';
 }
 
 function shapeEmail(row, email, mailboxAddress) {
@@ -171,7 +175,7 @@ async function loadThread(email, database, mailboxAddress, customerId) {
   try {
     const sender = normalizeAddress(email.from_address);
     const tagged = taggedMailboxPattern(mailboxAddress);
-    const readPage = (offset) => savepointRead(database, (connection) => connection('emails')
+    const readPage = (offset, size) => savepointRead(database, (connection) => connection('emails')
       .where({ gmail_thread_id: email.gmail_thread_id })
       .where('received_at', '<=', email.received_at)
       .whereRaw("NOT jsonb_exists(COALESCE(label_ids, '[]'::jsonb), 'DRAFT')")
@@ -184,15 +188,16 @@ async function loadThread(email, database, mailboxAddress, customerId) {
       .orderBy('received_at', 'desc')
       .orderBy('id', 'desc')
       .offset(offset)
-      .limit(THREAD_PAGE_ROWS)
+      .limit(size)
       .select('id', 'gmail_thread_id', 'from_address', 'to_address', 'subject', 'body_text', 'body_html', 'snippet', 'label_ids', 'received_at', 'customer_id'));
     const filtered = [];
     let scanned = 0;
     let exhausted = false;
     while (filtered.length <= LIMITS.email && !exhausted && scanned < THREAD_SCAN_ROWS) {
-      const rows = await readPage(scanned);
+      const size = Math.min(THREAD_PAGE_ROWS, THREAD_SCAN_ROWS - scanned);
+      const rows = await readPage(scanned, size);
       scanned += rows.length;
-      exhausted = rows.length < THREAD_PAGE_ROWS;
+      exhausted = rows.length < size;
       filtered.push(...rows.filter((row) => !labelsOf(row).includes('DRAFT') && belongsToConversation(row, email, mailboxAddress, customerId)));
     }
     if (!filtered.some((row) => String(row.id) === String(email.id))) filtered.unshift(email);
@@ -379,7 +384,7 @@ function limitMetadata(prompt, untrusted) {
   return {
     ...LIMITS,
     promptChars: prompt.block.length,
-    truncated: prompt.truncated || sections.some((section) => section.omitted > 0)
+    truncated: prompt.truncated || sections.some((section) => section.omitted > 0 || section.omittedIsLowerBound === true)
       || items.some((item) => item.truncated || item.omittedByTotalLimit),
     omitted: sections.reduce((total, section) => total + section.omitted, prompt.omitted),
   };

@@ -193,6 +193,35 @@ describe('assembleEmailReplyContext', () => {
     expect(result.untrusted.emailThread).toMatchObject({ omitted: 0, omittedIsLowerBound: false });
   });
 
+  test('a received copy with a tagged Waves From address is not a staff reply', async () => {
+    const received = {
+      ...EMAIL, id: 'email-tagged-received', from_address: 'contact+gads_home@wavespestcontrol.com', to_address: CUSTOMER.email,
+      label_ids: ['INBOX'], body_text: 'Not written by staff.', received_at: '2026-09-09T16:00:00Z',
+    };
+    const result = await assembleEmailReplyContext(EMAIL, {
+      customer: CUSTOMER, database: fakeDatabase({ emails: [received, EMAIL] }),
+      aggregator: { getContextForCustomer: jest.fn(async () => aggregatorContext()) },
+      mailboxAddress: MAILBOX, now: '2026-09-10T17:00:00Z',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.untrusted.emailThread.messages.map((m) => m.id)).toEqual(['email-current']);
+  });
+
+  test('a thread scan that stops at its row cap marks the context truncated', async () => {
+    const decoys = Array.from({ length: 120 }, (_, index) => ({
+      ...EMAIL, id: `decoy-${String(index).padStart(3, '0')}`, body_text: `Decoy ${index}`,
+      to_address: 'billing.contact+x@example.test, office@wavespestcontrol.com',
+      received_at: new Date(Date.parse(EMAIL.received_at) - (index + 1) * 60000).toISOString(),
+    }));
+    const result = await assembleEmailReplyContext(EMAIL, {
+      customer: CUSTOMER, database: fakeDatabase({ emails: [...decoys, EMAIL] }),
+      aggregator: { getContextForCustomer: jest.fn(async () => aggregatorContext()) },
+      mailboxAddress: MAILBOX, now: '2026-09-10T17:00:00Z',
+    });
+    expect(result.untrusted.emailThread).toMatchObject({ omitted: 0, omittedIsLowerBound: true });
+    expect(result.limits.truncated).toBe(true);
+  });
+
   test('a mailbox address that appears only in a display name is not a recipient', async () => {
     const aggregator = { getContextForCustomer: jest.fn() };
     await expect(assembleEmailReplyContext({ ...EMAIL, to_address: '"contact+gads_home@wavespestcontrol.com" <someone@example.test>' }, {
