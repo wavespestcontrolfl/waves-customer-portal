@@ -58,8 +58,13 @@ If staff claim the selected appointment before confirmation, the route returns
 `409 { error, code: "RESERVATION_CLAIMED", officeResolution: true }`. The
 appointment keeps its booked customer and price. The portal keeps the current
 purchase and selected appointment on the confirmation screen and shows the
-office number, (941) 297-5749. The existing expired and unavailable responses
-let the customer choose another time.
+office number, (941) 297-5749. In that office-resolution state confirm and
+change-time are disabled; closing the overlay does not release or void the
+purchase. Reserve, slot-refresh and release also return the same claim-specific
+409 instead of replacing or abandoning the pointer. A later init or card-return
+resume reopens the exact selected appointment with `officeResolution: true`.
+The existing expired and unavailable responses let the customer choose another
+time.
 
 Confirmation checks the locked appointment's `source_estimate_id` against
 the purchase's synthesized estimate. A mismatch returns `RESERVATION_EXPIRED`.

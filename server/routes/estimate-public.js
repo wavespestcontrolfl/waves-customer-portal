@@ -13465,6 +13465,17 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           const lockedCatalog = lockedAdoptRow?.service_id
             ? await trx('services').where({ id: lockedAdoptRow.service_id }).first('service_key', 'name')
             : null;
+          // Every identity predicate below must judge the same CURRENT
+          // catalog row. A FOR UPDATE wait may return fresh scheduled_service
+          // columns with the outer join's older service values, so using the
+          // joined aliases for assessment/family while only re-service used
+          // lockedCatalog could reprice a visit dispatch just moved to a free
+          // assessment or another family.
+          const lockedIdentityRow = lockedAdoptRow && {
+            ...lockedAdoptRow,
+            catalog_service_key: lockedAdoptRow.service_id ? lockedCatalog?.service_key : null,
+            catalog_service_name: lockedAdoptRow.service_id ? lockedCatalog?.name : null,
+          };
           const lockedAnyModeKeys = new Set([
             ...estimateFamilyKeysForAdoption(estimate, estData, { serviceMode: 'recurring' }),
             ...estimateFamilyKeysForAdoption(estimate, estData, { serviceMode: 'one_time' }),
@@ -13476,14 +13487,14 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           const lockedFamilyKeys = estimateFamilyKeysForAdoption(estimate, estData, {
             serviceModes: adoptionServiceModesForContract(estimate, estData),
           });
-          const lockedFamilyOk = !isAssessmentVisit(lockedAdoptRow)
+          const lockedFamilyOk = !isAssessmentVisit(lockedIdentityRow)
             && !isReService({
-              serviceKey: lockedCatalog?.service_key ?? lockedAdoptRow?.catalog_service_key,
-              serviceName: lockedCatalog?.name ?? lockedAdoptRow?.catalog_service_name,
-              serviceType: lockedAdoptRow?.service_type,
+              serviceKey: lockedIdentityRow?.catalog_service_key,
+              serviceName: lockedIdentityRow?.catalog_service_name,
+              serviceType: lockedIdentityRow?.service_type,
             })
             && (lockedAnyModeKeys.size === 0
-              || appointmentMatchesEstimateFamily(lockedAdoptRow || {}, lockedFamilyKeys));
+              || appointmentMatchesEstimateFamily(lockedIdentityRow || {}, lockedFamilyKeys));
           // Property scope under lock, mirroring the preflight's coverage
           // exactly (owner ruling 2026-08-15: the under-lock recheck must
           // never reject a row the preflight admitted). The preflight

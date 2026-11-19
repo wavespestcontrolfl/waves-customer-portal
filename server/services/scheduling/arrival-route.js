@@ -1334,7 +1334,10 @@ async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays }) 
   if (!await require('./tech-day-lock').lockTechDays(sp, [{ techId: row.technician_id, date }], { wait: false })) return refuse('lock_busy');
   // From the office, like every commit-time check (tech-start-point.js):
   // the save probe certified this day from there, so the same order wins.
-  const context = await loadArrivalRouteContext({ conn: sp, serviceId, date, technicianId: row.technician_id });
+  const context = await loadArrivalRouteContext({
+    conn: sp, serviceId, date, technicianId: row.technician_id,
+    includeClaimedBookings: true,
+  });
   if (!context) return refuse('no_context');
   if (context.grouped) return refuse('grouped');
   if (staffSave === true) context.travel = staffSaveTravel(date);
@@ -1466,13 +1469,18 @@ async function buySaveRoads({
   const [start, end] = [windowStart, windowEnd].map((value) => String(value ?? '').slice(0, 5) || undefined);
   const work = async () => {
     const load = (extra) => loadArrivalRouteContext({
-      conn, serviceId, prospective, date: day, technicianId, changes, cacheLocation: true, ...extra,
+      conn, serviceId, prospective, date: day, technicianId, changes, cacheLocation: true,
+      includeClaimedBookings: true, ...extra,
     });
     const checkContext = await load({ fromActiveStop: pickerRoadCheckLive(), excludeServiceIds });
     // The route number is read from a context with no exclusions and no active
     // stop (placeMovedVisit); reuse the check's when it is the same one.
     const placeContext = !capacityEnabled()
       && (excludeServiceIds.length || checkContext?.activeStop ? await load({}) : checkContext);
+    // A booked row newly visible through liveServiceOrHold changes the route
+    // whose roads would be purchased. Keep the actual staff check correct,
+    // but leave this preload provider-free for that route.
+    if (checkContext?.restoredBooking || placeContext?.restoredBooking) return;
     const travel = roadTimes.createPickerTravel({ spender, budget });
     // `check: false` = a move that numbers the day but runs no advisory check (Quick Move).
     const reads = [[check && checkContext, { allowInsertion: false }], [placeContext, { place: true }]]
@@ -1503,14 +1511,19 @@ async function checkArrivalPlacement({
   windowStart, windowEnd, durationMinutes, roads = false, roadSpender = null, pickerBudget = null, detail = false, lateDays = false, ...options
 }) {
   const live = pickerRoadCheckLive();
-  const context = await loadArrivalRouteContext({ fromActiveStop: live, ...options });
+  const context = await loadArrivalRouteContext({
+    fromActiveStop: live,
+    ...options,
+    includeClaimedBookings: true,
+  });
   // `lateDays`: only the staff picked-hour verdict asks for it, so an hour the
   // list offered on an already-late day is judged the same when picked. Saves and every other caller do not.
   const placement = { windowStart, windowEnd, durationMinutes, allowInsertion: false, ...(lateDays === true ? { lateDays: true } : {}) };
   const roadTimes = require('./hint-road-times');
   // A staff save reads the road times its picker bought; it never buys.
   if (context && roads === 'cache') context.travel = staffSaveTravel(options.date);
-  if (context && live && roads === true && roadTimes.onRoads(options.date, etDateString(new Date()))) {
+  if (context && !context.restoredBooking && live && roads === true
+    && roadTimes.onRoads(options.date, etDateString(new Date()))) {
     context.travel = roadTimes.createPickerTravel({ spender: roadSpender, ...(pickerBudget ? { budget: pickerBudget } : {}) });
     // Three passes, as certifyArrivalPlacement: a re-timed leg is asked again.
     for (let pass = 0; pass < 3; pass++) {

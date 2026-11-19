@@ -1211,7 +1211,16 @@ describe('getPurchaseState / sweepStaleOneTapDrafts', () => {
 
     db.__state.tables.scheduled_services[0].source_estimate_id = 'est-foreign';
     const guarded = await oneTap.getPurchaseState({ customerId: 'cust-1', purchaseId: 'p-1' });
-    expect(guarded).toMatchObject({ slot: null, holdLive: false });
+    expect(guarded).toMatchObject({ slot: null, holdLive: false, officeResolution: false });
+
+    // Even when the pointer and source estimate are restored, a staff-owned
+    // appointment for a different customer is not this purchase's recovery
+    // state and must not disclose its time through the portal.
+    db.__state.tables.scheduled_services[0].source_estimate_id = 'est-1';
+    db.__state.tables.scheduled_services[0].customer_id = 'cust-foreign';
+    db.__state.tables.scheduled_services[0].reservation_expires_at = null;
+    const foreignCustomer = await oneTap.getPurchaseState({ customerId: 'cust-1', purchaseId: 'p-1' });
+    expect(foreignCustomer).toMatchObject({ slot: null, holdLive: false, officeResolution: false });
   });
 
   test('another customer 404s; sweep voids open purchases on expired drafts and archives them', async () => {

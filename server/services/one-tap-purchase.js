@@ -172,6 +172,27 @@ async function loadPurchaseForCustomer(customerId, purchaseId) {
   return row;
 }
 
+function claimedReservationError() {
+  return httpError(409,
+    'This appointment was booked by our office. Please call or text us before continuing checkout.',
+    { code: 'RESERVATION_CLAIMED', officeResolution: true });
+}
+
+// A claim belongs to this checkout only when all immutable ownership
+// coordinates still agree: pointer, synthesized estimate and customer. A
+// foreign or moved row is never exposed as the customer's appointment.
+async function claimedReservationForPurchase(database, purchase, { lock = false } = {}) {
+  if (!purchase?.scheduled_service_id) return null;
+  let query = database('scheduled_services')
+    .where({
+      id: purchase.scheduled_service_id,
+      source_estimate_id: purchase.estimate_id,
+      customer_id: purchase.customer_id,
+    });
+  if (lock) query = query.forUpdate();
+  return query.first('id', 'customer_id', 'source_estimate_id', 'scheduled_date', 'window_start', 'reservation_expires_at');
+}
+
 function estimateExpired(estimate) {
   return !!(estimate?.expires_at && new Date(estimate.expires_at) < new Date());
 }
@@ -491,13 +512,43 @@ async function initPurchase({ customerId, clicked }) {
   // transitioned (releaseReservation only deletes live customer-less
   // holds, so a committed visit is untouchable either way).
   const token = crypto.randomBytes(16).toString('hex');
-  const { superseded, estimate, purchase } = await db.transaction(async (trx) => {
+  const initialized = await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`one_tap_init:${customerId}`]);
     const priorOpen = await trx('one_tap_purchases')
       .where({ customer_id: customerId })
       .whereIn('status', ['initiated', 'reserved'])
-      .update({ status: 'voided', updated_at: trx.fn.now() })
-      .returning(['id', 'estimate_id', 'scheduled_service_id']);
+      .forUpdate()
+      .select('id', 'customer_id', 'estimate_id', 'scheduled_service_id');
+
+    // Serialize each old pointer with a staff claim before superseding it.
+    // If the row is still an unclaimed hold, delete it inside this same
+    // transaction so a waiting staff update cannot claim it after the
+    // purchase pointer has been cleared. If staff won first, preserve and
+    // reopen the exact purchase instead of creating another checkout.
+    for (const prior of priorOpen) {
+      if (!prior.scheduled_service_id) continue;
+      const pointed = await trx('scheduled_services')
+        .where({ id: prior.scheduled_service_id, source_estimate_id: prior.estimate_id })
+        .forUpdate()
+        .first('id', 'customer_id', 'reservation_expires_at');
+      if (pointed?.customer_id != null) {
+        if (String(pointed.customer_id) === String(customerId)) {
+          return { claimedPurchaseId: prior.id, superseded: [], estimate: null, purchase: null };
+        }
+        throw httpError(409, OFFER_CHANGED);
+      }
+      if (pointed?.reservation_expires_at) {
+        await trx('scheduled_services').where({ id: pointed.id }).whereNull('customer_id').del();
+      }
+    }
+
+    const priorIds = priorOpen.map((row) => row.id);
+    if (priorIds.length) {
+      await trx('one_tap_purchases')
+        .whereIn('id', priorIds)
+        .whereIn('status', ['initiated', 'reserved'])
+        .update({ status: 'voided', updated_at: trx.fn.now() });
+    }
     await trx('estimates')
       .where({ customer_id: customerId, source: 'one_tap_purchase', status: 'draft' })
       .whereNull('archived_at')
@@ -544,6 +595,10 @@ async function initPurchase({ customerId, clicked }) {
 
     return { superseded: priorOpen, estimate: estimateRow, purchase: purchaseRow };
   });
+  if (initialized.claimedPurchaseId) {
+    return getPurchaseState({ customerId, purchaseId: initialized.claimedPurchaseId });
+  }
+  const { superseded, estimate, purchase } = initialized;
 
   // Hold release AFTER commit — a rolled-back init must not have freed a
   // hold that still belongs to the (still-open) prior purchase.
@@ -605,6 +660,7 @@ async function initPurchase({ customerId, clicked }) {
 async function reserve({ customerId, purchaseId, slotId }) {
   const purchase = await loadPurchaseForCustomer(customerId, purchaseId);
   if (!['initiated', 'reserved'].includes(purchase.status)) throw httpError(409, OFFER_CHANGED);
+  if (await claimedReservationForPurchase(db, purchase)) throw claimedReservationError();
   await rejectRetiredOneTapVariant(purchase);
   const estimate = await db('estimates')
     .where({ id: purchase.estimate_id })
@@ -625,13 +681,20 @@ async function reserve({ customerId, purchaseId, slotId }) {
       estimateId: estimate.id,
       slotId,
     });
+    // reserveSlot deletes/replaces only customer-less holds. If the pointed
+    // row survived because staff committed it first, keep that pointer and
+    // discard the new hold; a re-pick must never conceal the real booking.
+    if (await claimedReservationForPurchase(db, purchase)) {
+      await slotReservation.releaseReservation({ scheduledServiceId, estimateId: estimate.id });
+      throw claimedReservationError();
+    }
     // CAS: still-open purchase (a concurrent re-init can void it — a blind
     // update would revive the voided row) AND the just-created hold must
     // still exist as a live reservation (a concurrent reserve may have
     // replaced it). Either miss ⇒ release our hold (a no-op if already
     // replaced) and bounce the client to re-pick.
     const reserved = await db('one_tap_purchases')
-      .where({ id: purchase.id })
+      .where({ id: purchase.id, scheduled_service_id: purchase.scheduled_service_id })
       .whereIn('status', ['initiated', 'reserved'])
       .whereExists((qb) => qb.select(1).from('scheduled_services')
         .where({ id: scheduledServiceId })
@@ -677,6 +740,10 @@ async function release({ customerId, purchaseId }) {
       scheduledServiceId: purchase.scheduled_service_id,
       estimateId: purchase.estimate_id,
     });
+    // releaseReservation's narrow delete serializes with a staff claim. A
+    // surviving exact row is booked, not abandoned: preserve the purchase
+    // pointer so close/reopen can still explain the office resolution.
+    if (await claimedReservationForPurchase(db, purchase)) throw claimedReservationError();
   }
   // CAS on the still-open states + the snapshot's hold identity (P1): if
   // confirm commits while releaseReservation above is in flight, a blind
@@ -724,18 +791,28 @@ async function getPurchaseState({ customerId, purchaseId }) {
 
   let slot = null;
   let holdLive = false;
+  let officeResolution = false;
   if (purchase.scheduled_service_id) {
     const hold = await db('scheduled_services')
       .where({ id: purchase.scheduled_service_id, source_estimate_id: purchase.estimate_id })
-      .first('scheduled_date', 'window_start', 'reservation_expires_at');
+      .first('customer_id', 'scheduled_date', 'window_start', 'reservation_expires_at');
     if (hold) {
-      holdLive = !!(hold.reservation_expires_at && new Date(hold.reservation_expires_at) > new Date());
-      slot = {
-        date: dateOnly(hold.scheduled_date),
-        windowStart: hhmm(hold.window_start),
-        windowEnd: arrivalEndFor(hold.window_start),
-        holdExpiresAt: hold.reservation_expires_at || null,
-      };
+      const sameCustomerClaim = hold.customer_id != null
+        && String(hold.customer_id) === String(customerId);
+      // Never expose a foreign customer's appointment through a stale
+      // purchase pointer. Exact same-customer claims remain visible even
+      // after their old reservation stamp lapses or is cleared.
+      if (hold.customer_id == null || sameCustomerClaim) {
+        officeResolution = sameCustomerClaim;
+        holdLive = sameCustomerClaim
+          || !!(hold.reservation_expires_at && new Date(hold.reservation_expires_at) > new Date());
+        slot = {
+          date: dateOnly(hold.scheduled_date),
+          windowStart: hhmm(hold.window_start),
+          windowEnd: arrivalEndFor(hold.window_start),
+          holdExpiresAt: hold.reservation_expires_at || null,
+        };
+      }
     }
   }
 
@@ -750,7 +827,7 @@ async function getPurchaseState({ customerId, purchaseId }) {
     estimateId: purchase.estimate_id,
     status: purchase.status,
     open: ['initiated', 'reserved'].includes(purchase.status)
-      && estimate?.status === 'draft' && !estimateExpired(estimate),
+      && (officeResolution || (estimate?.status === 'draft' && !estimateExpired(estimate))),
     serviceKey: purchase.service_key,
     label: line?.name || String(purchase.service_key || 'service').replace(/_/g, ' '),
     perVisit: Number(purchase.per_visit),
@@ -761,6 +838,7 @@ async function getPurchaseState({ customerId, purchaseId }) {
     hasCardOnFile,
     slot,
     holdLive,
+    officeResolution,
     holdMinutes: HOLD_MINUTES,
   };
 }
@@ -806,6 +884,7 @@ async function sweepStaleOneTapDrafts() {
 async function slots({ customerId, purchaseId }) {
   const purchase = await loadPurchaseForCustomer(customerId, purchaseId);
   if (!['initiated', 'reserved'].includes(purchase.status)) throw httpError(409, OFFER_CHANGED);
+  if (await claimedReservationForPurchase(db, purchase)) throw claimedReservationError();
   try {
     return await loadSlots(purchase.estimate_id);
   } catch (err) {

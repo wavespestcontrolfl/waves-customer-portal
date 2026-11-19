@@ -605,7 +605,10 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     expect((await mockTransaction('estimates').where({ id: estimateId }).first()).status).not.toBe('accepted');
   });
 
-  test('locked adoption refuses a visit relabelled as a legacy re-service after preflight', async () => {
+  test.each([
+    ['legacy re-service', 'pest_re_service'],
+    ['free assessment', 'lawn_inspection'],
+  ])('locked adoption uses the refreshed catalog to refuse a visit relabelled as a %s after preflight', async (_label, replacementKey) => {
     await mockTransaction.rollback();
     mockTransaction = null;
     let seeded;
@@ -627,10 +630,10 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     let request;
     try {
       const { rows: [{ pid }] } = await relabel.raw('SELECT pg_backend_pid()::int AS pid');
-      const reServiceId = await serviceId(relabel, 'pest_re_service');
+      const replacementServiceId = await serviceId(relabel, replacementKey);
       await relabel('scheduled_services').where({ id: bookedId }).forUpdate().first();
       await relabel('scheduled_services').where({ id: bookedId }).update({
-        service_id: reServiceId,
+        service_id: replacementServiceId,
         is_callback: false,
       });
 
@@ -655,7 +658,7 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
       expect(response.status).toBe(409);
       expect((await mockTransaction('estimates').where({ id: seeded.estimateId }).first()).status).toBe('sent');
       expect(await mockTransaction('scheduled_services').where({ id: bookedId }).first())
-        .toMatchObject({ customer_id: seeded.customerId, service_id: reServiceId, estimated_price: '0.00' });
+        .toMatchObject({ customer_id: seeded.customerId, service_id: replacementServiceId, estimated_price: '0.00' });
     } finally {
       if (relabelOpen) await relabel.rollback().catch(() => {});
       if (request) await request.catch(() => {});

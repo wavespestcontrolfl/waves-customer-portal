@@ -260,6 +260,42 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
     expect(await trx('estimates').where({ id: init.estimateId }).first())
       .toMatchObject({ status: 'draft', price_locked_at: null });
     expect(await trx('scheduled_services').where({ source_estimate_id: init.estimateId })).toHaveLength(1);
+
+    // Every follow-on API preserves and reports the same office booking.
+    // No close, re-pick, slot refresh, card-return resume or fresh CTA may
+    // abandon the pointer or create a second appointment.
+    await expect(oneTap.release({ customerId: ids.customer, purchaseId: init.purchaseId }))
+      .rejects.toMatchObject({ code: 'RESERVATION_CLAIMED', officeResolution: true });
+    await expect(oneTap.slots({ customerId: ids.customer, purchaseId: init.purchaseId }))
+      .rejects.toMatchObject({ code: 'RESERVATION_CLAIMED', officeResolution: true });
+    await expect(oneTap.reserve({
+      customerId: ids.customer,
+      purchaseId: init.purchaseId,
+      slotId: mockSlots.primary[0].slotId,
+    })).rejects.toMatchObject({ code: 'RESERVATION_CLAIMED', officeResolution: true });
+
+    const resumed = await oneTap.getPurchaseState({ customerId: ids.customer, purchaseId: init.purchaseId });
+    expect(resumed).toMatchObject({
+      purchaseId: init.purchaseId,
+      open: true,
+      holdLive: true,
+      officeResolution: true,
+      slot: { date: expect.any(String), windowStart: '10:00', windowEnd: '12:00' },
+    });
+
+    const reopened = await oneTap.initPurchase({ customerId: ids.customer, clicked: {
+      fingerprint: purchase.fingerprint,
+      serviceKey: purchase.service_key,
+      optionId: purchase.option_id,
+      perApplication: Number(purchase.per_visit),
+    } });
+    expect(reopened).toMatchObject({
+      purchaseId: init.purchaseId,
+      officeResolution: true,
+      slot: { windowStart: '10:00', windowEnd: '12:00' },
+    });
+    expect(await trx('one_tap_purchases').where({ customer_id: ids.customer })).toHaveLength(1);
+    expect(await trx('scheduled_services').where({ source_estimate_id: init.estimateId })).toHaveLength(1);
   });
 
   test('confirm refuses a stale pointer to another estimate\'s unclaimed hold before updating it', async () => {

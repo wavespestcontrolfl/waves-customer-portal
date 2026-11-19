@@ -232,6 +232,9 @@ async function findArrivalWindowSlots(opts) {
           unit: opts.arrivalWindow.unit === true, alone: opts.arrivalWindow.alone === true,
         }),
         date, technicianId: tech.id, excludeServiceIds: opts.excludeServiceIds, now,
+        // Staff and customer reads share the same occupancy truth: a booked
+        // visit remains on the route even when its old hold stamp expires.
+        includeClaimedBookings: true,
         // Staff callers only (GATE_TECH_START_POINTS; tech-start-point.js).
         startPoints: opts.techStartPoints === true,
         // The route check: today's route under way continues from
@@ -250,7 +253,11 @@ async function findArrivalWindowSlots(opts) {
   }
   // The road days' routes are driven on Google, only each route's hours near
   // its best (the road band).
-  const onRoads = routes.filter((route) => roadCheck && roads.onRoads(route.date, today, windows));
+  // A newly restored booking changes the route that would be preloaded.
+  // Judge it on cached/conservative travel; never turn occupancy correctness
+  // into incremental provider spend. Unaffected routes keep their road pass.
+  const onRoads = routes.filter((route) => roadCheck && !route.context.restoredBooking
+    && roads.onRoads(route.date, today, windows));
   onRoads.forEach((route) => { route.context.travel = roadTravel; });
   if (onRoads.length) await preloadBandLegs(roadTravel, onRoads);
   for (const route of routes) {
