@@ -285,6 +285,19 @@ describeDb("the caller's word (PostgreSQL)", () => {
     });
   });
 
+  // Both storage eras of the extraction: a jsonb object, or a JSON string inside the jsonb column.
+  test('a word stored as a JSON string counts too: a newer cancel in that form takes an older yes back', async () => {
+    const customerId = await customer();
+    await call(customerId, 'per_application', { created_at: hoursAgo(5) });
+    await call(customerId, null, {
+      created_at: hoursAgo(1), ai_extraction_enriched: JSON.stringify(JSON.stringify(extractionWith(null, 'cancellation_request'))),
+    }, 'cancellation_request');
+    const [row] = await trx('call_log').where({ customer_id: customerId }).orderBy('created_at', 'desc').limit(1)
+      .select(trx.raw('jsonb_typeof(ai_extraction_enriched) AS kind'));
+    expect(row.kind).toBe('string');
+    await expect(callerWord(trx, { customerId, since: since() })).resolves.toEqual({ skip: 'took_back' });
+  });
+
   // `until`: from a newer estimate's send on, a call may be about that estimate (the cards pass it).
   test('until: only calls that began before it give the word; a later yes or cancel is not this word', async () => {
     const customerId = await customer();

@@ -132,6 +132,10 @@ function wordOfCall(row) {
   return { choice, callLogId: row.id, at: callStartedAt(row), quote };
 }
 
+// The extraction as jsonb in both storage eras: a jsonb object, or a JSON string inside the jsonb column (the unwrap
+// day-agreement-shadow.js uses; call-prepay-choice.js reads both eras too).
+const EXTRACTION_SQL = "(CASE WHEN jsonb_typeof(call_log.ai_extraction_enriched) = 'string' THEN (call_log.ai_extraction_enriched #>> '{}')::jsonb ELSE call_log.ai_extraction_enriched END)";
+
 // The customer's latest word on a call that began since `since`: the newest read, valid, two-party call whose
 // extraction names a billing choice, a cancellation (intent or flag), a one-time ask or a price the caller declined, as
 // wordOfCall gives it, or null. SQL keeps only rows that name a word; pages of CHOICE_SCAN_LIMIT follow until one is a two-party conversation,
@@ -148,10 +152,10 @@ async function latestBillingChoice(conn, { customerId, since, until = null }) {
     .modify((qb) => { if (until) qb.whereRaw(`${startedSql()} < ?::timestamptz`, [until]); })
     .whereRaw(`NOT ${owedReadSql('call_log')}`)
     .where((qb) => qb
-      .whereRaw("ai_extraction_enriched -> 'service_request' ->> 'billing_choice' = ANY(?)", [[...BILLING_CHOICES]])
-      .orWhereRaw("ai_extraction_enriched -> 'service_request' ->> 'service_intent' = ANY(?)", [[...CONTRARY_INTENTS]])
-      .orWhereRaw("ai_extraction_enriched -> 'triage_flags' @> ?::jsonb", [JSON.stringify([CANCEL_FLAG])])
-      .orWhereRaw("ai_extraction_enriched -> 'service_request' -> 'price' ->> 'caller_response' = 'declined'"))
+      .whereRaw(`${EXTRACTION_SQL} -> 'service_request' ->> 'billing_choice' = ANY(?)`, [[...BILLING_CHOICES]])
+      .orWhereRaw(`${EXTRACTION_SQL} -> 'service_request' ->> 'service_intent' = ANY(?)`, [[...CONTRARY_INTENTS]])
+      .orWhereRaw(`${EXTRACTION_SQL} -> 'triage_flags' @> ?::jsonb`, [JSON.stringify([CANCEL_FLAG])])
+      .orWhereRaw(`${EXTRACTION_SQL} -> 'service_request' -> 'price' ->> 'caller_response' = 'declined'`))
     .modify((qb) => whereNotSandboxCall(qb))
     .orderByRaw(`${startedSql()} DESC, id DESC`)
     .limit(CHOICE_SCAN_LIMIT)
