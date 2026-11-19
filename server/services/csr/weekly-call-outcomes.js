@@ -8,8 +8,10 @@
  * the call STARTED (callStartedAtSql: a row inserted after hangup has a later created_at).
  * Its outcome is call_log.disposition, written by the AI (call-disposition.js TERMINAL_DISPOSITIONS) or by
  * staff tagging the call (admin-call-recordings.js DISPOSITION_LABELS): 'booked' or the staff tag
- * 'new_lead_booked' = an appointment was made on the call; 'estimate_send' = a quote was requested or
- * promised (not proof it was sent). A caller is counted once per week, however many times they rang, so
+ * 'new_lead_booked' = an appointment was made on the call. A quote was requested or promised (not proof it
+ * was sent) when the outcome is 'estimate_send' or the valid extraction's service_request flags say so
+ * (call-disposition.js step 5 reads the same flags; a quote can come with another outcome, e.g.
+ * callback_task_created on an out-of-area hold). A caller is counted once per week, however many times they rang, so
  * the counts are callers, not calls. AI dispositions are written only while GATE_CALL_DISPOSITION_V1 is
  * on, so a caller can have no outcome on record: the booked share is taken over callers with a known
  * outcome, and is null when none has one.
@@ -26,11 +28,16 @@ const { callStartedAtSql } = require('../sms-pending-conversations');
 const BOOKED_DISPOSITIONS = Object.freeze(['booked', 'new_lead_booked']);
 const ESTIMATE_DISPOSITION = 'estimate_send';
 // Outcomes that say the caller was no prospect, whatever the extraction classed: an existing customer
-// (the AI's routing or a staff tag), spam, a wrong number, a vendor, or no conversation at all.
+// (the AI's routing or a staff tag), spam, a wrong number or a vendor. Not 'no_action_needed': the processor
+// also writes it after a real new-lead conversation (an out-of-area caller with nothing owed,
+// call-recording-processor.js), so that caller stays in the count as one who did not book.
 const NO_PROSPECT_OUTCOMES = Object.freeze([
   'existing_customer_routed', 'existing_service_q', 'existing_complaint',
-  'spam_discarded', 'wrong_number_closed', 'vendor_logged', 'no_action_needed',
+  'spam_discarded', 'wrong_number_closed', 'vendor_logged',
 ]);
+// The valid extraction's own quote flags, JSON true only (call-disposition.js tests `=== true`).
+const QUOTE_FLAGS_SQL = "cl.ai_extraction_enriched #> '{service_request,quote_requested}' = 'true'::jsonb"
+  + " OR cl.ai_extraction_enriched #> '{service_request,quote_promised}' = 'true'::jsonb";
 // The last seven ET calendar days ending today, the window generateWeeklyTeamRecommendation uses.
 const WEEK_DAYS = 7;
 
@@ -63,7 +70,7 @@ async function loadWeeklyCallOutcomes({ now = new Date(), conn = db } = {}) {
       conn.raw(`${caller} AS caller`),
       conn.raw('bool_or(cl.disposition IS NOT NULL) AS known'),
       conn.raw('bool_or(cl.disposition IN (?, ?)) AS booked', [...BOOKED_DISPOSITIONS]),
-      conn.raw('bool_or(cl.disposition = ?) AS estimate', [ESTIMATE_DISPOSITION]),
+      conn.raw(`bool_or(cl.disposition = ? OR ${QUOTE_FLAGS_SQL}) AS estimate`, [ESTIMATE_DISPOSITION]),
     )
     .groupByRaw(caller)
     .as('callers');

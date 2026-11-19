@@ -37,7 +37,8 @@ describe('loadWeeklyCallOutcomes', () => {
     expect(selects.map((c) => c.sql)).toContain('bool_or(cl.disposition IS NOT NULL) AS known');
     expect(selects.filter((c) => c.bindings).map((c) => [c.sql, c.bindings])).toEqual([
       ['bool_or(cl.disposition IN (?, ?)) AS booked', ['booked', 'new_lead_booked']],
-      ['bool_or(cl.disposition = ?) AS estimate', ['estimate_send']],
+      ["bool_or(cl.disposition = ? OR cl.ai_extraction_enriched #> '{service_request,quote_requested}' = 'true'::jsonb"
+        + " OR cl.ai_extraction_enriched #> '{service_request,quote_promised}' = 'true'::jsonb) AS estimate", ['estimate_send']],
     ]);
   });
 
@@ -57,6 +58,8 @@ describe('loadWeeklyCallOutcomes', () => {
     const conn = fakeConn({ total: 0, known: 0, booked: 0, estimates: 0 });
     await loadWeeklyCallOutcomes({ now: new Date('2026-11-20T13:00:00Z'), conn });
     expect(NO_PROSPECT_OUTCOMES).toEqual(expect.arrayContaining(['existing_customer_routed', 'existing_service_q', 'existing_complaint', 'spam_discarded', 'wrong_number_closed']));
+    // A real new-lead conversation can end 'no_action_needed' (an out-of-area caller): that caller did not book.
+    expect(NO_PROSPECT_OUTCOMES).not.toContain('no_action_needed');
     const grouped = conn.calls.find(([m, arg]) => m === 'where' && typeof arg === 'function');
     const seen = [];
     const recorder = new Proxy({}, { get: (_t, m) => (...args) => { seen.push([m, ...args]); return recorder; } });
