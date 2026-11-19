@@ -5986,13 +5986,16 @@ const ZONE_COORDS = {
 // zone, used when the stop's city and ZIP match no zone rule.
 const LOCATION_ZONE_FORECAST = { bradenton: 'bradenton_north', venice: 'venice_north_port' };
 
-// The forecast zone of a day-board stop. A stored zone with no forecast point
-// (a location id) reads the stop's city and ZIP, else the zone its location id
-// names; any other unmatched stop has none (owner 2026-11-02, "leave the rain
-// for all"; 11-19: 18 of 84 stops, stored 'bradenton', showed no rain).
-function stopForecastZone(stop) {
-  if (ZONE_COORDS[stop.zone]) return stop.zone;
-  return getZone(stop.premise?.city, stop.premise?.zip, LOCATION_ZONE_FORECAST[stop.zone] || null);
+// The forecast zone of a day-board stop, read from its scheduled_services row:
+// the stored zone, never the card's display zone, which defaults to Lakewood
+// Ranch for a city and ZIP no rule places. A stored zone with a forecast point
+// stays; else the row's city and ZIP place the stop, else the zone its stored
+// location id names; a stop none of these place has no forecast zone (owner
+// 2026-11-02, "leave the rain for all"; 11-19: 18 of 84 stops, stored
+// 'bradenton', showed no rain).
+function stopForecastZone(row) {
+  if (ZONE_COORDS[row.zone]) return row.zone;
+  return getZone(row.city, row.zip, LOCATION_ZONE_FORECAST[row.zone] || null);
 }
 
 // Completion reuses a non-void invoice already attached to the visit
@@ -7440,7 +7443,10 @@ router.get('/', async (req, res, next) => {
     const { attachStopRain, zoneHourlyOutlooks, weatherNow } = require('../services/scheduling/stop-rain');
     attachStopRain(enriched, date, {});
     try {
-      const zonesPresent = [...new Set(enriched.map(stopForecastZone))].filter((z) => ZONE_COORDS[z]);
+      // From the raw rows: `enriched` carries only the display zone.
+      const forecastZoneById = new Map(services.map((s) => [s.id, stopForecastZone(s)]));
+      const forecastZoneOf = (stop) => forecastZoneById.get(stop.id) || null;
+      const zonesPresent = [...new Set(enriched.map(forecastZoneOf))].filter((z) => ZONE_COORDS[z]);
       const [outlook, perZone, hourlyByZone, officeWeather] = await Promise.all([
         rainOutlookPromise,
         Promise.all(zonesPresent.map(async (z) => {
@@ -7455,7 +7461,7 @@ router.get('/', async (req, res, next) => {
       const officeChance = outlook?.[date]?.rainChance;
       rainChance = Number.isFinite(officeChance) ? officeChance : null;
       if (perZone.length > 0) zoneRain = Object.fromEntries(perZone);
-      attachStopRain(enriched, date, hourlyByZone, stopForecastZone);
+      attachStopRain(enriched, date, hourlyByZone, forecastZoneOf);
     } catch { /* rain outlook is optional */ }
 
     await attachOfficeToldFields(req, enriched);
