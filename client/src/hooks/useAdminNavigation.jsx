@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import { adminNavigationPreferenceKey as preferenceKey, readFieldViewPreference } from '../lib/fieldView';
+import { adminNavigationPreferenceKey as preferenceKey } from '../lib/fieldView';
 import { ADMIN_WORKSPACE_DESTINATIONS, ADMIN_WORKSPACE_GROUP_IDS, getAdminWorkspaceGroups, getAdminWorkspaceSelection } from '../config/adminNavigation';
 
 export const AdminNavigationContext = createContext(null);
@@ -10,18 +10,22 @@ export const AdminNavigationContext = createContext(null);
 const PREFERENCE_VERSION = 2;
 const destinationIds = new Set(ADMIN_WORKSPACE_DESTINATIONS.map(({ id }) => id));
 
-function readPreferences(accountId) {
-  const defaults = { groups: {}, pins: [], fieldView: false };
-  if (!accountId) return defaults;
+// This account's saved menu settings on this phone, or null when storage
+// cannot be read. Field view is not a menu group, so a version change never
+// drops it.
+function readSavedPreferences(accountId) {
   try {
     const saved = JSON.parse(localStorage.getItem(preferenceKey(accountId)) || '{}');
     const groups = saved?.version !== PREFERENCE_VERSION ? {} : Object.fromEntries(ADMIN_WORKSPACE_GROUP_IDS
       .filter((id) => typeof saved?.groups?.[id] === 'boolean')
       .map((id) => [id, saved.groups[id]]));
     const pins = Array.isArray(saved?.pins) ? [...new Set(saved.pins)].filter((id) => destinationIds.has(id)).slice(0, 3) : [];
-    // Field view is not a menu group, so a version change never drops it.
-    return { groups, pins, fieldView: readFieldViewPreference(accountId) };
-  } catch { return defaults; }
+    return { groups, pins, fieldView: saved?.fieldView === true };
+  } catch { return null; }
+}
+
+function readPreferences(accountId) {
+  return (accountId && readSavedPreferences(accountId)) || { groups: {}, pins: [], fieldView: false };
 }
 
 export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, children }) {
@@ -53,25 +57,25 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
     setAutoOpen(selection.groupId);
   }, [enabled, location.key, selection.groupId, selection.itemId]);
 
-  // Field view can change in another tab on this phone. A write here keeps
-  // the newest saved value unless this write changes it, so a tab that has
-  // not seen the other tab's switch never writes its old value back.
-  const updatePreferences = (update) => setPreferences((current) => {
-    const next = update(current);
-    if (!user?.id) return next;
-    const merged = next.fieldView === current.fieldView ? { ...next, fieldView: readFieldViewPreference(user.id) } : next;
-    try { localStorage.setItem(preferenceKey(user.id), JSON.stringify({ ...merged, version: PREFERENCE_VERSION })); } catch { /* optional preference */ }
-    return merged;
-  });
-  // Another tab's write takes effect here at once: the tabs and the /admin
-  // landing read the switch. (A cleared storage reads as off.)
+  // Every tab on this phone saves to the same record. A change applies to the
+  // newest saved settings (this tab's own when storage cannot be read), so a
+  // tab that missed another tab's change never writes an old value back. The
+  // read and the write stay outside the state update: StrictMode runs a queued
+  // update twice in development, and a second pin toggle would undo the first.
+  const updatePreferences = (update) => {
+    const next = update((user?.id && readSavedPreferences(user.id)) || preferences);
+    if (user?.id) {
+      try { localStorage.setItem(preferenceKey(user.id), JSON.stringify({ ...next, version: PREFERENCE_VERSION })); } catch { /* optional preference */ }
+    }
+    setPreferences(next);
+  };
+  // Another tab's save shows here at once: pins, groups and the switch the
+  // tabs and the /admin landing read. A cleared storage reads as nothing saved.
   useEffect(() => {
     if (!user?.id) return undefined;
     const key = preferenceKey(user.id);
     const onStorage = (event) => {
-      if (event.key !== null && event.key !== key) return;
-      const fieldView = readFieldViewPreference(user.id);
-      setPreferences((current) => (current.fieldView === fieldView ? current : { ...current, fieldView }));
+      if (event.key === null || event.key === key) setPreferences(readPreferences(user.id));
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);

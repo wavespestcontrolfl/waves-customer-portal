@@ -79,8 +79,11 @@ describe("App's /admin index and catch-all", () => {
     // does an admin with Field view on) but must still replace; so must the
     // Field view redirect in front of the admin shell.
     expect(adminRoutes).toContain('<Route index element={<AdminIndexRedirect />} />');
-    expect(indexRedirect).toContain("<Navigate to={role === 'technician' || fieldView ? 'today' : 'dashboard'} replace />");
-    expect(fieldViewEntry).toContain("<Navigate to={landing} replace state={FIELD_VIEW_LANDING_STATE} />");
+    for (const source of [indexRedirect, fieldViewEntry]) {
+      const navigates = source.match(/<Navigate\b[^>]*\/>/g) || [];
+      expect(navigates.length).toBeGreaterThan(0);
+      for (const navigate of navigates) expect(navigate).toMatch(/\sreplace(\s|\/>)/);
+    }
     render(<MemoryRouter initialEntries={["/before", "/admin"]} initialIndex={1}>
       <Routes>
         <Route path="/admin">

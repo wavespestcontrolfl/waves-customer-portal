@@ -28,6 +28,7 @@ vi.mock("./admin/GlobalCommandPalette", async () => {
 
 import AdminLayoutV2 from "./AdminLayoutV2";
 import AdminFieldViewEntry from "./AdminFieldViewEntry";
+import AdminIndexRedirect from "./AdminIndexRedirect";
 import TechNavigationLock from "./tech/TechNavigationLock";
 import { saveStaffOfflinePass } from "../lib/adminAuth";
 
@@ -56,10 +57,11 @@ function staffJwt(exp = Math.floor(Date.now() / 1000) + 3600) {
   return `${part({ alg: "HS256" })}.${part({ exp })}.fixture-signature`;
 }
 
-// A phone a verified check left signed in, with Field view on.
-function signedIn(token = staffJwt()) {
+// A phone a verified check left signed in, with Field view on. A fresh
+// sign-in has no offline pass yet (the first verified check writes it).
+function signedIn(token = staffJwt(), { pass = true } = {}) {
   localStorage.setItem("waves_admin_token", token);
-  saveStaffOfflinePass(token, ADMIN);
+  if (pass) saveStaffOfflinePass(token, ADMIN);
   localStorage.setItem(`waves_admin_navigation:${ADMIN.id}`, JSON.stringify({ version: 2, fieldView: true }));
 }
 
@@ -69,7 +71,7 @@ function openAt(pathname) {
       <MemoryRouter initialEntries={[pathname]}>
         <Routes>
           <Route path="/admin" element={<AdminFieldViewEntry><AdminLayoutV2 /></AdminFieldViewEntry>}>
-            <Route index element={<div>Index content</div>} />
+            <Route index element={<AdminIndexRedirect />} />
             <Route path="today" element={<TodayChild />} />
           </Route>
           <Route path="/admin/login" element={<LoginProbe />} />
@@ -115,6 +117,19 @@ it("another tab signing out after a Field view landing returns this tab's sign-i
   await screen.findByText("Today content", undefined, SIGN_IN_WAIT);
   localStorage.removeItem("waves_admin_token");
   await act(async () => { window.dispatchEvent(new StorageEvent("storage", { key: "waves_admin_token" })); });
+  expect(await screen.findByText("Staff login /admin/login?next=%2Fadmin", undefined, SIGN_IN_WAIT)).toBeInTheDocument();
+});
+
+// Pre-push P1 (round 2): no pass yet, so the shell checks at /admin and its
+// own index rule lands on Today; that landing is marked too.
+it("after a fresh sign-in (no offline pass yet) the shell's own Today landing returns a later sign-in to /admin", async () => {
+  signedIn(staffJwt(), { pass: false });
+  vi.stubGlobal("fetch", vi.fn(async (url) => {
+    if (String(url).includes("/admin/auth/me")) return response(200, ADMIN);
+    if (String(url).includes("/fixture/today-data")) return response(401, { error: "revoked" });
+    return response(200, {});
+  }));
+  openAt("/admin");
   expect(await screen.findByText("Staff login /admin/login?next=%2Fadmin", undefined, SIGN_IN_WAIT)).toBeInTheDocument();
 });
 

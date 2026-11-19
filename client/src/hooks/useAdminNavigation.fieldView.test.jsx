@@ -68,6 +68,37 @@ describe('Field view preference', () => {
     expect(saved('acct-1')).toMatchObject({ fieldView: true, pins: ['today'] });
     expect(navigation.fieldView).toBe(true);
   });
+  // Pre-push P1 (round 2): the switch, a pin or a group in a tab that missed
+  // another tab's pin keeps that pin; another tab's pins show at once.
+  const otherTabSaved = (fields) => localStorage.setItem('waves_admin_navigation:acct-1', JSON.stringify({ version: 2, groups: {}, pins: [], fieldView: false, ...fields }));
+  it("the switch in a tab that missed another tab's pin keeps that pin", () => {
+    mount({ id: 'acct-1', role: 'admin' });
+    otherTabSaved({ pins: ['today'] });
+    act(() => navigation.setFieldView(true));
+    expect(saved('acct-1')).toMatchObject({ fieldView: true, pins: ['today'] });
+    expect(navigation.pinnedItems.map(({ id }) => id)).toEqual(['today']);
+  });
+  it("a pin in a tab that missed another tab's pin keeps both", () => {
+    mount({ id: 'acct-1', role: 'admin' });
+    otherTabSaved({ pins: ['today'] });
+    act(() => navigation.togglePin('customers'));
+    expect(saved('acct-1').pins).toEqual(['today', 'customers']);
+  });
+  // The app runs in StrictMode, which renders twice in development: a change
+  // queued behind another change in the same event runs twice. One pin tap
+  // must still pin exactly once.
+  it('one pin tap pins once under StrictMode, also behind another change', () => {
+    render(<React.StrictMode><MemoryRouter><AdminNavigationProvider user={{ id: 'acct-1', role: 'admin' }} enabled><Probe /></AdminNavigationProvider></MemoryRouter></React.StrictMode>);
+    act(() => { navigation.setFieldView(true); navigation.togglePin('customers'); });
+    expect(saved('acct-1')).toMatchObject({ fieldView: true, pins: ['customers'] });
+    expect(navigation.pinnedItems.map(({ id }) => id)).toEqual(['customers']);
+  });
+  it("another tab's pins show here at once", () => {
+    mount({ id: 'acct-1', role: 'admin' });
+    otherTabSaved({ pins: ['today'] });
+    act(() => { window.dispatchEvent(new StorageEvent('storage', { key: 'waves_admin_navigation:acct-1' })); });
+    expect(navigation.pinnedItems.map(({ id }) => id)).toEqual(['today']);
+  });
   it('never applies to a login that is not an admin', () => {
     localStorage.setItem('waves_admin_navigation:acct-3', JSON.stringify({ version: 2, fieldView: true }));
     mount({ id: 'acct-3', role: 'technician' });
