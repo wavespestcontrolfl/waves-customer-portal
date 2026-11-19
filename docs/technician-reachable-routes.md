@@ -249,6 +249,8 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/schedule/:id/wdo-brief` | admin-schedule |
 | GET | `/api/admin/schedule/:serviceId/property-areas` | admin-property-service-areas#serviceRouter |
 | PUT | `/api/admin/schedule/:serviceId/property-areas` | admin-property-service-areas#serviceRouter |
+| GET | `/api/admin/schedule/:serviceId/property-areas/fertilizer-map` | admin-property-service-areas#serviceRouter |
+| PUT | `/api/admin/schedule/:serviceId/property-areas/fertilizer-map` | admin-property-service-areas#serviceRouter |
 | POST | `/api/admin/schedule/:serviceId/property-areas/lookup` | admin-property-service-areas#serviceRouter |
 | GET | `/api/admin/schedule/card-request-availability` | admin-schedule |
 | GET | `/api/admin/schedule/eta/:serviceId` | admin-schedule |
@@ -386,6 +388,7 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/communications/compliance-export` | admin-communications |
 | POST | `/api/admin/communications/contact-compliance-checks` | admin-communications |
 | POST | `/api/admin/communications/messages/:id/like` | admin-communications |
+| POST | `/api/admin/communications/messages/read-all` | admin-communications |
 | POST | `/api/admin/communications/schedule-sms` | admin-communications |
 | GET | `/api/admin/communications/scheduled` | admin-communications |
 | DELETE | `/api/admin/communications/scheduled/:id` | admin-communications |

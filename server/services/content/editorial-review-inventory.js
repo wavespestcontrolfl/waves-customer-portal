@@ -6,7 +6,9 @@ const TEMPLATE_TOKEN_RE = /\{\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}\}/g;
 const DECORATIVE_HEADING_RE = /^(?:table of contents|contents|related (?:articles|guides|posts)|more (?:articles|guides|resources)|resources|sources|references|share this|about the author|get help|contact(?: us)?|ready to (?:start|book)|next steps?)(?:\s*[:!?])?$/i;
 const CTA_PARAGRAPH_RE = /^(?:(?:call|contact)\s+(?:us|today|now|for|to)\b|(?:book|schedule)\s+(?:now|today|an?|your|online|service)\b|request\s+(?:an?|your)\b|get (?:a |your )?(?:quote|estimate)\b|learn more\b|read more\b|share this\b|subscribe\b)/i;
 const NAV_PARAGRAPH_RE = /^(?:[-*+]\s*)?(?:\[[^\]]+\]\([^)]+\)(?:\s*[|·,]\s*)?){1,}$/;
-const FACTUAL_QUESTION_RE = /(?:\$|%|\b\d+(?:[.,]\d+)?\b|["“][^"”]{3,}["”]|\baccording to\b)/i;
+// Same figure rule as editorial-review-validation's FIGURE_RE: a number may sit against its unit ("38mm")
+// or inside emphasis ("_5_").
+const FACTUAL_QUESTION_RE = /(?:\$|%|(?<![A-Za-z0-9])\d+(?:[.,]\d+)?|["“][^"”]{3,}["”]|\baccording to\b)/i;
 
 function splitFrontmatter(document) {
   const text = String(document || '');

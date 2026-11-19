@@ -173,9 +173,9 @@ describe('findConflictingVisits', () => {
     // Default status set mirrors createSelfBooking's commit gate exactly.
     expect(q.whereNotIn).toHaveBeenCalledWith('status', ['cancelled', 'skipped', 'no_show', 'rescheduled']);
     expect(DEFAULT_EXCLUDE_STATUSES).toEqual(['cancelled', 'skipped', 'no_show', 'rescheduled']);
-    // Expired holds never block; live ones do.
-    expect(q.whereNull).toHaveBeenCalledWith('reservation_expires_at');
-    expect(q.orWhereRaw).toHaveBeenCalledWith('reservation_expires_at > NOW()');
+    // Only an unclaimed hold releases its hour at expiry.
+    expect(q.whereNull).toHaveBeenCalledWith('scheduled_services.reservation_expires_at');
+    expect(q.orWhereRaw).toHaveBeenCalledWith('scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at > NOW()');
     // Same COALESCE(window_end, start + duration-or-60) overlap predicate as
     // the existing gates — window_start NULL rows evaluate NULL and stay
     // inert (converter/seeder placeholders never conflict).
@@ -294,6 +294,25 @@ describe('listOccupiedWindows', () => {
     expect(rows[0]).toMatchObject({ date: '2099-01-05', startMin: 540, endMin: 630 });
     expect(rows[1]).toMatchObject({ date: '2099-01-06', startMin: 780, endMin: 825 });
     expect(rows[2]).toMatchObject({ date: '2099-01-07', startMin: 480, endMin: 540 });
+  });
+
+  test('includeClaimedReservations counts every visit staff have booked; unset keeps the hold-timestamp filter', async () => {
+    const booked = 'scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at > NOW()';
+    for (const withCoords of [false, true]) {
+      const reads = {};
+      for (const includeClaimedReservations of [false, true]) {
+        const q = makeQuery([]);
+        const fake = jest.fn(() => q);
+        fake.raw = jest.fn((sql) => sql);
+        await listOccupiedWindows({ db: fake, dateFrom: '2099-01-01', dateTo: '2099-01-01', withCoords, includeClaimedReservations });
+        reads[includeClaimedReservations] = q.orWhereRaw.mock.calls.map(([sql]) => sql);
+      }
+      const hold = withCoords ? 'scheduled_services.reservation_expires_at > NOW()' : 'reservation_expires_at > NOW()';
+      expect(reads.false).toContain(hold);
+      expect(reads.false).not.toContain(booked);
+      expect(reads.true).toContain(booked);
+      expect(reads.true).not.toContain(hold);
+    }
   });
 
   test('excludeServiceIds (the rescheduling row) passes through', async () => {

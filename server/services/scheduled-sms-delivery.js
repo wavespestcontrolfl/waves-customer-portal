@@ -16,6 +16,7 @@ const { requiresDurableFinalize } = require('./messaging/deferred-replay-registr
 // genuine SEPARATE reservation: preserving a prior attempt's evidence on a
 // bundled completion row before that row's own marker gets stripped.
 const { REVIEW_ASK_MARKER, reserveForRequest } = require('./messaging/review-ask-reservation');
+const { websiteLineRefusal } = require('./website-line-contact');
 
 // dispatchReviewAsk results that hold a queued review text for later.
 const REVIEW_HOLD_CODES = ['REVIEW_ASK_SPACING', 'REVIEW_HISTORY_UNAVAILABLE', 'REVIEW_SEND_BUSY', 'REVIEW_CLICK_STATE_UNAVAILABLE'];
@@ -91,6 +92,11 @@ const LINK_REFUSAL_PHRASE = {
   customer_link_phone_changed: 'The customer\'s phone no longer matches the number this text was queued for',
 };
 const LINK_REFUSAL_PHRASE_DEFAULT = 'A link in the text failed the link safety check';
+// The website-line check's codes (scheduledWebsiteLineRefusal below). The fix there is another line, not new words.
+const WEBSITE_LINE_REFUSAL_PHRASE = {
+  website_line_first_contact: 'It was set to go from a website-only line that this number never called or texted',
+  website_line_unverified: 'The website-only line it was set to go from could not be checked',
+};
 
 // One office alert per refused row, plain words, never the text or a phone number. The dedupe key is the row id,
 // so a re-run or a crash-recovered claim raises no second one.
@@ -99,10 +105,13 @@ async function raiseScheduledLinkAlert(msg, refusalCode) {
     const names = require('./admin-alert-names');
     const [first = '', ...rest] = (await names.lookupCustomerName(db, msg.customer_id)).split(' ');
     const who = first ? `${first}${rest.length ? ` ${rest[rest.length - 1][0]}` : ''}` : 'a customer';
-    const phrase = LINK_REFUSAL_PHRASE[refusalCode] || LINK_REFUSAL_PHRASE_DEFAULT;
+    const lineRefusal = Object.prototype.hasOwnProperty.call(WEBSITE_LINE_REFUSAL_PHRASE, refusalCode);
+    const phrase = WEBSITE_LINE_REFUSAL_PHRASE[refusalCode] || LINK_REFUSAL_PHRASE[refusalCode] || LINK_REFUSAL_PHRASE_DEFAULT;
     await require('./admin-alert-compose').raiseAdminAlert('alert', {
       area: 'Comms',
-      action: names.fitAction('Comms', who, [(name) => `rewrite the scheduled text to ${name}`]),
+      action: names.fitAction('Comms', who, [(name) => (lineRefusal
+        ? `send the text to ${name} from another line`
+        : `rewrite the scheduled text to ${name}`)]),
       why: `${phrase}, so it was not sent.`,
       severity: 'needs-you',
       link: msg.customer_id ? `/admin/communications?thread=${msg.customer_id}` : '/admin/communications',
@@ -112,7 +121,7 @@ async function raiseScheduledLinkAlert(msg, refusalCode) {
     }, {
       bell: true,
       dedupeKey: `scheduled-sms-link-refused:${msg.id}`,
-      detail: `A scheduled text to ${who} was not sent: ${phrase.charAt(0).toLowerCase()}${phrase.slice(1)}. Open Communications to rewrite it.`,
+      detail: `A scheduled text to ${who} was not sent: ${phrase.charAt(0).toLowerCase()}${phrase.slice(1)}. Open Communications to ${lineRefusal ? 'send it from another line' : 'rewrite it'}.`,
       metadata: { smsLogId: msg.id, refusalCode, customerId: msg.customer_id || null },
     });
   } catch (err) {
@@ -158,7 +167,32 @@ async function scheduledLinkRefusal(msg, meta, maxAttempts) {
   return { sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable, code: 'CUSTOMER_LINK_REFUSED', reason: refusal.code };
 }
 
-async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
+// The website-line rule (website-line-contact.js) run again right before the send: a website-only line texts only
+// someone who already called or texted it. The writer checks it when an operator queues a text, but the row can
+// change after that: the contact fan-out (customer-contact-fanout.js) moves a customer's queued texts to a new phone
+// and keeps from_phone. `to` is the recipient the replay sends to (scheduler.js resolveScheduledRecipient). Every row
+// the replay sends from its own from_phone is checked, whatever queued it. A resolve_from_by_customer row sends from
+// the customer's location line instead (scheduler.js), a replay with no phone (a registered Email-only billing
+// replay, scheduler.js canReplayBillingWithoutPhone) texts no one, and a line that is not website-only needs no read.
+//   - A refusal is terminal: the scheduler blocks the row and stamps blocked_code / blocked_reason. The office gets
+//     the same alert as a link refusal.
+//   - A failed read goes back on the bounded retry rail; when the attempts run out the row ends blocked and alerts.
+async function scheduledWebsiteLineRefusal(msg, meta, maxAttempts, to) {
+  if (meta.resolve_from_by_customer === true || !to) return null;
+  let reason = null;
+  try {
+    if (await websiteLineRefusal(msg.from_phone, to)) reason = 'website_line_first_contact';
+  } catch (err) {
+    logger.warn(`[scheduled-sms] website-line contact read failed for ${msg.id}: ${err.message}`);
+    reason = 'website_line_unverified';
+  }
+  if (!reason) return null;
+  const retryable = reason === 'website_line_unverified' && (Number(meta.scheduled_sms_attempts) || 1) < maxAttempts;
+  if (!retryable) await raiseScheduledLinkAlert(msg, reason);
+  return { sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable, code: 'WEBSITE_LINE_REFUSED', reason };
+}
+
+async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3, to = msg.to_phone) {
   const linkStop = await scheduledLinkRefusal(msg, meta, maxAttempts);
   if (linkStop) return linkStop;
   let reviewAsk = purpose === 'review_request' || !!meta.bundled_review_request_id
@@ -178,6 +212,11 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
       code: 'REVIEW_DELIVERY_UNCERTAIN_EXHAUSTED',
     };
   }
+  // After that exit: a row whose last attempt already reached the provider makes no new attempt, so the
+  // website-line check has nothing to stop there (a refusal would tell the office to send a text that may
+  // have arrived).
+  const lineStop = await scheduledWebsiteLineRefusal(msg, meta, maxAttempts, to);
+  if (lineStop) return lineStop;
   const clearUnsentReservation = async () => {
     if (!reviewAsk) return;
     await db('sms_log').where({ id: msg.id, status: 'sending' }).update({

@@ -9,6 +9,7 @@ const { technicianCurrentVisitFilter, lockOwnedLiveVisit } = require('./technici
 const logger = require('./logger');
 
 const AREA_KEYS = ['beds', 'lawn', 'mosquito'];
+const fertilizerMap = require('../../shared/fertilizer-map.json');
 const AREA_SOURCES = ['imagery', 'field', 'recorded', 'computed'];
 const propertyServiceAreasEnabled = () => gateEnvValue('GATE_PROPERTY_SERVICE_AREAS');
 const fail = (message, status = 400) => Object.assign(new Error(message), {
@@ -43,6 +44,49 @@ function areaVersion(property, primaryLawnSqft = null) {
     property.id, addressKey(property), property.is_primary, property.bed_sqft,
     property.property_sqft, primaryLawnSqft, property.service_area_measurements || {},
   ])).digest('hex');
+}
+
+// The plan belongs to this service address. Changing a property address must
+// never show a previous home's boundaries to either crew.
+function savedFertilizerMap(property) {
+  const saved = property.service_area_measurements;
+  return saved?.addressKey === addressKey(property) ? saved.fertilizerMap || null : null;
+}
+
+function fertilizerMapView(property) {
+  return { propertyId: property.id, version: areaVersion(property), map: savedFertilizerMap(property) };
+}
+
+async function readFertilizerMap(scope, req, knex = db) {
+  return fertilizerMapView(await loadAreaProperty(scope, req, knex));
+}
+
+async function saveFertilizerMap(scope, req, input, knex = db) {
+  const { cells, landmarks, version } = input || {};
+  if (typeof cells !== 'string' || cells.length !== fertilizerMap.rows * fertilizerMap.columns
+    || [...cells].some(cell => !Object.hasOwn(fertilizerMap.assignments, cell))) {
+    throw fail('Review the fertilizer map assignments.');
+  }
+  if (typeof landmarks !== 'string' || landmarks.length > 600 || (!landmarks.trim() && /[^.]/.test(cells))) {
+    throw fail('Describe the boundaries on site in 600 characters or fewer.');
+  }
+  return knex.transaction(async trx => {
+    const property = await loadAreaProperty(scope, req, trx, { lock: true });
+    if (version !== areaVersion(property)) throw fail('The property changed. Reload the map before saving.', 409);
+    const key = addressKey(property);
+    const previous = property.service_area_measurements;
+    const map = { cells, landmarks: landmarks.trim(), reviewedAt: new Date().toISOString(), reviewedBy: req.technicianId };
+    const measurements = { ...(previous?.addressKey === key ? previous : {}), addressKey: key, fertilizerMap: map };
+    const [updated] = await trx('customer_properties').where({ id: property.id })
+      .update({ service_area_measurements: measurements, updated_at: trx.fn.now() }).returning('*');
+    await require('./audit-log').recordAuditEvent({
+      actor_type: req.techRole === 'admin' ? 'admin' : 'technician', actor_id: req.technicianId,
+      action: 'property_fertilizer_map_reviewed', resource_type: 'customer_property', resource_id: property.id,
+      metadata: { service_id: scope.serviceId || null, before: savedFertilizerMap(property), after: map },
+      critical: true, trx,
+    });
+    return fertilizerMapView(updated);
+  });
 }
 
 // The customer row and its primary property name the same address. addressKey
@@ -198,8 +242,10 @@ async function saveAreaMeasurements(scope, req, input, { knex = db } = {}) {
     const next = { ...before };
     const reviewedAt = new Date().toISOString();
     for (const [key, value] of Object.entries(changes)) next[key] = { ...value, reviewedAt, reviewedBy: req.technicianId };
+    const feedingPlan = savedFertilizerMap(property);
     await trx('customer_properties').where({ id: property.id }).update({
-      service_area_measurements: { addressKey: addressKey(property), areas: next },
+      service_area_measurements: { addressKey: addressKey(property), areas: next,
+        ...(feedingPlan && { fertilizerMap: feedingPlan }) },
       ...(changes.beds ? { bed_sqft: changes.beds.sqft } : {}),
       ...(changes.lawn ? { property_sqft: changes.lawn.sqft } : {}), updated_at: trx.fn.now(),
     });
@@ -259,6 +305,7 @@ async function snapshotVisitArea(input, service, req, knex = db, { treatmentEvid
 }
 
 module.exports = { resolveVisitPropertyId, AREA_KEYS, AREA_SOURCES, propertyServiceAreasEnabled, areaNumber, areaVersion, reviewedAreas,
+  readFertilizerMap, saveFertilizerMap,
   validateAreaChanges, lookupSuggestions, loadAreaProperty, readAreaMeasurements, saveAreaMeasurements, snapshotVisitArea,
   hasAreaMeasurementsColumn, sameCustomerAddress,
   _resetAreaColumnCache: () => { areaColumnKnown = false; } };

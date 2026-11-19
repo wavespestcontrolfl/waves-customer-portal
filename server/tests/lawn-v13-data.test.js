@@ -38,6 +38,7 @@ const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
 const nameOfLine = (line) => line.split(' — ')[0];
 const visitFor = (month) => v13.st_augustine.visits.find((v) => v.month === MONTH_ABBR[month - 1]);
 const lines = (text) => String(text || '').split('\n').filter(Boolean);
+const productLines = (text) => lines(text).filter((line) => line.includes(' — '));
 
 describe('the v13 recipe', () => {
   test('three tracks (no bahia), one universal program, 12 months in the existing visit shape', () => {
@@ -79,14 +80,32 @@ describe('the v13 recipe', () => {
     expect(visitFor(3).secondary).toMatch(/artavia/i);
   });
 
-  test('line grammar the plan engine depends on: no "if", no scope words, one product per line', () => {
+  test('line grammar the plan engine depends on: product lines use the separator and bare scout steps classify as inspections', () => {
+    const inspectionMonths = [];
     for (const visit of v13.st_augustine.visits) {
       for (const line of lines(visit.primary)) {
         expect(line).not.toMatch(/\bif\b|skip|audit|premium|history|drive by|soil sample/i);
-        if (visit.month !== 'Jul') expect(line).toMatch(/ — /);
+        const [parsed] = engine.parseProtocolLines(line, 'base', { exactName: true });
+        if (line.includes(' — ')) {
+          expect(parsed.scope).not.toBe('INSPECTION_ONLY');
+        } else {
+          inspectionMonths.push(visit.month);
+          expect(parsed).toMatchObject({ scope: 'INSPECTION_ONLY', product: null, areaFactorDefault: 0 });
+        }
       }
       for (const line of [...lines(visit.primary), ...lines(visit.secondary)]) expect(line).not.toMatch(/\$\d/);
     }
+    expect(inspectionMonths).toEqual(['May', 'Jul']);
+  });
+
+  test('May is scout-only by default and keeps Tetrino as a conditional product', () => {
+    const may = visitFor(5);
+    expect(productLines(may.primary)).toEqual([]);
+    expect(productLines(may.secondary).map(nameOfLine)).toContain(migration.NAMES.TET);
+    expect(engine.parseProtocolLines(may.primary, 'base', { exactName: true })[0]).toMatchObject({ scope: 'INSPECTION_ONLY', product: null });
+    expect(engine.parseProtocolLines(productLines(may.secondary)[0], 'conditional', { exactName: true })[0]).toMatchObject({
+      role: 'conditional', conditional: true, scope: 'CONDITIONAL_RESCUE',
+    });
   });
 
   test('July is inspect and spot: its primary line classifies as inspection (no area, no product)', () => {
@@ -110,10 +129,10 @@ describe('the v13 recipe', () => {
   });
 
   test('whole-lawn tools per month match the approved program', () => {
-    const tools = MONTHS.map((m) => lines(visitFor(m).primary).filter((l) => / — /.test(l)).map(nameOfLine));
+    const tools = MONTHS.map((m) => productLines(visitFor(m).primary).map(nameOfLine));
     const N = migration.NAMES;
     expect(tools).toEqual([
-      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [aprilPolymerMigration.NEW_NAME], [N.TET], [N.NT, N.DIM], [], [N.NT, potassiumMigration.NAME], [N.NT, potassiumMigration.NAME], [octoberMigration.NEW_NAME], [N.F24], [decemberMigration.NEW_NAME],
+      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [aprilPolymerMigration.NEW_NAME], [], [N.NT, N.DIM], [], [N.NT, potassiumMigration.NAME], [N.NT, potassiumMigration.NAME], [octoberMigration.NEW_NAME], [N.F24], [decemberMigration.NEW_NAME],
     ]);
   });
 });
@@ -325,7 +344,7 @@ describe('staged migration 20261005120000', () => {
     expect(db.lawn_protocols.filter((p) => p.version === LAWN_V13_VERSION).length).toBe(3);
   });
 
-  test('default_in_plan is true only for the whole-lawn tool, and matches the recipe', () => {
+  test('historical defaults remain intact while the current recipe names today\'s routine and conditional products', () => {
     for (const month of MONTHS) {
       const [, windowKey] = migration.WINDOWS.find((w) => w[0] === month);
       const rowsForWindow = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, spec]) => spec);
@@ -354,13 +373,25 @@ describe('staged migration 20261005120000', () => {
       const potassiumRows = potassiumMigration.WINDOWS.filter((w) => w.key === windowKey).map(() => potassiumMigration.NAME);
       whole.push(...potassiumRows);
       const visit = visitFor(month);
-      expect(whole.sort()).toEqual(lines(visit.primary).filter((l) => / — /.test(l)).map(nameOfLine).sort());
+      const currentWhole = productLines(visit.primary).map(nameOfLine);
+      // This applied migration records the original May program, when Tetrino was the default broadcast.
+      // The current recipe makes May scout-only and lists Tetrino conditionally; do not rewrite migration history.
+      if (month === 5) {
+        expect(whole).toEqual([migration.NAMES.TET]);
+        expect(currentWhole).toEqual([]);
+      } else {
+        expect(whole.sort()).toEqual(currentWhole.sort());
+      }
       // The staged rows of 120000 carry no Blindside; 140000 adds them (tested below).
       // Migration 20261007150000 retires the Dismiss rows and the recipe drops its lines (use up the jug, do not reorder).
       // 20261008130000 retires February's Certainty and surfactant rows (Celsius alone in February); the recipe lines are gone.
       const retiredHere = new Set((decemberMigration.RETIRE.find(([key]) => key === windowKey) || [, []])[1]);
-      // 20261119010000 (house bifenthrin, owner 2026-11-18) links every staged Talak row to LESCO Crosscheck Plus; the recipe names it.
-      expect(spots.filter((n) => n !== migration.NAMES.DIS && !retiredHere.has(n)).map((n) => (n === migration.NAMES.TAL ? 'LESCO Crosscheck Plus' : n)).sort()).toEqual([...new Set(lines(visit.secondary).map(nameOfLine))].filter((n) => n !== BLINDSIDE).sort());
+      const currentConditional = [...new Set(productLines(visit.secondary).map(nameOfLine))]
+        .filter((n) => n !== BLINDSIDE && !(month === 5 && n === migration.NAMES.TET));
+      // Migration 20261119010000 links the staged Talak rows to Crosscheck.
+      const activeSpots = spots.filter((name) => name !== migration.NAMES.DIS && !retiredHere.has(name))
+        .map((name) => (name === migration.NAMES.TAL ? 'LESCO Crosscheck Plus' : name));
+      expect(activeSpots.sort()).toEqual(currentConditional.sort());
       // Spot products are application_mode spot except the granular Dylox; broadcast only for the tool.
       for (const s of rowsForWindow) {
         if (s[6]) expect(s[2]).toBe('broadcast');

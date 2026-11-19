@@ -72,7 +72,8 @@ import FastCompleteWrapUp, { useWrapUp } from './FastCompleteWrapUp';
 import { rowsShowSpray } from '../../lib/spray-evidence';
 import { withPestCheck } from '../../lib/tree-shrub-pest-check';
 import { evaluateNeonicCap } from '../../lib/tree-shrub-neonic-cap';
-import { Button, ActionFeedback, cn } from '../ui';
+import FERTILIZER_EVIDENCE from '../../../../shared/tree-shrub-fertilizer-evidence.json';
+import { Button, Input, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
 // The typed form's option lists (server/services/project-types.js tree_shrub
@@ -103,6 +104,8 @@ const BEES_ACTIVE = 'Blooming — bees active';
 // The server's own words for this block (tree-shrub-closeout.js).
 const BEES_ACTIVE_MESSAGE = 'Do not complete bee-sensitive insect/contact applications on blooming plants while bees are active.';
 const NP_BLACKOUT_TEXT = 'N/P blackout — can’t apply Jun 1–Sep 30';
+const NUTRIROOT_SOIL_TEST_BASIS = FERTILIZER_EVIDENCE.nutriRoot.soilTestBasis;
+const NUTRIROOT_ALREADY_APPLIED_BASIS = FERTILIZER_EVIDENCE.nutriRoot.alreadyAppliedBasis;
 
 // The server's jointMosquitoAccount flag: this account also has mosquito service
 // (the T&S protocol asks for a scale / sooty mold / mite check at every visit).
@@ -246,7 +249,7 @@ function decisionAction(action) {
 // editable, and cannot be sent without one.
 const needsBedArea = (product) => /\b13-0-13\b/.test(String(product?.name || ''));
 
-function productRow(product, { method, last = null, added = false, bedSqft = null }) {
+function productRow(product, { method, last = null, added = false, bedSqft = null, heldReason = '' }) {
   const flags = flagsOf(product);
   const own = productUnits(product, { method });
   // The 13-0-13 amount starts blank (its dose follows the treated square feet, not last time's bag).
@@ -272,6 +275,7 @@ function productRow(product, { method, last = null, added = false, bedSqft = nul
     added,
     active: false,
     blocked: !!flags.npBlackout,
+    heldReason,
     dimension,
     totalAmount: seeded.amount,
     amountUnit: seeded.unit,
@@ -287,8 +291,8 @@ const hasBedArea = (row) => !row.needsArea || Number(row.areaValue) > 0;
 // product, such as the palm feed, gets the reason alone.
 const heldLine = (row, holds) => {
   const hold = holds.find((item) => item.name === row.name);
-  if (!hold) return null;
-  const reason = String(hold.reason).replace(/\.\s*$/, '');
+  const reason = String(row.heldReason || hold?.reason || '').replace(/\.\s*$/, '');
+  if (!reason) return null;
   return row.needsArea ? `Held: ${reason}. It will be recorded and the office will review it.` : `Held: ${reason}.`;
 };
 
@@ -454,11 +458,23 @@ function useProductRows(ctx) {
       : row)));
   }, []);
   const addProduct = useCallback((product) => {
+    const flags = flagsOf(product);
+    const monthHoldReason = ctx.monthProductHolds.find((item) => item.name === product.name)?.reason || '';
+    const heldReason = monthHoldReason || flags.nutriRootHoldReason || '';
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
-      { ...productRow(product, { method: catalogMethod(product), last: lastAmounts[String(product.id)] || null, added: true, bedSqft: ctx.bedSqft }), active: !flagsOf(product).npBlackout },
+      {
+        ...productRow(product, {
+          method: catalogMethod(product), last: lastAmounts[String(product.id)] || null, added: true, bedSqft: ctx.bedSqft, heldReason,
+        }),
+        // An interval/history hold is advisory for an application the tech is
+        // already recording, so selecting the catalog result opens its editor.
+        // NutriRoot's ordinance/evidence hold requires a separate confirmation
+        // tap before its application-basis controls and actuals are enabled.
+        active: !flags.npBlackout && !flags.nutriRootHoldReason,
+      },
     ]));
-  }, [lastAmounts, ctx.bedSqft]);
+  }, [lastAmounts, ctx.bedSqft, ctx.monthProductHolds]);
   const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
   // A fresh stock read changes each row's stock on hand, nothing the tech set.
   const applyStock = useCallback((fresh) => {
@@ -504,6 +520,7 @@ function missingRequirement({ form, rows, slots, photoBusy, ctx, dictationPendin
   const missingArea = active.find((row) => !hasBedArea(row));
   const insect = active.some((row) => flagsOf(row.product).insectFamily);
   const manualIrac = needsManualIrac(rows, ctx);
+  const nutriRoot = active.find((row) => flagsOf(row.product).nutriRoot);
   const [, reason = ''] = [
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
@@ -516,6 +533,8 @@ function missingRequirement({ form, rows, slots, photoBusy, ctx, dictationPendin
     [insect && !form.pollinator, 'Select the flowering / bee status.'],
     [insect && form.pollinator === BEES_ACTIVE, BEES_ACTIVE_MESSAGE],
     [manualIrac && form.irac !== 'Yes', 'Confirm the IRAC / FRAC rotation was checked and logged.'],
+    [nutriRoot && ![NUTRIROOT_SOIL_TEST_BASIS, NUTRIROOT_ALREADY_APPLIED_BASIS].includes(form.nutriRootBasis), 'Record the NutriRoot application basis.'],
+    [nutriRoot && form.nutriRootBasis === NUTRIROOT_SOIL_TEST_BASIS && !String(form.nutriRootSoilTestReference || '').trim(), 'Enter the P-deficient soil-test report date or file reference.'],
     [!form.plantGroups.size, 'Select the plant groups serviced.'],
     [!form.condition, 'Select the overall landscape condition.'],
   ].find(([missing]) => missing) || [];
@@ -566,6 +585,14 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
         // Yes when the app ran the rotation check (the context loaded its
         // warnings) or the tech confirmed it by hand.
         ...(irac ? { irac_frac_logged: 'Yes' } : {}),
+        ...(active.some((row) => flagsOf(row.product).nutriRoot) && form.nutriRootBasis
+          ? { nutriroot_application_basis: form.nutriRootBasis }
+          : {}),
+        ...(active.some((row) => flagsOf(row.product).nutriRoot)
+          && form.nutriRootBasis === NUTRIROOT_SOIL_TEST_BASIS
+          && String(form.nutriRootSoilTestReference || '').trim()
+          ? { nutriroot_soil_test_reference: String(form.nutriRootSoilTestReference).trim().slice(0, 240) }
+          : {}),
         // Optional internal costing fact (project-types.js spray_mix_gallons);
         // blank stays absent so the typed-findings validator never sees ''.
         // Sent only while a LIQUID product is still on the visit: the field
@@ -699,7 +726,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     // What the server says was serviced last time, kept to the form's own options.
     plantGroups: new Set(PLANT_GROUP_OPTIONS.filter((option) => (ctx.lastVisit?.plantGroups || []).includes(option))),
     areas: new Set(AREA_OPTIONS.filter((option) => (ctx.lastVisit?.areasTreated || []).includes(option))),
-    condition: '', pollinator: '', irac: '', tipId: '', customTip: '',
+    condition: '', pollinator: '', irac: '', nutriRootBasis: '', nutriRootSoilTestReference: '', tipId: '', customTip: '',
     // Gallons of finished spray mix used this visit (owner 2026-10-21): an
     // optional costing fact for the spray-volume material model, never on
     // the customer report.
@@ -766,6 +793,8 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   const active = rows.filter((row) => row.active);
   const insect = active.some((row) => flagsOf(row.product).insectFamily);
   const iracRows = active.some((row) => flagsOf(row.product).needsIracFrac);
+  const nutriRootRows = active.filter((row) => flagsOf(row.product).nutriRoot);
+  const nutriRootSoilTestEligible = nutriRootRows.some((row) => flagsOf(row.product).nutriRootSoilTestEligible);
   const suggested = previewCurrent && CONDITION_OPTIONS.includes(photos.preview.result?.suggestedCondition)
     ? photos.preview.result.suggestedCondition
     : '';
@@ -797,7 +826,39 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
           {(insect || iracRows) && (
             <ComplianceSection form={form} setField={setField} insect={insect} iracRows={iracRows} manualIrac={needsManualIrac(rows, ctx)} locked={locked} />
           )}
-          <ChoiceSection title="Plant groups serviced" columns={2}>
+          {nutriRootRows.length > 0 && (
+            <>
+              <ChoiceSection title="NutriRoot application basis" columns={1}>
+                {[
+                  ...(nutriRootSoilTestEligible ? [NUTRIROOT_SOIL_TEST_BASIS] : []),
+                  NUTRIROOT_ALREADY_APPLIED_BASIS,
+                ].map((basis) => (
+                  <Chip
+                    disabled={locked}
+                    key={basis}
+                    label={basis}
+                    pressed={form.nutriRootBasis === basis}
+                    onClick={() => setField('nutriRootBasis', form.nutriRootBasis === basis ? '' : basis)}
+                  />
+                ))}
+              </ChoiceSection>
+              {form.nutriRootBasis === NUTRIROOT_SOIL_TEST_BASIS && (
+                <div className="tech-visit-choice-section">
+                  <label className="tech-product-editor-label" htmlFor="tree-shrub-nutriroot-soil-test-reference">Soil-test report date / file reference</label>
+                  <Input
+                    id="tree-shrub-nutriroot-soil-test-reference"
+                    className="tech-visit-control"
+                    value={form.nutriRootSoilTestReference}
+                    maxLength={240}
+                    disabled={locked}
+                    placeholder="e.g. UF report 2026-10-14, customer file"
+                    onChange={(event) => setField('nutriRootSoilTestReference', event.target.value)}
+                  />
+                </div>
+              )}
+            </>
+          )}
+          <ChoiceSection title={insect ? 'Host / plant groups serviced' : 'Plant groups serviced'} columns={2}>
             {PLANT_GROUP_OPTIONS.map((label) => (
               <Chip disabled={locked} key={label} label={label} pressed={form.plantGroups.has(label)} onClick={() => setField('plantGroups', toggleInSet(form.plantGroups, label))} />
             ))}
@@ -1232,6 +1293,7 @@ function ProductsSection({ ctx, products, neonicLines, locked, other, popover, i
 function ProductTile({ row, locked, onClick }) {
   let detail = 'Tap if applied';
   if (row.blocked) detail = NP_BLACKOUT_TEXT;
+  else if (!row.active && row.heldReason) detail = `Held: ${String(row.heldReason).replace(/\.\s*$/, '')}`;
   else if (row.active) detail = hasAmount(row) ? amountText(row.totalAmount, row.amountUnit) : 'How much?';
   return (
     <ProductTileButton

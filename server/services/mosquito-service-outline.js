@@ -25,7 +25,7 @@ const {
   makeSection,
   parseJsonMaybe,
   renderOutlineHtml,
-  resolveJurisdictionId,
+  resolveOutlineJurisdictionId,
   resolveSeasonBand,
   validateContent,
 } = require('./lawn-service-outline');
@@ -277,7 +277,7 @@ async function buildMosquitoOutline({ db, estimate, input = {}, now = new Date()
   const month = Number(input.month || currentMonthNumber(now));
   const seasonBand = resolveSeasonBand(month);
   // Mosquito has no fertilizer rule, but the packet records its rule area as every outline does (validateContent).
-  const jurisdictionId = input.jurisdictionId || resolveJurisdictionId(estimate.address);
+  const jurisdictionId = resolveOutlineJurisdictionId(input, estimate, estimateData);
   const jurisdictionRule = await loadFertilizerRule(db, jurisdictionId);
   const ruleJurisdictionId = jurisdictionRule?.jurisdiction_id || jurisdictionId;
   const productList = await loadMosquitoProductList(db, addOns);

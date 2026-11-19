@@ -17,13 +17,14 @@ const {
   currentMonthNumber,
   estimateSnapshot,
   estimateViewPath,
+  fertilizerSetbackTiles,
   firstNonEmpty,
   isRestrictedSeason,
   loadFertilizerRule,
   makeSection,
   parseJsonMaybe,
   renderOutlineHtml,
-  resolveJurisdictionId,
+  resolveOutlineJurisdictionId,
   resolveSeasonBand,
   validateContent,
 } = require('./lawn-service-outline');
@@ -118,23 +119,23 @@ const TS_COPY = Object.freeze({
     { icon: 'rotate', title: 'Resistance management', text: 'Products are rotated by chemical group and logged after every use.' },
   ].map((tile) => Object.freeze(tile))),
   yearTitle: 'Your Year At A Glance',
-  yearBody: 'Each visit does the work of the month it falls in. This month and the next two are open; tap any month to see what a visit then does and one thing to do at home. Feedings and the bed weed barrier go down only when due.',
+  yearBody: 'Each visit does the work of the month it falls in. This month and the next two are open; tap any month to see what a visit then does and one thing to do at home. The bed weed barrier goes down only when due. Shrub feeding also needs a documented plant or site need; timing alone is not a reason to feed.',
   limitLabel: 'Local summer limits on nitrogen and phosphorus',
   // The month's visit line and one thing to do at home: the protocol card's work in plain words, and an approved
   // report tip or a UF/IFAS fact word for word.
   months: Object.freeze({
     1: { visit: 'Weed barrier and winter palm feeding when due; insect, oil and iron treatments only where needed.', atHome: 'After a cold snap, wait until spring growth starts before cutting back damaged branches.' },
-    2: { visit: 'A spray visit for scale, mites and whitefly where found; the spring shrub feeding goes down if due.', atHome: 'Leave yellowing lower palm fronds on; the palm pulls nutrients from them, and cutting them speeds the decline.' },
+    2: { visit: 'A spray visit for scale, mites and whitefly where found; spring shrub feeding only where a need is documented and history says it is due.', atHome: 'Leave yellowing lower palm fronds on; the palm pulls nutrients from them, and cutting them speeds the decline.' },
     3: { visit: 'A spray visit aimed at whitefly and scale before summer, where found.', atHome: 'Rinsing dusty shrubs with plain water during dry spells helps keep mites from building up.' },
-    4: { visit: 'Feedings when due and allowed; scale crawlers and young whitefly checked for.', atHome: 'Whitefly and scale live on the underside of leaves, so that’s the best place to look between visits.' },
-    5: { visit: 'The last nitrogen feedings before the summer limits, where allowed.', atHome: 'When fronds are trimmed, keep everything above the 9-to-3 o’clock line on the palm.' },
-    6: { visit: 'Summer limits: palms may get a feeding with no nitrogen or phosphorus; heat-stressed plants are noted, not sprayed.', atHome: 'Beds that stay soggy for days are where root rot starts; check for a stuck zone or a broken head.' },
+    4: { visit: 'Palm feeding when due; shrub feeding only for a documented need. Scale crawlers and young whitefly are checked for.', atHome: 'Whitefly and scale live on the underside of leaves, so that’s the best place to look between visits.' },
+    5: { visit: 'We check established shrubs for a documented need before their last spring feeding opportunity.', atHome: 'When fronds are trimmed, keep everything above the 9-to-3 o’clock line on the palm.' },
+    6: { visit: 'We use a summer palm fertilizer with no nitrogen or phosphorus when a feeding is due. We hold sprays on heat-stressed plants.', atHome: 'Beds that stay soggy for days are where root rot starts; check for a stuck zone or a broken head.' },
     7: { visit: 'A scouting visit: bed weeds, whitefly, scale crawlers, palm symptoms and heat stress; treatment only where found.', atHome: 'Fresh chewing on new growth is often caterpillars; a quick look at dusk can spot them.' },
     8: { visit: 'Lightest on products, heaviest on looking; whitefly treated by life stage where found.', atHome: 'New trees and shrubs need extra water at first. UF/IFAS says a small new tree needs daily water for its first 2 weeks, and full establishment takes 3 to 4 months per inch of trunk thickness. The watering rules allow new plants extra days for their first 60.' },
     9: { visit: 'Late-summer scale and whitefly treated where found.', atHome: 'After saltwater flooding, UF/IFAS says to flush the soil thoroughly with fresh water to move the salt down through it, and not to rush to prune or pull plants that look burned. Text us a photo.' },
-    10: { visit: 'The fall reset: weed barrier and nitrogen feedings again where allowed, and a fall scale check.', atHome: 'When the sprinklers go back up after the rains, check that they reach the beds without hitting stems and trunks.' },
-    11: { visit: 'A cool-season cleanup, not a dormant spray: late-fall feedings when due, micronutrients where needed.', atHome: 'UF/IFAS says 2 to 3 inches of mulch controls weeds without smothering the roots, and more than 3 inches can hurt the plants. Topping up the thin spots in the beds helps between visits.' },
-    12: { visit: 'Feedings when due; declining palms and stubborn yellowing get a closer look for next year’s plan.', atHome: 'After a freeze, leave brown palm fronds on until the cold season ends; we check the spear leaf at the next visit.' },
+    10: { visit: 'The fall reset: weed barrier when due, feeding only where a documented need supports it, and a fall scale check.', atHome: 'When the sprinklers go back up after the rains, check that they reach the beds without hitting stems and trunks.' },
+    11: { visit: 'A cool-season cleanup, not a dormant spray: established shrubs with no documented need are inspected, not fed; micronutrients go only where needed.', atHome: 'UF/IFAS says 2 to 3 inches of mulch controls weeds without smothering the roots, and more than 3 inches can hurt the plants. Topping up the thin spots in the beds helps between visits.' },
+    12: { visit: 'Palm feeding when due and shrub feeding only for a documented need; declining palms and stubborn yellowing get a closer look.', atHome: 'After a freeze, leave brown palm fronds on until the cold season ends; we check the spear leaf at the next visit.' },
   }),
   problemsTitle: 'Problems We Watch For',
   problemsBody: 'How to spot common Southwest Florida plant problems, and what we do.',
@@ -153,7 +154,7 @@ const TS_COPY = Object.freeze({
     { key: 'inspection', label: 'Inspection', text: 'Every palm, bed and tree, each visit; some visits are inspection only.' },
     { key: 'barrier', label: 'Bed weed barrier', text: 'A granular pre-emergent in beds, at least 60 days apart; it stops weed seeds, not weeds already up.' },
     { key: 'feeding', label: 'Palm fertilizer', text: 'Slow-release, spread under the whole canopy, at least three months apart.' },
-    { key: 'feeding', label: 'Shrub fertilizer', text: 'Slow-release, up to twice a year in spring and late fall, below the bag’s amount to stay inside the county nitrogen limit.' },
+    { key: 'feeding', label: 'Shrub fertilizer', text: 'Slow-release and never routine: only for a documented plant or site need, up to twice a year in spring and late fall, below the bag’s amount to stay inside the county nitrogen limit.' },
     { key: 'micros', label: 'Micronutrients', text: 'Iron, manganese or soil acidifier, only where a shortage shows.' },
     { key: 'insects', label: 'Insect and mite control', text: 'Sprays on live finds, matched to the life stage. Root-zone (neonicotinoid) treatments only where the same pest has come back, within a yearly limit.' },
     { key: 'insects', label: 'Spray oil', text: 'For live scale crawlers and mites; never above 90°F, on drought-stressed plants or before a cold snap.' },
@@ -164,7 +165,7 @@ const TS_COPY = Object.freeze({
   visitSteps: Object.freeze([
     { icon: 'inspection', title: 'Check', text: 'Every palm, bed and tree: leaves, stems, trunks, soil moisture, mulch and sprinkler spray' },
     { icon: 'decide', title: 'Decide', text: 'Treat, fix the site, or watch, by pest, life stage, blooms, weather, label and local rules' },
-    { icon: 'treat', title: 'Treat', text: 'Bed and palm granules when due, then spot sprays only where needed' },
+    { icon: 'treat', title: 'Treat', text: 'Bed barrier and palm granules when due; shrub feed only for a documented need; spot sprays only where needed' },
     { icon: 'report', title: 'Report', text: 'Products with EPA numbers, findings, photos, and next steps for you' },
   ].map((step) => Object.freeze(step))),
   afterTreatmentTitle: 'After A Treatment',
@@ -252,7 +253,7 @@ function monthsVisual(jurisdictionRule, month) {
       label,
       name: FULL_MONTHS[index],
       ...monthSteps(card),
-      limited: isRestrictedSeason(jurisdictionRule, number),
+      limited: isRestrictedSeason(jurisdictionRule, number, 'landscape'),
       visit: TS_COPY.months[number].visit,
       atHome: TS_COPY.months[number].atHome,
       open: open.has(number),
@@ -272,12 +273,19 @@ function yourPartTiles(jurisdictionId, now) {
   return [TS_COPY.keepDryTile, ...(orderLive ? [{ ...TS_COPY.wateringOrderTile, until: WATERING_ORDER.until }] : []), ...TS_COPY.yourPartTiles];
 }
 
-// The rule area and its summary come from the rule the outline resolved, as on the lawn outline; no dates.
+function landscapeRuleSummary(rule) {
+  return rule?.jurisdiction_id === 'north_port_fl'
+    ? 'North Port allows fertilizer on landscape plants during the turf restriction. At least 50% of the nitrogen in fertilizer for landscape plants must be slow-release.'
+    : rule?.public_summary || null;
+}
+
 function ruleTiles(jurisdictionRule) {
+  const northPort = jurisdictionRule?.jurisdiction_id === 'north_port_fl';
   return [
     { icon: 'area', title: 'Your rule area', text: jurisdictionRule?.jurisdiction_name || 'To be confirmed' },
-    { icon: 'calendar', title: 'What it limits', text: jurisdictionRule?.public_summary || 'Local fertilizer rules may affect what nutrient products can be used.' },
-    { icon: 'micros', title: 'What we do instead', text: TS_COPY.rulesInstead },
+    { icon: 'calendar', title: 'What it limits', text: landscapeRuleSummary(jurisdictionRule) || 'Local fertilizer rules may affect what nutrient products can be used.' },
+    { icon: 'micros', title: 'Our summer program', text: northPort ? TS_COPY.months[6].visit : TS_COPY.rulesInstead },
+    ...fertilizerSetbackTiles(jurisdictionRule),
   ];
 }
 
@@ -305,9 +313,9 @@ async function buildTreeShrubOutline({ db, estimate, input = {}, now = new Date(
   const estimateData = parseJsonMaybe(estimate.estimate_data || estimate.estimateData) || {};
   const month = Number(input.month || currentMonthNumber(now));
   const seasonBand = resolveSeasonBand(month);
-  const jurisdictionId = input.jurisdictionId || resolveJurisdictionId(estimate.address);
+  const jurisdictionId = resolveOutlineJurisdictionId(input, estimate, estimateData);
   const jurisdictionRule = await loadFertilizerRule(db, jurisdictionId);
-  const restrictedSeasonActive = isRestrictedSeason(jurisdictionRule, month);
+  const restrictedSeasonActive = isRestrictedSeason(jurisdictionRule, month, 'landscape');
   const ruleJurisdictionId = jurisdictionRule?.jurisdiction_id || jurisdictionId;
   const snapshot = estimateSnapshot(estimate, estimateData);
   const customerName = firstNonEmpty(snapshot.customerName, 'your property');
@@ -337,7 +345,7 @@ async function buildTreeShrubOutline({ db, estimate, input = {}, now = new Date(
       jurisdictionId: ruleJurisdictionId,
       jurisdictionName: jurisdictionRule?.jurisdiction_name || null,
       version: jurisdictionRule?.version || null,
-      summary: jurisdictionRule?.public_summary || null,
+      summary: landscapeRuleSummary(jurisdictionRule),
       restrictedSeasonActive,
     },
     sections: treeShrubSections({ month, jurisdictionRule, now }),

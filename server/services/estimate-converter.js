@@ -9478,6 +9478,9 @@ module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
+// The office's manual accept registers, after its commit, the reminders this converter deferred for the visits it
+// seeded inside the accept's transaction (deferFollowUpReminderRegistration; estimate-manual-acceptance.js).
+module.exports.registerSeededFollowUpReminders = registerSeededFollowUpReminders;
 module.exports.seedingFamilyKey = seedingFamilyKey;
 module.exports.isCommercialRecurringLine = isCommercialRecurringLine;
 module.exports.seedRecurringFollowUpsForParent = seedRecurringFollowUpsForParent;

@@ -35,6 +35,9 @@ jest.mock('../services/sms-auto-send', () => ({
 // it is a pure string builder (never touches the DB), and bookedSinceCall's
 // own mocked chain.whereRaw ignores whatever string it returns, so there is
 // no reason to fake it.
+// The website-only line contact read (its own suites run its SQL); here only
+// this lane's use of the answer is under test.
+jest.mock('../services/website-line-contact', () => ({ websiteLineRefusal: jest.fn(async () => null) }));
 jest.mock('../services/outbound-call-reason', () => ({
   hasPriorContact: jest.fn(),
   nanpStoredPhoneClause: jest.requireActual('../services/outbound-call-reason').nanpStoredPhoneClause,
@@ -47,12 +50,14 @@ const { isEnabled } = require('../config/feature-gates');
 const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { hasPriorContact } = require('../services/outbound-call-reason');
+const { websiteLineRefusal } = require('../services/website-line-contact');
 const { isAmbiguousProviderOutcome } = require('../services/sms-auto-send');
 const {
   computeSendAt,
   callEndFor,
   conversationSeconds,
   managedLineForCall,
+  bookingTextLine,
   stagingIneligibleReason,
   outboundPriorContactMissing,
   outboundStagingReason,
@@ -328,6 +333,38 @@ describe('managedLineForCall', () => {
     delete process.env.INTERNAL_ALERT_CALLER_ID;
     expect(TWILIO_NUMBERS.internalAlertLine()).toBeNull(); // falls back to main line — no distinct alert line to exclude
     expect(managedLineForCall({ direction: 'inbound', to_phone: PARRISH })).toBe(PARRISH);
+  });
+});
+
+// ── bookingTextLine — a website-only line only for someone who dialed it ──
+describe('bookingTextLine', () => {
+  const WEB_LINE = '+19412542617';
+  const PERSON = '+19415550100';
+  beforeEach(() => { websiteLineRefusal.mockClear(); });
+  // An unused once-answer must not leak into a later test.
+  afterEach(() => { websiteLineRefusal.mockReset(); websiteLineRefusal.mockResolvedValue(null); });
+
+  test('an inbound call from the destination to the line keeps it, with no contact read', async () => {
+    expect(await bookingTextLine({ direction: 'inbound', from_phone: PERSON, to_phone: WEB_LINE }, '9415550100')).toBe(WEB_LINE);
+    expect(websiteLineRefusal).not.toHaveBeenCalled();
+  });
+
+  test('an outbound call from the line proves no contact: the person called gets the check', async () => {
+    websiteLineRefusal.mockResolvedValueOnce('refused');
+    expect(await bookingTextLine({ direction: 'outbound-api', from_phone: WEB_LINE, to_phone: PERSON }, PERSON)).toBeNull();
+    expect(websiteLineRefusal).toHaveBeenCalledWith(WEB_LINE, PERSON);
+  });
+
+  test('a call whose line is the bridge caller ID, not the dialed line, gets the check', async () => {
+    websiteLineRefusal.mockResolvedValueOnce('refused');
+    const bridged = { direction: 'inbound', from_phone: PERSON, to_phone: '+19415550999', metadata: { bridgeCallerId: WEB_LINE } };
+    expect(await bookingTextLine(bridged, PERSON)).toBeNull();
+    expect(websiteLineRefusal).toHaveBeenCalledWith(WEB_LINE, PERSON);
+  });
+
+  test('an outbound call keeps its office line when the check passes it', async () => {
+    const PARRISH = '+19412972817';
+    expect(await bookingTextLine({ direction: 'outbound-api', from_phone: PARRISH, to_phone: PERSON }, PERSON)).toBe(PARRISH);
   });
 });
 
@@ -2527,6 +2564,50 @@ describe('dispatchClaimedCall', () => {
     const conn = makeDb();
     await dispatchClaimedCall(conn, CALL, NOW); // CALL carries no to_phone/from_phone at all
     expect(sendCustomerMessage.mock.calls[0][0].metadata.fromNumber).toBeUndefined();
+  });
+
+  // A website-only line texts only someone who already called or texted it:
+  // a later call from a number it reached any other way would read as a
+  // website lead.
+  describe('a call to a website-only line', () => {
+    const WEB_LINE = '+19412542617';
+    const SPOKEN = '+19415550177'; // a second number the caller gave, with SMS consent
+    const toWebLine = { ...CALL, to_phone: WEB_LINE };
+    const spokenCall = { ...toWebLine, ai_extraction_enriched: { ...CALL.ai_extraction_enriched, caller: { ...CALL.ai_extraction_enriched.caller, phone_e164: SPOKEN } } };
+    const sentFrom = () => sendCustomerMessage.mock.calls[0][0].metadata.fromNumber;
+    afterEach(() => { websiteLineRefusal.mockReset(); websiteLineRefusal.mockResolvedValue(null); });
+    const sendToSpoken = async () => {
+      buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://wavespest.co/l/abcd', line: 'Pick a time...\n\n', phone: SPOKEN });
+      const result = await dispatchClaimedCall(makeDb({ lead: { ...OPEN_LEAD, phone: SPOKEN } }), spokenCall, NOW);
+      expect(result.sent).toBe(true);
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: SPOKEN }));
+    };
+
+    test('the caller gets the text from the line called, with no contact read', async () => {
+      await dispatchClaimedCall(makeDb(), toWebLine, NOW);
+      expect(sentFrom()).toBe(WEB_LINE);
+      expect(websiteLineRefusal).not.toHaveBeenCalled();
+    });
+
+    test('a spoken second number with no contact on the line gets a shared line', async () => {
+      websiteLineRefusal.mockResolvedValueOnce('refused');
+      await sendToSpoken();
+      expect(websiteLineRefusal).toHaveBeenCalledWith(WEB_LINE, SPOKEN);
+      expect(sentFrom()).toBeUndefined();
+    });
+
+    test('a spoken second number that already called or texted the line keeps it', async () => {
+      await sendToSpoken();
+      expect(websiteLineRefusal).toHaveBeenCalledWith(WEB_LINE, SPOKEN);
+      expect(sentFrom()).toBe(WEB_LINE);
+    });
+
+    test('a failed contact read still sends the text, from a shared line', async () => {
+      websiteLineRefusal.mockRejectedValueOnce(new Error('read failed'));
+      await sendToSpoken();
+      expect(sentFrom()).toBeUndefined();
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('website-line contact read failed'));
+    });
   });
 
   // codex r1 P1: a retryable/deferred sendCustomerMessage outcome (a

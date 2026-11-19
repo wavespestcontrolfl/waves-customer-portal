@@ -27,6 +27,7 @@ const config = require('../config');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const { etParts } = require('../utils/datetime-et');
+const { linkedinArticleCard } = require('./linkedin-article');
 
 const FACEBOOK_PAGE_ID = process.env.FACEBOOK_PAGE_ID;
 const INSTAGRAM_ACCOUNT_ID = process.env.INSTAGRAM_ACCOUNT_ID;
@@ -690,10 +691,15 @@ function stripFixedReentryTiming(value, replacement = '') {
 
 const PHONE_PATTERN = /(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|\+1\d{10})/g;
 
+// The phone numbers a post may carry: the shared lines only (the main line
+// and the office lines). A website-only line proves a website visit
+// (config/shared-phone-lines), so a post never shows one.
 const KNOWN_PHONES = new Set();
 try {
   const twilioNumbers = require('../config/twilio-numbers');
+  const shared = new Set(require('../config/shared-phone-lines').sharedLineNumbers(twilioNumbers));
   const addPhone = (n) => {
+    if (!shared.has(n.number)) return;
     if (n.number) KNOWN_PHONES.add(n.number.replace(/\D/g, ''));
     if (n.formatted) KNOWN_PHONES.add(n.formatted.replace(/\D/g, ''));
   };
@@ -701,6 +707,28 @@ try {
   if (twilioNumbers.domainTracking) twilioNumbers.domainTracking.forEach(addPhone);
   if (twilioNumbers.lawnDomainTracking) twilioNumbers.lawnDomainTracking.forEach(addPhone);
 } catch { /* twilio config not available */ }
+
+// One issue for each phone number in `text` that is not a shared line.
+function unknownPhoneIssues(text) {
+  return (String(text || '').match(PHONE_PATTERN) || []).flatMap((phone) => {
+    const digits = phone.replace(/\D/g, '');
+    const normalized = digits.length === 11 && digits.startsWith('1') ? digits : `1${digits}`;
+    return KNOWN_PHONES.has(digits) || KNOWN_PHONES.has(normalized) ? [] : [`Unknown phone number: ${phone} — may be hallucinated`];
+  });
+}
+
+// A validation issue names the phone number it found, and that may be a
+// customer's: logs get the issues with every phone number masked.
+const issuesForLog = (issues) => issues.join('; ').replace(PHONE_PATTERN, '[phone]');
+
+// LinkedIn also shows an article card under a post with a link: the card
+// createPost sends (linkedin-article.js). A phone number in its title or
+// description gets the same check as the post text. A post with no link has
+// no card, so its title and description are not shown and not checked.
+const linkedinCardIssues = (platform, link, title, description) => {
+  const card = platform === 'linkedin' ? linkedinArticleCard({ link, title, description }) : null;
+  return card ? unknownPhoneIssues([card.title, card.description].filter(Boolean).join('\n')) : [];
+};
 
 const PLATFORM_LENGTH_LIMITS = { facebook: 500, instagram: 2200, linkedin: 3000, gbp: 1500, tiktok: 2200, twitter: 250 };
 
@@ -736,14 +764,7 @@ function validateContent(text, platform) {
     issues.push('AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL: contains affiliate material — affiliate links publish on the blog only');
   }
 
-  const phones = text.match(PHONE_PATTERN) || [];
-  for (const phone of phones) {
-    const digits = phone.replace(/\D/g, '');
-    const normalized = digits.length === 11 && digits.startsWith('1') ? digits : `1${digits}`;
-    if (!KNOWN_PHONES.has(digits) && !KNOWN_PHONES.has(normalized)) {
-      issues.push(`Unknown phone number: ${phone} — may be hallucinated`);
-    }
-  }
+  issues.push(...unknownPhoneIssues(text));
 
   const limit = PLATFORM_LENGTH_LIMITS[platform];
   if (limit && text.length > limit) {
@@ -2423,10 +2444,10 @@ const SocialMediaService = {
       try {
         const content = customContent?.[p.key] || await generateContent(p.key, { title, description, link, source });
 
-        const validation = validateContent(content, p.key);
-        if (!validation.valid) {
-          logger.warn(`[social] Content validation failed for ${p.key}: ${validation.issues.join('; ')}`);
-          platformResults.push({ platform: p.key, success: false, error: `Validation: ${validation.issues[0]}`, validationIssues: validation.issues });
+        const issues = [...validateContent(content, p.key).issues, ...linkedinCardIssues(p.key, link, title, description)];
+        if (issues.length) {
+          logger.warn(`[social] Content validation failed for ${p.key}: ${issuesForLog(issues)}`);
+          platformResults.push({ platform: p.key, success: false, error: `Validation: ${issues[0]}`, validationIssues: issues });
           continue;
         }
         // Semantic second pass (owner ruling 2026-07-30): the deterministic
@@ -2620,7 +2641,7 @@ const SocialMediaService = {
 
         const gbpValidation = validateContent(gbpContent, 'gbp');
         if (!gbpValidation.valid) {
-          logger.warn(`[social] GBP content validation failed for ${loc.name}: ${gbpValidation.issues.join('; ')}`);
+          logger.warn(`[social] GBP content validation failed for ${loc.name}: ${issuesForLog(gbpValidation.issues)}`);
           platformResults.push({ platform: 'gbp', location: loc.id, success: false, error: `Validation: ${gbpValidation.issues[0]}` });
           continue;
         }
@@ -2777,9 +2798,9 @@ const SocialMediaService = {
 
     const text = content || await generateContent(platform, { title, description, link, locationName: locationId });
 
-    const validation = validateContent(text, platform);
-    if (!validation.valid) {
-      return { platform, success: false, error: `Validation: ${validation.issues[0]}`, validationIssues: validation.issues };
+    const issues = [...validateContent(text, platform).issues, ...linkedinCardIssues(platform, link, title, description)];
+    if (issues.length) {
+      return { platform, success: false, error: `Validation: ${issues[0]}`, validationIssues: issues };
     }
     // Semantic second pass (owner ruling 2026-07-30) — postToSingle serves
     // the tech no-admin-queue flow, which must not bypass the judge. A

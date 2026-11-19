@@ -44,8 +44,12 @@ const MAKER_DOMAINS = [
 ];
 const SENDER_DOMAINS = [SITEONE_DOMAIN, ...MAKER_DOMAINS];
 
-// Order, cart, account and auto-reply mail is never a deal, whatever words it carries.
-const TRANSACTIONAL_SUBJECT = /invoice|order summary|order has been submitted|order\b.*\bis ready|shopping cart|ewallet|automatic reply|out of office|statement|payment received|password|verify your/i;
+// Order, cart, account, support-case and auto-reply mail is never a deal, whatever words it
+// carries. A support case notice starts with its case ID, after any RE:/FW: ("Case: CS0012345
+// has been updated.", "RE: Case Number: CS0012345", "Case #01234567"). A deal that names a code
+// after "case" ("10% off by the case: CS12345XL") stays a deal. Each optional marker takes its
+// own trailing spaces, so a run of spaces has one way to match and a long one cannot stall it.
+const TRANSACTIONAL_SUBJECT = /invoice|order summary|order has been submitted|order\b.*\bis ready|shopping cart|ewallet|automatic reply|out of office|statement|payment received|password|verify your|^\s*(?:(?:re|fwd?)\s*:\s*)*case\s*(?:(?::\s*)?cs\s*|#\s*|number\s*(?:[:#]\s*)?(?:cs\s*)?)\d{5,}\b/i;
 
 // One entry per kind of deal word. promo/promotion share an entry, and "cash
 // discount" is not also counted as "discount", so "two different deal words"
