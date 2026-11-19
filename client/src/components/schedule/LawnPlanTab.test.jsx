@@ -21,11 +21,11 @@ const plan = {
   },
   protocol: {
     objective: 'Fixture objective',
-    base: [{ raw: 'Fixture kelp line', matched: true, selected: true, product: kelp, mix: { amount: 30, amountUnit: 'fl oz' } }],
+    base: [{ raw: 'Fixture kelp line', description: 'Fixture kelp line', matched: true, selected: true, product: kelp, mix: { amount: 30, amountUnit: 'fl oz' } }],
     conditional: [
-      { raw: 'Fixture optional line', conditional: true, matched: true, selected: false, product: { id: 'opt', name: 'Fixture optional' }, mix: { amount: 7.25, amountUnit: 'fl oz' } },
-      { raw: 'Fixture chosen line', conditional: true, matched: true, selected: true, product: { id: 'chosen', name: 'Fixture chosen' } },
-      { raw: 'Fixture orphan line', conditional: false, matched: false, selected: true },
+      { raw: 'Fixture optional line', description: 'Fixture optional line', conditional: true, matched: true, selected: false, product: { id: 'opt', name: 'Fixture optional' }, mix: { amount: 7.25, amountUnit: 'fl oz' } },
+      { raw: 'Fixture chosen line', description: 'Fixture chosen line', conditional: true, matched: true, selected: true, product: { id: 'chosen', name: 'Fixture chosen' } },
+      { raw: 'Fixture orphan line', description: 'Fixture orphan line', conditional: false, matched: false, selected: true },
     ],
   },
   mixCalculator: { carrierGalPer1000: 2, nutrientProjection: { nPer1000: 0.5, pPer1000: 0, kPer1000: 1 }, items: [{ mix: { amount: 99 } }] },
@@ -52,6 +52,23 @@ describe('LawnPlanTab', () => {
     expect(container.querySelector('input[type="checkbox"]')).toBeNull();
     // The plan carries mix amounts (30, 7.25, 99); the tab shows none of them.
     expect(container.textContent).not.toMatch(/\b(30|7\.25|99)\b/);
+  });
+
+  it('shows each line\'s description, never the raw protocol text with its rate and price, matched or not', () => {
+    const rated = {
+      ...plan,
+      mixCalculator: { carrierGalPer1000: 2, nutrientProjection: { nPer1000: 1, pPer1000: 0, kPer1000: 1 } },
+      protocol: {
+        objective: 'Fixture objective',
+        base: [{ raw: 'Stonewall 4FL 0.5 fl oz per 1,000 ($3.51)', description: 'Stonewall 4FL', matched: true, selected: true, product: { id: 's', name: 'Stonewall 4FL' } }],
+        conditional: [{ raw: 'Orphan Herbicide 2 oz/1000 sq ft ($15.00)', description: 'Orphan Herbicide', conditional: true, matched: false, selected: false }],
+      },
+    };
+    const { container } = render(<LawnPlanTab plan={rated} loading={false} error="" onRefresh={() => {}} />);
+    expect(screen.getAllByText('Stonewall 4FL').length).toBeGreaterThan(0);
+    // The unmatched line has no product: its description is the name.
+    expect(screen.getAllByText('Orphan Herbicide').length).toBeGreaterThan(0);
+    expect(container.textContent).not.toMatch(/0\.5|3\.51|per 1,000|\$|2 oz|15\.00/);
   });
 
   it('says so while loading, and when the plan cannot be read', () => {

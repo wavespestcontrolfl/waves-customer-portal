@@ -6,6 +6,7 @@ const { lawnCompletionDefaultsEnabled } = require('../services/lawn-completion-d
 const { isTechnicianRequest, technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
 const { stripKeysDeep, deepStripPriceTokens } = require('../services/protocol-reader');
 const db = require('../models/db');
+const { describeLine } = require('../services/job-card');
 const Joi = require('joi');
 
 router.use(adminAuthenticate);
@@ -57,6 +58,12 @@ function projectPlanResponse(plan, { technician = false } = {}) {
     const { billingMode: _billingMode, ...propertyGate } = plan.propertyGate;
     const stockAdvisory = require('../services/stock-advisory').isLawnTsStockAdvisoryCompletion({ service_type: propertyGate.service });
     projected = { ...plan, propertyGate, ...(stockAdvisory ? { stockAdvisory: true } : {}) };
+  }
+  // The Plan tab shows each protocol line's `description`: the Job tab's own text rule (no rate, no price), for every
+  // viewer. `raw` stays for readers that need the protocol's words.
+  if (projected?.protocol) {
+    const describe = (items) => (Array.isArray(items) ? items.map((item) => ({ ...item, description: describeLine(item.raw) })) : items);
+    projected = { ...projected, protocol: { ...projected.protocol, base: describe(projected.protocol.base), conditional: describe(projected.protocol.conditional) } };
   }
   return technician ? deepStripPriceTokens(stripKeysDeep(projected, TECHNICIAN_PLAN_OWNER_ONLY_KEYS)) : projected;
 }

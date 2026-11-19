@@ -7642,6 +7642,8 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
   // from the first time that tab opens (the server builds a full plan for it).
   const [planSeenFor, setPlanSeenFor] = useState(null);
   const [lawnPlan, setLawnPlan] = useState(null);
+  // The tick query the shown plan was read with: a plan read with other ticks is not shown as current.
+  const [lawnPlanQuery, setLawnPlanQuery] = useState("");
   const [lawnPlanLoading, setLawnPlanLoading] = useState(false);
   const [lawnPlanError, setLawnPlanError] = useState("");
   const [lawnPlanRefresh, setLawnPlanRefresh] = useState(0);
@@ -7750,7 +7752,9 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
     setLawnPlanError("");
     adminFetch(`/admin/treatment-plans/${service.id}${selectedQuery}`)
       .then((data) => {
-        if (!cancelled) setLawnPlan(data?.plan || null);
+        if (cancelled) return;
+        setLawnPlanQuery(selectedQuery);
+        setLawnPlan(data?.plan || null);
       })
       .catch((err) => {
         if (!cancelled) setLawnPlanError(err?.message || "Failed to load treatment plan");
@@ -8126,8 +8130,8 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
           />
         ) : activeSection === "lawn_plan" && isLawn ? (
           <LawnPlanTab
-            plan={lawnPlan}
-            loading={lawnPlanLoading}
+            plan={lawnPlanQuery === selectedQuery ? lawnPlan : null}
+            loading={lawnPlanLoading || (Boolean(lawnPlan) && lawnPlanQuery !== selectedQuery)}
             error={lawnPlanError}
             onRefresh={() => setLawnPlanRefresh((k) => k + 1)}
           />

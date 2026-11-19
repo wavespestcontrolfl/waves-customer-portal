@@ -131,3 +131,17 @@ test('an admin plan keeps every price and cost field', async () => {
   }
   expect(res.body.plan.protocol.base[0].raw).toBe('K-Flow 0-0-25 ($2.18)');
 });
+
+// The Plan tab shows each protocol line's `description`, the Job tab's own text rule: no rate and no price, for every viewer.
+test.each([true, false])('every protocol line carries a description with no rate and no price (technician=%s); raw stays', async tech => {
+  const raw = 'Stonewall 4FL 0.5 fl oz per 1,000 ($3.51)';
+  buildPlanForService.mockResolvedValue({
+    propertyGate: { service: 'Lawn Care' },
+    protocol: { base: [{ raw, matched: true }], conditional: [{ raw: 'If needed: Fungicide 2 oz/1000 sq ft ($15.00)', matched: false }] },
+  });
+  const { protocol } = (await run({ tech })).body.plan;
+  expect(protocol.base[0].description).toBe('Stonewall 4FL');
+  expect(protocol.conditional[0].description).toBe('If needed: Fungicide');
+  for (const item of [...protocol.base, ...protocol.conditional]) expect(item.description).not.toMatch(/\$|0\.5|1,000|fl oz| oz|15\.00/);
+  expect(protocol.base[0].raw).toBe(tech ? 'Stonewall 4FL 0.5 fl oz per 1,000' : raw);
+});

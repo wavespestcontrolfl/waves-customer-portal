@@ -33,7 +33,7 @@ const planFor = (url) => {
   const line = (id, name, extra = {}) => ({ raw: name, conditional: true, matched: true, selected: on.includes(id), product: { id, name }, ...extra });
   return {
     status: "approved",
-    propertyGate: { trackName: "Fixture track", month: "Jul", visit: 7, blocks: [] },
+    propertyGate: { trackName: "Fixture track", month: "Jul", visit: 7, blocks: on.includes("opt") ? [{ code: "nitrogen_blackout", message: "Blackout after the tick." }] : [] },
     protocol: { objective: "Fixture objective", base: [], conditional: [line("opt", "Fixture optional"), ...STEP_IDS.map((id) => line(id, `Fixture ${id}`, { bermudaStep: true }))] },
     mixCalculator: { carrierGalPer1000: 2, items: [] },
     closeout: { requiredPhotos: ["Before"] },
@@ -84,8 +84,8 @@ beforeEach(() => {
   hold = null;
   vi.stubGlobal("fetch", vi.fn((url) => {
     const u = String(url);
-    // A held read of the job card with ticks: the panel waits on it, as on a slow network.
-    if (hold && /\/protocols\/job-card\/[^/?]+\?/.test(u)) return hold.promise.then(() => reply(fixture(u)));
+    // A held read of the job card or the plan with ticks: the panel waits on it, as on a slow network.
+    if (hold && /\/(protocols\/job-card|treatment-plans)\/[^/?]+\?/.test(u)) return hold.promise.then(() => reply(fixture(u)));
     return reply(fixture(u));
   }));
   vi.stubGlobal("scrollTo", vi.fn());
@@ -119,6 +119,22 @@ describe("ProtocolPanel Plan tab", () => {
     expect(await screen.findByText("Fixture track")).toBeInTheDocument();
     expect(asked("/treatment-plans/")).toHaveLength(1);
     expect(screen.queryByLabelText(/^Use /)).toBeNull();
+  });
+
+  it("after a tick the Plan tab does not show the previous selection's plan as current while the new read is out", async () => {
+    await mount();
+    fireEvent.click(screen.getByRole("button", { name: "Plan" }));
+    expect(await screen.findByText("Fixture track")).toBeInTheDocument();
+    expect(screen.queryByText("Blackout after the tick.")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Job" }));
+    hold = deferred();
+    fireEvent.click(await screen.findByLabelText("Use Fixture optional"));
+    fireEvent.click(screen.getByRole("button", { name: "Plan" }));
+    expect(await screen.findByText("Loading plan…")).toBeInTheDocument();
+    expect(screen.queryByText("Fixture track")).toBeNull();
+    await act(async () => { hold.release(); });
+    expect(await screen.findByText("Blackout after the tick.")).toBeInTheDocument();
+    expect(screen.getByText("Fixture track")).toBeInTheDocument();
   });
 
   it("the blocked-plan box on the Job tab opens the Plan tab", async () => {

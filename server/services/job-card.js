@@ -1929,13 +1929,27 @@ function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, no
  * The plan's mixing steps the card stands behind. A step stays only while its product's card shows an
  * amount and is the visit's own (a hosted add-on card is a separate application), so a blocked plan,
  * an alternate address, a plan outage, a missing carrier rate, a held spray check or an unverified
- * label all leave no step. Steps renumber from 1. The bermuda mix keeps its water step (no productId)
- * only while a product step remains.
+ * label all leave no step. Steps renumber from 1. Every instruction goes through describeLine, the
+ * rule the card's own line text uses: a step falls back to the protocol line when its product has no
+ * mixing instructions, and that line can carry an owner-only price or a rate.
  */
-function mixingOrderForCards(steps, cards, { keepWater = false } = {}) {
+function mixingOrderForCards(steps, cards) {
   const shown = new Set(cards.filter((c) => c.planned != null && !c.addOnKey).map((c) => String(c.id)));
-  const kept = (steps || []).filter((step) => (step.productId == null ? keepWater : shown.has(String(step.productId))));
-  return kept.some((step) => step.productId != null) ? kept.map((step, index) => ({ ...step, step: index + 1 })) : [];
+  return (steps || []).filter((step) => step.productId != null && shown.has(String(step.productId)))
+    .map((step, index) => ({ ...step, step: index + 1, instruction: describeLine(step.instruction) }));
+}
+
+/**
+ * The bermuda backpack mix is all or none. The engine leaves its rows without an amount (the treated area is
+ * measured in the field), so the amount rule above cannot judge it. It is the engine's whole order, water step
+ * included, only while the card has no plan block and every product step is a primary card not on a spray hold.
+ */
+function bermudaMixOrderForCards(steps, cards, blocks) {
+  const primary = new Map(cards.filter((c) => !c.addOnKey).map((c) => [String(c.id), c]));
+  const products = (steps || []).filter((step) => step.productId != null);
+  const whole = products.length > 0 && !blocks.length
+    && products.every((step) => primary.has(String(step.productId)) && primary.get(String(step.productId)).verdict !== 'hold');
+  return whole ? steps.map((step) => ({ ...step, instruction: describeLine(step.instruction) })) : [];
 }
 
 async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), includePricing = false, readinessOnly = false, selectedConditionalProductIds = [] } = {}) {
@@ -2036,7 +2050,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     tank: { ...tank, rigs: rigOptions(systems) },
     products: cards,
     mixingOrder: mixingOrderForCards(mixingOrder, cards),
-    bermudaMixingOrder: mixingOrderForCards(bermudaMixingOrder, cards, { keepWater: true }),
+    bermudaMixingOrder: bermudaMixOrderForCards(bermudaMixingOrder, cards, blocks),
     planBlocks: blocks,
     visit: visit ? { number: visit.visit || null, month: visit.month || null } : null,
     lineNote: note || null,
@@ -2379,5 +2393,6 @@ module.exports = {
   resolveVisitProducts,
   mergeProductLines,
   resolveVisitLines,
-  _test: { mixingOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
+  describeLine,
+  _test: { mixingOrderForCards, bermudaMixOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
 };

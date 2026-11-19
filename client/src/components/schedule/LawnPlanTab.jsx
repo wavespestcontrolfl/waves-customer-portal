@@ -1,7 +1,8 @@
 // The Plan tab of the Protocol panel (lawn visits): the visit's lawn facts, nitrogen budget,
 // blocks and warnings, protocol lines and closeout list, from GET /admin/treatment-plans/:id.
-// It shows no product amount: amounts live on the Job tab only, under the Job tab's own
-// withhold rules (blocked plan, no rig carrier rate, unverified label, spray-check hold).
+// It shows no product amount and no rate: amounts live on the Job tab only, under the Job tab's own
+// withhold rules (blocked plan, no rig carrier rate, unverified label, spray-check hold). A protocol line
+// shows its server `description` (the Job tab's line-text rule: no rate, no price), never `raw`.
 import { AlertTriangle, Camera, ClipboardList, Leaf, RefreshCw } from 'lucide-react';
 import { Button, Badge, cn } from '../ui';
 
@@ -62,11 +63,11 @@ function ProtocolLine({ item }) {
   return (
     <div className="border-hairline border-zinc-200 rounded-sm p-3">
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-14 font-medium text-zinc-900">{product?.name || item.raw}</span>
+        <span className="text-14 font-medium text-zinc-900">{product?.name || item.description}</span>
         {item.conditional && <Badge tone="neutral">{item.selected ? 'Selected' : 'Optional'}</Badge>}
         {!item.matched && <Badge tone="alert">Unmatched</Badge>}
       </div>
-      <div className="text-14 text-ink-secondary mt-1 leading-snug">{item.raw}</div>
+      <div className="text-14 text-ink-secondary mt-1 leading-snug">{item.description}</div>
       {product && (
         <div className="flex gap-3 flex-wrap mt-2 text-14 text-ink-secondary">
           {product.category && <span>{product.category}</span>}

@@ -1312,7 +1312,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       propertyGate: { month: 'Sep', visit: 9, blocks: [] },
       mixCalculator: { carrierGalPer1000: 2, items: [item('a'), item('b'), item('u')], conditionalOptions: [] },
       mixingOrder: steps('a', 'b', 'u'),
-      bermudaMixingOrder: [{ step: 1, productId: null, productName: 'Water', instruction: 'Half fill.' }, ...steps('a', 'u').map((s, i) => ({ ...s, step: i + 2 }))],
+      bermudaMixingOrder: [{ step: 1, productId: null, productName: 'Water', instruction: 'Half fill.' }, ...steps('a', 'b').map((s, i) => ({ ...s, step: i + 2 }))],
       ...over,
     });
     const card = async (plan, svc = lawn, verdictOver = {}) => {
@@ -1327,8 +1327,26 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       const { out } = await card(planWith());
       expect(out.products.map((c) => [c.id, c.planned != null])).toEqual([['a', true], ['b', true], ['u', false]]);
       expect(out.mixingOrder.map((s) => [s.step, s.productId])).toEqual([[1, 'a'], [2, 'b']]);
-      // The bermuda mix keeps its water step while a product step remains.
-      expect(out.bermudaMixingOrder.map((s) => [s.step, s.productId])).toEqual([[1, null], [2, 'a']]);
+      // The bermuda mix is the engine's whole order (its rows carry no amount): all step products have primary cards, none on hold.
+      expect(out.bermudaMixingOrder.map((s) => [s.step, s.productId])).toEqual([[1, null], [2, 'a'], [3, 'b']]);
+    });
+
+    test('no step instruction carries a price or a rate, for a technician card or an owner card', async () => {
+      const raw = 'Stonewall 4FL 0.5 fl oz per 1,000 ($3.51)';
+      const plan = planWith({
+        mixingOrder: [{ step: 1, productId: 'a', productName: 'Alpha', instruction: raw }],
+        bermudaMixingOrder: [{ step: 1, productId: null, productName: 'Water', instruction: 'Half fill.' }, { step: 2, productId: 'a', productName: 'Alpha', instruction: raw }],
+      });
+      for (const includePricing of [false, true]) {
+        const base = factsDb({ 'scheduled_services as ss': lawn, products_catalog: rows, property_preferences: prefs });
+        const dbh = Object.assign((table) => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
+        const out = await jobCard.buildJobCard('svc1', { dbh, includePricing, deps: { buildPlan: jest.fn().mockResolvedValue(plan), getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] } }, now: new Date('2026-09-04T12:00:00Z') });
+        for (const step of [...out.mixingOrder, ...out.bermudaMixingOrder]) {
+          expect(step.instruction).not.toMatch(/\$|3\.51|0\.5|fl oz|1,000/);
+        }
+        expect(out.mixingOrder.map((s) => s.instruction)).toEqual(['Stonewall 4FL']);
+        expect(out.bermudaMixingOrder).toHaveLength(2);
+      }
     });
 
     test('a plan block, a plan outage and an alternate address leave no steps (and an alternate address reads no plan)', async () => {
@@ -1350,12 +1368,32 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect(jobCard._test.mixingOrderForCards(steps('a', 'b'), cards).map((s) => [s.step, s.productId])).toEqual([[1, 'a']]);
     });
 
-    test('a bermuda mix with no product step left gives no lone water step; a hosted add-on card is not a step', () => {
+    test('a hosted add-on card is not a mixing step', () => {
       const cards = [{ id: 'a', planned: null }, { id: 'b', planned: { amount: 1 }, addOnKey: 'area_addon_x' }];
-      const bermuda = [{ step: 1, productId: null, productName: 'Water' }, ...steps('a').map((s) => ({ ...s, step: 2 }))];
-      expect(jobCard._test.mixingOrderForCards(bermuda, cards, { keepWater: true })).toEqual([]);
       expect(jobCard._test.mixingOrderForCards(steps('b'), cards)).toEqual([]);
       expect(jobCard._test.mixingOrderForCards(undefined, cards)).toEqual([]);
+    });
+
+    describe('the bermuda backpack mix is all or none', () => {
+      const water = { step: 1, productId: null, productName: 'Water', instruction: 'Fill about half full.' };
+      const bermuda = [water, ...steps('r', 'f', 'n').map((st, i) => ({ ...st, step: i + 2 }))];
+      const card = (id, extra = {}) => ({ id, planned: null, verdict: 'ok', ...extra });
+      const cards = ['r', 'f', 'n'].map((id) => card(id));
+      const order = (c, blocks = []) => jobCard._test.bermudaMixOrderForCards(bermuda, c, blocks);
+
+      test('the engine\'s whole order stands while every step product has a primary card, even with no amount on any', () => {
+        expect(order(cards).map((st) => [st.step, st.productId])).toEqual([[1, null], [2, 'r'], [3, 'f'], [4, 'n']]);
+      });
+      test('a step product on a spray hold, a plan block, or a step product with no primary card gives none', () => {
+        expect(order([card('r'), card('f', { verdict: 'hold' }), card('n')])).toEqual([]);
+        expect(order(cards, [{ code: 'x', message: 'Blocked.' }])).toEqual([]);
+        expect(order([card('r'), card('f')])).toEqual([]);
+        expect(order([card('r'), card('f'), card('n', { addOnKey: 'area_addon_x' })])).toEqual([]);
+      });
+      test('a lone water step, or no order, gives none', () => {
+        expect(jobCard._test.bermudaMixOrderForCards([water], cards, [])).toEqual([]);
+        expect(jobCard._test.bermudaMixOrderForCards(undefined, cards, [])).toEqual([]);
+      });
     });
   });
 
