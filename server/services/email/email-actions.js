@@ -1172,7 +1172,9 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
   if (typeof labels === 'string') { try { labels = JSON.parse(labels); } catch { labels = []; } }
   labels = Array.isArray(labels) ? labels : [];
   if (labels.includes('SENT') || labels.includes('DRAFT')) return null;
-  const ownAddress = normalizeAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
+  // Both sides read as the base mailbox: a tag on the sender or on the
+  // configured address is the same contact@ mailbox.
+  const ownAddress = ownMailboxAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
   if (ownMailboxAddress(email.from_address) === ownAddress) return null;
   // ATOMIC idempotency claim in Postgres — the in-memory row is stale by the
   // time reclassification (which runs auto-actions twice with the same

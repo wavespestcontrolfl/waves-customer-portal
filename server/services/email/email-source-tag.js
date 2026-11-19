@@ -141,14 +141,15 @@ function ownSiteEvidence(domain) {
 
 /**
  * Source evidence for an inbound email row, or null (the lead keeps its
- * "Email inquiry" label).
+ * "Email inquiry" label). It reads every captured recipient: To, Cc and Bcc
+ * (the same three fields as email-customer-link.js).
  *   1. A valid tagged address on the hub domain wins (first one found).
  *   2. No valid tag, but the mail went to contact@ on a spoke or lawn-care
  *      domain: website evidence naming that domain.
  *   3. Anything else (contact@ on the main domain, a foreign address): null.
  */
 function emailSourceEvidence(email = {}) {
-  const addresses = extractEmailAddresses([email.to_address, email.cc_address].filter(Boolean).join(','));
+  const addresses = extractEmailAddresses([email.to_address, email.cc_address, email.bcc_address].filter(Boolean).join(','));
   for (const address of addresses) {
     const tagged = parseTaggedAddress(address);
     if (tagged) return taggedEvidence(tagged);

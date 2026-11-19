@@ -58,6 +58,14 @@ describe('emailSourceEvidence: tagged website email links', () => {
       .toMatchObject({ kind: 'meta_ads' });
   });
 
+  test('a tag captured only in Bcc wins over an untagged spoke address in To', () => {
+    expect(emailSourceEvidence({
+      to_address: 'contact@bradentonflpestcontrol.com',
+      cc_address: '',
+      bcc_address: 'contact+gads_home@wavespestcontrol.com',
+    })).toMatchObject({ kind: 'google_ads' });
+  });
+
   test.each([
     ['unknown code', 'contact+bogus_home'],
     ['near-miss code', 'contact+gbp-tampa_home'],
