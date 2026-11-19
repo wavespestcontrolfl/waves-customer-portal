@@ -8,6 +8,8 @@ import EstimateToolViewV2 from './EstimateToolViewV2';
 
 // The estimator is a very large component; a busy machine can pass the 1 s default.
 configure({ asyncUtilTimeout: 15000 });
+// The full editor renders slowly on a loaded runner (same setting as the dead-animal and misting suites).
+vi.setConfig({ testTimeout: 30000 });
 
 vi.mock('../../components/admin/EstimateSendDialog', () => ({ useEstimateSend: () => vi.fn() }));
 
