@@ -457,6 +457,32 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(rung('addendum')).toHaveLength(0);
     });
 
+    test('a second MFMP notice of one advertisement in a new thread joins the first bid, which is filed with its Close Date confirmed', async () => {
+      // MFMP sends each notice as its own Gmail thread. Its stored header as delivered: DKIM and DMARC pass for dms.myflorida.com.
+      const mfmpEmail = (threadId, receivedAt) => storeEmail({
+        from_address: 'MFMP.NoReply@dms.myflorida.com', from_name: 'MFMP Notifications', gmail_thread_id: threadId, received_at: receivedAt,
+        authentication_results: 'mx.google.com; dkim=pass header.i=@dms.myflorida.com header.s=selector1; spf=pass smtp.mailfrom=bounce@mail.dms.myflorida.com; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=dms.myflorida.com',
+        subject: 'Advertisement Posted - ITB-17200', body_text: [
+          ' A bid advertisement was posted to the MyFloridaMarketPlace (MFMP) Vendor Information Portal (VIP).',
+          ' Organization: Sample Water Management District', ' Advertisement Number: ITB-17200 ', ' Agency Advertisement Number: ITB 99Z-001',
+          ' Advertisement Type: Invitation to Bid', ' Title: ITB 99Z-001 Sample Site Preparation and Weed Control',
+          ' Open Date: Oct 20, 2026', ' Close Date: Oct 29, 2026', ' Agency Contact: Casey Sample', ' Phone: (555) 010-0100',
+          ' Address: 1 Fixture Agency Way', ' Email: casey.sample@fixture-agency.example',
+        ].join('\n'),
+      });
+      const first = await service.ingestEmail(await mfmpEmail('t-mfmp-1', new Date(NOW.getTime() - 3 * DAY)));
+      expect(first.created).toBe(true);
+      expect(await bidRow(first.bidId)).toMatchObject({
+        source: 'gov_email', gc_or_agency: 'Sample Water Management District', project_title: 'ITB 99Z-001 Sample Site Preparation and Weed Control',
+        solicitation_number: 'ITB-17200', location: null, due_confirmed: true, due_source_line: 'Close Date: Oct 29, 2026',
+      });
+      expect((await bidRow(first.bidId)).due_at.toISOString()).toBe('2026-10-30T03:59:00.000Z');
+      const second = await service.ingestEmail(await mfmpEmail('t-mfmp-2', new Date(NOW.getTime() - 60000)));
+      expect(second).toMatchObject({ created: false, bidId: first.bidId });
+      expect(await mockPg('bid_opportunities').where({ solicitation_number: 'ITB-17200' })).toHaveLength(1);
+      expect(await links(first.bidId)).toHaveLength(2);
+    });
+
     test('an addendum naming no package joins the project\'s one open package bid before a decided bid of the project', async () => {
       const bare = BC_BODY().replace(': Pest Control', '');
       const decided = await service.ingestEmail(await storeEmail({ body_text: bare }));
