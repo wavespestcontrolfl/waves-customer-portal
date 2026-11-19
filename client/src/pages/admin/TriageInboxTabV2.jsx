@@ -470,8 +470,13 @@ export function PhoneYesEvidence({ payload, isOpenView }) {
   const saidAt = p.yes_at
     ? `${new Date(p.yes_at).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} ET`
     : null;
+  // Why there is no yes, when the reason is more than "none heard" (a later cancel, an annual choice, a tenant's word).
+  const noYes = p.no_yes_reason && p.no_yes_reason !== "no_yes_heard" && p.no_yes_message ? `No yes heard. ${p.no_yes_message}` : "No yes heard";
   const heard = p.yes_heard === true ? ["Caller said yes to pay per application", saidAt].filter(Boolean).join(" · ")
-    : p.yes_rechecking === true ? "The call with the yes is being read again" : "No yes heard";
+    : p.yes_rechecking === true ? "The call with the yes is being read again" : noYes;
+  // Accepted, but the visit the call booked is still unlinked: the card stays until the visit is linked.
+  const openHeading = p.estimate_accepted === true
+    ? "The estimate is accepted. The visit this call booked is not linked to it yet" : "The estimate is not accepted yet";
   const rows = [
     ["On the call", heard],
     ["Caller's words", p.yes_heard === true && p.caller_words ? `\u201c${p.caller_words}\u201d` : null],
@@ -480,7 +485,7 @@ export function PhoneYesEvidence({ payload, isOpenView }) {
   return (
     <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
       {/* A closed card (resolved, or dismissed when the estimate was accepted) shows its evidence as history. */}
-      <div className="text-11 text-ink-tertiary font-medium mb-1">{isOpenView ? "The estimate is not accepted yet" : "Card closed. What it showed while open"}</div>
+      <div className="text-11 text-ink-tertiary font-medium mb-1">{isOpenView ? openHeading : "Card closed. What it showed while open"}</div>
       {rows.map(([label, value]) => (
         <div key={label} className="text-14 text-ink-secondary">
           <span className="text-ink-tertiary">{label}:</span> {value}

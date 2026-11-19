@@ -1413,6 +1413,25 @@ describe('call_phone_yes card', () => {
     expect(screen.getByText('The estimate is not accepted yet')).toBeInTheDocument();
   });
 
+  it('no yes, with the reason when it is more than none heard', () => {
+    render(<PhoneYesEvidence isOpenView payload={JSON.stringify({
+      flag: 'call_phone_yes', yes_heard: false, estimate_id: 'est-7', no_yes_reason: 'caller_took_back',
+      no_yes_message: "The customer's latest word asks to cancel or for a one-time visit, not a plan.",
+    })} />);
+    expect(screen.getByText(/No yes heard\. The customer's latest word asks to cancel/)).toBeInTheDocument();
+    cleanup();
+    render(<PhoneYesEvidence isOpenView payload={JSON.stringify({
+      flag: 'call_phone_yes', yes_heard: false, estimate_id: 'est-7', no_yes_reason: 'no_yes_heard', no_yes_message: 'No yes was heard on the call.',
+    })} />);
+    expect(screen.getByText('No yes heard')).toBeInTheDocument();
+  });
+
+  it('an accepted estimate whose visit is still unlinked: the heading says so', () => {
+    render(<PhoneYesEvidence isOpenView payload={JSON.stringify({ flag: 'call_phone_yes', yes_heard: false, estimate_id: 'est-7', estimate_accepted: true })} />);
+    expect(screen.getByText('The estimate is accepted. The visit this call booked is not linked to it yet')).toBeInTheDocument();
+    expect(screen.queryByText('The estimate is not accepted yet')).toBeNull();
+  });
+
   it('a yes call being read again: says so, with no words', async () => {
     load(card({
       yes_heard: false, yes_rechecking: true, yes_call_log_id: 'call-10', caller_words: null, estimate_id: 'est-7',

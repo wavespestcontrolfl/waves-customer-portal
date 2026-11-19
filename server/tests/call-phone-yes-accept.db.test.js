@@ -229,10 +229,7 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
   });
 
   test.each([
-    ['a later call chose annual prepay (the prepay card owns it)', { bookingChoice: 'annual_prepay' }, 'chose_annual_prepay'],
-    ['the booking call asked for a one-time visit instead', { bookingIntent: 'preventative_one_time' }, 'took_back'],
-    ['the booking call asked to cancel', { bookingIntent: 'cancellation_request' }, 'took_back'],
-    ['the yes call itself also asked for a one-time visit', { yesIntent: 'preventative_one_time' }, 'took_back'],
+    ['the booking call itself chose annual prepay (the prepay card owns that call)', { bookingChoice: 'annual_prepay' }, 'chose_annual_prepay'],
     ['the call booked a lawn visit, not a pest visit', { visitOver: { service_type: 'Lawn Care' } }, 'no_pest_visit'],
     ['the estimate lapsed', { estimateOver: { expires_at: new Date(Date.now() - 3600000) } }, 'no_open_estimate'],
     // Archiving keeps the status, but the estimate is closed to the customer.
@@ -389,11 +386,47 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     await expect(sweep()).resolves.toMatchObject({ filed: 1 });
   });
 
-  test("the latest word is found past fifty calls with none: a cancellation before them takes the yes back", async () => {
+  test("the latest word is found past fifty calls with none: a cancellation before them is no yes", async () => {
     const { customerId, bookingCallId } = await phoneYes();
     await call(customerId, null, { created_at: new Date(Date.now() - 90 * 60000) }, 'cancellation_request');
     for (let n = 0; n < 55; n += 1) await call(customerId, null, { created_at: new Date(Date.now() - 3600000 + n * 1000) });
-    await expect(evaluatePhoneYes({ callLogId: bookingCallId, customerId })).resolves.toEqual({ card: false, reason: 'took_back' });
+    await expect(evaluatePhoneYes({ callLogId: bookingCallId, customerId }))
+      .resolves.toMatchObject({ card: true, yes: null, noYes: 'caller_took_back' });
+  });
+
+  // The caller's word decides the card's state, never whether it exists (AGENTS.md: an owed ask closes only on evidence
+  // answering it). A cancel or one-time ask may be about another estimate or service; the office reads it.
+  test.each([
+    ['the booking call asked for a one-time visit instead', { bookingIntent: 'preventative_one_time' }, 'caller_took_back'],
+    ['the booking call asked to cancel', { bookingIntent: 'cancellation_request' }, 'caller_took_back'],
+    ['the yes call itself also asked for a one-time visit', { yesIntent: 'preventative_one_time' }, 'caller_took_back'],
+    ['an earlier call chose annual prepay', { yesChoice: 'annual_prepay' }, 'caller_chose_annual_prepay'],
+  ])('the card files with no yes, the word named, when %s', async (_name, setup, reason) => {
+    const { bookingCallId } = await phoneYes(setup);
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ yes_heard: false, caller_words: null, no_yes_reason: reason, auto_would_accept: false, auto_reason: reason });
+    expect(payloadOf(card).no_yes_message).toMatch(/latest word/);
+  });
+
+  test('a send claim older than the settle time is a send that died: the card no longer waits on it', async () => {
+    const { customerId, bookingCallId } = await phoneYes();
+    await estimate(customerId, { status: 'sending', updated_at: new Date(Date.now() - 20 * 60000) });
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    expect(await cards(bookingCallId)).toHaveLength(1);
+  });
+
+  // A send in flight claims 'sending' and then restores the status: which estimates are open is known once it settles.
+  test('an estimate being sent at filing: the card waits, then names every open estimate', async () => {
+    const { customerId, bookingCallId } = await phoneYes();
+    const other = await estimate(customerId, { status: 'sending' });
+    await expect(evaluatePhoneYes({ callLogId: bookingCallId, customerId })).resolves.toEqual({ card: false, reason: 'estimate_being_sent' });
+    await expect(sweep()).resolves.toMatchObject({ filed: 0 });
+    await trx('estimates').where({ id: other.id }).update({ status: 'sent' });
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ auto_would_accept: false, auto_reason: 'more_than_one_estimate' });
+    expect(payloadOf(card).estimate_ids).toHaveLength(2);
   });
 
   test('while the call with the yes is read again, the card shows no words and says so; after the read, the yes is back', async () => {
@@ -415,13 +448,35 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     expect(payloadOf(card)).toMatchObject({ yes_heard: true, yes_rechecking: false, yes_call_log_id: yesCallId, caller_words: WORDS });
   });
 
-  test('a re-read that turns the yes into a cancel closes the card in the same pass', async () => {
+  test('a re-read that turns the yes into a cancel clears the yes in the same pass, the word named', async () => {
     const { yesCallId, bookingCallId } = await phoneYes();
     await sweep();
     await trx('call_log').where({ id: yesCallId }).update({ ai_extraction_enriched: JSON.stringify(extractionWith(null, 'cancellation_request')) });
-    await expect(sweep()).resolves.toMatchObject({ closed: 1 });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
     const [card] = await cards(bookingCallId);
-    expect(card).toMatchObject({ status: 'dismissed', resolution_rule: 'call_phone_yes_moot' });
+    expect(card.status).toBe('open');
+    expect(payloadOf(card)).toMatchObject({ yes_heard: false, caller_words: null, no_yes_reason: 'caller_took_back' });
+  });
+
+  // While a call owes a read nothing new shows, but a yes the read calls no longer back is cleared at once.
+  test('a later cancel read while another call still owes a read clears the yes at once', async () => {
+    const { customerId, bookingCallId } = await phoneYes();
+    await sweep();
+    await call(customerId, null, { created_at: new Date(Date.now() - 1800000) }, 'cancellation_request');
+    await call(customerId, null, { created_at: new Date(Date.now() - 600000), processing_status: null });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    const [card] = await cards(bookingCallId);
+    expect(card.status).toBe('open');
+    expect(payloadOf(card)).toMatchObject({ yes_heard: false, caller_words: null, no_yes_reason: 'caller_took_back' });
+  });
+
+  test('a yes the read calls still back stays while another call owes a read', async () => {
+    const { customerId, yesCallId, bookingCallId } = await phoneYes();
+    await sweep();
+    await call(customerId, null, { created_at: new Date(Date.now() - 600000), processing_status: null });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    const [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ yes_heard: true, yes_call_log_id: yesCallId });
   });
 
   test('a call relinked after the check gets no card for the old customer, and no row that would block the new one', async () => {
@@ -658,6 +713,7 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     await expect(sweep()).resolves.toMatchObject({ closed: 0 });
     [card] = await cards(bookingCallId);
     expect(card.status).toBe('open');
+    expect(payloadOf(card)).toMatchObject({ yes_heard: true, yes_call_log_id: yesCallId });
   });
 
   test("a yes after a newer estimate was sent is not the card's at filing either", async () => {
@@ -689,7 +745,7 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
   });
 
   // The send path stamps sent_at even when every channel was held back; such a send reached no one, so it bounds nothing.
-  test('a newer estimate whose send was held back bounds nothing: a later cancel still closes the card', async () => {
+  test('a newer estimate whose send was held back bounds nothing: a later cancel still clears the yes', async () => {
     const { customerId, bookingCallId } = await phoneYes();
     await sweep();
     await estimate(customerId, {
@@ -697,9 +753,9 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       estimate_data: JSON.stringify({ ...planData(), deliveryState: { attemptedAt: new Date(Date.now() - 3600000).toISOString(), sentChannels: [], failedChannels: ['sms'], channels: [] } }),
     });
     await call(customerId, null, { created_at: new Date(Date.now() - 1200000) }, 'cancellation_request');
-    await expect(sweep()).resolves.toMatchObject({ closed: 1 });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
     const [card] = await cards(bookingCallId);
-    expect(card).toMatchObject({ status: 'dismissed', resolution_rule: 'call_phone_yes_moot' });
+    expect(payloadOf(card)).toMatchObject({ yes_heard: false, no_yes_reason: 'caller_took_back' });
   });
 
   test('another estimate open at the yes and sent again after it: the shadow line still says the yes may be about it', async () => {
@@ -754,13 +810,9 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
   });
 
   test.each([
-    ['the estimate is accepted', ({ est }) => trx('estimates').where({ id: est.id }).update({ status: 'accepted', accepted_at: new Date() }), 'was accepted'],
     ['the estimate is declined', ({ est }) => trx('estimates').where({ id: est.id }).update({ status: 'declined', declined_at: new Date() }), 'declined'],
     ['every visit the call booked is cancelled', ({ bookingCallId }) => trx('scheduled_services').where({ source_call_log_id: bookingCallId }).update({ status: 'cancelled' }),
       'off the calendar'],
-    ['the customer chooses annual prepay on a later call', ({ customerId }) => call(customerId, 'annual_prepay', { created_at: new Date() }), 'annual prepay'],
-    ['the customer asks to cancel on a later call', ({ customerId }) => call(customerId, null, { created_at: new Date() }, 'cancellation_request'),
-      'asked to cancel'],
     ['the estimate is archived', ({ est }) => trx('estimates').where({ id: est.id }).update({ archived_at: new Date() }), 'archived'],
     ['the call moves to another customer', async ({ bookingCallId }) => {
       await trx('call_log').where({ id: bookingCallId }).update({ customer_id: await customer() });
@@ -773,6 +825,41 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     const [card] = await cards(fixture.bookingCallId);
     expect(card).toMatchObject({ status: 'dismissed', resolution_source: 'auto', resolution_rule: 'call_phone_yes_moot' });
     expect(card.resolution_note).toContain(note);
+  });
+
+  // A later word never closes the card: it shows as no yes, the word named.
+  test.each([
+    ['the customer chooses annual prepay on a later call', ({ customerId }) => call(customerId, 'annual_prepay', { created_at: new Date() }), 'caller_chose_annual_prepay'],
+    ['the customer asks to cancel on a later call', ({ customerId }) => call(customerId, null, { created_at: new Date() }, 'cancellation_request'), 'caller_took_back'],
+  ])('the card stays open with no yes, the word named, when %s', async (_name, change, reason) => {
+    const fixture = await phoneYes();
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    await change(fixture);
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    const [card] = await cards(fixture.bookingCallId);
+    expect(card.status).toBe('open');
+    expect(payloadOf(card)).toMatchObject({ yes_heard: false, no_yes_reason: reason });
+  });
+
+  // The office's Mark accepted links no visit: the visit still needs the plan's price, so the card stays and says so.
+  test('an accept that leaves the visit unlinked keeps the card open and says so; linking the visit closes it', async () => {
+    const { est, bookingCallId, visitId } = await phoneYes();
+    await sweep();
+    await trx('estimates').where({ id: est.id }).update({ status: 'accepted', accepted_at: new Date() });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    let [card] = await cards(bookingCallId);
+    expect(card.status).toBe('open');
+    expect(payloadOf(card)).toMatchObject({ estimate_accepted: true });
+    expect(card.summary).toMatch(/accepted, but the visit this call booked is not linked/);
+    const version = card.updated_at;
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    [card] = await cards(bookingCallId);
+    expect(card.updated_at).toEqual(version);
+    await trx('scheduled_services').where({ id: visitId }).update({ source_estimate_id: est.id });
+    await expect(sweep()).resolves.toMatchObject({ closed: 1 });
+    [card] = await cards(bookingCallId);
+    expect(card).toMatchObject({ status: 'dismissed', resolution_rule: 'call_phone_yes_moot' });
+    expect(card.resolution_note).toContain('linked to an estimate');
   });
 
   test('gate off: no card', async () => {

@@ -262,16 +262,18 @@ async function laterWordProblem(conn, { customerId, yes, booking }) {
   return later ? 'newer_call' : null;
 }
 
-// The customer's word since `since` (and before `until`, when given), as the cards read it: a reason for no card ({ skip: 'took_back' |
-// 'chose_annual_prepay' }), or the yes and, when there is none, why ({ yes: null, noYes: 'no_yes_heard' |
-// 'yes_without_words' | 'caller_not_account_holder' | 'caller_declined_price' }). A yes is the call reader's pay-per-application choice WITH the
+// The customer's word since `since` (and before `until`, when given), as the cards read it: the yes and, when there is
+// none, why ({ yes: null, noYes: 'no_yes_heard' | 'yes_without_words' | 'caller_not_account_holder' |
+// 'caller_declined_price' | 'caller_took_back' | 'caller_chose_annual_prepay' }; an annual choice also names its call,
+// `callLogId`). A later word never decides whether a card exists: it is no yes, shown to the office (AGENTS.md: an owed
+// ask closes only on evidence answering that ask). A yes is the call reader's pay-per-application choice WITH the
 // caller's own words ({ yes: { callLogId, at, quote }, noYes: null }); any other choice is no yes a card shows.
 async function callerWord(conn, { customerId, since, until = null }) {
   const word = await latestBillingChoice(conn, { customerId, since, until });
   if (word?.notHolder) return { yes: null, noYes: 'caller_not_account_holder' };
-  if (word?.contrary) return { skip: 'took_back' };
+  if (word?.contrary) return { yes: null, noYes: 'caller_took_back' };
   if (word?.declined) return { yes: null, noYes: 'caller_declined_price' };
-  if (word?.choice === 'annual_prepay') return { skip: 'chose_annual_prepay' };
+  if (word?.choice === 'annual_prepay') return { yes: null, noYes: 'caller_chose_annual_prepay', callLogId: word.callLogId };
   if (word?.choice !== 'per_application') return { yes: null, noYes: 'no_yes_heard' };
   if (!word.quote) return { yes: null, noYes: 'yes_without_words' };
   return { yes: { callLogId: word.callLogId, at: word.at, quote: word.quote }, noYes: null };

@@ -19,14 +19,16 @@
  * Each card also records a shadow verdict for the later automatic step, as of its filing: would an automatic accept go
  * ahead, and if not, the first reason (the accept's own checks, then the caller's word).
  *
- * No card when the customer's latest word since the send is annual prepay (the prepay card owns it,
- * call-prepay-choice.js), a cancellation or a one-time visit; and none while a call since the send still owes a read
- * (call-phone-yes-word.js owedReadSql). Only an estimate already sent when the call began counts, and never an
- * archived one. "Sent" is the estimate's first real handoff (deliveryState.firstDeliveredAt, which a resend never
- * moves), else sent_at. The card stays open while an unlinked pest visit the call booked is on the calendar, also after the
- * estimate expires. It closes itself once none of its estimates is open or lapsed (each accepted, declined or
- * archived), no unlinked pest visit of the call is left on the calendar, the call moves to another customer, or a later
- * call takes the yes back.
+ * The caller's word decides the card's state, never whether it exists: a later cancel, one-time ask or annual prepay
+ * choice is no yes, named on the card. The one exception is an annual prepay choice on the booking call itself: the
+ * prepay card owns that call (call-prepay-choice.js). No card while a call since the send still owes a read
+ * (call-phone-yes-word.js owedReadSql) or while one of the customer's estimates is being sent. Only an estimate already
+ * sent when the call began counts, and never an archived one. "Sent" is the estimate's first real handoff
+ * (deliveryState.firstDeliveredAt, which a resend never moves), else sent_at. The card stays open while an unlinked
+ * pest visit the call booked is on the calendar, also after the estimate expires. It closes itself only on evidence that
+ * answers its ask (AGENTS.md): none of its estimates is open, lapsed or accepted (each declined or archived; an accept
+ * that leaves the visit unlinked keeps the card, saying so), no unlinked pest visit of the call is left on the
+ * calendar, or the call moves to another customer.
  *
  * Dark behind GATE_CALL_PHONE_YES_ACCEPT; off = nothing here runs.
  */
@@ -42,6 +44,8 @@ const MOOT_RULE = 'call_phone_yes_moot';
 const LOOKBACK_DAYS = 3;
 const SCAN_LIMIT = 200;
 const MAX_CARDS_PER_RUN = 10;
+// How long a card waits on an estimate claimed 'sending' before it reads the claim as a send that died.
+const SEND_SETTLE_MS = 15 * 60 * 1000;
 const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
 // A visit still on the calendar keeps the card: every status but cancelled and skipped. A visit waiting for its new
 // slot (rescheduled) and a done visit keep it too (the plan was still never accepted), so the gap never closes by itself.
@@ -65,6 +69,8 @@ const REASONS = {
   yes_without_words: "The call reader recorded a pay-per-application choice, but the caller's own words for it are not in the call's recording.",
   caller_not_account_holder: "The caller is not shown to be the account holder's side (a tenant, a relative, or a caller on a phone that is not theirs), so their word is not the customer's yes.",
   caller_declined_price: 'The caller said no to the price on the call.',
+  caller_took_back: "The customer's latest word asks to cancel or for a one-time visit, not a plan.",
+  caller_chose_annual_prepay: "The customer's latest word chooses annual prepay, not pay per application.",
   more_than_one_estimate: 'The customer has more than one open estimate.',
   more_than_one_visit: 'The call booked more than one visit.',
   termite_estimate: 'The estimate has a termite line. Its notice and agreement are handled on the estimate.',
@@ -310,12 +316,19 @@ async function evaluatePhoneYes({ callLogId, customerId, conn = db, now = new Da
   const open = await openEstimatesOf(conn, customerId, now);
   const answerable = open.filter((e) => sentAnchorOf(e) <= callStartedAt(call));
   if (!answerable.length) return skip('no_open_estimate');
+  // A send in flight claims 'sending' and then restores the status (admin-estimates.js): which estimates are open is
+  // known only once it settles, so the card waits (a send takes seconds). A claim older than SEND_SETTLE_MS is a send
+  // that died mid-flight (nothing restores it): the card no longer waits on it.
+  if (await conn('estimates').where({ customer_id: customerId, status: 'sending' }).whereNull('archived_at')
+    .where('updated_at', '>', new Date(now.getTime() - SEND_SETTLE_MS)).first('id')) return skip('estimate_being_sent');
   const since = earliestSentAnchor(answerable);
   // Every call since the send, the booking call included, is read first: an unread one may hold the yes or take it back.
   if (await Word.unreadCallSince(conn, { customerId, since })) return skip('call_still_processing');
   const until = await newerEstimateSentAt(conn, { customerId, cardIds: answerable.map((e) => e.id), bookingCallId: callLogId });
   const heard = await Word.callerWord(conn, { customerId, since, until });
-  if (heard.skip) return skip(heard.skip);
+  // An annual prepay choice on the booking call itself is the prepay card's (call-prepay-choice.js files one per booked
+  // call). Any other later word files this card with no yes, the word named.
+  if (heard.noYes === 'caller_chose_annual_prepay' && String(heard.callLogId) === String(callLogId)) return skip('chose_annual_prepay');
   const { yes } = heard;
   const estimate = open.length === 1 ? open[0] : null;
   // One visit: the call booked no other one still on the calendar (one en route, on site or done counts too).
@@ -328,6 +341,7 @@ async function evaluatePhoneYes({ callLogId, customerId, conn = db, now = new Da
     estimate,
     visit,
     estimateIds: cardIds.map(String),
+    noYes: heard.noYes,
     acceptProblem: problem,
     autoProblem: problem || (await yesProblem(conn, { customerId, yes, call, cardIds, estimate })) || heard.noYes,
   };
@@ -345,6 +359,8 @@ async function yesProblem(conn, { customerId, yes, call, cardIds, estimate }) {
 
 // The card's headline, by state. Only a yes the call reader recorded is called a yes; while the call that gave it is
 // read again, the card says so instead of showing words it cannot check.
+const ACCEPTED_SUMMARY = 'The estimate was accepted, but the visit this call booked is not linked to it yet.';
+
 function cardSummary({ yes, rechecking = false }) {
   if (yes) return 'Caller said yes to pay per application on the call. The estimate is not accepted yet.';
   if (rechecking) return 'A call booked a pest visit while an estimate is open. The call with the yes is being read again. The estimate is not accepted yet.';
@@ -354,7 +370,8 @@ function cardSummary({ yes, rechecking = false }) {
 // The card's yes fields: the caller's pay-per-application choice with their own words, none, or (rechecking) the call
 // that gave the yes while it is read again, with no words. The sweep keeps them current (cardState); the shadow
 // verdict stays as filed.
-function heardFields(yes, { recheckingCallId = null } = {}) {
+function heardFields(yes, { recheckingCallId = null, noYes = null } = {}) {
+  const why = !yes && !recheckingCallId ? noYes || null : null;
   return {
     yes_heard: !!yes,
     yes_rechecking: !yes && !!recheckingCallId,
@@ -362,6 +379,9 @@ function heardFields(yes, { recheckingCallId = null } = {}) {
     yes_call_log_id: yes ? String(yes.callLogId) : (recheckingCallId ? String(recheckingCallId) : null),
     yes_at: yes?.at ? new Date(yes.at).toISOString() : null,
     caller_words: yes?.quote || null,
+    // Why there is no yes (a later cancel, an annual choice, a tenant's word...), shown to the office.
+    no_yes_reason: why,
+    no_yes_message: why ? REASONS[why] || null : null,
   };
 }
 
@@ -399,7 +419,7 @@ async function fileCard({ call, extraction, evaluation }) {
         estimate_id: estimate ? String(estimate.id) : null,
         estimate_ids: evaluation.estimateIds,
         scheduled_service_id: visit ? String(visit.id) : null,
-        ...heardFields(yes),
+        ...heardFields(yes, { noYes: evaluation.noYes }),
         // The shadow verdict for the later automatic step, as of the card's filing. Nothing acts on it.
         auto_would_accept: !autoProblem,
         auto_reason: autoProblem,
@@ -429,10 +449,7 @@ const MOOT_NOTES = {
   no_booked_visit: 'No longer applies: the visits the call booked are off the calendar.',
   no_pest_visit: 'No longer applies: no pest visit the call booked is left on the calendar.',
   visit_linked: 'No longer applies: the visit the call booked is linked to an estimate now.',
-  estimate_accepted: 'No longer applies: the estimate was accepted.',
   estimate_closed: 'No longer applies: the estimate was declined, archived or is gone.',
-  took_back: 'No longer applies: the customer asked to cancel or for a one-time visit on a later call.',
-  chose_annual_prepay: 'No longer applies: the customer chose annual prepay on a later call.',
 };
 
 // The estimates a card names: its one estimate, or every estimate that was open when it was filed.
@@ -472,7 +489,13 @@ async function cardState(card, conn = db) {
       .select('id', 'status', 'sent_at', 'created_at', 'archived_at', conn.raw(`${handoffSql()} AS handoff_at`))
     : [];
   const kept = estimates.filter((e) => CARD_ESTIMATE_STATUSES.includes(e.status) && !e.archived_at);
-  if (!kept.length) return { close: estimates.some((e) => e.status === 'accepted') ? MOOT_NOTES.estimate_accepted : MOOT_NOTES.estimate_closed };
+  if (!kept.length) {
+    // Accepted while a pest visit this call booked is still unlinked (checked above): the office's Mark accepted links no
+    // visit (skipAutoSchedule), so the visit still lacks the plan's price and series. The card stays until the visit is
+    // linked or leaves the calendar; the estimate being settled answers only half of its ask.
+    if (estimates.some((e) => e.status === 'accepted')) return parseJson(card.payload).estimate_accepted === true ? null : { acceptedVisitUnlinked: true };
+    return { close: MOOT_NOTES.estimate_closed };
+  }
   // A card with more than one estimate links only the ones still open or lapsed, in the card's own order (a set
   // compare: a row order that differs is no change, so the card's version moves only when an estimate leaves).
   const keptSet = new Set(kept.map((e) => String(e.id)));
@@ -489,17 +512,21 @@ async function yesState(card, { customerId, ids, since }, conn = db) {
   const p = parseJson(card.payload);
   const yesCall = await yesCallState(p, customerId, conn);
   if (yesCall === 'owed') return p.yes_rechecking === true ? null : { refresh: null, rechecking: p.yes_call_log_id };
-  // Words that no longer hold are cleared at once; the latest word is then read in the same pass when no call owes a read.
+  // Words that no longer hold are cleared at once. A later word never closes the card (AGENTS.md: an owed ask closes
+  // only on evidence answering it); it shows as no yes, the word named.
   const stale = yesCall === 'gone' || yesCall === 'changed';
-  if (await Word.unreadCallSince(conn, { customerId, since })) return stale ? { refresh: null } : null;
   const until = await newerEstimateSentAt(conn, { customerId, cardIds: ids, bookingCallId: card.call_log_id });
   const heard = await Word.callerWord(conn, { customerId, since, until });
-  if (heard.skip) return { close: MOOT_NOTES[heard.skip] };
+  if (await Word.unreadCallSince(conn, { customerId, since })) {
+    // A call still owes a read, so nothing new is shown yet; but a yes the read calls no longer back is cleared now.
+    const backed = p.yes_heard !== true || (heard.yes && String(heard.yes.callLogId) === String(p.yes_call_log_id) && heard.yes.quote === p.caller_words);
+    return stale || !backed ? { refresh: null, noYes: heard.yes ? null : heard.noYes } : null;
+  }
   // The yes the card shows must be the customer's latest word, from the same call with the same words.
-  const now = heardFields(heard.yes);
-  const same = !stale && ['yes_heard', 'yes_rechecking', 'yes_call_log_id', 'caller_words']
+  const now = heardFields(heard.yes, { noYes: heard.noYes });
+  const same = !stale && ['yes_heard', 'yes_rechecking', 'yes_call_log_id', 'caller_words', 'no_yes_reason']
     .every((k) => now[k] === (typeof now[k] === 'boolean' ? p[k] === true : (p[k] ?? null)));
-  return same ? null : { refresh: heard.yes };
+  return same ? null : { refresh: heard.yes, noYes: heard.noYes };
 }
 
 // Closes a card that stopped being true (dismissed, as the prepay card does), or rewrites its yes fields and headline.
@@ -522,10 +549,16 @@ async function applyCardState(card, state) {
       await syncCallReviewStatus(trx, card.call_log_id, 'dismissed');
       return true;
     }
+    if (state.acceptedVisitUnlinked) {
+      await trx('triage_items').where({ id: card.id, status: 'open' }).update({
+        payload: JSON.stringify({ ...parseJson(row.payload), estimate_accepted: true }), summary: ACCEPTED_SUMMARY, updated_at: stamp,
+      });
+      return false;
+    }
     await trx('triage_items').where({ id: card.id, status: 'open' }).update({
       payload: JSON.stringify({
         ...parseJson(row.payload),
-        ...(state.keepYes ? {} : heardFields(state.refresh, { recheckingCallId: state.rechecking })),
+        ...(state.keepYes ? {} : heardFields(state.refresh, { recheckingCallId: state.rechecking, noYes: state.noYes })),
         ...(state.estimateIds ? { estimate_ids: state.estimateIds } : {}),
       }),
       ...(state.keepYes ? {} : { summary: cardSummary({ yes: state.refresh, rechecking: !!state.rechecking }) }),
