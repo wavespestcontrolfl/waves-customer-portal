@@ -119,6 +119,15 @@ describe('where the van is now (today)', () => {
     expect(rc.todaysStops(own, [{ id: 'c', status: 'on_site' }]).onSite.flat(2).map((r) => r.id)).toEqual(['c']);
   });
 
+  test('two stops done in one minute: the later timestamp sets the place', () => {
+    const completed = [
+      { completed_at: '2026-11-19T14:45:40Z', lat: 27.5, lng: -82.4 },
+      { completed_at: '2026-11-19T14:45:10Z', lat: 27.3, lng: -82.5 },
+    ];
+    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 630, onSite: [], completed }).origin).toEqual({ lat: 27.5, lng: -82.4 });
+    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 630, onSite: [], completed: completed.slice().reverse() }).origin).toEqual({ lat: 27.5, lng: -82.4 });
+  });
+
   test('nothing done yet: the start point at the departure minute', () => {
     expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 450, onSite: [], completed: [] })).toEqual({ origin: home, clockMin: 480, source: 'start_point' });
   });
@@ -408,6 +417,29 @@ describe('runRouteCheck', () => {
     const days = JSON.parse(writes[0][1].days);
     expect(days.find((d) => d.date === '2026-11-20')).toMatchObject({ skip: 'FAILED' });
     expect(days.find((d) => d.date === '2026-11-22')).toMatchObject({ skip: 'FAILED' }); // staffed when unknown
+  });
+
+  test('a stop put on site after the rows\' read leaves today unmeasured', async () => {
+    replan.loadDayStops.mockResolvedValue([]);
+    const { conn, writes } = fakeConn({ progress: [{ id: 'late', technician_id: TECH, status: 'on_site', arrived_at: '2026-11-19T15:20:00Z', lat: 27.5, lng: -82.4 }] });
+    await runRouteCheck({ conn, now: NOW });
+    expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ date: '2026-11-19', skip: 'ON_SITE_NOT_IN_ROUTE' });
+  });
+
+  test("a failed progress read on a Sunday keeps today's technicians, marked FAILED", async () => {
+    replan.loadDayStops.mockResolvedValue([]);
+    const { conn, writes } = fakeConn();
+    const base = conn;
+    const failing = (table) => {
+      const q = base(table);
+      if (table === 'scheduled_services') q.leftJoin = () => { throw new Error('timeout'); };
+      return q;
+    };
+    failing.raw = base.raw;
+    await runRouteCheck({ conn: failing, now: new Date('2026-11-22T17:00:00Z') }); // Sunday noon ET
+    const today = JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-22');
+    expect(today).toMatchObject({ skip: 'FAILED' });
+    expect(JSON.parse(writes[0][1].ad_shadow).decision).not.toBe('floor');
   });
 
   test("one date's occupancy read failing marks that date and the row is still written", async () => {

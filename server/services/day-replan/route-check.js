@@ -81,13 +81,15 @@ const hasCoords = (row) => {
  * when the latest stop done has no place.
  */
 function vanNow({ completed, onSite, home, departureMin, nowMin, day }) {
-  const doneMins = completed.map((row) => etMinuteOn(row.completed_at, day)).filter((m) => m != null);
-  const lastDone = doneMins.length ? Math.max(...doneMins) : -Infinity;
+  // The latest stop done by its full timestamp (two in one minute: the later one), then its ET minute.
+  const done = completed.filter((row) => etMinuteOn(row.completed_at, day) != null)
+    .reduce((top, row) => (!top || new Date(row.completed_at) > new Date(top.completed_at) ? row : top), null);
+  const lastDone = done ? etMinuteOn(done.completed_at, day) : -Infinity;
   const onSiteClock = (row) => Math.max(nowMin, Math.max(etMinuteOn(row.arrived_at, day) ?? nowMin, lastDone) + row.stayMin);
   const seen = [
-    ...completed.map((row) => ({ row, clockMin: etMinuteOn(row.completed_at, day), source: 'completed' })),
+    ...(done ? [{ row: done, clockMin: lastDone, source: 'completed' }] : []),
     ...onSite.map((row) => ({ row, clockMin: onSiteClock(row), source: 'on_site' })),
-  ].filter((s) => s.clockMin != null);
+  ];
   const best = seen.reduce((top, s) => (!top || s.clockMin > top.clockMin ? s : top), null);
   if (!best) return { origin: home, clockMin: departureMin, source: 'start_point' };
   // The latest stop done has no place: the van's place is unknown (never an earlier customer's, never home).
@@ -361,6 +363,9 @@ async function measureOne(conn, env, { day, techId, rows, progress, occupancy })
     }
     if (!progress) return { stops: own.length, skip: 'FAILED' };
     const mine = progress.filter((p) => String(p.technician_id) === techId);
+    // A stop put on site for this technician after the rows' read: its place and length are not in hand.
+    const ownIds = new Set(own.map((r) => String(r.id)));
+    if (mine.some((p) => p.status === 'on_site' && !ownIds.has(String(p.id)))) return { stops: own.length, skip: 'ON_SITE_NOT_IN_ROUTE' };
     const { live, onSite, enRoute, rest } = todaysStops(own, mine);
     // The van is at the stop on site, so one with no place leaves the day unmeasured (never free time from home).
     if (onSite.flat(2).some((r) => !hasCoords(r))) return { stops: live.length, skip: 'ON_SITE_WITHOUT_COORDINATES' };
@@ -401,7 +406,8 @@ async function runRouteCheck({ conn = db, now = new Date() } = {}) {
   // stays staffed after its last stop).
   const withStopsOn = async (day) => {
     const rows = await rowsOn(day);
-    if (!rows) return null;
+    // Today without the progress read: a Sunday's stops done may be the only sign a technician worked.
+    if (!rows || (day === today && !progress)) return null;
     return techsWithStops(day === today ? [...rows, ...(progress || [])] : rows);
   };
   const stopsOn = new Map();
