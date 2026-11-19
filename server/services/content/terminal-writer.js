@@ -478,14 +478,14 @@ async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
     const rejected = fetched.ok && plansReviewed ? rejectedPlanProblem(row, fetched.revision) : null;
     if (rejected) due.push({ ...item, problem: rejected });
     else if (fetched.ok) written.push({ ...item, handoff: handoffWait(row) });
-    else if (fetched.code === HELD) held.push({ ...item, hold: fetched.hold });
+    else if (fetched.code === HELD) held.push({ ...item, hold: fetched.hold, handoff: handoffWait(row) });
     else due.push({ ...item, problem: fetched.code === INVALID ? fetched.reason : null });
   }
   return { due, written, held, rebrief };
 }
 
 // The waits that only stood for "no usable draft yet" (a server handoff in Mac mode, no file, a
-// rejected file): once a draft is written, the Mac pass may take it before the recheck time. A
+// rejected file): once a draft or a hold is pushed, the Mac pass may take it before the recheck time. A
 // publish-cap deferral after that wait, or a reviewer outage, keeps its time.
 const HANDOFF_WAITS = new Set([AWAITS_MAC, MISSING, INVALID]);
 function handoffWait(row) {

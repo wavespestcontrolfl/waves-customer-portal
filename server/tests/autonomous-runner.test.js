@@ -1913,6 +1913,13 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
         { excludeIds: [], onlyIds: ['written_a', 'written_b'], availableNowIds: ['written_b'] },
         { excludeIds: [], onlyIds: ['written_b'], availableNowIds: ['written_b'] },
       ]);
+      // A hold pushed during the handoff wait is taken the same way.
+      const holds = queueRunner(rows(), { held: ['held_a'], handoff: ['held_a'] });
+      holds.runner._withEngineLock = jest.fn((label, fn) => fn());
+      await holds.runner.runTerminalDrafts({ limit: 5 });
+      expect(holds.runner.runNext.mock.calls.map(([args]) => args)).toEqual([
+        { excludeIds: [], onlyIds: ['held_a'], terminalHoldPass: true, availableNowIds: ['held_a'] },
+      ]);
     });
 
     test('runTerminalDrafts with nothing written still settles and reports no opportunity; the limit and the failure stop hold', async () => {

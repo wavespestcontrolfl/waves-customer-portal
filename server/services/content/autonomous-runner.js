@@ -1999,7 +1999,7 @@ class AutonomousRunner {
     try {
       const listing = await terminalWriter.awaitingTerminalDrafts();
       const ids = (rows) => (rows || []).filter((row) => !actionType || row.action_type === actionType).map((row) => row.opportunity_id);
-      const handoff = ids((listing.written || []).filter((row) => row.handoff));
+      const handoff = ids([...(listing.written || []), ...(listing.held || [])].filter((row) => row.handoff));
       return { written: ids(listing.written), held: ids(listing.held), ...(handoff.length ? { handoff } : {}) };
     } catch (err) {
       if (throwOnError) throw err;
@@ -2073,8 +2073,8 @@ class AutonomousRunner {
     for (let i = 0; i < batchLimit; i += 1) {
       const scope = terminalFirstScope(terminalFirst);
       if (!scope) break;
-      // A draft written after a handoff wait is taken now, not at the wait's recheck time.
-      const handoff = scope.kind === 'written' ? scope.ids.filter((id) => terminalFirst.handoff?.includes(id)) : [];
+      // A draft or hold pushed after a handoff wait is taken now, not at the wait's recheck time.
+      const handoff = scope.ids.filter((id) => terminalFirst.handoff?.includes(id));
       const run = await this.runNext({ excludeIds: [...failedOppIds], ...terminalScopeArgs(scope), ...(handoff.length ? { availableNowIds: handoff } : {}) });
       takeFromTerminalScope(terminalFirst, scope, run);
       if (run.outcome === 'skipped_no_opportunity') { i -= 1; continue; }

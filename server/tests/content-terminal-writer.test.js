@@ -468,6 +468,10 @@ describe('blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST / _RUNNER)',
     astro.getFile.mockReset().mockResolvedValue(null);
     const gone = await run(refresh, withPlan());
     expect(gone).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/Push a hold with reason brief_unusable.*\[terminal revision commit-1\]$/) });
+    // A target whose frontmatter does not parse is broken, not unreachable: the writer is asked for a hold too.
+    astro.getFile.mockResolvedValue({ content: '---\ntitle: [unclosed\n---\n\nBody.' });
+    expect(await run(refresh, withPlan())).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/brief_unusable/) });
+    astro.getFile.mockReset().mockResolvedValue(null);
     const untitled = await run({ ...blog, working_title: '', target_keyword: '' }, withPlan());
     expect(untitled).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/brief_unusable/) });
     astro.getFile.mockImplementation(async (filePath) => (filePath === 'src/content/services/pest-control-venice-fl.md'
@@ -563,7 +567,7 @@ describe('waiting rows and the admin item', () => {
     expect(withHold.written.map((r) => r.opportunity_id)).toEqual([B, C]);
   });
 
-  test('a written draft after a handoff wait is marked for the Mac pass; a reviewer outage or a later publish-cap deferral is not', async () => {
+  test('a draft or hold pushed after a handoff wait is marked for the Mac pass; a reviewer outage or a later publish-cap deferral is not', async () => {
     const [D, E] = ['00000000-0000-4000-8000-0000000000d1', '00000000-0000-4000-8000-0000000000e1'];
     const t = new Date('2026-11-19T14:00:00Z');
     const rows = [
@@ -573,9 +577,14 @@ describe('waiting rows and the admin item', () => {
       waiting(D, { skip_reason: tw.PLAN_UNAVAILABLE, created_at: t }),
       waiting(E, { skip_reason: tw.AWAITS_MAC, created_at: t, capped_at: new Date('2026-11-19T15:00:00Z') }),
     ];
+    const F = '00000000-0000-4000-8000-0000000000f1';
+    rows.push(waiting(F, { skip_reason: tw.AWAITS_MAC, created_at: t }));
     const branches = Object.fromEntries([ID, B, C, D, E].map((id) => [id, draftFor(id)]));
+    // A hold pushed during the handoff wait is marked too (a needs_owner question is raised that pass).
+    branches[F] = { opportunity_id: F, brief_id: `brief-${F.slice(-2)}`, hold: { reason: 'needs_owner', detail: 'Two services share this page.', question: 'Keep both services on one page?' } };
     const out = await tw.awaitingTerminalDrafts({ deps: deps({ rows, branches }) });
     expect(out.written.map((r) => [r.opportunity_id, r.handoff])).toEqual([[ID, true], [B, true], [C, false], [D, false], [E, false]]);
+    expect(out.held.map((r) => [r.opportunity_id, r.handoff])).toEqual([[F, true]]);
   });
 
   test('a waiting row whose brief is too old, or gone, is not offered for writing, nor listed written with its draft pushed: the next run briefs it again', async () => {

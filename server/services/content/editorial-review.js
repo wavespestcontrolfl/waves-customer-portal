@@ -165,6 +165,10 @@ async function review({ document, title, domain, sourceUrls = [], factsPack = nu
   if (validationError) return errorResult(document, title, `Editorial response failed validation: ${validationError}.`, 'Retry the complete editorial review; do not publish from partial coverage.', evidence.records, reviewedAt, false);
 
   const checks = addOperationalFindings(reviewed.checks, analysis, evidence.errors, document, title);
+  // Another check that failed (a template token, a model finding outside source support) is a verdict a
+  // source retry cannot change, so the result is an outage only when source support alone blocks it.
+  // Source support itself is left out: with the sources down, its "unsupported" verdicts follow from the outage.
+  const onlySourceErrors = checks.every((check) => check.name === 'source_support' || check.status === 'pass');
   return {
     pass: checks.every((check) => check.status === 'pass'),
     checks,
@@ -172,7 +176,7 @@ async function review({ document, title, domain, sourceUrls = [], factsPack = nu
     model: response.model || null,
     reviewedAt: new Date().toISOString(),
     // Only source errors make a reviewed result an outage; transient when every one may pass a retry.
-    ...(evidence.errors.length ? { transient: evidence.transient === true } : {}),
+    ...(evidence.errors.length ? { transient: evidence.transient === true && onlySourceErrors } : {}),
   };
 }
 

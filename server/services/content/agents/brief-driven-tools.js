@@ -381,7 +381,13 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
         // parser expects a markdown STRING, not the wrapper object —
         // passing the wrapper yields empty frontmatter and a serialized
         // object as body, which breaks refresh + meta rewrites.
-        const parsed = fm.parse(file.content);
+        let parsed;
+        try {
+          parsed = fm.parse(file.content);
+        } catch (parseErr) {
+          // Not "failed": the page itself is broken, and a retry reads the same file.
+          return { error: `get_existing_page: the page frontmatter does not parse (${filePath}): ${parseErr.message}`, code: 'frontmatter_invalid' };
+        }
         return { page_url, file_path: filePath, frontmatter: parsed.data, body: parsed.content };
       } catch (err) {
         return { error: `get_existing_page failed: ${err.message}` };

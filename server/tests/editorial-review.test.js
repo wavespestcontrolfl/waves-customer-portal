@@ -178,6 +178,21 @@ describe('editorial review', () => {
     expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 
+  test('a source outage is transient only while nothing else blocks the review', async () => {
+    mockFetchPage.mockResolvedValue({ status: 503, finalUrl: null, blocked: false, html: null, error: 'http_503' });
+    const sourceUrls = ['https://health.example.gov/mosquitoes'];
+    mockDispatch.mockResolvedValue({ ok: true, json: modelReview(DOCUMENT, { sources: false }), model: 'test-model' });
+    const alone = await editorial.review({ document: DOCUMENT, title: 'Stop Mosquito Breeding', sourceUrls });
+    expect(alone.checks.filter((check) => check.status !== 'pass').map((check) => check.name)).toEqual(['source_support']);
+    expect(alone.transient).toBe(true);
+    // An unknown template token fails editorial_quality on its own: a source retry cannot change that.
+    const tokenDocument = `${DOCUMENT}\n\nAsk {{mysteryOffice}} for details.`;
+    mockDispatch.mockResolvedValue({ ok: true, json: modelReview(tokenDocument, { sources: false }), model: 'test-model' });
+    const withToken = await editorial.review({ document: tokenDocument, title: 'Stop Mosquito Breeding', sourceUrls });
+    expect(withToken.checks.find((check) => check.name === 'editorial_quality').status).toBe('fail');
+    expect(withToken.transient).toBe(false);
+  });
+
   test('rejects unknown unresolved domain tokens while allowing known caller tokens', async () => {
     const tokenDocument = `${DOCUMENT}\n\nCall {{cityPhone}} and ask {{mysteryOffice}} for details.`;
     mockDispatch.mockResolvedValue({ ok: true, json: modelReview(tokenDocument, { sources: false }), model: 'test-model' });

@@ -417,10 +417,12 @@ class OpportunityQueue {
     const only = Array.isArray(onlyIds) ? onlyIds.filter((id) => id != null) : null;
     const whereOnly = only ? 'AND id = ANY(?)' : '';
     // availableNowIds: rows of onlyIds that may be claimed before their available_at (the Mac
-    // pass takes a terminal draft written after a handoff wait). Every other rule still applies.
+    // pass takes a terminal draft written after a handoff wait), only while that time is within one
+    // handoff wait from now: a later date set since (a seeder, a cap) still holds. Every other rule applies.
     const availableNow = only && Array.isArray(availableNowIds) ? availableNowIds.filter((id) => id != null && only.includes(id)) : [];
+    const handoffSeconds = availableNow.length ? Math.ceil(require('./terminal-writer').MAC_RECHECK_MS / 1000) : 0;
     const whereAvailable = availableNow.length
-      ? 'AND (available_at IS NULL OR available_at <= now() OR id = ANY(?))'
+      ? `AND (available_at IS NULL OR available_at <= now() OR (id = ANY(?) AND available_at <= now() + (?::int * interval '1 second')))`
       : 'AND (available_at IS NULL OR available_at <= now())';
     // See listicleFamilyLaneOpen — gate-off family rows are unclaimable.
     const whereFamilyGate = listicleFamilyLaneOpen() ? '' : `AND bucket <> 'listicle_family'`;
@@ -491,7 +493,7 @@ class OpportunityQueue {
          LIMIT 1
        )
        RETURNING *, ${effectiveActionSql} AS effective_action_type`,
-      [new Date(), ...(availableNow.length ? [availableNow] : []), maxClaimAttempts(), blogMinScoreFor(minScore), rewriteMinScoreFor(minScore), minScore]
+      [new Date(), ...(availableNow.length ? [availableNow, handoffSeconds] : []), maxClaimAttempts(), blogMinScoreFor(minScore), rewriteMinScoreFor(minScore), minScore]
         .concat(actionType ? [actionType] : [])
         .concat(bucket ? [bucket] : [])
         .concat(exclude.length ? [exclude] : [])

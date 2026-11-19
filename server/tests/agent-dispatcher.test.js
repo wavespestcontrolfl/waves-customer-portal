@@ -536,6 +536,16 @@ describe('get_existing_page registry fallback', () => {
     expect(seen).toContainEqual(['whereRaw', 'metadata::text ILIKE ?', ['%sarasotaflpestcontrol.com%']]);
   });
 
+  test('a page whose frontmatter does not parse is its own error, not a failed read', async () => {
+    db.mockReturnValue(registryQuery(null));
+    gh.getFile.mockResolvedValue({ sha: 'broken-sha', content: '---\ntitle: [unclosed\n---\n\nBody.' });
+    const r = await executeBriefTool('get_existing_page', {
+      page_url: 'https://www.wavespestcontrol.com/blog/broken-frontmatter/',
+    }, { sessionId: 'sess-existing-page-bad-yaml' });
+    expect(r).toMatchObject({ code: 'frontmatter_invalid', error: expect.stringMatching(/^get_existing_page: the page frontmatter does not parse/) });
+    expect(r.error).not.toMatch(/^get_existing_page failed:/);
+  });
+
   test('a registry read that failed is a failed page read, not "file not found"', async () => {
     const query = registryQuery(null);
     query.first = jest.fn(async () => { throw new Error('connection terminated'); });
