@@ -57,6 +57,7 @@ const { sendReceiptEmail } = require('../services/invoice-email');
 const { rowIsSelfPayDue } = require('../services/open-balance');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const { recordManualPayment, VALID_PAYMENT_METHODS } = require('../services/invoice-manual-payment');
+const ORIGINAL_PARTIAL_PAYMENTS_GATE = process.env.GATE_PARTIAL_PAYMENTS;
 
 function recorder({ first = null, returning = [] } = {}) {
   const q = {};
@@ -77,13 +78,62 @@ const openInvoice = (over = {}) => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
+  StripeService.assertNoInvoiceChargeReconciliationPending.mockReset().mockResolvedValue(undefined);
   db.mockImplementation((table) => { throw new Error(`unexpected table ${table}`); });
   db.transaction.mockReset();
+});
+
+afterEach(() => {
+  if (ORIGINAL_PARTIAL_PAYMENTS_GATE === undefined) delete process.env.GATE_PARTIAL_PAYMENTS;
+  else process.env.GATE_PARTIAL_PAYMENTS = ORIGINAL_PARTIAL_PAYMENTS_GATE;
+  delete db.schema;
 });
 
 async function refusalOf(promise) {
   try { await promise; } catch (err) { return err; }
   throw new Error('expected a refusal');
+}
+
+// A small full/part settlement fixture for the saved-card fence tests. The
+// part-payment safety reads all answer "clear" so the test reaches the shared
+// under-invoice-lock reconciliation guard, then either stops there or posts.
+function manualPostingFixture({ partial = false } = {}) {
+  const row = openInvoice();
+  const settled = partial
+    ? openInvoice({ amount_paid: '25.00' })
+    : openInvoice({ status: 'paid', payment_method: 'cash' });
+  const calls = { invoiceUpdate: null, paymentsInsert: null, trx: null };
+  db.schema = { hasTable: jest.fn(async () => false) };
+  db.mockImplementation((table) => {
+    if (table === 'invoices') return recorder({ first: row });
+    if (table === 'activity_log') return recorder();
+    if (table === 'payment_plans' || table === 'payments') return recorder({ first: null });
+    if (table === 'customers') return recorder({ first: { id: 'cust-1', autopay_enabled: false } });
+    throw new Error(`unexpected table ${table}`);
+  });
+  db.transaction.mockImplementation(async (fn) => {
+    const payments = recorder({ first: null });
+    const trx = jest.fn((table) => {
+      if (table === 'invoices') {
+        const r = recorder({ first: row, returning: [settled] });
+        calls.invoiceUpdate = r.update;
+        return r;
+      }
+      if (table === 'payments') {
+        calls.paymentsInsert = payments.insert;
+        return payments;
+      }
+      if (table === 'payment_plans') return recorder({ first: null });
+      if (table === 'customers') return recorder({ first: { id: 'cust-1', autopay_enabled: false } });
+      throw new Error(`unexpected trx table ${table}`);
+    });
+    trx.fn = { now: () => 'NOW()' };
+    trx.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    trx.schema = { hasTable: jest.fn(async () => false) };
+    calls.trx = trx;
+    return fn(trx);
+  });
+  return calls;
 }
 
 describe('recordManualPayment — refusal contract', () => {
@@ -249,6 +299,77 @@ describe('recordManualPayment — refusal contract', () => {
     const err = await refusalOf(recordManualPayment('inv-1', { method: 'check' }));
     expect(err.statusCode).toBe(409);
     expect(err.message).toMatch(/new payment session started/);
+  });
+
+  test('a held invoice keeps its existing payment session when staff try to post money', async () => {
+    db.mockImplementation(() => recorder({ first: openInvoice({ stripe_payment_intent_id: 'pi_open' }) }));
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockRejectedValueOnce(
+      Object.assign(new Error('An earlier card payment is awaiting verification.'), { code: 'STRIPE_CHARGE_IN_PROGRESS' }),
+    );
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash' }));
+    expect(err.statusCode).toBe(409);
+    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('inv-1', db, { checkout: true });
+    expect(StripeService.retrievePaymentIntent).not.toHaveBeenCalled();
+    expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['full', 'cash', false],
+    ['full', 'check', false],
+    ['full', 'zelle', false],
+    ['partial', 'cash', true],
+    ['partial', 'check', true],
+    ['partial', 'zelle', true],
+  ])('authentication_required saved-card hold blocks %s %s posting under the invoice lock', async (_kind, method, partial) => {
+    if (partial) process.env.GATE_PARTIAL_PAYMENTS = 'true';
+    const calls = manualPostingFixture({ partial });
+    const pending = Object.assign(
+      new Error('An earlier card payment is awaiting verification. Please contact us before trying again.'),
+      { code: 'STRIPE_CHARGE_IN_PROGRESS', chargeAttemptId: 'attempt-auth' },
+    );
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockRejectedValueOnce(pending);
+
+    const options = partial
+      ? { method, sendReceipt: false, amountCents: 2500, owedCentsSeen: 11700 }
+      : { method, sendReceipt: false };
+    const err = await refusalOf(recordManualPayment('inv-1', options));
+
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toMatch(/awaiting verification.*resolve it before recording another payment/i);
+    expect(StripeService.assertNoInvoiceChargeReconciliationPending)
+      .toHaveBeenCalledWith('inv-1', calls.trx, { checkout: true });
+    expect(calls.invoiceUpdate).not.toHaveBeenCalled();
+    expect(calls.paymentsInsert).toBeNull();
+  });
+
+  test.each([
+    ['full', false, { method: 'check', sendReceipt: false }],
+    ['partial', true, { method: 'cash', sendReceipt: false, amountCents: 2500, owedCentsSeen: 11700 }],
+  ])('only verified cancellation of the exact authentication PI releases %s manual posting', async (_kind, partial, options) => {
+    if (partial) process.env.GATE_PARTIAL_PAYMENTS = 'true';
+    const calls = manualPostingFixture({ partial });
+    const authentication = { paymentIntentId: 'pi_auth', verifiedCanceledIntentId: 'pi_other' };
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockImplementation(async (_invoiceId, _trx, guardOptions) => {
+      if (guardOptions?.checkout !== true || authentication.verifiedCanceledIntentId !== authentication.paymentIntentId) {
+        throw Object.assign(
+          new Error('An earlier card payment is awaiting verification. Please contact us before trying again.'),
+          { code: 'STRIPE_CHARGE_IN_PROGRESS', chargeAttemptId: 'attempt-auth' },
+        );
+      }
+    });
+
+    await expect(recordManualPayment('inv-1', options)).rejects.toMatchObject({ statusCode: 409 });
+    expect(calls.invoiceUpdate).not.toHaveBeenCalled();
+
+    authentication.verifiedCanceledIntentId = authentication.paymentIntentId;
+    const out = await recordManualPayment('inv-1', options);
+
+    expect(out.invoice).toBeTruthy();
+    expect(calls.invoiceUpdate).toHaveBeenCalled();
+    expect(calls.paymentsInsert).toHaveBeenCalled();
+    expect(StripeService.assertNoInvoiceChargeReconciliationPending)
+      .toHaveBeenLastCalledWith('inv-1', calls.trx, { checkout: true });
   });
 
   test('expectedAmountCents is fenced under the invoice lock: a moved amount due → 409 and nothing written', async () => {

@@ -198,6 +198,18 @@ function owedChangedMessage(nowCents) {
   return `The amount owed on this invoice changed to $${(nowCents / 100).toFixed(2)} since the page loaded (another payment or an edit). Reload the invoice and check it before you record a payment. Nothing was recorded.`;
 }
 
+async function manualPaymentHold(invoiceId, connection) {
+  try {
+    await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoiceId, connection, { checkout: true });
+    return null;
+  } catch (err) {
+    if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(err.code)) {
+      return `${err.message} — resolve it before recording another payment`;
+    }
+    throw err;
+  }
+}
+
 // Whether a checkout tender is the invoice's only money (see checkoutTender above), read on the LOCKED row and in the settlement
 // transaction, after this payment's ledger row is inserted (paymentId, excluded). Only money rows count (paid, refunded,
 // processing: the statuses the receipt reader considers); a declined card attempt's failed row is no money. Card details left
@@ -359,6 +371,11 @@ async function recordManualPayment(id, {
     throw refusal(409, 'The settlement claim was lost before the payment could be recorded (the notice was reclaimed, or the bank changed or withdrew the payment) — nothing was recorded');
   }
   const triagedPiId = invoice.stripe_payment_intent_id || null;
+  if (triagedPiId) {
+    // Keep the customer's open Stripe session intact while an earlier card can settle.
+    const hold = await manualPaymentHold(id, db);
+    if (hold) throw refusal(409, hold);
+  }
   const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'recording a manual payment' });
   if (openPi) throw refusal(openPi.status, openPi.error);
 
@@ -419,15 +436,11 @@ async function recordManualPayment(id, {
     // into stripe_orphan_charges when the webhook lands, once by
     // cash/check/Zelle/credit). Run under the SAME row lock as the paid
     // flip so a claim that lands between the pre-lock read and here is
-    // still caught.
-    try {
-      await require('./stripe').assertNoInvoiceChargeReconciliationPending(id, trx);
-    } catch (err) {
-      if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(err.code)) {
-        return { chargeReconciliationPending: err.message };
-      }
-      throw err;
-    }
+    // still caught. Checkout mode also fences a resolved
+    // authentication_required attempt: its saved-card PI can still settle
+    // until cancellation of that exact PI has been verified.
+    const hold = await manualPaymentHold(id, trx);
+    if (hold) return { chargeReconciliationPending: hold };
     // Amount fence under the same lock as the paid flip: the caller settles
     // a specific sum; the ledger row below records invoiceAmountDue(row), so
     // the two must agree NOW, not when the caller last looked.
@@ -663,7 +676,7 @@ async function recordManualPayment(id, {
     throw refusal(409, `${updatedInvoice.noLongerCollectible} — nothing was recorded`);
   }
   if (updatedInvoice?.chargeReconciliationPending) {
-    throw refusal(409, `${updatedInvoice.chargeReconciliationPending} — resolve it before recording another payment`);
+    throw refusal(409, updatedInvoice.chargeReconciliationPending);
   }
   if (updatedInvoice?.notSelfPay) {
     throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded', { drift: true });

@@ -2638,7 +2638,15 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     // fence directly before touching anything — not yet in a transaction,
     // so a stale-claim promotion here commits on its own statement.
     try {
-      await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(invoice.id);
+      // Removing coverage competes with a still-settleable authentication
+      // challenge even when the invoice itself has no PI pointer. Checkout
+      // mode includes that exact hold; verified cancellation of its bound PI
+      // releases it through the shared authentication predicate.
+      await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(
+        invoice.id,
+        db,
+        { checkout: true },
+      );
     } catch (fenceErr) {
       if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(fenceErr.code)) {
         return res.status(409).json({ error: `${fenceErr.message} — resolve it before removing the annual prepay flag` });
@@ -2690,7 +2698,11 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       // refusal outside, after commit (same shape as apply-credit's own
       // chargeReconciliationPending handling).
       try {
-        await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(invoice.id, trx);
+        await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(
+          invoice.id,
+          trx,
+          { checkout: true },
+        );
       } catch (fenceErr) {
         if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(fenceErr.code)) {
           return { chargeReconciliationPending: `${fenceErr.message} — resolve it before removing the annual prepay flag` };

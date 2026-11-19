@@ -223,8 +223,9 @@ function invoiceChargeConflict(err, checkout) {
 }
 
 // readOnly leaves every unresolved claim in place. checkout also covers a
-// resolved authentication decline when authorizing a new collection. Recording
-// money already received keeps the original reconciliation rules.
+// resolved authentication decline before collecting, posting a manual payment,
+// or changing coverage. A webhook recording the existing Stripe charge can
+// still reconcile that same payment.
 async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db, { readOnly = false, checkout = false, excludeChargeAttemptId = null } = {}) {
   let chargeAttempt = await blockingInvoiceChargeAttempt(invoiceId, database, checkout, excludeChargeAttemptId);
   if (checkout && chargeAttempt?.status === 'failed') {
