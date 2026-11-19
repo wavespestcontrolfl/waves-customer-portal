@@ -10,6 +10,7 @@ jest.mock('../config/feature-gates', () => ({
   ...jest.requireActual('../config/feature-gates'),
   alertEpisodesLive: jest.fn(() => true),
 }));
+jest.mock('../services/invoice-payer-ownership', () => ({ invoicePayerOwnership: jest.fn(async () => null) }));
 jest.mock('../services/admin-alert-episodes', () => ({
   raiseAdminAlertWithReopen: jest.fn(async () => ({ id: 'bell-1', deduped: false })),
   openAdminAlertKeys: jest.fn(async () => []),
@@ -19,6 +20,7 @@ jest.mock('../services/admin-alert-episodes', () => ({
 const logger = require('../services/logger');
 const { alertEpisodesLive } = require('../config/feature-gates');
 const episodes = require('../services/admin-alert-episodes');
+const { invoicePayerOwnership } = require('../services/invoice-payer-ownership');
 const check = require('../services/paid-visit-receipt-check');
 
 // 2026-11-18 14:50 ET; the window is paid_at between Nov 11 19:50 UTC and Nov 18 17:50 UTC.
@@ -28,7 +30,7 @@ const B = '22222222-2222-4222-8222-222222222222';
 const keyOf = (id) => `paid-visit-no-receipt:${id}`;
 // Paid 10:30 ET on the visit day, Nov 18.
 const row = (id, extra = {}) => ({
-  id, customer_id: `cust-${id.slice(0, 1)}`, invoice_number: `WPC-${id.slice(0, 1)}`, total: '125.00', payment_method: 'check',
+  id, customer_id: `cust-${id.slice(0, 1)}`, scheduled_service_id: `sv-${id.slice(0, 1)}`, service_record_id: null, invoice_number: `WPC-${id.slice(0, 1)}`, total: '125.00', payment_method: 'check',
   paid_at: new Date('2026-11-18T15:30:00Z'), status: 'paid', receipt_sent_at: null, archived_at: null,
   scheduled_date: '2026-11-18', first_name: 'Pat', last_name: 'Tester', ...extra,
 });
@@ -45,7 +47,17 @@ function chain(table) {
   const rec = (name) => (...args) => { q.calls.push([name, ...args]); return q; };
   Object.assign(q, {
     join: rec('join'), joinRaw: rec('joinRaw'), leftJoin: rec('leftJoin'), whereNull: rec('whereNull'), whereNotIn: rec('whereNotIn'), whereIn: rec('whereIn'),
-    where: (...args) => { q.calls.push(['where', ...args]); if (args[0] && typeof args[0] === 'object') q.filter = args[0]; return q; },
+    where: (...args) => {
+      if (typeof args[0] === 'function') {
+        // A grouped condition: record what the callback asks for.
+        const group = [];
+        const sub = { whereIn: (...a) => { group.push(['whereIn', ...a]); return sub; }, orWhereNotNull: (col) => { group.push(['orWhereNotNull', col]); return sub; } };
+        args[0](sub);
+        q.calls.push(['whereGroup', group]);
+        return q;
+      }
+      q.calls.push(['where', ...args]); if (args[0] && typeof args[0] === 'object') q.filter = args[0]; return q;
+    },
     select: async (...cols) => { sqlCalls.push({ table, calls: q.calls, cols }); return candidates; },
     first: async () => {
       if (failing?.table === table) throw Object.assign(new Error('boom: secret-token'), { code: 'XX000' });
@@ -53,9 +65,10 @@ function chain(table) {
       // The pre-raise re-read finds the candidate itself unless a test gives the invoice a newer state.
       if (table === 'invoices') return invoices.find((r) => r.id === id) ?? candidates.find((r) => r.id === id);
       if (table === 'email_messages') {
-        const where = q.calls.find(([name]) => name === 'whereIn');
+        const [, group] = q.calls.find(([name]) => name === 'whereGroup');
         const msg = emails[q.filter.trigger_event_id];
-        return msg && where[2].includes(msg.status) ? msg : undefined;
+        const hit = (cond) => (cond[0] === 'whereIn' ? cond[2].includes(msg.status) : msg[cond[1]] != null);
+        return msg && group.some(hit) ? msg : undefined;
       }
       if (table === 'receipt_delivery_jobs') return jobs[id] || undefined;
       if (table === 'notification_prefs') return prefs[q.filter.customer_id] || undefined;
@@ -83,12 +96,15 @@ beforeEach(() => {
   episodes.openAdminAlertKeys.mockResolvedValue([]);
   episodes.closeAdminAlertKeys.mockResolvedValue(1);
   episodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: 'bell-1', deduped: false, rang: true });
+  invoicePayerOwnership.mockResolvedValue(null);
 });
 
 describe('what the query asks for', () => {
   test('every fixed rule is in the SQL, with the 7 day to 2 hour window', async () => {
     await run();
-    const { calls } = sqlCalls[0];
+    const { calls, cols } = sqlCalls[0];
+    // The links the payer resolver judges the visit's own payer by.
+    expect(cols).toEqual(expect.arrayContaining(['i.scheduled_service_id', 'i.service_record_id', 'i.payer_id', 'i.payer_statement_id']));
     expect(calls).toEqual(expect.arrayContaining([
       // The visit, directly or through the invoice's service record (a post-completion invoice carries only that link).
       ['leftJoin', 'service_records as sr', 'sr.id', 'i.service_record_id'],
@@ -184,10 +200,25 @@ describe('raising', () => {
   });
 
   test('an accepted receipt email (any sender, keyed invoice_receipt:<id>) rings nothing; a failed one does not count', async () => {
-    candidates = [row(A), row(B)];
-    emails = { [`invoice_receipt:${A}`]: { id: 'm-1', status: 'delivered' }, [`invoice_receipt:${B}`]: { id: 'm-2', status: 'failed' } };
+    const C = '33333333-3333-4333-8333-333333333333';
+    candidates = [row(A), row(B), row(C)];
+    emails = {
+      [`invoice_receipt:${A}`]: { id: 'm-1', status: 'delivered' },
+      [`invoice_receipt:${B}`]: { id: 'm-2', status: 'failed' },
+      // Delivered, then the customer unsubscribed: the status moved, delivered_at stays.
+      [`invoice_receipt:${C}`]: { id: 'm-3', status: 'unsubscribed', delivered_at: new Date('2026-11-18T16:00:00Z') },
+    };
     await run();
     expect(raised().map((b) => b.opts.dedupeKey)).toEqual([keyOf(B)]);
+  });
+
+  test('an invoice a third-party payer owns right now rings nothing; an unverifiable owner fails closed for that row', async () => {
+    candidates = [row(A), row(B)];
+    invoicePayerOwnership.mockImplementation(async (inv) => (inv.id === A ? 'payer_owned' : 'payer_unverifiable'));
+    await expect(run()).rejects.toThrow('1 paid-visit receipt check failed');
+    expect(raised()).toEqual([]);
+    // The resolver gets the links it needs to judge the visit's own payer.
+    expect(invoicePayerOwnership).toHaveBeenCalledWith(expect.objectContaining({ id: A, customer_id: 'cust-1', scheduled_service_id: 'sv-1', service_record_id: null }), expect.any(Function));
   });
 
   test('a receipt stamped after the batch read (an SMS-only send leaves no job) rings nothing', async () => {
@@ -250,6 +281,7 @@ describe('closing', () => {
     ['receipts turned off', {}, 'Receipts turned off', () => { prefs = { 'cust-1': { payment_receipt: false } }; }],
     ['receipt delivered', {}, 'Receipt delivered', () => { jobs = { [A]: { status: 'completed', email_result: { ok: true } } }; }],
     ['receipt emailed', {}, 'Receipt emailed', () => { emails = { [`invoice_receipt:${A}`]: { id: 'm-1', status: 'sent' } }; }],
+    ['billed to a payer', {}, 'Billed to a payer', () => { invoicePayerOwnership.mockResolvedValue('payer_owned'); }],
     ['the visit text alert covers it', {}, 'The visit text alert covers it', () => { jobs = { [A]: { status: 'completed', sms_result: { sent: false, reason: 'carried_by_visit_summary' } } }; }],
   ])('%s closes the bell with a one-line resolution', async (why, change, resolution, arrange) => {
     candidates = [];

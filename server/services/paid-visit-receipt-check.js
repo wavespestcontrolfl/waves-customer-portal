@@ -16,7 +16,10 @@
 //   - the customer is not an internal test customer and has not turned payment receipts off
 //     (notification_prefs.payment_receipt = false);
 //   - no receipt email for it was accepted (email_messages with trigger_event_id `invoice_receipt:<id>`, which every
-//     templated receipt send stamps: the queue, a manual send, the inspection-credit resend);
+//     templated receipt send stamps: the queue, a manual send, the inspection-credit resend), by status or by a
+//     delivered_at / opened_at / clicked_at stamp (a later unsubscribe or spam report rewrites the status, not those);
+//   - no third-party payer owns it RIGHT NOW (invoicePayerOwnership: a payer assigned through the visit or the customer
+//     default after the invoice was minted leaves payer_id NULL); an ownership that cannot be verified fails closed;
 //   - its receipt_delivery_jobs row (one per invoice) did not deliver a leg (email_result.ok or sms_result.sent: a
 //     delivered receipt the stamp missed, read first, even on a job still running) and is not still in flight (any
 //     status but completed or failed). A Text leg carried by the visit summary text that was never accepted is a hit,
@@ -47,6 +50,7 @@ const { composeAdminAlert } = require('./admin-alert-compose');
 const { fitAction, realName, shortDateET } = require('./admin-alert-names');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { TEXT_CARRIED_BY_SUMMARY, CARRIED_RECEIPT_ALERT_PREFIX } = require('./receipt-delivery-queue');
+const { invoicePayerOwnership } = require('./invoice-payer-ownership');
 const episodes = require('./admin-alert-episodes');
 
 const KEY_PREFIX = 'paid-visit-no-receipt:';
@@ -91,7 +95,8 @@ async function loadCandidates(conn, now) {
     .whereNull('i.payer_statement_id').whereNull('i.payer_id')
     .where('i.paid_at', '>=', new Date(now.getTime() - MAX_AGE_MS))
     .where('i.paid_at', '<=', new Date(now.getTime() - MIN_AGE_MS))
-    .select('i.id', 'i.customer_id', 'i.invoice_number', 'i.total', 'i.payment_method', 'i.paid_at', 'i.status',
+    .select('i.id', 'i.customer_id', 'i.scheduled_service_id', 'i.service_record_id', 'i.payer_id', 'i.payer_statement_id',
+      'i.invoice_number', 'i.total', 'i.payment_method', 'i.paid_at', 'i.status',
       'i.receipt_sent_at', 'i.receipt_sms_sent_at', 'i.archived_at', 's.scheduled_date', 'c.first_name', 'c.last_name');
   return rows.filter((row) => !settledReason(row) && paidAtVisit(row) && !isInternalTestCustomerId(row.customer_id));
 }
@@ -106,7 +111,9 @@ function legOf(value) {
 // deliver); the others are final, and the close pass closes an open bell on them, so they are read first. Throws on a
 // failed read; the caller fails the row closed.
 async function receiptNotOwed(conn, row) {
-  const emailed = await conn('email_messages').where({ trigger_event_id: `invoice_receipt:${row.id}` }).whereIn('status', EMAILED_STATUSES).first('id');
+  const emailed = await conn('email_messages').where({ trigger_event_id: `invoice_receipt:${row.id}` })
+    .where((q) => q.whereIn('status', EMAILED_STATUSES).orWhereNotNull('delivered_at').orWhereNotNull('opened_at').orWhereNotNull('clicked_at'))
+    .first('id');
   if (emailed) return 'receipt emailed';
   // One job row per invoice (receipt_delivery_jobs.invoice_id is the enqueue's conflict key).
   const job = await conn('receipt_delivery_jobs').where({ invoice_id: row.id }).first('status', 'sms_result', 'email_result');
@@ -117,6 +124,9 @@ async function receiptNotOwed(conn, row) {
   if (sms?.reason === TEXT_CARRIED_BY_SUMMARY && (await episodes.openAdminAlertKeys(conn, `${CARRIED_RECEIPT_ALERT_PREFIX}${row.id}`)).length) {
     return 'the visit text alert covers it';
   }
+  const owner = await invoicePayerOwnership(row, conn);
+  if (owner === 'payer_owned') return 'billed to a payer';
+  if (owner) throw Object.assign(new Error('payer ownership unverifiable'), { code: 'payer_unverifiable' });
   const prefs = row.customer_id ? await conn('notification_prefs').where({ customer_id: row.customer_id }).first('payment_receipt') : null;
   if (prefs?.payment_receipt === false) return 'receipts turned off';
   return job && !DONE_JOB_STATUSES.includes(job.status) ? 'in flight' : null;
@@ -165,7 +175,7 @@ async function closeSettled(conn, now) {
   for (const key of keys) {
     try {
       const id = idOf(key);
-      const row = UUID_RE.test(id) ? await conn('invoices').where({ id }).first('id', 'customer_id', 'status', 'receipt_sent_at', 'receipt_sms_sent_at', 'archived_at') : null;
+      const row = UUID_RE.test(id) ? await conn('invoices').where({ id }).first('id', 'customer_id', 'scheduled_service_id', 'service_record_id', 'payer_id', 'payer_statement_id', 'status', 'receipt_sent_at', 'receipt_sms_sent_at', 'archived_at') : null;
       const owed = row && !settledReason(row) ? await receiptNotOwed(conn, row) : null;
       const why = settledReason(row) || (owed && owed !== 'in flight' ? owed : null);
       if (why) tally.closed += Number(await episodes.closeAdminAlertKeys(conn, [key], why, { now, resolution: capital(why) })) || 0;
