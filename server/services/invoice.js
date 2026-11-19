@@ -771,17 +771,29 @@ function assertVoidExpected(row, expected) {
     || (row.stripe_payment_intent_id || null) !== (expected.paymentIntentId || null);
   if (changed) throw new Error("Invoice status changed while voiding — re-check and retry");
 }
-// The bar's void only: a saved-card charge attempt or orphan charge that exists by the time the void holds the invoice's
-// row lock refuses the void (the same durable fence the charge paths use), read-only, inside the void transaction.
-async function assertVoidChargeFence(trx, id, expected) {
-  if (!expected) return;
+// Every staff void checks the durable saved-card fence after taking the invoice
+// row lock and before any irreversible Stripe cancel or local money/coverage
+// change. Exact authentication cancellation clears the checkout fence.
+function voidChargeConflict(err) {
+  return Object.assign(
+    new Error("Cannot void this invoice while a saved-card payment is in progress or awaiting verification. Cancel or reconcile that payment before voiding."),
+    err,
+    { statusCode: 409, isOperational: true },
+  );
+}
+
+// Returns a known payment conflict instead of throwing it inside the caller's
+// transaction. The writing fence may promote a stale submitted claim to
+// `ambiguous`; the transaction must commit that durable reconciliation state
+// before the staff action receives its 409. Unexpected failures still throw.
+async function voidChargeFenceConflict(trx, id) {
+  const StripeService = require("./stripe");
   try {
-    await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx, { readOnly: true });
+    await StripeService.assertNoInvoiceChargeReconciliationPending(id, trx, { checkout: true });
+    return null;
   } catch (err) {
-    if (err?.reconciliationRequired || /^STRIPE_/.test(String(err?.code || ""))) {
-      throw new Error("A saved-card charge is in progress or unresolved on this invoice while voiding — reconcile it instead of voiding");
-    }
-    throw err;
+    if (!StripeService.savedCardChargeSuppressesAlternateCollection(err)) throw err;
+    return voidChargeConflict(err);
   }
 }
 // The bar's void only: a payment plan (any status but cancelled) created after the card refuses the void, read inside the
@@ -791,9 +803,10 @@ async function assertVoidNoPaymentPlan(trx, id, expected) {
   const plan = await trx("payment_plans").where({ invoice_id: id }).whereNot("status", "cancelled").first("id");
   if (plan) throw new Error("A payment plan exists on this invoice while voiding — cancel it on the Invoices page instead of voiding from the bar");
 }
-// The void's PaymentIntent triage (unchanged for the page, which runs it before its transaction): refuse money in
-// flight, cancel a still-cancelable intent, unbind combined-payment siblings. With the bar's `expected` it also
-// requires the freshly retrieved Stripe status to be the one the card showed (or canceled).
+// After the locked saved-card fence, triage the attached PaymentIntent inside
+// the void transaction: refuse money in flight, cancel a still-cancelable
+// intent, and unbind combined-payment siblings. With the bar's `expected` it
+// also requires the fresh Stripe status to match the card (or be canceled).
 async function triageVoidPaymentIntent({ id, piId, expected, conn }) {
   if (!piId) return;
   const StripeService = require("./stripe");
@@ -828,20 +841,45 @@ function assertVoidPiStatus(pi, expected) {
   if (!expected || pi.status === "canceled" || pi.status === expected.paymentIntentStatus) return;
   throw new Error("Invoice status changed while voiding — re-check and retry");
 }
-// Bar only (`expected`), inside the void transaction: take the invoice row (FOR NO KEY UPDATE, held to commit, so no
-// other writer can change it), assert the card's version on the locked row, then run the PaymentIntent triage. The
-// Stripe cancel and the void's UPDATE therefore see the same invoice the card showed.
-async function voidLockAndTriage(trx, { id, piId, expected }) {
-  if (!expected) return;
-  const locked = await trx("invoices").where({ id }).forNoKeyUpdate().first();
+// Lock the target plus every collectible sibling that the same PaymentIntent
+// can mutate, in the ascending invoice-id order used by combined checkout.
+// The stable-owner advisory lock freezes combined allocation changes before
+// the set is selected, so cancel + sibling-stamp cleanup cannot deadlock after
+// Stripe has already accepted the cancellation.
+async function lockVoidInvoiceAllocation(trx, { id, piId, customerId, combinedCustomerLocked = false }) {
+  if (!piId) return trx("invoices").where({ id }).forNoKeyUpdate().first();
+  const PayCombined = require("./pay-combined");
+  if (!combinedCustomerLocked) {
+    await PayCombined.lockCombinedCustomerStable(trx, id, customerId);
+  }
+  const rows = await trx("invoices")
+    .whereRaw(
+      "id = ? OR (stripe_payment_intent_id = ? AND status NOT IN (?, ?, ?))",
+      [id, piId, "paid", "processing", "prepaid"],
+    )
+    .orderBy("id", "asc")
+    .forUpdate();
+  return rows.find((row) => String(row.id) === String(id)) || null;
+}
+
+// Inside every void transaction: lock the canonical PI allocation (or the
+// target alone), assert the bar card's version when supplied, then check the
+// saved-card fence before any Stripe cancel. A known conflict is returned so
+// the caller can commit a stale-claim promotion before raising its 409.
+async function voidLockAndGuard(trx, { id, piId, customerId, expected }) {
+  const locked = await lockVoidInvoiceAllocation(trx, { id, piId, customerId });
   if (!locked) throw new Error("Invoice not found");
-  assertVoidExpected(locked, expected);
+  if (expected) assertVoidExpected(locked, expected);
+  else if ((locked.stripe_payment_intent_id || null) !== (piId || null)) {
+    throw new Error("A new payment session started for this invoice — re-check and retry the void");
+  }
   // The durable saved-card charge fence and the payment-plan fence, now that this transaction holds the row and BEFORE
   // the one effect that cannot roll back (the Stripe cancel): a claim or plan that started after the card refuses the
   // void with the session untouched.
-  await assertVoidChargeFence(trx, id, expected);
+  const chargeConflict = await voidChargeFenceConflict(trx, id);
+  if (chargeConflict) return { locked, chargeConflict };
   await assertVoidNoPaymentPlan(trx, id, expected);
-  await triageVoidPaymentIntent({ id, piId, expected, conn: trx });
+  return { locked, chargeConflict: null };
 }
 function applyVoidExpected(q, expected) {
   if (!expected) return q;
@@ -5741,10 +5779,6 @@ async function assertInvoiceGenuinelyUnsettledLocked(trx, id) {
     err.invoiceStatus = lockedInvoice.status;
     throw err;
   }
-  // Same reconciliation guard the termite-annual-renewal grace lapse used
-  // to run in its OWN separate transaction — folded in here so it runs
-  // under this SAME row lock too.
-  await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
 }
 
 // The money a cancel's void moves for one invoice, as the confirmation card
@@ -6028,9 +6062,10 @@ async function selectCancelledServiceVoidCandidates({ scheduledServiceId, invoic
       "total", "credit_applied", "line_items", "customer_id", "created_at", "scheduled_service_id");
 }
 
-// Pre-lock Stripe triage of the PaymentIntent stamped on a candidate invoice. Returns true when the invoice must be
-// left alone (logged here); false when the sweep may go on to the row-locked void. `piConn` is the connection the
-// stamp clear runs on (the pinned path's combined-payment lock transaction, else the shared db).
+// Locked Stripe triage of the PaymentIntent stamped on a candidate invoice.
+// The caller already holds the checkout fence and the canonical allocation
+// locks. Returns true when the invoice must stay open; `piConn` owns the
+// same-transaction sibling-stamp cleanup.
 async function triageCancelledServicePaymentIntent({ candidate, triagedPiId, scheduledServiceId, piConn, StripeService }) {
   let pi;
   try {
@@ -6203,14 +6238,29 @@ async function recheckAndVoidCancelledServiceCandidate(candidate, triagedPiId, c
         return { skipped: "on a finalized payer statement; needs a credit on the next statement", invoice: candidate };
       }
     }
-    const locked = await trx("invoices")
-      .where({ id: candidate.id })
-      .forUpdate()
-      .first();
+    const locked = await lockVoidInvoiceAllocation(trx, {
+      id: candidate.id,
+      piId: triagedPiId,
+      customerId: candidate.customer_id,
+      combinedCustomerLocked: ctx.combinedCustomerLocked,
+    });
     if (!locked) return { skipped: "invoice no longer exists" };
     // Recovery sweep only: under the invoice lock, in this transaction, the visit must still be the cancelled one the
     // card approved (a restore waits for this transaction or has already committed). NOWAIT: no lock-order deadlock.
     if (ctx.cancelFence) await require("./cancel-generation-fence").assertCancelGeneration(trx, ctx.cancelFence);
+    // Schedule, Dispatch, card-confirmed cancellation and refused-send cleanup
+    // all reach this writer. An off-session authentication PI may be able to
+    // settle without an invoice PI stamp, so check the writable checkout fence
+    // under this row lock before any void/credit/coverage mutation. Returning a
+    // known conflict commits any stale submitted-claim promotion to ambiguous.
+    const chargeConflict = await voidChargeFenceConflict(trx, locked.id);
+    if (chargeConflict) {
+      return {
+        skipped: chargeConflict.message,
+        invoice: locked,
+        chargeConflict,
+      };
+    }
     const stateSkip = ctx.refusedSendCleanup
       ? await refusedSendCleanupSkip(trx, locked, ctx)
       : await lockedCandidateSkip(trx, locked, ctx);
@@ -6225,6 +6275,22 @@ async function recheckAndVoidCancelledServiceCandidate(candidate, triagedPiId, c
     }
     const moneySkip = await appliedMoneySkip(trx, locked);
     if (moneySkip) return moneySkip;
+    // Provider triage belongs after the locked checkout fence. A saved-card
+    // hold committed after the candidate scan can represent a different valid
+    // payment; canceling the customer's checkout before seeing it would leave
+    // the visit cancelled but destroy the still-valid collection session.
+    if (triagedPiId && await triageCancelledServicePaymentIntent({
+      candidate: locked,
+      triagedPiId,
+      scheduledServiceId: ctx.scheduledServiceId,
+      piConn: trx,
+      StripeService: ctx.StripeService,
+    })) {
+      return {
+        skipped: `PaymentIntent ${triagedPiId} could not be safely retired; needs manual review`,
+        invoice: locked,
+      };
+    }
     return voidLockedCancelledServiceInvoice(trx, locked, { ...ctx, lockedDues });
   });
 }
@@ -6244,8 +6310,9 @@ async function afterCancelledServiceVoid(result) {
   }
 }
 
-// Pre-triage checks for one candidate: a pinned (card-confirmed) cancel leaves anything that changed since the card.
-// Returns the connection the PaymentIntent steps run on and the combined-payment lock, or { skip: true }.
+// Pre-transaction checks for one candidate: a pinned (card-confirmed) cancel
+// leaves anything that changed since the card. Returns its already-held
+// combined-payment lock, or { skip: true }.
 async function pinnedCandidateGate(candidate, ctx) {
   const { scheduledServiceId, pinnedById, pinnedMismatch } = ctx;
   // A card-confirmed cancel never pins an invoice carrying a
@@ -6265,7 +6332,8 @@ async function pinnedCandidateGate(candidate, ctx) {
   // card did not list, and cancelling it clears their stamps. Left open for the office. The sibling check, the
   // Stripe cancel and the stamp clear all run under the SAME per-customer pay.combined.customer advisory lock
   // the combined setup takes (same key), so a combined session cannot be stamped between the check and the
-  // cancel. Dispatch's unpinned sweep takes no lock and is unchanged.
+  // cancel. Dispatch's unpinned sweep acquires that same lock inside its
+  // atomic fence/triage/void transaction below.
   const held = await lockPinnedPaymentIntent(pinnedById, candidate);
   if (held.shared) {
     logger.warn(
@@ -6273,27 +6341,27 @@ async function pinnedCandidateGate(candidate, ctx) {
     );
     return { skip: true, combinedLock: held.lock };
   }
-  return { skip: false, combinedLock: held.lock, piConn: held.lock || db };
+  return { skip: false, combinedLock: held.lock };
 }
 
 // One candidate of the sweep, start to finish. Returns the voided invoice id, or null when it was left alone or failed
 // (best-effort: logs and continues, never throws).
 async function voidOneCancelledServiceCandidate(candidate, ctx) {
-  const { scheduledServiceId, refusedSendCleanup, StripeService } = ctx;
+  const { scheduledServiceId, refusedSendCleanup } = ctx;
   // Pinned path only: the combined-payment lock, held until this candidate is settled.
   let combinedLock = null;
   try {
-    // Recovery sweep only: no Stripe call for a visit that is no longer the cancelled one. A point-in-time check on purpose: a
-    // share lock on the visit held across the Stripe call (on a connection of its own) inverts the lock order against flows that
-    // lock the invoice first and the visit second (customer-credit application), which PostgreSQL cannot detect across the
-    // sweep's two connections. The guard of the void itself is the locked, NOWAIT proof inside its transaction below; a restore
-    // landing in the instant between this check and the PaymentIntent cancel leaves the PaymentIntent cancelled and the
-    // invoice open (the next payment attempt creates a new one).
+    // Recovery sweep only: fast-fail before opening any combined-session lock.
+    // The authoritative NOWAIT proof runs again inside the invoice transaction
+    // and holds its visit share lock across provider triage + void, so a restore
+    // either wins before the check or waits for the completed cancellation.
     if (ctx.cancelFence) await require("./cancel-generation-fence").assertCancelGeneration(db, ctx.cancelFence);
     const gate = await pinnedCandidateGate(candidate, ctx);
     combinedLock = gate.combinedLock;
     if (gate.skip) return null;
-    // ── Stripe PI triage (pre-lock) ────────────────────────────────
+    // PaymentIntent identity is pinned from the candidate scan, then rechecked
+    // under the canonical allocation lock. Provider triage now happens there,
+    // after the saved-card checkout fence and every local refusal.
     const triagedPiId = candidate.stripe_payment_intent_id || null;
     // The refused-send cleanup runs after provider preparation. Never
     // perform an external Stripe cancellation from that delayed path:
@@ -6307,11 +6375,11 @@ async function voidOneCancelledServiceCandidate(candidate, ctx) {
       );
       return null;
     }
-    if (triagedPiId && await triageCancelledServicePaymentIntent({ candidate, triagedPiId, scheduledServiceId, piConn: gate.piConn, StripeService })) {
-      return null;
-    }
-    // ── Atomic re-check + void (row lock) ──────────────────────────
-    const result = await recheckAndVoidCancelledServiceCandidate(candidate, triagedPiId, ctx);
+    // ── Atomic fence + Stripe triage + void (allocation locks) ─────
+    const result = await recheckAndVoidCancelledServiceCandidate(candidate, triagedPiId, {
+      ...ctx,
+      combinedCustomerLocked: Boolean(combinedLock),
+    });
     if (!result.voided) {
       if (result.skipped && result.invoice) {
         logger.warn(
@@ -11826,11 +11894,21 @@ const InvoiceService = {
       }
     }
     if (current.status === "void") {
-      await stopInvoiceFollowupSequence(id, "invoice_voided");
       // RE-ENTRY HEALS (codex #3591 r55 local P0): a prior void whose
       // annual-prepay sync failed post-commit left the term/claim state
       // behind — re-running the idempotent sync here makes "retry the
-      // void" the repair path instead of a permanent stranding.
+      // void" the repair path instead of a permanent stranding. The same
+      // locked saved-card fence as a first-time void runs before that repair:
+      // an older void can still carry an authentication PI that may settle,
+      // and removing its annual coverage first would make the result unsafe.
+      const repairGuard = await db.transaction((trx) => voidLockAndGuard(trx, {
+        id,
+        piId: current.stripe_payment_intent_id || null,
+        customerId: current.customer_id,
+        expected,
+      }));
+      if (repairGuard.chargeConflict) throw repairGuard.chargeConflict;
+      await stopInvoiceFollowupSequence(id, "invoice_voided");
       await require("./annual-prepay-renewals").syncTermForInvoicePayment(current);
       return current;
     }
@@ -11858,16 +11936,11 @@ const InvoiceService = {
       );
     }
     // PI ↔ invoice ↔ webhook amount agreement: with partial credit, a collectible
-    // invoice can carry a live PaymentIntent (a customer mid-pay on /pay). Voiding
-    // returns the applied credit, so the PI must be cancelled FIRST — else the live
-    // client secret could still charge the reduced amount while the credit is back
-    // on the balance and the webhook skips the void invoice. Refuse if money is in
-    // flight; cancel a still-cancelable intent. Pre-lock Stripe triage (mirrors the
-    // apply-credit route); the transaction re-checks the PI id under the row lock.
+    // invoice can carry a live PaymentIntent (a customer mid-pay on /pay). The
+    // transaction locks and rechecks the saved-card fence before canceling this
+    // checkout, so a newly committed authentication hold preserves the open
+    // checkout and refuses the void without an irreversible Stripe side effect.
     const triagedVoidPiId = current.stripe_payment_intent_id || null;
-    // The page triages here, before the transaction. The bar (`expected`) triages inside it, under the invoice row
-    // lock (voidLockAndTriage below), so the version it checked cannot change before the Stripe cancel.
-    if (!expected) await triageVoidPaymentIntent({ id, piId: triagedVoidPiId, expected, conn: db });
     // Void + deposit-ledger restore commit TOGETHER: a committed void beside
     // a still-consumed deposit strands the customer's money — the credit can
     // no longer roll forward or refund (a restore failure rolls the void
@@ -11875,7 +11948,7 @@ const InvoiceService = {
     // update makes a concurrent void/payment lose cleanly, so the restore
     // can never run twice for one invoice.
     let invoice = null;
-    await db.transaction(async (trx) => {
+    const voidOutcome = await db.transaction(async (trx) => {
       // A stamped dues invoice's void removes the month's coverage: commit
       // under the dues-month lock (first lock of this transaction).
       const lockedDues = await lockMembershipDuesMonthOfInvoice(trx, current);
@@ -11914,12 +11987,24 @@ const InvoiceService = {
       // `.forUpdate()` read below), closing the exact race a caller's OWN
       // separate eligibility-check transaction can't: account credit (or
       // any other settlement) landing in the gap between that check
-      // committing and this void call starting. Every existing caller
-      // (requireUnsettled defaults off) is byte-identical to before.
-      if (requireUnsettled) {
-        await assertInvoiceGenuinelyUnsettledLocked(trx, id);
-      }
-      await voidLockAndTriage(trx, { id, piId: triagedVoidPiId, expected });
+      // committing and this void call starting. Callers without
+      // requireUnsettled keep these settlement-shape rules unchanged; all
+      // callers cross only the narrower saved-card fence below.
+      const guard = await voidLockAndGuard(trx, {
+        id,
+        piId: triagedVoidPiId,
+        customerId: current.customer_id,
+        expected,
+      });
+      if (guard.chargeConflict) return { chargeConflict: guard.chargeConflict };
+      const lockedVoidInvoice = guard.locked;
+      if (requireUnsettled) await assertInvoiceGenuinelyUnsettledLocked(trx, id);
+      await triageVoidPaymentIntent({
+        id,
+        piId: lockedVoidInvoice.stripe_payment_intent_id || null,
+        expected,
+        conn: trx,
+      });
       const [updated] = await applyVoidExpected(trx("invoices").where({ id, status: current.status }), expected)
         .update({ status: "void", send_claim_token: null, updated_at: new Date() })
         .returning("*");
@@ -11930,10 +12015,10 @@ const InvoiceService = {
       // A voided standard invoice that billed the rodent bait-station setup
       // puts the obligation back on the living series (codex #3591 r44 P1).
       await this.restoreRodentSetupObligationForReversedInvoice(trx, updated);
-      // A customer could have opened /pay and minted a NEW PaymentIntent between
-      // the pre-lock triage above and this locked update. If the attached PI
-      // changed, refuse — rolling back so the operator retries and the new PI gets
-      // triaged, rather than returning credit while a fresh client secret can charge.
+      // Keep the attached-PI identity pinned through the conditional update.
+      // The locked guard above already refuses a session created after the
+      // initial read; this assertion protects that contract if later writes in
+      // this transaction ever start changing the stamp before credit is restored.
       if ((updated.stripe_payment_intent_id || null) !== triagedVoidPiId) {
         throw new Error("A new payment session started for this invoice — re-check and retry the void");
       }
@@ -11977,7 +12062,9 @@ const InvoiceService = {
         await require("./payer-statements").rollupStatement(updated.payer_statement_id, trx);
       }
       invoice = updated;
+      return { chargeConflict: null };
     });
+    if (voidOutcome?.chargeConflict) throw voidOutcome.chargeConflict;
     await alertIfMembershipDuesCoverageReleased(invoice, { releasedBy: "voided" });
     await stopInvoiceFollowupSequence(id, "invoice_voided");
     try {

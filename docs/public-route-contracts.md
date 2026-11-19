@@ -804,6 +804,11 @@ under lock. A verified cancellation for the same attempt and PaymentIntent
 clears the authentication hold. The `/confirm` endpoint can still record money
 the processor has already accepted.
 
+While a saved card can still settle, staff payment posting, credit application,
+annual-prepay removal, and invoice voids recheck the hold under the invoice
+lock. A refused posting preserves the customer's existing checkout. Applying
+credit also rechecks the available balance under the customer lock.
+
 Off-Stripe tender block (2026-08-29; ZELLE-ONLY since 2026-09-02 — owner
 ruling, Venmo and PayPal retired over their fees): the GET payload carries
 an OPTIONAL `manualPayOptions` = `{ zelle: { recipient }, amountDue,

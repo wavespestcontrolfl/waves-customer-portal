@@ -11,13 +11,19 @@ jest.mock('../services/invoice-followups', () => ({
 // parent-decision gate (Codex #4971 pre-push lock order) — covered against
 // real Postgres in annual-prepay-parent-decision-lock-postgres; a no-op here.
 const mockAcquireTermiteGateAtEntry = jest.fn(async () => []);
+const mockSyncTermForInvoicePayment = jest.fn(async () => undefined);
 jest.mock('../services/annual-prepay-renewals', () => ({
-  syncTermForInvoicePayment: jest.fn(async () => undefined),
+  syncTermForInvoicePayment: (...args) => mockSyncTermForInvoicePayment(...args),
   acquireTermiteGateAtEntry: (...args) => mockAcquireTermiteGateAtEntry(...args),
 }));
 const mockRestoreDepositCredit = jest.fn(async () => 0);
 jest.mock('../services/estimate-deposits', () => ({
   restoreDepositCreditForVoidedInvoice: (...args) => mockRestoreDepositCredit(...args),
+}));
+const mockVoidChargeFence = jest.fn(async () => undefined);
+jest.mock('../services/stripe', () => ({
+  assertNoInvoiceChargeReconciliationPending: (...args) => mockVoidChargeFence(...args),
+  savedCardChargeSuppressesAlternateCollection: jest.fn(() => false),
 }));
 
 const db = require('../models/db');
@@ -29,6 +35,7 @@ function chain({ first, returning } = {}) {
   q.where = jest.fn(() => q);
   q.whereIn = jest.fn(() => q);
   q.whereRaw = jest.fn(() => q);
+  q.forNoKeyUpdate = jest.fn(() => q);
   q.update = jest.fn(() => q);
   q.first = jest.fn(async () => first);
   q.returning = jest.fn(async () => returning || []);
@@ -60,6 +67,7 @@ describe('InvoiceService.voidInvoice follow-up cleanup', () => {
     db
       .mockReturnValueOnce(chain({ first: invoice() }))
       .mockReturnValueOnce(noPayment())
+      .mockReturnValueOnce(chain({ first: invoice() })) // locked invoice
       .mockReturnValueOnce(chain({ returning: [invoice({ status: 'void' })] }))
       .mockReturnValueOnce(noPayment())
       .mockReturnValueOnce(chain()); // payment_plans cancel (active plan → cancelled by system:invoice_void)
@@ -74,10 +82,22 @@ describe('InvoiceService.voidInvoice follow-up cleanup', () => {
   });
 
   test('also stops a stale sequence when the invoice is already void', async () => {
-    db.mockReturnValueOnce(chain({ first: invoice({ status: 'void' }) }));
+    const alreadyVoid = invoice({ status: 'void' });
+    const lockedInvoice = chain({ first: alreadyVoid });
+    db
+      .mockReturnValueOnce(chain({ first: alreadyVoid }))
+      .mockReturnValueOnce(lockedInvoice);
 
     await InvoiceService.voidInvoice('inv-1');
 
+    expect(lockedInvoice.forNoKeyUpdate).toHaveBeenCalledTimes(1);
+    expect(mockVoidChargeFence).toHaveBeenCalledWith('inv-1', db, { checkout: true });
+    expect(lockedInvoice.forNoKeyUpdate.mock.invocationCallOrder[0])
+      .toBeLessThan(mockVoidChargeFence.mock.invocationCallOrder[0]);
+    expect(mockVoidChargeFence.mock.invocationCallOrder[0])
+      .toBeLessThan(FollowUps.stopSequence.mock.invocationCallOrder[0]);
+    expect(mockVoidChargeFence.mock.invocationCallOrder[0])
+      .toBeLessThan(mockSyncTermForInvoicePayment.mock.invocationCallOrder[0]);
     expect(FollowUps.stopSequence).toHaveBeenCalledWith('inv-1', {
       reason: 'invoice_voided',
     });
@@ -94,6 +114,7 @@ describe('InvoiceService.voidInvoice follow-up cleanup', () => {
     db
       .mockReturnValueOnce(chain({ first: invoice() }))
       .mockReturnValueOnce(noPayment())
+      .mockReturnValueOnce(chain({ first: invoice() })) // locked invoice
       .mockReturnValueOnce(chain({ returning: [voided] }))
       .mockReturnValueOnce(noPayment())
       .mockReturnValueOnce(chain()); // payment_plans cancel
@@ -108,6 +129,7 @@ describe('InvoiceService.voidInvoice follow-up cleanup', () => {
     db
       .mockReturnValueOnce(chain({ first: invoice() }))
       .mockReturnValueOnce(noPayment())
+      .mockReturnValueOnce(chain({ first: invoice() })) // locked invoice
       .mockReturnValueOnce(chain({ returning: [invoice({ status: 'void' })] }))
       .mockReturnValueOnce(noPayment())
       .mockReturnValueOnce(chain()); // payment_plans cancel (active plan → cancelled by system:invoice_void)
@@ -123,6 +145,7 @@ describe('InvoiceService.voidInvoice follow-up cleanup', () => {
     db
       .mockReturnValueOnce(chain({ first: invoice() }))
       .mockReturnValueOnce(noPayment())
+      .mockReturnValueOnce(chain({ first: invoice() })) // locked invoice
       .mockReturnValueOnce(chain({ returning: [] }));
 
     await expect(InvoiceService.voidInvoice('inv-1')).rejects.toThrow(/changed while voiding/);

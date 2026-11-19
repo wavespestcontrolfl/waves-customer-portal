@@ -196,10 +196,13 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     expect((await trx('invoices').where({ id: prepayInvoiceId }).first('stripe_payment_intent_id')).stripe_payment_intent_id).toBe('pi_synthetic_kept');
   });
 
-  test('removing the flag is refused while a submitted saved-card charge awaits reconciliation, even with no payment row or invoice PI', async () => {
+  test.each([
+    ['claimed', /in progress or awaiting reconciliation/],
+    ['ambiguous', /ambiguous Stripe outcome/],
+  ])('removing the flag is refused while a submitted %s saved-card charge awaits reconciliation, even with no payment row or invoice PI', async (attemptStatus, message) => {
     // A saved-card charge can succeed at Stripe while its DB transaction rolls
     // back: no payments row, no stripe_payment_intent_id on the invoice, but
-    // the stripe_invoice_charge_attempts claim is still 'claimed'/submitted
+    // the stripe_invoice_charge_attempts claim is still submitted/unresolved
     // and unresolved. Every other refusal check (invoice status/paid_at,
     // payments table, the pay-page PI triage) sees nothing wrong and would
     // pass, so this proves assertNoInvoiceChargeReconciliationPending itself
@@ -214,19 +217,145 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     const attemptId = randomUUID();
     await trx('stripe_invoice_charge_attempts').insert({
       id: attemptId, invoice_id: prepayInvoiceId, stripe_payment_method_id: 'pm_fixture_removal',
-      idempotency_key: `inv_card_on_file_${prepayInvoiceId}_${attemptId}`, status: 'claimed',
+      idempotency_key: `inv_card_on_file_${prepayInvoiceId}_${attemptId}`, status: attemptStatus,
       submitted_at: new Date(), amount: 400,
     });
 
     const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
     expect(res.status).toBe(409);
-    expect(res.body.error).toMatch(/in progress or awaiting reconciliation/);
+    expect(res.body.error).toMatch(message);
     expect(require('../services/stripe').retrievePaymentIntent).not.toHaveBeenCalled();
     // Nothing moved: the term, invoice flag and the claim itself are untouched.
     expect((await trx('annual_prepay_terms').where({ id: termId }).first('status')).status).toBe('payment_pending');
     expect((await trx('invoices').where({ id: prepayInvoiceId }).first('annual_prepay_term_id')).annual_prepay_term_id).toBe(termId);
     expect((await trx('stripe_invoice_charge_attempts').where({ id: attemptId }).first('status', 'resolved_at')))
-      .toEqual({ status: 'claimed', resolved_at: null });
+      .toEqual({ status: attemptStatus, resolved_at: null });
+  });
+
+  test('removing the flag is refused while its authentication-required card attempt can still settle', async () => {
+    const { prepayInvoiceId, term } = await markedPaidPrepay();
+    await trx('invoices').where({ id: prepayInvoiceId }).update({
+      status: 'sent', paid_at: null, stripe_payment_intent_id: null,
+    });
+    await trx('annual_prepay_terms').where({ id: term.id }).update({ status: 'payment_pending' });
+    const coveredVisit = await trx('scheduled_services')
+      .where({ annual_prepay_term_id: term.id })
+      .orderBy('scheduled_date')
+      .first();
+    const attemptId = randomUUID();
+    const paymentIntentId = `pi_auth_${attemptId.replaceAll('-', '')}`;
+    await trx('stripe_invoice_charge_attempts').insert({
+      id: attemptId,
+      invoice_id: prepayInvoiceId,
+      stripe_payment_method_id: 'pm_fixture_auth_removal',
+      stripe_payment_intent_id: paymentIntentId,
+      idempotency_key: `inv_card_on_file_${prepayInvoiceId}_${attemptId}`,
+      status: 'failed',
+      decline_code: 'authentication_required',
+      submitted_at: new Date(),
+      resolved_at: new Date(),
+      amount: 400,
+    });
+    const before = {
+      term: await trx('annual_prepay_terms').where({ id: term.id })
+        .first('id', 'customer_id', 'prepay_invoice_id', 'status', 'prepay_amount'),
+      invoice: await trx('invoices').where({ id: prepayInvoiceId })
+        .first('id', 'status', 'annual_prepay_term_id', 'stripe_payment_intent_id', 'total'),
+      visit: await trx('scheduled_services').where({ id: coveredVisit.id })
+        .first('id', 'status', 'annual_prepay_term_id', 'prepaid_method', 'prepaid_amount'),
+    };
+
+    const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/awaiting verification/);
+    expect(require('../services/stripe').retrievePaymentIntent).not.toHaveBeenCalled();
+    expect(await trx('annual_prepay_terms').where({ id: term.id })
+      .first('id', 'customer_id', 'prepay_invoice_id', 'status', 'prepay_amount')).toEqual(before.term);
+    expect(await trx('invoices').where({ id: prepayInvoiceId })
+      .first('id', 'status', 'annual_prepay_term_id', 'stripe_payment_intent_id', 'total')).toEqual(before.invoice);
+    expect(await trx('scheduled_services').where({ id: coveredVisit.id })
+      .first('id', 'status', 'annual_prepay_term_id', 'prepaid_method', 'prepaid_amount')).toEqual(before.visit);
+    expect(await trx('stripe_invoice_charge_attempts').where({ id: attemptId })
+      .first('status', 'decline_code', 'stripe_payment_intent_id', 'authentication_canceled_intent_id')).toEqual({
+      status: 'failed',
+      decline_code: 'authentication_required',
+      stripe_payment_intent_id: paymentIntentId,
+      authentication_canceled_intent_id: null,
+    });
+  });
+
+  test('a saved-card claim appearing after removal preflight returns 409 before the checkout is retired', async () => {
+    const customerId = await customer({ billing_mode: null });
+    const termId = randomUUID();
+    await trx('annual_prepay_terms').insert({
+      id: termId, customer_id: customerId, status: 'payment_pending', term_start: etDateString(), term_end: '2099-12-31', prepay_amount: 400,
+    });
+    const prepayInvoiceId = await invoice(customerId, {
+      status: 'sent',
+      annual_prepay_term_id: termId,
+      stripe_payment_intent_id: 'pi_checkout_kept',
+    });
+    await trx('annual_prepay_terms').where({ id: termId }).update({ prepay_invoice_id: prepayInvoiceId });
+
+    const StripeService = require('../services/stripe');
+    const pending = Object.assign(
+      new Error('An earlier card payment is awaiting verification. Please contact us before trying again.'),
+      { code: 'STRIPE_CHARGE_IN_PROGRESS', chargeAttemptId: 'attempt-raced' },
+    );
+    const fence = jest.spyOn(StripeService, 'assertNoInvoiceChargeReconciliationPending')
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(pending);
+    try {
+      const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toMatch(/awaiting verification.*resolve it before removing the annual prepay flag/i);
+      expect(fence).toHaveBeenNthCalledWith(1, prepayInvoiceId, expect.anything(), { checkout: true });
+      expect(fence).toHaveBeenNthCalledWith(2, prepayInvoiceId, expect.anything(), { checkout: true });
+      expect(StripeService.retrievePaymentIntent).not.toHaveBeenCalled();
+      expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+      expect(await trx('invoices').where({ id: prepayInvoiceId }).first('annual_prepay_term_id', 'stripe_payment_intent_id'))
+        .toEqual({ annual_prepay_term_id: termId, stripe_payment_intent_id: 'pi_checkout_kept' });
+      expect((await trx('annual_prepay_terms').where({ id: termId }).first('status')).status).toBe('payment_pending');
+    } finally {
+      fence.mockRestore();
+    }
+  });
+
+  test('exact cancellation of the authentication challenge releases annual-prepay removal', async () => {
+    const { prepayInvoiceId, term } = await markedPaidPrepay();
+    await trx('invoices').where({ id: prepayInvoiceId }).update({
+      status: 'sent', paid_at: null, stripe_payment_intent_id: null,
+    });
+    await trx('annual_prepay_terms').where({ id: term.id }).update({ status: 'payment_pending' });
+    const openVisit = await trx('scheduled_services')
+      .where({ annual_prepay_term_id: term.id })
+      .whereNotIn('status', Array.from(require('../services/annual-prepay-renewals').PREPAID_UPDATE_EXCLUDED_STATUSES))
+      .orderBy('scheduled_date')
+      .first();
+    const attemptId = randomUUID();
+    const paymentIntentId = `pi_auth_${attemptId.replaceAll('-', '')}`;
+    await trx('stripe_invoice_charge_attempts').insert({
+      id: attemptId,
+      invoice_id: prepayInvoiceId,
+      stripe_payment_method_id: 'pm_fixture_auth_cancelled',
+      stripe_payment_intent_id: paymentIntentId,
+      authentication_canceled_intent_id: paymentIntentId,
+      idempotency_key: `inv_card_on_file_${prepayInvoiceId}_${attemptId}`,
+      status: 'failed',
+      decline_code: 'authentication_required',
+      submitted_at: new Date(),
+      resolved_at: new Date(),
+      amount: 400,
+    });
+
+    const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
+
+    expect(res.status).toBe(200);
+    expect((await trx('annual_prepay_terms').where({ id: term.id }).first('status')).status).toBe('cancelled');
+    expect((await trx('invoices').where({ id: prepayInvoiceId }).first('annual_prepay_term_id')).annual_prepay_term_id).toBeNull();
+    expect((await trx('scheduled_services').where({ id: openVisit.id }).first('annual_prepay_term_id')).annual_prepay_term_id).toBeNull();
   });
 
   test('removing the flag from an unpaid prepay runs the canonical cancel: prior billing mode back, covered invoice owed again, open visits released', async () => {
