@@ -381,14 +381,20 @@ router.post('/interview/:token/withdraw', interviewLimiter, async (req, res) => 
       at: new Date().toISOString(),
     };
 
-    const updatedRows = await db('job_applications')
-      .where({ id: application.id, status: 'interview', interview_token: req.params.token })
-      .update({
-        status: 'withdrawn',
-        status_history: db.raw("COALESCE(status_history, '[]'::jsonb) || ?::jsonb", [JSON.stringify([historyEntry])]),
-        updated_at: new Date(),
-      })
-      .returning('id');
+    // The application leaves the pipeline: any job offer still out for it is withdrawn in the same transaction, so
+    // reopening the application later cannot revive an old offer link (GATE_JOB_OFFERS).
+    const updatedRows = await db.transaction(async (trx) => {
+      const rows = await trx('job_applications')
+        .where({ id: application.id, status: 'interview', interview_token: req.params.token })
+        .update({
+          status: 'withdrawn',
+          status_history: trx.raw("COALESCE(status_history, '[]'::jsonb) || ?::jsonb", [JSON.stringify([historyEntry])]),
+          updated_at: new Date(),
+        })
+        .returning('id');
+      if (rows.length) await require('../services/job-offers').closeOffersWithApplication(trx, application.id, null);
+      return rows;
+    });
 
     if (!updatedRows.length) return res.status(404).json({ error: 'Not found' });
 

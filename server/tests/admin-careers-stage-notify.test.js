@@ -55,6 +55,7 @@ function makeDb() {
   // The detail's same-phone read: the raw SQL + binding it sent, and a switch that fails it.
   let samePhoneQueries = [];
   let samePhoneFails = false;
+  const closedOffers = [];
   const lastTen = (value) => String(value || '').replace(/\D/g, '').slice(-10);
   function tableApi(table) {
     if (table === 'technicians') {
@@ -65,6 +66,16 @@ function makeDb() {
         select: () => Promise.resolve(staff.filter((s) => ids.includes(s.id)).map((s) => ({ ...s }))),
       };
       return query;
+    }
+    if (table === 'job_offers') {
+      // Closing an application withdraws its live offers (services/job-offers.js closeOffersWithApplication).
+      const filter = { where: null, statuses: null };
+      const offers = {
+        where(cond) { filter.where = cond; return offers; },
+        whereIn(_column, list) { filter.statuses = list; return offers; },
+        update: async (payload) => { closedOffers.push({ ...filter, payload }); return 1; },
+      };
+      return offers;
     }
     if (table !== 'job_applications') throw new Error(`unexpected table ${table}`);
     let whereCond = {};
@@ -106,12 +117,13 @@ function makeDb() {
   }
   const db = jest.fn((table) => tableApi(table));
   db.transaction = async (fn) => fn(tableApi);
+  db.__closedOffers = () => closedOffers;
   db.__rows = () => rows;
   db.__setRows = (r) => { rows = r; };
   db.__setStaff = (list) => { staff = list; };
   db.__samePhoneQueries = () => samePhoneQueries;
   db.__setSamePhoneFails = (fails) => { samePhoneFails = fails; };
-  db.__resetSamePhone = () => { samePhoneQueries = []; samePhoneFails = false; };
+  db.__resetSamePhone = () => { samePhoneQueries = []; samePhoneFails = false; closedOffers.length = 0; };
   db.schema = { hasTable: jest.fn(async () => true) };
   return db;
 }
@@ -708,5 +720,29 @@ describe('History names the staff member behind each stage change (audit F10)', 
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body.application.status_history.some((e) => 'by_name' in e)).toBe(false);
+  });
+});
+
+describe('PATCH /:id/status — closing an application withdraws its outstanding job offers', () => {
+  const APP_ID = 'aaaaaaaa-0000-4000-8000-000000000001';
+
+  test.each(['rejected', 'withdrawn', 'hired'])('moving to %s withdraws the live offers in the same transaction', async (status) => {
+    mockDb.__setRows([appRow({ status: 'offer' })]);
+    const res = await patch(APP_ID, { status });
+    expect(res.status).toBe(200);
+    expect(mockDb.__closedOffers()).toEqual([expect.objectContaining({
+      where: { application_id: APP_ID },
+      statuses: ['draft', 'sent', 'date_requested'],
+      payload: expect.objectContaining({ status: 'withdrawn', withdrawn_by: mockStaffId }),
+    })]);
+  });
+
+  test('a stage that keeps the application open, a note with no change, and an unchanged stage touch no offer', async () => {
+    mockDb.__setRows([appRow({ status: 'reviewed' })]);
+    await patch(APP_ID, { status: 'interview' });
+    await patch(APP_ID, { status: 'interview', note: 'called back' });
+    mockDb.__setRows([appRow({ status: 'rejected' })]);
+    await patch(APP_ID, { status: 'rejected', note: 'still no' });
+    expect(mockDb.__closedOffers()).toEqual([]);
   });
 });

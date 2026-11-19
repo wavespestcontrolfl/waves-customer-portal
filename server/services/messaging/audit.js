@@ -16,6 +16,7 @@
 const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
+const { redactOfferLinks } = require('../../utils/offer-link-redaction');
 
 function sha256(s) {
   return crypto.createHash('sha256').update(String(s || ''), 'utf8').digest('hex');
@@ -58,7 +59,8 @@ async function persistAudit(record) {
     identity_trust_level: identityTrust || input.identityTrustLevel || null,
 
     body_hash: sha256(input.body),
-    body_preview: preview(input.body),
+    // A job-offer link is a signing credential: the stored preview never holds it (utils/offer-link-redaction.js).
+    body_preview: preview(redactOfferLinks(input.body)),
     segment_count: segmentMeta ? segmentMeta.segmentCount : null,
     encoding: segmentMeta ? segmentMeta.encoding : null,
 

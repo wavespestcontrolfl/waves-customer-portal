@@ -7,6 +7,10 @@
  *   GET   /:id/stage-preview  rendered notify preview for a candidate status
  *   PATCH /:id/status         owner status transition + optional notify/resend;
  *                             optional expected_status refuses a stale decision (409)
+ *   GET   /:id/offer, POST /:id/offer, POST /:id/offer/:offerId/{send,withdraw,revise},
+ *   GET   /:id/offer/:offerId/signed-copy
+ *                             the job offer flow (GATE_JOB_OFFERS; 404 { enabled: false } while off).
+ *                             send / withdraw / revise are owner-account only (ibFullAccess)
  *
  * Owner-only (requireAdmin): applications hold applicant PII and hiring
  * decisions. Every real transition appends to status_history — the AI
@@ -27,6 +31,8 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { ROLES, STATUSES, lastTenDigits, CONTACT_PHONE_LAST_TEN_SQL } = require('../services/job-applications');
 const { isEnabled } = require('../config/feature-gates');
 const RecruitingComms = require('../services/recruiting-comms');
+const JobOffers = require('../services/job-offers');
+const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -440,6 +446,11 @@ async function applyStatusTransition(trx, applicationId, technicianId, plan) {
     .where({ id: applicationId })
     .update(updatePayload)
     .returning('*');
+  // Closing an application (rejected, withdrawn, hired) withdraws its outstanding job offers in the same transaction, so
+  // moving it back later cannot revive an old link (the offer flow, GATE_JOB_OFFERS).
+  if (['rejected', 'withdrawn', 'hired'].includes(plan.status) && row.status !== plan.status) {
+    await JobOffers.closeOffersWithApplication(trx, applicationId, technicianId);
+  }
 
   return { row: next, interviewApplicable, willSend };
 }
@@ -558,5 +569,68 @@ router.patch('/:id/status', async (req, res) => {
     res.status(500).json({ error: 'Failed to update application' });
   }
 });
+
+// --- Job offers (GATE_JOB_OFFERS) ------------------------------------------
+// Dark: every offer endpoint answers 404 { enabled: false } before any database work. send / withdraw / revise
+// belong to the owner account (ibFullAccess, the check requireFullAccess uses); the read, the
+// draft save and the signed copy stay open to any admin. The offer token itself never rides in a response: only
+// the computed offer URL does, and only on the admin shape.
+router.use('/:id/offer', (req, res, next) => {
+  if (!isEnabled('jobOffers')) return res.status(404).json({ enabled: false });
+  if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'Not found', code: 'NOT_FOUND' });
+  next();
+});
+router.param('offerId', (req, res, next, offerId) => {
+  if (!UUID_RE.test(offerId)) return res.status(404).json({ error: 'Not found', code: 'NOT_FOUND' });
+  next();
+});
+
+// Owner-account only (the same predicate as requireFullAccess), answering with a code the page reads.
+function requireOwnerAccount(req, res, next) {
+  if (!ibFullAccess(req)) return res.status(403).json({ error: 'This action is limited to the owner account.', code: 'OWNER_ONLY' });
+  next();
+}
+
+function offerActor(req) {
+  return { id: req.technicianId, name: (req.technician && req.technician.name) || null, ownerAccount: ibFullAccess(req) };
+}
+
+// One answer for every offer handler: the service's own refusals carry status, code and detail; anything else is a 500.
+function offerHandler(label, work) {
+  return async (req, res) => {
+    try {
+      return res.json(await work(req));
+    } catch (err) {
+      if (err instanceof JobOffers.OfferError) {
+        return res.status(err.status).json({ error: err.message, code: err.code, ...err.extra });
+      }
+      logger.error(`[admin-careers] offer ${label} failed: ${RecruitingComms.errorSummary(err)}`);
+      return res.status(500).json({ error: 'Failed to update the offer' });
+    }
+  };
+}
+
+// viewer.ownerActions: whether this login passes the owner-only check Send / Withdraw / Revise use (the page hides
+// those buttons from other admins; the server still refuses them).
+router.get('/:id/offer', offerHandler('read', async (req) => ({
+  ...(await JobOffers.adminPanel(req.params.id, offerActor(req))),
+  viewer: { ownerActions: ibFullAccess(req) },
+})));
+
+router.post('/:id/offer', offerHandler('save', async (req) => ({
+  offer: await JobOffers.saveDraft(req.params.id, req.body && typeof req.body === 'object' ? req.body : {}, offerActor(req)),
+})));
+
+router.post('/:id/offer/:offerId/send', requireOwnerAccount, offerHandler('send', (req) => JobOffers.sendOffer(req.params.id, req.params.offerId, offerActor(req), req.body && req.body.draftHash)));
+
+router.post('/:id/offer/:offerId/withdraw', requireOwnerAccount, offerHandler('withdraw', async (req) => ({
+  offer: await JobOffers.withdrawOffer(req.params.id, req.params.offerId, offerActor(req)),
+})));
+
+router.post('/:id/offer/:offerId/revise', requireOwnerAccount, offerHandler('revise', async (req) => ({
+  offer: await JobOffers.reviseOffer(req.params.id, req.params.offerId, req.body && typeof req.body === 'object' ? req.body : {}, offerActor(req)),
+})));
+
+router.get('/:id/offer/:offerId/signed-copy', offerHandler('signed copy', (req) => JobOffers.signedCopy(req.params.id, req.params.offerId)));
 
 module.exports = router;
