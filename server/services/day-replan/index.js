@@ -62,6 +62,7 @@ const MOVABLE_STATUSES = ['pending', 'confirmed'];
 const EXCLUDED_STATUSES = ['cancelled', 'completed', 'skipped', 'rescheduled', 'no_show'];
 const IN_PROGRESS_STATUSES = ['en_route', 'on_site'];
 const PLAN_TABLE = 'day_replan_plans';
+const { liveServiceOrHold } = require('../scheduling/reservation-occupancy');
 
 function daysAhead() {
   const raw = Number.parseInt(process.env.DAY_REPLAN_DAYS_AHEAD, 10);
@@ -111,9 +112,11 @@ const TOLD_LOCK_SELECT = [
   'scheduled_services.date_exception', 'scheduled_services.date_exception_source', 'scheduled_services.date_exception_at',
 ];
 
-async function loadDayStops(conn, dateStr) {
+// `includeClaimedBookings` is the internal open-blocks proof only. The night
+// planner keeps its established live-hold query and selected columns.
+async function loadDayStops(conn, dateStr, { includeClaimedBookings = false } = {}) {
   const { _internals, CUSTOMER_PREMISE_ALIASES } = require('../route-reorder');
-  return dayStopsQuery(conn, {
+  const query = dayStopsQuery(conn, {
     dateStr,
     excludeStatuses: EXCLUDED_STATUSES,
     select: [
@@ -130,6 +133,7 @@ async function loadDayStops(conn, dateStr) {
       'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
       ...CUSTOMER_PREMISE_ALIASES,
       'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
+      ...(includeClaimedBookings ? ['scheduled_services.source_estimate_id', 'scheduled_services.reservation_service_mix'] : []),
       'scheduled_services.reservation_expires_at', 'scheduled_services.route_order', 'scheduled_services.created_at',
       // Apply mode's version hash reads these (the shadow plan ignores them).
       'scheduled_services.scheduled_date', 'scheduled_services.customer_confirmed', 'scheduled_services.updated_at',
@@ -139,7 +143,8 @@ async function loadDayStops(conn, dateStr) {
       ...guardedCoordSelects(conn),
       ...TOLD_LOCK_SELECT,
     ],
-  }).whereRaw(_internals.LIVE_HOLD_SQL);
+  });
+  return includeClaimedBookings ? query.where(liveServiceOrHold) : query.whereRaw(_internals.LIVE_HOLD_SQL);
 }
 
 /** Ids whose 24-hour reminder is recorded as sent. Throws when the read fails (the caller skips the day). */

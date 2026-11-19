@@ -1476,7 +1476,7 @@ async function pageSlotPicker(estimateId) {
   };
 }
 
-async function offerableEstimateSlots(estimateId, customerId, { fresh = false } = {}) {
+async function offerableEstimateSlots(estimateId, customerId, { fresh = false, dispatchWindow = null } = {}) {
   const estimate = await db('estimates').where({ id: estimateId }).first(...SLOT_ESTIMATE_COLUMNS);
   if (!estimate || !(await estimateBelongsToCustomer(estimate, customerId))) return null;
   // Fail closed: a refusal, or a verdict that cannot be read (the park lookup), offers no times.
@@ -1495,6 +1495,8 @@ async function offerableEstimateSlots(estimateId, customerId, { fresh = false } 
       serviceMode: picker.serviceMode,
       ...picker.selection,
       ...(fresh ? { bypassCache: true, maxResults: FRESH_MAX_SLOTS, expanderMaxResults: 0 } : {}),
+      ...(dispatchWindow ? { ...dispatchWindow, bypassCache: true, paidCalls: false, offer: true,
+        measureBookingFit: true, maxResults: FRESH_MAX_SLOTS, expanderMaxResults: 0 } : {}),
     });
   } catch (err) {
     if (SETTLED_SLOT_CODES.includes(err.code)) return null;

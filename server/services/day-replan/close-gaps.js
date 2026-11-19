@@ -208,11 +208,25 @@ function tryStart(input, startMin) {
   // refuses the hour when that breaks a promise (Codex #7935 r1).
   const sim = simulate(seq, { origin, departureMin: bounds.departureMin, blockedIntervals: serviceBlocks(input.blocks) });
   if (!sim || !promisesKept(sim, seq, marginMin)) return null;
+  if (input.requireClose && sim.serviceFinishMin > bounds.closeMin) return null;
   const fig = openTime(sim, bounds);
-  return { start: hhmm(startMin), startMin, driveMin: fig.driveMin, waitMin: fig.waitMin, sellableMin: fig.sellableMin, biggestMin: fig.biggestMin, slots: fig.slots };
+  const finish = input.requireClose
+    ? { finishMin: sim.arrivals.find(a => String(a.id) === String(leaderId))?.departureMin } : {};
+  return { start: hhmm(startMin), startMin, ...finish, driveMin: fig.driveMin, waitMin: fig.waitMin, sellableMin: fig.sellableMin, biggestMin: fig.biggestMin, slots: fig.slots };
 }
 
 const prefOk = (pref, startMin) => !pref || (startMin >= pref.startMin && startMin < pref.endMin);
+function fitOfferedHour(input, hour) {
+  if (!Number.isInteger(hour) || hour * 60 < input.bounds.openMin || hour > lastHour(input.group[0], input.bounds.closeMin)) return null;
+  return prefOk(input.pref, hour * 60) && hourFree(input, hour) ? tryStart(input, hour * 60) : null;
+}
+
+function preferredFit(fits) {
+  if (!fits.length) return null;
+  const least = Math.min(...fits.map(f => f.driveMin));
+  return fits.filter(f => f.driveMin <= least + S1_DRIVE_ALLOWANCE_MIN)
+    .sort((a, b) => b.slots - a.slots || a.waitMin - b.waitMin || b.biggestMin - a.biggestMin || a.driveMin - b.driveMin || a.startMin - b.startMin)[0];
+}
 const strip = (fit) => (fit ? {
   start: fit.start, driveMin: fit.driveMin, waitMin: fit.waitMin, sellableMin: fit.sellableMin, biggestMin: fit.biggestMin, slots: fit.slots,
 } : null);
@@ -229,21 +243,20 @@ const strip = (fit) => (fit ? {
  * booked hours. Hours outside the stop's customer window are not tried.
  */
 function replayBooking(input) {
-  const { group, pref, bounds } = input;
+  const { group, bounds } = input;
   const lead = group[0];
   const run = (startMin) => tryStart({ ...input, leaderId: lead.id }, startMin);
   const bookedMin = toMin(lead.window_start);
   const tried = [];
   for (let hour = Math.ceil(bounds.openMin / 60); hour <= lastHour(lead, bounds.closeMin); hour += 1) {
-    const fit = prefOk(pref, hour * 60) && hourFree(input, hour) ? run(hour * 60) : null;
+    const fit = fitOfferedHour({ ...input, leaderId: lead.id }, hour);
     if (fit) tried.push(fit);
   }
   const asBooked = tried.find((t) => t.startMin === bookedMin) || run(bookedMin);
   const base = { id: lead.id, source: lead.source_action || null, booked: strip(asBooked) };
   if (!tried.length) return { ...base, leastDrive: null, s1: null, differs: false };
   const leastDrive = [...tried].sort((a, b) => a.driveMin - b.driveMin || a.startMin - b.startMin)[0];
-  const s1 = tried.filter((t) => t.driveMin <= leastDrive.driveMin + S1_DRIVE_ALLOWANCE_MIN)
-    .sort((a, b) => b.slots - a.slots || a.waitMin - b.waitMin || b.biggestMin - a.biggestMin || a.driveMin - b.driveMin || a.startMin - b.startMin)[0];
+  const s1 = preferredFit(tried);
   return { ...base, leastDrive: strip(leastDrive), s1: strip(s1), differs: s1.startMin !== bookedMin };
 }
 
@@ -269,7 +282,7 @@ function replayRecentBookings({ groups, prefById, now, ...rest }) {
 }
 
 module.exports = {
-  openTime, planSims, packVerdict, hourChanges, lockedGaps, replayRecentBookings, recentGroups, serviceBlocks,
+  openTime, planSims, packVerdict, hourChanges, lockedGaps, replayRecentBookings, recentGroups, serviceBlocks, fitOfferedHour,
   SELLABLE_MIN, SLOT_MIN, P1_MIN_GAIN, S1_DRIVE_ALLOWANCE_MIN,
   _internals: { openBlocks, minusUnavailable, replayBooking, recentlyBooked, lastHour, tryStart, hourFree, departAfter },
 };
