@@ -407,7 +407,7 @@
       "statement": "Large patch is most likely to show up from November through May, when temperatures are below 80°F and the grass stays wet for 48 hours or more; the fungus does not affect roots.",
       "lead": [
         "Large patch is most likely to show up from November through May, when temperatures are below 80°F and the grass stays wet for 48 hours or more.",
-        "Rain, extra irrigation or long stretches of high humidity can keep the leaves wet that long.",
+        "Rainfall, extra irrigation or long stretches of high humidity can keep the leaves wet that long.",
         "The fungus does not affect the roots."
       ],
       "quotes": [
@@ -641,17 +641,19 @@
     {
       "id": "O02",
       "title": "Sarasota County's fertilizer blackout",
-      "statement": "June 1 to September 30, most of Sarasota County bans nitrogen and phosphorus lawn fertilizer; outside that window, nitrogen fertilizer must contain at least 50 percent slow-release nitrogen.",
+      "statement": "June 1 to September 30, most of Sarasota County bans nitrogen and phosphorus lawn fertilizer; outside that window, nitrogen fertilizer there must contain at least 50 percent slow-release nitrogen; in North Port, fertilizer on turf grass is prohibited from April 1 through Sept. 30.",
       "lead": [
         "June 1 to September 30, most of Sarasota County bans nitrogen and phosphorus lawn fertilizer.",
-        "Outside that window, nitrogen fertilizer must contain at least 50 percent slow-release nitrogen.",
+        "Outside that window, nitrogen fertilizer there must contain at least 50 percent slow-release nitrogen.",
+        "In North Port, fertilizer on turf grass is prohibited from April 1 through Sept. 30.",
         "WUSF reports that in Manatee County, the fertilizer ban has been in place for over a decade."
       ],
       "quotes": [
         "From June 1 through Sept. 30, no fertilizer containing nitrogen or phosphorus shall be applied to turf or landscape plants in residential areas.",
         "Nitrogen fertilizer must contain at least 50 percent slow-release nitrogen.",
         "The bans are limited to fertilizers containing nitrogen and phosphorus.",
-        "In Manatee County, the fertilizer ban has been in place for over a decade."
+        "In Manatee County, the fertilizer ban has been in place for over a decade.",
+        "Use of fertilizer on turf grass is prohibited between April 1 through Sept. 30."
       ],
       "sources": [
         {
@@ -667,6 +669,13 @@
           "pub_id": null,
           "url": "https://www.wusf.org/environment/2026-06-03/most-of-the-tampa-bay-region-is-under-a-seasonal-fertilizer-ban-heres-what-you-need-to-know",
           "date_text": "June 3, 2026"
+        },
+        {
+          "publisher": "City of North Port",
+          "title": "Fertilizer Ordinance",
+          "pub_id": null,
+          "url": "https://www.northportfl.gov/City-Services-and-Safety/Public-Works/Stormwater-Management/Fertilizer-Ordinance",
+          "date_text": "read 2026-11-19"
         }
       ],
       "months": [
@@ -676,12 +685,13 @@
       "kind": "rule",
       "confidence": "high",
       "notes": "high for Sarasota County jurisdictions; medium for Manatee (news source, no county code text opened); Charlotte County not verified. Related: the same brochure sets a fertilizer-free zone near water: 10 feet in unincorporated Sarasota County, City of Sarasota, Venice and North Port; 3 feet on Longboat Key (10 feet with a broadcast spreader that has no deflector).",
-      "scope_note": "Sarasota County towns only (unincorporated Sarasota County, City of Sarasota, City of Venice, Longboat Key). Manatee is medium confidence (news source, no county code text opened); Charlotte County not verified. North Port has its own April 1 start (O01).",
+      "scope_note": "Sarasota County towns only (unincorporated Sarasota County, City of Sarasota, City of Venice, Longboat Key). Manatee is medium confidence (news source, no county code text opened); Charlotte County not verified. North Port's own April 1 start is in the lead (and in O01).",
       "quote_sources": [
         0,
         0,
         1,
-        1
+        1,
+        2
       ]
     },
     {
@@ -1945,8 +1955,8 @@
     {
       "id": "X03",
       "reserve": true,
-      "title": "St. Augustine has no seed",
-      "statement": "St. Augustine has no seed",
+      "title": "St. Augustinegrass has no seed",
+      "statement": "St. Augustinegrass has no seed",
       "quotes": [
         "St. Augustinegrass is established by vegetative propagation only, which includes sod, plugs, or sprigs."
       ],

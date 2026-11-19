@@ -66,6 +66,9 @@ describe('the sentence rules', () => {
     expect(sentenceProblem('Termidor is what pros reach for.', factSource(FACT))).toMatch(/brand/);
     expect(sentenceProblem('Some Acme Mosquito Magnet works.', factSource(FACT))).toMatch(/name not in the source/);
     expect(sentenceProblem('A Latin name like A. aegypti is not here.', factSource(FACT))).toMatch(/name not in the source/);
+    // a name must be a whole word of the source, not the start of one ("Ed" is not "EDIS"; pre-push round 18)
+    expect(sentenceProblem('According to Ed, water matters.', factSource(factById('R02')))).toMatch(/name not in the source: Ed/);
+    expect(sentenceProblem("Sarasota County's rules differ.", factSource(factById('O02')))).toBeNull();
   });
 
   test('a capital that opens a later sentence is not a name', () => {

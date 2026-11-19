@@ -248,7 +248,9 @@ function nameCandidates(sentence) {
     .map((p) => p.map((w) => w.word).join(' '));
 }
 
-const hasWord = (corpus, phrase) => new RegExp(`(?:^|[^a-z])${phrase.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(corpus);
+// A name must be a whole word or phrase of the source, with at most a plural
+// or possessive ending: "Ed" is not "EDIS" (pre-push round 18).
+const hasWord = (corpus, phrase) => new RegExp(`(?:^|[^a-z])${phrase.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:s|es|'s)?(?![a-z])`, 'i').test(corpus);
 
 function unknownName(sentence, namesCorpus) {
   const corpus = norm(namesCorpus).toLowerCase();
