@@ -84,6 +84,7 @@ async function loadLegacyStageDelivery() {
 // Engagement signal: if the customer opened the estimate within the last N
 // hours (default 2), skip the scheduled nudge. They're thinking about it
 // right now and don't need a poke.
+const RECENT_OPEN_HOURS = 2;
 function wasRecentlyOpened(est, hours = 2, nowMs = Date.now()) {
   const last = est.last_viewed_at || est.viewed_at;
   if (!last) return false;
@@ -106,16 +107,30 @@ function wasRecentlyOpened(est, hours = 2, nowMs = Date.now()) {
 // after quiet hours, so an unverifiable checkout state must hold the row (the
 // caller's catch turns the throw into the retryable recheck-failed verdict),
 // the same as the reply-pause check beside it.
+// A grouped estimate (estimate_group_id) shows every live sibling on one
+// link page, and the customer can book ANY sibling through its own accept
+// link, so the hold and the card step are looked up for the whole group. The
+// sibling ids come from publishedGroupLinks, the lister the group's link
+// page and admin send use. `conn` lets the engine run the read inside its
+// final-check snapshot.
 const CHECKOUT_ACTIVE_MINUTES = 20;
-async function estimateMidCheckout(estimateId, { throwOnError = false } = {}) {
+async function checkoutEstimateIds(estimateId, groupId, conn) {
+  if (!groupId) return [estimateId];
+  const { publishedGroupLinks } = require("./estimate-group-navigation");
+  const links = await publishedGroupLinks(conn, { estimate_group_id: groupId });
+  return [...new Set([estimateId, ...links.map((l) => l.id)])];
+}
+
+async function estimateMidCheckout(estimateId, { throwOnError = false, conn = db, groupId = null } = {}) {
   try {
-    const hold = await db("scheduled_services")
-      .where({ source_estimate_id: estimateId })
+    const ids = await checkoutEstimateIds(estimateId, groupId, conn);
+    const hold = await conn("scheduled_services")
+      .whereIn("source_estimate_id", ids)
       .whereRaw("reservation_expires_at > NOW()")
       .first("id");
     if (hold) return true;
-    const card = await db("estimate_checkout_events")
-      .where({ estimate_id: estimateId })
+    const card = await conn("estimate_checkout_events")
+      .whereIn("estimate_id", ids)
       .whereRaw("updated_at > NOW() - make_interval(mins => ?)", [CHECKOUT_ACTIVE_MINUTES])
       .first("id");
     return !!card;
@@ -266,7 +281,7 @@ async function safetyGate(est, now = new Date(), { replay = false } = {}) {
   // contract test).
   if (estimateOptedOutOfFollowups(est))
     return { skip: true, reason: 'engagement-opted-out' };
-  if (wasRecentlyOpened(est, 2, now.getTime()))
+  if (wasRecentlyOpened(est, RECENT_OPEN_HOURS, now.getTime()))
     return { skip: true, reason: "recently-opened" };
   // Conversion guard: the customer already paid an invoice, booked an
   // appointment after this estimate, or is an active customer — the estimate
@@ -279,9 +294,28 @@ async function safetyGate(est, now = new Date(), { replay = false } = {}) {
   if (await hasRepliedRecently(est, 14, { throwOnError: replay }))
     return { skip: true, reason: "customer-replied-recently" };
   // Mid-checkout: held for later, not dropped (see estimateMidCheckout).
-  if (await estimateMidCheckout(est.id, { throwOnError: replay }))
+  if (await estimateMidCheckout(est.id, { throwOnError: replay, groupId: est.estimate_group_id }))
     return { skip: true, reason: "customer-mid-checkout" };
   return { skip: false };
+}
+
+// The two TEMPORARY holds in safetyGate are waits, not verdicts: the customer
+// may abandon the card step, and a page view ages out. The queued text must
+// come back, not be settled as stale. Mid-checkout retries after
+// CHECKOUT_ACTIVE_MINUTES, the whole card-step window (a visit-time hold
+// lapses sooner, in 15 minutes); recently-opened retries when the view leaves
+// the RECENT_OPEN_HOURS window. Either way the next pass re-runs the whole
+// gate, so a finished checkout or a terminal estimate ends the row then.
+function replayHoldVerdict(reason, est, nowMs) {
+  let retryAtMs;
+  if (reason === "customer-mid-checkout") {
+    retryAtMs = nowMs + CHECKOUT_ACTIVE_MINUTES * 60000;
+  } else if (reason === "recently-opened") {
+    retryAtMs = new Date(est.last_viewed_at || est.viewed_at).getTime() + RECENT_OPEN_HOURS * 3600000;
+  } else {
+    return null;
+  }
+  return { eligible: false, reason, retryable: true, retryAt: new Date(retryAtMs) };
 }
 
 // Replay-time eligibility for a quiet-hours-deferred follow-up SMS: the
@@ -301,20 +335,8 @@ async function deferredFollowupStillEligible(estimateId) {
     // here (codex r27) instead of the cron path's fail-open false, so an
     // unverifiable reply state lands in the catch below and holds the row.
     const gate = await safetyGate(est, new Date(), { replay: true });
-    // Mid-checkout is a wait, not a verdict: the customer may abandon the
-    // card step, so the queued text must come back instead of being settled
-    // as stale. retryAt = now + CHECKOUT_ACTIVE_MINUTES, the whole
-    // card-step window (a visit-time hold lapses sooner, in 15 minutes), so
-    // the next pass finds the checkout either lapsed or the estimate
-    // accepted (which the terminal-status check then ends).
-    if (gate.skip && gate.reason === "customer-mid-checkout") {
-      return {
-        eligible: false,
-        reason: gate.reason,
-        retryable: true,
-        retryAt: new Date(Date.now() + CHECKOUT_ACTIVE_MINUTES * 60000),
-      };
-    }
+    const hold = gate.skip ? replayHoldVerdict(gate.reason, est, Date.now()) : null;
+    if (hold) return hold;
     if (gate.skip) return { eligible: false, reason: gate.reason };
     return { eligible: true };
   } catch (e) {

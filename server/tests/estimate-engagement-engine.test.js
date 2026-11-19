@@ -541,6 +541,34 @@ describe('processDueJobs', () => {
       expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(expect.objectContaining({ consultation_url: OFFER_URL }));
     });
 
+    test('checkout is read INSIDE the final snapshot: a hold seen there releases the claim, defers, and nothing is sent', async () => {
+      probeGoneQuietConsultation.mockResolvedValue(CONTEXT);
+      mintGoneQuietConsultationUrl.mockResolvedValue(OFFER_URL);
+      goneQuietConsultationStillValid.mockResolvedValue(true);
+      // Idle on pass 1 and pass 2; the customer is booking by the snapshot.
+      followupShared.estimateMidCheckout
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+      enqueueProcessorHappyPath();
+      enqueueSecondPass();
+      enqueueLastRead();
+
+      const result = await Engine.processDueJobs(NOW);
+
+      expect(result.sent).toBe(0);
+      // The third read took the snapshot's connection (db stands in for the
+      // transaction handle here) and the estimate's group; no fourth read
+      // ran after the snapshot.
+      expect(followupShared.estimateMidCheckout).toHaveBeenCalledTimes(3);
+      expect(followupShared.estimateMidCheckout).toHaveBeenLastCalledWith('est-1', { conn: db, groupId: undefined });
+      expect(db.transaction).toHaveBeenCalledTimes(1);
+      expect(followupShared.releaseFollowupSend).toHaveBeenCalledWith('est-1', 'viewed_gone_quiet_72h');
+      expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
+      expect(lastJobUpdate().payload).toEqual(expect.objectContaining({ due_at: expect.any(Date) }));
+      expect(lastJobUpdate().payload).not.toHaveProperty('status');
+    });
+
     test.each([
       ['reopened recently (the gone-quiet clock restarts)', () => baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 2 * MIN) }), null],
       ['the send budget is spent', () => baseEstimate({ follow_up_count: 99 }), null],
@@ -939,7 +967,7 @@ describe('processDueJobs', () => {
       const result = await Engine.processDueJobs(NOW);
 
       expect(result.sent).toBe(0);
-      expect(followupShared.estimateMidCheckout).toHaveBeenCalledWith('est-1');
+      expect(followupShared.estimateMidCheckout).toHaveBeenCalledWith('est-1', { groupId: undefined });
       expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
       expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
       // Held, not dropped: still pending, due again after the 15-minute defer.

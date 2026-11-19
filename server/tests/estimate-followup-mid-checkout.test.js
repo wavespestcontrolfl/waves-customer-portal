@@ -44,17 +44,22 @@ jest.mock('../services/estimate-conversion-guard', () => ({
 jest.mock('../services/estimate-lead-linkage', () => ({
   leadIdForEstimate: jest.fn(async () => null),
 }));
+jest.mock('../services/estimate-group-navigation', () => ({
+  publishedGroupLinks: jest.fn(async () => []),
+}));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { _private } = require('../services/estimate-follow-up');
+const { publishedGroupLinks } = require('../services/estimate-group-navigation');
 
 // A knex-builder stub per table: every chain method returns the builder, and
 // first() resolves the row the test set for that table (or rejects with an error).
 function tableStub(result) {
-  const calls = { where: [], whereRaw: [] };
+  const calls = { where: [], whereIn: [], whereRaw: [] };
   const b = {};
   b.where = jest.fn((arg) => { calls.where.push(arg); return b; });
+  b.whereIn = jest.fn((col, ids) => { calls.whereIn.push([col, ids]); return b; });
   b.whereRaw = jest.fn((sql, bindings) => { calls.whereRaw.push([sql, bindings]); return b; });
   b.first = jest.fn(() => (result instanceof Error ? Promise.reject(result) : Promise.resolve(result)));
   b.calls = calls;
@@ -78,7 +83,7 @@ describe('estimateMidCheckout', () => {
     await expect(_private.estimateMidCheckout('est-1')).resolves.toBe(true);
 
     // The hold row is found by the estimate it was made for, still unexpired.
-    expect(stubs.scheduled_services.calls.where).toEqual([{ source_estimate_id: 'est-1' }]);
+    expect(stubs.scheduled_services.calls.whereIn).toEqual([['source_estimate_id', ['est-1']]]);
     expect(stubs.scheduled_services.calls.whereRaw[0][0]).toMatch(/reservation_expires_at > NOW\(\)/);
   });
 
@@ -88,7 +93,7 @@ describe('estimateMidCheckout', () => {
     await expect(_private.estimateMidCheckout('est-1')).resolves.toBe(true);
 
     expect(_private.CHECKOUT_ACTIVE_MINUTES).toBe(20);
-    expect(stubs.estimate_checkout_events.calls.where).toEqual([{ estimate_id: 'est-1' }]);
+    expect(stubs.estimate_checkout_events.calls.whereIn).toEqual([['estimate_id', ['est-1']]]);
     expect(stubs.estimate_checkout_events.calls.whereRaw[0]).toEqual([
       'updated_at > NOW() - make_interval(mins => ?)',
       [20],
@@ -108,6 +113,25 @@ describe('estimateMidCheckout', () => {
     const logged = logger.warn.mock.calls.map((c) => c[0]).join(' ');
     expect(logged).toContain('42P01');
     expect(logged).not.toContain('5551234');
+  });
+
+  test('a grouped estimate also looks for a hold or card step on every live sibling', async () => {
+    publishedGroupLinks.mockResolvedValueOnce([{ id: 'est-1' }, { id: 'est-2' }, { id: 'est-3' }]);
+    const stubs = arrange({ hold: undefined, card: { id: 'evt-2' } });
+
+    await expect(_private.estimateMidCheckout('est-1', { groupId: 'grp-1' })).resolves.toBe(true);
+
+    expect(publishedGroupLinks).toHaveBeenCalledWith(db, { estimate_group_id: 'grp-1' });
+    expect(stubs.scheduled_services.calls.whereIn).toEqual([['source_estimate_id', ['est-1', 'est-2', 'est-3']]]);
+    expect(stubs.estimate_checkout_events.calls.whereIn).toEqual([['estimate_id', ['est-1', 'est-2', 'est-3']]]);
+  });
+
+  test('reads through the connection it is given (the engine passes its snapshot transaction)', async () => {
+    const trx = jest.fn((table) => tableStub(table === 'estimate_checkout_events' ? { id: 'evt-1' } : undefined));
+    await expect(_private.estimateMidCheckout('est-1', { conn: trx })).resolves.toBe(true);
+    expect(trx).toHaveBeenCalledWith('scheduled_services');
+    expect(trx).toHaveBeenCalledWith('estimate_checkout_events');
+    expect(db).not.toHaveBeenCalled();
   });
 
   test('with throwOnError (the deferred replay) a lookup error propagates instead of reading "not booking"', async () => {
@@ -147,8 +171,8 @@ describe('deferredFollowupStillEligible (quiet-hours text replay)', () => {
     return b;
   }
 
-  function arrangeReplay({ hold, card } = {}) {
-    const est = { id: 'est-1', status: 'viewed', customer_id: null, customer_phone: null, customer_email: null };
+  function arrangeReplay({ hold, card, est: estOverrides = {} } = {}) {
+    const est = { id: 'est-1', status: 'viewed', customer_id: null, customer_phone: null, customer_email: null, ...estOverrides };
     const stubs = {
       estimates: tableStub(est),
       scheduled_services: tableStub(hold),
@@ -171,6 +195,28 @@ describe('deferredFollowupStillEligible (quiet-hours text replay)', () => {
 
     expect(verdict).toMatchObject({ eligible: false, reason: 'customer-mid-checkout', retryable: true });
     expect(verdict.retryAt).toEqual(new Date(NOW.getTime() + 20 * 60000));
+  });
+
+  test('a recent page view (last_viewed_at set) is a retryable wait, never a stale verdict, with or without checkout', async () => {
+    const viewedAt = new Date(NOW.getTime() - 10 * 60000);
+    // Reopened the estimate and started checkout: the gate answers recently-opened first.
+    arrangeReplay({ hold: { id: 'hold-1' }, est: { last_viewed_at: viewedAt } });
+
+    const verdict = await deferredFollowupStillEligible('est-1');
+
+    expect(verdict).toMatchObject({ eligible: false, reason: 'recently-opened', retryable: true });
+    // Retries when the 2-hour view window ends.
+    expect(verdict.retryAt).toEqual(new Date(viewedAt.getTime() + 2 * 3600000));
+  });
+
+  test('a view older than the window no longer holds the replay', async () => {
+    arrangeReplay({ est: { last_viewed_at: new Date(NOW.getTime() - 3 * 3600000) } });
+    await expect(deferredFollowupStillEligible('est-1')).resolves.toEqual({ eligible: true });
+  });
+
+  test('a terminal estimate is still a final verdict, not a retry', async () => {
+    arrangeReplay({ est: { status: 'accepted' } });
+    await expect(deferredFollowupStillEligible('est-1')).resolves.toEqual({ eligible: false, reason: 'terminal-status:accepted' });
   });
 
   test('a lookup error on the checkout check fails closed and retryable (never authorizes the replay)', async () => {

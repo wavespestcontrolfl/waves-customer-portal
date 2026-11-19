@@ -663,7 +663,7 @@ async function processDueBatch(now = new Date()) {
       // has not decided; a customer who is booking has. Once they accept, the
       // estimate-inactive check above ends the job; if they walk away, the
       // email goes after the hold lapses.
-      if (await followupShared.estimateMidCheckout(est.id)) {
+      if (await followupShared.estimateMidCheckout(est.id, { groupId: est.estimate_group_id })) {
         await deferOrShadow(live, job, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000), 'mid-checkout');
         continue;
       }
@@ -831,7 +831,7 @@ async function processDueBatch(now = new Date()) {
       let consultationUrl = '';
       if (consultationContext) {
         const minted = await mintGoneQuietConsultationUrl(consultationContext);
-        const { current, prefs, offerStillValid } = await db.transaction(async (trx) => ({
+        const { current, prefs, offerStillValid, midCheckout } = await db.transaction(async (trx) => ({
           current: await trx('estimates').where({ id: est.id }).first(),
           prefs: est.customer_id
             ? await trx('notification_prefs').where({ customer_id: est.customer_id }).first('email_enabled')
@@ -839,10 +839,14 @@ async function processDueBatch(now = new Date()) {
           offerStillValid: minted
             ? await goneQuietConsultationStillValid(consultationContext, est.customer_email, trx)
             : false,
+          // Checkout is judged from the same snapshot as the rest: a hold or
+          // card step committed after it cannot be seen, and one committed
+          // before it cannot be missed.
+          midCheckout: await followupShared.estimateMidCheckout(est.id, { conn: trx, groupId: est.estimate_group_id }),
         }), FINAL_CHECK_SNAPSHOT);
         const changed = !current || Object.keys(current).some((col) => !IGNORED_ESTIMATE_COLUMNS.has(col)
           && JSON.stringify(current[col]) !== JSON.stringify(est[col]));
-        if (changed || prefs?.email_enabled === false) {
+        if (changed || prefs?.email_enabled === false || midCheckout) {
           await followupShared.releaseFollowupSend(est.id, rule.rule_key);
           claimed = false;
           await deferJob(job.id, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000));
@@ -852,9 +856,12 @@ async function processDueBatch(now = new Date()) {
       }
       // Last look before dispatch: the customer can reserve a visit time or
       // open the card step while the claim is held and the links are minted,
-      // and neither write touches the estimate row the snapshot above
-      // compares. Give the claim back and look again later, as the checks above do.
-      if (await followupShared.estimateMidCheckout(est.id)) {
+      // and neither write touches the estimate row the snapshot compares.
+      // The consultation path already read it inside that snapshot (nothing
+      // awaits after it but the send); every other path looks here. Give the
+      // claim back and look again later, as the checks above do.
+      if (!consultationContext
+        && await followupShared.estimateMidCheckout(est.id, { groupId: est.estimate_group_id })) {
         await followupShared.releaseFollowupSend(est.id, rule.rule_key);
         claimed = false;
         await deferJob(job.id, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000));
