@@ -332,8 +332,16 @@ const SILENT_METADATA_KEYS = [
   // The staff repeat-caller alert, which counts calls only.
   'repeat_caller_claim', 'repeat_caller_alerted_at', 'repeat_caller_delivery_id',
 ];
+// The text-back's outcome, by value: only the values production's silent
+// calls carry (unset, sent, or skipped for a line that cannot take a text or
+// for an earlier text-back of ours). Any other value is refused. Most point at
+// a person (a staff number, an existing customer, a number already contacted,
+// the voicemail lane's text, an opt-out, a wrong number, a do-not-call hold);
+// a failed press-1 screen comes with the screen's own key, which the shape
+// refuses already (pre-push audit r11).
+const SILENT_TEXT_BACK_OUTCOMES = ['sent', 'skipped:NON_MOBILE_SMS_RECIPIENT', 'skipped:SUPPRESSED_NON_MOBILE', 'skipped:already_sent_to_phone'];
 const sqlNames = (names) => names.map((name) => {
-  if (!/^[A-Za-z_]+$/.test(name)) throw new Error(`not a plain name: ${name}`);
+  if (!/^[A-Za-z_:]+$/.test(name)) throw new Error(`not a plain name: ${name}`);
   return `'${name}'`;
 }).join(', ');
 // Every other column NULL, and the counters 0: a recorded length of 0 is a
@@ -348,19 +356,24 @@ const SILENT_SHAPE_SQL = `(NOT EXISTS (SELECT 1 FROM jsonb_each(to_jsonb(call_lo
   + ZERO_COUNTER_COLUMNS.map((column) => ` AND COALESCE(call_log.${column}, 0) = 0`).join('')
   + " AND COALESCE(jsonb_typeof(call_log.metadata), 'null') IN ('null', 'object')"
   + " AND NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(call_log.metadata) = 'object' THEN call_log.metadata ELSE '{}'::jsonb END) mk"
-  + ` WHERE mk NOT IN (${sqlNames(SILENT_METADATA_KEYS)})))`;
+  + ` WHERE mk NOT IN (${sqlNames(SILENT_METADATA_KEYS)}))`
+  + ` AND COALESCE(call_log.metadata->>'missed_call_text_outcome', 'sent') IN (${sqlNames(SILENT_TEXT_BACK_OUTCOMES)}))`;
 
-// A silent call: inbound, nobody (no person, no AI) answered, over, with the
-// silent shape. Built per call: the status lists are defined further down.
+// A silent call: inbound, over, with the silent shape, and who answered and
+// the outcome both the voicemail or not yet written: the only values on
+// production's silent calls. Any other answer ('unknown' included) or outcome
+// (an AI one, or a human-contact one such as 'info_given') is no silent call
+// (pre-push audit r11). Built per call: the status lists are defined further
+// down this file.
 function silentCallSql() {
   const marks = (list) => [...list].map(() => '?').join(', ');
   return [
     "(call_log.direction = 'inbound'"
-      + ` AND (call_log.answered_by IN (${marks(UNANSWERED)}) OR (call_log.answered_by IS NULL AND call_log.status IN (${marks(UNANSWERED_STATUSES)})))`
-      + ` AND COALESCE(call_log.call_outcome, '') NOT IN (${marks(AI_OUTCOMES)})`
+      + ` AND (call_log.answered_by = 'voicemail' OR (call_log.answered_by IS NULL AND call_log.status IN (${marks(UNANSWERED_STATUSES)})))`
+      + " AND COALESCE(call_log.call_outcome, 'voicemail') = 'voicemail'"
       + ` AND call_log.status IN (${marks(TERMINAL_STATUSES)})`
       + ` AND ${SILENT_SHAPE_SQL})`,
-    [...UNANSWERED, ...UNANSWERED_STATUSES, ...AI_OUTCOMES, ...TERMINAL_STATUSES],
+    [...UNANSWERED_STATUSES, ...TERMINAL_STATUSES],
   ];
 }
 
@@ -372,15 +385,30 @@ function settledSilentSql(checkedAt) {
 }
 
 // The number's record beside the counted history, read only once that matched
-// and bounded like it: the judged call, read fresh, is still a silent call (a
-// late write can mark it answered after the bell read it; pre-push audit
-// r10), with no grace test, since the bell itself rings 5 minutes after the
-// terminal status; no other call from or to the number, from the window
-// start up to this check, is anything but a settled silent hang-up (IS NOT
-// TRUE: a NULL in the test blocks too); no text from it. Up to the check, not
-// to the judged call: a staff callback can come between the call and its
-// bell (pre-push audit r9).
+// and bounded like it: the number is no staff or internal phone; the judged
+// call, read fresh, is still a silent call (a late write can mark it answered
+// after the bell read it; pre-push audit r10), with no grace test, since the
+// bell itself rings 5 minutes after the terminal status; no other call from
+// or to the number, from the window start up to this check, is anything but a
+// settled silent hang-up (IS NOT TRUE: a NULL in the test blocks too); and no
+// text from or to it but our own text-back. Up to the check, not to the
+// judged call: a staff callback can come between the call and its bell
+// (pre-push audit r9).
 async function recordIsSilent(row, key, at, checkedAt) {
+  // One of our own lines, a staff forward or a staff or tech phone is never a
+  // robocaller: the text-back's own test (pre-push audit r11). The staff list
+  // can read the database, so it has the same time limit as the reads below:
+  // a slow read throws, and the push goes.
+  const phone = `+${key}`;
+  if (require('../config/twilio-numbers').isInternalNumber(phone)) return false;
+  let staffTimer;
+  const staffPhone = await Promise.race([
+    require('./staff-sender-phones').isStaffTechSender(phone),
+    new Promise((resolve, reject) => {
+      staffTimer = setTimeout(() => reject(new Error('staff phone check timed out')), EXCHANGE_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(staffTimer));
+  if (staffPhone) return false;
   const since = new Date(at.getTime() - REPEAT_DAYS * 86400 * 1000);
   const judged = await db('call_log').where('id', row.id).whereRaw(...silentCallSql())
     .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true }).first('id');
@@ -397,11 +425,17 @@ async function recordIsSilent(row, key, at, checkedAt) {
     .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
     .first('id');
   if (other) return false;
+  // Texts the same way: none from or to the number since the window start but
+  // our own text-back (message_type as in missed-call-text-back.js). A reply,
+  // a staff text or another lane's text is contact, as the text-back's
+  // contactState reads it (pre-push audit r11).
   const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
   const text = await excludeUnresolvedSendReservations(db('sms_log'))
-    .where('direction', 'inbound')
     .where('created_at', '>=', since)
-    .whereRaw(`${phoneKeySql('sms_log.from_phone')} = ?`, [key])
+    .where((number) => number
+      .whereRaw(`${phoneKeySql('sms_log.from_phone')} = ?`, [key])
+      .orWhereRaw(`${phoneKeySql('sms_log.to_phone')} = ?`, [key]))
+    .whereRaw("(sms_log.direction = 'outbound' AND sms_log.message_type = 'missed_call_text_back') IS NOT TRUE")
     .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
     .first('id');
   return !text;

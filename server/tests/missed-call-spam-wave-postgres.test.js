@@ -23,9 +23,11 @@ jest.mock('../config/twilio-numbers', () => {
   const gbp = { '+19413840224': 'GBP — Parrish', '+19412590111': 'GBP — Venice' };
   return {
     findByNumber: jest.fn((n) => (gbp[n] ? { type: 'gbp_tracking', label: gbp[n] } : { type: 'location', label: 'Office' })),
+    isInternalNumber: jest.fn(() => false),
     gbpTracking: { parrish: { number: '+19413840224', label: 'GBP — Parrish' }, venice: { number: '+19412590111', label: 'GBP — Venice' } },
   };
 });
+jest.mock('../services/staff-sender-phones', () => ({ isStaffTechSender: jest.fn(async () => false) }));
 jest.mock('../services/notification-triggers', () => ({
   // Like the real trigger, reports the bell result through onBell before the push.
   triggerNotification: jest.fn(async (key, payload, opts) => { opts?.onBell?.(true); return { bellWritten: true }; }),
@@ -745,6 +747,12 @@ jest.setTimeout(30000);
       ['a call whose status was never saved', { answered_by: null, status: null, metadata: { stir_verstat: 'TN-Validation-Passed-A' } }],
       // A recording callback wrote the length, long settled (pre-push audit r9).
       ['a recorded length of 0 s', { metadata: { stir_verstat: 'TN-Validation-Passed-A' }, recording_duration_seconds: 0 }],
+      // Values, not only keys (pre-push audit r11).
+      ['an answer that is neither the voicemail nor unset', { answered_by: 'unknown', status: 'completed', metadata: { stir_verstat: 'TN-Validation-Passed-A' } }],
+      ['a human-contact outcome', { call_outcome: 'info_given', metadata: { stir_verstat: 'TN-Validation-Passed-A' } }],
+      ['a text-back skipped for a staff number', { metadata: { stir_verstat: 'TN-Validation-Passed-A', missed_call_text_outcome: 'skipped:internal_number' } }],
+      ['a text-back skipped because the number was already contacted', { metadata: { stir_verstat: 'TN-Validation-Passed-A', missed_call_text_outcome: 'skipped:already_contacted' } }],
+      ['a text-back held for an opt-out', { metadata: { stir_verstat: 'TN-Validation-Passed-A', missed_call_text_outcome: 'skipped:SUPPRESSED_OPT_OUT' } }],
     ])('a number with %s in the last 14 days is never a repeat (pre-push audit)', async (label, sign) => {
       await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
       const row = judged();
@@ -794,7 +802,7 @@ jest.setTimeout(30000);
       expect(await repeat(row)).toBe(false);
     });
 
-    test('a silent hang-up with every call-setup and bookkeeping key production stores still counts', async () => {
+    test.each(['sent', 'skipped:NON_MOBILE_SMS_RECIPIENT', 'skipped:SUPPRESSED_NON_MOBILE', 'skipped:already_sent_to_phone'])('a silent hang-up with every call-setup and bookkeeping key production stores still counts (text-back %s)', async (textOutcome) => {
       const at = new Date(Date.now() - 60 * 24 * 2 * 60 * 1000).toISOString();
       await database('call_log').insert(prior(CALLER, 60 * 24 * 2, {
         to_phone: SECOND_GBP_LINE,
@@ -804,7 +812,7 @@ jest.setTimeout(30000);
           stir_verstat: 'TN-Validation-Passed-A', addons: { status: 'successful' }, domain: 'example.test', location: 'GBP — Venice', numberType: 'mobile',
           screen_caller_name: 'WIRELESS CALLER', promise_chaser_eligible: true, ended_at: at,
           missed_call_notified_at: at, missed_call_settled_at: at, missed_call_text_leased_at: at, missed_call_text_settled_at: at,
-          missed_call_text_outcome: 'sent', missed_call_text_body: 'Sorry we missed your call', missed_call_spam_wave: 'repeat_quiet',
+          missed_call_text_outcome: textOutcome, missed_call_text_body: 'Sorry we missed your call', missed_call_spam_wave: 'repeat_quiet',
           missed_call_spam_repeat_shadow: true, repeat_caller_alerted_at: at,
         },
       }));
@@ -825,16 +833,38 @@ jest.setTimeout(30000);
       expect(await repeat(row)).toBe(true);
     });
 
-    test('a text from the number in the last 14 days is a person; our own text and an older sign are not (pre-push audit)', async () => {
+    // Texts like calls: only our own text-back leaves the number a repeat; an
+    // older sign of a person (15 days) is outside the window (pre-push audit r11).
+    test.each([
+      ['our own text-back to it', true, { direction: 'outbound', from_phone: GBP_LINE, to_phone: CALLER, message_type: 'missed_call_text_back', message_body: 'Sorry we missed your call' }],
+      ['a staff text to it', false, { direction: 'outbound', from_phone: GBP_LINE, to_phone: CALLER, message_type: 'manual', message_body: 'Hi, Waves returning your call' }],
+      ['a text from it', false, { direction: 'inbound', from_phone: '(727) 555-0611', to_phone: GBP_LINE, message_body: 'please call me back', status: 'received' }],
+    ])('a number with %s in the last 14 days is a repeat: %s', async (label, stillRepeat, sms) => {
       await database('call_log').insert([prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }), call(CALLER, 60 * 24 * 15, { answered_by: 'human' })]);
       const row = judged();
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(true);
-      const text = (extra) => database('sms_log').insert({ id: randomUUID(), to_phone: GBP_LINE, status: 'delivered', created_at: new Date(Date.now() - 30 * 60 * 1000), ...extra });
-      await text({ direction: 'outbound', from_phone: GBP_LINE, to_phone: CALLER, message_body: 'Sorry we missed your call' });
+      await database('sms_log').insert({ id: randomUUID(), status: 'delivered', created_at: new Date(Date.now() - 30 * 60 * 1000), ...sms });
+      expect(await repeat(row)).toBe(stillRepeat);
+    });
+
+    test('a staff or tech phone, or one of our own lines, is never a repeat (pre-push audit r11)', async () => {
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      const row = judged();
+      await database('call_log').insert(row);
       expect(await repeat(row)).toBe(true);
-      await text({ direction: 'inbound', from_phone: '(727) 555-0611', message_body: 'please call me back', status: 'received' });
+      const staff = require('../services/staff-sender-phones');
+      const numbers = require('../config/twilio-numbers');
+      staff.isStaffTechSender.mockResolvedValueOnce(true);
       expect(await repeat(row)).toBe(false);
+      numbers.isInternalNumber.mockReturnValueOnce(true);
+      expect(await repeat(row)).toBe(false);
+      expect(numbers.isInternalNumber).toHaveBeenCalledWith('+17275550611');
+      expect(staff.isStaffTechSender).toHaveBeenCalledWith('+17275550611');
+      // A staff list read that hangs has the reads' time limit: the check
+      // throws, and the bell pushes (the fail-open test below).
+      staff.isStaffTechSender.mockImplementationOnce(() => new Promise(() => {}));
+      await expect(repeat(row)).rejects.toThrow('staff phone check timed out');
     });
 
     test('a caller who got through later, is on a live lead or on a customer slot is a real caller', async () => {
