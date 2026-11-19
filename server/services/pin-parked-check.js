@@ -29,10 +29,9 @@
  *        - staff have not dismissed a suggestion for this same pin.
  *   4. ONE open suggestion per customer (customer-pin-suggestions.js); a re-run never duplicates. A later visit
  *      with a stop inside the radius, a verified pin, a changed pin or a deleted customer closes it (superseded).
- *      So does the two-fact rule of step 3, judged again on the suggestion's own parked spot and day with the truck
- *      data of the visit it was made from (late data can show the short stop at the pin): suggestionExplained. That
- *      visit is read again by id even after it left the window (up to the lookback cap), and only the technician who
- *      made the suggestion counts.
+ *      So does the two-fact rule of step 3, judged again on the suggestion's own stored facts (its pin, the truck's
+ *      spot, the day, that technician's truck that day; late data can show the truck at the pin after the bell),
+ *      whatever happened to its visit since: recheckOpenSuggestions, up to the lookback cap.
  *   5. ONE admin notification per new suggestion, keyed on the suggestion id.
  *
  * Needs GATE_GEOCODE_REVIEW on as well (verify_pin is the only way to apply a suggestion).
@@ -449,11 +448,12 @@ async function loadVehicles(conn, visits, window) {
 }
 
 /**
- * Did the truck park inside `radius` of one of these pins on this ET day, for less than truckStops.MIN_STOP_MINUTES
- * (entry.briefStops)? Never a stop: it cannot settle a pin and cannot be suggested. It only says "the truck did come
- * to the pin that day", before or after the long stop (clearStopsAtOtherCustomers, suggestionExplained).
+ * Did the truck park inside `radius` of one of these pins on this ET day? `stops` are parked gaps read with
+ * BRIEF_STOP_MIN_MINUTES: a visit's short ones (entry.briefStops, never a stop of their own: they cannot settle a pin
+ * and cannot be suggested), or one vehicle-day's (suggestionExplained). It only says "the truck did come to the pin
+ * that day", before or after the long stop.
  */
-const briefStopNear = (briefStops, pins, day, radius) => (briefStops || [])
+const briefStopNear = (stops, pins, day, radius) => (stops || [])
   .some((stop) => stopDay(stop) === day && isWithin(nearestPinDistance(pins, stop), radius));
 
 /** A visit's pins, as generous as "a stop at the pin": its own stamp (destination) and the customer's saved pin. */
@@ -556,102 +556,95 @@ function decideCustomer(judged) {
   return flagged.length ? { action: 'flag', visit: flagged[0].visit, verdict: flagged[0].verdict } : { action: 'none' };
 }
 
+/** The ET day the truck stood at a suggestion's parked spot (stop_started_at); null when it is missing or unreadable. */
+function suggestionDay(row) {
+  const ms = row.stop_started_at ? new Date(row.stop_started_at).getTime() : NaN;
+  return Number.isFinite(ms) ? etDateString(new Date(ms)) : null;
+}
+
 /**
- * Does the two-fact rule (clearStopsAtOtherCustomers) explain this OPEN suggestion? It is judged on the suggestion
- * itself: its stored pin and parked spot, the ET day the truck stood there, and the truck data of the visit it was made from, read
- * again today (late data can show the short stop at the pin after the suggestion was made). `entryById` holds every
- * judged visit of the run and the source visits (loadSourceVisits), by scheduled service id. Today's verdict for that
- * visit does not matter: an exclusion that only prevents a new suggestion (home base, a fence, a neighbour's visit)
- * does not hide it, and a newer closest stop does not stand in for the suggestion's own.
- * A read that fails answers no: the suggestion stays as it was.
+ * Does the two-fact rule (clearStopsAtOtherCustomers) explain this OPEN suggestion? Judged on the suggestion's own
+ * stored facts only, whatever happened to its visit since (moved, reassigned, rescheduled, re-stamped, out of the
+ * window): the pin it was made against (pin_lat, pin_lng), the truck's parked spot (parked_lat, parked_lng), the ET
+ * day the truck stood there (stop_started_at) and the truck of the technician who made it, read again for that one
+ * day (late data can show the truck at the pin after the bell). Any parked gap of BRIEF_STOP_MIN_MINUTES or more at
+ * the stored pin is "the truck came to the pin". A day past the lookback cap is not read, nor one that began before
+ * the technician's tracker was remapped (it may have been another vehicle: dayBeforeMapping). `stopsOfDay(imei, day)`
+ * reads that vehicle-day (recheckOpenSuggestions shares one read per vehicle-day). A read that fails answers no: the
+ * suggestion stays as it was.
  */
-async function suggestionExplained(conn, open, entryById, radius) {
-  const spot = usablePin(open.parked_lat, open.parked_lng);
-  const pin = usablePin(open.pin_lat, open.pin_lng);
-  const source = entryById.get(String(open.scheduled_service_id || ''));
-  if (!spot || !pin || !open.stop_started_at || !source) return false;
-  // Only the customer and the truck that made the suggestion: a visit moved to another customer or technician since
-  // carries another stop's data. (A technician pointed at another device since is unloadable for those days:
-  // requiredDays.)
-  if (String(source.visit.customer_id) !== String(open.customer_id)) return false;
-  if (String(source.visit.technician_id) !== String(open.technician_id)) return false;
-  // The short stop is measured from the pin the suggestion would replace, as stored on it: a visit stamp or address
-  // corrected since is not the place the truck was judged against.
-  if (!briefStopNear(source.briefStops, [pin], etDateString(new Date(open.stop_started_at)), radius)) return false;
+async function suggestionExplained(conn, row, technician, { radius, now, stopsOfDay }) {
+  const pin = usablePin(row.pin_lat, row.pin_lng);
+  const spot = usablePin(row.parked_lat, row.parked_lng);
+  const imei = String((technician && technician.bouncie_imei) || '').trim();
+  const day = suggestionDay(row);
+  if (!pin || !spot || !imei || !day) return false;
+  if (day < etDateString(addETDays(now, -MAX_LOOKBACK_DAYS)) || dayBeforeMapping(day, technician.bouncie_imei_changed_at)) return false;
   try {
-    return await otherCustomerPinNear(conn, open.customer_id, spot, radius);
+    if (!briefStopNear(await stopsOfDay(imei, day), [pin], day, radius)) return false;
+    return await otherCustomerPinNear(conn, row.customer_id, spot, radius);
   } catch (err) {
-    logger.warn(`${LOG} could not check an open suggestion against other customers' pins`, { error: err.code || err.name });
+    logger.warn(`${LOG} could not check an open suggestion again`, { error: err.code || err.name });
     return false;
   }
 }
 
+/**
+ * Every open suggestion the two-fact rule now explains is closed (superseded, with its bell) BEFORE any visit is
+ * decided: insertSuggestion keeps an open suggestion for the same pin ("already_open"), so a newer visit's suggestion
+ * could not replace it. A closed one leaves `openByCustomer`. Every open suggestion whose stop is inside the lookback
+ * cap is checked on every run while it stays open; the reads are one technicians read and at most one truck read per
+ * vehicle-day (a technician's suggestions of one day share it). Returns the count closed.
+ */
+async function recheckOpenSuggestions(conn, openByCustomer, { radius, now }) {
+  const cap = etDateString(addETDays(now, -MAX_LOOKBACK_DAYS));
+  const rows = [...openByCustomer.values()].filter((row) => row.technician_id && suggestionDay(row) && suggestionDay(row) >= cap);
+  if (!rows.length) return 0;
+  let technicians;
+  try {
+    const ids = [...new Set(rows.map((row) => String(row.technician_id)))];
+    technicians = new Map((await conn('technicians').whereIn('id', ids).select('id', 'bouncie_imei', 'bouncie_imei_changed_at'))
+      .map((tech) => [String(tech.id), tech]));
+  } catch (err) {
+    logger.warn(`${LOG} could not read the technicians of open suggestions`, { error: err.code || err.name });
+    return 0;
+  }
+  const days = new Map();
+  const stopsOfDay = (imei, day) => {
+    const key = `${imei} ${day}`;
+    if (!days.has(key)) {
+      const { startMs, endMs } = etDayBounds(day);
+      days.set(key, truckStops.loadTruckStops(conn, imei, {
+        fromMs: startMs, toMs: endMs, maxGapMeters: radius, now: now.getTime(), minMinutes: BRIEF_STOP_MIN_MINUTES,
+      }));
+    }
+    return days.get(key);
+  };
+  let closed = 0;
+  for (const row of rows) {
+    if (!(await suggestionExplained(conn, row, technicians.get(String(row.technician_id)), { radius, now, stopsOfDay }))) continue;
+    try {
+      const done = await store.closeSuggestion(row.id, 'superseded', {
+        reason: 'other_customer_stop', resolution: "Closed: the truck also came to the pin that day; the long stop was at another customer's", conn,
+      });
+      if (done) { closed += 1; openByCustomer.delete(String(row.customer_id)); }
+    } catch (err) {
+      logger.warn(`${LOG} could not close an explained suggestion`, { error: err.code || err.name });
+    }
+  }
+  return closed;
+}
+
 async function applyDecision(conn, customerId, decision, openByCustomer, tally) {
   const open = openByCustomer.get(String(customerId));
-  if (decision.action === 'ok') {
-    if (!open) return;
+  if (decision.action === 'ok' && open) {
     const closed = await store.closeSuggestion(open.id, 'superseded', {
       reason: 'stop_at_pin', resolution: 'Closed: the truck stopped at the pin', conn,
     });
     if (closed) tally.closed += 1;
-    return;
-  }
-  // Retired BEFORE a newer visit's suggestion is recorded: insertSuggestion keeps an open suggestion for the same
-  // pin ("already_open"), which would leave the explained truck spot on offer.
-  if (open && decision.retireOpen) {
-    const closed = await store.closeSuggestion(open.id, 'superseded', {
-      reason: 'other_customer_stop', resolution: "Closed: the truck also came to the pin that day; the long stop was at another customer's", conn,
-    });
-    if (closed) tally.closed += 1;
-  }
-  if (decision.action === 'flag') {
+  } else if (decision.action === 'flag') {
     const result = await recordSuggestion(conn, decision.visit, decision.verdict);
     if (result.created) tally.created += 1;
-  }
-}
-
-/**
- * The visits open suggestions were made from that are not among this run's visits: one left the window (a run was
- * missed), or a grouped partner is the row oneRowPerVisit kept. Read again by id only so suggestionExplained can
- * judge each suggestion on its own visit's truck data. They never make a suggestion and decide nothing else. A visit
- * with a day past the lookback cap is unloadable (requiredDays): its truck is not read. A failed read reads nothing.
- */
-async function loadSourceVisits(conn, openByCustomer, visits, now) {
-  const known = new Set(visits.map((visit) => String(visit.id)));
-  const cap = etDateString(addETDays(now, -MAX_LOOKBACK_DAYS));
-  // Only a suggestion whose stop is inside the lookback cap can be judged again (older truck data is not read). Newest
-  // first, so suggestions that can no longer be checked never crowd out one that can.
-  const ids = [...openByCustomer.values()]
-    .filter((row) => row.scheduled_service_id && !known.has(String(row.scheduled_service_id))
-      && row.stop_started_at && etDateString(new Date(row.stop_started_at)) >= cap)
-    .sort((a, b) => new Date(b.stop_started_at) - new Date(a.stop_started_at))
-    .slice(0, RETIRE_LIMIT).map((row) => row.scheduled_service_id);
-  if (!ids.length) return [];
-  try {
-    return shapeVisits(await completedVisitQuery(conn).whereIn('s.id', ids));
-  } catch (err) {
-    logger.warn(`${LOG} could not read the visits of open suggestions`, { error: err.code || err.name });
-    return [];
-  }
-}
-
-/**
- * One decision per customer with a visit in the window. A customer with an open suggestion and no visit in the
- * window decides nothing: only the suggestion is judged again (suggestionExplained).
- */
-async function applyDecisions(conn, { judged, sources, openByCustomer, radius, tally }) {
-  const entryById = new Map([...sources, ...judged].map((entry) => [String(entry.visit.id), entry]));
-  const byCustomer = new Map([...openByCustomer.keys()].map((customerId) => [customerId, []]));
-  for (const j of judged) byCustomer.set(String(j.visit.customer_id), [...(byCustomer.get(String(j.visit.customer_id)) || []), j]);
-  for (const [customerId, group] of byCustomer) {
-    try {
-      const decision = decideCustomer(group);
-      const open = openByCustomer.get(customerId);
-      const retireOpen = decision.action !== 'ok' && Boolean(open) && await suggestionExplained(conn, open, entryById, radius);
-      await applyDecision(conn, customerId, { ...decision, retireOpen }, openByCustomer, tally);
-    } catch (err) {
-      logger.warn(`${LOG} customer skipped`, { customerId, error: err.code || err.name });
-    }
   }
 }
 
@@ -675,15 +668,20 @@ async function runPinParkedCheck({ now = new Date(), conn = db } = {}) {
   const visits = oneRowPerVisit(await loadCompletedVisits(conn, window));
   const openByCustomer = new Map((await conn('customer_pin_suggestions').where({ status: 'open' }).select(store.COLUMNS))
     .map((row) => [String(row.customer_id), row]));
-  const sourceVisits = await loadSourceVisits(conn, openByCustomer, visits, now);
-  const vehicles = await loadVehicles(conn, [...visits, ...sourceVisits], window);
+  tally.closed += await recheckOpenSuggestions(conn, openByCustomer, { radius, now });
+  const vehicles = await loadVehicles(conn, visits, window);
   const pool = [...visits, ...await loadNeighbourVisits(conn, visits, now)];
-  const fences = await loadFences(conn);
-  const judged = await clearStopsAtOtherCustomers(conn, judgeVisits(visits, vehicles, { radius, fences, now, pool }), radius);
+  const judged = await clearStopsAtOtherCustomers(conn, judgeVisits(visits, vehicles, { radius, fences: await loadFences(conn), now, pool }), radius);
   for (const { verdict } of judged) tallyKey(tally, verdict.flag ? 'flagged' : verdict.reason);
-  // The source visits are judged for their truck data only (briefStops); their verdicts decide nothing.
-  const sources = judgeVisits(sourceVisits, vehicles, { radius, fences, now, pool });
-  await applyDecisions(conn, { judged, sources, openByCustomer, radius, tally });
+  const byCustomer = new Map();
+  for (const j of judged) byCustomer.set(String(j.visit.customer_id), [...(byCustomer.get(String(j.visit.customer_id)) || []), j]);
+  for (const [customerId, group] of byCustomer) {
+    try {
+      await applyDecision(conn, customerId, decideCustomer(group), openByCustomer, tally);
+    } catch (err) {
+      logger.warn(`${LOG} customer skipped`, { customerId, error: err.code || err.name });
+    }
+  }
   const notified = await postPendingNotifications(conn);
   logger.info(`${LOG} done`, { visits: visits.length, ...tally, notified });
   return { visits: visits.length, notified, ...tally };
@@ -694,7 +692,7 @@ module.exports = {
   _private: {
     judgeVisit, destinationOf, homeBaseFrom, visitDays, etDayBounds, oneRowPerVisit, excludedStopReason, alertSpec,
     alertDetail, settledReason, visitUnchanged, homeSince, loadNeighbourVisits, usablePin, isWithin, nearestPinDistance, retireAllOpen, requiredDays, judgeVisits, loadVehicles, neighbourPins, effectivePinColumns, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
-    clearStopsAtOtherCustomers, otherCustomerPinNear, applyDecision, applyDecisions, briefStopNear, visitPins, loadSourceVisits, suggestionExplained, withinSql, BRIEF_STOP_MIN_MINUTES,
+    clearStopsAtOtherCustomers, otherCustomerPinNear, briefStopNear, visitPins, suggestionDay, suggestionExplained, recheckOpenSuggestions, withinSql, BRIEF_STOP_MIN_MINUTES,
     REPORT_MIN_STOP_MINUTES, MAX_STOP_DISTANCE_M,
   },
 };
