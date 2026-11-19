@@ -643,7 +643,9 @@ jest.setTimeout(30000);
       ['a reply only in the unified inbox', () => inbox(CALLER, { channel: 'sms', direction: 'inbound', body: 'who is this' })],
       ['a staff row with the number', () => database('technicians').insert({ id: randomUUID(), name: 'Staff Test', phone: CALLER, role: 'technician', employment_status: 'active' })],
       ['a conversation with the number linked to a customer', () => inbox(CALLER, null, { customer_id: LINKED_CUSTOMER })],
-    ])('%s that lands after the check read the record leaves the push alone (pre-push audit r13, r14)', async (label, lateWrite) => {
+      ['a lead saved for the number', () => lead('727.555.0611')],
+      ['a customer saved with the number on a secondary slot', () => database('customers').insert({ id: randomUUID(), first_name: 'Test', service_contact_phone: '727-555-0611', created_at: new Date(), updated_at: new Date() })],
+    ])('%s that lands after the check read the record leaves the push alone (pre-push audit r13, r14, r15)', async (label, lateWrite) => {
       isEnabled.mockImplementation((name) => name === 'missedCallSpamRepeat' || name === 'missedCallUnknownCallers');
       await database('call_log').insert([prior(CALLER, 60 * 24 * 3), prior(CALLER, 60 * 24)]);
       const inserted = judged();
@@ -905,8 +907,15 @@ jest.setTimeout(30000);
       ['a staff call to it', { channel: 'voice', direction: 'outbound' }, {}],
       ['an answered call', { channel: 'voice', direction: 'inbound', answered_by: 'human' }, {}],
       ['a recorded call', { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', recording_sid: 'RE00000000000000000000000000000611' }, {}],
+      // A mirror of a silent call holds no more than the measured shape (pre-push audit r15).
+      ['a call with a transcript', { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', author_type: 'customer', body: 'Hi, calling about a quote, please call me back', media: '[]' }, {}],
+      ['a call with recording audio', { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', author_type: 'customer', media: JSON.stringify([{ url: 'https://example.invalid/voicemail.mp3', contentType: 'audio/mpeg' }]) }, {}],
+      ['a call with a recording length', { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', author_type: 'customer', duration_seconds: 31 }, {}],
+      ['a call a staff member wrote', { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', author_type: 'admin' }, {}],
+      ['a call with a key no silent call carries', { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', author_type: 'customer', metadata: { domain: 'x', voicemail_note: 'asked for a quote' } }, {}],
+      ['a call another lane mirrored', { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', author_type: 'customer', metadata: { source: 'voice_agent' } }, {}],
       ['a conversation linked to a customer', null, { customer_id: LINKED_CUSTOMER }],
-    ])('a number with %s only in the unified inbox is never a repeat (pre-push audit r14)', async (label, message, conversation) => {
+    ])('a number with %s only in the unified inbox is never a repeat (pre-push audit r14, r15)', async (label, message, conversation) => {
       await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
       const row = judged();
       await database('call_log').insert(row);
@@ -922,10 +931,17 @@ jest.setTimeout(30000);
       const id = randomUUID();
       await database('conversations').insert({ id, channel: 'voice', contact_phone: CALLER, unknown_contact: true, created_at: new Date() });
       const ago = (minutes) => new Date(Date.now() - minutes * 60 * 1000);
+      // The shape production's mirrors of the matched numbers hold (13 columns,
+      // empty media, three call-setup keys), one read by staff, and our text-back.
+      const mirror = (minutes, extra) => ({
+        id: randomUUID(), conversation_id: id, channel: 'voice', direction: 'inbound', author_type: 'customer', answered_by: 'voicemail',
+        delivery_status: 'no-answer', twilio_sid: `CA${randomUUID().replaceAll('-', '')}`, is_read: false, media: '[]',
+        metadata: { domain: 'x', location: 'GBP — Parrish', numberType: 'mobile' }, created_at: ago(minutes), updated_at: ago(minutes), ...extra,
+      });
       await database('messages').insert([
-        { id: randomUUID(), conversation_id: id, channel: 'voice', direction: 'inbound', answered_by: 'voicemail', delivery_status: 'no-answer', author_type: 'customer', metadata: { domain: 'x', location: 'GBP — Parrish', numberType: 'mobile' }, created_at: ago(60 * 24 * 2) },
-        { id: randomUUID(), conversation_id: id, channel: 'voice', direction: 'inbound', answered_by: null, delivery_status: 'completed', author_type: 'customer', created_at: ago(10) },
-        { id: randomUUID(), conversation_id: id, channel: 'sms', direction: 'outbound', message_type: 'missed_call_text_back', author_type: 'system', created_at: ago(5) },
+        mirror(60 * 24 * 2),
+        mirror(10, { answered_by: null, delivery_status: 'completed', is_read: true, read_at: ago(2), read_by_admin_user_id: randomUUID(), metadata: { domain: 'x', location: 'GBP — Parrish', numberType: 'mobile', source: 'voice_message_sync' } }),
+        { id: randomUUID(), conversation_id: id, channel: 'sms', direction: 'outbound', message_type: 'missed_call_text_back', author_type: 'system', body: 'Sorry we missed your call. Reply here or call us back.', media: '[]', delivery_status: 'delivered', twilio_sid: `SM${randomUUID().replaceAll('-', '')}`, is_read: true, metadata: { sms_contact_phone: CALLER, sms_our_endpoint_id: GBP_LINE }, created_at: ago(5), updated_at: ago(5) },
         { id: randomUUID(), conversation_id: id, channel: 'sms', direction: 'inbound', body: 'an old thread', created_at: ago(60 * 24 * 15) },
       ]);
       expect(await repeat(row)).toBe(true);

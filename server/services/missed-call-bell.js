@@ -404,15 +404,31 @@ function settledSilentSql(checkedAt) {
 //    contactState reads contact; pre-push audit r11);
 //  - in the unified inbox, which the SMS webhook writes first and the text log
 //    only as best effort (pre-push audit r14), nothing in the window but
-//    mirrors of silent calls (the voicemail or unanswered, no recording) and
-//    our text-back: the only shapes the inbox holds for the matched numbers
-//    of the 90 days to 2026-11-19. And no conversation with the number is
-//    linked to a customer.
+//    mirrors of silent calls and our text-back. A mirror of a silent call
+//    holds only the columns the matched numbers' mirrors of the 90 days to
+//    2026-11-19 hold (SILENT_MIRROR_COLUMNS; body, recording, duration and
+//    the rest NULL), no media, the voicemail or no answer, a customer author,
+//    and only a silent call's metadata keys: a transcript in the body or
+//    audio in the media is a message (pre-push audit r15). And no
+//    conversation with the number is linked to a customer;
+//  - the number is on no customer slot and no live lead, as in the history
+//    read: staff can save the caller between the check and the stamp
+//    (pre-push audit r15).
 // The inner reads name call_log without an alias: inside them it is the inner
 // table, and the judged call is excluded by its id.
+const SILENT_MIRROR_COLUMNS = ['id', 'conversation_id', 'channel', 'direction', 'author_type', 'twilio_sid', 'answered_by',
+  'delivery_status', 'metadata', 'media', 'is_read', 'read_at', 'read_by_admin_user_id', 'created_at', 'updated_at'];
 const INBOX_SILENT_SQL = "((m.channel = 'voice' AND m.direction = 'inbound'"
-  + " AND COALESCE(m.answered_by, 'voicemail') = 'voicemail' AND m.recording_sid IS NULL)"
-  + " OR (m.channel = 'sms' AND m.direction = 'outbound' AND m.message_type = 'missed_call_text_back'))";
+  + ` AND NOT EXISTS (SELECT 1 FROM jsonb_each(to_jsonb(m) - ARRAY[${sqlNames(SILENT_MIRROR_COLUMNS)}]::text[]) col WHERE col.value <> 'null'::jsonb)`
+  + " AND COALESCE(m.author_type, 'customer') = 'customer'"
+  + " AND COALESCE(m.answered_by, 'voicemail') = 'voicemail'"
+  + " AND COALESCE(m.media, '[]'::jsonb) = '[]'::jsonb"
+  + " AND COALESCE(jsonb_typeof(m.metadata), 'null') IN ('null', 'object')"
+  + " AND COALESCE(m.metadata->>'source', 'voice_message_sync') = 'voice_message_sync'"
+  + " AND NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(m.metadata) = 'object' THEN m.metadata ELSE '{}'::jsonb END) mk"
+  + ` WHERE mk NOT IN (${sqlNames([...SILENT_METADATA_KEYS, 'source'])})))`
+  + " OR (m.channel = 'sms' AND m.direction = 'outbound' AND m.message_type = 'missed_call_text_back'"
+  + " AND COALESCE(m.author_type, 'system') = 'system'))";
 function silentRecordClauses(row, key, since, checkedAt) {
   const [settledSql, settledBindings] = settledSilentSql(checkedAt);
   const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
@@ -449,7 +465,9 @@ function silentRecordClauses(row, key, since, checkedAt) {
       this.select(1).from('conversations as c')
         .whereRaw(`${phoneKeySql('c.contact_phone')} = ?`, [key])
         .whereNotNull('c.customer_id');
-    });
+    })
+    .whereRaw(NOT_ON_CUSTOMER_SLOT_SQL)
+    .whereRaw(NOT_ON_LIVE_LEAD_SQL);
 }
 
 // Read only once the history matched. Returns the record conditions for the
