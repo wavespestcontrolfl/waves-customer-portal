@@ -95,6 +95,13 @@ const PERSON = '+19415550123';
     expect(await refusal(WEB_LINE, INTERNATIONAL)).toBeNull();
   });
 
+  test('a short international number (9 digits) that called the line gets its reply', async () => {
+    const SHORT = '+353876543';
+    expect(await refusal(WEB_LINE, SHORT)).toBe(WEBSITE_LINE_REFUSAL);
+    await trx('call_log').insert({ direction: 'inbound', from_phone: SHORT, to_phone: WEB_LINE });
+    expect(await refusal(WEB_LINE, SHORT)).toBeNull();
+  });
+
   test('both reads can use the last-10 expression index on from_phone', async () => {
     const built = [];
     const database = (table) => { const query = trx(table); built.push(query); return query; };

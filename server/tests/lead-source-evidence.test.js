@@ -321,8 +321,8 @@ describe('call leads on website sources: only a call that dialed a website-only 
     }
   });
 
-  test('a number that only ends in a website line\'s digits is not that line', () => {
-    for (const number of ['+449412542617', '0019412542617', '29412542617']) {
+  test('a number that only ends in a website line\'s digits, or has them after a + as another country\'s number, is not that line', () => {
+    for (const number of ['+449412542617', '0019412542617', '29412542617', '+9412542617']) {
       expect(sourceEvidenceForLead(callLead(number))).toMatchObject({ kind: 'unknown', label: 'Source unknown' });
     }
   });

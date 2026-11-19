@@ -27,6 +27,7 @@ const config = require('../config');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const { etParts } = require('../utils/datetime-et');
+const { linkedinArticleCard } = require('./linkedin-article');
 
 const FACEBOOK_PAGE_ID = process.env.FACEBOOK_PAGE_ID;
 const INSTAGRAM_ACCOUNT_ID = process.env.INSTAGRAM_ACCOUNT_ID;
@@ -720,11 +721,14 @@ function unknownPhoneIssues(text) {
 // customer's: logs get the issues with every phone number masked.
 const issuesForLog = (issues) => issues.join('; ').replace(PHONE_PATTERN, '[phone]');
 
-// LinkedIn also shows the title and description on the article card, so a
-// phone number there gets the same check as the post text.
-const linkedinCardIssues = (platform, title, description) => (
-  platform === 'linkedin' ? unknownPhoneIssues([title, description].filter(Boolean).join('\n')) : []
-);
+// LinkedIn also shows an article card under a post with a link: the card
+// createPost sends (linkedin-article.js). A phone number in its title or
+// description gets the same check as the post text. A post with no link has
+// no card, so its title and description are not shown and not checked.
+const linkedinCardIssues = (platform, link, title, description) => {
+  const card = platform === 'linkedin' ? linkedinArticleCard({ link, title, description }) : null;
+  return card ? unknownPhoneIssues([card.title, card.description].filter(Boolean).join('\n')) : [];
+};
 
 const PLATFORM_LENGTH_LIMITS = { facebook: 500, instagram: 2200, linkedin: 3000, gbp: 1500, tiktok: 2200, twitter: 250 };
 
@@ -2440,7 +2444,7 @@ const SocialMediaService = {
       try {
         const content = customContent?.[p.key] || await generateContent(p.key, { title, description, link, source });
 
-        const issues = [...validateContent(content, p.key).issues, ...linkedinCardIssues(p.key, title, description)];
+        const issues = [...validateContent(content, p.key).issues, ...linkedinCardIssues(p.key, link, title, description)];
         if (issues.length) {
           logger.warn(`[social] Content validation failed for ${p.key}: ${issuesForLog(issues)}`);
           platformResults.push({ platform: p.key, success: false, error: `Validation: ${issues[0]}`, validationIssues: issues });
@@ -2794,7 +2798,7 @@ const SocialMediaService = {
 
     const text = content || await generateContent(platform, { title, description, link, locationName: locationId });
 
-    const issues = [...validateContent(text, platform).issues, ...linkedinCardIssues(platform, title, description)];
+    const issues = [...validateContent(text, platform).issues, ...linkedinCardIssues(platform, link, title, description)];
     if (issues.length) {
       return { platform, success: false, error: `Validation: ${issues[0]}`, validationIssues: issues };
     }

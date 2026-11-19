@@ -72,6 +72,16 @@ test('a reply the check passes goes to the send; a row that sends from the custo
   expect(raiseAdminAlert).not.toHaveBeenCalled();
 });
 
+test('a row whose last attempt already reached the provider makes no new attempt, so it is not checked and raises no alert', async () => {
+  websiteLineRefusal.mockResolvedValue('WEBSITE_LINE_REFUSAL');
+  const send = jest.fn(async () => notSent);
+  expect(await dispatchScheduledSms(row(), { review_delivery_uncertain_exhausted: true, scheduled_sms_attempts: 3 }, send, 'review_request', 3, SENDS_TO))
+    .toMatchObject({ deliveryOutcome: 'uncertain', uncertaintyExhausted: true, code: 'REVIEW_DELIVERY_UNCERTAIN_EXHAUSTED' });
+  expect(websiteLineRefusal).not.toHaveBeenCalled();
+  expect(send).not.toHaveBeenCalled();
+  expect(raiseAdminAlert).not.toHaveBeenCalled();
+});
+
 test('a failed read goes back on the retry rail with no alert; on the last attempt the row ends blocked with one alert', async () => {
   websiteLineRefusal.mockRejectedValue(new Error('synthetic read failure'));
   const send = jest.fn(async () => notSent);

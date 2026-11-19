@@ -102,6 +102,13 @@ test('a 10-digit international number and the US number with the same 10 digits 
   expect(await websiteLineRefusal(WEB_LINE, '+9415550123', { database: internationalCalled })).toBeNull();
 });
 
+test('a short international number (9 digits) that texted the line gets its reply: the indexed suffix has no +', async () => {
+  const SHORT = '+353876543';
+  const database = fakeDatabase({ sms_log: [inbound(SHORT, WEB_LINE)] });
+  expect(await websiteLineRefusal(WEB_LINE, SHORT, { database })).toBeNull();
+  expect(database.reads.map((read) => read.last10)).toEqual(['353876543', '353876543']);
+});
+
 test('a Sandy sandbox call or a tech-voice call is internal and does not count', async () => {
   const { VOICE_RELAY_SANDBOX_SOURCE, TECH_VOICE_SOURCE } = require('../services/voice-agent/relay-protocol');
   for (const source of [VOICE_RELAY_SANDBOX_SOURCE, TECH_VOICE_SOURCE]) {

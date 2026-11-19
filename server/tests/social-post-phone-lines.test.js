@@ -54,6 +54,18 @@ describe('the LinkedIn article card', () => {
     expect(await post({ title: 'Fixture guide', description: `Call ${TWILIO_NUMBERS.mainLine.formatted}.` })).toMatchObject({ dryRun: true });
   });
 
+  test('the check reads only the card LinkedIn shows: a post with no link has none, and a description is cut at 300 characters', async () => {
+    const post = (card) => social.postToSingle('linkedin', { content: 'A clean caption.', complianceJudged: true, ...card });
+    expect(await post({ title: WEB_LINE_CARD, description: WEB_LINE_CARD })).toMatchObject({ dryRun: true });
+    expect(await post({ link: BLOG, title: 'Fixture guide', description: `${'x'.repeat(300)} ${WEB_LINE_CARD}` })).toMatchObject({ dryRun: true });
+    expect(await post({ link: BLOG, title: 'Fixture guide', description: `${'x'.repeat(250)} ${WEB_LINE_CARD}` })).toEqual(refusedForPhone);
+    const publish = social.publishToAll({
+      title: WEB_LINE_CARD, description: WEB_LINE_CARD, source: 'manual',
+      customContent: { linkedin: 'A clean caption.' }, channels: ['linkedin'], noAiImage: true,
+    });
+    expect((await publish).platforms).toEqual([expect.objectContaining({ platform: 'linkedin', dryRun: true })]);
+  });
+
   test('a publish to all channels refuses it on LinkedIn too, and its log masks the number', async () => {
     logger.warn.mockClear();
     const publish = (description) => social.publishToAll({

@@ -68,7 +68,8 @@ async function websiteLineRefusal(fromNumber, to, { database = db } = {}) {
   if (!person) return WEBSITE_LINE_REFUSAL;
   const contacted = (query) => query
     .where('direction', 'inbound')
-    .whereRaw(FROM_LAST10_SQL, [person.slice(-10)])
+    // Digits only: the indexed expression has no +, and a short international number keeps it in its last 10.
+    .whereRaw(FROM_LAST10_SQL, [person.slice(1).slice(-10)])
     .whereRaw(`${storedE164Sql('from_phone')} = ?`, [person])
     .whereRaw(`${storedE164Sql('to_phone')} = ?`, [line])
     .first('id');

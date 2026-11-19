@@ -250,6 +250,10 @@ describePg('intake source evidence SQL (PostgreSQL 16)', () => {
       lead_type: 'inbound_call', first_contact_channel: 'call',
       source_type: 'main_site', source_channel: 'organic', source_name: 'Main Site', call_dialed_phone: '+449412542617',
     }],
+    ['call to a foreign number written with + and a website line\'s 10 digits', {
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      source_type: 'main_site', source_channel: 'organic', source_name: 'Main Site', call_dialed_phone: '+9412542617',
+    }],
     ['call to a website source whose number is too short to read', {
       lead_type: 'inbound_call', first_contact_channel: 'call',
       source_type: 'main_site', source_channel: 'organic', source_name: 'Main Site', call_dialed_phone: '555',

@@ -13,6 +13,7 @@ const { SPOKE_SITES } = require('./content-astro/spoke-sites');
 const { findGbpLocationByUtmContent } = require('../config/locations');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { websiteOnlyLines } = require('../config/shared-phone-lines');
+const { nanpNationalDigits } = require('../utils/phone');
 
 const EVIDENCE_KINDS = new Set([
   'google_ads', 'google_business', 'meta_ads', 'organic_search',
@@ -127,16 +128,11 @@ function hasMetaCallPlacementEvidence(lead = {}) {
     && text(lead.source_channel).toLowerCase() === 'paid';
 }
 
-// The US national number in a phone value: 10 digits, or 11 starting with 1.
-// Anything else (no number, a short code, another country code) is null.
-const nationalNumber = (value) => {
-  const digits = String(value == null ? '' : value).replace(/\D/g, '');
-  if (digits.length === 10) return digits;
-  return digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : null;
-};
+// The US national number in a phone value is nanpNationalDigits (utils/phone.js): 10 digits, 11 starting with 1,
+// or +1 and 10 digits. Anything else (no number, a short code, another country code, + with 10 digits) is null.
 // Read on use, not at load: many suites mock config/twilio-numbers with only
 // the fields they need.
-const websiteOnlyNationalNumbers = () => websiteOnlyLines(TWILIO_NUMBERS).map((line) => nationalNumber(line.number));
+const websiteOnlyNationalNumbers = () => websiteOnlyLines(TWILIO_NUMBERS).map((line) => nanpNationalDigits(line.number));
 
 /**
  * The name (label, else domain) of the registered website-only line
@@ -149,8 +145,8 @@ const websiteOnlyNationalNumbers = () => websiteOnlyLines(TWILIO_NUMBERS).map((l
  * empty lead_source_id with another website's row.
  */
 function dialedWebsiteLineName(lead = {}) {
-  const dialed = nationalNumber(lead.call_dialed_phone);
-  const line = dialed === null ? null : websiteOnlyLines(TWILIO_NUMBERS).find((entry) => nationalNumber(entry.number) === dialed);
+  const dialed = nanpNationalDigits(lead.call_dialed_phone);
+  const line = dialed === null ? null : websiteOnlyLines(TWILIO_NUMBERS).find((entry) => nanpNationalDigits(entry.number) === dialed);
   return line ? line.label || line.domain : null;
 }
 
@@ -431,10 +427,13 @@ function sourceEvidenceLabelSql(db) {
     AND LOWER(BTRIM(COALESCE(lead_sources.source_type, ''))) = 'facebook'
     AND LOWER(BTRIM(COALESCE(lead_sources.channel, ''))) = 'paid')`;
   // SQL twin of dialedWebsiteLineName: the national number the initiating
-  // call dialed against the website-only lines. No call, or a number that is
-  // not 10 digits (or 11 starting with 1), never matches, as in the JS.
+  // call dialed against the website-only lines, by nanpNationalDigits' rule.
+  // No call, a number written with + and another country code, or a number
+  // that is not 10 digits (or 11 starting with 1) never matches, as in the JS.
   const dialedDigitsSql = "regexp_replace(COALESCE(lead_call.to_phone, ''), '[^0-9]', '', 'g')";
-  const dialedNationalSql = `(CASE WHEN LENGTH(${dialedDigitsSql}) = 10 THEN ${dialedDigitsSql}
+  const dialedNationalSql = `(CASE WHEN BTRIM(COALESCE(lead_call.to_phone, '')) LIKE '+%'
+      THEN CASE WHEN LENGTH(${dialedDigitsSql}) = 11 AND LEFT(${dialedDigitsSql}, 1) = '1' THEN RIGHT(${dialedDigitsSql}, 10) END
+    WHEN LENGTH(${dialedDigitsSql}) = 10 THEN ${dialedDigitsSql}
     WHEN LENGTH(${dialedDigitsSql}) = 11 AND LEFT(${dialedDigitsSql}, 1) = '1' THEN RIGHT(${dialedDigitsSql}, 10) END)`;
   const websiteOnlyNumbers = websiteOnlyNationalNumbers();
   const websiteOnlyCallSql = `COALESCE(${dialedNationalSql} IN (${websiteOnlyNumbers.map(() => '?').join(', ')}), FALSE)`;

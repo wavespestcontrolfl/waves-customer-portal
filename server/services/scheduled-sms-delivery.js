@@ -195,8 +195,6 @@ async function scheduledWebsiteLineRefusal(msg, meta, maxAttempts, to) {
 async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3, to = msg.to_phone) {
   const linkStop = await scheduledLinkRefusal(msg, meta, maxAttempts);
   if (linkStop) return linkStop;
-  const lineStop = await scheduledWebsiteLineRefusal(msg, meta, maxAttempts, to);
-  if (lineStop) return lineStop;
   let reviewAsk = purpose === 'review_request' || !!meta.bundled_review_request_id
     || meta.review_delivery_uncertain_exhausted === true || looksLikeReviewAsk(msg.message_body);
   const attemptsExhausted = (Number(meta.scheduled_sms_attempts) || 1) >= maxAttempts;
@@ -214,6 +212,11 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3, t
       code: 'REVIEW_DELIVERY_UNCERTAIN_EXHAUSTED',
     };
   }
+  // After that exit: a row whose last attempt already reached the provider makes no new attempt, so the
+  // website-line check has nothing to stop there (a refusal would tell the office to send a text that may
+  // have arrived).
+  const lineStop = await scheduledWebsiteLineRefusal(msg, meta, maxAttempts, to);
+  if (lineStop) return lineStop;
   const clearUnsentReservation = async () => {
     if (!reviewAsk) return;
     await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
