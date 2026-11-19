@@ -226,20 +226,18 @@ const FAILED_SCREEN_SILENT_SECONDS = 10;
 const FAILED_SCREEN_SQL = "metadata->>'preconnect_screen' = 'failed'";
 const NOT_ON_LIVE_LEAD_SQL = `NOT EXISTS (SELECT 1 FROM leads ld WHERE ld.deleted_at IS NULL AND ${phoneKeySql('ld.phone')} = ${phoneKeySql('call_log.from_phone')})`;
 
-async function exchangeHangupScreenHit(fromPhone, at = new Date()) {
-  const raw = String(fromPhone || '').replace(/\D/g, '');
-  const plus = String(fromPhone || '').trim().startsWith('+');
-  if (!(plus ? /^1[2-9]\d{9}$/ : /^1?[2-9]\d{9}$/).test(raw)) return false;
-  const digits = raw.slice(-10);
-  const found = await db('call_log')
+// The silent hang-ups of the `days` before `at` that the exchange trigger and
+// the repeat-caller rule count: an unknown North American caller nobody
+// answered (or who failed the screen), no message proven as described above,
+// never got through later, on no customer slot and no live lead.
+function silentHangupsBefore(at, days) {
+  return db('call_log')
     .modify((qb) => whereNotSandboxCall(qb))
     .where('direction', 'inbound')
     .whereNull('customer_id')
-    .where('created_at', '>=', new Date(at.getTime() - EXCHANGE_DAYS * 86400 * 1000))
+    .where('created_at', '>=', new Date(at.getTime() - days * 86400 * 1000))
     .where('created_at', '<', at)
     .whereRaw(NANP_DIGITS_SQL('from_phone'))
-    .whereRaw(`substr(${LAST10_SQL('from_phone')}, 1, 6) = ?`, [digits.slice(0, 6)])
-    .whereRaw(`${LAST10_SQL('from_phone')} <> ?`, [digits])
     .whereRaw("COALESCE(call_outcome, '') NOT IN ('ai_handled', 'ai_transferred')")
     .where((outcome) => outcome
       .whereRaw(FAILED_SCREEN_SQL)
@@ -253,7 +251,17 @@ async function exchangeHangupScreenHit(fromPhone, at = new Date()) {
       .orWhere((screened) => screened.whereRaw(FAILED_SCREEN_SQL).where('recording_duration_seconds', '<=', FAILED_SCREEN_SILENT_SECONDS)))
     .whereRaw(calledBackSql({ retire: true }))
     .whereRaw(NOT_ON_CUSTOMER_SLOT_SQL)
-    .whereRaw(NOT_ON_LIVE_LEAD_SQL)
+    .whereRaw(NOT_ON_LIVE_LEAD_SQL);
+}
+
+async function exchangeHangupScreenHit(fromPhone, at = new Date()) {
+  const raw = String(fromPhone || '').replace(/\D/g, '');
+  const plus = String(fromPhone || '').trim().startsWith('+');
+  if (!(plus ? /^1[2-9]\d{9}$/ : /^1?[2-9]\d{9}$/).test(raw)) return false;
+  const digits = raw.slice(-10);
+  const found = await silentHangupsBefore(at, EXCHANGE_DAYS)
+    .whereRaw(`substr(${LAST10_SQL('from_phone')}, 1, 6) = ?`, [digits.slice(0, 6)])
+    .whereRaw(`${LAST10_SQL('from_phone')} <> ?`, [digits])
     .select(db.raw(`COUNT(DISTINCT ${LAST10_SQL('from_phone')}) AS n`))
     .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
     .first();
@@ -264,6 +272,39 @@ async function exchangeHangupScreenHit(fromPhone, at = new Date()) {
     .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
     .first('id');
   return !lead;
+}
+
+// A repeat silent caller (owner 2026-11-19 "YES BUILD", after the missed-call
+// spam check): from 2026-11-02 two numbers in one 941 exchange called the
+// Parrish, Sarasota and Venice Google Business Profile lines 10 times, about
+// 24 s each with no message, and pushed 8 bells in 14 days. Two numbers are too
+// few for the block wave (3), the burst (3) or the exchange trigger (2 OTHER
+// numbers). This rule reads only the caller's own history, so nobody can prime
+// it without calling from that very number. A repeat = an unknown caller on a
+// GBP line whose same number made a silent hang-up (silentHangupsBefore) on a
+// DIFFERENT GBP line, or REPEAT_MIN_PRIOR silent hang-ups on any line, in the
+// last REPEAT_DAYS. The first call from a number never matches. Production
+// back-test, 90 days to 2026-11-19: 22 calls from 14 numbers, 13 pushed bells,
+// 0 real callers (no message, no later text, no later call that got through,
+// no lead, no customer).
+const REPEAT_DAYS = 14;
+const REPEAT_MIN_PRIOR = 2;
+
+async function isRepeatSilentCaller(row) {
+  if (!row || row.customer_id) return false;
+  const line = require('../config/twilio-numbers').findByNumber(row.to_phone);
+  if (line?.type !== 'gbp_tracking') return false;
+  const raw = String(row.from_phone || '').replace(/\D/g, '');
+  const plus = String(row.from_phone || '').trim().startsWith('+');
+  if (!(plus ? /^1[2-9]\d{9}$/ : /^1?[2-9]\d{9}$/).test(raw)) return false;
+  const otherLines = gbpLines().filter((d) => d !== String(row.to_phone || '').replace(/\D/g, '').slice(-10));
+  const otherLineSql = otherLines.length ? `${LAST10_SQL('to_phone')} IN (${otherLines.map(() => '?').join(', ')})` : 'false';
+  const found = await silentHangupsBefore(new Date(row.created_at || Date.now()), REPEAT_DAYS)
+    .whereNot('id', row.id)
+    .whereRaw(`${CALLER_KEY} = ?`, [`1${raw.slice(-10)}`])
+    .select(db.raw('COUNT(*) AS n'), db.raw(`COALESCE(bool_or(${otherLineSql}), false) AS other_line`, otherLines))
+    .first();
+  return Boolean(found?.other_line) || Number(found?.n || 0) >= REPEAT_MIN_PRIOR;
 }
 
 const spamGateOn = (name) => require('../config/feature-gates').isEnabled(name);
@@ -492,6 +533,7 @@ function leaseStale(token, now = Date.now()) {
 // cluster on one length). Returns true when the push must be skipped.
 //  - Block wave with GATE_MISSED_CALL_SPAM_WAVE on: stamped missed_call_spam_wave: 'block_quiet'.
 //  - Burst with GATE_MISSED_CALL_SPAM_BURST on: stamped 'burst_quiet'.
+//  - A repeat silent caller with GATE_MISSED_CALL_SPAM_REPEAT on: stamped 'repeat_quiet'.
 //  - An unknown caller who failed the press-1 screen (no key; owner 2026-11-16
 //    "build") with GATE_CALL_SCREEN_EXCHANGE_HISTORY on: stamped 'screen_quiet'.
 //    Since October 12 of 16 such calls pushed; the screen kept them off the
@@ -503,12 +545,17 @@ function leaseStale(token, now = Date.now()) {
 const QUIET_RULES = [
   { flag: 'block', gate: 'missedCallSpamWave', quiet: 'block_quiet', shadow: 'missed_call_spam_wave_shadow' },
   { flag: 'burst', gate: 'missedCallSpamBurst', quiet: 'burst_quiet', shadow: 'missed_call_spam_burst_shadow' },
+  { flag: 'repeat', gate: 'missedCallSpamRepeat', quiet: 'repeat_quiet', shadow: 'missed_call_spam_repeat_shadow' },
   { flag: 'screen', gate: 'callScreenExchangeHistory', quiet: 'screen_quiet', shadow: 'missed_call_screen_quiet_shadow' },
 ];
 
 async function quietRobodialerPush(row, fenced) {
   const flags = {
     ...(await classifySpamWave(row)), // fails open inside
+    repeat: await isRepeatSilentCaller(row).catch((err) => {
+      logger.warn(`[missed-call-bell] repeat check failed, treating as not spam: ${err.message}`);
+      return false;
+    }),
     screen: !row.customer_id && parseMeta(row.metadata).preconnect_screen === 'failed',
   };
   const stamps = {};
@@ -750,9 +797,11 @@ async function ringMissedCallIfUnanswered(callSid) {
     try {
       stats = await triggerNotification('customer_missed_call', {
         customerId: row.customer_id || null,
+        // A quieted call matched a robodialer rule: its bell row says so, so the
+        // list tells it apart from a real missed call (owner 2026-11-19 "YES BUILD").
         name: row.customer_id
           ? ([customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || 'Customer')
-          : `unknown caller${lineLabel ? ` (${lineLabel})` : ''}`,
+          : `${quiet ? 'likely robocall' : 'unknown caller'}${lineLabel ? ` (${lineLabel})` : ''}`,
         phone: row.from_phone,
         callLogId: row.id,
         at: row.created_at,
@@ -1032,6 +1081,7 @@ module.exports = {
   ringMissedCallIfUnanswered,
   isRobodialerWave,
   isRobodialerBurst,
+  isRepeatSilentCaller,
   classifySpamWave,
   exchangeHangupScreenHit,
   sweepMissedCalls,

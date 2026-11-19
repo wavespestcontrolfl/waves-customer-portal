@@ -123,7 +123,7 @@ jest.setTimeout(30000);
     await database('call_log').insert({ id: row.callLogId, twilio_call_sid: `CA_${row.callLogId}`, direction: 'inbound', from_phone: '+19415550100', to_phone: '+19412975749', status: 'no-answer', answered_by: 'missed', duration_seconds: 53, metadata: meta, created_at: missedAt, updated_at: missedAt });
   }
 
-  test.each(['burst_quiet', 'block_quiet', 'screen_quiet'])('a quiet robodialer call (%s) is never re-pushed, and does not fill the batch ahead of a real bell', async (kind) => {
+  test.each(['burst_quiet', 'block_quiet', 'repeat_quiet', 'screen_quiet'])('a quiet robodialer call (%s) is never re-pushed, and does not fill the batch ahead of a real bell', async (kind) => {
     const quiet = await bell(120);
     const ordinary = await bell(45);
     await missedCallFor(quiet, { missed_call_spam_wave: kind });

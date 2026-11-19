@@ -27,7 +27,7 @@ const { soundForTrigger } = require('./alert-sounds');
 
 const TRIGGER_KEY = 'customer_missed_call';
 // call_log.metadata.missed_call_spam_wave values the bell stamps on a call whose push it quieted.
-const QUIET_SPAM_WAVE = ['block_quiet', 'burst_quiet', 'screen_quiet'];
+const QUIET_SPAM_WAVE = ['block_quiet', 'burst_quiet', 'repeat_quiet', 'screen_quiet'];
 const REPUSH_AFTER_MS = 30 * 60 * 1000;
 // A bell older than this is the office's to close by hand; the window also
 // bounds the first sweep after the gate is turned on.

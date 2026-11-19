@@ -18,10 +18,14 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 const GBP_LINE = '+19413840224';
 const OFFICE_LINE = '+19412975749';
-jest.mock('../config/twilio-numbers', () => ({
-  findByNumber: jest.fn((n) => (n === '+19413840224' ? { type: 'gbp_tracking', label: 'GBP — Parrish' } : { type: 'location', label: 'Office' })),
-  gbpTracking: { parrish: { number: '+19413840224', label: 'GBP — Parrish' } },
-}));
+const SECOND_GBP_LINE = '+19412590111';
+jest.mock('../config/twilio-numbers', () => {
+  const gbp = { '+19413840224': 'GBP — Parrish', '+19412590111': 'GBP — Venice' };
+  return {
+    findByNumber: jest.fn((n) => (gbp[n] ? { type: 'gbp_tracking', label: gbp[n] } : { type: 'location', label: 'Office' })),
+    gbpTracking: { parrish: { number: '+19413840224', label: 'GBP — Parrish' }, venice: { number: '+19412590111', label: 'GBP — Venice' } },
+  };
+});
 jest.mock('../services/notification-triggers', () => ({
   // Like the real trigger, reports the bell result through onBell before the push.
   triggerNotification: jest.fn(async (key, payload, opts) => { opts?.onBell?.(true); return { bellWritten: true }; }),
@@ -32,7 +36,7 @@ jest.mock('../services/admin-alert-compose', () => ({ raiseAdminAlert: jest.fn(a
 const { isEnabled } = require('../config/feature-gates');
 const { triggerNotification } = require('../services/notification-triggers');
 const { raiseAdminAlert } = require('../services/admin-alert-compose');
-const { ringMissedCallIfUnanswered, isRobodialerWave, isRobodialerBurst, exchangeHangupScreenHit } = require('../services/missed-call-bell');
+const { ringMissedCallIfUnanswered, isRobodialerWave, isRobodialerBurst, isRepeatSilentCaller, exchangeHangupScreenHit } = require('../services/missed-call-bell');
 
 jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('missed-call bell: robodialer wave on PostgreSQL', () => {
@@ -584,6 +588,122 @@ jest.setTimeout(30000);
       const { metadata } = await stored(row);
       expect(metadata.missed_call_spam_wave).toBeUndefined();
       expect(metadata.missed_call_screen_quiet_shadow).toBeUndefined();
+    });
+  });
+  describe('repeat silent caller (GATE_MISSED_CALL_SPAM_REPEAT)', () => {
+    const CALLER = '+17275550611';
+    const repeat = (row) => isRepeatSilentCaller(row);
+    const lead = (phone, extra = {}) => database('leads').insert({ id: randomUUID(), phone, created_at: new Date(), ...extra });
+    // The call judged: the caller's latest silent hang-up on the Parrish GBP line
+    // (the webhook stores the line's label as metadata.location; the bell names it).
+    const judged = (extra = {}) => call(CALLER, 10, { metadata: { location: 'GBP — Parrish' }, ...extra });
+
+    test('gate on: the third silent call from one number keeps its bell row, sends no push, is titled likely robocall, and settles', async () => {
+      isEnabled.mockImplementation((name) => name === 'missedCallSpamRepeat' || name === 'missedCallUnknownCallers');
+      await database('call_log').insert([call(CALLER, 60 * 24 * 3), call(CALLER, 60 * 24)]);
+      const row = judged();
+      await database('call_log').insert(row);
+      reports({ bellWritten: true, push: { sent: 0, skipped: 'superseded_before_push' } });
+      expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
+      const [, payload, opts] = triggerNotification.mock.calls[0];
+      expect(payload.name).toBe('likely robocall (GBP — Parrish)');
+      expect(await opts.beforePush({ dispatching: true })).toBe(false);
+      const { metadata } = await stored(row);
+      expect(metadata.missed_call_spam_wave).toBe('repeat_quiet');
+      expect(metadata.missed_call_settled_at).toEqual(expect.any(String));
+      expect(metadata.missed_call_push_retries).toBeUndefined();
+    });
+
+    test('gate off: the call rings as before, titled unknown caller, stamped for the shadow read', async () => {
+      isEnabled.mockImplementation((name) => name === 'missedCallUnknownCallers');
+      await database('call_log').insert([call(CALLER, 60 * 24 * 3), call(CALLER, 60 * 24)]);
+      const row = judged();
+      await database('call_log').insert(row);
+      reports({ bellWritten: true, push: { sent: 1, subscriptions: 1 } });
+      await ringMissedCallIfUnanswered(row.twilio_call_sid);
+      const [, payload, opts] = triggerNotification.mock.calls[0];
+      expect(payload.name).toBe('unknown caller (GBP — Parrish)');
+      expect(await opts.beforePush({ dispatching: true })).toBe(true);
+      const { metadata } = await stored(row);
+      expect(metadata.missed_call_spam_wave).toBeUndefined();
+      expect(metadata.missed_call_spam_repeat_shadow).toBe(true);
+    });
+
+    test('one earlier silent call on another GBP line is a repeat; one on the same line is not; the first call never is', async () => {
+      const row = judged();
+      await database('call_log').insert(row);
+      expect(await repeat(row)).toBe(false);
+      await database('call_log').insert(call(CALLER, 60 * 24));
+      expect(await repeat(row)).toBe(false);
+      await database('call_log').insert(call(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      expect(await repeat(row)).toBe(true);
+    });
+
+    test('two earlier silent calls on any line make a repeat, but only a call on a GBP line is judged', async () => {
+      await database('call_log').insert([call(CALLER, 60 * 24 * 3, { to_phone: OFFICE_LINE }), call(CALLER, 60 * 24, { to_phone: OFFICE_LINE })]);
+      const row = judged();
+      await database('call_log').insert(row);
+      expect(await repeat(row)).toBe(true);
+      expect(await repeat({ ...row, to_phone: OFFICE_LINE })).toBe(false);
+    });
+
+    test('only silent hang-ups of the last 14 days by the same number count', async () => {
+      await database('call_log').insert([
+        call(CALLER, 60 * 24 * 15, { to_phone: SECOND_GBP_LINE }),
+        // Answered before the later silent call below, so it never makes that call a real caller.
+        call(CALLER, 60 * 24 * 5, { answered_by: 'human' }),
+        call(CALLER, 60, { recording_sid: 'RE5', recording_duration_seconds: 20 }),
+        call(CALLER, 60, { call_outcome: 'ai_handled' }),
+        call('+17275550612', 60 * 24, { to_phone: SECOND_GBP_LINE }),
+        call('+17275550612', 60 * 24 * 2),
+      ]);
+      const row = judged();
+      await database('call_log').insert(row);
+      expect(await repeat(row)).toBe(false);
+      // A silent recording of 3 s or less is no message.
+      await database('call_log').insert(call(CALLER, 60, { to_phone: SECOND_GBP_LINE, recording_sid: 'RE6', recording_duration_seconds: 2 }));
+      expect(await repeat(row)).toBe(true);
+    });
+
+    test('a caller who got through later, is on a live lead or on a customer slot is a real caller', async () => {
+      await database('call_log').insert(call(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      const row = judged();
+      await database('call_log').insert(row);
+      expect(await repeat(row)).toBe(true);
+      await lead('(727) 555-0611', { deleted_at: new Date() });
+      expect(await repeat(row)).toBe(true);
+      await lead('727.555.0611');
+      expect(await repeat(row)).toBe(false);
+      await database('leads').del();
+      await database('customers').insert({ id: randomUUID(), first_name: 'Test', service_contact_phone: '727-555-0611', created_at: new Date(), updated_at: new Date() });
+      expect(await repeat(row)).toBe(false);
+      await database('customers').del();
+      await database('call_log').insert(call(CALLER, 60 * 24, { answered_by: 'human' }));
+      expect(await repeat(row)).toBe(false);
+    });
+
+    test('a call linked to a customer, or from a non-North-American number, is never a repeat', async () => {
+      await database('call_log').insert([call('+4922123401', 120, { to_phone: SECOND_GBP_LINE }), call(CALLER, 120, { to_phone: SECOND_GBP_LINE })]);
+      expect(await repeat(call('+4922123401', 10))).toBe(false);
+      expect(await repeat(judged({ customer_id: randomUUID() }))).toBe(false);
+    });
+
+    test('a repeat check that errors pushes as usual', async () => {
+      isEnabled.mockImplementation((name) => name === 'missedCallSpamRepeat' || name === 'missedCallUnknownCallers');
+      await database('call_log').insert(call(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      const row = judged();
+      await database('call_log').insert(row);
+      const numbers = require('../config/twilio-numbers');
+      const original = numbers.findByNumber.getMockImplementation();
+      numbers.findByNumber.mockImplementation(() => { throw new Error('config down'); });
+      try {
+        reports({ bellWritten: true, push: { sent: 1, subscriptions: 1 } });
+        expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
+        expect(await triggerNotification.mock.calls[0][2].beforePush({ dispatching: true })).toBe(true);
+      } finally {
+        numbers.findByNumber.mockImplementation(original);
+      }
+      expect((await stored(row)).metadata.missed_call_spam_wave).toBeUndefined();
     });
   });
 });
