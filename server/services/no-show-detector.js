@@ -60,7 +60,14 @@ const NOTICE_PURPOSES = ['appointment_confirmation', 'appointment_reminder_72h',
 // covered by the LIKE 'rain_out_moved%' clause; 'manual' call-requested
 // acks, prep-info texts, the recurring welcome text, and recipient-optin
 // requests never quote a specific arrival slot and must stay excluded).
+// Quick Move's "let the customer pick a day" text (rain-out.js
+// handOffToCustomer, PICK_TEMPLATE_KEY rain_out_customer_pick_v1, added
+// after that grep) supersedes too: it tells the customer the visit is moved
+// and parks the row windowless until they pick. It quotes no slot, so it is
+// read as an unknown window (PICK_HANDOFF_MESSAGE_TYPE_PATTERN below).
 const LEGACY_SCHEDULING_MESSAGE_TYPES = ['reschedule_series_confirmation', 'confirmation'];
+// Every version of the pick template (the key carries a _vN suffix).
+const PICK_HANDOFF_MESSAGE_TYPE_PATTERN = 'rain_out_customer_pick%';
 // email_messages.status values that mean the recipient actually got it —
 // webhooks-sendgrid.js's own vocabulary. 'processed'/'sent' are SendGrid's
 // accept states, 'delivered' its confirmation, and the last three are
@@ -251,10 +258,13 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // the other predicates fetch it. Left unread, the reader would fall back to an OLDER known window (the trap
       // the LEGACY_SCHEDULING_MESSAGE_TYPES note describes) and keep enforcing a window the visit no longer holds.
       // Only the day-only senders write the marker (services/time-promise.js DAY_PROMISE_META).
+      // The pick hand-off text is the same trap: left unread, the 24-hour reminder's old window stayed the latest
+      // promise and the office got a critical "promised arrival" card for a visit the customer was told had moved.
       .whereRaw(`(a.purpose = ANY(?::text[]) OR (a.purpose = 'appointment' AND
         (a.metadata->>'rendered_slot_ms' IS NOT NULL OR a.metadata->>'original_message_type' LIKE 'rain_out_moved%'
           OR a.metadata->>'original_message_type' = ANY(?::text[])
-          OR a.metadata->>'promise_level' = 'day')))`, [NOTICE_PURPOSES, LEGACY_SCHEDULING_MESSAGE_TYPES])
+          OR a.metadata->>'original_message_type' LIKE ?
+          OR a.metadata->>'promise_level' = 'day')))`, [NOTICE_PURPOSES, LEGACY_SCHEDULING_MESSAGE_TYPES, PICK_HANDOFF_MESSAGE_TYPE_PATTERN])
       .where('a.sent_at', '<=', now).whereNull('a.blocked_code').whereNull('a.provider_error')
       // Live delivery state comes from the sms_log row Twilio's status
       // callback updates. A LINKED row must currently read sent/delivered/
