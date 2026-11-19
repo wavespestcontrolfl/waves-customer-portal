@@ -1163,17 +1163,16 @@ const PUBLIC_BODIES = [
   'Florida Fish and Wildlife Conservation Commission', 'Florida Medical Entomology Laboratory', 'National Weather Service',
 ];
 
-// Sources the 2026-11-18 customer-question briefs cite by name, and the
-// building code they cite. They add their own word pairs but no "the <first
-// word>" pair: "the federal" would clear "The Federal family", a surname with
-// no agency named (pre-push audit). A sentence that opens "The Federal Trade
-// Commission" still holds the draft for review, as it did before this list;
-// the briefs never open a sentence with "The" and a capitalized word. North
-// Carolina State University is not listed: the briefs cite NC State
-// Extension, and its "carolina state" pair would clear a person's name.
+// Sources the 2026-11-18 customer-question briefs cite by name (CQ09 cites
+// the FTC, and a post spells the name out). They add their own word pairs but
+// no "the <first word>" pair: "the federal" would clear "The Federal family",
+// a surname with no agency named (pre-push audit). A sentence that opens "The
+// Federal Trade Commission" still holds the draft for review, as it did before
+// this list; the briefs never open a sentence with "The" and a capitalized
+// word. North Carolina State University is not listed: the briefs cite NC
+// State Extension, and its "carolina state" pair would clear a person's name.
 const PUBLIC_BODIES_NO_ARTICLE_PAIR = [
-  'NC State Extension', 'Pennsylvania State University Extension',
-  'Federal Trade Commission', 'National Park Service', 'Florida Building Code',
+  'NC State Extension', 'Pennsylvania State University Extension', 'Federal Trade Commission',
 ];
 
 function approvedCompetitorNames() {

@@ -686,6 +686,45 @@ describe('customer-question manifest 2026-11-18', () => {
       .toContain('UNSUPPORTED_BODY_SYNTAX');
   });
 
+  // Editorial review fetches at most LIMITS.sourceUrls sources, reads only
+  // HTML or plain text, and fails a draft on any source it cannot read. A
+  // draft that links every required source must fit, so the review's own
+  // source list is built for such a draft (pre-push audit).
+  test('a draft that links every required source stays within the editorial review source limit, with no PDF source', () => {
+    const { LIMITS } = require('../services/content/editorial-review-contracts');
+    const { sourceUrls } = require('../services/content/editorial-evidence');
+    const failures = [];
+    for (const id of ids) {
+      const brief = composeSeedBrief(manifest, id);
+      const required = brief.voice_constraints.operator_brief.required_sources;
+      const body = required.map((url, i) => `Point ${i + 1}: the [cited source](${url}) says so.`).join('\n\n');
+      const urls = sourceUrls(`---\ntitle: "Draft"\n---\n\n${body}\n`, { ...brief, required_sources: required });
+      expect(urls.length).toBe(new Set(required).size);
+      if (urls.length > LIMITS.sourceUrls) failures.push(`${id}: ${urls.length} source URLs`);
+      for (const url of urls) if (/\.pdf$|\/pdf\/?$/i.test(new URL(url).pathname)) failures.push(`${id} PDF: ${url}`);
+    }
+    expect(failures).toEqual([]);
+  });
+
+  // The review checks a claim only against the fetched sources, so a statute
+  // section a brief cites by number must be one of its required sources
+  // (pre-push audit on CQ06 and CQ07).
+  test('every statute section a brief cites by number is one of its required sources', () => {
+    const failures = [];
+    const citing = [];
+    for (const payload of manifest.briefs) {
+      const text = [payload.thesis, ...payload.outline].join(' ');
+      const sections = [...new Set([...text.matchAll(/\bsections? (\d{2,3}\.\d{2,4})\b/g)].map((m) => m[1]))];
+      if (sections.length) citing.push(payload.id);
+      const required = composeSeedBrief(manifest, payload.id).voice_constraints.operator_brief.required_sources;
+      for (const section of sections) {
+        if (!required.some((url) => url.endsWith(`_${section}`))) failures.push(`${payload.id} section ${section}`);
+      }
+    }
+    expect(citing).toEqual(['CQ06', 'CQ07']);
+    expect(failures).toEqual([]);
+  });
+
   // The completion gate's conversion CTA is judged on the link anchor: it
   // must ask for an estimate or quote and name the brief's own service
   // ("the contact page" does not qualify). Each Waves section names the

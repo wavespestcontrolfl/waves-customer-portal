@@ -151,8 +151,7 @@ describe.each(LANES)('%s public-entity exemptions', (_lane, brief) => {
     'a university extension citation': 'The University of Florida IFAS Extension recommends inspecting mulch beds near the slab.',
     'a state agency citation': 'The Florida Department of Agriculture and Consumer Services licenses every pest control operator.',
     'an out-of-state extension citation': 'NC State Extension and Pennsylvania State University Extension both say not to cut a hammerhead worm found in a Sarasota yard.',
-    'a federal agency citation': 'Homeowners in Venice can read guidance from the Federal Trade Commission and the National Park Service.',
-    'a building code citation': 'The Florida Building Code requires termite protection for every new home in Bradenton.',
+    'a federal agency citation': 'Homeowners in Venice can read what the Federal Trade Commission said about ultrasonic pest devices.',
   };
 
   test.each(Object.entries(PUBLIC))('live: %s passes the check', (_label, body) => {
