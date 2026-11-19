@@ -1192,7 +1192,7 @@ describe('revertMerge', () => {
       expect(sodRestores(state)).toEqual([]);
     });
 
-    // The sprinkler timer on file of the same moved row: its own journal entry ({ row_id, before, kept }).
+    // The sprinkler timer on file of the same moved row: its own journal entry ({ row_id, before, kept, home }).
     describe('the sprinkler timer on that row', () => {
       const X2 = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
       const RAIN_BIRD = { irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null, irrigation_controller_app: null };
@@ -1245,16 +1245,12 @@ describe('revertMerge', () => {
         expectRefused(await revert(journal, { rowNow: X2 }));
       });
 
-      // A same-home merge left the timer on the row. It described the home both customers shared: the restored
-      // customer's address in the journal snapshot. The undo reads the kept customer's address NOW against it.
+      // A same-home merge left the timer on the row. It described the home both customers shared: the kept
+      // customer's address right after the merge (entry.home). The undo reads their address NOW against it.
       describe('a same-home merge left the timer on the row (kept)', () => {
         const SHARED = { address_line1: '100 Main St', city: 'Bradenton', zip: '34205' };
         const ELSEWHERE = { address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' };
-        const kept = () => {
-          const journal = journalWithTimer({ kept: true });
-          Object.assign(journal.loser_snapshot, SHARED);
-          return journal;
-        };
+        const kept = () => journalWithTimer({ kept: true, home: { ...SHARED, address_line2: null } });
 
         it('the kept customer still has that address: the timer on the row, the original or a later pick, goes back with the row untouched', async () => {
           for (const timerNow of [X2, RAIN_BIRD, NO_TIMER]) {
@@ -1271,7 +1267,11 @@ describe('revertMerge', () => {
           expect(timerRestores(state)).toEqual([]);
         });
 
-        it.each([['another address', ELSEWHERE], ['no address', { address_line1: null, city: null, zip: null }]])('the kept customer has %s now and the row carries a timer: REFUSES', async (_label, winnerAddr) => {
+        it.each([
+          ['another address', ELSEWHERE],
+          ['the same street in another ZIP', { ...SHARED, city: 'Sarasota', zip: '34236' }],
+          ['no address', { address_line1: null, city: null, zip: null }],
+        ])('the kept customer has %s now and the row carries a timer: REFUSES', async (_label, winnerAddr) => {
           expectRefused(await revert(kept(), { rowNow: RAIN_BIRD, winnerAddr }));
         });
 
