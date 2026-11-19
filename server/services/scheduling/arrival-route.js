@@ -177,6 +177,10 @@ function exemptFromPlanning(rows, planningMinutes) {
   return planningMinutes === false ? rows.map(row => ({ ...row, planning_exempt: true })) : rows;
 }
 
+function capacityRouteRowEligible(row) {
+  return !!(row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status));
+}
+
 async function loadArrivalRouteContext({
   conn = db, serviceId, prospective, date, technicianId, excludeServiceIds = [], excludeEstimateId,
   changes = {}, now = new Date(), travel, preserveCapacity = false, unit = false, alone = false,
@@ -277,7 +281,7 @@ async function loadArrivalRouteContext({
   (movedTarget?.memberIds || []).forEach(id => excluded.add(String(id)));
   const activeTarget = dateOnly(stored.scheduled_date) === date && ['en_route', 'on_site'].includes(stored.status);
   const dayRows = exemptFromPlanning(rows.filter(row => !excluded.has(String(row.id))
-    && (!capacity || row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status))
+    && (!capacity || capacityRouteRowEligible(row))
     && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && row.reservation_expires_at)), planningMinutes);
   const activeStop = fromActiveStop && date === etDateString(now) ? await loadActiveStop(conn, dayRows, techId) : null;
   return { target: movedTarget || target, rows: dayRows,
@@ -413,6 +417,10 @@ function storedOrderStale(rows, members = rows) {
  *  stale-order baseline) — identical behavior. */
 function clockOrder(rows) {
   return promisedWindowOrder(rows);
+}
+
+function placementSequencers(groupedPending, pending, mayRepairOrder) {
+  return mayRepairOrder && storedOrderStale(groupedPending, pending) ? [currentOrder, clockOrder] : [currentOrder];
 }
 
 function routeDriveMinutes(stops, origin, end = RouteOptimizer.HQ) {
@@ -577,6 +585,33 @@ function rowIsFixedBlock(row, target, capacity) {
   return row.technician_id !== target.technician_id || row.reservation_expires_at != null;
 }
 
+// Capacity's fixed intervals are wider than stored service spans: an
+// unassigned visit may arrive anywhere in its promise, then perform all of
+// its work. Shared with the office-only advisory replay so a fresh proof and
+// the reservation writer reserve exactly the same interval.
+function capacityFixedIntervals(rows) {
+  const fixedRows = rows.filter(row => row.status !== 'completed' && row.technician_id == null);
+  return occupiedRows(fixedRows).map((row) => {
+    const range = effectiveWindowRange(row);
+    const duration = Math.max(workDuration(row), row.endMin - (row.startMin ?? 0));
+    return range ? { ...row, window_start: hhmm(range.startMin), endMin: range.endMin + duration } : row;
+  });
+}
+
+function capacityRouteHitsFixed(simulation, fixed, startMin) {
+  return simulation.arrivals.some((arrival, index) => fixed.some((row) => {
+    if (row.id === arrival.id) return false;
+    const fixedStart = minuteOfDay(row.window_start);
+    const fixedEnd = Math.max(fixedStart + workDuration(row), row.endMin ?? 0);
+    const occupiedFrom = index === 0 ? startMin : simulation.arrivals[index - 1].departureMin;
+    return fixedStart == null || (occupiedFrom < fixedEnd && arrival.departureMin > fixedStart);
+  })) || fixed.some((row) => {
+    const fixedStart = minuteOfDay(row.window_start);
+    const fixedEnd = Math.max(fixedStart + workDuration(row), row.endMin ?? 0);
+    return fixedStart == null || (simulation.serviceFinishMin < fixedEnd && simulation.returnFinishMin > fixedStart);
+  });
+}
+
 /** Simulate every candidate order and certify the winner: least travel,
  *  ties broken by less waiting — skipping any order that overruns a return
  *  deadline (returnTooLate) or collides with a FIXED blocker (unassigned
@@ -601,25 +636,15 @@ function selectWinningOrder(orders, { simulate, collectLegs, returnByMin, rows, 
     // blocks it, including the drive home. Legacy placement keeps its shared
     // occupancy rule for other technicians and live holds.
     const fixedRows = rows.filter(row => row.status !== 'completed' && rowIsFixedBlock(row, target, capacity));
-    const fixed = capacity ? occupiedRows(fixedRows).map(row => {
-      const range = effectiveWindowRange(row);
-      // Unassigned work can start anywhere in its arrival promise. Add that
-      // promise once to the complete allocation, not once per member.
-      const duration = Math.max(workDuration(row), row.endMin - (row.startMin ?? 0));
-      return range ? { ...row, window_start: hhmm(range.startMin),
-        endMin: range.endMin + duration } : row;
-    }) : fixedRows;
-    const hitsFixed = simulation.arrivals.some((arrival, index) => fixed.some(row => {
-      if (row.id === arrival.id) return false;
-      const start = minuteOfDay(row.window_start);
-      const end = Math.max(start + workDuration(row), row.endMin ?? 0);
-      const occupiedFrom = index === 0 ? startMin : simulation.arrivals[index - 1].departureMin;
-      return (capacity && start == null) || (start != null && occupiedFrom < end && arrival.departureMin > start);
-    })) || (capacity && fixed.some(row => {
-      const start = minuteOfDay(row.window_start);
-      const end = Math.max(start + workDuration(row), row.endMin ?? 0);
-      return start == null || (simulation.serviceFinishMin < end && simulation.returnFinishMin > start);
-    }));
+    const fixed = capacity ? capacityFixedIntervals(rows) : fixedRows;
+    const hitsFixed = capacity ? capacityRouteHitsFixed(simulation, fixed, startMin)
+      : simulation.arrivals.some((arrival, index) => fixed.some((row) => {
+        if (row.id === arrival.id) return false;
+        const fixedStart = minuteOfDay(row.window_start);
+        const fixedEnd = Math.max(fixedStart + workDuration(row), row.endMin ?? 0);
+        const occupiedFrom = index === 0 ? startMin : simulation.arrivals[index - 1].departureMin;
+        return fixedStart != null && occupiedFrom < fixedEnd && arrival.departureMin > fixedStart;
+      }));
     if (hitsFixed) continue;
     if (marginMinutes > 0 && laterStopTooTight(simulation, order, target.id, rangeForStop, marginMinutes, marginSkipIds)) {
       tooTight = true;
@@ -996,7 +1021,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   // staff route insertion a staff move follows the same rule, and so does
   // the visit where it is saved, so its own hour reads like every other hour
   // (nothing is written for it: only a move's result carries an order).
-  const sequencers = (capacity || placement) && storedOrderStale(groupedPending, pending) ? [currentOrder, clockOrder] : [currentOrder];
+  const sequencers = placementSequencers(groupedPending, pending, capacity || placement);
   const rangeForStop = row => row.arrivalRange || effectiveWindowRange(row);
   const simulate = (order, usedLegs, extra = {}) => {
     const travel = context.travel || (capacity ? RouteOptimizer.createSchedulingTravel({ maxRequests: 0 }) : null);
@@ -1516,7 +1541,8 @@ async function checkArrivalPlacement({
 module.exports = {
   arrivalWindowRoutingEnabled, pickerRoadCheckLive, saveRoadBuyLive, buySaveRoads, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
   enumerateArrivalPlacements,
-  groupRouteStops, workDuration,
+  groupRouteStops, workDuration, capacityFixedIntervals, capacityRouteHitsFixed,
+  capacityRouteRowEligible, placementSequencers,
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
   placeMovedVisit, INSERTION_MARGIN_MINUTES,
   _internals: { clockOrder, storedOrderStale, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget, laterStopTooTight, staffSaveTravel },

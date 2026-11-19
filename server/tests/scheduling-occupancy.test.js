@@ -279,6 +279,23 @@ describe('listOccupiedWindows', () => {
     expect(q.whereNotIn).toHaveBeenCalledWith('status', ['cancelled', 'skipped', 'no_show', 'rescheduled']);
   });
 
+  test('claimed bookings are included only for the explicit office-proof read', async () => {
+    const ordinary = makeQuery([]);
+    const office = makeQuery([]);
+    db.mockReturnValueOnce(ordinary).mockReturnValueOnce(office);
+
+    await listOccupiedWindows({ db, dateFrom: '2099-01-01', dateTo: '2099-01-14' });
+    await listOccupiedWindows({
+      db, dateFrom: '2099-01-01', dateTo: '2099-01-14', includeClaimedBookings: true,
+    });
+
+    expect(ordinary.orWhereRaw).toHaveBeenCalledWith('reservation_expires_at > NOW()');
+    expect(ordinary.orWhereRaw).not.toHaveBeenCalledWith(expect.stringContaining('customer_id IS NOT NULL'));
+    expect(office.orWhereRaw).toHaveBeenCalledWith(
+      'scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at > NOW()',
+    );
+  });
+
   test('normalizes dates and derives endMin with the duration-or-60 fallback', async () => {
     const q = makeQuery([
       // Unassigned row with an explicit end.

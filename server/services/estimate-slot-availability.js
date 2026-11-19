@@ -2124,7 +2124,17 @@ function signCustomerFacingSlots(slots, estimateId) {
   });
 }
 
-function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPTS.durationMinutes) {
+function capacityPlacementProof(slot, include) {
+  if (!include || slot.route_mode !== 'arrival_windows' || !Array.isArray(slot.route_arrivals)) return {};
+  const order = slot.route_arrivals.map(row => row?.id).filter(id => id != null);
+  const workMinutes = Number(slot[Symbol.for('waves.dispatch.certifiedWorkMinutes')]);
+  if (order.length !== slot.route_arrivals.length || !(workMinutes > 0)) return {};
+  return { [Symbol.for('waves.dispatch.certifiedCapacityPlacement')]: {
+    routeMode: slot.route_mode, order, workMinutes,
+  } };
+}
+
+function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPTS.durationMinutes, { includeCapacityProof = false } = {}) {
   const routeOptimal = Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= proximityDriveMinutes
     && (!capacityEnabled() || slot.stops_that_day > 0);
   const nearbyAnchor = routeOptimal ? pickNearbyAnchor(slot) : null;
@@ -2140,6 +2150,7 @@ function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPT
     windowStart,
     windowEnd,
     durationMinutes,
+    ...capacityPlacementProof(slot, includeCapacityProof),
     ...(capacityEnabled() ? { routeMode: slot.route_mode } : {}),
     techFirstName: (slot.technician?.name || '').split(/\s+/)[0] || null,
     techId: slot.technician?.id || null,
@@ -2171,13 +2182,14 @@ function routeCheckModeFor(userOpts) {
 // removal can never leave an empty picker (the floor returns the pool whole). The helper
 // returns the input's own objects in input order. Returns the pool unchanged with the
 // gate off or on any error.
-async function routeCheckedPool(pool, { coords, estimateId, durationMinutes, mode }) {
+async function routeCheckedPool(pool, { coords, estimateId, durationMinutes, mode, cacheLocation = false }) {
   try {
     if (mode === 'off' || !pool.length) return pool;
     const routeCheck = require('./scheduling/customer-route-check');
     const checked = await routeCheck.filterOfferedSlots({
       surface: 'estimate', mode, slots: pool, durationMinutes, today: new Date(),
-      target: { prospective: { lat: coords.lat, lng: coords.lng, estimated_duration_minutes: durationMinutes }, excludeEstimateId: estimateId },
+      target: { prospective: { lat: coords.lat, lng: coords.lng, estimated_duration_minutes: durationMinutes },
+        ...(cacheLocation ? { cacheLocation: true } : {}), excludeEstimateId: estimateId },
     });
     return Array.isArray(checked.slots) ? checked.slots : pool;
   } catch (err) {
@@ -2396,6 +2408,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // GATE_BOOKING_MAKE_ROOM on (hour mode): this list may carry one make-room hour; read at call time.
   const makeRoomMode = makeRoomModeFor(userOpts);
   const makeRoomOffer = makeRoomOffersOn(makeRoomMode);
+  // Internal office recommendations opt into a deferred, provider-free fit
+  // check. Ordinary public slot responses keep their existing work and JSON.
+  const measureHours = userOpts.measureBookingFit === true;
   // Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate offers no first
   // visit before the move-in date, which the customer can still change. Only
   // a stamped estimate reads its move; every other estimate skips the lookup.
@@ -2451,6 +2466,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // switch must not serve the other mode's list for the TTL. An entry built for a
     // caller that did not ask for the check (offer unset) is always 'off'.
     `route-check:${routeCheckMode}`,
+    ...(measureHours ? ['measure-hours'] : []),
     // A gate flip to live must not serve the other list for the TTL.
     ...(lineMapOfferLive() ? ['line-map:live'] : []),
     // A list with a make-room hour (mode on) is never served to a caller in another mode, or the other way round.
@@ -2508,7 +2524,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // outlook now so it overlaps the slot computation below. Bounded + cached +
   // fail-open inside the service; the extra .catch is belt-and-braces — this
   // decoration must never break or delay a slot payload.
-  const rainOutlookPromise = isEnabled('bookingRainChips')
+  const rainOutlookPromise = !measureHours && isEnabled('bookingRainChips')
     ? getDailyRainOutlookBounded(RAIN_OFFICE_POINT.lat, RAIN_OFFICE_POINT.lng).catch(() => null)
     : null;
 
@@ -2635,6 +2651,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
         ...(funnel ? { zoneDayFunnel: funnel } : {}),
       },
     };
+    if (measureHours) {
+      const { observeOffers, OFFER_RANK } = require('./day-replan/booking-fit');
+      fallback[OFFER_RANK] = observeOffers(db, [...primary, ...expander], null);
+    }
     return fallback;
   }
 
@@ -2713,7 +2733,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   const asapRaw = applyLineOfferRule(asapLists.flat().filter((s) => !dateHasStop(stopDates, s)), lineRanking);
 
   const classifiedRaw = applyLineOfferRule((raw?.slots || [])
-    .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes)), lineRanking);
+    .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes,
+      { includeCapacityProof: measureHours })), lineRanking);
   // Drop candidates whose rounded display window collides with a real
   // existing booking on the same tech/date — see filterCollidingSlots.
   const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
@@ -2772,6 +2793,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // builder, so a wrapper cache hit neither recomputes nor logs.
   const routeChecked = await routeCheckedPool(funneledEligible, {
     coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode,
+    cacheLocation: measureHours,
   });
   // GATE_BOOKING_MAKE_ROOM: the taken hours this customer could have, measured against this same final pool.
   const makeRoomArgs = {
@@ -2803,9 +2825,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // above has no detour data, so its ordering is unchanged either way.
   // Rain fit (GATE_CUSTOMER_RAIN_RANK, dark): null — today's order — with
   // the gate off, no slot inside the next 3 dates, or any failure.
-  const rainTierOf = await slotRainTierOf(funneledBookable, {
+  const rainTierOf = !measureHours ? await slotRainTierOf(funneledBookable, {
     profile: serviceProfile, services: appointmentServicesFor(serviceProfile), point: coords, db,
-  });
+  }) : null;
   const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL, {
     routeFirst: isEnabled('geoSlotRanking'),
     rainTierOf,
@@ -2849,6 +2871,22 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // staleness guard.
     },
   };
+
+  if (measureHours) {
+    const { observeOffers, OFFER_RANK } = require('./day-replan/booking-fit');
+    const target = coords.source === 'service_zone_fallback' ? null : {
+      lat: coords.lat, lng: coords.lng, planning_exempt: true,
+      estimated_duration_minutes: candidateExpectedMinutes || serviceProfile.durationMinutes,
+    };
+    result[OFFER_RANK] = observeOffers(db, shown, target, {
+      calendar: userOpts.dispatchCalendar, ownEstimateId: estimateId,
+      // The staff arrival-route writer may repair stale numbering. Capacity
+      // reservations persist their own certified order under the same rule.
+      allowStaleOrderFallback: userOpts.dispatchCalendar
+        ? require('./scheduling/arrival-route').arrivalWindowRoutingEnabled()
+        : require('./scheduling/policy').capacityEnabled(),
+    });
+  }
 
   // Never cache a funnel-ACTIVE result: the funnel's day set changes with
   // EVERY zone-stop mutation (create/cancel/reschedule/hold-expiry on ANY

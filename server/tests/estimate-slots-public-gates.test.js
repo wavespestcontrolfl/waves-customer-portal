@@ -1369,6 +1369,20 @@ describe('offerableEstimateSlots — the page picker, for the texting AI', () =>
     expect(getAvailableSlots).not.toHaveBeenCalled();
   });
 
+  test('the office dispatch window is fresh, provider-free and carries only an internal fit observer', async () => {
+    currentEstimate = OWN;
+    getAvailableSlots.mockResolvedValue(SLOTS);
+    const dispatchCalendar = new Map();
+    await expect(offerableEstimateSlots('est-1', 'cust-1', {
+      dispatchWindow: { dateFrom: '2027-05-20', dateTo: '2027-05-21', dispatchCalendar },
+    })).resolves.toBe(SLOTS);
+    expect(getAvailableSlots).toHaveBeenCalledWith('est-1', expect.objectContaining({
+      serviceMode: expect.any(String), dateFrom: '2027-05-20', dateTo: '2027-05-21', dispatchCalendar,
+      bypassCache: true, paidCalls: false, offer: true, measureBookingFit: true,
+      maxResults: expect.any(Number), expanderMaxResults: 0,
+    }));
+  });
+
   test('another customer\'s estimate, or no customer, is never offered — the picker is not even asked', async () => {
     currentEstimate = OWN;
     await expect(offerableEstimateSlots('est-1', 'cust-2')).resolves.toBeNull();

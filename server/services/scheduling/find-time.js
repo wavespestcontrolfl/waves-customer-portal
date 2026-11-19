@@ -446,6 +446,10 @@ async function findCapacitySlots(opts) {
       score: fit.detourMinutes + daysOut * 0.5 - familyScore, service_family_score: familyScore,
       occupied_minutes: fit.occupiedMinutes, waiting_minutes: fit.waitingMinutes,
       estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
+      // Office advisory replay must not infer candidate work from the
+      // displayed arrival window. Preserve exactly what this simulation
+      // certified, without adding a JSON-visible/public response field.
+      [Symbol.for('waves.dispatch.certifiedWorkMinutes')]: Number(fit.target?.estimated_duration_minutes),
       // The simulation's own arrival delay past THIS slot's start (same field
       // findArrivalWindowSlots already exposes) — packCapacityEnds' self-serve
       // arrival grace (owner ruling 2026-09-28) reads it to decide whether a

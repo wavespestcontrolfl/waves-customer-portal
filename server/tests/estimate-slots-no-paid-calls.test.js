@@ -24,7 +24,10 @@ jest.mock('../config/feature-gates', () => ({
 
 const db = require('../models/db');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
+const customerRouteCheck = require('../services/scheduling/customer-route-check');
 const makeRoom = require('../services/scheduling/booking-make-room');
+const weather = require('../services/weather-forecast');
+const featureGates = require('../config/feature-gates');
 const estimateSlotAvailability = require('../services/estimate-slot-availability');
 
 /**
@@ -70,6 +73,7 @@ describe('getAvailableSlots paidCalls: false', () => {
   let fetchSpy;
   beforeEach(() => {
     jest.clearAllMocks();
+    featureGates.isEnabled.mockReturnValue(false);
     delete process.env.GATE_SCHEDULING_CAPACITY;
     process.env.GOOGLE_MAPS_API_KEY = 'synthetic-key';
     customerRow = { latitude: 27.3364, longitude: -82.5307, address_line1: '123 Test St', city: 'Sarasota', state: 'FL', zip: '34231' };
@@ -84,12 +88,35 @@ describe('getAvailableSlots paidCalls: false', () => {
   afterEach(() => { jest.useRealTimers(); });
 
   test('passes providerTravel: false into every find-time call, never fetches, and starts no make-room check', async () => {
-    const result = await getAvailableSlots('est-free-1', { ...OFFER, paidCalls: false });
+    const result = await getAvailableSlots('est-free-1', {
+      ...OFFER, paidCalls: false, measureBookingFit: true,
+    });
     expect([...result.primary, ...result.expander].length).toBeGreaterThan(0);
     expect(findAvailableSlots).toHaveBeenCalled();
     for (const [args] of findAvailableSlots.mock.calls) expect(args.providerTravel).toBe(false);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(makeRoom.startBackgroundCheck).not.toHaveBeenCalled();
+  });
+
+  test('the office measurement starts no rain provider even when its customer gate is on', async () => {
+    featureGates.isEnabled.mockImplementation((gate) => gate === 'bookingRainChips');
+    await getAvailableSlots('est-free-1', {
+      ...OFFER, paidCalls: false, measureBookingFit: true, bypassCache: true,
+    });
+    expect(weather.getDailyRainOutlookBounded).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test('the provider-free route check resolves its target from cached coordinates only', async () => {
+    customerRouteCheck.customerRouteCheckMode.mockReturnValueOnce('true');
+    customerRouteCheck.filterOfferedSlots.mockImplementationOnce(async ({ slots }) => ({ slots }));
+    await getAvailableSlots('est-free-1', {
+      ...OFFER, paidCalls: false, bypassCache: true, measureBookingFit: true,
+    });
+    expect(customerRouteCheck.filterOfferedSlots).toHaveBeenCalledWith(expect.objectContaining({
+      target: expect.objectContaining({ cacheLocation: true, excludeEstimateId: 'est-free-1' }),
+    }));
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   test('stored customer coordinates that cannot be used throw COORDS_NEED_GEOCODE: no geocode, no find-time', async () => {
