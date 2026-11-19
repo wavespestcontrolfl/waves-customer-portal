@@ -2159,12 +2159,14 @@ function EstimatePipelineViewV2({
     estimates,
     refresh: refreshEstimates,
   });
+  // A Call today link the list takes (callTodayLinksTaken) loads it fresh too: with the filter already selected, the
+  // filter alone does not change, and the rows the push counted may have moved since the last load.
   useEffect(() => {
     refreshEstimates();
     return () => {
       estimatesRequestRef.current += 1;
     };
-  }, [filter, refreshEstimates, estimatesRefresh]);
+  }, [filter, refreshEstimates, estimatesRefresh, callTodayLinksTaken]);
   const archiveEstimate = useCallback(
     async (e) => {
       if (
@@ -4198,7 +4200,8 @@ function EstimatesMobileListView({
     return () => {
       estimatesRequestRef.current += 1;
     };
-  }, [filter, refreshEstimates, estimatesRefresh]);
+    // A Call today link the list takes loads it fresh, as on desktop.
+  }, [filter, refreshEstimates, estimatesRefresh, callTodayLinksTaken]);
   const markEstimateAccepted = useCallback(
     async (e) => {
       // A commercial proposal win auto-creates the customer when none is linked.

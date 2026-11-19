@@ -204,6 +204,29 @@ it.each([
   await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
 });
 
+// With Call today already selected, a new link changes no filter: the list must still load fresh rows, or it keeps
+// showing an estimate another admin has called since (or misses one viewed since).
+it.each([
+  ["desktop", 1440],
+  ["mobile", 390],
+])("(%s) a second link on an open Call today list loads the rows fresh", async (_label, width) => {
+  const { container } = renderPage(width, "?tab=estimates&view=call_today");
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
+  const before = globalThis.fetch.getMockImplementation();
+  globalThis.fetch.mockImplementation(async (url, init = {}) => {
+    const parsed = new URL(String(url), "http://fixture.invalid");
+    const listRead = parsed.pathname === "/api/admin/estimates" && init.method !== "PATCH"
+      && parsed.searchParams.get("archived") !== "only" && parsed.searchParams.get("status") !== "draft";
+    if (!listRead) return before(url, init);
+    // Another admin called the five-hour estimate after the first load.
+    return response({ estimates: ROWS.map((r) => (r.id === "v-5h" ? { ...r, lastCalledAt: new Date().toISOString() } : r)), truncated: false });
+  });
+  act(() => routerProbe.navigate("/admin/pipeline?tab=estimates&view=call_today"));
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h"]));
+  await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
+});
+
 it("(mobile) the status-pills flag loading after the link keeps Call today; after the customer picks All it stays All", async () => {
   flags.estimates_v2_status_pills = false;
   const { container, rerenderSame } = renderPage(390, "?tab=estimates&view=call_today");
