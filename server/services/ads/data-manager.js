@@ -1036,37 +1036,32 @@ function summarizeCandidates(candidates, existingByTransaction = new Map()) {
 // new_customer is one per customer, ever, and a customer merge repoints every
 // customer_id column (these rows too) to the surviving customer, whose own
 // transaction id is new: a row under the same customer that skips the upload
-// stands for it, so a merge never sends the acquisition again. A row under the
-// same winning lead stands for it too: a merge that commits after a run
-// collected the customer leaves that run's row under the retired id, and a
-// lead id never changes.
+// stands for it, so a merge never sends the acquisition again. So does a row
+// whose lead now belongs to the customer: a merge that commits after a run
+// collected the customer leaves that run's row under the retired id, and the
+// survivor's first win may be another lead.
 async function existingUploads(conversionType, candidates) {
   if (!candidates.length) return new Map();
-  const idsOf = (field) => (conversionType === 'new_customer'
-    ? [...new Set(candidates.map((c) => c[field]).filter(Boolean).map(String))]
-    : []);
-  const customerIds = idsOf('customerId');
-  const leadIds = idsOf('leadId');
-  const rows = await db('google_ads_conversion_uploads')
-    .where({ conversion_type: conversionType })
+  const customerIds = conversionType === 'new_customer'
+    ? [...new Set(candidates.map((c) => c.customerId).filter(Boolean).map(String))]
+    : [];
+  const rows = await db('google_ads_conversion_uploads as u')
+    .leftJoin('leads as ul', 'ul.id', 'u.lead_id')
+    .where('u.conversion_type', conversionType)
     .where((q) => {
-      q.whereIn('transaction_id', candidates.map((c) => c.transactionId));
-      if (customerIds.length) q.orWhereIn('customer_id', customerIds);
-      if (leadIds.length) q.orWhereIn('lead_id', leadIds);
+      q.whereIn('u.transaction_id', candidates.map((c) => c.transactionId));
+      if (customerIds.length) q.orWhereIn('u.customer_id', customerIds).orWhereIn('ul.customer_id', customerIds);
     })
-    .select('transaction_id', 'customer_id', 'lead_id', 'status', 'request_id', 'updated_at');
+    .select('u.transaction_id', 'u.customer_id', 'ul.customer_id as lead_customer_id', 'u.status', 'u.request_id', 'u.updated_at');
   const byTransaction = new Map(rows.map((row) => [row.transaction_id, row]));
-  const skipBy = (ids, column) => new Map(rows
-    .filter((row) => ids.length && row[column] && priorUploadSkipReason(row))
-    .map((row) => [String(row[column]), row]));
-  const skipByCustomer = skipBy(customerIds, 'customer_id');
-  const skipByLead = skipBy(leadIds, 'lead_id');
+  const skipByCustomer = new Map();
+  for (const row of rows.filter((r) => customerIds.length && priorUploadSkipReason(r))) {
+    for (const id of [row.customer_id, row.lead_customer_id]) if (id) skipByCustomer.set(String(id), row);
+  }
   const history = new Map();
   for (const c of candidates) {
     const own = byTransaction.get(c.transactionId);
-    const row = priorUploadSkipReason(own)
-      ? own
-      : (skipByCustomer.get(String(c.customerId)) || skipByLead.get(String(c.leadId)) || own);
+    const row = priorUploadSkipReason(own) ? own : (skipByCustomer.get(String(c.customerId)) || own);
     if (row) history.set(c.transactionId, row);
   }
   return history;
@@ -1225,6 +1220,17 @@ async function uploadConversionsLocked({
   const cappedLimit = Math.min(Math.max(parseInt(limit, 10) || 100, 1), MAX_EVENTS_PER_REQUEST, MAX_LIMIT);
   const effectiveValidateOnly = uploadValidateOnly(validateOnly);
   const config = configurationFor(conversionType);
+  // No destination, nothing to collect (readiness still counts the candidates).
+  if (!config.configured) {
+    return {
+      synced: false,
+      configured: false,
+      conversionType,
+      period: range,
+      config,
+      error: `Data Manager is missing required config: ${config.missing.join(', ')}`,
+    };
+  }
   const candidates = dedupeCandidatesByTransaction(
     await collectCandidates(conversionType, {
       ...range,
@@ -1250,20 +1256,6 @@ async function uploadConversionsLocked({
       continue;
     }
     uploadable.push(candidate);
-  }
-
-  if (!config.configured) {
-    return {
-      synced: false,
-      configured: false,
-      conversionType,
-      period: range,
-      config,
-      candidates: candidates.length,
-      uploadable: uploadable.length,
-      skipped,
-      error: `Data Manager is missing required config: ${config.missing.join(', ')}`,
-    };
   }
 
   if (!uploadable.length) {

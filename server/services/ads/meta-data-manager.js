@@ -197,33 +197,29 @@ async function sendableEventIds(conversionType, candidates, force) {
 // The candidates' event ids already sent. new_customer is one per customer,
 // ever, and a customer merge repoints every customer_id column (these rows
 // too) to the surviving customer, whose own event id is new: a sent row under
-// the same customer counts, so a merge never sends the acquisition again. A
-// sent row under the same winning lead counts too: a merge that commits after a
-// run collected the customer leaves that run's row under the retired id, and a
-// lead id never changes.
+// the same customer counts, so a merge never sends the acquisition again. So
+// does a sent row whose lead now belongs to the customer: a merge that commits
+// after a run collected the customer leaves that run's row under the retired
+// id, and the survivor's first win may be another lead.
 async function existingSent(conversionType, candidates) {
   if (!candidates.length) return new Set();
-  const idsOf = (field) => (conversionType === 'new_customer'
-    ? [...new Set(candidates.map((c) => c[field]).filter(Boolean).map(String))]
-    : []);
-  const customerIds = idsOf('customerId');
-  const leadIds = idsOf('leadId');
-  const rows = await db('meta_conversion_uploads')
-    .where({ conversion_type: conversionType, status: SENT })
+  const customerIds = conversionType === 'new_customer'
+    ? [...new Set(candidates.map((c) => c.customerId).filter(Boolean).map(String))]
+    : [];
+  const rows = await db('meta_conversion_uploads as u')
+    .leftJoin('leads as ul', 'ul.id', 'u.lead_id')
+    .where({ 'u.conversion_type': conversionType, 'u.status': SENT })
     .where((q) => {
-      q.whereIn('event_id', candidates.map((c) => c.transactionId));
-      if (customerIds.length) q.orWhereIn('customer_id', customerIds);
-      if (leadIds.length) q.orWhereIn('lead_id', leadIds);
+      q.whereIn('u.event_id', candidates.map((c) => c.transactionId));
+      if (customerIds.length) q.orWhereIn('u.customer_id', customerIds).orWhereIn('ul.customer_id', customerIds);
     })
-    .select('event_id', 'customer_id', 'lead_id');
+    .select('u.event_id', 'u.customer_id', 'ul.customer_id as lead_customer_id');
   const sentEvents = new Set(rows.map((r) => r.event_id));
-  const sentBy = (ids, column) => new Set(ids.length ? rows.filter((r) => r[column]).map((r) => String(r[column])) : []);
-  const sentCustomers = sentBy(customerIds, 'customer_id');
-  const sentLeads = sentBy(leadIds, 'lead_id');
+  const sentCustomers = new Set(customerIds.length
+    ? rows.flatMap((r) => [r.customer_id, r.lead_customer_id]).filter(Boolean).map(String)
+    : []);
   return new Set(candidates
-    .filter((c) => sentEvents.has(c.transactionId)
-      || (c.customerId && sentCustomers.has(String(c.customerId)))
-      || (c.leadId && sentLeads.has(String(c.leadId))))
+    .filter((c) => sentEvents.has(c.transactionId) || (c.customerId && sentCustomers.has(String(c.customerId))))
     .map((c) => c.transactionId));
 }
 
@@ -340,6 +336,11 @@ async function buildReadiness({ periodDays = 7, limit = 50 } = {}) {
   const mode = resolveMode(false);
   const conversions = {};
   for (const conversionType of Object.keys(EVENT_NAMES)) {
+    // A type its kill switch turned off is reported off and not collected.
+    if (!conversionTypeEnabled(conversionType)) {
+      conversions[conversionType] = { eventName: EVENT_NAMES[conversionType], enabled: false, reason: 'disabled' };
+      continue;
+    }
     try {
       const candidates = await collectCandidates(conversionType, { ...range, limit });
       const counts = { total: candidates.length, eligible: 0, missingMatchKeys: 0, missingConversionValue: 0, consentSuppressed: 0, internalTest: 0 };

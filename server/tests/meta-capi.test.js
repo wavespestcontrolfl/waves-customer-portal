@@ -8,6 +8,7 @@ const mockDb = jest.fn(() => {
   const b = {};
   b.where = jest.fn(() => b);
   b.whereIn = jest.fn(() => b);
+  b.leftJoin = jest.fn(() => b);
   b.select = jest.fn(() => Promise.resolve(sentRows));
   b.first = jest.fn(() => Promise.resolve(priorRow));
   b.insert = jest.fn((row) => {
@@ -295,6 +296,14 @@ describe('test records, junk leads and the NewCustomer event (owner 2026-11-19)'
     const r = await MetaCapi.uploadConversions({ conversionType: 'new_customer' });
     expect(r).toMatchObject({ configured: true, skipped: true, reason: 'disabled' });
     expect(mockCollect).not.toHaveBeenCalled();
+  });
+
+  test('readiness with the switch off reports NewCustomer as off and does not collect it', async () => {
+    process.env.META_CAPI_NEW_CUSTOMER_ENABLED = 'false';
+    mockCollect.mockResolvedValue([]);
+    const r = await MetaCapi.buildReadiness();
+    expect(r.conversions.new_customer).toEqual({ eventName: 'NewCustomer', enabled: false, reason: 'disabled' });
+    expect(mockCollect.mock.calls.map((c) => c[0])).toEqual(['qualified_lead', 'completed_job_revenue']);
   });
 
   test('upload skips test records and reports the reason; real ones go out as NewCustomer', async () => {

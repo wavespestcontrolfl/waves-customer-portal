@@ -4,6 +4,7 @@ jest.mock('../models/db', () => {
   return db;
 });
 
+jest.mock('../utils/cron-lock', () => ({ runExclusive: (_n, fn) => fn() }));
 jest.mock('../services/logger', () => ({
   error: jest.fn(),
   warn: jest.fn(),
@@ -911,6 +912,16 @@ describe('test records, junk leads and the new_customer conversion (owner 2026-1
       expect(config.configured).toBe(false);
       expect(config.missing).toContain('GOOGLE_ADS_DM_NEW_CUSTOMER_CONVERSION_ACTION_ID');
       expect(destinationFor('new_customer')).toBeNull();
+    });
+
+    test('an upload with the action id unset returns before collecting anything', async () => {
+      dbMock.mockClear();
+      mockLoadSuppression.mockClear();
+      const r = await DataManager.uploadConversions({ conversionType: 'new_customer', validateOnly: false });
+      expect(r).toMatchObject({ synced: false, configured: false, conversionType: 'new_customer' });
+      expect(r.error).toContain('GOOGLE_ADS_DM_NEW_CUSTOMER_CONVERSION_ACTION_ID');
+      expect(dbMock).not.toHaveBeenCalled();
+      expect(mockLoadSuppression).not.toHaveBeenCalled();
     });
 
     test('action-id env set: a destination exists', () => {

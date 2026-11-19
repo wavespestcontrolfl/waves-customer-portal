@@ -328,7 +328,7 @@ jest.setTimeout(30000);
     expect((await existingSent('completed_job_revenue', [nextJob])).size).toBe(0);
   });
 
-  test('a merge that commits mid-run never sends the acquisition again: the row left under the retired id counts by its lead, on both platforms', async () => {
+  test("a merge that commits mid-run never sends the acquisition again: the row left under the retired id counts through its lead's customer, on both platforms", async () => {
     const { existingSent } = require('../services/ads/meta-data-manager')._private;
     const retired = await customer({ member_since: null });
     const kept = await customer({ member_since: null, email: 'pat.two@example.com' });
@@ -346,11 +346,19 @@ jest.setTimeout(30000);
       conversion_type: 'new_customer', event_id: sentAs, event_name: 'Purchase', status: 'sent', customer_id: retired.id, lead_id: won.id,
     });
 
-    const candidates = await collect();
     const keptId = `waves_new_customer:${kept.id}`;
-    expect(candidates.map((x) => x.transactionId)).toEqual([keptId]);
-    expect([...await _private.uploadableTransactionIds('new_customer', candidates, false)]).toEqual([]);
-    expect([...await existingSent('new_customer', candidates)]).toEqual([keptId]);
+    const blocked = async () => {
+      const candidates = await collect();
+      expect(candidates.map((x) => x.transactionId)).toEqual([keptId]);
+      expect([...await _private.uploadableTransactionIds('new_customer', candidates, false)]).toEqual([]);
+      expect([...await existingSent('new_customer', candidates)]).toEqual([keptId]);
+      return candidates;
+    };
+    await blocked();
+    // The survivor's own, earlier win is its first win now: another lead, still blocked.
+    const earlier = await lead(kept, { email: 'pat.two@example.com', converted_at: new Date('2026-11-11T15:00:00Z') });
+    const candidates = await blocked();
+    expect(candidates[0].leadId).toBe(earlier.id);
     // Only a row that skips the upload counts: after a failed send it goes again.
     await database('google_ads_conversion_uploads').update({ status: 'failed' });
     await database('meta_conversion_uploads').update({ status: 'failed' });
