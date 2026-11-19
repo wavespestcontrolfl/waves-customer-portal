@@ -49,15 +49,15 @@ function validateChecks(checks, document, title, sources) {
 // are removed for the figure test only: an attributed quote is detected on the passage as written.
 const DOCUMENT_CODE_RE = /\b(?:EENY|ENY|ENH|LH|SL|IN|CIR)-?\d+[A-Z]?\b/g;
 const FIGURE_RE = /(?:\$|%|\b\d+(?:[.,]\d+)?\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b)/i;
-// A link's destination is not read as prose ("[guide](/pest-control/2026-roach-guide/)"); its text is.
+// A Markdown link's destination is not read as prose ("[guide](/pest-control/2026-roach-guide/)"); its
+// text is. A bare URL stays in: it is visible text.
 const LINK_DESTINATION_RE = /\]\([^)\s]*(?:\([^)\s]*\)[^)\s]*)*(?:\s+"[^"]*")?\)/g;
-const BARE_URL_RE = /https?:\/\/\S+/g;
+const hasVisibleFigure = (text) => FIGURE_RE.test(String(text).replace(LINK_DESTINATION_RE, '] ').replace(DOCUMENT_CODE_RE, ' '));
 function deterministicClaimKind(passage) {
   const text = String(passage || '');
   const hasQuote = /["“][^"”]{3,}["”]/.test(text);
   if (hasQuote && /\b(?:said|says|stated|according to|wrote|called|described)\b/i.test(text)) return 'expert_quote';
-  const prose = text.replace(LINK_DESTINATION_RE, '] ').replace(BARE_URL_RE, ' ').replace(DOCUMENT_CODE_RE, ' ');
-  if (FIGURE_RE.test(prose)) return 'quantitative';
+  if (hasVisibleFigure(text)) return 'quantitative';
   return null;
 }
 
@@ -67,16 +67,16 @@ function exactQuotedPhrases(passage) {
   return phrases;
 }
 
-// An instruction whose only number counts places the reader checks ("Check 2 traps by the door"): the
+// An instruction whose only number counts places the reader checks ("Check 2 containers by the door"): the
 // number sits right after the verb and counts one of a closed list of places, never a time, a size, an
 // amount or a package ("Look for larvae that hatch in 3 days", "Remove 2 ounces of bait", "2 bags"), and
 // no other figure follows in the sentence. A missed form costs a repair, not the review: see
 // holdUnsourcedFigures.
-const COUNT_INSTRUCTION_RE = /^(?:check|empty|inspect|look at|remove|walk)\s+(?:(?:the|your|all|each|at least|about)\s+)?\d+\s+(?:traps?|stations?|spots?|areas?|corners?|rooms?|doors?|windows?|sides?|pots?|saucers?|drains?|vents?|plants?|gutters?)\b/i;
+const COUNT_INSTRUCTION_RE = /^(?:check|empty|inspect|look at|remove|walk)\s+(?:(?:the|your|all|each|at least|about)\s+)?\d+\s+(?:containers?|traps?|stations?|spots?|areas?|corners?|rooms?|doors?|windows?|sides?|pots?|saucers?|drains?|vents?|plants?|gutters?)\b/i;
 function isTrivialNumericInstruction(passage) {
   const text = String(passage || '').trim();
   const match = text.match(COUNT_INSTRUCTION_RE);
-  return Boolean(match) && !FIGURE_RE.test(text.slice(match[0].length).replace(DOCUMENT_CODE_RE, ' '));
+  return Boolean(match) && !hasVisibleFigure(text.slice(match[0].length));
 }
 
 // A non_external passage may carry a number only where the number makes no outside claim: a trivial

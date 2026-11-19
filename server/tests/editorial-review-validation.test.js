@@ -33,7 +33,7 @@ describe('editorial review coverage validation', () => {
   });
 
   test('allows numeric instructions to be classified as non-external', () => {
-    const passage = 'Check 2 traps near your door.';
+    const passage = 'Check 2 containers near your door.';
     expect(validateClaim(passage, { verdict: 'non_external', claimKind: 'non_external', sourceSuitability: 'not_applicable', sourceIndex: -1, sourceQuote: '' })).toBeNull();
   });
 
@@ -62,6 +62,7 @@ describe('editorial review coverage validation', () => {
   test.each([
     'Read the [cockroach guide](/pest-control/cockroach-types-2026/) next.',
     'The [UF/IFAS page](https://edis.ifas.ufl.edu/publication/IN917 "Woods roach") has photos.',
+    'Check 2 traps, as the [trap guide](/pest-control/trap-guide-2026/) shows.',
   ])('does not read digits in a link destination as a figure: %s', (passage) => {
     expect(validateClaim(passage, NON_EXTERNAL)).toBeNull();
   });
@@ -85,6 +86,7 @@ describe('editorial review coverage validation', () => {
     'Look for larvae that hatch in 3 days.',
     'Remove 2 ounces of bait from each station.',
     'Remove 2 bags of mulch from the bed.',
+    'See https://example.org/guide,40% of homes have roaches.',
     'Check 3 days later for new droppings.',
     'Check 2 traps, since 40% of roaches hide there.',
   ])('still rejects a figure outside those cases as non-external: %s', (passage) => {
