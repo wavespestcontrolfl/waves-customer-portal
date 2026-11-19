@@ -1,9 +1,15 @@
 /**
- * Text-quote bells dedupe on the phone's thread key for 7 days, OPEN bells
- * only. Before, a done bell inside the window still matched: a new ask with
- * no draft "stood" on it (both sides draft-less), so the ask raised nothing.
- * In production 3 asks between 11-10 and 11-18 got no bell this way, each
- * behind a bell the 72-hour quiet fall-off had closed.
+ * Text-quote bells dedupe on the phone's thread key for 7 days. A NEW ASK
+ * (the placeholder startSmsThreadDraft raises, `newAsk: true`) matches OPEN
+ * bells only. Before, a done bell inside the window still matched: a new ask
+ * with no draft "stood" on it (both sides draft-less), so the ask raised
+ * nothing. In production 3 asks between 11-10 and 11-18 got no bell this way,
+ * each behind a bell the 72-hour quiet fall-off had closed.
+ *
+ * A run's OUTCOME (no `newAsk`) still matches its own placeholder, open or
+ * done: a person who closed the placeholder while the composer ran must not
+ * get a second "send it" bell for the same ask, and a real draft still
+ * reopens it in place, as before.
  *
  * Drives the real notify() over a fake notifications table that applies the
  * same filters the query asks for (thread key, the 7-day window, done_at).
@@ -57,18 +63,18 @@ jest.mock('../services/notification-service', () => ({
 const { notify } = require('../services/estimator-engine/index');
 
 const KEY = 'sms:9415550123';
-const HOUR = 3600e3;
+const MINUTE = 60e3;
 
-function bell(id, { hoursAgo, done = false, estimateId = null }) {
+function bell(id, { minutesAgo, done = false, estimateId = null }) {
   return {
     id,
-    created_at: new Date(Date.now() - hoursAgo * HOUR),
-    done_at: done ? new Date(Date.now() - HOUR) : null,
+    created_at: new Date(Date.now() - minutesAgo * MINUTE),
+    done_at: done ? new Date() : null,
     metadata: { smsThreadKey: KEY, estimator_engine: true, quote_promised: true, lane: 'red', estimateId },
   };
 }
 
-// The placeholder startSmsThreadDraft writes for every ask, before the draft runs.
+// The placeholder startSmsThreadDraft raises for each fresh ask, before the draft runs.
 const askPlaceholder = () => notify({
   call: null,
   context: null,
@@ -78,6 +84,7 @@ const askPlaceholder = () => notify({
   title: 'Quote asked by text — send it',
   body: 'Texter …0123 asked for a quote by text. The estimator engine is drafting now.',
   link: '/admin/communications?message=SM-test-2',
+  newAsk: true,
 });
 
 beforeEach(() => {
@@ -86,9 +93,9 @@ beforeEach(() => {
   mockUpdates.length = 0;
 });
 
-describe('notify() text-thread dedupe matches open bells only', () => {
-  test('a new ask after the number\'s bell was closed rings a fresh bell (it used to stand on the closed one)', async () => {
-    mockRows.push(bell('bell-closed', { hoursAgo: 100, done: true }));
+describe('a new ask matches the number\'s OPEN bell only', () => {
+  test('after the number\'s bell was closed, a new ask rings a fresh bell (it used to stand on the closed one)', async () => {
+    mockRows.push(bell('bell-closed', { minutesAgo: 100 * 60, done: true }));
 
     await expect(askPlaceholder()).resolves.toBe(true);
 
@@ -98,24 +105,12 @@ describe('notify() text-thread dedupe matches open bells only', () => {
     expect(title).toBe('Quote asked by text — send it');
     expect(opts.metadata.smsThreadKey).toBe(KEY);
     expect(opts.link).toBe('/admin/communications?message=SM-test-2');
+    // The closed bell is left alone.
     expect(mockUpdates).toHaveLength(0);
   });
 
-  test('a draft for that ask also gets a fresh bell; the closed bell stays closed', async () => {
-    mockRows.push(bell('bell-closed', { hoursAgo: 100, done: true }));
-
-    await notify({
-      call: null, context: null, lane: 'yellow', quotePromised: true, threadKey: KEY,
-      estimateId: 'est-7', title: 'AI estimate draft needs review — $49/mo', body: 'Drafted from the text thread.',
-    });
-
-    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
-    expect(mockNotifyAdmin.mock.calls[0][3].metadata.estimateId).toBe('est-7');
-    expect(mockUpdates).toHaveLength(0);
-  });
-
-  test('a new ask while the bell is still open stands on it: no second ring, no rewrite', async () => {
-    mockRows.push(bell('bell-open', { hoursAgo: 20 }));
+  test('while the bell is still open, a new ask stands on it: no second ring, no rewrite', async () => {
+    mockRows.push(bell('bell-open', { minutesAgo: 20 * 60 }));
 
     await expect(askPlaceholder()).resolves.toBe(true);
 
@@ -123,9 +118,31 @@ describe('notify() text-thread dedupe matches open bells only', () => {
     expect(mockUpdates).toHaveLength(0);
   });
 
-  test('a draft upgrades the open placeholder in place, even when a newer closed bell exists', async () => {
-    mockRows.push(bell('bell-open', { hoursAgo: 30 }));
-    mockRows.push(bell('bell-closed-newer', { hoursAgo: 10, done: true }));
+  test('a bell older than the 7-day window is not matched, open or not', async () => {
+    mockRows.push(bell('bell-old-open', { minutesAgo: 8 * 24 * 60 }));
+
+    await askPlaceholder();
+
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(mockUpdates).toHaveLength(0);
+  });
+});
+
+describe('a run\'s outcome still finds its own placeholder, open or done', () => {
+  test('a no-draft outcome after a person closed the placeholder stands: no second "send it" bell', async () => {
+    mockRows.push(bell('bell-placeholder', { minutesAgo: 0.5, done: true }));
+
+    await expect(notify({
+      call: null, context: null, lane: 'red', quotePromised: true, threadKey: KEY,
+      title: 'Quote asked by text — send it', body: 'Texter …0123: quote requested over SMS, no auto-draft (thin thread). Reply with pricing manually.',
+    })).resolves.toBe(true);
+
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockUpdates).toHaveLength(0);
+  });
+
+  test('a draft outcome reopens its closed placeholder in place, with the draft (unchanged)', async () => {
+    mockRows.push(bell('bell-placeholder', { minutesAgo: 0.5, done: true }));
 
     await notify({
       call: null, context: null, lane: 'green', quotePromised: true, threadKey: KEY,
@@ -134,16 +151,20 @@ describe('notify() text-thread dedupe matches open bells only', () => {
 
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
     expect(mockUpdates).toHaveLength(1);
-    expect(mockUpdates[0].ids).toEqual(['bell-open']);
+    expect(mockUpdates[0].ids).toEqual(['bell-placeholder']);
+    expect(mockUpdates[0].patch.done_at).toBeNull();
     expect(JSON.parse(mockUpdates[0].patch.metadata).estimateId).toBe('est-8');
   });
 
-  test('a bell older than the 7-day window is not matched, open or not', async () => {
-    mockRows.push(bell('bell-old-open', { hoursAgo: 8 * 24 }));
+  test('an outcome for an open placeholder upgrades it in place', async () => {
+    mockRows.push(bell('bell-placeholder', { minutesAgo: 0.5 }));
 
-    await askPlaceholder();
+    await notify({
+      call: null, context: null, lane: 'yellow', quotePromised: true, threadKey: KEY,
+      estimateId: 'est-9', title: 'AI estimate draft needs review — $49/mo', body: 'Drafted from the text thread.',
+    });
 
-    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
-    expect(mockUpdates).toHaveLength(0);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockUpdates.map((u) => u.ids)).toEqual([['bell-placeholder']]);
   });
 });

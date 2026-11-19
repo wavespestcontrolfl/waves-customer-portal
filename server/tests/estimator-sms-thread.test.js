@@ -171,6 +171,9 @@ describe('startSmsThreadDraft', () => {
       threadKey: 'sms:9415550123',
       title: 'Quote asked by text — send it',
       quotePromised: true,
+      // A fresh ask merges into an OPEN bell of the number only: an ask after
+      // that bell was closed raises a new one.
+      newAsk: true,
     }));
     const draft = await result.draftPromise;
     expect(draft.created).toBe(true);
@@ -300,6 +303,10 @@ describe('startSmsThreadDraft', () => {
       lane: 'red',
       body: expect.stringContaining('ambiguous_phone'),
     }));
+    // An outcome is not a new ask: it still finds its own placeholder open or
+    // done, so a person who closed it during the run gets no second bell.
+    const outcome = mockNotify.mock.calls.map(([args]) => args).find((args) => /ambiguous_phone/.test(args.body));
+    expect(outcome.newAsk).toBeUndefined();
     expect(mockRunDraftPipeline).not.toHaveBeenCalled();
   });
 
@@ -313,6 +320,17 @@ describe('startSmsThreadDraft', () => {
     expect(mockDispatch).not.toHaveBeenCalled();
     expect(mockNotify).not.toHaveBeenCalled();
     expect(mockRunDraftPipeline).not.toHaveBeenCalled();
+  });
+
+  test('a bell a person already closed still holds the cooldown: no bell, no paid call', async () => {
+    // The cooldown runs BEFORE the paid quote-intent check, so it cannot tell
+    // a new ask from "thanks": raising a bell here would ring for any text.
+    // Within these 10 minutes the text's own inbound handling still runs.
+    mockRecentBell = { id: 'bell-1', done_at: new Date() };
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'quote for pest control please' });
+    expect(result.skipped).toBe('cooldown');
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockNotify).not.toHaveBeenCalled();
   });
 
   test('a failed durable bell reports not-started — callers keep their fallback', async () => {

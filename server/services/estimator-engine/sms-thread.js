@@ -545,6 +545,9 @@ async function startSmsThreadDraft({
         title: origin.strings.redTitle,
         body: `${sender.label} asked for a quote by text. The estimator engine is drafting now — if no draft notification follows, review the thread and send the estimate manually.`,
         link: sender.link,
+        // A fresh ask: it merges only into an OPEN bell of the number, so an
+        // ask after that bell was closed raises a new one (notify in ./index).
+        newAsk: true,
       });
       if (!belled) {
         result.skipped = 'durable_bell_failed';
