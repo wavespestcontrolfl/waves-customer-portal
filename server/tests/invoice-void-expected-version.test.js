@@ -12,7 +12,11 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   acquireTermiteGateAtEntry: jest.fn(async () => []),
 }));
 jest.mock('../services/estimate-deposits', () => ({ restoreDepositCreditForVoidedInvoice: jest.fn(async () => 0) }));
-jest.mock('../services/pay-combined', () => ({ clearPaymentIntentStamps: jest.fn(async () => undefined) }));
+const mockCombinedOwnerLock = jest.fn(async (_trx, _invoiceId, customerId) => customerId || null);
+jest.mock('../services/pay-combined', () => ({
+  clearPaymentIntentStamps: jest.fn(async () => undefined),
+  lockCombinedCustomerStable: (...args) => mockCombinedOwnerLock(...args),
+}));
 const mockRetrievePi = jest.fn();
 const mockCancelPi = jest.fn();
 const mockFence = jest.fn(async () => undefined);
@@ -32,16 +36,17 @@ const InvoiceService = require('../services/invoice');
 const UPDATED = new Date('2099-01-01T12:00:00.123Z');
 const EXPECTED = { status: 'sent', updatedAt: UPDATED.getTime(), total: 129, creditApplied: 0, paymentIntentId: null };
 
-function chain({ first, returning } = {}) {
+function chain({ first, returning, rows } = {}) {
   const q = { calls: [] };
-  for (const name of ['where', 'whereNot', 'whereIn', 'whereRaw', 'whereNull', 'update', 'forNoKeyUpdate']) {
+  for (const name of ['where', 'whereNot', 'whereIn', 'whereRaw', 'whereNull', 'update', 'orderBy', 'forUpdate', 'forNoKeyUpdate']) {
     q[name] = jest.fn((...args) => { q.calls.push([name, ...args]); return q; });
   }
   q.first = jest.fn(async () => first);
   q.returning = jest.fn(async () => returning || []);
+  q.then = (resolve, reject) => Promise.resolve(rows || (first ? [first] : [])).then(resolve, reject);
   return q;
 }
-const row = (overrides = {}) => ({ id: 'inv-1', status: 'sent', invoice_number: 'WPC-2099-0001', total: '129.00', credit_applied: '0.00', updated_at: UPDATED, stripe_payment_intent_id: null, payment_recorded_at: null, ...overrides });
+const row = (overrides = {}) => ({ id: 'inv-1', customer_id: 'cust-1', status: 'sent', invoice_number: 'WPC-2099-0001', total: '129.00', credit_applied: '0.00', updated_at: UPDATED, stripe_payment_intent_id: null, payment_recorded_at: null, ...overrides });
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -49,9 +54,10 @@ beforeEach(() => {
   db.transaction = jest.fn(async (fn) => fn(db));
 });
 
-function queueVoid({ current = row(), returning = [row({ status: 'void' })], plan, bar = true, locked } = {}) {
+function queueVoid({ current = row(), returning = [row({ status: 'void' })], plan, bar = true, locked, allocationRows } = {}) {
   const update = chain({ returning });
-  const lockedInvoice = chain({ first: locked || current });
+  const lockedRow = locked || current;
+  const lockedInvoice = chain({ first: lockedRow, rows: allocationRows || [lockedRow] });
   db
     .mockReturnValueOnce(chain({ first: current }))
     .mockReturnValueOnce(chain({ first: undefined })) // payments guard
@@ -61,6 +67,7 @@ function queueVoid({ current = row(), returning = [row({ status: 'void' })], pla
   if (bar) db.mockReturnValueOnce(chain({ first: plan }));
   db.mockReturnValueOnce(update); // the void UPDATE
   db
+    .mockReturnValueOnce(chain({ first: undefined })) // rodent setup-obligation probe
     .mockReturnValueOnce(chain({ first: undefined })) // payments guard under the lock
     .mockReturnValueOnce(chain()); // payment_plans cancel
   update.lockedInvoice = lockedInvoice;
@@ -121,17 +128,47 @@ test('an edit between the first read and the lock is caught on the LOCKED row, b
   expect(mockCancelPi).not.toHaveBeenCalled();
 });
 
-test('with `expected` the row is taken FOR NO KEY UPDATE before the Stripe cancel and the cancel runs inside the transaction', async () => {
+test('with `expected` the PI allocation is locked in canonical order before the Stripe cancel', async () => {
   const withPi = row({ stripe_payment_intent_id: 'pi_test_1' });
   const expected = { ...EXPECTED, paymentIntentId: 'pi_test_1', paymentIntentStatus: 'requires_payment_method' };
   mockRetrievePi.mockResolvedValue({ id: 'pi_test_1', status: 'requires_payment_method' });
   mockCancelPi.mockResolvedValue({});
   const update = queueVoid({ current: withPi, returning: [row({ status: 'void', stripe_payment_intent_id: 'pi_test_1' })] });
   await InvoiceService.voidInvoice('inv-1', { expected });
-  expect(update.lockedInvoice.forNoKeyUpdate).toHaveBeenCalledTimes(1);
-  expect(update.lockedInvoice.forNoKeyUpdate.mock.invocationCallOrder[0]).toBeLessThan(mockFence.mock.invocationCallOrder[0]);
+  expect(mockCombinedOwnerLock).toHaveBeenCalledWith(db, 'inv-1', 'cust-1');
+  expect(update.lockedInvoice.orderBy).toHaveBeenCalledWith('id', 'asc');
+  expect(update.lockedInvoice.forUpdate).toHaveBeenCalledTimes(1);
+  expect(update.lockedInvoice.forUpdate.mock.invocationCallOrder[0]).toBeLessThan(mockFence.mock.invocationCallOrder[0]);
   expect(mockFence.mock.invocationCallOrder[0]).toBeLessThan(mockRetrievePi.mock.invocationCallOrder[0]);
   expect(mockRetrievePi.mock.invocationCallOrder[0]).toBeLessThan(mockCancelPi.mock.invocationCallOrder[0]);
+});
+
+test('a shared PI locks target and collectible siblings in ascending id order before provider cancellation', async () => {
+  const withPi = row({ stripe_payment_intent_id: 'pi_shared' });
+  const sibling = row({
+    id: 'inv-0',
+    invoice_number: 'WPC-2099-0000',
+    stripe_payment_intent_id: 'pi_shared',
+  });
+  const expected = { ...EXPECTED, paymentIntentId: 'pi_shared', paymentIntentStatus: 'requires_payment_method' };
+  mockRetrievePi.mockResolvedValue({ id: 'pi_shared', status: 'requires_payment_method' });
+  mockCancelPi.mockResolvedValue({});
+  const update = queueVoid({
+    current: withPi,
+    allocationRows: [sibling, withPi],
+    returning: [row({ status: 'void', stripe_payment_intent_id: 'pi_shared' })],
+  });
+
+  await InvoiceService.voidInvoice('inv-1', { expected });
+
+  expect(mockCombinedOwnerLock).toHaveBeenCalledWith(db, 'inv-1', 'cust-1');
+  expect(update.lockedInvoice.whereRaw).toHaveBeenCalledWith(
+    'id = ? OR (stripe_payment_intent_id = ? AND status NOT IN (?, ?, ?))',
+    ['inv-1', 'pi_shared', 'paid', 'processing', 'prepaid'],
+  );
+  expect(update.lockedInvoice.orderBy).toHaveBeenCalledWith('id', 'asc');
+  expect(update.lockedInvoice.forUpdate.mock.invocationCallOrder[0])
+    .toBeLessThan(mockCancelPi.mock.invocationCallOrder[0]);
 });
 
 test('a session that moved to requires_action since the card is refused, never cancelled', async () => {
@@ -163,8 +200,8 @@ test('without `expected` the page also locks and fences before touching Stripe',
   mockCancelPi.mockResolvedValue({});
   const update = queueVoid({ current: withPi, bar: false, returning: [row({ status: 'void', stripe_payment_intent_id: 'pi_test_1' })] });
   await InvoiceService.voidInvoice('inv-1');
-  expect(update.lockedInvoice.forNoKeyUpdate).toHaveBeenCalledTimes(1);
-  expect(update.lockedInvoice.forNoKeyUpdate.mock.invocationCallOrder[0]).toBeLessThan(mockFence.mock.invocationCallOrder[0]);
+  expect(update.lockedInvoice.forUpdate).toHaveBeenCalledTimes(1);
+  expect(update.lockedInvoice.forUpdate.mock.invocationCallOrder[0]).toBeLessThan(mockFence.mock.invocationCallOrder[0]);
   expect(mockFence).toHaveBeenCalledWith('inv-1', db, { checkout: true });
   expect(mockFence.mock.invocationCallOrder[0]).toBeLessThan(mockRetrievePi.mock.invocationCallOrder[0]);
   expect(mockRetrievePi.mock.invocationCallOrder[0]).toBeLessThan(mockCancelPi.mock.invocationCallOrder[0]);
@@ -253,7 +290,7 @@ describe('the fences run before the Stripe cancel (a cancel cannot roll back)', 
       statusCode: 409,
       isOperational: true,
     });
-    expect(update.lockedInvoice.forNoKeyUpdate.mock.invocationCallOrder[0]).toBeLessThan(mockFence.mock.invocationCallOrder[0]);
+    expect(update.lockedInvoice.forUpdate.mock.invocationCallOrder[0]).toBeLessThan(mockFence.mock.invocationCallOrder[0]);
     expect(mockRetrievePi).not.toHaveBeenCalled();
     expect(mockCancelPi).not.toHaveBeenCalled();
     expect(update.update).not.toHaveBeenCalled();
