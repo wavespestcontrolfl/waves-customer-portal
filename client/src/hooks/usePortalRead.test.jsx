@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import usePortalRead, { PortalReadProvider, usePortalRefresh } from './usePortalRead';
+import usePortalRead, { PortalReadProvider, READ_TIMEOUT_MS, usePortalRefresh } from './usePortalRead';
 import { PortalRefreshArea } from '../components/portal/PortalRefresh';
 
 const native = vi.hoisted(() => ({ enabled: false, callback: null, remove: vi.fn().mockResolvedValue(undefined) }));
@@ -235,6 +235,20 @@ describe('customer portal reads', () => {
     expect(screen.queryByText('Visit A')).not.toBeInTheDocument();
   });
 
+  it('clears a saved result when the loader throws an access denial synchronously', async () => {
+    const denied = Object.assign(new Error('Denied'), { status: 403 });
+    const load = vi.fn()
+      .mockResolvedValueOnce({ title: 'Visit A' })
+      .mockImplementationOnce(() => { throw denied; });
+    render(<App load={load} />);
+    await screen.findByText('Visit A');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry read' }));
+
+    await waitFor(() => expect(screen.queryByText('Visit A')).not.toBeInTheDocument());
+    expect(screen.getByTestId('state')).toHaveTextContent('error');
+  });
+
   it.each([401, 403])('evicts a saved result when an in-flight denial settles after the reader unmounts (%s)', async status => {
     const denied = deferred();
     const load = vi.fn()
@@ -247,6 +261,29 @@ describe('customer portal reads', () => {
 
     rerender(<App load={load} show={false} />);
     await act(async () => denied.reject(Object.assign(new Error('Denied'), { status })));
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    rerender(<App load={load} />);
+
+    expect(screen.queryByText('Visit A')).not.toBeInTheDocument();
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([401, 403])('evicts a saved result when access denial arrives after the read timeout (%s)', async status => {
+    const denied = deferred();
+    const load = vi.fn()
+      .mockResolvedValueOnce({ title: 'Visit A' })
+      .mockReturnValueOnce(denied.promise);
+    const { rerender } = render(<App load={load} />);
+    await screen.findByText('Visit A');
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry read' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS); });
+    expect(screen.getByText('Visit A')).toBeInTheDocument();
+
+    await act(async () => denied.reject(Object.assign(new Error('Denied'), { status })));
+    expect(screen.queryByText('Visit A')).not.toBeInTheDocument();
+    rerender(<App load={load} show={false} />);
     Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
     rerender(<App load={load} />);
 

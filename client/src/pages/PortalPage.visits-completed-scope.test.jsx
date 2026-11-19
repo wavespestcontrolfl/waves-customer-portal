@@ -210,6 +210,38 @@ describe('Completed visits by property', () => {
     expect(refreshProperties).not.toHaveBeenCalled();
   });
 
+  it('evicts the original scoped cache when a wrong pagination echo arrives after Completed unmounts', async () => {
+    let resolvePagination;
+    const refreshProperties = vi.fn();
+    api.getServices
+      .mockResolvedValueOnce({
+        historyProperty: 'pa', historyCustomerId: customer.id, total: 2,
+        services: [{ id: 'old', status: 'completed', date: '2026-01-10', type: 'Pest', propertyAddress: 'Cached echoed house' }],
+      })
+      .mockImplementationOnce(() => new Promise(resolve => { resolvePagination = resolve; }));
+    render(<RemountableCompleted visitsProps={{ onSavedScopeUnavailable: refreshProperties }} />);
+    expect(await screen.findByText('Cached echoed house')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load More Visits' }));
+    await waitFor(() => expect(resolvePagination).toEqual(expect.any(Function)));
+    fireEvent.click(screen.getByRole('button', { name: 'Close completed visits' }));
+    await act(async () => {
+      resolvePagination({
+        historyProperty: 'pb', historyCustomerId: customer.id, total: 1,
+        services: [{ id: 'wrong', status: 'completed', date: '2026-01-09', type: 'Lawn', propertyAddress: 'Wrong echoed house' }],
+      });
+    });
+
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    fireEvent.click(screen.getByRole('button', { name: 'Reopen completed visits' }));
+
+    expect(screen.queryByText('Cached echoed house')).not.toBeInTheDocument();
+    expect(screen.queryByText('Wrong echoed house')).not.toBeInTheDocument();
+    expect(api.getServices).toHaveBeenCalledTimes(2);
+    expect(refreshProperties).not.toHaveBeenCalled();
+  });
+
   it('rearms automatic picker recovery after wrong echo, matching verification, then another wrong echo', async () => {
     const refreshProperties = vi.fn();
     api.getServices

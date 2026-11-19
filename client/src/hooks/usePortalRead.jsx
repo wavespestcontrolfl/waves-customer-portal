@@ -103,6 +103,10 @@ export function usePortalRefresh() {
   return useContext(PortalReadContext);
 }
 
+function portalReadAuthorizationDenied(error) {
+  return error?.status === 401 || error?.status === 403 || error?.sessionExpired;
+}
+
 // Used only for the portal's read-only visit/document data. Cached results never
 // stand in for auth, permission checks, writes, or success acknowledgments.
 export default function usePortalRead(key, load) {
@@ -138,11 +142,43 @@ export default function usePortalRead(key, load) {
       error: previous.data === undefined ? '' : previous.error,
     }));
     let timer;
+    let timedOut = false;
+    const clearDeniedRead = (error) => {
+      const denied = portalReadAuthorizationDenied(error);
+      if (denied) cache?.clear();
+      return denied;
+    };
     try {
       if (cache && navigator.onLine === false) throw new Error('You are offline. Reconnect to update this information.');
+      const loadPromise = Promise.resolve(loadRef.current({ isCurrent: () => sequence.current === attempt }));
+      // Promise.race stops forwarding once the timeout wins. Observe the
+      // underlying request as well so a later explicit denial still purges
+      // shared customer data before an offline remount can recover it.
+      void loadPromise.catch(error => {
+        // Rejections before the timeout continue through the ordinary catch
+        // below. This observer owns only a rejection that arrives after the
+        // race has already settled, avoiding duplicate state transitions.
+        if (!timedOut || !clearDeniedRead(error)) return;
+        if (sequence.current === attempt) {
+          setState(previous => ({
+            ...previous,
+            data: undefined,
+            updatedAt: null,
+            loading: false,
+            pending: false,
+            verified: false,
+            error: error?.message || 'Could not update this information.',
+          }));
+        }
+      });
       const data = await Promise.race([
-        loadRef.current({ isCurrent: () => sequence.current === attempt }),
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('The connection is taking too long. Please try again.')), READ_TIMEOUT_MS); }),
+        loadPromise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            reject(new Error('The connection is taking too long. Please try again.'));
+          }, READ_TIMEOUT_MS);
+        }),
       ]);
       if (sequence.current !== attempt) return;
       const next = { data, updatedAt: Date.now(), loading: false, pending: false, verified: navigator.onLine !== false, error: '' };
@@ -150,8 +186,7 @@ export default function usePortalRead(key, load) {
       setState(next);
     } catch (error) {
       // An explicit access denial must not leave cached customer details behind.
-      const denied = error?.status === 401 || error?.status === 403 || error?.sessionExpired;
-      if (denied) cache?.clear();
+      const denied = clearDeniedRead(error);
       // Auth/session denial is provider-wide and remains authoritative even
       // when this reader unmounted while the request was in flight. Local UI
       // state is still guarded by the sequence below, but the shared cache

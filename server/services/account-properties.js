@@ -136,6 +136,7 @@ async function accountSavedProperties(req, knex = db) {
     ? [req.customer]
     : await accountProfiles(req, knex);
   const entries = [];
+  let selectedProfileRetired = false;
   for (const profile of profiles) {
     // Same lazy primary the admin list makes (ensurePrimaryProperty): a
     // profile created by a path that skipped the property table still lists
@@ -159,11 +160,13 @@ async function accountSavedProperties(req, knex = db) {
       // would resolve to a zero-property scope showing customer-wide visits.
       const everHadRow = await knex('customer_properties').where({ customer_id: profile.id }).first('id');
       if (!everHadRow) entries.push(savedPropertyEntry(profile, null));
+      else if (profile.active === true && String(profile.id) === String(req.customerId)) selectedProfileRetired = true;
       continue;
     }
     for (const row of rows) entries.push(savedPropertyEntry(profile, row));
   }
   const selected = selectedEntryFor(req, entries);
+  if (selectedProfileRetired) selected.closed = true;
   // C4 cancelled read-only session: exactly ONE entry — the current selection
   // (or the primary). /auth/select-property is not a cancelled read, so a
   // picker would only offer switches that 401; and resolveSessionScope leaves

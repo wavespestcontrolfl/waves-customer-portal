@@ -3752,6 +3752,30 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
 // =========================================================================
 // SERVICES TAB
 // =========================================================================
+function historyAuthorizationDenied(error) {
+  return error?.status === 401 || error?.status === 403 || error?.sessionExpired;
+}
+
+function historyPropertyUnavailable(error, historyProperty) {
+  return Boolean(historyProperty) && error?.status === 403 && error?.code === 'PROPERTY_HISTORY_UNAVAILABLE';
+}
+
+function historyScopeMismatch(result, historyProperty, customerId) {
+  return Boolean(historyProperty)
+    && (result?.historyProperty !== historyProperty || result?.historyCustomerId !== customerId);
+}
+
+function settleHistoryScopeConflict({
+  current, originalCacheEntryIsCurrent, evictOriginalCache,
+  invalidateCurrentScope, requestedScopeKey, message,
+}) {
+  if (!current) {
+    if (originalCacheEntryIsCurrent()) evictOriginalCache();
+    return;
+  }
+  invalidateCurrentScope(requestedScopeKey, message);
+}
+
 function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUnavailable = null }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
@@ -3798,10 +3822,14 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
     let result;
     try {
       result = await api.getServices(historyProperty ? { ...pagination, historyProperty } : pagination);
+      if (historyScopeMismatch(result, historyProperty, customerId)) {
+        const mismatch = new Error('Your selected property changed. Reopen Visits to see its history.');
+        mismatch.status = 409;
+        throw mismatch;
+      }
     } catch (error) {
-      const authorizationDenied = error?.status === 401 || error?.status === 403 || error?.sessionExpired;
-      const propertyUnavailable = historyProperty && error?.status === 403 && error?.code === 'PROPERTY_HISTORY_UNAVAILABLE';
-      const propertyConflict = historyProperty && error?.status === 409;
+      const authorizationDenied = historyAuthorizationDenied(error);
+      const propertyConflict = Boolean(historyProperty) && error?.status === 409;
       // Pagination bypasses usePortalRead.refresh. A denial that arrives after
       // Completed unmounts must still evict the provider cache, or an offline
       // remount can resurrect the previously authorized rows and actions.
@@ -3810,25 +3838,22 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
       // A scope conflict invalidates the cache entry this request started
       // from even after unmount. Preserve a replacement written by a newer
       // verified request for the same key.
-      if (propertyConflict && !current && originalCacheEntryIsCurrent()) {
-        evictOriginalCache();
-      }
-      if (current && (authorizationDenied || propertyConflict)) {
+      if (propertyConflict) {
+        settleHistoryScopeConflict({
+          current, originalCacheEntryIsCurrent, evictOriginalCache,
+          invalidateCurrentScope: invalidateHistoryScopeRef.current,
+          requestedScopeKey, message: error?.message,
+        });
+      } else if (current && authorizationDenied) {
         invalidateHistoryScopeRef.current(requestedScopeKey, error?.message, {
-          clearAll: authorizationDenied,
-          refreshPicker: propertyUnavailable || propertyConflict,
+          clearAll: true,
+          refreshPicker: historyPropertyUnavailable(error, historyProperty),
         });
       }
       throw error;
     }
     if (!requestIsCurrent()) {
       throw new Error('This service-history request is no longer current.');
-    }
-    if (historyProperty && (result.historyProperty !== historyProperty || result.historyCustomerId !== customerId)) {
-      const mismatch = new Error('Your selected property changed. Reopen Visits to see its history.');
-      mismatch.status = 409;
-      invalidateHistoryScopeRef.current(requestedScopeKey, mismatch.message);
-      throw mismatch;
     }
     // A verified response ends the previous conflict episode. A later scope
     // conflict must be allowed to refresh the picker again automatically.
