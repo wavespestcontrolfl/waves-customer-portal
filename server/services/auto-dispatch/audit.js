@@ -477,12 +477,11 @@ async function noWindowDetail(trx, row, date, now = new Date()) {
   const detail = [series, 'The dispatch due date is missing.'].filter(Boolean);
   const { etDateString } = require('../../utils/datetime-et');
   const {
-    inBlackout, isWeekendDay, violatesPreferredDay, DAY_OPEN, DAY_CLOSE,
+    inBlackout, isWeekendDay, seriesDatesInWindow, violatesPreferredDay, DAY_OPEN, DAY_CLOSE,
   } = require('./candidate-slots');
   if (date <= etDateString(now) || !row.technician_id || row.visit_id || row.customer_confirmed
       || row.reservation_expires_at || row.auto_dispatch_locked || row.auto_dispatch_excluded
       || (row.skip_weekends === true && isWeekendDay(date))) return { detail: detail.join(' '), hours: [] };
-  const { seriesDatesInWindow } = require('./candidate-slots')._internals;
   if ((await seriesDatesInWindow(row, { db: trx }, date, date)).has(date)) return { detail: detail.join(' '), hours: [] };
   const { _internals: replan } = require('../day-replan');
   const { applyAssignable, absentTechDays } = require('../technician-eligibility');
@@ -509,7 +508,10 @@ async function noWindowDetail(trx, row, date, now = new Date()) {
     slots.push({ date, techId, windowStart: fmt(start), windowEnd: fmt(start + duration) });
   }
   const { assessOfferedHours } = require('../day-replan/booking-fit');
-  const fits = await assessOfferedHours(trx, slots, target, { now, pref: prefs.preferred_time_window || replan.dryWindowPref(prefs.dry_time) });
+  const fits = await assessOfferedHours(trx, slots, target, {
+    now, pref: prefs.preferred_time_window || replan.dryWindowPref(prefs.dry_time),
+    allowStaleOrderFallback: require('../scheduling/arrival-route').arrivalWindowRoutingEnabled(),
+  });
   // These hours do not come through find-time, so ask the move writer's own
   // interview-inclusive occupancy probe once for the whole day. Its technician
   // scope follows the live multi-tech policy and the moving row is invisible,

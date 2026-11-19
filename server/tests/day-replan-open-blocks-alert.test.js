@@ -157,7 +157,7 @@ describe('the copy', () => {
 
 test('a matching estimate needs its two-hour arrival promise, stored window and simulated finish inside the opening', () => {
   const block = { day: '2026-11-20', tech: 'Pat', techId: 't1', start: 600, min: 120 };
-  const offer = { date: block.day, techId: 't1', start: '10:00', end: '11:00', finishMin: 675, driveMin: 42, addedDriveMin: 5, proposed: 1 };
+  const offer = { date: block.day, techId: 't1', start: '10:00', end: '11:00', finishMin: 675, driveMin: 42, addedDriveMin: 5, proposedApiRank: 1 };
   const fits = (diff, blocks = [block]) => _internals.matchingHour([{ ...offer, ...diff }], blocks);
   expect(fits({})).toMatchObject({ tech: 'Pat', start: 600 });
   expect(fits({}, [{ ...block, min: 119 }])).toBeNull(); // customer sees 10 AM to noon
@@ -175,6 +175,46 @@ test('booking fit removes only the trusted estimate\'s hold; absent and unknown 
   expect(fit.withoutOwnEstimateHold(rows, 'estimate-own')).toEqual([rival, unscoped, committed, linkedWithExpiry]);
   expect(fit.withoutOwnEstimateHold(rows, 'estimate-unknown')).toEqual(rows);
   expect(fit.withoutOwnEstimateHold(rows, null)).toBe(rows);
+});
+
+test('booking fit repairs missing, partial and duplicate future numbering only under the live reorder policy', () => {
+  const { _internals: fit } = require('../services/day-replan/booking-fit');
+  const row = (id, hour, route_order) => ({
+    id, route_order, window_start: `${String(hour).padStart(2, '0')}:00`, created_at: `2026-11-01T${String(hour).padStart(2, '0')}:00:00Z`,
+  });
+  const morning = row('morning', 9, null);
+  const afternoon = row('afternoon', 13, 1);
+  const missing = fit.routeOrderFor([afternoon, morning], false);
+  expect(missing.ordered).toBeNull();
+  expect(missing.staleReasons).toEqual(expect.arrayContaining(['null', 'inversion']));
+  expect(fit.routeOrderFor([afternoon, morning], true).ordered.map(r => r.id)).toEqual(['morning', 'afternoon']);
+
+  expect(fit.routeOrderFor([row('first', 9, 1), row('third', 13, 3)], false).staleReasons).toContain('gap');
+  expect(fit.routeOrderFor([row('first', 9, 1), row('also-first', 13, 1)], false).staleReasons).toContain('duplicate');
+  expect(fit.routeOrderFor([row('first', 9, 1), row('second', 13, 2)], false).ordered.map(r => r.id))
+    .toEqual(['first', 'second']);
+});
+
+test('booking fit suppresses a stale route unless its writer may persist the promised-window order', async () => {
+  const { assessOfferedHours } = require('../services/day-replan/booking-fit');
+  const RouteOptimizer = require('../services/route-optimizer');
+  const date = '2026-11-20';
+  const tech = 'tech-1';
+  const stop = (id, hour, route_order) => ({
+    id, customer_id: `customer-${id}`, technician_id: tech, status: 'confirmed', scheduled_date: date,
+    window_start: `${String(hour).padStart(2, '0')}:00`, window_end: `${String(hour + 1).padStart(2, '0')}:00`,
+    estimated_duration_minutes: 60, lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, route_order,
+  });
+  const rows = [stop('afternoon', 13, 1), stop('morning', 9, null)];
+  const slot = { date, techId: tech, windowStart: '15:00', windowEnd: '16:00' };
+  const target = { lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
+  const run = allowStaleOrderFallback => assessOfferedHours(jest.fn(), [slot], target, {
+    now: NOW, allowStaleOrderFallback,
+    calendar: new Map([['homes', new Map()], ['departure', 8 * 60], [date, rows], [`${date}|${tech}`, []]]),
+  });
+
+  await expect(run(false)).resolves.toEqual([]);
+  await expect(run(true)).resolves.toEqual([expect.objectContaining({ slot })]);
 });
 
 test('booking fit blocks live make-room destinations from the writer reader with its technician scope', async () => {
@@ -218,7 +258,7 @@ test('booking fit filters only this estimate\'s genuine hold after the shared oc
     reservation_expires_at: '2097-01-01', window_start: '10:00', window_end: '11:00' };
   const linked = { id: 'visit-linked', customer_id: 'customer-1', technician_id: tech, source_estimate_id: 'estimate-own',
     reservation_expires_at: '2097-01-01', status: 'confirmed', window_start: '09:00', window_end: '10:00',
-    estimated_duration_minutes: 60, lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng };
+    estimated_duration_minutes: 60, lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, route_order: 1 };
   const calendar = new Map([
     ['homes', new Map()], ['departure', 8 * 60], [date, [own, linked]], [`${date}|${tech}`, []],
   ]);
@@ -376,7 +416,7 @@ describe('runOpenBlocksAlert', () => {
     const estimate = { id: 'estimate123', customer_id: 'customer', customer_name: 'Test Customer' };
     const { conn } = fakeConn({ rows: [{ day, technician_id: TECH, close_gaps: rec([tail(600, 120)]) }], assignable: [{ id: TECH }], estimates: [estimate] });
     offerableEstimateSlots.mockResolvedValueOnce({ [OFFER_RANK]: async () => [
-      { date: day, techId: TECH, start: '10:00', end: '11:00', finishMin: 670, driveMin: 25, addedDriveMin: 3, proposed: 1 },
+      { date: day, techId: TECH, start: '10:00', end: '11:00', finishMin: 670, driveMin: 25, addedDriveMin: 3, proposedApiRank: 1 },
     ] });
     await runOpenBlocksAlert({ conn, now: NOW });
     const notice = raiseAdminAlert.mock.calls.at(-1)[2];

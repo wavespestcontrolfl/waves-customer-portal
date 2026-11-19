@@ -187,7 +187,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     expect(observation()).toBe(observation());
     const measured = await observation();
     expect(measured.map(m => m.start)).toEqual(cards.map(s => s.windowStart));
-    expect(measured[0]).toMatchObject({ displayed: 1, proposed: 1, driveMin: expect.any(Number), finishMin: expect.any(Number) });
+    expect(measured[0]).toMatchObject({ apiRank: 1, proposedApiRank: 1, driveMin: expect.any(Number), finishMin: expect.any(Number) });
     for (const i of [1, 2, 4, 5]) expect(measured[i]).not.toHaveProperty('driveMin');
   });
 
@@ -208,7 +208,8 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
       }
       await mockConn('scheduled_services').insert({ customer_id: customer, technician_id: techId, scheduled_date: date,
         service_type: 'Quarterly Pest Control Service', status: 'pending', source_estimate_id: own, lat: HQ.lat, lng: HQ.lng,
-        reservation_expires_at: '2001-01-01T00:00Z', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 60 });
+        reservation_expires_at: '2001-01-01T00:00Z', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 60,
+        route_order: 1 });
       const target = { lat: HQ.lat, lng: HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
       const measure = ownEstimateId => observeOffers(mockConn, cards, target, { now: NOW, ownEstimateId })();
       expect((await measure(own)).map(m => Number.isFinite(m.driveMin))).toEqual([true, false, false, false]);
@@ -234,6 +235,14 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     const slot = { date, techId, windowStart: '10:00', windowEnd: '11:00' };
     const target = { lat: HQ.lat, lng: HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
     const assess = () => assessOfferedHours(mockConn, [slot], target, { now: NOW });
+
+    const { findConflictingVisits } = require('../services/scheduling/occupancy');
+    const writerArgs = { db: mockConn, date, windowStart: '11:00', windowEnd: '12:00' };
+    expect((await findConflictingVisits(writerArgs)).map(row => row.id)).toContain(booked.id);
+    expect((await findConflictingVisits({ ...writerArgs, includeHolds: false })).map(row => row.id)).toContain(booked.id);
+    await withOfficeEnv('GATE_SLOT_TRAVEL_GAP', 'true', async () => {
+      expect((await findConflictingVisits({ ...writerArgs, travel: HQ })).map(row => row.id)).toContain(booked.id);
+    });
 
     await expect(assess()).resolves.toEqual([]); // tech-blind: the other technician still occupies the office
     await withOfficeEnv('GATE_MULTI_TECH_CONFIRM', 'true', async () => {
@@ -279,9 +288,10 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     const date = '2097-06-11';
     const ids = [randomUUID(), randomUUID()];
     const mix = { version: 2, allocatedServiceIds: ids };
-    await mockConn('scheduled_services').insert(ids.map(id => ({ id, customer_id: visits[0].customerId, technician_id: techId,
+    await mockConn('scheduled_services').insert(ids.map((id, routeOrder) => ({ id, customer_id: visits[0].customerId, technician_id: techId,
       scheduled_date: date, service_type: 'Quarterly Pest Control Service', status: 'pending', lat: HQ.lat, lng: HQ.lng,
-      window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, reservation_service_mix: mix })));
+      window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, reservation_service_mix: mix,
+      route_order: routeOrder + 1 })));
     const cards = ['10', '12', '14'].map(h => ({ date, techId, windowStart: h + ':00', windowEnd: (Number(h) + 1) + ':00' }));
     const target = { lat: HQ.lat, lng: HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
     const measuredHours = async () => (await observeOffers(mockConn, cards, target, { now: NOW })()).map(m => Number.isFinite(m.driveMin));
@@ -316,7 +326,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     const { flagUnplacedVisits } = require('../services/auto-dispatch/audit');
     const compose = require('../services/admin-alert-compose');
     const capture = jest.spyOn(compose, 'raiseAdminAlert').mockResolvedValue({ id: 'synthetic-notice' });
-    const [target, root, pending] = visits;
+    const [target, root, pending, remaining] = visits;
     const start = '2097-03-11';
     await mockConn('scheduled_services').where({ id: root.id }).update({ customer_id: target.customerId, scheduled_date: start,
       recurring_pattern: 'quarterly', recurring_parent_id: null });
@@ -324,6 +334,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     await mockConn('scheduled_services').where({ id: target.id }).update({ recurring_parent_id: root.id, window_start: null, window_end: null, customer_confirmed: false });
     await mockConn('scheduled_services').where({ id: pending.id }).update({ scheduled_date: '2097-06-11', window_start: null, window_end: null,
       customer_pick_by: '2097-06-10T23:00:00Z' });
+    await mockConn('scheduled_services').where({ id: remaining.id }).update({ route_order: 1 });
     await flagUnplacedVisits({ lockWindowDays: 14 }, NOW);
     const notices = capture.mock.calls.map(c => c[2]).filter(n => n?.metadata?.scheduledServiceId);
     const notice = notices.find(n => n.metadata.scheduledServiceId === target.id);

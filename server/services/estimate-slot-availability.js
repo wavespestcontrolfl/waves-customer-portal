@@ -2870,6 +2870,11 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // reservation may occupy one of these public cards; booking-fit ignores only that hold and keeps every rival hold.
     result[OFFER_RANK] = observeOffers(db, shown, target, {
       pinned, rainTierOf, calendar: userOpts.dispatchCalendar, ownEstimateId: estimateId,
+      // Office placement may repair stale numbering under the arrival-route policy; a public reservation may do so
+      // only under capacity, whose writer persists the certified order.
+      allowStaleOrderFallback: userOpts.dispatchCalendar
+        ? require('./scheduling/arrival-route').arrivalWindowRoutingEnabled()
+        : require('./scheduling/policy').capacityEnabled(),
     });
   }
 

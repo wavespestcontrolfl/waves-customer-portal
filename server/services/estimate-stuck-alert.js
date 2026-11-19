@@ -209,7 +209,11 @@ function noteSlotAnswer(req, estimate, { windowDays = null, date = null, search 
     const observation = result[require('./day-replan/booking-fit').OFFER_RANK];
     const saveOffers = typeof observation === 'function' ? safely('record offered hours', async () => {
       const offers = await observation();
-      await recordStep('estimate_slot_offers', estimate, { via: via || 'picker', generatedAt: result.metadata?.generatedAt, offers });
+      // New evidence states its API-order basis explicitly. Existing rows with displayed/proposed and no rankBasis
+      // remain valid historical evidence; no runtime reader rewrites or interprets them as rendered card positions.
+      await recordStep('estimate_slot_offers', estimate, {
+        via: via || 'picker', generatedAt: result.metadata?.generatedAt, rankBasis: 'api_order', offers,
+      });
     }) : null;
     const [outcome] = await Promise.all([slotOutcome(estimate, { via, date, windowDays, empty }, result), saveOffers]);
     return outcome;

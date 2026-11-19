@@ -203,9 +203,9 @@ describe('the reasons, in the approved words', () => {
   });
 });
 
-test('only real customer reads record the offered hours and their measured order, without exposing it on the page', async () => {
+test('only real customer reads record offered hours with API-order labels, without exposing them on the page', async () => {
   const { OFFER_RANK } = require('../services/day-replan/booking-fit');
-  const offers = [{ date: '2026-12-01', techId: 'T', start: '09:00', end: '10:00', displayed: 1, proposed: 1 }];
+  const offers = [{ date: '2026-12-01', techId: 'T', start: '09:00', end: '10:00', apiRank: 1, proposedApiRank: 1 }];
   const observe = jest.fn(async () => offers);
   const result = { primary: [{}], [OFFER_RANK]: observe };
   expect(JSON.stringify(result)).toBe('{"primary":[{}]}');
@@ -214,7 +214,8 @@ test('only real customer reads record the offered hours and their measured order
   expect(observe).not.toHaveBeenCalled();
   await stuck.noteSlotAnswer(REQ, OPEN_ROW, {}, result);
   expect(auditEstimateBookingStep).toHaveBeenCalledWith(expect.objectContaining({
-    action: 'estimate_slot_offers', estimateId: OPEN_ROW.id, metadata: expect.objectContaining({ offers, via: 'picker' }),
+    action: 'estimate_slot_offers', estimateId: OPEN_ROW.id,
+    metadata: expect.objectContaining({ offers, via: 'picker', rankBasis: 'api_order' }),
   }));
 });
 

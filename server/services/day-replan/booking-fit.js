@@ -1,6 +1,6 @@
 'use strict';
 
-const { currentOrder, effectiveWindowRange } = require('../route-reorder-window-fit');
+const { currentOrder, promisedWindowOrder, staleOrderReasons } = require('../route-reorder-window-fit');
 const { coVisitGroups, simulate } = require('./app-sim');
 const { preferredFit, fitOfferedHour } = require('./close-gaps');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
@@ -78,10 +78,19 @@ function occupiedBlockedHours(rows) {
   return [...hours].sort((a, b) => a - b);
 }
 
+// Future-day route numbers are authoritative only when they form one complete, unique, promise-ordered sequence.
+// The live arrival-route writer is allowed to repair a stale sequence; callers outside that policy must suppress the
+// uncertain measurement rather than score a route nobody has certified.
+function routeOrderFor(rows, allowStaleOrderFallback) {
+  const staleReasons = staleOrderReasons(rows, rows, { futureDay: true });
+  if (!staleReasons.length) return { ordered: currentOrder(rows), staleReasons };
+  return { ordered: allowStaleOrderFallback ? promisedWindowOrder(rows) : null, staleReasons };
+}
+
 // All inputs are stored appointments, pins and local drive estimates. One read of the route per date and
 // one of the calendar blocks per technician-date. Candidates come from the caller's own admitted hours.
 async function assessOfferedHours(conn, offered, target, {
-  now = new Date(), pref = null, calendar = new Map(), ownEstimateId = null,
+  now = new Date(), pref = null, calendar = new Map(), ownEstimateId = null, allowStaleOrderFallback = false,
 } = {}) {
   if (!hasPin(target)) return [];
   const replan = require('./index')._internals;
@@ -104,6 +113,7 @@ async function assessOfferedHours(conn, offered, target, {
   const homes = await read('homes', () => loadTechStartPoints(conn));
   const departureMin = await read('departure', () => dayDepartureMinutes(conn));
   const techBlind = !techScopedConfirmActive();
+  const mayRepairStaleOrder = allowStaleOrderFallback === true;
   const fits = [];
   for (const [date, techs] of byDate) {
     const loaded = await read(date, () => replan.loadDayStops(conn, date));
@@ -133,8 +143,8 @@ async function assessOfferedHours(conn, offered, target, {
       // A linked appointment with a leftover reservation stamp is committed, not a hold: route and simulate it.
       const own = rows.filter(r => sameTech(r, techId) && !isHoldStop(r));
       if (own.some(r => !r.window_start || !hasPin(r) || !['confirmed', 'pending'].includes(r.status))) continue;
-      const ordered = currentOrder(own);
-      if (ordered.some((r, i) => i && effectiveWindowRange(r).startMin < effectiveWindowRange(ordered[i - 1]).startMin)) continue;
+      const { ordered } = routeOrderFor(own, mayRepairStaleOrder);
+      if (!ordered) continue;
       const groups = coVisitGroups(ordered);
       const blocks = await read(`${date}|${techId}`, () => replan.loadBlocks(conn, date, techId));
       const routeIds = new Set(own.map(row => String(row.id)));
@@ -187,8 +197,9 @@ function rankOfferedHours(slots, fits, { pinned = 0, rainTierOf = null } = {}) {
   return ranked;
 }
 
-// Only identifiers, offered times and local forecasts enter the internal record. The Symbol is
-// copied by the in-process cache and omitted by JSON when Express answers the public request.
+// Only identifiers, offered times and local forecasts enter the internal record. These ranks describe the API slot
+// array, not rendered card positions: customer pickers may truncate or rearrange that array. The Symbol is copied by
+// the in-process cache and omitted by JSON when Express answers the public request.
 async function measureOffers(conn, shown, target, options) {
   const fits = target ? await assessOfferedHours(conn, shown, target, options) : [];
   const ranks = rankOfferedHours(shown, fits, options);
@@ -196,7 +207,7 @@ async function measureOffers(conn, shown, target, options) {
   return shown.map((slot, index) => {
     const fit = bySlot.get(slot);
     return { date: slot.date, techId: slot.techId || null, start: slot.windowStart, end: slot.windowEnd,
-      displayed: index + 1, proposed: ranks.indexOf(slot) + 1,
+      apiRank: index + 1, proposedApiRank: ranks.indexOf(slot) + 1,
       ...(fit ? { driveMin: fit.driveMin, addedDriveMin: fit.addedDriveMin, finishMin: fit.finishMin, slots: fit.slots, waitMin: fit.waitMin } : {}) };
   });
 }
@@ -216,5 +227,5 @@ function observeOffers(conn, shown, target, options = {}) {
 
 module.exports = {
   assessOfferedHours, rankOfferedHours, observeOffers, OFFER_RANK,
-  _internals: { withoutOwnEstimateHold },
+  _internals: { withoutOwnEstimateHold, routeOrderFor },
 };

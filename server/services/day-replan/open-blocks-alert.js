@@ -235,8 +235,9 @@ function matchingHour(offers, blocks) {
       && end <= b.start + b.min && offer.finishMin <= b.start + b.min);
     if (block) matches.push({ offer, block, start });
   }
+  const proposedApiRank = offer => offer.proposedApiRank ?? offer.proposed ?? Number.MAX_SAFE_INTEGER;
   matches.sort((a, b) => a.offer.addedDriveMin - b.offer.addedDriveMin || a.offer.date.localeCompare(b.offer.date)
-    || a.offer.proposed - b.offer.proposed);
+    || proposedApiRank(a.offer) - proposedApiRank(b.offer));
   if (matches.length) {
     const { offer, block, start } = matches[0];
     return { date: offer.date, start, tech: block.tech, techId: block.techId, addedDriveMin: Math.round(offer.addedDriveMin) };

@@ -36,7 +36,7 @@ const notifications = require('../services/notification-service');
 const rebooker = require('../services/rebooker');
 const replan = require('../services/day-replan')._internals;
 const bookingFit = require('../services/day-replan/booking-fit');
-const seriesDatesInWindow = jest.spyOn(require('../services/auto-dispatch/candidate-slots')._internals, 'seriesDatesInWindow');
+const seriesDatesInWindow = jest.spyOn(require('../services/auto-dispatch/candidate-slots'), 'seriesDatesInWindow');
 const { flagUnplacedVisits } = require('../services/auto-dispatch/audit');
 const knex = require('knex')({ client: 'pg' });
 
