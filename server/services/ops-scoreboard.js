@@ -1,6 +1,6 @@
 /**
- * Weekly ops scoreboard — four owner-approved metrics computed from existing
- * production data (owner ruling 2026-09-26). Read-only: no writes, no
+ * Weekly ops scoreboard — operational metrics computed from existing
+ * production data. Read-only: no writes, no
  * customer communication, no side effects.
  *
  * Each metric is computed independently and wrapped in its own try/catch —
@@ -298,7 +298,68 @@ async function computeBookingsWithoutStaff({ from, to }, conn) {
   };
 }
 
-// ─── 4. ai_route_days ────────────────────────────────────────────────────
+// ─── 4. customer_picker_conversion (existing, provider-free events) ──────
+// Customer picker selections already have a provider-free audit event:
+// estimate-stuck-alert records estimate_hold_started only for a real customer
+// browser after reserveSlot creates the hold. Measure that existing cohort
+// instead of adding another GA/PostHog event or a write on every slot-list read.
+//
+// A selection converted when that exact held row is now customer-linked. The
+// row may since have been cancelled and may retain a stale reservation stamp;
+// neither changes the historical fact that the selected appointment became a
+// booking. Requiring source_estimate_id to match the event's estimate prevents
+// a malformed/reused service id from adopting another estimate's booking.
+// Multiple retries of the same hold id and repeated holds are deduplicated.
+const metadataObject = (value) => {
+  if (value && typeof value === 'object') return value;
+  try { return JSON.parse(value) || {}; } catch { return {}; }
+};
+
+async function computeCustomerPickerConversion({ from, to }, conn) {
+  const events = await applyETTimestampWindow(
+    conn('audit_log')
+      .where('actor_type', 'customer')
+      .where('action', 'estimate_hold_started')
+      .where('resource_type', 'estimate'),
+    'created_at',
+    from,
+    to,
+  ).whereRaw(`NOT EXISTS (
+    SELECT 1 FROM audit_log prior
+     WHERE prior.actor_type = 'customer' AND prior.action = 'estimate_hold_started'
+       AND prior.resource_type = 'estimate' AND prior.resource_id IS NOT NULL
+       AND prior.metadata ->> 'scheduled_service_id' = audit_log.metadata ->> 'scheduled_service_id'
+       AND prior.created_at < ?::timestamp AT TIME ZONE 'America/New_York'
+  )`, [`${from}T00:00:00`]).select('resource_id', 'metadata');
+
+  const selected = new Map();
+  for (const event of events) {
+    const serviceId = metadataObject(event.metadata).scheduled_service_id;
+    if (serviceId == null || event.resource_id == null) continue;
+    const id = String(serviceId);
+    if (!selected.has(id)) selected.set(id, String(event.resource_id));
+  }
+  const selectedIds = [...selected.keys()];
+  const rows = selectedIds.length
+    ? await conn('scheduled_services').whereIn('id', selectedIds)
+      .select('id', 'source_estimate_id', 'customer_id')
+    : [];
+  const bookedIds = new Set(rows.filter((row) => row.customer_id != null
+    && String(row.source_estimate_id || '') === selected.get(String(row.id))).map(row => String(row.id)));
+  const selectingEstimates = new Set(selected.values());
+  const bookedEstimates = new Set([...bookedIds].map(id => selected.get(id)));
+
+  return {
+    numerator: bookedEstimates.size,
+    denominator: selectingEstimates.size,
+    share: shareOf(bookedEstimates.size, selectingEstimates.size),
+    selectedAppointments: selected.size,
+    bookedAppointments: bookedIds.size,
+    appointmentShare: shareOf(bookedIds.size, selected.size),
+  };
+}
+
+// ─── 5. ai_route_days ────────────────────────────────────────────────────
 // Completed tech-days driven in the order the nightly optimizer planned.
 // Reuses route-performance.js's selectPlanningSnapshots (the canonical
 // pre-day-plan selection: latest valid snapshot captured strictly before
@@ -432,6 +493,8 @@ async function computeOpsScoreboard(range = {}, conn = db) {
     'drive_minutes_per_stop: average en-route → arrived minutes from the '
       + 'technician\'s status taps; van GPS trips are reported only as total '
       + 'driving because they are not linked to stops. See ops-scoreboard.js.',
+    'customer_picker_conversion: existing real-customer hold-start audit rows; a selection counts as booked only '
+      + 'when that exact appointment is now customer-linked to the same estimate. No analytics provider event is sent.',
   ];
 
   const results = await Promise.all([
@@ -447,18 +510,23 @@ async function computeOpsScoreboard(range = {}, conn = db) {
       logger.error(`[ops-scoreboard] bookings_without_staff failed: ${err.message}`);
       return { error: 'unavailable' };
     }),
+    computeCustomerPickerConversion(window, conn).catch((err) => {
+      logger.error(`[ops-scoreboard] customer_picker_conversion failed: ${err.message}`);
+      return { error: 'unavailable' };
+    }),
     computeAiRouteDays(window, conn).catch((err) => {
       logger.error(`[ops-scoreboard] ai_route_days failed: ${err.message}`);
       return { error: 'unavailable' };
     }),
   ]);
-  const [driveMinutesPerStop, aiCallShare, bookingsWithoutStaff, aiRouteDays] = results;
+  const [driveMinutesPerStop, aiCallShare, bookingsWithoutStaff, customerPickerConversion, aiRouteDays] = results;
 
   return {
     window,
     driveMinutesPerStop,
     aiCallShare,
     bookingsWithoutStaff,
+    customerPickerConversion,
     aiRouteDays,
     notes,
   };
@@ -466,6 +534,7 @@ async function computeOpsScoreboard(range = {}, conn = db) {
 
 module.exports = {
   computeOpsScoreboard,
+  computeCustomerPickerConversion,
   classifyCall,
   classifyBooking,
   planFollowed,
