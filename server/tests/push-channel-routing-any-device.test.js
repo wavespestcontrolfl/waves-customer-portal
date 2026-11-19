@@ -75,6 +75,10 @@ jest.mock('../services/push-notifications', () => ({
   sendToCustomer: (...args) => mockSendToCustomer(...args),
 }));
 jest.mock('../services/notification-service', () => ({ notifyCustomer: (...args) => mockNotifyCustomer(...args) }));
+// Provider configuration the legacy lookup reads under the stale floor (as customerStatus does).
+const mockProviders = { ios: true, android: true };
+jest.mock('../services/apns', () => ({ status: () => ({ configured: mockProviders.ios }) }));
+jest.mock('../services/fcm', () => ({ status: () => ({ configured: mockProviders.android }) }));
 jest.mock('../services/messaging/notice-scope', () => ({ noticeScope: jest.fn(async () => ({})) }));
 jest.mock('../services/account-properties', () => ({ resolvePrimaryProfileId: jest.fn(async () => 'c-1') }));
 jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(async () => {}) }));
@@ -210,6 +214,20 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
     expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
     expect(await send()).not.toHaveProperty('staleAppCompanion');
+  });
+
+  it('legacy lookup: a recent phone on an unconfigured provider never makes the holder fresh', async () => {
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    mockProviders.android = false;
+    try {
+      mockDevices.push(device({ id: 'd-a', platform: 'android', updated_at: hoursAgo(2) }));
+      mockDevices.push(device({ id: 'd-i', platform: 'ios', updated_at: hoursAgo(40 * 24) }));
+      // The only deliverable phone (iOS) is stale: text first, then the app alert; no push before the text.
+      expect(await send()).toMatchObject({ delivered: false, reason: 'stale_app_text', staleAppCompanion: true });
+      expect(mockSendToCustomer).not.toHaveBeenCalled();
+    } finally {
+      mockProviders.android = true;
+    }
   });
 
   it('a browser-only holder (no phone app) is neither fresh nor stale with the floor on', async () => {

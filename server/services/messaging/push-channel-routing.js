@@ -321,8 +321,11 @@ async function holderPushReach(customerId, knex = db, { anyDevice = false } = {}
     .whereNull('contact_phone_key');
   if (!anyDevice) query.where('updated_at', '>=', heartbeatCutoff());
   if (!staleFloor) return { fresh: Boolean(await query.first('id').catch(() => null)), appStale: false };
-  // Floor on: phone apps only (a browser-only holder is neither fresh nor stale).
-  const phones = await query.whereIn('platform', ['ios', 'android']).select('updated_at').catch(() => []);
+  // Floor on: phone apps on a configured provider only, as customerStatus counts them (a
+  // browser-only holder, or a phone whose provider is off, is neither fresh nor stale).
+  const providers = { ios: require('../apns').status().configured, android: require('../fcm').status().configured };
+  const phones = (await query.whereIn('platform', ['ios', 'android']).select('platform', 'updated_at').catch(() => []))
+    .filter((row) => providers[row.platform]);
   const fresh = phones.some((row) => new Date(row.updated_at).getTime() >= staleFloor.getTime());
   return { fresh, appStale: !fresh && phones.length > 0 };
 }

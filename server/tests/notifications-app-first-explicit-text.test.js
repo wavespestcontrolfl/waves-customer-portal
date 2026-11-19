@@ -186,20 +186,27 @@ describe('GET payload: App is shown for an untouched Text default', () => {
     expect(payload.paymentConfirmationChannel).toBe('sms');
   });
 
-  describe('GATE_APP_FIRST_STALE_TEXT: the page shows what routing will do for a phone not opened in 30 days', () => {
-    // customerStatus applies the floor itself; the stub stands in for it: reachable only while the gate is off.
-    const floorInStatus = () => ({ enabled: true, registered: true, fresh: false, reachable: process.env.GATE_APP_FIRST_STALE_TEXT !== 'true' });
+  describe('GATE_APP_FIRST_STALE_TEXT: a phone not opened in 30 days still shows App (its app alert still goes, with the text)', () => {
+    // customerStatus applies the floor itself; the stub stands in for it: with the gate on, a stale phone is
+    // not reachable but appStale.
+    const floorInStatus = () => {
+      const stale = process.env.GATE_APP_FIRST_STALE_TEXT === 'true';
+      return { enabled: true, registered: true, fresh: false, reachable: !stale, appStale: stale };
+    };
 
-    test('both gates on: the stored Text shows, and an App save is not dropped as an echo', async () => {
+    test('both gates on: App shows, so the customer can pick Text, and that Text save is kept (not dropped as an echo)', async () => {
       process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
       mockCustomerStatus.mockImplementation(floorInStatus);
       mockRows({ own: defaults, primary: defaults });
       const payload = await loadPreferencePayload(req());
-      for (const key of KEYS) expect(payload[key]).toBe('sms');
-      const updates = { enRouteChannel: 'push' };
-      expect(await settleShownAppChoices({ customerId: 'c-1', query: { appPreferences: '1' } }, updates, {})).toBe(false);
-      expect(updates).toEqual({ enRouteChannel: 'push' });
+      for (const key of KEYS) expect(payload[key]).toBe('push');
       expect(mockCustomerStatus.mock.calls[0][2]).toEqual({ withReachable: true });
+      // Picking Text on that page is a real choice: kept, and the page reports it showed App
+      // (the caller then stores the explicit Text marker that stops the app alerts).
+      db.mockImplementation(() => ({ where: () => ({ first: async () => ({ en_route_channel: 'sms', en_route_channel_explicit: false }) }) }));
+      const updates = { enRouteChannel: 'sms' };
+      expect(await settleShownAppChoices({ customerId: 'c-1', query: { appPreferences: '1' } }, updates, {})).toBe(true);
+      expect(updates).toEqual({ enRouteChannel: 'sms' });
     });
 
     test('new gate off: App shows as today', async () => {
@@ -207,6 +214,14 @@ describe('GET payload: App is shown for an untouched Text default', () => {
       mockRows({ own: defaults, primary: defaults });
       const payload = await loadPreferencePayload(req());
       for (const key of KEYS) expect(payload[key]).toBe('push');
+    });
+
+    test('no phone app at all (not stale): the stored values', async () => {
+      process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+      mockCustomerStatus.mockResolvedValue({ enabled: true, registered: false, fresh: false, reachable: false, appStale: false });
+      mockRows({ own: defaults, primary: defaults });
+      const payload = await loadPreferencePayload(req());
+      for (const key of KEYS) expect(payload[key]).toBe('sms');
     });
   });
 
