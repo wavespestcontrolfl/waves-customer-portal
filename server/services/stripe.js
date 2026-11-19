@@ -630,8 +630,8 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
       .whereIn('status', ['claimed', 'ambiguous'])
       .whereNull('resolved_at')
       .forUpdate()
-      .first('id', 'credit_applied_delta', 'credit_applied_total');
-    if (!attempt) return false;
+      .first('id', 'stripe_payment_intent_id', 'credit_applied_delta', 'credit_applied_total');
+    if (!attempt || (attempt.stripe_payment_intent_id && attempt.stripe_payment_intent_id !== stripePaymentIntentId)) return false;
 
     // A timeout ambiguity may have committed the credit reservation even
     // though the Stripe PI ultimately failed. Return only the portion this
