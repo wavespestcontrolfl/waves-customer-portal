@@ -150,13 +150,20 @@ describeDb("the caller's word (PostgreSQL)", () => {
       processing_status: 'extraction_failed', extraction_attempts: 3, ...RECORDED,
     }]], { yes: null, noYes: 'no_yes_heard' }],
     ["the transcript does not hold the caller's words", [['per_application', { transcription: transcriptWith(null) }]], { yes: null, noYes: 'yes_without_words' }],
-    ["the caller's words carry a condition", [['per_application', {
-      transcription: `Agent: Thanks for calling Waves.\nCaller: If the price is $49.99, ${WORDS}\nAgent: Okay.`,
-    }]], { yes: null, noYes: 'yes_not_plain' }],
   ])('%s', async (_name, calls, expected) => {
     const customerId = await customer();
     for (const [choice, over, intent] of calls) await call(customerId, choice, over, intent);
     await expect(callerWord(trx, { customerId, since: since() })).resolves.toEqual(expected);
+  });
+
+  test("a condition in the caller's turn stays in front of the office: the yes carries the whole turn", async () => {
+    const customerId = await customer();
+    const yesCallId = await call(customerId, 'per_application', {
+      created_at: hoursAgo(5), transcription: `Agent: Thanks for calling Waves.\nCaller: If the price is $49.99, ${WORDS}\nAgent: Okay.`,
+    });
+    await expect(callerWord(trx, { customerId, since: since() })).resolves.toEqual({
+      yes: { callLogId: yesCallId, at: expect.any(Date), quote: `If the price is $49.99, ${WORDS}` }, noYes: null,
+    });
   });
 
   test('a yes on a sandbox call is not heard', async () => {

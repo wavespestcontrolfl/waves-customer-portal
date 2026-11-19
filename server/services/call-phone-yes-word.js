@@ -3,17 +3,15 @@
  * 2026-11-18 "ok go"; the cards land in call-phone-yes-accept.js, and a person acts on each one). It reads only: it
  * writes nothing and sends nothing.
  *
- * The call reader (the V2 extraction) judges what the caller chose: service_request.billing_choice (never consent on
- * its own, the extraction schema says so), and a cancellation or one-time ask in service_request.service_intent. This
- * module adds no word lists of its own (a list cannot keep up with free speech). It checks that the choice's evidence
- * quote is the caller's, word for word in a caller turn of that call's transcript. It gives the office that whole
- * turn, cut around the quote, so any condition or "no" the caller said is in front of the person who decides. It
- * calls the choice a yes only when every caller turn that says the quote passes the triage flags' shared
- * plain-statement screen (quoteIsPlainStatement) as it is, whole: a turn is the unit the grounding tools trust, so no
- * sentence split decides it. A choice that fails is no yes (yes_not_plain): any "if", "when", "not" or question in
- * those turns fails closed, and the office reads the call. A later word that does not repeat the quote is the call
- * reader's to judge (billing_choice reads the whole call). And it waits, for a bounded time, for any recent call that
- * is not read yet (owedReadSql).
+ * The call reader (the V2 extraction) judges what the caller chose, over the whole call: service_request.billing_choice,
+ * and a cancellation or one-time ask in service_request.service_intent. Its billing_choice rule
+ * (prompts/call-extraction-v1.js) already holds the language judgment: staff offering a plan, a caller question, an
+ * "okay" after a price question and an unclear word are no choice; the caller must name or plainly pick the plan; a
+ * changed mind takes the final choice. This module judges no words itself, because a word screen cannot keep up with
+ * free speech. It checks only what code can check: the choice's evidence is the caller's own words, word for word in a
+ * caller turn of that call (the shared grounding tools). It gives the office the caller's latest turn that says them,
+ * whole or cut around the quote, so any condition or "no" is in front of the person who decides, and that person
+ * decides every card. And it waits, for a bounded time, for any recent call that is not read yet (owedReadSql).
  */
 
 const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
@@ -71,40 +69,31 @@ function excerptOf(text, span) {
   return `${start > 0 ? '…' : ''}${tidy(text.slice(start, end))}${end < text.length ? '…' : ''}`;
 }
 
-// The caller's own words for the plan choice, from the caller turns that hold an evidence quote for billing_choice
-// (labeled the caller's) word for word, with outbound labels oriented the way the triage flags read them:
-// { words, plain }. The shared tools ground the quote (a short one must be a whole caller turn); then every caller turn
-// that says it, at any length, is screened. plain = in every such turn, the whole turn, each of its sentences (the
-// grounding tools' split, so each sentence start meets the question check) and every quote it says pass the shared
-// screen (so the order of the evidence never matters).
-// words = the first turn that does not (so the office sees the "no"), else the latest turn, cut around the quote. Null
-// when no caller turn holds a quote; an unlabeled or one-speaker transcript grounds nothing.
+// The caller's own words for the plan choice (a string), or null. The shared grounding tools ground each billing_choice
+// evidence quote labeled the caller's (a short one must be a whole caller turn), with outbound labels oriented the way
+// the triage flags read them; an unlabeled or one-speaker transcript grounds nothing. The words are the caller's latest
+// turn that says a grounded quote at any length, found with the tools' own normalization ("9am" = "9 a.m."), so a
+// later turn that takes the choice back is the one the office sees.
 function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   const quotes = (Array.isArray(extraction?.evidence) ? extraction.evidence : [])
     .filter((e) => BILLING_CHOICE_PATHS.has(e?.field_path) && e.speaker === 'caller' && typeof e.quote === 'string' && e.quote.trim());
   if (!quotes.length) return null;
   const { parseTurns, turnsHolding, normalize } = require('./call-reschedule-agreement').groundingTools;
-  const { orientTranscriptForOutbound, quoteIsPlainStatement } = require('./call-triage-flags');
+  const { orientTranscriptForOutbound } = require('./call-triage-flags');
   const turns = parseTurns(orientTranscriptForOutbound(transcript, outbound));
   if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return null;
-  // The grounding tools' own normalization ("9am" = "9 a.m."), so a turn that says the quote is always found.
   const grounded = quotes.filter((e) => turnsHolding(turns, e.quote, 'caller').length).map((e) => ({ quote: e.quote, ns: normalize(e.quote) }));
-  const held = [];
-  for (const turn of turns.filter((t) => !t.agent)) {
-    const hits = grounded.filter((g) => g.ns && ` ${turn.ns} `.includes(` ${g.ns} `));
-    if (!hits.length) continue;
+  for (const turn of turns.filter((t) => !t.agent).reverse()) {
+    const hit = grounded.find((g) => g.ns && ` ${turn.ns} `.includes(` ${g.ns} `));
     const text = String(turn.raw || '');
-    const plain = quoteIsPlainStatement(text) && hits.every((g) => quoteIsPlainStatement(g.quote))
-      && turn.sentences.every((x) => !x.question && quoteIsPlainStatement(x.ns));
-    held.push({ words: excerptOf(text, spanOf(text, hits[0].quote)), plain });
+    if (hit) return excerptOf(text, spanOf(text, hit.quote));
   }
-  if (!held.length) return null;
-  return held.find((h) => !h.plain) || held[held.length - 1];
+  return null;
 }
 
 // One call's word (row: WORD_COLUMNS, one read): a cancellation or one-time ask ({ contrary: true, callLogId, at }), a
-// billing choice with the caller's words ({ choice, callLogId, at, quote, plain }; quote and plain from callerWordsOf,
-// quote null without words), or null (no word, not a two-party conversation, or not read: only a 'processed' row's
+// billing choice with the caller's words ({ choice, callLogId, at, quote }; quote from callerWordsOf, null without
+// words), or null (no word, not a two-party conversation, or not read: only a 'processed' row's
 // extraction is its last read, as a failed re-read keeps the old one).
 function wordOfCall(row) {
   if (row.processing_status !== 'processed' || row.v2_extraction_status !== 'valid') return null;
@@ -115,8 +104,8 @@ function wordOfCall(row) {
   if (CONTRARY_INTENTS.has(extraction.service_request?.service_intent)) return { contrary: true, callLogId: row.id, at: row.created_at };
   const choice = require('./call-prepay-choice').billingChoiceOf(extraction);
   if (!choice) return null;
-  const heard = callerWordsOf(extraction, { transcript: row.transcription, outbound: String(row.direction || '').startsWith('outbound') });
-  return { choice, callLogId: row.id, at: row.created_at, quote: heard?.words || null, plain: heard?.plain === true };
+  const quote = callerWordsOf(extraction, { transcript: row.transcription, outbound: String(row.direction || '').startsWith('outbound') });
+  return { choice, callLogId: row.id, at: row.created_at, quote };
 }
 
 // The customer's latest word on a call since `since`: the newest read, valid, two-party call whose extraction names a
@@ -179,15 +168,14 @@ async function laterWordProblem(conn, { customerId, yes, booking }) {
 
 // The customer's word since `since`, as the cards read it: a reason for no card ({ skip: 'took_back' |
 // 'chose_annual_prepay' }), or the yes and, when there is none, why ({ yes: null, noYes: 'no_yes_heard' |
-// 'yes_without_words' | 'yes_not_plain' }). A yes is the caller's pay-per-application choice WITH the caller's own
-// words in a plain statement ({ yes: { callLogId, at, quote }, noYes: null }); any other choice is no yes a card shows.
+// 'yes_without_words' }). A yes is the call reader's pay-per-application choice WITH the caller's own words
+// ({ yes: { callLogId, at, quote }, noYes: null }); any other choice is no yes a card shows.
 async function callerWord(conn, { customerId, since }) {
   const word = await latestBillingChoice(conn, { customerId, since });
   if (word?.contrary) return { skip: 'took_back' };
   if (word?.choice === 'annual_prepay') return { skip: 'chose_annual_prepay' };
   if (word?.choice !== 'per_application') return { yes: null, noYes: 'no_yes_heard' };
   if (!word.quote) return { yes: null, noYes: 'yes_without_words' };
-  if (!word.plain) return { yes: null, noYes: 'yes_not_plain' };
   return { yes: { callLogId: word.callLogId, at: word.at, quote: word.quote }, noYes: null };
 }
 
