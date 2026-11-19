@@ -133,7 +133,7 @@ function closeCopy(target, firstName, liveOffer) {
   };
 }
 
-function DateRequestNote({ offer, busy, onUpdate }) {
+function DateRequestNote({ offer, busy, canAct, onUpdate }) {
   if (offer.status !== "date_requested" || !offer.requestedStartDate) return null;
   return (
     <div className="border-hairline border rounded p-3 mb-3">
@@ -141,9 +141,11 @@ function DateRequestNote({ offer, busy, onUpdate }) {
         Asked to start {formatDay(offer.requestedStartDate)}.
         {offer.dateRequestNote ? ` Note: ${offer.dateRequestNote}` : ""}
       </div>
-      <Button size="sm" onClick={() => onUpdate(offer.requestedStartDate)} disabled={busy}>
-        Make an updated offer for {formatDay(offer.requestedStartDate)}
-      </Button>
+      {canAct && (
+        <Button size="sm" onClick={() => onUpdate(offer.requestedStartDate)} disabled={busy}>
+          Make an updated offer for {formatDay(offer.requestedStartDate)}
+        </Button>
+      )}
     </div>
   );
 }
@@ -176,7 +178,7 @@ export function History({ history, onViewSigned }) {
   );
 }
 
-function DraftBlock({ draft, busy, onOpen, onDiscard }) {
+function DraftBlock({ draft, busy, canAct, onOpen, onDiscard }) {
   return (
     <div className="border-hairline border rounded p-3 mb-3">
       <div className="flex flex-wrap items-center gap-2 mb-1">
@@ -188,19 +190,57 @@ function DraftBlock({ draft, busy, onOpen, onDiscard }) {
         <Button size="sm" onClick={onOpen} disabled={busy}>
           Open the updated draft
         </Button>
-        <Button size="sm" variant="secondary" onClick={onDiscard} disabled={busy}>
-          Discard this draft — the offer you sent stays open
-        </Button>
+        {canAct && (
+          <Button size="sm" variant="secondary" onClick={onDiscard} disabled={busy}>
+            Discard this draft — the offer you sent stays open
+          </Button>
+        )}
       </div>
     </div>
   );
 }
 
-export default function OfferTimeline({ applicationId, firstName, offer, draft, history, canMakeOffer, onMakeOffer, onChanged, onOpenDraft, onEdit }) {
+function OfferActions({ offer, draft, busy, stale, canAct, canMakeOffer, onMakeOffer, onEdit, onViewSigned, onRevise, onClose }) {
+  return (
+    <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+      {canMakeOffer && (
+        <Button size="sm" onClick={onMakeOffer} disabled={busy || stale}>
+          Make an offer
+        </Button>
+      )}
+      {offer.status === "draft" && (
+        <Button size="sm" onClick={onEdit} disabled={busy || stale}>
+          Open the draft
+        </Button>
+      )}
+      {offer.signedAt && (
+        <Button size="sm" variant="secondary" onClick={onViewSigned} disabled={busy}>
+          View signed copy
+        </Button>
+      )}
+      {canAct && CAN_REVISE.includes(offer.status) && !draft && (
+        <Button size="sm" variant="secondary" onClick={onRevise} disabled={busy}>
+          Revise
+        </Button>
+      )}
+      {canAct && CAN_WITHDRAW.includes(offer.status) && (
+        <Button size="sm" variant="secondary" onClick={onClose} disabled={busy}>
+          {offer.status === "draft" ? "Discard this draft" : "Withdraw offer"}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+export default function OfferTimeline({ applicationId, firstName, offer, draft, history, canMakeOffer, ownerActions, refreshError, onRetry, onMakeOffer, onChanged, onOpenDraft, onEdit }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [closing, setClosing] = useState(null); // the offer record being withdrawn or discarded
   const [signed, setSigned] = useState(null);
+  // Owner-only actions (send, revise, withdraw, discard) need the server's
+  // viewer.ownerActions; none run on data that a failed re-read left stale.
+  const stale = Boolean(refreshError);
+  const canAct = ownerActions === true && !stale;
 
   const act = async (work) => {
     setBusy(true);
@@ -244,42 +284,33 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
       </div>
       <Terms offer={offer} />
       <Timeline entries={offer.timeline} />
-      <DateRequestNote offer={offer} busy={busy || Boolean(draft)} onUpdate={revise} />
+      <DateRequestNote offer={offer} busy={busy || Boolean(draft)} canAct={canAct} onUpdate={revise} />
+      {refreshError && (
+        <ActionFeedback error className="mb-3" onRetry={onRetry}>
+          {refreshError}
+        </ActionFeedback>
+      )}
       {error && !closing && (
         <ActionFeedback error className="mb-3">
           {error}
         </ActionFeedback>
       )}
       {draft && (
-        <DraftBlock draft={draft} busy={busy} onOpen={() => onOpenDraft(draft)} onDiscard={() => setClosing(draft)} />
+        <DraftBlock draft={draft} busy={busy || stale} canAct={canAct} onOpen={() => onOpenDraft(draft)} onDiscard={() => setClosing(draft)} />
       )}
-      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-        {canMakeOffer && (
-          <Button size="sm" onClick={onMakeOffer} disabled={busy}>
-            Make an offer
-          </Button>
-        )}
-        {offer.status === "draft" && (
-          <Button size="sm" onClick={onEdit} disabled={busy}>
-            Open the draft
-          </Button>
-        )}
-        {offer.signedAt && (
-          <Button size="sm" variant="secondary" onClick={() => viewSigned(offer)} disabled={busy}>
-            View signed copy
-          </Button>
-        )}
-        {CAN_REVISE.includes(offer.status) && !draft && (
-          <Button size="sm" variant="secondary" onClick={() => revise()} disabled={busy}>
-            Revise
-          </Button>
-        )}
-        {CAN_WITHDRAW.includes(offer.status) && (
-          <Button size="sm" variant="secondary" onClick={() => setClosing(offer)} disabled={busy}>
-            {offer.status === "draft" ? "Discard this draft" : "Withdraw offer"}
-          </Button>
-        )}
-      </div>
+      <OfferActions
+        offer={offer}
+        draft={draft}
+        busy={busy}
+        stale={stale}
+        canAct={canAct}
+        canMakeOffer={canMakeOffer}
+        onMakeOffer={onMakeOffer}
+        onEdit={onEdit}
+        onViewSigned={() => viewSigned(offer)}
+        onRevise={() => revise()}
+        onClose={() => setClosing(offer)}
+      />
       <History history={history} onViewSigned={viewSigned} />
       <SignedCopyView copy={signed} onClose={() => setSigned(null)} />
       {closing && (

@@ -12,7 +12,7 @@ import { offerErrorMessage } from "./offerLogic";
 const REOFFER_STATES = ["withdrawn", "expired"];
 
 export default function OfferSection({ detail, offerFlow }) {
-  const { enabled, data, openForm, reload, error: readError, retry } = offerFlow;
+  const { enabled, data, openForm, reload, error: readError, refreshError, ownerActions, retry } = offerFlow;
   const [signed, setSigned] = useState(null);
   const [error, setError] = useState(null);
   if (detail.role !== "technician") return null;
@@ -29,20 +29,24 @@ export default function OfferSection({ detail, offerFlow }) {
   // A new offer is allowed while the application is in Offer and there is no
   // offer to act on: none yet, or the last one was withdrawn or closed unsigned.
   const stillInOffer = detail.status === "offer";
-  const canMakeOffer = stillInOffer && (!data.current || REOFFER_STATES.includes(data.current.status));
+  const canMakeOffer = stillInOffer && !refreshError && (!data.current || REOFFER_STATES.includes(data.current.status));
   if (data.current) {
     return (
       <OfferTimeline
+        key={detail.id}
         applicationId={detail.id}
+        ownerActions={ownerActions}
+        refreshError={refreshError}
+        onRetry={retry}
         firstName={firstName}
         offer={data.current}
         draft={data.draft || null}
         history={history}
         canMakeOffer={canMakeOffer}
-        onMakeOffer={() => openForm()}
+        onMakeOffer={() => openForm(null, detail.id)}
         onChanged={reload}
-        onOpenDraft={(draft) => openForm(draft)}
-        onEdit={() => openForm(data.current)}
+        onOpenDraft={(draft) => openForm(draft, detail.id)}
+        onEdit={() => openForm(data.current, detail.id)}
       />
     );
   }
@@ -57,7 +61,7 @@ export default function OfferSection({ detail, offerFlow }) {
   return (
     <div className="mb-4">
       {canMakeOffer && (
-        <Button size="sm" variant="secondary" onClick={() => openForm()}>
+        <Button size="sm" variant="secondary" onClick={() => openForm(null, detail.id)}>
           Make an offer
         </Button>
       )}

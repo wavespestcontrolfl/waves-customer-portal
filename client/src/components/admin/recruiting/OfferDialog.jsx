@@ -164,7 +164,7 @@ function formView({ fields, reviewed, data, contact, busy }) {
     startError,
     fieldsOk,
     dirty,
-    canSend: Boolean(reviewed?.draftHash) && !dirty && fieldsOk && data.termsIssued && !busy,
+    canSend: data.viewer?.ownerActions === true && Boolean(reviewed?.draftHash) && !dirty && fieldsOk && data.termsIssued && !busy,
   };
 }
 
@@ -178,11 +178,15 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
   const [result, setResult] = useState(null);
   const reviewed = reviewedDraft(data, draftId);
   const { firstName, sendTo, startError, fieldsOk, dirty, canSend } = formView({ fields, reviewed, data, contact, busy });
+  const ownerActions = data.viewer?.ownerActions === true;
 
   const onChange = (key, value) => {
     setFields((prev) => {
       const next = { ...prev, [key]: value };
+      // The step date follows the start date whenever a step rate is set, and is
+      // recomputed when a cleared rate is restored. It stays editable after that.
       if (key === "startDate" && next.stepRate !== "") next.stepEffectiveOn = stepDateFor(value);
+      if (key === "stepRate") next.stepEffectiveOn = value === "" ? "" : prev.stepRate === "" ? stepDateFor(prev.startDate) : prev.stepEffectiveOn;
       return next;
     });
   };
@@ -270,7 +274,9 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
             <div className="text-14 text-zinc-400 mt-1">Shows the saved draft. Save the draft to refresh it.</div>
           </div>
           <div className="text-14 text-zinc-500">
-            Sends one text and one email to {firstName}. Nothing goes out until you press Send offer.
+            {ownerActions
+              ? `Sends one text and one email to ${firstName}. Nothing goes out until you press Send offer.`
+              : "Only the owner can send this offer. You can save the draft."}
           </div>
           {error && !confirming && <ActionFeedback error>{error}</ActionFeedback>}
         </div>
@@ -282,9 +288,11 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
         <Button size="sm" variant="secondary" onClick={save} disabled={busy || !fieldsOk || !dirty}>
           {busy && !confirming ? "Saving…" : "Save draft"}
         </Button>
-        <Button size="sm" onClick={() => setConfirming(true)} disabled={!canSend}>
-          Send offer
-        </Button>
+        {ownerActions && (
+          <Button size="sm" onClick={() => setConfirming(true)} disabled={!canSend}>
+            Send offer
+          </Button>
+        )}
       </DialogFooter>
       <ConfirmSend
         open={confirming}

@@ -48,6 +48,7 @@ function offerPayload(overrides = {}) {
     termsIssued: true,
     terms: { templateId: 't1', versionId: 'v1', title: 'Offer Letter: Technician Terms', issuedAt: '2026-11-11T02:30:00Z' },
     termsBlockers: [],
+    viewer: { ownerActions: true },
     defaults: DEFAULTS,
     letterPreview: { markdown: '# Your job offer\n\nStart: **Monday, January 4, 2027**.\n\n<script>alert(1)</script>' },
     current: null,
@@ -172,6 +173,24 @@ describe('RecruitingPage offer flow: form', () => {
     fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2027-01-09' } });
     expect(screen.getByText('Pick a Monday to Thursday.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Save draft' })).toBeDisabled();
+  });
+
+  it('recomputes the step date when a cleared step rate is restored after a start-date change', async () => {
+    setupFetch({});
+    await openForm();
+    fireEvent.change(screen.getByLabelText('Step rate ($)'), { target: { value: '' } });
+    expect(screen.getByLabelText('Step date')).toHaveValue('');
+    fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2027-01-11' } });
+    fireEvent.change(screen.getByLabelText('Step rate ($)'), { target: { value: '25' } });
+    expect(screen.getByLabelText('Step date')).toHaveValue('2027-04-12');
+  });
+
+  it('hides Send offer for an admin who is not the owner but still lets them save', async () => {
+    setupFetch({}, { offer: offerPayload({ viewer: { ownerActions: false } }) });
+    await openForm();
+    expect(screen.queryByRole('button', { name: 'Send offer' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save draft' })).toBeInTheDocument();
+    expect(screen.getByText(/Only the owner can send this offer/)).toBeInTheDocument();
   });
 
   it('saves the draft, then asks before sending one text and one email', async () => {
@@ -455,5 +474,82 @@ describe('RecruitingPage offer flow: read failures, re-offers and drafts', () =>
     fireEvent.click(within(discardDialog).getByRole('button', { name: 'Discard draft' }));
     await waitFor(() => expect(calls.filter((c) => c.path === '/admin/careers/app-1/offer/offer-2/withdraw')).toHaveLength(1));
     expect(calls.some((c) => c.path === '/admin/careers/app-1/offer/offer-1/withdraw')).toBe(false);
+  });
+});
+
+describe('RecruitingPage offer flow: owner actions, stale reads and applicant switches', () => {
+  const sent = offerRecord({ status: 'sent', timeline: [] });
+  const asked = offerRecord({ status: 'date_requested', requestedStartDate: '2027-01-11', timeline: [] });
+  const draft = offerRecord({ id: 'offer-2', supersedesId: 'offer-1' });
+
+  it('without viewer.ownerActions the card hides Revise, Withdraw, Discard and the updated-offer button but keeps the signed copy', async () => {
+    const signed = offerRecord({ status: 'accepted', signedAt: '2026-12-12T13:15:00Z', signedName: 'Jordan Rivera', timeline: [] });
+    setupFetch({}, { offer: offerPayload({ current: signed, viewer: { ownerActions: false } }), detail: detailFixture({ status: 'hired' }) });
+    await openDetail();
+    const card = await screen.findByTestId('offer-card');
+    expect(within(card).getByRole('button', { name: 'View signed copy' })).toBeInTheDocument();
+
+    cleanup();
+    setupFetch({}, { offer: offerPayload({ current: asked, draft, viewer: { ownerActions: false } }), detail: detailFixture({ status: 'offer' }) });
+    await openDetail();
+    const card2 = await screen.findByTestId('offer-card');
+    expect(within(card2).getByRole('button', { name: 'Open the updated draft' })).toBeInTheDocument();
+    for (const name of ['Revise', 'Withdraw offer', 'Discard this draft — the offer you sent stays open', /Make an updated offer/]) {
+      expect(within(card2).queryByRole('button', { name })).toBeNull();
+    }
+  });
+
+  it('after a successful withdraw whose re-read fails it shows Try again and disables the stale actions', async () => {
+    let failRead = false;
+    setupFetch(
+      { 'POST /admin/careers/app-1/offer/offer-1/withdraw': () => { failRead = true; return res(200, { offer: { ...sent, status: 'withdrawn' } }); } },
+      { offer: () => (failRead ? res(500, { error: 'Read failed' }) : res(200, offerPayload({ current: sent }))), detail: detailFixture({ status: 'offer' }) },
+    );
+    await openDetail();
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Withdraw offer' }));
+    const dialog = (await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Withdraw' }));
+    expect(await screen.findByText('Read failed')).toBeInTheDocument();
+    expect(within(card).queryByRole('button', { name: 'Revise' })).toBeNull();
+    expect(within(card).queryByRole('button', { name: 'Withdraw offer' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Interview' })).toBeInTheDocument();
+    failRead = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.queryByText('Read failed')).toBeNull());
+    expect(within(await screen.findByTestId('offer-card')).getByRole('button', { name: 'Revise' })).toBeInTheDocument();
+  });
+
+  it('drops a Revise result that comes back after the owner opened another applicant', async () => {
+    let releaseRevise;
+    const pending = new Promise((resolve) => { releaseRevise = resolve; });
+    const fetchMock = vi.fn((url, options = {}) => {
+      const method = options.method || 'GET';
+      const path = String(url).replace(/^.*\/api/, '');
+      if (path.startsWith('/admin/careers?status=')) {
+        return Promise.resolve(res(200, {
+          applications: ['app-1', 'app-2'].map((id, i) => ({ id, role: 'technician', status: 'offer', contact_snapshot: { name: i ? 'Casey Morgan' : 'Jordan Rivera' }, created_at: '2026-09-10T12:00:00Z' })),
+          counts: {},
+        }));
+      }
+      if (method === 'POST' && path.endsWith('/offer/offer-1/revise')) return pending.then(() => res(200, { offer: draft }));
+      if (path === '/admin/careers/app-1/offer') return Promise.resolve(res(200, offerPayload({ current: sent })));
+      if (path === '/admin/careers/app-2/offer') return Promise.resolve(res(200, offerPayload({ current: null })));
+      if (path === '/admin/careers/app-1') return Promise.resolve(res(200, { application: detailFixture({ status: 'offer' }) }));
+      if (path === '/admin/careers/app-2') return Promise.resolve(res(200, { application: detailFixture({ id: 'app-2', status: 'offer', contact_snapshot: { name: 'Casey Morgan', phone: '9415550199', email: 'casey@example.com' } }) }));
+      return Promise.resolve(res(200, {}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText('Jordan Rivera'));
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Revise' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByTestId('offer-card')).toBeNull());
+    fireEvent.click(await screen.findByText('Casey Morgan'));
+    await screen.findByRole('heading', { name: /Casey Morgan/ });
+    releaseRevise();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByLabelText('Hourly rate ($)')).toBeNull();
   });
 });

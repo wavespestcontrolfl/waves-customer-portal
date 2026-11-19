@@ -833,7 +833,7 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, on
   const technician = detail.role === "technician";
   const offerForm = offerFlow.enabled && technician;
   // Until the offer read confirms on or off, a technician has no Offer move.
-  const offerPending = technician && (offerFlow.loading || Boolean(offerFlow.error));
+  const offerPending = technician && (offerFlow.loading || Boolean(offerFlow.error) || Boolean(offerFlow.refreshError));
   const onStageButton = (key) => (key === "offer" && offerForm ? offerFlow.openForm() : onOpenStageDialog(key));
   const screen = detail?.ai_screen || null;
 
@@ -1006,6 +1006,8 @@ export default function RecruitingPage() {
 
   const stageWorkflow = useStageChangeWorkflow(detail, tab, load, setDetail);
   const offerFlow = useOfferFlow(detail?.id);
+  const detailIdRef = useRef(null);
+  detailIdRef.current = detail?.id ?? null;
 
   const openDetail = useCallback(async (id) => {
     const seq = ++detailSeq.current;
@@ -1198,8 +1200,10 @@ export default function RecruitingPage() {
         onClose={offerFlow.closeForm}
         onChanged={offerFlow.reload}
         onSent={async () => {
+          // Only refresh the detail if it is still this applicant's.
+          const sentFor = detail.id;
           await offerFlow.reload();
-          await openDetail(detail.id);
+          if (detailIdRef.current === sentFor) await openDetail(sentFor);
           load(tab);
         }}
       />
