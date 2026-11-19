@@ -15,7 +15,6 @@
 
 let mockRow = null;
 let mockAffectedRows = 1;
-let mockUpdateThrows = false;
 const mockUpdates = [];
 // Every where clause applied to the builder that ran each update, in order.
 const mockUpdateWheres = [];
@@ -41,14 +40,12 @@ jest.mock('../models/db', () => {
       return mockRow;
     };
     b.update = async (row) => {
-      if (mockUpdateThrows) throw new Error('update failed');
       mockUpdates.push(row);
       mockUpdateWheres.push(log.slice());
       return mockAffectedRows;
     };
     return b;
   };
-  db.raw = (sql, bindings) => ({ sql, bindings });
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -63,16 +60,6 @@ const THREAD_KEY = 'sms:9415550123';
 // Links carry a customer id and the text's SID, never the phone number.
 const SENDER_LINK = '/admin/communications?message=SM0abc';
 const PLACEHOLDER_TITLE = 'Quote asked by text — send it';
-
-// A new ask on an open bell writes ONLY a quiet askedAt stamp (a jsonb key set in SQL, conditional on open).
-function expectOnlyAskedAtStamp() {
-  expect(mockUpdates).toHaveLength(1);
-  expect(Object.keys(mockUpdates[0])).toEqual(['metadata']);
-  expect(mockUpdates[0].metadata.sql).toMatch(/jsonb_set\(.*'\{askedAt\}'/);
-  expect(new Date(mockUpdates[0].metadata.bindings[0]).toString()).not.toBe('Invalid Date');
-  expect(mockUpdateWheres[0].some((w) => w.m === 'whereRaw' && w.args[0] === 'done_at IS NULL')).toBe(true);
-  expect(mockNotifyAdmin).not.toHaveBeenCalled();
-}
 
 function bellRow(meta = {}, overrides = {}) {
   return {
@@ -126,7 +113,6 @@ beforeEach(() => {
   mockUpdateWheres.length = 0;
   mockFirstWheres.length = 0;
   mockAffectedRows = 1;
-  mockUpdateThrows = false;
   mockRow = null;
 });
 
@@ -144,7 +130,7 @@ describe('notify() with a thread key', () => {
     mockRow = bellRow();
     const result = await notify(outcomeCall({
       title: 'Quote asked by text — send it (red)',
-      link: '/admin/communications?thread=cust-1',
+      link: '/admin/communications?message=SM1',
     }));
     expect(result).toBe(true);
     expect(mockUpdates).toHaveLength(1);
@@ -153,7 +139,7 @@ describe('notify() with a thread key', () => {
     expect(update.title).toBe('Quote asked by text — send it (red)');
     expect(update.body).toMatch(/^Jane Doe: quote requested over SMS/);
     expect(update.body).not.toMatch(/drafting/);
-    expect(update.link).toBe('/admin/communications?thread=cust-1');
+    expect(update.link).toBe('/admin/communications?message=SM1');
     expect(update.read_at).toBeNull();
     expect(update.done_at).toBeNull();
     const meta = JSON.parse(update.metadata);
@@ -200,14 +186,16 @@ describe('notify() with a thread key', () => {
   test('a LATER placeholder never overwrites an outcome bell', async () => {
     mockRow = bellRow({ placeholder: false });
     expect(await notify(placeholderCall())).toBe(true);
-    // Only the quiet askedAt stamp: title, body, link and read state are untouched.
-    expectOnlyAskedAtStamp();
+    // Stands exactly as on main: no write at all.
+    expect(mockUpdates).toHaveLength(0);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
   test('two placeholders stand (a repeated text never rewrites the row)', async () => {
     mockRow = bellRow();
     expect(await notify(placeholderCall())).toBe(true);
-    expectOnlyAskedAtStamp();
+    expect(mockUpdates).toHaveLength(0);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
   test('an outcome after an outcome (no estimate on either side) still stands', async () => {
@@ -297,14 +285,13 @@ describe('a new ask after a CLOSED thread bell gets its own row', () => {
     expect(mockUpdates).toHaveLength(0);
   });
 
-  test('an OPEN bell plus a placeholder still stands: no insert, only the askedAt stamp', async () => {
+  test('an OPEN bell plus a placeholder still stands: no insert, no write', async () => {
     for (const meta of [{ placeholder: false }, {}]) {
-      mockUpdates.length = 0;
-      mockUpdateWheres.length = 0;
       mockRow = bellRow(meta);
       expect(await notify(placeholderCall())).toBe(true);
-      expectOnlyAskedAtStamp();
     }
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockUpdates).toHaveLength(0);
   });
 
   test('an outcome against a closed placeholder still stands', async () => {
@@ -348,43 +335,6 @@ describe('dedupe is by sender identity', () => {
     });
     expect(dedupeSql()).not.toContain('senderIdentity');
     expect(dedupeSql()).toContain("metadata->>'callSid' = ?");
-  });
-});
-
-describe('a new ask on an open bell stamps askedAt', () => {
-  test('the stamp is conditional on open and writes only the metadata key', async () => {
-    mockRow = bellRow();
-    await notify(placeholderCall());
-    expectOnlyAskedAtStamp();
-  });
-
-  test('a stamp that matches 0 rows (closed meanwhile) or throws never fails the bell: notify still returns true', async () => {
-    mockRow = bellRow();
-    mockAffectedRows = 0;
-    expect(await notify(placeholderCall())).toBe(true);
-    mockUpdateThrows = true;
-    expect(await notify(placeholderCall())).toBe(true);
-    expect(mockNotifyAdmin).not.toHaveBeenCalled();
-  });
-
-  test('a rewrite keeps askedAt through the metadata merge (gives-way and draft upgrade)', async () => {
-    mockRow = bellRow({ askedAt: '2026-11-19T12:00:00.000Z' });
-    await notify(outcomeCall());
-    expect(JSON.parse(mockUpdates[0].metadata).askedAt).toBe('2026-11-19T12:00:00.000Z');
-    mockUpdates.length = 0;
-    mockRow = bellRow({ askedAt: '2026-11-19T12:00:00.000Z' });
-    await notify(outcomeCall({ estimateId: 'est-5', link: undefined }));
-    expect(JSON.parse(mockUpdates[0].metadata).askedAt).toBe('2026-11-19T12:00:00.000Z');
-  });
-
-  test('an outcome never stamps askedAt, and a placeholder on a CLOSED bell inserts a fresh row with no stamp', async () => {
-    mockRow = bellRow({ placeholder: false });
-    await notify(outcomeCall());
-    expect(mockUpdates).toHaveLength(0);
-    mockRow = bellRow({ placeholder: false }, { done_at: new Date('2026-11-18T12:00:00Z') });
-    await notify(placeholderCall());
-    expect(mockUpdates).toHaveLength(0);
-    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -225,6 +225,18 @@ function smsOrigin(threadKey) {
   };
 }
 
+// A log-safe error summary (code or name only): a knex message can carry the
+// bound phone number. Some suites mock notification-service as a whole module,
+// so fall back to a fixed string; this must never throw inside a catch block.
+function safeErrorText(err) {
+  try {
+    const summarize = require('../notification-service').safeErrorSummary;
+    return typeof summarize === 'function' ? summarize(err) : 'error';
+  } catch {
+    return 'error';
+  }
+}
+
 // Who texted, for the owed-quote bell. The sender is named by the SAME rule
 // the relevance sweep judges the bell by (customerIdsBySenderIdentity: the
 // canonical phone identity on a customer's phone or service-contact phones,
@@ -233,8 +245,10 @@ function smsOrigin(threadKey) {
 // Exactly one live customer names the sender; none, several, an error or a
 // timeout fall back to the last four digits. The triggering text's Twilio SID
 // anchors the link. The phone number NEVER appears in a link (access logs and
-// referrers carry it): links use the customer id and the SID, the way the
-// inbound-text bell does. Fail-soft and bounded: this must never block or
+// referrers carry it), and neither does a customer id: the link is the
+// message SID alone (CommunicationsPageV2 opens the thread that holds that
+// message for any sender), because an id derived from a lead can belong to a
+// different conversation. Fail-soft and bounded: this must never block or
 // fail the durable bell (the Twilio webhook awaits it), so every failure
 // returns the fallback, and a failed SID read only drops the anchor.
 const SENDER_LOOKUP_TIMEOUT_MS = 1000;
@@ -250,7 +264,7 @@ async function triggerTextSid(triggerSmsLogId) {
       .first();
     return row?.twilio_sid ? String(row.twilio_sid) : null;
   } catch (err) {
-    logger.warn(`[estimator-sms] trigger text lookup failed (link without anchor): ${err.message}`);
+    logger.warn(`[estimator-sms] trigger text lookup failed (link without anchor): ${safeErrorText(err)}`);
     return null;
   }
 }
@@ -271,19 +285,18 @@ async function namedSender(senderIdentity) {
     const name = row ? [row.first_name, row.last_name].filter(Boolean).join(' ').trim() : '';
     return name ? { id, name } : null;
   } catch (err) {
-    logger.warn(`[estimator-sms] sender lookup failed (using phone label): ${err.message}`);
+    logger.warn(`[estimator-sms] sender lookup failed (using phone label): ${safeErrorText(err)}`);
     return null;
   }
 }
 
-function threadBellLinkFor(customerId, sid) {
-  const anchor = sid ? `message=${encodeURIComponent(sid)}` : '';
-  if (customerId) return `/admin/communications?thread=${customerId}${anchor ? `&${anchor}` : ''}`;
-  return anchor ? `/admin/communications?${anchor}` : '/admin/communications';
+// The message SID alone; the bare communications page when there is none.
+function threadBellLinkFor(sid) {
+  return sid ? `/admin/communications?message=${encodeURIComponent(sid)}` : '/admin/communications';
 }
 
 async function threadSenderInfo(digits, triggerSmsLogId = null, senderIdentity = null) {
-  const info = { label: `Texter …${digits.slice(-4)}`, link: threadBellLinkFor(null, null), named: false };
+  const info = { label: `Texter …${digits.slice(-4)}`, link: threadBellLinkFor(null), named: false };
   let timer;
   try {
     const lookups = Promise.all([namedSender(senderIdentity), triggerTextSid(triggerSmsLogId)]);
@@ -292,13 +305,13 @@ async function threadSenderInfo(digits, triggerSmsLogId = null, senderIdentity =
       timer = setTimeout(() => resolve([null, null]), SENDER_LOOKUP_TIMEOUT_MS + 500);
     });
     const [sender, sid] = await Promise.race([lookups, guard]);
-    info.link = threadBellLinkFor(sender?.id || null, sid);
+    info.link = threadBellLinkFor(sid);
     if (sender) {
       info.label = sender.name;
       info.named = true;
     }
   } catch (err) {
-    logger.warn(`[estimator-sms] sender info failed (using phone label): ${err.message}`);
+    logger.warn(`[estimator-sms] sender info failed (using phone label): ${safeErrorText(err)}`);
   } finally {
     clearTimeout(timer);
   }

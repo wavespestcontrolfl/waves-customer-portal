@@ -4,10 +4,12 @@
  * Text-origin estimator bells are about a sender identified by
  * `phoneIdentityKey` (utils/phone.js: a NANP number is its 10 digits, any other
  * country `+<digits>`), whose SQL twin is `phoneIdentitySql`
- * (sms-response-policy.js). The bell emitter names the sender with it, and the
- * relevance sweep judges the bell with it, so the two can never disagree about
- * who a number belongs to. Matching on the last 10 digits alone would let an
- * international sender collide with a US customer who shares them.
+ * (sms-response-policy.js). The estimator names the sender of a text-quote bell
+ * with this module (estimator-engine/sms-thread.js). Any later rule that closes
+ * or judges such a bell by who the sender is must use the same function, so the
+ * two can never disagree about who a number belongs to. Matching on the last 10
+ * digits alone would let an international sender collide with a US customer
+ * who shares them.
  *
  * A customer belongs to an identity when the identity is on its phone or on any
  * of its three service-contact phones (a number that is primary on one account

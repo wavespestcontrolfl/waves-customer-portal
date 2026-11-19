@@ -620,22 +620,6 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
 // minimal query fake must support beyond whereRaw.
 const PLACEHOLDER_OPEN_SQL = "done_at IS NULL AND metadata->>'placeholder' = 'true' AND COALESCE(metadata->>'estimateId', '') = ''";
 
-// A new ask on a still-open thread bell: stamp metadata.askedAt (now) so the
-// relevance sweep judges a quote or visit from the LATEST ask, not the first.
-// A quiet metadata write (a jsonb key set in SQL, so a concurrent rewrite's
-// other keys are never clobbered): no unread reset, no title or body change,
-// conditional on the row still being open. Fail-soft: the bell already exists.
-async function stampAskedAt(id) {
-  try {
-    await db('notifications')
-      .where({ id })
-      .whereRaw('done_at IS NULL')
-      .update({ metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{askedAt}', to_jsonb(?::text))", [new Date().toISOString()]) });
-  } catch (err) {
-    logger.warn(`[estimator-engine] askedAt stamp failed (bell stands): ${err.message}`);
-  }
-}
-
 // True when the existing thread bell is a still-open "drafting now"
 // placeholder and this call is an outcome with no estimate on either side.
 function openPlaceholderGivesWay(existing, existingMeta, { placeholder, estimateId }) {
@@ -791,11 +775,7 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
             // gets its own row: standing would hide the ask, and a later
             // draft upgrading the old row would carry its old created_at.
             const newAskAfterClosed = placeholder === true && !!existing.done_at;
-            if (!newAskAfterClosed && (sameDraft || bothOpen)) {
-              // A new ask that reuses an OPEN bell moves the evidence boundary.
-              if (placeholder === true) await stampAskedAt(existing.id);
-              return true;
-            }
+            if (!newAskAfterClosed && (sameDraft || bothOpen)) return true;
             if (newAskAfterClosed) insertFresh = true;
             if (existingMeta.estimateId && existingMeta.estimateId !== estimateId) insertFresh = true;
           }

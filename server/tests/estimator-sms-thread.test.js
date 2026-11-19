@@ -196,9 +196,12 @@ describe('startSmsThreadDraft', () => {
       expect(link).not.toMatch(/9415550123/);
       expect(link).not.toMatch(/phone=/);
       expect(link).not.toMatch(/%2B1/);
+      // Never a customer id: a lead-derived id can belong to another conversation.
+      expect(link).not.toMatch(/thread=/);
+      expect(link).not.toMatch(/cust-/);
     };
 
-    test('one unambiguous customer: name in the body, thread + message anchor, placeholder marker', async () => {
+    test('one unambiguous customer: name in the body, message-only link, placeholder marker', async () => {
       named();
       mockSmsLogRow = { twilio_sid: 'SM123abc' };
       const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
@@ -207,7 +210,7 @@ describe('startSmsThreadDraft', () => {
       const args = placeholderArgs();
       expect(args.title).toBe('Quote asked by text — send it');
       expect(args.body).toMatch(/^Jane Doe asked for a quote by text\./);
-      expect(args.link).toBe('/admin/communications?thread=cust-42&message=SM123abc');
+      expect(args.link).toBe('/admin/communications?message=SM123abc');
       noDigits(args.link);
       expect(args.placeholder).toBe(true);
       await result.draftPromise;
@@ -257,10 +260,11 @@ describe('startSmsThreadDraft', () => {
       expect(placeholderArgs().link).toBe('/admin/communications');
     });
 
-    test('a known customer with no triggering text id gets the bare thread link', async () => {
+    test('a known customer with no triggering text id gets the bare communications link', async () => {
       named();
       await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT });
-      expect(placeholderArgs().link).toBe('/admin/communications?thread=cust-42');
+      expect(placeholderArgs().link).toBe('/admin/communications');
+      noDigits(placeholderArgs().link);
     });
 
     test('no customer on file: last four digits and a message-only anchor, no phone in the link', async () => {
@@ -307,13 +311,26 @@ describe('startSmsThreadDraft', () => {
       expect(placeholderArgs().link).toBe(`${BARE}?message=SM7`);
     });
 
+    test('lookup warnings never log the phone number (a knex message can carry the bound value)', async () => {
+      const logger = require('../services/logger');
+      const leaky = () => new Error('select ... where phone = \'9415550123\' timed out');
+      mockCustomerIdsBySenderIdentity.mockRejectedValueOnce(leaky());
+      mockSmsLogThrows = true;
+      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
+      expect(result.started).toBe(true);
+      const warned = logger.warn.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(warned).toMatch(/sender lookup failed|trigger text lookup failed/);
+      expect(warned).not.toMatch(/9415550123/);
+      expect(warned).not.toMatch(/timed out/);
+    });
+
     test('a failed sms_log read only drops the anchor; the customer is still named', async () => {
       named();
       mockSmsLogThrows = true;
       const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
       expect(result.started).toBe(true);
       expect(placeholderArgs().body).toMatch(/^Jane Doe/);
-      expect(placeholderArgs().link).toBe('/admin/communications?thread=cust-42');
+      expect(placeholderArgs().link).toBe('/admin/communications');
     });
 
     test('a lookup that never answers is cut off and the bell is still written', async () => {
