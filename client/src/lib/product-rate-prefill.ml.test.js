@@ -98,7 +98,7 @@ describe('resolveRatePrefill for every other product', () => {
       usePestSprayDefault: false, perBasisUnit: true, defaultUnit: 'fl_oz/gal',
     });
     expect(resolveRatePrefill(TAURUS, { applicationMethod: 'perimeter_spray', serviceLine: 'pest' })).toEqual({
-      rate: 4, labelMaxRate: 0.8, rateUnit: 'oz', amountUnit: 'oz',
+      rate: 1.6, labelMaxRate: 0.8, rateUnit: 'oz', amountUnit: 'oz',
       usePestSprayDefault: true, perBasisUnit: true, defaultUnit: 'fl_oz/gal',
     });
   });

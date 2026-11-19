@@ -136,6 +136,13 @@ function isCareersInterviewPath(reqPath = '') {
   return /^\/careers\/interview\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
 }
 
+// Public job-offer page — 64-hex bearer token (job_offers.token) that signs, declines or asks for another date on the
+// applicant's offer and renders their first name, pay and start date, so the shell gets the same headers as the interview
+// page (matches the /api/public/careers/offer headers in server/index.js; GATE_JOB_OFFERS).
+function isCareersOfferPath(reqPath = '') {
+  return /^\/careers\/offer\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
+}
+
 // The portal home and login page are an app door, not a search result.
 // GSC audit 2026-10-22: Google indexed portal.wavespestcontrol.com/ and /login
 // (102 impressions in 90 days) beside the marketing site.
@@ -153,7 +160,7 @@ function applySensitiveSpaHeaders(reqPath, res) {
     res.set('Referrer-Policy', 'no-referrer');
     return;
   }
-  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath) || isContractPath(reqPath) || isAppointmentPath(reqPath) || isReservicePath(reqPath) || isMovingPath(reqPath) || isInspectionPath(reqPath) || isCareersInterviewPath(reqPath)) {
+  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath) || isContractPath(reqPath) || isAppointmentPath(reqPath) || isReservicePath(reqPath) || isMovingPath(reqPath) || isInspectionPath(reqPath) || isCareersInterviewPath(reqPath) || isCareersOfferPath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     res.set('Cache-Control', 'no-store');
@@ -163,6 +170,7 @@ function applySensitiveSpaHeaders(reqPath, res) {
 module.exports = {
   isPortalEntryPath,
   isCareersInterviewPath,
+  isCareersOfferPath,
   applySensitiveSpaHeaders,
   isServiceOutlinePath,
   isLawnReportPath,

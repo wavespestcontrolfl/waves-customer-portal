@@ -42,6 +42,18 @@
  *     by slug. Zone-stop matching mirrors filterCollidingSlots exactly (zone
  *     slug OR customer city, both case-insensitive) so the two can't drift.
  *
+ * Per truck (GATE_MULTI_TECH_CONFIRM, read through occupancy.js
+ * techScopedConfirmActive like every tech-scoped check; owner 2026-11-19
+ * "build south"): getZoneFunnelDays also returns each zone day's technicians
+ * (techDays), and onZoneDay decides whether a date is a zone day for one
+ * technician: a stop of that technician, or an unassigned stop (any truck may
+ * take it). The night run's far-south rule (auto-dispatch/south-day-kept.js)
+ * reads it. The booking funnels here (the estimate page, the assessment link)
+ * keep the fleet's zone days: their slot builders choose among trucks around
+ * the funnel (one technician per start, the customer route check's floor, the
+ * seed day), so per truck there needs those choices made per truck too
+ * (follow-up). Off, every zone day is the fleet's, as with one truck.
+ *
  * Fail-open like blackout-dates: any lookup failure disables the funnel for
  * that request (full pool offered) — a scattered offer beats no offer.
  */
@@ -49,6 +61,17 @@
 const logger = require('../logger');
 const { zoneSlugOf, resolveEstimateZone } = require('../slot-zone');
 const { isEnabled } = require('../../config/feature-gates');
+
+// The per-truck switch: the scheduler's one technician-scope reader (occupancy.js techScopedConfirmActive,
+// GATE_MULTI_TECH_CONFIRM), read at call time. A read that throws (a suite that mocks occupancy or feature-gates
+// down to a few functions) reads as off, every zone day the fleet's, and never fails the zone lookup.
+function perTruckLive() {
+  try {
+    return require('./occupancy').techScopedConfirmActive() === true;
+  } catch {
+    return false;
+  }
+}
 
 // Funneled zone slugs (zoneSlugOf format — 'Venice / North Port' → 'venice').
 // Override without a deploy via SOUTH_FUNNEL_ZONE_SLUGS (comma-separated);
@@ -151,11 +174,13 @@ function rowMatchesZone(row, estimateZone, zoneSlug, zoneCities) {
 // is (or was) in the zone.
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 
-// Distinct YYYY-MM-DD dates in [dateFrom, dateTo] with at least one live
-// scheduled service (assigned or unassigned — either means a truck is in the
-// zone that day) matching the estimate's zone. Hold rows count only while
-// unexpired, mirroring filterCollidingSlots.
-async function zoneStopDates(dbc, estimateZone, dateFrom, dateTo) {
+// The zone's stop days in [dateFrom, dateTo]. `dates`: the distinct
+// YYYY-MM-DD dates with at least one live scheduled service (assigned or
+// unassigned — either means a truck is in the zone that day) matching the
+// estimate's zone. `techs`: each of those dates -> the technician ids of its
+// stops (null = an unassigned stop). Hold rows count only while unexpired,
+// mirroring filterCollidingSlots.
+async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo) {
   const rows = await dbc('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
@@ -168,6 +193,7 @@ async function zoneStopDates(dbc, estimateZone, dateFrom, dateTo) {
       'scheduled_services.zone',
       'scheduled_services.service_address_city as service_city',
       'customers.city as customer_city',
+      'scheduled_services.technician_id',
     );
 
   const zoneSlug = zoneSlugOf(estimateZone);
@@ -175,30 +201,48 @@ async function zoneStopDates(dbc, estimateZone, dateFrom, dateTo) {
     (estimateZone?.cities || []).map((c) => String(c || '').toLowerCase()).filter(Boolean),
   );
   const dates = new Set();
+  const techs = new Map();
   for (const row of rows) {
     if (!rowMatchesZone(row, estimateZone, zoneSlug, zoneCities)) continue;
     const date = row.scheduled_date instanceof Date
       ? row.scheduled_date.toISOString().slice(0, 10)
       : String(row.scheduled_date).slice(0, 10);
-    if (date) dates.add(date);
+    if (!date) continue;
+    dates.add(date);
+    if (!techs.has(date)) techs.set(date, new Set());
+    techs.get(date).add(row.technician_id == null ? null : String(row.technician_id));
   }
-  return dates;
+  return { dates, techs };
 }
 
-// { days, failed }: `days` is the Set of zone-stop dates when the funnel
-// applies to this estimate's zone, null when it doesn't (gate off, no/other
-// zone, or lookup failure — null means "leave the pool alone"). `failed`
-// distinguishes a transient lookup failure from genuinely-inactive so the
-// caller can keep fail-open REQUEST-scoped (e.g. not cache the unfunneled
-// result and extend one bad lookup across the whole cache TTL).
+// { days, techDays, failed }: `days` is the Set of zone-stop dates when the
+// funnel applies to this estimate's zone, null when it doesn't (gate off,
+// no/other zone, or lookup failure — null means "leave the pool alone").
+// `techDays` is the per-truck view of the same days (date -> technician ids,
+// null = an unassigned stop) when GATE_MULTI_TECH_CONFIRM is on, else null:
+// every zone day is the fleet's. `failed` distinguishes a transient lookup
+// failure from genuinely-inactive so the caller can keep fail-open
+// REQUEST-scoped (e.g. not cache the unfunneled result and extend one bad
+// lookup across the whole cache TTL).
 async function getZoneFunnelDays(dbc, { estimateZone, dateFrom, dateTo }) {
-  if (!isFunnelZone(estimateZone)) return { days: null, failed: false };
+  if (!isFunnelZone(estimateZone)) return { days: null, techDays: null, failed: false };
   try {
-    return { days: await zoneStopDates(dbc, estimateZone, dateFrom, dateTo), failed: false };
+    const { dates, techs } = await zoneStopDays(dbc, estimateZone, dateFrom, dateTo);
+    return { days: dates, techDays: perTruckLive() ? techs : null, failed: false };
   } catch (err) {
     logger.warn(`[zone-day-funnel] zone-stop lookup failed (failing open): ${err.message}`);
-    return { days: null, failed: true };
+    return { days: null, techDays: null, failed: true };
   }
+}
+
+// Is `date` a zone day for technician `techId`? `days` = the zone-stop dates, `techDays` = their per-truck view
+// (getZoneFunnelDays). Fleet-wide (techDays null) or no technician: any zone stop that day. Per truck: a stop of
+// that technician, or an unassigned stop (any truck may take it).
+function onZoneDay(date, techId, days, techDays) {
+  if (!days.has(date)) return false;
+  if (!techDays || techId == null) return true;
+  const techs = techDays.get(date);
+  return !!techs && (techs.has(null) || techs.has(String(techId)));
 }
 
 // Pure pool filter. funnelDays null → untouched. Otherwise clustered mode
@@ -265,7 +309,7 @@ async function funnelZoneRows(dbc) {
   return zones.filter(isFunnelZone);
 }
 
-// Is this visit/stop row ({zone, service_city, customer_city}, the shape zoneStopDates matches) in one of the funneled
+// Is this visit/stop row ({zone, service_city, customer_city}, the shape zoneStopDays matches) in one of the funneled
 // zones (funnelZoneRows)? true / false, or null when the row carries no usable zone stamp and no city, so the funnel
 // has nothing to decide on. Same matcher as the cluster days: rowMatchesZone.
 function rowInFunnelZones(row, zones) {
@@ -282,9 +326,11 @@ module.exports = {
   funnelOfferPool,
   funnelZoneRows,
   rowInFunnelZones,
+  onZoneDay,
+  perTruckLive,
   isFunnelZone,
   funnelZoneSlugs,
   fallbackCenterZoneName,
   // Exposed for tests.
-  _internals: { funnelZoneSlugs, rowMatchesZone, zoneStopDates },
+  _internals: { funnelZoneSlugs, rowMatchesZone, zoneStopDays },
 };

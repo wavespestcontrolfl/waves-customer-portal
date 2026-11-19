@@ -120,10 +120,10 @@ const INPUT = {
   },
   protocolReview: [{ serviceKey: 'pest', programKey: 'pest', visitCount: 6 }],
   inventoryReview: [
-    { serviceKey: 'pest', productName: 'Talstar P', status: 'in_stock', onHand: 8 },
+    { serviceKey: 'pest', productName: 'LESCO Crosscheck Plus', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Atticus Antapex WSG', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion WDG Granular', status: 'in_stock', onHand: 8 },
-    { serviceKey: 'pest', productName: 'Advion Cockroach Gel Bait', status: 'in_stock', onHand: 8 },
+    { serviceKey: 'pest', productName: 'Advion Evolution Cockroach Gel Bait', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Gentrol Complete EC3', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion Ant Gel', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Contrac Blox', status: 'in_stock', onHand: 8 },

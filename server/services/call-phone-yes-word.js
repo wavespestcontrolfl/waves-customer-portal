@@ -45,8 +45,8 @@ const OWED_READ_HOURS = 2;
 // recording webhook sets the status back to NULL and bumps updated_at), so a long read and an old call with new audio
 // are waited for too. Bounded in time on purpose, so no processor path is copied here: a row no pass will finish (a
 // missed call with nothing to read, a dead claim) delays a card by at most OWED_READ_HOURS after its last change and
-// never blocks it. Never NULL, so NOT owed is exact.
-function owedReadSql(t) {
+// never blocks it. Never NULL, so NOT owed is exact. SQL over the alias `t`, call_log by default.
+function owedReadSql(t = 'call_log') {
   const { exhaustedExtractionSql } = require('./call-commitments');
   const final = `(${t}.processing_status IN ('processed', 'voicemail', 'spam') OR ${exhaustedExtractionSql(t)})`;
   // GREATEST skips NULLs: a row with no update or no heartbeat counts from its insert.
@@ -110,8 +110,13 @@ function wordOfCall(row) {
   // relative, an agent: the processor's isExplicitlyNonOwner; owner, spouse or partner, and unknown are the holder's
   // side) is never the customer's yes, choice or cancellation, and their word still hides an older yes. Booking keeps
   // its own exceptions (a relative with a confirmed time, owner 2026-09-28); agreeing to a price takes none here, so
-  // the office decides.
-  if (require('./call-triage-flags').isExplicitlyNonOwner(extraction.caller?.relationship_to_property)) {
+  // the office decides. A caller who says the phone is not theirs (caller_id_disclaimed) and does not say they are the
+  // owner or the owner's spouse or partner is not shown to be the holder either: the phone linked the call, and
+  // 'unknown' is the holder's side (owner 2026-07-31) only because the phone vouches for it.
+  const caller = extraction.caller || {};
+  const relationship = String(caller.relationship_to_property || '').trim().toLowerCase();
+  const statedHolder = relationship === 'owner' || relationship === 'spouse_partner';
+  if (require('./call-triage-flags').isExplicitlyNonOwner(relationship) || (caller.caller_id_disclaimed === true && !statedHolder)) {
     return { notHolder: true, callLogId: row.id, at: callStartedAt(row) };
   }
   // Checked before the choice: a call that both names a plan and asks to cancel or for a one-time visit is no yes, and
@@ -127,24 +132,30 @@ function wordOfCall(row) {
   return { choice, callLogId: row.id, at: callStartedAt(row), quote };
 }
 
+// The extraction as jsonb in both storage eras: a jsonb object, or a JSON string inside the jsonb column (the unwrap
+// day-agreement-shadow.js uses; call-prepay-choice.js reads both eras too).
+const EXTRACTION_SQL = "(CASE WHEN jsonb_typeof(call_log.ai_extraction_enriched) = 'string' THEN (call_log.ai_extraction_enriched #>> '{}')::jsonb ELSE call_log.ai_extraction_enriched END)";
+
 // The customer's latest word on a call that began since `since`: the newest read, valid, two-party call whose
 // extraction names a billing choice, a cancellation (intent or flag), a one-time ask or a price the caller declined, as
 // wordOfCall gives it, or null. SQL keeps only rows that name a word; pages of CHOICE_SCAN_LIMIT follow until one is a two-party conversation,
 // so voicemails never hide the last word. Each page starts after the last row read (start time, then id), never at an
 // offset: a row that leaves the set between pages (a re-read starts) cannot shift another row past a page. The start
-// time is carried as text, so no microsecond is lost. Sandbox calls do not count.
-async function latestBillingChoice(conn, { customerId, since }) {
+// time is carried as text, so no microsecond is lost. Sandbox calls do not count. `until` (a timestamptz as text, or
+// null) keeps only calls that began before it: from then on a call may be about another estimate.
+async function latestBillingChoice(conn, { customerId, since, until = null }) {
   const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
   const { BILLING_CHOICES } = require('./call-prepay-choice');
   const query = conn('call_log')
     .where({ customer_id: customerId, processing_status: 'processed', v2_extraction_status: 'valid' })
     .whereRaw(`${startedSql()} >= ?`, [since])
+    .modify((qb) => { if (until) qb.whereRaw(`${startedSql()} < ?::timestamptz`, [until]); })
     .whereRaw(`NOT ${owedReadSql('call_log')}`)
     .where((qb) => qb
-      .whereRaw("ai_extraction_enriched -> 'service_request' ->> 'billing_choice' = ANY(?)", [[...BILLING_CHOICES]])
-      .orWhereRaw("ai_extraction_enriched -> 'service_request' ->> 'service_intent' = ANY(?)", [[...CONTRARY_INTENTS]])
-      .orWhereRaw("ai_extraction_enriched -> 'triage_flags' @> ?::jsonb", [JSON.stringify([CANCEL_FLAG])])
-      .orWhereRaw("ai_extraction_enriched -> 'service_request' -> 'price' ->> 'caller_response' = 'declined'"))
+      .whereRaw(`${EXTRACTION_SQL} -> 'service_request' ->> 'billing_choice' = ANY(?)`, [[...BILLING_CHOICES]])
+      .orWhereRaw(`${EXTRACTION_SQL} -> 'service_request' ->> 'service_intent' = ANY(?)`, [[...CONTRARY_INTENTS]])
+      .orWhereRaw(`${EXTRACTION_SQL} -> 'triage_flags' @> ?::jsonb`, [JSON.stringify([CANCEL_FLAG])])
+      .orWhereRaw(`${EXTRACTION_SQL} -> 'service_request' -> 'price' ->> 'caller_response' = 'declined'`))
     .modify((qb) => whereNotSandboxCall(qb))
     .orderByRaw(`${startedSql()} DESC, id DESC`)
     .limit(CHOICE_SCAN_LIMIT)
@@ -251,16 +262,18 @@ async function laterWordProblem(conn, { customerId, yes, booking }) {
   return later ? 'newer_call' : null;
 }
 
-// The customer's word since `since`, as the cards read it: a reason for no card ({ skip: 'took_back' |
-// 'chose_annual_prepay' }), or the yes and, when there is none, why ({ yes: null, noYes: 'no_yes_heard' |
-// 'yes_without_words' | 'caller_not_account_holder' | 'caller_declined_price' }). A yes is the call reader's pay-per-application choice WITH the
+// The customer's word since `since` (and before `until`, when given), as the cards read it: the yes and, when there is
+// none, why ({ yes: null, noYes: 'no_yes_heard' | 'yes_without_words' | 'caller_not_account_holder' |
+// 'caller_declined_price' | 'caller_took_back' | 'caller_chose_annual_prepay' }; an annual choice also names its call,
+// `callLogId`). A later word never decides whether a card exists: it is no yes, shown to the office (AGENTS.md: an owed
+// ask closes only on evidence answering that ask). A yes is the call reader's pay-per-application choice WITH the
 // caller's own words ({ yes: { callLogId, at, quote }, noYes: null }); any other choice is no yes a card shows.
-async function callerWord(conn, { customerId, since }) {
-  const word = await latestBillingChoice(conn, { customerId, since });
+async function callerWord(conn, { customerId, since, until = null }) {
+  const word = await latestBillingChoice(conn, { customerId, since, until });
   if (word?.notHolder) return { yes: null, noYes: 'caller_not_account_holder' };
-  if (word?.contrary) return { skip: 'took_back' };
+  if (word?.contrary) return { yes: null, noYes: 'caller_took_back' };
   if (word?.declined) return { yes: null, noYes: 'caller_declined_price' };
-  if (word?.choice === 'annual_prepay') return { skip: 'chose_annual_prepay' };
+  if (word?.choice === 'annual_prepay') return { yes: null, noYes: 'caller_chose_annual_prepay', callLogId: word.callLogId };
   if (word?.choice !== 'per_application') return { yes: null, noYes: 'no_yes_heard' };
   if (!word.quote) return { yes: null, noYes: 'yes_without_words' };
   return { yes: { callLogId: word.callLogId, at: word.at, quote: word.quote }, noYes: null };
