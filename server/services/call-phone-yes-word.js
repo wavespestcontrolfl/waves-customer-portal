@@ -75,7 +75,8 @@ function excerptOf(text, span) {
 // (labeled the caller's) word for word, with outbound labels oriented the way the triage flags read them:
 // { words, plain }. The shared tools ground the quote (a short one must be a whole caller turn); then every caller turn
 // that says it, at any length, is screened. plain = in every such turn, the whole turn, each of its sentences (the
-// grounding tools' split, so each sentence start meets the question check) and the quote pass the shared screen.
+// grounding tools' split, so each sentence start meets the question check) and every quote it says pass the shared
+// screen (so the order of the evidence never matters).
 // words = the first turn that does not (so the office sees the "no"), else the latest turn, cut around the quote. Null
 // when no caller turn holds a quote; an unlabeled or one-speaker transcript grounds nothing.
 function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
@@ -90,12 +91,12 @@ function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   const grounded = quotes.filter((e) => turnsHolding(turns, e.quote, 'caller').length).map((e) => ({ quote: e.quote, ns: normalize(e.quote) }));
   const held = [];
   for (const turn of turns.filter((t) => !t.agent)) {
-    const hit = grounded.find((g) => g.ns && ` ${turn.ns} `.includes(` ${g.ns} `));
-    if (!hit) continue;
+    const hits = grounded.filter((g) => g.ns && ` ${turn.ns} `.includes(` ${g.ns} `));
+    if (!hits.length) continue;
     const text = String(turn.raw || '');
-    const plain = quoteIsPlainStatement(text) && quoteIsPlainStatement(hit.quote)
+    const plain = quoteIsPlainStatement(text) && hits.every((g) => quoteIsPlainStatement(g.quote))
       && turn.sentences.every((x) => !x.question && quoteIsPlainStatement(x.ns));
-    held.push({ words: excerptOf(text, spanOf(text, hit.quote)), plain });
+    held.push({ words: excerptOf(text, spanOf(text, hits[0].quote)), plain });
   }
   if (!held.length) return null;
   return held.find((h) => !h.plain) || held[held.length - 1];

@@ -51,9 +51,11 @@ describe("the caller's words", () => {
     expect(callerWordsOf(evidence(choice('bill me each time')), talk(line))).toEqual(notPlain(line));
   });
 
-  test('a quote that itself asks is not plain, wherever it sits', () => {
-    expect(callerWordsOf(evidence(choice('can you bill me each time')), talk('I said can you bill me each time.')))
-      .toEqual(notPlain('I said can you bill me each time.'));
+  test('a quote that itself asks is not plain, wherever it sits and whatever the order of the evidence', () => {
+    const line = 'I said can you bill me each time.';
+    expect(callerWordsOf(evidence(choice('can you bill me each time')), talk(line))).toEqual(notPlain(line));
+    expect(callerWordsOf(evidence(choice('bill me each time'), choice('can you bill me each time')), talk(line))).toEqual(notPlain(line));
+    expect(callerWordsOf(evidence(choice('can you bill me each time'), choice('bill me each time')), talk(line))).toEqual(notPlain(line));
   });
 
   test('a price in the turn is fine', () => {
