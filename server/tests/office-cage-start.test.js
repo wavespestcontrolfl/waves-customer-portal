@@ -310,9 +310,17 @@ describe('seededCageFeatures (an accepted estimate\'s saved cage replayed on a l
 
     test('a legacy-only Large is held; a legacy-only Medium is not', () => {
       expect(seededCageFeatures(seed(), { poolCageLegacySize: 'LARGE' })).toMatchObject({ poolCageSize: 'medium', poolCageReview: true });
-      const out = seededCageFeatures(seed('large'), { poolCageLegacySize: 'MEDIUM' });
+      const out = seededCageFeatures(seed('medium'), { poolCageLegacySize: 'MEDIUM' });
       expect(out.poolCageSize).toBe('medium');
       expect(out.poolCageReview).toBeUndefined();
+    });
+
+    // Stored evidence can be older than the saved size (a website quote stores the visitor's profile,
+    // while its saved size came from the server re-read): it never releases a saved Large or Oversized.
+    test('a saved Large or Oversized stays held when the stored evidence says Medium', () => {
+      expect(seededCageFeatures(seed('large'), { poolCageLegacySize: 'MEDIUM' })).toMatchObject({ poolCageSize: 'medium', poolCageReview: true });
+      expect(seededCageFeatures(seed('oversized'), { poolCageSqft: 500 })).toMatchObject({ poolCageSize: 'medium', poolCageReview: true });
+      expect(seededCageFeatures(seed('LARGE'), { poolCageSqft: 500, poolCageLegacySize: 'MEDIUM' }).poolCageReview).toBe(true);
     });
 
     test('a legacy key with no usable value is not evidence, so a person quotes', () => {
@@ -337,6 +345,13 @@ describe('seededCageFeatures (an accepted estimate\'s saved cage replayed on a l
       const out = seededCageFeatures(seed(), { poolCageSqft: 750, poolCageLegacySize: 'LARGE' });
       expect(out.poolCageSize).toBe('large');
       expect(out.poolCageReview).toBeUndefined();
+    });
+
+    test('a saved Large or Oversized prices as saved (the engine holds it), even when two-size evidence says Medium', () => {
+      const large = seed('large');
+      expect(seededCageFeatures(large, { poolCageLegacySize: 'MEDIUM' })).toBe(large);
+      const oversized = seed('oversized');
+      expect(seededCageFeatures(oversized, { poolCageSqft: 500, poolCageLegacySize: 'MEDIUM' })).toBe(oversized);
     });
 
     test('a null legacy key alone, gate-off-era evidence (area, no key) and null evidence are unchanged', () => {

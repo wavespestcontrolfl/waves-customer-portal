@@ -70,23 +70,29 @@ function customerCageHold(enriched) {
 // The features to price for a SEEDED cage (an accepted estimate's saved features replayed on a lookup
 // miss), under THIS call's gate. `evidence` is the seed's own cage evidence (county area, the four-size
 // answer, and the presence of the legacy key), or null. Pure apart from the gate read. A seed's
-// poolCageReview is never removed here.
+// poolCageReview is never removed here, and neither is the hold of a SAVED Large or Oversized: the
+// stored evidence can be older than the saved size (a website quote stores the visitor's profile,
+// while its saved size came from the server's re-read), and a saved Large or Oversized is held in
+// every era (four sizes: over 600 sq ft; two sizes: Large is over 1,000 sq ft).
 //  - Gate on: the size reads as two sizes and the cage is held for a person to quote when its four-size
-//    answer is Large or Oversized, or when there is no evidence at all: a two-size Medium may be
-//    601 to 1,000 sq ft, which today's four sizes call Large.
-//  - Gate off (rollback): a seed written under two sizes (legacy key with a four-size answer) prices that
-//    four-size answer, and the engine holds Large and Oversized itself. Anything else is main's behavior.
+//    answer is Large or Oversized, when the saved size is, or when there is no evidence at all: a
+//    two-size Medium may be 601 to 1,000 sq ft, which today's four sizes call Large.
+//  - Gate off (rollback): a saved Large or Oversized prices as saved (the engine holds it). Otherwise a
+//    seed written under two sizes (legacy key with a four-size answer) prices that four-size answer,
+//    and the engine holds Large and Oversized itself. Anything else is main's behavior.
 function seededCageFeatures(features, evidence) {
   if (!features || features.poolCage !== true || !features.poolCageSize) return features;
   const four = fourSizeOf(evidence);
+  const savedHeld = isHeldFourSize(up(features.poolCageSize));
   if (twoSizesLive()) {
     const two = twoSizeOf(evidence);
     return {
       ...features,
       poolCageSize: two ? two.toLowerCase() : features.poolCageSize,
-      ...(!four || isHeldFourSize(four) ? { poolCageReview: true } : {}),
+      ...(!four || isHeldFourSize(four) || savedHeld ? { poolCageReview: true } : {}),
     };
   }
+  if (savedHeld) return features;
   return hasLegacyKey(evidence) && four ? { ...features, poolCageSize: four.toLowerCase() } : features;
 }
 

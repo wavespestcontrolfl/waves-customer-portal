@@ -1208,8 +1208,25 @@ function poolCageSizeOptions(twoSizes, loadedSize) {
   return POOL_CAGE_SIZE_OPTIONS.filter((o) => o.value === "MEDIUM" || o.value === "LARGE" || o.value === loadedSize);
 }
 
-// A legacy size read as two sizes (the server module's fourToTwo; the client cannot import it).
+// A Small or Oversized read as two sizes. Medium and Large are also two-size words, so a size whose
+// source is not a four-size lookup keeps them.
 const POOL_CAGE_TWO_SIZE_OF = { SMALL: "MEDIUM", OVERSIZED: "LARGE" };
+
+// The two-size reading of a FOUR-size lookup's cage (a profile without poolCageLegacySize, from a lookup
+// made while the gate was off): the county area first (Medium up to 1,000 sq ft, Large above), else its
+// four-size answer (Small, Medium and Large read Medium, Oversized reads Large). Null for a two-size
+// lookup (it carries the key; the caller also skips a lookup whose own meta said two sizes), which is
+// already two sizes, and for no cage answer. Mirrors twoSizeOf in
+// server/services/property-lookup/cage-sizes.js; the client cannot import it.
+const POOL_CAGE_TWO_SIZES_MEDIUM_MAX_SQFT = 1000;
+function lookupTwoSizeCage(lookupProfile) {
+  if (!lookupProfile || Object.prototype.hasOwnProperty.call(lookupProfile, "poolCageLegacySize")) return null;
+  const area = Number(lookupProfile.poolCageSqft);
+  if (Number.isFinite(area) && area > 0) return area <= POOL_CAGE_TWO_SIZES_MEDIUM_MAX_SQFT ? "MEDIUM" : "LARGE";
+  const four = String(lookupProfile.poolCageSize || "").toUpperCase();
+  if (four === "OVERSIZED") return "LARGE";
+  return ["SMALL", "MEDIUM", "LARGE"].includes(four) ? "MEDIUM" : null;
+}
 
 function SelectV2({ k, options, id = `estimate-${k}`, ...rest }) {
   const { form, set } = useContext(FormCtx);
@@ -3585,13 +3602,19 @@ export default function EstimateToolViewV2({
       active = false;
     };
   }, []);
-  // GATE_CAGE_TWO_SIZES: a Small or Oversized that was not loaded from an existing estimate (a pick
-  // made before the gate was known, or a stale draft) moves to its two-size reading, visibly.
+  // GATE_CAGE_TWO_SIZES: once the gate is known, a size that was not loaded from an existing estimate
+  // moves to its two-size reading, visibly. A size the lookup filled (not an operator pick) reads from
+  // that lookup when it was a four-size lookup: a 750 sq ft Large and a 950 sq ft Oversized both read
+  // Medium. Any other Small or Oversized (a pick made before the gate was known, or a stale draft) moves
+  // to Medium or Large; an operator's Medium or Large stays.
   useEffect(() => {
     if (!cageTwoSizes) return;
     const size = String(form.poolCageSize || "").toUpperCase();
-    const reading = POOL_CAGE_TWO_SIZE_OF[size];
-    if (reading && size !== loadedCageSize) {
+    if (!size || size === loadedCageSize) return;
+    const operatorPick = !!form._poolCageSizeEdited || (form._manualFields || []).includes("poolCageSize");
+    const fromLookup = !operatorPick && lookupMeta?.poolCageTwoSizes !== true ? lookupTwoSizeCage(enrichedProfile) : null;
+    const reading = fromLookup || POOL_CAGE_TWO_SIZE_OF[size];
+    if (reading && reading !== size) {
       // Not set(): an automatic conversion is not an operator pick. It must not join _manualFields or
       // _poolCageSizeEdited, so it keeps its provenance (a later lookup may still replace it). It does the
       // same estimate invalidation a size change normally causes.
@@ -3600,7 +3623,7 @@ export default function EstimateToolViewV2({
       setSavedId(null);
       setSavedViewUrl(null);
     }
-  }, [cageTwoSizes, form.poolCageSize, loadedCageSize]);
+  }, [cageTwoSizes, form.poolCageSize, form._poolCageSizeEdited, form._manualFields, loadedCageSize, enrichedProfile, lookupMeta]);
   useEffect(() => {
     (async () => {
       try {
@@ -3975,6 +3998,8 @@ export default function EstimateToolViewV2({
         businessIdentityBypassed: data.meta?.businessIdentityBypassed === true,
         addressStatus: data.meta?.addressStatus || null,
         campusParcel: data.meta?.campusParcel || null,
+        // This lookup's own cage era: a two-size lookup's size is never reclassified.
+        poolCageTwoSizes: data.meta?.poolCageTwoSizes === true,
       });
       setCageTwoSizes(data.meta?.poolCageTwoSizes === true);
       setVerifySaveState({});

@@ -337,6 +337,35 @@ describe('buildReportCrossSell', () => {
         expect((await draftOffer()).mode).toBe('priced');
       });
 
+      // A website quote stores the visitor's profile as `enriched`, while its saved size came from the
+      // server's re-read. That older profile never releases the hold of a saved Large.
+      test('a website seed saved Large with a stale Medium profile is the quote CTA with the gate off and on', async () => {
+        const websiteOffer = () => buildReportCrossSell(
+          SERVICE(),
+          dbFor({
+            serviceTypes: ['Lawn Care'],
+            turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+            estimates: [{
+              id: 'est-website', address: '123 Gulf Dr, Sarasota, FL 34236', status: 'accepted',
+              estimate_data: JSON.stringify({
+                engineInput: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup', features: { poolCage: true, poolCageSize: 'large' } },
+                enriched: { poolCage: 'YES', poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' },
+              }),
+            }],
+          }),
+          { propertyLookup: missLookup },
+        );
+        const off = await websiteOffer();
+        expect(off.serviceKey).toBe('pest_control');
+        expect(off.mode).toBe('quote_cta');
+        expect(off.option).toBeNull();
+        process.env[TWO_SIZES] = 'true';
+        const on = await websiteOffer();
+        expect(on.serviceKey).toBe('pest_control');
+        expect(on.mode).toBe('quote_cta');
+        expect(on.option).toBeNull();
+      });
+
       test('gate off (rollback): a seed written under two sizes (area 750, legacy Large, saved Medium) is the quote CTA', async () => {
         const held = await seededOffer({ poolCageSqft: 750, poolCageLegacySize: 'LARGE' });
         expect(held.mode).toBe('quote_cta');

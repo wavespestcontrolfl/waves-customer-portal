@@ -5266,10 +5266,12 @@ and the county area first (`server/services/property-lookup/cage-sizes.js`). Gat
 on: the priced size is the two-size answer (Medium up to 1,000 sq ft, Large above),
 and a cage that today's four sizes call Large or Oversized is held
 (`quote_required`, the existing manual-quote answer). A visitor who answers no
-cage is not held and not charged; a client that omits the cage answer takes the
-re-read's, so it prices like an explicit answer and a partial `enriched` cannot
-drop a hold. Gate off: a profile that carries `poolCageLegacySize` (one from before
-a rollback) prices the four-size answer, the re-read first; any other profile
+cage (`NO` in any case, or `false`) is not held and not charged; a client with no
+decided cage answer (omitted, `POSSIBLE`, `UNKNOWN` or any other value) takes the
+re-read's decided answer, so it prices like an explicit answer and a partial or
+undecided `enriched` cannot drop a hold. Gate off: a profile that carries
+`poolCageLegacySize` (one from before a rollback) prices the four-size answer, the
+re-read first, with the same rule for an undecided answer; any other profile
 prices its own `poolCageSize`, exactly as before the gate. Either way a Large or
 Oversized cage is held as before. The response
 shape does not change; `quote_required` was already a possible answer.

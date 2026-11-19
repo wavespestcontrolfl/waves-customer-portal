@@ -248,8 +248,9 @@ function trustedTreeShrubFootprintSqFt(trustedTurf = {}, propertyRecord = null) 
 // it decided the cage (YES or NO); it beats the client's profile, which only an API
 // caller can hand-build (the website forms echo the lookup unchanged).
 //  - Gate on: price the two-size answer; hold the four-size answer's Large and
-//    Oversized. A client that OMITS poolCage takes the re-read's cage answer, so it
-//    prices like an explicit answer; an explicit client answer stands.
+//    Oversized. A client with no decided poolCage (omitted, POSSIBLE, UNKNOWN) takes the
+//    re-read's cage answer, so it prices like an explicit answer; a YES or an explicit
+//    negative from the client stands.
 //  - Gate off: a profile with its own poolCageLegacySize key (a two-size profile from
 //    before a rollback) prices its four-size answer, the re-read first. Any other
 //    profile is today's code exactly.
@@ -264,14 +265,13 @@ function websiteCageFeatures(ep, trustedTurf) {
 
 // Gate off. A profile with its own poolCageLegacySize key is a two-size profile from
 // before a rollback: price its four-size answer, the re-read first, and inherit the
-// re-read's cage when the client omits the answer. Any other profile is today's code exactly.
+// re-read's cage when the client has no decided answer. Any other profile is today's code exactly.
 function fourSizeCageFeatures(ep, trusted, { pool, clientCage }) {
   const { fourSizeOf } = require('../services/property-lookup/cage-sizes');
   if (Object.prototype.hasOwnProperty.call(ep, 'poolCageLegacySize')) {
     const four = fourSizeOf(trusted) || fourSizeOf(ep);
-    // A client that omits poolCage inherits the re-read's decided cage, as the gate-on path does.
-    const cageOmitted = ep.poolCage === undefined || ep.poolCage === null || ep.poolCage === '';
-    const trustedCage = cageOmitted && String(trusted?.poolCage).toUpperCase() === 'YES';
+    // A client with no decided answer inherits the re-read's decided cage, as the gate-on path does.
+    const trustedCage = clientCageUndecided(ep, clientCage) && String(trusted?.poolCage).toUpperCase() === 'YES';
     const poolCage = clientCage || trustedCage;
     // No cage, no size: the engine reads a Large size as a hold even without a cage.
     return { pool: pool || trustedCage, poolCage, poolCageSize: poolCage && four ? four.toLowerCase() : undefined };
@@ -285,14 +285,13 @@ function fourSizeCageFeatures(ep, trusted, { pool, clientCage }) {
 }
 
 // Gate on: price the two-size answer, hold the four-size answer's Large and
-// Oversized. A client that OMITS poolCage takes the re-read's cage answer, so it
-// prices like an explicit YES (a held cage is held, a Medium one is charged); an
-// explicit client answer stands.
+// Oversized. A client with no decided poolCage takes the re-read's cage answer, so it
+// prices like an explicit YES (a held cage is held, a Medium one is charged); a YES or
+// an explicit negative from the client stands.
 function twoSizeCageFeatures(ep, trusted, { pool, clientCage }) {
   const { fourSizeOf, twoSizeOf, isHeldFourSize } = require('../services/property-lookup/cage-sizes');
   const four = fourSizeOf(trusted) || fourSizeOf(ep);
-  const cageOmitted = ep.poolCage === undefined || ep.poolCage === null || ep.poolCage === '';
-  const trustedCage = cageOmitted && String(trusted?.poolCage).toUpperCase() === 'YES';
+  const trustedCage = clientCageUndecided(ep, clientCage) && String(trusted?.poolCage).toUpperCase() === 'YES';
   const poolCage = clientCage || trustedCage;
   const size = twoSizeOf(trusted) ?? twoSizeOf(ep);
   return {
@@ -302,6 +301,13 @@ function twoSizeCageFeatures(ep, trusted, { pool, clientCage }) {
     poolCageSize: poolCage && size ? size.toLowerCase() : undefined,
     ...(poolCage && isHeldFourSize(four) ? { poolCageReview: true } : {}),
   };
+}
+
+// True when the client gave no decided cage answer: not a YES (clientCage) and not an
+// explicit negative (NO in any case, or false). Omitted, POSSIBLE, UNKNOWN or any other
+// value is undecided, so the server re-read's decided answer applies.
+function clientCageUndecided(ep, clientCage) {
+  return !clientCage && ep.poolCage !== false && String(ep.poolCage ?? '').trim().toUpperCase() !== 'NO';
 }
 
 // The server's re-read, only when it decided the cage (YES or NO).

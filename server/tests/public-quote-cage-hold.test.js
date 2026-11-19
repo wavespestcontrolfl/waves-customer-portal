@@ -206,11 +206,21 @@ describe('POST /api/public/quote/calculate: pool cage manual-quote hold', () => 
       expect(omitted.monthly_total).toBeGreaterThan(noCage.monthly_total);
     });
 
-    test('gate on: an explicit NO (string or boolean) with a trusted held cage is priced', async () => {
+    test('gate on: an explicit NO (string in any case, or boolean) with a trusted held cage is priced', async () => {
       trustedHeldCage();
       process.env[TWO_SIZES] = 'true';
       expect(await held({ poolCage: 'NO', poolCageSize: 'NONE' })).toBe(false);
       expect(await held({ poolCage: false, poolCageSize: 'NONE' })).toBe(false);
+      expect(await held({ poolCage: 'no', poolCageSize: 'NONE' })).toBe(false);
+    });
+
+    // The lookup can answer POSSIBLE or UNKNOWN, and the website echoes it: not a decided answer.
+    test('gate on: an undecided client answer (POSSIBLE, UNKNOWN, a lowercase yes) takes the re-read\'s held cage', async () => {
+      trustedHeldCage();
+      process.env[TWO_SIZES] = 'true';
+      expect(await held({ poolCage: 'POSSIBLE', poolCageSize: 'MEDIUM' })).toBe(true);
+      expect(await held({ poolCage: 'UNKNOWN', poolCageSize: 'NONE' })).toBe(true);
+      expect(await held({ poolCage: 'yes' })).toBe(true);
     });
 
     test('an explicit NO is never held, even when the re-read has a cage over 1,000 sq ft', async () => {
@@ -230,6 +240,8 @@ describe('POST /api/public/quote/calculate: pool cage manual-quote hold', () => 
       trustedHeldCage();
       expect(await held({ poolCage: undefined, poolCageSize: 'MEDIUM' })).toBe(false);
       expect(await held({ poolCage: 'NO', poolCageSize: 'NONE' })).toBe(false);
+      // A profile with no legacy key is today's code: an undecided answer is no cage.
+      expect(await held({ poolCage: 'POSSIBLE', poolCageSize: 'MEDIUM' })).toBe(false);
     });
   });
 
@@ -299,6 +311,12 @@ describe('POST /api/public/quote/calculate: pool cage manual-quote hold', () => 
       expect(await held({ poolCage: undefined, pool: undefined, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' })).toBe(true);
       expect(await held({ poolCage: null, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' })).toBe(true);
       expect(await held({ poolCage: '', poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' })).toBe(true);
+    });
+
+    test('gate off: an undecided client answer (POSSIBLE, UNKNOWN) with the re-read saying YES and area 750 is held', async () => {
+      serverSaysCage();
+      expect(await held({ poolCage: 'POSSIBLE', poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' })).toBe(true);
+      expect(await held({ poolCage: 'UNKNOWN', poolCageSize: 'NONE', poolCageLegacySize: 'MEDIUM' })).toBe(true);
     });
 
     test('gate off: an explicit NO with the re-read saying YES is not held', async () => {

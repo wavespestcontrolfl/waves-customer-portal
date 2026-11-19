@@ -241,6 +241,38 @@ describe('Pool Cage Size automatic conversion keeps its provenance', () => {
     await waitFor(() => expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('LARGE'));
   }, 120000);
 
+  // A lookup made while the gate was off answers four sizes (no poolCageLegacySize key). Once the gate is
+  // known, the size it filled reads from that lookup: its county area first, else its four-size answer.
+  it('a four-size lookup\'s 750 sq ft Large reads Medium once the gate is known', async () => {
+    lookupAnswer = { enriched: { poolCageSize: 'LARGE', poolCageSqft: 750 } };
+    const release = openWithGateHeld();
+    await lookUp();
+    expect(await screen.findByLabelText('Pool Cage Size')).toHaveValue('LARGE');
+    release();
+    await waitFor(() => expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('MEDIUM'));
+    expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE']);
+  }, 120000);
+
+  it('a four-size lookup\'s 950 sq ft Oversized reads Medium, not Large', async () => {
+    lookupAnswer = { enriched: { poolCageSize: 'OVERSIZED', poolCageSqft: 950 } };
+    const release = openWithGateHeld();
+    await lookUp();
+    expect(await screen.findByLabelText('Pool Cage Size')).toHaveValue('OVERSIZED');
+    release();
+    await waitFor(() => expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('MEDIUM'));
+  }, 120000);
+
+  it('an operator\'s Large over a four-size lookup of 750 sq ft stays Large', async () => {
+    lookupAnswer = { enriched: { poolCageSize: 'MEDIUM', poolCageSqft: 750 } };
+    const release = openWithGateHeld();
+    await lookUp();
+    fireEvent.change(await screen.findByLabelText('Pool Cage Size'), { target: { value: 'LARGE' } });
+    expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('LARGE');
+    release();
+    await waitFor(async () => expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE']));
+    expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('LARGE');
+  }, 120000);
+
   it('a manual Small pick converted to Medium stays Medium after that lookup', async () => {
     lookupAnswer = { enriched: { poolCageSize: 'MEDIUM' } };
     const release = openWithGateHeld();
