@@ -2543,6 +2543,48 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY NEAR-STOPS CHECK — Monday 6:17am ET (owner 2026-11-19, "check" on the
+  // Next-Door and Nearby Stops page): one read-only owner notification with the
+  // next-door stops booked apart and the truck GPS minutes for short drives
+  // (parts 1 and 3 of the page). It runs after the 4:10 night run
+  // and the 4:40 day re-plan, so it reads their newest log. Minute 17 of hours 6
+  // and 11 is free in every schedule here.
+  // =========================================================================
+  // The tick body is shared with the 11:17 catch-up registered below it.
+  const runNearStopsWeeklyTick = async () => {
+    const tickStartedAt = Date.now();
+    try {
+      const lockRes = await runExclusive('near-stops-weekly', async () => {
+        const { runNearStopsWeeklyCheck } = require('./near-stops-weekly-check');
+        const result = await runNearStopsWeeklyCheck();
+        logger.info(`[near-stops-weekly] cron run: ${JSON.stringify({ outcome: result.outcome || null, skipped: result.skipped || null, pairs: result.pairs ?? null })}`);
+        if (result?.skipped === 'query_failed' || result?.error) {
+          throw new Error(`near-stops weekly check did not complete (${result.skipped || 'write_failed'})`);
+        }
+      });
+      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('near-stops-weekly', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`near-stops weekly check tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`Weekly near-stops check failed: ${err.message}`);
+    }
+  };
+  cron.schedule('17 6 * * 1', () => runNearStopsWeeklyTick(), { timezone: 'America/New_York' });
+
+  // Catch-up for the Monday 6:17 check: Monday and Tuesday at 11:17, only while this
+  // week's marker is missing. The check re-reads the marker under the lock.
+  cron.schedule('17 11 * * 1,2', async () => {
+    try {
+      if (!(await require('./near-stops-weekly-check').weekIsMissing())) return;
+      logger.warn('[near-stops-weekly] catch-up: this week\'s check has not run, running it now');
+      await runNearStopsWeeklyTick();
+    } catch (err) {
+      logger.error(`Weekly near-stops check catch-up failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // RECLAIMED WATER METERS — daily 3:47am ET (GATE_LAWN_RECLAIMED_HALF_N, owner 2026-10-23). Downloads Manatee County's public
   // reclaimed-meter layer about weekly (the tick does it only when the stored copy is older than six days) and marks the properties
   // at a meter, locally: no property data is sent to the county. Minute 47 is free in the 3am hour. Gate off = the tick does nothing.
