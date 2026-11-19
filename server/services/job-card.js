@@ -1333,6 +1333,9 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
         product,
         planMix: item.mix || null,
         substitutedFor: item.substitution?.originalProductName || null,
+        // Only the primary lawn plan's lines take the "Use" tick: the ids ride to the plan engine, never to an add-on's protocol.
+        ...(item.role === 'conditional' || item.conditional === true ? { planOption: true } : {}),
+        ...(item.bermudaStep ? { bermudaStep: true } : {}),
       });
     }
     const gate = plan?.propertyGate || {};
@@ -1351,7 +1354,11 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
       conditional: [],
       notes: structured.operatingSentence ? [structured.operatingSentence] : [],
     } : null;
-    return { visit: gate.month ? { month: gate.month, visit: gate.visit || null } : null, lines, blocks, procedure, carrierGalPer1000: plan.mixCalculator?.carrierGalPer1000 ?? null };
+    return {
+      visit: gate.month ? { month: gate.month, visit: gate.visit || null } : null, lines, blocks, procedure,
+      carrierGalPer1000: plan.mixCalculator?.carrierGalPer1000 ?? null,
+      mixingOrder: plan.mixingOrder || [], bermudaMixingOrder: plan.bermudaMixingOrder || [],
+    };
   }
   return { ...resolveProtocolLines(facts.serviceType, facts.scheduledDate, protocols, catalog, { programKey: identityKey || null, serviceKey: facts.serviceKey || null }), blocks: [] };
 }
@@ -1749,6 +1756,9 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       name: p.name,
       role: line.role || 'base',
       conditional: line.selected === false,
+      // The primary lawn plan's "if needed" line (takes a Use tick) and the bermuda removal step (its lines tick together).
+      ...(line.planOption ? { planOption: true } : {}),
+      ...(line.bermudaStep ? { bermudaStep: true } : {}),
       line: [line.substitutedFor ? `Substitute for ${line.substitutedFor}` : null, line.source ? `${line.source}: ${describeLine(line.raw)}` : describeLine(line.raw), ...line.extraLines.map(describeLine)].map((r) => clean(r, 120)).filter(Boolean).join(' · '),
       verdict: verdict.verdict,
       verdictReason: verdict.reason,
@@ -1915,6 +1925,19 @@ function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, no
   return { serviceId: facts.serviceId, checkedAt: now.toISOString(), issues };
 }
 
+/**
+ * The plan's mixing steps the card stands behind. A step stays only while its product's card shows an
+ * amount and is the visit's own (a hosted add-on card is a separate application), so a blocked plan,
+ * an alternate address, a plan outage, a missing carrier rate, a held spray check or an unverified
+ * label all leave no step. Steps renumber from 1. The bermuda mix keeps its water step (no productId)
+ * only while a product step remains.
+ */
+function mixingOrderForCards(steps, cards, { keepWater = false } = {}) {
+  const shown = new Set(cards.filter((c) => c.planned != null && !c.addOnKey).map((c) => String(c.id)));
+  const kept = (steps || []).filter((step) => (step.productId == null ? keepWater : shown.has(String(step.productId))));
+  return kept.some((step) => step.productId != null) ? kept.map((step, index) => ({ ...step, step: index + 1 })) : [];
+}
+
 async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), includePricing = false, readinessOnly = false, selectedConditionalProductIds = [] } = {}) {
   const facts = await loadJobCardFacts(serviceId, dbh, deps, { displayContext: !readinessOnly });
   if (!facts) return null;
@@ -1931,7 +1954,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     loadRigSystems(dbh),
     forecastAt({ coords: facts.coords, scheduledDate: facts.scheduledDate, now, deps }),
   ]);
-  const { visit, lines, blocks, addons, note, procedure, carrierGalPer1000 } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now, selectedConditionalProductIds });
+  const { visit, lines, blocks, addons, note, procedure, carrierGalPer1000, mixingOrder, bermudaMixingOrder } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now, selectedConditionalProductIds });
   const tank = tankFromCalibrations(rigRows(calibrations, facts.rig), carrierGalPer1000);
   // One entry per catalog product: a host's line and an add-on's line of the same product are two cards, one spray check.
   const products = [...new Map(lines.map((l) => [l.product.id, l.product])).values()];
@@ -2012,6 +2035,8 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     sprayCheck: { ...sprayCheck, coordsSource: facts.coords.source, window: isToday ? 'today' : 'not_today', heatSafety: heatSafetyAt({ hourly, now: serviceInstant, isToday }) },
     tank: { ...tank, rigs: rigOptions(systems) },
     products: cards,
+    mixingOrder: mixingOrderForCards(mixingOrder, cards),
+    bermudaMixingOrder: mixingOrderForCards(bermudaMixingOrder, cards, { keepWater: true }),
     planBlocks: blocks,
     visit: visit ? { number: visit.visit || null, month: visit.month || null } : null,
     lineNote: note || null,
@@ -2045,7 +2070,7 @@ function unselectedBaseBlock(plan, product) {
   return item ? { code: 'base_not_selected', message: UNSELECTED_BASE_REASONS[item.selectionReason] || 'Not selected by this visit\'s plan — amount withheld' } : null;
 }
 
-async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId = null, technicianId = null, dbh = db, deps = {}, now = new Date(), includePricing = false } = {}) {
+async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId = null, technicianId = null, dbh = db, deps = {}, now = new Date(), includePricing = false, selectedConditionalProductIds = [] } = {}) {
   const [product, svc] = await Promise.all([
     dbh('products_catalog').where({ id: productId }).where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); }).select('id', 'name', 'epa_reg_number', 'formulation', 'label_weather_review', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at', 'min_temp_f', 'max_temp_f', 'max_wind_mph', 'rain_free_hours', 'rainfast_minutes').first().catch((err) => { throw unavailable('Product catalog unavailable', err); }),
     serviceId
@@ -2081,7 +2106,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   // already resolved (substitution rate override, nutrient-target rate)
   // is dosed at the plan's rate, never the catalog default.
   // Same rule as the card: no plan at a non-primary address.
-  const lawnPlan = primaryIsLawn ? (svc.address_diverges ? { plan: null, blocks: [ALTERNATE_ADDRESS_BLOCK] } : await loadLawnPlan(serviceId, { dbh, deps, now })) : null;
+  const lawnPlan = primaryIsLawn ? (svc.address_diverges ? { plan: null, blocks: [ALTERNATE_ADDRESS_BLOCK] } : await loadLawnPlan(serviceId, { dbh, deps, now, selectedConditionalProductIds })) : null;
   const planned = lawnPlan?.plan ? [...(lawnPlan.plan.mixCalculator?.items || []), ...(lawnPlan.plan.mixCalculator?.conditionalOptions || [])].find((i) => i.product?.id === product.id) : null;
   // The Tank section's rig pick doses a full tank of THAT rig on its own
   // volume and carrier — the backpack's 1.33 gal/1,000 over 4 gal, not the
@@ -2354,5 +2379,5 @@ module.exports = {
   resolveVisitProducts,
   mergeProductLines,
   resolveVisitLines,
-  _test: { lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
+  _test: { mixingOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
 };

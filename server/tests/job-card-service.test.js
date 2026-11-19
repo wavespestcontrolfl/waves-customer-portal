@@ -555,6 +555,40 @@ describe('resolveVisitProducts reuses the appointment plan for lawn visits (Code
     expect(hyd).toMatchObject({ planned: null, amountNote: 'Label rate not yet verified — amount withheld' });
   });
 
+  test('only the primary lawn plan\'s "if needed" and bermuda step lines are marked for a Use tick; an add-on\'s conditional line is not', async () => {
+    const cat = [
+      { id: 'opt', name: 'Optional', rate_unit: 'fl oz', label_verified_at: '2026-08-01' },
+      { id: 'rec', name: 'Recognition', rate_unit: 'fl oz', label_verified_at: '2026-08-01' },
+      { id: 'base', name: 'Base', rate_unit: 'fl oz', label_verified_at: '2026-08-01' },
+    ];
+    const mix = { amount: 1, amountUnit: 'fl oz' };
+    const buildPlan = jest.fn().mockResolvedValue({
+      propertyGate: { month: 'Sep', visit: 9, blocks: [] },
+      mixCalculator: {
+        items: [{ raw: 'Base', role: 'base', selected: true, product: { id: 'base' }, mix }, { raw: 'Rec', role: 'conditional', conditional: true, bermudaStep: true, selected: true, product: { id: 'rec' }, mix }],
+        conditionalOptions: [{ raw: 'Opt', role: 'conditional', conditional: true, selected: false, product: { id: 'opt' }, mix }],
+      },
+    });
+    const out = await jobCard.resolveVisitLines({ facts, protocols: {}, catalog: cat, dbh: () => ({}), deps: { buildPlan } });
+    const cards = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, verdicts: [], packSizes: {} });
+    const byId = Object.fromEntries(cards.map((c) => [c.id, c]));
+    expect(byId.base).not.toHaveProperty('planOption');
+    expect(byId.base).not.toHaveProperty('bermudaStep');
+    expect(byId.opt).toMatchObject({ planOption: true, conditional: true });
+    expect(byId.opt).not.toHaveProperty('bermudaStep');
+    // A ticked step line is selected (no longer "if needed") and still takes a tick.
+    expect(byId.rec).toMatchObject({ planOption: true, bermudaStep: true, conditional: false });
+    // A tree and shrub add-on's "if needed" line is conditional but never a plan option.
+    const pest = await jobCard.resolveVisitLines({
+      facts: { isLawn: false, serviceType: 'Quarterly Pest Control', scheduledDate: '2026-09-04', addons: [{ name: 'Tree & Shrub Care', category: 'tree_shrub' }] },
+      protocols: { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Base 1 fl oz', secondary: 'Optional 1 fl oz' }] }, tree_shrub: { visits: [{ visit: 9, month: 'Sep', primary: 'Recognition 1 fl oz', secondary: 'If needed: Optional 1 fl oz' }] } },
+      catalog: cat, dbh: () => ({}),
+    });
+    const addOnCards = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: pest.lines, verdicts: [], packSizes: {} });
+    expect(addOnCards.some((c) => c.conditional)).toBe(true);
+    for (const c of addOnCards) expect(c).not.toHaveProperty('planOption');
+  });
+
   test('a plan failure yields no lines instead of a crash', async () => {
     const buildPlan = jest.fn().mockRejectedValue(new Error('Scheduled service not found'));
     const out = await jobCard.resolveVisitProducts({ facts, protocols: {}, catalog, dbh: () => ({}), deps: { buildPlan } });
@@ -706,6 +740,15 @@ describe('mixForProduct', () => {
     const dbh = makeDb({ scheduled_services: [mistingVisit], products_catalog: [product], equipment_calibrations: [live] });
     const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), evaluateApprovals: approve() }, ...at });
     expect(out).toMatchObject({ amount: null, reason: 'No treatment protocol for this visit (no catalog identity)' });
+  });
+
+  test('the Tank search builds the plan with the same Use ticks as the card', async () => {
+    const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
+    const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [] } });
+    await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals: approve() }, selectedConditionalProductIds: ['opt'], ...at });
+    expect(buildPlan).toHaveBeenLastCalledWith('svc1', expect.objectContaining({ selectedConditionalProductIds: ['opt'] }));
+    await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals: approve() }, ...at });
+    expect(buildPlan.mock.calls.at(-1)[1]).not.toHaveProperty('selectedConditionalProductIds');
   });
 
   test('a lawn visit whose plan is blocked gets no searched dose either (Codex r11 P1)', async () => {
@@ -1254,6 +1297,66 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     expect(jobCard._test.tankFromCalibrations([], 2)).toMatchObject({ calibrated: true, source: 'protocol_default', carrierGalPer1000: 2 });
     // The Lawn plan's own read keeps its empty-list default.
     expect(await require('../services/waveguard-plan-engine').getActiveCalibrations(failing, {})).toEqual([]);
+  });
+
+  describe('the card\'s mixing order is what the card stands behind', () => {
+    const lawn = { ...visit(false), service_type: 'WaveGuard Lawn Care' };
+    const rows = [
+      { id: 'a', name: 'Alpha', rate_unit: 'fl oz', label_verified_at: '2026-08-01' },
+      { id: 'b', name: 'Bravo', rate_unit: 'fl oz', label_verified_at: '2026-08-01' },
+      { id: 'u', name: 'Unverified', rate_unit: 'fl oz', label_verified_at: null },
+    ];
+    const item = (id, extra = {}) => ({ raw: `${id} line`, role: 'base', selected: true, product: { id }, mix: { amount: 3, amountUnit: 'fl oz' }, ...extra });
+    const steps = (...ids) => ids.map((id, i) => ({ step: i + 1, productId: id, productName: id, instruction: `Add ${id}.` }));
+    const planWith = (over = {}) => ({
+      propertyGate: { month: 'Sep', visit: 9, blocks: [] },
+      mixCalculator: { carrierGalPer1000: 2, items: [item('a'), item('b'), item('u')], conditionalOptions: [] },
+      mixingOrder: steps('a', 'b', 'u'),
+      bermudaMixingOrder: [{ step: 1, productId: null, productName: 'Water', instruction: 'Half fill.' }, ...steps('a', 'u').map((s, i) => ({ ...s, step: i + 2 }))],
+      ...over,
+    });
+    const card = async (plan, svc = lawn, verdictOver = {}) => {
+      const base = factsDb({ 'scheduled_services as ss': svc, products_catalog: rows, property_preferences: prefs });
+      const dbh = Object.assign((table) => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
+      const buildPlan = jest.fn().mockResolvedValue(plan);
+      const out = await jobCard.buildJobCard('svc1', { dbh, deps: { buildPlan, getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] }, ...verdictOver }, now: new Date('2026-09-04T12:00:00Z') });
+      return { out, buildPlan };
+    };
+
+    test('steps for products that show an amount stay, renumbered; an unverified label drops out', async () => {
+      const { out } = await card(planWith());
+      expect(out.products.map((c) => [c.id, c.planned != null])).toEqual([['a', true], ['b', true], ['u', false]]);
+      expect(out.mixingOrder.map((s) => [s.step, s.productId])).toEqual([[1, 'a'], [2, 'b']]);
+      // The bermuda mix keeps its water step while a product step remains.
+      expect(out.bermudaMixingOrder.map((s) => [s.step, s.productId])).toEqual([[1, null], [2, 'a']]);
+    });
+
+    test('a plan block, a plan outage and an alternate address leave no steps (and an alternate address reads no plan)', async () => {
+      const blocked = (await card(planWith({ propertyGate: { month: 'Sep', visit: 9, blocks: [{ code: 'nitrogen_blackout', message: 'Blackout.' }] } }))).out;
+      expect([blocked.mixingOrder, blocked.bermudaMixingOrder]).toEqual([[], []]);
+      const base = factsDb({ 'scheduled_services as ss': lawn, products_catalog: rows, property_preferences: prefs });
+      const dbh = Object.assign((table) => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
+      const down = await jobCard.buildJobCard('svc1', { dbh, deps: { buildPlan: jest.fn().mockRejectedValue(new Error('down')), getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] } }, now: new Date('2026-09-04T12:00:00Z') });
+      expect([down.mixingOrder, down.bermudaMixingOrder]).toEqual([[], []]);
+      const away = await card(planWith(), { ...lawn, address_diverges: true });
+      expect([away.out.mixingOrder, away.out.bermudaMixingOrder]).toEqual([[], []]);
+      expect(away.buildPlan).not.toHaveBeenCalled();
+    });
+
+    test('a product on a spray-check hold drops out of the order', async () => {
+      const facts = { customerId: 'c1', scheduledDate: '2026-09-04' };
+      const line = (id) => ({ raw: id, role: 'base', selected: true, product: rows.find((r) => r.id === id), planMix: { amount: 3, amountUnit: 'fl oz' } });
+      const cards = await jobCard._test.buildProductCards({ facts, lines: [line('a'), line('b')], verdicts: [{ productId: 'b', verdict: 'hold', reason: 'wind' }], packSizes: {} });
+      expect(jobCard._test.mixingOrderForCards(steps('a', 'b'), cards).map((s) => [s.step, s.productId])).toEqual([[1, 'a']]);
+    });
+
+    test('a bermuda mix with no product step left gives no lone water step; a hosted add-on card is not a step', () => {
+      const cards = [{ id: 'a', planned: null }, { id: 'b', planned: { amount: 1 }, addOnKey: 'area_addon_x' }];
+      const bermuda = [{ step: 1, productId: null, productName: 'Water' }, ...steps('a').map((s) => ({ ...s, step: 2 }))];
+      expect(jobCard._test.mixingOrderForCards(bermuda, cards, { keepWater: true })).toEqual([]);
+      expect(jobCard._test.mixingOrderForCards(steps('b'), cards)).toEqual([]);
+      expect(jobCard._test.mixingOrderForCards(undefined, cards)).toEqual([]);
+    });
   });
 
   test('special instructions and the visit note reach the card verbatim, outside the paragraph budget (hook P1)', async () => {

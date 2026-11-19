@@ -2,10 +2,10 @@
 //
 // The Plan tab of the Protocol panel (lawn visits): facts, nitrogen budget, blocks, protocol
 // lines and closeout, with no product amount anywhere (amounts live on the Job tab, under its
-// withhold rules). Also the "Use" tick rule, including the bermuda removal step as one selection.
+// withhold rules).
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import LawnPlanTab, { toggleConditionalIds } from './LawnPlanTab';
+import LawnPlanTab from './LawnPlanTab';
 
 afterEach(cleanup);
 
@@ -60,23 +60,5 @@ describe('LawnPlanTab', () => {
     rerender(<LawnPlanTab plan={null} loading={false} error="Boom" onRefresh={() => {}} />);
     expect(screen.getByText('Plan unavailable')).toBeTruthy();
     expect(screen.getByText('Boom')).toBeTruthy();
-  });
-});
-
-describe('toggleConditionalIds', () => {
-  const step = (id, selected) => ({ conditional: true, bermudaStep: true, selected, product: { id } });
-  const withStep = (selected) => ({ protocol: { base: [], conditional: [step('rec', selected), step('fus', selected), step('nis', selected), { conditional: true, selected: false, product: { id: 'extra' } }] } });
-
-  it('adds and removes a single product id', () => {
-    expect(toggleConditionalIds([], 'a', null)).toEqual(['a']);
-    expect(toggleConditionalIds(['a', 'b'], 'a', null)).toEqual(['b']);
-  });
-
-  it('a tick on any bermuda step line puts all three on, and a tick on any member takes all three off', () => {
-    const on = toggleConditionalIds([], 'fus', withStep(false));
-    expect([...on].sort()).toEqual(['fus', 'nis', 'rec']);
-    // A different member than the first one ticked; the other line stays.
-    const withExtra = toggleConditionalIds(on, 'extra', withStep(true));
-    expect(toggleConditionalIds(withExtra, 'nis', withStep(true))).toEqual(['extra']);
   });
 });

@@ -1677,6 +1677,8 @@ export default function DispatchPageV2({
             }
           }}
           onEnRoute={handleEnRoute}
+          // The week list's Protocol button opens the panel (its Plan tab holds the lawn plan).
+          onProtocol={(svc) => setProtocolService(svc)}
           // Open-hour rows book; POST /admin/schedule is admin-only.
           onCreateSlot={getAdminUser()?.role === "admin" ? ({ date: slotDate, windowStart, techId }) => {
             setNewApptDefaults({ date: slotDate, windowStart, techId });

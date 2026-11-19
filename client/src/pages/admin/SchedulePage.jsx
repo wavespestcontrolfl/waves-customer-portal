@@ -57,7 +57,7 @@ import CompletionPricingCard from "../../components/schedule/CompletionPricingCa
 import PromiseCheck, { currentMark, promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
 import BlogPostPicker from "../../components/schedule/BlogPostPicker";
 import NoteBoxPhotos from "../../components/schedule/NoteBoxPhotos";
-import LawnPlanTab, { toggleConditionalIds } from "../../components/schedule/LawnPlanTab";
+import LawnPlanTab from "../../components/schedule/LawnPlanTab";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
@@ -7132,8 +7132,8 @@ export function JobCardGoverned({ governed, D }) {
 // The "Use" tick on an "if needed" lawn product: asks the job card to plan it. Not saved to the visit.
 function JobCardUse({ name, use, D }) {
   return (
-    <label style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 14px 0 4px", minHeight: 44, fontSize: 14, color: D.text, cursor: "pointer", flexShrink: 0 }}>
-      <input type="checkbox" checked={use.checked} onChange={use.onToggle} aria-label={`Use ${name}`} style={{ width: 18, height: 18, accentColor: D.heading }} />
+    <label style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 14px 0 4px", minHeight: 44, fontSize: 14, color: D.text, cursor: use.disabled ? "default" : "pointer", flexShrink: 0 }}>
+      <input type="checkbox" checked={use.checked} disabled={use.disabled} onChange={() => use.onSet(!use.checked)} aria-label={`Use ${name}`} style={{ width: 18, height: 18, accentColor: D.heading }} />
       Use
     </label>
   );
@@ -7159,16 +7159,19 @@ function JobCardMixingOrder({ title, steps, D }) {
   );
 }
 
-function JobCardProduct({ p, serviceId, D, use = null }) {
-  const amount = fmtAmount(p.planned?.amount, p.planned?.unit);
+// `pending`: a "Use" tick is being read again; the amounts on this card belong to the old selection, so none shows.
+function JobCardProduct({ p, serviceId, D, use = null, pending = false }) {
+  const amount = pending ? null : fmtAmount(p.planned?.amount, p.planned?.unit);
   // The shortage line names the plan's requirement even while the dose is withheld.
-  const demand = fmtAmount(p.demand?.amount, p.demand?.unit) || amount;
+  const demand = pending ? null : fmtAmount(p.demand?.amount, p.demand?.unit) || amount;
+  const short = p.short && !pending;
   const right = (
     <>
       {p.conditional && <span style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>If needed</span>}
-      {p.short && <JobCardChip tone="hold" label="Short" D={D} />}
+      {short && <JobCardChip tone="hold" label="Short" D={D} />}
       <JobCardChip tone={p.verdictLevel === "warning" ? "warning" : p.verdict} D={D} />
       {amount && <span style={{ fontSize: 13, color: D.text, fontVariantNumeric: "tabular-nums" }}>{amount}</span>}
+      {pending && <span style={{ fontSize: 14, color: D.muted }}>Checking the new selection…</span>}
     </>
   );
   return (
@@ -7182,17 +7185,17 @@ function JobCardProduct({ p, serviceId, D, use = null }) {
         {p.verdictAction && <div style={{ fontSize: 14, color: D.text }}>{p.verdictAction}</div>}
         {p.precautions && <div>{p.precautions}</div>}
         {p.signalWord && <div style={{ color: D.muted }}>Signal word: {p.signalWord}</div>}
-        {p.short && (
+        {short && (
           <div style={{ color: "#C8312F" }}>
             {demand
               ? `On hand ${fmtAmount(p.onHand, p.onHandUnit)} vs ${demand} planned.`
               : `On hand ${fmtAmount(p.onHand, p.onHandUnit)} — short of the planned amount (withheld).`}
           </div>
         )}
-        {!p.short && p.onHand != null && (
+        {!short && !pending && p.onHand != null && (
           <div style={{ color: D.muted }}>On hand {fmtAmount(p.onHand, p.onHandUnit)}{p.lowStock ? " (low)" : ""}</div>
         )}
-        {p.amountNote && <div style={{ color: D.muted }}>{p.amountNote}</div>}
+        {p.amountNote && !pending && <div style={{ color: D.muted }}>{p.amountNote}</div>}
         {p.stockNote && <div style={{ color: D.muted }}>{p.stockNote}</div>}
         {p.rotation && <div style={{ color: D.muted }}>{p.rotation}</div>}
         {(p.labelUrl || p.sdsUrl) && (
@@ -7207,7 +7210,8 @@ function JobCardProduct({ p, serviceId, D, use = null }) {
   );
 }
 
-function JobCardTank({ tank, serviceId, D }) {
+// `ticks`: the Use ticks (comma list) the card was read with; the search reads the same plan.
+function JobCardTank({ tank, serviceId, ticks = "", D }) {
   const [gallons, setGallons] = useState(110);
   // A rig row picked in place of the 110 / 1 gal presets: a full tank of
   // that rig, dosed on its own carrier and volume.
@@ -7253,12 +7257,12 @@ function JobCardTank({ tank, serviceId, D }) {
     // Never show the previous product's verdict beside the new one.
     setMix(null);
     const volume = pickedRigId ? `rig=${encodeURIComponent(pickedRigId)}` : `gallons=${gallons}`;
-    adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&${volume}`)
+    adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&${volume}${ticks ? `&selectedConditionalProductIds=${encodeURIComponent(ticks)}` : ""}`)
       .then((data) => { if (!cancelled) setMix(data); })
       .catch(() => { if (!cancelled) setMix({ amount: null, reason: "Could not load the mix" }); })
       .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; };
-  }, [picked, gallons, pickedRigId, serviceId]);
+  }, [picked, gallons, pickedRigId, serviceId, ticks]);
 
   const pill = (selected) => ({
     flex: 1,
@@ -7490,8 +7494,10 @@ export function JobCardAwayWatch({ lines, D }) {
   ));
 }
 
-// `lawn` (lawn visits): { plan, selectedIds, onToggle(productId), onOpenPlan() } from the panel, which holds the
-// Plan tab's data and the "Use" ticks. A card gets a Use tick while it is an "if needed" line or ticked.
+// `lawn` (lawn visits): { selectedIds, ticks, pending, onSet(productIds, wanted), onOpenPlan() } from the panel, which
+// holds the "Use" ticks. Only a card the server marks `planOption` (the primary lawn plan's "if needed" line) gets a
+// box; it reads the server's own selection (`!conditional`), or the local tick while a re-read is pending. While
+// `pending` the card's amounts, the mixing orders and the Tank search belong to the old selection, so none shows.
 export function JobCardTab({ card, loading, error, D, lawn = null }) {
   if (loading) {
     return <div style={{ padding: 40, textAlign: "center", color: D.muted }}>Loading job card...</div>;
@@ -7523,9 +7529,9 @@ export function JobCardTab({ card, loading, error, D, lawn = null }) {
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>Visit note: {card.notes.visitNotes}</p>
       )}
       <JobCardSprayCheck sprayCheck={card.sprayCheck} products={products} D={D} />
-      <JobCardTank tank={card.tank} serviceId={card.serviceId} D={D} />
-      {lawn && <JobCardMixingOrder title="Mixing order" steps={lawn.plan?.mixingOrder} D={D} />}
-      {lawn && <JobCardMixingOrder title="Bermuda backpack mix" steps={lawn.plan?.bermudaMixingOrder} D={D} />}
+      {!lawn?.pending && <JobCardTank key={lawn?.ticks || ""} tank={card.tank} serviceId={card.serviceId} ticks={lawn?.ticks || ""} D={D} />}
+      {!lawn?.pending && <JobCardMixingOrder title="Mixing order" steps={card.mixingOrder} D={D} />}
+      {!lawn?.pending && <JobCardMixingOrder title="Bermuda backpack mix" steps={card.bermudaMixingOrder} D={D} />}
       {card.planBlocks?.length > 0 && (
         <div style={{ border: "1px solid #C8312F", borderRadius: 2, padding: "10px 12px", margin: "14px 0 0", fontSize: 14, color: D.text }}>
           <div style={{ fontWeight: 500, color: "#C8312F", marginBottom: 4 }}>Lawn plan blocked — amounts withheld</div>
@@ -7550,9 +7556,14 @@ export function JobCardTab({ card, loading, error, D, lawn = null }) {
         <div key={a.name} style={{ fontSize: 13, color: D.muted, marginBottom: 6 }}>{a.name}: {a.note}</div>
       ))}
       {products.map((p) => {
-        const ticked = lawn?.selectedIds.includes(String(p.id));
-        const use = lawn && (p.conditional || ticked) ? { checked: Boolean(ticked), onToggle: () => lawn.onToggle(p.id) } : null;
-        return <JobCardProduct key={jobCardRowId(p)} p={p} serviceId={card.serviceId} D={D} use={use} />;
+        // The bermuda removal step is one selection: its lines tick together.
+        const ids = (p.bermudaStep ? products.filter((c) => c.bermudaStep) : [p]).map((c) => String(c.id));
+        const use = lawn && p.planOption ? {
+          checked: lawn.pending ? lawn.selectedIds.includes(String(p.id)) : !p.conditional,
+          disabled: lawn.pending,
+          onSet: (wanted) => lawn.onSet(ids, wanted),
+        } : null;
+        return <JobCardProduct key={jobCardRowId(p)} p={p} serviceId={card.serviceId} D={D} use={use} pending={Boolean(lawn?.pending)} />;
       })}
       {products.length === 0 && (
         <div style={{ fontSize: 13, color: D.muted }}>{card.lineNote || "No protocol products matched this visit."}</div>
@@ -7619,13 +7630,17 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
   const [jobCard, setJobCard] = useState(null);
   const [jobCardLoading, setJobCardLoading] = useState(true);
   const [jobCardError, setJobCardError] = useState(false);
+  // The tick query the shown card was read with: a card read with another one is pending its re-read.
+  const [jobCardQuery, setJobCardQuery] = useState("");
   // "Use" ticks on "if needed" lawn lines: product ids for this visit. Not saved to the visit; a new visit starts clean.
   const [useTicks, setUseTicks] = useState({ serviceId: null, ids: [] });
   const selectedConditionalIds = useTicks.serviceId === service?.id ? useTicks.ids : NO_TICKS;
   const selectedQuery = selectedConditionalIds.length
     ? `?selectedConditionalProductIds=${encodeURIComponent(selectedConditionalIds.join(","))}`
     : "";
-  // The lawn plan (GET /admin/treatment-plans), read with the same ticks: the Plan tab, the Mixing order and the bermuda step.
+  // The lawn plan (GET /admin/treatment-plans), read with the same ticks. It feeds only the Plan tab, so it is read
+  // from the first time that tab opens (the server builds a full plan for it).
+  const [planSeenFor, setPlanSeenFor] = useState(null);
   const [lawnPlan, setLawnPlan] = useState(null);
   const [lawnPlanLoading, setLawnPlanLoading] = useState(false);
   const [lawnPlanError, setLawnPlanError] = useState("");
@@ -7698,6 +7713,7 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
       .then((data) => {
         if (cancelled) return;
         jobCardShownFor.current = service.id;
+        setJobCardQuery(selectedQuery);
         setJobCard(data && data.enabled ? data : { enabled: false });
       })
       .catch(() => {
@@ -7721,8 +7737,14 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
     setLawnPlan(null);
   }, [service?.id]);
 
+  const planTabOpen = isLawn && requestedSection === "lawn_plan";
   useEffect(() => {
-    if (!isLawn || !service?.id) return undefined;
+    if (planTabOpen) setPlanSeenFor(service?.id);
+  }, [planTabOpen, service?.id]);
+
+  const readPlan = planTabOpen || (isLawn && planSeenFor === service?.id);
+  useEffect(() => {
+    if (!readPlan || !service?.id) return undefined;
     let cancelled = false;
     setLawnPlanLoading(true);
     setLawnPlanError("");
@@ -7739,7 +7761,7 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
     return () => {
       cancelled = true;
     };
-  }, [isLawn, service?.id, selectedQuery, lawnPlanRefresh]);
+  }, [readPlan, service?.id, selectedQuery, lawnPlanRefresh]);
 
   useEffect(() => {
     let cancelled = false;
@@ -8090,11 +8112,14 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
             error={jobCardError}
             D={D}
             lawn={isLawn ? {
-              plan: lawnPlan,
               selectedIds: selectedConditionalIds,
-              onToggle: (productId) => setUseTicks({
+              ticks: selectedConditionalIds.join(","),
+              pending: Boolean(jobCard) && jobCardQuery !== selectedQuery,
+              onSet: (productIds, wanted) => setUseTicks({
                 serviceId: service.id,
-                ids: toggleConditionalIds(selectedConditionalIds, productId, lawnPlan),
+                ids: wanted
+                  ? [...new Set([...selectedConditionalIds, ...productIds])]
+                  : selectedConditionalIds.filter((id) => !productIds.includes(id)),
               }),
               onOpenPlan: () => setActiveSection("lawn_plan"),
             } : null}

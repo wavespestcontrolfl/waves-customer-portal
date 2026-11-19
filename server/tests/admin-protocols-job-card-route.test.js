@@ -181,7 +181,7 @@ describe('job-card routes', () => {
     await run('/job-card/:serviceId', { serviceId: SERVICE_ID, __tech: true });
     expect(jobCard.buildJobCard).toHaveBeenLastCalledWith(SERVICE_ID, { includePricing: false, selectedConditionalProductIds: [] });
     await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, gallons: '1', __tech: true });
-    expect(jobCard.mixForProduct).toHaveBeenLastCalledWith(SERVICE_ID, 1, { serviceId: SERVICE_ID, includePricing: false });
+    expect(jobCard.mixForProduct).toHaveBeenLastCalledWith(SERVICE_ID, 1, { serviceId: SERVICE_ID, includePricing: false, selectedConditionalProductIds: [] });
     await run('/job-card/:serviceId', { serviceId: SERVICE_ID });
     expect(jobCard.buildJobCard).toHaveBeenLastCalledWith(SERVICE_ID, { includePricing: true, selectedConditionalProductIds: [] });
     const outage = Object.assign(new Error('Product catalog unavailable'), { statusCode: 503 });
@@ -205,6 +205,20 @@ describe('job-card routes', () => {
     expect(jobCard.buildJobCard).not.toHaveBeenCalled();
   });
 
+  test('the Tank search reads the same ticks as the card; a bad list is a 400 before any read', async () => {
+    process.env.GATE_JOB_CARD = 'true';
+    jobCard.mixForProduct.mockResolvedValue({ amount: 1, unit: 'oz' });
+    db.ownedRow = { id: SERVICE_ID };
+    const other = '99999999-2222-4333-8444-555555555555';
+    await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, gallons: '110', selectedConditionalProductIds: `${SERVICE_ID},${other}` });
+    expect(jobCard.mixForProduct).toHaveBeenLastCalledWith(SERVICE_ID, 110, { serviceId: SERVICE_ID, includePricing: true, selectedConditionalProductIds: [SERVICE_ID, other] });
+    jobCard.mixForProduct.mockClear();
+    for (const bad of ['nope', { a: SERVICE_ID }, Array(51).fill(SERVICE_ID).join(',')]) {
+      expect((await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, gallons: '110', selectedConditionalProductIds: bad })).statusCode).toBe(400);
+    }
+    expect(jobCard.mixForProduct).not.toHaveBeenCalled();
+  });
+
   test('mix validates gallons and productId', async () => {
     process.env.GATE_JOB_CARD = 'true';
     jobCard.mixForProduct.mockResolvedValue({ amount: 0.75, unit: 'oz' });
@@ -214,7 +228,7 @@ describe('job-card routes', () => {
     expect((await run('/job-card/mix', { productId: SERVICE_ID, gallons: '1' })).statusCode).toBe(400);
     const ok = await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, gallons: '1' });
     expect(ok.body).toEqual({ enabled: true, amount: 0.75, unit: 'oz' });
-    expect(jobCard.mixForProduct).toHaveBeenCalledWith(SERVICE_ID, 1, { serviceId: SERVICE_ID, includePricing: true });
+    expect(jobCard.mixForProduct).toHaveBeenCalledWith(SERVICE_ID, 1, { serviceId: SERVICE_ID, includePricing: true, selectedConditionalProductIds: [] });
   });
 
   test('a rig pick replaces gallons: a full tank of that rig, validated as an id, scoped to the technician', async () => {
@@ -225,10 +239,10 @@ describe('job-card routes', () => {
     const rig = await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, rig: SERVICE_ID });
     expect(rig.body).toEqual({ enabled: true, amount: 0.34, unit: 'oz', gallons: 4 });
     // An admin doses on any calibration.
-    expect(jobCard.mixForProduct).toHaveBeenLastCalledWith(SERVICE_ID, null, { serviceId: SERVICE_ID, includePricing: true, equipmentSystemId: SERVICE_ID, technicianId: null });
+    expect(jobCard.mixForProduct).toHaveBeenLastCalledWith(SERVICE_ID, null, { serviceId: SERVICE_ID, includePricing: true, selectedConditionalProductIds: [], equipmentSystemId: SERVICE_ID, technicianId: null });
     // A technician's pick carries their id: only a shared calibration or their own may dose it (Codex r1 P1).
     db.ownedRow = { id: SERVICE_ID };
     await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, rig: SERVICE_ID, __tech: true });
-    expect(jobCard.mixForProduct).toHaveBeenLastCalledWith(SERVICE_ID, null, { serviceId: SERVICE_ID, includePricing: false, equipmentSystemId: SERVICE_ID, technicianId: 'tech-1' });
+    expect(jobCard.mixForProduct).toHaveBeenLastCalledWith(SERVICE_ID, null, { serviceId: SERVICE_ID, includePricing: false, selectedConditionalProductIds: [], equipmentSystemId: SERVICE_ID, technicianId: 'tech-1' });
   });
 });

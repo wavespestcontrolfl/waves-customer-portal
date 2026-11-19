@@ -12,22 +12,6 @@ function fmtNumber(value, suffix = '') {
   return `${n.toLocaleString(undefined, { maximumFractionDigits: 3 })}${suffix}`;
 }
 
-// A tick on a lawn product line, as the plan route reads it (selectedConditionalProductIds).
-// The bermuda removal step is one selection: the server marks all three lines selected when
-// any one is asked for, so a tick on any member puts every member on, or takes every member off.
-export function toggleConditionalIds(prev, productId, plan) {
-  const id = String(productId);
-  const lines = [...(plan?.protocol?.base || []), ...(plan?.protocol?.conditional || [])];
-  const line = lines.find((l) => l.product?.id != null && String(l.product.id) === id);
-  if (line?.bermudaStep) {
-    const groupIds = lines.filter((l) => l.bermudaStep && l.product?.id != null).map((l) => String(l.product.id));
-    const on = !!line.selected || groupIds.some((member) => prev.includes(member));
-    const rest = prev.filter((v) => !groupIds.includes(v));
-    return on ? rest : [...rest, ...groupIds];
-  }
-  return prev.includes(id) ? prev.filter((v) => v !== id) : [...prev, id];
-}
-
 function Field({ label, value }) {
   return (
     <div className="min-w-0">
