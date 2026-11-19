@@ -119,6 +119,12 @@ import {
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
+import {
+  TYPED_INSECT_EVIDENCE_KEYS,
+  missingTypedPesticideCompliance,
+  typedInsectEvidencePath,
+  typedPesticideFieldApplies,
+} from "../../lib/tree-shrub-pest-check";
 import { AREA_ADDONS_LOOKUP_FAILED_MESSAGE, addOnActualsProblem, addOnRecordMissingProblem, areaAddOnRowServiceType, isAreaAddOnVisit, withGovernedAddOnRate } from "../../lib/areaAddOns";
 import AreaAddOnFields from "../../components/admin/AreaAddOnFields";
 import { productDimension } from "../../lib/fast-complete-products";
@@ -9923,6 +9929,9 @@ export function TypedFindingsSection({
   recommendations,
   onRecommendationsChange,
   pesticideProductPresent = true,
+  pesticideComplianceScope = null,
+  insectEvidencePath: controlledInsectEvidencePath,
+  onInsectEvidencePathChange,
   frozen = false,
   // Typed voice fill (GATE_TYPED_VOICE_FILL): the words each filled field
   // came from ({ key: { value, quotes } }) and the fields the notes left
@@ -9955,6 +9964,42 @@ export function TypedFindingsSection({
   const accent = mobile ? CP_M.ink : D.teal;
   const accentFg = mobile ? CP_M.actionFg : D.teal;
   const requiredColor = mobile ? "#C2410C" : D.red;
+  const complianceScope = pesticideComplianceScope || {
+    pesticideProductPresent,
+    insectProductPresent: pesticideProductPresent,
+    insectProductUnknown: false,
+    rotationProductPresent: pesticideProductPresent,
+  };
+  const storedInsectEvidencePath = typedInsectEvidencePath(values);
+  const [localInsectEvidencePath, setLocalInsectEvidencePath] = useState(storedInsectEvidencePath);
+  const insectEvidencePath = storedInsectEvidencePath
+    || controlledInsectEvidencePath
+    || localInsectEvidencePath;
+  useEffect(() => {
+    if (storedInsectEvidencePath) setLocalInsectEvidencePath(storedInsectEvidencePath);
+  }, [storedInsectEvidencePath]);
+  const insectEvidenceFieldsServed = (schema.fields || []).some((field) =>
+    ['insect_live', 'insect_preventive'].includes(field.pesticideComplianceWhen),
+  );
+  const showInsectEvidenceChoice = insectEvidenceFieldsServed
+    && complianceScope.pesticideProductPresent === true && (
+    complianceScope.insectProductPresent === true
+    || complianceScope.insectProductUnknown === true
+    || storedInsectEvidencePath != null
+  );
+  const setInsectEvidencePath = (nextPath) => {
+    const normalized = nextPath === "live" || nextPath === "preventive" ? nextPath : null;
+    setLocalInsectEvidencePath(normalized);
+    onInsectEvidencePathChange?.(normalized);
+    const clear = normalized === "live"
+      ? TYPED_INSECT_EVIDENCE_KEYS.preventive
+      : normalized === "preventive"
+        ? TYPED_INSECT_EVIDENCE_KEYS.live
+        : [...TYPED_INSECT_EVIDENCE_KEYS.live, ...TYPED_INSECT_EVIDENCE_KEYS.preventive];
+    for (const key of clear) {
+      if (String(values?.[key] ?? "").trim()) onFieldChange(key, "");
+    }
+  };
   const scoreLabels = schema.activity?.techScoreLabels || {};
   const fieldLabelStyle = {
     fontSize: 14,
@@ -9976,13 +10021,20 @@ export function TypedFindingsSection({
   // products) and never rendered — companion schema slices clear the flag
   // for fields the companion must collect (shared products list can't be
   // attributed per service line), so this filter is schema-driven for both
-  // contexts. pesticideOnly compliance fields appear once a pesticide
-  // product is recorded (the server 422s them if missed, so hiding them
-  // can't skip enforcement). detail fields collapse behind one optional
+  // contexts. pesticideOnly compliance fields follow the served schema's
+  // product/evidence predicate: rotations for pesticide families,
+  // pollinator status for insect products, and exactly one insect evidence
+  // path. The server remains authoritative. detail fields collapse behind one optional
   // expander so routine visits stay a short form (owner directive
   // 2026-07-21).
   const visibleFields = (schema.fields || []).filter(
-    (f) => !f.autoFilled && (!f.pesticideOnly || pesticideProductPresent),
+    (f) => !f.autoFilled && (
+      !f.pesticideOnly
+      || typedPesticideFieldApplies(f, values, complianceScope, insectEvidencePath)
+      // Never hide a restored contradictory value: keep it visible so the
+      // tech can clear it or use the evidence-path choice to reconcile it.
+      || String(values?.[f.key] ?? "").trim() !== ""
+    ),
   );
   // A detail field that is REQUIRED for the current values (requiredUnless /
   // conditional cores — flea evidence, roach follow-up window, rodent
@@ -10020,11 +10072,8 @@ export function TypedFindingsSection({
       )}
       <div style={fieldLabelStyle}>
         {typedFieldLabel(schema.type, field, values)}
-        {/* pesticideOnly compliance fields only render when a pesticide
-            product is recorded — and then the server REQUIRES them
-            (validateTreeShrubTypedCompliance), so they carry the required
-            marker whenever visible (codex P2 r13). */}
-        {(typedFieldRequiredNow(field, values) || field.pesticideOnly) && (
+        {(typedFieldRequiredNow(field, values)
+          || (field.pesticideOnly && typedPesticideFieldApplies(field, values, complianceScope, insectEvidencePath))) && (
           <span style={{ color: requiredColor }}> *</span>
         )}
       </div>
@@ -10074,6 +10123,31 @@ export function TypedFindingsSection({
         aria-disabled={frozen || undefined}
         style={{ border: "none", margin: 0, padding: 0, minWidth: 0, opacity: frozen ? 0.55 : 1 }}
       >
+      {showInsectEvidenceChoice && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={fieldLabelStyle}>
+            {complianceScope.insectProductPresent
+              ? "Evidence for this insect treatment"
+              : "If this was an insect treatment, choose its evidence"}
+            {complianceScope.insectProductPresent && <span style={{ color: requiredColor }}> *</span>}
+          </div>
+          <select
+            aria-label="Insect treatment evidence path"
+            value={insectEvidencePath === "conflict" ? "" : (insectEvidencePath || "")}
+            onChange={(event) => setInsectEvidencePath(event.target.value)}
+            style={{ width: "100%", boxSizing: "border-box" }}
+          >
+            <option value="">{complianceScope.insectProductPresent ? "Choose evidence path" : "No insect treatment recorded"}</option>
+            <option value="live">Current live target and life stage</option>
+            <option value="preventive">Documented label-supported preventive use</option>
+          </select>
+          {storedInsectEvidencePath === "conflict" && (
+            <div role="alert" style={{ fontSize: 14, color: requiredColor, marginTop: 4 }}>
+              Choose one evidence path; current live evidence and preventive use cannot both be recorded.
+            </div>
+          )}
+        </div>
+      )}
       {primaryFields.map(renderField)}
       {detailFields.length > 0 && (
         <details style={{ marginBottom: 12 }}>
@@ -10598,6 +10672,31 @@ function treeShrubProductFlagsClient(selectedProducts = [], catalog = []) {
     hasInjectionProduct,
     injectionRows,
     missingActuals,
+  };
+}
+
+export function treeShrubTypedPesticideScopeClient(selectedProducts = []) {
+  const flags = treeShrubProductFlagsClient(selectedProducts);
+  const unclassifiedPesticideProductPresent = selectedProducts.some((product) => {
+    const category = String(product.category || product.product_category || "");
+    if (/pesticid|termitic|systemic|hort/i.test(`${product.name || ""} ${category}`)) return true;
+    return !category.trim() || /uncategor|unknown|\bother\b|\bmisc\b|n\/a/i.test(category);
+  });
+  const pesticideProductPresent = flags.hasInsectProduct
+    || flags.hasFungicideProduct
+    || flags.hasHerbicideProduct
+    || unclassifiedPesticideProductPresent;
+  return {
+    pesticideProductPresent,
+    insectProductPresent: flags.hasInsectProduct,
+    insectProductUnknown: unclassifiedPesticideProductPresent
+      && !flags.hasInsectProduct
+      && !flags.hasFungicideProduct
+      && !flags.hasHerbicideProduct,
+    // Preserve the conservative pre-submit rotation prompt for a catalog row
+    // whose family is unknown; unlike insect evidence, it makes no claim
+    // about what target was treated.
+    rotationProductPresent: pesticideProductPresent,
   };
 }
 
@@ -12447,19 +12546,13 @@ export function CompletionPanel({
   // for surfaces the fields here; a category-word-only test hid them for
   // brand-named pre-emergents and left the tech no way to satisfy the
   // server 400 (codex P1 r5).
-  const tsPesticideFlags = treeShrubProductFlagsClient(selectedProducts);
-  const pesticideProductPresent =
-    tsPesticideFlags.hasInsectProduct ||
-    tsPesticideFlags.hasFungicideProduct ||
-    tsPesticideFlags.hasHerbicideProduct ||
-    selectedProducts.some((p) => {
-      const category = String(p.category || p.product_category || "");
-      if (/pesticid|termitic|systemic|hort/i.test(`${p.name || ""} ${category}`)) return true;
-      // "Uncategorized"/"other" style categories are non-blank but carry no
-      // signal (prod has Bifen XTS filed as Uncategorized) — they must stay
-      // on the conservative show-the-fields path, same as a missing category.
-      return !category.trim() || /uncategor|unknown|\bother\b|\bmisc\b|n\/a/i.test(category);
-    });
+  // Unknown catalog categories keep the rotation prompt available, but do
+  // not assert that an insect treatment occurred. The tech can explicitly
+  // choose a live-evidence or preventive path if the unknown product was in
+  // fact an insecticide; known fungicide/herbicide rows never ask for insect
+  // evidence or pollinator status.
+  const typedPesticideComplianceScope = treeShrubTypedPesticideScopeClient(selectedProducts);
+  const { pesticideProductPresent } = typedPesticideComplianceScope;
   const [productSearch, setProductSearch] = useState("");
   const [sendSms, setSendSms] = useState(true);
   const [includePayLink, setIncludePayLink] = useState(true);
@@ -13067,6 +13160,12 @@ export function CompletionPanel({
     ),
   );
   const [findingsValues, setFindingsValues] = useState({});
+  // UI-only branch choice for the mutually exclusive typed insect evidence
+  // fields. Once a field is entered the persisted values themselves recover
+  // the path; keeping the empty selection here lets pre-submit still require
+  // the branch's fields before the first value is chosen.
+  const [typedInsectEvidencePath, setTypedInsectEvidencePath] = useState(null);
+  const [companionInsectEvidencePaths, setCompanionInsectEvidencePaths] = useState({});
   // Invalidate an untouched generated report only when the station autofill
   // ACTUALLY wrote a count (flag set by its applyCounts) — never on a
   // discarded auto candidate against a hand-overridden field (codex r70).
@@ -18171,20 +18270,12 @@ export function CompletionPanel({
             String(findingsValues[f.key] ?? "").trim() === "",
         )
         .map((f) => f.label);
-      // Pesticide compliance answers: the server blocks completion without
-      // pollinator_status and irac_frac_logged = Yes whenever a pesticide
-      // product is recorded — mirror that pre-submit so the tech is guided
-      // to the field instead of a generic server failure (codex P2 r13).
-      if (pesticideProductPresent) {
-        for (const f of typedFindingsSchema.fields || []) {
-          if (!f.pesticideOnly) continue;
-          const value = String(findingsValues[f.key] ?? "").trim();
-          if (!value) missingTypedRequired.push(f.label);
-          else if (f.key === "irac_frac_logged" && value !== "Yes") {
-            missingTypedRequired.push(`${f.label} (must be confirmed Yes)`);
-          }
-        }
-      }
+      missingTypedRequired.push(...missingTypedPesticideCompliance(
+        typedFindingsSchema.fields || [],
+        findingsValues,
+        typedPesticideComplianceScope,
+        typedInsectEvidencePath,
+      ));
       // Tech-set-only gauge types (no derive field) still require a score
       // on any completed-side outcome — the server 422s
       // (activity_score_required) the same way. A derive-mapped type has
@@ -18273,19 +18364,12 @@ export function CompletionPanel({
               String(entry.values[f.key] ?? "").trim() === "",
           )
           .map((f) => f.label);
-        // Pesticide compliance mirror for companions (codex P2 r15): same
-        // gate as the primary form — the server requires these whenever a
-        // pesticide product is on the (shared) products list.
-        if (pesticideProductPresent) {
-          for (const f of schema.fields || []) {
-            if (!f.pesticideOnly) continue;
-            const value = String(entry.values[f.key] ?? "").trim();
-            if (!value) missingCompanionRequired.push(f.label);
-            else if (f.key === "irac_frac_logged" && value !== "Yes") {
-              missingCompanionRequired.push(`${f.label} (must be confirmed Yes)`);
-            }
-          }
-        }
+        missingCompanionRequired.push(...missingTypedPesticideCompliance(
+          schema.fields || [],
+          entry.values,
+          typedPesticideComplianceScope,
+          companionInsectEvidencePaths[schema.type] || null,
+        ));
         // Same derive-mapped exemption as the primary (owner ruling
         // 2026-09-26): a companion gauge with a findings-derived score is
         // never blocked here, only a tech-set-only one.
@@ -21025,6 +21109,9 @@ export function CompletionPanel({
                 variant="mobile"
                 frozen={generating}
                 pesticideProductPresent={pesticideProductPresent}
+                pesticideComplianceScope={typedPesticideComplianceScope}
+                insectEvidencePath={typedInsectEvidencePath}
+                onInsectEvidencePathChange={setTypedInsectEvidencePath}
                 schema={findingsDisplaySchema}
                 values={findingsValues}
                 onFieldChange={handleTypedFindingChange}
@@ -21053,6 +21140,9 @@ export function CompletionPanel({
                   variant="mobile"
                   frozen={generating}
                   pesticideProductPresent={pesticideProductPresent}
+                  pesticideComplianceScope={typedPesticideComplianceScope}
+                  insectEvidencePath={companionInsectEvidencePaths[schema.type] || null}
+                  onInsectEvidencePathChange={(path) => setCompanionInsectEvidencePaths((current) => ({ ...current, [schema.type]: path }))}
                   schema={schema}
                   values={entry.values}
                   onFieldChange={(key, value) =>
@@ -23505,6 +23595,9 @@ export function CompletionPanel({
               variant="desktop"
               frozen={generating}
               pesticideProductPresent={pesticideProductPresent}
+              pesticideComplianceScope={typedPesticideComplianceScope}
+              insectEvidencePath={typedInsectEvidencePath}
+              onInsectEvidencePathChange={setTypedInsectEvidencePath}
               schema={findingsDisplaySchema}
               values={findingsValues}
               onFieldChange={handleTypedFindingChange}
@@ -23533,6 +23626,9 @@ export function CompletionPanel({
                 variant="desktop"
                 frozen={generating}
                 pesticideProductPresent={pesticideProductPresent}
+                pesticideComplianceScope={typedPesticideComplianceScope}
+                insectEvidencePath={companionInsectEvidencePaths[schema.type] || null}
+                onInsectEvidencePathChange={(path) => setCompanionInsectEvidencePaths((current) => ({ ...current, [schema.type]: path }))}
                 schema={schema}
                 values={entry.values}
                 onFieldChange={(key, value) =>

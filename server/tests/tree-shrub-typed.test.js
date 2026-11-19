@@ -44,6 +44,28 @@ const COMPANION_ONLY_FIELD_KEYS = [
 ];
 
 describe('tree & shrub schema', () => {
+  test('insect evidence fields follow the backend evidence gate; pollinator and rotation fields do not', () => {
+    const prior = process.env.GATE_TS_PEST_CHECK;
+    try {
+      delete process.env.GATE_TS_PEST_CHECK;
+      const dark = new Map(findingsSchemaForType('tree_shrub').fields.map((field) => [field.key, field]));
+      expect([...dark.keys()]).not.toEqual(expect.arrayContaining(['insect_target', 'insect_life_stage', 'insect_preventive_reason']));
+      expect(dark.get('pollinator_status')).toMatchObject({ pesticideOnly: true, pesticideComplianceWhen: 'insect' });
+      expect(dark.get('irac_frac_logged')).toMatchObject({ pesticideOnly: true, pesticideComplianceWhen: 'rotation' });
+
+      process.env.GATE_TS_PEST_CHECK = 'true';
+      for (const companion of [false, true]) {
+        const live = new Map(findingsSchemaForType('tree_shrub', { companion }).fields.map((field) => [field.key, field]));
+        expect(live.get('insect_target')).toMatchObject({ pesticideComplianceWhen: 'insect_live' });
+        expect(live.get('insect_life_stage')).toMatchObject({ pesticideComplianceWhen: 'insect_live' });
+        expect(live.get('insect_preventive_reason')).toMatchObject({ pesticideComplianceWhen: 'insect_preventive' });
+      }
+    } finally {
+      if (prior === undefined) delete process.env.GATE_TS_PEST_CHECK;
+      else process.env.GATE_TS_PEST_CHECK = prior;
+    }
+  });
+
   test('primary slice carries the simplified sections and a required core', () => {
     const config = PROJECT_TYPES.tree_shrub;
     expect(config).toBeTruthy();

@@ -958,13 +958,13 @@ const PROJECT_TYPES = {
       // validateTreeShrubTypedCompliance): pollinator status gates
       // bee-sensitive insect applications, IRAC/FRAC confirms resistance
       // rotation was checked for pesticide products.
-      { key: 'pollinator_status', label: 'Flowering / pollinator status', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, options: [
+      { key: 'pollinator_status', label: 'Flowering / pollinator status', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, pesticideComplianceWhen: 'insect', options: [
         'No blooms or no bees', 'Blooming — no bees active', 'Blooming — bees active', 'No insecticide applied',
       ] },
-      { key: 'irac_frac_logged', label: 'IRAC / FRAC rotation checked & logged', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, options: ['Yes', 'No'] },
-      { key: 'insect_target', label: 'Live insect target (if found)', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, options: TREE_SHRUB_PEST_EVIDENCE.insectTypes.map((item) => item.label) },
-      { key: 'insect_life_stage', label: 'Live insect stage (if found)', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, options: TREE_SHRUB_PEST_EVIDENCE.lifeStages.map((item) => item.label) },
-      { key: 'insect_preventive_reason', label: 'Label-supported preventive reason (if no live target)', type: 'text', section: 'Compliance', internal: true, pesticideOnly: true, placeholder: 'Label use plus site or documented history reason' },
+      { key: 'irac_frac_logged', label: 'IRAC / FRAC rotation checked & logged', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, pesticideComplianceWhen: 'rotation', options: ['Yes', 'No'] },
+      { key: 'insect_target', label: 'Current live insect target', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, pesticideComplianceWhen: 'insect_live', options: TREE_SHRUB_PEST_EVIDENCE.insectTypes.map((item) => item.label) },
+      { key: 'insect_life_stage', label: 'Current live insect stage', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, pesticideComplianceWhen: 'insect_live', options: TREE_SHRUB_PEST_EVIDENCE.lifeStages.map((item) => item.label) },
+      { key: 'insect_preventive_reason', label: 'Documented label-supported preventive reason', type: 'text', section: 'Compliance', internal: true, pesticideOnly: true, pesticideComplianceWhen: 'insect_preventive', placeholder: 'Label use plus site or documented history reason' },
       // NutriRoot is 2-2-3 with all-soluble nitrogen. Ordinary use is not
       // valid in Sarasota/North Port; Manatee use needs a P-deficient soil
       // test and must be outside the N/P blackout. The second option exists

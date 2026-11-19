@@ -15,6 +15,68 @@ import PEST_CHECK from '../../../shared/tree-shrub-pest-check.json';
 export const INSECT_TYPES = PEST_CHECK.insectTypes;
 export const LIFE_STAGES = PEST_CHECK.lifeStages;
 
+// The typed Tree & Shrub form stores the same decision as Fast Complete in
+// three legacy-compatible fields. The server accepts exactly one evidence
+// path: current target + life stage, or a documented preventive reason.
+export const TYPED_INSECT_EVIDENCE_KEYS = Object.freeze({
+  live: ['insect_target', 'insect_life_stage'],
+  preventive: ['insect_preventive_reason'],
+});
+
+const COMPLIANCE_WHEN_BY_KEY = Object.freeze({
+  pollinator_status: 'insect',
+  irac_frac_logged: 'rotation',
+  insect_target: 'insect_live',
+  insect_life_stage: 'insect_live',
+  insect_preventive_reason: 'insect_preventive',
+});
+
+export function typedInsectEvidencePath(values = {}) {
+  const present = (key) => String(values?.[key] ?? '').trim() !== '';
+  const live = TYPED_INSECT_EVIDENCE_KEYS.live.some(present);
+  const preventive = TYPED_INSECT_EVIDENCE_KEYS.preventive.some(present);
+  if (live && preventive) return 'conflict';
+  if (live) return 'live';
+  if (preventive) return 'preventive';
+  return null;
+}
+
+export function pesticideComplianceWhen(field = {}) {
+  return field.pesticideComplianceWhen || COMPLIANCE_WHEN_BY_KEY[field.key] || 'pesticide';
+}
+
+const insectTreatmentFor = (scope, evidencePath) => scope?.insectProductPresent === true
+  || (scope?.insectProductUnknown === true && ['live', 'preventive', 'conflict'].includes(evidencePath));
+
+export function typedPesticideFieldApplies(field, values = {}, scope = {}, selectedPath = null) {
+  if (!field?.pesticideOnly || scope.pesticideProductPresent !== true) return !field?.pesticideOnly;
+  const evidencePath = selectedPath || typedInsectEvidencePath(values);
+  const when = pesticideComplianceWhen(field);
+  if (when === 'rotation') return scope.rotationProductPresent === true;
+  if (when === 'insect') return insectTreatmentFor(scope, evidencePath);
+  if (when === 'insect_live') return insectTreatmentFor(scope, evidencePath) && ['live', 'conflict'].includes(evidencePath);
+  if (when === 'insect_preventive') return insectTreatmentFor(scope, evidencePath) && ['preventive', 'conflict'].includes(evidencePath);
+  return true;
+}
+
+export function missingTypedPesticideCompliance(fields = [], values = {}, scope = {}, selectedPath = null) {
+  if (scope.pesticideProductPresent !== true) return [];
+  const evidencePath = typedInsectEvidencePath(values) || selectedPath;
+  const missing = [];
+  const evidenceFieldsServed = fields.some((field) =>
+    ['insect_live', 'insect_preventive'].includes(pesticideComplianceWhen(field))
+  );
+  if (evidenceFieldsServed && scope.insectProductPresent === true && !evidencePath) missing.push('Insect treatment evidence path');
+  if (evidenceFieldsServed && evidencePath === 'conflict') missing.push('Choose either current live evidence or documented preventive use (not both)');
+  for (const field of fields) {
+    if (!typedPesticideFieldApplies(field, values, scope, evidencePath)) continue;
+    const value = String(values?.[field.key] ?? '').trim();
+    if (!value) missing.push(field.label);
+    else if (field.key === 'irac_frac_logged' && value !== 'Yes') missing.push(`${field.label} (must be confirmed Yes)`);
+  }
+  return [...new Set(missing)];
+}
+
 export const MERIT_BLOCK_MESSAGE = 'Merit does not control armored scale. Distance scale use is on hold; use oil on live crawlers or a label-supported Zylam drench.';
 export const DISTANCE_SCALE_BLOCK_MESSAGE = 'Distance IGR scale use is on hold. Remove Distance or record a non-scale target supported by the label.';
 

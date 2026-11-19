@@ -2,7 +2,8 @@
 import { describe, expect, test } from 'vitest';
 import {
   DISTANCE_SCALE_BLOCK_MESSAGE, MERIT_BLOCK_MESSAGE, MERIT_TRISTAR_BLOCK_MESSAGE, TRISTAR_BLOCK_MESSAGE, evaluatePestCheck, isDistanceProduct, isMeritProduct, isTristarProduct,
-  liveFindsOnlyLabel, pestCheckPayload, withPestCheck,
+  liveFindsOnlyLabel, missingTypedPesticideCompliance, pestCheckPayload,
+  typedInsectEvidencePath, typedPesticideFieldApplies, withPestCheck,
 } from './tree-shrub-pest-check';
 
 const row = (name, active = true, product = {}) => ({ productId: name, name, active, product: { name, ...product } });
@@ -150,5 +151,56 @@ describe('payload', () => {
     const out = evaluatePestCheck({ found: false, types: [] }, [{ active: true, name: 'TriTek Spray Oil Emulsion' }]);
     expect(out.blockMessage).toBe('TriTek requires a live target and stage. Remove the treatment or record what was found.');
     expect(out.noteMessages).toEqual([]);
+  });
+});
+
+describe('typed closeout pesticide evidence', () => {
+  const fields = [
+    { key: 'pollinator_status', label: 'Flowering / pollinator status', pesticideOnly: true, pesticideComplianceWhen: 'insect' },
+    { key: 'irac_frac_logged', label: 'IRAC / FRAC rotation checked & logged', pesticideOnly: true, pesticideComplianceWhen: 'rotation' },
+    { key: 'insect_target', label: 'Current live insect target', pesticideOnly: true, pesticideComplianceWhen: 'insect_live' },
+    { key: 'insect_life_stage', label: 'Current live insect stage', pesticideOnly: true, pesticideComplianceWhen: 'insect_live' },
+    { key: 'insect_preventive_reason', label: 'Preventive reason', pesticideOnly: true, pesticideComplianceWhen: 'insect_preventive' },
+  ];
+  const insect = { pesticideProductPresent: true, insectProductPresent: true, insectProductUnknown: false, rotationProductPresent: true };
+  const fungicide = { pesticideProductPresent: true, insectProductPresent: false, insectProductUnknown: false, rotationProductPresent: true };
+  const unknown = { pesticideProductPresent: true, insectProductPresent: false, insectProductUnknown: true, rotationProductPresent: true };
+
+  test('live evidence and preventive use are mutually exclusive paths', () => {
+    expect(typedInsectEvidencePath({ insect_target: 'Whitefly' })).toBe('live');
+    expect(typedInsectEvidencePath({ insect_preventive_reason: 'Label timing.' })).toBe('preventive');
+    expect(typedInsectEvidencePath({ insect_target: 'Whitefly', insect_preventive_reason: 'Label timing.' })).toBe('conflict');
+  });
+
+  test('fungicide-only requires rotation, never insect or pollinator answers', () => {
+    expect(fields.filter((field) => typedPesticideFieldApplies(field, {}, fungicide)).map((field) => field.key))
+      .toEqual(['irac_frac_logged']);
+    expect(missingTypedPesticideCompliance(fields, { irac_frac_logged: 'Yes' }, fungicide)).toEqual([]);
+  });
+
+  test('an insect product requires one complete evidence path without requiring the other', () => {
+    expect(missingTypedPesticideCompliance(fields, { pollinator_status: 'No blooms or no bees', irac_frac_logged: 'Yes' }, insect))
+      .toEqual(['Insect treatment evidence path']);
+    expect(missingTypedPesticideCompliance(fields, {
+      pollinator_status: 'No blooms or no bees', irac_frac_logged: 'Yes',
+      insect_target: 'Whitefly', insect_life_stage: 'Crawlers / nymphs',
+    }, insect)).toEqual([]);
+    expect(missingTypedPesticideCompliance(fields, {
+      pollinator_status: 'No blooms or no bees', irac_frac_logged: 'Yes',
+      insect_preventive_reason: 'Label-supported systemic timing and documented site history.',
+    }, insect)).toEqual([]);
+  });
+
+  test('a gate-dark schema does not invent an evidence-path requirement', () => {
+    const gateDarkFields = fields.filter((field) => !field.pesticideComplianceWhen.startsWith('insect_'));
+    expect(missingTypedPesticideCompliance(gateDarkFields, {
+      pollinator_status: 'No blooms or no bees', irac_frac_logged: 'Yes',
+    }, insect)).toEqual([]);
+  });
+
+  test('an unknown category does not presume insect treatment but can opt into either evidence path', () => {
+    expect(missingTypedPesticideCompliance(fields, { irac_frac_logged: 'Yes' }, unknown)).toEqual([]);
+    expect(missingTypedPesticideCompliance(fields, { irac_frac_logged: 'Yes' }, unknown, 'live'))
+      .toEqual(['Flowering / pollinator status', 'Current live insect target', 'Current live insect stage']);
   });
 });
