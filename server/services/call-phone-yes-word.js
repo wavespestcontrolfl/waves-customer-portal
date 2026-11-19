@@ -169,9 +169,10 @@ async function customerPhoneKeys(conn, customerId) {
   return [...new Set(keys)];
 }
 
-// A call_log phone column matches a key: a NANP key by its last 10 digits, any other key by all its digits.
-const contactMatchSql = (col) => `(right(regexp_replace(call_log.${col}, '\\D', '', 'g'), 10) = ANY(?::text[])`
-  + ` OR regexp_replace(call_log.${col}, '\\D', '', 'g') = ANY(?::text[]))`;
+// A call_log phone column holds one of the numbers, on intake's identity rule (findCustomerPhoneMatches): all its
+// digits equal a key, or a NANP key with the country code 1 (contactForms).
+const contactMatchSql = (col) => `regexp_replace(call_log.${col}, '\\D', '', 'g') = ANY(?::text[])`;
+const contactForms = (keys) => keys.flatMap((key) => (key.length === 10 ? [key, `1${key}`] : [key]));
 
 // Calls with the customer, for the two hold checks only: linked to them, or linked to no one with one of their numbers
 // (customerPhoneKeys) as the contact (the caller; on an outbound call, the number called: call-log-relink's
@@ -186,15 +187,15 @@ function whereWithCustomer(qb, customerId, keys) {
     if (!keys.length) return;
     const { NOT_EXPLICITLY_UNLINKED_SQL } = require('../utils/call-link-override');
     const { TRANSCRIPTION_REJECTED_SENTINEL } = require('./call-log-relink');
-    const byKind = [keys.filter((key) => key.length === 10), keys.filter((key) => key.length !== 10)];
+    const forms = contactForms(keys);
     w.orWhere((unlinked) => unlinked.whereNull('call_log.customer_id')
       .whereRaw(NOT_EXPLICITLY_UNLINKED_SQL)
       .whereRaw('call_log.transcription IS DISTINCT FROM ?', [TRANSCRIPTION_REJECTED_SENTINEL])
       .where((contact) => contact
         .where((inbound) => inbound.whereRaw("lower(COALESCE(call_log.direction, '')) NOT LIKE 'outbound%'")
-          .whereRaw(contactMatchSql('from_phone'), byKind))
+          .whereRaw(contactMatchSql('from_phone'), [forms]))
         .orWhere((outbound) => outbound.whereRaw("lower(call_log.direction) LIKE 'outbound%'")
-          .whereRaw(contactMatchSql('to_phone'), byKind))));
+          .whereRaw(contactMatchSql('to_phone'), [forms]))));
   });
 }
 

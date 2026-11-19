@@ -163,6 +163,7 @@ describeDb("the caller's word (PostgreSQL)", () => {
     ['from their secondary number, filed in another format', (n) => ({ from_phone: n.secondary }), true],
     ['from their number abroad (all its digits)', () => ({ from_phone: '+442079460958' }), true],
     ['from a number abroad that only ends like theirs', () => ({ from_phone: '+4412079460958' }), false],
+    ['from a number abroad that ends like their US number', (n) => ({ from_phone: `+44${n.contact.slice(2)}` }), false],
     ['an outbound call to their secondary number', (n) => ({ direction: 'Outbound-API', from_phone: OURS(), to_phone: n.secondary }), true],
     ['from a number not on their record', () => ({ from_phone: '+19415550199' }), false],
     ['an outbound call whose number called is not theirs', (n) => ({ direction: 'outbound-dial', from_phone: n.contact, to_phone: '+19415550199' }), false],
