@@ -4912,6 +4912,17 @@ function lawnFastProductIds(req) {
 // New-sod capability signal: a sheet that understands the context's `newSod` sends `sodAware=1` (query string).
 const sodAwareRequest = (req) => req.query?.sodAware === '1';
 
+function tetrinoScoutRequest(req) {
+  const target = String(req.query?.tetrinoTarget || '').trim().toLowerCase();
+  const observations = String(req.query?.tetrinoCurrentObservations || '').trim();
+  const pressure = String(req.query?.tetrinoPressure || '').trim().toLowerCase();
+  const grubTimingEvidence = String(req.query?.grubTimingEvidence || '').trim();
+  if (!target && !observations && !pressure && !grubTimingEvidence) return undefined;
+  if (!['chinch', 'grubs', 'none'].includes(target) || observations.length > 1000
+    || (pressure && !['ordinary', 'high'].includes(pressure)) || grubTimingEvidence.length > 1000) return null;
+  return { tetrinoTarget: target, tetrinoCurrentObservations: observations, tetrinoPressure: pressure, grubTimingEvidence };
+}
+
 // GET /api/admin/dispatch/:lawnFastServiceId/lawn-fast/context
 // What the regular lawn Fast Complete sheet opens with (owner 2026-10-03: every
 // lawn visit type is eligible, recurring program visits first): the eligibility
@@ -4926,8 +4937,10 @@ router.get('/:lawnFastServiceId/lawn-fast/context', async (req, res, next) => {
     const serviceId = await lawnFastRequestId(req, res);
     if (!serviceId) return;
     const productIds = lawnFastProductIds(req);
+    const tetrinoScout = tetrinoScoutRequest(req);
+    if (tetrinoScout === null) return res.status(400).json({ error: 'Check the May scouting fields and try again.', code: 'tetrino_scout_invalid' });
     // The new-sod holds go only to a sheet that sends `sodAware=1` (it understands `newSod`).
-    const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId, ...(sodAwareRequest(req) ? { sodAware: true } : {}), ...(productIds ? { productIds } : {}) });
+    const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId, ...(sodAwareRequest(req) ? { sodAware: true } : {}), ...(productIds ? { productIds } : {}), ...(tetrinoScout ? { tetrinoScout } : {}) });
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason, code: ctx.reason });
     const { ok, ...body } = ctx;
     // /complete takes a lawn visit's stock below zero instead of refusing (the same rule), so the sheet lets a

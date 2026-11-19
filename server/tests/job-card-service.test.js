@@ -566,11 +566,40 @@ describe('current-visit procedure uses the same authority as product resolution'
     const card = async (products) => (await jobCard.resolveVisitProducts({ facts: { isLawn: true, serviceId: 'synthetic-visit' }, protocols: {}, catalog: [], dbh: () => ({}), deps: { buildPlan: jest.fn().mockResolvedValue(planFor(products)) } })).procedure;
     const spreader = await card([{ productId: 'f24', gates: { targetN: '0.75 lb N/1000', fertilizerSafety: true } }]);
     expect(spreader.visitNotes).toEqual(['N rate: 0.75 lb N. Spreader visit.', `Fertilizer safety: ${FERTILIZER_SAFETY_RULES.join(' ')}`]);
-    for (const rule of ['deflector shield', '10 ft fertilizer-free band', 'severe thunderstorm, flood or tropical watch or warning', 'Sweep fertilizer off driveways, sidewalks and streets', 'Manatee BMP decal']) {
+    for (const rule of ['deflector shield', '10 ft fertilizer-free band', 'severe thunderstorm, flood or tropical watch or warning', 'Sweep fertilizer off driveways, sidewalks and streets', 'shared lawn/bed fertilizer map', 'North Port exception', 'Manatee BMP decal']) {
       expect(spreader.visitNotes.join(' ')).toContain(rule);
     }
     expect((await card([{ productId: 'nt', gates: { requiresZeroNP: true } }])).visitNotes).toEqual(['N rate: 0.75 lb N. Spreader visit.']);
     expect((await card([])).visitNotes).toEqual(['N rate: 0.75 lb N. Spreader visit.']);
+  });
+
+  test('property-aware N-visit cards distinguish North Port from Sarasota and carry the local setbacks', async () => {
+    const { NORTH_PORT_FERTILIZER_SAFETY_RULES, SARASOTA_FERTILIZER_SAFETY_RULES } = require('../services/lawn-fertilizer-safety');
+    const products = [{ productId: 'f24', gates: { targetN: '0.75 lb N/1000', fertilizerSafety: true } }];
+    const planFor = (propertyGate) => ({ propertyGate: { month: 'Feb', visit: 2, trackKey: 'st_augustine', county: 'Sarasota', ...propertyGate }, protocol: { objective: 'Spreader visit.', structured: {
+      status: 'active', grassTrack: 'st_augustine', name: 'Synthetic lawn protocol', version: 3, window: { title: 'Feeding', goal: 'One spreader feeding.', requiredTasks: [] }, products,
+    } } });
+    const card = async (propertyGate) => (await jobCard.resolveVisitProducts({
+      facts: { isLawn: true, serviceId: 'synthetic-visit' },
+      protocols: {},
+      catalog: [],
+      dbh: () => ({}),
+      deps: { buildPlan: jest.fn().mockResolvedValue(planFor(propertyGate)) },
+    })).procedure;
+
+    const northPort = await card({ municipality: 'North Port' });
+    expect(northPort.visitNotes).toEqual(['Spreader visit.', `Fertilizer safety: ${NORTH_PORT_FERTILIZER_SAFETY_RULES.join(' ')}`]);
+    expect(northPort.visitNotes.join(' ')).toContain('April 1 through September 30');
+    expect(northPort.visitNotes.join(' ')).toContain('wetland\'s 25 ft buffer');
+    expect(northPort.visitNotes.join(' ')).toContain('flow channel of any swale');
+    expect(northPort.visitNotes.join(' ')).toContain('at least 10 ft from a pond, stream, canal or top of a seawall');
+    expect(northPort.visitNotes.join(' ')).toContain('shared lawn/bed fertilizer map');
+    expect(northPort.visitNotes.join(' ')).not.toContain('June 1');
+
+    const sarasota = await card({ municipality: 'Sarasota' });
+    expect(sarasota.visitNotes).toEqual(['Spreader visit.', `Fertilizer safety: ${SARASOTA_FERTILIZER_SAFETY_RULES.join(' ')}`]);
+    expect(sarasota.visitNotes.join(' ')).toContain('June 1 through September 30');
+    expect(sarasota.visitNotes.join(' ')).not.toContain('April 1');
   });
 
   test('an assessment cannot inherit a treatment procedure from its display name', async () => {

@@ -228,7 +228,7 @@
       "limits": [
         "Does not provide rapid adult-insect control.",
         "Whiteflies: one application at 8 fl oz per 100 gal per calendar year, or 6 fl oz followed by 6 fl oz 21 to 28 days later. Yearly limit 0.176 lb of active ingredient per acre, all pyriproxyfen products together.",
-        "Scale and mealybug use is on hold. The label allows one application a year and prints the yearly limit two ways (12 fl oz per acre, and 0.176 lb active ingredient per acre, which is 26 fl oz per acre). No scale spray until Valent confirms which one applies.",
+        "Scale and mealybug use is on hold. The label allows one application a year and prints the yearly limit two ways (12 fl oz per acre, and 0.176 lb active ingredient per acre, which is 26 fl oz per acre). Do not apply Distance for scale or mealybug until Valent confirms which yearly limit applies.",
         "Label advises against use on gardenia, schefflera, salvia, Boston fern, ghost plant, and coral bells. Test other plants first."
       ],
       "source": "Valent · EPA 59639-96 · label accepted 11-08-23 · Table 1",
@@ -245,7 +245,7 @@
     "tristar": {
       "kind": "Insects · foliar spray",
       "targetTitle": "Pest targets",
-      "targets": "Whiteflies, mealybugs, aphids and soft scales (Florida wax, cottony cushion). Use on live finds only, foliar only. Not for armored scale (euonymus, tea, false Florida red, oleander): use Distance, oil or a Zylam drench.",
+      "targets": "Whiteflies, mealybugs, aphids and soft scales (Florida wax, cottony cushion). Use on live finds only, foliar only. Not for armored scale (euonymus, tea, false Florida red, oleander): Distance scale use is on hold; use oil on live crawlers or a label-supported Zylam drench.",
       "apply": "Cover all plant surfaces evenly. The label sets the finished spray volume by plant size. Tank mixing with a surfactant may improve control of adult whiteflies; test a small area first. Allow 6 hours before overhead irrigation.",
       "rates": [
         [
@@ -279,7 +279,7 @@
         ]
       ],
       "limits": [
-        "Not for armored scale. Use Distance on crawlers, oil, or a Zylam drench.",
+        "Not for armored scale. Distance scale use is on hold; use oil on live crawlers or a label-supported Zylam drench.",
         "Do not reapply more than once every 7 days.",
         "Maximum 4 applications per calendar year; 25.3 fl oz per acre per application; 92.5 fl oz per acre per year.",
         "Group 4A neonicotinoid: count it with Merit and Zylam in the annual 4A log.",
@@ -580,13 +580,14 @@
         ]
       ],
       "limits": [
-        "Two feedings a year, spring and late fall, at least 5 months apart.",
+        "Apply only when a documented plant or site need supports feeding; timing alone does not make it due.",
+        "At most two feedings a year, spring and late fall, at least 5 months apart.",
         "No nitrogen or phosphorus fertilizer June 1 to Sept. 30 (Sarasota and Manatee landscape).",
         "Keep fertilizer out of water and storm drains.",
         "Not for nursery container production.",
         "Harmful if inhaled; eye and skin irritant. Avoid breathing dust and wash after handling."
       ],
-      "program": "The bag says to apply two times per year as needed, in spring and late fall for trees and larger shrubs. The Waves bed and tree rates are company choices set by the county nitrogen limit.",
+      "program": "The bag says to apply two times per year as needed, in spring and late fall for trees and larger shrubs. A visit month or elapsed interval alone is not a need. The Waves bed and tree rates are company choices set by the county nitrogen limit.",
       "source": "LESCO 13-0-13 Palm & Tropical Ornamental Fertilizer · SiteOne 510245WB · bag label · rev. 9/1/2020",
       "url": "/labels/lesco-13-0-13-510245WB-label.pdf",
       "name": "LESCO 13-0-13",

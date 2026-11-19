@@ -30,9 +30,6 @@ const PROTOCOL_PRODUCTS = [
   { token: /\b0-0-16\b/, pattern: /^lesco\s+0-0-16\s+palm\b/i, method: 'granular_broadcast' },
   { token: /\b13-0-13\b/, pattern: /^lesco\s+13-0-13\b/i, method: 'granular_broadcast' },
   { token: /\btritek\b/i, pattern: /^tritek\s+spray\s+oil\s+emulsion\b/i, method: 'foliar_spray' },
-  // Three package rows (1 gal / 1 qt / 2.5 gal) share this name, so it resolves
-  // ambiguous and is skipped until the catalog carries one row.
-  { token: /\bnutriroot\b/i, pattern: /^arborjet\s+nutriroot\b/i, method: 'soil_drench' },
   { token: /\bkontos\b/i, pattern: /^kontos\b/i, method: 'foliar_spray' },
   { token: /\bmainspring\b/i, pattern: /^mainspring\s+gnl\b/i, method: 'foliar_spray' },
   { token: /\bdistance\b/i, pattern: /^distance\s+igr\b/i, method: 'foliar_spray' },

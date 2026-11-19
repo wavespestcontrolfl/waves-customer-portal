@@ -35,6 +35,9 @@ const { normalizeTreeShrubPhotoSlot } = require('../config/tree-shrub-photo-slot
 const { watchListForMonth } = require('../config/tree-shrub-watch-list');
 const { tsWatchListLive, visitWatchMonth } = require('./tree-shrub-watch-items');
 const { tsPestCheckLive } = require('./tree-shrub-pest-check');
+const {
+  NUTRIROOT_SOIL_TEST_BASIS, isNutriRootName, nutriRootDecision, nutriRootHoldReason,
+} = require('./tree-shrub-fertilizer-evidence');
 const { tsNeonicCapLive, buildNeonicCapContext } = require('./tree-shrub-neonic-ledger');
 const PEST_CHECK_TYPES = require('../../shared/tree-shrub-pest-check.json').insectTypes;
 
@@ -73,10 +76,18 @@ const daysBetween = (laterDay, earlierDay) => Math.round(dayNumber(laterDay) - d
 // prompts can never disagree with the closeout's blocks.
 function treeShrubProductFlags(row, { serviceDate, zone }) {
   const ref = { catalog: row };
+  const nutriRoot = isNutriRootName(row?.name);
   return {
     insectFamily: isInsectFamilyProduct(ref),
     needsIracFrac: productNeedsIracFracLog(ref),
-    npBlackout: productHasNpFertilizer(ref) && isSummerBlackoutForZone(serviceDate, zone),
+    // NutriRoot has a separate evidence/review path: leave its tile tappable
+    // so an application that already happened can still be recorded.
+    npBlackout: !nutriRoot && productHasNpFertilizer(ref) && isSummerBlackoutForZone(serviceDate, zone),
+    nutriRoot,
+    ...(nutriRoot ? {
+      nutriRootHoldReason: nutriRootHoldReason({ zone, serviceDate }),
+      nutriRootSoilTestEligible: nutriRootDecision({ zone, serviceDate, basis: NUTRIROOT_SOIL_TEST_BASIS }).state === 'eligible',
+    } : {}),
     injection: isInjectionProduct(ref),
   };
 }
@@ -568,6 +579,7 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     eligible: true,
     reason: null,
     service,
+    ordinanceZone: zone,
     products,
     monthProducts,
     bedSqft: await loadBedSqft(svc, knex),

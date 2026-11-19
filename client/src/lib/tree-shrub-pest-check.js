@@ -6,15 +6,17 @@
 // freezes the answer (server/services/tree-shrub-pest-check.js).
 //
 // Agronomy: Merit 2F (imidacloprid, IRAC 4A) does not control ARMORED scale; it
-// is for soft scale, whitefly and borers. Armored scale takes Distance IGR or
-// oil on crawlers, or a Zylam drench; TriStar is not for armored scale (owner
-// 2026-10-09). The protocol cards say several products are for live finds
+// is for soft scale, whitefly and borers. Distance scale use is on hold; oil
+// on live crawlers or a label-supported Zylam drench are the available card
+// paths. TriStar is not for armored scale (owner 2026-10-09). The protocol cards say several products are for live finds
 // only; a No answer beside one of them is a note, never a block.
 import PEST_CHECK from '../../../shared/tree-shrub-pest-check.json';
 
 export const INSECT_TYPES = PEST_CHECK.insectTypes;
+export const LIFE_STAGES = PEST_CHECK.lifeStages;
 
-export const MERIT_BLOCK_MESSAGE = 'Merit does not control armored scale. Use Distance or oil on crawlers, or a Zylam drench.';
+export const MERIT_BLOCK_MESSAGE = 'Merit does not control armored scale. Distance scale use is on hold; use oil on live crawlers or a label-supported Zylam drench.';
+export const DISTANCE_SCALE_BLOCK_MESSAGE = 'Distance IGR scale use is on hold. Remove Distance or record a non-scale target supported by the label.';
 
 // Products the protocol says to use on live finds only. Matched on the product
 // name, the same text the tech sees on the row.
@@ -32,17 +34,23 @@ const LIVE_FINDS_ONLY = [
   { pattern: /\btritek\b/i, label: 'TriTek' },
 ];
 
-export const TRISTAR_BLOCK_MESSAGE = 'TriStar does not control armored scale. Use Distance or oil on crawlers, or a Zylam drench.';
-export const MERIT_TRISTAR_BLOCK_MESSAGE = 'Merit and TriStar do not control armored scale. Use Distance or oil on crawlers, or a Zylam drench.';
+export const TRISTAR_BLOCK_MESSAGE = 'TriStar does not control armored scale. Distance scale use is on hold; use oil on live crawlers or a label-supported Zylam drench.';
+export const MERIT_TRISTAR_BLOCK_MESSAGE = 'Merit and TriStar do not control armored scale. Distance scale use is on hold; use oil on live crawlers or a label-supported Zylam drench.';
 
 const MERIT_NAME = /\bmerit\b/i;
 const IMIDACLOPRID = /imidacloprid/i;
+const DISTANCE_NAME = /\bdistance\s+igr\b/i;
 
 // Merit by name, or any imidacloprid product by its active ingredient.
 export function isMeritProduct(row) {
   const product = row?.product || {};
   return MERIT_NAME.test(String(row?.name ?? product.name ?? ''))
     || IMIDACLOPRID.test(String(product.active_ingredient ?? ''));
+}
+
+export function isDistanceProduct(row) {
+  const product = row?.product || {};
+  return DISTANCE_NAME.test(String(row?.name ?? product.name ?? ''));
 }
 
 const TRISTAR_NAME = /\btristar\b/i;
@@ -84,16 +92,57 @@ function armoredScaleRule(types, active) {
   };
 }
 
-function liveFindNotes(active) {
-  const notes = [];
+function distanceScaleRule(types, active) {
+  if (!types.has('armored_scale') && !types.has('soft_scale')) return null;
+  const blockedRows = active.filter(isDistanceProduct);
+  if (!blockedRows.length) return null;
+  return {
+    blockMessage: DISTANCE_SCALE_BLOCK_MESSAGE,
+    noteMessages: [],
+    blockedRows,
+    blockedLabel: 'Distance',
+  };
+}
+
+function liveFindLabels(active) {
+  const labels = [];
   const seen = new Set();
   for (const row of active) {
     const label = liveFindsOnlyLabel(row);
     if (!label || seen.has(label)) continue;
     seen.add(label);
-    notes.push(`No live insects recorded. ${label} is for live finds only.`);
+    labels.push(label);
   }
-  return notes;
+  return labels;
+}
+
+function isInsectTreatment(row) {
+  if (!row?.active) return false;
+  const product = row.product || {};
+  return product.tsFlags?.insectFamily === true
+    || /insect|miticide|acaricide|\bigr\b/i.test(`${product.category || ''} ${product.product_type || ''}`)
+    || !!liveFindsOnlyLabel(row)
+    || isMeritProduct(row)
+    || isTristarProduct(row);
+}
+
+const pickedLifeStage = (answer) => LIFE_STAGES.some((stage) => stage.key === answer?.lifeStage);
+
+function evidenceBlock(answer, active) {
+  const insect = active.filter(isInsectTreatment);
+  if (!insect.length) return '';
+  if (answer?.found === true) {
+    if (!(answer.types || []).length) return 'Select the live target before recording an insect treatment.';
+    if (!pickedLifeStage(answer)) return 'Select the live stage before recording an insect treatment.';
+    return '';
+  }
+  if (answer?.found === false) {
+    const liveOnly = liveFindLabels(insect);
+    if (liveOnly.length) return `${liveOnly.join(', ')} ${liveOnly.length === 1 ? 'requires' : 'require'} a live target and stage. Remove the treatment or record what was found.`;
+    if (!String(answer.preventiveReason || '').trim()) return 'Enter the label-supported preventive reason before recording an insect treatment.';
+    return '';
+  }
+  return 'Record the live target and stage, or a label-supported preventive reason. A scout-only visit needs no insect treatment.';
 }
 
 // answer: { found: true | false | null, types: string[] }; rows: the sheet's
@@ -101,11 +150,14 @@ function liveFindNotes(active) {
 export function evaluatePestCheck(answer, rows) {
   const out = { blockMessage: '', noteMessages: [], blockedRows: [], blockedLabel: '' };
   const active = (rows || []).filter((row) => row?.active);
+  const missingEvidence = evidenceBlock(answer, active);
+  if (missingEvidence) return { ...out, blockMessage: missingEvidence };
   if (answer?.found === true) {
     const types = new Set(answer.types || []);
+    const distanceHold = distanceScaleRule(types, active);
+    if (distanceHold) return distanceHold;
     return types.has('armored_scale') ? armoredScaleRule(types, active) : out;
   }
-  if (answer?.found === false) out.noteMessages = liveFindNotes(active);
   return out;
 }
 
@@ -113,9 +165,17 @@ export function evaluatePestCheck(answer, rows) {
 export function pestCheckPayload(answer) {
   if (answer?.found === true) {
     const picked = new Set(answer.types || []);
-    return { liveInsectsFound: true, insectTypes: INSECT_TYPES.map((type) => type.key).filter((key) => picked.has(key)) };
+    const lifeStage = LIFE_STAGES.some((stage) => stage.key === answer.lifeStage) ? answer.lifeStage : null;
+    return {
+      liveInsectsFound: true,
+      insectTypes: INSECT_TYPES.map((type) => type.key).filter((key) => picked.has(key)),
+      ...(lifeStage ? { lifeStage } : {}),
+    };
   }
-  if (answer?.found === false) return { liveInsectsFound: false, insectTypes: [] };
+  if (answer?.found === false) {
+    const preventiveReason = String(answer.preventiveReason || '').trim().slice(0, 240);
+    return { liveInsectsFound: false, insectTypes: [], ...(preventiveReason ? { preventiveReason } : {}) };
+  }
   return null;
 }
 

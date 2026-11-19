@@ -47,6 +47,8 @@ import {
   visitMoneySummary,
 } from './visitBrief';
 import { useVisitPrepPhotoUrls } from '../../hooks/useVisitPrepPhotoUrls';
+import PropertyFertilizerMap from '../../components/tech/PropertyFertilizerMap';
+import { detectServiceCategory } from '../../lib/service-colors';
 
 // Inside the field workspace (.tech-field, tech-field.css) these resolve to the
 // Waves Admin look; the fallbacks are the same light values, for a render
@@ -1204,6 +1206,14 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   // The day row marks a member whose neighborhood takes gate codes from the visit.
   const gateVisit = request ? stop.services.find((m) => m.neighborhoodGateActions === true) : null;
   const grouped = stop.services.length > 1;
+  const mappedProperties = new Set();
+  const fertilizerVisits = stop.services.filter(member => {
+    if (!member.id || !['tree', 'lawn'].includes(detectServiceCategory(member.serviceType || member.service_type))) return false;
+    const propertyKey = member.propertyId || member.property_id || member.id;
+    if (mappedProperties.has(propertyKey)) return false;
+    mappedProperties.add(propertyKey);
+    return true;
+  });
   const loading = detail?.status === 'loading';
   const failed = detail?.status === 'error';
   const byService = detail?.byService || {};
@@ -1283,6 +1293,10 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
       )}
       {line && <SetTextsSection line={line} service={service} visitIds={stop.services.map((m) => m.id).filter(Boolean)} request={request} onBusyChange={setPresetBusy} />}
       <AccessSection alerts={alerts} access={access} gate={gateVisit ? { visitId: gateVisit.id, request, onChanged: onGateChanged } : null} />
+      {request && fertilizerVisits.map(member => <div key={member.id}>
+        {fertilizerVisits.length > 1 && <strong>{member.serviceType || member.service_type}</strong>}
+        <PropertyFertilizerMap request={request} endpoint={`/admin/schedule/${member.id}/property-areas/fertilizer-map`} />
+      </div>)}
       <VisitAccessCodes
         request={request}
         customerId={service.customer_id || service.customerId || null}

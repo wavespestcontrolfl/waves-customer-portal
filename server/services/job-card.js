@@ -1344,7 +1344,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
       source: `Published protocol · version ${structured.version}`,
       title: structured.window.title,
       objective: structured.window.goal || null,
-      visitNotes: [...procedureLines(plan.protocol?.objective), ...fertilizerSafetyNotes(structured.products)],
+      visitNotes: [...procedureLines(plan.protocol?.objective), ...fertilizerSafetyNotes(structured.products, gate)],
       steps: (structured.window.requiredTasks || []).map(task => String(task).replace(/_/g, ' ')),
       conditional: [],
       notes: structured.operatingSentence ? [structured.operatingSentence] : [],
@@ -1406,8 +1406,11 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
 // Hide template costs without dropping restrictions elsewhere in the same
 // line (for example, an add-on-only scope beside a minimum office price).
 // The full fertilizer safety block for an N visit (a window with a gated spreader row), as one note.
-function fertilizerSafetyNotes(rows) {
-  const rules = fertilizerSafetyRules(rows);
+function fertilizerSafetyNotes(rows, propertyGate = {}) {
+  const rules = fertilizerSafetyRules(rows, {
+    municipality: propertyGate.municipality,
+    county: propertyGate.county,
+  });
   return rules.length ? [`Fertilizer safety: ${rules.join(' ')}`] : [];
 }
 

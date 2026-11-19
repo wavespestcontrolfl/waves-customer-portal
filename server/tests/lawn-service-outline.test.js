@@ -2,6 +2,7 @@ const {
   buildOutline,
   currentMonthNumber,
   normalizeTurfType,
+  resolveJurisdictionId,
   validateContent,
 } = require('../services/lawn-service-outline');
 
@@ -117,6 +118,43 @@ describe('lawn service outline composer', () => {
   test('resolves default outline month in Eastern time', () => {
     expect(currentMonthNumber(new Date('2026-06-01T03:30:00.000Z'))).toBe(5);
     expect(currentMonthNumber(new Date('2026-06-01T04:30:00.000Z'))).toBe(6);
+  });
+
+  test('resolves North Port to its city overlay without changing nearby Sarasota or Charlotte addresses', () => {
+    expect(resolveJurisdictionId('100 Test Way, North Port, FL 34286')).toBe('north_port_fl');
+    expect(resolveJurisdictionId('100 Test Way, Sarasota, FL 34240')).toBe('sarasota_county_fl');
+    expect(resolveJurisdictionId('100 Test Way, Port Charlotte, FL 33948')).toBe('charlotte_county_fl');
+    expect(resolveJurisdictionId('100 North Port Drive, Venice, FL 34285')).toBe('sarasota_county_fl');
+    expect(resolveJurisdictionId('100 North Port Drive')).toBe('generic_swfl');
+    expect(resolveJurisdictionId({ city: 'North Port', county: 'Sarasota' })).toBe('north_port_fl');
+    expect(resolveJurisdictionId({ city: 'Venice', address: '100 North Port Drive, Venice, FL 34285' })).toBe('sarasota_county_fl');
+    expect(resolveJurisdictionId({ resolvedJurisdictionId: 'north_port_fl', city: 'Venice' })).toBe('north_port_fl');
+  });
+
+  test('an ambiguous service address asks for city or county confirmation instead of guessing a date', async () => {
+    const result = await buildOutline({
+      db: makeDb(),
+      estimate: {
+        id: 'estimate-ambiguous',
+        customer_name: 'Test Customer',
+        address: '100 North Port Drive',
+        service_interest: 'Lawn care',
+        estimate_data: JSON.stringify({ turfType: 'St. Augustine' }),
+      },
+      input: { month: 5, includeProductCards: false },
+      now: new Date('2026-05-30T12:00:00Z'),
+    });
+
+    expect(result.inputSnapshot.jurisdictionId).toBe('generic_swfl');
+    expect(result.content.localRule).toMatchObject({
+      jurisdictionId: 'generic_swfl',
+      jurisdictionName: 'Confirm city or county',
+      summary: 'Confirm the service property\'s city or county before relying on fertilizer dates.',
+    });
+    expect(result.validation).toMatchObject({
+      status: 'warning',
+      warnings: ['Confirm the service property\'s city or county before relying on fertilizer dates.'],
+    });
   });
 
   test('builds May St. Augustine outline with spring focus and conditional protocol language', async () => {

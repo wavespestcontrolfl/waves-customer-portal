@@ -334,13 +334,14 @@ function normalizeOptionList(value) {
 function classifyProtocolLine(raw, role) {
   const text = normalizeText(raw);
   const hasDollarCost = /\$[\d.]+/.test(String(raw || ''));
+  const namedProductLine = String(raw || '').includes(' — ');
   const scope = (() => {
     if (text.includes('if p') && (text.includes('24 2 11') || text.includes('24 0 11'))) {
       return 'BRANCH_ONE_OF';
     }
     if (text.includes('skip') && !hasDollarCost) return 'INSPECTION_ONLY';
     if (text.includes('soil sample')) return 'FIRST_YEAR_ONLY';
-    if (text.includes('drive by scout') || text.includes('scout') || text.includes('audit') || text.includes('wellness touchpoint') || text.includes('annual report')) {
+    if (!namedProductLine && (text.includes('drive by scout') || text.includes('scout') || text.includes('audit') || text.includes('wellness touchpoint') || text.includes('annual report'))) {
       return 'INSPECTION_ONLY';
     }
     if (text.includes('premium only') || text.startsWith('premium ') || text.includes(' premium ')) {
@@ -474,6 +475,38 @@ function normalizeFlagValues(value) {
 
 function normalizedFlagSet(...values) {
   return new Set(values.flatMap((value) => normalizeFlagValues(value)).map(normalizeText));
+}
+
+// May Tetrino is a scout decision, never a sunlight default. Normal field
+// endpoints may send the observation text directly, or the closeout/guide may
+// send the equivalent exact condition flags after it has stored that text.
+// Chinch evidence is enough for the optional treatment decision; grubs also
+// need the local timing indication (peak adult flight or egg hatch). The
+// historical trouble-area map is deliberately absent from this decision.
+const TETRINO_CHINCH_FLAGS = new Set(['chinch current observations recorded', 'chinch threshold met']);
+const TETRINO_GRUB_FLAGS = new Set(['grub current observations recorded', 'grubs current observations recorded']);
+const TETRINO_GRUB_TIMING_FLAGS = new Set(['grub local peak adult flight or egg hatch documented', 'grubs local peak adult flight or egg hatch documented']);
+const TETRINO_HIGH_PRESSURE_FLAGS = new Set(['chinch high current pressure documented']);
+
+function tetrinoScoutDecision(options = {}) {
+  const flags = normalizedFlagSet(options.conditionFlags, options.condition_flags);
+  const statedTarget = normalizeText(options.tetrinoTarget || options.tetrino_target);
+  const observations = String(options.tetrinoCurrentObservations || options.tetrino_current_observations || '').trim();
+  const grubTiming = String(options.grubTimingEvidence || options.grub_timing_evidence || '').trim();
+  const pressure = normalizeText(options.tetrinoPressure || options.tetrino_pressure);
+  const chinch = (statedTarget === 'chinch' && observations) || [...TETRINO_CHINCH_FLAGS].some((flag) => flags.has(flag));
+  const grubObserved = ((statedTarget === 'grub' || statedTarget === 'grubs') && observations)
+    || [...TETRINO_GRUB_FLAGS].some((flag) => flags.has(flag));
+  const grubTimed = Boolean(grubTiming) || [...TETRINO_GRUB_TIMING_FLAGS].some((flag) => flags.has(flag));
+  const target = chinch ? 'chinch' : (grubObserved ? 'grubs' : null);
+  return {
+    eligible: Boolean(chinch || (grubObserved && grubTimed)),
+    target,
+    currentObservationsRecorded: Boolean(chinch || grubObserved),
+    grubTimingRecorded: Boolean(grubTimed),
+    pressure: pressure || null,
+    highRateEligible: Boolean(chinch && (pressure === 'high' || [...TETRINO_HIGH_PRESSURE_FLAGS].some((flag) => flags.has(flag)))),
+  };
 }
 
 function isPremiumOrDroughtPrep(options = {}) {
@@ -755,7 +788,7 @@ function v13SpotReference(row, product) {
 const SUNNY_TURF_SHARE = { full_sun: 1, partial_shade: 0.5, heavy_shade: 0 };
 
 function effectiveAreaFactor(line, property = {}) {
-  if (line?.scope === 'BROADCAST_FULL' && line.sunnyTurfOnly) return SUNNY_TURF_SHARE[property.sunExposure] ?? 0.5;
+  if (line?.sunnyTurfOnly && (line.scope === 'BROADCAST_FULL' || line.selected === true)) return SUNNY_TURF_SHARE[property.sunExposure] ?? 0.5;
   if (line?.scope === 'BROADCAST_FULL' || line?.scope === 'BRANCH_ONE_OF') return 1;
   if (line?.scope === 'INSPECTION_ONLY') return 0;
   if (line?.scope === 'FIRST_YEAR_ONLY' && property.isFirstYear === false) return 0;
@@ -975,14 +1008,66 @@ async function chinchRaiseFits(knex, service, { strict = false } = {}) {
 // (or not a v13 program) nothing is read. Only May; `normalRate` is the visit's stated rate, and a rate already at or above the raised
 // one is never touched. The raise needs a mapped chinch area AND room under the label limits (chinchRaiseFits). `strict`: a failed read
 // throws (see hasChinchMapped).
-async function chinchTetrinoRate(knex, service, { monthNumber, statedRate = V13_CHINCH_TETRINO.normalRate, v13Active, strict = false }) {
+async function chinchTetrinoRate(knex, service, { monthNumber, statedRate = V13_CHINCH_TETRINO.normalRate, v13Active, strict = false, scout = {} }) {
   if (!v13Active || !featureGates.lawnChinchTetrinoRateLive()) return null;
   if (monthNumber !== V13_CHINCH_TETRINO.month || !(Number(statedRate) < V13_CHINCH_TETRINO.ratePer1000)) return null;
+  // A map from last season is history, not current pressure. It can support the
+  // high rate only after this visit records current chinch observations.
+  if (!tetrinoScoutDecision(scout).highRateEligible) return null;
   if (!(await hasChinchMapped(knex, service, { strict }))) return null;
   return (await chinchRaiseFits(knex, service, { strict })) ? V13_CHINCH_TETRINO.ratePer1000 : null;
 }
 
 const isChinchTetrinoRow = (row) => !!row && [row.productName, row.protocolProductName].some((name) => String(name || '').trim() === V13_CHINCH_TETRINO.productName);
+
+const TETRINO_SCOUT_EVIDENCE_REASON = 'tetrino_scout_evidence_required';
+const TURF_SPECIES_HERBICIDE_REASON = 'turf_species_herbicide_hold';
+
+// Selecting the optional product is not itself evidence. Keep it unselected
+// until the same request records a qualifying scouting decision. This leaves
+// May as a genuine scout-only visit by default and keeps completion defaults
+// from silently prefilling Tetrino.
+function holdTetrinoWithoutScoutEvidence(items, v13Rows, options = {}) {
+  const decision = tetrinoScoutDecision(options);
+  return items.map((item) => {
+    if (!item.product || !isChinchTetrinoRow(bermudaRemoval.rowFor(v13Rows, item.product.id, item.bermudaStep === true))) return item;
+    const withDecision = {
+      ...item,
+      tetrinoDecision: decision,
+      ...(!decision.eligible ? { fieldHold: TETRINO_SCOUT_EVIDENCE_REASON, selectionReason: TETRINO_SCOUT_EVIDENCE_REASON } : {}),
+    };
+    return item.selected && !decision.eligible ? { ...withDecision, selected: false } : withDecision;
+  });
+}
+
+function itemIsHerbicide(item, row = null) {
+  const category = normalizeText(item?.product?.category);
+  const role = normalizeText(row?.role || item?.role);
+  const text = normalizeText(`${item?.product?.name || ''} ${item?.raw || ''}`);
+  return category === 'herbicide' || role.includes('pre emergent') || role.includes('post emergent')
+    || text.includes('pre emergent') || text.includes('herbicide');
+}
+
+// The universal v13 steps may still run on a mixed/unknown lawn, but a turf-
+// selective or pre-emergent herbicide cannot be chosen until the treated
+// area's species is known. Other nutrition, scouting and curative work stays.
+function holdUnresolvedTurfHerbicides(items, v13Rows, hold) {
+  if (!hold) return items;
+  return items.map((item) => {
+    const row = item.product ? bermudaRemoval.rowFor(v13Rows, item.product.id, item.bermudaStep === true) : null;
+    return item.product && itemIsHerbicide(item, row)
+      ? { ...item, selected: false, selectionReason: TURF_SPECIES_HERBICIDE_REASON, fieldHold: TURF_SPECIES_HERBICIDE_REASON }
+      : item;
+  });
+}
+
+function unresolvedTreatedTurf(options = {}) {
+  const species = normalizeText(options.treatedTurfSpecies || options.treated_turf_species);
+  if (['mixed', 'unknown', 'unidentified', 'unresolved'].includes(species)) return true;
+  const flags = normalizedFlagSet(options.conditionFlags, options.condition_flags, options.propertyFlags, options.property_flags);
+  return ['mixed turf treated patch', 'unknown turf treated patch', 'unidentified turf treated patch']
+    .some((flag) => flags.has(flag));
+}
 
 // The staged rows with the May Tetrino row's stated rate raised to `rate`, so the plan amount, the tank sheet, the limit reader's
 // proposed application and the completion defaults all read the same number. The same Map back for no raise (byte-identical), else a
@@ -996,18 +1081,18 @@ function chinchRateRows(rows, rate) {
   return raised;
 }
 
-// The recipe text of a May visit whose Tetrino rate was raised, so what staff read (the line's `raw`, the visit's primary) agrees with
+// The recipe text of a May visit whose Tetrino rate was raised, so what staff read (the line's `raw`, in May's conditional list) agrees with
 // the amount the plan computes. Rewrites only the shape the v13 recipe uses; a line the pattern does not match stays as written (the
 // raise and the line note still apply: the amount and the note never depend on this text).
 const TETRINO_LINE = new RegExp(`^(${V13_CHINCH_TETRINO.productName} \u2014 )(\\d+(?:\\.\\d+)?)( fl oz per 1,000 sq ft)`);
 function chinchAdjustedVisit(visit, rate) {
-  if (typeof visit?.primary !== 'string') return visit;
-  const primary = visit.primary.split('\n').map((line) => {
+  if (!visit) return visit;
+  const adjust = (text) => typeof text !== 'string' ? text : text.split('\n').map((line) => {
     const found = line.match(TETRINO_LINE);
     if (!found || !(Number(found[2]) < rate)) return line;
-    return `${line.replace(TETRINO_LINE, `$1${rate}$3`)}, chinch bugs mapped`;
+    return `${line.replace(TETRINO_LINE, `$1${rate}$3`)}, high current chinch pressure plus mapped history`;
   }).join('\n');
-  return { ...visit, primary };
+  return { ...visit, primary: adjust(visit.primary), secondary: adjust(visit.secondary) };
 }
 
 // A visit's nutrient targets, for the plan and the tank sheet alike, so the plan amount, the mix sheet, the completion defaults, the
@@ -1018,7 +1103,7 @@ function chinchAdjustedVisit(visit, rate) {
 // 'kept' when a pre-emergent or potash bag was left at full rate, `keptFor`: 'pre_emergent' | 'potash'; `fungusAlso` when the fungus rule
 // applied too). Without any of them the result is the same three keys as before, so a gate that is off changes nothing a reader can see.
 // Call it BEFORE the visit's lines are parsed.
-async function visitNutrientTargets(knex, service, { visit, month, v13Active, strict = false }) {
+async function visitNutrientTargets(knex, service, { visit, month, v13Active, strict = false, scout = {} }) {
   const targets = parseVisitNutrientTargets(visit?.notes);
   const monthNumber = MONTH_ABBR.indexOf(month) + 1;
   // The swap is December's, the Tetrino raise May's: they never meet on one visit. A swapped bag carries no nitrogen (its target is 0), so
@@ -1032,7 +1117,7 @@ async function visitNutrientTargets(knex, service, { visit, month, v13Active, st
     targetN: targets.targetNPer1000, monthNumber, v13Active,
     keep: keptBagReason({ primary: visit.primary, targetK: targets.targetKPer1000 }), strict,
   }) : null;
-  const chinchRate = visit ? await chinchTetrinoRate(knex, service, { monthNumber, v13Active, strict }) : null;
+  const chinchRate = visit ? await chinchTetrinoRate(knex, service, { monthNumber, v13Active, strict, scout }) : null;
   if (!decision && chinchRate == null) return { visit, targets, nitrogenCut: null };
   const water = decision?.reclaimed ? {
     reclaimedWater: decision.reclaimed, ...(decision.keptFor ? { keptFor: decision.keptFor } : {}), ...(decision.fungusApplied ? { fungusAlso: true } : {}),
@@ -1632,16 +1717,23 @@ function selectProtocolVisit(profile, serviceDate, legacyGrass = null, { month: 
   // recorded value (a conflicting track key or grass type) can pick a track. Only this
   // result carries the flag; every other keeps its old shape.
   if (noProgram) return { trackKey: null, track: null, month, visit: null, v13NoProgram: true };
-  const trackKey = resolveTrackKey(profile?.track_key, normalizeGrassType(profile?.grass_type))
-    || (!profileRecorded && resolveTrackKey(null, normalizeGrassType(legacyGrass)))
+  const recordedTrack = resolveTrackKey(profile?.track_key, normalizeGrassType(profile?.grass_type))
+    || (!profileRecorded && resolveTrackKey(null, normalizeGrassType(legacyGrass)));
+  const anyGrassTrack = !recordedTrack && recorded ? lawnV13AnyGrassTrack() : null;
+  const trackKey = recordedTrack
     // GATE_LAWN_V13: a recorded grass with no track of its own (mixed, unknown,
     // free text) runs the one v13 program instead of blocking the visit (bahia never
     // reaches this: it returned above).
-    || (recorded ? lawnV13AnyGrassTrack() : null)
+    || anyGrassTrack
     || (recorded || requireKnownGrass ? null : 'st_augustine');
   const track = trackKey ? lawnProtocols()?.[trackKey] : null;
   const visit = track?.visits?.find((v) => v.month === month) || null;
-  return { trackKey, track, month, visit };
+  return {
+    trackKey, track, month, visit,
+    // The v13 any-grass fallback permits non-herbicide work, but its borrowed
+    // track must never imply the treated turf species is known.
+    ...(anyGrassTrack ? { herbicideTurfHold: true } : {}),
+  };
 }
 
 // The ordinance jurisdictions (county + city) one visit is judged under —
@@ -2028,6 +2120,8 @@ function planLineFields(item) {
     areaFactorBroadcast: item.areaFactorBroadcast,
     selectionReason: item.selectionReason,
     selected: item.selected,
+    ...(item.fieldHold ? { fieldHold: item.fieldHold } : {}),
+    ...(item.tetrinoDecision ? { tetrinoDecision: item.tetrinoDecision } : {}),
     ...(item.bermudaStep ? { bermudaStep: true } : {}),
     // The spring pre-emergent catch-up line of a new rounds customer's first visit: named for every reader.
     ...roundsCatchUp.catchUpLineFields(item),
@@ -2094,13 +2188,26 @@ function holdNorthPortProducts(items, v13Rows, municipality, { nitrogen = false 
 }
 
 function v13HoldWarnings(planItems) {
-  return planItems.filter((item) => item.product && [NORTH_PORT_HOLD_REASON, NORTH_PORT_ROUNDS_N_REASON].includes(item.selectionReason)).map((item) => (item.selectionReason === NORTH_PORT_ROUNDS_N_REASON ? {
-    code: 'lawn_rounds_north_port_nitrogen', severity: 'warning', productId: item.product.id, productName: item.product.name,
-    message: `${item.product.name}: North Port bans nitrogen and phosphorus from April 1 to September 30. The plan holds this round-3 feeding back; do not apply it at this visit.`,
-  } : {
-    code: 'lawn_v13_north_port_product_window', severity: 'warning', productId: item.product.id, productName: item.product.name,
-    message: `${item.product.name}: North Port holds this product from June to September until the city confirms. The plan holds it back; do not apply it at this visit.`,
-  }));
+  const reasons = new Set([NORTH_PORT_HOLD_REASON, NORTH_PORT_ROUNDS_N_REASON, TETRINO_SCOUT_EVIDENCE_REASON, TURF_SPECIES_HERBICIDE_REASON]);
+  return planItems.filter((item) => item.product && reasons.has(item.selectionReason)).map((item) => {
+    const shared = { severity: 'warning', productId: item.product.id, productName: item.product.name };
+    if (item.selectionReason === NORTH_PORT_ROUNDS_N_REASON) return {
+      ...shared, code: 'lawn_rounds_north_port_nitrogen',
+      message: `${item.product.name}: North Port bans nitrogen and phosphorus from April 1 to September 30. The plan holds this round-3 feeding back; do not apply it at this visit.`,
+    };
+    if (item.selectionReason === NORTH_PORT_HOLD_REASON) return {
+      ...shared, code: 'lawn_v13_north_port_product_window',
+      message: `${item.product.name}: North Port holds this product from June to September until the city confirms. The plan holds it back; do not apply it at this visit.`,
+    };
+    if (item.selectionReason === TURF_SPECIES_HERBICIDE_REASON) return {
+      ...shared, code: 'lawn_v13_turf_species_herbicide_hold',
+      message: `${item.product.name}: the turf is mixed or unresolved. Confirm the species in the treated area before applying this herbicide; non-herbicide work may proceed.`,
+    };
+    return {
+      ...shared, code: 'lawn_v13_tetrino_scout_evidence_required',
+      message: `${item.product.name}: record the target and current observations before applying. Chinch needs current counts at damage; grubs need current observations plus local peak adult-flight or egg-hatch evidence. Sunlight or last year's map alone is not enough; scout-only is valid.`,
+    };
+  });
 }
 
 const V13_ROUNDS_N_HELD = 'North Port bans nitrogen and phosphorus from April 1 to September 30, so this round-3 feeding is not selected and no amount is planned.';
@@ -2521,7 +2628,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
   // The visit the lines are parsed from: the recipe step, or its copy with the cut nitrogen stated (the November large patch cut,
   // GATE_LAWN_RECLAIMED_HALF_N), the Tetrino rate raised (GATE_LAWN_CHINCH_TETRINO_RATE) or the whole-lawn bag swapped (GATE_LAWN_DEC_LARGE_PATCH_K).
-  const nitrogen = await visitNutrientTargets(knex, service, { visit: recipeStep, month, v13Active, strict });
+  const nitrogen = await visitNutrientTargets(knex, service, { visit: recipeStep, month, v13Active, strict, scout: options });
   const { visit, targets: nutrientTargets, nitrogenCut, chinchRate, productSwap } = nitrogen;
   const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
   const conditionalLines = [
@@ -2533,11 +2640,14 @@ async function buildPlanForService(serviceId, options = {}) {
   // own protocol row supplies its rate, its sunny-turf limit and its gates.
   // GATE_LAWN_CHINCH_TETRINO_RATE: the May Tetrino row states the raised rate for a chinch-mapped lawn (same Map back otherwise).
   const v13Rows = chinchRateRows(v13ProtocolRows(structuredProtocol), chinchRate ?? null);
-  const resolvedItems = resolveProtocolItems([...baseLines, ...conditionalLines], products, options, {
+  let resolvedItems = resolveProtocolItems([...baseLines, ...conditionalLines], products, options, {
     profile,
     service,
     stressFlags,
   });
+  resolvedItems = holdTetrinoWithoutScoutEvidence(resolvedItems, v13Rows, options);
+  const herbicideTurfHold = selection.herbicideTurfHold === true || unresolvedTreatedTurf(options);
+  resolvedItems = holdUnresolvedTurfHerbicides(resolvedItems, v13Rows, herbicideTurfHold);
   // A product the city bans for this visit's window is held back before anything is sized; the
   // bermuda step lines are then one selection: any selected selects all.
   const holdRoundsNitrogen = roundsNitrogenHold(rounds, resolvedOrdinanceCity);
@@ -2826,6 +2936,7 @@ async function buildPlanForService(serviceId, options = {}) {
       billingMode: service.billing_mode || null,
       trackKey,
       trackName: track?.name || null,
+      ...(herbicideTurfHold ? { herbicideTurfHold: true } : {}),
       month,
       visit: visit?.visit || null,
       lawnSqft: completionContext ? lawnSqft || null : profile?.lawn_sqft || null,
@@ -2946,6 +3057,10 @@ module.exports = {
   nitrogenCutWhy,
   CUT_WHY_NOTE,
   nitrogenDecision,
+  tetrinoScoutDecision,
+  holdTetrinoWithoutScoutEvidence,
+  holdUnresolvedTurfHerbicides,
+  unresolvedTreatedTurf,
   chinchTetrinoRate,
   chinchRateRows,
   chinchTetrinoNotes,

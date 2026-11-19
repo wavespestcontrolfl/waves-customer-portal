@@ -1,4 +1,6 @@
 const TREE_SHRUB_CLOSEOUT_VERSION = 'tree_shrub_closeout_v1';
+const { validatePestTreatmentEvidence } = require('./tree-shrub-pest-check');
+const { isNutriRootName, validateNutriRootEvidence } = require('./tree-shrub-fertilizer-evidence');
 
 const TREE_SHRUB_SERVICE_LINES = new Set(['tree_shrub', 'palm']);
 const BLACKOUT_ZONES = new Set(['sarasota_venice', 'manatee_parrish', 'other_unknown']);
@@ -745,6 +747,7 @@ function validateTreeShrubTypedCompliance({
   products = [],
   productRows = [],
   completionPhotos = [],
+  treeShrubReview = null,
 } = {}) {
   const blocks = [];
   const warnings = [];
@@ -754,6 +757,20 @@ function validateTreeShrubTypedCompliance({
   const needsIracFracLog = productRefs.some(productNeedsIracFracLog);
   const missingActuals = productRefs.filter(missingProductActuals).map(productName).filter(Boolean);
   const pollinatorStatus = text(values.pollinator_status);
+
+  blocks.push(...validatePestTreatmentEvidence(treeShrubReview, {
+    hasInsectProduct,
+    productNames: productRefs.map(productName).filter(Boolean),
+    fallbackValues: values,
+  }));
+
+  const nutriRootEvidence = validateNutriRootEvidence(values, {
+    zone,
+    serviceDate: serviceDate || service.scheduled_date,
+    productNames: productRefs.map(productName).filter(Boolean),
+  });
+  blocks.push(...nutriRootEvidence.blocks);
+  warnings.push(...nutriRootEvidence.warnings);
 
   const treatments = String(values.treatments_completed || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
@@ -770,7 +787,7 @@ function validateTreeShrubTypedCompliance({
   }
 
   if (
-    productRefs.some(productHasNpFertilizer)
+    productRefs.some((ref) => productHasNpFertilizer(ref) && !isNutriRootName(productName(ref)))
     && isSummerBlackoutForZone(serviceDate || service.scheduled_date, zone)
   ) {
     pushBlock(

@@ -3,8 +3,9 @@
  *
  * Tetrino label (EPA 432-1591), chinch bugs: 16 to 32 fl oz per acre (0.367 to 0.735 fl oz per 1,000 sq ft), the top rate "under high
  * pest pressure"; no more than 2 maximum-rate applications a year, 4 weeks apart, 64 fl oz per acre a year (1.469 fl oz per 1,000 sq ft).
- * The v13 May visit applies Tetrino at 0.367 fl oz per 1,000 sq ft on sunny turf. While the property has a mapped trouble area of type
- * `troubleType` that is ACTIVE or was resolved within `resolvedWithinDays` days, the May line is planned at the top rate instead.
+ * The v13 May visit offers Tetrino at 0.367 fl oz per 1,000 sq ft on sunny turf after a qualifying scouting decision. Only when that
+ * decision records HIGH current chinch pressure AND the property has a mapped trouble area of type `troubleType` that is ACTIVE or was
+ * resolved within `resolvedWithinDays` days is the May line planned at the top rate instead. History alone never raises the rate.
  *
  * The entry applies to the visit whose month number is `month`, to the one product `productName`, and only RAISES its stated rate
  * (a row already at or above `ratePer1000` is unchanged). Nothing else moves. The raise must fit the label limits the Tetrino entry of
@@ -24,6 +25,6 @@ const V13_CHINCH_TETRINO = Object.freeze({
 
 // The key of the line note a raised Tetrino rate carries (plan gateNotes), so the Fast Complete sheet can pick that one note out.
 const CHINCH_TETRINO_NOTE_KEY = 'chinchTetrinoRate';
-const CHINCH_TETRINO_NOTE = `Chinch bugs mapped here: Tetrino at the label's high rate, ${V13_CHINCH_TETRINO.ratePer1000} fl oz per 1,000 sq ft.`;
+const CHINCH_TETRINO_NOTE = `High current chinch pressure plus mapped history: Tetrino at the label's high rate, ${V13_CHINCH_TETRINO.ratePer1000} fl oz per 1,000 sq ft.`;
 
 module.exports = { V13_CHINCH_TETRINO, CHINCH_TETRINO_NOTE_KEY, CHINCH_TETRINO_NOTE };

@@ -13,8 +13,8 @@ const { etDateString } = require('../utils/datetime-et');
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const TEMPLATE_VERSION = 'mvp-1';
 const CONTENT_LIBRARY_VERSION = 'seed-v1';
-const V13_CONTENT_LIBRARY_VERSION = 'lawn-v13-copy-2';
-const V13_VISUAL_CONTENT_LIBRARY_VERSION = 'lawn-v13-visual-2';
+const V13_CONTENT_LIBRARY_VERSION = 'lawn-v13-copy-4';
+const V13_VISUAL_CONTENT_LIBRARY_VERSION = 'lawn-v13-visual-4';
 const PRODUCT_REGISTRY_VERSION = 'public-facts-v1';
 const PROTOCOL_VERSION = 'lawn-v4';
 const V13_PROTOCOL_VERSION = 'lawn-v13';
@@ -230,12 +230,45 @@ function v13TrackKey(turfType) {
   return lawnProtocols()?.[turfType] ? turfType : lawnV13AnyGrassTrack(turfType);
 }
 
+function jurisdictionForPlace(value) {
+  const place = String(value || '').toLowerCase().replace(/[^a-z]+/g, ' ').replace(/\b(?:city of|county)\b/g, ' ').replace(/\s+/g, ' ').trim();
+  if (place === 'north port') return 'north_port_fl';
+  if (['sarasota', 'venice', 'nokomis', 'osprey', 'englewood'].includes(place)) return 'sarasota_county_fl';
+  if (['manatee', 'bradenton', 'palmetto', 'parrish', 'lakewood ranch', 'ellenton', 'anna maria'].includes(place)) return 'manatee_county_fl';
+  if (['charlotte', 'port charlotte', 'punta gorda', 'rotunda'].includes(place)) return 'charlotte_county_fl';
+  return null;
+}
+
+function addressJurisdictionParts(address) {
+  if (address && typeof address === 'object') {
+    const jurisdictionId = firstNonEmpty(address.jurisdictionId, address.jurisdiction_id, address.resolvedJurisdictionId, address.resolved_jurisdiction_id);
+    if (jurisdictionId) return { jurisdictionId };
+    const municipality = firstNonEmpty(address.municipality, address.city, address.locality, address.address_city);
+    const county = firstNonEmpty(address.county, address.address_county);
+    if (municipality || county) return { municipality, county };
+    return addressJurisdictionParts(firstNonEmpty(address.formattedAddress, address.formatted_address, address.address));
+  }
+  const parts = String(address || '').split(',').map((part) => part.trim()).filter(Boolean);
+  const stateIndex = parts.findIndex((part) => /^(?:fl|florida)(?:\s+\d{5}(?:-\d{4})?)?$/i.test(part));
+  return stateIndex > 0 ? { municipality: parts[stateIndex - 1] } : {};
+}
+
 function resolveJurisdictionId(address) {
-  const a = String(address || '').toLowerCase();
-  if (/(sarasota|venice|north port|nokomis|osprey|englewood)/.test(a)) return 'sarasota_county_fl';
-  if (/(manatee|bradenton|palmetto|parrish|lakewood ranch|ellenton|anna maria)/.test(a)) return 'manatee_county_fl';
-  if (/(charlotte|port charlotte|punta gorda|rotunda)/.test(a)) return 'charlotte_county_fl';
+  const { jurisdictionId, municipality, county } = addressJurisdictionParts(address);
+  if (jurisdictionId) return jurisdictionId;
+  const resolved = jurisdictionForPlace(municipality) || jurisdictionForPlace(county);
+  if (resolved) return resolved;
   return 'generic_swfl';
+}
+
+function resolveOutlineJurisdictionId(input, estimate, estimateData) {
+  if (input.jurisdictionId) return input.jurisdictionId;
+  const property = estimateData.property || {};
+  return resolveJurisdictionId({
+    municipality: firstNonEmpty(input.municipality, input.city, estimate.municipality, estimate.city, estimate.service_address_city, estimateData.municipality, estimateData.city, property.city),
+    county: firstNonEmpty(input.county, estimate.county, estimate.service_address_county, estimateData.county, property.county),
+    formattedAddress: estimate.address,
+  });
 }
 
 function isRestrictedSeason(rule, month) {
@@ -280,6 +313,7 @@ function outlineDetailLive() {
 // Each category also names the steps the page draws for it (V13_STEP_LABELS): the pre-emergent
 // with fertilizer bag is a feeding and a weed barrier.
 const V13_FULL_OUTLINE_CATEGORIES = [
+  [/\bscout\b[^.\n;]*\binsect pressure\b/i, 'Insect scouting', ['inspection'], 'Insect scouting checks current insect pressure and records the target and observations; treatment is only as needed after evidence is found.'],
   [/scout visit|inspect/i, 'Lawn inspection', ['inspection']],
   [/stonewall 0\.43%|dimension 0\.21%/i, 'Pre-emergent weed control with fertilizer', ['feeding', 'barrier']],
   [/stonewall|dimension/i, 'Pre-emergent weed control', ['barrier']],
@@ -314,9 +348,9 @@ function v13OutlineCategory(line) {
 }
 
 function v13FullOutlineBullets(visit) {
-  const labels = v13StepLines(visit).map((line) => v13OutlineCategory(line)?.[1]).filter(Boolean);
-  return [...new Set(labels)]
-    .map((label) => `${label} may be relevant when turf condition, weather, label directions, and local rules allow.`);
+  const categories = v13StepLines(visit).map((line) => v13OutlineCategory(line)).filter(Boolean);
+  return [...new Map(categories.map((category) => [category[1], category])).values()]
+    .map((category) => category[3] || `${category[1]} may be relevant when turf condition, weather, label directions, and local rules allow.`);
 }
 
 // A month's steps for the page: the whole-lawn step (the 12x primary lines), then what may be
@@ -382,16 +416,9 @@ async function loadFertilizerRule(db, jurisdictionId) {
   if (jurisdictionId === 'generic_swfl') {
     return {
       jurisdiction_id: 'generic_swfl',
-      jurisdiction_name: 'Southwest Florida service area',
+      jurisdiction_name: 'Confirm city or county',
       version: 'generic-2026-05-30',
-      public_summary: 'Local fertilizer rules may affect nitrogen or phosphorus applications during certain months.',
-      nitrogen_restricted: true,
-      phosphorus_restricted: true,
-      phosphorus_soil_test_required: true,
-      restricted_start_month: 6,
-      restricted_start_day: 1,
-      restricted_end_month: 9,
-      restricted_end_day: 30,
+      public_summary: 'Confirm the service property\'s city or county before relying on fertilizer dates.',
     };
   }
   return db('jurisdiction_fertilizer_rules')
@@ -529,7 +556,7 @@ function buildTreatmentCategories({ turfType, visit, seasonBand }) {
 // we treat are st augustine"). No product name, rate, tier, visit count, date, or grass-specific line.
 const V13_COPY = Object.freeze({
   title: 'Your Waves Lawn Care Program Overview',
-  intro: (customerName) => `Based on your estimate for ${customerName}. The program follows the time of year. What each visit applies is set on site: your grass, your county's fertilizer rules, sun and shade, new sod, the weather, and the spots we map for insects, disease or bermudagrass.`,
+  intro: (customerName) => `Based on your estimate for ${customerName}. The program follows the time of year. What each visit applies is set on site: your grass, your local fertilizer rules, sun and shade, new sod, the weather, and the spots we map for insects, disease or bermudagrass.`,
   programLabel: 'Year-round, set to your lawn',
   programTitle: 'How Your Program Works',
   programBody: 'Most of the lawns we treat are St. Augustine, so the program is built around it. Each visit adjusts to the lawn in front of us, and every product is applied within its label.',
@@ -579,23 +606,37 @@ const V13_TREATMENT_CATEGORIES = Object.freeze([
   { key: 'barrier', reason: 'A herbicide barrier at the soil surface that stops weed seeds as they sprout. It needs about 1/2 inch of rain or irrigation within 14 days to activate; your regular watering counts. Never on new sod or thin turf.' },
   { key: 'micros', reason: 'Iron and other micronutrients for color without forcing growth. They carry the lawn through the summer limits on nitrogen.' },
   { key: 'weeds', reason: 'Post-emergent herbicide on existing weeds only, by backpack sprayer, never across the whole lawn.' },
-  { key: 'insects', reason: 'Applied where insects are found, after a count for chinch bugs. The one whole-lawn insecticide goes on sunny turf in May, peak chinch bug season.' },
+  { key: 'insects', reason: 'Insect treatment is only as needed after current evidence is recorded: a chinch-bug count at the damaged edge, or current grub observations plus a local flight or hatch indication. A scouting-only May visit is valid.' },
   { key: 'disease', reason: 'Fungicide on active disease, plus preventive passes on areas mapped for large patch (as the soil cools through 80\u00b0F in fall) and take-all root rot (spring and fall).' },
   { key: 'dry_spots', reason: 'A soil surfactant that helps water soak into dry, water-repellent spots.' },
   { key: 'report', label: 'Service report', reason: 'Lists each product applied with its EPA number where it has one, what was found, photos, and any action items.' },
 ].map((item) => Object.freeze({ ...item, label: item.label || V13_STEP_LABELS[item.key] })));
 
 // The local-rule tiles: the rule area and its summary come from the jurisdiction rule the outline
-// resolved; no dates (North Port differs from its county, owner "forget north port" 2026-10-09).
+// resolved. North Port resolves to its own April 1 rule row, never Sarasota County's June 1 row.
 function v13RuleTiles(jurisdictionRule) {
   return [
     { icon: 'area', title: 'Your rule area', text: jurisdictionRule?.jurisdiction_name || 'To be confirmed' },
-    { icon: 'calendar', title: 'What it limits', text: jurisdictionRule?.public_summary || 'Local fertilizer rules may affect what nutrient products can be used.' },
+    { icon: 'calendar', title: 'What it limits', text: fertilizerRuleWindowText(jurisdictionRule) },
     { icon: 'micros', title: 'What we do instead', text: V13_COPY.rulesInstead },
   ];
 }
 
 const FULL_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+function fertilizerRuleWindowText(rule) {
+  const startMonth = Number(rule?.restricted_start_month);
+  const endMonth = Number(rule?.restricted_end_month);
+  const startDay = Number(rule?.restricted_start_day) || 1;
+  const endDay = Number(rule?.restricted_end_day) || 1;
+  const nutrients = [rule?.nitrogen_restricted && 'nitrogen', rule?.phosphorus_restricted && 'phosphorus'].filter(Boolean);
+  if (!startMonth || !endMonth || !nutrients.length) {
+    return rule?.public_summary || 'Local fertilizer rules may affect what nutrient products can be used.';
+  }
+  const nutrientText = nutrients.length === 2 ? `${nutrients[0]} or ${nutrients[1]}` : nutrients[0];
+  const scope = rule?.jurisdiction_id === 'north_port_fl' ? ' on turf' : '';
+  return `No ${nutrientText}${scope} from ${FULL_MONTHS[startMonth - 1]} ${startDay} through ${FULL_MONTHS[endMonth - 1]} ${endDay}.`;
+}
 const stepNames = (steps) => steps.map((step) => V13_STEP_LABELS[step]).join(', ');
 
 // The year chart: every month's steps from the recipe, and the months the local rule limits.
@@ -739,10 +780,14 @@ function renderOutlineHtml(content) {
   `;
 }
 
+const jurisdictionValidationWarnings = (rule) => rule?.jurisdiction_id === 'generic_swfl'
+  ? ['Confirm the service property\'s city or county before relying on fertilizer dates.']
+  : [];
+
 function validateContent(content, { turfType, includeProductCards, jurisdictionRule, noProgram = false }) {
   const text = JSON.stringify(content).toLowerCase();
   const errors = [];
-  const warnings = [];
+  const warnings = jurisdictionValidationWarnings(jurisdictionRule);
   for (const phrase of BANNED_PHRASES) {
     if (text.includes(phrase)) errors.push(`Banned phrase detected: ${phrase}`);
   }
@@ -939,7 +984,7 @@ const V13_DETAIL_COPY = Object.freeze({
 
 // Decision D2-A: the order tile shows only for these rule areas, and only while the order runs. A stored outline keeps
 // the tile, so the tile carries `until` and the page hides it after that day.
-const WATERING_ORDER = Object.freeze({ jurisdictions: Object.freeze(['manatee_county_fl', 'sarasota_county_fl']), until: '2027-03-31' });
+const WATERING_ORDER = Object.freeze({ jurisdictions: Object.freeze(['manatee_county_fl', 'sarasota_county_fl', 'north_port_fl']), until: '2027-03-31' });
 
 // The one-day watering-order tile, or null outside those rule areas or after the order ends.
 function v13WateringOrderTile(jurisdictionId, now) {
@@ -1182,7 +1227,7 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
   const seasonBand = resolveSeasonBand(month);
   const modules = await loadApprovedModules(db);
   const turf = variant.resolveTurf({ estimate, estimateData, input });
-  const jurisdictionId = input.jurisdictionId || resolveJurisdictionId(estimate.address);
+  const jurisdictionId = resolveOutlineJurisdictionId(input, estimate, estimateData);
   const jurisdictionRule = await loadFertilizerRule(db, jurisdictionId);
   const restrictedSeasonActive = isRestrictedSeason(jurisdictionRule, month);
   const ruleJurisdictionId = jurisdictionRule?.jurisdiction_id || jurisdictionId;

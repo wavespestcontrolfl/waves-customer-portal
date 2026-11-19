@@ -16,9 +16,9 @@ const { etDateString } = require('../utils/datetime-et');
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const MONTH_FULL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const MONTH_INITIALS = ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'];
-const KEY_STEPS = Object.freeze(['feeding', 'barrier', 'micros', 'insects']);
-const ROUND_SHORT = Object.freeze(['Barrier + color', 'Feed + barrier', 'Spring feed', 'Insects', 'Color + barrier', 'Color + potassium', 'Color + potassium', 'Feed + barrier', 'Potassium feed']);
-const MONTH_SHORT = Object.freeze(['Barrier + color', 'Feed', 'Barrier + color', 'Feed', 'Insects', 'Color + barrier', 'Inspection', 'Color + potassium', 'Color + potassium', 'Feed + barrier', 'Feed', 'Potassium feed']);
+const KEY_STEPS = Object.freeze(['feeding', 'barrier', 'micros', 'inspection']);
+const ROUND_SHORT = Object.freeze(['Barrier + color', 'Feed + barrier', 'Spring feed', 'Insect scouting', 'Color + barrier', 'Color + potassium', 'Color + potassium', 'Feed + barrier', 'Potassium feed']);
+const MONTH_SHORT = Object.freeze(['Barrier + color', 'Feed', 'Barrier + color', 'Feed', 'Insect scouting', 'Color + barrier', 'Inspection', 'Color + potassium', 'Color + potassium', 'Feed + barrier', 'Feed', 'Potassium feed']);
 const PLAN_LABELS = Object.freeze({ rounds: '9 visits a year, one per round', months12: '12 visits a year, one a month' });
 // The month bar's words. A plan that is not known (a 6-visit plan, several lawn
 // lines) gets no visit count: its words are the month list's own approved line plus the 12-visit body without "One visit a month".
@@ -76,8 +76,8 @@ const ROUND_WORDS = Object.freeze([
     ]
   },
   {
-    title: "Insect season",
-    why: "Before the rains, chinch bugs and other lawn insects peak in hot, sunny turf. The sunny turf gets the program's one whole-lawn insect treatment where it fits the property, and we spot treat chinch bugs, weeds and dry spots elsewhere.",
+    title: "Insect scouting",
+    why: "Before the rains, chinch bugs and other lawn insects can peak in hot, sunny turf. We scout first and record the target and current observations. Insect treatment is only as needed after current evidence is found; a scouting-only visit is valid. We also check for weeds, dry spots and disease.",
     atHome: "Text us a photo the day a dry-looking patch shows on a watered lawn.",
     links: [
       {
@@ -247,7 +247,7 @@ const FAQ_ROWS = Object.freeze([
   },
   {
     q: "Are chinch bugs and other lawn insects included?",
-    a: "Yes. We confirm chinch bugs at the edge of the damage, then treat where we find them, and we rotate products to slow resistance. In round 4, the sunny turf gets a whole-lawn insect treatment where it fits the property. Caterpillars, mole crickets and grubs are covered too. Fire ant control is an add-on, on request.",
+    a: "Yes. In round 4, we scout and record the target and current observations. Insect treatment is only as needed after evidence is found: chinch bugs counted at a damaged edge, or current grub signs plus a local flight or hatch indication. A scouting-only visit is valid. Caterpillars and mole crickets are covered too. Fire ant control is an add-on, on request.",
     links: [
       {
         label: "Southern chinch bug",
@@ -260,8 +260,8 @@ const FAQ_ROWS = Object.freeze([
         source: "Waves blog"
       }
     ],
-    aMonths: "Yes. We confirm chinch bugs at the edge of the damage, then treat where we find them, and we rotate products to slow resistance. In May, the sunny turf gets a whole-lawn insect treatment where it fits the property. Caterpillars, mole crickets and grubs are covered too. Fire ant control is an add-on, on request.",
-    aUnknown: "Yes. We confirm chinch bugs at the edge of the damage, then treat where we find them, and we rotate products to slow resistance. Caterpillars, mole crickets and grubs are covered too. Fire ant control is an add-on, on request."
+    aMonths: "Yes. In May, we scout and record the target and current observations. Insect treatment is only as needed after evidence is found: chinch bugs counted at a damaged edge, or current grub signs plus a local flight or hatch indication. A scouting-only visit is valid. Caterpillars and mole crickets are covered too. Fire ant control is an add-on, on request.",
+    aUnknown: "Yes. We scout and record the target and current observations. Insect treatment is only as needed after evidence is found: chinch bugs counted at a damaged edge, or current grub signs plus a local flight or hatch indication. A scouting-only visit is valid. Caterpillars and mole crickets are covered too. Fire ant control is an add-on, on request."
   },
   {
     q: "What about fungus and mushrooms?",
@@ -489,9 +489,10 @@ function limitBand(rule, barStart, year) {
   const start = ymd(year, startMonth, startDay);
   const end = ymd(year, endMonth, endDay);
   const area = rule.jurisdiction_name ? `Your rule area: ${rule.jurisdiction_name}. ` : '';
+  const scope = rule.jurisdiction_id === 'north_port_fl' ? ' on turf' : '';
   return {
     limit: { offset: dayDiff(barStart, start), days: dayDiff(start, end) + 1, label: LIMIT_LABEL },
-    caption: `${area}No nitrogen or phosphorus from ${MONTH_FULL[startMonth - 1]} ${startDay} to ${MONTH_FULL[endMonth - 1]} ${endDay}; micronutrients keep the color instead.`,
+    caption: `${area}No nitrogen or phosphorus${scope} from ${MONTH_FULL[startMonth - 1]} ${startDay} to ${MONTH_FULL[endMonth - 1]} ${endDay}; micronutrients keep the color instead.`,
   };
 }
 
