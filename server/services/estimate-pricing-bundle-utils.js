@@ -28,6 +28,69 @@ function pricingBundleMatchesEstimateTotals(bundle = {}, estimate = {}) {
   });
 }
 
+// The entry the estimate page opens a service on (client EstimateViewPage
+// pricingServices + defaultSelectedForServices; keep in step): that
+// service's section, then its defaultFrequencyKey, else its first entry. A
+// bundle with no services[] split renders as one pest section.
+function openingEntryForService(bundle, serviceKey) {
+  const sections = Array.isArray(bundle?.services) && bundle.services.length
+    ? bundle.services
+    : [{ key: 'pest_control', frequencies: bundle?.frequencies }];
+  const section = sections.find((candidate) => candidate?.key === serviceKey);
+  const frequencies = Array.isArray(section?.frequencies) ? section.frequencies : [];
+  return frequencies.find((entry) => entry?.key === section.defaultFrequencyKey) || frequencies[0] || null;
+}
+
+// The per-application price the estimate page's price card leads with on a
+// service section, and the visits it covers (client PriceCard
+// perApplicationNetForFrequency and its quote and range guards; keep in
+// step): the one priced treatment row's net displayPrice, or with no priced
+// row the entry's own perTreatment. null when the card leads with anything
+// else (a quote-required note, a price range, several priced rows).
+function displayedPerApplication(entry) {
+  if (!entry || entry.quoteRequired === true || Number(entry.lowConfidenceRangePct) > 0) return null;
+  const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  const rows = Array.isArray(entry.perServiceTreatments) ? entry.perServiceTreatments : [];
+  const priced = rows
+    .map((row) => ({ price: Number(row?.displayPrice ?? row?.perTreatment), monthly: Number(row?.monthly), visits: Number(row?.visitsPerYear) }))
+    .filter((row) => (Number.isFinite(row.price) && row.price > 0) || (Number.isFinite(row.monthly) && row.monthly > 0));
+  if (priced.length > 1) return null;
+  if (priced.length === 1) {
+    return priced[0].price > 0 && priced[0].visits > 0 ? { amount: round2(priced[0].price), visits: priced[0].visits } : null;
+  }
+  const CADENCE_VISITS = { quarterly: 4, bi_monthly: 6, monthly: 12 };
+  const visitRows = rows.filter((row) => Number(row?.visitsPerYear) > 0);
+  const visits = Number(entry.visitsPerYear) > 0
+    ? Number(entry.visitsPerYear)
+    : (visitRows.length === 1
+      ? Number(visitRows[0].visitsPerYear)
+      : (visitRows.length === 0 ? (CADENCE_VISITS[entry.key] || null) : null));
+  const perTreatment = Number(entry.perTreatment);
+  return perTreatment > 0 && Number.isFinite(visits) && visits > 0 ? { amount: round2(perTreatment), visits } : null;
+}
+
+// A plan-start quote (estimates.source 'plan_start', GATE_PORTAL_PLAN_START)
+// opens on one entry, which the mint checked against the portal card to the
+// cent. That entry's yearly figure is its monthly x 12, so it sits cents off
+// a yearly total the monthly cannot carry exactly (quarterly pest: 4 x $113
+// = $452 billed, 37.67 x 12 = $452.04 shown). pricingBundleMatchesEstimateTotals
+// then misses and the page would rebuild the offer on live pricing. The page
+// (sentSnapshotServesAsIs) and the mint accept such a snapshot when its
+// opening entry carries the row's monthly to the cent, and its displayed
+// per-application price times its visits is the row's yearly total to the cent.
+function planStartSnapshotMatchesTotals(bundle, estimate, estData) {
+  if (estimate?.source !== 'plan_start') return false;
+  const families = estData?.planStart?.families;
+  if (!Array.isArray(families) || families.length !== 1) return false;
+  const entry = openingEntryForService(bundle, families[0]);
+  const perApplication = displayedPerApplication(entry);
+  const monthly = moneyCents(estimate.monthly_total);
+  const annual = moneyCents(estimate.annual_total);
+  return Boolean(perApplication) && monthly > 0 && annual > 0
+    && moneyCents(entry.monthly) === monthly
+    && moneyCents(perApplication.amount) * perApplication.visits === annual;
+}
+
 // Curve provenance for an UNSTAMPED pest replay (codex #2966 r7-r9 P1s,
 // extended to the public read path 2026-07-28): stored engineInputs and
 // persisted Admin-V2 engineRequests predate version stamping, and agent
@@ -74,5 +137,8 @@ module.exports = {
   moneyCents,
   moneyMatches,
   pricingBundleMatchesEstimateTotals,
+  openingEntryForService,
+  displayedPerApplication,
+  planStartSnapshotMatchesTotals,
   resolveStoredPestPricingVersion,
 };

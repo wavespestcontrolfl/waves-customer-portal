@@ -234,6 +234,8 @@ export function perApplicationBilledMonthly(frequency, perAppNet) {
 // per-application price, or null when no single unambiguous one exists (the
 // caller falls back to its cadence total). Callers gate quoteRequired /
 // low-confidence themselves — this mirrors only the row/visit resolution.
+// Server mirror (the plan-start mint and page reader): displayedPerApplication
+// in server/services/estimate-pricing-bundle-utils.js. Change both together.
 export function perApplicationNetForFrequency(frequency) {
   if (!frequency) return null;
   const round2 = (n) => Math.round(Number(n) * 100) / 100;

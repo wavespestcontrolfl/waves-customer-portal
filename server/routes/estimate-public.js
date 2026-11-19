@@ -135,6 +135,7 @@ const {
 } = require('../constants/business');
 const {
   pricingBundleMatchesEstimateTotals,
+  planStartSnapshotMatchesTotals,
   resolveStoredPestPricingVersion,
 } = require('../services/estimate-pricing-bundle-utils');
 const {
@@ -29499,10 +29500,15 @@ async function buildPricingBundle(estimate, { monthlyBilled = null } = {}) {
 // buildPricingBundleInner) instead of rebuilding the offer from live pricing.
 // Pure; also read by the admin Pipeline card, which shows an open offer's
 // per-application price only when the page would sell exactly that snapshot.
+// The plan-start mint publishes a quote only when this returns true.
 function sentSnapshotServesAsIs(snapshotBundle, estimate, estData) {
   return Boolean(snapshotBundle)
     && Array.isArray(snapshotBundle.frequencies)
-    && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
+    && (pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
+      // A plan-start quote's opening entry can carry its totals where no
+      // entry is within a cent of both (quarterly pest: monthly x 12 is
+      // not the per-application total); see the helper.
+      || planStartSnapshotMatchesTotals(snapshotBundle, estimate, estData))
     // Snapshots that violate the lawn program policy (retired Quarterly
     // cadence, or an itemized lawn price below the program minimum) must NOT
     // short-circuit — they re-derive through the clamped ladder builders so

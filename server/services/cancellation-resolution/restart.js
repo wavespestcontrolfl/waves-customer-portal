@@ -54,22 +54,10 @@ const toCents = (value) => Math.round(Number(value || 0) * 100);
 // (quarterly), whatever cadence was priced (EstimateViewPage
 // defaultSelectedForServices), so a bi-monthly or monthly start would open on
 // another price. The other services open on the priced tier. The mint's
-// snapshot check (planStartOpeningEntry) is the belt.
+// snapshot check (openingEntryForService) is the belt.
 function planStartOptionBookable(serviceKey, option) {
   return PLAN_START_SERVICE_KEYS.includes(serviceKey) && Boolean(option)
     && (serviceKey !== 'pest_control' || option.frequency === 'quarterly');
-}
-
-// The frozen bundle entry the estimate page opens on, chosen as
-// EstimateViewPage does: the family's section (a flat bundle is one pest
-// section), then its defaultFrequencyKey, else its first entry.
-function planStartOpeningEntry(bundle, family) {
-  const sections = Array.isArray(bundle?.services) && bundle.services.length
-    ? bundle.services
-    : [{ key: 'pest_control', frequencies: bundle?.frequencies }];
-  const section = sections.find((candidate) => candidate?.key === family);
-  const frequencies = Array.isArray(section?.frequencies) ? section.frequencies : [];
-  return frequencies.find((entry) => entry?.key === section.defaultFrequencyKey) || frequencies[0] || null;
 }
 // Pricing-ai speaks 'termite' for the termite_bait family (LINE_SERVICE_KEYS).
 const pricingKeyFor = (family) => (family === 'termite_bait' ? 'termite' : family);
@@ -572,6 +560,10 @@ function resolveMintDeps(deps) {
     // click-mint cites.
     buildEstimateSendSnapshot: deps.buildEstimateSendSnapshot
       || require('../../routes/admin-estimates').buildEstimateSendSnapshot,
+    // The public page's own snapshot predicate (plan start only), loaded on
+    // first call so a restart mint never pulls in the page route.
+    sentSnapshotServesAsIs: deps.sentSnapshotServesAsIs
+      || ((...args) => require('../../routes/estimate-public').sentSnapshotServesAsIs(...args)),
   };
 }
 
@@ -595,9 +587,10 @@ function resolveMintDeps(deps) {
 //   assertOffer       optional ({ monthlyTotal, annualTotal, onetimeTotal,
 //                     rawEngineResult }) => throws when the server's price is
 //                     not the offer the entry expects
-//   assertSnapshot    optional (pricingBundle, createdRow) => throws when the
-//                     frozen bundle is not the offer; default = the bundle
-//                     carries the minted totals (pricingBundleMatchesEstimateTotals)
+//   assertSnapshot    optional (pricingBundle, createdRow, estimateData) =>
+//                     throws when the frozen bundle is not the offer; default
+//                     = the bundle carries the minted totals
+//                     (pricingBundleMatchesEstimateTotals)
 //   note              (estimateId) => { subject, body } for the timeline
 //   logTag / logDetail / handMessage   wording that stays per-source
 // Returns { estimateId, token, url, reused }.
@@ -831,7 +824,13 @@ async function mintPricedEstimate({
       priorQualifyingServices: Array.isArray(data?.priorQualifyingServices) ? [...data.priorQualifyingServices].sort() : [],
       result: data?.result ?? null,
     });
+    // Same premises (codex pre-push P1): the offer fingerprint carries the
+    // property facts, not the street, so a quote minted before the account's
+    // address changed would hand back a link addressed to the old house. Its
+    // stored address must key to today's primary premises; else the lineage
+    // archives and a fresh quote is minted at the current address.
     if (matchesLive(liveData)
+      && linkage.normalizedEstimateStreet(live.address) === primaryStreet
       && cents(monthlyTotal) === cents(live.monthly_total)
       && cents(annualTotal) === cents(live.annual_total)
       && cents(onetimeTotal) === cents(live.onetime_total)
@@ -917,7 +916,7 @@ async function mintPricedEstimate({
     throw new Error(`${logTag} send snapshot did not freeze pricing${withSnapshot?.sendSnapshot?.pricingBundleError ? `: ${withSnapshot.sendSnapshot.pricingBundleError}` : ''}`);
   }
   if (assertSnapshot) {
-    assertSnapshot(withSnapshot.sendSnapshot.pricingBundle, created);
+    assertSnapshot(withSnapshot.sendSnapshot.pricingBundle, created, withSnapshot);
   } else if (!pricingBundleMatchesEstimateTotals(withSnapshot.sendSnapshot.pricingBundle, created)) {
     throw new Error(`${logTag} send snapshot does not match the minted totals`);
   }
@@ -1133,19 +1132,21 @@ async function mintPlanStartEstimate({
           throw new RestartUnavailableError('offer_changed', 'The price changed since you last looked. Please check the new price.');
         }
       },
-      // The entry the estimate page opens on must show the card's price to
-      // the cent (codex pre-push P0), not merely some entry within a cent of
-      // the totals: its monthly, and its per-application price where it
-      // carries one, else the yearly price behind it. A pest entry's yearly
-      // figure is monthly x 12, cents off the engine's per-visit total, so
-      // pest compares per application.
-      assertSnapshot: (bundle, created) => {
-        const entry = planStartOpeningEntry(bundle, family);
-        const sameCents = (a, b) => toCents(a) === toCents(b);
-        const matches = Boolean(entry) && sameCents(entry.monthly, shownMonthly)
-          && (entry.perVisit != null ? sameCents(entry.perVisit, shown.perVisit) : sameCents(entry.annual, created.annual_total));
-        if (!matches) {
-          logger.warn(`[plan-start] estimate page would open on ${entry?.key || 'no entry'}, not option ${option.id} — refusing`);
+      // The page must sell exactly this frozen offer (codex pre-push P0s).
+      // The entry it opens on shows the card's monthly and the card's
+      // per-application price to the cent, read as the page's price card
+      // reads it (displayedPerApplication). The public reader also serves
+      // the snapshot as is (its own sentSnapshotServesAsIs), so a quote the
+      // page would rebuild on live pricing is never published.
+      assertSnapshot: (bundle, created, estimateData) => {
+        const { openingEntryForService, displayedPerApplication } = require('../estimate-pricing-bundle-utils');
+        const entry = openingEntryForService(bundle, family);
+        const perApplication = displayedPerApplication(entry);
+        const pageShowsCard = Boolean(perApplication)
+          && toCents(entry.monthly) === toCents(shownMonthly)
+          && toCents(perApplication.amount) === toCents(shown.perVisit);
+        if (!pageShowsCard || !mintDeps.sentSnapshotServesAsIs(bundle, created, estimateData)) {
+          logger.warn(`[plan-start] estimate page would not sell option ${option.id} as shown (opening entry ${entry?.key || 'none'}${pageShowsCard ? ', page rebuilds the snapshot' : ''}) — refusing`);
           throw new RestartUnavailableError('pricing_unavailable', HAND_PRICED_PLAN_START);
         }
       },
@@ -1317,7 +1318,6 @@ module.exports = {
   PLAN_START_SHOWN_KEYS,
   planStartAccountOpen,
   planStartOptionBookable,
-  planStartOpeningEntry,
   ownsAnyRecurringService,
   mintPlanStartEstimate,
   assertPlanStartAcceptEligible,

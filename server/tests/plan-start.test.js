@@ -254,12 +254,21 @@ const CUSTOMER = {
   address_line1: '1 Main St', city: 'Parrish', state: 'FL', zip: '34219', property_type: null,
 };
 const recompute = jest.fn();
-// The frozen bundle in the real builder's shape (services[], each with defaultFrequencyKey and
-// frequencies[]): one section for the minted family whose opening entry carries the row's own
-// totals. A test that moves the page's opening entry passes `entry`.
+// The frozen bundle in the real builder's shape (frequencies[] plus services[], each section with
+// defaultFrequencyKey and frequencies[]): one section for the minted family whose opening entry
+// carries the row's own totals and one treatment row at the per-application price the card
+// derives from the stored engine line. A test that moves the page's opening entry passes `entry`.
 function openingBundle(row, entry = {}) {
-  const family = JSON.parse(row.estimate_data).planStart?.families?.[0];
-  return { services: [{ key: family, defaultFrequencyKey: 'opening', frequencies: [{ key: 'opening', monthly: row.monthly_total, annual: row.annual_total, perVisit: null, ...entry }] }] };
+  const data = JSON.parse(row.estimate_data);
+  const family = data.planStart?.families?.[0];
+  const line = data.result?.lineItems?.[0] || null;
+  const perApplication = line ? require('../services/customer-pricing-ai').quoteAmountFromLine(line).perVisit : null;
+  const opening = {
+    key: 'opening', monthly: row.monthly_total, annual: row.annual_total,
+    perServiceTreatments: [{ service: family, perTreatment: perApplication, displayPrice: perApplication, visitsPerYear: line?.visitsPerYear ?? null }],
+    ...entry,
+  };
+  return { frequencies: [opening], services: [{ key: family, defaultFrequencyKey: 'opening', frequencies: [opening] }] };
 }
 const snapshotWith = (entry) => async (row) => ({ ...JSON.parse(row.estimate_data), sendSnapshot: { pricingBundle: openingBundle(row, entry) } });
 function deps(overrides = {}) {
@@ -287,6 +296,9 @@ function deps(overrides = {}) {
     hasVerifiedOverrides: async () => false,
     bundleUtils: { pricingBundleMatchesEstimateTotals: () => true },
     buildEstimateSendSnapshot: snapshotWith({}),
+    // The public page's snapshot predicate: serves as is here; plan-start-snapshot-reader.test.js
+    // runs the real one on a real bundle.
+    sentSnapshotServesAsIs: () => true,
     ...overrides,
   };
 }
@@ -324,7 +336,7 @@ function shownOf(line) {
 function pricedAs(line) {
   return {
     recomputed: true,
-    serverResult: { engineVersion: 'v9.9', lineItems: [] },
+    serverResult: { engineVersion: 'v9.9', lineItems: [line] },
     rawEngineResult: { waveGuard: { tier: 'Bronze' }, lineItems: [line] },
     serverTotals: { monthlyTotal: line.monthlyAfterDiscount, annualTotal: line.annualAfterDiscount, onetimeTotal: 0 },
   };
@@ -543,30 +555,36 @@ describe('mintPlanStartEstimate', () => {
   describe('the estimate page opens on the card\'s price', () => {
     test.each([
       ['another monthly price', snapshotWith({ monthly: 31.68 })],
-      ['another per-application price', snapshotWith({ perVisit: 94 })],
-      ['no section for the family', async (row) => ({ ...JSON.parse(row.estimate_data), sendSnapshot: { pricingBundle: { services: [] } } })],
+      ['another net price on its treatment row', snapshotWith({ perServiceTreatments: [{ service: 'pest_control', perTreatment: 95.01, displayPrice: 94, visitsPerYear: 4 }] })],
+      ['a price range in place of the price', snapshotWith({ lowConfidenceRangePct: 0.1 })],
+      ['no section for the family', async (row) => ({ ...JSON.parse(row.estimate_data), sendSnapshot: { pricingBundle: { frequencies: [], services: [] } } })],
     ])('an opening entry with %s refuses (priced by hand)', async (_label, buildEstimateSendSnapshot) => {
       await expect(mint({}, { buildEstimateSendSnapshot })).rejects.toMatchObject({ code: 'pricing_unavailable', restartUnavailable: true });
     });
 
-    test('pest compares per application: its yearly figure (monthly x 12) can sit cents off the engine total', async () => {
-      // The engine's quarterly total is 4 x 95 = 380; the page's entry carries 31.67 x 12 = 380.04, which the
-      // generic "some entry within a cent of the totals" check rejects.
-      const line = engineLine('pest_control', 31.67, { annualAfterDiscount: 380 });
-      recompute.mockResolvedValue(pricedAs(line));
-      const result = await mint({ shown: shownOf(line) }, {
-        bundleUtils: { pricingBundleMatchesEstimateTotals: () => false },
-        buildEstimateSendSnapshot: snapshotWith({ annual: 380.04, perVisit: 95 }),
-      });
-      expect(result.reused).toBe(false);
-    });
-
-    test('an entry with no per-application price (lawn) compares the yearly price behind the monthly', async () => {
+    test('a lawn entry has no perVisit: the net price its treatment row shows must equal the card\'s', async () => {
       recompute.mockResolvedValue(pricedAs(LAWN_LINE));
       const lawn = { serviceKey: 'lawn_care', optionId: 'lawn-enhanced', shown: shownOf(LAWN_LINE) };
-      await expect(mint(lawn, { buildEstimateSendSnapshot: snapshotWith({ annual: 587.99 }) })).rejects.toMatchObject({ code: 'pricing_unavailable' });
+      // Same monthly and yearly totals as the card; only the per-application price differs.
+      const lawnEntry = (displayPrice) => snapshotWith({ perServiceTreatments: [{ service: 'lawn_care', perTreatment: 65.33, displayPrice, visitsPerYear: 9 }] });
+      await expect(mint(lawn, { buildEstimateSendSnapshot: lawnEntry(65.32) })).rejects.toMatchObject({ code: 'pricing_unavailable' });
       tables.estimates = [];
-      await expect(mint(lawn)).resolves.toMatchObject({ reused: false });
+      await expect(mint(lawn, { buildEstimateSendSnapshot: lawnEntry(65.33) })).resolves.toMatchObject({ reused: false });
+    });
+
+    test('publishes only what the public page serves as is: the page\'s own predicate decides, not the generic totals check', async () => {
+      const servesAsIs = jest.fn(() => true);
+      // The generic check misses (quarterly pest: monthly x 12 is not the per-application total); the page's predicate decides.
+      await mint({}, { sentSnapshotServesAsIs: servesAsIs, bundleUtils: { pricingBundleMatchesEstimateTotals: () => false } });
+      const stored = JSON.parse(tables.estimates[0].estimate_data);
+      expect(servesAsIs).toHaveBeenCalledWith(
+        stored.sendSnapshot.pricingBundle,
+        expect.objectContaining({ source: 'plan_start', monthly_total: 31.67 }),
+        expect.objectContaining({ planStart: stored.planStart, sendSnapshot: stored.sendSnapshot }),
+      );
+      tables.estimates = [];
+      servesAsIs.mockReturnValue(false);
+      await expect(mint({}, { sentSnapshotServesAsIs: servesAsIs })).rejects.toMatchObject({ code: 'pricing_unavailable', restartUnavailable: true });
     });
   });
 
@@ -595,6 +613,16 @@ describe('mintPlanStartEstimate', () => {
       expect(next.estimateId).not.toBe(first.estimateId);
       expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeTruthy();
       expect(tables.estimates.find((r) => r.id === next.estimateId).archived_at).toBeFalsy();
+    });
+
+    test('a live quote stored at another address is archived, and the fresh one is minted at today\'s primary premises', async () => {
+      const first = await mint();
+      // Identical offer and option; only the street the quote names differs from the account's.
+      tables.estimates[0].address = '9 Oak Ave, Parrish, FL 34219';
+      const next = await mint({ randomBytes: () => Buffer.from('0123456789abcdef') });
+      expect(next.reused).toBe(false);
+      expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeTruthy();
+      expect(tables.estimates.find((r) => r.id === next.estimateId).address).toBe('1 Main St, Parrish, FL 34219');
     });
 
     test('same option but today\'s totals drifted from the stored offer: the lineage is archived and re-minted', async () => {

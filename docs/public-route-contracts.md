@@ -2076,6 +2076,17 @@ the option with no WaveGuard qualifiers. Otherwise it answers 409 `{ error, code
 error reads "This account changed since this estimate was created — please go back to your portal
 for a current price.", or a retry line when the state cannot be read) and writes nothing. Estimates of every other source are unchanged.
 
+`GET /api/estimates/:token` and the accept build an estimate's offer through
+`buildPricingBundle`, which serves the frozen send snapshot as is only when
+`sentSnapshotServesAsIs` passes (`server/routes/estimate-public.js`). For a `plan_start` row that
+predicate also accepts the snapshot when the entry the page opens on carries the row's
+`monthly_total` to the cent and its displayed per-application price times its visits equals the
+row's `annual_total` to the cent (`planStartSnapshotMatchesTotals`,
+`server/services/estimate-pricing-bundle-utils.js`). Without it, a quarterly pest quote misses the
+generic check (its entry shows monthly x 12, cents off the per-application total) and the page
+rebuilds the offer on live pricing. The plan-start mint publishes a quote only when this predicate
+serves its snapshot. Every other source keeps the generic check.
+
 `PUT /api/estimates/:token/accept` answers 409
 `{ error, reason: 'retired_lawn_cadence_selection' }` when a recurring lawn
 row still resolves to a retired lawn cadence — any tier hidden via

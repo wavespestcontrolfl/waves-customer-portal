@@ -297,6 +297,9 @@ function pricingServices(pricing = {}) {
   }];
 }
 
+// The opening entry (with pricingServices above) has a server mirror for the
+// plan-start mint and page reader: openingEntryForService in
+// server/services/estimate-pricing-bundle-utils.js. Change both together.
 function defaultSelectedForServices(services = [], previous = {}, preserveSelection = false) {
   return services.reduce((next, section) => {
     const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
