@@ -536,7 +536,7 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
   // A settlement fixture over a mutable locked row. The combined-session release can rewrite the row, as clearPaymentIntentStamps does;
   // `terms` feed the fence's own lookups on the plain connection and on the trx.
   function settle({ pre = card(), locked = card(), onRelease = null, termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null, taggedPayment = null } = {}) {
-    const calls = { update: null, updateArgs: null, paymentsInsert: null };
+    const calls = { update: null, updateArgs: null, paymentsInsert: null, paymentsQuery: null };
     const answer = (table, row) => {
       if (table === 'annual_prepay_terms') return recorder({ first: termLinked ? { id: 'term-9' } : null });
       return null || row;
@@ -560,10 +560,13 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
           calls.update = r.update;
           return r;
         }
-        if (table === 'payments') { const r = recorder({ first: taggedPayment }); calls.paymentsInsert = r.insert; calls.paymentsQuery = r; return r; }
+        // One payments recorder per settlement: the insert and the later sole-money read share it.
+        if (table === 'payments') { calls.paymentsQuery = calls.paymentsQuery || recorder({ first: taggedPayment }); calls.paymentsInsert = calls.paymentsQuery.insert; return calls.paymentsQuery; }
         if (table === 'scheduled_services') return recorder({ first: visit });
         if (table === 'time_entries') return recorder({ first: timer });
         if (table === 'annual_prepay_terms') return answer(table);
+        // requireSelfPay locks the customer row (and any payer it names) before its locked re-check.
+        if (table === 'customers') return recorder({ first: { id: locked.customer_id, payer_id: locked.payer_id || null } });
         throw new Error(`unexpected trx table ${table}`);
       });
       trx.fn = { now: () => 'NOW()' };
@@ -795,6 +798,23 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       expect(out.receipt).toEqual({ manual: true });
       expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).not.toHaveBeenCalled();
       expect(sendReceiptEmail).not.toHaveBeenCalled();
+    });
+
+    test('checkoutTender with requireSelfPay (as the route sends it): a payer assigned while the sheet was open writes no payment and no receipt job', async () => {
+      // Same balance, but the Bill-To moved to a payer since the checkout opened.
+      const calls = settle({ pre: card({ payer_id: 'payer-9' }), locked: card({ payer_id: 'payer-9' }) });
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash', sendReceipt: true, checkoutTender: true, requireSelfPay: true, amountCents: 11700, owedCentsSeen: 11700, recordedByTechnicianId: 'staff-1' }));
+      expect(err.statusCode).toBe(409);
+      expect(calls.paymentsInsert).toBeNull();
+      expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).not.toHaveBeenCalled();
+    });
+
+    test('checkoutTender with requireSelfPay on a self-pay invoice settles and queues the receipt', async () => {
+      const calls = settle();
+      jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: true });
+      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: true, checkoutTender: true, requireSelfPay: true, amountCents: 11700, owedCentsSeen: 11700, recordedByTechnicianId: 'staff-1' });
+      expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+      expect(out.receipt).toEqual({ queued: true });
     });
 
     test('checkoutTender: the sole-money read names this invoice and leaves out its own new ledger row', async () => {

@@ -2976,7 +2976,8 @@ const cardResultOf = (req, closeout) => (req.ibApprovedPayment ? { closeout: clo
 // technician took (GATE_CHECKOUT_TENDER_RECEIPT, owner 2026-11-18, after a check paid at the visit got no receipt): the receipt is queued
 // with the payment, and that amount is recorded through the page's own amount + owedSeen fence (checked before any Stripe session is
 // retired and again under the invoice lock), so the receipt never confirms a sum nobody took. Cash and check only (the two tenders the
-// sheets take), never the Intelligence Bar card. Returns null (not a checkout tender: the body stands, as before), { totalSeenCents },
+// sheets take), never the Intelligence Bar card. The tender also carries requireSelfPay, so a payer assigned while the sheet was
+// open is refused (409) before anything is written. Returns null (not a checkout tender: the body stands, as before), { totalSeenCents },
 // or { invalid: true } (a marked tender with no usable amount, or one that is not a JSON number: refused, nothing recorded).
 const CHECKOUT_TENDER_METHODS = ['cash', 'check'];
 function checkoutTenderOf(req) {
@@ -3046,7 +3047,9 @@ const recordPaymentHandler = async (req, res, next) => {
     // reconciler). Refusals arrive as statusCode-shaped errors.
     const { invoice, receipt, closeout, partial } = await recordManualPayment(id, {
       method, reference, note, recordedBy, sendReceipt: Boolean(checkout) || sendReceipt, via, recordedByTechnicianId: req.technicianId || null,
-      ...(checkout ? { checkoutTender: true } : {}),
+      // requireSelfPay: the checkout refuses in-person collection for a payer-billed visit when it opens, but a Bill-To change
+      // while the sheet is open can keep the same balance. The existing self-pay fence (pre-lock and on the locked row) refuses it.
+      ...(checkout ? { checkoutTender: true, requireSelfPay: true } : {}),
       ...(amountCents != null ? { amountCents, owedCentsSeen } : {}),
       ...cardPinsOf(req),
     });

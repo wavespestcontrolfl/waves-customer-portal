@@ -64,6 +64,8 @@ describe('record-payment from the dispatch checkout (GATE_CHECKOUT_TENDER_RECEIP
     expect(res.status).toBe(200);
     expect(recordManualPayment).toHaveBeenCalledWith('inv-1', expect.objectContaining({
       method: 'check', sendReceipt: true, checkoutTender: true, amountCents: 12500, owedCentsSeen: 12500, recordedByTechnicianId: 'admin-1',
+      // A payer assigned while the sheet was open (same balance) is refused by the existing self-pay fence.
+      requireSelfPay: true,
     }));
   });
 
@@ -88,6 +90,7 @@ describe('record-payment from the dispatch checkout (GATE_CHECKOUT_TENDER_RECEIP
       expect(args).toEqual(expect.objectContaining({ sendReceipt: false, via: 'both' }));
       expect(args).not.toHaveProperty('checkoutTender');
       expect(args).not.toHaveProperty('amountCents');
+      expect(args).not.toHaveProperty('requireSelfPay');
     }
   });
 
