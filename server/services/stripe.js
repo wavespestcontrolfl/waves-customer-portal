@@ -10,6 +10,7 @@ const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { v4: uuidv4 } = require('uuid');
 const { etDateString, etCalendarDayOf } = require('../utils/datetime-et');
 const { CONSENT_VERSION, CONSENT_VERSION_METADATA_KEY } = require('./payment-method-consent-text');
+const { whereAwaitingAuthentication } = require('./invoice-payment-authentication');
 
 // Rendered-version stamp for a consent captured through an intent (codex
 // #5434 r1 P1): the saved-payment-method consent version the MINTING tab
@@ -188,18 +189,37 @@ async function releaseStalePreSubmitSavedCardClaim(attempt, database = db) {
 // lease that proves a bound PI is a dead session rather than a live page.
 const paySessionTouchedAt = () => String(Math.floor(Date.now() / 1000));
 
-// readOnly: reach a verdict without writing (a READ ONLY transaction or a pure
-// resolver such as customer-dunning's). ANY unresolved claimed/ambiguous
-// attempt is pending: a stale submitted claim reads as ambiguous (what the
-// writing path promotes it to), and a stale pre-submit or fresh claim reads as
-// in progress (STRIPE_CHARGE_IN_PROGRESS) — a read never releases a claim
-// whose worker may still commit. Nothing is updated.
-async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db, { readOnly = false } = {}) {
-  let chargeAttempt = await database('stripe_invoice_charge_attempts')
-    .where({ invoice_id: invoiceId })
-    .whereIn('status', ['claimed', 'ambiguous'])
-    .whereNull('resolved_at')
-    .first('id', 'status', 'stripe_payment_intent_id', 'idempotency_key', 'submitted_at', 'created_at');
+function blockingInvoiceChargeAttempt(invoiceId, database, checkout) {
+  const attempts = database('stripe_invoice_charge_attempts').where({ invoice_id: invoiceId });
+  const activeClaim = (q) => q.whereIn('status', ['claimed', 'ambiguous']).whereNull('resolved_at');
+  if (checkout) {
+    // One snapshot includes both sides of the claimed -> authentication decline
+    // transition. Prefer a failed authentication attempt over a stale claimed
+    // row that this call could otherwise release and mistake for clearance.
+    attempts.where((q) => q.where(activeClaim)
+      .orWhere((auth) => whereAwaitingAuthentication(auth, 'stripe_invoice_charge_attempts')))
+      .orderByRaw("CASE WHEN status = 'failed' THEN 0 ELSE 1 END");
+  } else {
+    activeClaim(attempts);
+  }
+  return attempts.first('id', 'status', 'stripe_payment_intent_id', 'idempotency_key', 'submitted_at', 'created_at');
+}
+
+function invoiceChargeConflict(err, checkout) {
+  if (checkout) Object.assign(err, { statusCode: 409, savedCardPending: true });
+  return err;
+}
+
+// readOnly leaves every unresolved claim in place. checkout also covers a
+// resolved authentication decline when authorizing a new collection. Recording
+// money already received keeps the original reconciliation rules.
+async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db, { readOnly = false, checkout = false } = {}) {
+  let chargeAttempt = await blockingInvoiceChargeAttempt(invoiceId, database, checkout);
+  if (checkout && chargeAttempt?.status === 'failed') {
+    throw Object.assign(new Error('An earlier card payment is awaiting verification. Please contact us before trying again.'), {
+      code: 'STRIPE_CHARGE_IN_PROGRESS', chargeAttemptId: chargeAttempt.id, statusCode: 409, savedCardPending: true,
+    });
+  }
   if (chargeAttempt) {
     let ambiguous = chargeAttempt.status === 'ambiguous';
     if (!ambiguous && readOnly) {
@@ -236,7 +256,7 @@ async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = 
     err.stripePaymentIntentId = chargeAttempt.stripe_payment_intent_id || null;
     err.idempotencyKey = chargeAttempt.idempotency_key;
     err.reconciliationRequired = ambiguous;
-    throw err;
+    throw invoiceChargeConflict(err, checkout);
   }
 
   const orphan = await database('stripe_orphan_charges')
@@ -247,7 +267,7 @@ async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = 
     err.code = 'STRIPE_CHARGED_DB_FAILED';
     err.stripePaymentIntentId = orphan.stripe_payment_intent_id;
     err.reconciliationRequired = true;
-    throw err;
+    throw invoiceChargeConflict(err, checkout);
   }
 
   // An API/connection failure without a returned PI may still have collected
@@ -269,7 +289,7 @@ async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = 
     err.code = 'STRIPE_AMBIGUOUS_OUTCOME';
     err.paymentRecordId = ambiguousAttempt.id;
     err.reconciliationRequired = true;
-    throw err;
+    throw invoiceChargeConflict(err, checkout);
   }
 }
 
@@ -484,6 +504,7 @@ async function resolveNoFundsSavedCardChargeAttempt({
   // has. Optional; every other caller of this function omits it and the
   // column stays null, unaffected.
   declineCode = null,
+  authenticationIntentId = null,
   database = db,
 }) {
   if (!attemptId || !invoiceId) return false;
@@ -525,6 +546,7 @@ async function resolveNoFundsSavedCardChargeAttempt({
         status: 'failed',
         error_message: String(failureMessage || 'Pre-charge setup failed').slice(0, 1000),
         decline_code: declineCode,
+        ...(authenticationIntentId ? { stripe_payment_intent_id: authenticationIntentId } : {}),
         resolved_at: new Date(),
         updated_at: new Date(),
       });
@@ -2745,8 +2767,15 @@ const StripeService = {
           if (activePayment && !terminalStatuses.includes(activePayment.status)) {
             throw new Error('Invoice has a different active payment');
           }
-          if (!activePayment) {
+          // A failed payment row can still point to a reusable checkout PI.
+          // A browser holding that secret can confirm it directly (wallet or
+          // ACH). Retire it under the same rules as an abandoned checkout.
+          if (!activePayment || activePayment.status === 'failed') {
             const activeIntent = await stripe.paymentIntents.retrieve(lockedInvoice.stripe_payment_intent_id);
+            if (activePayment && activeIntent.status !== 'canceled'
+              && !require('./pay-combined').paymentIntentOwnsInvoice(activeIntent.metadata, invoiceId)) {
+              throw new Error('Could not verify the previous payment for this invoice');
+            }
             const cancellableStatuses = ['requires_payment_method', 'requires_confirmation', 'canceled'];
             if (!cancellableStatuses.includes(activeIntent.status)) {
               throw new Error('Invoice has a different active payment');
@@ -3152,14 +3181,18 @@ const StripeService = {
         // code (an InvalidRequestError's resource_missing, say) persisted
         // there would recover as a false "your payment method was declined"
         // notice. A non-decline keeps its raw code in the message instead.
-        const customerDecline = err.type === 'StripeCardError' || err.code === 'card_declined' || Boolean(err.decline_code);
-        const rawCode = err.decline_code || err.raw?.decline_code || err.code || null;
+        const rawCode = err.decline_code || err.raw?.decline_code || err.code || err.raw?.code || null;
+        const customerDecline = err.type === 'StripeCardError' || err.code === 'card_declined'
+          || Boolean(err.decline_code) || rawCode === 'authentication_required';
         const declineCode = customerDecline ? rawCode : null;
+        const failedIntent = err.payment_intent || err.raw?.payment_intent;
+        const failedIntentId = typeof failedIntent === 'string' ? failedIntent : failedIntent?.id || null;
         await resolveNoFundsSavedCardChargeAttempt({
           attemptId: chargeAttempt.id,
           invoiceId,
           failureMessage: `${err.message || 'Card charge failed'}${!customerDecline && rawCode ? ` (${rawCode})` : ''}`,
           declineCode,
+          authenticationIntentId: declineCode === 'authentication_required' ? failedIntentId : null,
         }).catch((attemptErr) => {
           logger.error(`[stripe] charge-attempt release failed after deterministic decline ${chargeAttempt.id}; claim remains blocking: ${attemptErr.message}`);
         });
@@ -3186,7 +3219,7 @@ const StripeService = {
         // before opening a pay-link rail beside it (the
         // payment_intent.requires_action webhook rails may still invite
         // the customer to complete the original intent).
-        chargeFailed.stripePaymentIntentId = err.payment_intent?.id || err.raw?.payment_intent?.id || null;
+        chargeFailed.stripePaymentIntentId = failedIntentId;
         throw chargeFailed;
       }
 
@@ -4065,7 +4098,7 @@ const StripeService = {
           // Route preflight is intentionally duplicated under the invoice lock:
           // a saved-card owner can claim after the public request's unlocked
           // check but before this transaction mints/reuses a client secret.
-          await assertNoInvoiceChargeReconciliationPending(invoiceId, trx);
+          await assertNoInvoiceChargeReconciliationPending(invoiceId, trx, { checkout: true });
         } catch (fenceErr) {
           fenceErr.statusCode = 409;
           fenceErr.inProgress = false;
@@ -4902,7 +4935,8 @@ const StripeService = {
     // The live read doubles as the replacement path's status inspection
     // (one retrieve per update, the same fail-closed contract).
     let liveIntent = null;
-    const refuseInPlaceOnConsentStampChange = async () => {
+    const verifyUpdateSession = async (updateTrx) => {
+      await assertNoInvoiceChargeReconciliationPending(invoiceId, updateTrx, { checkout: true });
       try {
         liveIntent = await stripe.paymentIntents.retrieve(effectivePaymentIntentId);
       } catch (retrieveErr) {
@@ -4946,7 +4980,7 @@ const StripeService = {
             anchorInvoiceId: invoiceId,
             expectPaymentIntentId: effectivePaymentIntentId,
           });
-          await refuseInPlaceOnConsentStampChange();
+          await verifyUpdateSession(updateTrx);
           return stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
         });
       } else {
@@ -4961,7 +4995,7 @@ const StripeService = {
             throw err;
           }
           await require('./estimate-deposits').assertInvoiceDepositSettlementReady(updateTrx, lockedInvoice);
-          await refuseInPlaceOnConsentStampChange();
+          await verifyUpdateSession(updateTrx);
           return stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
         });
       }
@@ -5059,7 +5093,7 @@ const StripeService = {
       // as-is, not wrapped as a generic update failure — and so must the
       // combined allocation's staleBalance 409 (the page reloads to live
       // amounts).
-      if (err && (err.sessionChanged || err.staleBalance || err.code === 'DEPOSIT_RECONCILIATION_REQUIRED')) throw err;
+      if (err && (err.sessionChanged || err.staleBalance || err.savedCardPending || err.code === 'DEPOSIT_RECONCILIATION_REQUIRED')) throw err;
       if (err && err.consentStampChanged) {
         logger.info(`[stripe] PI ${effectivePaymentIntentId} consent stamp changed on update-amount; replacing for method=${selectedMethodCategory}`);
         return this.replaceInvoicePaymentIntentForTender(invoiceId, effectivePaymentIntentId, replacementContext());
@@ -5170,6 +5204,7 @@ const StripeService = {
         .first();
       if (!lockedInvoice) throw new Error('Invoice not found');
       assertInvoiceCollectible(lockedInvoice);
+      await assertNoInvoiceChargeReconciliationPending(invoiceId, trx, { checkout: true });
       if (replacementAllocation) {
         await PayCombined.verifyAllocationLocked(trx, replacementAllocation, {
           anchorInvoiceId: invoiceId,
@@ -5515,10 +5550,10 @@ const StripeService = {
         // For a combined charge the fence covers EVERY allocated invoice — a
         // saved-card claim on any sibling suppresses the whole combined
         // confirm (that sibling's money may already be moving elsewhere).
-        await assertNoInvoiceChargeReconciliationPending(invoiceId, finalizeTrx);
+        await assertNoInvoiceChargeReconciliationPending(invoiceId, finalizeTrx, { checkout: true });
         if (finalizeCombinedCtx) {
           for (const sibling of finalizeCombinedCtx.siblings) {
-            await assertNoInvoiceChargeReconciliationPending(sibling.id, finalizeTrx);
+            await assertNoInvoiceChargeReconciliationPending(sibling.id, finalizeTrx, { checkout: true });
           }
         }
 

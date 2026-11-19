@@ -11,6 +11,7 @@ const { loadPayerLinkage, invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, isCo
 const { invoiceAmountDue, isCollectibleOwnInvoice, invoiceWithdrawnFromCustomer, neverRanVisitStatus } = require('./invoice-helpers');
 const { isNeverAttemptedDeferral } = require('./failed-payments');
 const { isParkedOrSupersededAttempt } = require('./retry-collectibility');
+const { whereAwaitingAuthentication } = require('./invoice-payment-authentication');
 
 // Receipt links per payment row. Two sources, in preference order:
 //   1. The Waves receipt — invoice.token drives the permanent
@@ -260,12 +261,7 @@ async function loadAuthenticationRecoveryStates(customerId, invoices, database) 
         this.where(function unresolvedAttempt() {
           this.whereIn('attempt.status', ['claimed', 'ambiguous'])
             .whereNull('attempt.resolved_at');
-        }).orWhere(function authenticationRequired() {
-          this.where({
-            'attempt.status': 'failed',
-            'attempt.decline_code': 'authentication_required',
-          }).whereNotNull('attempt.resolved_at');
-        });
+        }).orWhere((q) => whereAwaitingAuthentication(q, 'attempt'));
       })
       .whereIn('attempt.invoice_id', invoiceIds)
       .select('attempt.invoice_id', 'attempt.status', 'attempt.decline_code', 'attempt.resolved_at');
@@ -401,8 +397,17 @@ function emptyRecoveryDetails() {
   };
 }
 
-function recoveryFieldsFor(paymentId, { recoveryByPaymentId, recoveryStateByPaymentId }) {
-  const id = String(paymentId);
+function recoveryFieldsFor(payment, { recoveryByPaymentId, recoveryStateByPaymentId }) {
+  const id = String(payment.id);
+  if (payment.status === 'failed') {
+    if (isNeverAttemptedDeferral(payment)
+      || (payment.superseded_by_payment_id != null && String(payment.superseded_by_payment_id) !== id)) {
+      return { recoveryInvoice: null, recoveryState: 'recovery_inactive' };
+    }
+    if (isParkedOrSupersededAttempt(payment)) {
+      return { recoveryInvoice: null, recoveryState: 'authentication_unknown' };
+    }
+  }
   return {
     recoveryInvoice: recoveryByPaymentId.get(id) || null,
     // Do not collapse this into an ordinary unavailable invoice. The client
@@ -492,13 +497,9 @@ async function recoveryDetailsFor(customerId, visiblePayments, database = db) {
   const ownership = await require('./invoice-payer-ownership').liveInvoiceOwnership(
     customerId, identifiedInvoices, database, { maxResolutions: 30, byCandidatePayer: true },
   );
-  if (ownership.unverifiable) {
-    return { recoveryByPaymentId: new Map(), recoveryStateByPaymentId };
-  }
-
   const availableInvoices = new Map();
   for (const invoice of identifiedInvoices) {
-    if (!recoveryInvoiceIsPayable(invoice, ownership.ownedIds)) continue;
+    if (ownership.unverifiable || !recoveryInvoiceIsPayable(invoice, ownership.ownedIds)) continue;
     const current = await recoveryInvoiceAvailableNow(customerId, invoice, database);
     if (recoveryInvoiceIsPayable(current)) availableInvoices.set(String(invoice.id), current);
   }
@@ -677,7 +678,7 @@ async function listPortalPayments(customerId, {
       refundAmount: p.refund_amount ? parseFloat(p.refund_amount) : null,
       refundStatus: p.refund_status || null,
       ...(includeRecoveryInvoices
-        ? recoveryFieldsFor(p.id, recoveryDetails)
+        ? recoveryFieldsFor(p, recoveryDetails)
         : {}),
       // Receipt surfaces (see the resolution block above). All three are
       // null when this payment has no retrievable receipt — the row simply

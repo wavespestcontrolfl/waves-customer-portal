@@ -119,6 +119,13 @@ describe('abandoned sibling PI — preview (GET) mode', () => {
     expect(out).toHaveLength(1);
   });
 
+  test('an old saved-card authentication is never canceled to collect a sibling', async () => {
+    paymentRow = { status: 'failed' };
+    mockRetrieve.mockResolvedValue(deadPi({ status: 'requires_action', metadata: { waves_invoice_id: SIBLING_ID, source: 'admin_card_on_file' } }));
+    expect(await PayCombined.combinedEligibleSiblings(anchor(), { releaseAbandonedPaymentIntents: true })).toBeNull();
+    expect(mockCancel).not.toHaveBeenCalled();
+  });
+
   test('Stripe unconfigured (null) or unreadable ⇒ excluded, never thrown', async () => {
     mockRetrieve.mockResolvedValueOnce(null);
     expect(await PayCombined.combinedEligibleSiblings(anchor())).toBeNull();

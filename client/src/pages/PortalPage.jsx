@@ -7144,12 +7144,14 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   // the Auto Pay-off banner can point at the Pay now button when one renders.
   const openInvoices = Array.isArray(balance?.openInvoices) ? balance.openInvoices : [];
   const primaryOpenInvoice = openInvoices[0] || null;
-  // A saved-card attempt awaiting authentication can still settle; a failed
-  // verification read cannot prove otherwise. Keep the original open-invoice
-  // list intact, but do not let the newer failed-payment recovery surfaces
-  // actively send the customer toward another checkout in any blocked state.
-  const paymentVerificationRequired = payments.some(paymentNeedsVerification);
-  const recoveryShortcutsBlocked = payments.some(paymentBlocksRecoveryShortcut);
+  // Balance and history can refresh independently. Base the banner on the
+  // attempt that triggered it. Each history row has its own recovery action.
+  const currentFailure = balance?.lastPaymentAttemptId
+    ? payments.find((p) => p.id === balance.lastPaymentAttemptId && p.status === 'failed')
+    : payments.find((p) => p.status === 'failed' && p.recoveryState !== 'recovery_inactive');
+  const paymentVerificationRequired = paymentNeedsVerification(currentFailure);
+  const recoveryShortcutsBlocked = paymentBlocksRecoveryShortcut(currentFailure)
+    || (balance?.lastPaymentAttemptId && (!currentFailure || currentFailure.recoveryState === 'recovery_inactive'));
   const failedBannerCopy = failedPaymentBannerCopy({
     paymentVerificationRequired,
     recoveryShortcutsBlocked,
@@ -8082,7 +8084,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
                     bank payment never reads "Card ending in …". */}
                 {p.lastFour && ` - ${isBankMethod(p.methodType) ? (p.bankName || 'Bank account') : cardBrandLabel(p.cardBrand)} ending in ${p.lastFour}`}
               </div>
-              {p.status === 'failed' && (
+              {p.status === 'failed' && p.recoveryState !== 'recovery_inactive' && (
                 <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                   {paymentNeedsVerification(p) ? (
                     <span role="status" style={{ color: B.red, fontSize: 14, fontWeight: 700, lineHeight: 1.4 }}>
@@ -8092,11 +8094,11 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
                     <span role="status" style={{ color: B.red, fontSize: 14, fontWeight: 700, lineHeight: 1.4 }}>
                       Contact us to review this payment before trying again.
                     </span>
-                  ) : p.recoveryInvoice && !recoveryShortcutsBlocked ? (
+                  ) : p.recoveryInvoice ? (
                     <a data-glass-accent="" href={p.recoveryInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
                       Review invoice
                     </a>
-                  ) : primaryOpenInvoice && !recoveryShortcutsBlocked ? (
+                  ) : primaryOpenInvoice ? (
                     <a data-glass-accent="" href="#billing-open-invoices" style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
                       View open invoices
                     </a>

@@ -756,7 +756,9 @@ router.get('/balance', async (req, res, next) => {
       .whereIn('status', ['paid', 'failed', 'refunded'])
       .whereNull('superseded_by_payment_id')
       .orderBy('payment_date', 'desc')
-      .select('status', 'metadata', 'stripe_payment_intent_id', 'retry_count', 'next_retry_at');
+      .orderBy('created_at', 'desc')
+      .orderBy('id', 'desc')
+      .select('id', 'status', 'metadata', 'stripe_payment_intent_id', 'retry_count', 'next_retry_at');
     let mostRecentAttempt = null;
     {
       const PAGE = 50;
@@ -836,6 +838,7 @@ router.get('/balance', async (req, res, next) => {
         description: nextPayment.description,
       } : null,
       lastPaymentFailed: mostRecentAttempt?.status === 'failed',
+      lastPaymentAttemptId: mostRecentAttempt?.id || null,
       ...(openInvoices ? { openInvoices } : {}),
     });
   } catch (err) {

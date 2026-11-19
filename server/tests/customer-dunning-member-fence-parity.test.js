@@ -129,7 +129,7 @@ describe('memberCollectionPending mirrors the pay page\'s per-member checks', ()
     expect(out).toEqual({ row: stored });
     expect(out.reason).toBeUndefined();
     expect(mockDeposit).toHaveBeenCalledWith(database, expect.objectContaining({ id: 'i1' }), { lock: false });
-    expect(mockRecon).toHaveBeenCalledWith('i1', database, { readOnly: true });
+    expect(mockRecon).toHaveBeenCalledWith('i1', database, { readOnly: true, checkout: true });
     expect(mockResolveForInvoice.mock.calls[0][0]).toMatchObject({ database, throwOnError: true });
   });
 

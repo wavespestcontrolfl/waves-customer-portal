@@ -196,13 +196,13 @@ describe('the caller\'s database handle reaches the payer resolve', () => {
     expect(mockStopped).toHaveBeenCalledWith(['s1'], { database: handle });
     // Default callers (the pay page, money seams) keep the writing fence: the
     // very same two-argument call they always made.
-    expect(mockReconcile.mock.calls).toEqual([['s1', handle]]);
+    expect(mockReconcile.mock.calls).toEqual([['s1', handle, { checkout: true }]]);
   });
 
   test('readOnly reaches the sibling reconciliation fence', async () => {
     const handle = jest.fn(serveFullRow);
     await PayCombined.combinedEligibleSiblings(anchor(), { database: handle, readOnly: true });
-    expect(mockReconcile).toHaveBeenCalledWith('s1', handle, { readOnly: true });
+    expect(mockReconcile).toHaveBeenCalledWith('s1', handle, { readOnly: true, checkout: true });
   });
 
   test('with no handle the default pool handle is passed explicitly', async () => {

@@ -74,10 +74,10 @@ function reader(rows, resolvedAttempts = [], supplementalRows = rows, { attemptE
   return jest.fn((table) => {
     const query = {};
     for (const method of [
-      'join', 'where', 'whereNull', 'whereNotNull', 'whereIn', 'orWhere', 'orWhereIn',
+      'join', 'where', 'whereNull', 'whereNotNull', 'whereIn', 'orWhere', 'orWhereIn', 'orWhereColumn', 'orWhereNull',
     ]) {
       query[method] = (...args) => {
-        if (typeof args[0] === 'function') args[0].call(query);
+        if (typeof args[0] === 'function') args[0].call(query, query);
         return query;
       };
     }
@@ -250,6 +250,12 @@ test.each([
     expectedCollectionChecks: 1,
   },
   {
+    label: 'unverifiable payer ownership',
+    invoiceRow: invoice(),
+    ownershipUnverifiable: true,
+    expectedState: 'recovery_unavailable',
+  },
+  {
     label: 'historical authentication_required after settlement',
     invoiceRow: invoice({ status: 'paid', amount_paid: '95.00' }),
     attemptRows: [{
@@ -265,6 +271,7 @@ test.each([
   attemptRows = [],
   attemptFailure,
   collectionResult,
+  ownershipUnverifiable,
   expectedState,
   expectedCollectionChecks = 0,
 }) => {
@@ -281,12 +288,13 @@ test.each([
     method_type: 'card',
   };
   stripe.getPaymentHistory.mockResolvedValue([payment]);
+  if (ownershipUnverifiable) liveInvoiceOwnership.mockResolvedValueOnce({ ownedIds: new Set(), unverifiable: true });
   if (collectionResult !== undefined) memberCollectionPending.mockResolvedValue(collectionResult);
   let invoiceReads = 0;
   const database = jest.fn((table) => {
     const query = {};
     for (const method of [
-      'join', 'where', 'whereNull', 'whereNotNull', 'whereRaw', 'whereIn', 'orWhere', 'orWhereIn', 'count',
+      'join', 'where', 'whereNull', 'whereNotNull', 'whereRaw', 'whereIn', 'orWhere', 'orWhereIn', 'orWhereColumn', 'orWhereNull', 'count',
     ]) {
       query[method] = (...args) => {
         if (typeof args[0] === 'function') args[0].call(query, query);

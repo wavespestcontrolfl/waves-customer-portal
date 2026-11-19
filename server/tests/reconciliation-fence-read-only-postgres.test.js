@@ -8,6 +8,11 @@
 // database (skipped without APP_TEST_DATABASE_URL, run for real in CI).
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
+const migration = require('../models/migrations/20261119081500_saved_card_authentication_cancellation');
+const { recordAuthenticationCancellation } = require('../services/invoice-payment-authentication');
+jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => null) }));
+jest.mock('../services/completion-balance-sweep', () => ({ dunningStoppedInvoiceIds: jest.fn(async () => new Set()) }));
+jest.mock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn(async () => {}) }));
 
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -26,12 +31,22 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     admin = knex({ client: 'pg', connection, pool: { min: 0, max: 1 } });
     await admin.schema.createSchema(schema);
     app = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 2 } });
+    await app.schema.createTable('invoices', (t) => {
+      t.uuid('id').primary();
+      t.uuid('customer_id');
+      t.string('status');
+      t.string('invoice_number');
+      t.decimal('total');
+      t.string('stripe_payment_intent_id');
+    });
     await app.schema.createTable('stripe_invoice_charge_attempts', (t) => {
       t.uuid('id').primary();
       t.uuid('invoice_id');
       t.string('status');
       t.string('stripe_payment_intent_id');
       t.string('idempotency_key');
+      t.string('decline_code');
+      t.string('stripe_payment_method_id');
       t.text('error_message');
       t.timestamp('submitted_at');
       t.timestamp('resolved_at');
@@ -50,6 +65,12 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       t.jsonb('metadata');
       t.uuid('superseded_by_payment_id');
     });
+    await app.schema.createTable('stripe_webhook_events', (t) => {
+      t.string('event_type');
+      t.boolean('processed');
+      t.jsonb('payload');
+    });
+    await migration.up(app);
     StripeService = require('../services/stripe');
   });
 
@@ -85,6 +106,120 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
   const verdict = (invoiceId, database, opts) => StripeService
     .assertNoInvoiceChargeReconciliationPending(invoiceId, database, opts)
     .then(() => null, (e) => e);
+
+  async function authenticationFixture(conn, customerId = randomUUID()) {
+    const invoiceId = randomUUID();
+    const attemptId = randomUUID();
+    const intent = {
+      id: `pi_${attemptId}`, status: 'canceled', payment_method: 'pm_synthetic',
+      metadata: { source: 'admin_card_on_file', saved_card_attempt_id: attemptId, waves_invoice_id: invoiceId, waves_customer_id: customerId },
+    };
+    await conn('invoices').insert({ id: invoiceId, customer_id: customerId, status: 'sent', invoice_number: invoiceId, total: 25 });
+    await conn('stripe_invoice_charge_attempts').insert({
+      id: attemptId, invoice_id: invoiceId, stripe_payment_method_id: intent.payment_method, created_at: new Date(),
+      status: 'failed', decline_code: 'authentication_required', resolved_at: new Date(),
+    });
+    return { invoiceId, attemptId, intent, customerId };
+  }
+
+  test('an older authenticating attempt outranks a releasable stale claim until its own cancellation', async () => {
+    const { invoiceId, attemptId, intent } = await authenticationFixture(app);
+    const staleId = randomUUID();
+    await app('stripe_invoice_charge_attempts').insert({
+      id: staleId, invoice_id: invoiceId, status: 'claimed', created_at: new Date(Date.now() - 600_000),
+    });
+    await recordAuthenticationCancellation({ ...intent, status: 'processing' }, app);
+    await recordAuthenticationCancellation({ ...intent, payment_method: 'pm_different' }, app);
+    await recordAuthenticationCancellation({ ...intent, metadata: { ...intent.metadata, saved_card_attempt_id: staleId } }, app);
+    expect(await inReadOnly((trx) => verdict(invoiceId, trx, { readOnly: true, checkout: true })))
+      .toMatchObject({ chargeAttemptId: attemptId, statusCode: 409, savedCardPending: true });
+    expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ chargeAttemptId: attemptId });
+    expect((await app('stripe_invoice_charge_attempts').where({ id: staleId }).first()).status).toBe('claimed');
+    await recordAuthenticationCancellation(intent, app);
+    await recordAuthenticationCancellation(intent, app);
+    expect(await verdict(invoiceId, app, { checkout: true })).toBeNull();
+  });
+
+  test('an early cancellation only clears the same intent when the decline is recorded later', async () => {
+    const { invoiceId, attemptId, intent } = await authenticationFixture(app);
+    const attempt = () => app('stripe_invoice_charge_attempts').where({ id: attemptId });
+    await attempt().update({ status: 'claimed', decline_code: null, resolved_at: null });
+    await recordAuthenticationCancellation({ ...intent, payment_method: null }, app);
+    expect(await attempt().first()).toMatchObject({ authentication_canceled_intent_id: intent.id, stripe_payment_intent_id: null });
+    expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ code: 'STRIPE_CHARGE_IN_PROGRESS' });
+    await StripeService.resolveNoFundsSavedCardChargeAttempt({
+      database: app, invoiceId, attemptId, failureMessage: 'Card verification required',
+      declineCode: 'authentication_required', authenticationIntentId: intent.id,
+    });
+    expect(await verdict(invoiceId, app, { checkout: true })).toBeNull();
+    await attempt().update({ stripe_payment_intent_id: 'pi_different' });
+    expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ chargeAttemptId: attemptId });
+    expect(await verdict(invoiceId, app)).toBeNull(); // settlement of existing money still runs
+    await recordAuthenticationCancellation({ ...intent, id: 'pi_different' }, app);
+    expect(await verdict(invoiceId, app, { checkout: true })).toBeNull();
+  });
+
+  test('migration recovers only exact processed cancellations and retains them after event expiry', async () => {
+    await app.transaction(async (trx) => {
+      await migration.down(trx);
+      const cleared = await authenticationFixture(trx);
+      const blocked = await authenticationFixture(trx);
+      const event = (pi, processed = true) => ({
+        event_type: 'payment_intent.canceled', processed, payload: JSON.stringify({ object: pi }),
+      });
+      await trx('stripe_webhook_events').insert([
+        event(cleared.intent), event(blocked.intent, false),
+        event({ ...blocked.intent, metadata: { ...blocked.intent.metadata, waves_customer_id: cleared.customerId } }),
+      ]);
+      await migration.up(trx);
+      await trx('stripe_webhook_events').del();
+      expect(await verdict(cleared.invoiceId, trx, { checkout: true })).toBeNull();
+      expect(await verdict(blocked.invoiceId, trx, { checkout: true })).toMatchObject({ chargeAttemptId: blocked.attemptId });
+    });
+  });
+
+  test('combined checkout waiting for a sibling lock sees the new authentication decline before collection', async () => {
+    const { verifyAllocationLocked } = require('../services/pay-combined');
+    const sibling = await authenticationFixture(app);
+    const anchor = randomUUID();
+    await app('invoices').insert({ id: anchor, customer_id: sibling.customerId, status: 'sent', total: 25 });
+    const allocation = [anchor, sibling.invoiceId].map((invoiceId) => ({ invoiceId, cents: 2500 }));
+    const collect = jest.fn();
+    let queued;
+    const started = new Promise((resolve) => { queued = resolve; });
+    await app('stripe_invoice_charge_attempts').where({ id: sibling.attemptId }).update({ decline_code: 'insufficient_funds' });
+    expect(await verdict(sibling.invoiceId, app, { checkout: true })).toBeNull();
+    const nextId = randomUUID();
+    const nextIntent = { ...sibling.intent, id: 'pi_next', metadata: { ...sibling.intent.metadata, saved_card_attempt_id: nextId } };
+    await app('stripe_invoice_charge_attempts').insert({
+      id: nextId, invoice_id: sibling.invoiceId, status: 'claimed', created_at: new Date(), stripe_payment_method_id: 'pm_synthetic',
+    });
+    const charge = await app.transaction();
+    try {
+      await charge('invoices').where({ id: sibling.invoiceId }).forUpdate().first();
+      await charge('stripe_invoice_charge_attempts').where({ id: nextId }).update({
+        status: 'failed', resolved_at: new Date(), decline_code: 'authentication_required', stripe_payment_intent_id: nextIntent.id,
+      });
+      const checkout = app.transaction(async (trx) => {
+        trx.on('query', (q) => { if (q.sql.includes('for update')) queued(); });
+        await verifyAllocationLocked(trx, allocation, { anchorInvoiceId: anchor, allowUnbound: true });
+        collect();
+      });
+      const refused = expect(checkout).rejects.toMatchObject({ staleBalance: true, statusCode: 409 });
+      await started;
+      await charge.commit();
+      await refused;
+      expect(collect).not.toHaveBeenCalled();
+    } finally {
+      if (!charge.isCompleted()) await charge.rollback();
+    }
+    await recordAuthenticationCancellation(nextIntent, app);
+    await app.transaction(async (trx) => {
+      await verifyAllocationLocked(trx, allocation, { anchorInvoiceId: anchor, allowUnbound: true });
+      collect();
+    });
+    expect(collect).toHaveBeenCalledTimes(1);
+  });
 
   test('stale SUBMITTED claim: ambiguous verdict, no write, transaction stays usable', async () => {
     const f = await staleClaim({ submitted: true });

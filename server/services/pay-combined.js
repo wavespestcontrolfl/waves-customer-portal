@@ -86,6 +86,9 @@ async function abandonedSiblingPaymentIntent(inv, { database = db } = {}) {
     if (!pi) return null;
     if (!paymentIntentOwnsInvoice(pi.metadata, inv.id)) return null;
     if (pi.status === 'canceled') return pi;
+    // A saved-card challenge can still settle after a customer closes the
+    // page. Inactivity only establishes abandonment of a checkout session.
+    if (pi.metadata?.source === 'admin_card_on_file') return null;
     if (!UNCONFIRMED_PI_STATUSES.includes(pi.status)) return null;
     if (pi.status === 'requires_action' && pi.next_action?.type === 'verify_with_microdeposits') return null;
     const createdMs = Number(pi.created) * 1000;
@@ -314,7 +317,7 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
     const StripeService = require('./stripe');
     const fenceOne = readOnly
       ? (inv) => memberCollectionPending(inv, { database, customerId: anchorInvoice.customer_id })
-      : (inv) => StripeService.assertNoInvoiceChargeReconciliationPending(inv.id, database).then(() => ({ row: inv }));
+      : (inv) => StripeService.assertNoInvoiceChargeReconciliationPending(inv.id, database, { checkout: true }).then(() => ({ row: inv }));
     const cleared = [];
     for (const inv of eligible) {
       let verdict;
@@ -490,7 +493,7 @@ async function memberCollectionPending(inv, {
     throw err;
   }
   try {
-    await require('./stripe').assertNoInvoiceChargeReconciliationPending(inv.id, database, { readOnly: true });
+    await require('./stripe').assertNoInvoiceChargeReconciliationPending(inv.id, database, { readOnly: true, checkout: true });
   } catch (err) {
     if (isCollectionPendingFenceError(err)) return { reason: 'charge_reconciliation', code: err.code };
     throw err;
@@ -577,7 +580,7 @@ async function verifyAllocationLocked(trx, allocation, { anchorInvoiceId, expect
     // route/setup preflights cover the anchor.
     if (!isAnchor) {
       try {
-        await require('./stripe').assertNoInvoiceChargeReconciliationPending(row.id, trx);
+        await require('./stripe').assertNoInvoiceChargeReconciliationPending(row.id, trx, { checkout: true });
       } catch (fenceErr) {
         logger.warn(`[pay-combined] sibling ${row.invoice_number} failed the reconciliation fence during locked verification: ${fenceErr.message}`);
         throw staleErr(`invoice ${row.invoice_number} has a pending payment reconciliation`);

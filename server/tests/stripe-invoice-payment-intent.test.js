@@ -74,6 +74,7 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       first: jest.fn().mockResolvedValue(null),
     };
     const chargeAttemptsQuery = {
+      orderByRaw: jest.fn(() => chargeAttemptsQuery),
       where: jest.fn(() => chargeAttemptsQuery),
       whereIn: jest.fn(() => chargeAttemptsQuery),
       whereNull: jest.fn(() => chargeAttemptsQuery),
@@ -127,13 +128,13 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     }));
   });
 
-  test('rechecks the saved-card fence while holding the invoice lock', async () => {
+  test.each(['claimed', 'failed'])('refuses a %s saved-card attempt returned by the locked checkout check', async (status) => {
     // A committed claim can still have no Stripe PI; the null stamp must
     // never make the invoice collectible through a second rail.
     invoiceRow.stripe_payment_intent_id = null;
     savedCardAttempt = {
       id: 'attempt-active',
-      status: 'claimed',
+      status,
       idempotency_key: 'attempt-key',
       created_at: new Date().toISOString(),
     };
@@ -830,7 +831,7 @@ describe('StripeService.finalizeInvoicePayment saved-card serialization', () => 
     else process.env.JWT_SECRET = originalJwtSecret;
   });
 
-  test('locks the invoice and rejects a saved-card claim before Stripe confirm', async () => {
+  test.each(['claimed', 'failed'])('locks the invoice and rejects the %s saved-card attempt before Stripe confirm', async (status) => {
     const invoice = {
       id: 'inv-finalize',
       invoice_number: 'WPC-FINALIZE',
@@ -859,12 +860,13 @@ describe('StripeService.finalizeInvoicePayment saved-card serialization', () => 
       first: jest.fn().mockResolvedValue(invoice),
     };
     const attemptQuery = {
+      orderByRaw: jest.fn(() => attemptQuery),
       where: jest.fn(() => attemptQuery),
       whereIn: jest.fn(() => attemptQuery),
       whereNull: jest.fn(() => attemptQuery),
       first: jest.fn().mockResolvedValue({
         id: 'attempt-race',
-        status: 'claimed',
+        status,
         idempotency_key: 'attempt-key',
         created_at: new Date().toISOString(),
       }),
@@ -972,6 +974,7 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
       first: jest.fn().mockResolvedValue(invoice),
     };
     const attemptQuery = {
+      orderByRaw: jest.fn(() => attemptQuery),
       where: jest.fn(() => attemptQuery),
       whereIn: jest.fn(() => attemptQuery),
       whereNull: jest.fn(() => attemptQuery),
@@ -1149,9 +1152,11 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
   let invoiceRow;
   let stripeClient;
   let dbMock;
+  let checkoutAttempt;
 
   beforeEach(() => {
     jest.resetModules();
+    checkoutAttempt = null;
 
     invoiceRow = {
       id: 'inv_123',
@@ -1201,6 +1206,13 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
     dbMock.transaction = jest.fn(async (cb) => {
       const trx = jest.fn(table => {
         if (table === 'invoices') return trxInvoiceQuery;
+        if (['stripe_invoice_charge_attempts', 'stripe_orphan_charges', 'payments'].includes(table)) {
+          const query = {
+            where: () => query, whereNull: () => query, whereRaw: () => query, orderByRaw: () => query,
+            first: async () => table === 'stripe_invoice_charge_attempts' ? checkoutAttempt : null,
+          };
+          return query;
+        }
         throw new Error(`Unexpected trx table: ${table}`);
       });
       return cb(trx);
@@ -1218,6 +1230,19 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
       error: jest.fn(),
     }));
     jest.doMock('../models/db', () => dbMock);
+  });
+
+  test('refuses a pending authentication before repricing or minting a tender replacement', async () => {
+    checkoutAttempt = { id: 'attempt-sca', status: 'failed' };
+    const service = require('../services/stripe');
+    await expect(service.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card'))
+      .rejects.toMatchObject({ statusCode: 409, savedCardPending: true });
+    await expect(service.replaceInvoicePaymentIntentForTender(invoiceRow.id, 'pi_invoice', {
+      baseCents: 7500, base: 75, paymentMethodTypes: ['card'], metadata: {},
+    })).rejects.toMatchObject({ statusCode: 409, savedCardPending: true });
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
   test('card-family updates keep the PaymentIntent at base amount (surcharge deferred to /finalize)', async () => {

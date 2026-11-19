@@ -91,7 +91,11 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     }));
   });
 
-  test('rejects a stale expected total before cancelling an abandoned pay-session intent', async () => {
+  test.each([
+    [null, 'requires_payment_method', 'Invoice amount changed after the payment quote'],
+    ['failed', 'requires_payment_method', 'Invoice amount changed after the payment quote'],
+    ['failed', 'processing', 'Invoice has a different active payment'],
+  ])('rechecks the previous checkout before charging (ledger %s, processor %s)', async (ledgerStatus, intentStatus, refusal) => {
     const invoice = {
       id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'draft',
       total: '250.00', credit_applied: '0.00', payer_id: null,
@@ -115,6 +119,9 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
         if (table === 'payment_methods') return card;
         if (table === 'customers') return { id: 'cust-1', stripe_customer_id: 'cus-1' };
         if (table === 'stripe_invoice_charge_attempts') return chargeAttempt;
+        if (table === 'payments' && chain.where.mock.calls.some(([where]) => where?.stripe_payment_intent_id === 'pi-old')) {
+          return ledgerStatus ? { status: ledgerStatus } : null;
+        }
         return null;
       });
       chain.insert = jest.fn((payload) => {
@@ -139,7 +146,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
 
     const stripeClient = {
       paymentIntents: {
-        retrieve: jest.fn().mockResolvedValue({ id: 'pi-old', status: 'requires_payment_method' }),
+        retrieve: jest.fn().mockResolvedValue({ id: 'pi-old', status: intentStatus, metadata: { waves_invoice_id: invoice.id } }),
         cancel: jest.fn().mockResolvedValue({ id: 'pi-old', status: 'canceled' }),
         create: jest.fn(),
       },
@@ -153,7 +160,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
 
     const StripeService = require('../services/stripe');
     await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { expectedTotal: 999 }))
-      .rejects.toThrow('Invoice amount changed after the payment quote');
+      .rejects.toThrow(refusal);
     expect(stripeClient.paymentIntents.retrieve).toHaveBeenCalledWith('pi-old');
     expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();

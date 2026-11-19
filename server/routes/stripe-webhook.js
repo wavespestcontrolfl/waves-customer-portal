@@ -7058,6 +7058,7 @@ async function alertCanceledMonthlyAutopay(paymentIntent, row) {
 async function handlePaymentIntentCanceled(paymentIntent) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent canceled: ${piId}`);
+  await require('../services/invoice-payment-authentication').recordAuthenticationCancellation(paymentIntent, db);
   if (paymentIntent.metadata?.waves_statement_id) {
     await handleStatementPaymentIntentEvent(paymentIntent, 'canceled');
     return;

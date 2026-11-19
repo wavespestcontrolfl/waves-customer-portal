@@ -56,20 +56,20 @@ describe('isZelleTransferEligible / payPageZelleVisibility readOnly plumbing', (
   test('readOnly: the charge-claim fence is asked in READ-ONLY mode, and so are the sibling fences', async () => {
     const siblings = jest.spyOn(PayCombined, 'combinedEligibleSiblings').mockResolvedValue(null);
     await expect(payRouter.isZelleTransferEligible(invoice, { readOnly: true })).resolves.toBe(true);
-    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('inv-1', db, { readOnly: true });
+    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('inv-1', db, { readOnly: true, checkout: true });
     expect(siblings).toHaveBeenCalledWith(invoice, expect.objectContaining({ readOnly: true }));
   });
   test('payPageZelleVisibility passes readOnly through (the SMS entry point)', async () => {
     const siblings = jest.spyOn(PayCombined, 'combinedEligibleSiblings').mockResolvedValue(null);
     const out = await payRouter.payPageZelleVisibility({ invoice, readOnly: true, creditWillCoverAnchor: false });
     expect(out.visible).toBe(true);
-    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('inv-1', db, { readOnly: true });
+    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('inv-1', db, { readOnly: true, checkout: true });
     expect(siblings).toHaveBeenCalledWith(invoice, expect.objectContaining({ readOnly: true }));
   });
-  test('default (the public pay page GET): main\'s behavior is unchanged — the plain single-argument call, no readOnly on siblings', async () => {
+  test('default (the public pay page GET): checkout checks authentication and keeps the writing mode', async () => {
     const siblings = jest.spyOn(PayCombined, 'combinedEligibleSiblings').mockResolvedValue(null);
     await payRouter.payPageZelleVisibility({ invoice, creditWillCoverAnchor: false });
-    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('inv-1');
+    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('inv-1', expect.anything(), { readOnly: false, checkout: true });
     expect(siblings.mock.calls[0][1]).not.toHaveProperty('readOnly');
   });
   test('a fenced claim still withholds Zelle in read-only mode (STRIPE_CHARGE_IN_PROGRESS => not eligible)', async () => {

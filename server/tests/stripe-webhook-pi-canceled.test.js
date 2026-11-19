@@ -136,6 +136,20 @@ beforeEach(() => {
   resolveFailedInvoiceSavedCardChargeAttempt.mockResolvedValue(true);
 });
 
+test('a saved-card cancellation records its exact attempt even when the invoice has no PI stamp', async () => {
+  const { randomUUID } = require('node:crypto');
+  const metadata = {
+    source: 'admin_card_on_file', waves_invoice_id: randomUUID(), waves_customer_id: randomUUID(), saved_card_attempt_id: randomUUID(),
+  };
+  await handleCanceled({ id: 'pi_auth', status: 'canceled', metadata, payment_method: 'pm_auth' });
+  const evidence = mockState.updates.filter((entry) => entry.table === 'stripe_invoice_charge_attempts');
+  expect(evidence).toHaveLength(1);
+  expect(evidence[0].wheres).toContainEqual({ id: metadata.saved_card_attempt_id, invoice_id: metadata.waves_invoice_id });
+  expect(evidence[0].patch).toEqual({ authentication_canceled_intent_id: 'pi_auth', stripe_payment_intent_id: 'pi_auth' });
+  expect(invoiceReverts()).toHaveLength(0);
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+});
+
 // B16: billing-cron cancels the live intent of an autopay charge parked on card authentication.
 // The parked failed row (stripe.js stamps metadata.requires_action) is a debt still owed, so the
 // canceled event must leave it 'failed' (failed-payments.js counts only failed rows); every other

@@ -793,6 +793,17 @@ labeled an account balance — with no sibling tokens and no service names
 (service names ride only the EMAILED invoice PDF, which reaches the
 customer's own saved recipient); gate off ⇒ no sibling read and the PDF
 is unchanged.
+
+An earlier saved-card attempt that requires bank authentication can still
+settle. While that attempt is unverified, the invoice's `/setup`, `/quote`,
+`/update-amount`, and `/finalize` return HTTP 409 with `savedCardPending`.
+Combined checkout omits a held sibling. If the hold appears after selection,
+checkout returns HTTP 409 with `staleBalance` so the page can reload the
+amount. Setup, tender changes, and finalization check the affected invoices
+under lock. A verified cancellation for the same attempt and PaymentIntent
+clears the authentication hold. The `/confirm` endpoint can still record money
+the processor has already accepted.
+
 Off-Stripe tender block (2026-08-29; ZELLE-ONLY since 2026-09-02 — owner
 ruling, Venmo and PayPal retired over their fees): the GET payload carries
 an OPTIONAL `manualPayOptions` = `{ zelle: { recipient }, amountDue,

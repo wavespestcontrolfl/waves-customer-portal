@@ -142,7 +142,7 @@ async function rejectIfInvoiceCollectionPending(invoice, res, { recordExistingPa
     if (!recordExistingPayment) {
       await require('../services/estimate-deposits').assertInvoiceDepositSettlementReady(db, invoice, { lock: false });
     }
-    await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id);
+    await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id, db, { checkout: !recordExistingPayment });
     return false;
   } catch (err) {
     if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') {
@@ -376,8 +376,7 @@ async function zelleDeniedByChargeReconciliation(invoice, readOnly, database = d
     // writing default would release a stale pre-submit claim / promote a submitted one while the original
     // charge worker can still commit, exposing a second payment rail. The public pay page GET keeps main's
     // behavior (default, writing) — the same call main's own GET makes.
-    if (readOnly) await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id, database, { readOnly: true });
-    else await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id);
+    await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id, database, { readOnly, checkout: true });
   } catch (err) {
     if (!StripeService.savedCardChargeSuppressesAlternateCollection(err)) throw err;
     return true;
@@ -1096,7 +1095,11 @@ router.post('/:token/update-amount', async (req, res, next) => {
     // allocation drifted under the locked re-verification — same
     // reload-and-retry contract as /setup.
     if (err.statusCode === 409) {
-      return res.status(409).json({ error: err.message, staleBalance: !!err.staleBalance });
+      return res.status(409).json({
+        error: err.message,
+        staleBalance: !!err.staleBalance,
+        ...(err.savedCardPending ? { savedCardPending: true } : {}),
+      });
     }
     logger.error(
       `[pay-v2] Update-amount error `

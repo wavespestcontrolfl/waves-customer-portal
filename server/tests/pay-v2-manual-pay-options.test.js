@@ -239,7 +239,7 @@ describe('GET /pay/:token manualPayOptions', () => {
     );
     const { body } = await getPayPage(invoiceData({ status: 'overdue' }));
     expect(body).not.toHaveProperty('manualPayOptions');
-    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('inv-1');
+    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('inv-1', expect.anything(), { readOnly: false, checkout: true });
   });
 
   test('env set ⇒ key absent when the attached PaymentIntent already collected (codex r6 P1)', async () => {
@@ -798,7 +798,7 @@ describe('the final pass: active collection and full coverage', () => {
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(Object.assign(new Error('charge in progress'), { code: 'STRIPE_CHARGE_IN_PROGRESS' }));
     await expect(visibilityOf({ invoice: inv, creditWillCoverAnchor: false, saveRequired: false })).resolves.toEqual({ visible: false, reason: 'invoice_changed' });
-    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenLastCalledWith(inv.id, expect.anything(), { readOnly: true });
+    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenLastCalledWith(inv.id, expect.anything(), { readOnly: true, checkout: true });
   });
   test('the attached PaymentIntent moved to processing after the first pass => withheld', async () => {
     const StripeService = require('../services/stripe');

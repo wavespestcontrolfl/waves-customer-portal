@@ -143,14 +143,29 @@ describe('failed payment recovery', () => {
       expect(screen.getByText(bannerTitle)).toBeInTheDocument();
       expect(screen.getByText(bannerDetail)).toBeInTheDocument();
       expect(within(row).getByRole('status')).toHaveTextContent(rowDetail);
-      expect(screen.queryByRole('link', { name: 'View open invoices' })).not.toBeInTheDocument();
-      expect(screen.queryByRole('link', { name: 'Review invoice' })).not.toBeInTheDocument();
-      // The bounded fix does not change the original account-balance invoice
-      // list or central checkout behavior.
+      expect(within(row).queryByRole('link')).not.toBeInTheDocument();
+      expect(screen.getByRole('link', { name: 'Review invoice' })).toHaveAttribute('href', '/pay/tok-other');
       expect(screen.getByRole('link', { name: 'Pay $95.00 now' }))
         .toHaveAttribute('href', '/pay/tok-failed');
     },
   );
+
+  it('keeps older unchecked and superseded entries out of current recovery', async () => {
+    api.getPayments.mockResolvedValue({ payments: [
+      failedPayment({ recoveryInvoice: { payUrl: '/pay/tok-failed' } }),
+      failedPayment({ id: 'old', description: 'Older attempt', recoveryState: 'recovery_unchecked' }),
+      failedPayment({ id: 'replaced', description: 'Replaced attempt', recoveryState: 'recovery_inactive' }),
+    ] });
+    api.getBalance.mockResolvedValue({ currentBalance: 95, lastPaymentFailed: true, lastPaymentAttemptId: 'pay-failed', openInvoices });
+    render(<BillingTab customer={customer} />);
+    const current = paymentRow(await screen.findByText('November pest visit'));
+    expect(within(current).getByRole('link', { name: 'Review invoice' })).toHaveAttribute('href', '/pay/tok-failed');
+    expect(screen.getByRole('link', { name: 'View open invoices' })).toHaveAttribute('href', '#billing-open-invoices');
+    expect(within(paymentRow(screen.getByText('Older attempt'))).queryByRole('link')).not.toBeInTheDocument();
+    const replaced = within(paymentRow(screen.getByText('Replaced attempt')));
+    expect(replaced.queryByRole('link')).not.toBeInTheDocument();
+    expect(replaced.queryByRole('button')).not.toBeInTheDocument();
+  });
 
   it('does not send a cancelled customer to hidden payment-method controls', async () => {
     api.getPayments.mockResolvedValue({ payments: [failedPayment()] });

@@ -93,6 +93,22 @@ test('failed rows beyond the first-page recovery cap suppress their unchecked fa
   });
 });
 
+test('parked, superseded and never-attempted failures carry their own states on later pages', async () => {
+  const failures = [
+    { id: 'parked', superseded_by_payment_id: 'parked' },
+    { id: 'sca', metadata: { requires_action: true } },
+    { id: 'uncertain', metadata: { ambiguous_outcome: 'true' } },
+    { id: 'replaced', superseded_by_payment_id: 'paid-retry', metadata: { requires_action: true } },
+    { id: 'deferred', next_retry_at: '2026-11-21', metadata: { deferred_reason: 'lock_contention' } },
+  ];
+  stripe.getPaymentHistory.mockResolvedValue(failures.map((row) => ({ status: 'failed', amount: 50, ...row })));
+  const result = await listPortalPayments('customer-1', { database: emptyReader(), cursor: 100, includeRecoveryInvoices: true });
+  expect(result.payments.map((row) => row.recoveryState)).toEqual([
+    'authentication_unknown', 'authentication_unknown', 'authentication_unknown', 'recovery_inactive', 'recovery_inactive',
+  ]);
+  expect(result.payments.every((row) => row.recoveryInvoice === null)).toBe(true);
+});
+
 test('cancellation on the first payer read cannot start count or payment queries', async () => {
   const failure = Object.assign(new Error('cancelled'), { code: '57014' });
   const database = jest.fn(reader(failure));
