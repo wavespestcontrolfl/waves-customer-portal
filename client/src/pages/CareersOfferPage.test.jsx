@@ -120,7 +120,7 @@ describe('CareersOfferPage — open state', () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockResolvedValueOnce(jsonResponse({ textConsent: true }))
-      .mockRejectedValueOnce(new Error('offline'));
+      .mockResolvedValueOnce(jsonResponse({ error: 'Try later' }, 500));
     globalThis.fetch = fetchMock;
     renderPage();
     const box = await screen.findByLabelText('Text me about this offer');
@@ -129,8 +129,37 @@ describe('CareersOfferPage — open state', () => {
     expect(fetchMock.mock.calls[1][0]).toMatch(/\/text-consent$/);
     expect(bodyOf(fetchMock, 1)).toEqual({ consent: true });
     fireEvent.click(box);
-    expect(await screen.findByText(/Check your connection/)).toBeInTheDocument();
+    expect(await screen.findByText('Try later')).toBeInTheDocument();
     expect(box).toBeChecked();
+  });
+
+  it('re-reads the stored consent when a consent reply is lost, and keeps signing locked until it can', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockRejectedValueOnce(new Error('offline')) // POST: reply lost
+      .mockRejectedValueOnce(new Error('offline')) // re-read fails
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true }))); // retry works
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
+    expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
+  });
+
+  it('re-reads the offer when a successful sign reply cannot be read', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => { throw new Error('cut off'); } })
+      .mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' })));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026/)).toBeInTheDocument();
   });
 
   it('sends a date request for a future Monday to Thursday only', async () => {

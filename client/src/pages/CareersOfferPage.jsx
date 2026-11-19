@@ -120,13 +120,16 @@ function offerUrl(token, suffix = '') {
   return `${API_BASE}/public/careers/offer/${encodeURIComponent(token)}${suffix}`;
 }
 
+// A reply that cannot be read is not a failure: the write may have committed.
+// Only a non-OK status is a clean refusal; a lost or unreadable OK reply throws
+// so the caller re-reads the offer.
 async function postJson(token, suffix, payload) {
   const res = await fetch(offerUrl(token, suffix), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  const body = await res.json().catch(() => ({}));
+  const body = res.ok ? await res.json() : await res.json().catch(() => ({}));
   return { ok: res.ok, status: res.status, body };
 }
 
@@ -295,27 +298,50 @@ function TermsSection({ terms }) {
   );
 }
 
-function TextConsent({ token, initial, onPending, locked }) {
+function TextConsent({ token, initial, onPending, onStale, locked }) {
   const [checked, setChecked] = useState(Boolean(initial));
   const [saving, setSaving] = useState(false);
+  const [unconfirmed, setUnconfirmed] = useState(false);
   const [error, setError] = useState('');
+
+  // After a write whose reply was lost, ask the server what it stored. Signing
+  // stays locked until that read works.
+  const confirm = async () => {
+    setSaving(true);
+    onPending(true);
+    try {
+      const body = await readOffer(token);
+      setChecked(Boolean(body.textConsent));
+      setUnconfirmed(false);
+      setError('');
+      onPending(false);
+      if (body.state !== 'open') onStale();
+    } catch {
+      setUnconfirmed(true);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const toggle = async (next) => {
     setChecked(next);
     setSaving(true);
     onPending(true);
     setError('');
+    let res;
     try {
-      const res = await postJson(token, '/text-consent', { consent: next });
-      if (!res.ok) throw new Error('failed');
-      setChecked(Boolean(res.body.textConsent));
+      res = await postJson(token, '/text-consent', { consent: next });
     } catch {
-      setChecked(!next);
-      setError(CONNECTION_ERROR);
-    } finally {
-      setSaving(false);
-      onPending(false);
+      await confirm();
+      return;
     }
+    if (res.ok) setChecked(Boolean(res.body.textConsent));
+    else {
+      setChecked(!next);
+      setError(res.body?.error || CONNECTION_ERROR);
+    }
+    setSaving(false);
+    onPending(false);
   };
 
   return (
@@ -324,12 +350,20 @@ function TextConsent({ token, initial, onPending, locked }) {
         <input
           type="checkbox"
           checked={checked}
-          disabled={saving || locked}
+          disabled={saving || locked || unconfirmed}
           onChange={(e) => toggle(e.target.checked)}
           style={{ width: 24, height: 24, flex: '0 0 auto', accentColor: 'var(--brand, #04395E)' }}
         />
         <span style={{ fontFamily: FONTS.body, fontSize: 16, color: TEXT }}>Text me about this offer</span>
       </label>
+      {unconfirmed && (
+        <div style={ERROR_BANNER_STYLE} role="alert">
+          We could not confirm that choice. Check your connection and try again.
+          <div style={{ marginTop: 8 }}>
+            <BrandButton variant="secondary" disabled={saving} onClick={confirm}>Try again</BrandButton>
+          </div>
+        </div>
+      )}
       {error && <div style={ERROR_BANNER_STYLE} role="alert">{error}</div>}
     </div>
   );
@@ -481,7 +515,7 @@ function OpenOffer({ token, data, onApplied, onReload, onInvalid }) {
         <p style={{ ...BODY_STYLE, borderTop: '1px solid var(--border, #E2E8F0)', paddingTop: 12 }}>
           Please don&rsquo;t give notice at your current job until you have signed this offer.
         </p>
-        <TextConsent token={token} initial={data.textConsent} onPending={setConsentPending} locked={accept.busy || dateReq.busy || decline.busy} />
+        <TextConsent token={token} initial={data.textConsent} onPending={setConsentPending} onStale={onReload} locked={accept.busy || dateReq.busy || decline.busy} />
         <SignBlock
           name={name}
           onName={setName}
