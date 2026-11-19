@@ -203,6 +203,8 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
   });
 
   test('the fenced repair changes only route_order and records before-route measurements', async () => {
+    await mockConnection('scheduled_services').where('id', ids[1])
+      .update({ reservation_expires_at: new Date(Date.now() - 60000) });
     const before = await mockConnection('scheduled_services').whereIn('id', ids).select('*').orderBy('id');
     const result = await runRouteReorder({ now });
     expect(result).toMatchObject({ applied: 1, failed: 0 });

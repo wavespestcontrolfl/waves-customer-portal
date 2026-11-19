@@ -48,6 +48,7 @@ const { applyAssignable, assertAssignableTechnician, NOT_ASSIGNABLE } = require(
 const { assertCapabilitiesActive, inactiveCapabilitiesForServices } = require('./technician-capabilities');
 const { dayStopsQuery, guardedCoordSelects } = require('./scheduling/day-stops');
 const { DEFAULT_EXCLUDE_STATUSES, windowsOverlap } = require('./scheduling/occupancy');
+const { liveServiceOrHold, serviceOrHoldIsLive } = require('./scheduling/reservation-occupancy');
 const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('./scheduling/arrival-route');
 const { resolveGeo, driveMin, HQ } = require('./auto-dispatch/geo');
 const { resolveAlert, emitAlert } = require('./dispatch-alerts');
@@ -139,9 +140,9 @@ async function fitsWindow(stop, tech, date, conn = db) {
       // Same status set as the rebooker's commit probe: a finished visit
       // occupies nothing (never stricter than the commit, Codex r9 P2).
       .whereNotIn('status', FIT_EXCLUDE_STATUSES)
-      // A lapsed estimate hold occupies nothing — same predicate as the
-      // rebooker's kept-tech check and scheduling/occupancy.js.
-      .where((q) => q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'))
+      // Only a lapsed, unclaimed estimate hold releases the hour. A booked
+      // visit remains occupancy when an old hold stamp was not cleared.
+      .where(liveServiceOrHold)
       .select('window_start', 'window_end', 'estimated_duration_minutes');
     const conflict = others.some((row) => {
       const oStart = timeToMinutes(row.window_start);
@@ -166,7 +167,8 @@ async function detourForTech(stop, techId, date) {
     excludeStatuses: FIT_EXCLUDE_STATUSES,
     select: [
       'scheduled_services.id', 'scheduled_services.window_start', 'scheduled_services.window_end',
-      'scheduled_services.estimated_duration_minutes', 'scheduled_services.reservation_expires_at',
+      'scheduled_services.estimated_duration_minutes', 'scheduled_services.customer_id',
+      'scheduled_services.reservation_expires_at',
       ...guardedCoordSelects(db),
     ],
   });
@@ -174,7 +176,7 @@ async function detourForTech(stop, techId, date) {
   // and the rebooker's commit check) — never a count or an anchor.
   const now = Date.now();
   const neighbors = rows.filter((r) => r.id !== stop.id
-    && (r.reservation_expires_at == null || new Date(r.reservation_expires_at).getTime() > now));
+    && serviceOrHoldIsLive(r, now));
   if (!geo) return { detour_minutes: null, stops_that_day: neighbors.length + 1 };
 
   const myStart = timeToMinutes(stop.window_start) ?? 0;

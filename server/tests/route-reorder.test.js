@@ -641,11 +641,15 @@ test('expired estimate holds are excluded: live-hold predicate on the day load A
   expect(res.applied).toBe(1);
   // Every day-load carries the occupancy live-hold predicate…
   expect(loadWhereRaws.length).toBe(BAND.length);
-  for (const { sql } of loadWhereRaws) expect(sql).toContain('reservation_expires_at');
+  for (const { sql } of loadWhereRaws) {
+    expect(sql).toContain('customer_id IS NOT NULL');
+    expect(sql).toContain('reservation_expires_at');
+  }
   // …and the commit-time membership re-read uses the SAME predicate, so the
   // two reads agree on membership (an expired-at-load hold must not resurface
   // as a phantom "joined the tech-day" stale abort).
-  expect(commitWhereRaws.some((sql) => String(sql).includes('reservation_expires_at'))).toBe(true);
+  expect(commitWhereRaws.some((sql) => String(sql).includes('customer_id IS NOT NULL')
+    && String(sql).includes('reservation_expires_at'))).toBe(true);
 });
 
 test('commit-time revalidation: a changed tech-day rolls back untouched (STALE_TECH_DAY)', async () => {

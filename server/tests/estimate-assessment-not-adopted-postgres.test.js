@@ -246,6 +246,33 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     expect(acceptance.appointment).not.toHaveProperty('reservationExpiresAt');
   });
 
+  test('an open picker accepts its chosen visit when staff have already booked it for the same estimate and customer', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    const id = await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: { source_estimate_id: estimateId },
+    });
+    const response = await putAccept(token, { slotId: `${CHOSEN_DATE}_09-00_unassigned`, paymentMethodPreference: 'pay_at_visit' });
+    const body = await response.json();
+    expect({ status: response.status, error: body.error }).toEqual({ status: 200, error: undefined });
+    expect((await mockTransaction('estimates').where({ id: estimateId }).first()).status).toBe('accepted');
+    const firstVisits = await mockTransaction('scheduled_services')
+      .where({ customer_id: customerId, source_estimate_id: estimateId, scheduled_date: CHOSEN_DATE }).pluck('id');
+    expect(firstVisits).toEqual([id]);
+  });
+
+  test('an open picker cannot adopt a different hour when the submitted hold has expired', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: { source_estimate_id: estimateId },
+    });
+    const response = await putAccept(token, { slotId: `${CHOSEN_DATE}_11-00_unassigned` });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: 'RESERVATION_EXPIRED' });
+    expect((await mockTransaction('estimates').where({ id: estimateId }).first()).status).toBe('sent');
+  });
+
   test('/data: a booked assessment is not offered — the normal slot-picker flow renders', async () => {
     const { customerId, token } = await fixture(mockTransaction);
     await assessmentVisit(mockTransaction, customerId);
