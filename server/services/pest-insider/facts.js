@@ -84,7 +84,18 @@ function validateBank(data) {
   return data.facts;
 }
 
-const FACTS = validateBank(bank);
+// The bank is reviewed copy, and the copy check reads a fact's own quotes as
+// its evidence, so no caller may change it between builds: the facts are
+// frozen all the way down (pre-push round 13).
+function deepFreeze(value) {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
+  }
+  return value;
+}
+
+const FACTS = deepFreeze(validateBank(bank));
 
 /**
  * ET calendar date 'YYYY-MM-DD' for a send date: a 'YYYY-MM-DD' string, an

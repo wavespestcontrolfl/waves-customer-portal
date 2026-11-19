@@ -155,6 +155,13 @@ describe('identifier species (the portal species catalog)', () => {
     }
   });
 
+  test('the facts and species are frozen, so no caller can change the copy a later build prints', () => {
+    const fact = FACTS.find((f) => !f.reserve);
+    for (const part of [FACTS, fact, fact.lead, fact.quotes, fact.months, fact.sources, fact.sources[0], SPECIES, SPECIES[0]]) {
+      expect(Object.isFrozen(part)).toBe(true);
+    }
+  });
+
   test('an entry whose reviewed copy changed after approval, or with no identifier page, is left out', () => {
     const entry = getEntry('wolf-spider');
     const edited = { ...entry, copy: { ...entry.copy, fact: "It's the only spider that does this." } };

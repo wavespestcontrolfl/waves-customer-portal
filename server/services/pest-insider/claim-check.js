@@ -31,16 +31,18 @@ const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 
 const MONTH_ABBR = { jan: 'january', feb: 'february', mar: 'march', apr: 'april', jun: 'june', jul: 'july', aug: 'august', sep: 'september', sept: 'september', oct: 'october', nov: 'november', dec: 'december' };
 const TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
 const NUMBER_WORDS = {
-  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
   eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19,
   ...TENS, twice: 2, thrice: 3,
 };
-// Every spelled-out number counts, so a sentence that states one must copy
-// its source (pre-push round 12: "thirty days" passed unread against a
-// source that says 12 days). A compound ("twenty-five", "thirty five") is
+// Every spelled-out number counts, zero included, so a sentence that states
+// one must copy its source (pre-push rounds 12 and 13: "thirty days" and
+// "zero days" passed unread against a source that says 12 days). Lookups
+// test membership, since zero is falsy. A compound ("twenty-five", "thirty five") is
 // one number, never a range, so it becomes digits before any number is read.
 const COMPOUND_NUMBER = new RegExp(`\\b(${Object.keys(TENS).join('|')})[-\\s]+(one|two|three|four|five|six|seven|eight|nine)\\b`, 'g');
 const compoundDigits = (lower) => lower.replace(COMPOUND_NUMBER, (m, tens, unit) => String(TENS[tens] + NUMBER_WORDS[unit]));
+const numberWord = (word) => (Object.hasOwn(NUMBER_WORDS, word) ? String(NUMBER_WORDS[word]) : null);
 const FRACTION_DEN = { half: 2, halves: 2, third: 3, thirds: 3, fourth: 4, fourths: 4, quarter: 4, quarters: 4, fifth: 5, fifths: 5 };
 const SCALE_WORDS = /\b(hundred|thousand|million|billion|dozen)s?\b/g;
 
@@ -101,7 +103,7 @@ function numberTokens(text) {
   t = t.replace(/\d+\/\d+/g, (m) => { tokens.add(m); return ' '; });
   t = t.replace(/\d+(?:,\d{3})*(?:\.\d+)?/g, (m) => { tokens.add(String(Number(m.replace(/,/g, '')))); return ' '; });
   t = t.replace(SCALE_WORDS, (m, w) => { tokens.add(`scale:${w}`); return ' '; });
-  for (const w of t.match(/[a-z]+/g) || []) if (NUMBER_WORDS[w]) tokens.add(String(NUMBER_WORDS[w]));
+  for (const w of t.match(/[a-z]+/g) || []) if (numberWord(w) !== null) tokens.add(numberWord(w));
   if (/%|\bpercent\b/i.test(text)) tokens.add('percent');
   return tokens;
 }
@@ -129,7 +131,7 @@ function quantityTokens(text) {
     .match(/\d+(?:,\d{3})*(?:\.\d+)?|[a-z]+|-/g) || [];
 }
 
-const tokenNumber = (tok) => (/^\d/.test(tok) ? String(Number(tok.replace(/,/g, ''))) : (NUMBER_WORDS[tok] ? String(NUMBER_WORDS[tok]) : null));
+const tokenNumber = (tok) => (/^\d/.test(tok) ? String(Number(tok.replace(/,/g, ''))) : numberWord(tok));
 
 /** "number unit" pairs; a range ("7 to 10 days") gives the unit to every number in it. */
 function quantityPairs(text) {

@@ -18,17 +18,18 @@ const RECENT_WINDOW = 6;
 // field). The issue prints the catalog's reviewed copy (copy.fact, with
 // copy.blurb as its evidence), not the website's own identifier text, which
 // states some facts more broadly ("the only spider that does this", "never
-// lives outdoors"; pre-push round 12).
+// lives outdoors"; pre-push round 12). Each entry is frozen, so no caller
+// can change the copy a later build prints (pre-push round 13).
 function identifierSpecies(entries) {
   const species = entries
     .filter((e) => e.links && e.links.site_page === `/pest-identifier/${e.slug}/` && isApproved(e))
-    .map((e) => ({ slug: e.slug, name: e.common_name, category: e.site_category, fact: e.copy && e.copy.fact, note: e.copy && e.copy.blurb }));
+    .map((e) => Object.freeze({ slug: e.slug, name: e.common_name, category: e.site_category, fact: e.copy && e.copy.fact, note: e.copy && e.copy.blurb }));
   if (!species.length) throw new Error('pest-insider species: the catalog has no approved identifier species');
   for (const s of species) {
     const missing = ['name', 'category', 'fact', 'note'].find((k) => typeof s[k] !== 'string' || !s[k].trim());
     if (missing) throw new Error(`pest-insider species: ${s.slug} lacks ${missing}`);
   }
-  return species;
+  return Object.freeze(species);
 }
 
 const SPECIES = identifierSpecies(listEntries());
