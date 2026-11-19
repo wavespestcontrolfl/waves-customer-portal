@@ -169,7 +169,7 @@ const {
   applicatorIdentityPdfSignature,
   applicatorRenderedPdfSignature,
 } = require('../services/service-report/pdf-storage');
-const { summaryCopySignature, renderWriterRulesState } = require('../services/service-report/technician-report-copy');
+const { summaryCopySignature, renderWriterRulesState, reportDependsOnWriterRules } = require('../services/service-report/technician-report-copy');
 const { treeShrubTechParagraphPdfSignature } = require('../services/service-report/tree-shrub-tech-paragraph-gate');
 const { customerSafeVisitNotes } = require('../services/context-aggregator');
 const {
@@ -2197,6 +2197,7 @@ router.get('/:token', async (req, res, next) => {
             pinnedLawnAssessmentId: canonicalPin,
             pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt,
             pinnedLawnHistoryIdentity: canonical.lawnHistory?.identity,
+            dependsOnWriterRules: reportDependsOnWriterRules(service),
           });
           pdf = rendered.pdf;
           renderImageFailures = rendered.imageFailures ?? null;

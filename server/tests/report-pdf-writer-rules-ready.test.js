@@ -6,7 +6,10 @@
 // PDF mode names its state (`writerRules`), the page shows it on its root
 // (data-writer-rules), and both PDF providers wait for the state of their own
 // key: any other page never matches, so the render times out and nothing is
-// stored (pre-push P1s on e73ee6952d, 0e897d73d1 and 51dc88d64d).
+// stored (pre-push P1s on e73ee6952d, 0e897d73d1 and 51dc88d64d). Only a
+// record whose render depends on the switch waits for the state; every other
+// record renders the same in both states and waits for the root alone, also
+// in a restart overlap (pre-push P1 on 47f088853e).
 const mockPage = {
   goto: jest.fn().mockResolvedValue(),
   waitForSelector: jest.fn().mockResolvedValue(),
@@ -23,6 +26,8 @@ jest.mock('../services/service-report/pdf-events', () => ({
   safePdfRenderError: (err) => String(err?.message || err),
 }));
 
+const fs = require('fs');
+const path = require('path');
 const { renderReportPdf, renderServiceReportV1Pdf, reportPdfReadySelector } = require('../services/service-report/pdf');
 
 const ENV_KEYS = ['GATE_REPORT_WRITER_RULES', 'PDF_RENDERER', 'CF_ACCOUNT_ID', 'CF_BROWSER_RENDERING_TOKEN'];
@@ -78,6 +83,27 @@ describe('a service report PDF prints only a page built in its own writer-rules 
     mockPage.waitForSelector.mockRejectedValueOnce(new Error('Timeout 10000ms exceeded'));
     await expect(renderServiceReportV1Pdf({ token: 'tok-1' }, { serviceRecordId: 'service-1' })).rejects.toThrow();
     expect(mockPage.pdf).not.toHaveBeenCalled();
+  });
+
+  test('a record whose render does not depend on the switch waits for the root alone, with either provider', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    expect(reportPdfReadySelector(false)).toBe('.service-report-v1');
+    process.env.PDF_RENDERER = 'playwright';
+    await renderServiceReportV1Pdf({ token: 'tok-1' }, { serviceRecordId: 'service-1', dependsOnWriterRules: false });
+    expect(mockPage.waitForSelector).toHaveBeenCalledWith('.service-report-v1', { timeout: 10000 });
+
+    const calls = cloudflareFetch();
+    await renderServiceReportV1Pdf({ token: 'tok-1' }, { serviceRecordId: 'service-1', dependsOnWriterRules: false });
+    expect(calls[0].waitForSelector).toEqual({ selector: '.service-report-v1', visible: true, timeout: 10000 });
+  });
+
+  test('both render callers pass the flag from the record they key the render on', () => {
+    ['services/service-report/pdf-queue.js', 'routes/reports-public.js'].forEach((file) => {
+      const source = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+      const calls = source.split('renderServiceReportV1Pdf(data, {').slice(1).map((rest) => rest.slice(0, rest.indexOf('});')));
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toContain('dependsOnWriterRules: reportDependsOnWriterRules(service),');
+    });
   });
 
   test('a caller that names no selector keeps the report root alone', async () => {

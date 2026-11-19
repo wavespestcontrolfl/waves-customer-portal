@@ -20,6 +20,7 @@
 const {
   technicianReportCustomerCopy,
   summaryCopySignature,
+  reportDependsOnWriterRules,
   MAX_REPORT_CHARS,
 } = require('../services/service-report/technician-report-copy');
 const {
@@ -271,6 +272,62 @@ describe('summaryCopySignature — PDF cache-key component', () => {
       expect(summaryCopySignature(companionCard('internal_only'))).toBe('');
       // A card in another format keeps its key with the switch off.
       expect(summaryCopySignature({ technician_notes: AI_REPORT })).toMatch(/^-tr[0-9a-f]{8}$/);
+    } finally {
+      if (gate === undefined) delete process.env.GATE_REPORT_WRITER_RULES;
+      else process.env.GATE_REPORT_WRITER_RULES = gate;
+    }
+  });
+
+  // Pre-push P1 on 47f088853e: notes with the four-section shape print as
+  // the summary only while the switch is on, so with no frozen card such a
+  // record kept its old key in the off state, where a PDF an older worker
+  // stored from an on-state page could still be served.
+  const FOUR_SECTION_NOTES = [
+    'WHAT WE FOUND', '', 'You mentioned ants by the dishwasher. Ghost ants were trailing along the counter.', '',
+    'WHAT WE DID AND WHY', '', 'We placed bait along the counter. Outside, we treated the foundation.', '',
+    'WHAT TO EXPECT', '', 'You may see a few more ants for a few days.', '',
+    "WHAT'S NEXT", '', 'If the ants are still trailing after about 1–2 weeks, let us know.',
+  ].join('\n');
+
+  test('notes with the four-section shape key the switch state in both states, with no card', () => {
+    const gate = process.env.GATE_REPORT_WRITER_RULES;
+    const untyped = { technician_notes: FOUR_SECTION_NOTES };
+    try {
+      process.env.GATE_REPORT_WRITER_RULES = 'false';
+      // The gated parse is null here, and a key stored before the suffix was ''.
+      expect(technicianReportCustomerCopy(FOUR_SECTION_NOTES)).toBeNull();
+      expect(summaryCopySignature(untyped)).toBe('-fsoff');
+      process.env.GATE_REPORT_WRITER_RULES = 'true';
+      const on = summaryCopySignature(untyped);
+      expect(on).toMatch(/^-tr[0-9a-f]{8}-fson$/);
+      // Neither state reuses a key stored before the suffix existed.
+      expect(['', on.replace(/-fson$/, '')]).not.toContain(on);
+    } finally {
+      if (gate === undefined) delete process.env.GATE_REPORT_WRITER_RULES;
+      else process.env.GATE_REPORT_WRITER_RULES = gate;
+    }
+  });
+
+  test('reportDependsOnWriterRules: only four-section notes or a printed four-section card, the same in both states', () => {
+    const gate = process.env.GATE_REPORT_WRITER_RULES;
+    const card = (delivery) => JSON.stringify({
+      companionReportSnapshots: [{ type: 'rodent_trapping', delivery, todaysResult: { body: 'x', bodyFormat: 'four_section' } }],
+    });
+    try {
+      ['true', 'false'].forEach((state) => {
+        process.env.GATE_REPORT_WRITER_RULES = state;
+        expect(reportDependsOnWriterRules({ technician_notes: FOUR_SECTION_NOTES })).toBe(true);
+        expect(reportDependsOnWriterRules({ technician_notes: FOUR_SECTION_NOTES.replace(/\n/g, '\r\n') })).toBe(true);
+        expect(reportDependsOnWriterRules({ technician_notes: 'wiped webs', service_data: card('auto_send') })).toBe(true);
+        // The two-section report, a note, an internal card, a shape over the
+        // cap and an empty record render the same in both states.
+        expect(reportDependsOnWriterRules({ technician_notes: AI_REPORT })).toBe(false);
+        expect(reportDependsOnWriterRules({ technician_notes: 'wiped webs, treated perimeter' })).toBe(false);
+        expect(reportDependsOnWriterRules({ technician_notes: 'wiped webs', service_data: card('internal_only') })).toBe(false);
+        expect(reportDependsOnWriterRules({ technician_notes: `${FOUR_SECTION_NOTES}${' '.repeat(3200)}` })).toBe(false);
+        expect(reportDependsOnWriterRules({ service_data: '{not json' })).toBe(false);
+        expect(reportDependsOnWriterRules()).toBe(false);
+      });
     } finally {
       if (gate === undefined) delete process.env.GATE_REPORT_WRITER_RULES;
       else process.env.GATE_REPORT_WRITER_RULES = gate;
