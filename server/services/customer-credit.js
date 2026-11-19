@@ -882,6 +882,20 @@ async function reverseAppliedCredit({ invoiceId, amount, createdBy = 'system', n
     }
     const reverse = Math.min(want, round2(inv.credit_applied || 0));
     if (!(reverse > 0)) return { reversed: 0 };
+    // A saved-card PaymentIntent can still settle without being attached to
+    // invoices.stripe_payment_intent_id (most notably authentication_required).
+    // Recheck that durable hold while the invoice row is locked, before moving
+    // either the invoice credit or the customer ledger. Exact PI cancellation
+    // clears the checkout fence and makes the ordinary reversal safe again.
+    const StripeService = require('./stripe');
+    try {
+      await StripeService.assertNoInvoiceChargeReconciliationPending(invoiceId, t, { checkout: true });
+    } catch (paymentErr) {
+      if (StripeService.savedCardChargeSuppressesAlternateCollection(paymentErr)) {
+        return { reversed: 0, skipped: 'payment_in_flight' };
+      }
+      throw paymentErr;
+    }
     await t('invoices').where({ id: invoiceId })
       .update({ credit_applied: round2(round2(inv.credit_applied || 0) - reverse), updated_at: t.fn.now() });
     await postCreditMovement({

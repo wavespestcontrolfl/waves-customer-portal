@@ -604,4 +604,113 @@ postgres('account credit authentication hold (PostgreSQL)', () => {
       await terminal.rollback();
     }
   });
+
+  test('a locked reversal preserves posted credit while the reduced card can settle, then releases after exact cancellation', async () => {
+    const customerId = randomUUID();
+    const invoiceId = randomUUID();
+    const attemptId = randomUUID();
+    const paymentMethodId = randomUUID();
+    const intentId = `pi_${attemptId.replaceAll('-', '')}`;
+    const stripeMethodId = 'pm_synthetic_reversal_hold';
+
+    await app('customers').insert({
+      id: customerId,
+      account_credits: 75,
+      auto_apply_account_credit: true,
+    });
+    await app('invoices').insert({
+      id: invoiceId,
+      customer_id: customerId,
+      invoice_number: `REV-${invoiceId.slice(0, 8)}`,
+      status: 'sent',
+      total: 100,
+      subtotal: 100,
+      credit_applied: 25,
+      amount_paid: 0,
+    });
+    await app('customer_credit_ledger').insert({
+      customer_id: customerId,
+      delta: -25,
+      balance_after: 75,
+      source: 'invoice_application',
+      invoice_id: invoiceId,
+      note: 'Synthetic posted credit',
+      created_by: 'system:test',
+    });
+    await app('stripe_invoice_charge_attempts').insert({
+      id: attemptId,
+      invoice_id: invoiceId,
+      payment_method_id: paymentMethodId,
+      stripe_payment_method_id: stripeMethodId,
+      status: 'claimed',
+      created_at: new Date(),
+    });
+
+    const reverse = () => app.transaction((trx) => CustomerCredit.reverseAppliedCredit({
+      invoiceId, amount: 25, createdBy: 'system:test',
+    }, trx));
+    const challengeWriter = await app.transaction();
+    try {
+      const { rows: [writerConnection] } = await challengeWriter.raw('SELECT pg_backend_pid() AS pid');
+      await challengeWriter('invoices').where({ id: invoiceId }).forUpdate().first();
+      await challengeWriter('stripe_invoice_charge_attempts').where({ id: attemptId }).update({
+        stripe_payment_intent_id: intentId,
+        status: 'failed',
+        decline_code: 'authentication_required',
+        amount: 75,
+        submitted_at: new Date(),
+        resolved_at: new Date(),
+      });
+
+      let identifyReverseConnection;
+      const connectionReady = new Promise((resolve) => { identifyReverseConnection = resolve; });
+      const reversal = app.transaction(async (trx) => {
+        const { rows: [reverseConnection] } = await trx.raw('SELECT pg_backend_pid() AS pid');
+        identifyReverseConnection(reverseConnection.pid);
+        return CustomerCredit.reverseAppliedCredit({
+          invoiceId, amount: 25, createdBy: 'system:test',
+        }, trx);
+      });
+      const reversePid = await connectionReady;
+      const deadline = Date.now() + 5000;
+      while (true) {
+        const { rows: [lock] } = await challengeWriter.raw(
+          'SELECT ?::int = ANY(pg_blocking_pids(?::int)) AS blocked',
+          [writerConnection.pid, reversePid],
+        );
+        if (lock.blocked) break;
+        if (Date.now() >= deadline) throw new Error('Credit reversal did not wait for the invoice lock');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      await challengeWriter.commit();
+      await expect(reversal).resolves.toEqual({ reversed: 0, skipped: 'payment_in_flight' });
+    } finally {
+      if (!challengeWriter.isCompleted()) await challengeWriter.rollback();
+    }
+    expect(await app('invoices').where({ id: invoiceId }).first('status', 'credit_applied'))
+      .toMatchObject({ status: 'sent', credit_applied: '25.00' });
+    expect(await app('customers').where({ id: customerId }).first('account_credits'))
+      .toMatchObject({ account_credits: '75.00' });
+    expect(await app('customer_credit_ledger').where({ invoice_id: invoiceId })).toHaveLength(1);
+
+    await recordAuthenticationCancellation({
+      id: intentId,
+      status: 'canceled',
+      payment_method: stripeMethodId,
+      metadata: {
+        source: 'admin_card_on_file',
+        saved_card_attempt_id: attemptId,
+        waves_invoice_id: invoiceId,
+        waves_customer_id: customerId,
+      },
+    }, app);
+
+    await expect(reverse()).resolves.toEqual({ reversed: 25 });
+    expect(await app('invoices').where({ id: invoiceId }).first('status', 'credit_applied'))
+      .toMatchObject({ status: 'sent', credit_applied: '0.00' });
+    expect(await app('customers').where({ id: customerId }).first('account_credits'))
+      .toMatchObject({ account_credits: '100.00' });
+    expect(await app('customer_credit_ledger').where({ invoice_id: invoiceId })).toHaveLength(2);
+  });
 });

@@ -126,6 +126,8 @@ Find the saved-card attempt UUID on the held invoice's `stripe_invoice_charge_at
 node ops/agents/verify-saved-card-cancellation.js --attempt <attempt-uuid> --intent <pi_id>
 ```
 
+The verifier uses the effective PostgreSQL host (including a URL `host` override and `PGHOST` when the URL host is empty): loopback synthetic databases stay plain, while every remote host uses verified TLS with Node's public roots by default. A private provider root may be supplied via `PG_CA_FILE`, `PGSSLROOTCERT`, or URL `sslrootcert`; URL downgrade options are ignored. Do not put credentials in diagnostic output.
+
 A preview returning `cancellation_verified` leaves the hold in place. After approval, repeat with `--execute` to retrieve the payment again and record the evidence on that attempt. The command requires a canceled PaymentIntent with the matching source, attempt, invoice, customer and payment method. When Stripe omits the method, the attempt must already name that PaymentIntent. Missing or conflicting proof leaves the hold in place. Other attempts on the invoice are checked independently. [Stripe webhook resend windows](https://docs.stripe.com/webhooks#manual-retries)
 
 If a customer merge changed the invoice owner, each transfer from the original owner to the current owner must identify that invoice in the active merge journal. An undone merge, counts without row IDs, or a conflicting transfer leaves the hold in place. Use the same preview for older cancellations skipped by the original migration.
