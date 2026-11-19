@@ -115,11 +115,15 @@ function providerNotConfigured(push) {
   return Array.isArray(push?.results) && push.results.some((r) => r?.skipped && PROVIDER_NOT_CONFIGURED.has(r.reason));
 }
 
+// The dispatcher's own pre-send skips (notification-triggers.js): each returns before any device send. Any other skip
+// text is not recognized, so its claim stays.
+const PRE_SEND_SKIPS = new Set(['claude_queue', 'bell_policy', 'superseded_before_push']);
 function isRecognizedNoDelivery(push) {
   if (push === null) return true;
   if (!push || typeof push !== 'object' || push.sent !== 0) return false;
-  if (Number(push.retryable) > 0) return false;
-  if (typeof push.skipped === 'string' && push.skipped) return true; // { sent: 0, skipped: 'reason' }
+  // Failure counters first: a failed or retrying device may have reached a provider, whatever else the result says.
+  if (Number(push.retryable) > 0 || (push.failed !== undefined && push.failed !== 0)) return false;
+  if (typeof push.skipped === 'string') return PRE_SEND_SKIPS.has(push.skipped); // { sent: 0, skipped: 'reason' }
   return push.failed === 0; // the push service's own summary with its counters
 }
 

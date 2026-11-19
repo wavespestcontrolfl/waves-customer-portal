@@ -312,10 +312,27 @@ describe('the banner', () => {
       expect([...claimed]).toEqual([]);
     });
 
-    test('a recognized policy skip (sent 0 with a skipped reason): a skip, the claim is released', async () => {
-      mockTrigger.mockResolvedValue({ bellWritten: false, push: { sent: 0, skipped: 'bell_policy' } });
-      await expect(run()).resolves.toMatchObject({ sent: false, skipped: 'no_push_delivered' });
-      expect([...claimed]).toEqual([]);
+    test.each(['claude_queue', 'bell_policy', 'superseded_before_push'])(
+      'a recognized pre-send skip (sent 0, skipped %s): a skip, the claim is released',
+      async (reason) => {
+        mockTrigger.mockResolvedValue({ bellWritten: false, push: { sent: 0, skipped: reason } });
+        await expect(run()).resolves.toMatchObject({ sent: false, skipped: 'no_push_delivered' });
+        expect([...claimed]).toEqual([]);
+      },
+    );
+
+    // A skip text the dispatcher never writes, or one beside a failed device, is no proof nothing reached a phone.
+    test.each([
+      ['an unknown skip text', { sent: 0, skipped: 'unknown' }],
+      ['a known skip beside a failed device', { sent: 0, failed: 1, skipped: 'bell_policy' }],
+      ['an unknown skip beside a failed device', { sent: 0, failed: 1, skipped: 'unknown' }],
+      ['an empty skip text', { sent: 0, skipped: '' }],
+    ])('%s: uncertain, the claim stays, a same-day rerun does not dispatch again', async (_label, push) => {
+      mockTrigger.mockResolvedValue({ bellWritten: false, push });
+      await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'delivery_uncertain' });
+      expect([...claimed]).toEqual(['estimate_call_today:2026-11-19']);
+      await expect(run()).resolves.toMatchObject({ skipped: 'already_claimed' });
+      expect(mockTrigger).toHaveBeenCalledTimes(1);
     });
 
     test('the dispatcher says its push dispatch threw (pushFailed push_dispatch): an error, the claim stays, a rerun does not dispatch', async () => {
