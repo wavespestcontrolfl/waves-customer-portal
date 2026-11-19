@@ -800,7 +800,9 @@ settle. While that attempt is unverified, the invoice's `/setup`, `/quote`,
 Combined checkout omits a held sibling. If the hold appears after selection,
 checkout returns HTTP 409 with `staleBalance` so the page can reload the
 amount. Setup, tender changes, and finalization check the affected invoices
-under lock. A verified cancellation for the same attempt and PaymentIntent
+under lock. Staff and automated saved-card retries also check the hold under
+the invoice lock before recording a new charge attempt.
+A verified cancellation for the same attempt and PaymentIntent
 clears the authentication hold. The `/confirm` endpoint can still record money
 the processor has already accepted.
 
@@ -6495,6 +6497,17 @@ adjustments do not add up to the handoff amount, every item carries
 never shows prices that disagree with the charge; a failure building them
 returns empty lists, never an error, because the jti is already burned. No
 contact field, address, note or other invoice rides this reply.
+
+For an invoice with a saved-card payment awaiting bank verification,
+`POST /api/stripe/terminal/payment-intent` returns HTTP 409 with
+`code: payment_charge_in_progress`. Terminal checks before creating the
+card-present intent and under the invoice lock before returning its client
+secret. If the hold appears during creation, the handoff must be reissued
+and the response includes `newHandoffRequired: true`. The post-tap
+`/apply-surcharge` request also checks the hold under lock before the
+device can continue. A surcharge-disabled session that already holds a
+client secret confirms directly with Stripe.
+
 `POST /api/stripe/terminal/validate-save-card-handoff` (machine-to-machine
 burn of the 60s single-use Tap to Pay CARD-SAVE handoff JWT — the token IS the
 auth; no charge ever happens on this surface). Minted by the admin-only,

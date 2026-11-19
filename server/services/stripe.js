@@ -312,6 +312,9 @@ async function claimInvoiceSavedCardCharge({
         .forUpdate()
         .first('id');
       if (!lockedInvoice) throw new Error('Invoice not found');
+      // A previous charge can move from a claim to an authentication decline
+      // between preflight and this lock. It can still settle in either state.
+      await assertNoInvoiceChargeReconciliationPending(invoiceId, claimTrx, { checkout: true });
 
       const [attempt] = await claimTrx('stripe_invoice_charge_attempts')
         .insert({
@@ -2246,7 +2249,7 @@ const StripeService = {
     // request to a generic status error and let callers miss the terminal
     // reconciliation semantics (and potentially expose a fallback pay rail).
     try {
-      await assertNoInvoiceChargeReconciliationPending(invoiceId);
+      await assertNoInvoiceChargeReconciliationPending(invoiceId, db, { checkout: true });
     } catch (err) {
       if (savedCardChargeNeedsReconciliation(err)) {
         const parked = await parkInvoiceForSavedCardReconciliation({ invoiceId, error: err });

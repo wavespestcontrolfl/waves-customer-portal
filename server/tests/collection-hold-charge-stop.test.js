@@ -260,9 +260,9 @@ describe('off-session charge primitives — the hold check is default-ON', () =>
     let chargeAttempt = null;
     const db = jest.fn((table) => {
       const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
+      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNull', 'orWhereColumn', 'forUpdate', 'orderBy', 'orderByRaw'].forEach((method) => {
         chain[method] = jest.fn((arg) => {
-          if (method === 'where' && typeof arg === 'function') arg.call(chain);
+          if (['where', 'orWhere'].includes(method) && typeof arg === 'function') arg.call(chain, chain);
           return chain;
         });
       });

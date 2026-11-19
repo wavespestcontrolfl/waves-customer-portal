@@ -20,9 +20,9 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
     let chargeAttempt = null;
     const db = jest.fn((table) => {
       const chain = {};
-      ['where', 'whereNot', 'whereIn', 'orWhereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
+      ['where', 'whereNot', 'whereIn', 'orWhereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNull', 'orWhereColumn', 'forUpdate', 'orderBy', 'orderByRaw'].forEach((method) => {
         chain[method] = jest.fn((arg) => {
-          if (method === 'where' && typeof arg === 'function') arg.call(chain);
+          if (['where', 'orWhere'].includes(method) && typeof arg === 'function') arg.call(chain, chain);
           return chain;
         });
       });

@@ -80,9 +80,9 @@ describe('StripeService.chargeInvoiceWithSavedCard settlement moment', () => {
     // Permissive: every read the charge path makes resolves, and the rows it writes are captured.
     const db = jest.fn((table) => {
       const chain = {};
-      for (const name of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereColumn', 'forUpdate',
-        'orderBy', 'select', 'andWhere', 'whereExists', 'leftJoin', 'join', 'limit', 'modify', 'skipLocked']) {
-        chain[name] = jest.fn((arg) => { if (name === 'where' && typeof arg === 'function') arg.call(chain); return chain; });
+      for (const name of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNull', 'orWhereColumn', 'forUpdate',
+        'orderBy', 'orderByRaw', 'select', 'andWhere', 'whereExists', 'leftJoin', 'join', 'limit', 'modify', 'skipLocked']) {
+        chain[name] = jest.fn((arg) => { if (['where', 'orWhere'].includes(name) && typeof arg === 'function') arg.call(chain, chain); return chain; });
       }
       chain.first = jest.fn(async () => ({ invoices: invoice, payment_methods: method, customers: { id: 'cust-1', stripe_customer_id: 'cus-1' },
         stripe_invoice_charge_attempts: state.attempt }[table] || null));

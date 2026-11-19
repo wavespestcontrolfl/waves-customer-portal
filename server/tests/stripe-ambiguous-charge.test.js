@@ -190,8 +190,11 @@ function claimDb({ insertError = null, blocking = null } = {}) {
   const makeQuery = (table, { root = false } = {}) => {
     calls.push(`${root ? 'root' : 'trx'}:${table}`);
     const query = {};
-    ['where', 'whereIn', 'whereNull', 'forUpdate'].forEach((method) => {
-      query[method] = jest.fn(() => query);
+    ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNull', 'orWhereColumn', 'forUpdate', 'orderByRaw'].forEach((method) => {
+      query[method] = jest.fn((arg) => {
+        if (['where', 'orWhere'].includes(method) && typeof arg === 'function') arg.call(query, query);
+        return query;
+      });
     });
     query.insert = jest.fn((payload) => {
       insertedAttempt = payload;
@@ -233,8 +236,11 @@ describe('saved-card charge claim', () => {
       stripe_payment_method_id: 'pm-stripe-1',
       idempotency_key: 'inv_card_on_file_inv-1_attempt-new',
     });
-    expect(database.calls.slice(0, 2)).toEqual([
+    expect(database.calls.slice(0, 5)).toEqual([
       'trx:invoices',
+      'trx:stripe_invoice_charge_attempts',
+      'trx:stripe_orphan_charges',
+      'trx:payments',
       'trx:stripe_invoice_charge_attempts',
     ]);
   });

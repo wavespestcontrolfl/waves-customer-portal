@@ -27,6 +27,7 @@ const { assertInvoiceDepositSettlementReady } = require('../services/estimate-de
 const {
   assertNoInvoiceChargeReconciliationPending,
   parkInvoiceForSavedCardReconciliation,
+  savedCardChargeSuppressesAlternateCollection,
 } = require('../services/stripe');
 
 function terminalChargeFenceResponse(err) {
@@ -1403,7 +1404,7 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       });
     }
     try {
-      await assertNoInvoiceChargeReconciliationPending(invoice.id);
+      await assertNoInvoiceChargeReconciliationPending(invoice.id, db, { checkout: true });
       await assertInvoiceDepositSettlementReady(db, invoice, { lock: false });
     } catch (fenceErr) {
       if (fenceErr.code !== 'DEPOSIT_RECONCILIATION_REQUIRED'
@@ -1494,7 +1495,7 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
         // Close the race between the unlocked pre-create fence check and PI
         // creation. If a saved-card owner claimed the invoice meanwhile, do
         // not bind or return this PI; the caller cancels it below.
-        await assertNoInvoiceChargeReconciliationPending(invoice.id, trx);
+        await assertNoInvoiceChargeReconciliationPending(invoice.id, trx, { checkout: true });
       } catch (fenceErr) {
         if (fenceErr.reconciliationRequired) {
           // The invoice row is already locked by this transaction. Park it on
@@ -1700,6 +1701,9 @@ router.post('/apply-surcharge', terminalAuthenticate, async (req, res) => {
         return res.status(409).json({ error: 'Invoice amount changed since handoff', code: 'invoice_amount_changed' });
       }
       await assertInvoiceDepositSettlementReady(trx, invoice);
+      // With surcharging enabled, iOS calls this after the card is read and
+      // before confirming its bound PI. Recheck even for earlier handoffs.
+      await assertNoInvoiceChargeReconciliationPending(invoice.id, trx, { readOnly: true, checkout: true });
 
       // Feature off → no surcharge write. Still fence the last server step
       // before this already-created PI can be confirmed by the device.
@@ -1809,7 +1813,8 @@ router.post('/apply-surcharge', terminalAuthenticate, async (req, res) => {
       }
     });
   } catch (err) {
-    if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') {
+    if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED'
+      || savedCardChargeSuppressesAlternateCollection(err)) {
       return res.status(409).json(terminalChargeFenceResponse(err));
     }
     logger.error(`[stripe-terminal] apply-surcharge failed: ${err.message}`);

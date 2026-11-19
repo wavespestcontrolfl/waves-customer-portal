@@ -42,6 +42,7 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     await app.schema.createTable('stripe_invoice_charge_attempts', (t) => {
       t.uuid('id').primary();
       t.uuid('invoice_id');
+      t.uuid('payment_method_id');
       t.string('status');
       t.string('stripe_payment_intent_id');
       t.string('idempotency_key');
@@ -122,6 +123,31 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     return { invoiceId, attemptId, intent, customerId };
   }
 
+  async function commitWithWaitingCheckout(charge, checkout) {
+    let identifyConnection;
+    const connectionReady = new Promise((resolve) => { identifyConnection = resolve; });
+    const operation = app.transaction(async (trx) => {
+      const { rows: [connection] } = await trx.raw('SELECT pg_backend_pid() AS pid');
+      identifyConnection(connection.pid);
+      await checkout(trx);
+    });
+    const outcome = operation.then(() => null, (err) => err);
+    // A refusal against the old, already-visible claim could look identical.
+    // Observe this checkout blocked on the other backend before committing.
+    const waitingPid = await connectionReady;
+    const deadline = Date.now() + 5000;
+    while (true) {
+      const { rows: [lock] } = await charge.raw(
+        'SELECT pg_backend_pid() = ANY(pg_blocking_pids(?::int)) AS blocked', [waitingPid],
+      );
+      if (lock.blocked) break;
+      if (Date.now() >= deadline) throw new Error('Checkout did not wait for the invoice lock');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await charge.commit();
+    return outcome;
+  }
+
   test('an older authenticating attempt outranks a releasable stale claim until its own cancellation', async () => {
     const { invoiceId, attemptId, intent } = await authenticationFixture(app);
     const staleId = randomUUID();
@@ -198,29 +224,11 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       await charge('stripe_invoice_charge_attempts').where({ id: nextId }).update({
         status: 'failed', resolved_at: new Date(), decline_code: 'authentication_required', stripe_payment_intent_id: nextIntent.id,
       });
-      let identifyCheckout;
-      const connectionReady = new Promise((resolve) => { identifyCheckout = resolve; });
-      const checkout = app.transaction(async (trx) => {
-        const { rows: [connection] } = await trx.raw('SELECT pg_backend_pid() AS pid');
-        identifyCheckout(connection.pid);
+      const refusal = await commitWithWaitingCheckout(charge, async (trx) => {
         await verifyAllocationLocked(trx, allocation, { anchorInvoiceId: anchor, allowUnbound: true });
         collect();
       });
-      const outcome = checkout.then(() => null, (err) => err);
-      // Observe a real database waiter before committing. A rejection based on
-      // the older, already-visible claim would otherwise look just as safe.
-      const waitingPid = await connectionReady;
-      const deadline = Date.now() + 5000;
-      while (true) {
-        const { rows: [lock] } = await charge.raw(
-          'SELECT pg_backend_pid() = ANY(pg_blocking_pids(?::int)) AS blocked', [waitingPid],
-        );
-        if (lock.blocked) break;
-        if (Date.now() >= deadline) throw new Error('Combined checkout did not wait for the sibling invoice lock');
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      await charge.commit();
-      expect(await outcome).toMatchObject({ staleBalance: true, statusCode: 409 });
+      expect(refusal).toMatchObject({ staleBalance: true, statusCode: 409 });
       expect(collect).not.toHaveBeenCalled();
     } finally {
       if (!charge.isCompleted()) await charge.rollback();
@@ -231,6 +239,32 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       collect();
     });
     expect(collect).toHaveBeenCalledTimes(1);
+  }, 15000);
+
+  test('a saved-card retry rechecks the locked invoice before inserting its own claim', async () => {
+    const { invoiceId, attemptId, intent } = await authenticationFixture(app);
+    const retry = { invoiceId, paymentMethodId: randomUUID(), stripePaymentMethodId: 'pm_retry', attemptId: randomUUID() };
+    const attempt = (conn) => conn('stripe_invoice_charge_attempts').where({ id: attemptId });
+    await attempt(app).update({ status: 'claimed', decline_code: null, resolved_at: null });
+    const charge = await app.transaction();
+    try {
+      await charge('invoices').where({ id: invoiceId }).forUpdate().first();
+      await attempt(charge).update({
+        status: 'failed', decline_code: 'authentication_required', stripe_payment_intent_id: intent.id, resolved_at: new Date(),
+      });
+      const refusal = await commitWithWaitingCheckout(charge, (database) =>
+        StripeService.claimInvoiceSavedCardCharge({ ...retry, database }));
+      expect(refusal).toMatchObject({ code: 'STRIPE_CHARGE_IN_PROGRESS', chargeAttemptId: attemptId, statusCode: 409 });
+    } finally {
+      if (!charge.isCompleted()) await charge.rollback();
+    }
+    expect(await app('stripe_invoice_charge_attempts').where({ id: retry.attemptId }).first()).toBeUndefined();
+    expect(await verdict(invoiceId, app, {})).toBeNull();
+    await recordAuthenticationCancellation(intent, app);
+    await expect(StripeService.claimInvoiceSavedCardCharge({ ...retry, database: app }))
+      .resolves.toMatchObject({ id: retry.attemptId, invoice_id: invoiceId, status: 'claimed' });
+    await expect(StripeService.claimInvoiceSavedCardCharge({ ...retry, attemptId: randomUUID(), database: app }))
+      .rejects.toMatchObject({ code: 'STRIPE_CHARGE_IN_PROGRESS', chargeAttemptId: retry.attemptId });
   }, 15000);
 
   test('stale SUBMITTED claim: ambiguous verdict, no write, transaction stays usable', async () => {

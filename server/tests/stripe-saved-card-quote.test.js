@@ -1,3 +1,19 @@
+const SAVED_CARD_QUERY_METHODS = [
+  'where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw',
+  'orWhere', 'orWhereNull', 'orWhereColumn', 'forUpdate', 'orderBy', 'orderByRaw',
+];
+
+function makeSavedCardQueryChain() {
+  const chain = {};
+  SAVED_CARD_QUERY_METHODS.forEach((method) => {
+    chain[method] = jest.fn((arg) => {
+      if (['where', 'orWhere'].includes(method) && typeof arg === 'function') arg.call(chain, chain);
+      return chain;
+    });
+  });
+  return chain;
+}
+
 describe('StripeService.quoteInvoiceSavedCardCharge', () => {
   beforeEach(() => {
     jest.resetModules();
@@ -13,12 +29,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     const db = jest.fn((table) => {
       if (table === 'invoices') return invoiceQuery;
       if (['stripe_invoice_charge_attempts', 'stripe_orphan_charges', 'payments'].includes(table)) {
-        const query = {};
-        query.where = () => query;
-        query.whereIn = () => query;
-        query.whereNull = () => query;
-        query.whereRaw = () => query;
-        query.orWhereColumn = () => query;
+        const query = makeSavedCardQueryChain();
         query.first = async () => null;
         return query;
       }
@@ -44,6 +55,60 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     } finally {
       jest.dontMock('../services/estimate-deposits');
     }
+  });
+
+  test('an earlier authentication-required attempt blocks a new claim before any Stripe charge', async () => {
+    const invoice = {
+      id: 'inv-1', customer_id: 'cust-1', status: 'draft', total: '250.00',
+      credit_applied: '0.00', payer_id: null, stripe_payment_intent_id: null,
+    };
+    const earlierAttempt = {
+      id: 'attempt-auth-1', invoice_id: 'inv-1', status: 'failed',
+      decline_code: 'authentication_required', resolved_at: new Date(),
+      stripe_payment_intent_id: 'pi_auth_1', authentication_canceled_intent_id: null,
+    };
+    let attemptQuery;
+    const attemptInsert = jest.fn();
+    const db = jest.fn((table) => {
+      const chain = makeSavedCardQueryChain();
+      chain.first = jest.fn(async () => {
+        if (table === 'invoices') return invoice;
+        if (table === 'stripe_invoice_charge_attempts') return earlierAttempt;
+        return null;
+      });
+      chain.insert = table === 'stripe_invoice_charge_attempts'
+        ? attemptInsert.mockImplementation(() => chain)
+        : jest.fn(() => chain);
+      chain.returning = jest.fn(async () => []);
+      if (table === 'stripe_invoice_charge_attempts') attemptQuery = chain;
+      return chain;
+    });
+    db.transaction = jest.fn(async (callback) => callback(db));
+    const stripeClient = { paymentIntents: { create: jest.fn() } };
+    jest.doMock('../models/db', () => db);
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock' }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1'))
+      .rejects.toMatchObject({
+        code: 'STRIPE_CHARGE_IN_PROGRESS',
+        chargeAttemptId: 'attempt-auth-1',
+        statusCode: 409,
+        savedCardPending: true,
+      });
+
+    expect(attemptQuery.where).toHaveBeenCalledWith({
+      'stripe_invoice_charge_attempts.status': 'failed',
+      'stripe_invoice_charge_attempts.decline_code': 'authentication_required',
+    });
+    expect(attemptQuery.orderByRaw).toHaveBeenCalledWith("CASE WHEN status = 'failed' THEN 0 ELSE 1 END");
+    expect(db.mock.calls.some(([table]) => table === 'payment_methods')).toBe(false);
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(attemptInsert).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
   test('uses live funding and the shared surcharge math for the displayed total', async () => {
@@ -107,13 +172,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     };
     let chargeAttempt = null;
     const db = jest.fn((table) => {
-      const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
-        chain[method] = jest.fn((arg) => {
-          if (method === 'where' && typeof arg === 'function') arg.call(chain);
-          return chain;
-        });
-      });
+      const chain = makeSavedCardQueryChain();
       chain.first = jest.fn(async () => {
         if (table === 'invoices') return invoice;
         if (table === 'payment_methods') return card;
@@ -179,13 +238,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     };
     let chargeAttempt = null;
     const db = jest.fn((table) => {
-      const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
-        chain[method] = jest.fn((arg) => {
-          if (method === 'where' && typeof arg === 'function') arg.call(chain);
-          return chain;
-        });
-      });
+      const chain = makeSavedCardQueryChain();
       chain.first = jest.fn(async () => {
         if (table === 'invoices') return invoice;
         if (table === 'payment_methods') return card;
@@ -263,13 +316,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     };
     let chargeAttempt = null;
     const db = jest.fn((table) => {
-      const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
-        chain[method] = jest.fn((arg) => {
-          if (method === 'where' && typeof arg === 'function') arg.call(chain);
-          return chain;
-        });
-      });
+      const chain = makeSavedCardQueryChain();
       chain.first = jest.fn(async () => {
         if (table === 'invoices') return invoice;
         if (table === 'payment_methods') return card;
@@ -332,13 +379,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     };
     let chargeAttempt = null;
     const db = jest.fn((table) => {
-      const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
-        chain[method] = jest.fn((arg) => {
-          if (method === 'where' && typeof arg === 'function') arg.call(chain);
-          return chain;
-        });
-      });
+      const chain = makeSavedCardQueryChain();
       chain.first = jest.fn(async () => {
         if (table === 'invoices') return invoice;
         if (table === 'payment_methods') return card;
@@ -396,13 +437,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     };
     let chargeAttempt = null;
     const db = jest.fn((table) => {
-      const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
-        chain[method] = jest.fn((arg) => {
-          if (method === 'where' && typeof arg === 'function') arg.call(chain);
-          return chain;
-        });
-      });
+      const chain = makeSavedCardQueryChain();
       chain.first = jest.fn(async () => {
         if (table === 'invoices') return invoice;
         if (table === 'payment_methods') return card;
@@ -463,13 +498,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     };
     let chargeAttempt = null;
     const db = jest.fn((table) => {
-      const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
-        chain[method] = jest.fn((arg) => {
-          if (method === 'where' && typeof arg === 'function') arg.call(chain);
-          return chain;
-        });
-      });
+      const chain = makeSavedCardQueryChain();
       chain.first = jest.fn(async () => {
         if (table === 'invoices') return invoice;
         if (table === 'payment_methods') return card;
@@ -532,13 +561,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     };
     let chargeAttempt = null;
     const db = jest.fn((table) => {
-      const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
-        chain[method] = jest.fn((arg) => {
-          if (method === 'where' && typeof arg === 'function') arg.call(chain);
-          return chain;
-        });
-      });
+      const chain = makeSavedCardQueryChain();
       chain.first = jest.fn(async () => {
         if (table === 'invoices') return invoice;
         if (table === 'payment_methods') return card;
@@ -602,13 +625,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     };
     let chargeAttempt = null;
     const db = jest.fn((table) => {
-      const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
-        chain[method] = jest.fn((arg) => {
-          if (method === 'where' && typeof arg === 'function') arg.call(chain);
-          return chain;
-        });
-      });
+      const chain = makeSavedCardQueryChain();
       chain.first = jest.fn(async () => {
         if (table === 'invoices') return invoice;
         if (table === 'payment_methods') return card;
@@ -673,13 +690,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     };
     let chargeAttempt = null;
     const db = jest.fn((table) => {
-      const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
-        chain[method] = jest.fn((arg) => {
-          if (method === 'where' && typeof arg === 'function') arg.call(chain);
-          return chain;
-        });
-      });
+      const chain = makeSavedCardQueryChain();
       chain.first = jest.fn(async () => {
         if (table === 'invoices') return invoice;
         if (table === 'payment_methods') return card;
@@ -752,13 +763,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     };
     let chargeAttempt = null;
     const db = jest.fn((table) => {
-      const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
-        chain[method] = jest.fn((arg) => {
-          if (method === 'where' && typeof arg === 'function') arg.call(chain);
-          return chain;
-        });
-      });
+      const chain = makeSavedCardQueryChain();
       chain.first = jest.fn(async () => {
         if (table === 'invoices') return invoice;
         if (table === 'payment_methods') return card;
@@ -818,13 +823,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     };
     let chargeAttempt = null;
     const db = jest.fn((table) => {
-      const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
-        chain[method] = jest.fn((arg) => {
-          if (method === 'where' && typeof arg === 'function') arg.call(chain);
-          return chain;
-        });
-      });
+      const chain = makeSavedCardQueryChain();
       chain.first = jest.fn(async () => {
         if (table === 'invoices') return invoice;
         if (table === 'payment_methods') return card;
@@ -888,13 +887,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     };
     let chargeAttempt = null;
     const db = jest.fn((table) => {
-      const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
-        chain[method] = jest.fn((arg) => {
-          if (method === 'where' && typeof arg === 'function') arg.call(chain);
-          return chain;
-        });
-      });
+      const chain = makeSavedCardQueryChain();
       chain.first = jest.fn(async () => {
         if (table === 'invoices') return invoice;
         if (table === 'payment_methods') {
@@ -1001,13 +994,7 @@ describe('chargeInvoiceWithSavedCard — invoice Bill-To and deleted accounts un
     let invoiceRead = 0;
     let chargeAttempt = null;
     const db = jest.fn((table) => {
-      const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
-        chain[method] = jest.fn((arg) => {
-          if (method === 'where' && typeof arg === 'function') arg.call(chain);
-          return chain;
-        });
-      });
+      const chain = makeSavedCardQueryChain();
       chain.first = jest.fn(async () => {
         if (table === 'invoices') {
           const row = invoiceReads[Math.min(invoiceRead, invoiceReads.length - 1)];
