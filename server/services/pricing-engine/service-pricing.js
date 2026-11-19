@@ -7084,12 +7084,14 @@ function labelCheckCounts(options, productKey, product) {
 // product, rate and product oz. Custom inputs count too: a replay re-prices the stored inputs, and a custom rate, cost or
 // container size still takes the rest of its cost basis from config (a custom cost divides by the configured container oz).
 // A quote priced before the label's volume adjustment stored the product for the full labeled volume, so that oz matches too.
-function trenchReplaySurcharge(replay, priced, surcharge) {
-  if (!replay || typeof replay !== 'object') return surcharge;
+// The line reports whether the pin priced it (replayPinApplied, on a replay only): the public bundle sends a quote whose pin did not
+// apply, and whose total moved, to review.
+function trenchReplayPinApplies(replay, priced) {
+  if (!replay || typeof replay !== 'object') return false;
   const pinned = Number(replay.productSurcharge);
   const samePricing = replay.productKey === priced.productKey && replay.applicationRate === priced.applicationRate
     && [priced.productOz, priced.labeledProductOz].includes(Number(replay.productOz));
-  return samePricing && Number.isInteger(pinned) && pinned >= 0 ? pinned : surcharge;
+  return samePricing && Number.isInteger(pinned) && pinned >= 0;
 }
 
 function priceTrenching(property = {}, options = {}, replay) {
@@ -7309,12 +7311,15 @@ function priceTrenching(property = {}, options = {}, replay) {
     includedProduct.productOzPerFinishedGallonAtStandardRate *
     (includedProduct.containerCost / includedProduct.containerOz);
   const chemicalPremiumCost = Math.max(0, allocatedChemicalCost - includedChemicalCost);
-  const productSurcharge = trenchReplaySurcharge(replay, {
+  const replayPinApplied = trenchReplayPinApplies(replay, {
     productKey: productResolution.productKey,
     applicationRate: rateResolution.applicationRate,
     productOz: roundMoney(productOz),
     labeledProductOz: roundMoney(labeledGallons * productOzPerFinishedGallon),
-  }, Math.round(chemicalPremiumCost * (cfg.productPremiumMultiplier || 1)));
+  });
+  const productSurcharge = replayPinApplied
+    ? Number(replay.productSurcharge)
+    : Math.round(chemicalPremiumCost * (cfg.productPremiumMultiplier || 1));
   const totalLF = Math.max(1, measurements.dirtLF + measurements.concreteLF);
   const chemicalCostPerLF = allocatedChemicalCost / totalLF;
   const containersRequired = Math.max(1, Math.ceil(productOz / containerOz));
@@ -7354,6 +7359,7 @@ function priceTrenching(property = {}, options = {}, replay) {
     includedChemicalCost: roundMoney(includedChemicalCost),
     chemicalPremiumCost: roundMoney(chemicalPremiumCost),
     productSurcharge,
+    ...(replay ? { replayPinApplied } : {}),
     chemicalCostPerLF: roundMoney(chemicalCostPerLF),
     containersRequired,
     baseInstallBeforePremium,

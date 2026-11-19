@@ -3040,6 +3040,12 @@ describe('public estimate one-time breakdown', () => {
     expect(kept.oneTimeBreakdown.total).toBe(993);
     expect(kept.quoteRequiredReason).not.toBe('termiticide_price_changed_requote');
     expect(resolveEstimateQuoteRequirement(kept, pinned.estimate_data).quoteRequired).toBe(false);
+    // A never-issued draft with the same stored row is not sold: its first send prices today's bottle (pre-push audit 15).
+    const draft = slabQuote({ id: 'estimate-public-inputs-only-slab-pinned-draft', onetime_total: 993, status: 'draft' });
+    draft.estimate_data.engineResult = pinned.estimate_data.engineResult;
+    const firstSend = await buildPricingBundle(draft);
+    expect(firstSend.oneTimeBreakdown.total).toBe(743);
+    expect(resolveEstimateQuoteRequirement(firstSend, draft.estimate_data).quoteRequired).toBe(false);
   });
 
   // A stored pin prices the line only for the product, rate and product oz it was quoted with. A pin the engine skipped (another
@@ -3065,13 +3071,22 @@ describe('public estimate one-time breakdown', () => {
       expect(slabSkipped.oneTimeBreakdown.total).toBe(743);
       expect(slabSkipped.quoteRequiredReason).toBe('termiticide_price_changed_requote');
     }
+    // A pin for the product the inputs price applies, and the engine marks the line: a total that moved for another reason
+    // is not this hold's (the trench case below too).
+    const slabKept = await buildPricingBundle(issued('slab-kept', slab,
+      [{ service: 'pre_slab_termiticide', productKey: 'talstar_p', containerCost: 41.57, containerOz: 96, price: 993 }], 1));
+    expect(slabKept.oneTimeBreakdown.total).toBe(993);
+    expect(slabKept.quoteRequiredReason).not.toBe('termiticide_price_changed_requote');
 
-    // Trench: the stored surcharge replays only for the product oz the engine prices today.
+    // Trench: the stored surcharge replays only for the product oz the engine prices today, and the engine marks the line it
+    // priced with the pin. A pin skipped for another product oz (other footage, a changed dilution) holds even when both
+    // surcharges are the same $0: the figures alone cannot show the skip (pre-push audit 15).
     const trench = { trenching: { measurements: { perimeterLF: 240, concreteLF: 0 }, labelConfirmed: true } };
     const live = generateEstimate({ ...property, services: trench }).lineItems.find((line) => line.service === 'trenching');
-    const trenchRow = (productOz) => [{
+    expect(live.replayPinApplied).toBeUndefined();
+    const trenchRow = (productOz, extra = 120) => [{
       service: 'trenching', productKey: live.productKey, applicationRate: live.applicationRate, productOz,
-      productSurcharge: live.productSurcharge + 120, price: live.price + 120,
+      productSurcharge: live.productSurcharge + extra, price: live.price + extra,
     }];
     const trenchKept = await buildPricingBundle(issued('trench-kept', trench, trenchRow(live.productOz), 1));
     expect(trenchKept.quoteRequiredReason).not.toBe('termiticide_price_changed_requote');
@@ -3079,6 +3094,10 @@ describe('public estimate one-time breakdown', () => {
       trenchKept.oneTimeBreakdown.total));
     expect(trenchSkipped.oneTimeBreakdown.total).toBeLessThan(trenchKept.oneTimeBreakdown.total);
     expect(trenchSkipped.quoteRequiredReason).toBe('termiticide_price_changed_requote');
+    const sameSurchargeSkipped = await buildPricingBundle(issued('trench-skipped-same-surcharge', trench,
+      trenchRow(live.productOz + 1, 0), trenchSkipped.oneTimeBreakdown.total + 200));
+    expect(sameSurchargeSkipped.oneTimeBreakdown.total).toBe(trenchSkipped.oneTimeBreakdown.total);
+    expect(sameSurchargeSkipped.quoteRequiredReason).toBe('termiticide_price_changed_requote');
   });
 
   test('detects nested legacy one-time-only estimates for acceptance flow', () => {

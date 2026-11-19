@@ -2806,18 +2806,20 @@ Crosscheck Plus): a replay of a sent estimate (`GET /:token/data`, the view,
 or trench line was quoted with when a stored row carries it: the pre-slab
 container cost and size, and the trench product surcharge (server-owned
 `preSlabTermiticidePricingKnobs` / `trenchingTermiticidePricingKnobs`, like the
-termite station and misting pins). The engine uses a pin only for the product,
-rate and product oz it was quoted with. When a replayed pre-slab or trench line
-did not price on its pin's figures (no stored row, or a pin the engine skipped)
-and the replayed one-time total no longer matches the issued `onetime_total`,
-the pricing bundle carries `{ quoteRequired: true, quoteRequiredReason:
+termite station and misting pins). The engine uses a pin only for the product
+it was quoted with (for trenching, also the rate and product oz), and it marks
+the line it priced with the pin (`replayPinApplied`). When a replayed pre-slab
+or trench line lacks that mark (no stored row, or a pin the engine skipped) and
+the replayed one-time total no longer matches the issued `onetime_total`, the
+pricing bundle carries `{ quoteRequired: true, quoteRequiredReason:
 'termiticide_price_changed_requote' }` with the friendly "Our termite treatment
 pricing has been updated since this quote was sent — call Waves and we’ll
 refresh your quote with current pricing." copy. Every gate that reads
 `resolveEstimateQuoteRequirement` then treats it as any other quote
 requirement, so the page shows the requote state instead of an acceptable
-price. A never-issued draft, or a quote still at its issued total, prices live;
-a send snapshot that serves as sent is unchanged.
+price. A never-issued draft skips the pins and prices live, its first send
+included; a quote whose replayed total still matches its issued total is not
+held; a send snapshot that serves as sent is unchanged.
 
 Termite annual plan sign-before-pay (dark behind `GATE_TERMITE_ANNUAL_PLAN`,
 or an annual-plan offer already delivered before the gate turned off): a

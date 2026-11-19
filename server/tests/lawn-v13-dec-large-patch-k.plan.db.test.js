@@ -63,7 +63,7 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
     await knex('equipment_calibrations').insert({ equipment_system_id: equipment.id, carrier_gal_per_1000: 1, active: true });
   }, 90000);
   afterAll(async () => { if (owned) await owned.dispose(); });
-  beforeEach(async () => { setGates(); await knex('lawn_trouble_areas').del(); await knex('property_application_history').del(); await knex('products_catalog').where({ id: boProduct.id }).update({ best_price: null }); });
+  beforeEach(async () => { setGates(); await knex('lawn_trouble_areas').del(); await knex('property_application_history').del(); await knex('products_catalog').where({ id: boProduct.id }).update({ best_price: null, needs_pricing: true }); });
   afterEach(() => { for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
 
   // A December visit at a fresh lawn, optionally with mapped areas ({ type, status, target, firstSeen, lastSeen, clearedAt }). `target` is the disease the newest fungicide
@@ -148,7 +148,8 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
     const visit = await decemberVisit([{ type: 'fungus', target: LARGE }]);
     const unpriced = itemOf((await plan(visit)).mixCalculator.items, BO);
     expect(unpriced.mix.materialCost).toBeNull();
-    await knex('products_catalog').where({ id: boProduct.id }).update({ best_price: 30.06 });
+    // Priced the way Inventory prices it: the recalculation clears the needs_pricing mark (a marked price is no cost).
+    await knex('products_catalog').where({ id: boProduct.id }).update({ best_price: 30.06, needs_pricing: false });
     const result = await plan(visit);
     const item = itemOf(result.mixCalculator.items, BO);
     expect(item.mix.materialCost).toBeCloseTo((41.25 * 16 / 800) * 30.06, 1);

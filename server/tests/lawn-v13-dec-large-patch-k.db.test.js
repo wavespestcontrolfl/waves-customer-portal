@@ -203,8 +203,9 @@ describeDb('v13 December 0-0-24 migration through PostgreSQL', () => {
       expect(mix.ratePer1000 * Number(product.analysis_n) / 100).toBe(0);
       const summary = engine.summarizeMaterialCost([{ selected: true, product, mix }]);
       expect(summary).toMatchObject({ pricedLineCount: 0, total: 0, missingPriceCount: 1, source: 'unavailable' });
-      // Priced the way Inventory prices it (SiteOne $30.06 for the 50 lb bag, 800 oz): the same plan has a cost line.
-      const priced = engine.calculateProductAmount({ product: { ...product, best_price: 30.06 }, lawnSqft: 10000, areaFactor: 1, targetNPer1000: 0, targetKPer1000: 0.99, ...engine.v13RateOptions(row) });
+      // Priced the way Inventory prices it (SiteOne $30.06 for the 50 lb bag, 800 oz; the recalculation clears the
+      // needs_pricing mark, and a marked price is no cost): the same plan has a cost line.
+      const priced = engine.calculateProductAmount({ product: { ...product, best_price: 30.06, needs_pricing: false }, lawnSqft: 10000, areaFactor: 1, targetNPer1000: 0, targetKPer1000: 0.99, ...engine.v13RateOptions(row) });
       expect(priced.materialCost).toBeCloseTo(24.8, 1);
       // Without the target (a row that lost it) the catalog default rate still plans 4.1 lb.
       expect(engine.calculateProductAmount({ product, lawnSqft: 1000, areaFactor: 1 })).toMatchObject({ rateSource: 'catalog_default_rate', amount: 4.1 });

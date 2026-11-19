@@ -38,7 +38,8 @@ describe('costLineFromUsage prices usage only in a unit its cost converts to', (
   test('every service-usage cost query that reads the package price also reads its needs_pricing mark', () => {
     const fs = require('fs');
     const path = require('path');
-    for (const rel of ['../routes/admin-pricing-config.js', '../services/estimate-pricing-audit.js', '../routes/admin-inventory.js']) {
+    const files = ['../routes/admin-pricing-config.js', '../services/estimate-pricing-audit.js', '../routes/admin-inventory.js', '../services/knowledge-base.js'];
+    for (const rel of files) {
       const source = fs.readFileSync(path.join(__dirname, rel), 'utf8');
       const count = (needle) => source.split(needle).length - 1;
       expect({ rel, mark: count("'products_catalog.needs_pricing'") })

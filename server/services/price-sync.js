@@ -30,7 +30,7 @@ async function syncPricesToEstimator(options = {}) {
     const products = await db('products_catalog')
       .whereNotNull('best_price')
       .where('best_price', '>', 0)
-      .select('id', 'name', 'best_price', 'unit_size_oz', 'category');
+      .select('id', 'name', 'best_price', 'unit_size_oz', 'category', 'needs_pricing');
 
     logger.info(`[PriceSync] Found ${products.length} products with pricing`);
 
@@ -40,7 +40,14 @@ async function syncPricesToEstimator(options = {}) {
     //    package size (e.g. defaulting to one gallon).
     const priceMap = {};
     const unsizedProductIds = new Set();
+    // A package price the inventory marked needs_pricing (a price it cannot trust, which the estimate links and job costing skip
+    // too) never costs a mix: a mix that uses it is skipped like one with an unpriced product.
+    const markedProductIds = new Set();
     for (const p of products) {
+      if (p.needs_pricing === true) {
+        markedProductIds.add(p.id);
+        continue;
+      }
       const containerOz = parseFloat(p.unit_size_oz);
       if (!Number.isFinite(containerOz) || containerOz <= 0) {
         unsizedProductIds.add(p.id);
@@ -79,7 +86,8 @@ async function syncPricesToEstimator(options = {}) {
         if (priceMap[p.product_id]) continue;
         blockers.push({
           product_id: p.product_id,
-          reason: unsizedProductIds.has(p.product_id) ? 'missing_unit_size_oz' : 'no_best_price',
+          reason: unsizedProductIds.has(p.product_id) ? 'missing_unit_size_oz'
+            : (markedProductIds.has(p.product_id) ? 'needs_pricing' : 'no_best_price'),
         });
       }
       if (blockers.length) {

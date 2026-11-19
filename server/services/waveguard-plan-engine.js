@@ -1277,7 +1277,8 @@ function materialCostForAmount(product, amount, amountUnit) {
     };
   }
 
-  const bestPrice = product.best_price != null ? Number(product.best_price) : null;
+  // A package price the inventory marked needs_pricing is one it cannot trust (job and service-usage costing skip it too): no cost.
+  const bestPrice = product.best_price != null && product.needs_pricing !== true ? Number(product.best_price) : null;
   const unitSizeOz = productUnitSizeOz(product);
   const amountOz = convertToOz(quantity, amountUnit);
   if (
