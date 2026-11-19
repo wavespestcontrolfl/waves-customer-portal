@@ -495,6 +495,36 @@ describe('the 60-minute ring (GATE_NEW_LEAD_CELL_RING, dark)', () => {
     expect(mockPlaceRing).toHaveBeenCalledTimes(1);
   });
 
+  test('an uncertain create (ring_uncertain) uses up the sweep\'s one ring: the next lead is not rung', async () => {
+    process.env.GATE_NEW_LEAD_CELL_RING = 'true';
+    const second = '55555555-5555-4555-8555-555555555555';
+    mockState.rows = [row('n-1'), { ...row('n-2'), link: `/admin/leads?lead=${second}`, metadata: { triggerKey: 'new_lead', payload: { leadId: second } } }];
+    mockState.leads = [lead(), lead({ id: second, phone: '+19415550101' })];
+    mockPlaceRing.mockResolvedValueOnce({ rang: false, reason: 'ring_uncertain' });
+    expect(await run(RING_NOW)).toMatchObject({ due: 2, rang: 1 });
+    expect(mockPlaceRing).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    ['an international number', '+442079460958'],
+    ['a number with an extension', '(941) 555-0100 x12'],
+    ['an 11-digit number that is not +1', '+49 941 555 0100'],
+    ['an area code starting with 1', '+11205550100'],
+  ])('%s is no US destination: nobody is rung (never its last ten digits with +1)', async (_label, phone) => {
+    process.env.GATE_NEW_LEAD_CELL_RING = 'true';
+    mockState.leads = [lead({ phone })];
+    mockState.customer = { id: CUST, first_name: 'Pat', last_name: 'Sample', phone: null };
+    await run(RING_NOW);
+    expect(mockPlaceRing).not.toHaveBeenCalled();
+  });
+
+  test('a formatted US number is rung as +1 and its ten digits', async () => {
+    process.env.GATE_NEW_LEAD_CELL_RING = 'true';
+    mockState.leads = [lead({ phone: '(941) 555-0100' })];
+    await run(RING_NOW);
+    expect(mockPlaceRing.mock.calls[0][0].fromPhone).toBe('+19415550100');
+  });
+
   test('a reached lead is never rung', async () => {
     process.env.GATE_NEW_LEAD_CELL_RING = 'true';
     mockBundles.byId = { 'n-1': { backAt: est('09', '10:40') } };

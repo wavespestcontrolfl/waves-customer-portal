@@ -118,19 +118,24 @@ async function leadTextBlocker({ customer, digits, now }, conn = db) {
   return leadText ? null : 'no_lead_text';
 }
 
-// Every read runs on `conn` so the caller's advisory lock covers it.
-async function ringBlocker({ customer, digits, now }, conn) {
-  const leadBlocker = await leadTextBlocker({ customer, digits, now }, conn);
-  if (leadBlocker) return leadBlocker;
-
+// The guards every ring of this file shares: one ring per phone per 24 h counting a CALL-reply ring AND a new-lead cell ring
+// (new-lead-reminder.js), whichever came first, and none while another call to the phone is going. Every read runs on
+// `conn` so the caller's advisory lock covers it.
+async function ringLimitBlocker({ digits, now }, conn) {
   const priorRing = await conn('call_log')
-    .where({ source: SOURCE, direction: 'outbound' })
+    .whereIn('source', [SOURCE, NEW_LEAD_CELL_RING_SOURCE]).where({ direction: 'outbound' })
     .where('created_at', '>=', new Date(now.getTime() - ONE_RING_WINDOW_MS))
     .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
     .first('id');
   if (priorRing) return 'rang_today';
-
   return callInProgressBlocker({ digits, now }, conn);
+}
+
+// The CALL reply's guards: the lead-text rule, then the shared ring limits.
+async function ringBlocker({ customer, digits, now }, conn) {
+  const leadBlocker = await leadTextBlocker({ customer, digits, now }, conn);
+  if (leadBlocker) return leadBlocker;
+  return ringLimitBlocker({ digits, now }, conn);
 }
 
 // Another call to this phone started in the last 10 minutes. The web-form auto-bridge (lead-webhook.js) stores Adam's
@@ -145,18 +150,6 @@ async function callInProgressBlocker({ digits, now }, conn) {
     })
     .first('id');
   return recentCall ? 'call_in_progress' : null;
-}
-
-// The new-lead cell ring's guards (new-lead-reminder.js): one ring per phone per 24 h counting this ring AND a CALL-reply
-// ring, and none while another call to the phone is going. No lead-text rule: the lead never texted us CALL.
-async function newLeadRingBlocker({ digits, now }, conn) {
-  const priorRing = await conn('call_log')
-    .whereIn('source', [SOURCE, NEW_LEAD_CELL_RING_SOURCE]).where({ direction: 'outbound' })
-    .where('created_at', '>=', new Date(now.getTime() - ONE_RING_WINDOW_MS))
-    .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
-    .first('id');
-  if (priorRing) return 'rang_today';
-  return callInProgressBlocker({ digits, now }, conn);
 }
 
 async function newestLeadId(customerId, conn) {
@@ -410,7 +403,8 @@ async function settleUnstartedRing(callLogId) {
 module.exports = {
   ringForCallReply,
   placeRing,
-  newLeadRingBlocker,
+  // The new-lead cell ring's guards: the shared ring limits, no lead-text rule (the lead never texted us CALL).
+  newLeadRingBlocker: ringLimitBlocker,
   NEW_LEAD_CELL_RING_SOURCE,
   settleUnstartedRing,
   leadTextBlocker,
@@ -418,5 +412,5 @@ module.exports = {
   noteRingEnded,
   inRingHours,
   LEAD_CALL_REPLY_RING_SOURCE: SOURCE,
-  _test: { ringBlocker, displayName, raiseMissedBell, bellSettled, settleUnstartedRing, RING_TIMEOUT_SECONDS, UNCERTAIN_RING_CHECK_MS },
+  _test: { ringBlocker, ringLimitBlocker, displayName, raiseMissedBell, bellSettled, settleUnstartedRing, RING_TIMEOUT_SECONDS, UNCERTAIN_RING_CHECK_MS },
 };

@@ -370,6 +370,16 @@ describe('a ring of another kind (the new-lead cell ring)', () => {
     await expect(newLeadRingBlocker({ digits: '9415550100', now: AFTERNOON }, (table) => mockQuery(table))).resolves.toBeNull();
   });
 
+  test('the CALL-reply ring counts a new-lead cell ring in its 24 h limit too, through the same two-source lookup', async () => {
+    const queries = [];
+    const conn = (table) => { const q = mockQuery(table); queries.push(q); return q; };
+    expect(newLeadRingBlocker).toBe(_test.ringLimitBlocker);
+    mockState.priorRing = { id: 'new-lead-ring' };
+    await expect(_test.ringBlocker({ customer: LEAD, digits: '9415550100', now: AFTERNOON }, conn)).resolves.toBe('rang_today');
+    const ringQuery = queries.find((q) => q.filters.some(([f]) => f === 'source'));
+    expect(ringQuery.filters).toContainEqual(['source', ['lead-call-reply-ring', 'new-lead-cell-ring']]);
+  });
+
   test('needs no lead text: the lead never texted CALL', async () => {
     mockState.leadText = null;
     expect(await placeNewLeadRing()).toMatchObject({ rang: true });
