@@ -6,16 +6,17 @@
  * right estimate draft when they mention service details.
  *
  *   classifyServiceIntent(body) -> Promise<{
- *     interest: 'pest' | 'lawn' | 'one_time' | null,
+ *     interest: 'pest' | 'lawn' | 'pest_lawn' | 'one_time' | null,
  *     confidence: number (0..1),
  *     method: 'regex' | 'claude' | 'none',
  *   }>
  *
  * Fast-path unambiguous keyword matches, fall back to Claude FAST for
  * anything ambiguous (multi-service mentions, natural language like
- * "I've got bugs in my yard"). Returns null interest when the classifier
- * can't confidently pick a branch — caller should fall through to the
- * human-draft path in that case.
+ * "I've got bugs in my yard"). 'pest_lawn' is one request for BOTH pest
+ * control and lawn care ("pest and lawn"; owner 2026-11-19: one draft names
+ * both). Returns null interest when the classifier can't confidently pick a
+ * branch — caller should fall through to the human-draft path in that case.
  *
  * Sibling for inbound PHOTO texts (services/photo-text-triage.js):
  *
@@ -61,6 +62,19 @@ const LAWN_KEYWORDS = [
 // "one time" / "one-time" / "just once" / "single visit"
 const ONE_TIME_RE = /\b(one[\s-]?time|just once|one visit|single visit|one[\s-]?off|one shot)\b/i;
 
+// The two services named as a PAIR ("pest and lawn", "lawn fertilization &
+// pest control", "pest/lawn"): one request for both. Only the explicit pair
+// matches. "Bugs in my yard", "chinch bugs in the lawn" and the lawn-line
+// "lawn pest control" also carry both keyword sets but ask for one service,
+// so they still go to the model.
+const PEST_SERVICE = 'pests?(?:\\s+control)?';
+const LAWN_SERVICE = '(?:lawn(?:\\s+(?:care|fertilization|treatments?|maintenance|service))?|fertilization)';
+const PAIR_JOIN = '\\s*(?:,\\s*)?(?:\\s(?:and|plus)\\s|[&+/])\\s*';
+const SERVICE_PAIR_RE = new RegExp(
+  `(^|[^a-z])(?:${PEST_SERVICE}${PAIR_JOIN}${LAWN_SERVICE}|${LAWN_SERVICE}${PAIR_JOIN}${PEST_SERVICE})([^a-z]|$)`,
+  'i',
+);
+
 function tokenMatches(lower, tokens) {
   for (const t of tokens) {
     const re = new RegExp(`(^|[^a-z])${escapeRe(t)}([^a-z]|$)`, 'i');
@@ -86,7 +100,8 @@ function regexClassify(body) {
   // no service signal is still one_time.
   if (hasOneTime) return { interest: 'one_time', confidence: 0.9, method: 'regex' };
 
-  // Both pest + lawn mentioned → ambiguous, let Claude decide.
+  if (SERVICE_PAIR_RE.test(lower)) return { interest: 'pest_lawn', confidence: 0.9, method: 'regex' };
+  // Both pest + lawn words but no explicit pair → ambiguous, let Claude decide.
   if (hasPest && hasLawn) return null;
   if (hasPest) return { interest: 'pest', confidence: 0.9, method: 'regex' };
   if (hasLawn) return { interest: 'lawn', confidence: 0.9, method: 'regex' };
@@ -101,7 +116,7 @@ const INTENT_SCHEMA = {
   additionalProperties: false,
   required: ['interest', 'confidence'],
   properties: {
-    interest: { type: 'string', enum: ['pest', 'lawn', 'one_time', 'unknown'] },
+    interest: { type: 'string', enum: ['pest', 'lawn', 'pest_lawn', 'one_time', 'unknown'] },
     // Range constraints (minimum/maximum) are outside the structured-output
     // schema subset every provider accepts; the 0–1 range is enforced below.
     confidence: { type: 'number', description: 'Confidence in the classification, from 0 to 1' },
@@ -119,12 +134,14 @@ Their reply: ${JSON.stringify(body)}
 Classify into ONE of:
 - "pest" — recurring pest control (any bug/rodent/termite/mosquito/roach service, including quarterly exterior)
 - "lawn" — lawn care (grass, weeds, fertilizer, turf, mowing, lawn treatments)
+- "pest_lawn" — BOTH recurring pest control AND lawn care in the same request
 - "one_time" — a single-visit service (not a recurring plan)
-- "unknown" — ambiguous, doesn't match any of the three, a question, or a complaint
+- "unknown" — ambiguous, doesn't match any of these, a question, or a complaint
 
 Rules:
 - Classify by what the customer is ASKING FOR, not by which pest/lawn words appear — a species or yard word is evidence, not the request.
 - An explicit statement of cadence or scope (single visit vs recurring plan) outranks any species mention.
+- Turf insects (chinch bugs, grubs, sod webworms, armyworms) are lawn care, not pest control.
 - Customers phrase these intents in unseen ways; match the meaning at the least-specific reading that fits, not keywords.`;
 
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
@@ -136,7 +153,7 @@ Rules:
     });
     if (!response.ok || !response.json) return { interest: null, confidence: 0, method: 'ai' };
     const parsed = response.json;
-    const interest = ['pest', 'lawn', 'one_time'].includes(parsed.interest) ? parsed.interest : null;
+    const interest = ['pest', 'lawn', 'pest_lawn', 'one_time'].includes(parsed.interest) ? parsed.interest : null;
     const confidence = typeof parsed.confidence === 'number' && parsed.confidence >= 0 && parsed.confidence <= 1 ? parsed.confidence : 0;
     return { interest, confidence, method: 'ai' };
   } catch (err) {
