@@ -61,7 +61,7 @@ const V13_SUMMARY = {
     { productId: 'are', applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: { trigger: 'chinch_20_to_25_per_sqft' } },
     { productId: 'cel', applicationMode: 'spot', ratePer1000: 0.085, rateUnit: 'oz', gates: { annualCounter: 'celsius_oz_per_1000' } },
     { productId: 'nis', applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: { concentration: '0.25% v/v', tankMixWith: 'Celsius WG' } },
-    { productId: 'tet', ratePer1000: 0.367, rateUnit: 'fl oz', gates: { sunnyTurfOnly: true, minDistanceFromWaterFt: 25, applyAlone: true } },
+    { productId: 'tet', productName: TETRINO, ratePer1000: 0.367, rateUnit: 'fl oz', gates: { sunnyTurfOnly: true, minDistanceFromWaterFt: 25, applyAlone: true } },
   ],
 };
 
@@ -283,6 +283,20 @@ test('gate on with no staged v13 protocol: 409, never a sheet priced at catalog 
   expect(next).not.toHaveBeenCalled();
   expect(res.status).toHaveBeenCalledWith(409);
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'lawn_v13_protocol_missing' }));
+});
+
+test.each([
+  ['May Tetrino awaiting scouting evidence', TETRINO, { month: '5', selectedConditionalProductNames: TETRINO }],
+  ['January herbicide on mixed turf', STONEWALL, { month: '1', grassType: 'mixed' }],
+  ['January herbicide on unknown turf', STONEWALL, { month: '1', grassType: 'unknown' }],
+])('%s has no job or full-tank quantity, even as a preview', async (_case, name, query) => {
+  const sheet = await lawnMix(query);
+  expect(itemFor(sheet, name)).toMatchObject({
+    fieldHold: expect.any(String), selected: false,
+    jobMix: null, plannedMix: null, fullTankMix: null, plannedFullTankMix: null,
+  });
+  expect(sheet.mixingOrder.map(step => step.productName)).not.toContain(name);
+  expect(sheet.warnings).toContainEqual(expect.objectContaining({ productName: name, code: 'lawn_v13_' + itemFor(sheet, name).fieldHold }));
 });
 
 test('May Tetrino with current evidence is sunny-turf-only: 10,000 sq ft with no turf profile is the half, 1.835 fl oz, not 3.67', async () => {

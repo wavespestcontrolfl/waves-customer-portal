@@ -947,7 +947,8 @@ function lawnMixWarnings({ calibration, items, selectedItems, municipality, cade
     });
   }
   warnings.push(...v13SelectedGateWarnings(selectedItems));
-  warnings.push(...(municipality ? v13HoldWarnings(items) : v13NorthPortReferenceWarnings(items)));
+  warnings.push(...v13HoldWarnings(items));
+  if (!municipality) warnings.push(...v13NorthPortReferenceWarnings(items));
   warnings.push(...cadenceWarnings, ...limitCheck.warnings);
   return warnings;
 }
@@ -1139,7 +1140,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       // no quantity at all; a capped line none either).
       const v13Line = v13Active && product ? v13LineState(product, v13Rows, limitCheck.capped, gateContext, line) : null;
       const lineCarrier = roundsCatchUp.carrierFor(line, v13Line?.row, carrier);
-      const canMix = Boolean(product && lineCarrier && (!v13Line || v13Line.state === 'calculate') && !(blocks.length && selected));
+      const canMix = Boolean(product && !line.fieldHold && lineCarrier && (!v13Line || v13Line.state === 'calculate') && !(blocks.length && selected));
       const mixAt = (sqft, areaFactor) => calculateProductAmount({
         product, lawnSqft: sqft, carrierGalPer1000: lineCarrier, areaFactor, ...nutrientTargets, ...v13RateOptions(v13Line?.row),
       });

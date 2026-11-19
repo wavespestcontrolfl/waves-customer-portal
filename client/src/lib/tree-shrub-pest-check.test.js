@@ -178,6 +178,22 @@ describe('typed closeout pesticide evidence', () => {
     expect(missingTypedPesticideCompliance(fields, { irac_frac_logged: 'Yes' }, fungicide)).toEqual([]);
   });
 
+  test('a full findings schema requires only the applicable pesticide answers', () => {
+    const fullSchema = [
+      { key: 'treatment_recommendation', label: 'Recommended treatment' },
+      { key: 'nutriroot_application_basis', label: 'NutriRoot application basis', pesticideOnly: false },
+      { key: 'nutriroot_soil_test_reference', label: 'NutriRoot soil-test reference' },
+      ...fields,
+    ];
+    expect(missingTypedPesticideCompliance(fullSchema, {}, fungicide)).toEqual(['IRAC / FRAC rotation checked & logged']);
+    expect(missingTypedPesticideCompliance(fullSchema, { irac_frac_logged: 'Yes' }, fungicide)).toEqual([]);
+    expect(missingTypedPesticideCompliance(fullSchema, {
+      pollinator_status: 'No blooms or no bees', irac_frac_logged: 'Yes', insect_target: 'Whitefly', insect_life_stage: 'Crawlers / nymphs',
+    }, insect)).toEqual([]);
+    // Another findings section can use the same field name without serving the pesticide evidence path.
+    expect(missingTypedPesticideCompliance([{ key: 'insect_target', label: 'Observed insects' }], {}, insect)).toEqual([]);
+  });
+
   test('an insect product requires one complete evidence path without requiring the other', () => {
     expect(missingTypedPesticideCompliance(fields, { pollinator_status: 'No blooms or no bees', irac_frac_logged: 'Yes' }, insect))
       .toEqual(['Insect treatment evidence path']);

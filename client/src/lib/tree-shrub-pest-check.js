@@ -63,12 +63,13 @@ export function missingTypedPesticideCompliance(fields = [], values = {}, scope 
   if (scope.pesticideProductPresent !== true) return [];
   const evidencePath = typedInsectEvidencePath(values) || selectedPath;
   const missing = [];
-  const evidenceFieldsServed = fields.some((field) =>
+  const pesticideFields = fields.filter((field) => field.pesticideOnly);
+  const evidenceFieldsServed = pesticideFields.some((field) =>
     ['insect_live', 'insect_preventive'].includes(pesticideComplianceWhen(field))
   );
   if (evidenceFieldsServed && scope.insectProductPresent === true && !evidencePath) missing.push('Insect treatment evidence path');
   if (evidenceFieldsServed && evidencePath === 'conflict') missing.push('Choose either current live evidence or documented preventive use (not both)');
-  for (const field of fields) {
+  for (const field of pesticideFields) {
     if (!typedPesticideFieldApplies(field, values, scope, evidencePath)) continue;
     const value = String(values?.[field.key] ?? '').trim();
     if (!value) missing.push(field.label);
