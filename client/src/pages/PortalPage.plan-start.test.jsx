@@ -18,7 +18,7 @@ vi.mock('../utils/api', () => {
 
 const OPTION = {
   id: 'pest-quarterly', serviceKey: 'pest_control', label: 'Quarterly pest control', cadence: '4 visits/year',
-  monthly: 31.67, perVisit: 95, dueAtStart: null, oneTime: null, confidence: 'high', manualReview: false, notes: [],
+  monthly: 31.67, perVisit: 95, dueAtStart: null, oneTime: null, setupFee: null, confidence: 'high', manualReview: false, notes: [],
   requestSubject: 'Add Pest Control to my plan', requestDescription: 'Customer priced Quarterly pest control in the portal.',
 };
 const BIMONTHLY = { ...OPTION, id: 'pest-bimonthly', label: 'Bi-monthly pest control', cadence: '6 visits/year', monthly: 44, perVisit: 88 };
@@ -56,12 +56,14 @@ it('swaps the primary button for "See my price and book" when the server offers 
 
 // One render per case: the portal page is large, and three renders in one test outran the 5 s limit under load.
 it.each([
-  ['no plan-start hint', priced()],
-  ['a hint that lists other options only', priced({ planStart: { optionIds: ['pest-bimonthly'] } })],
-])('keeps today\'s button when there is %s', async (_label, result) => {
+  ['no plan-start hint', priced({}, { setupFee: 99 })],
+  ['a hint that lists other options only', priced({ planStart: { optionIds: ['pest-bimonthly'] } }, { setupFee: 99 })],
+])('keeps today\'s button and tiles when there is %s', async (_label, result) => {
   await priceIt(result);
   expect(await screen.findByRole('button', { name: 'Request This' })).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'See my price and book' })).toBeNull();
+  // The setup-fee tile comes only with the plan-start button.
+  expect(screen.queryByText('WaveGuard setup')).toBeNull();
 });
 
 it('posts the selected option and every amount it shows, then hands off to the estimate URL', async () => {
@@ -74,7 +76,7 @@ it('posts the selected option and every amount it shows, then hands off to the e
     await priceIt(priced(OFFER));
     fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
     await waitFor(() => expect(api.startPlan).toHaveBeenCalledWith({
-      serviceKey: 'pest_control', optionId: 'pest-quarterly', shown: { monthly: 31.67, perVisit: 95, dueAtStart: null, oneTime: null },
+      serviceKey: 'pest_control', optionId: 'pest-quarterly', shown: { monthly: 31.67, perVisit: 95, dueAtStart: null, oneTime: null, setupFee: null },
     }));
     expect(await screen.findByRole('link', { name: 'Open it now' })).toHaveAttribute('href', '/estimate/tok123');
     expect(api.createRequest).not.toHaveBeenCalled();
@@ -156,4 +158,34 @@ it('a fallback request that lands after the customer picked another option never
   await act(async () => { settle.resolve({ success: true }); });
   expect(screen.queryByText('Request sent')).toBeNull();
   expect(await screen.findByRole('button', { name: 'Request This' })).toBeEnabled();
+});
+
+it('shows the WaveGuard setup fee a bookable option\'s estimate charges, and posts it with the other amounts', async () => {
+  api.startPlan.mockReturnValue(new Promise(() => {}));
+  await priceIt(priced(OFFER, { setupFee: 99 }));
+  fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
+  expect(screen.getByText('WaveGuard setup')).toBeInTheDocument();
+  expect(screen.getByText('$99.00')).toBeInTheDocument();
+  await waitFor(() => expect(api.startPlan).toHaveBeenCalledWith(expect.objectContaining({
+    shown: { monthly: 31.67, perVisit: 95, dueAtStart: null, oneTime: null, setupFee: 99 },
+  })));
+});
+
+it('an older pricing answer that lands after the customer asked again is dropped: it never turns booking on', async () => {
+  const first = {};
+  const second = {};
+  api.queryCustomerPricing
+    .mockReturnValueOnce(new Promise((resolve) => Object.assign(first, { resolve })))
+    .mockReturnValueOnce(new Promise((resolve) => Object.assign(second, { resolve })));
+  render(<MyPlanTab customer={{ id: 'fixture-account', firstName: 'Fixture', tier: 'Bronze', property: {} }} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Get Pricing' }));
+  // A quick prompt asks again while the first answer is still out.
+  fireEvent.click(screen.getByRole('button', { name: 'Mosquito' }));
+  await waitFor(() => expect(api.queryCustomerPricing).toHaveBeenCalledTimes(2));
+  await act(async () => { first.resolve(priced(OFFER)); });
+  expect(screen.queryByRole('button', { name: 'See my price and book' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Pricing...' })).toBeDisabled();
+  await act(async () => { second.resolve(priced()); });
+  expect(await screen.findByRole('button', { name: 'Request This' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'See my price and book' })).toBeNull();
 });

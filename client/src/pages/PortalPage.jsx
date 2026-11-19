@@ -11017,8 +11017,13 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
     setPlanStartUrl('');
     setStartingPlan(false);
   };
+  // Bumped on every pricing query and when the card goes away: only the latest
+  // answer may set the result, the option, the error or the loading state, so
+  // an older answer never turns booking on (codex pre-push P1).
+  const pricingSeq = useRef(0);
   useEffect(() => () => {
     planStartSeq.current += 1;
+    pricingSeq.current += 1;
     clearTimeout(planStartTimer.current);
   }, []);
   useEffect(dropPendingPlanStart, [selectedId]);
@@ -11032,6 +11037,8 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
 
   const runPricing = async (nextPrompt = prompt) => {
     const cleanPrompt = String(nextPrompt || '').trim();
+    pricingSeq.current += 1;
+    const seq = pricingSeq.current;
     setPrompt(cleanPrompt);
     setLoading(true);
     setError('');
@@ -11039,12 +11046,14 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
     dropPendingPlanStart();
     try {
       const data = await api.queryCustomerPricing(cleanPrompt);
+      if (seq !== pricingSeq.current) return;
       setResult(data);
       setSelectedId(data?.options?.[0]?.id || '');
     } catch (err) {
+      if (seq !== pricingSeq.current) return;
       setError(err.message || 'Pricing unavailable.');
     } finally {
-      setLoading(false);
+      if (seq === pricingSeq.current) setLoading(false);
     }
   };
 
@@ -11072,8 +11081,8 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
     const seq = planStartSeq.current;
     setStartingPlan(true);
     try {
-      const { serviceKey, id: optionId, monthly, perVisit, dueAtStart, oneTime } = selected;
-      const out = await api.startPlan({ serviceKey, optionId, shown: { monthly, perVisit, dueAtStart, oneTime } });
+      const { serviceKey, id: optionId, monthly, perVisit, dueAtStart, oneTime, setupFee } = selected;
+      const out = await api.startPlan({ serviceKey, optionId, shown: { monthly, perVisit, dueAtStart, oneTime, setupFee } });
       if (seq !== planStartSeq.current) return; // another option or a new answer took over
       if (!out?.url) throw new Error('No estimate was returned.');
       // Same hand-off as the cancelled-plan restart: a beat on screen, plus a link if navigation is blocked.
@@ -11281,6 +11290,9 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                       // option's own price leads above; only setup / one-time
                       // / tier facts tile here.
                       selected.dueAtStart ? { label: 'Setup', value: money(selected.dueAtStart) } : null,
+                      // A bookable first plan shows the WaveGuard setup fee its estimate charges (codex pre-push
+                      // P1). Only with the plan-start button: the request flow keeps today's tiles.
+                      canStartPlan && selected.setupFee ? { label: 'WaveGuard setup', value: money(selected.setupFee) } : null,
                       selected.oneTime ? { label: 'One-time', value: money(selected.oneTime) } : null,
                       selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
                     ].filter(Boolean).slice(0, 3).map((item) => (

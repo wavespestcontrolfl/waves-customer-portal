@@ -6,7 +6,9 @@
 // frozen snapshot); this suite pins what is different: eligibility, the exact option priced, price parity with what
 // the card showed, per-option reuse versus supersede, and the accept-time revalidation.
 
-jest.mock('express-rate-limit', () => () => (_req, _res, next) => next());
+// Every limiter is one counting pass-through, so a test can prove a call never reached one.
+const mockLimiterHit = jest.fn();
+jest.mock('express-rate-limit', () => () => (req, _res, next) => { mockLimiterHit(req.path); next(); });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'n' }) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn().mockResolvedValue({ sent: false }) }));
@@ -84,7 +86,7 @@ afterAll((done) => { server.close(done); });
 beforeEach(() => { process.env.GATE_PORTAL_PLAN_START = 'true'; mockMint.mockReset(); });
 afterEach(() => { delete process.env.GATE_PORTAL_PLAN_START; });
 
-const GOOD_SHOWN = { monthly: 31.67, perVisit: 95.01, dueAtStart: null, oneTime: null };
+const GOOD_SHOWN = { monthly: 31.67, perVisit: 95.01, dueAtStart: null, oneTime: null, setupFee: null };
 const GOOD_BODY = { serviceKey: 'pest_control', optionId: 'pest-quarterly', shown: GOOD_SHOWN };
 async function post(body = GOOD_BODY) {
   const res = await fetch(`${baseUrl}/api/requests/start-plan`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -94,12 +96,19 @@ async function post(body = GOOD_BODY) {
 }
 
 describe('POST /api/requests/start-plan', () => {
-  test('dark = 404 { error: Not found }, nothing minted', async () => {
+  test('dark = 404 { error: Not found }, nothing minted, and the shared limit is not spent (codex pre-push P1)', async () => {
     delete process.env.GATE_PORTAL_PLAN_START;
+    mockLimiterHit.mockClear();
     const res = await post();
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: 'Not found' });
     expect(mockMint).not.toHaveBeenCalled();
+    expect(mockLimiterHit).not.toHaveBeenCalled();
+    // Live, the same call passes the limiter.
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    mockMint.mockResolvedValueOnce({ estimateId: 'est-1', token: 'tok', url: '/estimate/tok', reused: false });
+    await post();
+    expect(mockLimiterHit).toHaveBeenCalledWith('/start-plan');
   });
 
   test('success hands back the estimate path and passes the body to the mint', async () => {
@@ -125,7 +134,8 @@ describe('POST /api/requests/start-plan', () => {
 
   test('a bad body is a 400 and never reaches the mint', async () => {
     for (const body of [
-      {}, { ...GOOD_BODY, serviceKey: 'rodent_bait' }, { ...GOOD_BODY, optionId: '' }, { serviceKey: 'pest_control', optionId: 'pest-quarterly' },
+      {}, { ...GOOD_BODY, serviceKey: 'rodent_bait' }, { ...GOOD_BODY, serviceKey: 'mosquito' }, { ...GOOD_BODY, optionId: '' }, { serviceKey: 'pest_control', optionId: 'pest-quarterly' },
+      { ...GOOD_BODY, shown: { ...GOOD_SHOWN, setupFee: -1 } },
       { ...GOOD_BODY, shown: { ...GOOD_SHOWN, monthly: 0 } }, { ...GOOD_BODY, shown: { ...GOOD_SHOWN, monthly: 'abc' } },
       { ...GOOD_BODY, shown: { ...GOOD_SHOWN, perVisit: -1 } }, { ...GOOD_BODY, shown: { perVisit: 95.01 } },
     ]) {
@@ -346,7 +356,9 @@ function engineLine(service, monthly, extra = {}) {
 }
 function shownOf(line) {
   const amount = require('../services/customer-pricing-ai').quoteAmountFromLine(line);
-  return { monthly: amount.monthly ?? null, perVisit: amount.perVisit ?? null, dueAtStart: amount.dueAtStart ?? null, oneTime: amount.oneTime ?? null };
+  // The option's setupFee, as buildQuoteOption derives it: the line's declared initialFee.
+  const setupFee = Number(line.initialFee) > 0 ? Number(line.initialFee) : null;
+  return { monthly: amount.monthly ?? null, perVisit: amount.perVisit ?? null, dueAtStart: amount.dueAtStart ?? null, oneTime: amount.oneTime ?? null, setupFee };
 }
 // The server's quote for one engine line. Its one-time money is the line's own one-time amounts
 // (what the card shows as due at start and one-time) plus `setupFee`, the WaveGuard setup fee the
@@ -624,13 +636,24 @@ describe('mintPlanStartEstimate', () => {
     const termite = { serviceKey: 'termite', optionId: 'termite-basic', shown: shownOf(TERMITE) };
     const charge = (service, amount, more = {}) => ({ service, amount, kind: 'charge', quoteRequired: false, ...more });
     const setup = (amount) => ({ service: 'waveguard_setup', amount, label: 'WaveGuard setup' });
-    // The pest line declares its setup fee (initialFee), as the real engine's pest line does.
-    const withSetupFee = pricedAs({ ...PEST_LINE, initialFee: 99 }, { setupFee: 99 });
+    // The pest line declares its setup fee (initialFee), as the real engine's pest line does; the card shows it.
+    const PEST_FEE_LINE = { ...PEST_LINE, initialFee: 99 };
+    const withSetupFee = pricedAs(PEST_FEE_LINE, { setupFee: 99 });
+    const pestWithFee = { shown: shownOf(PEST_FEE_LINE) };
 
-    test('the setup fee the option\'s line declares, itemized on the page, mints at the card\'s other amounts', async () => {
+    test('the setup fee the card shows, itemized on the page, mints at the card\'s other amounts', async () => {
       recompute.mockResolvedValue(withSetupFee);
-      await mint();
+      await mint(pestWithFee);
       expect(tables.estimates[0].onetime_total).toBe(99);
+    });
+
+    test.each([
+      ['another amount than the card showed', { ...PEST_FEE_LINE, initialFee: 129 }, pestWithFee],
+      ['a fee the card did not show', PEST_FEE_LINE, {}],
+    ])('a setup fee on today\'s line at %s: offer_changed, nothing minted (codex pre-push P1)', async (_label, todayLine, option) => {
+      recompute.mockResolvedValue(pricedAs(todayLine, { setupFee: todayLine.initialFee }));
+      await expect(mint(option)).rejects.toMatchObject({ code: 'offer_changed', restartUnavailable: true });
+      expect(tables.estimates).toHaveLength(0);
     });
 
     test.each([
@@ -643,8 +666,12 @@ describe('mintPlanStartEstimate', () => {
       ['the page prices the station setup by quote', termite, pricedAs(TERMITE),
         { oneTimeBreakdown: { items: [charge('termite_bait_installation', 199, { quoteRequired: true })], total: 199 } }],
       ['the engine adds a setup fee the option\'s line does not declare (a mosquito-only plan)', {}, pricedAs(PEST_LINE, { setupFee: 99 }), {}],
-      ['the page does not itemize the setup fee', {}, withSetupFee, { oneTimeBreakdown: { items: [], total: 99 } }],
-      ['the page shows another setup fee', {}, withSetupFee, { setupFee: setup(129) }],
+      ['the page does not itemize the setup fee', pestWithFee, withSetupFee, { oneTimeBreakdown: { items: [], total: 99 } }],
+      ['the page shows another setup fee', pestWithFee, withSetupFee, { setupFee: setup(129) }],
+      // The accept invoices the stored fee (estimate-accept-effects membershipFeeLine), so it must be the card's too.
+      ['the stored quote invoices another setup fee than the card and the page show', pestWithFee,
+        { ...withSetupFee, serverResult: { ...withSetupFee.serverResult, oneTime: { ...withSetupFee.serverResult.oneTime, membershipFee: 0 } } },
+        { oneTimeBreakdown: { items: [charge('waveguard_setup', 99)], total: 99 }, setupFee: setup(99) }],
       ['the page shows a setup fee the quote does not carry', {}, pricedAs(PEST_LINE),
         { oneTimeBreakdown: { items: [charge('waveguard_setup', 99)], total: 99 }, setupFee: setup(99) }],
     ])('%s: refused (priced by hand)', async (_label, option, quote, pageOneTime) => {

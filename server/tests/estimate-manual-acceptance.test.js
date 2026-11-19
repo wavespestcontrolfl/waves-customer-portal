@@ -1014,6 +1014,22 @@ describe('estimate manual acceptance', () => {
     expect(inserts).toEqual([]);
   });
 
+  test('rejects an open portal plan-start quote: only the customer accepts it, on its page (codex pre-push P0)', async () => {
+    const estimate = { id: 'estimate-ps', status: 'sent', source: 'plan_start' };
+    const { database, updates, inserts } = makeDb(estimate);
+    await expect(markEstimateManuallyAccepted({ estimateId: estimate.id, adminUserId: 1, database })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'plan_start_self_serve',
+      message: expect.stringMatching(/Only the customer can accept this portal plan-start quote/),
+    });
+    expect(updates).toEqual([]);
+    expect(inserts).toEqual([]);
+    // One the customer already accepted still answers as already accepted.
+    const accepted = makeDb({ ...estimate, status: 'accepted' });
+    const result = await markEstimateManuallyAccepted({ estimateId: estimate.id, adminUserId: 1, database: accepted.database });
+    expect(result.alreadyAccepted).toBe(true);
+  });
+
   test('rejects non-delivered estimates', async () => {
     const estimate = { id: 'estimate-3', status: 'draft' };
     const { database, updates, inserts } = makeDb(estimate);

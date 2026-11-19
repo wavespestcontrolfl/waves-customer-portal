@@ -48,7 +48,8 @@ const HAND_PRICED_PLAN_START = 'This plan needs to be priced by hand — please 
 // Billing lanes that are a plan (a row in hand resolves through billing-lane's resolveBillingLane).
 const PLAN_BILLING_LANES = ['monthly_membership', 'per_application', 'annual_prepay'];
 // Every amount the portal card shows for an option (customer-pricing-ai quoteAmountFromLine). The
-// plan-start offer check compares each one in cents.
+// plan-start offer check compares each one in cents, and the card's setup fee (`shown.setupFee`,
+// the option's setupFee = the line's initialFee) beside them.
 const PLAN_START_SHOWN_KEYS = ['monthly', 'perVisit', 'dueAtStart', 'oneTime'];
 const toCents = (value) => Math.round(Number(value || 0) * 100);
 
@@ -68,11 +69,10 @@ function planStartOptionBookable(serviceKey, option) {
 // before it publishes and a live quote before it hands it back.
 //   - The entry the page opens on shows the card's monthly and the
 //     per-application price the page's price card leads with.
-//   - One-time money is the card's setup and one-time amounts plus the
-//     WaveGuard setup fee (result.oneTime.membershipFee), on the row, in the
-//     stored result and itemized on the page. The offer check holds that fee
-//     to the one the option's line declares; the page itemizes it before
-//     acceptance, as for click-estimate-mint's card, and the accept invoices it.
+//   - One-time money is the card's setup, one-time and WaveGuard setup-fee
+//     amounts, on the row and in the stored result (the fee is
+//     result.oneTime.membershipFee), and itemized on the page (the fee on its
+//     own waveguard_setup line). The accept invoices the fee.
 //   - The page serves this snapshot as is (its own sentSnapshotServesAsIs).
 function planStartQuoteMismatch({ bundle, row, data, family, shown, servesAsIs }) {
   if (!bundle) return 'no page snapshot';
@@ -83,7 +83,7 @@ function planStartQuoteMismatch({ bundle, row, data, family, shown, servesAsIs }
     || toCents(perApplication.amount) !== toCents(shown.perVisit)) {
     return `opening entry ${entry?.key || 'none'} shows another price`;
   }
-  const setupFee = toCents(data?.result?.oneTime?.membershipFee);
+  const setupFee = toCents(shown.setupFee);
   const cardOneTime = toCents(shown.dueAtStart) + toCents(shown.oneTime);
   const breakdown = bundle.oneTimeBreakdown || {};
   const items = Array.isArray(breakdown.items) ? breakdown.items : [];
@@ -92,6 +92,7 @@ function planStartQuoteMismatch({ bundle, row, data, family, shown, servesAsIs }
     .reduce((sum, item) => sum + toCents(item?.amount), 0);
   if ([row.onetime_total, data?.result?.oneTime?.total, breakdown.total]
     .some((amount) => toCents(amount) !== cardOneTime + setupFee)
+    || toCents(data?.result?.oneTime?.membershipFee) !== setupFee
     || breakdown.quoteRequired === true
     || items.some((item) => item?.kind !== 'charge' || item?.quoteRequired === true)
     || itemized(true) !== setupFee || itemized(false) !== cardOneTime
@@ -1177,17 +1178,18 @@ async function mintPlanStartEstimate({
         const { quoteAmountFromLine, findLineItem } = mintDeps.pricingAi;
         const line = findLineItem(rawEngineResult, serviceKey);
         const today = quoteAmountFromLine(line);
+        // The setup fee the card showed is the one today's line declares
+        // (initialFee, the option's setupFee) — codex pre-push P1.
         const drifted = toCents(monthlyTotal) !== toCents(shownMonthly)
-          || PLAN_START_SHOWN_KEYS.some((key) => toCents(today[key]) !== toCents(shown[key]));
+          || PLAN_START_SHOWN_KEYS.some((key) => toCents(today[key]) !== toCents(shown[key]))
+          || toCents(Number(line?.initialFee) > 0 ? line.initialFee : 0) !== toCents(shown.setupFee);
         if (drifted) {
           throw new RestartUnavailableError('offer_changed', 'The price changed since you last looked. Please check the new price.');
         }
-        // One-time money (codex pre-push P0): the card's setup and one-time
-        // amounts plus only the setup fee the option's own line declares
-        // (initialFee, the card option's setupFee), as click-estimate-mint
-        // allows. Any other one-time charge is priced by hand.
-        const declaredSetupFee = Number(line?.initialFee) > 0 ? Number(line.initialFee) : 0;
-        if (toCents(onetimeTotal) !== toCents(shown.dueAtStart) + toCents(shown.oneTime) + toCents(declaredSetupFee)) {
+        // One-time money (codex pre-push P0): only what the card showed (its
+        // setup, one-time and setup-fee amounts). Any other one-time charge,
+        // such as a fee no line declares, is priced by hand.
+        if (toCents(onetimeTotal) !== toCents(shown.dueAtStart) + toCents(shown.oneTime) + toCents(shown.setupFee)) {
           logger.warn(`[plan-start] option ${option.id} carries one-time money the card does not show (${onetimeTotal}) — refusing`);
           throw new RestartUnavailableError('pricing_unavailable', HAND_PRICED_PLAN_START);
         }

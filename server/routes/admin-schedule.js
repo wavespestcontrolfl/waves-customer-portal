@@ -2271,6 +2271,7 @@ async function insertRecurringChildAddons(conn, scheduledServiceId, dueAddons, r
 const LINKED_ESTIMATE_COLUMNS = Object.freeze([
   'id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'estimate_data', 'expires_at',
   'monthly_total', 'annual_total', 'onetime_total', 'bill_by_invoice', 'show_one_time_option', 'property_id', 'address', 'pricing_authority',
+  'source',
 ]);
 
 // The add-on decisions of a staff booking made inside its transaction, on the linked estimate row that transaction holds locked:
@@ -8910,6 +8911,13 @@ async function scheduleCreateHandler(req, res, next) {
       const BOOKABLE_ESTIMATE_STATUSES = ['accepted', 'sent', 'viewed'];
       if (!BOOKABLE_ESTIMATE_STATUSES.includes(linkedEstimate.status)) {
         return res.status(400).json({ error: `Cannot book from an estimate that is ${linkedEstimate.status}. Only accepted, sent, or viewed estimates can be linked.` });
+      }
+      // An open portal plan-start quote books only through the customer's own
+      // accept (codex pre-push P0). Refuse it here, before any rows exist: the
+      // accept-on-book failure handler below keeps the booking.
+      if (linkedEstimate.status !== 'accepted') {
+        const planStartRefusal = require('../services/estimate-manual-acceptance').planStartManualAcceptRefusal(linkedEstimate);
+        if (planStartRefusal) return res.status(planStartRefusal.statusCode).json({ error: planStartRefusal.message, code: planStartRefusal.code });
       }
       // A Bill-by-invoice proposal's Net term reaches a bill only once the proposal is won, so a visit booked from it
       // earlier would bill due on the visit day (and Auto Pay could charge it). Refuse until Mark won.

@@ -1148,20 +1148,26 @@ router.post('/restart-plan', authenticate, cancelResolutionLimiter, async (req, 
 // compares each with today's price, to the cent); null = not shown.
 const shownAmount = Joi.number().min(0).max(100000).allow(null);
 const startPlanSchema = Joi.object({
-  serviceKey: Joi.string().valid('pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite').required(),
+  serviceKey: Joi.string().valid('pest_control', 'lawn_care', 'tree_shrub', 'termite').required(),
   optionId: Joi.string().trim().max(60).required(),
   shown: Joi.object({
     monthly: Joi.number().greater(0).max(100000).required(),
     perVisit: shownAmount,
     dueAtStart: shownAmount,
     oneTime: shownAmount,
+    setupFee: shownAmount,
   }).required(),
 });
 
-router.post('/start-plan', authenticate, cancelResolutionLimiter, async (req, res, next) => {
+// Dark = 404 BEFORE the limiter (codex pre-push P1): calls while the gate is
+// off never spend the customer's shared cancellation and restart allowance.
+// Optional call: a whole-module feature-gates mock reads as off (dark).
+const planStartLiveOr404 = (req, res, next) => (require('../config/feature-gates').portalPlanStartLive?.() === true
+  ? next()
+  : res.status(404).json({ error: 'Not found' }));
+
+router.post('/start-plan', authenticate, planStartLiveOr404, cancelResolutionLimiter, async (req, res, next) => {
   try {
-    // Optional call: a whole-module feature-gates mock reads as off (dark).
-    if (require('../config/feature-gates').portalPlanStartLive?.() !== true) return res.status(404).json({ error: 'Not found' });
     const { value, error } = startPlanSchema.validate(req.body, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
     const { mintPlanStartEstimate } = require('../services/cancellation-resolution/restart');

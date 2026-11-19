@@ -471,8 +471,23 @@ function oneTapPurchaseRefusal(estimate) {
     : null;
 }
 
+// A portal plan-start quote (GATE_PORTAL_PLAN_START) is the customer's own
+// booking (codex pre-push P0). Only the public accept re-runs the plan-start
+// eligibility under its locks (assertPlanStartAcceptEligible), and the mint
+// priced the option standalone, for an account with no plan. A staff accept
+// could convert that price after the account gained a plan, and the
+// scheduler's accept-on-book runs after its own visits exist. An accepted one
+// still answers as already accepted (the check runs after that return).
+function planStartManualAcceptRefusal(estimate) {
+  return estimate.source === 'plan_start'
+    ? refusal('Only the customer can accept this portal plan-start quote, on its estimate page. Book without it, or send a new estimate.', 409, 'plan_start_self_serve')
+    : null;
+}
+
 // Checked after the already-accepted return, on the row as first read.
 function manualAcceptRowRefusal(estimate, { billingTerm = 'standard' } = {}) {
+  const planStartRefusal = planStartManualAcceptRefusal(estimate);
+  if (planStartRefusal) return planStartRefusal;
   if (!MANUAL_ACCEPTABLE_STATUSES.has(estimate.status)) {
     return refusal(`Only sent or viewed estimates can be manually marked accepted. Current status: ${estimate.status}.`, 400);
   }
@@ -1478,6 +1493,7 @@ module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   lawnProfilePin,
   propertyPin,
   oneTapPurchaseRefusal,
+  planStartManualAcceptRefusal,
   manualAcceptRowRefusal,
   manualAcceptLockedRowRefusal,
   persistedAddOnRefusal,
