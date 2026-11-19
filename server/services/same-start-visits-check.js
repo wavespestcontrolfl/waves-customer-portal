@@ -17,9 +17,11 @@
  * on one day after today, with the same arrival-window start, for the same
  * technician or with one of them unassigned. Today is left out: by the 6:40 AM
  * run its route is set and its day-before text has gone. Two technicians at one
- * start are two people working at once, so they never count. A visit with no
- * arrival time is the no-window notice's (auto-dispatch/audit.js), and a
- * deleted or inactive customer's work is not checked here.
+ * start are two people working at once, so they never count. A visit the
+ * tracker already reads complete or cancelled is not live, whatever its
+ * status says, and a time held for an estimate is not a booked visit yet. A
+ * visit with no arrival time is the no-window notice's (auto-dispatch/audit.js),
+ * and a deleted or inactive customer's work is not checked here.
  *
  * GROUPS: the visits at one start are one group when one of them is
  * unassigned (each conflicts through it), else one group per technician with
@@ -56,6 +58,7 @@ const DETAIL_DAYS = 10;
 // technician, or with one of the two unassigned. One row per visit, with its
 // technician, so the groups keep two technicians' pairs apart.
 function findSameStartVisits(todayET) {
+  const { TERMINAL_TRACK_STATES } = require('./customer-lifecycle-guard');
   return db('scheduled_services as a')
     .join('scheduled_services as b', function sameCustomerDayAndStart() {
       this.on('b.customer_id', '=', 'a.customer_id')
@@ -72,6 +75,14 @@ function findSameStartVisits(todayET) {
     .where(function oneTechnician() {
       this.whereNull('a.technician_id').orWhereNull('b.technician_id').orWhereRaw('a.technician_id = b.technician_id');
     })
+    // The tracker can lead `status`: a visit it already reads complete or
+    // cancelled is not live work on either side (customer-lifecycle-guard.js).
+    .where(function trackerLive() { this.whereNull('a.track_state').orWhereNotIn('a.track_state', TERMINAL_TRACK_STATES); })
+    .where(function partnerTrackerLive() { this.whereNull('b.track_state').orWhereNotIn('b.track_state', TERMINAL_TRACK_STATES); })
+    // A time held for an estimate (reservation_expires_at set) is not a booked
+    // visit yet: the hold clears the stamp when it becomes one (slot-reservation.js).
+    .whereNull('a.reservation_expires_at')
+    .whereNull('b.reservation_expires_at')
     .distinct('a.id', 'a.customer_id', 'a.scheduled_date', 'a.window_start', 'a.service_type', 'a.technician_id', 'c.first_name', 'c.last_name')
     .orderBy([{ column: 'a.customer_id' }, { column: 'a.scheduled_date' }, { column: 'a.window_start' }, { column: 'a.id' }]);
 }

@@ -1221,12 +1221,26 @@ describe('same-start visits (class 5)', () => {
     expect(sameStartKeys()).toEqual(['same-start-visits:cust-pair-1']);
   });
 
-  test('a failed combined-booking check reports no rings: the same-start bells still ring in the budget the classes left', async () => {
+  test('a failed combined-booking check may have rung before it threw: the same-start bells wait for a later run', async () => {
     sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [pairAlert('cust-pair-1')], failed: false });
-    runCombinedBookingCheck.mockRejectedValueOnce(new Error('boom'));
+    runCombinedBookingCheck.mockRejectedValueOnce(new Error('boom after one post'));
     makeDbMock();
-    expect(await runInner({ now: NOW })).toMatchObject({ combinedBookingCheckFailed: true, alerted: 1 });
-    expect(episodeHelpers.raiseAdminAlertWithReopen.mock.calls.map((c) => c[3].dedupeKey)).toEqual(['same-start-visits:cust-pair-1']);
+    expect(await runInner({ now: NOW })).toMatchObject({ combinedBookingCheckFailed: true, sameStartVisits: 1, alerted: 0 });
+    expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+  });
+
+  test('kill switch off: a same-start refresh that rang counts toward the cap, so one slot rings one customer', async () => {
+    alertEpisodesLive.mockReturnValue(false);
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [pairAlert('cust-pair-1'), pairAlert('cust-pair-2')], failed: false });
+    runCombinedBookingCheck.mockResolvedValueOnce({ checked: 8, problems: 8, rings: 8 });
+    makeDbMock({ coverageRows: [unpricedChild()] });
+    // A new day on each standing same-start bell: notifyAdmin refreshes it and rings.
+    NotificationService.notifyAdmin.mockImplementation(async (_c, _t, _b, opts) => (opts.dedupeKey.startsWith('same-start-visits:')
+      ? { id: 5, deduped: true, refreshed: true, rung: true } : { id: 1 }));
+    expect(await runInner({ now: NOW })).toMatchObject({ alerted: 2 });
+    expect(NotificationService.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey))
+      .toEqual(['unpriced-series:ss-parent-1', 'same-start-visits:cust-pair-1']);
+    expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   });
 
   test('a customer with no same-time day left has its bell closed; a customer still listed keeps it', async () => {

@@ -850,8 +850,7 @@ async function runInner({ now = new Date() } = {}) {
 }
 
 // One finding to the bell: [dedupeKey, title, body, metadata, options].
-// Returns true for a REAL ring (a row created or re-rung); false for a silent
-// dedupe onto a standing row or a suppressed internal-test alert.
+// Returns the notification result; realRing says whether it was a real ring.
 async function ringAlert(episodes, dedupeKey, title, body, metadata, { link = '/admin/dispatch', detail, refreshOnDedupe, ringOnRefresh, dedupeVersion } = {}) {
   // bell: true — under GATE_ADMIN_BELL_POLICY the 'alert' category is
   // silenced-by-default (OVERRIDABLE_CATEGORIES), so without the explicit
@@ -883,20 +882,31 @@ async function ringAlert(episodes, dedupeKey, title, body, metadata, { link = '/
   if (!created || (created.id == null && !created.suppressed)) {
     throw new Error(`[schedule-integrity] notification insert failed for ${dedupeKey} — pager output lost`);
   }
-  // A deduped result (the standing row already exists and either matched
-  // or was just refreshed) is not a NEW alert for this run's count. Under
-  // episodes the cap counts REAL rings: a row created or re-rung (a reopen,
-  // or a refresh that rang) — never a silent dedupe onto a standing row.
-  // A suppressed alert (an internal test customer) made no bell in either
-  // mode, so it never takes a cap slot from a real one.
-  return !(created.suppressed || (episodes ? !created.rang : created.deduped));
+  return created;
+}
+
+// Whether one delivery was a REAL ring for the run's cap. A suppressed alert
+// (an internal test customer) made no bell in either mode, so it never takes a
+// cap slot from a real one. Under episodes the cap counts a row created or
+// re-rung (a reopen, or a refresh that rang) — never a silent dedupe onto a
+// standing row. Killed, the classes rung by deliverAlerts keep the
+// pre-episode rule (a deduped result never counts: a pure kill switch); a
+// class with no pre-episode behavior counts a refresh that rang as well
+// (`countRefreshRings`), so its new-day re-rings stay inside the cap.
+function realRing(created, episodes, { countRefreshRings = false } = {}) {
+  if (created.suppressed) return false;
+  if (episodes) return Boolean(created.rang);
+  return !created.deduped || (countRefreshRings && Boolean(created.refreshed && created.rung));
 }
 
 // What the classes rung so far and the combined-booking check left of the run's
 // shared budget. The check's time-critical problems ring whatever the budget,
-// and those rings count here too. A failed check (null) reports no rings.
+// and those rings count here too. A check that failed (null) may have rung
+// some bells before it threw, so its rings are unknown: nothing is left, and
+// the late class rings on a later run.
 function lateBudget(delivered, combinedBooking) {
-  return Math.max(0, MAX_ALERTS_PER_RUN - delivered.alerted - (Number(combinedBooking?.rings) || 0));
+  if (!combinedBooking) return 0;
+  return Math.max(0, MAX_ALERTS_PER_RUN - delivered.alerted - (Number(combinedBooking.rings) || 0));
 }
 
 const capHit = () => logger.warn(`[schedule-integrity] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
@@ -907,7 +917,7 @@ async function ringWithinBudget(alerts, { episodes, budget }) {
   let rang = 0;
   for (const alert of alerts) {
     if (rang >= budget) { capHit(); break; }
-    if (await ringAlert(episodes, ...alert)) rang += 1;
+    if (realRing(await ringAlert(episodes, ...alert), episodes, { countRefreshRings: true })) rang += 1;
   }
   return rang;
 }
@@ -929,7 +939,7 @@ async function deliverAlerts({ alerts, lateAlerts = [], episodes, now, horizonDa
   const deliveredKeys = new Set();
   for (const alert of alerts) {
     if (alerted >= MAX_ALERTS_PER_RUN) { capHit(); break; }
-    if (await ringAlert(episodes, ...alert)) alerted += 1;
+    if (realRing(await ringAlert(episodes, ...alert), episodes)) alerted += 1;
     deliveredKeys.add(alert[0]);
   }
   if (!episodes) return { alerted };

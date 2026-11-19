@@ -89,6 +89,11 @@ postgres('same-start visits check on Postgres', () => {
     await pair(live, { scheduled_date: TODAY }); // today: its route is set and its day-before text has gone
     await pair(live, { scheduled_date: '2040-01-09' });
     await pair(live, { scheduled_date: '2040-01-21', window_start: null, window_end: null }); // no arrival time
+    // The tracker leads `status`: a visit it reads cancelled or complete is not live, whatever its status says.
+    await pair(live, { scheduled_date: '2040-01-25' }, { track_state: 'cancelled' });
+    await pair(live, { scheduled_date: '2040-01-26', track_state: 'complete' }, { track_state: 'scheduled' });
+    // A time held for an estimate is not a booked visit yet.
+    await pair(live, { scheduled_date: '2040-01-27' }, { reservation_expires_at: new Date('2040-01-10T18:00:00Z') });
     await pair(inactive, { scheduled_date: '2040-01-15' });
     await pair(deleted, { scheduled_date: '2040-01-15' });
 
