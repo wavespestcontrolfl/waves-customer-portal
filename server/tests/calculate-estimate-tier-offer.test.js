@@ -94,3 +94,33 @@ test('a lead gets no tick list, and a failed list still returns the quote', asyn
   expect(failed.payload).not.toHaveProperty('currentServiceTierOffer');
   expect(failed.payload.recurring.services.length).toBeGreaterThan(0);
 });
+
+// GATE_CAGE_TWO_SIZES (owner 2026-11-19): the result tells the tool its Pool Cage Size
+// box offers two sizes even with no property lookup on the estimate. The key exists
+// only while the gate is on, so gate-off shapes are unchanged.
+describe('poolCageTwoSizes on the calculate result', () => {
+  const TWO_SIZES = 'GATE_CAGE_TWO_SIZES';
+  let prior;
+  beforeAll(() => { prior = process.env[TWO_SIZES]; });
+  afterAll(() => {
+    if (prior === undefined) delete process.env[TWO_SIZES];
+    else process.env[TWO_SIZES] = prior;
+  });
+  beforeEach(() => { delete process.env[TWO_SIZES]; });
+
+  test('gate on: the flag is true', async () => {
+    process.env[TWO_SIZES] = 'true';
+    const { status, payload } = await invoke(quote());
+    expect(status).toBe(200);
+    expect(payload.poolCageTwoSizes).toBe(true);
+  });
+
+  test('gate off or unset: the key is absent', async () => {
+    for (const value of [undefined, 'false']) {
+      if (value === undefined) delete process.env[TWO_SIZES]; else process.env[TWO_SIZES] = value;
+      const { status, payload } = await invoke(quote());
+      expect(status).toBe(200);
+      expect(payload).not.toHaveProperty('poolCageTwoSizes');
+    }
+  });
+});

@@ -2473,8 +2473,10 @@ export default function EstimateToolViewV2({
         // The stored result does not carry the server's tier-availability flag
         // (it is stamped on fresh calculate responses): restore it from the
         // edit source so the Good / Better / Best checkbox shows on a reopen.
+        // poolCageTwoSizes is the edit source's LIVE gate value, an explicit
+        // override so a stale stored true never survives a rollback.
         setEstimate(d.result && !stale
-          ? { ...d.result, engineRequest: d.engineRequest, ...(d.offerTiersAvailable === true ? { offerTiersAvailable: true } : {}) }
+          ? { ...d.result, engineRequest: d.engineRequest, ...(d.offerTiersAvailable === true ? { offerTiersAvailable: true } : {}), poolCageTwoSizes: d.poolCageTwoSizes === true }
           : null);
         setSavedId(stale ? null : d.id);
         setReopenNotice(notice);
@@ -5312,7 +5314,7 @@ export default function EstimateToolViewV2({
       // Same as the edit loader: the stored result carries no tier-availability
       // flag, so the Good / Better / Best checkbox survives the post-send refresh.
       setEstimate(source.result && !stale
-        ? { ...source.result, engineRequest: source.engineRequest, ...(source.offerTiersAvailable === true ? { offerTiersAvailable: true } : {}) }
+        ? { ...source.result, engineRequest: source.engineRequest, ...(source.offerTiersAvailable === true ? { offerTiersAvailable: true } : {}), poolCageTwoSizes: source.poolCageTwoSizes === true }
         : null);
 
     } catch (err) {
@@ -6666,7 +6668,7 @@ export default function EstimateToolViewV2({
                 <Field label="Pool Cage Size" id="estimate-poolCageSize" className="mb-4">
                   <SelectV2
                     k="poolCageSize"
-                    options={poolCageSizeOptions(form.poolCageSize, lookupMeta?.poolCageTwoSizes === true)}
+                    options={poolCageSizeOptions(form.poolCageSize, lookupMeta?.poolCageTwoSizes === true || estimate?.poolCageTwoSizes === true)}
                   />
                 </Field>
               )}

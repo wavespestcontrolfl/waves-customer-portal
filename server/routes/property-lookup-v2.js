@@ -4341,13 +4341,14 @@ function normalizePoolCageSizeFourSizes(value, poolCage) {
 }
 
 // The satellite answer. The AI prompt still answers four sizes; with two sizes
-// on, Small and Medium read Medium and Large and Oversized read Large (this
-// also covers a stored answer rebuilt on a cache hit).
+// on, Small, Medium and Large read Medium (an old Large, 600 to 900 sq ft, is
+// now Medium) and only Oversized reads Large. This also covers a stored answer
+// rebuilt on a cache hit.
 function normalizePoolCageSize(value, poolCage) {
   const size = normalizePoolCageSizeFourSizes(value, poolCage);
   if (!cageTwoSizesLive()) return size;
-  if (size === 'SMALL') return 'MEDIUM';
-  return size === 'OVERSIZED' ? 'LARGE' : size;
+  if (size === 'NONE') return size;
+  return size === 'OVERSIZED' ? 'LARGE' : 'MEDIUM';
 }
 
 // Two sizes on only: the four-size answer today's rule gives, so the website
@@ -6457,6 +6458,10 @@ router.post('/calculate-estimate', async (req, res) => {
         if (verdict.eligible) mapped.offerTiersAvailable = true;
       }
     } catch (_) { /* a convenience flag; the save decides */ }
+    // GATE_CAGE_TWO_SIZES: tell the tool its Pool Cage Size box offers two sizes
+    // even with no property lookup on this estimate. Present only while the gate
+    // is on, so gate-off shapes are unchanged. Never a price field.
+    if (cageTwoSizesLive()) mapped.poolCageTwoSizes = true;
     // The linked member's current services at the tier this quote moves
     // them to, for staff to tick (owner 2026-10-30 option B). Read-only; a
     // failure only leaves the list off.

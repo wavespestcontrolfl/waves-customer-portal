@@ -321,9 +321,10 @@ describe('GATE_CAGE_TWO_SIZES: two sizes in the lookup', () => {
     }
   });
 
-  it('on: the satellite answer maps Small/Medium to Medium and Large/Oversized to Large', () => {
+  it('on: the satellite answer maps Small, Medium and Large to Medium, and Oversized to Large', () => {
     process.env[TWO_SIZES] = 'true';
-    const mapped = { SMALL: 'MEDIUM', MEDIUM: 'MEDIUM', LARGE: 'LARGE', OVERSIZED: 'LARGE' };
+    // An old Large (600 to 900 sq ft) reads Medium; an old Oversized reads Large.
+    const mapped = { SMALL: 'MEDIUM', MEDIUM: 'MEDIUM', LARGE: 'MEDIUM', OVERSIZED: 'LARGE' };
     for (const [answer, size] of Object.entries(mapped)) {
       const enriched = profile({ hasPool: null }, aiCage(answer));
       expect(enriched.poolCageSize).toBe(size);

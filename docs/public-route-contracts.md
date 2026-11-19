@@ -5157,6 +5157,13 @@ estimate; `GATE_LOOKUP_PERMIT_FACTS`), with a story count the permit filled
 `storiesSource: 'default'`) and the `homeSqFt` verify flag's prose replaced by
 the shared source-free vacant-parcel copy — `publicEnrichedProfile` strips all of
 it on both paths; the response otherwise describes only the requested parcel).
+While `GATE_CAGE_TWO_SIZES` is on (owner 2026-11-19, "cage 1000"; dark by default), the
+returned and lead-stored `enriched` profile also carries `poolCageLegacySize`, the
+four-size pool cage answer (SMALL/MEDIUM/LARGE/OVERSIZED, or NONE) while
+`poolCageSize` is the two-size answer (MEDIUM or LARGE). It is derived from the same
+county cage area and satellite read already in the payload, so it adds no new data
+and no new field source. With the gate off the key is absent and the profile is
+unchanged. `/api/public/quote/calculate` reads it (see that entry).
 Operational `meta.providerStatus` (credential configuration and attempted-provider
 health) is staff-only; `publicLookupMeta` removes it from every public response.
 The public `errors` array includes only the known outside-service-area verdict;
@@ -5251,6 +5258,17 @@ a staff correction) and its prompt are never overwritten. Unknown values are
 silently dropped, the question is never required, and the response is
 unchanged; the pair is staff-only, never part of `extracted_data`, the
 quote text, or any customer-facing copy.
+Pool cage hold (`GATE_CAGE_TWO_SIZES`, owner 2026-11-19, "hold"; dark by default):
+the lookup's `enriched.poolCageLegacySize` (the four-size answer, see the
+property-lookup entry), and the server's own cache-only re-read of the same
+address, are read ONLY to hold a quote (`quote_required`, the existing manual-quote
+answer) for a cage that today's four sizes call Large or Oversized; they never
+lower or change a price. A visitor who answers no cage is not held, and a client
+that omits the cage answer takes the re-read's, so a partial `enriched` cannot
+drop the hold. Gate off: the route prices the four-size answer
+(`poolCageLegacySize` when a profile carries one from before a rollback, else
+`poolCageSize`), so a Large or Oversized cage is held as before. The response
+shape does not change; `quote_required` was already a possible answer.
 `services.treeShrub.tier` is validated (2026-09-24, codex P1 round 2): a
 present tier must be a currently-sold one (`standard`/`enhanced`) or the
 route answers 400 before pricing — `light` (4x/quarterly, retired for new

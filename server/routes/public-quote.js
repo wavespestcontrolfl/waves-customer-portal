@@ -239,10 +239,33 @@ function trustedTreeShrubFootprintSqFt(trustedTurf = {}, propertyRecord = null) 
   return null;
 }
 
-// GATE_CAGE_TWO_SIZES website hold: shared rule, lazy so a whole-module mock reads as off.
-function cageHeldForCustomer(...profiles) {
+// Pool and pool-cage features for the website quote. GATE_CAGE_TWO_SIZES (owner
+// 2026-11-19, "hold"): a cage that today's four sizes call Large or Oversized keeps
+// its manual-quote hold. All gate reads are lazy, per request, and read as off
+// when a whole-module mock lacks the reader.
+//  - Size priced: gate on, the profile's own size (the lookup's two-size answer). Gate
+//    off, the four-size answer poolCageLegacySize when the profile carries one (a
+//    two-size profile from before a rollback), else the profile's size.
+//  - Hold: poolCageReview (the engine adds large_pool_cage), from the client's profile
+//    or the server's own cache-only re-read (a public API caller can send a partial one).
+//  - A client that OMITS poolCage while the re-read confirms a held cage still gets
+//    the cage and the hold; an explicit NO keeps today's no-cage answer.
+function websiteCageFeatures(ep, trustedTurf) {
   const { customerCageHold } = require('../services/property-lookup/office-cage-start');
-  return profiles.some((profile) => customerCageHold(profile));
+  const twoSizesOn = require('../config/feature-gates').cageTwoSizesLive?.() === true;
+  const sizes = ['small', 'medium', 'large', 'oversized'];
+  const lower = (v) => String(v || '').toLowerCase();
+  const legacy = lower(ep.poolCageLegacySize);
+  const sizeSource = !twoSizesOn && sizes.includes(legacy) ? legacy : ep.poolCageSize;
+  const cageOmitted = ep.poolCage === undefined || ep.poolCage === null || ep.poolCage === '';
+  const trustedHeldCage = cageOmitted && lower(trustedTurf?.poolCage) === 'yes' && customerCageHold(trustedTurf);
+  const held = customerCageHold(ep) || customerCageHold(trustedTurf);
+  return {
+    pool: ep.pool === 'YES' || ep.pool === true || ep.poolCage === 'YES' || trustedHeldCage,
+    poolCage: ep.poolCage === 'YES' || ep.poolCage === true || trustedHeldCage,
+    poolCageSize: sizes.includes(lower(sizeSource)) ? lower(sizeSource) : undefined,
+    ...(held ? { poolCageReview: true } : {}),
+  };
 }
 
 function isPublicCommercialQuote(body = {}, enriched = {}) {
@@ -1717,18 +1740,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       isCommercial: commercialDetected,
       commercialSubtype: commercialSubtype || ep.commercialSubtype || null,
       features: {
-        pool: ep.pool === 'YES' || ep.pool === true || ep.poolCage === 'YES',
-        poolCage: ep.poolCage === 'YES' || ep.poolCage === true,
-        poolCageSize: ['small', 'medium', 'large', 'oversized'].includes(String(ep.poolCageSize || '').toLowerCase())
-          ? String(ep.poolCageSize).toLowerCase()
-          : undefined,
-        // GATE_CAGE_TWO_SIZES: the lookup now says Medium or Large, so a cage that
-        // today's four sizes call Large or Oversized keeps its manual-quote hold
-        // (the engine adds large_pool_cage for the flag). Absent while the gate is off.
-        // The client's profile OR the server's own cache-only re-read can carry the
-        // four-size answer: /calculate is a public API, so a partial `enriched` must not
-        // drop the hold.
-        ...(cageHeldForCustomer(ep, trustedTurf) ? { poolCageReview: true } : {}),
+        ...websiteCageFeatures(ep, trustedTurf),
         shrubs: (ep.shrubDensity || ep.shrubs || '').toString().toLowerCase() || undefined,
         trees: (ep.treeDensity || ep.trees || '').toString().toLowerCase() || undefined,
         complexity: (ep.landscapeComplexity || ep.complexity || '').toString().toLowerCase() || undefined,

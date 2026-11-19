@@ -55,6 +55,9 @@ jest.mock('../services/newsletter-subscribers', () => ({ subscribeOrResubscribe:
 jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn(async () => ({ enrolled: false })) }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (u) => u) }));
 
+// The route allows 10 quotes an hour per address; this suite sends more.
+jest.mock('express-rate-limit', () => () => (req, res, next) => next());
+
 // The route's own cache-only server re-read. A test sets what it answers.
 let mockServerLookup = null;
 jest.mock('../routes/property-lookup-v2', () => ({
@@ -65,6 +68,8 @@ jest.mock('../routes/property-lookup-v2', () => ({
 const express = require('express');
 
 const TWO_SIZES = 'GATE_CAGE_TWO_SIZES';
+// The first request cold-loads the whole route graph, which can pass 5 s on a busy machine.
+jest.setTimeout(30000);
 
 describe('POST /api/public/quote/calculate: pool cage manual-quote hold', () => {
   let server;
@@ -121,12 +126,29 @@ describe('POST /api/public/quote/calculate: pool cage manual-quote hold', () => 
     expect(priced.monthly_total).toBeGreaterThan(0);
   });
 
-  test('gate off: four sizes as today (Large and Oversized held, Medium priced), the legacy key ignored', async () => {
+  test('gate off: four sizes as today (Large and Oversized held, Medium priced)', async () => {
     expect(await held({ poolCageSqft: 750, poolCageSize: 'LARGE' })).toBe(true);
     expect(await held({ poolCageSqft: 1200, poolCageSize: 'OVERSIZED' })).toBe(true);
     expect(await held({ poolCageSqft: 500, poolCageSize: 'MEDIUM' })).toBe(false);
-    // A stray legacy key with the gate off must not hold a Medium cage.
-    expect(await held({ poolCageSqft: 500, poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' })).toBe(false);
+  });
+
+  // The gate can flip between the lookup and /calculate. /calculate prices from the gate
+  // state of THIS request, so a two-size profile from before a rollback prices its four-size answer.
+  test('rollback: gate off, a two-size profile (Medium, legacy Large) prices its four-size answer and is held', async () => {
+    expect(await held({ poolCageSqft: 750, poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' })).toBe(true);
+    expect(await held({ poolCageSqft: 1200, poolCageSize: 'LARGE', poolCageLegacySize: 'OVERSIZED' })).toBe(true);
+  });
+
+  test('rollback: gate off, a two-size profile whose four-size answer is Medium is priced', async () => {
+    const priced = await quote({ poolCageSqft: 500, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' });
+    expect(priced.quote_required).toBeUndefined();
+    expect(priced.monthly_total).toBeGreaterThan(0);
+  });
+
+  test('gate on: a four-size profile from before the flip (no legacy key) with Large is held', async () => {
+    process.env[TWO_SIZES] = 'true';
+    expect(await held({ poolCageSqft: 750, poolCageSize: 'LARGE' })).toBe(true);
+    expect(await held({ poolCageSqft: 500, poolCageSize: 'MEDIUM' })).toBe(false);
   });
 
   // /calculate is a public API: a caller can send a partial `enriched` with no
@@ -150,5 +172,37 @@ describe('POST /api/public/quote/calculate: pool cage manual-quote hold', () => 
     };
     process.env[TWO_SIZES] = 'true';
     expect(await held({ poolCage: 'NO', poolCageSize: 'NONE' })).toBe(false);
+  });
+
+  // A partial client profile can omit poolCage. The engine only holds a cage that is
+  // present, so the server re-read supplies it; an explicit NO stays no cage.
+  describe('a client that omits poolCage', () => {
+    const trustedHeldCage = () => {
+      mockServerLookup = {
+        enriched: { pool: 'YES', poolCage: 'YES', poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE', poolCageSqft: 750 },
+        propertyRecord: {},
+      };
+    };
+
+    test('gate on: omitted poolCage with a trusted held cage is held', async () => {
+      trustedHeldCage();
+      process.env[TWO_SIZES] = 'true';
+      expect(await held({ poolCage: undefined, poolCageSize: 'MEDIUM' })).toBe(true);
+      expect(await held({ poolCage: null, pool: undefined })).toBe(true);
+      expect(await held({ poolCage: '' })).toBe(true);
+    });
+
+    test('gate on: an explicit NO (string or boolean) with a trusted held cage is priced', async () => {
+      trustedHeldCage();
+      process.env[TWO_SIZES] = 'true';
+      expect(await held({ poolCage: 'NO', poolCageSize: 'NONE' })).toBe(false);
+      expect(await held({ poolCage: false, poolCageSize: 'NONE' })).toBe(false);
+    });
+
+    test('gate off: both cases are as today (a cage the client omits is not priced, not held)', async () => {
+      trustedHeldCage();
+      expect(await held({ poolCage: undefined, poolCageSize: 'MEDIUM' })).toBe(false);
+      expect(await held({ poolCage: 'NO', poolCageSize: 'NONE' })).toBe(false);
+    });
   });
 });
