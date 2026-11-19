@@ -31,8 +31,8 @@
  * in the Tampa Bay to Southwest Florida ZIP areas (the same ones the SAM.gov reader files). Its "Vendor Commodity
  * Code Changed" list (every open bid that loosely matches, sent when the codes change) is never a bid.
  * MFMP sends statewide notices by commodity code, so only the Advertisement Type decides whether one is a bid
- * (an invitation to bid, a request for proposals, quotes or information is read; an Agency Decision or a meeting
- * notice is not). Its "Address:" line is the agency's own office, not the work site, so it is never a location. A
+ * (an invitation to bid or to negotiate, or a request for proposals or quotes, is read; an Agency Decision, a request
+ * for information or a meeting notice is not). Its "Address:" line is the agency's own office, not the work site, so it is never a location. A
  * notice whose labels no longer parse falls back to bid words in the subject, so a real bid is never lost.
  * Every other email (a city RFQ, an HOA RFP, a portal notice) leaves the fields null: a date guessed out of free
  * text would become a deadline somebody trusts. A date we do read is stored with the exact line it came from.
