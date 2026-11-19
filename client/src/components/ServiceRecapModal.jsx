@@ -74,6 +74,17 @@ function fmtTime(ts) {
   } catch { return ''; }
 }
 
+// The ledger's facts on a recorded product (the recap's own rows keep no amounts): its quantity with its unit,
+// its dilution and its application date, as the Taurus yearly-limit warning reads a row. The yearly count reads them.
+function recordedLedgerFacts(rp) {
+  return {
+    ...(Number(rp.ledger_quantity) > 0 && rp.ledger_quantity_unit
+      ? { totalAmount: Number(rp.ledger_quantity), amountUnit: rp.ledger_quantity_unit } : {}),
+    ...(rp.ledger_dilution_rate ? { dilution: rp.ledger_dilution_rate } : {}),
+    ...(rp.ledger_application_date ? { applicationDate: rp.ledger_application_date } : {}),
+  };
+}
+
 export default function ServiceRecapModal({
   service,
   request,
@@ -101,9 +112,9 @@ export default function ServiceRecapModal({
   const [selected, setSelected] = useState(() => new Set());
   // The house mix was pre-selected on open (so a Taurus left off it for the label limit is worth saying).
   const [houseMixSeeded, setHouseMixSeeded] = useState(false);
-  // Amounts recorded on a reopened recap, by catalog id: this lane edits no amounts, but the Taurus
-  // yearly-limit warning reads them as the ledger count does.
-  const [recordedAmounts, setRecordedAmounts] = useState(() => ({}));
+  // The ledger's facts on a reopened recap, by catalog id (amount, dilution, application date): this lane edits
+  // none of them, but the Taurus yearly-limit warning reads them as the ledger count does.
+  const [recordedLedger, setRecordedLedger] = useState(() => ({}));
   // productId -> { rate: string, unit: string }. Seeded from the rate
   // already recorded on the visit (reopen) or the catalog prefill
   // (fresh selection); the tech edits it before submit.
@@ -166,7 +177,7 @@ export default function ServiceRecapModal({
           );
           const preselect = new Set();
           const seededRates = {};
-          const seededAmounts = {};
+          const seededLedger = {};
           recorded.forEach((rp) => {
             const cat = (rp.product_id != null ? byId.get(String(rp.product_id)) : null)
               || byName.get(String(rp.product_name || '').trim().toLowerCase());
@@ -178,10 +189,8 @@ export default function ServiceRecapModal({
               return;
             }
             preselect.add(cat.id);
-            // The ledger's quantity (the recap's own rows keep no amounts), with its unit: the yearly count reads it.
-            if (Number(rp.ledger_quantity) > 0 && rp.ledger_quantity_unit) {
-              seededAmounts[cat.id] = { totalAmount: Number(rp.ledger_quantity), amountUnit: rp.ledger_quantity_unit };
-            }
+            const ledger = recordedLedgerFacts(rp);
+            if (Object.keys(ledger).length) seededLedger[cat.id] = ledger;
             // The rate RECORDED on the visit outranks the catalog prefill —
             // reopening a recap must show (and re-submit) what was applied,
             // not rewrite it to the current catalog default.
@@ -213,7 +222,7 @@ export default function ServiceRecapModal({
           if (preselect.size) {
             setSelected(preselect);
             setRates(seededRates);
-            setRecordedAmounts(seededAmounts);
+            setRecordedLedger(seededLedger);
           }
         }
         // Default pest tank mix (shared with CompletionPanel via
@@ -281,7 +290,7 @@ export default function ServiceRecapModal({
 
   // Taurus SC's label limit: a warning (never a block) when it is selected over the limit, else the line
   // saying the house mix left it off (over the limit, or this year's count unavailable). Null when the count is under the limit.
-  const taurusNote = taurusYearlyNote(taurusYearlyOf(ctx?.taurusYearly), [...selected].map((id) => ({ ...productById.get(id), ...recordedAmounts[id], rate: rates[id]?.rate, rateUnit: rates[id]?.unit })), { mixVisit: houseMixSeeded });
+  const taurusNote = taurusYearlyNote(taurusYearlyOf(ctx?.taurusYearly), [...selected].map((id) => ({ ...productById.get(id), ...recordedLedger[id], rate: rates[id]?.rate, rateUnit: rates[id]?.unit })), { mixVisit: houseMixSeeded });
 
   const [restoredNames, setRestoredNames] = useState({});
   const draft = useServiceRecapDraft({

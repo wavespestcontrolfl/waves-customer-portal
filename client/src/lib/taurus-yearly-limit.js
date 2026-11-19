@@ -17,7 +17,9 @@
 // known); the line says so and the tech adds it by hand. Nothing here blocks
 // a save.
 
-import { TSP_PER_FL_OZ } from './measure-units';
+import {
+  LOW_RATE_MAX_FL_OZ_PER_GAL, TAURUS_LOW_RATE_SINCE, flOzAmount, isFlOzPerGalUnit, isHouseTaurusFlOz, taurusConcentration,
+} from '@taurus-concentration';
 const TAURUS_RE = /^taurus\s*sc\b/i;
 
 export const isTaurusProduct = (product) => TAURUS_RE.test(String(product?.name || product?.product_name || product?.productName || '').trim());
@@ -30,44 +32,25 @@ export function taurusYearlyOf(taurusYearly) {
 const known = (taurusYearly) => taurusYearlyOf(taurusYearly) !== null;
 const exhausted = (taurusYearly) => known(taurusYearly) && taurusYearly.eligible === false;
 
-// A selected row mixed stronger than the house mix, by the same rule the server applies to a saved ledger row
-// (services/taurus-yearly-count.js applicationConcentration): a fl_oz/gal rate decides when the row has one
-// (above 0.4 = 0.06%; 1.6 fl oz per 4 gal is 0.4, 0.03%); with no such rate, a bare oz / fl oz rate or amount
-// above the 1.6 fl oz house mix reads as the old 0.06% tank (one 4-gal tank per home).
 // The house mix's Taurus concentration: 1.6 fl oz in the 4-gal FlowZone = 0.4 fl oz/gal (0.03%).
-export const HOUSE_FL_OZ_PER_GAL = 0.4;
-const HOUSE_TAURUS_FL_OZ = 1.6;
-const unitKey = (unit) => String(unit ?? '').trim().toLowerCase().replace(/[\s.]+/g, '_');
-const isFlOzUnit = (unit) => ['oz', 'fl_oz', 'floz'].includes(unitKey(unit));
-// A tank concentration in fl oz per gallon: "fl_oz/gal" / "oz/gal", or the per-100-gallon units the completion
-// API also accepts, divided by 100 (the server's rule). null for any other unit.
-const PER_GAL_UNITS = { 'fl_oz/gal': 1, 'oz/gal': 1, 'floz/gal': 1, 'fl_oz/100gal': 100, 'oz/100gal': 100, 'floz/100gal': 100 };
-const flOzPerGal = (value, unit) => {
-  const divisor = PER_GAL_UNITS[unitKey(unit)];
-  const n = Number(value);
-  return divisor && Number.isFinite(n) && n > 0 ? n / divisor : null;
-};
+export const HOUSE_FL_OZ_PER_GAL = LOW_RATE_MAX_FL_OZ_PER_GAL;
 // A per-gallon fl oz unit (the house Taurus row's seed applies only in "fl_oz/gal" / "oz/gal").
-export const isFlOzPerGal = (unit) => PER_GAL_UNITS[unitKey(unit)] === 1;
-// An amount in fl oz: teaspoons (the sheet shows small amounts in tsp) are converted first.
-const flOzOf = (value, unit) => {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return 0;
-  if (unitKey(unit) === 'tsp') return n / TSP_PER_FL_OZ;
-  return unit == null || isFlOzUnit(unit) ? n : 0;
-};
-// Whether a row's amount is the house mix's 1.6 fl oz (tsp converted; a unitless amount reads as fl oz).
-export const isHouseTaurusAmount = (totalAmount, amountUnit) => Math.abs(flOzOf(totalAmount, amountUnit) - HOUSE_TAURUS_FL_OZ) < 1e-6;
-export const isHighTaurusRate = (row) => {
-  const rate = Number(row?.rate);
-  const perGal = flOzPerGal(row?.rate, row?.rateUnit);
-  if (perGal != null) return perGal > HOUSE_FL_OZ_PER_GAL;
-  const amounts = [
-    row?.rateUnit == null ? 0 : flOzOf(rate, row.rateUnit),
-    flOzOf(row?.totalAmount, row?.amountUnit),
-  ];
-  return amounts.some((n) => Number.isFinite(n) && n > HOUSE_TAURUS_FL_OZ);
-};
+export const isFlOzPerGal = isFlOzPerGalUnit;
+// Whether a row's amount is the house mix's 1.6 fl oz (tsp, gal and mL converted; a unitless amount reads as fl oz).
+export const isHouseTaurusAmount = (totalAmount, amountUnit) => isHouseTaurusFlOz(flOzAmount(totalAmount, amountUnit, { nullUnitIsFlOz: true }));
+// A selected row that is a 0.06% application, by the rule the yearly count applies to the saved ledger row
+// (shared/taurus-concentration.cjs): its dilution, else its per-gallon rate, else its amount against the
+// 1.6 fl oz house mix. A reopened recap's recorded row carries the ledger's dilution and application date;
+// a row being entered has neither and is read as an application after the 0.03% ruling.
+export const isHighTaurusRate = (row) => taurusConcentration({
+  dilution: row?.dilution,
+  rate: row?.rate,
+  rateUnit: row?.rateUnit,
+  amount: row?.totalAmount,
+  amountUnit: row?.amountUnit,
+  beforeRuling: typeof row?.applicationDate === 'string' && row.applicationDate < TAURUS_LOW_RATE_SINCE,
+  nullAmountUnitIsFlOz: true,
+}) === 'high';
 
 // pestDefaultMixSelections(...) rows, minus Taurus SC unless the home is known to have room under the label.
 export function applyTaurusYearlyLimit(selections, taurusYearly) {

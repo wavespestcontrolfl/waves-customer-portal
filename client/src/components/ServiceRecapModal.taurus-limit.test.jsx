@@ -67,6 +67,26 @@ describe('ServiceRecapModal Taurus yearly limit', () => {
     expect(screen.queryByText("Over the label's yearly Taurus limit at this home.")).toBeNull();
   });
 
+  test("a reopened recap reads the ledger dilution and date: a 0.06% row at a 1.6 oz rate after three 0.03% visits warns", async () => {
+    const threeLow = { high: 0, low: 3, count: 3, eligible: true, eligibleHigh: false, year: 2026 };
+    const record = (ledger) => ({
+      id: 'rec-1',
+      products: [{ product_id: 1, product_name: 'Taurus SC', application_rate: '1.6', rate_unit: 'oz', ...ledger }],
+    });
+    const warning = "Over the label's yearly Taurus limit at this home.";
+    for (const [ledger, warns] of [
+      [{ ledger_dilution_rate: '0.06%' }, true],
+      [{ ledger_application_date: '2026-10-14' }, true],
+      [{ ledger_dilution_rate: '0.03%', ledger_application_date: '2026-10-14' }, false],
+      [{ ledger_application_date: '2026-11-20' }, false],
+    ]) {
+      render(<ServiceRecapModal service={{ id: 'svc-1', serviceType: 'General Pest Control (Quarterly)' }} request={makeRequest(threeLow, record(ledger))} onClose={() => {}} />);
+      await screen.findByRole('button', { name: 'Taurus SC', pressed: true });
+      expect(Boolean(screen.queryByText(warning))).toBe(warns);
+      cleanup();
+    }
+  });
+
   test('room under the label: Taurus stays on the mix and nothing is said', async () => {
     await open(ROOM);
     expect(screen.getByRole('button', { name: 'Taurus SC', pressed: true })).toBeTruthy();

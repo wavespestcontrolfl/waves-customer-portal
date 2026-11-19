@@ -227,6 +227,44 @@ test('a legacy ledger row with no product_id is found through its service produc
   expect(result.existingRecord.products[0]).toMatchObject({ ledger_quantity: 3.2, ledger_quantity_unit: 'fl_oz' });
 });
 
+test('a reopened recap carries the ledger dilution and date, also on a row with no quantity', async () => {
+  const { knex } = contextDb({
+    record: { id: 'rec-1', technician_notes: null, status: 'completed' },
+    recordedProducts: [
+      { product_name: 'Taurus SC', application_rate: '1.6000', rate_unit: 'oz', product_id: 'p-taurus' },
+      { product_name: 'LESCO Crosscheck Plus', application_rate: '4.0000', rate_unit: 'oz', product_id: 'p-cross' },
+    ],
+    ledgerRows: [
+      // pg returns a DATE column as a UTC-midnight Date.
+      { product_id: 'p-taurus', quantity_applied: null, quantity_unit: null, dilution_rate: '0.06%', application_date: new Date('2026-10-14T00:00:00Z') },
+      { product_id: 'p-cross', quantity_applied: '4.000', quantity_unit: 'fl_oz', dilution_rate: ' ', application_date: '2026-10-14' },
+    ],
+  });
+
+  const result = await buildRecapContext(visit.id, knex);
+
+  const [taurus, cross] = result.existingRecord.products;
+  expect(taurus).toMatchObject({ ledger_dilution_rate: '0.06%', ledger_application_date: '2026-10-14' });
+  expect(taurus).not.toHaveProperty('ledger_quantity');
+  expect(cross).toMatchObject({ ledger_quantity: 4, ledger_quantity_unit: 'fl_oz', ledger_application_date: '2026-10-14' });
+  expect(cross).not.toHaveProperty('ledger_dilution_rate');
+});
+
+test('a linked ledger row with no quantity does not hide the quantity on the catalog-id row', async () => {
+  const { knex } = contextDb({
+    record: { id: 'rec-1', technician_notes: null, status: 'completed' },
+    recordedProducts: [{ service_product_id: 'sp-1', product_name: 'Taurus SC', application_rate: '1.6000', rate_unit: 'oz', product_id: 'p-taurus' }],
+    ledgerRows: [
+      { product_id: null, service_product_id: 'sp-1', quantity_applied: null, quantity_unit: null, dilution_rate: null },
+      { product_id: 'p-taurus', service_product_id: null, quantity_applied: '3.200', quantity_unit: 'fl_oz', dilution_rate: '0.06%' },
+    ],
+  });
+
+  const result = await buildRecapContext(visit.id, knex);
+
+  expect(result.existingRecord.products[0]).toMatchObject({ ledger_quantity: 3.2, ledger_quantity_unit: 'fl_oz', ledger_dilution_rate: '0.06%' });
+});
+
 test('a failed ledger read leaves the recorded products without a quantity and the context ok', async () => {
   const { knex } = contextDb({
     record: { id: 'rec-1', technician_notes: null, status: 'completed' },
@@ -238,4 +276,5 @@ test('a failed ledger read leaves the recorded products without a quantity and t
 
   expect(result.ok).toBe(true);
   expect(result.existingRecord.products[0]).not.toHaveProperty('ledger_quantity');
+  expect(result.existingRecord.products[0]).not.toHaveProperty('ledger_dilution_rate');
 });

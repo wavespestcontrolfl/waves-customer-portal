@@ -41,7 +41,7 @@ const { pestPressureConfigAllowsTechnicianRating } = require('./pest-pressure/te
 const { isValidRateUnit } = require('./inventory-units');
 const { completionSuppliesOwedMarker } = require('./supplies-consumption');
 const { promoteStagedServicePhotos } = require('./service-photos');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, dateOnlyString } = require('../utils/datetime-et');
 
 const PEST_CONTROL_CATEGORY = 'pest_control';
 
@@ -404,16 +404,47 @@ async function traceOnReportForVisit(svc, profile, knex = db) {
   return visitTraceOnReport(svc, profile, lane, knex);
 }
 
-/** Non-retracted ledger quantities on one service record; [] on any failure. */
-async function ledgerQuantitiesFor(recordId, knex) {
+/** Non-retracted ledger rows on one service record (quantity, dilution, date); [] on any failure. */
+async function ledgerFactsFor(recordId, knex) {
   try {
     const rows = await knex('property_application_history')
       .where({ service_record_id: recordId })
       .whereNull('retracted_at')
-      .select(['product_id', 'service_product_id', 'quantity_applied', 'quantity_unit']);
+      .select(['product_id', 'service_product_id', 'quantity_applied', 'quantity_unit', 'dilution_rate', 'application_date']);
     return Array.isArray(rows) ? rows : [];
   } catch {
     return [];
+  }
+}
+
+/**
+ * The compliance ledger's facts on each recorded product, for the Taurus yearly-limit warning on a reopened
+ * recap: its quantity (a recap save replaces its product rows without amounts, but the ledger keeps it), its
+ * dilution (no recap writes it, so a save keeps it, and it decides the count) and its date. The yearly count
+ * reads the ledger. Fail-soft (no facts, no warning input).
+ */
+async function attachLedgerFacts(recordId, products, knex) {
+  const ledgerRows = await ledgerFactsFor(recordId, knex);
+  // By the row's own link first (a legacy ledger row with no product_id is reachable only through it),
+  // then by catalog id.
+  const byServiceProduct = new Map(ledgerRows.filter((row) => row.service_product_id != null)
+    .map((row) => [String(row.service_product_id), row]));
+  const byProduct = new Map(ledgerRows.filter((row) => row.product_id != null).map((row) => [String(row.product_id), row]));
+  for (const sp of products) {
+    // Each fact from the first matching row that records it.
+    const rows = [
+      sp.service_product_id != null ? byServiceProduct.get(String(sp.service_product_id)) : null,
+      sp.product_id != null ? byProduct.get(String(sp.product_id)) : null,
+    ].filter(Boolean);
+    const quantity = rows.find((row) => Number(row.quantity_applied) > 0 && row.quantity_unit);
+    if (quantity) {
+      sp.ledger_quantity = Number(quantity.quantity_applied);
+      sp.ledger_quantity_unit = quantity.quantity_unit;
+    }
+    const dilution = rows.map((row) => String(row.dilution_rate ?? '').trim()).find(Boolean);
+    if (dilution) sp.ledger_dilution_rate = dilution;
+    const appliedOn = rows.map((row) => dateOnlyString(row.application_date)).find(Boolean);
+    if (appliedOn) sp.ledger_application_date = appliedOn;
   }
 }
 
@@ -481,26 +512,7 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
       })
     : [];
 
-  // The compliance ledger's quantity for each recorded product, for the Taurus yearly-limit warning on a
-  // reopened recap. A recap save replaces its product rows without amounts, but the ledger keeps the quantity,
-  // and the yearly count reads the ledger. Fail-soft (no quantity, no warning input).
-  if (existingRecord && existingProducts.length) {
-    const ledgerRows = (await ledgerQuantitiesFor(existingRecord.id, knex))
-      .filter((row) => Number(row.quantity_applied) > 0 && row.quantity_unit);
-    // By the row's own link first (a legacy ledger row with no product_id is reachable only through it),
-    // then by catalog id.
-    const byServiceProduct = new Map(ledgerRows.filter((row) => row.service_product_id != null)
-      .map((row) => [String(row.service_product_id), row]));
-    const byProduct = new Map(ledgerRows.filter((row) => row.product_id != null).map((row) => [String(row.product_id), row]));
-    for (const sp of existingProducts) {
-      const ledger = (sp.service_product_id != null ? byServiceProduct.get(String(sp.service_product_id)) : null)
-        || (sp.product_id != null ? byProduct.get(String(sp.product_id)) : null);
-      if (ledger) {
-        sp.ledger_quantity = Number(ledger.quantity_applied);
-        sp.ledger_quantity_unit = ledger.quantity_unit;
-      }
-    }
-  }
+  if (existingRecord && existingProducts.length) await attachLedgerFacts(existingRecord.id, existingProducts, knex);
 
   // null when the caller did not ask for the list.
   const commonProducts = await commonProductsLoad;

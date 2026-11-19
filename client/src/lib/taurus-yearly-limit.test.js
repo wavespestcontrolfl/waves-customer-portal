@@ -3,6 +3,7 @@ import { pestDefaultMixSelections } from './pest-default-mix';
 import {
   applyTaurusYearlyLimit,
   isHighTaurusRate,
+  isHouseTaurusAmount,
   isTaurusProduct,
   taurusLeftOutLine,
   taurusOverLimitWarning,
@@ -133,7 +134,7 @@ describe('isHighTaurusRate (the same rule the server applies to a saved ledger r
     expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz', totalAmount: 3.2, amountUnit: 'fl_oz' })).toBe(true);
     expect(isHighTaurusRate({ totalAmount: 3.2 })).toBe(true);
     expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz', totalAmount: 1.6, amountUnit: 'fl_oz' })).toBe(false);
-    expect(isHighTaurusRate({ totalAmount: 3.2, amountUnit: 'gal' })).toBe(false);
+    expect(isHighTaurusRate({ totalAmount: 3.2, amountUnit: 'g' })).toBe(false);
     expect(isHighTaurusRate({ name: 'Taurus SC' })).toBe(false);
   });
 
@@ -143,6 +144,33 @@ describe('isHighTaurusRate (the same rule the server applies to a saved ledger r
     expect(isHighTaurusRate({ totalAmount: 19.2, amountUnit: 'tsp' })).toBe(true);
     expect(isHighTaurusRate({ totalAmount: 9.6, amountUnit: 'tsp' })).toBe(false);
     expect(isHighTaurusRate({ rate: 9.6, rateUnit: 'tsp' })).toBe(false);
+  });
+
+  it('converts a gallon or mL amount to fl oz like the fl oz entry it equals, as the server does', () => {
+    expect(isHighTaurusRate({ totalAmount: 0.025, amountUnit: 'gal' })).toBe(true); // 3.2 fl oz
+    expect(isHighTaurusRate({ totalAmount: 0.0125, amountUnit: 'gal' })).toBe(false); // 1.6 fl oz
+    expect(isHighTaurusRate({ rate: 0.025, rateUnit: 'gal' })).toBe(true);
+    expect(isHighTaurusRate({ totalAmount: 94.6, amountUnit: 'ml' })).toBe(true);
+    expect(isHighTaurusRate({ rate: '23.7', rateUnit: 'ml/gal' })).toBe(true); // 0.8 fl oz/gal
+    expect(isHouseTaurusAmount(0.0125, 'gal')).toBe(true);
+    expect(isHouseTaurusAmount(9.6, 'tsp')).toBe(true);
+    expect(isHouseTaurusAmount(1.6)).toBe(true);
+    expect(isHouseTaurusAmount(3.2, 'fl_oz')).toBe(false);
+  });
+
+  it("reads a reopened recap's ledger dilution first, as the count does", () => {
+    expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz', dilution: '0.06%' })).toBe(true);
+    expect(isHighTaurusRate({ rate: '0.8', rateUnit: 'fl_oz/gal', dilution: '0.03%' })).toBe(false);
+    expect(isHighTaurusRate({ rate: '0.8', rateUnit: 'fl_oz/gal', dilution: '0.4 fl oz/gal' })).toBe(true);
+  });
+
+  it("reads a reopened recap's application date: before the 0.03% ruling, the old mix counts as 0.06%", () => {
+    const oldSheet = { rate: '0.2', rateUnit: 'fl_oz/gal', totalAmount: 4, amountUnit: 'fl_oz' };
+    expect(isHighTaurusRate({ ...oldSheet, applicationDate: '2026-11-12' })).toBe(true);
+    expect(isHighTaurusRate(oldSheet)).toBe(false);
+    expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz', applicationDate: '2026-10-01' })).toBe(true);
+    expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz', applicationDate: '2026-11-20' })).toBe(false);
+    expect(isHighTaurusRate({ rate: '0.4', rateUnit: 'fl_oz/gal', totalAmount: 1.6, amountUnit: 'fl_oz', applicationDate: '2026-11-19' })).toBe(false);
   });
 
   it('reads a per-100-gallon rate as fl oz per gallon, as the server does', () => {
