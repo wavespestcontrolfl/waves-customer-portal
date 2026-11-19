@@ -224,6 +224,50 @@ describe('unknown alert type', () => {
   });
 });
 
+describe('commercial prepay setup review', () => {
+  it('explains the retained fee and links the office to the source records', () => {
+    render(<AlertCard alert={{
+      id: 'alert', type: 'commercial_prepay_setup_review', severity: 'warn', created_at: new Date().toISOString(),
+      payload: {
+        sourceInvoiceId: 'inv/source 1', customerId: 'customer/1', estimateId: '4821', amount: '73',
+      },
+    }} onResolve={vi.fn()} />);
+
+    expect(screen.getByText('Setup fee needs review')).toBeTruthy();
+    expect(screen.getByText(/commercial rodent prepay was reversed before a visit was confirmed/i)).toBeTruthy();
+    expect(screen.getByText(/\$73\.00 is still tied to the source invoice/)).toBeTruthy();
+    expect(screen.getByText(/compare the correct visit and property with the accepted service/i)).toBeTruthy();
+    expect(screen.getByText(/check whether the setup fee was already billed/i)).toBeTruthy();
+    expect(screen.getByText('Accepted estimate #4821')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Review source invoice' }).getAttribute('href'))
+      .toBe('/admin/invoices?invoice=inv%2Fsource%201');
+    expect(screen.getByRole('link', { name: 'Review customer account' }).getAttribute('href'))
+      .toBe('/admin/customers?customerId=customer%2F1');
+    expect(screen.getByRole('button', { name: 'Resolve' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /charge|bill|refund/i })).toBeNull();
+  });
+
+  it('explains the duplicate check when payment returns to the original invoice', () => {
+    render(<AlertCard alert={{
+      id: 'alert-restored', type: 'commercial_prepay_setup_review', severity: 'warn', created_at: new Date().toISOString(),
+      payload: {
+        sourceInvoiceId: 'invoice-73', customerId: 'customer-73', amount: 73, paymentRestored: true,
+      },
+    }} onResolve={vi.fn()} />);
+
+    expect(screen.getByText(/payment was restored on the original commercial rodent prepay invoice/i)).toBeTruthy();
+    expect(screen.getByText(/including its \$73\.00 setup fee/i)).toBeTruthy();
+    expect(screen.getByText(/check whether a separate setup fee was billed during the earlier review/i)).toBeTruthy();
+    expect(screen.getByText(/reconcile any duplicate through normal office billing/i)).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Review source invoice' }).getAttribute('href'))
+      .toBe('/admin/invoices?invoice=invoice-73');
+    expect(screen.getByRole('link', { name: 'Review customer account' }).getAttribute('href'))
+      .toBe('/admin/customers?customerId=customer-73');
+    expect(screen.getByRole('button', { name: 'Resolve' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /charge|bill|refund/i })).toBeNull();
+  });
+});
+
 // "Visit not closed out" (services/not-closed-out.js, owner 2026-10-03): the card
 // says only what is known, and is settled by a decision — never a bare Resolve.
 describe('visit not closed out card', () => {

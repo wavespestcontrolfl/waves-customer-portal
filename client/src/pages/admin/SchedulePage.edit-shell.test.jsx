@@ -115,6 +115,58 @@ it('retains edits after a failed save and prevents duplicate saves and dismissal
   expect(JSON.parse(writes()[1][1].body)).toMatchObject({ notes: 'Updated note', createInvoice: false });
 });
 
+it('requires an explicit commercial setup choice and retries the exact recurring save with its opaque visit token', async () => {
+  const setupFeeReview = {
+    invoiceId: 'invoice-source-55',
+    visitKey: 'opaque-visit-property-time-token',
+    prepaidAmountCents: 5500,
+    visitFeeCents: 7300,
+  };
+  let putCount = 0;
+  fetch.mockImplementation(async (url, options = {}) => {
+    if (isPut(url, options)) {
+      putCount += 1;
+      if (putCount === 1) {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({
+            code: 'COMMERCIAL_SETUP_VISIT_REVIEW',
+            error: 'Choose which setup this prepayment covers.',
+            setupFeeReview,
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({ success: true }) };
+    }
+    return okJson(url);
+  });
+  const onSaved = vi.fn();
+  render(<Harness onSaved={onSaved} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const repeatText = screen.getByText('Repeat');
+  const repeatCheckbox = repeatText.parentElement.parentElement.querySelector('input[type="checkbox"]');
+  fireEvent.click(repeatCheckbox);
+  await clickSave();
+
+  const reviewDialog = await screen.findByRole('dialog', { name: 'Choose how to handle this setup fee' });
+  expect(reviewDialog).toHaveTextContent('$55.00');
+  expect(reviewDialog).toHaveTextContent('$73.00');
+  expect(screen.getByRole('link', { name: 'Open source invoice' })).toHaveAttribute('href', '/admin/invoices?invoice=invoice-source-55');
+  expect(writes()).toHaveLength(1);
+  const firstBody = body(0);
+  expect(firstBody).toMatchObject({ isRecurring: true, spawnRecurringChildren: true });
+  expect(firstBody).not.toHaveProperty('commercialSetupDecision');
+
+  fireEvent.click(screen.getByRole('button', { name: "Bill this booking's $73.00 setup separately" }));
+  await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+  expect(writes()).toHaveLength(2);
+  expect(body(1)).toEqual({
+    ...firstBody,
+    commercialSetupDecision: { ...setupFeeReview, resolution: 'separate' },
+  });
+});
+
 it('keeps a failed cancellation open for retry and blocks duplicate cancellation while pending', async () => {
   let rejectCancel;
   let attempts = 0;

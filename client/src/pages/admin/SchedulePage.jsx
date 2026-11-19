@@ -61,6 +61,10 @@ import LawnPlanTab from "../../components/schedule/LawnPlanTab";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
+import CommercialSetupVisitReviewDialog, {
+  commercialSetupDecision,
+  commercialSetupReviewFromError,
+} from "../../components/schedule/CommercialSetupVisitReviewDialog";
 
 import { etDateString, formatETDateOnly } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
@@ -746,6 +750,7 @@ function adminFetch(path, options = {}) {
       err.status = r.status;
       if (body?.code) err.code = body.code;
       if (body?.violations) err.violations = body.violations;
+      if (body?.setupFeeReview) err.setupFeeReview = body.setupFeeReview;
       // Collective series moves: a refused ack hands back the refreshed
       // preview the surface must re-render (GATE_ADMIN_COLLECTIVE_MOVE).
       if (body?.preview) err.preview = body.preview;
@@ -1904,6 +1909,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [saveError, setSaveErrorState] = useState("");
+  const [commercialSetupReview, setCommercialSetupReview] = useState(null);
   const setSaveError = setSaveErrorState;
   const saveErrorRef = useRef(null);
   useEffect(() => { saveErrorRef.current?.focus(); }, [saveError]);
@@ -3384,7 +3390,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     return Object.keys(before).some((k) => !Object.is(before[k], after[k]));
   };
 
-  const handleSave = async ({ takePayment = false } = {}) => {
+  const handleSave = async ({ takePayment = false, commercialSetupRetry = null } = {}) => {
     if (stackingUnconfirmedBlocksSave) return;
     if (lineDiscountPriceMissing || appointmentDiscountPriceMissing || invalidPriceEntered) return;
     // Codex pre-push audit structural round on #4657: Save is blocked while
@@ -3503,6 +3509,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       }
     }
     let saveRequestSent = false;
+    let submittedSetupPayload = null;
     try {
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
@@ -3524,10 +3531,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       if (comboTogether && comboRegroupingEdit) {
         throw new Error("A different service can take this service off the shared stop. Save that change on its own first, or choose Separate.");
       }
-      saveRequestSent = true;
-      const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
-        method: "PUT",
-        body: JSON.stringify({
+      const savePayload = {
           ...form,
           // The auto-dispatch box and the value it opened with; the server acts only on a flip.
           autoDispatchLocked,
@@ -3669,7 +3673,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             moneyPreviewFresh && moneyPreview.total == null
               ? null
               : typeof appointmentTotal === "number" ? appointmentTotal : undefined,
-        }),
+        };
+      submittedSetupPayload = commercialSetupRetry
+        ? {
+            ...commercialSetupRetry.body,
+            commercialSetupDecision: commercialSetupDecision(
+              commercialSetupRetry.review,
+              commercialSetupRetry.resolution,
+            ),
+          }
+        : savePayload;
+      if (commercialSetupRetry) setCommercialSetupReview(null);
+      saveRequestSent = true;
+      const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
+        method: "PUT",
+        body: JSON.stringify(submittedSetupPayload),
       });
       // The whole-stop move's outcome rides in the saved answer: the other
       // changes are saved either way.
@@ -3846,6 +3864,20 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       }
       onSaved?.();
     } catch (e) {
+      const setupReview = commercialSetupReviewFromError(e);
+      if (setupReview) {
+        const originalPayload = { ...(submittedSetupPayload || {}) };
+        delete originalPayload.commercialSetupDecision;
+        setCommercialSetupReview({
+          review: setupReview,
+          body: originalPayload,
+          takePayment,
+          changed: !!commercialSetupRetry,
+        });
+        savingRef.current = false;
+        setSaving(false);
+        return;
+      }
       const ack = parseSeriesAckError(e);
       // The server refused a date/time change because the stop is shared and
       // this form did not know it (the read on open was slow, failed, or the
@@ -3896,6 +3928,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     }
     savingRef.current = false;
     setSaving(false);
+  };
+
+  const resolveCommercialSetupReview = async (resolution) => {
+    if (!commercialSetupReview || savingRef.current) return;
+    await handleSave({
+      takePayment: commercialSetupReview.takePayment,
+      commercialSetupRetry: { ...commercialSetupReview, resolution },
+    });
   };
 
   // no_show is terminal on the server too (the status route 409s a
@@ -4854,6 +4894,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         fontFamily: "Roboto, Arial, sans-serif",
       }}
     >
+      <CommercialSetupVisitReviewDialog
+        review={commercialSetupReview?.review}
+        changed={commercialSetupReview?.changed}
+        busy={saving}
+        onResolve={resolveCommercialSetupReview}
+        onCancel={() => setCommercialSetupReview(null)}
+      />
       {" "}
       <div
         onClick={(e) => e.stopPropagation()}

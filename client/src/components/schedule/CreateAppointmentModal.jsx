@@ -56,6 +56,10 @@ import InPersonCardSheet from './InPersonCardSheet';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { AskedTimeBoxLegacy } from './DayOnlyPromiseLegacy';
 import { askedTimeCreateFields, reminderAnswerFor } from './dayOnlyPromise';
+import CommercialSetupVisitReviewDialog, {
+  commercialSetupDecision,
+  commercialSetupReviewFromError,
+} from './CommercialSetupVisitReviewDialog';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -2349,6 +2353,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [callBookingConflict, setCallBookingConflict] = useState(null);
   const callBookingConflictRef = useRef(null);
   const callBookingDuplicateOverrideRef = useRef(new Map());
+  const [commercialSetupReview, setCommercialSetupReview] = useState(null);
+  const commercialSetupRetryRef = useRef(null);
   useEffect(() => {
     if (duplicateConflict) duplicateConflictRef.current?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
   }, [duplicateConflict]);
@@ -2359,6 +2365,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setDuplicateConflict(null);
     setSeparateProgramReason('');
     setCallBookingConflict(null);
+    setCommercialSetupReview(null);
+    commercialSetupRetryRef.current = null;
   }, [selectedCustomer?.id, selectedPropertyId, services]);
   // The phone agent's visit was matched to THIS date (±1 day): a new date is
   // a new check, so the stale box never offers "Book another anyway" for it.
@@ -4207,6 +4215,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // ever affect the ONE submit it triggered, never a later unrelated one.
     const callBookingOverrides = callBookingDuplicateOverrideRef.current;
     callBookingDuplicateOverrideRef.current = new Map();
+    // A setup decision is scoped to the ONE submit the review dialog starts.
+    // It carries the exact payload that received the 409 and is consumed here,
+    // before any await, so an unrelated later save can never inherit it.
+    const commercialSetupRetry = commercialSetupRetryRef.current;
+    commercialSetupRetryRef.current = null;
     submittingRef.current = true;
     setSaving(true);
     const releaseSubmit = () => {
@@ -4294,6 +4307,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       }
       const groups = groupServicesForAppointmentSubmit(services);
       let firstError = null;
+      let setupReviewPending = false;
       // Annual-prepay-on-book rides exactly ONE recurring group's POST — if a
       // one-time group also carried it, whichever request landed first would
       // accept the estimate (possibly as standard) and strand the prepay.
@@ -4322,6 +4336,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         // the catch's "recoverable" branch below also needs to read this to
         // apply the SAME commit-lock a genuine success does).
         let carriesAppointmentDiscount = false;
+        let submittedSetupPayload = null;
+        let setupRetryForGroup = null;
         try {
           const [primary, ...extras] = group.lines;
           const groupSubtotal = group.lines.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
@@ -4564,8 +4580,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             body.expected_discount_stacking = confirmedGroupRegime;
             body.expected_price = verdict.price;
           }
+          setupRetryForGroup = commercialSetupRetry?.key === key ? commercialSetupRetry : null;
+          submittedSetupPayload = setupRetryForGroup
+            ? {
+              ...setupRetryForGroup.body,
+              commercialSetupDecision: commercialSetupDecision(
+                setupRetryForGroup.review,
+                setupRetryForGroup.resolution,
+              ),
+            }
+            : body;
+          if (setupRetryForGroup) setCommercialSetupReview(null);
           bookingPostAttempted = true;
-          const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
+          const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(submittedSetupPayload) });
           // Codex pre-push audit P1 (round 5, blocked push 9): freeze THIS
           // group's displayed total to whatever groupStackedPerVisitTotal
           // just produced (the same number that shaped this POST) before
@@ -4598,6 +4625,20 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         } catch (e) {
           // A late failure must not update a closed draft.
           assertSubmitCurrent();
+          const setupReview = commercialSetupReviewFromError(e);
+          if (setupReview) {
+            const originalPayload = { ...(submittedSetupPayload || {}) };
+            delete originalPayload.commercialSetupDecision;
+            setCommercialSetupReview({
+              review: setupReview,
+              changed: !!setupRetryForGroup,
+              key,
+              body: originalPayload,
+              separateProgram,
+            });
+            setupReviewPending = true;
+            break;
+          }
           const decision = classifySubmitGroupFailure(e, {
             group, linkedEstimate, separateProgram, key, groupLabelText: groupLabel(group),
             carriesAppointmentDiscount,
@@ -4632,6 +4673,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         ...results.flatMap((r) => (Array.isArray(r?.warnings) ? r.warnings : [])),
         ...[autoAssignWarning(results)].filter(Boolean),
       ];
+      if (setupReviewPending) {
+        showBookingWarnings(committedWarnings);
+        reportBackground();
+        return;
+      }
       if (firstError) {
         const created = createdGroupKeysRef.current.size;
         const total = groups.length;
@@ -5261,6 +5307,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (newCallerBookMode) return bookNewCaller();
     return quickAddSaveMode ? saveNewCustomerThenBook() : handleSubmit(arg);
   };
+  const resolveCommercialSetupReview = async (resolution) => {
+    if (!commercialSetupReview || saving) return;
+    commercialSetupRetryRef.current = { ...commercialSetupReview, resolution };
+    try {
+      await handleSubmit(commercialSetupReview.separateProgram);
+    } finally {
+      commercialSetupRetryRef.current = null;
+    }
+  };
   // The wait below fires later than the render that started it: it reads the
   // form as it is when it fires (a technician or note changed during the wait
   // is booked as shown), never the values from when the wait began.
@@ -5375,6 +5430,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         aria-modal="true"
         aria-labelledby="new-appointment-title"
       >
+        <CommercialSetupVisitReviewDialog
+          review={commercialSetupReview?.review}
+          changed={commercialSetupReview?.changed}
+          busy={saving}
+          onResolve={resolveCommercialSetupReview}
+          onCancel={() => {
+            commercialSetupRetryRef.current = null;
+            setCommercialSetupReview(null);
+          }}
+        />
         <style>{`
           .waves-sq-date::-webkit-calendar-picker-indicator { opacity: 0.5; cursor: pointer; filter: grayscale(1); transition: opacity 0.15s; }
           .waves-sq-date::-webkit-calendar-picker-indicator:hover { opacity: 1; }
