@@ -63,8 +63,14 @@ function exactQuotedPhrases(passage) {
   return phrases;
 }
 
+// An instruction whose only number counts the reader's own action ("Check 2 containers by the door").
+// A number later in the sentence, or one that is a time or a size ("Look for larvae that hatch in 3 days",
+// "Check 3 days later"), states a fact and needs a source.
+const COUNT_INSTRUCTION_RE = /^(?:check|empty|inspect|look at|remove|walk)\s+(?:(?:the|your|all|each|at least|about)\s+)?\d+\s+(?!(?:days?|weeks?|hours?|minutes?|months?|years?|inch(?:es)?|feet|foot|percent)\b)[a-z]/i;
 function isTrivialNumericInstruction(passage) {
-  return /^(?:check|empty|inspect|look|remove|walk)\b/i.test(String(passage || '').trim());
+  const text = String(passage || '').trim();
+  const match = text.match(COUNT_INSTRUCTION_RE);
+  return Boolean(match) && !FIGURE_RE.test(text.slice(match[0].length - 1).replace(DOCUMENT_CODE_RE, ' '));
 }
 
 // A non_external passage may carry a number only where the number makes no outside claim: a trivial

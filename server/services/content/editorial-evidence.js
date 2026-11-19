@@ -95,11 +95,13 @@ function sourceUrls(document, brief = {}, evidenceUrls = []) {
   // Parentheses are allowed inside the match (URLs can legitimately contain
   // them); trimTrailingUrlNoise strips only what's unmatched.
   const evidence = (Array.isArray(evidenceUrls) ? evidenceUrls : []).map(evidenceUrl).filter(Boolean);
-  const urlsIn = (text) => text.match(/https:\/\/[^\s<>"'\]}]+/g) || [];
+  const URL_RE = /https:\/\/[^\s<>"'\]}]+/g;
+  const body = fm.parse(document).content;
   const structured = `${JSON.stringify(brief.required_sources || [])}\n${JSON.stringify(brief.facts_pack || [])}\n${evidence.join('\n')}`;
   return [...new Set([
-    ...urlsIn(fm.parse(document).content).map((url) => trimTrailingUrlNoise(url, { prose: true })),
-    ...urlsIn(structured).map((url) => trimTrailingUrlNoise(url)),
+    // An autolink ("<https://a.org/r?id=ABC:>") is delimited, so its colon is the URL's.
+    ...[...body.matchAll(URL_RE)].map((m) => trimTrailingUrlNoise(m[0], { prose: body[m.index + m[0].length] !== '>' })),
+    ...(structured.match(URL_RE) || []).map((url) => trimTrailingUrlNoise(url)),
   ]
     .filter((url) => {
       try {

@@ -75,6 +75,9 @@ describe('editorial review coverage validation', () => {
     'EENY-514 says the roach is 1.5 inches long.',
     '**Last updated:** November 2026. Most homes have roaches.',
     'Homes need a MERV-13 filter.',
+    'Look for larvae that hatch in 3 days.',
+    'Check 3 days later for new droppings.',
+    'Check 2 traps, since 40% of roaches hide there.',
   ])('still rejects a figure outside those cases as non-external: %s', (passage) => {
     expect(validateClaim(passage, NON_EXTERNAL)).toBe('claim_kind_mismatch:C1');
   });

@@ -432,6 +432,8 @@ test('source extraction drops a colon that follows a link', () => {
 test('source extraction keeps a colon inside a link destination or a structured source', () => {
   expect(evidence.sourceUrls('The [record](https://example.org/record?id=ABC:) lists it.'))
     .toEqual(['https://example.org/record?id=ABC:']);
+  expect(evidence.sourceUrls('The record <https://example.org/record?id=ABC:> lists it.'))
+    .toEqual(['https://example.org/record?id=ABC:']);
   expect(evidence.sourceUrls('Body.', { required_sources: ['https://example.org/record?id=ABC:'] }))
     .toEqual(['https://example.org/record?id=ABC:']);
 });
