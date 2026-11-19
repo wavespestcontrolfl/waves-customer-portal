@@ -9,6 +9,7 @@ const SKIP = !process.env.DATABASE_URL;
 const connection = process.env.DATABASE_URL;
 
 const { randomUUID } = require('node:crypto');
+const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 
 let mockDb;
 jest.mock('../models/db', () => {
@@ -218,7 +219,7 @@ jest.setTimeout(120000);
       const oldToken = (await root('job_offers').where({ id: draft.id }).first()).token;
 
       await expect(JobOffers.saveDraft(app.id, {}, actor())).rejects.toMatchObject({ status: 409, code: 'OFFER_ALREADY_OPEN' });
-      const revised = await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'sent', startDate: JobOffers.addDays(JobOffers.suggestStartDate(), 7) }, actor());
+      const revised = await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'sent', startDate: addStaffWorkDays(JobOffers.suggestStartDate(), 7) }, actor());
       expect(revised).toMatchObject({ status: 'draft', supersedesId: sent.offer.id });
       expect((await root('job_offers').where({ id: draft.id }).first()).status).toBe('sent');
       expect((await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'sent' }, actor())).id).toBe(revised.id);
@@ -238,7 +239,7 @@ jest.setTimeout(120000);
       const app = await newApplication();
       const sent = await sendNew(app);
       const token = (await root('job_offers').where({ id: sent.offer.id }).first()).token;
-      const wanted = JobOffers.addDays(JobOffers.suggestStartDate(), 14);
+      const wanted = addStaffWorkDays(JobOffers.suggestStartDate(), 14);
       const result = await JobOffers.requestDate(token, { requestedStartDate: wanted, note: 'Need two more weeks' });
       expect(result.body).toEqual({ state: 'date_requested' });
       const revised = await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'date_requested' }, actor());
@@ -341,11 +342,11 @@ jest.setTimeout(120000);
       });
 
       test('a date request needs a future Monday to Thursday, keeps the application at offer, and rings once', async () => {
-        const saturday = JobOffers.addDays(JobOffers.suggestStartDate(), 12);
+        const saturday = addStaffWorkDays(JobOffers.suggestStartDate(), 12);
         expect(JobOffers.dowOf(saturday)).toBe(6);
         expect(await JobOffers.requestDate(token, { requestedStartDate: saturday })).toMatchObject({ invalid: expect.any(String) });
         expect(await JobOffers.requestDate(token, { requestedStartDate: '2020-01-06' })).toMatchObject({ invalid: expect.any(String) });
-        const monday = JobOffers.addDays(JobOffers.suggestStartDate(), 7);
+        const monday = addStaffWorkDays(JobOffers.suggestStartDate(), 7);
         const result = await JobOffers.requestDate(token, { requestedStartDate: monday, note: 'My notice ends later' });
         expect(result.body).toEqual({ state: 'date_requested' });
         const row = await root('job_offers').where({ id: offer.id }).first();
@@ -515,7 +516,7 @@ jest.setTimeout(120000);
     test('a draft edit that sends the same start date keeps the negotiated raise date', async () => {
       const app = await newApplication();
       const start = JobOffers.suggestStartDate();
-      const raise = JobOffers.addDays(JobOffers.stepDateFor(start), 7);
+      const raise = addStaffWorkDays(JobOffers.stepDateFor(start), 7);
       const draft = await JobOffers.saveDraft(app.id, { startDate: start, stepEffectiveOn: raise }, actor());
       const edited = await JobOffers.saveDraft(app.id, { startDate: start, hoursLine: 'Four 10-hour days', draftId: draft.id, draftHash: draft.draftHash }, actor());
       expect(edited.stepEffectiveOn).toBe(raise);
@@ -537,14 +538,14 @@ jest.setTimeout(120000);
 
     test('Revise keeps a negotiated raise date unless the start date changes, and a second Revise returns the draft untouched', async () => {
       const app = await newApplication();
-      const first = await JobOffers.saveDraft(app.id, { stepEffectiveOn: JobOffers.addDays(JobOffers.stepDateFor(JobOffers.suggestStartDate()), 7) }, actor());
+      const first = await JobOffers.saveDraft(app.id, { stepEffectiveOn: addStaffWorkDays(JobOffers.stepDateFor(JobOffers.suggestStartDate()), 7) }, actor());
       const sent = (await JobOffers.sendOffer(app.id, first.id, actor(), first.draftHash)).offer;
       const token = (await root('job_offers').where({ id: sent.id }).first()).token;
       await JobOffers.requestDate(token, { requestedStartDate: sent.startDate }); // asks for the very same day
       const revised = await JobOffers.reviseOffer(app.id, sent.id, { expectedStatus: 'date_requested', startDate: sent.startDate }, actor());
       expect(revised.stepEffectiveOn).toBe(sent.stepEffectiveOn);
       const edited = await JobOffers.saveDraft(app.id, { hoursLine: 'Four 10-hour days', draftId: revised.id, draftHash: revised.draftHash }, actor());
-      const again = await JobOffers.reviseOffer(app.id, sent.id, { expectedStatus: 'date_requested', startDate: JobOffers.addDays(sent.startDate, 7) }, actor());
+      const again = await JobOffers.reviseOffer(app.id, sent.id, { expectedStatus: 'date_requested', startDate: addStaffWorkDays(sent.startDate, 7) }, actor());
       expect(again.id).toBe(revised.id);
       expect(again.hoursLine).toBe('Four 10-hour days');
       expect(again.startDate).toBe(sent.startDate);

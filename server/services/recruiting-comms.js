@@ -30,7 +30,7 @@ const { portalUrl } = require('../utils/portal-url');
 const { formatETTime } = require('../utils/datetime-et');
 const { effectiveSendMs, newerEvidence } = require('../utils/recruiting-thread-scope');
 const { WAVES_ADDRESS_LINE, WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
-const { redactOfferLinks } = require('../utils/offer-link-redaction');
+const { redactOfferLinks, offerLinkTokens } = require('../utils/offer-link-redaction');
 const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
@@ -887,6 +887,22 @@ async function queuedInviteRivals(app, stage, handoffEntry, trx) {
   return { superseded: true, rivals: [] };
 }
 
+// Offer links pasted into any other held text (an owner reply), pinned in order as { job_offer_id, token_hash } so the
+// replay can put each real link back (deferred-replay-registry replayBodyFor): the stored body hides them and the token
+// is never stored. null = no link to pin; false = a link that matches no offer, which cannot be rebuilt, so the text is
+// not queued (the owner sees it did not go out) rather than queued with a link that could never be sent.
+async function pinPastedOfferLinks(stage, body, trx) {
+  const tokens = stage === 'offer_sent' ? [] : offerLinkTokens(body);
+  if (!tokens.length) return null;
+  const rows = await trx('job_offers').whereIn('token', [...new Set(tokens)]).select('id', 'token');
+  const idOf = new Map(rows.map((r) => [r.token, r.id]));
+  if (tokens.some((t) => !idOf.has(t))) {
+    logger.warn(`[recruiting-comms] held ${stage} text not queued: it carries an offer link that matches no offer`);
+    return false;
+  }
+  return tokens.map((t) => ({ job_offer_id: idOf.get(t), token_hash: crypto.createHash('sha256').update(t).digest('hex') }));
+}
+
 // Held by the send window (8am–8pm ET): queue the text on the scheduled-SMS
 // rail the cron replays (services/scheduler.js) — an applicant who applies or
 // books overnight still gets the text when the window opens (Codex r5 P1).
@@ -902,6 +918,8 @@ async function queueDeferredSms({ app, stage, contact, body, applicantFromNumber
       await trx('job_applications').where({ id: app.id }).forUpdate().first('id');
       const { superseded, rivals } = await queuedInviteRivals(app, stage, handoffEntry, trx);
       if (superseded) return 'superseded';
+      const offerLinks = await pinPastedOfferLinks(stage, body, trx);
+      if (offerLinks === false) return null;
       await trx('sms_log').insert({
         customer_id: null,
         direction: 'outbound',
@@ -930,6 +948,7 @@ async function queueDeferredSms({ app, stage, contact, body, applicantFromNumber
           // that was withdrawn, replaced, signed or closed overnight (deferred-replay-registry recheck).
           // (the token itself is never stored here: a hash pins the link, the replay reads the real token from the offer row)
           ...(stage === 'offer_sent' ? { job_offer_id: opts.offerId || null, offer_token_hash: opts.offerToken ? crypto.createHash('sha256').update(String(opts.offerToken)).digest('hex') : null } : {}),
+          ...(offerLinks ? { offer_links: offerLinks } : {}),
           original_message_type: `job_${stage}`,
           consent_basis: { status: 'transactional_allowed', source: 'job_application' },
           original_block_code: sendRes.code || null,

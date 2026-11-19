@@ -178,6 +178,18 @@ function checkOfferSupersession(meta, app) {
   return newer ? { eligible: false, reason: 'superseded-by-newer-attempt' } : null;
 }
 
+// The real links of offer links pasted into another held text (an owner reply), in order, read from their offer rows
+// now (recruiting-comms pinPastedOfferLinks pinned them at queue time). The owner's words go out as written, so the
+// offer's status does not matter here; a row that is gone or whose link changed refuses the text.
+async function pastedOfferLinkTokens(refs, conn) {
+  const ids = [...new Set(refs.map((r) => r && r.job_offer_id).filter(Boolean))];
+  const rows = ids.length ? await conn('job_offers').whereIn('id', ids).select('id', 'token') : [];
+  const tokenOf = new Map(rows.map((r) => [r.id, r.token]));
+  const tokens = refs.map((r) => tokenOf.get(r && r.job_offer_id) || null);
+  const intact = tokens.every((t, i) => t && require('crypto').createHash('sha256').update(String(t)).digest('hex') === refs[i].token_hash);
+  return intact ? tokens : null;
+}
+
 // The offer a held text pins must still be the sent, unexpired one with the same link. Returns a refusal, or
 // { ok: true, token } for an offer that is still open.
 async function checkRecruitingOfferOpen(meta, conn, lock) {
@@ -1206,6 +1218,11 @@ const REGISTRY = {
           // The queued row stores the text with the link token hidden; the replay sends the real link, read from the offer
           // row now (replayBodyFor), never from the stored body.
           return { eligible: true, offerToken: open.token };
+        }
+        if (Array.isArray(meta.offer_links) && meta.offer_links.length) {
+          const offerTokens = await pastedOfferLinkTokens(meta.offer_links, conn);
+          if (!offerTokens) return { eligible: false, reason: 'offer-link-missing' };
+          return { eligible: true, offerTokens };
         }
 
         return { eligible: true };
@@ -2475,15 +2492,22 @@ const DURABLE_FINALIZE_ENTRY_POINTS = Object.entries(REGISTRY)
   .filter(([, entry]) => entry.durableFinalize === true && typeof entry.finalize === 'function')
   .map(([key]) => key);
 
-// The text a held message really sends. Almost every entry replays its stored body as it is. A held job-offer text is
-// stored with the link token hidden (utils/offer-link-redaction.js), so its replay puts back the token read from the
-// job_offers row by the recheck that just passed (`offerToken`), never one kept in a stored body. Returns null when the
-// body carries the hidden link and no token came with it: the caller must not send that text.
+// The text a held message really sends. Almost every entry replays its stored body as it is. A held recruiting text
+// that carries offer links is stored with each token hidden (utils/offer-link-redaction.js), so its replay puts back
+// the tokens read from the job_offers rows by the recheck that just passed, never ones kept in a stored body: the offer
+// text's one offer (`offerToken`, every hidden link), or an owner reply's pasted links in order (`offerTokens`, one per
+// hidden link). Returns null when a hidden link has no token: the caller must not send that text.
 const { OFFER_LINK_HIDDEN } = require('../../utils/offer-link-redaction');
+const HIDDEN_OFFER_PATH = `/careers/offer/${OFFER_LINK_HIDDEN}`;
+const isOfferToken = (t) => /^[0-9a-f]{64}$/.test(String(t || ''));
 function replayBodyFor(entryPoint, recheck, storedBody) {
-  if (entryPoint !== 'recruiting_comms_deferred' || typeof storedBody !== 'string' || !storedBody.includes(`/careers/offer/${OFFER_LINK_HIDDEN}`)) return storedBody;
-  if (!recheck || !/^[0-9a-f]{64}$/.test(String(recheck.offerToken || ''))) return null;
-  return storedBody.split(`/careers/offer/${OFFER_LINK_HIDDEN}`).join(`/careers/offer/${recheck.offerToken}`);
+  if (entryPoint !== 'recruiting_comms_deferred' || typeof storedBody !== 'string' || !storedBody.includes(HIDDEN_OFFER_PATH)) return storedBody;
+  const parts = storedBody.split(HIDDEN_OFFER_PATH);
+  const tokens = Array.isArray(recheck && recheck.offerTokens)
+    ? recheck.offerTokens
+    : parts.slice(1).map(() => recheck && recheck.offerToken);
+  if (tokens.length !== parts.length - 1 || !tokens.every(isOfferToken)) return null;
+  return parts.reduce((text, part, i) => `${text}/careers/offer/${tokens[i - 1]}${part}`);
 }
 
 module.exports = {

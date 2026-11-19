@@ -17,8 +17,9 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
-const { dateOnlyString } = require('../utils/date-only');
+const { dateOnlyAtNoonUtc, dateOnlyString, formatDateOnly, validDateOnly } = require('../utils/date-only');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 const { portalUrl } = require('../utils/portal-url');
 const { hash: canonicalHash } = require('./staff-document-source');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
@@ -51,46 +52,40 @@ class OfferError extends Error {
 }
 
 // ------------------------------------------------------------------ dates
+// Calendar-date checks, arithmetic and formatting come from the shared utils (utils/date-only.js,
+// utils/staff-time-work-date.js on utils/datetime-et.js). Only the offer's own rules live here: a Monday-to-Thursday
+// start, the Monday pay step after day 90, the 7-day expiry.
 
-const noon = (ymd) => new Date(`${ymd}T12:00:00Z`);
-const isYmd = (value) => {
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const at = noon(value);
-  return !Number.isNaN(at.getTime()) && at.toISOString().slice(0, 10) === value;
-};
-function addDays(ymd, days) {
-  const at = noon(ymd);
-  at.setUTCDate(at.getUTCDate() + days);
-  return at.toISOString().slice(0, 10);
-}
-const dowOf = (ymd) => noon(ymd).getUTCDay(); // 0 Sunday .. 6 Saturday
-const nextMondayOnOrAfter = (ymd) => addDays(ymd, (8 - dowOf(ymd)) % 7);
+const isYmd = validDateOnly;
+const dowOf = (ymd) => dateOnlyAtNoonUtc(ymd).getUTCDay(); // 0 Sunday .. 6 Saturday
+const nextMondayOnOrAfter = (ymd) => addStaffWorkDays(ymd, (8 - dowOf(ymd)) % 7);
 
-/** First Monday strictly after day 90 (day 1 = the start date, so day 90 = start + 89 days). */
+/**
+ * First Monday strictly after day 90 (day 1 = the start date, so day 90 = start + 89 days, and the step is the first
+ * Monday on or after start + 90 days). Null when that falls past 9999-12-31, which no calendar date can hold.
+ */
 function stepDateFor(startDate) {
-  return nextMondayOnOrAfter(addDays(addDays(startDate, DEFAULTS.stepAfterDays - 1), 1));
+  const dayAfter90 = addStaffWorkDays(startDate, DEFAULTS.stepAfterDays);
+  if (!isYmd(dayAfter90)) return null;
+  const monday = nextMondayOnOrAfter(dayAfter90);
+  return isYmd(monday) ? monday : null;
 }
 
 /** The first Monday at least 21 days after today (ET). */
 function suggestStartDate(now = new Date()) {
-  return nextMondayOnOrAfter(addDays(etDateString(now), DEFAULTS.leadDays));
+  return nextMondayOnOrAfter(addStaffWorkDays(etDateString(now), DEFAULTS.leadDays));
 }
 
 /** 23:59:59 America/New_York on the send day + 7 days. */
 function expiryFor(now = new Date()) {
-  return parseETDateTime(`${addDays(etDateString(now), DEFAULTS.expiresAfterDays)}T23:59:59`);
+  return parseETDateTime(`${addStaffWorkDays(etDateString(now), DEFAULTS.expiresAfterDays)}T23:59:59`);
 }
 
 // "Mon, Jan 4" or, with the year, "Mon, Jan 4, 2027" (a calendar date; no zone shift).
-function fmtDay(ymd, { year = false } = {}) {
-  if (!isYmd(ymd)) return '';
-  return noon(ymd).toLocaleDateString('en-US', {
-    weekday: 'short', month: 'short', day: 'numeric', ...(year ? { year: 'numeric' } : {}), timeZone: 'UTC',
-  });
-}
-const fmtMonthDay = (ymd) => (isYmd(ymd)
-  ? noon(ymd).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })
+const fmtDay = (ymd, { year = false } = {}) => (isYmd(ymd)
+  ? formatDateOnly(ymd, { weekday: 'short', month: 'short', year: year ? 'numeric' : undefined })
   : '');
+const fmtMonthDay = (ymd) => (isYmd(ymd) ? formatDateOnly(ymd, { month: 'short', year: undefined }) : '');
 const money = (value) => `$${Number(value).toFixed(2)}`;
 const instantToEtDay = (value) => etDateString(value instanceof Date ? value : new Date(value));
 const iso = (value) => (value ? new Date(value).toISOString() : null);
@@ -1140,7 +1135,7 @@ module.exports = {
   DEFAULTS,
   LIMITS,
   // pure helpers (unit-tested)
-  addDays, dowOf, isYmd, stepDateFor, suggestStartDate, expiryFor, fmtDay, defaultsFor,
+  dowOf, isYmd, stepDateFor, suggestStartDate, expiryFor, fmtDay, defaultsFor,
   validateOffer, mergeOfferInput, inputOfRow, parseSignedName,
   snapshotHashOf, signatureHashOf, renderLetterMarkdown, readableTerms, payDayLineFrom,
   publicStateOf, closedMessage, presentOffer, timelineOf, buildSnapshot,

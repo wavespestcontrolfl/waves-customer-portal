@@ -67,6 +67,26 @@ describe('the deferred replay body', () => {
     expect(replayBodyFor('recruiting_comms_deferred', { eligible: true }, 'Pick a time: portal.x/careers/interview/abc')).toBe('Pick a time: portal.x/careers/interview/abc');
     expect(replayBodyFor('invoice_followup_deferred', { eligible: true, offerToken: TOKEN }, stored)).toBe(stored);
   });
+
+  test('a held owner reply gets each pasted link back in order; a missing or extra link refuses it', () => {
+    const other = 'f'.repeat(64);
+    const reply = `Old: x/careers/offer/${OFFER_LINK_HIDDEN} New: x/careers/offer/${OFFER_LINK_HIDDEN} Thanks.`;
+    expect(replayBodyFor('recruiting_comms_deferred', { eligible: true, offerTokens: [TOKEN, other] }, reply))
+      .toBe(`Old: x/careers/offer/${TOKEN} New: x/careers/offer/${other} Thanks.`);
+    expect(replayBodyFor('recruiting_comms_deferred', { eligible: true, offerTokens: [TOKEN] }, reply)).toBeNull();
+    expect(replayBodyFor('recruiting_comms_deferred', { eligible: true, offerTokens: [TOKEN, 'short'] }, reply)).toBeNull();
+    expect(replayBodyFor('recruiting_comms_deferred', { eligible: true }, reply)).toBeNull();
+  });
+});
+
+describe('offerLinkTokens', () => {
+  const { offerLinkTokens } = require('../utils/offer-link-redaction');
+  test('lists every link token in order, in lowercase, and nothing for other text', () => {
+    const upper = 'A'.repeat(64);
+    expect(offerLinkTokens(`a https://p.x/careers/offer/${TOKEN} b p.x/careers/offer/${upper}`)).toEqual([TOKEN, 'a'.repeat(64)]);
+    expect(offerLinkTokens('Pick a time: p.x/careers/interview/abc')).toEqual([]);
+    expect(offerLinkTokens(null)).toEqual([]);
+  });
 });
 
 describe('every writer of a stored message body redacts the offer link (source guard)', () => {
