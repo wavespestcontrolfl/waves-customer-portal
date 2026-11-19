@@ -88,9 +88,34 @@ describe('failed payment recovery', () => {
     expect(within(row).queryByRole('link', { name: /^Pay / })).not.toBeInTheDocument();
   });
 
-  it.each(['authentication_pending', 'authentication_unknown'])(
-    'shows verification guidance without a new invoice shortcut for %s',
-    async (recoveryState) => {
+  it.each([
+    {
+      recoveryState: 'authentication_pending',
+      bannerTitle: 'Payment needs verification',
+      bannerDetail: 'Contact us to confirm the payment status before trying again.',
+      rowDetail: 'Payment needs verification. Contact us to confirm the payment status before trying again.',
+    },
+    {
+      recoveryState: 'authentication_unknown',
+      bannerTitle: 'Payment needs verification',
+      bannerDetail: 'Contact us to confirm the payment status before trying again.',
+      rowDetail: 'Payment needs verification. Contact us to confirm the payment status before trying again.',
+    },
+    {
+      recoveryState: 'recovery_unavailable',
+      bannerTitle: 'Payment failed',
+      bannerDetail: 'Contact us to review the failed payment before trying again.',
+      rowDetail: 'Contact us to review this payment before trying again.',
+    },
+    {
+      recoveryState: 'recovery_unchecked',
+      bannerTitle: 'Payment failed',
+      bannerDetail: 'Contact us to review the failed payment before trying again.',
+      rowDetail: 'Contact us to review this payment before trying again.',
+    },
+  ])(
+    'shows verification guidance without a new invoice shortcut for $recoveryState',
+    async ({ recoveryState, bannerTitle, bannerDetail, rowDetail }) => {
       api.getPayments.mockResolvedValue({
         payments: [
           failedPayment({
@@ -115,11 +140,9 @@ describe('failed payment recovery', () => {
       render(<BillingTab customer={customer} />);
 
       const row = paymentRow(await screen.findByText('November pest visit'));
-      expect(screen.getByText('Payment needs verification')).toBeInTheDocument();
-      expect(screen.getByText('Contact us to confirm the payment status before trying again.'))
-        .toBeInTheDocument();
-      expect(within(row).getByRole('status'))
-        .toHaveTextContent('Payment needs verification. Contact us to confirm the payment status before trying again.');
+      expect(screen.getByText(bannerTitle)).toBeInTheDocument();
+      expect(screen.getByText(bannerDetail)).toBeInTheDocument();
+      expect(within(row).getByRole('status')).toHaveTextContent(rowDetail);
       expect(screen.queryByRole('link', { name: 'View open invoices' })).not.toBeInTheDocument();
       expect(screen.queryByRole('link', { name: 'Review invoice' })).not.toBeInTheDocument();
       // The bounded fix does not change the original account-balance invoice

@@ -69,7 +69,28 @@ test('later history pages keep the fallback without starting recovery enrichment
   });
 
   expect(result.payments[0].recoveryInvoice).toBeNull();
+  expect(result.payments[0].recoveryState).toBe('recovery_unchecked');
   expect(database.mock.calls.filter(([table]) => table === 'invoices')).toHaveLength(1);
+});
+
+test('failed rows beyond the first-page recovery cap suppress their unchecked fallback', async () => {
+  stripe.getPaymentHistory.mockResolvedValue(Array.from({ length: 11 }, (_, index) => ({
+    id: `payment-failed-${index + 1}`,
+    amount: 50,
+    status: 'failed',
+  })));
+
+  const result = await listPortalPayments('customer-1', {
+    database: emptyReader(),
+    includeRecoveryInvoices: true,
+  });
+
+  expect(result.payments.slice(0, 10).every((payment) => payment.recoveryState === null)).toBe(true);
+  expect(result.payments[10]).toMatchObject({
+    id: 'payment-failed-11',
+    recoveryInvoice: null,
+    recoveryState: 'recovery_unchecked',
+  });
 });
 
 test('cancellation on the first payer read cannot start count or payment queries', async () => {

@@ -6439,9 +6439,56 @@ function BillingChannelFieldset({ field, channels, available, saving, onToggle, 
 }
 
 const PAYMENT_VERIFICATION_STATES = new Set(['authentication_pending', 'authentication_unknown']);
+const PAYMENT_RECOVERY_BLOCKING_STATES = new Set([
+  ...PAYMENT_VERIFICATION_STATES,
+  'recovery_unavailable',
+  'recovery_unchecked',
+]);
 
 function paymentNeedsVerification(payment) {
   return payment?.status === 'failed' && PAYMENT_VERIFICATION_STATES.has(payment?.recoveryState);
+}
+
+function paymentBlocksRecoveryShortcut(payment) {
+  return payment?.status === 'failed' && PAYMENT_RECOVERY_BLOCKING_STATES.has(payment?.recoveryState);
+}
+
+function failedPaymentBannerCopy({
+  paymentVerificationRequired,
+  recoveryShortcutsBlocked,
+  cancelledAccount,
+  primaryOpenInvoice,
+}) {
+  if (paymentVerificationRequired) {
+    return {
+      badge: 'Status check needed',
+      title: 'Payment needs verification',
+      detail: 'Contact us to confirm the payment status before trying again.',
+    };
+  }
+  if (recoveryShortcutsBlocked) {
+    return {
+      badge: 'Action needed',
+      title: 'Payment failed',
+      detail: 'Contact us to review the failed payment before trying again.',
+    };
+  }
+  if (cancelledAccount) {
+    return {
+      badge: 'Action needed',
+      title: 'Payment failed',
+      detail: primaryOpenInvoice
+        ? 'Your last payment could not be processed. Review your open invoices above.'
+        : 'Your last payment could not be processed. Contact us to review your balance.',
+    };
+  }
+  return {
+    badge: 'Action needed',
+    title: 'Payment failed',
+    detail: primaryOpenInvoice
+      ? 'Your last payment could not be processed. Review and pay your open invoices above. Update your saved payment method below for future payments.'
+      : 'Your last payment could not be processed. Contact us to review the failed payment. Update your saved payment method below for future payments.',
+  };
 }
 
 function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) {
@@ -7100,14 +7147,20 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   // A saved-card attempt awaiting authentication can still settle; a failed
   // verification read cannot prove otherwise. Keep the original open-invoice
   // list intact, but do not let the newer failed-payment recovery surfaces
-  // actively send the customer toward another checkout in either state.
+  // actively send the customer toward another checkout in any blocked state.
   const paymentVerificationRequired = payments.some(paymentNeedsVerification);
+  const recoveryShortcutsBlocked = payments.some(paymentBlocksRecoveryShortcut);
+  const failedBannerCopy = failedPaymentBannerCopy({
+    paymentVerificationRequired,
+    recoveryShortcutsBlocked,
+    cancelledAccount,
+    primaryOpenInvoice,
+  });
   const bannerConfig = {
     failed: {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
-      badge: paymentVerificationRequired ? 'Status check needed' : 'Action needed',
       titleColor: B.red, subtitleColor: B.grayDark,
-      title: paymentVerificationRequired ? 'Payment needs verification' : 'Payment failed',
+      ...failedBannerCopy,
       // No interruption claim: a balance never withholds service (nothing
       // reads service_paused_at to block a visit). No retry promise either —
       // billing-cron only retries rows it armed with next_retry_at, which
@@ -7120,15 +7173,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       // skips and no card update clears (there is no resume path today), and
       // it renders with Auto Pay off. Both actions are stated plainly and
       // nothing is guaranteed about what happens next.
-      detail: paymentVerificationRequired
-        ? 'Contact us to confirm the payment status before trying again.'
-        : cancelledAccount
-        ? (primaryOpenInvoice
-          ? 'Your last payment could not be processed. Review your open invoices above.'
-          : 'Your last payment could not be processed. Contact us to review your balance.')
-        : primaryOpenInvoice
-          ? 'Your last payment could not be processed. Review and pay your open invoices above. Update your saved payment method below for future payments.'
-          : 'Your last payment could not be processed. Contact us to review the failed payment. Update your saved payment method below for future payments.',
     },
     expired: {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
@@ -7573,7 +7617,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 3, lineHeight: 1.45 }}>
             {bannerConfig.detail}
           </div>
-          {bannerState === 'failed' && primaryOpenInvoice && !paymentVerificationRequired && (
+          {bannerState === 'failed' && primaryOpenInvoice && !recoveryShortcutsBlocked && (
             <div style={{ marginTop: 10 }}>
               <a href="#billing-open-invoices" style={payNowButtonStyle} data-glass-accent="">
                 View open invoices
@@ -8044,11 +8088,15 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
                     <span role="status" style={{ color: B.red, fontSize: 14, fontWeight: 700, lineHeight: 1.4 }}>
                       Payment needs verification. Contact us to confirm the payment status before trying again.
                     </span>
-                  ) : p.recoveryInvoice && !paymentVerificationRequired ? (
+                  ) : paymentBlocksRecoveryShortcut(p) ? (
+                    <span role="status" style={{ color: B.red, fontSize: 14, fontWeight: 700, lineHeight: 1.4 }}>
+                      Contact us to review this payment before trying again.
+                    </span>
+                  ) : p.recoveryInvoice && !recoveryShortcutsBlocked ? (
                     <a data-glass-accent="" href={p.recoveryInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
                       Review invoice
                     </a>
-                  ) : primaryOpenInvoice && !paymentVerificationRequired ? (
+                  ) : primaryOpenInvoice && !recoveryShortcutsBlocked ? (
                     <a data-glass-accent="" href="#billing-open-invoices" style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
                       View open invoices
                     </a>

@@ -217,7 +217,24 @@ test.each([
   {
     label: 'known authentication_required',
     invoiceRow: invoice(),
+    attemptRows: [{
+      invoice_id: INV_A,
+      status: 'failed',
+      decline_code: 'authentication_required',
+      resolved_at: new Date(),
+    }],
     expectedState: 'authentication_pending',
+  },
+  {
+    label: 'a still-claimed attempt before authentication_required is persisted',
+    invoiceRow: invoice(),
+    attemptRows: [{
+      invoice_id: INV_A,
+      status: 'claimed',
+      decline_code: null,
+      resolved_at: null,
+    }],
+    expectedState: 'authentication_unknown',
   },
   {
     label: 'authentication lookup failure',
@@ -226,11 +243,31 @@ test.each([
     expectedState: 'authentication_unknown',
   },
   {
+    label: 'an attempt that starts after authentication classification but before current-row verification',
+    invoiceRow: invoice(),
+    collectionResult: null,
+    expectedState: 'recovery_unavailable',
+    expectedCollectionChecks: 1,
+  },
+  {
     label: 'historical authentication_required after settlement',
     invoiceRow: invoice({ status: 'paid', amount_paid: '95.00' }),
+    attemptRows: [{
+      invoice_id: INV_A,
+      status: 'failed',
+      decline_code: 'authentication_required',
+      resolved_at: new Date(),
+    }],
     expectedState: null,
   },
-])('the portal serializes verification state for $label', async ({ invoiceRow, attemptFailure, expectedState }) => {
+])('the portal serializes verification state for $label', async ({
+  invoiceRow,
+  attemptRows = [],
+  attemptFailure,
+  collectionResult,
+  expectedState,
+  expectedCollectionChecks = 0,
+}) => {
   const payment = {
     id: 'pay-sca',
     customer_id: 'cust-1',
@@ -244,6 +281,7 @@ test.each([
     method_type: 'card',
   };
   stripe.getPaymentHistory.mockResolvedValue([payment]);
+  if (collectionResult !== undefined) memberCollectionPending.mockResolvedValue(collectionResult);
   let invoiceReads = 0;
   const database = jest.fn((table) => {
     const query = {};
@@ -259,12 +297,7 @@ test.each([
     query.select = async () => {
       if (table === 'stripe_invoice_charge_attempts as attempt') {
         if (attemptFailure) throw attemptFailure;
-        return [{
-          invoice_id: INV_A,
-          decline_code: 'authentication_required',
-          status: 'failed',
-          resolved_at: new Date(),
-        }];
+        return attemptRows;
       }
       if (table !== 'invoices') return [];
       invoiceReads += 1;
@@ -285,7 +318,7 @@ test.each([
     recoveryInvoice: null,
     recoveryState: expectedState,
   });
-  expect(memberCollectionPending).not.toHaveBeenCalled();
+  expect(memberCollectionPending).toHaveBeenCalledTimes(expectedCollectionChecks);
 });
 
 test('a legacy invoice-number failure still sees its invoice authentication_required fence', async () => {

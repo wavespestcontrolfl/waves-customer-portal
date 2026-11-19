@@ -246,23 +246,39 @@ async function loadResolvedAttemptEvidence(customerId, intentIds, initialRows, d
 // payment row deliberately omits the PI id, so resolve payment identity first,
 // then ask by EVERY candidate invoice id (metadata, number, charge, or PI).
 // A failed read is unknown, not terminal; callers withhold the whole batch.
-async function loadAuthenticationPendingInvoiceIds(customerId, invoices, database) {
+async function loadAuthenticationRecoveryStates(customerId, invoices, database) {
   const invoiceIds = [...new Set(invoices.map((invoice) => String(invoice.id)))];
-  if (!invoiceIds.length) return new Set();
+  if (!invoiceIds.length) return new Map();
   try {
+    // Read the pre-resolution claim and the resolved authentication decline
+    // in one statement. The saved-card writer can move claimed -> failed
+    // between separate reads; either side may still own a completable intent.
     const rows = await database('stripe_invoice_charge_attempts as attempt')
       .join('invoices as attempt_invoice', 'attempt_invoice.id', 'attempt.invoice_id')
-      .where({
-        'attempt_invoice.customer_id': customerId,
-        'attempt.status': 'failed',
-        'attempt.decline_code': 'authentication_required',
+      .where({ 'attempt_invoice.customer_id': customerId })
+      .where(function authenticationMayStillSettle() {
+        this.where(function unresolvedAttempt() {
+          this.whereIn('attempt.status', ['claimed', 'ambiguous'])
+            .whereNull('attempt.resolved_at');
+        }).orWhere(function authenticationRequired() {
+          this.where({
+            'attempt.status': 'failed',
+            'attempt.decline_code': 'authentication_required',
+          }).whereNotNull('attempt.resolved_at');
+        });
       })
       .whereIn('attempt.invoice_id', invoiceIds)
-      .whereNotNull('attempt.resolved_at')
-      .select('attempt.invoice_id', 'attempt.decline_code');
-    return new Set(rows
-      .filter((row) => row.decline_code === 'authentication_required')
-      .map((row) => String(row.invoice_id)));
+      .select('attempt.invoice_id', 'attempt.status', 'attempt.decline_code', 'attempt.resolved_at');
+    const states = new Map();
+    for (const row of rows) {
+      const id = String(row.invoice_id);
+      if (row.status === 'failed' && row.decline_code === 'authentication_required' && row.resolved_at) {
+        states.set(id, 'authentication_pending');
+      } else if (!row.resolved_at && ['claimed', 'ambiguous'].includes(row.status) && !states.has(id)) {
+        states.set(id, 'authentication_unknown');
+      }
+    }
+    return states;
   } catch (err) {
     logger.warn(`[billing] failed-payment authentication lookup failed for customer ${customerId}: ${err.message}`);
     return null;
@@ -405,6 +421,20 @@ function unknownRecoveryDetails(payments) {
   };
 }
 
+function markUncheckedRecoveryStates(details, payments, checkedLimit) {
+  // Direct-link verification is deliberately capped, but an unchecked row
+  // must not regain the generic invoice-list fallback merely by falling just
+  // outside that cap (or onto a later history page).
+  const unchecked = payments.filter(isRecoveryPayment).slice(checkedLimit);
+  for (const payment of unchecked) {
+    const id = String(payment.id);
+    if (!details.recoveryByPaymentId.has(id) && !details.recoveryStateByPaymentId.has(id)) {
+      details.recoveryStateByPaymentId.set(id, 'recovery_unchecked');
+    }
+  }
+  return details;
+}
+
 async function recoveryDetailsFor(customerId, visiblePayments, database = db) {
   const failedPayments = visiblePayments.filter(isRecoveryPayment)
     // Checkout parity requires several read-only fences per candidate. Keep
@@ -437,10 +467,10 @@ async function recoveryDetailsFor(customerId, visiblePayments, database = db) {
   if (attemptLookupFailed) return unknownRecoveryDetails(failedPayments);
   const invoiceByPaymentId = identifyRecoveryInvoices(failedPayments, indexes, attemptLookupFailed);
 
-  const authPendingInvoiceIds = await loadAuthenticationPendingInvoiceIds(
+  const authenticationStates = await loadAuthenticationRecoveryStates(
     customerId, [...invoiceByPaymentId.values()], database,
   );
-  if (!authPendingInvoiceIds) {
+  if (!authenticationStates) {
     const outstandingPayments = failedPayments.filter((payment) => (
       recoveryInvoiceIsPayable(invoiceByPaymentId.get(String(payment.id)))
     ));
@@ -448,8 +478,9 @@ async function recoveryDetailsFor(customerId, visiblePayments, database = db) {
   }
   const recoveryStateByPaymentId = new Map();
   for (const [paymentId, invoice] of invoiceByPaymentId) {
-    if (!authPendingInvoiceIds.has(String(invoice.id)) || !recoveryInvoiceIsPayable(invoice)) continue;
-    recoveryStateByPaymentId.set(paymentId, 'authentication_pending');
+    const authenticationState = authenticationStates.get(String(invoice.id));
+    if (!authenticationState || !recoveryInvoiceIsPayable(invoice)) continue;
+    recoveryStateByPaymentId.set(paymentId, authenticationState);
     invoiceByPaymentId.delete(paymentId);
   }
 
@@ -476,7 +507,12 @@ async function recoveryDetailsFor(customerId, visiblePayments, database = db) {
   const recoveryByPaymentId = new Map();
   for (const [paymentId, invoice] of invoiceByPaymentId) {
     const current = availableInvoices.get(String(invoice.id));
-    if (!current) continue;
+    if (!current) {
+      if (recoveryInvoiceIsPayable(invoice)) {
+        recoveryStateByPaymentId.set(paymentId, 'recovery_unavailable');
+      }
+      continue;
+    }
     const payment = failedPaymentById.get(paymentId);
     // If the fresh row moved back to draft after identity resolution, retain
     // Billing's stricter rule: only its canonical explicit invoice id may
@@ -494,6 +530,26 @@ async function recoveryDetailsFor(customerId, visiblePayments, database = db) {
 async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = db) {
   const { recoveryByPaymentId } = await recoveryDetailsFor(customerId, visiblePayments, database);
   return recoveryByPaymentId;
+}
+
+async function portalRecoveryDetailsFor({
+  includeRecoveryInvoices,
+  payerLookupFailed,
+  requestedCursor,
+  customerId,
+  visiblePayments,
+  database,
+}) {
+  if (!includeRecoveryInvoices) return emptyRecoveryDetails();
+  const enrichmentEnabled = !payerLookupFailed && Number(requestedCursor) === 0;
+  const details = enrichmentEnabled
+    ? await recoveryDetailsFor(customerId, visiblePayments, database)
+    : emptyRecoveryDetails();
+  return markUncheckedRecoveryStates(
+    details,
+    visiblePayments,
+    enrichmentEnabled ? RECOVERY_PAYMENT_LIMIT : 0,
+  );
 }
 
 async function listPortalPayments(customerId, {
@@ -593,9 +649,14 @@ async function listPortalPayments(customerId, {
   // BillingTab follows every history cursor before rendering. Enrich only its
   // first page so a long ledger cannot multiply the per-invoice fence reads
   // across as many as 50 sequential requests.
-  const recoveryDetails = !includeRecoveryInvoices || payerLookupFailed || Number(requestedCursor) !== 0
-    ? emptyRecoveryDetails()
-    : await recoveryDetailsFor(customerId, visiblePayments, database);
+  const recoveryDetails = await portalRecoveryDetailsFor({
+    includeRecoveryInvoices,
+    payerLookupFailed,
+    requestedCursor,
+    customerId,
+    visiblePayments,
+    database,
+  });
 
   return {
     payments: visiblePayments.map(p => ({
