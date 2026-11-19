@@ -34,6 +34,12 @@ const SHARED_EMAIL_DOMAINS = new Set([
   'protonmail.com',
 ]);
 
+// A domain here (or a subdomain) is an identity: a classifier verdict never
+// blocks or unsubscribes it, and never quarantines mail that proves its sender
+// (hasOperationalSenderAuth in inbox-hygiene.js). isBlocked reads no whole-domain row
+// for it, and validateManualBlockScope refuses a new one. A manual whole-domain
+// block made before the domain joined would therefore stop working: before you
+// add a domain, check that blocked_email_senders has no such row for it.
 const OPERATIONAL_EMAIL_DOMAINS = new Set([
   'google.com',
   'googleapis.com',
@@ -87,6 +93,8 @@ const OPERATIONAL_EMAIL_DOMAINS = new Set([
   // ec.siteone.com. On 2026-05-19 one newsletter verdict unsubscribed
   // contact@ and the promo mail stopped for six months before anyone saw
   // it (owner 2026-11-18: opt back in, the deals digest owns that mail).
+  // When it joined, no block row of any kind named a SiteOne domain
+  // (production read, 2026-11-18).
   'siteone.com',
 ]);
 
@@ -699,8 +707,7 @@ async function isBlocked(fromAddress, { gmailId = null } = {}) {
   // A government sender is an identity too: a stale AUTOMATIC block on an
   // agency address is removed; a manual admin block still stands.
   const governmentSender = isGovernmentDomain(domain);
-  const operationalSender = isOperationalDomain(domain);
-  const identity = operationalSender
+  const identity = isOperationalDomain(domain)
     || governmentSender
     // Live customers only — a soft-deleted customer is no longer a protected
     // identity (mirrors isKnownSender), so their block stays enforced.
@@ -718,14 +725,10 @@ async function isBlocked(fromAddress, { gmailId = null } = {}) {
       return true;
     }
     if (exactBlocked) await removeStaleAutoBlock(normalized, { untrashGmailId: gmailId });
-    // An identity by DOMAIN (government or operational) only voids AUTOMATIC
-    // blocks: an admin's manual block of the whole domain stays enforced, as
-    // an exact manual block does above (Codex P2, #6668).
-    // validateManualBlockScope accepts a government domain (fdacs.gov). It
-    // refuses an operational one, so such a row can only be older than the
-    // domain's place in OPERATIONAL_EMAIL_DOMAINS (siteone.com, 2026-11-18):
-    // it stays the admin's to remove.
-    if (governmentSender || operationalSender) {
+    // The government identity only voids AUTOMATIC blocks: an admin's manual
+    // block of the whole domain (validateManualBlockScope accepts fdacs.gov)
+    // stays enforced, as an exact manual block does above (Codex P2, #6668).
+    if (governmentSender) {
       const domainBlock = await db('blocked_email_senders')
         .where('domain', domain)
         .whereNull('email_address')
