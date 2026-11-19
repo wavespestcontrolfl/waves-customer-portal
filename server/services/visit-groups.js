@@ -22,6 +22,7 @@
  * dissolve, live fan-out, unit moves, notifications and closeout.
  */
 
+const { liveServiceOrHold } = require('./scheduling/reservation-occupancy');
 const db = require('../models/db');
 const { assertAssignableTechnician } = require('./technician-eligibility');
 
@@ -233,7 +234,7 @@ async function destinationTechClash(t, { technicianId, date, windowStart, window
     .where('technician_id', technicianId)
     .whereNotIn('id', [...new Set((excludeIds || []).map(String))])
     .whereNotIn('status', ['cancelled', 'completed'])
-    .where((q) => { q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'); })
+    .where(liveServiceOrHold)
     .whereRaw(
       "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
       [end, start],

@@ -1342,6 +1342,11 @@ fields only: /api/booking/availability builds each public slot field by field
 (`routes/booking.js`) and the estimate routes build theirs through
 `classifySlot`, so neither field reaches a customer response. Gate-off availability is unchanged apart from the
 shared grid / day-end rules above, which apply in both modes.
+Booking and estimate availability reserve an appointment’s time as soon as it
+has a customer, including when its original hold expiry has passed. An expired
+hold without a customer releases the hour. Reservation and booking writers
+apply the same rule when they recheck the calendar under their scheduling locks.
+
 Commit-time capacity re-check (`GATE_BOOK_CAPACITY_COMMIT`, owner-approved
 2026-09-26; needs `GATE_SCHEDULING_CAPACITY` live too): every `createSelfBooking`
 commit — `/api/booking/confirm` here and the re-service commit below — prepares

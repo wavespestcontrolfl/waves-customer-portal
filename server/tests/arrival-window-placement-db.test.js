@@ -261,7 +261,11 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
 
     // The route check refuses this save (a 4-hour visit runs past the next stop). A refused check still numbers the
     // visit, by arrival time, so it never lists last on the phone with no stop number.
-    test('a save past its warning is numbered by arrival time', async () => {
+    test.each([false, true])('a save past its warning numbers the whole day, including an old booking stamp (%s)', async (stamped) => {
+      if (stamped) {
+        await mockConn('scheduled_services').where({ id: SOUTH })
+          .update({ reservation_expires_at: mockConn.raw("NOW() - INTERVAL '1 day'") });
+      }
       await mockConn('scheduled_services').where({ id: TARGET })
         .update({ scheduled_date: DAY, estimated_duration_minutes: 240, window_end: '13:00' });
       await expect(placeMovedVisit(mockConn, { serviceId: TARGET })).resolves.toEqual([NORTH, TARGET, SOUTH]);
@@ -385,6 +389,71 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
     await mockConn('scheduled_services').where({ id: BLOCKER }).update({ reservation_expires_at: new Date(Date.now() - 60_000) });
     expect(await probe()).toEqual([]);
     expect((await findAvailableSlots(OPTIONS)).slots.some(slot => slot.start_time === '09:00')).toBe(true);
+  });
+
+  test('a route restored by a customer-linked hold stamp schedules with existing travel estimates', async () => {
+    const { loadArrivalRouteContext, enumerateArrivalPlacements } = require('../services/scheduling/arrival-route');
+    const travel = require('../services/route-optimizer').createSchedulingTravel({ maxRequests: 0 });
+    const read = async () => {
+      const context = await loadArrivalRouteContext({
+        conn: mockConn, date: DAY, technicianId: TECH, serviceId: TARGET, preserveCapacity: true, travel,
+      });
+      const legs = [];
+      const { placements } = enumerateArrivalPlacements(context, {
+        durationMinutes: 60, earliestStartMin: 480, latestServiceEndMin: 1080, collectLegs: legs,
+      });
+      return { legs, placements: placements.map(slot => slot.windowStart) };
+    };
+    await mockConn('scheduled_services').where({ id: NORTH }).update({ customer_id: CUSTOMER });
+    const before = await read();
+    expect(before.legs.length).toBeGreaterThan(0);
+    expect(before.placements.length).toBeGreaterThan(0);
+    await mockConn('scheduled_services').where({ id: NORTH }).update({
+      reservation_expires_at: mockConn.raw("now() - interval '1 hour'"),
+    });
+    const after = await read();
+    expect(after.placements).toEqual(before.placements);
+    expect(after.legs).toEqual([]);
+  });
+
+  test('the estimate picker, route capacity and writer preserve a committed appointment from the same estimate', async () => {
+    const { filterCollidingSlots } = require('../services/estimate-slot-availability');
+    const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
+    const { listOccupiedWindows } = require('../services/scheduling/occupancy');
+    const estimate = '70000000-0000-4000-8000-000000000001';
+    const slot = { date: DAY, techId: TECH, windowStart: '13:00', windowEnd: '14:00' };
+    await mockConn('scheduled_services').insert({ id: BLOCKER, technician_id: TECH, customer_id: CUSTOMER,
+      source_estimate_id: estimate, scheduled_date: DAY, window_start: slot.windowStart, window_end: slot.windowEnd,
+      status: 'confirmed', estimated_duration_minutes: 60, lat: 27.545, lng: -82.4,
+      reservation_expires_at: mockConn.raw("now() - interval '1 hour'") });
+    const options = { dateFrom: DAY, dateTo: DAY, conn: mockConn };
+    const kept = ownEstimateId => filterCollidingSlots([slot], { ...options, ownEstimateId });
+    const hasBlocker = rows => rows.some(row => row.id === BLOCKER);
+    const onRoute = async excludeEstimateId => hasBlocker((await loadArrivalRouteContext({
+      conn: mockConn, date: DAY, technicianId: TECH, serviceId: TARGET, excludeEstimateId, preserveCapacity: true, cacheLocation: true,
+    })).rows);
+    const conflicts = async includeHolds => hasBlocker(await findConflictingVisits({
+      db: mockConn, date: DAY, windowStart: slot.windowStart, windowEnd: slot.windowEnd, includeHolds,
+    }));
+    expect(await kept(estimate)).toEqual([]);
+    expect(await onRoute(estimate)).toBe(true);
+    expect(await conflicts(false)).toBe(true);
+    for (const withCoords of [false, true]) {
+      expect(hasBlocker(await listOccupiedWindows({ db: mockConn, dateFrom: DAY, dateTo: DAY, withCoords }))).toBe(true);
+    }
+
+    await mockConn('scheduled_services').where({ id: BLOCKER }).update({ customer_id: null });
+    expect(await kept()).toEqual([slot]);
+    expect(await onRoute()).toBe(false);
+    expect(await conflicts(true)).toBe(false);
+
+    await mockConn('scheduled_services').where({ id: BLOCKER }).update({ reservation_expires_at: mockConn.raw("now() + interval '1 hour'") });
+    expect(await kept()).toEqual([]);
+    expect(await kept(estimate)).toEqual([slot]);
+    expect(await onRoute()).toBe(true);
+    expect(await onRoute(estimate)).toBe(false);
+    expect(await conflicts(true)).toBe(true);
+    expect(await conflicts(false)).toBe(false);
   });
 
   test('a grouped target remains unverified when its sibling is still on the source date', async () => {

@@ -39,6 +39,7 @@ const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
 const moveIntentColumns = (...args) => require('./time-promise').moveIntentColumns(...args);
 const { clearTechCurrentJob } = require('./tech-status');
 const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./call-booking-catalog');
+const { liveServiceOrHold } = require('./scheduling/reservation-occupancy');
 const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks, techScopedConfirmActive } = require('./scheduling/occupancy');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { resolveStopCoords } = require('./scheduling/travel-gap');
@@ -2305,14 +2306,8 @@ class SmartRebooker {
           // conflict for the shifted primary (codex #3609 r1).
           .whereNotIn('id', [...new Set([serviceId, ...(options.excludeServiceIds || [])].map(String))])
           .whereNotIn('status', [...NOT_A_ROUTE_STOP_STATUSES, 'completed'])
-          // Expired estimate-slot holds are dead weight until cleanup
-          // reclaims them — same active-reservation predicate
-          // slot-reservation.js uses, so a lapsed hold can't block a
-          // legitimate reschedule.
-          .where((q) => {
-            q.whereNull('reservation_expires_at')
-              .orWhereRaw('reservation_expires_at > NOW()');
-          })
+          // Apply the reservation writer's calendar rule to the shifted visit.
+          .where(liveServiceOrHold)
           // COALESCE the nullable window_end (same predicate as
           // slot-reservation) — rows without an end time would otherwise
           // never register as conflicts.
@@ -4180,10 +4175,7 @@ class SmartRebooker {
               // not a clash for it (the plain whereNot when nothing is carried).
               [carry.partnerIds.length ? 'whereNotIn' : 'whereNot']('id', carry.partnerIds.length ? [sib.id, ...carry.partnerIds] : sib.id)
               .whereNotIn('status', [...NOT_A_ROUTE_STOP_STATUSES, 'completed'])
-              .where((q) => {
-                q.whereNull('reservation_expires_at')
-                  .orWhereRaw('reservation_expires_at > NOW()');
-              })
+              .where(liveServiceOrHold)
               .whereRaw(
                 "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
                 [anchorGateEnd, updateData.window_start],
