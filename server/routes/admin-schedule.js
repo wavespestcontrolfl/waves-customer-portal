@@ -7424,9 +7424,14 @@ router.get('/', async (req, res, next) => {
     let zoneRain;
     let weather = {};
     const { attachStopRain, zoneHourlyOutlooks, weatherNow } = require('../services/scheduling/stop-rain');
+    // A stored zone with no forecast point (a location id such as 'bradenton'
+    // or 'venice') reads its forecast from the stop's city and ZIP, as a stop
+    // with no stored zone does, so every stop gets its rain figure (owner
+    // 2026-11-02, "leave the rain for all"; 11-19: 18 of 84 stops had none).
+    const rainZoneOf = (s) => (ZONE_COORDS[s.zone] ? s.zone : getZone(s.premise?.city, s.premise?.zip));
     attachStopRain(enriched, date, {});
     try {
-      const zonesPresent = [...new Set(enriched.map((s) => s.zone))].filter((z) => ZONE_COORDS[z]);
+      const zonesPresent = [...new Set(enriched.map(rainZoneOf))];
       const [outlook, perZone, hourlyByZone, officeWeather] = await Promise.all([
         rainOutlookPromise,
         Promise.all(zonesPresent.map(async (z) => {
@@ -7441,7 +7446,7 @@ router.get('/', async (req, res, next) => {
       const officeChance = outlook?.[date]?.rainChance;
       rainChance = Number.isFinite(officeChance) ? officeChance : null;
       if (perZone.length > 0) zoneRain = Object.fromEntries(perZone);
-      attachStopRain(enriched, date, hourlyByZone);
+      attachStopRain(enriched, date, hourlyByZone, rainZoneOf);
     } catch { /* rain outlook is optional */ }
 
     await attachOfficeToldFields(req, enriched);
