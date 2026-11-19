@@ -44,6 +44,54 @@ function terminalChargeFenceResponse(err) {
   };
 }
 
+function terminalSavedCardReconciliationNeedsPark(err) {
+  return err?.reconciliationRequired === true
+    && ['STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(err?.code);
+}
+
+// The Terminal route must keep status-only collection rails (notably automatic
+// account credit) behind an ambiguous/orphaned saved-card charge. Park only an
+// unstamped collectible invoice, and never copy the conflicting charge's PI id
+// onto it: an existing pay-page pointer belongs to that payable checkout and
+// remains authoritative until reconciliation retires or settles it.
+async function parkTerminalSavedCardReconciliationLocked(trx, invoice, err) {
+  if (!invoice || !terminalSavedCardReconciliationNeedsPark(err)
+    || invoice.stripe_payment_intent_id
+    || ['paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled'].includes(invoice.status)) {
+    return false;
+  }
+  const parked = await trx('invoices')
+    .where({ id: invoice.id })
+    .whereNull('stripe_payment_intent_id')
+    .whereNotIn('status', ['paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled'])
+    .update({ status: 'processing', updated_at: trx.fn.now() });
+  if (parked > 0) invoice.status = 'processing';
+  return parked > 0;
+}
+
+// An unlocked preflight can observe evidence that a webhook resolves before
+// we act on it. Re-read the evidence while holding the invoice row, then park
+// only if that same reconciliation-required condition still exists. The
+// request remains refused even if it cleared; the device can retry from a
+// fresh invoice snapshot without this request minting against stale facts.
+async function terminalPreflightChargeFence(invoiceId, initialErr) {
+  if (!terminalSavedCardReconciliationNeedsPark(initialErr)) {
+    return terminalChargeFenceResponse(initialErr);
+  }
+  return db.transaction(async (trx) => {
+    const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+    if (!locked) return terminalChargeFenceResponse(initialErr);
+    try {
+      await assertNoInvoiceChargeReconciliationPending(invoiceId, trx, { readOnly: true, checkout: true });
+      return terminalChargeFenceResponse(initialErr);
+    } catch (lockedErr) {
+      if (!savedCardChargeSuppressesAlternateCollection(lockedErr)) throw lockedErr;
+      await parkTerminalSavedCardReconciliationLocked(trx, locked, lockedErr);
+      return terminalChargeFenceResponse(lockedErr);
+    }
+  });
+}
+
 async function terminalProcessingRefusal(invoice, database, ordinaryResponse) {
   if (invoice?.status !== 'processing') return null;
   try {
@@ -122,13 +170,16 @@ async function lockTerminalPreviousCheckout(trx, invoice, terminalPaymentIntentI
       if (!locked || String(locked.stripe_payment_intent_id || '') !== String(openIntent.id)) {
         return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: 'combined allocation anchor changed' } };
       }
+      if (allocationRows.some((row) => String(row.customer_id) !== String(locked.customer_id))) {
+        return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: 'combined allocation owner changed' } };
+      }
       const chargeFence = await terminalAllocationChargeFence(trx, allocationRows);
       if (chargeFence) return { ok: false, chargeFence };
-      if (openIntent.status === 'canceled') {
-        await PayCombined.releaseCombinedSessionBeforeCollection(trx, locked, { context: 'collecting at the terminal' });
-        locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
-      } else {
-        const verifiedRows = await PayCombined.verifyAllocationLocked(trx, allocation, {
+      if (openIntent.status !== 'canceled') {
+        // Terminal collects only the anchor. Original siblings remain locked
+        // and fenced, even if they now owe a different amount or stopped dunning.
+        const anchor = { invoiceId: locked.id, cents: Math.round(invoiceAmountDue(locked) * 100) };
+        const verifiedRows = await PayCombined.verifyAllocationLocked(trx, [anchor], {
           anchorInvoiceId: invoice.id,
           expectPaymentIntentId: reserved.stripe_payment_intent_id,
         });
@@ -144,6 +195,30 @@ function terminalHandoffNeedsReissue(handoff) {
   const usedAt = new Date(handoff?.used_at || '').getTime();
   const expiresAt = new Date(handoff?.expires_at || '').getTime();
   return Number.isFinite(usedAt) && Number.isFinite(expiresAt) && expiresAt <= usedAt;
+}
+
+// A refusal may cancel the idempotent Terminal PI only after this transaction
+// proves the handoff is still unbound and wins its durable invalidation. A
+// concurrent successful bind takes the same row lock and publishes its PI;
+// cleanup then observes that binding and must leave the shared PI alive.
+async function invalidateTerminalHandoffIfUnbound(jti) {
+  return db.transaction(async (trx) => {
+    const handoff = await trx('terminal_handoff_tokens').where({ jti }).forUpdate().first();
+    if (!handoff) return { invalidated: false, missing: true };
+    if (handoff.stripe_payment_intent_id) {
+      return { invalidated: false, boundPaymentIntentId: handoff.stripe_payment_intent_id };
+    }
+    if (terminalHandoffNeedsReissue(handoff)) {
+      return { invalidated: false, alreadyInvalidated: true };
+    }
+    if (!handoff.used_at) return { invalidated: false, notValidated: true };
+    const invalidated = await trx('terminal_handoff_tokens')
+      .where({ jti })
+      .whereNull('stripe_payment_intent_id')
+      .where('expires_at', '>', handoff.used_at)
+      .update({ expires_at: handoff.used_at });
+    return { invalidated: invalidated > 0 };
+  });
 }
 
 // Accepts both regular admin JWTs and terminal-scoped JWTs (minted by
@@ -1534,11 +1609,8 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       await assertInvoiceDepositSettlementReady(db, invoice, { lock: false });
     } catch (fenceErr) {
       if (!savedCardChargeSuppressesAlternateCollection(fenceErr)) throw fenceErr;
-      // The reconciliation record is already the collection fence. Do not
-      // park it by overwriting stripe_payment_intent_id here: a different
-      // pay-page checkout may still be live and its issued client secret must
-      // remain attached until a reconciler can verify or retire it.
-      return res.status(409).json(terminalChargeFenceResponse(fenceErr));
+      const chargeFence = await terminalPreflightChargeFence(invoice.id, fenceErr);
+      return res.status(409).json(chargeFence);
     }
     const tech = await db('technicians').where({ id: handoff.tech_user_id }).first();
     if (!tech || tech.active === false) {
@@ -1581,6 +1653,19 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
     let bound;
     try {
       bound = await db.transaction(async (trx) => {
+      // The handoff row is the one-jti serialization point for successful
+      // bind versus refusal cleanup. Hold it through checkout retirement and
+      // invoice publication so invalidation cannot win and cancel this same
+      // idempotent PI after it has been bound for the device.
+      const lockedHandoff = await trx('terminal_handoff_tokens').where({ jti }).forUpdate().first();
+      if (!lockedHandoff) return { ok: false, handoffMissing: true };
+      if (terminalHandoffNeedsReissue(lockedHandoff)) return { ok: false, handoffInvalidated: true };
+      if (lockedHandoff.stripe_payment_intent_id) {
+        if (String(lockedHandoff.stripe_payment_intent_id) === String(pi.id)) {
+          return { ok: true, alreadyBound: true };
+        }
+        return { ok: false, handoffBoundPaymentIntentId: lockedHandoff.stripe_payment_intent_id };
+      }
       // Reserve the customer's combined-checkout namespace BEFORE any row
       // lock, matching /setup. Read the live binding under that reservation;
       // if it is shared, take the canonical sorted allocation locks before
@@ -1630,9 +1715,11 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
         // a standalone checkout can be retired below.
         await assertNoInvoiceChargeReconciliationPending(invoice.id, trx, { checkout: true });
       } catch (fenceErr) {
-        // Keep the live checkout pointer intact. The attempt/orphan itself is
-        // the durable collection fence; overwriting this pointer would detach
-        // a still-confirmable client secret while Terminal backs out.
+        if (!savedCardChargeSuppressesAlternateCollection(fenceErr)) throw fenceErr;
+        // This evidence was read while the invoice row is locked. An
+        // unstamped ambiguous/orphaned charge must park status-only collection
+        // rails, while a live checkout pointer remains untouched.
+        await parkTerminalSavedCardReconciliationLocked(trx, locked, fenceErr);
         return { ok: false, chargeFence: terminalChargeFenceResponse(fenceErr) };
       }
       // Only now may Terminal retire a checkout. The helper re-reads under the
@@ -1656,16 +1743,17 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       // PI in between this check and the bind. The invoice's own card-present PI
       // (pointer already equals pi.id) is never retired.
       if (locked.stripe_payment_intent_id && String(locked.stripe_payment_intent_id) !== String(pi.id)) {
-        const piGuard = await require('../services/prepaid-pi-guard').guardOpenPaymentIntentForPrepaid(locked);
+        const piGuard = await require('../services/prepaid-pi-guard').guardOpenPaymentIntentForPrepaid(locked, { database: trx });
         if (!piGuard.ok) return { ok: false, piGuard };
       }
       // SET only if still NULL — two concurrent /payment-intent calls for the
       // same jti share an idempotency key and get the same PI back; first
       // UPDATE wins, second is a no-op.
-      await trx('terminal_handoff_tokens')
+      const handoffBound = await trx('terminal_handoff_tokens')
         .where({ jti })
         .whereNull('stripe_payment_intent_id')
         .update({ stripe_payment_intent_id: pi.id });
+      if (handoffBound !== 1) return { ok: false, handoffBindLost: true };
       // Backfill the invoice row for admin-portal consistency (handoff row is
       // the source of truth for the terminal flow).
       await trx('invoices').where({ id: invoice.id }).update({ stripe_payment_intent_id: pi.id });
@@ -1688,23 +1776,35 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       // retry would otherwise replay the canceled PI and return its unusable
       // client secret. expires_at <= used_at is the durable reissue marker; a
       // naturally expired but otherwise valid handoff remains distinguishable.
-      let handoffInvalidated = false;
+      let invalidation;
       try {
-        const invalidated = await db('terminal_handoff_tokens')
-          .where({ jti })
-          .update({ expires_at: handoff.used_at });
-        handoffInvalidated = invalidated > 0;
+        invalidation = await invalidateTerminalHandoffIfUnbound(jti);
       } catch (invalidateErr) {
         logger.error(`[stripe-terminal] failed to invalidate canceled handoff ${jti}: ${invalidateErr.message}`);
+        throw new Error('Payment handoff could not be invalidated; start a new handoff');
+      }
+      if (invalidation.boundPaymentIntentId) {
+        // Another request bound and is publishing this idempotent PI while this
+        // request was unwinding. It owns the live PI; never cancel it.
+        return res.status(409).json({
+          error: 'Payment intent already created for this handoff',
+          code: 'payment_intent_already_created',
+          paymentIntentId: invalidation.boundPaymentIntentId,
+        });
+      }
+      if (invalidation.alreadyInvalidated) {
+        // A parallel refusal already won invalidation and owns the one cancel.
+        return res.status(409).json({
+          error: 'This payment handoff was canceled. Start a new handoff and try again.',
+          code: 'handoff_reissue_required',
+        });
+      }
+      if (!invalidation.invalidated) {
+        throw new Error('Payment handoff could not be invalidated; start a new handoff');
       }
       await stripe.paymentIntents
         .cancel(pi.id, { cancellation_reason: 'abandoned' })
         .catch((e) => logger.warn(`[stripe-terminal] failed to cancel orphaned PI ${pi.id}: ${e.message}`));
-      if (!handoffInvalidated) {
-        // Fail closed. A retry will replay the same Stripe PI, reach this branch,
-        // and retry the durable invalidation before any client secret is exposed.
-        throw new Error('Payment handoff could not be invalidated; start a new handoff');
-      }
       if (bound.amountChanged) {
         return res.status(409).json({
           error: 'Invoice amount changed since handoff',

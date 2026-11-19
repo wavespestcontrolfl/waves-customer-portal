@@ -2684,9 +2684,17 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       }
       // Customer before invoice — the order reverse-prepaid and apply-credit
       // take, and the cancel below locks the customer too — then re-read the
-      // invoice under its own lock: a payment landing on it waits for us.
+      // invoice's complete PI allocation in canonical order: a payment
+      // landing on any member waits for us, and stale-stamp cleanup cannot
+      // deadlock against a checkout finalize holding the original anchor.
       await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
-      const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first(INVOICE_FIELDS);
+      const locked = await InvoiceService.lockInvoicePaymentIntentAllocation(trx, {
+        id: invoice.id,
+        piId: openPiId,
+        customerId: invoice.customer_id,
+        combinedCustomerLocked: true,
+        targetForUpdate: true,
+      });
       if (!locked || locked.customer_id !== invoice.customer_id
         || locked.annual_prepay_term_id !== invoice.annual_prepay_term_id) {
         throw refuse('This invoice changed while the annual prepay flag was being removed — retry.');
@@ -3196,7 +3204,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     // down the service customer's credit to mark the AP invoice prepaid would
     // consume the wrong party's money. Reject it before any state change (a
     // payer-facing credit flow is Phase 2).
-    if (invoice.payer_id) {
+    if (invoice.payer_id || invoice.payer_statement_id) {
       return res.status(400).json({ error: 'Invoice is billed to a third-party payer — account credit cannot be applied to payer invoices' });
     }
     try {
@@ -3258,7 +3266,13 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         // pre-transaction `invoice` read above already carries customer_id.
         const lockedCustomer = await trx('customers').where({ id: invoice.customer_id })
           .forUpdate().first('id', 'account_credits');
-        const locked = await trx('invoices').where({ id }).forUpdate().first();
+        const locked = await InvoiceService.lockInvoicePaymentIntentAllocation(trx, {
+          id,
+          piId: openPiId,
+          customerId: invoice.customer_id,
+          combinedCustomerLocked: true,
+          targetForUpdate: true,
+        });
         if (!locked) {
           const err = new Error('Invoice not found'); err.statusCode = 404; err.isOperational = true; throw err;
         }
@@ -3276,6 +3290,14 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         if (locked.customer_id !== invoice.customer_id) {
           const err = new Error('This invoice\'s owner changed — retry applying credit');
           err.statusCode = 409; err.isOperational = true; throw err;
+        }
+        // Bill-To can be reassigned after the unlocked pre-check while this
+        // request waits for the invoice lock. The reassignment stamps the
+        // locked invoice with its payer; refuse before retiring the customer's
+        // checkout or drawing down the homeowner's account credit.
+        if (locked.payer_id || locked.payer_statement_id) {
+          const err = new Error('Invoice is billed to a third-party payer — account credit cannot be applied to payer invoices');
+          err.statusCode = 400; err.isOperational = true; throw err;
         }
         try {
           assertInvoiceCollectible(locked);

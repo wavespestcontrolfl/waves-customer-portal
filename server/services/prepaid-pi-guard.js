@@ -82,7 +82,7 @@ async function neutralizeOpenPaymentIntent(piId, { inspectOnly = false } = {}) {
   return { ok: true, piId };
 }
 
-async function guardOpenPaymentIntentForPrepaid(invoice, { inspectOnly = false } = {}) {
+async function guardOpenPaymentIntentForPrepaid(invoice, { inspectOnly = false, database = null } = {}) {
   const piId = invoice && invoice.stripe_payment_intent_id ? invoice.stripe_payment_intent_id : null;
   if (!piId) return { ok: true, piId: null };
   const neutralized = await neutralizeOpenPaymentIntent(piId, { inspectOnly });
@@ -90,7 +90,7 @@ async function guardOpenPaymentIntentForPrepaid(invoice, { inspectOnly = false }
   // A combined PI is stamped on its siblings too — unbind every collectible
   // row from the (now-)canceled intent, regardless of who canceled it
   // (codex #3427 r17 P2).
-  await require('./pay-combined').clearPaymentIntentStamps(require('../models/db'), piId, { keepInvoiceIds: [String(invoice.id)] });
+  await require('./pay-combined').clearPaymentIntentStamps(database || require('../models/db'), piId, { keepInvoiceIds: [String(invoice.id)] });
   return { ok: true, piId };
 }
 

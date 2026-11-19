@@ -414,23 +414,48 @@ describe('mint transaction lock order (pre-push P1)', () => {
 });
 
 describe('Terminal checkout bind lock order', () => {
-  test('the combined reservation and canonical allocation locks precede the hold and every checkout retirement', () => {
+  test('the handoff lock, combined reservation and canonical allocation locks precede the hold and every checkout retirement', () => {
     const s = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes/stripe-terminal.js'), 'utf8');
     const handler = s.slice(s.indexOf("router.post('/payment-intent'"), s.indexOf("router.post('/apply-surcharge'"));
     const bind = handler.indexOf('bound = await db.transaction(async (trx) => {');
-    const reservation = handler.indexOf('await PayCombined.lockCombinedCustomerStable(trx, invoice.id, invoice.customer_id);', bind);
-    const allocationLocks = handler.indexOf('await PayCombined.verifyAllocationLocked(trx, allocation, {', reservation);
-    const standaloneLock = handler.indexOf("trx('invoices').where({ id: invoice.id }).forUpdate().first()", allocationLocks);
-    const hold = handler.indexOf('await assertNoInvoiceChargeReconciliationPending(invoice.id, trx, { checkout: true });', allocationLocks);
-    const sharedRetirement = handler.indexOf('await PayCombined.releaseCombinedSessionBeforeCollection(trx, locked,', hold);
-    const standaloneRetirement = handler.indexOf("guardOpenPaymentIntentForPrepaid(locked)", sharedRetirement);
-    expect(bind).toBeGreaterThan(-1);
-    expect(reservation).toBeGreaterThan(bind);
+    const lockStart = s.indexOf('async function lockTerminalPreviousCheckout(');
+    const lockEnd = s.indexOf('return { ok: true, locked, PayCombined };', lockStart);
+    const lock = s.slice(lockStart, lockEnd);
+    const reservation = lock.indexOf('await PayCombined.lockCombinedCustomerStable(');
+    const allocationLocks = lock.indexOf("whereIn('id', allocationIds).orderBy('id', 'asc').forUpdate()");
+    const memberFences = lock.indexOf('await terminalAllocationChargeFence(trx, allocationRows)');
+    expect(lockStart).toBeGreaterThan(-1);
+    expect(lockEnd).toBeGreaterThan(lockStart);
+    expect(reservation).toBeGreaterThan(-1);
     expect(allocationLocks).toBeGreaterThan(reservation);
-    expect(standaloneLock).toBeGreaterThan(allocationLocks);
-    expect(hold).toBeGreaterThan(standaloneLock);
+    expect(memberFences).toBeGreaterThan(allocationLocks);
+    const handoffLock = handler.indexOf("await trx('terminal_handoff_tokens').where({ jti }).forUpdate().first();", bind);
+    const previous = handler.indexOf('await lockTerminalPreviousCheckout(trx, invoice, pi.id);', handoffLock);
+    const hold = handler.indexOf('await assertNoInvoiceChargeReconciliationPending(invoice.id, trx, { checkout: true });', previous);
+    const sharedRetirement = handler.indexOf('await PayCombined.releaseCombinedSessionBeforeCollection(trx, locked,', hold);
+    const standaloneRetirement = handler.indexOf('guardOpenPaymentIntentForPrepaid(locked', sharedRetirement);
+    const conditionalBind = handler.indexOf(".whereNull('stripe_payment_intent_id')", standaloneRetirement);
+    expect(bind).toBeGreaterThan(-1);
+    expect(handoffLock).toBeGreaterThan(bind);
+    expect(previous).toBeGreaterThan(handoffLock);
+    expect(hold).toBeGreaterThan(previous);
     expect(sharedRetirement).toBeGreaterThan(hold);
     expect(standaloneRetirement).toBeGreaterThan(sharedRetirement);
+    expect(conditionalBind).toBeGreaterThan(standaloneRetirement);
+  });
+
+  test('refusal cleanup invalidates only an unbound handoff before canceling the idempotent Terminal PI', () => {
+    const s = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes/stripe-terminal.js'), 'utf8');
+    const helperStart = s.indexOf('async function invalidateTerminalHandoffIfUnbound(jti)');
+    const helperEnd = s.indexOf('// Accepts both regular admin JWTs', helperStart);
+    const helper = s.slice(helperStart, helperEnd);
+    expect(helper).toContain("where({ jti }).forUpdate().first()");
+    expect(helper).toContain(".whereNull('stripe_payment_intent_id')");
+    const handler = s.slice(s.indexOf("router.post('/payment-intent'"), s.indexOf("router.post('/apply-surcharge'"));
+    const invalidate = handler.indexOf('invalidation = await invalidateTerminalHandoffIfUnbound(jti);');
+    const cancel = handler.indexOf('.cancel(pi.id, { cancellation_reason:', invalidate);
+    expect(invalidate).toBeGreaterThan(-1);
+    expect(cancel).toBeGreaterThan(invalidate);
   });
 });
 

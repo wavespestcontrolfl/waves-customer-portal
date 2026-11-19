@@ -19473,13 +19473,14 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
       // the saved-card hold and every no-write eligibility check. A cancelable
       // PI is retired; money in flight or an unverifiable session leaves both
       // the checkout and invoice untouched.
-      const piGuard = await guardOpenPaymentIntentForPrepaid(locked);
+      const piGuard = await guardOpenPaymentIntentForPrepaid(locked, { database: trx });
       if (!piGuard.ok) return { reason: piGuard.reason };
       const [updated] = await trx('invoices')
         .where({ id: locked.id })
         .update({
           status: 'paid',
           paid_at: trx.fn.now(),
+          ...(piGuard.piId ? { stripe_payment_intent_id: null, processor: null } : {}),
           payment_method: svc.prepaid_method || 'cash',
           payment_reference: svc.prepaid_note || null,
           payment_recorded_at: svc.prepaid_at || trx.fn.now(),
@@ -19889,6 +19890,9 @@ router.post('/:id/invoice', async (req, res, next) => {
         }
         if (!lockedInvoice) return { invoice, prepaidCredit: 0 };
         if (['paid', 'prepaid'].includes(lockedInvoice.status)) return { invoice: lockedInvoice, prepaidCredit: 0 };
+        if (!isInvoiceCollectibleStatus(lockedInvoice.status)) {
+          throw httpError(409, `Invoice is ${lockedInvoice.status}. Resolve its current payment before applying the recorded prepayment.`);
+        }
 
         // Checkout-mode saved-card fence under the invoice lock. This catches
         // authentication_required attempts whose invoice PI pointer is null.
@@ -19925,17 +19929,17 @@ router.post('/:id/invoice', async (req, res, next) => {
         // retired. The single return also keeps the amount/ledger path easy to
         // audit as one atomic branch.
         if (amountRefusal) {
+          if (dueCents > 0 && lockedInvoice.stripe_payment_intent_id) {
+            const inspection = await guardOpenPaymentIntentForPrepaid(lockedInvoice, { inspectOnly: true, database: trx });
+            if (!inspection.ok) return { invoice: lockedInvoice, prepaidCredit: 0, checkoutRefusal: inspection.reason };
+          }
           return { invoice: lockedInvoice, prepaidCredit: 0 };
         }
 
-        // Last pre-mutation step: retire a combined browser session only after
-        // the saved-card hold and every no-write eligibility check. A held
-        // saved-card attempt therefore preserves the customer's existing link.
-        await PayCombined.releaseCombinedSessionBeforeCollection(
-          trx,
-          lockedInvoice,
-          { context: 'applying a recorded prepayment' },
-        );
+        const piGuard = await guardOpenPaymentIntentForPrepaid(lockedInvoice, { database: trx });
+        if (!piGuard.ok) {
+          return { invoice: lockedInvoice, prepaidCredit: 0, checkoutRefusal: piGuard.reason };
+        }
 
         const creditCents = Math.min(prepaidCents, dueCents);
         const remainingCents = Math.max(0, invoiceTotalCents - creditCents);
@@ -19951,6 +19955,7 @@ router.post('/:id/invoice', async (req, res, next) => {
             total: remainingTotal,
             status: paidByPrepayment ? 'paid' : lockedInvoice.status,
             paid_at: paidByPrepayment ? trx.fn.now() : lockedInvoice.paid_at,
+            ...(piGuard.piId ? { stripe_payment_intent_id: null, processor: null } : {}),
             notes: nextNotes,
             payment_method: svc.prepaid_method || lockedInvoice.payment_method || null,
             payment_reference: svc.prepaid_note || lockedInvoice.payment_reference || null,
@@ -19987,6 +19992,12 @@ router.post('/:id/invoice', async (req, res, next) => {
       });
       if (outcome.collectionHold) {
         throw httpError(409, `${outcome.collectionHold.message} — resolve it before applying the recorded prepayment`);
+      }
+      if (outcome.checkoutRefusal) {
+        const message = outcome.checkoutRefusal === 'payment_in_flight'
+          ? 'A payment is in flight. Wait for it to settle before applying the recorded prepayment.'
+          : 'The existing checkout could not be verified. Resolve it before applying the recorded prepayment.';
+        throw httpError(409, message);
       }
       return outcome;
     };

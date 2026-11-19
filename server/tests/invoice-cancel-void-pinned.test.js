@@ -116,6 +116,23 @@ test('the preview pins each invoice with total, account credit and deposit credi
   expect(mockReverse).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', createdBy: 'system:inspection_credit_cancellation_void_hook' });
 });
 
+test('the preview suppresses an unstamped authentication hold through the read-only checkout fence', async () => {
+  mockInvoiceRows = [INV_B];
+  mockChargeFence.mockRejectedValue(Object.assign(new Error('saved-card authentication pending'), {
+    code: 'STRIPE_CHARGE_IN_PROGRESS',
+    chargeAttemptId: 'attempt-auth',
+  }));
+
+  await expect(InvoiceService.previewInvoiceVoidForCancelledService('svc-1')).resolves.toEqual([]);
+
+  expect(mockChargeFence).toHaveBeenCalledWith(
+    'inv-b',
+    db,
+    { readOnly: true, checkout: true },
+  );
+  expect(require('../services/stripe').retrievePaymentIntent).not.toHaveBeenCalled();
+});
+
 test('a pinned sweep voids only the pinned invoices — one created after the card stays open', async () => {
   const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
   mockInvoiceRows = [INV_A, INV_B, { id: 'inv-late', invoice_number: 'WPC-TEST-3', status: 'draft', total: '99.00', credit_applied: '0', line_items: '[]' }];

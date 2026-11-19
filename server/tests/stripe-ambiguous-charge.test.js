@@ -314,6 +314,65 @@ describe('saved-card charge claim', () => {
 });
 
 describe('saved-card attempt state updates', () => {
+  test('atomically records worker provenance with a create-returned PaymentIntent', async () => {
+    const updates = [];
+    const query = {};
+    query.where = jest.fn(() => query);
+    query.whereIn = jest.fn(() => query);
+    query.whereNull = jest.fn(() => query);
+    query.update = jest.fn(async (payload) => {
+      updates.push(payload);
+      return 1;
+    });
+    const database = jest.fn(() => query);
+
+    await markInvoiceSavedCardChargeAttempt(
+      'attempt-worker',
+      { status: 'ambiguous', stripe_payment_intent_id: 'pi-worker', resolved_at: null },
+      database,
+    );
+
+    expect(updates).toEqual([expect.objectContaining({
+      status: 'ambiguous',
+      stripe_payment_intent_id: 'pi-worker',
+      stripe_payment_intent_bound_at: expect.any(Date),
+    })]);
+  });
+
+  test('adds only worker provenance when an exact failure webhook wins the ordering race', async () => {
+    const queries = [];
+    const updateResults = [0, 1];
+    const database = jest.fn(() => {
+      const query = {};
+      ['where', 'whereIn', 'whereNull', 'whereNotNull'].forEach((method) => {
+        query[method] = jest.fn(() => query);
+      });
+      query.update = jest.fn(async (payload) => {
+        query.payload = payload;
+        return updateResults.shift();
+      });
+      queries.push(query);
+      return query;
+    });
+
+    await expect(markInvoiceSavedCardChargeAttempt(
+      'attempt-webhook-first',
+      { status: 'ambiguous', stripe_payment_intent_id: 'pi-failed-first', resolved_at: null },
+      database,
+    )).resolves.toBeUndefined();
+
+    expect(queries).toHaveLength(2);
+    expect(queries[1].where).toHaveBeenCalledWith({
+      id: 'attempt-webhook-first', stripe_payment_intent_id: 'pi-failed-first',
+    });
+    expect(queries[1].whereNotNull).toHaveBeenCalledWith('resolved_at');
+    expect(queries[1].payload).toEqual({
+      worker_payment_intent_id: 'pi-failed-first',
+      stripe_payment_intent_bound_at: expect.any(Date),
+      updated_at: expect.any(Date),
+    });
+  });
+
   test('guards bookkeeping writes so a final webhook cannot be reopened', async () => {
     const query = {};
     query.where = jest.fn(() => query);
@@ -455,6 +514,7 @@ function failedAttemptDb({ invoiceStatus = 'processing' } = {}) {
     },
     attempt: {
       id: 'attempt-1',
+      worker_payment_intent_id: 'pi-failed',
       credit_applied_delta: 15,
       credit_applied_total: 25,
     },
@@ -524,6 +584,8 @@ describe('saved-card failed-webhook attempt repair', () => {
         stripe_payment_intent_id: 'pi-failed',
       }),
     }));
+    const attemptUpdate = state.updates.find((entry) => entry.table === 'stripe_invoice_charge_attempts');
+    expect(attemptUpdate.payload).not.toHaveProperty('stripe_payment_intent_bound_at');
     expect(state.updates).toContainEqual(expect.objectContaining({
       table: 'stripe_orphan_charges',
       payload: expect.objectContaining({
@@ -531,6 +593,36 @@ describe('saved-card failed-webhook attempt repair', () => {
         resolution_notes: expect.stringContaining('final payment failure'),
       }),
     }));
+  });
+
+  test('withholds invoice and credit writes until the original worker binds a webhook-first failure', async () => {
+    const { database, state } = failedAttemptDb();
+    state.attempt.worker_payment_intent_id = null;
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({
+      attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1', stripePaymentIntentId: 'pi-failed', database,
+    })).rejects.toMatchObject({ code: 'SAVED_CARD_WORKER_INTENT_PENDING' });
+    expect(state.ledger).toEqual([]);
+    expect(state.updates).toEqual([]);
+  });
+
+  test('a completed create timeout stays held without independent request proof, even if processing stamped the invoice', async () => {
+    const { database, state } = failedAttemptDb();
+    Object.assign(state.attempt, { status: 'ambiguous', worker_payment_intent_id: null, submitted_at: new Date(), idempotency_key: 'original-create' });
+    state.invoice.stripe_payment_intent_id = 'pi-failed';
+    const failure = { attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1', stripePaymentIntentId: 'pi-failed', database };
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({ ...failure, requestIdempotencyKey: 'other-create' })).resolves.toBe(false);
+    expect(state.updates).toEqual([]);
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({ ...failure, requestIdempotencyKey: 'original-create' })).resolves.toBe(true);
+    expect(state.customer.account_credits).toBe(25);
+  });
+
+  test('an exact failure leaves a different customer checkout attached to a collectible invoice', async () => {
+    const { database, state } = failedAttemptDb({ invoiceStatus: 'sent' });
+    state.invoice.stripe_payment_intent_id = 'pi_customer_checkout';
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({
+      attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1', stripePaymentIntentId: 'pi-failed', database,
+    })).resolves.toBe(true);
+    expect(state.invoice.stripe_payment_intent_id).toBe('pi_customer_checkout');
   });
 
   test('does not release a fence beside a terminal invoice', async () => {

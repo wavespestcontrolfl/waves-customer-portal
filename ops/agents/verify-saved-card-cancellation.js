@@ -1,7 +1,7 @@
 // MUTATES with --execute. The default verifies one historical cancellation.
 const fs = require('node:fs');
-const { lookup } = require('node:dns/promises');
-const { isIP } = require('node:net');
+const { lookup } = require('node:dns');
+const { isIP, Socket } = require('node:net');
 const tls = require('node:tls');
 const { parseArgs } = require('node:util');
 const { parse: parsePgUrl } = require('pg-connection-string');
@@ -27,15 +27,18 @@ function databaseConfig(connectionString) {
   const port = Number(firstPresent(parsed.port, process.env.PGPORT, 5432));
   const database = firstPresent(parsed.database, process.env.PGDATABASE, user);
   const caFile = firstPresent(process.env.PG_CA_FILE, process.env.PGSSLROOTCERT, parsed.sslrootcert);
-  const certificateHost = firstPresent(String(process.env.PGSSL_SERVER_NAME || '').trim(), host);
+  const requestedCertificateHost = String(process.env.PGSSL_SERVER_NAME || '').trim();
+  const certificateHost = firstPresent(requestedCertificateHost, host);
   const local = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.startsWith('/');
+  const trustedLoopbackProxy = !host.startsWith('/') && Boolean(requestedCertificateHost || caFile);
   // pg-connection-string leaves the literal URL value ssl=false as a string;
   // normalize it before handing the local config back to node-postgres.
   const localSsl = parsed.ssl === 'false' ? false : parsed.ssl === 'true' ? true : parsed.ssl;
-  const ssl = local ? localSsl : {
+  const ssl = local && !trustedLoopbackProxy ? localSsl : {
     // Do not carry sslmode/no-verify/ssl=false from the URL into pg. A remote
-    // connection always verifies the certificate and hostname; with no ca,
-    // Node uses its public trust store.
+    // connection always verifies the certificate and hostname. Explicit trust
+    // inputs do the same for a TCP loopback proxy; with no ca, Node uses its
+    // public trust store. Ordinary local development remains unchanged.
     ...(typeof parsed.ssl === 'object' ? parsed.ssl : {}),
     rejectUnauthorized: true,
     ...(caFile ? { ca: fs.readFileSync(caFile, 'utf8') } : {}),
@@ -60,15 +63,20 @@ function databaseConfig(connectionString) {
   };
 }
 
-async function databaseDriverConfig(connectionString, resolveHost = lookup) {
+function databaseDriverConfig(connectionString, resolveHost = lookup) {
   const config = databaseConfig(connectionString);
   const { host, ssl } = config.connection;
   const requestedName = String(process.env.PGSSL_SERVER_NAME || '').trim();
   if (requestedName && requestedName !== host && ssl?.checkServerIdentity && !isIP(host)) {
-    // pg sets SNI to its TCP host when that host is a DNS name. Connect to
-    // the proxy address so TLS can send and verify the database hostname.
-    const { address } = await resolveHost(host);
-    config.connection.host = address;
+    // pg uses its configured host for SNI. Route the underlying socket to
+    // the proxy by DNS so Node can try both IPv6 and IPv4 for a TCP tunnel.
+    class DatabaseProxySocket extends Socket {
+      connect(port) {
+        return super.connect({ port, host, lookup: resolveHost, autoSelectFamily: true });
+      }
+    }
+    config.connection.host = requestedName;
+    config.connection.stream = () => new DatabaseProxySocket();
   }
   return config;
 }
@@ -84,7 +92,7 @@ async function main() {
     throw new Error(`Supply ${DATABASE_ENV} and STRIPE_SECRET_KEY for the same environment.`);
   }
   const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-  const database = require('knex')(await databaseDriverConfig(process.env[DATABASE_ENV]));
+  const database = require('knex')(databaseDriverConfig(process.env[DATABASE_ENV]));
   try {
     const result = await verifySavedCardCancellation({
       attemptId: values.attempt, intentId: values.intent, execute: values.execute, stripe, database,

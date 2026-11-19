@@ -34,6 +34,7 @@ postgres('termite renewal presentation authentication fence (PostgreSQL)', () =>
       table.string('decline_code');
       table.string('authentication_canceled_intent_id');
       table.timestamp('stripe_payment_intent_bound_at');
+      table.string('worker_payment_intent_id');
       table.timestamp('submitted_at');
       table.timestamp('resolved_at');
     });
@@ -60,6 +61,7 @@ postgres('termite renewal presentation authentication fence (PostgreSQL)', () =>
         status: 'failed',
         decline_code: 'authentication_required',
         stripe_payment_intent_id: unresolvedIntentId,
+        worker_payment_intent_id: unresolvedIntentId,
         stripe_payment_intent_bound_at: new Date(),
         submitted_at: new Date(),
         resolved_at: new Date(),

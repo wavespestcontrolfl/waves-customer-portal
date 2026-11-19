@@ -35,7 +35,10 @@ jest.mock('../services/pay-combined', () => ({
   lockCombinedCustomerStable: jest.fn(async (_trx, _invoiceId, customerId) => customerId),
   releaseCombinedSessionBeforeCollection: jest.fn(async () => undefined),
 }));
-jest.mock('../services/invoice', () => ({ sendReceipt: jest.fn(async () => ({ sent: true })) }));
+jest.mock('../services/invoice', () => ({
+  sendReceipt: jest.fn(async () => ({ sent: true })),
+  lockInvoicePaymentIntentAllocation: jest.fn(async (trx, { id }) => trx('invoices').where({ id }).forUpdate().first()),
+}));
 jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../services/invoice-followups', () => ({ stopOnPayment: jest.fn(async () => undefined) }));
 jest.mock('../services/billing-pause', () => ({ maybeResumeBillingPauseOnPayment: jest.fn(async () => undefined) }));
@@ -112,6 +115,7 @@ function heldManualPosting(overrides = {}) {
   });
   const trx = jest.fn((table) => {
     if (table === 'invoices') return invoice;
+    if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
     if (table === 'payments') return payments;
     throw new Error(`unexpected trx table ${table}`);
   });
@@ -120,7 +124,7 @@ function heldManualPosting(overrides = {}) {
 }
 
 describe('recordManualPayment — refusal contract', () => {
-  test('locked checkout retirement uses the caller transaction for combined sibling stamps', async () => {
+  test('locked checkout retirement reads the provider once and uses the caller transaction for combined sibling stamps', async () => {
     const trx = jest.fn();
     const invoice = openInvoice({ stripe_payment_intent_id: 'pi_combined' });
     StripeService.retrievePaymentIntent.mockResolvedValueOnce({
@@ -132,9 +136,10 @@ describe('recordManualPayment — refusal contract', () => {
     await expect(retireLockedPaymentSessionsBeforeSettlement(
       trx,
       invoice,
-      { action: 'recording a manual payment', finishCombinedCleanup: true },
+      { action: 'recording a manual payment' },
     )).resolves.toBeNull();
 
+    expect(StripeService.retrievePaymentIntent).toHaveBeenCalledTimes(1);
     expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith(
       'pi_combined',
       { cancellation_reason: 'abandoned' },
@@ -144,11 +149,7 @@ describe('recordManualPayment — refusal contract', () => {
       'pi_combined',
       { keepInvoiceIds: ['inv-1'] },
     );
-    expect(require('../services/pay-combined').releaseCombinedSessionBeforeCollection).toHaveBeenCalledWith(
-      trx,
-      invoice,
-      { context: 'recording a manual payment' },
-    );
+    expect(require('../services/pay-combined').releaseCombinedSessionBeforeCollection).not.toHaveBeenCalled();
   });
 
   test('unknown tender → 400 listing every accepted method, before any DB read', async () => {
@@ -227,6 +228,7 @@ describe('recordManualPayment — refusal contract', () => {
           invoiceUpdate = r.update;
           return r;
         }
+        if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
         if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
         throw new Error(`unexpected trx table ${table}`);
       });
@@ -248,6 +250,7 @@ describe('recordManualPayment — refusal contract', () => {
     db.transaction.mockImplementation(async (fn) => {
       const trx = jest.fn((table) => {
         if (table === 'invoices') { const r = recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }), returning: [] }); invoiceUpdate = r.update; return r; }
+        if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
         if (table === 'scheduled_services') { const r = recorder({ first: { id: 'svc-1', status: visitStatus } }); r.forUpdate = jest.fn(() => { visitLocked = true; return r; }); return r; }
         if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
         throw new Error(`unexpected trx table ${table}`);
@@ -272,6 +275,7 @@ describe('recordManualPayment — refusal contract', () => {
     db.transaction.mockImplementation(async (fn) => {
       const trx = jest.fn((table) => {
         if (table === 'invoices') { const r = recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }), returning: [] }); invoiceUpdate = r.update; return r; }
+        if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
         if (table === 'scheduled_services') {
           const r = recorder();
           r.noWait = jest.fn(() => { noWaitUsed = true; return r; });
@@ -298,6 +302,7 @@ describe('recordManualPayment — refusal contract', () => {
     db.transaction.mockImplementation(async (fn) => {
       const trx = jest.fn((table) => {
         if (table === 'invoices') { const r = recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }), returning: [openInvoice({ scheduled_service_id: 'svc-1', status: 'paid' })] }); invoiceUpdate = r.update; return r; }
+        if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
         if (table === 'scheduled_services') return recorder({ first: { id: 'svc-1', status: 'rescheduled' } });
         if (table === 'payments') return recorder();
         throw new Error(`unexpected trx table ${table}`);
@@ -398,6 +403,7 @@ describe('recordManualPayment — refusal contract', () => {
     db.transaction.mockImplementation(async (fn) => {
       const trx = jest.fn((table) => {
         if (table === 'invoices') return recorder({ first: openInvoice({ total: '120.00' }), returning: [] }); // amount moved under the lock
+        if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
         if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
         throw new Error(`unexpected trx table ${table}`);
       });
@@ -522,6 +528,7 @@ describe('recordManualPayment — settlement', () => {
     db.transaction.mockImplementation(async (fn) => {
       const trx = jest.fn((table) => {
         if (table === 'invoices') return recorder({ first: row, returning: [paid] });
+        if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
         if (table === 'payments') return recorder();
         throw new Error(`unexpected trx table ${table}`);
       });
@@ -567,6 +574,7 @@ describe('recordManualPayment — settlement', () => {
     db.transaction.mockImplementation(async (fn) => {
       const trx = jest.fn((table) => {
         if (table === 'invoices') return recorder({ first: openInvoice(), returning: [] });
+        if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
         if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
         throw new Error(`unexpected trx table ${table}`);
       });
@@ -676,7 +684,7 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
 
   // A settlement fixture over a mutable locked row. The combined-session release can rewrite the row, as clearPaymentIntentStamps does;
   // `terms` feed the fence's own lookups on the plain connection and on the trx.
-  function settle({ pre = card(), locked = card(), onReserve = null, onRelease = null, termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null, taggedPayment = null } = {}) {
+  function settle({ pre = card(), locked = card(), onReserve = null, termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null, taggedPayment = null } = {}) {
     const calls = { update: null, updateArgs: null, paymentsInsert: null, paymentsQuery: null };
     const answer = (table, row) => {
       if (table === 'annual_prepay_terms') return recorder({ first: termLinked ? { id: 'term-9' } : null });
@@ -717,7 +725,7 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
         if (onReserve) onReserve(locked);
         return locked.customer_id;
       });
-      PayCombined.releaseCombinedSessionBeforeCollection.mockReset().mockImplementation(async () => { if (onRelease) onRelease(locked); });
+      PayCombined.releaseCombinedSessionBeforeCollection.mockReset().mockResolvedValue(undefined);
       return fn(trx);
     });
     return calls;
@@ -823,11 +831,27 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       expect(calls.paymentsInsert).toBeNull();
     });
 
-    test('the release rewriting the invoice edit time is not drift: the approved payment records (Codex pre-push P1)', async () => {
-      const calls = settle({ onRelease: (row) => { row.updated_at = new Date('2099-01-01T12:00:30Z'); } });
-      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) });
+    test('a combined checkout is neutralized once under the advisory reservation, with sibling stamps cleared on the settlement transaction', async () => {
+      const stamped = card({ stripe_payment_intent_id: 'pi_combined' });
+      const calls = settle({ pre: stamped, locked: stamped });
+      StripeService.retrievePaymentIntent.mockResolvedValue({
+        id: 'pi_combined', status: 'requires_payment_method', metadata: { waves_combined_checkout: 'true' },
+      });
+      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: false });
       expect(out.invoice).toBeDefined();
       expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+      const PayCombined = require('../services/pay-combined');
+      expect(PayCombined.lockCombinedCustomerStable).toHaveBeenCalledWith(expect.any(Function), 'inv-1', 'cust-1');
+      const settlementTrx = PayCombined.lockCombinedCustomerStable.mock.calls[0][0];
+      expect(StripeService.retrievePaymentIntent).toHaveBeenCalledTimes(1);
+      expect(StripeService.cancelPaymentIntent).toHaveBeenCalledTimes(1);
+      expect(PayCombined.clearPaymentIntentStamps).toHaveBeenCalledWith(
+        settlementTrx,
+        'pi_combined',
+        { keepInvoiceIds: ['inv-1'] },
+      );
+      expect(PayCombined.releaseCombinedSessionBeforeCollection).not.toHaveBeenCalled();
+      expect(calls.updateArgs).toMatchObject({ stripe_payment_intent_id: null, processor: null });
     });
 
     test.each([

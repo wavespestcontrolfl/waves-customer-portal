@@ -293,6 +293,7 @@ jobs:
             tests/intelligence-bar-multi-card-db.test.js \
             tests/intelligence-bar-property-access-postgres.test.js \
             tests/invoice-edit-authentication-hold-postgres.test.js \
+            tests/invoice-payment-intent-allocation-lock-postgres.test.js \
             tests/invoice-settlement-lock-order-postgres.test.js \
             tests/lawn-copy-v6.db.test.js \
             tests/lawn-notification-deferred.db.test.js \

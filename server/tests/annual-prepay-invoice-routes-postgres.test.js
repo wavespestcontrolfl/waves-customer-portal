@@ -68,14 +68,14 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
   afterEach(async () => { if (trx) await trx.rollback(); });
   afterAll(async () => { await database?.destroy(); });
 
-  async function request(method, path, body) {
+  async function request(method, path, body, area = 'invoices') {
     const app = express();
     app.use(express.json());
-    app.use('/admin/invoices', require('../routes/admin-invoices'));
+    app.use(`/admin/${area}`, area === 'schedule' ? require('../routes/admin-schedule') : require('../routes/admin-invoices'));
     app.use((err, _req, res, _next) => res.status(err.statusCode || err.status || 500).json({ error: err.message }));
     const server = app.listen(0);
     try {
-      const res = await fetch(`http://127.0.0.1:${server.address().port}/admin/invoices${path}`, {
+      const res = await fetch(`http://127.0.0.1:${server.address().port}/admin/${area}${path}`, {
         method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined,
       });
       return { status: res.status, body: await res.json() };
@@ -103,6 +103,47 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
   }
 
   const { etDateString } = require('../utils/datetime-et');
+
+  test.each([
+    ['requires_payment_method', 200, 'sent', 0],
+    ['processing', 409, 'sent', 0],
+    [null, 409, 'sent', 0],
+    ['requires_action', 409, 'sent', 20],
+    ['canceled', 409, 'processing', 0],
+  ])('Schedule Charge Now with a recorded prepayment and a standalone checkout (%s / HTTP %i / %s / paid %i)', async (status, expectedHttp, invoiceStatus, amountPaid) => {
+    const customerId = await customer();
+    const visitId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: visitId, customer_id: customerId, scheduled_date: etDateString(), service_type: 'General Pest Control',
+      status: 'confirmed', estimated_price: 100, prepaid_amount: 25, prepaid_method: 'cash', prepaid_at: new Date(),
+    });
+    const piId = `pi_${visitId.replaceAll('-', '')}`;
+    const invoiceId = await invoice(customerId, {
+      scheduled_service_id: visitId, status: invoiceStatus, subtotal: 100, total: 100, amount_paid: amountPaid,
+      stripe_payment_intent_id: piId, processor: 'stripe',
+    });
+    const stripe = require('../services/stripe');
+    stripe.retrievePaymentIntent.mockResolvedValue(status ? { id: piId, status, metadata: {} } : null);
+    const result = await request('POST', `/${visitId}/invoice`, {}, 'schedule');
+    expect({ status: result.status, error: result.status >= 500 ? result.body.error : undefined })
+      .toEqual({ status: expectedHttp, error: undefined });
+    const updated = await trx('invoices').where({ id: invoiceId }).first();
+    const payments = await trx('payments').where({ customer_id: customerId, status: 'paid' });
+    expect(stripe.retrievePaymentIntent).toHaveBeenCalledTimes(invoiceStatus === 'processing' ? 0 : 1);
+    if (expectedHttp === 200) {
+      expect(stripe.cancelPaymentIntent).toHaveBeenCalledTimes(1);
+      expect(Number(updated.total)).toBe(75);
+      expect(updated.stripe_payment_intent_id).toBeNull();
+      expect(payments.map((p) => Number(p.amount))).toEqual([25]);
+    } else {
+      expect(stripe.cancelPaymentIntent).not.toHaveBeenCalled();
+      expect(Number(updated.total)).toBe(100);
+      expect(updated.stripe_payment_intent_id).toBe(piId);
+      expect(payments).toHaveLength(0);
+    }
+    const visit = await trx('scheduled_services').where({ id: visitId }).first('prepaid_amount');
+    expect(Number(visit.prepaid_amount)).toBe(25);
+  });
 
   async function markedPaidPrepay() {
     const customerId = await customer({ billing_mode: null });
@@ -249,6 +290,7 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
       invoice_id: prepayInvoiceId,
       stripe_payment_method_id: 'pm_fixture_auth_removal',
       stripe_payment_intent_id: paymentIntentId,
+      worker_payment_intent_id: paymentIntentId,
       stripe_payment_intent_bound_at: new Date(),
       idempotency_key: `inv_card_on_file_${prepayInvoiceId}_${attemptId}`,
       status: 'failed',
@@ -342,6 +384,7 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
       invoice_id: prepayInvoiceId,
       stripe_payment_method_id: 'pm_fixture_auth_cancelled',
       stripe_payment_intent_id: paymentIntentId,
+      worker_payment_intent_id: paymentIntentId,
       stripe_payment_intent_bound_at: new Date(),
       authentication_canceled_intent_id: paymentIntentId,
       idempotency_key: `inv_card_on_file_${prepayInvoiceId}_${attemptId}`,
