@@ -19,18 +19,24 @@
  * What the trace holds a cleaned note to, word by word:
  *   - every word that states something is a word of the note: the same word
  *     in another form, a count written the other way (3 / three, exactly),
- *     two words written as one, one letter changed in a word of five letters
- *     or more (never a count), a short table of twins;
- *   - a word the note only ever denies keeps a denial before it in its
- *     sentence ("did not treat the kitchen" never becomes "I treated the
- *     kitchen");
- *   - "told me" needs the customer speaking or seeing in the note ("cust
- *     said", "customer still seeing");
- *   - one to three sentences of plain text in the Latin script.
- * It does not judge which words go together beyond that: when the note says
- * a word both ways ("treated the garage, not the kitchen"), a denial can move
- * between the places it names. The technician reads the cleaned note before
- * it is sent (owner pick *read first*).
+ *     two words written as one (letters only), one letter changed in a word
+ *     of five letters or more (never a count), a short table of twins;
+ *   - a denial or a plan covers the rest of its clause ("did not treat the
+ *     kitchen", "will treat the kitchen"), and the cleaned note says plainly
+ *     only what the note says plainly: "I treated the kitchen" needs "treat"
+ *     and "kitchen" plain somewhere in the note. It may deny or plan a word
+ *     the note says plainly;
+ *   - work said as done keeps who did it ("customer sprayed" never becomes
+ *     "I sprayed"), and "you told me" needs the customer speaking in the note
+ *     ("I told the customer" is not);
+ *   - "treated" or "a treatment" for another work word needs a plain work
+ *     verb in the note ("sprayed", "baited"), not a noun ("bait station");
+ *   - one to three sentences of plain text in the Latin script, read as
+ *     NFKC, so the screens and the trace read the same letters.
+ * It does not judge which words go together within one mode: "baited the
+ * kitchen, sprayed the garage" may come out with the places swapped. The
+ * technician reads the cleaned note before it is sent (owner pick *read
+ * first*).
  */
 const { redactAccessCodes } = require('../context-aggregator');
 const CompletionRecap = require('../completion-recap');
@@ -55,9 +61,23 @@ today visit service serviced`.split(/\s+/));
 // A denial in the cleaned note needs a denial in the note.
 const NEGATIONS = new Set(`no not never none nothing nowhere neither nor without
 didnt dont doesnt wasnt werent isnt arent couldnt cant wont wouldnt hasnt havent hadnt shouldnt`.split(/\s+/));
-// The denials that deny the next word that states something: "not treat",
-// "no roaches", "never seen". "Nothing", "none" and "nowhere" deny themselves.
+// The words that make the rest of their clause denied ("not treat", "no
+// roaches"). "Nothing", "none" and "nowhere" deny themselves.
 const SCOPED_NEGATIONS = new Set([...NEGATIONS].filter((word) => !['nothing', 'none', 'nowhere'].includes(word)));
+// The words that make the rest of their clause a plan, not work done: "will
+// treat", "need to treat", "next visit". "Next to" is a place.
+const PLAN_WORDS = new Set(['will', 'would', 'should', 'shall', 'need', 'needs', 'plan', 'plans', 'planned',
+  'recommend', 'recommends', 'recommended', 'schedule', 'scheduled', 'next']);
+// A clause ends at a mark of punctuation, at a word that turns the sentence,
+// and where a new subject starts: no mode reaches past it. Within a clause,
+// a mode on an action ("not treat") ends at the next action ("did not treat
+// the kitchen treated the garage"); one on a thing ("no roaches") at the
+// first.
+const CLAUSE_TURNS = new Set(['but', 'then', 'so', 'because', 'while', 'though', 'although', 'however', 'yet']);
+const SUBJECTS = new Set(['i', 'we', 'you', 'he', 'she', 'they']);
+// Words that stand before a noun: "the building", "any damaged wood".
+const DETERMINERS = new Set(['a', 'an', 'the', 'any', 'some', 'no', 'this', 'that', 'these', 'those', 'my', 'your',
+  'our', 'their', 'his', 'her', 'its', 'each', 'every', 'all']);
 // Counts match exactly: "eighty" is one letter from "eight".
 const NUMBER_WORD_RE = /^(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)s?$/;
 // Forms the suffix rules below cannot reach, each with its base word.
@@ -89,16 +109,23 @@ const NUMBER_TWINS = new Map(NUMBER_WORDS.flatMap((word, n) => [[word, String(n)
 // Seeing is how a technician knows anything in the note: "ants in the kitchen"
 // may become "I saw ants in the kitchen".
 const SIGHT_WORDS = ['see', 'find', 'notice'];
-// "Said" may become "told me", only when the note has the customer speaking:
-// a customer word with a word of speech or of seeing right after it ("cust
-// said", "customer still seeing"). "Customer had ants" is not the customer
-// speaking.
+// "Said" may become "told me" only when the note has the customer speaking or
+// seeing: a word of speech or of seeing whose nearest doer is the customer
+// ("cust said", "customer still seeing"). "Customer had ants" is not the
+// customer speaking.
 const SPEECH_WORDS = ['tell', 'say', 'mention', 'report', 'ask', 'complain'];
 const CUSTOMER_WORDS = new Set(['customer', 'cust', 'homeowner', 'client', 'tenant', 'owner', 'resident', 'wife', 'husband', 'she', 'he', 'mr', 'mrs', 'ms']);
 // A dropped product name leaves "a treatment", and "sprayed" may become
-// "treated", only when the note itself says something was applied.
+// "treated", only when the note itself says plainly that something was
+// applied: a work verb in any form, or a word that is also a noun in its -ed
+// or -ing form ("baited", never "bait station").
 const WORK_WORDS = ['treat', 'apply', 'use', 'put', 'place', 'spread', 'product'];
-const APPLIED_WORDS = ['spray', 'treat', 'apply', 'dust', 'bait', 'gel', 'foam', 'granule', 'granular', 'spread', 'fog', 'mist', 'drench', 'inject', 'broadcast', 'use', 'put', 'place', 'lay'];
+const APPLIED_VERBS = ['spray', 'treat', 'apply', 'spread', 'drench', 'inject', 'broadcast', 'use', 'put', 'lay', 'granule', 'granular'];
+const APPLIED_NOUNS = ['bait', 'gel', 'foam', 'dust', 'fog', 'mist', 'place'];
+// More verbs the trace knows: each ends a denial in a note ("no ants inside
+// sealed the gap"), and work said as done keeps who did it.
+const ACTION_WORDS = ['seal', 'remove', 'inspect', 'sweep', 'clean', 'vacuum', 'install', 'replace', 'set', 'check',
+  'caulk', 'mow', 'water', 'cut', 'trim', 'fertilize', 'cover', 'repair', 'fix', 'close', 'move', 'leave', 'kill'];
 
 // The same word in another form gets the same stem: "sprayed", "spraying" and
 // "sprays"; "place", "placed" and "places". A stem is a key, not a word.
@@ -120,7 +147,10 @@ const ALSO_SAID_STEMS = new Map(Object.entries(ALSO_SAID).map(([word, also]) => 
 const SIGHT_STEMS = new Set(stemsOf(SIGHT_WORDS));
 const SPEECH_STEMS = new Set(stemsOf(SPEECH_WORDS));
 const WORK_STEMS = new Set(stemsOf(WORK_WORDS));
-const APPLIED_STEMS = stemsOf(APPLIED_WORDS);
+const APPLIED_VERB_STEMS = new Set(stemsOf(APPLIED_VERBS));
+const APPLIED_NOUN_STEMS = new Set(stemsOf(APPLIED_NOUNS));
+const ACTOR_STEMS = new Set([...SIGHT_STEMS, ...SPEECH_STEMS, ...WORK_STEMS, ...APPLIED_VERB_STEMS,
+  ...APPLIED_NOUN_STEMS, ...stemsOf(ACTION_WORDS)]);
 
 // Words as the trace reads them: lower case, "didn't" as "did not", a
 // possessive or "'ll" dropped, split on anything that is not a letter or a
@@ -153,85 +183,174 @@ function withinOneEdit(a, b) {
 const withTwins = (stem) => [stem, ...(ALSO_SAID_STEMS.get(stem) || [])];
 const statesSomething = (word) => !GLUE_WORDS.has(word) && !NEGATIONS.has(word);
 const isCount = (word) => /\d/.test(word) || NUMBER_WORD_RE.test(word);
+const isLetters = (word) => /^\p{L}+$/u.test(word);
+const MODE_RANK = { plain: 0, planned: 1, denied: 2 };
 
-// The stems the note only ever denies: the word a denial is on ("did not
-// treat the kitchen": treat), when the note never says it plainly as well.
-function deniedOnlyStems(words) {
-  const denied = new Set();
-  const plain = new Set();
-  let inDenial = false;
-  for (const word of words) {
-    if (NEGATIONS.has(word)) {
-      inDenial = SCOPED_NEGATIONS.has(word);
-    } else if (!GLUE_WORDS.has(word)) {
-      withTwins(traceStem(word)).forEach((stem) => (inDenial ? denied : plain).add(stem));
-      inDenial = false;
-    }
-  }
-  return new Set([...denied].filter((stem) => !plain.has(stem)));
+// The mode a word opens for the rest of its clause, if any.
+function opensMode(words, i) {
+  if (SCOPED_NEGATIONS.has(words[i])) return 'denied';
+  if (PLAN_WORDS.has(words[i]) && !(words[i] === 'next' && ['to', 'door'].includes(words[i + 1]))) return 'planned';
+  return null;
 }
 
-// What the note said, as the trace needs it.
+// Whether a word is an action, on one side of the trace. In a note: a known
+// verb ("treat", "swept"), so a note's denial runs to its next known verb
+// and is never cut short. In a cleaned note also a word in -ed or -ing that
+// does not follow a determiner ("pulled", never "the building" or "any
+// damaged wood"), so a cleaned note's denial ends early and no claim hides
+// in it.
+function isAction(words, i, side) {
+  if (ACTOR_STEMS.has(traceStem(words[i]))) return true;
+  return side === 'text' && words[i].length > 4 && /(?:ed|ing)$/.test(words[i]) && !DETERMINERS.has(words[i - 1]);
+}
+
+// An action joined by "or" or "nor" shares the mode before it ("did not
+// spray or bait"). In a note, so does a verb in its base form after "and"
+// ("did not spray and bait"; "did not spray and baited" ends it).
+function sharesMode(words, i, side) {
+  const word = words[i];
+  if (['or', 'nor'].includes(words[i - 1])) return true;
+  return side === 'note' && words[i - 1] === 'and' && !/(?:ed|ing|s)$/.test(word) && !SAME_WORD[word];
+}
+
+// Who a clause names as the doer of an action: the nearest of the customer
+// ("cust", "she", "you") and the technician ("I", "we") just before it.
+function doerBefore(words, i, reach) {
+  for (let at = i - 1; at >= Math.max(0, i - reach); at -= 1) {
+    if (CUSTOMER_WORDS.has(words[at]) || words[at] === 'you') return 'customer';
+    if (words[at] === 'i' || words[at] === 'we') return 'tech';
+  }
+  return null;
+}
+
+// Each word of one clause with its mode and, for an action, its doer. A
+// stronger mode wins (denied over planned over plain). A subject right
+// after an opener stays in its mode ("recommended they fix the leak").
+function clauseWords(clause, side) {
+  const words = traceWords(clause);
+  let mode = 'plain';
+  let headIsAction = false;
+  return words.map((word, i) => {
+    if (CLAUSE_TURNS.has(word) || (SUBJECTS.has(word) && !opensMode(words, i - 1))) mode = 'plain';
+    else if (mode !== 'plain' && isAction(words, i, side) && !sharesMode(words, i, side)) {
+      if (headIsAction) headIsAction = false;
+      else mode = 'plain';
+    }
+    const opened = opensMode(words, i);
+    if (opened && MODE_RANK[opened] >= MODE_RANK[mode]) {
+      mode = opened;
+      const head = words.findIndex((next, at) => at > i && statesSomething(next));
+      headIsAction = head > 0 && isAction(words, head, side);
+    }
+    const stem = traceStem(word);
+    return { word, stem, mode, doer: ACTOR_STEMS.has(stem) ? doerBefore(words, i, side === 'note' ? 2 : 3) : null };
+  });
+}
+
+// A text's words, clause by clause; side is 'note' or 'text'.
+const wordsInClauses = (text, side) => String(text || '').normalize('NFKC').split(/[.,;:!?()]+/)
+  .flatMap((clause) => clauseWords(clause, side));
+
+const appliedWord = ({ word, stem }) => APPLIED_VERB_STEMS.has(stem) || (APPLIED_NOUN_STEMS.has(stem) && /(?:ed|ing)$/.test(word));
+
+// What the note said, as the trace needs it: each stem with the modes and
+// doers the note gives it.
 function readNote(note) {
-  const words = traceWords(note);
-  const stems = new Set();
+  const words = wordsInClauses(note, 'note');
+  const stems = new Map();
+  // An action with no doer named is the technician's: the note is theirs.
+  const add = (stem, { mode, doer }) => withTwins(stem).forEach((also) => {
+    const entry = stems.get(also) || { modes: new Set(), doers: new Set() };
+    entry.modes.add(mode);
+    entry.doers.add(doer || 'tech');
+    stems.set(also, entry);
+  });
   // Stems a fixed error may sit one letter away from: the note's own words
   // that state something, never a count.
   const close = new Set();
-  const add = (stem) => withTwins(stem).forEach((also) => stems.add(also));
-  words.forEach((word, i) => {
-    const stem = traceStem(word);
-    add(stem);
-    if (!GLUE_WORDS.has(word) && stem.length >= 4 && !isCount(word)) close.add(stem);
+  const applied = { modes: new Set(), doers: new Set() };
+  words.forEach((entry, i) => {
+    add(entry.stem, entry);
+    if (statesSomething(entry.word) && entry.stem.length >= 4 && !isCount(entry.word)) close.add(entry.stem);
     // Two words the clean-up may write as one ("web worms", "webworms").
-    if (i + 1 < words.length) add(traceStem(`${word}${words[i + 1]}`));
-    if (NUMBER_TWINS.has(word)) add(traceStem(NUMBER_TWINS.get(word)));
+    const next = words[i + 1]?.word;
+    if (next && isLetters(entry.word) && isLetters(next)) add(traceStem(`${entry.word}${next}`), entry);
+    if (NUMBER_TWINS.has(entry.word)) add(traceStem(NUMBER_TWINS.get(entry.word)), entry);
+    if (appliedWord(entry)) {
+      applied.modes.add(entry.mode);
+      applied.doers.add(entry.doer || 'tech');
+    }
   });
   return {
     stems,
     close: [...close],
-    hasContent: words.some(statesSomething),
-    denies: words.some((word) => NEGATIONS.has(word)),
-    deniedOnly: deniedOnlyStems(words),
-    customerSpoke: words.some((word, i) => CUSTOMER_WORDS.has(word)
-      && words.slice(i + 1, i + 3).some((next) => SPEECH_STEMS.has(traceStem(next)) || SIGHT_STEMS.has(traceStem(next)))),
-    appliedWork: APPLIED_STEMS.some((stem) => stems.has(stem)),
+    hasContent: words.some((entry) => statesSomething(entry.word)),
+    denies: words.some((entry) => NEGATIONS.has(entry.word)),
+    // The customer speaking or seeing: "cust said", "customer still seeing",
+    // "customer not seeing"; never "customer did not mention".
+    customerSpoke: words.some((entry) => entry.doer === 'customer'
+      && (SIGHT_STEMS.has(entry.stem) || (SPEECH_STEMS.has(entry.stem) && entry.mode === 'plain'))),
+    applied: applied.modes.size ? applied : null,
   };
 }
 
-function wordTraces(words, i, said) {
-  const word = words[i];
-  if (GLUE_WORDS.has(word)) return true;
-  if (NEGATIONS.has(word)) return said.denies;
-  const stem = traceStem(word);
-  if (said.stems.has(stem) || SIGHT_STEMS.has(stem)) return true;
-  if (SPEECH_STEMS.has(stem) && said.customerSpoke) return true;
-  if (WORK_STEMS.has(stem) && said.appliedWork) return true;
-  // One word of the note written as two ("webworms", "web worms").
-  if (i + 1 < words.length && said.stems.has(traceStem(`${word}${words[i + 1]}`))) return true;
-  if (i > 0 && said.stems.has(traceStem(`${words[i - 1]}${word}`))) return true;
-  return stem.length >= 5 && !isCount(word) && said.close.some((other) => withinOneEdit(stem, other));
+// Any mode and either doer: words that need no more than to be there.
+const FREE = { modes: new Set(Object.keys(MODE_RANK)), doers: new Set(['tech', 'customer']) };
+
+// The note's entry a word of the cleaned note traces to, or null.
+function tracedEntry(words, i, said) {
+  const { word, stem } = words[i];
+  if (GLUE_WORDS.has(word)) return FREE;
+  if (NEGATIONS.has(word)) return said.denies ? FREE : null;
+  if (SIGHT_STEMS.has(stem) || SPEECH_STEMS.has(stem)) return heardOrSeenEntry(words[i], said);
+  if (said.stems.has(stem)) return said.stems.get(stem);
+  if (WORK_STEMS.has(stem) && said.applied) return said.applied;
+  return respelledEntry(words, i, said);
 }
 
-// A word the note only ever denies keeps a denial before it in its sentence:
-// "did not treat the kitchen" never becomes "I treated the kitchen".
-function undeniedWords(text, deniedOnly) {
-  if (!deniedOnly.size) return [];
-  return String(text || '').split(/[.!?]+/).flatMap((sentence) => {
-    let denied = false;
-    return traceWords(sentence).filter((word) => {
-      denied = denied || NEGATIONS.has(word);
-      return !denied && deniedOnly.has(traceStem(word));
-    });
-  });
+// Seeing is how the technician knows the note: "ants in the kitchen" may
+// become "I saw ants in the kitchen". The customer's words or seeing need the
+// customer speaking or seeing in the note ("cust said", "customer still
+// seeing"); the technician's words need the technician's own ("told them to
+// vacuum").
+function heardOrSeenEntry({ stem, doer }, said) {
+  if (doer === 'customer') return said.customerSpoke ? FREE : null;
+  if (SIGHT_STEMS.has(stem)) return FREE;
+  return said.stems.get(stem) || (doer === null && said.customerSpoke ? FREE : null);
 }
 
-// The words of a cleaned note that are not in the note, or that drop a
-// denial the note put on them. Empty = it adds none.
+// The note's entry for a word the clean-up spelled another way: one word of
+// the note written as two ("webworms", "web worms"; letters only, so "2-3"
+// never becomes "23"), or one letter changed in a word of five letters or
+// more, never a count.
+function respelledEntry(words, i, said) {
+  const { word, stem } = words[i];
+  const pairs = [[word, words[i + 1]?.word], [words[i - 1]?.word, word]];
+  const joined = pairs.find(([a, b]) => a && b && isLetters(a) && isLetters(b) && said.stems.has(traceStem(`${a}${b}`)));
+  if (joined) return said.stems.get(traceStem(joined.join('')));
+  if (stem.length < 5 || isCount(word)) return null;
+  const near = said.close.find((other) => withinOneEdit(stem, other));
+  return near ? said.stems.get(near) : null;
+}
+
+// The modes of the note a word of the cleaned note may stand on, by its own
+// mode: said plainly only what the note says plainly; denied or planned also
+// what the note says plainly.
+const MODES_ALLOWED = { plain: ['plain'], planned: ['planned', 'plain'], denied: ['denied', 'plain'] };
+
+// The words of a cleaned note that are not in the note, that say plainly
+// what the note denies or plans, or that give work said as done to another
+// doer. Empty = it adds none.
 function untracedWords(text, note) {
   const said = readNote(note);
-  const words = traceWords(text);
-  return [...new Set([...words.filter((word, i) => !wordTraces(words, i, said)), ...undeniedWords(text, said.deniedOnly)])];
+  const words = wordsInClauses(text, 'text');
+  return [...new Set(words.filter((entry, i) => {
+    const traced = tracedEntry(words, i, said);
+    if (!traced) return true;
+    if (!statesSomething(entry.word)) return false;
+    if (!MODES_ALLOWED[entry.mode].some((mode) => traced.modes.has(mode))) return true;
+    return entry.mode === 'plain' && Boolean(entry.doer) && !traced.doers.has(entry.doer);
+  }).map((entry) => entry.word))];
 }
 
 // ── The screens ────────────────────────────────────────────────────────
@@ -249,11 +368,12 @@ const MAX_OWN_NOTE_SENTENCES = 3;
 const oneLine = (value) => String(value || '').replace(/\s+/g, ' ').trim();
 // The note as the trace reads it: an access code is redacted first, so a code
 // can never trace.
-const noteAsRead = (note) => redactAccessCodes(oneLine(note));
+const noteAsRead = (note) => redactAccessCodes(oneLine(String(note || '').normalize('NFKC')));
 // The cleaned note as stored and screened. A line break stays in, so the
 // shape screen refuses it.
 function ownNoteText(value) {
-  const text = String(value || '').trim().replace(/[^\S\r\n]+/g, ' ').replace(/^["“”']+|["“”']+$/g, '').trim();
+  // NFKC first: the screens read the letters the trace reads ("ｓａｆｅ" is "safe").
+  const text = String(value || '').normalize('NFKC').trim().replace(/[^\S\r\n]+/g, ' ').replace(/^["“”']+|["“”']+$/g, '').trim();
   // The weed is one word; written as two, the price screen reads "dollar".
   return lowercaseGermanRoach(text).replace(/\b(dollar)[ -](weeds?)\b/gi, '$1$2');
 }
@@ -263,6 +383,8 @@ function shapeRejection(text) {
   if (REDACTED_RE.test(text)) return { reason: 'access_code' };
   if (/[\r\n]/.test(text) || SIGN_OFF_RE.test(text) || !PLAIN_TEXT_RE.test(text)) return { reason: 'shape' };
   if (text.length > MAX_OWN_NOTE_CHARS) return { reason: 'too_long' };
+  // At least one sentence that states something, at most three.
+  if (!traceWords(text).some(statesSomething)) return { reason: 'empty' };
   const sentences = text.split(/[.!?]+/).filter((sentence) => /[\p{L}\p{N}]/u.test(sentence));
   return sentences.length > MAX_OWN_NOTE_SENTENCES ? { reason: 'sentences' } : null;
 }

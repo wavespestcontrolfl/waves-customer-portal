@@ -75,11 +75,26 @@ describe('the trace: a cleaned note adds no word', () => {
   });
 
   test.each([
-    ['work the note denies', 'did not treat the kitchen', 'I treated the kitchen.', ['treated']],
-    ['a pest the note denies', 'no roaches in the garage', 'I saw roaches in the garage.', ['roaches']],
-    ['a short form of a denial', 'didnt spray the back yard dog out', 'I sprayed the back yard.', ['sprayed']],
-    ['a denial moved after the word', 'could not access the attic', 'I accessed the attic, not the garage.', ['garage', 'accessed']],
+    // The whole claim a denial covers is named, not only its verb or its pest.
+    ['work the note denies', 'did not treat the kitchen', 'I treated the kitchen.', ['treated', 'kitchen']],
+    ['a pest the note denies', 'no roaches in the garage', 'I saw roaches in the garage.', ['roaches', 'garage']],
+    ['a short form of a denial', 'didnt spray the back yard dog out', 'I sprayed the back yard.', ['sprayed', 'back', 'yard']],
+    ['a denial moved after the word', 'could not access the attic', 'I accessed the attic, not the garage.', ['accessed', 'attic', 'garage']],
+    ['a denial in an earlier clause', 'customer not home. did not treat kitchen', 'You were not home, and I treated the kitchen.', ['treated', 'kitchen']],
+    ['work joined to a denied verb by "or"', 'did not spray or bait the kitchen', 'I baited the kitchen.', ['baited', 'kitchen']],
+    ['a word that only describes what was not seen', 'did not see any damaged wood', 'I saw damaged wood.', ['damaged', 'wood']],
+    ['a plan, said as work done', 'will treat the garage next visit', 'I treated the garage.', ['treated', 'garage']],
   ])('refuses dropping %s', (_label, note, text, added) => {
+    expect(untracedWords(text, note)).toEqual(added);
+  });
+
+  test.each([
+    ['another work verb for a verb the note denies', 'did not spray the kitchen', 'I treated the kitchen.', ['treated', 'kitchen']],
+    ['a work verb when the note names a product but no work', 'left bait station by the fence', 'I applied bait by the fence.', ['applied']],
+    ["the technician's words as the customer's", 'I told the customer about ants', 'You told me about ants.', ['told']],
+    ["the customer's work as the technician's", 'customer sprayed the yard', 'I sprayed the yard.', ['sprayed']],
+    ['two counts written as one', 'set traps at stations 2-3', 'I set traps at station 23.', ['23']],
+  ])('refuses %s', (_label, note, text, added) => {
     expect(untracedWords(text, note)).toEqual(added);
   });
 
@@ -88,6 +103,17 @@ describe('the trace: a cleaned note adds no word', () => {
     ['a contracted denial', 'couldnt treat the back yard', "I couldn't treat the back yard."],
     ['a word the note says both ways', 'did not treat the kitchen treated the garage', 'I treated the garage. I did not treat the kitchen.'],
     ['a self-denying word', 'nothing in the attic', 'I found nothing in the attic.'],
+    ['a denial said in another order', 'no roaches seen in garage', 'I saw no roaches in the garage.'],
+    ['work after a denial in a note with no punctuation', 'no ants inside sprayed the perimeter', 'I saw no ants inside and sprayed the perimeter.'],
+    ['a denial that covers two verbs', 'did not spray or bait the kitchen', 'I did not spray or bait the kitchen.'],
+    ['a word that describes what was not seen', 'did not see any damaged wood', 'I did not see any damaged wood.'],
+    ['a plan the customer is to carry out', 'no activity inside. treated baseboards in kitchen and both bathrooms. recommended they fix the leak under the master bath sink',
+      'I treated the baseboards in the kitchen and both bathrooms. I recommend fixing the leak under the master bath sink.'],
+    ['the customer speaking, beside words of the technician', 'customer mentioned fleas from the neighbors cat. treated back patio and under the deck. told them to vacuum daily',
+      "You told me about fleas from the neighbor's cat. I treated the back patio and under the deck."],
+    ['what the customer is not seeing', 'customer not seeing ants anymore', 'You told me you are not seeing ants anymore.'],
+    ["the technician's own words", 'told cust to keep gate closed', 'I told you to keep the gate closed.'],
+    ['another work verb for one the note says plainly', 'baited the kitchen', 'I treated the kitchen.'],
   ])('keeps %s', (_label, note, text) => {
     expect(untracedWords(text, note)).toEqual([]);
   });
@@ -120,10 +146,16 @@ describe('the screens on a cleaned note', () => {
     ['a fourth sentence', 'checked the kitchen', 'I checked the kitchen. I checked the kitchen. I checked the kitchen. I checked the kitchen.', 'sentences'],
     ['a marked access code', 'gate code 4545 treated outside', 'The gate code is [redacted]. I treated outside.', 'access_code'],
     ['nothing', 'treated outside', '   ', 'empty'],
+    ['punctuation with no sentence', 'inspected kitchen', '...', 'empty'],
     ['any text, when the note is blank', '', 'I serviced it today.', 'no_note'],
     ['any text, when the note states nothing', 'it was the', 'It was the visit.', 'no_note'],
   ])('refuses %s', async (_label, note, text, reason) => {
     expect(await refusal(note, text)).toMatchObject({ reason });
+  });
+
+  test('the screens read the text as it is traced and stored (NFKC), so a full-width word is the word', async () => {
+    expect(ownNoteText('It is ｓａｆｅ for pets.')).toBe('It is safe for pets.');
+    expect(await refusal('treated outside safe for pets', 'I treated outside. It is ｓａｆｅ for pets.')).toEqual({ reason: 'banned', words: ['safe'] });
   });
 
   test('the marks a field note uses are plain text', async () => {
