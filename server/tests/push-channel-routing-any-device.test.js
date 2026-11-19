@@ -289,11 +289,37 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     expect(mockNotifyCustomer).not.toHaveBeenCalled();
   });
 
-  it('sendCompanionPush staleApp carries invoiceId and the event key: two receipts keep distinct tags, and the bell dedupes on the event key', async () => {
+  it('sendCompanionPush staleApp with an event key goes through the event claim (notifyCustomer), never straight to the fan-out', async () => {
+    const text = 'Your technician is on the way.\n\nTrack: https://example.invalid/t/abc';
+    await PushRouting.sendCompanionPush({ customerId: 'c-1', to: '9415550123', body: text, messageType: 'tech_en_route', appointmentId: 'visit-1',
+      staleApp: true, notificationEventKey: 'visit:v-1:en-route:2026-11-18T14:00:00.000Z' });
+    expect(mockSendToCustomer).not.toHaveBeenCalled();
+    expect(mockNotifyCustomer).toHaveBeenCalledTimes(1);
+    const [customerId, category, title, body, opts] = mockNotifyCustomer.mock.calls[0];
+    expect(customerId).toBe('c-1');
+    const presentation = PushRouting._test.pushPresentation('tech_en_route');
+    expect({ category, title, link: opts.link }).toEqual({ category: presentation.category, title: presentation.title, link: presentation.link });
+    expect(body).not.toContain('example.invalid');
+    expect(opts).toMatchObject({ dedupeKey: 'visit:v-1:en-route:2026-11-18T14:00:00.000Z', awaitPush: true, appointmentId: 'visit-1' });
+    expect(opts.pushOptions).toMatchObject({ nativeOnly: true, messageType: 'tech_en_route' });
+    expect(opts.pushOptions.minUpdatedAt).toBeUndefined();
+    expect(opts.pushOptions.holderMinUpdatedAt).toBeUndefined();
+    expect(mockProofRows).toHaveLength(0);
+  });
+
+  it('a bell already holding the event key (the lifecycle bell ran first) sends no second push and records no second bell', async () => {
+    mockNotifyCustomer.mockResolvedValueOnce({ id: 'bell-lifecycle', deduped: true, push: { queued: false, accepted: 0, reason: 'dedupe_payload_changed' } });
+    await PushRouting.sendCompanionPush({ customerId: 'c-1', to: '9415550123', body: 'Your technician is on the way.', messageType: 'tech_en_route',
+      staleApp: true, notificationEventKey: 'visit:v-1:en-route:2026-11-18T14:00:00.000Z' });
+    expect(mockNotifyCustomer).toHaveBeenCalledTimes(1);
+    expect(mockSendToCustomer).not.toHaveBeenCalled();
+  });
+
+  it('sendCompanionPush staleApp without an event key: the old path (direct fan-out, bell after acceptance); an invoice keeps its own tag and bell destination', async () => {
     mockPrefs = { payment_receipt_channel: 'sms' };
     mockSendToCustomer.mockResolvedValue({ sent: 1 });
     const companion = (invoiceId) => PushRouting.sendCompanionPush({ customerId: 'c-1', to: '9415550123', body: 'Your receipt is ready.', messageType: 'receipt',
-      staleApp: true, invoiceId, notificationEventKey: `receipt:${invoiceId}` });
+      staleApp: true, invoiceId });
     await companion('inv-1');
     await companion('inv-2');
     expect(mockSendToCustomer).toHaveBeenCalledTimes(2);
@@ -301,8 +327,6 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     expect(new Set(tags).size).toBe(2);
     expect(tags[0]).toContain('inv-1');
     expect(mockNotifyCustomer).toHaveBeenCalledTimes(2);
-    expect(mockNotifyCustomer.mock.calls[0][4]).toMatchObject({ dedupeKey: 'receipt:inv-1' });
-    expect(mockNotifyCustomer.mock.calls[1][4]).toMatchObject({ dedupeKey: 'receipt:inv-2' });
   });
 
   it('sendCompanionPush without staleApp passes no identifiers (push_and_sms unchanged): the type-wide bell, no dedupe key', async () => {
@@ -319,6 +343,17 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     expect(mockProofRows).toHaveLength(0);
     const opts = mockSendToCustomer.mock.calls[0][2];
     expect(opts.holderMinUpdatedAt).toBeInstanceOf(Date);
+    // The stale phone took the alert: it gets its in-app bell, once, on the event key (no push from the bell).
+    expect(mockNotifyCustomer).toHaveBeenCalledTimes(1);
+    expect(mockNotifyCustomer.mock.calls[0][4]).toMatchObject({ dedupeKey: 'reminder_24h:visit-1', push: false });
+  });
+
+  it('fresh phone rejects and no stale phone accepted: not_sent, no bell', async () => {
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    mockDevices.push(device({ updated_at: hoursAgo(2) }));
+    mockSendToCustomer.mockResolvedValue({ sent: 0 });
+    expect(await send()).toEqual({ delivered: false, deliveryOutcome: 'not_sent' });
+    expect(mockNotifyCustomer).not.toHaveBeenCalled();
   });
 
   it('fresh phone accepts (the stale phone was sent too): delivered, and the stamp is the fresh phone\'s check-in only', async () => {

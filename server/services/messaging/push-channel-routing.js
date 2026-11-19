@@ -337,6 +337,13 @@ function noPhoneReason(appStale) {
   return appStale === true ? { reason: 'stale_app_text', staleAppCompanion: true } : { reason: 'no_fresh_device' };
 }
 
+// A below-floor holder phone accepted the alert while the fresh phone did not: the text still goes
+// (delivery is false), but the phone that took the alert gets its in-app bell, recorded once with the
+// delivered path's event key. No push proof row (the text's row is the record).
+async function recordStaleAcceptanceBell(staleAccepted, { customerId, messageType, body, notificationEventKey, appointmentId, invoiceId }) {
+  if (staleAccepted) await recordBell(customerId, messageType, body, notificationEventKey, appointmentId, invoiceId);
+}
+
 // The proof row's app_checked_in_at: the check-in of the phone that accepted the push
 // (any-device sends only; unknown = no stamp). Internal log metadata, no customer effect.
 // The daily stale-app check reads it.
@@ -540,7 +547,9 @@ async function sendPush(customerId, messageType, body, { shouldContinue, minUpda
     // property so the app opens that house (GATE_APP_PROPERTY_SCOPE).
     ...(appointmentId ? { appointmentId } : {}),
   }, { shouldContinue, minUpdatedAt, messageType, ...(nativeOnly ? { nativeOnly: true } : {}), ...(holderMinUpdatedAt ? { holderMinUpdatedAt } : {}) });
-  return { stats, delivered: Number(stats && stats.sent) > 0, acceptedCheckedInAt: stats?.acceptedCheckedInAt || null };
+  return { stats, delivered: Number(stats && stats.sent) > 0, acceptedCheckedInAt: stats?.acceptedCheckedInAt || null,
+    // A below-floor holder phone took the push (GATE_APP_FIRST_STALE_TEXT): it never counts as delivery.
+    staleAccepted: Number(stats?.staleHolderDevices?.sent) > 0 };
 }
 
 // The push's collapse tag (APNs apns-collapse-id, hashed when long; the Android
@@ -833,7 +842,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     // accepting-but-silent token must not become the "delivery" that
     // suppresses the SMS while a fresh device failed.
     deliveryOutcome = 'uncertain';
-    const { delivered, acceptedCheckedInAt } = explicitPushOnly
+    const { delivered, acceptedCheckedInAt, staleAccepted } = explicitPushOnly
       ? { delivered: Number(appNotification?.push?.accepted) > 0 }
       : await sendPush(customerId, messageType, routedBody, {
         shouldContinue: windowGuardFrom(preSendCheck),
@@ -851,6 +860,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
           retryAfterMs: appNotification.push.retryAfterMs || 60000, ...bell };
       }
       logger.info(`[push-routing] ${messageType}: no device accepted delivery — falling back to SMS`);
+      await recordStaleAcceptanceBell(staleAccepted, { customerId, messageType, body, notificationEventKey, appointmentId, invoiceId });
       return { delivered: false, deliveryOutcome: 'not_sent', ...bell };
     }
     deliveryOutcome = 'accepted';
@@ -1020,6 +1030,9 @@ async function sendCompanionPush({ customerId, to, body, messageType, preSendChe
     if (!(await pushEligibleRuntime(customerId, to, messageType))) return;
     // staleApp (GATE_APP_FIRST_STALE_TEXT): the holder is already known stale, so the freshness
     // check below would refuse them. The text went; this is the app alert that still goes.
+    // With an event key it goes through the event's bell claim, so the lifecycle bell for the same
+    // event (en-route, completed) can never push a second alert.
+    if (staleApp && notificationEventKey) return await sendClaimedStaleAppAlert({ customerId, messageType, body, preSendCheck, appointmentId, notificationEventKey });
     if (!staleApp && !(await holderPushReach(customerId)).fresh) return;
     // The companion starts only after Twilio accepted the SMS, but its own
     // fan-out can still cross the cutoff — same per-leg gate. It also
@@ -1033,15 +1046,30 @@ async function sendCompanionPush({ customerId, to, body, messageType, preSendChe
       shouldContinue: windowGuardFrom(preSendCheck),
       ...companionReach(staleApp),
       appointmentId,
-      // staleApp: the identifiers the any-device delivered path passes, so two receipts keep their own
-      // collapse tags and the bell opens its own destination. Unset (push_and_sms) = as before.
+      // staleApp without an event key: the invoice keeps its own collapse tag and bell destination.
+      // Unset (push_and_sms) = as before.
       invoiceId,
-      eventKey: notificationEventKey,
     });
-    if (delivered) await recordBell(customerId, messageType, body, notificationEventKey || undefined, appointmentId, invoiceId);
+    if (delivered) await recordBell(customerId, messageType, body, undefined, appointmentId, invoiceId);
   } catch (err) {
     logger.warn(`[push-routing] companion push failed (SMS already sent): ${err.message}`);
   }
+}
+
+// The stale-app alert, claimed through the event's bell (notifyCustomer with the event key, like the
+// explicit-App branch of attemptPushFirst): whichever of this and the lifecycle bell (en-route
+// `visit:<id>:en-route:<at>`, completed `scheduled-service:<id>:completed`) runs first claims the key;
+// the other dedupes and sends no push. Same signed-in destination (the presentation link, never a
+// bearer page), link-free body, phone apps only, no floor of any kind, no proof row.
+async function sendClaimedStaleAppAlert({ customerId, messageType, body, preSendCheck, appointmentId, notificationEventKey }) {
+  const { title, link, category } = pushPresentation(messageType);
+  await require('../notification-service').notifyCustomer(customerId, category, title, pushBodyFor(true, body), {
+    link,
+    dedupeKey: notificationEventKey,
+    awaitPush: true,
+    ...(appointmentId ? { appointmentId } : {}),
+    pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), nativeOnly: true, messageType },
+  });
 }
 
 // What the companion sends and to whom. staleApp: the same presentation as an any-device push
