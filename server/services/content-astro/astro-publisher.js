@@ -1171,7 +1171,9 @@ async function assertFactCheckClear({ title, body, city, keyword, tag }, label) 
   const factCheck = await factCheckGate.evaluate({ title, body, city, keyword, tag });
   if (editorialEvidence.enabled() && factCheck.checked !== true) {
     throw editorialEvidence.reviewError({ checks: [{ name: 'source_support', status: 'error',
-      findings: [{ action: 'The mandatory factual review did not complete. Retry automatically; never treat an outage or disabled reviewer as approval.' }] }] });
+      findings: [{ action: 'The mandatory factual review did not complete. Retry automatically; never treat an outage or disabled reviewer as approval.' }] }],
+      // A model outage or timeout may pass a retry; a disabled checker or an empty body will not.
+      transient: factCheck.skipped === 'api_error' });
   }
   if (!factCheck.pass) {
     // Only P0 (objective, unambiguous) findings block; P1/P2 are advisory.
@@ -5590,6 +5592,7 @@ module.exports = {
   clampTitle,
   clampMetaDescription,
   _internals: {
+    assertFactCheckClear,
     competitorFreeMarkdown,
     generateHeroBuffer,
     compressToWebp,

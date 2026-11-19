@@ -217,7 +217,12 @@ describe('blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST / _RUNNER)',
   const planBody = `${body}\n\n## Why ghost ants trail\n\nText.\n\n## What stops them\n\nText.\n\n## Frequently Asked Questions\n\nText.\n`;
   const withPlan = (over = {}) => good({ body: planBody, answer_plan: { sections }, ...over });
   const run = (brief, content) => tw.draftSourceFor(ID, brief, { handed: true, gh: ghWith(content) }).runWithBrief();
-  const asMac = () => { process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac'; process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = 'mac'; };
+  // The Mac job runs under the Max-plan adapter, which marks itself on the global ('all' = every call).
+  const asMac = ({ adapter = true } = {}) => {
+    process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
+    process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = 'mac';
+    if (adapter) globalThis.__maxRunnerAdapter = { fetch: globalThis.fetch, answers: 'all' };
+  };
   beforeEach(() => {
     process.env.GATE_CONTENT_WRITER_TERMINAL = 'true';
     delete process.env.CONTENT_EDITORIAL_REVIEW_HOST;
@@ -226,7 +231,16 @@ describe('blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST / _RUNNER)',
     reviewPlan.mockReset().mockResolvedValue({ pass: true, findings: [], model: 'claude-opus' });
     astro.getFile.mockReset();
   });
-  afterEach(() => { process.env = { ...saved }; mockEditorialOn = false; });
+  afterEach(() => { process.env = { ...saved }; mockEditorialOn = false; delete globalThis.__maxRunnerAdapter; });
+
+  test('the Mac job without the Max-plan adapter reads no draft: it waits, so no fact-check call can bill the API', async () => {
+    asMac({ adapter: false });
+    const gh = ghWith(withPlan());
+    const out = await tw.draftSourceFor(ID, blog, { handed: true, gh }).runWithBrief();
+    expect(out).toMatchObject({ ok: false, wait: true, code: tw.MAX_PLAN_MISSING });
+    expect(gh.getBranchSha).not.toHaveBeenCalled();
+    expect(reviewPlan).not.toHaveBeenCalled();
+  });
 
   test('both switches are on only for exactly "mac", read at call time', () => {
     expect([tw.editorialReviewOnMac(), tw.runningOnMac()]).toEqual([false, false]);

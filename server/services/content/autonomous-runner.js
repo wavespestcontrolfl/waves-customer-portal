@@ -5449,7 +5449,7 @@ function macReviewOutage(err, run) {
 // waits) as a failure, so a model outage stops the pass and its run bell rings.
 function macPassFailure(run) {
   const tw = require('./terminal-writer');
-  return String(run.outcome).startsWith('failed') || [tw.PLAN_UNAVAILABLE, tw.REVIEW_UNAVAILABLE].includes(run.skip_reason);
+  return String(run.outcome).startsWith('failed') || [tw.PLAN_UNAVAILABLE, tw.REVIEW_UNAVAILABLE, tw.MAX_PLAN_MISSING].includes(run.skip_reason);
 }
 
 // The claim scope for the next batch slot (_terminalFirstIds lists): the

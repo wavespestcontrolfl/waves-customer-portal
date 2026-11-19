@@ -127,6 +127,8 @@ const AWAITS_MAC = 'terminal_draft_awaits_mac';
 const PLAN_UNAVAILABLE = 'terminal_plan_review_unavailable';
 // The Mac job's full editorial review could not run (autonomous-runner _awaitTerminalReviewer).
 const REVIEW_UNAVAILABLE = 'terminal_review_unavailable';
+// A Mac process without the Max-plan adapter (draftSourceFor): the draft is not read.
+const MAX_PLAN_MISSING = 'terminal_max_plan_missing';
 const MAX_PLAN_REASON_CHARS = 700;
 // In Mac mode a wait is rechecked soon, not after RECHECK_MS: the Mac job takes a
 // draft the terminal wrote after the server's look at the row, and its claim
@@ -344,6 +346,11 @@ function draftSourceFor(opportunityId, brief, { handed = false, dryRun = false, 
       // reads no branch and takes nothing, so nothing is consumed here.
       if (editorialReviewOnMac() && !runningOnMac()) {
         return waitResult(AWAITS_MAC, 'the Mac job takes terminal drafts; this row waits for it');
+      }
+      // The owner's spend line, at the one place a draft is consumed (any caller of runNext): on the Mac
+      // the fact-check calls ride the Max plan, or the draft is not read.
+      if (runningOnMac() && !maxPlanAdapterCovers()) {
+        return waitResult(MAX_PLAN_MISSING, 'the Max-plan adapter does not answer the fact-check lanes in this process; the draft is not read');
       }
       const fetched = await fetchTerminalDraft(opportunityId, { ...(gh ? { gh } : {}), expectedBriefId: handed ? brief.id : null })
         .catch((err) => ({ ok: false, code: UNREADABLE, reason: `terminal draft could not be read: ${err.message}`, agent_id: TERMINAL_AGENT_ID, session_id: null }));
@@ -737,7 +744,7 @@ module.exports = {
   terminalWriterLive, editorialReviewOnMac, runningOnMac, editorialPlanRequired, needsEditorialPlan, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, draftSourceFor, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue, closeTerminalItems, blogDraftRequested, macHoldsBlogDraft,
   raiseHoldQuestion, syncHoldQuestions, holdSkipReason,
   branchFor, draftPathFor, draftProblem, holdProblem,
-  AWAITS_MAC, PLAN_UNAVAILABLE, REVIEW_UNAVAILABLE, MAC_RECHECK_MS, recheckMs, MAC_MODEL_LANES, maxPlanAdapterCovers,
+  AWAITS_MAC, PLAN_UNAVAILABLE, REVIEW_UNAVAILABLE, MAX_PLAN_MISSING, MAC_RECHECK_MS, recheckMs, MAC_MODEL_LANES, maxPlanAdapterCovers,
   AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID, MISSING, INVALID, UNREADABLE, RECHECK_MS, MAX_BRIEF_AGE_MS, BRANCH_PREFIX, DRAFT_DIR, DRAFT_FIELDS,
   HELD, HOLD_OUTCOME, HOLD_MS, HOLD_REASONS,
 };

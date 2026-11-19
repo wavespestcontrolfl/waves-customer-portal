@@ -168,6 +168,8 @@ async function review({ document, title, domain, sourceUrls = [], factsPack = nu
     sources: evidence.records,
     model: response.model || null,
     reviewedAt: new Date().toISOString(),
+    // Only source errors make a reviewed result an outage; transient when every one may pass a retry.
+    ...(evidence.errors.length ? { transient: evidence.transient === true } : {}),
   };
 }
 
