@@ -1240,6 +1240,18 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
     expect(html).not.toContain('data-pay-pref="prepay_annual"');
   });
 
+  // A priced one-time pest choice makes a recurring choice keep only the pest rows (withPestOnlyRecurringChoice). With
+  // lawn as the only recurring row, accept then persists no recurring unit: zero units is no plan to prepay.
+  const PEST_ONE_TIME = { total: 250, items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 250 }], membershipFee: 99 };
+  test('the server-rendered page: a one-time pest choice beside lawn-only recurring rows offers no prepay', () => {
+    const lawnOnly = { result: { ...data([LAWN]).result, oneTime: PEST_ONE_TIME } };
+    // Control: without the one-time choice, accept keeps the lawn row (one unit) and the page offers prepay.
+    expect(renderPage('prepay-ssr-zero', lead(), lawnOnly, null)).toContain('data-payment-setup="prepay_annual"');
+    const html = renderPage('prepay-ssr-zero', { ...lead(), showOneTimeOption: true }, lawnOnly, null);
+    expect(html).not.toContain('data-payment-setup="prepay_annual"');
+    expect(html).not.toContain('data-pay-pref="prepay_annual"');
+  });
+
   // A legacy estimate keeps its mosquito ladder in result.recurring and a second service in the root recurring
   // block. The mosquito tier stamp runs after the estimate-level check, and the page prefers a frequency's flag, so
   // the multi-service veto must close the tier flags too.
@@ -1380,6 +1392,22 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
       } finally {
         spy.mockRestore();
       }
+    });
+
+    test('a one-time pest choice beside lawn-only rows leaves accept no recurring unit: prepay and its waiver close', () => {
+      const lawnOnly = {
+        result: {
+          recurring: { services: [lawnRow] },
+          oneTime: { total: 250, items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 250 }] },
+        },
+      };
+      const shown = bundle({ firstVisitFees: [{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: true }] });
+      // Control: with no one-time choice the lawn row is one unit, and the bundle is left as built.
+      expect(withMultiServicePrepayClosed(shown, lawnOnly, NO_CHOICE)).toBe(shown);
+      const out = withMultiServicePrepayClosed(shown, lawnOnly, { show_one_time_option: true });
+      expect(out.annualPrepayEligible).toBe(false);
+      expect(out.frequencies).toEqual([{ key: 'quarterly', annualPrepayEligible: false }]);
+      expect(out.firstVisitFees).toEqual([{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: false }]);
     });
 
     test('a split plan showing a setup fee: prepay closes everywhere, the fee row stays, its waiver line goes', () => {

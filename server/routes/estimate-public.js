@@ -6429,10 +6429,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // Sub-0.1% effective rates (e.g. a $3 headroom on a floor-priced $603/yr
   // lawn plan) are not a sellable incentive — treat them like the at-floor
   // case and hide the prepay option instead of advertising ~$0 savings.
-  // A plan with more than one recurring service cannot prepay: accept and the
-  // converter refuse it (multiServicePrepayClosed, the same count the /data bundle uses).
+  // Only a plan with exactly one recurring unit can prepay: accept and the
+  // converter refuse any other count (prepayUnitCountClosed, the same count the /data bundle uses).
   const showAnnualPrepayOption = prepayEligibleMix && !isExistingMember
-    && !multiServicePrepayClosed(estData, estimate)
+    && !prepayUnitCountClosed(estData, estimate)
     && (annualPrepayWaivesMembership || (prepayDiscountAmount > 0 && prepayDiscountRate >= 0.001));
   // The prepay invoice carries the disclosed bait-station setup as its own
   // line (converter, codex r4) — never waived by prepay — so the displayed
@@ -28377,13 +28377,16 @@ function recurringDataAsAccepted(estData, estimate) {
     : supplemented;
 }
 
-// True when the plan cannot prepay: accept and the converter count more than one recurring unit
-// (annualPrepayRecurringUnitCount, over the data accept persists). A count that fails is unknown, not one unit, so
-// prepay closes too: the page never offers a prepay, or its setup-fee waiver, that accept may refuse.
-function multiServicePrepayClosed(estData, estimate) {
+// True when the plan cannot prepay: the data accept persists does not hold exactly one recurring unit
+// (annualPrepayRecurringUnitCount; the manual accept and optOutPrepayOffered use the same `=== 1` rule). More than
+// one unit is a multi-service plan the converter refuses. Zero units is no plan: a priced one-time pest choice keeps
+// only the pest rows (withPestOnlyRecurringChoice), so lawn-only rows leave nothing to prepay. A count that fails is
+// unknown, not one unit, so prepay closes too: the page never offers a prepay, or its setup-fee waiver, that accept
+// may refuse.
+function prepayUnitCountClosed(estData, estimate) {
   try {
     return require('../services/estimate-converter')
-      .annualPrepayRecurringUnitCount(recurringDataAsAccepted(estData, estimate)) > 1;
+      .annualPrepayRecurringUnitCount(recurringDataAsAccepted(estData, estimate)) !== 1;
   } catch (err) {
     logger.warn(`[estimate-public] prepay unit count failed (${err?.name || 'Error'}); prepay closed`);
     return true;
@@ -28396,7 +28399,7 @@ function multiServicePrepayClosed(estData, estimate) {
 // just no longer says it is waived when you pay the year.
 function withMultiServicePrepayClosed(payload, estData, estimate) {
   const combos = Array.isArray(payload.serviceCadenceCombos) ? payload.serviceCadenceCombos : [];
-  const multi = multiServicePrepayClosed(estData, estimate);
+  const multi = prepayUnitCountClosed(estData, estimate);
   if (!combos.length && !multi) return payload;
   const closed = (entry) => ({ ...entry, annualPrepayEligible: false });
   // With no prepay there is no "waived when you pay the year": Ask Waves reads the fee flags as stated.
