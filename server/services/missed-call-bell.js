@@ -346,6 +346,13 @@ const SILENT_METADATA_KEYS = [
 // a failed press-1 screen comes with the screen's own key, which the shape
 // refuses already (pre-push audit r11).
 const SILENT_TEXT_BACK_OUTCOMES = ['sent', 'skipped:NON_MOBILE_SMS_RECIPIENT', 'skipped:SUPPRESSED_NON_MOBILE', 'skipped:already_sent_to_phone'];
+// The caller name the voice webhook saves for the press-1 announcement
+// (spokenCallerName) is set only when the call matched a customer as it came
+// in, so a name is a sign of a known caller even after the call's customer
+// link is gone. On production's unlinked inbound calls of the 90 days to
+// 2026-11-19 the key is JSON null (531 calls); 5 hold a name. A silent call,
+// and a silent call's mirror, hold none (pre-push audit r18).
+const NO_CALLER_NAME_SQL = (table) => `COALESCE(${table}.metadata->>'screen_caller_name', '') = ''`;
 const sqlNames = (names) => names.map((name) => {
   if (!/^[A-Za-z_:]+$/.test(name)) throw new Error(`not a plain name: ${name}`);
   return `'${name}'`;
@@ -363,6 +370,7 @@ const SILENT_SHAPE_SQL = `(NOT EXISTS (SELECT 1 FROM jsonb_each(to_jsonb(call_lo
   + " AND COALESCE(jsonb_typeof(call_log.metadata), 'null') IN ('null', 'object')"
   + " AND NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(call_log.metadata) = 'object' THEN call_log.metadata ELSE '{}'::jsonb END) mk"
   + ` WHERE mk NOT IN (${sqlNames(SILENT_METADATA_KEYS)}))`
+  + ` AND ${NO_CALLER_NAME_SQL('call_log')}`
   + ` AND COALESCE(call_log.metadata->>'missed_call_text_outcome', 'sent') IN (${sqlNames(SILENT_TEXT_BACK_OUTCOMES)}))`;
 
 // A silent call: inbound, over, with the silent shape, and who answered and
@@ -429,7 +437,10 @@ function otherGbpLineSql(row) {
 //    call and its bell (pre-push audit r9);
 //  - no text from or to it but our own text-back in the text log
 //    (message_type as in missed-call-text-back.js; as the text-back's
-//    contactState reads contact; pre-push audit r11);
+//    contactState reads contact; pre-push audit r11), in any status: a staff
+//    reply still sending (its reservation, the only row while the provider's
+//    outcome is unknown) or scheduled is contact too, so no reservation filter
+//    applies (pre-push audit r18);
 //  - in the unified inbox, which the SMS webhook writes first and the text log
 //    only as best effort (pre-push audit r14), nothing in the window but
 //    mirrors of silent calls and our text-back, on threads linked to no
@@ -460,6 +471,7 @@ const INBOX_SILENT_SQL = "((m.channel = 'voice' AND m.direction = 'inbound'"
   + " AND COALESCE(m.media, '[]'::jsonb) = '[]'::jsonb"
   + " AND COALESCE(jsonb_typeof(m.metadata), 'null') IN ('null', 'object')"
   + " AND COALESCE(m.metadata->>'source', 'voice_message_sync') = 'voice_message_sync'"
+  + ` AND ${NO_CALLER_NAME_SQL('m')}`
   + " AND NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(m.metadata) = 'object' THEN m.metadata ELSE '{}'::jsonb END) mk"
   + ` WHERE mk NOT IN (${sqlNames([...SILENT_METADATA_KEYS, 'source'])})))`
   + " OR (m.channel = 'sms' AND m.direction = 'outbound' AND m.message_type = 'missed_call_text_back'"
@@ -472,7 +484,6 @@ function silentRecordClauses(row, key, at, checkedAt) {
   const since = new Date(at.getTime() - REPEAT_DAYS * 86400 * 1000);
   const [settledSql, settledBindings] = settledSilentSql(checkedAt);
   const [otherLineSql, otherLines] = otherGbpLineSql(row);
-  const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
   const priorSilent = (qb) => wherePriorSilentHangup(qb.select(1).from('call_log'), row, key, at, checkedAt);
   return (qb) => qb
     .whereRaw(...silentCallSql())
@@ -494,7 +505,7 @@ function silentRecordClauses(row, key, at, checkedAt) {
         .whereRaw(`${settledSql} IS NOT TRUE`, settledBindings);
     })
     .whereNotExists(function loggedText() {
-      excludeUnresolvedSendReservations(this.select(1).from('sms_log as s'), 's')
+      this.select(1).from('sms_log as s')
         .where('s.created_at', '>=', since)
         .where((number) => number
           .whereRaw(`${phoneKeySql('s.from_phone')} = ?`, [key])

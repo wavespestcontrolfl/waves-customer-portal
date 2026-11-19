@@ -666,8 +666,9 @@ jest.setTimeout(30000);
       ['a conversation with the number linked to a customer', () => inbox(CALLER, null, { customer_id: LINKED_CUSTOMER })],
       ['a lead saved for the number', () => lead('727.555.0611')],
       ['a customer saved with the number on a secondary slot', () => database('customers').insert({ id: randomUUID(), first_name: 'Test', service_contact_phone: '727-555-0611', created_at: new Date(), updated_at: new Date() })],
+      ['a staff reply still sending, its reservation the only row', () => database('sms_log').insert({ id: randomUUID(), direction: 'outbound', from_phone: GBP_LINE, to_phone: CALLER, message_type: 'manual', message_body: 'Hi, Waves returning your call', status: 'sending', metadata: { manual_send_reservation: true }, created_at: new Date() })],
       ['a reply in a customer thread a promotion moved it to', () => inbox(null, { channel: 'sms', direction: 'inbound', body: 'who is this', metadata: { sms_contact_phone: CALLER } }, { contact_phone: null, unknown_contact: false, customer_id: LINKED_CUSTOMER })],
-    ])('%s that lands after the check read the record leaves the push alone (pre-push audit r13, r14, r15, r16)', async (label, lateWrite) => {
+    ])('%s that lands after the check read the record leaves the push alone (pre-push audit r13, r14, r15, r16, r18)', async (label, lateWrite) => {
       isEnabled.mockImplementation((name) => name === 'missedCallSpamRepeat' || name === 'missedCallUnknownCallers');
       await database('call_log').insert([prior(CALLER, 60 * 24 * 3), prior(CALLER, 60 * 24)]);
       const inserted = judged();
@@ -890,6 +891,8 @@ jest.setTimeout(30000);
       ['a text-back skipped for a staff number', { metadata: { stir_verstat: 'TN-Validation-Passed-A', missed_call_text_outcome: 'skipped:internal_number' } }],
       ['a text-back skipped because the number was already contacted', { metadata: { stir_verstat: 'TN-Validation-Passed-A', missed_call_text_outcome: 'skipped:already_contacted' } }],
       ['a text-back held for an opt-out', { metadata: { stir_verstat: 'TN-Validation-Passed-A', missed_call_text_outcome: 'skipped:SUPPRESSED_OPT_OUT' } }],
+      // The webhook saves a caller name only for a customer match (pre-push audit r18).
+      ['a caller name the webhook saved, with no customer link on the call', { metadata: { stir_verstat: 'TN-Validation-Passed-A', screen_caller_name: 'Pat Example' } }],
     ])('a number with %s in the last 14 days is never a repeat (pre-push audit)', async (label, sign) => {
       await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
       const row = judged();
@@ -947,7 +950,8 @@ jest.setTimeout(30000);
         call_recording_consent_disclaimer_played: true,
         metadata: {
           stir_verstat: 'TN-Validation-Passed-A', addons: { status: 'successful' }, domain: 'example.test', location: 'GBP — Venice', numberType: 'mobile',
-          screen_caller_name: 'WIRELESS CALLER', promise_chaser_eligible: true, ended_at: at,
+          // An unknown caller's name is JSON null on production (pre-push audit r18).
+          screen_caller_name: null, promise_chaser_eligible: true, ended_at: at,
           missed_call_notified_at: at, missed_call_settled_at: at, missed_call_text_leased_at: at, missed_call_text_settled_at: at,
           missed_call_text_outcome: textOutcome, missed_call_text_body: 'Sorry we missed your call', missed_call_spam_wave: 'repeat_quiet',
           missed_call_spam_repeat_shadow: true, repeat_caller_alerted_at: at,
@@ -976,6 +980,8 @@ jest.setTimeout(30000);
       ['our own text-back to it', true, { direction: 'outbound', from_phone: GBP_LINE, to_phone: CALLER, message_type: 'missed_call_text_back', message_body: 'Sorry we missed your call' }],
       ['a staff text to it', false, { direction: 'outbound', from_phone: GBP_LINE, to_phone: CALLER, message_type: 'manual', message_body: 'Hi, Waves returning your call' }],
       ['a text from it', false, { direction: 'inbound', from_phone: '(727) 555-0611', to_phone: GBP_LINE, message_body: 'please call me back', status: 'received' }],
+      // Its reservation is the only row while the provider's outcome is unknown (pre-push audit r18).
+      ['a staff reply still sending', false, { direction: 'outbound', from_phone: GBP_LINE, to_phone: CALLER, message_type: 'manual', message_body: 'Hi, Waves returning your call', status: 'sending', metadata: { manual_send_reservation: true } }],
     ])('a number with %s in the last 14 days is a repeat: %s', async (label, stillRepeat, sms) => {
       await database('call_log').insert([prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }), call(CALLER, 60 * 24 * 15, { answered_by: 'human' })]);
       const row = judged();
@@ -1002,6 +1008,7 @@ jest.setTimeout(30000);
       ['a call a staff member wrote', { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', author_type: 'admin' }, {}],
       ['a call with a key no silent call carries', { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', author_type: 'customer', metadata: { domain: 'x', voicemail_note: 'asked for a quote' } }, {}],
       ['a call another lane mirrored', { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', author_type: 'customer', metadata: { source: 'voice_agent' } }, {}],
+      ['a call mirror that names the caller', { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', author_type: 'customer', metadata: { domain: 'x', screen_caller_name: 'Pat Example' } }, {}],
       ['a conversation linked to a customer', null, { customer_id: LINKED_CUSTOMER }],
     ])('a number with %s only in the unified inbox is never a repeat (pre-push audit r14, r15)', async (label, message, conversation) => {
       await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
