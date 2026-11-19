@@ -70,6 +70,7 @@
  */
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const defaultDb = require('../../models/db');
+const { bookedVisitOrLiveHold } = require('./reservation-occupancy');
 const { guardedCoordSelects } = require('./day-stops');
 const { travelGapEnabled, travelGapConflicts } = require('./travel-gap');
 const { multiTechConfirmLive } = require('../../config/feature-gates');
@@ -601,12 +602,7 @@ async function findConflictingVisits({
   const query = db('scheduled_services')
     .where('scheduled_date', String(date).split('T')[0])
     .whereNotIn('status', excludeStatuses)
-    // Expired estimate-slot holds are dead weight until cleanup reclaims
-    // them — same active-reservation predicate every existing gate uses.
-    .where((q) => {
-      q.whereNull('reservation_expires_at')
-        .orWhereRaw('reservation_expires_at > NOW()');
-    })
+    .where(bookedVisitOrLiveHold)
     // COALESCE the nullable window_end (admin edits can leave a start with
     // no end) — same predicate as slot-reservation/rebooker/createSelfBooking.
     // window_start-NULL placeholder rows evaluate NULL here and stay inert.
@@ -890,10 +886,7 @@ async function findConflictingVisitsWithTravel({
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .where('scheduled_services.scheduled_date', String(date).split('T')[0])
     .whereNotIn('scheduled_services.status', excludeStatuses)
-    .where((q) => {
-      q.whereNull('scheduled_services.reservation_expires_at')
-        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-    })
+    .where(bookedVisitOrLiveHold)
     .whereNotNull('scheduled_services.window_start');
   if (excludeIds.length) query.whereNotIn('scheduled_services.id', excludeIds);
   if (scopeTechId) applyTechScope(query, 'scheduled_services.technician_id', scopeTechId);

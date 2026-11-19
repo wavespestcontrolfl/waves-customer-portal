@@ -159,6 +159,18 @@ postgres('hold grace + extend (real Postgres)', () => {
   });
 
   describe('commitReservation grace', () => {
+    test('checkout cannot claim a competing hold after staff booked the same hour', async () => {
+      await withHold({ windowStart: '10:00', windowEnd: '11:00' }, async ({ trx, holdId, customerId, date }) => {
+        const otherCustomer = randomUUID();
+        await trx('customers').insert({ id: otherCustomer, first_name: 'Office', last_name: 'Booking', phone: '+19415550112' });
+        await trx('scheduled_services').insert({ customer_id: otherCustomer, scheduled_date: date, window_start: '10:00',
+          window_end: '11:00', service_type: 'Lawn Care', status: 'confirmed', reservation_expires_at: trx.fn.now() });
+        await expect(slotReservation.commitReservation({ scheduledServiceId: holdId, customerId, trx }))
+          .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+        expect((await holdRow(trx, holdId)).customer_id).toBeNull();
+      });
+    });
+
     test('graduates a hold that expired 30 s ago (the owner case: 34 s late)', async () => {
       process.env.RESERVATION_COMMIT_GRACE_MINUTES = '10';
       await withHold({ expiresInSeconds: -30 }, async ({ trx, holdId, customerId }) => {

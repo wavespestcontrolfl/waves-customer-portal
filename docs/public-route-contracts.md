@@ -2030,7 +2030,11 @@ remain locked through persistence; a busy completion yields recoverable
 `SLOT_UNAVAILABLE`. Unrelated assigned technicians do not invalidate the proof;
 a concurrent move to unassigned is fenced. Completed stops retain their prefix.
 Capacity offers preserve the enabled south-zone day funnel and omit speculative
-ASAP expansion. Public acceptance and one-tap prepare route traffic before opening their write
+ASAP expansion. At reservation and confirmation, a visit linked to a customer
+still occupies its booked time after its original hold expires. An unclaimed
+hold releases that time at expiry. Fixed-hour writes check for overlap and
+arrival-window writes recheck the remaining route capacity under lock.
+Public acceptance and one-tap prepare route traffic before opening their write
 transaction, then acquire the date, selected-technician and unassigned fences
 before their first row lock. Commit verifies the prepared date/technician,
 current catalog allowance, live route, eligibility and closures; changed state
