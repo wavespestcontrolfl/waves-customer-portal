@@ -1193,6 +1193,33 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toContain('Thanks for having us out today.');
   });
 
+  it("prints the whole reconciled technician's report ahead of a typed report's frozen body", () => {
+    // The typed snapshot froze the report at completion with an old rain
+    // figure; the reconciliation corrected data.summary. The PDF prints the
+    // corrected whole report, as the live page's Visit Summary does.
+    const report = 'I fed the lawn and spot-treated the weeds by the mailbox. We had 1.2 inches of rain this week, so the turf is green. — Dana';
+    const data = {
+      ...BASE_DATA,
+      typedReport: {
+        ...BASE_DATA.typedReport,
+        todaysResult: {
+          headline: 'Your lawn visit is complete.',
+          body: 'I fed the lawn and spot-treated the weeds by the mailbox. We had 0.4 inches of rain this week, so the turf is green. — Dana',
+          bodySource: 'technician_report',
+        },
+      },
+      summary: report,
+      summarySource: 'technician_report',
+      reportV2: { todaysResult: 'I fed the lawn and spot-treated the weeds by the mailbox.', insights: [{ headline: 'Weed watch', whatWeSaw: 'Some weeds.' }] },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toContain(report);
+    expect(container.textContent).not.toContain('0.4 inches');
+    // Without the reconciliation, a typed report keeps its frozen body, as before.
+    const unreconciled = render(<ServiceReportDocument data={{ ...data, reportV2: { insights: [] } }} token="tok123" />);
+    expect(unreconciled.container.textContent).toContain('0.4 inches');
+  });
+
   it('keeps a promised follow-up and the next-service arrival window', () => {
     const data = {
       ...BASE_DATA,
