@@ -71,8 +71,9 @@ postgres('same-start visits check on Postgres', () => {
     const inactive = await customer({ active: false });
     const deleted = await customer({ deleted_at: new Date('2040-01-01T12:00:00Z') });
     const counted = [
-      // The same technician; pending and confirmed both count.
-      ...(await pair(live, { scheduled_date: '2040-01-15', technician_id: techA }, { status: 'confirmed' })),
+      // The same technician; pending and confirmed both count. A booked visit with a
+      // leftover hold stamp still counts: a hold has no customer (slot-reservation.js).
+      ...(await pair(live, { scheduled_date: '2040-01-15', technician_id: techA }, { status: 'confirmed', reservation_expires_at: new Date('2040-01-10T15:00:00Z') })),
       // One of the two has no technician yet.
       ...(await pair(live, { scheduled_date: '2040-01-16', window_start: '09:00', window_end: '10:00', technician_id: techA }, { technician_id: null })),
       // Three at one start: each visit is one row, not one row per partner.
@@ -99,8 +100,6 @@ postgres('same-start visits check on Postgres', () => {
     // The tracker leads `status`: a visit it reads cancelled or complete is not live, whatever its status says.
     await pair(live, { scheduled_date: '2040-01-25' }, { track_state: 'cancelled' });
     await pair(live, { scheduled_date: '2040-01-26', track_state: 'complete' }, { track_state: 'scheduled' });
-    // A time held for an estimate is not a booked visit yet.
-    await pair(live, { scheduled_date: '2040-01-27' }, { reservation_expires_at: new Date('2040-01-10T18:00:00Z') });
     await pair(inactive, { scheduled_date: '2040-01-15' });
     await pair(deleted, { scheduled_date: '2040-01-15' });
 

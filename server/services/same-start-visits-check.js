@@ -20,8 +20,10 @@
  * run its route is set and its day-before text has gone. Two technicians at one
  * start are two people working at once, so they never count. A visit the
  * tracker already reads complete or cancelled is not live, whatever its
- * status says, and a time held for an estimate is not a booked visit yet.
- * The services of one legacy visit group (one visit_id, visit-groups.js) are
+ * status says. A time held for an estimate has no customer yet (the hold
+ * discriminator in slot-reservation.js), so the customer join leaves it out; a
+ * booked visit with a leftover hold stamp still counts. The services of one
+ * legacy visit group (one visit_id, visit-groups.js) are
  * one stop that shares its start by design: they never pair with each other,
  * and beside a separate visit at that start they count as one. A visit with no
  * arrival time is the no-window notice's (auto-dispatch/audit.js), and a
@@ -89,10 +91,6 @@ function findSameStartVisits(todayET) {
     // cancelled is not live work on either side (customer-lifecycle-guard.js).
     .where(function trackerLive() { this.whereNull('a.track_state').orWhereNotIn('a.track_state', TERMINAL_TRACK_STATES); })
     .where(function partnerTrackerLive() { this.whereNull('b.track_state').orWhereNotIn('b.track_state', TERMINAL_TRACK_STATES); })
-    // A time held for an estimate (reservation_expires_at set) is not a booked
-    // visit yet: the hold clears the stamp when it becomes one (slot-reservation.js).
-    .whereNull('a.reservation_expires_at')
-    .whereNull('b.reservation_expires_at')
     // The services of one visit group are one stop: a pair only across stops.
     .where(function twoStops() { this.whereNull('a.visit_id').orWhereNull('b.visit_id').orWhereRaw('a.visit_id <> b.visit_id'); })
     .distinct('a.id', 'a.customer_id', 'a.scheduled_date', 'a.window_start', 'a.service_type', 'a.technician_id', 'a.visit_id', 'c.first_name', 'c.last_name')

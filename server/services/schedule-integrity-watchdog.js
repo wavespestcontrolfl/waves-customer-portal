@@ -825,7 +825,7 @@ async function runInner({ now = new Date() } = {}) {
   }
 
   // Last: two visits at one start, within what is left of the shared budget.
-  const sameStartRang = await ringWithinBudget(sameStart.alerts, { episodes, budget: lateBudget(classRings, combinedBooking) });
+  const sameStartRang = await ringWithinBudget(sameStart.alerts, { episodes, budget: lateBudget(classRings, combinedBooking), prefix: SAME_START_PREFIX });
 
   return {
     skipped: false,
@@ -911,14 +911,47 @@ function lateBudget(classRings, combinedBooking) {
 
 const capHit = () => logger.warn(`[schedule-integrity] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
 
-// Rings `alerts` in order until `budget` real rings are spent; the rest ring on
-// a later run (their condition is found again). Returns the real rings.
-async function ringWithinBudget(alerts, { episodes, budget }) {
-  let rang = 0;
-  for (const alert of alerts) {
-    if (rang >= budget) { capHit(); break; }
-    if (realRing(await ringAlert(episodes, ...alert), episodes, { countRefreshRings: true })) rang += 1;
+// The days each standing bell under `prefix` carries: the newest row per key,
+// the one a delivery lands on (notifyAdmin's own lookup). A key whose newest
+// row is auto-cleared maps to null: a delivery there reopens it and rings.
+async function standingBellDays(prefix) {
+  const rows = await db('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("starts_with(metadata->>'dedupeKey', ?)", [prefix])
+    .orderBy('created_at', 'desc')
+    .select(db.raw("metadata->>'dedupeKey' as dedupe_key"), db.raw("metadata->>'autoCleared' as auto_cleared"), db.raw("metadata->'itemKeys' as item_keys"));
+  const days = new Map();
+  for (const row of rows) {
+    const key = String(row.dedupe_key || '');
+    if (!key.startsWith(prefix) || days.has(key)) continue;
+    days.set(key, row.auto_cleared === 'true' ? null : (Array.isArray(row.item_keys) ? row.item_keys.map(String) : []));
   }
+  return days;
+}
+
+// The late class's alerts in order, with real rings up to `budget`. Past the
+// budget, under episodes, a standing bell still gets its quiet update (link,
+// detail, fixed days), so it never points at a visit already fixed: the update
+// carries only the days the bell already had and never rings, so a new day
+// stays new and rings on a later run. A finding with no standing bell, or an
+// auto-cleared one (a delivery would reopen it), waits. Killed, the rest wait.
+async function ringWithinBudget(alerts, { episodes, budget, prefix }) {
+  let rang = 0;
+  let held = 0;
+  let standing = null;
+  for (const alert of alerts) {
+    let delivery = alert;
+    if (rang >= budget) {
+      if (!episodes) { held += 1; break; }
+      standing ??= await standingBellDays(prefix);
+      const carried = standing.get(alert[0]);
+      if (!carried) { held += 1; continue; }
+      const [key, title, body, metadata, opts] = alert;
+      const kept = (metadata.itemKeys || []).filter((day) => carried.includes(day));
+      delivery = [key, title, body, { ...metadata, itemKeys: kept }, { ...opts, ringOnRefresh: () => false }];
+    }
+    if (realRing(await ringAlert(episodes, ...delivery), episodes, { countRefreshRings: true })) rang += 1;
+  }
+  if (held) capHit();
   return rang;
 }
 
