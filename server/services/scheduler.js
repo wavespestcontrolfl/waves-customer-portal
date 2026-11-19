@@ -10315,13 +10315,16 @@ function initScheduledJobs() {
   // =========================================================================
   // Call booking-miss watchdog — every 10 min (owner 2026-11-18: a visit the
   // call agent held rings about 15 minutes after the call, not 1.5-2 hours
-  // later), ring an admin bell for any call whose V2 extraction confirmed
-  // a concrete appointment slot that never became a scheduled_services row
+  // later). Its minutes stay 4 min off the ingest watchdog's :07/:37 and off
+  // the nightly checks' own minutes (23:20-23:32, the #3208 rule in
+  // failing-jobs-check.test.js). It rings an admin bell for any call whose V2
+  // extraction confirmed a concrete appointment slot that never became a
+  // scheduled_services row
   // (outbound skip / v2 routing block / missing fields all park silently in
   // triage otherwise). Dark behind GATE_CALL_BOOKING_MISS_WATCHDOG.
   // See server/services/call-booking-miss-watchdog.js.
   // =========================================================================
-  cron.schedule('2,12,22,32,42,52 * * * *', async () => {
+  cron.schedule('3,13,23,33,43,53 * * * *', async () => {
     try {
       const { runCallBookingMissWatchdog } = require('./call-booking-miss-watchdog');
       const result = await runCallBookingMissWatchdog();
