@@ -539,7 +539,7 @@ function OpenOffer({ token, data, onApplied, onReload, onInvalid }) {
         <p style={{ ...BODY_STYLE, borderTop: '1px solid var(--border, #E2E8F0)', paddingTop: 12 }}>
           Please don&rsquo;t give notice at your current job until you have signed this offer.
         </p>
-        <TextConsent token={token} initial={data.textConsent} onPending={setConsentPending} onStale={onReload} onSnapshot={onApplied} onInvalid={onInvalid} locked={accept.busy || dateReq.busy || decline.busy} />
+        <TextConsent token={token} initial={data.textConsent} onPending={setConsentPending} onStale={onReload} onSnapshot={onApplied} onInvalid={onInvalid} locked={accept.busy || dateReq.busy || decline.busy || unknown} />
         <SignBlock
           name={name}
           onName={setName}

@@ -283,6 +283,7 @@ describe('CareersOfferPage — open state', () => {
     expect(await screen.findByText(/We could not refresh this offer/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Decline' })).toBeDisabled();
+    expect(screen.getByLabelText('Text me about this offer')).toBeDisabled();
   });
 
   it('keeps actions locked after a lost reply until a re-read works, then shows the result', async () => {
