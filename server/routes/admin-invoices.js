@@ -3114,17 +3114,14 @@ router.get('/:id/credit-context', async (req, res, next) => {
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     const total = CustomerCredit.round2(invoice.total || 0);
     const amountDue = invoiceAmountDue(invoice);
-    const { spendable } = await CustomerCredit.accountCreditSnapshotForInvoice({
-      customerId: invoice.customer_id,
-      invoiceId: invoice.id,
-    }, db);
+    const balance = (await CustomerCredit.getBalance(invoice.customer_id)) || 0;
     res.json({
       customer_id: invoice.customer_id,
       invoice_number: invoice.invoice_number,
       total,
       credit_applied: CustomerCredit.round2(invoice.credit_applied || 0),
       amount_due: amountDue,
-      balance: spendable,
+      balance,
     });
   } catch (err) { next(err); }
 });

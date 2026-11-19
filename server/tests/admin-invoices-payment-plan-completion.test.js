@@ -54,6 +54,7 @@ jest.mock('../services/payment-lifecycle-email', () => ({
 }));
 jest.mock('../services/customer-credit', () => ({
   round2: (v) => Math.round((Number(v) || 0) * 100) / 100,
+  getBalance: jest.fn(async () => 100),
   accountCreditSnapshotForInvoice: jest.fn(async () => ({ spendable: 500 })),
   spendableAccountCreditForInvoice: jest.fn(async ({ balance }) => balance),
   postCreditMovement: jest.fn(async () => ({ balanceAfter: 400 })),
@@ -284,11 +285,14 @@ describe('active payment plans auto-complete when the invoice settles', () => {
     });
   });
 
-  test('apply-credit checks available credit before retiring a payment session', async () => {
+  test('the staff credit context reports the account balance while posting checks spendable credit before retiring a payment session', async () => {
     const CustomerCredit = require('../services/customer-credit');
     CustomerCredit.accountCreditSnapshotForInvoice.mockResolvedValueOnce({ spendable: 75 });
 
     await withServer(async (baseUrl) => {
+      const preview = await fetch(`${baseUrl}/admin/invoices/inv-1/credit-context`);
+      expect(preview.status).toBe(200);
+      await expect(preview.json()).resolves.toMatchObject({ balance: 100, amount_due: 100 });
       const res = await fetch(`${baseUrl}/admin/invoices/inv-1/apply-credit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -304,17 +308,6 @@ describe('active payment plans auto-complete when the invoice settles', () => {
       }, db);
       expect(db.transaction).not.toHaveBeenCalled();
       expect(CustomerCredit.postCreditMovement).not.toHaveBeenCalled();
-    });
-  });
-
-  test('the staff credit preview shows the $75 that can be applied to this invoice', async () => {
-    const CustomerCredit = require('../services/customer-credit');
-    CustomerCredit.accountCreditSnapshotForInvoice.mockResolvedValueOnce({ balance: 100, reserved: 25, spendable: 75 });
-    await withServer(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/admin/invoices/inv-1/credit-context`);
-      expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toMatchObject({ balance: 75, amount_due: 100 });
-      expect(CustomerCredit.accountCreditSnapshotForInvoice).toHaveBeenCalledWith({ customerId: INVOICE.customer_id, invoiceId: INVOICE.id }, db);
     });
   });
 });
