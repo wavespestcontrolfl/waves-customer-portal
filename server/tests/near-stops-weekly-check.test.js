@@ -167,6 +167,18 @@ describe('part 1: next-door stops booked apart', () => {
     expect(keys([home, lawn, pest])).toEqual(keys([home, pest, lawn]));
   });
 
+  test('a split keeps its key when another service at the same stop comes first', () => {
+    const home = stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', plan: true });
+    const pest = { ...stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', start: '09:00', plan: true }), created_at: '2027-01-01T12:00:00Z' };
+    const lawn = { ...stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', start: '10:00', plan: true }), created_at: '2027-01-02T12:00:00Z' };
+    const before = findApartPairs([home, pest, lawn]);
+    // The office moves the lawn service ahead of the pest service: the line shows it now, the key stays.
+    const after = findApartPairs([home, pest, { ...lawn, window_start: '08:00:00' }]);
+    expect([before[0].second.id, after[0].second.id]).toEqual([pest.id, lawn.id]);
+    const keys = (pairs) => composeWeeklyCheck({ apart: pairs, nightLog: new Map(), weekStart: '2027-03-01' }).itemKeys;
+    expect(keys(after)).toEqual(keys(before));
+  });
+
   test("one customer's two homes on one day with a stop between are reported: the re-plan keeps their hours", () => {
     const rental = north(0.3, HOME_A);
     const rows = [
@@ -457,6 +469,23 @@ describe('part 1: next-door stops booked apart', () => {
     const rows = [at('2027-03-01', '34202'), at('2027-03-08', null), at('2027-03-15', '34211')];
     // The two complete addresses are two homes; the partial one fits both, so it pairs with neither.
     expect(findApartPairs(rows).map((p) => [p.first.id, p.second.id])).toEqual([[rows[0].id, rows[2].id]]);
+  });
+
+  test('a street line with no zip never merges two homes whose zips differ, whichever row comes first', () => {
+    const at = (date, zip) => stop({ customer: 'c-a', at: HOME_A, date, street: '100 Sample Way', zip, city: null, plan: true });
+    const rows = [at('2027-03-01', null), at('2027-03-08', '34202'), at('2027-03-15', '34211')];
+    // The two zips are two homes; the street-only visit fits both, so it pairs with neither.
+    expect(findApartPairs(rows).map((p) => [p.first.id, p.second.id])).toEqual([[rows[1].id, rows[2].id]]);
+  });
+
+  test('on a day with no route numbers, an unassigned legacy visit runs at its window start', () => {
+    const rows = [
+      stop({ customer: 'c-x', at: north(20), date: '2027-03-01', start: '10:00' }),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-01', start: '11:00' }),
+      { ...stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: null }), time_window: 'morning', technician_id: null },
+    ];
+    // The morning visit runs at 8:00, before the 10:00 stop, so that stop sits between the neighbors.
+    expect(findApartPairs(rows)).toEqual([expect.objectContaining({ between: 1 })]);
   });
 
   test('a visit with no time yet on the same day is not judged', () => {

@@ -192,50 +192,62 @@ function toVisit(row) {
     tech: row.technician_id ? String(row.technician_id) : null,
     done: row.status === SERVED_STATUS, // served: a pairing partner, never a split to report
     nightKind: nightKindOf(row),
-    // The board's order fields (route-reorder-window-fit.js currentOrder).
+    // The board's order fields (route-reorder-window-fit.js currentOrder). A legacy
+    // window counts at its start, as the app's time fallback reads it, so a day with
+    // no route numbers runs by hour.
     route_order: row.route_order ?? null,
-    window_start: row.window_start ?? null,
+    window_start: windowStartOf(row),
     created_at: row.created_at ?? null,
     row,
   };
 }
 
-// How completely a row names its address, as the app's same-place rule reads it
-// (route-reorder-window-fit.js effectivePremise: the visit's stamp, else the
-// customer's): 2 a street line, zip and city; 1 a street line missing its zip or
-// city; 0 no street line.
-function addressRank(row) {
+const hasStreet = (premise) => !!premise?.service_address_line1;
+// What an address says beyond its street line and unit: its zip and its city.
+const detailOf = (premise) => Number(!!premise.service_address_zip) + Number(!!premise.service_address_city);
+
+// How surely a row names its home, under the app's same-place rule (route-reorder-
+// window-fit.js effectivePremise: the visit's stamp, else the customer's): 0 a linked
+// property; 1, 2 or 3 an address with both, one or neither of its zip and city; 4
+// only a map pin.
+function homeTier(row) {
+  if (row.property_id) return 0;
   const premise = effectivePremise(row);
-  if (!premise.service_address_line1) return 0;
-  return premise.service_address_zip && premise.service_address_city ? 2 : 1;
+  return hasStreet(premise) ? 3 - detailOf(premise) : 4;
 }
 
-// How surely a row names its home: 0 a linked property, 1 a complete address, 2 an
-// address missing its zip or city, 3 only a map pin.
-function homeTier(row) {
-  return row.property_id ? 0 : 3 - addressRank(row);
+// A home's address: the street line and unit of its rows, with every zip and city
+// they agree on, so each later row is checked against all the home knows.
+function withAddress(address, premise) {
+  if (!hasStreet(premise)) return address;
+  if (!address) return { ...premise };
+  if (!samePlace(address, premise)) return address; // a linked row stamped elsewhere adds nothing
+  return {
+    ...address,
+    service_address_zip: address.service_address_zip || premise.service_address_zip || null,
+    service_address_city: address.service_address_city || premise.service_address_city || null,
+  };
 }
 
 // Whether `row` belongs to `home` under the app's own same-place rule
 // (auto-dispatch/current-conflict.js samePlace). A linked row belongs only to its
-// own property's home. A row with an address belongs to a home whose own address
-// (its most complete row) agrees, unit included; two known addresses that differ are
+// own property's home. A row with an address belongs to a home whose address agrees,
+// unit included, with no zip or city in conflict; two known addresses that differ are
 // two homes even at one map pin (two units of one building). Only when the row or the
 // home has no street line does the map pin decide.
 function belongsTo(home, row, geo) {
   if (row.property_id) return home.propertyIds.has(String(row.property_id));
-  if (addressRank(row) > 0 && addressRank(home.identity) > 0) return samePlace(home.identity, row);
+  if (hasStreet(home.address) && hasStreet(effectivePremise(row))) return samePlace(home.address, row);
   return !!(home.geo && geo) && haversine(home.geo.lat, home.geo.lng, geo.lat, geo.lng) <= SAME_PLACE_MILES;
 }
 
 // Every row's home, pinned or not. Linked rows go first (one home per property),
-// then complete addresses, then addresses missing a zip or city, then rows with only
-// a map pin, so a weaker row never decides how stronger ones group, and a home is
-// matched by its own address, never through a weaker row it took in. Each row joins
-// the one home it belongs to; a row that belongs to none starts its own, and one
-// that belongs to more than one (one partial address or one pin for two homes)
-// cannot be placed: it stays a stop on its route but is never paired. Only a placed
-// home with a pin can be paired.
+// then addresses with the most detail (zip and city, then one of them, then neither),
+// then rows with only a map pin, so a vaguer row never decides how sharper ones
+// group. Each row joins the one home it belongs to; a row that belongs to none
+// starts its own, and one that belongs to more than one (a street line with no zip
+// for two zips, or one pin for two homes) cannot be placed: it stays a stop on its
+// route but is never paired. Only a placed home with a pin can be paired.
 function buildPlaces(rows) {
   const places = [];
   const byCustomer = new Map();
@@ -254,7 +266,7 @@ function buildPlaces(rows) {
         key: `home-${places.length + 1}`,
         customerId,
         geo,
-        identity: row, // its most complete address so far
+        address: null,
         propertyIds: new Set(),
         unplaced: matches.length > 1,
         name: shortName(row),
@@ -264,7 +276,7 @@ function buildPlaces(rows) {
       places.push(place);
       own.push(place);
     }
-    if (addressRank(row) > addressRank(place.identity)) place.identity = row;
+    place.address = withAddress(place.address, effectivePremise(row));
     if (row.property_id) place.propertyIds.add(String(row.property_id));
     if (!place.geo && geo) place.geo = geo;
     place.visits.push({ ...toVisit(row), home: place.key, placeName: place.name, city: place.city });
@@ -292,6 +304,11 @@ const slotKey = (v) => `${v.date} ${v.windowStart || '99:99'}`;
 // resolve the same way, so a split keeps its key from week to week.
 const visitOrder = (x, y) => slotKey(x).localeCompare(slotKey(y)) || x.id.localeCompare(y.id);
 
+// A stop's first-booked service (booked first, then the lower id): it names the stop
+// in the split's key, so a split keeps its key when the services it shows change
+// (siblings reordered, one served) or the whole stop moves to another day.
+const bookedFirst = (x, y) => (ms(x.created_at) || Infinity) - (ms(y.created_at) || Infinity) || x.id.localeCompare(y.id);
+
 // One stop per home and day: every service there that day (a combined visit, or
 // services back to back) is one trip. A stop stays live while any of its services
 // is outstanding, and its first live service (visitOrder) stands for it; it is
@@ -307,6 +324,7 @@ function homeDays(place) {
     date: visits[0].date,
     visits,
     lead: visits.find((v) => !v.done) || visits[0],
+    anchor: [...visits].sort(bookedFirst)[0].id,
     done: visits.every((v) => v.done),
   }));
 }
@@ -393,8 +411,8 @@ function splitOf(x, y, pair, routes) {
 }
 
 const gapOf = (p) => p.gap ?? 0;
-// One stable key per split: its two visits.
-const pairKey = (p) => [p.first.id, p.second.id].sort().join('|');
+// One stable key per split: its two stops' first-booked services.
+const pairKey = (p) => p.key;
 
 // The two homes' stops, paired one to one. A stop already together with a stop next
 // door (or on the same day with no time to judge) pairs first; the rest pair nearest
@@ -406,6 +424,7 @@ function pairSplits(pair, routes) {
     for (const y of homeDays(pair.b)) {
       candidates.push({
         keys: [x.key, y.key],
+        key: [x.anchor, y.anchor].sort().join('|'),
         done: x.done || y.done,
         days: Math.abs(daysBetween(x.date, y.date)),
         ...splitOf(x, y, pair, routes),
@@ -436,7 +455,7 @@ function findApartPairs(rows, { from = null, until = null } = {}) {
     for (const hit of pairSplits(pair, routes)) {
       if (hit.done || hit.days > LOOKAHEAD_DAYS) continue;
       if ((from && hit.first.date < from) || (until && hit.second.date > until)) continue;
-      apart.push({ ...pair, first: hit.first, second: hit.second, ...hit.split });
+      apart.push({ ...pair, key: hit.key, first: hit.first, second: hit.second, ...hit.split });
     }
   }
   // Same-day splits first, then the pairs the fewest days apart: the easiest to join.
