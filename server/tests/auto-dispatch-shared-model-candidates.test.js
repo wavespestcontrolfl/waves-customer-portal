@@ -77,6 +77,7 @@ function emptyDb() {
   ['where', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
     .forEach((m) => { c[m] = () => c; });
   c.select = async () => [];
+  c.distinct = async () => [];
   return () => c;
 }
 
@@ -180,6 +181,7 @@ function singleCandidateDb(dayStops) {
       if (n === 2) return dayStops; // the candidate tech-days' stops (one batched read)
       return []; // current-placement queries (legacy + shared-model)
     };
+    c.distinct = async () => [];
     return c;
   };
 }
@@ -247,6 +249,7 @@ function windowlessAwareSingleCandidateDb(dayStopsFixture) {
       if (field === 'scheduled_services.window_start') filteredWindowless = true;
       return c;
     };
+    c.distinct = async () => dayStopsFixture.filter(row => row.window_start == null);
     c.select = async () => {
       if (n === 1) return [];
       if (n === 2) return filteredWindowless ? dayStopsFixture.filter((r) => r.window_start != null) : dayStopsFixture;
@@ -256,7 +259,7 @@ function windowlessAwareSingleCandidateDb(dayStopsFixture) {
   };
 }
 
-test('a day whose only "stop" is a windowless placeholder scores like an empty day (Codex pre-push P1)', async () => {
+test('a windowless placeholder is never a timed stop and its technician-day cannot be renumbered by dispatch', async () => {
   process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
   const SLOT = { date: '2026-08-06', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 2, total_drive_minutes: 12, stops_that_day: 1, score: 2 };
   const placeholderRow = {
@@ -276,10 +279,9 @@ test('a day whose only "stop" is a windowless placeholder scores like an empty d
     SERVICE, prefs, { ...ctxBase(), db: windowlessAwareSingleCandidateDb([]) },
   );
 
-  expect(withPlaceholder).toHaveLength(1);
-  expect(withPlaceholder[0].detour_minutes).toBe(empty[0].detour_minutes);
-  expect(withPlaceholder[0].total_drive_minutes).toBe(empty[0].total_drive_minutes);
-  expect(withPlaceholder[0].same_area_share).toBe(0);
+  expect(withPlaceholder).toHaveLength(0);
+  expect(empty).toHaveLength(1);
+  expect(empty[0].same_area_share).toBe(0);
 });
 
 test('computeCurrentPlacement: a current-day expired hold / no_show does not count toward detour or clustering', async () => {

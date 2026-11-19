@@ -442,7 +442,8 @@ const SERIES_MOVE_SNAPSHOT_COLUMNS = [
 // The two automatic night writers: auto-dispatch and the day re-plan (services/day-replan, owner 2026-11-03). Neither
 // is a person's choice of date or time, so neither stamps a date exception, ends a customer-pick hand-off, or resets the
 // recurring due date; both fail closed on an unreadable blackout list.
-const isNightWriter = (initiatedBy) => initiatedBy === 'auto_dispatch' || initiatedBy === 'day_replan';
+const AUTO_DISPATCH_INITIATOR = 'auto_dispatch';
+const isNightWriter = (initiatedBy) => initiatedBy === AUTO_DISPATCH_INITIATOR || initiatedBy === 'day_replan';
 
 function dateExceptionStamp(row, source) {
   if (!row || row.is_recurring !== true || isNightWriter(source)) return {};
@@ -1804,6 +1805,9 @@ class SmartRebooker {
   async rescheduleOnce(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
+    if (options.dispatchRoutePosition && (initiatedBy !== AUTO_DISPATCH_INITIATOR || service.visit_id)) {
+      throw Object.assign(new Error('The scored dispatch stop changed'), { code: 'ROUTE_CHANGED', statusCode: 409 });
+    }
     const allowedStatuses = options.allowLive === true
       ? new Set([...RESCHEDULABLE_STATUSES, ...LIVE_OVERRIDE_STATUSES])
       : RESCHEDULABLE_STATUSES;
@@ -2185,12 +2189,15 @@ class SmartRebooker {
         // single path, the series path, and the zone-null confirm all acquire
         // date-occupancy -> tech in one order (no deadlock inversion). See the
         // ORDERING CONTRACT in scheduling/occupancy.js.
-        await acquireOccupancyLock(trx, newDateStr);
+        const sourceDay = dateOnly(originalDate);
+        if (options.dispatchRoutePosition) await acquireOccupancyLocks(trx, [sourceDay, newDateStr]);
+        else await acquireOccupancyLock(trx, newDateStr);
         // Fence both the kept route and unassigned capacity against U↔T
         // assignment changes. The helper dedupes a techless target.
         await lockTechDays(trx, [
           { techId: keptTechId, date: newDateStr },
           { techId: null, date: newDateStr },
+          ...(options.dispatchRoutePosition ? [{ techId: service.technician_id, date: sourceDay }, { techId: null, date: sourceDay }] : []),
         ]);
       }
       // Caller-supplied pre-move guard (the call applier's customer/property/
@@ -2403,6 +2410,10 @@ class SmartRebooker {
           trx, technicianId: keptTechId, service, destination: { date: newDateStr, windowStart: updates.window_start },
         });
       }
+      if (options.dispatchRoutePosition) {
+        await require('./auto-dispatch/candidate-slots').verifyScoredPosition(trx, service, newDateStr, keptTechId,
+          { start: updates.window_start, end: updates.window_end }, options.dispatchRoutePosition);
+      }
       // Row lock on the moving stop itself, immediately before verify
       // (Codex round 1 P1 on PR #5267, PRRT_kwDOR3YQi86mzgqH):
       // verifyArrivalCapacity's own row lock only covers the DESTINATION
@@ -2566,7 +2577,9 @@ class SmartRebooker {
       // uses). Never reached when capacityCommitFit is null (gate off, a
       // same-day/same-tech move, or no technician) — route_order stays null,
       // byte-identical to today.
-      if (capacityCommitFit) {
+      if (options.dispatchRoutePosition) {
+        await require('./scheduling/arrival-route').writeOrderNumbers(trx, options.dispatchRoutePosition.order, newDateStr, keptTechId);
+      } else if (capacityCommitFit) {
         await persistArrivalOrder(trx, capacityCommitFit, serviceId);
       } else if (placementWindowChanged && (useArrivalWindows || options.placeInRoute === true)) {
         // Staff route insertion: the staff check placed this visit between stops, so number

@@ -181,10 +181,11 @@ function hourUsable(ctx, stop, hour, used) {
 }
 
 /** The arrival hour (minutes) a movable stop takes when the van gets there at t, or null. */
-function pickHour(ctx, stop, t, used) {
+function pickHour(ctx, stop, t, used, previousSlot) {
   const h0 = Math.floor(t / 60);
   // The service itself ([start, start + work)) may not run through a block.
-  const clear = (hour) => !hitsBlock(ctx.blocks, Math.max(t, hour * 60), stop.workMin);
+  const clear = (hour) => (previousSlot == null || hour * 60 >= previousSlot)
+    && !hitsBlock(ctx.blocks, Math.max(t, hour * 60), stop.workMin);
   for (const hour of [h0 - 1, h0]) {
     if (hourUsable(ctx, stop, hour, used) && t >= hour * 60 && t - hour * 60 <= ctx.bound && clear(hour)) return hour * 60;
   }
@@ -202,11 +203,13 @@ function step(ctx, state, idx) {
   let used = state.used;
   let slot;
   if (stop.movable) {
-    slot = pickHour(ctx, stop, t, used);
+    slot = pickHour(ctx, stop, t, used, state.slot);
     if (slot == null) return null;
     used |= hoursMask(slot / 60, widthHours(stop));
   } else {
     slot = stop.slotStartMin;
+    // The dispatch board rejects a numbered route whose promised starts go backwards.
+    if (state.slot != null && slot < state.slot) return null;
     if (t > slot + ctx.bound) return null;
     if (!fixedBlockOk(ctx, idx, Math.max(t, slot), stop.workMin)) return null;
   }
