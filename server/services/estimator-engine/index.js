@@ -626,6 +626,11 @@ async function notify(args) {
   return (await notifyBell(args)).ok;
 }
 
+// The text-quote bell window: a fresh ask inside it can merge into the
+// number's open bell (notifyBell below), and the SMS cooldown in
+// ./sms-thread bounds its lookup by it.
+const SMS_BELL_DEDUPE_MS = 7 * 86400000;
+
 // notify() that also names the row this event landed on: { ok, bellId }.
 // bellId is null when no single row is known (a suppressed insert, or a
 // retirement that rewrote several bells). startSmsThreadDraft keeps its
@@ -670,7 +675,6 @@ async function notifyBell({ call, context, title, body, lane, estimateId = null,
   // Anything else with a thread key (a clarify-reply resume, which
   // continues the ask the number's bell already tells) keeps the newest
   // bell of the key in the window, open or done.
-  const SMS_BELL_DEDUPE_MS = 7 * 86400000;
   const askBellId = !callSid && threadKey ? (context?.origin?.bellId || null) : null;
   const dedupe = callSid
     ? { clause: "metadata->>'callSid' = ?", value: callSid, since: null, openOnly: false }
@@ -778,14 +782,26 @@ async function notifyBell({ call, context, title, body, lane, estimateId = null,
               } else if (sameDraft || bothOpen) {
                 return landed(existing.id);
               }
-              if (existingMeta.estimateId && existingMeta.estimateId !== estimateId) insertFresh = true;
-              // A bell a later ask merged into (mergedAsk) is the manual task
-              // of two asks, which may name different properties, and either
-              // run can finish first. So no draft replaces it: each draft gets
-              // its own bell, and the shared bell stays the task until a person
-              // closes it. A clarify resume is no merge: with one ask on the
-              // row, its draft still upgrades the row.
-              if (estimateId && !existingMeta.estimateId && existingMeta.mergedAsk === true) insertFresh = true;
+              // Past the stands above, an outcome that is not this row's own
+              // gets a fresh bell: the row tells another draft's story, or two
+              // asks share it (mergedAsk). Two asks may name different
+              // properties, and either run can finish first, so no draft
+              // replaces a shared bell: it stays the task until a person
+              // closes it. A draftless row with one ask upgrades in place, as
+              // a clarify resume's draft does.
+              if (existingMeta.estimateId || existingMeta.mergedAsk === true) insertFresh = true;
+              // A draft that one of the number's bells already shows stands on
+              // that bell: on a shared bell, the twin run whose draft the
+              // builder blocked returns the first run's estimate
+              // (existingEstimateId).
+              const shown = insertFresh && estimateId
+                ? await conn('notifications')
+                  .whereRaw("metadata->>'smsThreadKey' = ?", [threadKey])
+                  .whereRaw("metadata->>'estimateId' = ?", [String(estimateId)])
+                  .where('created_at', '>=', new Date(Date.now() - SMS_BELL_DEDUPE_MS))
+                  .first('id')
+                : null;
+              if (shown) return landed(shown.id);
             }
           }
           if (!insertFresh) {
@@ -3618,6 +3634,7 @@ module.exports = {
   runDraftPipeline,
   notify,
   notifyBell,
+  SMS_BELL_DEDUPE_MS,
   _private: {
     classifyListingSuiteByLicense,
     addressFromContext, ownStreetForUnitAdoption, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality,

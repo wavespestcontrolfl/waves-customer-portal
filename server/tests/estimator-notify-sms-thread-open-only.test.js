@@ -39,6 +39,7 @@ jest.mock('../models/db', () => {
     b.whereRaw = (clause, args) => {
       if (/smsThreadKey/.test(clause)) filters.push((row) => row.metadata.smsThreadKey === args[0]);
       if (clause === 'id = ?') filters.push((row) => row.id === args[0]);
+      if (/'estimateId' = \?/.test(clause)) filters.push((row) => String(row.metadata.estimateId) === args[0]);
       return b;
     };
     b.where = (col, op, value) => {
@@ -293,6 +294,19 @@ describe('a run\'s outcome updates the row its own ask landed on, open or done',
     expect(task.metadata.estimateId).toBeNull();
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(2);
     expect(mockNotifyAdmin.mock.calls[1][3].metadata.estimateId).toBe('est-14');
+  });
+
+  test('two asks on one bell, both runs end on one estimate: that draft gets one bell', async () => {
+    // Ask A raised the bell; ask B merged into it. The builder blocked B's
+    // draft behind A's open one, so B's run returns A's estimate.
+    const a = await askPlaceholder();
+    const b = await askPlaceholder();
+    await expect(outcome(a.bellId, { estimateId: 'est-15', lane: 'green' })).resolves.toEqual({ ok: true, bellId: 'bell-new-2' });
+
+    await expect(outcome(b.bellId, { estimateId: 'est-15', lane: 'green' })).resolves.toEqual({ ok: true, bellId: 'bell-new-2' });
+
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(2);
+    expect(mockRows.find((row) => row.id === a.bellId).metadata.estimateId).toBeNull();
   });
 
   test('red first, then a merged ask\'s draft: the draft gets its own bell and the "send it" task stays', async () => {

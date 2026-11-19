@@ -23,13 +23,15 @@ jest.mock('../models/db', () => {
   let table = null;
   const chain = {
     whereRaw: () => chain,
-    where: (arg) => {
+    where: (arg, ...rest) => {
       if (typeof arg === 'function') {
         const group = {
           where: (...args) => { mockCooldownClauses.push(['where', ...args]); return group; },
           orWhereRaw: (...args) => { mockCooldownClauses.push(['orWhereRaw', ...args]); return group; },
         };
         arg(group);
+      } else if (table === 'notifications') {
+        mockCooldownClauses.push(['outer', arg, ...rest]);
       }
       return chain;
     },
@@ -71,6 +73,7 @@ jest.mock('../services/estimator-engine/index', () => ({
   runDraftPipeline: (...args) => mockRunDraftPipeline(...args),
   notify: (...args) => mockNotify(...args),
   // The placeholder's call: the same recorder, plus the row id it landed on.
+  SMS_BELL_DEDUPE_MS: 7 * 86400000,
   notifyBell: async (...args) => {
     const ok = await mockNotify(...args);
     return { ok: !!ok, bellId: ok ? 'bell-ask-1' : null };
@@ -350,7 +353,11 @@ describe('startSmsThreadDraft', () => {
 
   test('the cooldown window also starts at a merged ask\'s observedAt stamp, not only at a new bell', async () => {
     await startSmsThreadDraft({ phone: PHONE, triggerBody: 'quote for pest control please' });
-    const [created, stamped] = mockCooldownClauses;
+    const [outer, created, stamped] = mockCooldownClauses;
+    // The outer bound keeps the lookup on the created_at index: a merge
+    // stamps only a bell inside the 7-day merge window.
+    expect(outer.slice(0, 3)).toEqual(['outer', 'created_at', '>=']);
+    expect(created[3].getTime() - outer[3].getTime()).toBe(7 * 86400000);
     expect(created.slice(0, 3)).toEqual(['where', 'created_at', '>=']);
     expect(stamped[0]).toBe('orWhereRaw');
     expect(stamped[1]).toBe("metadata->>'observedAt' >= ?");

@@ -435,8 +435,13 @@ async function startSmsThreadDraft({
       const SMS_DRAFT_COOLDOWN_MS = 10 * 60 * 1000;
       const db = require('../../models/db');
       const cooldownSince = new Date(Date.now() - SMS_DRAFT_COOLDOWN_MS);
+      // A merge stamps observedAt only on a bell inside the 7-day merge
+      // window, so the outer created_at bound loses no merged ask and keeps
+      // this awaited webhook lookup on the created_at index.
+      const { SMS_BELL_DEDUPE_MS } = require('./index');
       const recentRun = await db('notifications')
         .whereRaw("metadata->>'smsThreadKey' = ?", [`sms:${digits}`])
+        .where('created_at', '>=', new Date(cooldownSince.getTime() - SMS_BELL_DEDUPE_MS))
         // A new ask that merged into the number's bell stamps observedAt
         // (notifyBell in ./index): it starts the window as a new bell does.
         // Both sides are toISOString() text, so text order is time order.
