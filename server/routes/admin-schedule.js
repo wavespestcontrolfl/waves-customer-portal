@@ -5930,7 +5930,8 @@ function classifyAppointmentTag(serviceType) {
   return require('../services/appointment-tagger').classifyAppointmentType(serviceType).tag;
 }
 
-function getZone(city, zip) {
+// `fallback` is the zone for a city and ZIP no rule matches.
+function getZone(city, zip, fallback = 'lakewood_ranch') {
   const c = (city || '').toLowerCase();
   const z = zip || '';
   if (['parrish', 'ellenton'].includes(c) || z === '34219') return 'parrish';
@@ -5952,7 +5953,7 @@ function getZone(city, zip) {
     'englewood', 'port charlotte', 'punta gorda', 'murdock',
     'rotonda west', 'placida', 'boca grande',
   ].includes(c)) return 'venice_north_port';
-  return 'lakewood_ranch';
+  return fallback;
 }
 
 const ZONE_COLORS = {
@@ -5980,6 +5981,19 @@ const ZONE_COORDS = {
   sarasota: { lat: 27.3364, lng: -82.5307 },
   venice_north_port: { lat: 27.0998, lng: -82.4543 },
 };
+
+// Some booking paths store a location id as the zone. Each one's forecast
+// zone, used when the stop's city and ZIP match no zone rule.
+const LOCATION_ZONE_FORECAST = { bradenton: 'bradenton_north', venice: 'venice_north_port' };
+
+// The forecast zone of a day-board stop. A stored zone with no forecast point
+// (a location id) reads the stop's city and ZIP, else the zone its location id
+// names; any other unmatched stop has none (owner 2026-11-02, "leave the rain
+// for all"; 11-19: 18 of 84 stops, stored 'bradenton', showed no rain).
+function stopForecastZone(stop) {
+  if (ZONE_COORDS[stop.zone]) return stop.zone;
+  return getZone(stop.premise?.city, stop.premise?.zip, LOCATION_ZONE_FORECAST[stop.zone] || null);
+}
 
 // Completion reuses a non-void invoice already attached to the visit
 // (pre-minted Charge Now / accept-minted first-visit with setup fee / payer
@@ -7424,14 +7438,9 @@ router.get('/', async (req, res, next) => {
     let zoneRain;
     let weather = {};
     const { attachStopRain, zoneHourlyOutlooks, weatherNow } = require('../services/scheduling/stop-rain');
-    // A stored zone with no forecast point (a location id such as 'bradenton'
-    // or 'venice') reads its forecast from the stop's city and ZIP, as a stop
-    // with no stored zone does, so every stop gets its rain figure (owner
-    // 2026-11-02, "leave the rain for all"; 11-19: 18 of 84 stops had none).
-    const rainZoneOf = (s) => (ZONE_COORDS[s.zone] ? s.zone : getZone(s.premise?.city, s.premise?.zip));
     attachStopRain(enriched, date, {});
     try {
-      const zonesPresent = [...new Set(enriched.map(rainZoneOf))];
+      const zonesPresent = [...new Set(enriched.map(stopForecastZone))].filter((z) => ZONE_COORDS[z]);
       const [outlook, perZone, hourlyByZone, officeWeather] = await Promise.all([
         rainOutlookPromise,
         Promise.all(zonesPresent.map(async (z) => {
@@ -7446,7 +7455,7 @@ router.get('/', async (req, res, next) => {
       const officeChance = outlook?.[date]?.rainChance;
       rainChance = Number.isFinite(officeChance) ? officeChance : null;
       if (perZone.length > 0) zoneRain = Object.fromEntries(perZone);
-      attachStopRain(enriched, date, hourlyByZone, rainZoneOf);
+      attachStopRain(enriched, date, hourlyByZone, stopForecastZone);
     } catch { /* rain outlook is optional */ }
 
     await attachOfficeToldFields(req, enriched);
@@ -30442,6 +30451,7 @@ module.exports.buildAppointmentPricing = buildAppointmentPricing;
 // new-caller booking route (admin-schedule-new-caller.js), which books by
 // address before a customer exists.
 module.exports.getZone = getZone;
+module.exports.stopForecastZone = stopForecastZone;
 module.exports.newCallerRowFields = newCallerRowFields;
 // The percent-discount exclusion predicate (termite bond, rodent bait,
 // bed bug, Bora-Care, pre-slab, ...) — consumed lazily by the IB
