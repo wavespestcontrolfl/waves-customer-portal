@@ -142,6 +142,13 @@ describe('editorial review coverage validation', () => {
       .toBe('claim_attribution_quote:C1');
   });
 
+  test('a link title is not an attributed quote', () => {
+    const passage = 'The [UF/IFAS gallery](https://example.org/woods "Woods roach") says it hides in leaf mulch.';
+    const sources = [{ excerpt: 'This roach is commonly found in leaf mulch and wood piles.' }];
+    expect(validateClaim(passage, { verdict: 'supported', claimKind: 'general', sourceSuitability: 'suitable_secondary', sourceIndex: 0, sourceQuote: 'commonly found in leaf mulch' }, sources))
+      .toBeNull();
+  });
+
   test('holds a supported claim to the rules of its own label too', () => {
     const passage = 'Roach bait in Florida homes works best in kitchens.';
     const sources = [{ excerpt: 'Roach bait in Florida homes works best in kitchens and baths.' }];

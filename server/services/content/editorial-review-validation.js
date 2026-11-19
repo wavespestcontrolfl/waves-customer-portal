@@ -55,17 +55,19 @@ const FIGURE_RE = /(?:\$|%|(?<![A-Za-z0-9])\d+(?:[.,]\d+)?|\b(?:january|february
 // ("[guide](/pest-control/2026-roach-guide/ 'Roaches')"); its text is. A bare URL stays in: it is visible
 // text. A form this misses counts its digits, which costs a repair, never a pass (holdUnsourcedFigures).
 const LINK_DESTINATION_RE = /\]\(\s*(?:<[^>\n]*>|[^\s()]*(?:\([^\s()]*\)[^\s()]*)*)(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?\s*\)/g;
+// The text a reader sees: a link destination and its title (a tooltip) are set aside.
+const visibleText = (passage) => String(passage || '').replace(LINK_DESTINATION_RE, '] ');
 function deterministicClaimKind(passage) {
-  const text = String(passage || '');
+  const text = visibleText(passage);
   const hasQuote = /["“][^"”]{3,}["”]/.test(text);
   if (hasQuote && /\b(?:said|says|stated|according to|wrote|called|described)\b/i.test(text)) return 'expert_quote';
-  if (FIGURE_RE.test(text.replace(LINK_DESTINATION_RE, '] ').replace(DOCUMENT_CODE_RE, ' '))) return 'quantitative';
+  if (FIGURE_RE.test(text.replace(DOCUMENT_CODE_RE, ' '))) return 'quantitative';
   return null;
 }
 
 function exactQuotedPhrases(passage) {
   const phrases = [];
-  for (const match of String(passage || '').matchAll(/["“]([^"”]{3,})["”]/g)) phrases.push(match[1]);
+  for (const match of visibleText(passage).matchAll(/["“]([^"”]{3,})["”]/g)) phrases.push(match[1]);
   return phrases;
 }
 
