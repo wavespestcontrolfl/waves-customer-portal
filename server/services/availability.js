@@ -188,10 +188,7 @@ class AvailabilityEngine {
         .where('scheduled_services.scheduled_date', dateStr)
         .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
         .whereNotNull('scheduled_services.window_start')
-        .where((q) => {
-          q.whereNull('scheduled_services.reservation_expires_at')
-            .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-        })
+        .where(bookedVisitOrLiveHold)
         .modify((q) => {
           // Empty city list matches nothing — same as knex's empty whereIn.
           if (!zoneCitiesLower.length) return q.whereRaw('1 = 0');

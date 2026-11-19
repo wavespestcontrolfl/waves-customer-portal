@@ -105,6 +105,21 @@ describe('buildBookingAvailability — travel-gap mirror (GATE_SLOT_TRAVEL_GAP)'
 
   const dayStarts = (result) => (result.days.find((d) => d.date === D)?.slots || []).map((s) => s.start_time);
 
+  test('restoring a booked stop cannot open a previously refused hour for forecast ranking', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    process.env.SLOT_TRAVEL_BUFFER_MINUTES = '0';
+    findAvailableSlots.mockResolvedValue({ slots: [slot('09:00', 1)], total_feasible: 1 });
+    const remote = { id: 'remote', technician_id: 'tech-1', customer_id: 'a', date: D, startMin: 625, endMin: 685,
+      lat: 27.26, lng: -82.45 };
+    const near = { ...remote, id: 'near', customer_id: 'b', startMin: 620, endMin: 640, lat: 27.545, lng: -82.545 };
+    listOccupiedWindows.mockResolvedValue([remote]);
+    expect(dayStarts(await buildPalmetto())).not.toContain('09:00');
+    listOccupiedWindows.mockResolvedValue([remote, near]);
+    expect(dayStarts(await buildPalmetto())).toContain('09:00');
+    listOccupiedWindows.mockResolvedValue([remote, { ...near, reservation_lapsed: true }]);
+    expect(dayStarts(await buildPalmetto())).not.toContain('09:00');
+  });
+
   test('gate off: the touching 09:00 hour is still offered (legacy overlap-only mirror)', async () => {
     expect(dayStarts(await buildPalmetto())).toEqual(['09:00', '14:00']);
   });

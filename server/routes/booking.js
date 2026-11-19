@@ -1891,6 +1891,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
         // never carries, so every anchor here (Codex push-audit P1 on r6)
         // silently read as a full committed block instead.
         hold: anchor.hold,
+        restoredBooking: anchor.restoredBooking,
       };
       if (!occupiedByDate.has(row.date)) occupiedByDate.set(row.date, []);
       occupiedByDate.get(row.date).push(row);
@@ -1976,7 +1977,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       const candidateEntity = {
         startMin, endMin, lat, lng, windowMinutes: duration, expectedMinutes: candidateExpectedMinutes,
       };
-      if (dayOccupied && travelGapMirrorRefuses({ graceBuild, slot, slotGrace, candidateEntity, dayOccupied })) return;
+      const gap = { graceBuild, slot, slotGrace, candidateEntity };
+      if (travelGapMirrorRefuses({ ...gap, dayOccupied })) return;
+      // A newly counted near stop can hide an older, distant travel conflict.
+      // This repair only removes offers, so it cannot start a weather lookup
+      // for an hour that was previously ineligible.
+      if (dayOccupied.some(stop => stop.restoredBooking)
+        && travelGapMirrorRefuses({ ...gap, dayOccupied: dayOccupied.filter(stop => !stop.restoredBooking) })) return;
       idleMinutes = idleMinutesAgainst(dayOccupied, startMin, endMin, {
         lat, lng, durationMinutes: duration, expectedMinutes: candidateExpectedMinutes,
       });

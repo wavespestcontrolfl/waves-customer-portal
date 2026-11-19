@@ -2144,7 +2144,9 @@ async function commitReservation({
       )
       .forUpdate()
       .first();
-    if (!row) {
+    // A staff claim can leave a hold timestamp or clear it before checkout
+    // resumes. Only its owner may graduate the row or receive a replay.
+    if (!row || (row.customer_id != null && row.customer_id !== customerId)) {
       const err = new Error('reservation not found');
       err.code = 'RESERVATION_NOT_FOUND';
       throw err;
