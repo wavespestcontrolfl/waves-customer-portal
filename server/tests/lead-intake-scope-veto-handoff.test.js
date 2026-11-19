@@ -334,13 +334,14 @@ describe('two-service reply (pest_lawn)', () => {
   });
 
   test.each([
-    ['100 Palm Ave, Venice FL 34285, pest and lawn', 'pest_lawn', PEST_LAWN_LABEL],
+    ['100 Palm Ave, Venice FL 34285, pest and lawn', 'pest_lawn', PEST_LAWN_LABEL, '100 Palm Ave, Venice FL 34285, pest and'],
     // What main's model can answer for the same reply today: the same street line.
-    ['100 Palm Ave, Venice FL 34285, pest and lawn', 'lawn', 'Lawn Care'],
-    ['100 Palm Ave, quarterly pest control and grub treatment', 'pest_lawn', PEST_LAWN_LABEL],
-  ])('a combined reply %j read as %s: the street line is captured as before and the draft is made', async (body, interest, label) => {
-    // Address capture is main's, unchanged: it drops a known single-service tail, and other request
-    // words stay on the line for staff to clean at pricing time (dropping the line would strand the quote).
+    ['100 Palm Ave, Venice FL 34285, pest and lawn', 'lawn', 'Lawn Care', '100 Palm Ave, Venice FL 34285, pest and'],
+    ['100 Palm Ave, quarterly pest control and grub treatment', 'pest_lawn', PEST_LAWN_LABEL, '100 Palm Ave, quarterly pest control and grub treatment'],
+  ])('a combined reply %j read as %s: main\'s capture saves %j, and the draft is made', async (body, interest, label, line) => {
+    // Address capture is main's code, unchanged by this PR. It drops a known single-service tail ("lawn"
+    // here) and keeps other request words on the line for staff to clean at pricing time; dropping the
+    // line would strand the quote. A pair-aware strip is out of scope (PR body, "Not in this PR").
     mockClassify.mockResolvedValue({ interest, confidence: 0.8, method: 'ai' });
     mockStartSmsThreadDraft.mockImplementation(async (args) => (args.scopeCheckOnly
       ? { started: false, skipped: 'scope_check_only' }
@@ -349,10 +350,10 @@ describe('two-service reply (pest_lawn)', () => {
     const result = await handleIntakeReply({ ...CUSTOMER(), address_line1: '' }, body);
 
     expect(result).toEqual({ handled: true, next: 'estimate_drafted' });
-    const saved = mockCustomerUpdates.find((p) => p.address_line1);
-    expect(saved.address_line1).toMatch(/^100 Palm Ave, /);
+    expect(mockCustomerUpdates).toContainEqual({ address_line1: line });
     expect(mockCustomerUpdates).toContainEqual({ lead_service_interest: interest });
     expect(mockEstimateInserts).toHaveLength(1);
+    expect(mockEstimateInserts[0].address).toBe(line);
     expect(mockEstimateInserts[0].service_interest).toBe(label);
   });
 });
