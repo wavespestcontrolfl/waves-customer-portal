@@ -360,6 +360,25 @@ describe('fetchPage carryCookies (EDIS redirects through ask.ifas.ufl.edu)', () 
     expect(seen).toEqual([undefined, 'k=1; keep=1', 'keep=1', undefined, 'plain=1']);
   });
 
+  test('a cookie whose Max-Age runs out before the next hop is not sent', async () => {
+    let clock = 1700000000000;
+    const spy = jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    try {
+      const seen = [];
+      const fetchFn = async (url, opts) => {
+        seen.push(opts.headers.Cookie);
+        if (url === 'https://a.example.com/') return redir(302, '/two', ['short=1; Path=/; Max-Age=1', 'long=1; Path=/; Max-Age=600']);
+        if (url === 'https://a.example.com/two') { clock += 2000; return redir(302, '/three'); }
+        return page('ok');
+      };
+      const r = await fetchPage('https://a.example.com/', { fetchFn, resolveHostFn: async () => true, maxRedirects: 3, carryCookies: true });
+      expect(r.status).toBe(200);
+      expect(seen).toEqual([undefined, 'short=1; long=1', 'long=1']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('an oversized cookie is skipped, so a small locale cookie after it still goes out', async () => {
     const seen = [];
     const fetchFn = async (url, opts) => {

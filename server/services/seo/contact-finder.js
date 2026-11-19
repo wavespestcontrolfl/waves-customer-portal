@@ -232,8 +232,9 @@ function withDeadline(promise, ms, fallback) {
 // redirects through ask.ifas.ufl.edu, which answers 307 to itself until its
 // locale cookie comes back. Origin-only: a cookie goes back only to the exact
 // scheme, host and port that set it (Domain is ignored), and only to a path
-// its Path covers (RFC 6265 5.1.4). Max-Age=0 or a past Expires clears it, and
-// a Secure cookie set over plain http is ignored.
+// its Path covers (RFC 6265 5.1.4). Max-Age (which wins over Expires) or
+// Expires sets when it lapses; a lapsed cookie is never sent, and a Secure
+// cookie set over plain http is ignored.
 const COOKIE_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const MAX_COOKIES_PER_ORIGIN = 20;
 const MAX_COOKIE_HEADER = 4096;
@@ -276,29 +277,31 @@ function parseSetCookie(line, url, now) {
     else if (key === 'secure') secure = true;
   }
   if (secure && url.protocol !== 'https:') return null; // a Secure cookie set over http is ignored
-  const expired = maxAge !== null ? maxAge <= 0 : expires !== null && expires <= now; // Max-Age wins over Expires
-  return { name, value, path: path || defaultCookiePath(url.pathname), expired };
+  const expiresAt = maxAge !== null ? now + maxAge * 1000 : expires; // Max-Age wins over Expires; null = this fetch only
+  return { name, value, path: path || defaultCookiePath(url.pathname), expiresAt };
 }
 
 function storeCookies(jar, url, res) {
   if (!jar) return;
+  const now = Date.now();
   for (const line of readSetCookies(res)) {
-    const cookie = parseSetCookie(line, url, Date.now());
+    const cookie = parseSetCookie(line, url, now);
     if (!cookie) continue;
     let cookies = jar.get(url.origin);
     if (!cookies) { cookies = new Map(); jar.set(url.origin, cookies); }
     const key = `${cookie.name}=${cookie.path}`; // a token name has no "="
-    if (cookie.expired) { cookies.delete(key); continue; }
+    if (cookie.expiresAt !== null && cookie.expiresAt <= now) { cookies.delete(key); continue; }
     if (!cookies.has(key) && cookies.size >= MAX_COOKIES_PER_ORIGIN) continue;
-    cookies.set(key, { name: cookie.name, value: cookie.value, path: cookie.path });
+    cookies.set(key, { name: cookie.name, value: cookie.value, path: cookie.path, expiresAt: cookie.expiresAt });
   }
 }
 
 function cookieHeaderFor(jar, url) {
   const cookies = jar && jar.get(url.origin);
   if (!cookies) return null;
+  const now = Date.now(); // a cookie can lapse between hops (a slow DNS lookup or response)
   const eligible = [...cookies.values()]
-    .filter((c) => cookiePathMatches(c.path, url.pathname))
+    .filter((c) => (c.expiresAt === null || c.expiresAt > now) && cookiePathMatches(c.path, url.pathname))
     .sort((a, b) => b.path.length - a.path.length); // RFC 6265 5.4: longer paths first
   let out = '';
   for (const { name, value } of eligible) {
