@@ -426,6 +426,33 @@ describe('a saved completion whose stored copy will not clear (GitHub Codex P2 o
     expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.body).toEqual(newer);
   });
 
+  // `rejectedCopy`: a correctable rejection whose copy will not clear still
+  // has a stored row, which a send or a discard removes (a sheet with no form,
+  // Today's off-route attempt, offers that discard).
+  it('a correctable rejection whose copy will not clear reports rejectedCopy until a discard removes it', async () => {
+    const { view, release } = await sendRestored(() => { throw Object.assign(new Error('Fix the product'), { status: 422, code: 'invalid_product' }); });
+    const store = globalThis.indexedDB;
+    globalThis.indexedDB = undefined;
+    try { await release(); } finally { globalThis.indexedDB = store; }
+    expect(view.result.current.failure).toBeNull();
+    expect(view.result.current.restored).toBe(false);
+    expect(view.result.current.error).toBe('Fix the product');
+    expect(view.result.current.rejectedCopy).toBe(true);
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.body).toEqual(attempt);
+    await act(async () => { await view.result.current.discard(); });
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toBeNull();
+    expect(view.result.current.rejectedCopy).toBe(false);
+    expect(view.result.current.error).toBe('');
+  });
+
+  it('a correctable rejection whose copy clears never reports rejectedCopy', async () => {
+    const { view, release } = await sendRestored(() => { throw Object.assign(new Error('Fix the product'), { status: 422, code: 'invalid_product' }); });
+    await release();
+    expect(view.result.current.error).toBe('Fix the product');
+    expect(view.result.current.rejectedCopy).toBe(false);
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toBeNull();
+  });
+
   it('a request refused for good whose copy will not clear stays in hand to discard, and discarding keeps the refusal (GitHub Codex P2 on 102b99cb1b)', async () => {
     const { view, release } = await sendRestored(() => { throw Object.assign(new Error('Changed'), { status: 409, code: 'idempotency_key_mismatch' }); });
     const store = globalThis.indexedDB;

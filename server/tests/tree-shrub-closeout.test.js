@@ -53,23 +53,54 @@ describe('Tree/Shrub closeout validation', () => {
   test('the ordinance zone follows the visit stamped address, then the customer city', () => {
     expect(inferTreeShrubOrdinanceZone({ city: 'Bradenton', service_address_city: 'North Port' })).toBe('north_port');
     expect(inferTreeShrubOrdinanceZone({ city: 'North Port', service_address_city: 'Venice', service_address_line1: '1 Test St' })).toBe('sarasota_venice');
-    expect(inferTreeShrubOrdinanceZone({ city: 'Parrish', service_address_line1: '1 Test St' })).toBe('manatee_parrish');
+    expect(inferTreeShrubOrdinanceZone({ city: 'Parrish', address_line1: '1 Test Street', service_address_line1: '1 Test St' })).toBe('manatee_parrish');
     expect(inferTreeShrubOrdinanceZone({ city: 'Parrish', service_address_city: '  ', service_address_line1: null })).toBe('manatee_parrish');
     expect(inferTreeShrubOrdinanceZone({ city: 'Venice', county: 'Sarasota', service_address_city: 'Unknown Town' })).toBe('other_unknown');
   });
 
-  test('the city decides the zone; street text never overrides it or lifts a blackout', () => {
-    // Stamped street without a stamped city: the customer city decides.
-    expect(inferTreeShrubOrdinanceZone({ city: 'Bradenton', service_address_line1: '123 North Port Boulevard' })).toBe('manatee_parrish');
-    // Unstamped legacy fields: the same.
+  test('a street name cannot establish a fertilizer jurisdiction', () => {
+    // A partial stamp for an unconfirmed property cannot borrow the primary home's city.
+    expect(inferTreeShrubOrdinanceZone({ city: 'Bradenton', service_address_line1: '123 North Port Boulevard' })).toBe('other_unknown');
+    // A legacy unstamped primary visit has its own customer city.
     expect(inferTreeShrubOrdinanceZone({ city: 'Bradenton', address_line1: '123 North Port Boulevard' })).toBe('manatee_parrish');
     expect(inferTreeShrubOrdinanceZone({ city: 'Venice', address: '9 Parrish Road' })).toBe('sarasota_venice');
     expect(inferTreeShrubOrdinanceZone({ city: 'North Port', address_line1: '5 Venice Avenue' })).toBe('north_port');
     // A stamped city beats a customer city and any street.
     expect(inferTreeShrubOrdinanceZone({ city: 'North Port', service_address_city: 'Bradenton', service_address_line1: '1 North Port Boulevard' })).toBe('manatee_parrish');
-    // No city anywhere: a street may add a blackout zone, never North Port.
+    // A street named after a city or county still has an unknown jurisdiction.
     expect(inferTreeShrubOrdinanceZone({ service_address_line1: '123 North Port Boulevard' })).toBe('other_unknown');
-    expect(inferTreeShrubOrdinanceZone({ address_line1: '8 Venice Avenue' })).toBe('sarasota_venice');
+    expect(inferTreeShrubOrdinanceZone({ address_line1: '8 Venice Avenue' })).toBe('other_unknown');
+  });
+
+  describe('NutriRoot on a custom Tree & Shrub closeout', () => {
+    const { soilTestBasis, alreadyAppliedBasis } = require('../../shared/tree-shrub-fertilizer-evidence.json').nutriRoot;
+    const name = 'Arborjet NutriRoot 2-2-3';
+    const record = ({ zip, date = '2026-11-19', basis, reference, extra = [] }) => validateTreeShrubCloseout({
+      serviceLine: 'tree_shrub', service: { service_address_city: 'Lakewood Ranch', service_address_zip: zip },
+      serviceDate: date, completionPhotos: [{ url: 'a' }, { url: 'b' }],
+      completion: validCompletion({ ordinanceZone: 'manatee_parrish', nutriroot_application_basis: basis, nutriroot_soil_test_reference: reference }),
+      products: [{ productId: 'root', totalAmount: 1, amountUnit: 'oz' }, ...extra], productRows: [{ id: 'root', name }],
+    });
+    test('uses the booked address even when the crew selected Manatee or used only a catalog ID', () => {
+      for (const zip of ['34240', null]) {
+        const result = record({ zip, basis: soilTestBasis, reference: 'Fixture report' });
+        expect(result.blocks.map((b) => b.code)).toEqual(['tree_shrub_nutriroot_evidence_required']);
+      }
+      expect(record({ zip: '34202', basis: soilTestBasis }).blocks[0].code).toBe('tree_shrub_nutriroot_soil_test_reference_required');
+      const eligible = record({ zip: '34202', basis: soilTestBasis, reference: 'Fixture report' });
+      expect(eligible.ok).toBe(true);
+      expect(eligible.normalized).toMatchObject({ nutriroot_application_basis: soilTestBasis, nutriroot_soil_test_reference: 'Fixture report' });
+    });
+    test('a summer application can be truthfully reported for office review without releasing another N/P product', () => {
+      const args = { zip: '34240', date: '2026-08-19', basis: alreadyAppliedBasis };
+      const result = record(args);
+      expect(result.ok).toBe(true);
+      expect(result.warnings.map((w) => w.code)).toContain('tree_shrub_nutriroot_already_applied_review');
+      expect(result.normalized.nutriroot_application_basis).toBe(alreadyAppliedBasis);
+      const mixed = record({ ...args, extra: [{ productId: 'palm', name: 'Palm Fertilizer 8-2-12', totalAmount: 1, amountUnit: 'lb' }] });
+      expect(mixed.blocks.map((b) => b.code)).toContain('tree_shrub_np_blackout');
+      expect(record({ zip: '34202', date: '2026-08-19', basis: soilTestBasis, reference: 'Fixture' }).ok).toBe(false);
+    });
   });
 
   test('blocks N/P fertilizer during Sarasota and Manatee landscape blackout', () => {

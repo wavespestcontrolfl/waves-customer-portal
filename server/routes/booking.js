@@ -17,6 +17,7 @@ const {
   validateEstimateOwnershipUnderLock,
 } = require('../services/customer-account-ownership');
 const logger = require('../services/logger');
+const { attributionWithSourceEvidence } = require('../services/lead-source-evidence');
 const { bookPreferredTimeLive } = require('../config/feature-gates');
 const { noStore } = require('../middleware/no-store');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
@@ -3761,6 +3762,7 @@ async function createSelfBooking(payload = {}) {
       // pass their check and commit an overlapping visit on top of it. Taken
       // before the customer/tech/zone/day-cap locks below so every writer in
       // the family acquires the same rungs in the same order.
+      const { bookedVisitOrLiveHold } = require('../services/scheduling/reservation-occupancy');
       const { acquireOccupancyLock, findConflictingVisits } = require('../services/scheduling/occupancy');
       await acquireOccupancyLock(trx, slotDateStr);
       await trx.raw(
@@ -4328,10 +4330,7 @@ async function createSelfBooking(payload = {}) {
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .where('scheduled_services.scheduled_date', slotDateStr)
         .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-        .where((q) => {
-          q.whereNull('scheduled_services.reservation_expires_at')
-            .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-        })
+        .where(bookedVisitOrLiveHold)
         // COALESCE the nullable window_end (admin edits can leave a start
         // with no end) — same predicate as slot-reservation/rebooker.
         .whereRaw(
@@ -4478,7 +4477,7 @@ async function createSelfBooking(payload = {}) {
         // for EVERY booking — raw record; classification happens at read time
         // (attributeSelfBooking below only persisted the paid-click slice).
         attribution: (attribution && typeof attribution === 'object')
-          ? JSON.stringify(attribution) : null,
+          ? JSON.stringify(attributionWithSourceEvidence(attribution)) : null,
         service_type: resolvedServiceType,
       }).returning('*');
 
@@ -6993,7 +6992,7 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       slot_start: str(b.slot_start, 10),
       slot_end: str(b.slot_end, 10),
       source: str(b.source, 60),
-      attribution: b.attribution ? JSON.stringify(b.attribution) : null,
+      attribution: b.attribution ? JSON.stringify(attributionWithSourceEvidence(b.attribution)) : null,
       last_activity_at: db.fn.now(),
       updated_at: db.fn.now(),
       ...(linkedEstablished ? { suppressed: true } : {}),

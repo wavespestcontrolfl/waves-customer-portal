@@ -26,7 +26,7 @@
  * exactly like a manual "add product" tap. PEST is NOT curated here (owner ruling
  * 2026-09-27): the general recurring/one-time pest visit keeps its
  * existing house mix on the client — lib/pest-default-mix.js (Taurus SC +
- * Atticus Talak 7.9 F + LESCO 90/10 Nonionic Surfactant, fixed totals). A
+ * LESCO Crosscheck Plus + LESCO 90/10 Nonionic Surfactant, fixed totals). A
  * seasonal pest rotation is a possible LATER PR, built when a visit
  * actually needs it, not ahead of time.
  *
@@ -364,9 +364,9 @@ function emptyResult(serviceId) {
 // keeps the conservative Sarasota/Manatee rule (an unknown zone).
 async function propertyOrdinanceZone(db, propertyId) {
   const place = propertyId
-    ? await db('customer_properties').where({ id: propertyId }).first('city', 'address_line1').catch(() => null)
+    ? await db('customer_properties').where({ id: propertyId }).first('city', 'zip').catch(() => null)
     : null;
-  return inferTreeShrubOrdinanceZone({ city: place?.city, address: place?.address_line1 });
+  return inferTreeShrubOrdinanceZone(place || {});
 }
 
 // The route-facing orchestrator: loads the scheduled service + its

@@ -99,6 +99,10 @@ function makeListDb(recorded) {
         return builder;
       });
     }
+    builder.modify = (apply, ...args) => {
+      apply(builder, ...args);
+      return builder;
+    };
     builder.first = jest.fn(async () => ({ count: '0' }));
     builder.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
     return builder;
@@ -221,6 +225,23 @@ describe('admin leads list route — soft-delete exclusion + open filter', () =>
     for (const q of leadQueries) {
       expect(q.calls).toContainEqual(['whereNull', 'leads.deleted_at']);
     }
+  });
+
+  test('source sorting breaks ties by received time and ID before pagination', async () => {
+    const recorded = [];
+    makeListDb(recorded);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/leads?sort=source&order=asc&limit=2`);
+      expect(res.status).toBe(200);
+    });
+    const list = recorded.find(({ calls }) => calls.some(([op]) => op === 'limit'));
+    expect(list.calls.filter(([op]) => ['orderBy', 'limit', 'offset'].includes(op))).toEqual([
+      ['orderBy', expect.stringContaining('source_evidence'), 'asc'],
+      ['orderBy', 'leads.first_contact_at', 'desc'],
+      ['orderBy', 'leads.id', 'asc'],
+      ['limit', 2],
+      ['offset', 0],
+    ]);
   });
 
   test('status=open expands to the open-status set on both queries', async () => {

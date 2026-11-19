@@ -87,7 +87,7 @@ const MIX_CATALOG = [
   },
   {
     id: 5,
-    name: 'Atticus Talak 7.9 F',
+    name: 'LESCO Crosscheck Plus',
     category: 'Insecticide',
     active_ingredient: 'Bifenthrin',
     moa_group: '3A',
@@ -211,7 +211,7 @@ describe('ServiceRecapModal application rates', () => {
 // The default pest tank mix (lib/pest-default-mix) seeds the primary
 // field-tech completion too (codex P1 on #3611): a FRESH recurring
 // general-pest, one-time pest, or pest re-service recap pre-selects
-// Taurus SC, Atticus Talak 7.9 F, and the LESCO 90/10 Nonionic
+// Taurus SC, LESCO Crosscheck Plus, and the LESCO 90/10 Nonionic
 // Surfactant (owner ruling 2026-09-26 — supersedes the 2026-08-29
 // Talstar P / bare-surfactant list), rates prefilled exactly as a manual
 // tap would.
@@ -227,7 +227,7 @@ describe('ServiceRecapModal default pest tank mix', () => {
     );
 
     expect(await screen.findByRole('button', { name: 'Taurus SC', pressed: true })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Atticus Talak 7.9 F', pressed: true })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'LESCO Crosscheck Plus', pressed: true })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeTruthy();
     // The bare "Non-ionic Surfactant" row is never substituted into the mix —
     // exact catalog identity only.
@@ -269,7 +269,7 @@ describe('ServiceRecapModal default pest tank mix', () => {
     );
 
     expect(await screen.findByRole('button', { name: 'Taurus SC', pressed: true })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Atticus Talak 7.9 F', pressed: true })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'LESCO Crosscheck Plus', pressed: true })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeTruthy();
   });
 
@@ -286,7 +286,7 @@ describe('ServiceRecapModal default pest tank mix', () => {
     );
 
     expect(await screen.findByRole('button', { name: 'Taurus SC', pressed: true })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Atticus Talak 7.9 F', pressed: true })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'LESCO Crosscheck Plus', pressed: true })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeTruthy();
   });
 

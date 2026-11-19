@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  dictationTarget, guardRecording, openRecorderSlot, pickMode, pickRecorderMime, stopQuietly, transcribeClip,
+  dictationTarget, guardRecording, openRecorderSlot, pickMode, pickRecorderMime, stopOnLoginChange, stopQuietly,
+  transcribeClipWithResend,
 } from "./serverDictation";
 import useServerDictationMode, { readToken } from "./useServerDictationMode";
 import { startLiveWords } from "./liveDictation";
@@ -77,6 +78,13 @@ export const CLIP_MAX_MS = 3 * 60 * 1000;
  * `liveText` is cleared when they land (or the clip fails, or the mic is cancelled, unmounted or moved to
  * another customer or visit). A live session that fails only drops the preview.
  *
+ * A send that got no answer (iOS "Load failed", or a 2xx answer cut off) shows "The words did not
+ * come back." A caller that passes `{ resendWanted: () => boolean }`, true while its field can
+ * still take the words (the IB bar: its prompt takes any words), is asked "Send the recording
+ * again?" instead, once the page is visible and while the field still belongs to the recording
+ * and its login. Never resent on its own. Each field has its own limits and only its caller can
+ * check them: no check, no question.
+ *
  * Clip mode: pass `{ clipHandler }` (async (blob, durationSeconds) => void) and
  * the mic ALWAYS records, on every browser that can record, and hands the
  * finished clip to the handler instead of transcribing it here: no speech
@@ -90,6 +98,8 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   const clipMaxMs = Number(options.clipMaxMs) > 0 ? Number(options.clipMaxMs) : CLIP_MAX_MS;
   const clipHandlerRef = useRef(options.clipHandler);
   clipHandlerRef.current = options.clipHandler;
+  const resendWantedRef = useRef(options.resendWanted);
+  resendWantedRef.current = options.resendWanted;
   const [listening, setListening] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadAvailable, setUploadAvailable] = useState(false);
@@ -97,6 +107,8 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   const [liveText, setLiveText] = useState("");
   const liveRef = useRef(null);
   const liveKeyRef = useRef(null);
+  // The login the preview streams under (the tap's): its words show under no other login.
+  const liveTokenRef = useRef(null);
   const recognitionRef = useRef(null);
   const recorderRef = useRef(null);
   // Ends the live recording's own bookkeeping (hidden-page guard, the app-wide
@@ -186,13 +198,15 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     const session = liveRef.current;
     liveRef.current = null;
     liveKeyRef.current = null;
+    liveTokenRef.current = null;
     session?.abort();
     if (mountedRef.current) setLiveText("");
   }, []);
 
   // `clip` is the recording's target; the session shows words only while the field still belongs to it.
   const beginLive = useCallback((stream, clip) => {
-    const token = readToken();
+    // The preview streams under the login of the tap (`clip.token`), like the clip itself.
+    const { token } = clip;
     if (!token) return;
     liveRef.current?.abort();
     const session = startLiveWords({
@@ -200,17 +214,21 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       context: clip,
       token,
       onText: (text) => {
-        if (liveRef.current === session && mountedRef.current && targetRef.current.key === clip.key) setLiveText(text);
+        if (liveRef.current === session && mountedRef.current && targetRef.current.key === clip.key && readToken() === token) {
+          setLiveText(text);
+        }
       },
       onEnd: (failed) => {
         if (liveRef.current !== session || !failed) return;
         liveRef.current = null;
         liveKeyRef.current = null;
+        liveTokenRef.current = null;
         if (mountedRef.current) setLiveText("");
       },
     });
     liveRef.current = session;
     liveKeyRef.current = clip.key;
+    liveTokenRef.current = token;
   }, []);
 
   // Live words never gate the recording: only a server-mode mic whose server said yes starts a preview.
@@ -225,6 +243,16 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   useEffect(() => {
     if (liveRef.current && liveKeyRef.current !== target.key) clearLive();
   }, [target.key, clearLive]);
+
+  // Another tab signed out or switched staff: the preview is for the old login, also after Stop
+  // while the final words are on the way (the recording itself stops on its own watch).
+  useEffect(() => {
+    const onStorage = () => {
+      if (liveRef.current && liveTokenRef.current !== readToken()) clearLive();
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [clearLive]);
 
   const settleUpload = useCallback(() => {
     if (mountedRef.current) setUploading(false);
@@ -246,14 +274,22 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   // `clip` is the recording's own snapshot (target at the tap), never today's props.
   const runTranscription = useCallback(
     async (blob, durationSeconds, clip) => {
-      const token = readToken();
+      // The login that made the tap (`clip.token`); uploadClip already dropped a recording whose
+      // login changed since.
+      const { token } = clip;
       if (!token) return;
       setUploading(true);
+      // The round trip can outlive the field: unmounted, the mic now belongs to another customer or
+      // visit, or another tab switched the login. Never append into the wrong field.
+      const stillWanted = () => mountedRef.current && targetRef.current.key === clip.key && readToken() === token;
+      // Only a caller that checks its own field asks (`resendWanted` true: the field can still take
+      // the words), so no paid resend is offered for words with nowhere to go.
+      const canResend = () => stillWanted() && resendWantedRef.current?.() === true;
       try {
-        const { text, money } = await transcribeClip(blob, durationSeconds, clip, token);
-        // The round trip can outlive the field: unmounted, or the mic now
-        // belongs to another customer or visit. Never append into the wrong field.
-        if (!mountedRef.current || targetRef.current.key !== clip.key) return;
+        // A send with no answer asks to send the same recording again (null = the person said no).
+        const answer = await transcribeClipWithResend(blob, durationSeconds, clip, token, canResend, unmountSignalRef.current);
+        if (!answer || !stillWanted()) return;
+        const { text, money } = answer;
         if (text && onTranscriptRef.current) {
           if (money) onTranscriptRef.current(text, { money });
           else onTranscriptRef.current(text);
@@ -272,7 +308,9 @@ export default function useSpeechDictation(onTranscript, options = {}) {
 
   const uploadClip = useCallback(
     (blob, durationSeconds, clip) => {
-      if (!blob || !blob.size) {
+      // Empty, or another tab signed out or switched the login since the tap: the recording is
+      // dropped before either path sees it (a clip handler would send it under the new login).
+      if (!blob || !blob.size || readToken() !== clip.token) {
         clearLive();
         return undefined;
       }
@@ -292,8 +330,9 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     if (uploading || startingRef.current) return;
     startingRef.current = true;
     setStarting(true);
-    // The words are for the field this tap was made on, even if the panel moves on.
-    const clip = targetRef.current;
+    // The words are for the field this tap was made on, even if the panel moves on, and for the
+    // login that made it.
+    const clip = { ...targetRef.current, token: readToken() };
     // One microphone records at a time: claiming the slot stops the mic that
     // holds it (and hands over its clip). A mic still opening when it loses the
     // slot never starts.
@@ -313,9 +352,10 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       alert(`Microphone unavailable: ${e?.message || e}`);
       return;
     }
-    if (!mountedRef.current || slot.cancelled()) {
-      // Unmounted, cancelled (`cancel()`), or another mic took the microphone
-      // while the permission prompt was open — release the mic.
+    if (!mountedRef.current || slot.cancelled() || readToken() !== clip.token) {
+      // Unmounted, cancelled (`cancel()`), another mic took the microphone, or
+      // another tab switched the login while the permission prompt was open —
+      // release the mic: nothing records or streams under another login.
       stream.getTracks().forEach((t) => t.stop());
       release();
       doneStarting();
@@ -349,7 +389,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     // A recording never runs behind a hidden or closing page, and a forgotten
     // mic on a visible page (a phone on a mount) ends by itself at the cutoff:
     // the clip stops and what was recorded is handed over.
-    const guarded = (clipMode || serverMode) && typeof document !== "undefined";
+    const guarded = clipMode || serverMode;
     const unguard = guarded ? guardRecording(stopRecording, clipMaxMs) : () => {};
     if (!unguard) {
       // Hidden while the permission prompt was open: the clip never starts.
@@ -358,9 +398,12 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       doneStarting();
       return;
     }
-    // Everything a finished recording lets go of: the page guard and the slot.
+    // Every recording, guarded or not, stops when another tab signs out or switches staff.
+    const unwatchLogin = stopOnLoginChange(stopRecording, () => readToken() === clip.token);
+    // Everything a finished recording lets go of: the page guard, the login watch and the slot.
     const finish = () => {
       unguard();
+      unwatchLogin();
       release();
       unguardRef.current = null;
     };
@@ -604,6 +647,8 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   // modal closes mid-dictation) so the mic isn't left recording and stale
   // callbacks can't fire against an unmounted notes setter.
   const mountedRef = useRef(true);
+  // Aborts when the mic unmounts: ends a resend question's wait for the page (serverDictation.js).
+  const unmountSignalRef = useRef(null);
   // Abandon, don't upload: the field is gone. Lets go of a running recorder, its
   // page guard and the app-wide slot; its clip is never sent. No-op when nothing records.
   const dropRecorder = useCallback(() => {
@@ -623,8 +668,11 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   }, []);
   useEffect(() => {
     mountedRef.current = true;
+    const unmounted = new AbortController();
+    unmountSignalRef.current = unmounted.signal;
     return () => {
       mountedRef.current = false;
+      unmounted.abort();
       clearTimeout(idleTimerRef.current);
       const rec = recognitionRef.current;
       if (rec) {

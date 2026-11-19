@@ -600,6 +600,7 @@ async function getConversions(startDate, endDate) {
               values: [
                 'form_submit',
                 'phone_click',
+                'sms_click',
                 'generate_lead',
                 'purchase',
                 'sign_up',

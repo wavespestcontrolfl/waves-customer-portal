@@ -155,6 +155,30 @@ test('lawn_pricing_v2 carries the area add-on catalog beside the Bermuda flag, b
   }
 });
 
+// GATE_CAGE_TWO_SIZES (owner 2026-11-19): the estimator's startup read of this row also tells the
+// Pool Cage Size box the gate, so the box needs no new fetch. Strict 'true', and no other key has it.
+test('lawn_pricing_v2 carries poolCageTwoSizes only while GATE_CAGE_TWO_SIZES is exactly true, and no other key does', async () => {
+  const prior = process.env.GATE_CAGE_TWO_SIZES;
+  try {
+    await withServer(async (baseUrl) => {
+      for (const [gate, present] of [[undefined, false], ['false', false], ['1', false], ['TRUE', false], ['on', false], ['true', true]]) {
+        if (gate === undefined) delete process.env.GATE_CAGE_TWO_SIZES; else process.env.GATE_CAGE_TWO_SIZES = gate;
+        mockPricingConfigRow = { config_key: 'lawn_pricing_v2', data: {} };
+        const lawn = await call(baseUrl, 'GET', '/lawn_pricing_v2', { role: 'admin' });
+        expect(lawn.status).toBe(200);
+        if (present) expect(lawn.json.poolCageTwoSizes).toBe(true);
+        else expect(lawn.json).not.toHaveProperty('poolCageTwoSizes');
+        mockPricingConfigRow = { config_key: 'lawn_brackets_other', data: {} };
+        const other = await call(baseUrl, 'GET', '/lawn_brackets_other', { role: 'admin' });
+        expect(other.status).toBe(200);
+        expect(other.json).not.toHaveProperty('poolCageTwoSizes');
+      }
+    });
+  } finally {
+    if (prior === undefined) delete process.env.GATE_CAGE_TWO_SIZES; else process.env.GATE_CAGE_TWO_SIZES = prior;
+  }
+});
+
 test('lawn_pricing_v2 offers bahia as a new lawn plan only while GATE_LAWN_V13 is off', async () => {
   const prior = process.env.GATE_LAWN_V13;
   mockPricingConfigRow = { config_key: 'lawn_pricing_v2', data: {} };

@@ -1081,7 +1081,7 @@ test.each(['unknown', 'mixed'])('explicit %s turf never falls back to legacy St.
 });
 
 describe('ordinance jurisdiction for a profile with no county', () => {
-  const { getApplicableOrdinances } = require('../services/waveguard-plan-engine');
+  const { getApplicableOrdinances, resolveOrdinanceJurisdiction } = require('../services/fertilizer-jurisdiction');
   const { actualProductBlackoutBlocks } = require('../services/complete-scheduled-service');
   const window = (name, extra) => ({
     jurisdiction_name: name, active: true, restricted_nitrogen: true, restricted_phosphorus: true,
@@ -1118,11 +1118,12 @@ describe('ordinance jurisdiction for a profile with no county', () => {
     return query;
   };
   const knex = () => ordinanceQuery();
-  const names = async (profile, cities) => (await getApplicableOrdinances(knex, profile, cities)).map((r) => r.jurisdiction_name).sort();
+  const ordinances = (profile, service) => getApplicableOrdinances(knex, resolveOrdinanceJurisdiction(service, profile));
+  const names = async (profile, service) => (await ordinances(profile, service)).map((r) => r.jurisdiction_name).sort();
   const noCounty = { county: null, municipality: null };
 
   test('no profile county + Parrish ZIP resolves the Manatee window, which restricts N in July', async () => {
-    const rows = await getApplicableOrdinances(knex, noCounty, { customerCity: 'Parrish', customerZip: '34219' });
+    const rows = await ordinances(noCounty, { city: 'Parrish', zip: '34219' });
     expect(rows.map((r) => r.jurisdiction_name)).toEqual(['Manatee County']);
     const july = summarizeOrdinanceStatus({
       date: new Date('2026-07-15T12:00:00'), ordinances: rows,
@@ -1133,7 +1134,7 @@ describe('ordinance jurisdiction for a profile with no county', () => {
   });
 
   test('North Port still resolves its own Apr 1 city row', async () => {
-    const rows = await getApplicableOrdinances(knex, noCounty, { customerCity: 'North Port', customerZip: '34286' });
+    const rows = await ordinances(noCounty, { city: 'North Port', zip: '34286' });
     const northPort = rows.find((r) => r.jurisdiction_name === 'North Port');
     expect(northPort.restricted_start_month).toBe(4);
     expect(summarizeOrdinanceStatus({
@@ -1143,24 +1144,34 @@ describe('ordinance jurisdiction for a profile with no county', () => {
   });
 
   test('a profile county still wins over the address', async () => {
-    expect(await names({ county: 'Charlotte', municipality: null }, { customerCity: 'Parrish', customerZip: '34219' }))
+    expect(await names({ county: 'Charlotte', municipality: null }, { city: 'Parrish', zip: '34219' }))
       .toEqual(['Charlotte County']);
   });
 
   test('a stamped address in a different county uses the stamped county, not the profile or customer county', async () => {
     expect(await names(
       { county: 'Manatee', municipality: 'Parrish' },
-      { stampedCity: 'Port Charlotte', stampedZip: '33948', customerCity: 'Parrish', customerZip: '34219' },
+      { service_address_city: 'Port Charlotte', service_address_zip: '33948', city: 'Parrish', zip: '34219' },
     )).toEqual(['Charlotte County']);
     expect(await names(
       noCounty,
-      { stampedCity: 'Venice', stampedZip: '34285', customerCity: 'Parrish', customerZip: '34219' },
+      { service_address_city: 'Venice', service_address_zip: '34285', city: 'Parrish', zip: '34219' },
     )).toEqual(['Sarasota County']);
   });
 
   test('an unresolvable or straddling ZIP leaves no county window (unchanged)', async () => {
-    expect(await names(noCounty, { customerCity: 'Nowhere', customerZip: '99999' })).toEqual([]);
-    expect(await names(noCounty, { customerCity: '', customerZip: '34228' })).toEqual([]);
+    expect(await names(noCounty, { city: 'Nowhere', zip: '99999' })).toEqual([]);
+    expect(await names(noCounty, { city: '', zip: '34228' })).toEqual([]);
+  });
+
+  test('a saved county on a shared ZIP belongs only to the matching street', async () => {
+    const profile = { county: 'Charlotte', municipality: 'Englewood' };
+    const service = {
+      city: 'Englewood', zip: '34223', address_line1: '10 Sample Street',
+      service_address_city: 'Englewood', service_address_zip: '34223',
+    };
+    expect(await names(profile, { ...service, service_address_line1: '10 Sample St.' })).toEqual(['Charlotte County']);
+    expect(await names(profile, { ...service, service_address_line1: '12 Sample St.' })).toEqual([]);
   });
 
   test('the completion path derives the same county for actual N/P products', async () => {

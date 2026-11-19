@@ -149,12 +149,16 @@ describe('attachVoicemailPrefillLead — attach semantics', () => {
     expect(String(payload.status.__raw)).toContain("WHEN status = 'unresponsive' THEN 'new'");
   });
 
-  test('provenance stage is MERGED into extracted_data, never a replace', async () => {
+  test('provenance stage is merged without browser source evidence', async () => {
     state.returningRows = [{ id: LEAD_ID }];
-    const stage = { stage: 'lead_webhook_received', existing_customer_attach: true };
+    const stage = {
+      stage: 'lead_webhook_received', existing_customer_attach: true,
+      source_evidence: { kind: 'google_ads', label: 'Google Ads', basis: 'browser' },
+    };
     await attachVoicemailPrefillLead(callArgs({ webhookStage: stage }));
     const { payload } = state.updates[0];
     expect(String(payload.extracted_data.__raw)).toContain("COALESCE(extracted_data, '{}'::jsonb) ||");
+    expect(String(payload.extracted_data.__raw)).toContain("- 'source_evidence'");
     expect(payload.extracted_data.bindings[0]).toBe(JSON.stringify(stage));
   });
 

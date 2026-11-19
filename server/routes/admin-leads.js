@@ -20,7 +20,73 @@ const { leadAddressFields } = require('../utils/address-normalizer');
 const logger = require('../services/logger');
 const { nanpPhoneProblem } = require('../utils/phone');
 const { leadServiceDisplay, catalogNameIndex } = require('../utils/lead-service-display');
+const { sourceEvidenceLabelSql, withSourceEvidence } = require('../services/lead-source-evidence');
+const { projectRelatedVisits } = require('../services/related-visit-links');
 const { leadServiceDisplayLive } = require('../config/feature-gates');
+
+const RELATED_VISITS_LIMIT = 25;
+
+// Outcome evidence must name the record, not merely the person. A customer or
+// phone match can span multiple inquiries and is therefore never a visit link.
+function leadRelatedVisitQuery(conn, lead) {
+  const leadId = String(lead.id);
+  return conn('scheduled_services as ss')
+    .where(function confirmedLeadIdentity() {
+      this.whereExists(
+        conn('lead_activities as la')
+          .select(conn.raw('1'))
+          .where('la.lead_id', lead.id)
+          .where('la.activity_type', 'appointment_scheduled')
+          .whereRaw("la.metadata->>'appointmentId' = ss.id::text"),
+      ).orWhereExists(
+        conn('ad_service_attribution as asa')
+          .select(conn.raw('1'))
+          .where('asa.lead_id', lead.id)
+          .whereRaw('asa.self_booked_appointment_id = ss.self_booking_id'),
+      ).orWhereExists(
+        conn('estimates as e')
+          .select(conn.raw('1'))
+          .whereRaw('e.id = ss.source_estimate_id')
+          // The estimate's lead mirror wins over a stale leads.estimate_id.
+          .where(function exactEstimateOwner() {
+            this.whereRaw("e.estimate_data->>'lead_id' = ?", [leadId]);
+            if (lead.estimate_id) {
+              this.orWhere(function unmirroredLeadEstimate() {
+                this.whereRaw("e.estimate_data->>'lead_id' IS NULL")
+                  .where('e.id', lead.estimate_id);
+              });
+            }
+          })
+          // Nullable ownership is not disagreement. Two populated owners must
+          // agree, and a populated lead customer vetoes either dissenting row.
+          .whereRaw('(e.customer_id IS NULL OR ss.customer_id IS NULL OR e.customer_id = ss.customer_id)')
+          .modify((estimate) => {
+            if (!lead.customer_id) return;
+            estimate.where((owner) => owner.whereNull('e.customer_id').orWhere('e.customer_id', lead.customer_id));
+          }),
+      );
+    })
+    // Exact record linkage does not override a known owner conflict: showing
+    // another customer's invoice is worse than omitting a stale association.
+    // An unknown visit owner remains eligible for every exact linkage arm.
+    .modify((visits) => {
+      if (lead.customer_id) {
+        visits.where((owner) => owner.whereNull('ss.customer_id').orWhere('ss.customer_id', lead.customer_id));
+      }
+    })
+    .orderByRaw('ss.scheduled_date DESC NULLS LAST, ss.id DESC')
+    .limit(RELATED_VISITS_LIMIT + 1)
+    .select('ss.id', 'ss.status', 'ss.scheduled_date');
+}
+
+async function loadLeadRelatedVisits(conn, lead) {
+  const rows = await leadRelatedVisitQuery(conn, lead);
+  const hasMore = rows.length > RELATED_VISITS_LIMIT;
+  return {
+    items: await projectRelatedVisits(conn, rows.slice(0, RELATED_VISITS_LIMIT)),
+    hasMore,
+  };
+}
 
 // GATE_LEAD_SERVICE_DISPLAY: the Leads screen shows each lead's service the
 // way the booking catalog names it. Read-only: service_interest is untouched,
@@ -825,6 +891,9 @@ router.get('/', async (req, res, next) => {
 
     const validSorts = {
       first_contact_at: 'leads.first_contact_at',
+      received: 'leads.first_contact_at',
+      received_at: 'leads.first_contact_at',
+      source: sourceEvidenceLabelSql(db),
       name: 'leads.first_name',
       status: 'leads.status',
       response_time: 'leads.response_time_minutes',
@@ -879,12 +948,15 @@ router.get('/', async (req, res, next) => {
 
     const leads = await query
       .orderBy(sortCol, order === 'asc' ? 'asc' : 'desc')
+      // Source labels are often shared. Received time makes equal labels
+      // useful and stable before the UUID tie-breaker.
+      .modify((qb) => { if (sort === 'source') qb.orderBy('leads.first_contact_at', 'desc'); })
       .orderBy('leads.id', 'asc')
       .limit(lim)
       .offset((pg - 1) * lim);
 
     res.json({
-      leads: await withServiceDisplay(leads),
+      leads: withSourceEvidence(await withServiceDisplay(leads)),
       total: parseInt(count, 10),
       page: pg,
       limit: lim,
@@ -979,6 +1051,13 @@ router.get('/:id', async (req, res, next) => {
     const activities = await db('lead_activities')
       .where('lead_id', req.params.id)
       .orderBy('created_at', 'desc');
+
+    const includeOutcomes = req.query.include_outcomes === '1';
+    const relatedVisitsPromise = includeOutcomes
+      ? loadLeadRelatedVisits(db, lead)
+        .then((value) => ({ ok: true, value }))
+        .catch((error) => ({ ok: false, error }))
+      : null;
 
     // Recent calls for this lead, so the expanded lead card can show what the
     // caller actually asked for (transcript + recording) — the AI summary alone
@@ -1115,7 +1194,22 @@ router.get('/:id', async (req, res, next) => {
       console.error('[leads] call_log lookup failed (non-blocking):', e.message);
     }
 
-    const response = { lead: (await withServiceDisplay([lead]))[0], activities, calls };
+    const response = { lead: withSourceEvidence(await withServiceDisplay([lead]))[0], activities, calls };
+    if (includeOutcomes) {
+      const outcome = await relatedVisitsPromise;
+      if (outcome.ok) {
+        const related = outcome.value;
+        response.related_visits = related.items;
+        response.related_visits_status = 'available';
+        response.related_visits_has_more = related.hasMore;
+      } else {
+        const err = outcome.error;
+        logger.warn('[leads] related visit outcomes unavailable', { leadId: lead.id, code: err?.code || 'unknown' });
+        response.related_visits = null;
+        response.related_visits_status = 'unavailable';
+        response.related_visits_has_more = null;
+      }
+    }
     if (req.query.leadReview === '1') {
       response.linkedHistory = await require('../services/lead-linked-history').readLinkedLeadHistory(db, lead);
       try {
@@ -2581,3 +2675,4 @@ function convertLeadFromBar({ leadId, body, expected = null }) {
   });
 }
 module.exports.convertLeadFromBar = convertLeadFromBar;
+module.exports._relatedVisits = { leadRelatedVisitQuery, loadLeadRelatedVisits, RELATED_VISITS_LIMIT };

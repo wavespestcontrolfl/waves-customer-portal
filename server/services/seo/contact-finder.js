@@ -228,9 +228,95 @@ function withDeadline(promise, ms, fallback) {
   return Promise.race([Promise.resolve(promise).catch(() => fallback), deadline]).finally(() => clearTimeout(timer));
 }
 
-async function fetchPage(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT_MS, resolveHostFn = hostResolvesPublic, maxRedirects = 2, resolveOnly = false } = {}) {
+// Opt-in cookie carry for ONE fetchPage call's redirect chain. EDIS now
+// redirects through ask.ifas.ufl.edu, which answers 307 to itself until its
+// locale cookie comes back. Origin-only: a cookie goes back only to the exact
+// scheme, host and port that set it (Domain is ignored), and only to a path
+// its Path covers (RFC 6265 5.1.4). Max-Age (which wins over Expires) or
+// Expires sets when it lapses; a lapsed cookie is never sent, and a Secure
+// cookie set over plain http is ignored.
+const COOKIE_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const MAX_COOKIES_PER_ORIGIN = 20;
+const MAX_COOKIE_HEADER = 4096;
+
+function readSetCookies(res) {
+  const h = res.headers;
+  if (!h) return [];
+  let raw = null;
+  if (typeof h.getSetCookie === 'function') raw = h.getSetCookie();
+  else if (typeof h.get === 'function') raw = h.get('set-cookie');
+  if (typeof raw === 'string') return [raw];
+  return Array.isArray(raw) ? raw.filter((v) => typeof v === 'string') : [];
+}
+
+function defaultCookiePath(pathname) {
+  const last = String(pathname || '').lastIndexOf('/');
+  return last <= 0 ? '/' : pathname.slice(0, last);
+}
+
+function cookiePathMatches(cookiePath, requestPath) {
+  if (requestPath === cookiePath) return true;
+  return requestPath.startsWith(cookiePath) && (cookiePath.endsWith('/') || requestPath[cookiePath.length] === '/');
+}
+
+function parseSetCookie(line, url, now) {
+  const [pair, ...attrs] = line.split(';');
+  const eq = pair.indexOf('=');
+  if (eq < 1) return null;
+  const name = pair.slice(0, eq).trim();
+  const value = pair.slice(eq + 1).trim();
+  if (!COOKIE_NAME_RE.test(name) || /[\r\n]/.test(value)) return null;
+  let path = null; let maxAge = null; let expires = null; let secure = false;
+  for (const attr of attrs) {
+    const i = attr.indexOf('=');
+    const key = (i < 0 ? attr : attr.slice(0, i)).trim().toLowerCase();
+    const val = i < 0 ? '' : attr.slice(i + 1).trim();
+    if (key === 'path' && val.startsWith('/')) path = val;
+    else if (key === 'max-age' && /^-?\d+$/.test(val)) maxAge = Number(val);
+    else if (key === 'expires' && !Number.isNaN(Date.parse(val))) expires = Date.parse(val);
+    else if (key === 'secure') secure = true;
+  }
+  if (secure && url.protocol !== 'https:') return null; // a Secure cookie set over http is ignored
+  const expiresAt = maxAge !== null ? now + maxAge * 1000 : expires; // Max-Age wins over Expires; null = this fetch only
+  return { name, value, path: path || defaultCookiePath(url.pathname), expiresAt };
+}
+
+function storeCookies(jar, url, res) {
+  if (!jar) return;
+  const now = Date.now();
+  let cookies = jar.get(url.origin);
+  if (!cookies) { cookies = new Map(); jar.set(url.origin, cookies); }
+  for (const [key, c] of cookies) if (c.expiresAt !== null && c.expiresAt <= now) cookies.delete(key); // a lapsed cookie frees its slot
+  for (const line of readSetCookies(res)) {
+    const cookie = parseSetCookie(line, url, now);
+    if (!cookie) continue;
+    const key = `${cookie.name}=${cookie.path}`; // a token name has no "="
+    if (cookie.expiresAt !== null && cookie.expiresAt <= now) { cookies.delete(key); continue; }
+    if (!cookies.has(key) && cookies.size >= MAX_COOKIES_PER_ORIGIN) continue;
+    cookies.set(key, { name: cookie.name, value: cookie.value, path: cookie.path, expiresAt: cookie.expiresAt });
+  }
+}
+
+function cookieHeaderFor(jar, url) {
+  const cookies = jar && jar.get(url.origin);
+  if (!cookies) return null;
+  const now = Date.now(); // a cookie can lapse between hops (a slow DNS lookup or response)
+  const eligible = [...cookies.values()]
+    .filter((c) => (c.expiresAt === null || c.expiresAt > now) && cookiePathMatches(c.path, url.pathname))
+    .sort((a, b) => b.path.length - a.path.length); // RFC 6265 5.4: longer paths first
+  let out = '';
+  for (const { name, value } of eligible) {
+    const next = out ? `${out}; ${name}=${value}` : `${name}=${value}`;
+    if (next.length > MAX_COOKIE_HEADER) continue; // skip one that does not fit; a smaller one may
+    out = next;
+  }
+  return out || null;
+}
+
+async function fetchPage(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT_MS, resolveHostFn = hostResolvesPublic, maxRedirects = 2, resolveOnly = false, carryCookies = false } = {}) {
   let current = url;
   let redirectHops = 0;
+  const jar = carryCookies ? new Map() : null; // origin -> Map(name -> value); null = send no Cookie header
   const fail = (status, blocked, error) => ({ status, finalUrl: null, redirectHops, html: null, blocked, truncated: false, contentType: null, error });
   const headerOf = (res, name) => (res.headers && typeof res.headers.get === 'function' && res.headers.get(name)) || null;
   for (let hop = 0; hop <= maxRedirects; hop++) {
@@ -250,17 +336,21 @@ async function fetchPage(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const reqHeaders = { 'User-Agent': 'WavesPestControl-LinkResearch/1.0 (+https://wavespestcontrol.com)' };
+    const cookie = cookieHeaderFor(jar, u);
+    if (cookie) reqHeaders.Cookie = cookie;
     try {
       const res = await fetchFn(current, {
         redirect: 'manual',
         signal: controller.signal,
-        headers: { 'User-Agent': 'WavesPestControl-LinkResearch/1.0 (+https://wavespestcontrol.com)' },
+        headers: reqHeaders,
         resolveOnly, // default fetcher drops the socket at headers; injected fetchers may ignore it
       });
       if (!res) return fail(0, false, 'no_response');
       if (res.status >= 300 && res.status < 400 && res.headers && typeof res.headers.get === 'function') {
         const loc = res.headers.get('location');
         if (!loc) return fail(res.status, false, 'redirect_without_location');
+        storeCookies(jar, u, res);
         current = new URL(loc, current).toString(); // re-validated on next loop
         redirectHops++;
         continue;

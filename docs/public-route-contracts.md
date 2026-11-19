@@ -1365,6 +1365,11 @@ A zone/no-tech confirm (no technician bound) has no single route to re-check
 and keeps only the overlap gate, unchanged. Either gate off skips this
 whole-route capacity re-check.
 
+A confirmed visit keeps its place when staff book it from an estimate hold, even
+after the original hold expires. Confirmation counts that visit in the fixed-hour
+conflict check and in the locked arrival-window route check. An unclaimed hold
+frees its time at expiry.
+
 Tech-aware confirm conflict checks for a second field technician
 (`GATE_MULTI_TECH_CONFIRM`, owner-approved 2026-09-29, ships DARK; owner
 2026-10-30: it no longer needs `GATE_SCHEDULING_CAPACITY`, so two technicians can
@@ -1785,7 +1790,10 @@ last free card drops out when the list was full. `/reserve` takes the
 make-room path only for that signature, with the gate read inside the
 transaction, and re-proves the hour from current data under the date,
 tech-day and zone locks; any failure is the ordinary `SLOT_UNAVAILABLE` and
-no hold is written. The hold stores the stops that would move in
+no hold is written. This check includes staff-booked appointments at the
+proposed destinations even after their original estimate holds expire.
+An expired, unclaimed hold at a destination frees that time.
+The hold stores the stops that would move in
 `scheduled_services.make_room_moves`. While that hold is live its moves'
 destinations stay busy for every other offer, reserve, same-slot refresh,
 `/extend` and accept (the accepted window as resolved at accept, so a hold
@@ -2047,6 +2055,11 @@ allocation order at the certified anchor, using a nonblocking day fence for
 callers already holding rows. A busy reorder aborts allocation for recovery.
 Capacity stays off until the other booking/dispatch writers and parent traffic
 prerequisites integrate.
+
+An estimate can still show an hour after staff book its last opening. If the
+new reservation no longer fits, `/reserve` returns the existing 409
+`SLOT_UNAVAILABLE`, including when staff booked that estimate's original hold.
+
 Phone-booking primary and follow-up inserts (owner ruling 2026-09-11, option 1)
 try the shared day fence — rung 1 date occupancy plus the tech-day or
 unassigned-day rung — with a bounded non-blocking wait (`CALL_BOOKING_FENCE_WAIT_MS`,
@@ -4385,7 +4398,17 @@ DELIBERATELY SEPARATE from
 `leads.lead_source_id` / the classified `lead_source` — self-reported, never
 merged into technically-observed attribution, and "unknown" (the field
 omitted or invalid) stores NULL rather than a guess. Separately and
-independently of `heard_about`, the SAME technically-observed attribution
+independently of `heard_about`, website forms, quotes and self-booking can
+send the optional boolean `attribution.observed`. Only literal `true` with
+an empty referrer and no campaign signal can classify an entry as Direct.
+Older payloads may omit the marker. The server derives the staff-facing
+`source_evidence` from the submitted first-touch signals and ignores any
+client-supplied source label. Explicit GBP tags or a Google Maps referrer
+take precedence, followed by Google and Meta click IDs or matching paid
+campaign tags. Under the existing Meta routing rule an `fbclid` or `fbc`
+selects the Meta line. An unpaid social tag alone stays organic.
+
+The same technically-observed attribution
 pipeline both endpoints already run (UTM/click-id/referrer →
 `server/services/lead-source-classify.js`) now also classifies an
 AI-assistant referral: a visitor who asked ChatGPT, Perplexity, Gemini,
@@ -5147,6 +5170,13 @@ estimate; `GATE_LOOKUP_PERMIT_FACTS`), with a story count the permit filled
 `storiesSource: 'default'`) and the `homeSqFt` verify flag's prose replaced by
 the shared source-free vacant-parcel copy — `publicEnrichedProfile` strips all of
 it on both paths; the response otherwise describes only the requested parcel).
+While `GATE_CAGE_TWO_SIZES` is on (owner 2026-11-19, "cage 1000"; dark by default), the
+returned and lead-stored `enriched` profile also carries `poolCageLegacySize`, the
+four-size pool cage answer (SMALL/MEDIUM/LARGE/OVERSIZED, or NONE) while
+`poolCageSize` is the two-size answer (MEDIUM or LARGE). It is derived from the same
+county cage area and satellite read already in the payload, so it adds no new data
+and no new field source. With the gate off the key is absent and the profile is
+unchanged. `/api/public/quote/calculate` reads it (see that entry).
 Operational `meta.providerStatus` (credential configuration and attempted-provider
 health) is staff-only; `publicLookupMeta` removes it from every public response.
 The public `errors` array includes only the known outside-service-area verdict;
@@ -5241,6 +5271,23 @@ a staff correction) and its prompt are never overwritten. Unknown values are
 silently dropped, the question is never required, and the response is
 unchanged; the pair is staff-only, never part of `extracted_data`, the
 quote text, or any customer-facing copy.
+Pool cage hold (`GATE_CAGE_TWO_SIZES`, owner 2026-11-19, "hold"; dark by default):
+the lookup's `enriched.poolCageLegacySize` (the four-size answer, see the
+property-lookup entry), and the server's own cache-only re-read of the same
+address, decide the cage under the gate state of THIS request, the re-read first
+and the county area first (`server/services/property-lookup/cage-sizes.js`). Gate
+on: the priced size is the two-size answer (Medium up to 1,000 sq ft, Large above),
+and a cage that today's four sizes call Large or Oversized is held
+(`quote_required`, the existing manual-quote answer). A visitor who answers no
+cage (`NO` in any case, or `false`) is not held and not charged; a client with no
+decided cage answer (omitted, `POSSIBLE`, `UNKNOWN` or any other value) takes the
+re-read's decided answer, so it prices like an explicit answer and a partial or
+undecided `enriched` cannot drop a hold. Gate off: a profile that carries
+`poolCageLegacySize` (one from before a rollback) prices the four-size answer, the
+re-read first, with the same rule for an undecided answer; any other profile
+prices its own `poolCageSize`, exactly as before the gate. Either way a Large or
+Oversized cage is held as before. The response
+shape does not change; `quote_required` was already a possible answer.
 `services.treeShrub.tier` is validated (2026-09-24, codex P1 round 2): a
 present tier must be a currently-sold one (`standard`/`enhanced`) or the
 route answers 400 before pricing — `light` (4x/quarterly, retired for new
@@ -6726,13 +6773,49 @@ A non-null token fans out to `/prep/:token`. `en_route` additionally returns liv
 from Bouncie. The `complete` summary additionally hands out secondary bearer
 tokens — `serviceReportToken` (`report_view_token`), `invoiceToken`, a
 `/rate/:token` review URL, and TTL-presigned service-photo URLs — fanning out
-to the report / receipt / rate surfaces. Treat the track token and any change
+to the report / receipt / rate surfaces. The top-level `visitChange` is null
+for an ordinary visit. A Quick Move customer-pick handoff returns only its
+approved rain reason, original slot, pick deadline, and whether the customer
+still acts or a replacement is proven booked. The parked handoff date is never
+returned as a booked current slot. A replacement Auto-Dispatch placed follows
+the canonical day-only promise verdict: when its hour is still hidden, both
+`visitChange.current.windowStart` and the top-level `window.start` /
+`window.end` are null, while top-level `window.date` carries the proven placed
+calendar date independently of the optional handoff narrative. Parked and
+office-rebooking rows return `window.date = null`; a customer-selected hour
+remains visible. The durable marker-plus-window row
+shape triggers this verdict even if the optional handoff narrative cannot be
+read; `last_auto_dispatch_at` is best-effort bookkeeping, not display
+authority. Its only action opens signed-in Visits at
+`/?tab=schedule`, where the current schedule response can supply a
+write-capable reschedule link; the tracker also keeps call/text office fallback
+visible. When the durable `customer_pick_by` plus missing-window shape proves
+the visit is still unplaced but its narrative history is missing, unreadable or
+not approved for customer copy, the payload instead uses neutral
+`pending_rebook` office recovery with no reason or picker action. That unplaced
+shape returns no stops count, route progress, approximate vehicle or scheduled
+polling, and the stops-ahead POST does not compute or persist a count for it.
+The track payload never returns or mints a reschedule token. A
+cancelled or missed visit returns only that the office is the next actor. An
+operational `rescheduled` row adds `visitChange.kind = pending_rebook`; its
+public state is `scheduled` with a null window, no vehicle, no stops count and
+no polling while the office chooses a time. The tracker gives office call/text
+actions. An intentional plan skip preserves the existing top-level `cancelled` state for
+older clients and adds `visitChange.kind = skipped`, with the next regular
+date only when the same service and property can be proven; it returns no
+picker action and no make-up promise. The bounded public lookup also floors
+the candidate date at the current ET day, so an overdue open occurrence is
+never announced as the next visit.
+Treat the track token and any change
 to its payload, in any state, as security-critical. The GET stays strictly
 read-only; it has exactly TWO write companions, both bounded.
 `POST /api/public/track/:token/stops-ahead` — same token gate + rate limit,
 ignores its body, and only persists the stops-ahead display-clamp floor
 (monotone LEAST, skip-unchanged) via `computeStopsAhead` before returning the
-displayable count. `POST /api/public/track/:token/view` — same token format
+displayable count. The floor write and its no-op reread are bound to the exact
+technician/date/window used for the count and recheck that the visit is still
+placed and eligible, so a concurrent Quick Move cannot stamp its parked row.
+`POST /api/public/track/:token/view` — same token format
 gate, expiry fence (unknown / malformed / expired = the same generic 404, no
 write), privacy headers and router rate limit; ignores its body; records ONE
 `customer_page_views` row (`page: 'track'`, subject = the visit, bots / staff

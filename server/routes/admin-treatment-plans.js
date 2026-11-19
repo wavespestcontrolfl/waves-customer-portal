@@ -25,7 +25,8 @@ function plannerOptions(req) {
   }
   return {
     includeCompletionDefaults, completionDefaultsEnabled, ...value,
-    ...Object.fromEntries(['equipmentSystemId', 'calibrationId', 'selectedConditionalProductIds', 'selectedConditionalProductNames', 'selectedConditionalRaw']
+    ...Object.fromEntries(['equipmentSystemId', 'calibrationId', 'selectedConditionalProductIds', 'selectedConditionalProductNames', 'selectedConditionalRaw',
+      'conditionFlags', 'treatedTurfSpecies', 'tetrinoTarget', 'tetrinoCurrentObservations', 'tetrinoPressure', 'grubTimingEvidence']
       .map(key => [key, body[key] || req.query[key] || null])),
   };
 }

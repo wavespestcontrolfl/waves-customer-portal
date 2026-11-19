@@ -173,9 +173,9 @@ describe('findConflictingVisits', () => {
     // Default status set mirrors createSelfBooking's commit gate exactly.
     expect(q.whereNotIn).toHaveBeenCalledWith('status', ['cancelled', 'skipped', 'no_show', 'rescheduled']);
     expect(DEFAULT_EXCLUDE_STATUSES).toEqual(['cancelled', 'skipped', 'no_show', 'rescheduled']);
-    // Expired holds never block; live ones do.
-    expect(q.whereNull).toHaveBeenCalledWith('reservation_expires_at');
-    expect(q.orWhereRaw).toHaveBeenCalledWith('reservation_expires_at > NOW()');
+    // Only an unclaimed hold releases its hour at expiry.
+    expect(q.whereNull).toHaveBeenCalledWith('scheduled_services.reservation_expires_at');
+    expect(q.orWhereRaw).toHaveBeenCalledWith('scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at > NOW()');
     // Same COALESCE(window_end, start + duration-or-60) overlap predicate as
     // the existing gates — window_start NULL rows evaluate NULL and stay
     // inert (converter/seeder placeholders never conflict).
