@@ -153,9 +153,11 @@ describe('the accept says the hold expired', () => {
 
     await pickTimeAndConfirm();
 
-    // The same time is held again, and the page says nothing is booked yet.
+    // The same time is held again, and the page says nothing is booked yet, inside the review anchor the
+    // review-entry scroll brings into view.
     const banner = await screen.findByText(REHELD, {}, SLOW);
     expect(banner.closest('[role="alert"]')).not.toBeNull();
+    expect(banner.closest('#estimate-review-section')).not.toBeNull();
     expect(screen.getByText(/Your visit is not booked yet/)).toBeInTheDocument();
     const reserves = reserveCalls(fetchMock);
     expect(reserves).toHaveLength(2);
@@ -188,6 +190,7 @@ describe('the accept says the hold expired', () => {
 
     const banner = await screen.findByText(REHELD, {}, SLOW);
     expect(banner.closest('[role="alert"]')).not.toBeNull();
+    expect(banner.closest('#estimate-review-section')).not.toBeNull();
     expect(screen.getByText(/Your visit is not booked yet/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeInTheDocument();
     expect(reserveCalls(fetchMock)).toHaveLength(2);
@@ -223,7 +226,7 @@ describe('the accept says the hold expired', () => {
     const fetchMock = makeFetchMock({
       reserveImpl: (n) => (n === 1
         ? jsonResponse({ scheduledServiceId: 'ss-1', expiresAt: inFifteenMinutes() })
-        : jsonResponse({ error: 'slot no longer available' }, { ok: false, status: 409 })),
+        : jsonResponse({ error: 'slot no longer available', availableSlots: { primary: [{ slotId: 'slot-2' }], expander: [] } }, { ok: false, status: 409 })),
       acceptImpl: () => EXPIRED_409(),
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -236,6 +239,44 @@ describe('the accept says the hold expired', () => {
     // The picker is back, with the list read again.
     expect((await screen.findAllByRole('button', { name: /^Choose / }, SLOW)).length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: 'Confirm booking' })).toBeNull();
+  }, TEST_TIMEOUT_MS);
+
+  it('never says "taken" when the fresh availability cannot be read: the plain expiry copy', async () => {
+    stubLocalStorage();
+    const fetchMock = makeFetchMock({
+      reserveImpl: (n) => (n === 1
+        ? jsonResponse({ scheduledServiceId: 'ss-1', expiresAt: inFifteenMinutes() })
+        // The server's own refresh failed: no list comes back.
+        : jsonResponse({ error: 'slot no longer available', availableSlots: null }, { ok: false, status: 409 })),
+      acceptImpl: () => EXPIRED_409(),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<EstimateViewPage />);
+
+    await pickTimeAndConfirm();
+
+    expect(await screen.findByText(/Your held time ran out and nothing was booked/, {}, SLOW)).toBeInTheDocument();
+    expect(screen.queryByText(/just taken/i)).toBeNull();
+  }, TEST_TIMEOUT_MS);
+
+  it('an estimate staff reshaped meanwhile reloads the page, with no "pick a time" or held-again copy', async () => {
+    stubLocalStorage();
+    const fetchMock = makeFetchMock({
+      reserveImpl: (n) => (n === 1
+        ? jsonResponse({ scheduledServiceId: 'ss-1', expiresAt: inFifteenMinutes() })
+        : jsonResponse({ error: 'Commercial service is scheduled by our team — no self-booking.', commercialManualScheduling: true }, { ok: false, status: 409 })),
+      acceptImpl: () => EXPIRED_409(),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<EstimateViewPage />);
+
+    await pickTimeAndConfirm();
+
+    const dataReads = () => fetchMock.mock.calls.filter(([url]) => String(url).includes('/data')).length;
+    await waitFor(() => expect(dataReads()).toBeGreaterThan(1), SLOW);
+    expect(screen.queryByText(REHELD)).toBeNull();
+    expect(screen.queryByText(/Your held time ran out/)).toBeNull();
+    expect(screen.queryByText(/just taken/i)).toBeNull();
   }, TEST_TIMEOUT_MS);
 
   it('falls back to the plain expiry recovery when the time cannot be held again', async () => {
@@ -277,7 +318,11 @@ describe('holdSameTimeAgain', () => {
   });
 
   it.each([
-    ['a taken time', () => jsonResponse({ error: 'slot no longer available' }, { ok: false, status: 409 }), { taken: true }],
+    ['a taken time', () => jsonResponse({ error: 'slot no longer available', availableSlots: { primary: [], expander: [] } }, { ok: false, status: 409 }), { taken: true }],
+    ['a refusal with no fresh list, for a time it cannot look up', () => jsonResponse({ error: 'slot no longer available' }, { ok: false, status: 409 }), { failed: true }],
+    ['a commercial estimate (staff reshaped it)', () => jsonResponse({ error: 'x', commercialManualScheduling: true }, { ok: false, status: 409 }), { noBooking: true }],
+    ['a guarantee-only renewal', () => jsonResponse({ error: 'x', invoiceOnlyAcceptance: true }, { ok: false, status: 409 }), { noBooking: true }],
+    ['an add-on limit, whatever the status', () => jsonResponse({ error: 'x', code: 'AREA_ADDON_YEARLY_LIMIT_REACHED' }, { ok: false, status: 422 }), { noBooking: true }],
     ['an estimate the office parked', () => jsonResponse({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', error: 'x' }, { ok: false, status: 409 }), { review: { code: 'ACCEPT_NEEDS_OFFICE_REVIEW', error: 'x' } }],
     ['another 409', () => jsonResponse({ error: 'something else' }, { ok: false, status: 409 }), { failed: true }],
     ['a server error', () => jsonResponse({}, { ok: false, status: 500 }), { failed: true }],
@@ -303,15 +348,48 @@ describe('holdSameTimeAgain', () => {
     expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body).slotId)).toEqual([OLD, FRESH]);
   });
 
+  // The refusal answers /reserve; the picked day answers /available-slots.
+  const routed = ({ reserve, day }) => vi.fn(async (url) => (String(url).includes('/available-slots') ? day() : reserve()));
+
   it.each([
-    ['another technician at the same time is not the same time', [{ slotId: '2026-07-15_09-00_tech-2.1767216000000.90.x' }], 1],
-    ['a fresh list without the time', [{ slotId: '2026-07-15_10-00_tech-1.1767216000000.90.x' }], 1],
-    ['a list that is not a list', 'oops', 1],
-  ])('answers taken: %s', async (_label, primary, calls) => {
-    const fetchMock = vi.fn(async () => refusal(primary));
+    ['another technician at the same time is not the same time', [{ slotId: '2026-07-15_09-00_tech-2.1767216000000.90.x' }]],
+    ['neither list has the time', [{ slotId: '2026-07-15_10-00_tech-1.1767216000000.90.x' }]],
+    ['a list that is not a list', 'oops'],
+  ])('answers taken after reading the picked day: %s', async (_label, primary) => {
+    const fetchMock = routed({ reserve: () => refusal(primary), day: () => jsonResponse({ primary: Array.isArray(primary) ? primary : [], expander: [] }) });
     vi.stubGlobal('fetch', fetchMock);
     expect(await holdSameTimeAgain({ ...base, slotId: OLD })).toEqual({ taken: true });
-    expect(fetchMock).toHaveBeenCalledTimes(calls);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('a time first found by date search: the picked day gives the fresh offer, read with the picker query', async () => {
+    const reserves = [
+      () => refusal([{ slotId: '2026-07-15_10-00_tech-1.1767216000000.90.x' }]),
+      () => jsonResponse({ scheduledServiceId: 'ss-4', expiresAt: 'soon' }),
+    ];
+    const fetchMock = routed({ reserve: () => reserves.shift()(), day: () => jsonResponse({ primary: [], expander: [{ slotId: FRESH }] }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const out = await holdSameTimeAgain({ ...base, slotId: OLD, selectedFrequency: 'quarterly' });
+    expect(out).toEqual({ held: { scheduledServiceId: 'ss-4', expiresAt: 'soon' } });
+    const [dayUrl] = fetchMock.mock.calls.find(([url]) => String(url).includes('/available-slots'));
+    const query = new URL(String(dayUrl), 'http://x').searchParams;
+    expect(query.get('date')).toBe('2026-07-15');
+    expect(query.get('serviceMode')).toBe('recurring');
+    expect(query.get('selectedFrequency')).toBe('quarterly');
+    expect(JSON.parse(query.get('serviceCadences'))).toEqual({ lawn: 'standard' });
+    const sent = fetchMock.mock.calls.filter(([url]) => /\/reserve$/.test(String(url))).map(([, init]) => JSON.parse(init.body).slotId);
+    expect(sent).toEqual([OLD, FRESH]);
+  });
+
+  it.each([
+    ['the day read fails', () => jsonResponse({}, { ok: false, status: 500 })],
+    ['the day read throws', () => { throw new Error('offline'); }],
+    ['the day answers a parked estimate', () => jsonResponse({ primary: [], expander: [], reviewBeforeBooking: true, reason: 'contact_review' })],
+    ['the day answers no list', () => jsonResponse({ summary: null })],
+  ])('answers failed, never taken, when availability cannot be read: %s', async (_label, day) => {
+    const fetchMock = routed({ reserve: () => refusal([{ slotId: '2026-07-15_10-00_tech-1.1767216000000.90.x' }]), day });
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await holdSameTimeAgain({ ...base, slotId: OLD })).toEqual({ failed: true });
   });
 
   it('retries only once: a second refusal is taken', async () => {

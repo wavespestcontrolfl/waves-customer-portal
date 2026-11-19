@@ -4789,39 +4789,81 @@ export function EstimateErrorBanner({ error }) {
 // time and confirmed it, so hold it again if it is still free (the server
 // re-checks every conflict, so a time someone else took still refuses). Answers
 // { held } with the new hold, { taken } when the time is gone, { review } when the
-// office parked the estimate, or { failed } for anything else (the caller then reopens the time list). Never throws.
+// office parked the estimate, { noBooking } when staff reshaped the estimate meanwhile
+// so it books nothing online, or { failed } for anything else (the caller then reopens
+// the time list). Never throws.
 // A signed time offer lapses 45 minutes after its list was built, and reserve then
-// refuses even a free time. That refusal carries a fresh signed list: when the same
-// time is on it, hold it once more with its new id. The page keeps its own id:
-// accept finds the hold by date, time and technician, not by the signature.
-export async function holdSameTimeAgain({ token, slotId, serviceMode, selectedFrequency, serviceCadences }) {
+// refuses even a free time. So before "taken", look for the same time on a fresh
+// signed offer (freshOfferForSameTime) and hold it once more with its new id. When
+// availability cannot be read, the answer is { failed } (the plain expiry copy),
+// never "taken". The page keeps its own id: accept finds the hold by date, time and
+// technician, not by the signature.
+export async function holdSameTimeAgain(args) {
+  const { token, slotId } = args || {};
   if (!token || !slotId) return { failed: true };
+  try {
+    const first = await reserveForRehold(args, slotId);
+    if (!first.lapsedOrTaken) return first.answer;
+    const fresh = await freshOfferForSameTime(first.availableSlots, args);
+    if (fresh === undefined) return { failed: true };
+    if (!fresh) return { taken: true };
+    // One retry only: a second "no longer available" means the time is gone.
+    const second = await reserveForRehold(args, fresh);
+    return second.lapsedOrTaken ? { taken: true } : second.answer;
+  } catch {
+    return { failed: true };
+  }
+}
+
+// One POST /reserve for the re-hold, with the body the first pick sent. Answers the
+// result for holdSameTimeAgain, or { lapsedOrTaken } with the refusal's fresh list:
+// "slot no longer available" is a taken time or a lapsed signed offer.
+async function reserveForRehold({ token, serviceMode, selectedFrequency, serviceCadences }, slotId) {
   const payload = { slotId, serviceMode };
   if (serviceMode !== 'one_time' && selectedFrequency) payload.selectedFrequency = selectedFrequency;
   if (serviceMode !== 'one_time' && serviceCadences) payload.serviceCadences = serviceCadences;
+  const r = await fetch(`${API_BASE}/public/estimates/${token}/reserve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (r.ok) {
+    const body = await r.json();
+    return { answer: body.scheduledServiceId && body.expiresAt ? { held: body } : { failed: true } };
+  }
+  const body = await r.json().catch(() => ({}));
+  // Parked for the office (B18): the caller takes it through the one transition.
+  if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') return { answer: { review: body } };
+  if (isNoBookingRefusal(body)) return { answer: { noBooking: true } };
+  if (r.status === 409 && /slot no longer available/i.test(body.error || '')) {
+    return { lapsedOrTaken: true, availableSlots: body.availableSlots };
+  }
+  return { answer: { failed: true } };
+}
+
+// A fresh signed offer for the same time: its slot id, null when the time is not on
+// the fresh lists, or undefined when they could not be read. The refusal's own list
+// is the default window, so a time first found by date search can be missing from
+// it: the picked day is read next, with the slot picker's own query.
+async function freshOfferForSameTime(list, { token, slotId, serviceMode, selectedFrequency, serviceCadences }) {
+  const onList = sameTimeOnFreshList(list, slotId);
+  if (onList) return onList;
+  const day = /^(\d{4}-\d{2}-\d{2})_/.exec(String(slotId));
+  if (!day) return list ? null : undefined;
   try {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const r = await fetch(`${API_BASE}/public/estimates/${token}/reserve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (r.status !== 409) {
-        if (!r.ok) return { failed: true };
-        const body = await r.json();
-        return body.scheduledServiceId && body.expiresAt ? { held: body } : { failed: true };
-      }
-      const body = await r.json().catch(() => ({}));
-      // Parked for the office (B18): the caller takes it through the one transition.
-      if (body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') return { review: body };
-      if (!/slot no longer available/i.test(body.error || '')) return { failed: true };
-      const fresh = attempt === 0 ? sameTimeOnFreshList(body.availableSlots, slotId) : null;
-      if (!fresh) return { taken: true };
-      payload.slotId = fresh;
-    }
-    return { taken: true };
+    const p = new URLSearchParams();
+    p.set('serviceMode', serviceMode === 'one_time' ? 'one_time' : 'recurring');
+    if (serviceMode !== 'one_time' && selectedFrequency) p.set('selectedFrequency', selectedFrequency);
+    if (serviceMode !== 'one_time' && serviceCadences) p.set('serviceCadences', JSON.stringify(serviceCadences));
+    p.set('date', day[1]);
+    const r = await fetch(`${API_BASE}/public/estimates/${token}/available-slots?${p.toString()}`);
+    if (!r.ok) return undefined;
+    const dayList = await r.json();
+    if (!dayList || isNoBookingRefusal(dayList)) return undefined;
+    if (!Array.isArray(dayList.primary) && !Array.isArray(dayList.expander)) return undefined;
+    return sameTimeOnFreshList(dayList, slotId);
   } catch {
-    return { failed: true };
+    return undefined;
   }
 }
 
@@ -7089,8 +7131,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         // customer to pick a time again for a contract that needs no
         // appointment — or cannot be self-booked at all. Reload instead: the
         // server's own acceptance mode is the truth.
-        if (body.commercialManualScheduling || body.invoiceOnlyAcceptance || body.reviewBeforeBooking
-          || body.code === 'BERMUDA_SUPPRESSION_GATED' || isAreaAddOnNoBookingCode(body.code)) {
+        if (isNoBookingRefusal(body)) {
           // The suppression gate belongs here too (codex r9 P2): every later
           // reserve and accept stays gated, so "pick another time" is a
           // futile loop — reload and let the server's own
@@ -8088,10 +8129,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     if (!selectedSlotId || existingAppointment) return false;
     const again = await holdSameTimeAgain({ token, slotId: selectedSlotId, serviceMode, selectedFrequency, serviceCadences });
     if (again.held) {
+      // The review-entry effect scrolls the review anchor, which holds the notice, into view.
       setReservation({ scheduledServiceId: again.held.scheduledServiceId, expiresAt: again.held.expiresAt, reheld: true });
       setCtaPhase('review');
       setError(null);
-      try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch { /* scrolling is a convenience */ }
       return true;
     }
     if (again.taken) {
@@ -8101,6 +8142,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     if (again.review) {
       const body = again.review;
       await enterContactReviewRef.current(body);
+      return true;
+    }
+    if (again.noBooking) {
+      // Staff reshaped the estimate meanwhile: the same reload recovery accept and extend use.
+      recoverFromDeadHold('configure');
       return true;
     }
     return false;
@@ -8537,8 +8583,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // told the customer their slot was taken and offered slot-retry UX
           // for a flow that now books nothing — so they take the same
           // 'configure' + reload recovery the extend verdict does.
-          if (body.commercialManualScheduling || body.invoiceOnlyAcceptance || body.reviewBeforeBooking
-            || body.code === 'BERMUDA_SUPPRESSION_GATED' || isAreaAddOnNoBookingCode(body.code)) {
+          if (isNoBookingRefusal(body)) {
             recoverFromDeadHold('configure');
             return;
           }
@@ -10433,6 +10478,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               ReviewPhase, and anchoring the group leaves the confirm action
               below the fold on mobile (Codex #2545). */}
           <div id={REVIEW_SECTION_ID} style={{ scrollMarginTop: 76 }}>
+          {/* The held-again notice sits in the anchor too, so the review-entry
+              scroll shows it with the confirm card, on the website flow as well. */}
+          {ctaPhase === 'review' && reservation?.reheld ? <SlotIssueBanner kind="reheld" /> : null}
           {/* Inside the scroll anchor so a failed confirm scrolls the error
               into view along with the confirm card. Cleared on every retry
               (performAccept/handleConfirm) and on Go back (handleReviewCancel). */}
@@ -10844,8 +10892,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         ? ctaPhase
         : 'configure', ctaPhase === 'slot_conflict' ? deadHoldNote : null)}
     />
-  ) : ctaPhase === 'review' && reservation?.reheld ? (
-    <SlotIssueBanner kind="reheld" />
   ) : ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
     <SlotIssueBanner
       kind={ctaPhase === 'reservation_expired' ? 'expired' : 'conflict'}
@@ -10870,9 +10916,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         lockedSection={isLockedMirrorSection} oneTime={serviceMode === 'one_time'}
         oneTimeBreakdown={pricing.oneTimeBreakdown} combinedFrequency={combinedFrequency}
         fees={(pricing.firstVisitFees?.length ? pricing.firstVisitFees : (setupFeeEffective ? [setupFeeEffective] : [])).map(tierAwareFee).filter(fee => Number(fee.amount) > 0)}
-        // The flow shows only reviewContent while reviewing, so the banner rides on
-        // both steps: the held-again notice belongs to the review step.
-        bookingContent={<>{slotIssueBanner}{bookingContent}{paymentContent}</>} reviewContent={<>{slotIssueBanner}{reviewContent}</>}
+        bookingContent={<>{slotIssueBanner}{bookingContent}{paymentContent}</>} reviewContent={reviewContent}
         reviewing={!!reservation && (ctaPhase === 'review' || (ctaPhase === 'submitting' && !!inlineCardIntent))}
         busy={ctaPhase === 'submitting'} timer={reservation?.expiresAt ? (
           <HoldCountdownBarWhenTimed
@@ -11128,4 +11172,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 export function isAreaAddOnNoBookingCode(code) {
   return ['AREA_ADDONS_GATED', 'AREA_ADDON_YEARLY_LIMIT_REACHED', 'AREA_ADDON_HISTORY_UNAVAILABLE', 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY',
     'MOSQUITO_MISTING_GATED', 'MOSQUITO_MISTING_ACCEPT_PENDING', 'MOSQUITO_MISTING_INSTALL_UNRESOLVED'].includes(code);
+}
+
+// The specialized no-booking bodies /reserve, /extend and accept return when staff reshaped the estimate mid-checkout
+// (commercial manual scheduling, a guarantee-only renewal, review before booking) or a gate or limit holds it (the
+// Bermuda gate, the area add-on codes). None is a taken slot or a lapsed hold: the page reloads and the server's own
+// acceptance mode speaks.
+export function isNoBookingRefusal(body) {
+  return !!(body && (body.commercialManualScheduling || body.invoiceOnlyAcceptance || body.reviewBeforeBooking
+    || body.code === 'BERMUDA_SUPPRESSION_GATED' || isAreaAddOnNoBookingCode(body.code)));
 }

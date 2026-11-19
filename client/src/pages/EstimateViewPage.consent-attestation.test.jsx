@@ -93,9 +93,11 @@ describe('EstimateViewPage accept consent attestation', () => {
     expect(count(src, /enterContactReviewRef\.current\(body\)/g)).toBe(9);
     // The hold-extend call takes the code through the ONE transition too (not the generic no-booking recovery, which
     // discards the body): recognised BEFORE the generic reviewBeforeBooking branch below.
-    expect(src).toMatch(/body\.code === 'SLOT_UNAVAILABLE'\) return 'slot_unavailable';[\s\S]{0,900}r\.status === 409 && body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{\s*await enterContactReviewRef\.current\(body\);\s*return 'contact_review';\s*\}[\s\S]{0,1400}body\.reviewBeforeBooking/);
+    expect(src).toMatch(/body\.code === 'SLOT_UNAVAILABLE'\) return 'slot_unavailable';[\s\S]{0,900}r\.status === 409 && body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{\s*await enterContactReviewRef\.current\(body\);\s*return 'contact_review';\s*\}[\s\S]{0,1400}isNoBookingRefusal\(body\)/);
     expect(count(src, /\/reserve\/\$\{encodeURIComponent\(scheduledServiceId\)\}\/extend`/g)).toBe(1);
-    expect(src).toMatch(/body\.reviewBeforeBooking[\s\S]{0,400}return 'no_booking';/);
+    expect(src).toMatch(/if \(isNoBookingRefusal\(body\)\) \{[\s\S]{0,400}return 'no_booking';/);
+    // The generic no-booking predicate (shared by extend, accept and the re-hold) covers reviewBeforeBooking.
+    expect(src).toMatch(/export function isNoBookingRefusal\(body\) \{[\s\S]{0,300}body\.reviewBeforeBooking/);
     // The slot reads live in SlotPicker (3 fetches: default window, AI find, picked date), each hands the review shape up.
     expect(count(slotPicker, /\/public\/estimates\/\$\{token\}\/(?:available-slots|find-slots)/g)).toBe(3);
     expect(count(slotPicker, /isContactReview\(body\)/g)).toBe(3);

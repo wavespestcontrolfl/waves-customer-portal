@@ -178,7 +178,10 @@ describe("a host row and an add-on row of the SAME product are two rows", () => 
     }
     // a visit that needs a new slot IS a pick-another-time case
     expect(fn).not.toContain("AREA_ADDON_VISIT_NEEDS_NEW_SLOT");
-    expect(estimatePageSource.split("|| body.code === 'BERMUDA_SUPPRESSION_GATED' || isAreaAddOnNoBookingCode(body.code)) {").length - 1).toBe(2);
+    // One predicate (isNoBookingRefusal) carries the add-on codes; accept and hold extension each route it to the reload.
+    const helper = estimatePageSource.slice(estimatePageSource.indexOf("export function isNoBookingRefusal(body) {"));
+    expect(helper.slice(0, 400)).toContain("|| body.code === 'BERMUDA_SUPPRESSION_GATED' || isAreaAddOnNoBookingCode(body.code)));");
+    expect(estimatePageSource.split("if (isNoBookingRefusal(body)) {").length - 1).toBe(2);
   });
 
   // Codex round 44.

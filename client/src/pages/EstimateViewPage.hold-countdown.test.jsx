@@ -441,10 +441,13 @@ describe('hold countdown bar', () => {
     // Staff can reshape an estimate mid-checkout; /extend preserves those
     // bodies deliberately, and reporting them as "your hold expired" told the
     // customer to re-pick a time for a contract that books nothing.
-    expect(fn).toContain('body.commercialManualScheduling || body.invoiceOnlyAcceptance || body.reviewBeforeBooking');
+    // One predicate (isNoBookingRefusal) serves extend, accept and the re-hold.
+    expect(fn).toContain('if (isNoBookingRefusal(body)) {');
+    const helper = src.slice(src.indexOf('export function isNoBookingRefusal'), src.indexOf('export function isNoBookingRefusal') + 600);
+    expect(helper).toContain('body.commercialManualScheduling || body.invoiceOnlyAcceptance || body.reviewBeforeBooking');
     // The suppression gate is the same class: every later reserve/accept
     // stays gated, so an expiry banner would be a futile retry loop.
-    expect(fn).toContain("body.code === 'BERMUDA_SUPPRESSION_GATED'");
+    expect(helper).toContain("body.code === 'BERMUDA_SUPPRESSION_GATED'");
     expect(fn).toContain("return 'no_booking';");
     const wrapper = SETTLE;
     expect(SETTLE).toContain("if (outcome === 'no_booking') {");
@@ -635,8 +638,8 @@ describe('hold countdown bar', () => {
     // A reshape landing after the last successful extension comes back from
     // /accept with these bodies; slot_conflict told the customer their slot
     // was taken and offered slot-retry UX for a flow that books nothing.
-    expect(handler).toContain('body.commercialManualScheduling || body.invoiceOnlyAcceptance || body.reviewBeforeBooking');
-    expect(handler).toContain("body.code === 'BERMUDA_SUPPRESSION_GATED'");
+    // The same predicate as extend (isNoBookingRefusal; its conditions are pinned in the extend test above).
+    expect(handler).toContain('if (isNoBookingRefusal(body)) {');
     expect(handler).toContain("recoverFromDeadHold('configure');");
     // …and it is checked BEFORE the expired/slot_conflict split.
     expect(handler.indexOf("recoverFromDeadHold('configure');"))
