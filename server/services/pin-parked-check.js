@@ -21,10 +21,10 @@
  *        - that stop is not the vehicle's home base (its usual first start of the day), not inside a business,
  *          personal or supplier geo-fence, and not inside the radius of another customer's visit the same
  *          technician completed that day (the truck was parked for the neighbour);
- *        - these two are not BOTH true: the truck also parked at the pin on the ET day of that closest stop (too
- *          briefly to count as a stop), and the closest stop stands inside the radius of another customer's saved
- *          pin. Together they mean the technician did come to the pin and the long stop was the other customer's
- *          (clearStopsAtOtherCustomers);
+ *        - these two are not BOTH true: the truck also parked at the saved pin on the ET day of that closest stop
+ *          (too briefly to count as a stop), and the closest stop stands inside the radius of another customer's
+ *          saved pin. Together they mean the technician did come to the pin and the long stop was the other
+ *          customer's (clearStopsAtOtherCustomers);
  *        - the stop is a pin verify_pin would accept (inside the service-area box);
  *        - staff have not dismissed a suggestion for this same pin.
  *   4. ONE open suggestion per customer (customer-pin-suggestions.js); a re-run never duplicates. A later visit
@@ -456,9 +456,6 @@ async function loadVehicles(conn, visits, window) {
 const briefStopNear = (stops, pins, day, radius) => (stops || [])
   .some((stop) => stopDay(stop) === day && isWithin(nearestPinDistance(pins, stop), radius));
 
-/** A visit's pins, as generous as "a stop at the pin": its own stamp (destination) and the customer's saved pin. */
-const visitPins = (visit) => [destinationOf(visit), usablePin(visit.customer_latitude, visit.customer_longitude)].filter(Boolean);
-
 /**
  * One verdict per visit, judged against its own technician's truck. A visit whose truck data could not be read, or
  * one of whose required days is before the lookback cap, is `unknown`: no suggestion, nothing closed from it.
@@ -510,9 +507,8 @@ async function otherCustomerPinNear(conn, customerId, point, radius) {
 }
 
 /**
- * A flagged visit is not a wrong pin when BOTH hold: the truck also parked at this customer's pin on the ET day of the
- * long stop, too briefly to be a stop (entry.briefStops, measured from the visit's pins), and the long stop stands
- * inside the arrival radius of
+ * A flagged visit is not a wrong pin when BOTH hold: the truck also parked at this customer's saved pin on the ET day
+ * of the long stop, too briefly to be a stop (entry.briefStops), and the long stop stands inside the arrival radius of
  * ANOTHER customer's saved pin. The technician did come to the pin; the long stop was the other customer's. The
  * order of the two does not matter (the other customer's job first, then nobody home here, is the same day seen
  * from the other end). Seen on 2026-11-16:
@@ -523,12 +519,16 @@ async function otherCustomerPinNear(conn, customerId, point, radius) {
  * Either fact alone still flags. A brief stop at a wrong pin is how a technician who follows the map finds out the
  * pin is wrong, and on a dense street the right house is often near another customer's.
  *
+ * The short stop is measured from the saved pin only (verdict.pin), like everything that picks or limits the suggested
+ * stop: it is the pin the suggestion would replace, and the pin stored on it (pin_lat, pin_lng), so the recheck of an
+ * open suggestion (suggestionExplained) measures from the very same pin. The visit's own stamp does not count here.
+ *
  * A read that fails leaves the visit unknown: no suggestion from evidence that was not read.
  */
 async function clearStopsAtOtherCustomers(conn, judged, radius) {
   for (const entry of judged) {
     const { verdict } = entry;
-    if (!verdict.flag || !briefStopNear(entry.briefStops, visitPins(entry.visit), etDateString(verdict.stopStartedAt), radius)) continue;
+    if (!verdict.flag || !briefStopNear(entry.briefStops, [verdict.pin], etDateString(verdict.stopStartedAt), radius)) continue;
     try {
       if (await otherCustomerPinNear(conn, entry.visit.customer_id, verdict.parked, radius)) {
         entry.verdict = { flag: false, reason: 'other_customer_stop' };
@@ -692,7 +692,7 @@ module.exports = {
   _private: {
     judgeVisit, destinationOf, homeBaseFrom, visitDays, etDayBounds, oneRowPerVisit, excludedStopReason, alertSpec,
     alertDetail, settledReason, visitUnchanged, homeSince, loadNeighbourVisits, usablePin, isWithin, nearestPinDistance, retireAllOpen, requiredDays, judgeVisits, loadVehicles, neighbourPins, effectivePinColumns, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
-    clearStopsAtOtherCustomers, otherCustomerPinNear, briefStopNear, visitPins, suggestionDay, suggestionExplained, recheckOpenSuggestions, withinSql, BRIEF_STOP_MIN_MINUTES,
+    clearStopsAtOtherCustomers, otherCustomerPinNear, briefStopNear, suggestionDay, suggestionExplained, recheckOpenSuggestions, withinSql, BRIEF_STOP_MIN_MINUTES,
     REPORT_MIN_STOP_MINUTES, MAX_STOP_DISTANCE_M,
   },
 };

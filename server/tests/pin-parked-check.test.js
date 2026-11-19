@@ -375,24 +375,31 @@ describe("a short stop at the pin, then the long stop at another customer's", ()
     const [entry] = briefThenLong();
     expect(entry.verdict).toMatchObject({ flag: true, distanceM: 310, stopMinutes: 29 });
     expect(entry.briefStops.map((s) => s.minutes)).toEqual([3]);
-    expect(p.briefStopNear(entry.briefStops, p.visitPins(entry.visit), '2026-10-08', RADIUS)).toBe(true);
+    expect(p.briefStopNear(entry.briefStops, [entry.verdict.pin], '2026-10-08', RADIUS)).toBe(true);
     // at the floor it is a stop at the pin, as before
     expect(judgeDay([parkedShort(19, 5), stop(310, 29)])[0].verdict).toEqual({ flag: false, reason: 'stop_at_pin' });
     // a short gap is never the suggested spot and never a stop that is too short or too far
     expect(judgeDay([parkedShort(540, 3)])[0].verdict).toEqual({ flag: false, reason: 'no_stops' });
   });
 
-  test('no short stop at the pin, one somewhere else or one on another day is not "at the pin"; the visit stamp counts like the saved pin', () => {
-    const near = (entry, day = '2026-10-08') => p.briefStopNear(entry.briefStops, p.visitPins(entry.visit), day, RADIUS);
+  test('no short stop at the pin, one somewhere else or one on another day is not "at the pin"', () => {
+    const near = (entry, day = '2026-10-08') => p.briefStopNear(entry.briefStops, [BASE], day, RADIUS);
     expect(judgeDay([stop(310, 29)])[0].briefStops).toEqual([]);
     expect(near(judgeDay([stop(310, 29)])[0])).toBe(false);
     expect(near(judgeDay([parkedShort(900, 3), stop(310, 29)])[0])).toBe(false);
     expect(near(judgeDay([parkedShort(19, 3)])[0], '2026-10-07')).toBe(false);
-    // the saved pin is 400 m off, the visit stamp is right: a short stop at the stamp is "at the pin"
-    const off = { customer_latitude: at(400).lat, customer_longitude: at(400).lng };
-    expect(near(judgeDay([parkedShort(19, 3)], off)[0])).toBe(true);
+    expect(near(judgeDay([parkedShort(19, 3)])[0])).toBe(true);
     // unknown truck data has no short stops
     expect(p.judgeVisits([visit()], new Map(), { radius: RADIUS, fences: [], now: NOW })[0]).not.toHaveProperty('briefStops');
+  });
+
+  test("the short stop is measured from the saved pin (the pin the suggestion would replace and stores), not the visit's stamp", async () => {
+    // The saved pin is 400 m north of the visit's stamp; the long stop is 310 m past the saved pin.
+    const off = { customer_latitude: at(400).lat, customer_longitude: at(400).lng };
+    const atStamp = await p.clearStopsAtOtherCustomers(pinsConn({ customers: FOUND }), judgeDay([parkedShort(19, 3), stop(710, 29)], off), RADIUS);
+    expect(atStamp[0].verdict).toMatchObject({ flag: true, distanceM: 310, pin: at(400) });
+    const atSaved = await p.clearStopsAtOtherCustomers(pinsConn({ customers: FOUND }), judgeDay([parkedShort(419, 3), stop(710, 29)], off), RADIUS);
+    expect(atSaved[0].verdict).toEqual({ flag: false, reason: 'other_customer_stop' });
   });
 
   test("both facts together clear the flag: the stop is the other customer's (customer row or an active property)", async () => {
@@ -414,7 +421,7 @@ describe("a short stop at the pin, then the long stop at another customer's", ()
     for (const brief of [dayBefore, lateEvening]) {
       const conn = pinsConn({ customers: FOUND });
       const entries = judgeDay([brief, stop(310, 29)], twoDays);
-      expect(p.briefStopNear(entries[0].briefStops, p.visitPins(entries[0].visit), '2026-10-07', RADIUS)).toBe(true);
+      expect(p.briefStopNear(entries[0].briefStops, [BASE], '2026-10-07', RADIUS)).toBe(true);
       const [entry] = await p.clearStopsAtOtherCustomers(conn, entries, RADIUS);
       expect(entry.verdict).toMatchObject({ flag: true, distanceM: 310 });
       expect(conn.calls).toEqual([]);
