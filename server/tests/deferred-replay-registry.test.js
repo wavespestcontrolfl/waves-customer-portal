@@ -2327,3 +2327,63 @@ describe('recipient_optin_deferred: on-site ask re-checked against its booked vi
     expect(await recheckDeferredReplay('recipient_optin_deferred', portal)).toMatchObject({ eligible: true });
   });
 });
+
+describe('recruiting_comms_deferred — held job-offer text (GATE_JOB_OFFERS)', () => {
+  const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+  const db = require('../models/db');
+  const gates = require('../config/feature-gates');
+  const ENTRY = 'recruiting_comms_deferred';
+  const TOKEN = 'c'.repeat(64);
+  const hashOf = (token) => require('crypto').createHash('sha256').update(token).digest('hex');
+  const meta = { job_application_id: 'app-1', stage: 'offer_sent', job_offer_id: 'offer-1', offer_token_hash: hashOf(TOKEN), ledger_entry_id: 'e-1' };
+  const rowChain = (row) => {
+    const q = { where: jest.fn(() => q), first: jest.fn(async () => row) };
+    return q;
+  };
+  const offerApp = (over = {}) => rowChain({ id: 'app-1', status: 'offer', comms_history: [], ...over });
+  const FUTURE = new Date(Date.now() + 86400000).toISOString();
+  const offerRow = (over = {}) => rowChain({ status: 'sent', token: TOKEN, expires_at: FUTURE, ...over });
+  const gatesOn = (on) => jest.spyOn(gates, 'isEnabled').mockImplementation((gate) => on.includes(gate));
+  afterEach(() => jest.restoreAllMocks());
+
+  test('answers to GATE_JOB_OFFERS alone, not recruitingComms', async () => {
+    gatesOn(['recruitingComms']);
+    expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: 'job-offers-gate-off' });
+    gatesOn(['jobOffers']);
+    db.mockReturnValueOnce(offerApp()).mockReturnValueOnce(offerRow());
+    // the replay gets the real token from the offer row, not from the queue row
+    expect(await recheckDeferredReplay(ENTRY, meta)).toEqual({ eligible: true, offerToken: TOKEN });
+  });
+
+  test('an interview stage still answers to recruitingComms', async () => {
+    gatesOn(['jobOffers']);
+    expect(await recheckDeferredReplay(ENTRY, { ...meta, stage: 'interview_invite' })).toMatchObject({ eligible: false, reason: 'recruiting-gate-off' });
+  });
+
+  test('the application must still be at offer, and no newer offer text may be live', async () => {
+    gatesOn(['jobOffers']);
+    db.mockReturnValueOnce(offerApp({ status: 'hired' }));
+    expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: 'application-hired' });
+    db.mockReturnValueOnce(offerApp({ comms_history: [
+      { id: 'e-1', stage: 'offer_sent', channel: 'sms', outcome: 'deferred' },
+      { id: 'e-2', stage: 'offer_sent', channel: 'sms', outcome: 'pending' },
+    ] }));
+    expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: 'superseded-by-newer-attempt' });
+  });
+
+  test('the pinned offer must still be sent, unexpired and on the same link', async () => {
+    gatesOn(['jobOffers']);
+    const refuse = async (offer, expected) => {
+      db.mockReturnValueOnce(offerApp()).mockReturnValueOnce(offer);
+      expect(await recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: false, reason: expected });
+    };
+    await refuse(offerRow({ status: 'withdrawn' }), 'offer-withdrawn');
+    await refuse(offerRow({ status: 'superseded' }), 'offer-superseded');
+    await refuse(offerRow({ status: 'accepted' }), 'offer-accepted');
+    await refuse(offerRow({ token: 'd'.repeat(64) }), 'offer-token-changed');
+    await refuse(offerRow({ expires_at: new Date(Date.now() - 1000).toISOString() }), 'offer-expired');
+    await refuse(rowChain(undefined), 'offer-missing');
+    db.mockReturnValueOnce(offerApp());
+    expect(await recheckDeferredReplay(ENTRY, { ...meta, job_offer_id: null })).toMatchObject({ eligible: false, reason: 'offer-missing' });
+  });
+});

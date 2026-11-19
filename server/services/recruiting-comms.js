@@ -30,6 +30,8 @@ const { portalUrl } = require('../utils/portal-url');
 const { formatETTime } = require('../utils/datetime-et');
 const { effectiveSendMs, newerEvidence } = require('../utils/recruiting-thread-scope');
 const { WAVES_ADDRESS_LINE, WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { redactOfferLinks } = require('../utils/offer-link-redaction');
+const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const FROM_EMAIL = 'contact@wavespestcontrol.com';
@@ -40,6 +42,8 @@ const STAGE_KEYS = {
   application_received: 'job_application_received',
   interview_invite: 'job_interview_invite',
   interview_confirmation: 'job_interview_confirmation',
+  // Job offer link (GATE_JOB_OFFERS): owner-pressed Send, see services/job-offers.js.
+  offer_sent: 'job_offer_sent',
   // owner_reply: no template — the body is the owner's own words
   // (dashboard inbox reply / composer); message_type job_owner_reply.
   owner_reply: null,
@@ -50,6 +54,7 @@ const STAGE_PURPOSE = {
   application_received: 'application_received',
   interview_invite: 'interview_invite',
   interview_confirmation: 'interview_confirmation',
+  offer_sent: 'offer_sent',
   owner_reply: 'applicant_reply',
 };
 
@@ -95,6 +100,11 @@ async function outboundNumberForApplicants() {
     return null;
   }
 }
+
+// The job-offer link is the applicant's signing credential: every STORED copy (comms history, email ledger, deferred
+// queue row; the SMS log and messages rows through twilio.js) keeps the path with the token hidden
+// (utils/offer-link-redaction.js). The provider still gets the full body.
+const maskOfferLink = (text) => redactOfferLinks(String(text == null ? '' : text));
 
 function maskPhone(phone) {
   const digits = String(phone || '').replace(/\D/g, '').replace(/^1(\d{10})$/, '$1');
@@ -171,6 +181,10 @@ function buildVars(app, stage) {
   if (stage === 'interview_invite') {
     return { first_name: first, interview_url: interviewUrlFor(app.interview_token) || '' };
   }
+  if (stage === 'offer_sent') {
+    // The offer's own values (link, expiry day, title, sender) come from the caller (opts.vars).
+    return { first_name: first };
+  }
   if (stage === 'interview_confirmation') {
     const language = languageOf(app);
     return {
@@ -208,7 +222,7 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function wrapEmailHtml({ heading, paragraphs, buttonUrl, buttonLabel }) {
+function wrapEmailHtml({ heading, paragraphs, buttonUrl, buttonLabel, signoff }) {
   const parts = [
     '<div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;color:#1a1a1a;">',
     `<h2 style="font-size:18px;margin:0 0 16px;">${escapeHtml(heading)}</h2>`,
@@ -224,8 +238,28 @@ function wrapEmailHtml({ heading, paragraphs, buttonUrl, buttonLabel }) {
     );
     parts.push(`<p style="font-size:12px;color:#666;word-break:break-all;">${escapeHtml(buttonUrl)}</p>`);
   }
+  if (signoff) parts.push(`<p style="font-size:14px;line-height:1.5;margin:16px 0 0;">${escapeHtml(signoff)}</p>`);
   parts.push('</div>');
   return parts.join('\n');
+}
+
+// The job-offer email (owner-approved words, spec 2026-11-19). English only. No reply-time promise: the expiry day is
+// the only date. The sign-off is the sender's own name, taken from the technicians row that pressed Send.
+function buildOfferEmail(first, vars) {
+  const subject = 'Your job offer from Waves';
+  const paragraphs = [
+    `Hi ${first}, I'd like you to join Waves as a ${vars.job_title}.`,
+    'Your offer has your start date and pay. Please read it and the Technician Terms, then sign on your phone or computer.',
+    `It stays open until ${vars.expires_on}. Please don't give notice at your current job until you have signed it.`,
+  ];
+  const buttonLabel = 'Read your offer';
+  const signoff = `${vars.sender_name}, owner`;
+  return {
+    subject,
+    html: wrapEmailHtml({ heading: 'Your job offer', paragraphs, buttonUrl: vars.offer_link, buttonLabel, signoff }),
+    text: `${paragraphs.join('\n\n')}\n\n${vars.offer_link}\n\n${signoff}`,
+    buttonLabel,
+  };
 }
 
 function buildEmailContent(app, stage, vars) {
@@ -264,6 +298,8 @@ function buildEmailContent(app, stage, vars) {
       buttonLabel,
     };
   }
+
+  if (stage === 'offer_sent') return buildOfferEmail(first, vars);
 
   if (stage === 'interview_confirmation') {
     const subject = isEs
@@ -317,8 +353,8 @@ async function insertEmailLedgerRow({ app, to, subject, html, text, templateKey,
     from_email_snapshot: FROM_EMAIL,
     reply_to_snapshot: CONTACT_EMAIL,
     subject_snapshot: subject,
-    html_snapshot: html,
-    text_snapshot: text,
+    html_snapshot: redactOfferLinks(html),
+    text_snapshot: redactOfferLinks(text),
     categories: JSON.stringify([templateKey]),
     status: 'queued',
     queued_at: new Date(),
@@ -576,7 +612,9 @@ function historyEntry({ stage, channel, to, outcome, code, body, by }) {
     to: channel === 'sms' ? maskPhone(to) : maskEmail(to),
     outcome,
     code: code || null,
-    body: body || '',
+    // Every stored entry hides a job-offer link, whatever the stage or channel: an owner reply that pastes the link
+    // must not leave the applicant's signing credential readable in the application history (GATE_JOB_OFFERS).
+    body: maskOfferLink(body || ''),
     by: by || 'system',
   };
 }
@@ -855,7 +893,7 @@ async function queuedInviteRivals(app, stage, handoffEntry, trx) {
 // The rail re-derives the applicant policy from the metadata stamped here.
 // Returns true when the queue row + ledger transition committed (the caller
 // treats the leg outcome as 'deferred' only then).
-async function queueDeferredSms({ app, stage, contact, body, applicantFromNumber, handoffEntry, sendRes }) {
+async function queueDeferredSms({ app, stage, contact, body, applicantFromNumber, handoffEntry, sendRes, opts = {} }) {
   try {
     // Queue row + the 'deferred' ledger transition commit TOGETHER (Codex
     // r12 P1): a queued text must never leave a 'handoff' entry behind that
@@ -869,7 +907,7 @@ async function queueDeferredSms({ app, stage, contact, body, applicantFromNumber
         direction: 'outbound',
         from_phone: applicantFromNumber,
         to_phone: contact.phone,
-        message_body: body,
+        message_body: redactOfferLinks(body),
         status: 'scheduled',
         scheduled_for: new Date(sendRes.nextAllowedAt),
         message_type: `job_${stage}`,
@@ -888,6 +926,10 @@ async function queueDeferredSms({ app, stage, contact, body, applicantFromNumber
           interview_token: app.interview_token || null,
           interview_at: app.interview_at ? new Date(app.interview_at).toISOString() : null,
           interview_mode: app.interview_mode || null,
+          // A held job-offer text pins the offer it belongs to, so the replay never sends a link for an offer
+          // that was withdrawn, replaced, signed or closed overnight (deferred-replay-registry recheck).
+          // (the token itself is never stored here: a hash pins the link, the replay reads the real token from the offer row)
+          ...(stage === 'offer_sent' ? { job_offer_id: opts.offerId || null, offer_token_hash: opts.offerToken ? crypto.createHash('sha256').update(String(opts.offerToken)).digest('hex') : null } : {}),
           original_message_type: `job_${stage}`,
           consent_basis: { status: 'transactional_allowed', source: 'job_application' },
           original_block_code: sendRes.code || null,
@@ -958,7 +1000,7 @@ async function runSmsDelivery({ app, stage, opts, contact, applicantFromNumber, 
   // when the pipeline marks it retryable: the applicant may already hold it,
   // so it keeps its handoff evidence and is never replayed (Codex r15 P1).
   if (outcome !== 'sent' && sendRes.deliveryOutcome === 'not_sent' && sendRes.retryable && sendRes.nextAllowedAt) {
-    const queued = await queueDeferredSms({ app, stage, contact, body, applicantFromNumber, handoffEntry, sendRes });
+    const queued = await queueDeferredSms({ app, stage, contact, body, applicantFromNumber, handoffEntry, sendRes, opts });
     // 'deferred' = queued (ledger settled in the same transaction);
     // 'superseded' = an overlapping queued invite already owns the send
     // (ledger settled as blocked in that transaction); null = queue failed.
@@ -1000,6 +1042,13 @@ async function runSmsLeg(ctx) {
   }
   if (!body) {
     entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'skipped', code: 'template_disabled', body: '', by }));
+    return 'skipped';
+  }
+  // An edited or variant offer text that dropped {offer_link} would report "sent" while the applicant has nothing to open.
+  // The template renderer strips https:// from every link (sms-link-policy), so the rendered body carries the bare form.
+  const offerLinkForms = vars.offer_link ? [vars.offer_link, stripSmsUrlScheme(vars.offer_link)] : [];
+  if (stage === 'offer_sent' && !offerLinkForms.some((link) => body.includes(link))) {
+    entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'skipped', code: 'offer_link_missing', body: '', by }));
     return 'skipped';
   }
 
@@ -1070,11 +1119,14 @@ async function runEmailLeg(ctx) {
 /**
  * @param {object} app - job_applications row (fresh: must already carry
  *   any interview_token/mode/at the stage needs).
- * @param {'application_received'|'interview_invite'|'interview_confirmation'} stage
+ * @param {'application_received'|'interview_invite'|'interview_confirmation'|'offer_sent'} stage
  * @param {object} opts
  * @param {boolean} opts.sms - attempt the SMS leg
  * @param {boolean} opts.email - attempt the email leg
  * @param {string} [opts.by] - technicianId | 'system' | 'applicant'
+ * @param {object} [opts.vars] - extra template values (offer_sent: offer_link, expires_on, job_title, sender_name)
+ * @param {string} [opts.offerId] - offer_sent: the job_offers row a held text pins (replay recheck)
+ * @param {string} [opts.offerToken] - offer_sent: that offer's token
  * @param {string} [opts.smsBody] - admin-edited override (already
  *   link-guard-validated and placeholder-substituted by the caller)
  * @param {string} [opts.emailSubject] - admin-edited override
@@ -1090,14 +1142,15 @@ async function sendStageComms(app, stage, opts = {}) {
 
   if (!wantSms && !wantEmail) return result;
 
-  if (!isEnabled('recruitingComms')) {
+  // The job-offer stage is governed by GATE_JOB_OFFERS alone (the flow's own gate); every other stage by recruitingComms.
+  if (!isEnabled(stage === 'offer_sent' ? 'jobOffers' : 'recruitingComms')) {
     if (wantSms) result.sms = 'disabled';
     if (wantEmail) result.email = 'disabled';
     return result;
   }
 
   const contact = contactOf(app);
-  const vars = buildVars(app, stage);
+  const vars = { ...buildVars(app, stage), ...(opts.vars || {}) };
   const entries = [];
   // Authoritative eligibility immediately before EACH provider leg
   // (Codex r8 P2): the caller's check re-reads the application so a stage
@@ -1238,6 +1291,7 @@ module.exports = {
   appendCommsHistory,
   historyEntry,
   sendStageComms,
+  maskOfferLink,
   // exposed for tests
   _internals: { renderStageSmsBody, sendRawEmail },
 };

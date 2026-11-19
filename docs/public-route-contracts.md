@@ -8580,6 +8580,33 @@ that gate is dark the confirmation is skipped entirely (byte-identical to
 before the lane); it is never a blocking part of the request either way.
 Treat the gate, the limiters, the no-customer/no-lead rule, and the
 fire-and-forget-only comms contract as security-critical.)
+`/api/public/careers/offer/:token` (GET; `/offer/:token/text-consent`, `/offer/:token/accept`,
+`/offer/:token/date-request` and `/offer/:token/decline`, all POST — the applicant's private job offer
+(`services/job-offers.js`), gated `GATE_JOB_OFFERS` ALONE: 404 `{error:'Not found'}` for the WHOLE `/offer/*`
+family before even the limiter runs, and `index.js` carves `/offer` out of the `jobApplications` intake gate so a
+sent offer keeps working if intake closes). The token is `job_offers.token`, 64 lowercase hex (32 random bytes set
+when the owner presses Send), format-gated via `router.param` before any database read; an unknown, malformed or
+draft token answers the same generic 404. Privacy headers (`noStore`) are mounted AHEAD of the gates and the global
+`/api` limiter so every answer, the dark 404 included, carries them; the SPA document `/careers/offer/<64-hex>` gets
+the same headers via `utils/sensitive-spa-headers.js`. A 30/10min per-IP limiter (prod only, `ipFallbackKey`) sits
+behind the gates. GET returns `{state:'open'|'signed'|'declined'|'date_requested', firstName, jobTitle, startDate,
+hourlyRate, stepRate, stepEffectiveOn, hoursLine, reportTo, payDayLine, owner:{name,title,sentOn}, expiresAt,
+textConsent, signedName, signedAt, requestedStartDate, terms:{title, markdown}}` — every value is read from the
+snapshot frozen at Send (`job_offers.snapshot`), never from live records, so the Terms the applicant reads are the
+issued version the owner sent; for `superseded`, `withdrawn` and `expired` it returns only `{state, message,
+contactPhone}` (no terms). A sent offer past `expires_at` reads `expired` before any sweep, and an offer whose
+application the owner moved to hired/rejected/withdrawn reads `withdrawn` (that stage change also marks the offer row withdrawn in the same transaction, so reopening the application cannot revive the link). The first GET stamps `opened_at`, every
+GET `last_viewed_at`. POST bodies: `text-consent {consent: boolean}` -> `{textConsent}`; `accept {signedName}` (trimmed,
+3 to 120 characters, at least two words) -> `{state:'signed', signedAt}`; `date-request {requestedStartDate:
+'YYYY-MM-DD' (future Monday to Thursday), note? (<= 500)}` -> `{state:'date_requested'}`; `decline {reason? (<= 500)}` ->
+`{state:'declined'}`. Each acts only from state `open`; any other state answers 409 with the current state body (an
+identical replay of a signature answers 200 with the stored signature). Every action runs in one transaction that
+locks the application row, then the offer row, and re-reads the state under the lock, so a double tap or a replay
+cannot sign twice. Accept records the IP, user agent and a signature hash (sha256 of the snapshot hash, the Terms
+content hash, the typed name and the signing instant), moves the application to `hired` and raises an owner bell;
+decline moves it to `withdrawn` (history entry by `applicant`, reason `offer_declined`) and bells; a date request
+leaves the application at `offer` and bells. Treat the gate, the limiter, the format gate, the snapshot-only reads and
+the lock order as security-critical.)
 `/api/public/careers/interview/:token` (GET; `/interview/:token/book` and
 `/interview/:token/withdraw`, both POST — the interview self-scheduling
 funnel a `job_interview_invite` text/email sends the applicant, gated

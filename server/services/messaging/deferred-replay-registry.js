@@ -134,6 +134,7 @@ function followupReplayIsVerification(meta) {
 // P2) or by a token that changed since this row was queued.
 function checkRecruitingStageSupersession(meta, app, stage) {
   if (stage === 'application_received') return checkReceiptSupersession(meta, app);
+  if (stage === 'offer_sent') return checkOfferSupersession(meta, app);
   if (stage !== 'interview_invite' && stage !== 'interview_confirmation') return null;
   const status = String(app.status || '');
   if (status !== 'interview') return { eligible: false, reason: `application-${status}` };
@@ -163,6 +164,32 @@ function checkRecruitingStageSupersession(meta, app, stage) {
     return { eligible: false, reason: 'interview-token-changed' };
   }
   return null;
+}
+
+// A queued job-offer text (GATE_JOB_OFFERS): the application must still sit at 'offer', and no newer attempt of
+// this stage may be live in the ledger. The offer row itself is checked by checkRecruitingOfferOpen.
+function checkOfferSupersession(meta, app) {
+  const status = String(app.status || '');
+  if (status !== 'offer') return { eligible: false, reason: `application-${status}` };
+  const history = Array.isArray(app.comms_history) ? app.comms_history : [];
+  const mineIdx = history.findIndex((e) => e && e.id === meta.ledger_entry_id);
+  const newer = mineIdx >= 0 && history.slice(mineIdx + 1).some((e) => e && e.channel === 'sms' && e.stage === 'offer_sent'
+    && ['pending', 'handoff', 'sent', 'uncertain', 'deferred'].includes(e.outcome));
+  return newer ? { eligible: false, reason: 'superseded-by-newer-attempt' } : null;
+}
+
+// The offer a held text pins must still be the sent, unexpired one with the same link. Returns a refusal, or
+// { ok: true, token } for an offer that is still open.
+async function checkRecruitingOfferOpen(meta, conn, lock) {
+  if (!meta.job_offer_id || !meta.offer_token_hash) return { eligible: false, reason: 'offer-missing' };
+  let query = conn('job_offers').where({ id: meta.job_offer_id });
+  if (lock) query = query.forUpdate();
+  const offer = await query.first('status', 'token', 'expires_at');
+  if (!offer) return { eligible: false, reason: 'offer-missing' };
+  if (offer.status !== 'sent') return { eligible: false, reason: `offer-${offer.status}` };
+  if (require('crypto').createHash('sha256').update(String(offer.token || '')).digest('hex') !== meta.offer_token_hash) return { eligible: false, reason: 'offer-token-changed' };
+  if (offer.expires_at && Date.now() > new Date(offer.expires_at).getTime()) return { eligible: false, reason: 'offer-expired' };
+  return { ok: true, token: offer.token };
 }
 
 // A queued application receipt ("we received your application")
@@ -1157,18 +1184,29 @@ const REGISTRY = {
   recruiting_comms_deferred: {
     async recheck(meta, { conn = db, lock = false } = {}) {
       try {
-        if (!require('../../config/feature-gates').isEnabled('recruitingComms')) {
+        const stage = String(meta.stage || '');
+        // The job-offer stage answers to GATE_JOB_OFFERS alone; every other recruiting stage to recruitingComms.
+        if (stage === 'offer_sent') {
+          if (!require('../../config/feature-gates').isEnabled('jobOffers')) return { eligible: false, reason: 'job-offers-gate-off' };
+        } else if (!require('../../config/feature-gates').isEnabled('recruitingComms')) {
           return { eligible: false, reason: 'recruiting-gate-off' };
         }
         const { app, refusal } = await checkRecruitingApplicationEligibility(meta, conn, lock);
         if (refusal) return refusal;
 
-        const stage = String(meta.stage || '');
         const supersessionRefusal = checkRecruitingStageSupersession(meta, app, stage);
         if (supersessionRefusal) return supersessionRefusal;
 
         const bookingRefusal = checkRecruitingBookingVersion(meta, app, stage);
         if (bookingRefusal) return bookingRefusal;
+
+        if (stage === 'offer_sent') {
+          const open = await checkRecruitingOfferOpen(meta, conn, lock);
+          if (open.eligible === false) return open;
+          // The queued row stores the text with the link token hidden; the replay sends the real link, read from the offer
+          // row now (replayBodyFor), never from the stored body.
+          return { eligible: true, offerToken: open.token };
+        }
 
         return { eligible: true };
       } catch (err) {
@@ -2437,8 +2475,20 @@ const DURABLE_FINALIZE_ENTRY_POINTS = Object.entries(REGISTRY)
   .filter(([, entry]) => entry.durableFinalize === true && typeof entry.finalize === 'function')
   .map(([key]) => key);
 
+// The text a held message really sends. Almost every entry replays its stored body as it is. A held job-offer text is
+// stored with the link token hidden (utils/offer-link-redaction.js), so its replay puts back the token read from the
+// job_offers row by the recheck that just passed (`offerToken`), never one kept in a stored body. Returns null when the
+// body carries the hidden link and no token came with it: the caller must not send that text.
+const { OFFER_LINK_HIDDEN } = require('../../utils/offer-link-redaction');
+function replayBodyFor(entryPoint, recheck, storedBody) {
+  if (entryPoint !== 'recruiting_comms_deferred' || typeof storedBody !== 'string' || !storedBody.includes(`/careers/offer/${OFFER_LINK_HIDDEN}`)) return storedBody;
+  if (!recheck || !/^[0-9a-f]{64}$/.test(String(recheck.offerToken || ''))) return null;
+  return storedBody.split(`/careers/offer/${OFFER_LINK_HIDDEN}`).join(`/careers/offer/${recheck.offerToken}`);
+}
+
 module.exports = {
   invoiceStillCollectible,
+  replayBodyFor,
   recheckDeferredReplay,
   dispatchDeferredReplay,
   replaysWithoutPhone,
