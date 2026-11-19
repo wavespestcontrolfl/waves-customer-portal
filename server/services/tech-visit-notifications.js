@@ -11,9 +11,10 @@
  * Delivery = one `tech_notifications` row (the tech home feed polls it and
  * keeps the card until the tech clears it) + one best-effort push through
  * PushService. The push's first line is generic ("You have a new visit on
- * your route"); its second line names the visit: the customer's first and
- * last name, the service, the day and time, and the street (owner 2026-11-18,
- * replacing the one-line ruling of 2026-09-05; pushDetail below).
+ * your route"); the lines below it name the visit: the customer's first and
+ * last name and the service, then the day and time and the street on a line
+ * of their own (owner 2026-11-18, replacing the one-line ruling of
+ * 2026-09-05; two lines for easy reading, owner 2026-11-19; pushDetail below).
  *
  * Silent by design:
  *   - GATE_TECH_VISIT_NOTIFICATIONS is not exactly on → nothing (dark; unset
@@ -250,9 +251,9 @@ function streetLine(visit) {
   return String(visit.service_address_line1 || visit.cust_address || '').trim() || null;
 }
 
-// What a visit push's second line says, from one of two sources: the visit
+// What a visit push's detail lines say, from one of two sources: the visit
 // row as it is now, or the card as it was written. A move keeps the slot it
-// left (previousWhen) for its "Was … → Now …".
+// left (previousWhen) for its "Was …" line.
 function partsFromVisit(visit, kind, previousWhen = null) {
   return {
     name: customerFullName(visit),
@@ -281,15 +282,19 @@ function partsFromCard(payload, kind) {
 // "the customer picks a day by …" opens the line it starts.
 const capitalized = (text) => (text ? `${text.charAt(0).toUpperCase()}${text.slice(1)}` : null);
 
-// One visit's line: "Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312
-// Cortez Rd W". A move puts "Was Wed Sep 9, 1–3 PM → Now Thu Sep 10, 9–11 AM"
-// in the time's place.
+// A visit's detail lines: who, then when and where on a line of their own
+// (owner 2026-11-19, "easily readable"). A move adds the slot it left below.
+//   Ana Ruiz · Pest Control
+//   Thu Sep 10, 9–11 AM · 4312 Cortez Rd W
+//   Was Wed Sep 9, 1–3 PM
+const whoLine = (parts) => [parts.name, parts.service].filter(Boolean).join(' · ');
+const whenWhereLine = (parts) => [capitalized(parts.when), parts.street].filter(Boolean).join(' · ');
 function pushDetail(parts) {
-  const slot = parts.previousWhen && parts.when ? `Was ${parts.previousWhen} → Now ${parts.when}` : capitalized(parts.when);
-  return [parts.name, parts.service, slot, parts.street].filter(Boolean).join(' · ');
+  const was = parts.previousWhen && parts.when ? `Was ${parts.previousWhen}` : null;
+  return [whoLine(parts), whenWhereLine(parts), was].filter(Boolean).join('\n');
 }
 
-// A push's second line stays well inside the providers' 4 KB payload (APNs,
+// A push's detail lines stay well inside the providers' 4 KB payload (APNs,
 // FCM) with its title and keys: past the budget it is cut, with "…".
 const BODY_BYTE_BUDGET = 1500;
 function fitBody(text) {
@@ -629,9 +634,9 @@ async function newerCardExists(notice, conn) {
 // details go only to a device whose recheck passed, and only to one the
 // same recheck verified as this tech's staff app (namedDevices). The sender
 // builds each device's payload right after that device's recheck, so
-// clearing the second line there reaches that device and every later one.
+// clearing the details there reaches that device and every later one.
 // A tech who left field work since the card hears nothing (stillAssignable).
-// `liveBody()`, when given, is the second line as the visit reads at this
+// `liveBody()`, when given, is the details as the visit reads at this
 // recheck (the row checkCurrent just read), or null to keep the written one.
 async function pushCard(notice, { checkCurrent = null, liveBody = null } = {}) {
   try {
@@ -1115,9 +1120,9 @@ async function bundlePlan(technicianId, rows, conn) {
   return plan;
 }
 
-// Several visits under one count line: one line each (name, service, day and
-// time, street), soonest first, at most BUNDLE_LISTED, then "+N more". A
-// mixed bundle says what happened to each.
+// Several visits under one count line: two lines each (who, then when and
+// where, as pushDetail), soonest first, at most BUNDLE_LISTED, then "+N more".
+// A mixed bundle says what happened to each.
 const BUNDLE_LISTED = 3;
 const KIND_WORD = Object.freeze({ assigned: 'New', unassigned: 'Moved off', rescheduled: 'Moved', cancelled: 'Cancelled' });
 const slotKey = ({ parts }) => `${parts.date || '9999-12-31'} ${parts.start || '99:99'}`;
@@ -1125,8 +1130,8 @@ function bundleDetail(plan) {
   const mixed = new Set(plan.map((notice) => notice.kind)).size > 1;
   const sorted = [...plan].sort((a, b) => slotKey(a).localeCompare(slotKey(b)));
   const lines = sorted.slice(0, BUNDLE_LISTED).map(({ kind, parts }) => {
-    const line = [parts.name, parts.service, capitalized(parts.when), parts.street].filter(Boolean).join(' · ');
-    return mixed ? `${KIND_WORD[kind]}: ${line}` : line;
+    const who = mixed ? [`${KIND_WORD[kind]}:`, whoLine(parts)].filter(Boolean).join(' ') : whoLine(parts);
+    return [who, whenWhereLine(parts)].filter(Boolean).join('\n');
   });
   if (sorted.length > BUNDLE_LISTED) lines.push(`+${sorted.length - BUNDLE_LISTED} more`);
   return lines.join('\n');
