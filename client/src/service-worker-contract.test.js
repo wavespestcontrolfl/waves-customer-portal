@@ -424,6 +424,24 @@ describe('service-worker private link pages', () => {
     expect(worker.workerClients.claim).toHaveBeenCalledTimes(1);
   });
 
+  it('tries the purge again on the next page load when it fails at activate, without holding up the claim', async () => {
+    const cache = fakeCache();
+    await cache.put(offerPaths[0], fakeResponse('asset'));
+    const realDelete = cache.delete.bind(cache);
+    let failures = 1;
+    cache.delete = async (key) => {
+      if (failures > 0) { failures -= 1; throw new Error('Cache Storage error'); }
+      return realDelete(key);
+    };
+    const worker = loadWorker(cache);
+    worker.setFetch(serveBuild(['/assets/index-AAA.js']));
+    await worker.dispatchActivate();
+    expect(worker.workerClients.claim).toHaveBeenCalledTimes(1);
+    expect([...cache.store.keys()].some(url => /careers/i.test(url))).toBe(true);
+    await worker.dispatchFetch('/admin/', { mode: 'navigate' });
+    expect([...cache.store.keys()].some(url => /careers/i.test(url))).toBe(false);
+  });
+
   it('still serves and refreshes the shell for every other page', async () => {
     const cache = fakeCache();
     const { cacheCompleteShellResponse, dispatchFetch, setFetch } = loadWorker(cache);

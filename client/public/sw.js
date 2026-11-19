@@ -600,10 +600,15 @@ self.addEventListener('install', event => {
 // An older worker stored any same-origin GET in its catch-all branch, so it
 // could hold a job-offer URL as a request key. Drop those when this worker
 // takes over. The shell needs nothing: install just stored a fresh one from '/'.
+// Until one purge has finished, each navigation tries again, so a Cache
+// Storage error at activate cannot leave them behind (a restarted worker
+// checks once more; the list is cheap).
+let privateLinksPurged = false;
 async function purgePrivateLinkEntries() {
   const cache = await caches.open(CACHE_NAME);
   const requests = await cache.keys();
   await Promise.all(requests.filter(request => isPrivateLinkPage(new URL(request.url).pathname)).map(request => cache.delete(request)));
+  privateLinksPurged = true;
 }
 
 self.addEventListener('activate', event => {
@@ -638,6 +643,7 @@ self.addEventListener('fetch', event => {
   // ALWAYS return a Response (never undefined) so iOS standalone PWAs
   // never render a blank screen on flaky cellular.
   if (event.request.mode === 'navigate' || event.request.destination === 'document') {
+    if (!privateLinksPurged) event.waitUntil(purgePrivateLinkEntries().catch(() => {}));
     // Order navigations by when they BEGIN, not when their response lands:
     // an earlier request can be answered by the older deploy yet resolve
     // after a later request answered by the newer one.

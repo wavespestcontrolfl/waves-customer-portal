@@ -108,6 +108,8 @@ const ERROR_BANNER_STYLE = {
 const REFRESH_ERROR = 'We could not refresh this offer. Check your connection and try again.';
 const NOT_SAVED_ERROR = 'That did not go through. Please try again.';
 const CONNECTION_ERROR = 'Could not save that. Check your connection and try again.';
+// A send whose reply was lost: it may still go through, so it is not called failed.
+const LOST_ERROR = 'We could not confirm that. Check your connection and try again.';
 
 function ownerFirstName(data) {
   const first = String(data.owner?.name || '').trim().split(/\s+/)[0];
@@ -312,6 +314,9 @@ function TextConsent({ token, initial, onPending, onStale, onSnapshot, onRefused
   // The choice the applicant just made, while its save has no answer yet. It
   // survives a failed read, and Try again sends it again.
   const wanted = useRef(null);
+  // True once a save of that choice lost its reply: it may still land, so a
+  // later refusal (a 429, say) says nothing about what is stored.
+  const lostSave = useRef(false);
 
   // A fresh read of the offer (another tab changed the choice, or an action
   // re-read the offer) carries the stored choice. Show it, unless a choice
@@ -336,6 +341,7 @@ function TextConsent({ token, initial, onPending, onStale, onSnapshot, onRefused
         return;
       }
       wanted.current = null;
+      lostSave.current = false;
       setChecked(stored);
       setUnconfirmed(false);
       setError('');
@@ -360,16 +366,26 @@ function TextConsent({ token, initial, onPending, onStale, onSnapshot, onRefused
     try {
       res = await postJson(token, '/text-consent', { consent: next });
     } catch {
+      lostSave.current = true;
       await confirm();
       return;
     }
     if (res.status >= 500) {
       // A gateway error can arrive after the write committed: ask the server.
+      lostSave.current = true;
       await confirm();
+      return;
+    }
+    if (lostSave.current && !res.ok && res.status !== 404 && res.status !== 409) {
+      // Refused, but an earlier save of this choice may still have landed: keep
+      // the choice and the lock until a save or a read settles it.
+      setUnconfirmed(true);
+      setSaving(false);
       return;
     }
     // A definite answer: the server took the choice or refused it.
     wanted.current = null;
+    lostSave.current = false;
     if (res.ok) {
       const stored = Boolean(res.body.textConsent);
       setChecked(stored);
@@ -437,6 +453,11 @@ function NoteField({ id, label, value, onChange }) {
 function useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUnknown }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // The last send whose reply was lost ({ suffix, payload }). It may still go
+  // through, so until a resend of it gets a definite answer it is the only
+  // thing the applicant can do (a repeat is refused, and its 409 names the
+  // answer), and no other action can race it.
+  const [lost, setLost] = useState(null);
 
   const run = useCallback(async (suffix, payload) => {
     if (busy) return;
@@ -444,8 +465,9 @@ function useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUn
     setError('');
     try {
       const res = await postJson(token, suffix, payload);
+      if (res.status >= 500) throw new Error('unknown outcome'); // may have committed: handled below
+      setLost(null); // a definite answer
       if (res.status === 404) return onInvalid();
-      if (res.status >= 500) throw new Error('unknown outcome'); // may have committed: re-read below
       if (res.status === 409) {
         // The 409 says where the offer stands: the page shows it at once, so
         // a failed read cannot leave the old offer on screen.
@@ -459,17 +481,33 @@ function useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUn
         setError(res.body?.error || 'We could not save that. Please check what you entered and try again.');
         return;
       }
-      onApplied(res.body);
+      onApplied(res.body, payload);
     } catch {
-      const after = await onReload();
-      if (after === 'failed') onUnknown();
-      else if (after === 'open') setError(CONNECTION_ERROR);
+      // No answer, a gateway error, or an unreadable reply. A read shows an
+      // answer that already landed; otherwise only a resend is offered.
+      setLost({ suffix, payload });
+      await onReload();
     } finally {
       setBusy(false);
     }
   }, [busy, token, onApplied, onRefused, onReload, onInvalid, onUnknown]);
 
-  return { busy, error, setError, run };
+  const retry = useCallback(() => (lost ? run(lost.suffix, lost.payload) : undefined), [lost, run]);
+  return { busy, error, setError, run, lost: Boolean(lost), retry };
+}
+
+function LostBanner({ action }) {
+  if (!action.lost) return null;
+  return (
+    <div style={ERROR_BANNER_STYLE} role="alert">
+      {LOST_ERROR}
+      <div style={{ marginTop: 8 }}>
+        <BrandButton variant="secondary" disabled={action.busy} onClick={action.retry}>
+          {action.busy ? 'Trying…' : 'Try again'}
+        </BrandButton>
+      </div>
+    </div>
+  );
 }
 
 function DateRequestPanel({ onSubmit, onCancel, busy, locked, error }) {
@@ -521,7 +559,7 @@ function DeclinePanel({ onSubmit, onCancel, busy, locked, error }) {
   );
 }
 
-function SignBlock({ name, onName, onAccept, busy }) {
+function SignBlock({ name, onName, onAccept, busy, saving }) {
   const valid = signedNameValid(name);
   return (
     <div style={{ marginTop: 18 }}>
@@ -536,7 +574,7 @@ function SignBlock({ name, onName, onAccept, busy }) {
         style={FIELD_STYLE}
       />
       <BrandButton fullWidth disabled={!valid || busy} onClick={onAccept} style={{ marginTop: 12 }}>
-        {busy ? 'Saving…' : 'Accept and sign'}
+        {saving ? 'Saving…' : 'Accept and sign'}
       </BrandButton>
     </div>
   );
@@ -548,9 +586,8 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid }) {
   const [unknown, setUnknown] = useState(false);
   const [rechecking, setRechecking] = useState(false);
   const markUnknown = useCallback(() => setUnknown(true), []);
-  const accept = useOfferAction({ token, onApplied: (b) => onApplied({ ...b, signedName: name.trim() }), onRefused, onReload, onInvalid, onUnknown: markUnknown });
-  const askedDate = useRef('');
-  const dateReq = useOfferAction({ token, onApplied: (b) => onApplied({ requestedStartDate: askedDate.current, ...b }), onRefused, onReload, onInvalid, onUnknown: markUnknown });
+  const accept = useOfferAction({ token, onApplied: (b, sent) => onApplied({ ...b, signedName: sent.signedName }), onRefused, onReload, onInvalid, onUnknown: markUnknown });
+  const dateReq = useOfferAction({ token, onApplied: (b, sent) => onApplied({ requestedStartDate: sent.requestedStartDate, ...b }), onRefused, onReload, onInvalid, onUnknown: markUnknown });
   const decline = useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUnknown: markUnknown });
   const [consentPending, setConsentPending] = useState(false);
   // The last write may or may not have gone through and the offer could not be
@@ -561,7 +598,10 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid }) {
     setRechecking(false);
     if (after === 'open') setUnknown(false);
   };
-  const anyBusy = accept.busy || dateReq.busy || decline.busy || consentPending || unknown;
+  // Locks every action and the text box: a send in flight, a send whose reply
+  // was lost, or a refusal whose refresh failed.
+  const blocked = accept.busy || dateReq.busy || decline.busy || accept.lost || dateReq.lost || decline.lost || unknown;
+  const anyBusy = blocked || consentPending;
 
   return (
     <Column>
@@ -577,14 +617,16 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid }) {
         <p style={{ ...BODY_STYLE, borderTop: '1px solid var(--border, #E2E8F0)', paddingTop: 12 }}>
           Please don&rsquo;t give notice at your current job until you have signed this offer.
         </p>
-        <TextConsent token={token} initial={data.textConsent} onPending={setConsentPending} onStale={onReload} onSnapshot={onApplied} onRefused={onRefused} onInvalid={onInvalid} locked={accept.busy || dateReq.busy || decline.busy || unknown} />
+        <TextConsent token={token} initial={data.textConsent} onPending={setConsentPending} onStale={onReload} onSnapshot={onApplied} onRefused={onRefused} onInvalid={onInvalid} locked={blocked} />
         <SignBlock
           name={name}
           onName={setName}
           busy={anyBusy}
+          saving={accept.busy}
           onAccept={() => accept.run('/accept', { signedName: name.trim() })}
         />
         {accept.error && <div style={ERROR_BANNER_STYLE} role="alert">{accept.error}</div>}
+        <LostBanner action={accept} />
         {unknown && (
           <div style={ERROR_BANNER_STYLE} role="alert">
             {REFRESH_ERROR}
@@ -611,9 +653,10 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid }) {
             locked={anyBusy}
             error={dateReq.error}
             onCancel={() => setPanel('none')}
-            onSubmit={(payload) => { askedDate.current = payload.requestedStartDate; dateReq.run('/date-request', payload); }}
+            onSubmit={(payload) => dateReq.run('/date-request', payload)}
           />
         )}
+        <LostBanner action={dateReq} />
         {panel === 'decline' && (
           <DeclinePanel
             busy={decline.busy}
@@ -623,6 +666,7 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid }) {
             onSubmit={(payload) => decline.run('/decline', payload)}
           />
         )}
+        <LostBanner action={decline} />
 
         {data.expiresAt && (
           <p style={{ ...BODY_STYLE, marginTop: 18, fontSize: 14, color: MUTED, textAlign: 'center' }}>

@@ -371,18 +371,70 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.getByLabelText('Text me about this offer')).toBeDisabled();
   });
 
-  it('keeps actions locked after a lost reply until a re-read works, then shows the result', async () => {
+  // A send whose reply was lost may still go through, even when the read after
+  // it says open. Every action stays locked, and only a resend of that send is
+  // offered; a repeat is refused, and its 409 names the answer.
+  it('after a lost sign reply and a read that still says open, locks every action and offers only a resend', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockRejectedValueOnce(new Error('offline')) // sign: reply lost
-      .mockRejectedValueOnce(new Error('offline')) // re-read lost
-      .mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' })));
+      .mockResolvedValueOnce(jsonResponse(openPayload())) // the read: the sign has not landed yet
+      .mockResolvedValueOnce(jsonResponse({ state: 'signed' }, 409)); // the resend: it had landed
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Check again' }));
-    expect(await screen.findByText(/You signed this offer/)).toBeInTheDocument();
+    expect(await screen.findByText('We could not confirm that. Check your connection and try again.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Decline' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Ask for another start date' })).toBeDisabled();
+    expect(screen.getByLabelText('Text me about this offer')).toBeDisabled();
+    expect(screen.queryByText(/Could not save that/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText(/You signed this offer\. Welcome to Waves\./)).toBeInTheDocument();
+    expect(fetchMock.mock.calls[3][0]).toMatch(/\/accept$/);
+    expect(bodyOf(fetchMock, 3)).toEqual({ signedName: 'Jordan Rivera' });
+  });
+
+  it('after a lost decline reply and a failed read, the resend is the same decline and its answer is shown', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({}, 502)) // decline: no answer
+      .mockRejectedValueOnce(new Error('offline')) // the read fails
+      .mockResolvedValueOnce(jsonResponse({ state: 'declined' })); // the resend goes through
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Decline' }));
+    fireEvent.change(screen.getByLabelText('Reason (optional)'), { target: { value: 'Took another job' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, decline' }));
+    expect(await screen.findByText('We could not confirm that. Check your connection and try again.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('You declined this offer. Thank you for your time.')).toBeInTheDocument();
+    expect(fetchMock.mock.calls[3][0]).toMatch(/\/decline$/);
+    expect(bodyOf(fetchMock, 3)).toEqual(bodyOf(fetchMock, 1));
+  });
+
+  it('keeps a text choice locked when its resend after a lost reply is refused, until a save settles it', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockRejectedValueOnce(new Error('offline')) // POST consent true: reply lost
+      .mockRejectedValueOnce(new Error('offline')) // the read fails
+      .mockResolvedValueOnce(jsonResponse({ error: 'Too many requests, please try again shortly.' }, 429)) // the resend is refused
+      .mockResolvedValueOnce(jsonResponse({ textConsent: true })); // the next resend is saved
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Text me about this offer')).toBeChecked(); // never guessed back to off
+    expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
+    expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
+    expect(bodyOf(fetchMock, 4)).toEqual({ consent: true });
   });
 
   it('locks the other panel while the accept request is pending', async () => {
