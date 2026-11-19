@@ -475,7 +475,11 @@ function peopleClauseFor(plan, uniform) {
 }
 // Blog scene pictures state no verdict: an image model given a section
 // heading drew check marks and crosses that contradicted the post (owner
-// 2026-11-19).
+// 2026-11-19). This sentence and IDENTIFICATION_NO_PEST_CLOSEUP_LINE are
+// PROMPT rules only: the picture screen (hero-alt-vision) does not look for a
+// drawn mark or a pest close-up. A screen failure regenerates the picture, a
+// paid image call, so a screen check for either waits for the owner's yes on
+// that cost (asked 2026-11-19) and ships in its own gated PR.
 const NO_DRAWN_MARKS_LINE = 'Show one real scene with nothing drawn over it: no check marks, crosses, prohibition signs, arrows, callout bubbles, magnified insets, split panels or before-and-after comparisons — the picture states no verdict.';
 
 // What each combination of attached references changes in a scene prompt,
