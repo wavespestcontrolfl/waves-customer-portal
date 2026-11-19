@@ -79,7 +79,9 @@ async function loadWeeklyCallOutcomes({ now = new Date(), conn = db } = {}) {
       conn.raw('COUNT(*)::int AS total'),
       conn.raw('COUNT(*) FILTER (WHERE known)::int AS known'),
       conn.raw('COUNT(*) FILTER (WHERE booked)::int AS booked'),
-      conn.raw('COUNT(*) FILTER (WHERE estimate AND NOT booked)::int AS estimates'),
+      // A caller with no disposition on any call has booked NULL (bool_or of NULLs), not false; their quote flags
+      // still count, so the test is IS NOT TRUE.
+      conn.raw('COUNT(*) FILTER (WHERE estimate AND booked IS NOT TRUE)::int AS estimates'),
     )
     .first();
   const total = Number(row?.total) || 0;
@@ -101,7 +103,8 @@ async function loadWeeklyCallOutcomes({ now = new Date(), conn = db } = {}) {
 function formatWeeklyCallOutcomes(o) {
   const head = `New-customer callers: ${o.newCustomerCallers}.`;
   if (o.newCustomerCallers === 0) return `${head} Booked on the call: 0. Estimate requested or promised: 0.`;
-  if (!o.callersWithOutcome) return `${head} No call outcomes recorded yet, so no booking rate.`;
+  // The extraction's quote flags need no recorded outcome, so the estimate count shows even with no booking rate.
+  if (!o.callersWithOutcome) return `${head} No call outcomes recorded yet, so no booking rate. Estimate requested or promised: ${o.estimateRequestedOrPromised}.`;
   return `${head} Outcome known for ${o.callersWithOutcome}. Booked on the call: ${o.bookedOnCall} of ${o.callersWithOutcome} (${o.bookedPct}%). Estimate requested or promised: ${o.estimateRequestedOrPromised}.`;
 }
 

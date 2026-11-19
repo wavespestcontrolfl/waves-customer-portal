@@ -74,10 +74,19 @@ describe('loadWeeklyCallOutcomes', () => {
     expect(formatWeeklyCallOutcomes(out)).toBe('New-customer callers: 0. Booked on the call: 0. Estimate requested or promised: 0.');
   });
 
-  test('callers with no recorded outcome give no booking rate, not 0%', async () => {
-    const out = await loadWeeklyCallOutcomes({ now: new Date('2026-11-20T13:00:00Z'), conn: fakeConn({ total: 12, known: 0, booked: 0, estimates: 0 }) });
+  test('callers with no recorded outcome give no booking rate, not 0%, and still show the quotes their calls asked for', async () => {
+    const out = await loadWeeklyCallOutcomes({ now: new Date('2026-11-20T13:00:00Z'), conn: fakeConn({ total: 12, known: 0, booked: 0, estimates: 3 }) });
     expect(out.bookedPct).toBeNull();
-    expect(formatWeeklyCallOutcomes(out)).toBe('New-customer callers: 12. No call outcomes recorded yet, so no booking rate.');
+    expect(out.estimateRequestedOrPromised).toBe(3);
+    expect(formatWeeklyCallOutcomes(out)).toBe('New-customer callers: 12. No call outcomes recorded yet, so no booking rate. Estimate requested or promised: 3.');
+  });
+
+  test('a caller with no disposition on any call (booked NULL, not false) still counts toward the estimate figure', async () => {
+    const conn = fakeConn({ total: 1, known: 0, booked: 0, estimates: 1 });
+    await loadWeeklyCallOutcomes({ now: new Date('2026-11-20T13:00:00Z'), conn });
+    const outer = conn.calls.filter(([m]) => m === 'select').flatMap(([, ...cols]) => cols).filter((c) => c && c.sql).map((c) => c.sql);
+    expect(outer).toContain('COUNT(*) FILTER (WHERE estimate AND booked IS NOT TRUE)::int AS estimates');
+    expect(outer).not.toContain('COUNT(*) FILTER (WHERE estimate AND NOT booked)::int AS estimates');
   });
 });
 
