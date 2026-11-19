@@ -12,6 +12,8 @@
 const db = require('../models/db');
 const { isNeverAttemptedHoldDeferral, excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
 
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const metadataInvoiceId = (p) => {
   try {
     const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
@@ -62,41 +64,81 @@ function excludeNeverAttemptedDeferrals(query, alias = 'payments') {
 // COMPLETE ledger, not the 5-row display window (Codex round-35 P1).
 // `strict` (the SMS grounding caller) = payer-aware and fail-closed: direct payer-owned rows (payments.payer_id) are filtered in
 // SQL and every column the shared payer-linkage predicate reads (payer_id, stripe_charge_id, description, PI, metadata) is
-// selected so `isPayerLinked` can exclude AP rows; and a failed non-draft-invoice lookup THROWS (an empty set would
-// double-count the invoice's debt) so the aggregator marks billing unavailable. The route (default) keeps its original
-// behavior exactly: no payer_id filter (it excludes payer rows by metadata) and a lookup error reads as "no carrying
-// invoices" (Codex round-36 P1/P2).
+// selected so `isPayerLinked` can exclude AP rows. A failed invoice lookup in strict mode propagates to the aggregator.
+// The portal also reads the ownership columns and tolerates malformed historical invoice references.
 async function loadFailedPaymentFacts(customerId, dbh = db, { statuses = ['failed'], strict = false } = {}) {
-  // the default (route) query keeps its exact original shape
   const base = dbh('payments');
   let scoped = statuses.length === 1 && statuses[0] === 'failed'
     ? base.where({ customer_id: customerId, status: 'failed' })
     : base.where({ customer_id: customerId }).whereIn('status', statuses);
   scoped = scoped.whereNull('superseded_by_payment_id');
   if (strict) scoped = scoped.whereNull('payer_id');
-  const rows = await scoped.select(...(strict
-    ? ['id', 'amount', 'metadata', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'payer_id', 'retry_count', 'next_retry_at']
-    : ['id', 'amount', 'metadata', 'stripe_payment_intent_id', 'retry_count', 'next_retry_at']));
+  const rows = await scoped.select('id', 'amount', 'metadata', 'stripe_payment_intent_id', 'stripe_charge_id',
+    'description', 'payer_id', 'retry_count', 'next_retry_at');
   const failedInvoiceIds = [...new Set(rows.map(metadataInvoiceId).filter(Boolean))];
+  // invoices.id is UUID. Historical metadata is not: keep malformed legacy
+  // references out of the PostgreSQL lookup so one bad value cannot abort
+  // deduplication for every valid invoice on the account.
+  const validFailedInvoiceIds = [...new Set(failedInvoiceIds
+    .filter((id) => UUID_SHAPE.test(id))
+    .map((id) => id.toLowerCase()))];
   let carrying = [];
-  if (failedInvoiceIds.length) {
-    const lookup = dbh('invoices').whereIn('id', failedInvoiceIds).whereNot({ status: 'draft' }).select('id');
-    carrying = strict ? await lookup : await lookup.catch(() => []);
+  let invoiceLookupFailed = false;
+  if (validFailedInvoiceIds.length) {
+    const lookup = (connection) => connection('invoices')
+      .whereIn('id', validFailedInvoiceIds)
+      .whereNot({ status: 'draft' })
+      .select('id');
+    try {
+      if (!strict && dbh?.isTransaction === true && typeof dbh.transaction === 'function') {
+        // The portal balance runs in a read-only PostgreSQL snapshot. A bare
+        // caught statement error poisons that transaction (25P02), so contain
+        // this explicitly recoverable status lookup in Knex's nested-transaction
+        // SAVEPOINT before continuing with upcoming/open-invoice reads.
+        carrying = await dbh.transaction((savepoint) => lookup(savepoint));
+      } else {
+        carrying = await lookup(dbh);
+      }
+    } catch (err) {
+      if (strict) throw err;
+      invoiceLookupFailed = true;
+      carrying = [];
+    }
   }
-  const balanceCarryingInvoiceIds = new Set(carrying.map((r) => String(r.id)));
-  return { rows, failedInvoiceIds, balanceCarryingInvoiceIds };
+  const balanceCarryingInvoiceIds = new Set(carrying.map((r) => String(r.id).toLowerCase()));
+  // When the lookup itself fails, a valid linked attempt may already be
+  // represented by its invoice. Withhold that unresolved amount instead of
+  // treating the lookup failure as proof that it is standalone debt.
+  const unresolvedInvoiceIds = invoiceLookupFailed
+    ? new Set(validFailedInvoiceIds)
+    : new Set();
+  return { rows, failedInvoiceIds, balanceCarryingInvoiceIds, unresolvedInvoiceIds, invoiceLookupFailed };
 }
 
 // `isPayerPayment(row)` — the caller's payer-ownership predicate.
-function standaloneFailedTotal({ rows, balanceCarryingInvoiceIds }, isPayerPayment = () => false) {
+function standaloneFailedRows({ rows, balanceCarryingInvoiceIds, unresolvedInvoiceIds = new Set() }, isPayerPayment = () => false) {
   return rows
     .filter((p) => !isPayerPayment(p))
     .filter((p) => !isNeverAttemptedDeferral(p))
     .filter((p) => {
       const invId = metadataInvoiceId(p);
-      return !invId || !balanceCarryingInvoiceIds.has(invId);
-    })
+      if (!invId) return true;
+      const canonicalId = invId.toLowerCase();
+      return !balanceCarryingInvoiceIds.has(canonicalId) && !unresolvedInvoiceIds.has(canonicalId);
+    });
+}
+
+function standaloneFailedTotal(facts, isPayerPayment = () => false) {
+  return standaloneFailedRows(facts, isPayerPayment)
     .reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
 }
 
-module.exports = { loadFailedPaymentFacts, standaloneFailedTotal, isNeverAttemptedDeferral, excludeNeverAttemptedDeferrals, metadataInvoiceId };
+module.exports = {
+  UUID_SHAPE,
+  loadFailedPaymentFacts,
+  standaloneFailedRows,
+  standaloneFailedTotal,
+  isNeverAttemptedDeferral,
+  excludeNeverAttemptedDeferrals,
+  metadataInvoiceId,
+};

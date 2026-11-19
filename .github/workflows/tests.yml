@@ -274,6 +274,7 @@ jobs:
             npx jest --ci --silent --runInBand \
             tests/account-credit-authentication-hold-postgres.test.js \
             tests/annual-plan-documents-postgres.test.js \
+            tests/failed-payments-savepoint-postgres.test.js \
             tests/apply-credit-claim-fence-promotion-postgres.test.js \
             tests/backfill-lead-email-links-postgres.test.js \
             tests/billing-skip-events-schema-postgres.test.js \

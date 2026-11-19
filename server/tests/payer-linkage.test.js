@@ -38,6 +38,20 @@ describe('isPayerLinked recognizes every linkage', () => {
   test('no payer invoices => nothing is payer-linked', () => {
     expect(buildPayerLinkage([]).isPayerLinked({ metadata: { invoice_id: PAYER_INV.id }, stripe_payment_intent_id: 'pi_ap' })).toBe(false);
   });
+  test('UUID comparison is case-insensitive and every conflicting invoice alias is checked', () => {
+    const payerId = 'ab36f51e-4441-4cc8-bbf7-c41ffad50152';
+    const ownId = 'de27b36a-3054-4c64-93e4-0d15b785bb34';
+    const payer = buildPayerLinkage([{ id: payerId }]);
+
+    expect(payer.isPayerLinked({ metadata: { invoice_id: payerId.toUpperCase() } })).toBe(true);
+    expect(payer.isPayerLinked({
+      metadata: {
+        invoice_id: ownId,
+        dispute_invoice_id: payerId.toUpperCase(),
+        waves_invoice_id: '70a2c70d-bbd9-451a-a258-14e73473db08',
+      },
+    })).toBe(true);
+  });
 });
 
 describe('the payer-invoice lookup includes the WITHDRAWAL stamp (payer_billed:), not only payer_id', () => {
