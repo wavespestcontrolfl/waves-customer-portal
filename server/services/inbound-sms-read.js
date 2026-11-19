@@ -281,26 +281,37 @@ async function markInboundSmsRead({
   return { updated, notificationsCleared };
 }
 
-// The inbox's Mark all read (owner 2026-11-19): every unread inbound text
-// created at or before readBefore (never later than now), through the one
-// writer above, so the legacy mirror, backlog-marker strip and bell clear are
-// the same as a thread read. `customerIds` (a subquery of customer ids) limits
-// a technician to its own customers; a text with no customer is office work and
-// stays unread for them. Recruiting replies are read on the Recruiting page,
-// never by an inbox-wide read.
-async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, customerIds = null } = {}) {
+// The inbox's Mark all read (owner 2026-11-19): every unread inbound text the
+// inbox can show, created up to readBefore (the newest text the caller's list
+// showed, never later than now), through the one writer above, so the legacy
+// mirror, backlog-marker strip and bell clear are the same as a thread read.
+// The client's stamp is millisecond-rounded, so the cutoff takes the whole
+// millisecond (PostgreSQL keeps microseconds). `customerIds` (a subquery of
+// customer ids) limits a technician to its own customers; a text with no
+// customer is office work and stays unread for them. `excludePhones` is the
+// inbox log's own internal-phone exclusion (either side of the thread, or the
+// customer's phone). Recruiting replies are read on the Recruiting page, never
+// by an inbox-wide read.
+async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, customerIds = null, excludePhones = [] } = {}) {
   if (!(readBefore instanceof Date) || Number.isNaN(readBefore.getTime())) {
     throw new Error('readBefore required when marking every text read');
   }
-  const before = new Date(Math.min(readBefore.getTime(), Date.now()));
+  const cutoff = nextMillisecondBoundary(new Date(Math.min(readBefore.getTime(), Date.now())));
   const ids = await db('messages as m')
-    .modify((q) => {
-      if (customerIds) q.join('conversations as c', 'c.id', 'm.conversation_id').whereIn('c.customer_id', customerIds);
-    })
+    .join('conversations as c', 'c.id', 'm.conversation_id')
+    .leftJoin('customers as cu', 'cu.id', 'c.customer_id')
+    .modify((q) => { if (customerIds) q.whereIn('c.customer_id', customerIds); })
     .where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
     .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
-    .where('m.created_at', '<=', before)
+    .where('m.created_at', '<', cutoff)
     .modify((q) => excludeRecruitingSmsLog(q, 'm.message_type'))
+    .modify((q) => {
+      for (const phone of excludePhones) {
+        q.whereNot('c.our_endpoint_id', phone)
+          .where((b) => b.whereNot('c.contact_phone', phone).orWhereNull('c.contact_phone'))
+          .where((b) => b.whereNot('cu.phone', phone).orWhereNull('cu.phone'));
+      }
+    })
     .pluck('m.id');
   if (!ids.length) return { updated: 0, notificationsCleared: 0 };
   return markInboundSmsRead({ messageIds: ids, adminUserId, role });

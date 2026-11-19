@@ -2617,8 +2617,9 @@ router.post('/messages/read', async (req, res, next) => {
 });
 
 // POST /api/admin/communications/messages/read-all — the inbox's Mark all read (owner 2026-11-19): every unread
-// inbound text up to readBefore (the newest text the caller's list showed), through the one read writer. A
-// technician reads only texts from the customers on its own route.
+// inbound text the inbox can show up to readBefore (the newest text the caller's list showed), through the one read
+// writer. Internal admin-phone traffic stays out, as in /log. A technician reads only texts from the customers on its
+// own route.
 router.post('/messages/read-all', async (req, res, next) => {
   try {
     const readBefore = req.body?.readBefore ? new Date(req.body.readBefore) : null;
@@ -2629,6 +2630,7 @@ router.post('/messages/read-all', async (req, res, next) => {
       adminUserId: req.technicianId || null,
       role: req.techRole,
       customerIds: isTechnicianRequest(req) ? technicianCustomerIdsSubquery(req, db) : null,
+      excludePhones: ADMIN_PHONES,
     });
     res.json({ success: true, updated, notificationsCleared });
   } catch (err) { next(err); }

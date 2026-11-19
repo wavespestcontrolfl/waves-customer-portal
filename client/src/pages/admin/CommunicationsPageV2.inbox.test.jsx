@@ -1195,7 +1195,8 @@ it("Mark read on a row clears the dot at once, writes 5 s later, and Undo takes 
   expect(readPosts("/messages/read")).toHaveLength(0);
   await tick(200);
   const [[, init]] = readPosts("/messages/read");
-  expect(JSON.parse(init.body)).toEqual({ messageIds: ["a"], conversationIds: ["conv-a"], readBefore: "2024-07-01T12:00:00Z" });
+  // The row's own texts only: a customer's two phones can share one conversation.
+  expect(JSON.parse(init.body)).toEqual({ messageIds: ["a"] });
   expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();
   expect(screen.queryByRole("status")).not.toBeInTheDocument();
 });
@@ -1253,4 +1254,40 @@ it("leaving the inbox inside the 5 s sends the read instead of dropping it", asy
   fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
   view.unmount(); await tick(0);
   expect(readPosts("/messages/read")).toHaveLength(1);
+});
+
+it("Undo ends when the write starts, and the dot stays hidden while the write is out", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  let answer;
+  const okFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, init) => (String(url).endsWith("/messages/read") && init?.method === "POST"
+    ? new Promise((resolve) => { answer = () => resolve(response({ success: true })); })
+    : okFetch(url, init)));
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  await tick(5000);
+  expect(readPosts("/messages/read")).toHaveLength(1);
+  expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();
+  await act(async () => { answer(); });
+  await tick(0);
+  expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();
+});
+
+it("Mark all read leaves a recruiting reply's dot, as the server leaves it unread", async () => {
+  messages = [
+    { ...inbound("a", "Please check the gate"), isRead: false },
+    { ...inbound("j", "I can interview Tuesday", "+19415550109"), isRead: false, messageType: "job_applicant_reply" },
+  ];
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+  expect(screen.getAllByLabelText("Unread")).toHaveLength(1);
+  await tick(5000);
+  expect(screen.getAllByLabelText("Unread")).toHaveLength(1);
+});
+
+it("Mark all read stays on the whole list when the loaded rows are all read (older unread texts may not be loaded)", async () => {
+  setup(); await tick();
+  expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Mark all read" })).toBeInTheDocument();
 });

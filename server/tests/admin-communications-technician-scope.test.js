@@ -156,6 +156,8 @@ describe('routes', () => {
     expect(tech).toEqual({ status: 200, body: { success: true, updated: 3, notificationsCleared: 1 } });
     expect(mockMarkAllRead).toHaveBeenLastCalledWith(expect.objectContaining({
       readBefore: new Date(readBefore), role: 'technician', adminUserId: 'tech-1', customerIds: 'SCOPED_CUSTOMER_IDS',
+      // The inbox log's internal-phone exclusion rides along.
+      excludePhones: expect.arrayContaining([expect.stringMatching(/^\+1\d{10}$/)]),
     }));
     expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore })).status).toBe(200);
     expect(mockMarkAllRead).toHaveBeenLastCalledWith(expect.objectContaining({ role: 'admin', customerIds: null }));

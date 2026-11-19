@@ -85,12 +85,18 @@ test('the badge count drops needs-a-reply texts somebody already read; a thread 
 test('Mark all read selects unread inbound texts up to the boundary, never recruiting replies, then reads them through the one writer', async () => {
   mockPluck = (compiled) => (compiled.sql.includes('"messages" as "m"') ? ['m-1', 'm-2'] : []);
   const readBefore = new Date('2026-11-19T12:00:00Z');
-  await markAllInboundSmsRead({ readBefore, role: 'admin', adminUserId: 'admin-1' });
+  await markAllInboundSmsRead({ readBefore, role: 'admin', adminUserId: 'admin-1', excludePhones: ['+19415550199'] });
   const select = mockQueries.find((q) => q.method === 'pluck' && q.sql.includes('"messages" as "m"'));
-  expect(select.sql).toContain('"m"."created_at" <= ?');
+  // The client stamp is millisecond-rounded: the cutoff takes the whole millisecond.
+  expect(select.sql).toContain('"m"."created_at" < ?');
+  expect(select.bindings).toContainEqual(new Date(readBefore.getTime() + 1));
   expect(select.sql).toContain('"m"."message_type" not like ?');
-  expect(select.sql).not.toContain('join "conversations"');
-  expect(select.bindings).toEqual(expect.arrayContaining(['sms', 'inbound', readBefore, 'job\\_%']));
+  expect(select.sql).not.toContain('"c"."customer_id" in');
+  // The inbox log's internal-phone exclusion: either side of the thread, or the customer's phone.
+  expect(select.sql).toContain('not "c"."our_endpoint_id" = ?');
+  expect(select.sql).toContain('(not "c"."contact_phone" = ? or "c"."contact_phone" is null)');
+  expect(select.sql).toContain('(not "cu"."phone" = ? or "cu"."phone" is null)');
+  expect(select.bindings).toEqual(expect.arrayContaining(['sms', 'inbound', 'job\\_%', '+19415550199']));
   const read = mockQueries.find((q) => q.method === 'update' && q.sql.includes('"read_by_admin_user_id" = ?'));
   expect(read.sql).toContain('"id" in (?, ?)');
   expect(read.bindings).toEqual(expect.arrayContaining(['m-1', 'm-2', 'admin-1']));
@@ -103,7 +109,7 @@ test('Mark all read never reaches past now, and a technician scope reads only it
   expect(select.sql).toContain('inner join "conversations" as "c" on "c"."id" = "m"."conversation_id"');
   expect(select.sql).toContain('"c"."customer_id" in (?)');
   const boundary = select.bindings.find((b) => b instanceof Date);
-  expect(boundary.getTime()).toBeLessThanOrEqual(Date.now());
+  expect(boundary.getTime()).toBeLessThanOrEqual(Date.now() + 1);
   // Nothing unread: no write at all.
   expect(mockQueries.some((q) => q.method === 'update')).toBe(false);
   await expect(markAllInboundSmsRead({ readBefore: new Date('nope'), role: 'admin' })).rejects.toThrow('readBefore required');

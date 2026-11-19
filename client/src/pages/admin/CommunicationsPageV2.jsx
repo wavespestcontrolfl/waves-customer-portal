@@ -249,11 +249,14 @@ function newestCreatedAt(list) {
 // A list Mark read waits this long so its Undo can take it back.
 const LIST_READ_UNDO_MS = 5000;
 
-// Does a pending list read cover this loaded text? Mark all read covers every
-// inbound text up to its boundary; a row's Mark read covers that row's texts.
+// Does a list read cover this loaded text? Mark all read covers every inbound
+// text up to its boundary except recruiting replies (the server leaves those
+// for the Recruiting page); a row's Mark read covers that row's texts.
 function pendingReadCovers(pending, m) {
   if (!pending || m.direction !== "inbound") return false;
-  if (pending.all) return new Date(m.createdAt) <= new Date(pending.readBefore);
+  if (pending.all) {
+    return !String(m.messageType || "").startsWith("job_") && new Date(m.createdAt) <= new Date(pending.readBefore);
+  }
   return pending.messageIds.includes(m.id);
 }
 
@@ -1756,8 +1759,11 @@ export function SmsTab({
 
   // Mark read from the list (owner 2026-11-19): the dot clears at once and the
   // write waits LIST_READ_UNDO_MS so Undo can take it back. One list read waits
-  // at a time; a second tap, leaving the page or the timer sends it.
+  // at a time; a second tap, leaving the page or the timer sends it. Undo ends
+  // when the write starts; the dot stays hidden until the server answers.
   const [pendingRead, setPendingRead] = useState(null);
+  const [sendingReads, setSendingReads] = useState([]);
+  const hiddenReads = useMemo(() => (pendingRead ? [pendingRead, ...sendingReads] : sendingReads), [pendingRead, sendingReads]);
   const [listReadError, setListReadError] = useState("");
   const pendingReadRef = useRef(null);
   const pendingReadTimerRef = useRef(null);
@@ -1766,6 +1772,8 @@ export function SmsTab({
     window.clearTimeout(pendingReadTimerRef.current);
     pendingReadRef.current = null;
     if (!pending) return;
+    setSendingReads((prev) => [...prev, pending]);
+    setPendingRead((current) => (current === pending ? null : current));
     try {
       if (pending.all) {
         await adminFetch("/admin/communications/messages/read-all", {
@@ -1773,9 +1781,10 @@ export function SmsTab({
           body: JSON.stringify({ readBefore: pending.readBefore }),
         });
       } else {
+        // The row's own texts only: a customer's two phones can share one conversation.
         await adminFetch("/admin/communications/messages/read", {
           method: "POST",
-          body: JSON.stringify({ messageIds: pending.messageIds, conversationIds: pending.conversationIds, readBefore: pending.readBefore }),
+          body: JSON.stringify({ messageIds: pending.messageIds }),
         });
       }
       const readAt = new Date().toISOString();
@@ -1785,7 +1794,7 @@ export function SmsTab({
       setListReadError("The texts were not marked read. Try again.");
       loadData(smsSearchRef.current, { refresh: true });
     } finally {
-      setPendingRead((current) => (current === pending ? null : current));
+      setSendingReads((prev) => prev.filter((read) => read !== pending));
     }
   }, [loadData]);
   const commitPendingReadRef = useRef(commitPendingRead);
@@ -1804,9 +1813,9 @@ export function SmsTab({
     setPendingRead(null);
   };
   const markThreadReadFromList = (thread) => {
-    const { unreadIds, conversationIds, readBefore } = threadReadScope(thread);
+    const { unreadIds } = threadReadScope(thread);
     if (!unreadIds.length) return;
-    startListRead({ messageIds: unreadIds, conversationIds, readBefore, label: "Marked read" });
+    startListRead({ messageIds: unreadIds, label: "Marked read" });
   };
   const markAllReadFromList = () => {
     const readBefore = newestCreatedAt(messages);
@@ -3205,7 +3214,7 @@ export function SmsTab({
       if (unansweredReply) {
         t.ourNumber = unansweredReply.businessLine;
       }
-      t.unread = t.messages.some((m) => m.direction === "inbound" && !m.isRead && !pendingReadCovers(pendingRead, m));
+      t.unread = t.messages.some((m) => m.direction === "inbound" && !m.isRead && !hiddenReads.some((read) => pendingReadCovers(read, m)));
       return t;
     });
     threadList.sort(
@@ -3214,7 +3223,7 @@ export function SmsTab({
     return blocked.size
       ? threadList.filter((t) => !blocked.has(smsThreadKey(t.contactPhone)))
       : threadList;
-  }, [messages, blocked, pendingRead]);
+  }, [messages, blocked, hiddenReads]);
 
   useEffect(() => {
     if (!activeThread) return;
@@ -4258,8 +4267,9 @@ export function SmsTab({
                 ({filteredThreads.length})
               </span>{" "}
             </div>{" "}
-            {/* Mark all read covers every text, so it shows only on the whole list. */}
-            {chipCounts.unread > 0 && !smsSearch.trim() && smsFilter === "all" && (statusFilter === "all" || statusFilter === "unread") && (
+            {/* Mark all read covers every text, including older ones not loaded yet, so it
+                shows on the whole list only, whatever the loaded rows hold. */}
+            {messages.length > 0 && !smsSearch.trim() && smsFilter === "all" && (statusFilter === "all" || statusFilter === "unread") && (
               <button
                 type="button"
                 onClick={markAllReadFromList}
