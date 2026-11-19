@@ -180,7 +180,7 @@ describe('accept-path wiring (source pins)', () => {
     // would graduate — the same wrongly-declined-by-seconds failure.
     expect(src).toMatch(/\.select\('\*', db\.raw\('\(reservation_expires_at < NOW\(\) - make_interval\(mins => \?\)\) AS _beyond_grace', \[holdGraceMinutes\]\)\)/);
     expect(src).toContain('if (!reservationRow || reservationRow._beyond_grace)');
-    expect(src).toContain('if (!(await recoverBookedAppointment())) return res.status(409).json(HOLD_EXPIRED_409)');
+    expect(src).toContain('if (!recoveredAppointment) return res.status(409).json(HOLD_EXPIRED_409)');
     expect(src).not.toMatch(/Date\.now\(\) - holdGraceMinutes/);
   });
 

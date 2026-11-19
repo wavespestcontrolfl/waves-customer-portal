@@ -58,6 +58,7 @@ jest.mock('../services/estimate-accepted-email', () => ({
 }));
 jest.mock('../services/appointment-tagger', () => ({
   onServiceScheduled: jest.fn(async () => ({})),
+  classifyAppointmentType: jest.fn(() => ({ tag: 'lawn', label: 'Lawn Care' })),
 }));
 jest.mock('../services/lead-estimate-link', () => ({
   markLinkedLeadEstimateAccepted: jest.fn(async () => ({})),
@@ -76,6 +77,7 @@ const express = require('express');
 const knex = require('knex');
 const { randomUUID } = require('crypto');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { acquireOccupancyLock } = require('../services/scheduling/occupancy');
 
 const dateOnly = (value) => (value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10));
 
@@ -266,6 +268,9 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
         reservation_expires_at: mockTransaction.raw("NOW() - INTERVAL '1 day'"),
       },
     });
+    const reloaded = await getAcceptance(token);
+    expect(reloaded.appointment.id).toBe(id);
+    expect(reloaded.appointment).not.toHaveProperty('reservationExpiresAt');
     const body = { slotId: `${CHOSEN_DATE}_09-00_unassigned`, paymentMethodPreference: 'pay_at_visit' };
     const response = await putAccept(token, body);
     expect({ status: response.status, error: (await response.json()).error }).toEqual({ status: 200, error: undefined });
@@ -279,6 +284,124 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     expect(retry.status).toBe(200);
     expect(await mockTransaction('scheduled_services').where({ source_estimate_id: estimateId }).pluck('id'))
       .toEqual(beforeRetry);
+  });
+
+  test('cancelled history at the submitted coordinates does not hide the estimate\'s new live hold', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    let bookingDate = CHOSEN_DATE;
+    for (let i = 0; i < 30 && await require('../services/scheduling/blackout-dates').isBlackoutDate(bookingDate, mockTransaction); i += 1) {
+      bookingDate = etDateString(addETDays(new Date(`${bookingDate}T12:00:00Z`), 1));
+    }
+    expect(await require('../services/scheduling/blackout-dates').isBlackoutDate(bookingDate, mockTransaction)).toBe(false);
+    const cancelledId = await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: bookingDate,
+      extra: { source_estimate_id: estimateId, status: 'cancelled' },
+    });
+    const holdId = await visit(mockTransaction, {
+      customerId: null, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: bookingDate,
+      extra: {
+        source_estimate_id: estimateId,
+        status: 'pending',
+        reservation_expires_at: mockTransaction.raw("NOW() + INTERVAL '10 minutes'"),
+      },
+    });
+    expect(await mockTransaction('scheduled_services')
+      .where({ source_estimate_id: estimateId, scheduled_date: bookingDate, window_start: '09:00', technician_id: null })
+      .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
+      .whereNotNull('customer_id'))
+      .toHaveLength(0);
+    expect(await mockTransaction('scheduled_services').where({ id: holdId }).first('reservation_expires_at'))
+      .toEqual(expect.objectContaining({ reservation_expires_at: expect.any(Date) }));
+
+    const response = await putAccept(token, {
+      slotId: `${bookingDate}_09-00_unassigned`,
+      paymentMethodPreference: 'pay_at_visit',
+    });
+
+    const payload = await response.json();
+    expect({ status: response.status, payload }).toEqual({
+      status: 200,
+      payload: expect.objectContaining({ success: true }),
+    });
+    expect((await mockTransaction('estimates').where({ id: estimateId }).first()).status).toBe('accepted');
+    expect(await mockTransaction('scheduled_services').where({ id: cancelledId }).first('status', 'customer_id'))
+      .toMatchObject({ status: 'cancelled', customer_id: customerId });
+    expect(await mockTransaction('scheduled_services').where({ id: holdId }).first('status', 'customer_id', 'reservation_expires_at'))
+      .toMatchObject({ status: 'pending', customer_id: customerId, reservation_expires_at: null });
+  });
+
+  test('a second eligible booking committed while acceptance waits for the date lock makes recovery fail closed', async () => {
+    // This case needs two independently committed transactions. Replace the
+    // per-test rollback fixture with committed synthetic rows, then clean them
+    // explicitly after the request's own outer transaction is rolled back.
+    await mockTransaction.rollback();
+    mockTransaction = null;
+    let seeded;
+    let firstId;
+    let secondId;
+    await db.transaction(async (seedTrx) => {
+      seeded = await fixture(seedTrx);
+      firstId = await visit(seedTrx, {
+        customerId: seeded.customerId,
+        key: 'lawn_care_monthly',
+        type: 'Monthly Lawn Care Service',
+        date: CHOSEN_DATE,
+        extra: { source_estimate_id: seeded.estimateId },
+      });
+    });
+    mockTransaction = await db.transaction();
+    const blocker = await db.transaction();
+    const observer = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
+    let blockerOpen = true;
+    let request;
+    try {
+      await acquireOccupancyLock(blocker, CHOSEN_DATE);
+      request = putAccept(seeded.token, {
+        slotId: `${CHOSEN_DATE}_09-00_unassigned`,
+        paymentMethodPreference: 'pay_at_visit',
+      });
+
+      let waiting = false;
+      for (let i = 0; i < 100 && !waiting; i += 1) {
+        const rows = await observer('pg_stat_activity')
+          .whereRaw('datname = current_database()')
+          .where({ wait_event_type: 'Lock' })
+          .where('query', 'like', '%pg_advisory_xact_lock%')
+          .select('pid');
+        waiting = rows.length > 0;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(waiting).toBe(true);
+
+      secondId = await visit(blocker, {
+        customerId: seeded.customerId,
+        key: 'lawn_care_monthly',
+        type: 'Monthly Lawn Care Service',
+        date: CHOSEN_DATE,
+        extra: { source_estimate_id: seeded.estimateId },
+      });
+      await blocker.commit();
+      blockerOpen = false;
+
+      const response = await request;
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ code: 'RESERVATION_EXPIRED' });
+      expect((await mockTransaction('estimates').where({ id: seeded.estimateId }).first()).status).toBe('sent');
+      const owners = await mockTransaction('scheduled_services').whereIn('id', [firstId, secondId]).pluck('customer_id');
+      expect(owners).toHaveLength(2);
+      expect(new Set(owners)).toEqual(new Set([seeded.customerId]));
+    } finally {
+      if (blockerOpen) await blocker.rollback().catch(() => {});
+      if (request) await request.catch(() => {});
+      await observer.destroy();
+      await mockTransaction?.rollback().catch(() => {});
+      mockTransaction = null;
+      if (seeded) {
+        await db('scheduled_services').where({ source_estimate_id: seeded.estimateId }).del();
+        await db('estimates').where({ id: seeded.estimateId }).del();
+        await db('customers').where({ id: seeded.customerId }).del();
+      }
+    }
   });
 
   test('an open picker cannot adopt a moved hour or assigned technician', async () => {

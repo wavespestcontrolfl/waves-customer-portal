@@ -17,6 +17,7 @@ const VisitCapacity = require('./combined-visit-capacity');
 const { serviceDurationMinutes } = require('./service-library');
 const AvailabilityEngine = require('./availability');
 const { withoutAssessmentVisits } = require('./assessment-booking');
+const { RETAINED_HISTORY_STATUSES } = require('./visit-context/statuses');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, areaAddOnConfig } = require('./pricing-engine/constants');
 const { estimateLawnFloorArmed, lawnRowsShowFloorEnforcement } = require('./estimate-floor-signal-replay');
 // Canonical service-key tier membership (aliased: this module's local
@@ -6635,6 +6636,10 @@ const EstimateConverter = {
         .where({ source_estimate_id: estimateId })
         .whereNotNull('customer_id')
         .whereNull('reservation_expires_at')
+        // A cancelled/skipped/no-show/rescheduled predecessor can retain the
+        // estimate stamp beside the fresh committed hold. It is history, not
+        // the plan anchor; keep it out of the reserved-start selection.
+        .whereNotIn('status', RETAINED_HISTORY_STATUSES)
         .orderBy('scheduled_date', 'asc'), database)
       : [];
     const reservationRowsExist = reservedRows.length > 0;

@@ -91,7 +91,7 @@ const {
 } = require('../services/pricing-engine/discount-engine');
 const slotReservation = require('../services/slot-reservation');
 const { liveServiceOrHold } = require('../services/scheduling/reservation-occupancy');
-const { RETAINED_HISTORY_STATUSES } = require('../services/visit-context/statuses');
+const { RETAINED_HISTORY_STATUSES, UPCOMING_SERVICE_STATUSES } = require('../services/visit-context/statuses');
 // Rung 1 of the global scheduling lock order (ORDERING CONTRACT,
 // services/scheduling/occupancy.js): the accept transaction pre-acquires the
 // held slot's date key ahead of its estimate/customer row locks.
@@ -1811,6 +1811,25 @@ function adoptableAppointmentStatuses() {
     : ['pending', 'confirmed'];
 }
 
+async function bookedAtSubmittedSlot(database, estimate, data, coordinates, adoptableStatuses) {
+  const claims = await database('scheduled_services')
+    .where(coordinates)
+    .whereIn('scheduled_services.status', UPCOMING_SERVICE_STATUSES)
+    .whereNotNull('scheduled_services.customer_id')
+    .select('scheduled_services.customer_id');
+  if (!claims.length) return { claimed: false, appointment: null };
+  if (!estimate.customer_id || claims.some(row => String(row.customer_id) !== String(estimate.customer_id))) {
+    return { claimed: true, appointment: null };
+  }
+  const appointment = await findLinkedUpcomingAppointment(estimate, data, {
+    database,
+    bookedSlotMatch: { ...coordinates, 'scheduled_services.customer_id': estimate.customer_id },
+    serviceModes: adoptionServiceModesForContract(estimate, data),
+    adoptableStatuses,
+  });
+  return { claimed: true, appointment };
+}
+
 async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts = {}) {
   const conn = opts.database || db;
   const requestedId = opts.appointmentId ? String(opts.appointmentId) : '';
@@ -1868,6 +1887,9 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     })
     .orderBy('scheduled_services.scheduled_date', 'asc')
     .orderBy('scheduled_services.window_start', 'asc')
+    // At the same hour PostgreSQL sorts a linked customer's booking ahead of
+    // a customerless hold. Reloading the picker retains the real appointment.
+    .orderBy('scheduled_services.customer_id', 'asc')
     // Unique final key: scheduled_date + window_start is not a total order
     // (bundled/multi-property visits tie), and the fallback below paginates —
     // without a stable tiebreaker LIMIT/OFFSET pages can repeat or skip tied
@@ -10800,34 +10822,12 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         'scheduled_services.window_start': parsed.windowStart,
         'scheduled_services.technician_id': parsed.techId || null,
       };
-      const recoverBookedAppointment = async () => {
-        if (!estimate.customer_id) return null;
-        bookedSlotMatch = {
-          ...bookedCoordinates,
-          'scheduled_services.customer_id': estimate.customer_id,
-        };
-        recoveredAppointment = await findLinkedUpcomingAppointment(estimate, estData, {
-          bookedSlotMatch,
-          serviceModes: adoptionServiceModesForContract(estimate, estData),
-          adoptableStatuses: acceptAdoptableStatuses,
-        });
-        return recoveredAppointment;
-      };
-
-      // Prefer the real booking when staff claimed this slot while the picker
-      // was open, even if the original unclaimed hold still coexists. Any
-      // linked row at these coordinates must resolve to exactly one paid,
-      // same-customer, adoptable family; otherwise the identity is ambiguous.
-      const claimedAtCoordinates = await db('scheduled_services')
-        .where(bookedCoordinates)
-        .whereNotNull('scheduled_services.customer_id')
-        .select('scheduled_services.id', 'scheduled_services.customer_id');
-      if (claimedAtCoordinates.length > 0) {
-        if (!estimate.customer_id
-          || claimedAtCoordinates.some((row) => String(row.customer_id) !== String(estimate.customer_id))
-          || !(await recoverBookedAppointment())) {
-          return res.status(409).json(HOLD_EXPIRED_409);
-        }
+      const checkBooking = () => bookedAtSubmittedSlot(db, estimate, estData, bookedCoordinates, acceptAdoptableStatuses);
+      const claim = await checkBooking();
+      if (claim.claimed) {
+        if (!claim.appointment) return res.status(409).json(HOLD_EXPIRED_409);
+        bookedSlotMatch = bookedCoordinates;
+        recoveredAppointment = claim.appointment;
         existingAppointmentId = recoveredAppointment.id;
         slotId = '';
         reservationRow = null;
@@ -10851,7 +10851,9 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         if (!reservationRow || reservationRow._beyond_grace) {
           // Re-read through the strict booked identity in case staff claimed
           // the row between the linked-row probe and this hold query.
-          if (!(await recoverBookedAppointment())) return res.status(409).json(HOLD_EXPIRED_409);
+          recoveredAppointment = (await checkBooking()).appointment;
+          if (!recoveredAppointment) return res.status(409).json(HOLD_EXPIRED_409);
+          bookedSlotMatch = bookedCoordinates;
           existingAppointmentId = recoveredAppointment.id;
           slotId = '';
           reservationRow = null;
@@ -12241,6 +12243,15 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       // its own (hold ids are never reused), so no inversion opens.
       let acceptPreLockedDate = null;
       let acceptPreLockedTechId = null;
+      if (bookedSlotMatch) {
+        // Public reserve and staff schedule writers take the same day lock.
+        // Prove uniqueness again before the transaction takes any row locks.
+        await acquireOccupancyLock(trx, bookedSlotMatch['scheduled_services.scheduled_date']);
+        const { appointment } = await bookedAtSubmittedSlot(trx, estimate, estData, bookedSlotMatch, acceptAdoptableStatuses);
+        if (!appointment || String(appointment.id) !== String(existingAppointmentRow?.id)) {
+          throw Object.assign(new Error(HOLD_EXPIRED_409.error), { status: 409, code: 'RESERVATION_EXPIRED' });
+        }
+      }
       {
         const acceptHoldRow = reservationRow
           || (existingAppointmentRow && isReservationHeldAppointment(existingAppointmentRow)
@@ -22880,10 +22891,9 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   // A booking bound to this estimate (committed reservation, linked existing
   // appointment, or the converter's auto-scheduled first visit) — enough to
   // know the customer does NOT need the one-time booking link again.
-  const committedAppointment = await excludeAssessmentBookings(db('scheduled_services')
+  const committedAppointment = estimate.customer_id && await excludeAssessmentBookings(db('scheduled_services')
     .leftJoin('services', 'services.id', 'scheduled_services.service_id')
-    .where({ 'scheduled_services.source_estimate_id': estimate.id })
-    .whereNotNull('scheduled_services.customer_id')
+    .where({ 'scheduled_services.source_estimate_id': estimate.id, 'scheduled_services.customer_id': estimate.customer_id })
     .whereNotIn('scheduled_services.status', RETAINED_HISTORY_STATUSES)
     .andWhere((builder) => {
       builder.whereNull('scheduled_services.is_callback')
