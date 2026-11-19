@@ -395,20 +395,18 @@ function settledSilentSql(checkedAt) {
 // judged call: a staff callback can come between the call and its bell
 // (pre-push audit r9).
 async function recordIsSilent(row, key, at, checkedAt) {
-  // One of our own lines, a staff forward or a staff or tech phone is never a
-  // robocaller: the text-back's own test (pre-push audit r11). The staff list
-  // can read the database, so it has the same time limit as the reads below:
-  // a slow read throws, and the push goes.
-  const phone = `+${key}`;
-  if (require('../config/twilio-numbers').isInternalNumber(phone)) return false;
-  let staffTimer;
-  const staffPhone = await Promise.race([
-    require('./staff-sender-phones').isStaffTechSender(phone),
-    new Promise((resolve, reject) => {
-      staffTimer = setTimeout(() => reject(new Error('staff phone check timed out')), EXCHANGE_TIMEOUT_MS);
-    }),
-  ]).finally(() => clearTimeout(staffTimer));
-  if (staffPhone) return false;
+  // One of our own lines, a staff forward (pre-push audit r11) or a phone on
+  // any staff row (technician or admin, any status) is never a robocaller.
+  // The staff table is read here, not through the cached staff-sender list:
+  // that list answers "not staff" when its gate is off or its read failed
+  // (pre-push audit r12). The read has the same time limit as the reads
+  // below; a failed or slow read throws, and the push goes.
+  if (require('../config/twilio-numbers').isInternalNumber(`+${key}`)) return false;
+  const staff = await db('technicians')
+    .whereRaw(`${phoneKeySql('technicians.phone')} = ?`, [key])
+    .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
+    .first('id');
+  if (staff) return false;
   const since = new Date(at.getTime() - REPEAT_DAYS * 86400 * 1000);
   const judged = await db('call_log').where('id', row.id).whereRaw(...silentCallSql())
     .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true }).first('id');

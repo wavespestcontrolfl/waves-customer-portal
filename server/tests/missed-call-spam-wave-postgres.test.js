@@ -27,7 +27,6 @@ jest.mock('../config/twilio-numbers', () => {
     gbpTracking: { parrish: { number: '+19413840224', label: 'GBP — Parrish' }, venice: { number: '+19412590111', label: 'GBP — Venice' } },
   };
 });
-jest.mock('../services/staff-sender-phones', () => ({ isStaffTechSender: jest.fn(async () => false) }));
 jest.mock('../services/notification-triggers', () => ({
   // Like the real trigger, reports the bell result through onBell before the push.
   triggerNotification: jest.fn(async (key, payload, opts) => { opts?.onBell?.(true); return { bellWritten: true }; }),
@@ -44,7 +43,7 @@ jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('missed-call bell: robodialer wave on PostgreSQL', () => {
   let database;
   const schema = `missed_call_wave_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['call_log', 'scheduled_services', 'invoices', 'customers', 'leads', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'sms_log'];
+  const tables = ['call_log', 'scheduled_services', 'invoices', 'customers', 'leads', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'sms_log', 'technicians'];
 
   beforeAll(async () => {
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 3 } });
@@ -848,23 +847,45 @@ jest.setTimeout(30000);
       expect(await repeat(row)).toBe(stillRepeat);
     });
 
-    test('a staff or tech phone, or one of our own lines, is never a repeat (pre-push audit r11)', async () => {
+    test('one of our own lines or a staff forward is never a repeat (pre-push audit r11)', async () => {
       await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
       const row = judged();
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(true);
-      const staff = require('../services/staff-sender-phones');
       const numbers = require('../config/twilio-numbers');
-      staff.isStaffTechSender.mockResolvedValueOnce(true);
-      expect(await repeat(row)).toBe(false);
       numbers.isInternalNumber.mockReturnValueOnce(true);
       expect(await repeat(row)).toBe(false);
       expect(numbers.isInternalNumber).toHaveBeenCalledWith('+17275550611');
-      expect(staff.isStaffTechSender).toHaveBeenCalledWith('+17275550611');
-      // A staff list read that hangs has the reads' time limit: the check
-      // throws, and the bell pushes (the fail-open test below).
-      staff.isStaffTechSender.mockImplementationOnce(() => new Promise(() => {}));
-      await expect(repeat(row)).rejects.toThrow('staff phone check timed out');
+    });
+
+    // The staff table itself, with no gate and no cache: the cached
+    // staff-sender list answers "not staff" when it cannot tell (pre-push audit r12).
+    test.each([
+      ['an active technician', { role: 'technician', employment_status: 'active' }],
+      ['a former technician', { role: 'technician', employment_status: 'inactive' }],
+      ['a prospective hire', { role: 'technician', employment_status: 'prospective' }],
+      ['an admin', { role: 'admin', employment_status: 'active' }],
+    ])('the phone of %s, written another way, is never a repeat (pre-push audit r12)', async (label, staffRow) => {
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      const row = judged();
+      await database('call_log').insert(row);
+      expect(await repeat(row)).toBe(true);
+      await database('technicians').insert({ id: randomUUID(), name: 'Staff Test', phone: '727.555.0611', ...staffRow });
+      expect(await repeat(row)).toBe(false);
+    });
+
+    test('a staff read that fails throws, so the bell pushes (pre-push audit r12)', async () => {
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      const row = judged();
+      await database('call_log').insert(row);
+      await database('technicians').insert({ id: randomUUID(), name: 'Staff Test', phone: '(941) 555-0199', role: 'technician', employment_status: 'active' });
+      expect(await repeat(row)).toBe(true);
+      await database.raw('ALTER TABLE ??.?? RENAME TO ??', [schema, 'technicians', 'technicians_away']);
+      try {
+        await expect(repeat(row)).rejects.toThrow(/technicians/);
+      } finally {
+        await database.raw('ALTER TABLE ??.?? RENAME TO ??', [schema, 'technicians_away', 'technicians']);
+      }
     });
 
     test('a caller who got through later, is on a live lead or on a customer slot is a real caller', async () => {
