@@ -27,10 +27,11 @@ describe('buildIssue', () => {
   });
 
   test('recent picks are passed to the plan', () => {
-    const r = buildIssue({ sendDate: '2026-12-03', recent: { factIds: ['T03'], speciesSlugs: ['house-centipede'] } });
+    // T03 and the brown widow are what 2026-12-03 picks with no recent issues.
+    const r = buildIssue({ sendDate: '2026-12-03', recent: { factIds: ['T03'], speciesSlugs: ['brown-widow'] } });
     expect(r.ok).toBe(true);
     expect(r.diagnostics.factId).not.toBe('T03');
-    expect(r.diagnostics.speciesSlug).not.toBe('house-centipede');
+    expect(r.diagnostics.speciesSlug).not.toBe('brown-widow');
   });
 
   test('a copy problem fails the issue and names every problem; nothing is cut', () => {

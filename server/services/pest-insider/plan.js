@@ -6,30 +6,32 @@
 'use strict';
 
 const crypto = require('crypto');
-const snapshot = require('../../data/pest-identifier-species-v1.json');
+const { listEntries, isApproved } = require('../species-catalog');
 const { factsForSend, factById, sendDateET } = require('./facts');
 
 /** How many past issues count as "recent": the caller passes the last six. */
 const RECENT_WINDOW = 6;
 
-const VERDICTS = new Set(['ally', 'harmless', 'watch', 'call']);
-
-function validateSpecies(data) {
-  if (!data || !Array.isArray(data.species) || !data.species.length) throw new Error('pest-insider species: snapshot has no species');
-  if (!data.source_file || !data.source_commit) throw new Error('pest-insider species: snapshot must name its astro source file and commit');
-  const seen = new Set();
-  for (const s of data.species) {
-    const missing = ['slug', 'name', 'category', 'fact', 'verdict', 'note']
-      .find((k) => typeof s[k] !== 'string' || !s[k].trim());
-    if (missing) throw new Error(`pest-insider species: ${s && s.slug ? s.slug : 'entry'} lacks ${missing}`);
-    if (!VERDICTS.has(s.verdict) || !Array.isArray(s.looks) || !Array.isArray(s.where)) throw new Error(`pest-insider species: ${s.slug} has a malformed field`);
-    if (seen.has(s.slug)) throw new Error(`pest-insider species: duplicate slug ${s.slug}`);
-    seen.add(s.slug);
+// "What's this?" species come from the portal's species catalog: each entry
+// with a page in the website's pest identifier, while the owner's approval
+// still matches it (isApproved: the approval hash covers every authored
+// field). The issue prints the catalog's reviewed copy (copy.fact, with
+// copy.blurb as its evidence), not the website's own identifier text, which
+// states some facts more broadly ("the only spider that does this", "never
+// lives outdoors"; pre-push round 12).
+function identifierSpecies(entries) {
+  const species = entries
+    .filter((e) => e.links && e.links.site_page === `/pest-identifier/${e.slug}/` && isApproved(e))
+    .map((e) => ({ slug: e.slug, name: e.common_name, category: e.site_category, fact: e.copy && e.copy.fact, note: e.copy && e.copy.blurb }));
+  if (!species.length) throw new Error('pest-insider species: the catalog has no approved identifier species');
+  for (const s of species) {
+    const missing = ['name', 'category', 'fact', 'note'].find((k) => typeof s[k] !== 'string' || !s[k].trim());
+    if (missing) throw new Error(`pest-insider species: ${s.slug} lacks ${missing}`);
   }
-  return data.species;
+  return species;
 }
 
-const SPECIES = validateSpecies(snapshot);
+const SPECIES = identifierSpecies(listEntries());
 
 // Identifier category -> the bank services it relates to. A category absent
 // here (wildlife) relates to nothing and is only used as the "any unused" fallback.
@@ -115,4 +117,4 @@ function planIssue({ sendDate, recentFactIds = [], recentSpeciesSlugs = [], rech
   return { leadFact, idItem };
 }
 
-module.exports = { planIssue, SPECIES, RECENT_WINDOW, CATEGORY_SERVICES, SEASONAL_MAX_MONTHS };
+module.exports = { planIssue, identifierSpecies, SPECIES, RECENT_WINDOW, CATEGORY_SERVICES, SEASONAL_MAX_MONTHS };

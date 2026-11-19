@@ -1,11 +1,11 @@
-// Pest Insider fact bank + identifier snapshot: the data every issue is written from.
+// Pest Insider fact bank + identifier species: the data every issue is written from.
 const fs = require('fs');
 const path = require('path');
 const bank = require('../data/pest-insider-facts-v1.json');
-const snapshot = require('../data/pest-identifier-species-v1.json');
 const { FACTS, factsForSend, validateBank, sendDateET, LEAD_MIN, LEAD_MAX } = require('../services/pest-insider/facts');
 const { bannedReason } = require('../services/pest-insider/claim-check');
-const { SPECIES } = require('../services/pest-insider/plan');
+const { SPECIES, identifierSpecies } = require('../services/pest-insider/plan');
+const { getEntry, listEntries } = require('../services/species-catalog');
 
 const SERVICES = ['pest', 'lawn', 'tree_shrub', 'mosquito', 'termite', 'rodent'];
 
@@ -145,21 +145,22 @@ describe('factsForSend', () => {
   });
 });
 
-describe('identifier species snapshot', () => {
-  test('names its astro source file and commit', () => {
-    expect(snapshot.source_file).toBe('src/data/pestIdentifier.ts');
-    expect(snapshot.source_commit).toMatch(/^[0-9a-f]{40}$/);
+describe('identifier species (the portal species catalog)', () => {
+  test("every species is an approved catalog entry with a pest identifier page, printed in the catalog's reviewed words", () => {
+    expect(SPECIES.length).toBeGreaterThanOrEqual(60);
+    for (const s of SPECIES) {
+      const entry = getEntry(s.slug);
+      expect(entry.links.site_page).toBe(`/pest-identifier/${s.slug}/`);
+      expect(s).toEqual({ slug: entry.slug, name: entry.common_name, category: entry.site_category, fact: entry.copy.fact, note: entry.copy.blurb });
+    }
   });
 
-  test('every entry has the copied fields and a usable slug', () => {
-    expect(SPECIES.length).toBeGreaterThanOrEqual(60);
-    expect(new Set(SPECIES.map((s) => s.slug)).size).toBe(SPECIES.length);
-    for (const s of SPECIES) {
-      expect(s.slug).toMatch(/^[a-z0-9-]+$/);
-      ['name', 'category', 'fact', 'note'].forEach((k) => expect(s[k].trim()).not.toBe(''));
-      expect(['ally', 'harmless', 'watch', 'call']).toContain(s.verdict);
-      expect(Array.isArray(s.looks) && Array.isArray(s.where)).toBe(true);
-    }
+  test('an entry whose reviewed copy changed after approval, or with no identifier page, is left out', () => {
+    const entry = getEntry('wolf-spider');
+    const edited = { ...entry, copy: { ...entry.copy, fact: "It's the only spider that does this." } };
+    const noPage = { ...getEntry('ghost-ant'), links: { ...getEntry('ghost-ant').links, site_page: null } };
+    expect(identifierSpecies([entry, edited, noPage]).map((s) => s.fact)).toEqual([entry.copy.fact]);
+    expect(() => identifierSpecies(listEntries().filter((e) => !e.links.site_page))).toThrow(/no approved identifier species/);
   });
 
   test('the species facts pass the banned-word check (notes carry advice and are not restated)', () => {

@@ -24,6 +24,12 @@ describe('the sentence rules', () => {
     expect(sentenceProblem('Eggs survive up to nine months.', loose(FACT))).toMatch(/number not in the source: 9/);
     expect(sentenceProblem('A mosquito needs 7-10 days to grow up.', loose(FACT))).toBeNull();
     expect(sentenceProblem('A mosquito needs 14 days to grow up.', loose(FACT))).toMatch(/14/);
+    // past twenty too, and a compound is one number (pre-push round 12; R02's source says 12 days)
+    const roach = factById('R02');
+    expect(sentenceProblem('German cockroaches can survive thirty days without water.', factSource(roach))).toMatch(/number not in the source: 30/);
+    expect(sentenceProblem('German cockroaches can survive twenty-five days without water.', factSource(roach))).toMatch(/number not in the source: 25/);
+    expect(sentenceProblem('German cockroaches can survive twice as long without water.', factSource(roach))).toMatch(/number not in the source: 2/);
+    expect(quantityPairs('They live twenty-five days, not 7 to 10 days.')).toEqual(new Set(['25 day', '7 day', '10 day']));
   });
 
   test('fractions and percents must be in the fact too', () => {
@@ -79,7 +85,7 @@ describe('the sentence rules', () => {
     ]) expect({ text, reason: sentenceProblem(text, factSource(FACT)) }).toEqual({ text, reason: expect.any(String) });
   });
 
-  test('the shared register the send validator runs applies here, with its Formosan window', () => {
+  test('the shared register the send validator runs applies here', () => {
     expect(sentenceProblem('A technician can eliminate them for good.', factSource(FACT))).toMatch(/tripwire/);
     const formosan = factById('T02');
     expect(sentenceProblem(formosan.statement, factSource(formosan))).toBeNull();

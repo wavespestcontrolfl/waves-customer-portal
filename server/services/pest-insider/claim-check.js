@@ -3,9 +3,10 @@
  *
  * Every word an issue carries is fixed, reviewed text: the lead fact's
  * `lead` sentences and title from the fact bank, and the species entry's
- * `fact` from the identifier snapshot. Nothing is written per issue, so a
- * sentence cannot say the opposite of its source (a deterministic check
- * cannot judge free wording; codex pre-push round 3). This check runs on
+ * reviewed `copy.fact` from the portal species catalog. Nothing is written
+ * per issue, so a sentence cannot say the opposite of its source (a
+ * deterministic check cannot judge free wording; codex pre-push round 3).
+ * This check runs on
  * that copy before every render, and on the whole bank in the tests:
  *
  * - numbers (with their units), month and season words, and proper names
@@ -28,10 +29,18 @@ const { FACTS, sourceLabel, attributedQuotes, LEAD_MIN: MIN_LEAD_SENTENCES, LEAD
 
 const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 const MONTH_ABBR = { jan: 'january', feb: 'february', mar: 'march', apr: 'april', jun: 'june', jul: 'july', aug: 'august', sep: 'september', sept: 'september', oct: 'october', nov: 'november', dec: 'december' };
+const TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
 const NUMBER_WORDS = {
   one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
-  eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20,
+  eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19,
+  ...TENS, twice: 2, thrice: 3,
 };
+// Every spelled-out number counts, so a sentence that states one must copy
+// its source (pre-push round 12: "thirty days" passed unread against a
+// source that says 12 days). A compound ("twenty-five", "thirty five") is
+// one number, never a range, so it becomes digits before any number is read.
+const COMPOUND_NUMBER = new RegExp(`\\b(${Object.keys(TENS).join('|')})[-\\s]+(one|two|three|four|five|six|seven|eight|nine)\\b`, 'g');
+const compoundDigits = (lower) => lower.replace(COMPOUND_NUMBER, (m, tens, unit) => String(TENS[tens] + NUMBER_WORDS[unit]));
 const FRACTION_DEN = { half: 2, halves: 2, third: 3, thirds: 3, fourth: 4, fourths: 4, quarter: 4, quarters: 4, fifth: 5, fifths: 5 };
 const SCALE_WORDS = /\b(hundred|thousand|million|billion|dozen)s?\b/g;
 
@@ -82,7 +91,7 @@ function bannedReason(text) {
 
 // ── numbers, months, seasons ────────────────────────────────────────────
 function numberTokens(text) {
-  let t = norm(text).toLowerCase();
+  let t = compoundDigits(norm(text).toLowerCase());
   const tokens = new Set();
   t = t.replace(/\b(one|two|three|four|a)[-\s]+(half|halves|thirds?|fourths?|quarters?|fifths?)\b/g, (m, n, d) => {
     tokens.add(`${n === 'a' ? 1 : NUMBER_WORDS[n]}/${FRACTION_DEN[d]}`);
@@ -112,7 +121,7 @@ const unitOf = (word) => UNITS[word] || UNITS[word.replace(/(?:es|s)$/, '')] || 
 const RANGE_WORDS = new Set(['to', 'through', 'thru', 'and', 'or', '-']);
 
 function quantityTokens(text) {
-  return norm(text).toLowerCase()
+  return compoundDigits(norm(text).toLowerCase())
     .replace(/(\d)\s*%/g, '$1 percent ')
     .replace(/(\d)\s*[-\u2013\u2014]\s*(?=\d)/g, '$1 - ')
     .replace(/(\d)-(?=[a-z])/g, '$1 ')
@@ -212,7 +221,7 @@ const LEADING_CONNECTOR = /^(?:and|but|so|also|however|still|plus|in fact|did yo
 const ATTRIBUTION_VERBS = '(?:says|said|notes|noted|reports|reported|explains|found|finds|writes|adds|points out|tells us|warns)';
 
 function canonical(text) {
-  return norm(text).toLowerCase()
+  return compoundDigits(norm(text).toLowerCase())
     .replace(/[\u2013\u2014]/g, '-')
     .replace(NUMBER_WORD_RE, (w) => String(NUMBER_WORDS[w]))
     .replace(/(\d),(\d{3})/g, '$1$2')
