@@ -225,7 +225,7 @@ describe('summaryCopySignature — PDF cache-key component', () => {
     const keyed = summaryCopySignature({ technician_notes: AI_REPORT });
     try {
       process.env.GATE_REPORT_WRITER_RULES = 'true';
-      expect(summaryCopySignature(record({ bodyFormat: 'four_section' }))).toBe(keyed);
+      expect(summaryCopySignature(record({ bodyFormat: 'four_section' }))).toBe(`${keyed}-fson`);
       process.env.GATE_REPORT_WRITER_RULES = 'false';
       // The summary drops with the card's body; the card suffix marks the switch.
       expect(summaryCopySignature(record({ bodyFormat: 'four_section' }))).toBe('-fsoff');
@@ -240,7 +240,8 @@ describe('summaryCopySignature — PDF cache-key component', () => {
 
   // The PDF prints the cards too: a flip of the switch changes the key of a
   // record whose printed card has a four-section body, whatever the summary
-  // does (pre-push P1 on 5a14ba712b).
+  // does (pre-push P1 on 5a14ba712b), and neither state reuses a key stored
+  // before the suffix existed (pre-push P1 on e73ee6952d).
   test('a flip of the switch changes the key of a printed four-section card, also when the summary is rejected', () => {
     const gate = process.env.GATE_REPORT_WRITER_RULES;
     const card = { headline: 'Service completed.', body: 'x', bodySource: 'technician_report', bodyFormat: 'four_section' };
@@ -256,9 +257,13 @@ describe('summaryCopySignature — PDF cache-key component', () => {
       service_data: JSON.stringify({ companionReportSnapshots: [{ type: 'rodent_trapping', delivery, todaysResult: card }] }),
     });
     try {
+      // A key stored before the suffix existed: the empty suffix of a rejected
+      // summary. Neither state matches it.
+      const legacy = '';
       process.env.GATE_REPORT_WRITER_RULES = 'true';
-      expect(summaryCopySignature(rejected)).toBe('');
-      expect(summaryCopySignature(companionCard('auto_send'))).toBe('');
+      expect(summaryCopySignature(rejected)).toBe('-fson');
+      expect(summaryCopySignature(rejected)).not.toBe(legacy);
+      expect(summaryCopySignature(companionCard('auto_send'))).toBe('-fson');
       process.env.GATE_REPORT_WRITER_RULES = 'false';
       expect(summaryCopySignature(rejected)).toBe('-fsoff');
       expect(summaryCopySignature(companionCard('auto_send'))).toBe('-fsoff');

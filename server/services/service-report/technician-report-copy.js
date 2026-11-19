@@ -352,9 +352,12 @@ function technicianReportCustomerCopy(notes) {
 // prints (the primary card and auto_send companions): while
 // GATE_REPORT_WRITER_RULES is off, such a card with a four-section body prints
 // without it (activity-indicators withoutDarkFourSectionBody), whatever the
-// summary does. '-fsoff' then, so a flip changes the key both ways and a
-// cached PDF never keeps a body the switch dropped. Gate on: no suffix, so
-// cached keys stay.
+// summary does. Such a record's key ends '-fson' or '-fsoff', so a flip
+// changes the key both ways, and neither state matches a key stored before
+// this suffix existed (that render's state is unknown). Every other record
+// keeps its key. Env only, read when the key is computed, like the V2 report
+// gates' components: a render in a rolling restart's overlap can land under
+// the other state's key until the record's next key change.
 function darkFourSectionCardSuffix(serviceData = {}) {
   const cards = [
     serviceData.typedReportSnapshot,
@@ -364,7 +367,8 @@ function darkFourSectionCardSuffix(serviceData = {}) {
   ];
   const printsFourSectionCard = cards.some((snap) => snap && typeof snap === 'object' && snap.type
     && snap.todaysResult?.bodyFormat === 'four_section');
-  return printsFourSectionCard && !reportWriterRulesLive() ? '-fsoff' : '';
+  if (!printsFourSectionCard) return '';
+  return reportWriterRulesLive() ? '-fson' : '-fsoff';
 }
 
 function summaryCopySignature(service = {}) {

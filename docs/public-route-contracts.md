@@ -3013,10 +3013,10 @@ is off, a frozen Today's Result card whose body is four-section (`bodyFormat:
 `activity-indicators.js`). The summary rule (`technicianReportDrivesSummary`)
 reads the cards through the same transform for every customer render: this
 payload, the PDF key (`summaryCopySignature`) and the visit notes on the other
-surfaces (`customerSafeVisitNotes`). While the gate is off, the PDF key of a
-record whose printed card (the primary card or an `auto_send` companion) has a
-four-section body also ends in `-fsoff`, so a flip either way re-renders its
-cached PDF.
+surfaces (`customerSafeVisitNotes`). The PDF key of a record whose printed
+card (the primary card or an `auto_send` companion) has a four-section body
+also ends in `-fson` or `-fsoff`, by the gate, so a flip either way re-renders
+its cached PDF.
 
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
