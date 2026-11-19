@@ -261,7 +261,11 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
 
     // The route check refuses this save (a 4-hour visit runs past the next stop). A refused check still numbers the
     // visit, by arrival time, so it never lists last on the phone with no stop number.
-    test('a save past its warning is numbered by arrival time', async () => {
+    test.each([false, true])('a save past its warning numbers the whole day, including an old booking stamp (%s)', async (stamped) => {
+      if (stamped) {
+        await mockConn('scheduled_services').where({ id: SOUTH })
+          .update({ reservation_expires_at: mockConn.raw("NOW() - INTERVAL '1 day'") });
+      }
       await mockConn('scheduled_services').where({ id: TARGET })
         .update({ scheduled_date: DAY, estimated_duration_minutes: 240, window_end: '13:00' });
       await expect(placeMovedVisit(mockConn, { serviceId: TARGET })).resolves.toEqual([NORTH, TARGET, SOUTH]);

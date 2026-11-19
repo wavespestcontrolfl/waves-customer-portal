@@ -553,7 +553,7 @@ function cardChanged() {
 // starts from (estimate-converter.js reservation lookup — any status).
 function estimateLinkedVisitsQuery(conn, estimateId) {
   return conn('scheduled_services').where({ source_estimate_id: estimateId })
-    .whereNotNull('customer_id').whereNull('reservation_expires_at');
+    .whereNotNull('customer_id');
 }
 
 // The customer billing fields the accept reads and rewrites; the converter

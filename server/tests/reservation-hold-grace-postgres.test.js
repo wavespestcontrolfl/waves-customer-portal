@@ -150,11 +150,12 @@ postgres('hold grace + extend (real Postgres)', () => {
   test('a booked visit with an old hold stamp replays for its customer and keeps its owner', async () => {
     await withHold({ committed: true, expiresInSeconds: -3600 }, async ({ trx, holdId, customerId }) => {
       const before = await holdRow(trx, holdId);
-      await expect(slotReservation.commitReservation({ trx, scheduledServiceId: holdId, customerId }))
-        .resolves.toMatchObject({ id: holdId, customer_id: customerId });
       await expect(slotReservation.commitReservation({ trx, scheduledServiceId: holdId, customerId: randomUUID() }))
         .rejects.toMatchObject({ code: 'RESERVATION_NOT_FOUND' });
       expect(await holdRow(trx, holdId)).toEqual(before);
+      const booked = { id: holdId, customer_id: customerId, reservation_expires_at: null };
+      await expect(slotReservation.commitReservation({ trx, scheduledServiceId: holdId, customerId })).resolves.toMatchObject(booked);
+      expect(await holdRow(trx, holdId)).toEqual(booked);
     });
   });
 

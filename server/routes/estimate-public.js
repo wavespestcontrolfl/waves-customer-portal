@@ -13729,7 +13729,6 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         const reservedStartRow = await trx('scheduled_services')
           .where({ source_estimate_id: estimate.id })
           .whereNotNull('customer_id')
-          .whereNull('reservation_expires_at')
           .orderBy('scheduled_date', 'asc')
           .first('scheduled_date');
         const overlapTermStart = dateOnly(reservedStartRow?.scheduled_date) || etDateString();

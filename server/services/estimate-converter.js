@@ -6612,7 +6612,6 @@ const EstimateConverter = {
     const existingFromReservation = await database('scheduled_services')
       .where({ source_estimate_id: estimateId })
       .whereNotNull('customer_id')
-      .whereNull('reservation_expires_at')
       .count('id as count')
       .first();
     const linkedVisitCount = Number(existingFromReservation?.count || 0);
@@ -6634,7 +6633,6 @@ const EstimateConverter = {
       ? await withoutAssessmentVisits(await database('scheduled_services')
         .where({ source_estimate_id: estimateId })
         .whereNotNull('customer_id')
-        .whereNull('reservation_expires_at')
         .orderBy('scheduled_date', 'asc'), database)
       : [];
     const reservationRowsExist = reservedRows.length > 0;

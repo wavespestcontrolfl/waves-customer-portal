@@ -344,7 +344,7 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
       const assessmentId = await assessmentVisit(mockTransaction, customerId, { source_estimate_id: estimateId });
       const chosenId = await visit(mockTransaction, {
         customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
-        extra: { source_estimate_id: estimateId, estimated_price: 55 },
+        extra: { source_estimate_id: estimateId, estimated_price: 55, reservation_expires_at: mockTransaction.raw("NOW() - INTERVAL '1 day'") },
       });
       await mockTransaction('estimates').where({ id: estimateId }).update({ status: 'accepted', accepted_at: new Date() });
 

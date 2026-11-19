@@ -713,7 +713,7 @@ async function resolveReservationServiceProfile(client, row, opts = {}) {
 
 async function prepareReservationCommit(scheduledServiceId, options = {}) {
   const row = await db('scheduled_services').where({ id: scheduledServiceId }).first();
-  if (!row) return null;
+  if (!row || row.customer_id != null) return null;
   const held = require('./combined-visit-capacity').capacityFromReservation(row);
   if (held?.version === 1 || (!capacityEnabled() && row.reservation_policy_version !== 2)) return null;
   const profile = await resolveReservationServiceProfile(db, row, { ...options, preserveCombinedCapacity: !!held });
@@ -2160,8 +2160,13 @@ async function commitReservation({
       err.code = 'RESERVATION_NOT_FOUND';
       throw err;
     }
-    // A retry returns its customer's booked visit even before the old hold stamp is cleared.
-    if (row.customer_id != null || !row.reservation_expires_at) return row;
+    if (!row.reservation_expires_at) return row;
+    if (row.customer_id != null) {
+      // Repair the original booking under its row lock so downstream consumers see a committed visit.
+      const [booked] = await client('scheduled_services').where({ id: row.id })
+        .update({ reservation_expires_at: null, updated_at: client.fn.now() }).returning('*');
+      return booked;
+    }
     // A make-room hold refreshed or re-assigned since the pre-read: same recoverable code as the capacity technician check.
     requireMakeRoomUnchanged(row, preRow, preparedCapacity);
     if (row._expired) {
