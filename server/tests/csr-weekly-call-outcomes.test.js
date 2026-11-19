@@ -102,14 +102,14 @@ describe('loadWeeklyCallOutcomes', () => {
   test('a quiet week reads zero, not NaN', async () => {
     const out = await loadWeeklyCallOutcomes({ now: new Date('2026-11-20T13:00:00Z'), conn: fakeConn({ total: 0, known: 0, booked: 0, estimates: 0 }) });
     expect(out).toMatchObject({ newCustomerCallers: 0, callersWithOutcome: 0, bookedOnCall: 0, bookedPct: null, estimateRequestedOrPromised: 0 });
-    expect(formatWeeklyCallOutcomes(out)).toBe('New-customer callers: 0. Booked on the call: 0. Estimate requested or promised, not booked: 0.');
+    expect(formatWeeklyCallOutcomes(out)).toBe('New-customer callers: 0. Booked on the call: 0. Estimate requested or promised, no booking recorded: 0.');
   });
 
   test('callers with no recorded outcome give no booking rate, not 0%, and still show the quotes their calls asked for', async () => {
     const out = await loadWeeklyCallOutcomes({ now: new Date('2026-11-20T13:00:00Z'), conn: fakeConn({ total: 12, known: 0, booked: 0, estimates: 3 }) });
     expect(out.bookedPct).toBeNull();
     expect(out.estimateRequestedOrPromised).toBe(3);
-    expect(formatWeeklyCallOutcomes(out)).toBe('New-customer callers: 12. No call outcomes recorded yet, so no booking rate. Estimate requested or promised, not booked: 3.');
+    expect(formatWeeklyCallOutcomes(out)).toBe('New-customer callers: 12. No call outcomes recorded yet, so no booking rate. Estimate requested or promised, no booking recorded: 3.');
   });
 
   test('a caller with no disposition on any call (booked NULL, not false) still counts toward the estimate figure', async () => {
@@ -124,6 +124,6 @@ describe('loadWeeklyCallOutcomes', () => {
 describe('formatWeeklyCallOutcomes', () => {
   test('reads as the one-line summary the Friday tip and the overview show', () => {
     expect(formatWeeklyCallOutcomes({ newCustomerCallers: 40, callersWithOutcome: 30, bookedOnCall: 6, bookedPct: 20, estimateRequestedOrPromised: 20 }))
-      .toBe('New-customer callers: 40. Outcome known for 30. Booked on the call: 6 of 30 (20%). Estimate requested or promised, not booked: 20.');
+      .toBe('New-customer callers: 40. Outcome known for 30. Booked on the call: 6 of 30 (20%). Estimate requested or promised, no booking recorded: 20.');
   });
 });

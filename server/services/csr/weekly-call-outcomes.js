@@ -111,13 +111,13 @@ async function loadWeeklyCallOutcomes({ now = new Date(), conn = db, completedDa
   };
 }
 
-// "New-customer callers: 40. Outcome known for 30. Booked on the call: 8 of 30 (27%). Estimate requested or promised, not booked: 20."
+// "New-customer callers: 40. Outcome known for 30. Booked on the call: 8 of 30 (27%). Estimate requested or promised, no booking recorded: 20."
 function formatWeeklyCallOutcomes(o) {
   const head = `New-customer callers: ${o.newCustomerCallers}.`;
-  if (o.newCustomerCallers === 0) return `${head} Booked on the call: 0. Estimate requested or promised, not booked: 0.`;
+  if (o.newCustomerCallers === 0) return `${head} Booked on the call: 0. Estimate requested or promised, no booking recorded: 0.`;
   // The extraction's quote flags need no recorded outcome, so the estimate count shows even with no booking rate.
-  if (!o.callersWithOutcome) return `${head} No call outcomes recorded yet, so no booking rate. Estimate requested or promised, not booked: ${o.estimateRequestedOrPromised}.`;
-  return `${head} Outcome known for ${o.callersWithOutcome}. Booked on the call: ${o.bookedOnCall} of ${o.callersWithOutcome} (${o.bookedPct}%). Estimate requested or promised, not booked: ${o.estimateRequestedOrPromised}.`;
+  if (!o.callersWithOutcome) return `${head} No call outcomes recorded yet, so no booking rate. Estimate requested or promised, no booking recorded: ${o.estimateRequestedOrPromised}.`;
+  return `${head} Outcome known for ${o.callersWithOutcome}. Booked on the call: ${o.bookedOnCall} of ${o.callersWithOutcome} (${o.bookedPct}%). Estimate requested or promised, no booking recorded: ${o.estimateRequestedOrPromised}.`;
 }
 
 module.exports = {
