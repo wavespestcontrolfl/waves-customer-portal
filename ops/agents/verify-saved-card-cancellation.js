@@ -1,5 +1,6 @@
 // MUTATES with --execute. The default verifies one historical cancellation.
 const fs = require('node:fs');
+const tls = require('node:tls');
 const { parseArgs } = require('node:util');
 const { parse: parsePgUrl } = require('pg-connection-string');
 const { verifySavedCardCancellation } = require('../../server/services/invoice-payment-authentication');
@@ -22,14 +23,22 @@ function databaseConfig(connectionString) {
   const port = Number(parsed.port || process.env.PGPORT || 5432);
   const database = parsed.database || process.env.PGDATABASE || user;
   const caFile = process.env.PG_CA_FILE || process.env.PGSSLROOTCERT || parsed.sslrootcert;
+  const certificateHost = String(process.env.PGSSL_SERVER_NAME || '').trim() || null;
   const local = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.startsWith('/');
-  const ssl = local ? parsed.ssl : {
+  // pg-connection-string leaves the literal URL value ssl=false as a string;
+  // normalize it before handing the local config back to node-postgres.
+  const localSsl = parsed.ssl === 'false' ? false : parsed.ssl === 'true' ? true : parsed.ssl;
+  const ssl = local ? localSsl : {
     // Do not carry sslmode/no-verify/ssl=false from the URL into pg. A remote
     // connection always verifies the certificate and hostname; with no ca,
     // Node uses its public trust store.
     ...(typeof parsed.ssl === 'object' ? parsed.ssl : {}),
     rejectUnauthorized: true,
     ...(caFile ? { ca: fs.readFileSync(caFile, 'utf8') } : {}),
+    ...(certificateHost ? {
+      servername: certificateHost,
+      checkServerIdentity: (_host, certificate) => tls.checkServerIdentity(certificateHost, certificate),
+    } : {}),
   };
   return {
     client: 'pg',
@@ -39,6 +48,8 @@ function databaseConfig(connectionString) {
       user,
       password: parsed.password || process.env.PGPASSWORD,
       database,
+      options: parsed.options || process.env.PGOPTIONS,
+      application_name: parsed.application_name || process.env.PGAPPNAME,
       ssl,
     },
     pool: { min: 0, max: 1 },
