@@ -404,29 +404,26 @@ async function traceOnReportForVisit(svc, profile, knex = db) {
   return visitTraceOnReport(svc, profile, lane, knex);
 }
 
-/** Non-retracted ledger rows on one service record (quantity, rate, dilution, date); [] on any failure. */
+/** Non-retracted ledger rows on one service record (quantity, dilution, date); [] on any failure. */
 async function ledgerFactsFor(recordId, knex) {
   try {
     const rows = await knex('property_application_history')
       .where({ service_record_id: recordId })
       .whereNull('retracted_at')
-      .select(['product_id', 'service_product_id', 'quantity_applied', 'quantity_unit', 'application_rate', 'rate_unit', 'dilution_rate', 'application_date']);
+      .select(['product_id', 'service_product_id', 'quantity_applied', 'quantity_unit', 'dilution_rate', 'application_date']);
     return Array.isArray(rows) ? rows : [];
   } catch {
     return [];
   }
 }
 
-/** One ledger row's facts the Taurus warning reads (quantity and rate with their units, dilution, application date). */
+/** One ledger row's facts the Taurus warning reads (quantity with its unit, dilution, application date). */
 function ledgerRowFacts(row) {
   const dilution = String(row.dilution_rate ?? '').trim();
   const appliedOn = dateOnlyString(row.application_date);
   return {
     ...(Number(row.quantity_applied) > 0 && row.quantity_unit
       ? { quantity: Number(row.quantity_applied), quantity_unit: row.quantity_unit } : {}),
-    // The stored rate: a save that sends no rate row (a recorded mL rate is never shown) keeps it.
-    ...(Number(row.application_rate) > 0 && row.rate_unit
-      ? { application_rate: Number(row.application_rate), rate_unit: row.rate_unit } : {}),
     ...(dilution ? { dilution_rate: dilution } : {}),
     ...(appliedOn ? { application_date: appliedOn } : {}),
   };

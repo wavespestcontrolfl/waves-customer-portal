@@ -108,9 +108,10 @@ describe('applicationConcentration', () => {
     expect(applicationConcentration(row({ quantity_applied: '0.013', quantity_unit: 'gal' }))).toBe('low');
     expect(applicationConcentration(row({ quantity_applied: '0.014', quantity_unit: 'gal' }))).toBe('high');
     expect(applicationConcentration(row({ quantity_applied: '1.602', quantity_unit: 'fl_oz' }))).toBe('high');
-    // A rate keeps 4 decimals (application_rate decimal(8,4)): 0.0125 gal stays the house mix, 0.013 gal is above it.
+    // A rate is saved to 3 decimals too (service_products.application_rate): 0.0125 gal is saved as 0.013, the house mix.
     expect(applicationConcentration(row({ application_rate: '0.0125', rate_unit: 'gal' }))).toBe('low');
-    expect(applicationConcentration(row({ application_rate: '0.0130', rate_unit: 'gal' }))).toBe('high');
+    expect(applicationConcentration(row({ application_rate: '0.0130', rate_unit: 'gal' }))).toBe('low');
+    expect(applicationConcentration(row({ application_rate: '0.0140', rate_unit: 'gal' }))).toBe('high');
     // A per-gallon rate in mL: 23.7 mL/gal = 0.8 fl oz/gal.
     expect(applicationConcentration(row({ application_rate: '23.7', rate_unit: 'ml/gal' }))).toBe('high');
     expect(applicationConcentration(row({ application_rate: '11.8', rate_unit: 'ml/gal' }))).toBe('low');

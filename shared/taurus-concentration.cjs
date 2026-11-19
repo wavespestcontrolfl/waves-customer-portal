@@ -27,10 +27,10 @@ const HIGH_DILUTION_PERCENT = 0.06;
 const TSP_PER_FL_OZ = 6;
 // Float slack for converted amounts (9.6 tsp is 1.5999999999999999 fl oz).
 const FL_OZ_EPSILON = 1e-6;
-// The ledger keeps a value to a fixed number of decimals in its own unit: quantity_applied decimal(8,3) (0.0125 gal is
-// saved as 0.013 gal, 1.664 fl oz), application_rate decimal(8,4). A value within half its last stored decimal of
-// the house mix is the house mix, at entry and once saved.
-const STORED_DECIMALS = { amount: 3, rate: 4 };
+// A value is saved to 3 decimals in its own unit: quantity_applied decimal(8,3) (0.0125 gal is saved as 0.013 gal,
+// 1.664 fl oz), and a rate through service_products.application_rate decimal(8,3), which the recap copies to the
+// ledger. A value within half its last stored decimal of the house mix is the house mix, at entry and once saved.
+const STORED_DECIMALS = { amount: 3, rate: 3 };
 
 // fl oz in one unit of a liquid amount of product: the volume units the completion API accepts
 // (shared/rate-units.json: oz, fl_oz, ml, gal), at the factors of server/services/inventory-units.js, and the

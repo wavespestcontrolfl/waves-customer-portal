@@ -259,18 +259,6 @@ test('a reopened recap carries the ledger dilution and date, also on a row with 
   expect(cross.ledger_rows).toEqual([{ quantity: 4, quantity_unit: 'fl_oz', application_date: '2026-10-14' }]);
 });
 
-test('a ledger row carries its stored rate (a recorded mL rate is never shown, and a save keeps it)', async () => {
-  const { knex } = contextDb({
-    record: { id: 'rec-1', technician_notes: null, status: 'completed' },
-    recordedProducts: [{ product_name: 'Taurus SC', application_rate: '23.7000', rate_unit: 'ml/gal', product_id: 'p-taurus' }],
-    ledgerRows: [{ product_id: 'p-taurus', application_rate: '23.7000', rate_unit: 'ml/gal', application_date: '2026-11-21' }],
-  });
-
-  const result = await buildRecapContext(visit.id, knex);
-
-  expect(result.existingRecord.products[0].ledger_rows).toEqual([{ application_rate: 23.7, rate_unit: 'ml/gal', application_date: '2026-11-21' }]);
-});
-
 test('a failed ledger read leaves the recorded products without a quantity and the context ok', async () => {
   const { knex } = contextDb({
     record: { id: 'rec-1', technician_notes: null, status: 'completed' },

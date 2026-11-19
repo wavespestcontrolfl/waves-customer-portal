@@ -90,18 +90,20 @@ describe('ServiceRecapModal Taurus yearly limit', () => {
     }
   });
 
-  test('a recorded mL rate (never shown) is read from the ledger row: 23.7 mL/gal after three 0.03% visits warns', async () => {
+  test("a recorded mL rate (never shown) is the rate a save restores: 23.7 mL/gal after three 0.03% visits warns", async () => {
     const threeLow = { high: 0, low: 3, count: 3, eligible: true, eligibleHigh: false, year: 2026 };
-    const record = {
-      id: 'rec-1',
-      products: [{
-        product_id: 1, product_name: 'Taurus SC', application_rate: '23.7', rate_unit: 'ml/gal',
-        ledger_rows: [{ application_rate: 23.7, rate_unit: 'ml/gal', application_date: '2026-11-21' }],
-      }],
-    };
-    render(<ServiceRecapModal service={{ id: 'svc-1', serviceType: 'General Pest Control (Quarterly)' }} request={makeRequest(threeLow, record)} onClose={() => {}} />);
-    await screen.findByRole('button', { name: 'Taurus SC', pressed: true });
-    expect(screen.getByText("Over the label's yearly Taurus limit at this home.")).toBeTruthy();
+    const warning = "Over the label's yearly Taurus limit at this home.";
+    // With a ledger row that records no rate, and with no ledger row at all.
+    for (const ledgerRows of [[{ application_date: '2026-11-21' }], undefined]) {
+      const record = {
+        id: 'rec-1',
+        products: [{ product_id: 1, product_name: 'Taurus SC', application_rate: '23.7', rate_unit: 'ml/gal', ...(ledgerRows ? { ledger_rows: ledgerRows } : {}) }],
+      };
+      render(<ServiceRecapModal service={{ id: 'svc-1', serviceType: 'General Pest Control (Quarterly)' }} request={makeRequest(threeLow, record)} onClose={() => {}} />);
+      await screen.findByRole('button', { name: 'Taurus SC', pressed: true });
+      expect(screen.getByText(warning)).toBeTruthy();
+      cleanup();
+    }
   });
 
   test('room under the label: Taurus stays on the mix and nothing is said', async () => {

@@ -75,19 +75,22 @@ function fmtTime(ts) {
 }
 
 // The ledger's rows on a recorded product (the recap's own rows keep no amounts), as the Taurus yearly-limit
-// warning reads a row: quantity with its unit, stored rate, dilution, application date.
+// warning reads a row: quantity with its unit, dilution, application date. A recorded mL rate is never shown, and a
+// save with no rate row restores the product's recorded rate onto its ledger rows, so each row reads that rate.
 function recordedLedgerRows(rp) {
-  return (Array.isArray(rp.ledger_rows) ? rp.ledger_rows : []).map((row) => ({
+  const rows = (Array.isArray(rp.ledger_rows) ? rp.ledger_rows : []).map((row) => ({
     ...(Number(row?.quantity) > 0 && row.quantity_unit ? { totalAmount: Number(row.quantity), amountUnit: row.quantity_unit } : {}),
-    ...(Number(row?.application_rate) > 0 && row.rate_unit ? { storedRate: Number(row.application_rate), storedRateUnit: row.rate_unit } : {}),
     ...(row?.dilution_rate ? { dilution: row.dilution_rate } : {}),
     ...(row?.application_date ? { applicationDate: row.application_date } : {}),
   }));
+  if (!(Number(rp.application_rate) > 0 && isMlUnit(rp.rate_unit))) return rows;
+  const hidden = { storedRate: Number(rp.application_rate), storedRateUnit: rp.rate_unit };
+  return rows.length ? rows.map((row) => ({ ...row, ...hidden })) : [hidden];
 }
 
 // The rows the Taurus warning reads for one selected product: on a reopened recap one per ledger row, so any 0.06%
 // row warns (the yearly count reads a record at its strongest); else the product at its rate. With no rate row (a
-// recorded mL rate is never shown) the save keeps each row's stored rate, so that rate is read.
+// recorded mL rate is never shown) the row reads the recorded rate the save restores.
 function taurusWarningRows(product, rateRow, ledgerRows) {
   const rated = { ...product, rate: rateRow?.rate, rateUnit: rateRow?.unit };
   if (!ledgerRows?.length) return [rated];
