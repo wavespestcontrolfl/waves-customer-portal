@@ -44,7 +44,7 @@ const {
   DEDUPE_KEY,
   _private: {
     buildPlaces, findApartPairs, holdFor, replanHoldFor, loadNightLog, loadReplanFixed, loadStops, physicalLegs,
-    shortDriveSummary, composeWeeklyCheck, ringOnNewPair, writeAlert, sentRecently,
+    shortDriveSummary, composeWeeklyCheck, ringOnNewPair, writeAlert, sentRecently, loadWeek,
   },
 } = require('../services/near-stops-weekly-check');
 
@@ -73,7 +73,7 @@ const TECH = { id: 'tech-1', name: 'Tech One' };
 // ------------------------------------------------------------------ part 1
 
 let seq = 0;
-function stop({ customer, first = 'Avery', last = 'Sample', city = 'Lakewood Ranch', at, date, start = '09:00', plan = false, status = 'pending', property = null, street = null, unit = null }) {
+function stop({ customer, first = 'Avery', last = 'Sample', city = 'Lakewood Ranch', at, date, start = '09:00', plan = false, status = 'pending', property = null, street = null, unit = null, zip = null }) {
   seq += 1;
   return {
     id: `svc-${seq}`,
@@ -91,7 +91,7 @@ function stop({ customer, first = 'Avery', last = 'Sample', city = 'Lakewood Ran
     lng: at.lng,
     service_address_line1: street,
     service_address_line2: unit,
-    service_address_zip: null,
+    service_address_zip: zip,
     service_address_city: city,
     first_name: first,
     last_name: last,
@@ -452,6 +452,13 @@ describe('part 1: next-door stops booked apart', () => {
     expect([pairs[0].first.windowStart, pairs[0].second.windowStart]).toEqual(['08:00', '12:00']);
   });
 
+  test('an address missing its zip never bridges two homes whose zips differ', () => {
+    const at = (date, zip) => stop({ customer: 'c-a', at: HOME_A, date, street: '100 Sample Way', zip, plan: true });
+    const rows = [at('2027-03-01', '34202'), at('2027-03-08', null), at('2027-03-15', '34211')];
+    // The two complete addresses are two homes; the partial one fits both, so it pairs with neither.
+    expect(findApartPairs(rows).map((p) => [p.first.id, p.second.id])).toEqual([[rows[0].id, rows[2].id]]);
+  });
+
   test('a visit with no time yet on the same day is not judged', () => {
     const rows = [
       stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '09:00' }),
@@ -482,6 +489,19 @@ describe('what holds each visit, in plain words', () => {
   test("the night run's own reason for the visit", () => {
     const log = new Map([['svc-9', { reason_code: 'REMINDER_SENT_FROZEN', action: 'no_change' }]]);
     expect(holdFor(planVisit, log)).toBe('customer already told the time');
+  });
+
+  test("the night run's reason is for the day it judged: a visit moved since then says so", () => {
+    const at = (date) => ({ id: 'svc-9', nightKind: 'cadence', date });
+    const moved = new Map([['svc-9', { action: 'changed', reason_code: 'CHANGE_APPLIED', old_scheduled_date: '2027-03-05', new_scheduled_date: '2027-03-08' }]]);
+    expect(holdFor(at('2027-03-08'), moved)).toBe('the night run moved it there');
+    expect(holdFor(at('2027-03-10'), moved)).toBe('moved after the last night run');
+    const kept = new Map([['svc-9', { action: 'no_change', reason_code: 'REMINDER_SENT_FROZEN', old_scheduled_date: '2027-03-05' }]]);
+    expect(holdFor(at('2027-03-05'), kept)).toBe('customer already told the time');
+    expect(holdFor(at('2027-03-06'), kept)).toBe('moved after the last night run');
+    // A dry run moves nothing: its reason is for the day the visit still has.
+    const dry = new Map([['svc-9', { action: 'recommended', reason_code: 'DRY_RUN_RECOMMENDATION', old_scheduled_date: '2027-03-05', new_scheduled_date: '2027-03-07', dry_run: true }]]);
+    expect(holdFor(at('2027-03-05'), dry)).toBe('dry run: the night run would move it');
   });
 
   test('a visit at the move limit says so, never a count the log does not hold', () => {
@@ -522,6 +542,25 @@ describe('what holds each visit, in plain words', () => {
 
 describe('what the check reads', () => {
   const NOW = new Date('2027-03-01T11:17:00.000Z');
+
+  test("the night run's reasons are read only for the lines the notification shows; every split still counts", async () => {
+    const rows = [];
+    for (let i = 0; i < 7; i += 1) {
+      const home = north(10 + 2 * i);
+      const later = `2027-03-${String(3 + i).padStart(2, '0')}`;
+      rows.push(stop({ customer: `c-${i}a`, at: home, date: '2027-03-02', plan: true }));
+      rows.push(stop({ customer: `c-${i}b`, at: north(0.05, home), date: later, plan: true }));
+    }
+    const { conn, calls } = recorder({
+      'scheduled_services as s': rows, auto_dispatch_runs: { id: 'run-1', mode: 'apply' },
+      auto_dispatch_audit_logs: [], day_replan_plans: [], visit_gps_legs: [],
+    });
+    const week = await loadWeek(NOW, conn);
+    expect(week.apart).toHaveLength(7);
+    const ids = calls.find((c) => c[0] === 'whereIn' && c[1] === 'scheduled_service_id')[2];
+    const shown = week.apart.slice(0, 5).flatMap((p) => [p.first.id, p.second.id]);
+    expect([...ids].sort()).toEqual([...shown].sort());
+  });
 
   test('the stops read: live visits and served ones; never a cancelled, skipped, moved or missed visit, a held slot or the demo account', async () => {
     const { conn, calls } = recorder({ 'scheduled_services as s': [{ id: 'v1', customer_id: 'c-1' }, { id: 'v2', customer_id: INTERNAL_TEST_CUSTOMER_IDS[0] }] });

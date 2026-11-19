@@ -200,35 +200,42 @@ function toVisit(row) {
   };
 }
 
-// A street line on the visit or, for an unstamped visit, on the customer: the
-// address the app's same-place rule compares.
-const addressKnown = (row) => !!effectivePremise(row).service_address_line1;
+// How completely a row names its address, as the app's same-place rule reads it
+// (route-reorder-window-fit.js effectivePremise: the visit's stamp, else the
+// customer's): 2 a street line, zip and city; 1 a street line missing its zip or
+// city; 0 no street line.
+function addressRank(row) {
+  const premise = effectivePremise(row);
+  if (!premise.service_address_line1) return 0;
+  return premise.service_address_zip && premise.service_address_city ? 2 : 1;
+}
 
-// How surely a row names its home: 0 a linked property, 1 a known address, 2 only a map pin.
+// How surely a row names its home: 0 a linked property, 1 a complete address, 2 an
+// address missing its zip or city, 3 only a map pin.
 function homeTier(row) {
-  if (row.property_id) return 0;
-  return addressKnown(row) ? 1 : 2;
+  return row.property_id ? 0 : 3 - addressRank(row);
 }
 
 // Whether `row` belongs to `home` under the app's own same-place rule
 // (auto-dispatch/current-conflict.js samePlace). A linked row belongs only to its
-// own property's home. A row with a known address belongs to a home that holds that
-// address (unit included) on any of its rows; two known addresses that differ are
-// two homes even at one map pin (two units of one building). Only a row with no
-// known address is placed by its map pin.
+// own property's home. A row with an address belongs to a home whose own address
+// (its most complete row) agrees, unit included; two known addresses that differ are
+// two homes even at one map pin (two units of one building). Only when the row or the
+// home has no street line does the map pin decide.
 function belongsTo(home, row, geo) {
-  const tier = homeTier(row);
-  if (tier === 0) return home.propertyIds.has(String(row.property_id));
-  if (tier === 1) return home.rows.some((r) => addressKnown(r) && samePlace(r, row));
+  if (row.property_id) return home.propertyIds.has(String(row.property_id));
+  if (addressRank(row) > 0 && addressRank(home.identity) > 0) return samePlace(home.identity, row);
   return !!(home.geo && geo) && haversine(home.geo.lat, home.geo.lng, geo.lat, geo.lng) <= SAME_PLACE_MILES;
 }
 
 // Every row's home, pinned or not. Linked rows go first (one home per property),
-// then rows with a known address, then rows with only a map pin, so a weaker row
-// never decides how stronger ones group. Each row joins the one home it belongs
-// to; a row that belongs to none starts its own, and one that belongs to more than
-// one (one address or one pin for two homes) cannot be placed: it stays a stop on
-// its route but is never paired. Only a placed home with a pin can be paired.
+// then complete addresses, then addresses missing a zip or city, then rows with only
+// a map pin, so a weaker row never decides how stronger ones group, and a home is
+// matched by its own address, never through a weaker row it took in. Each row joins
+// the one home it belongs to; a row that belongs to none starts its own, and one
+// that belongs to more than one (one partial address or one pin for two homes)
+// cannot be placed: it stays a stop on its route but is never paired. Only a placed
+// home with a pin can be paired.
 function buildPlaces(rows) {
   const places = [];
   const byCustomer = new Map();
@@ -247,7 +254,7 @@ function buildPlaces(rows) {
         key: `home-${places.length + 1}`,
         customerId,
         geo,
-        rows: [],
+        identity: row, // its most complete address so far
         propertyIds: new Set(),
         unplaced: matches.length > 1,
         name: shortName(row),
@@ -257,7 +264,7 @@ function buildPlaces(rows) {
       places.push(place);
       own.push(place);
     }
-    place.rows.push(row);
+    if (addressRank(row) > addressRank(place.identity)) place.identity = row;
     if (row.property_id) place.propertyIds.add(String(row.property_id));
     if (!place.geo && geo) place.geo = geo;
     place.visits.push({ ...toVisit(row), home: place.key, placeName: place.name, city: place.city });
@@ -436,12 +443,19 @@ function findApartPairs(rows, { from = null, until = null } = {}) {
   return apart.sort((x, y) => gapOf(x) - gapOf(y) || visitOrder(x.first, y.first) || pairKey(x).localeCompare(pairKey(y)));
 }
 
+// The day the night run left a visit on, by its own audit rule (auto-dispatch/
+// audit.js): the new day of a move it made, else the day it judged.
+const dayRunLeft = (row) => dateOnlyString(row.action === 'changed' ? row.new_scheduled_date || row.old_scheduled_date : row.old_scheduled_date);
+
 function holdFor(visit, nightLog) {
   if (visit.nightKind === 'first') return 'first or one-time visit';
   if (visit.nightKind === 'booster') return 'booster visit, which the night run never moves';
   if (!nightLog) return 'no night run to read';
   const row = nightLog.get(visit.id);
   if (!row) return 'not in the night run';
+  // Its reason is for the day it judged; a visit moved since then has no reason here.
+  const left = dayRunLeft(row);
+  if (left && left !== visit.date) return 'moved after the last night run';
   const code = String(row.reason_code || row.action || 'no reason logged');
   const words = HOLD_WORDS[code] || code.toLowerCase().replace(/_/g, ' ');
   return row.dry_run ? `dry run: ${words}` : words;
@@ -675,7 +689,7 @@ async function loadNightLog(visitIds, now = new Date(), conn = db) {
     .where('auto_dispatch_run_id', run.id)
     .whereIn('scheduled_service_id', visitIds)
     .orderBy([{ column: 'created_at' }, { column: 'id' }])
-    .select('scheduled_service_id', 'action', 'reason_code');
+    .select('scheduled_service_id', 'action', 'reason_code', 'old_scheduled_date', 'new_scheduled_date');
   const dryRun = run.mode === 'dry_run';
   return new Map(rows.map((r) => [String(r.scheduled_service_id), { ...r, dry_run: dryRun }]));
 }
@@ -717,8 +731,11 @@ async function loadWeek(now = new Date(), conn = db) {
   const weekStart = etWeekStart(now);
   const stops = await loadStops(etDateString(addETDays(now, -PAIR_DAYS_BACK)), etDateString(addETDays(now, PAIR_DAYS_AHEAD)), conn);
   const apart = findApartPairs(stops, { from: etDateString(now), until: etDateString(addETDays(now, LOOKAHEAD_DAYS)) });
-  const nightLog = await loadNightLog(apart.flatMap((p) => [p.first.id, p.second.id]), now, conn);
-  const replan = await loadReplanFixed(apart, now, conn);
+  // Reasons only for the lines the notification shows; the whole set still counts and rings.
+  const shown = apart.slice(0, MAX_LINES);
+  const twoDays = shown.filter((p) => p.first.date !== p.second.date);
+  const nightLog = await loadNightLog([...new Set(twoDays.flatMap((p) => [p.first.id, p.second.id]))], now, conn);
+  const replan = await loadReplanFixed(shown, now, conn);
   const drives = await loadShortDrives(conn);
   return { weekStart, apart, nightLog, replan, drives };
 }
