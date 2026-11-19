@@ -564,8 +564,6 @@ async function startSmsThreadDraft({
       }
       // The run's outcome updates the row this ask landed on, open or done.
       origin.bellId = bell.bellId;
-      // A merged ask's draft gets its own bell (notifyBell in ./index).
-      if (bell.merged) origin.mergedAsk = true;
     }
     result.started = true;
     result.draftPromise = runThreadDraft({

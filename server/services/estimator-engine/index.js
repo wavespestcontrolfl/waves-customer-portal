@@ -765,25 +765,27 @@ async function notifyBell({ call, context, title, body, lane, estimateId = null,
                 // the quiet fall-off's 72 hours (ACTIVITY_STAMP_KEYS in
                 // admin-alert-retention.js), so a bell near that limit cannot
                 // close minutes after the ask. The merge also changes the row
-                // version the fall-off's close is fenced on. A close that won
+                // version the fall-off's close is fenced on, and mergedAsk
+                // marks the row as two asks' task (below). A close that won
                 // since the lookup leaves no open row to stamp: the ask then
                 // raises its own bell.
                 const stamped = await conn('notifications')
                   .where({ id: existing.id })
                   .whereNull('done_at')
-                  .update({ metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ observedAt: new Date().toISOString() })]) });
-                if (stamped) return { ...landed(existing.id), merged: true };
+                  .update({ metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ observedAt: new Date().toISOString(), mergedAsk: true })]) });
+                if (stamped) return landed(existing.id);
                 insertFresh = true;
               } else if (sameDraft || bothOpen) {
                 return landed(existing.id);
               }
               if (existingMeta.estimateId && existingMeta.estimateId !== estimateId) insertFresh = true;
-              // A later ask that merged into this bell (origin.mergedAsk, set by
-              // startSmsThreadDraft) may be about another property, and the
-              // bell may already hold the earlier ask's "send it" task: its
-              // draft gets its own bell instead of replacing that task. A
-              // clarify resume is no merge: its draft still upgrades the row.
-              if (askBellId && estimateId && !existingMeta.estimateId && context?.origin?.mergedAsk === true) insertFresh = true;
+              // A bell a later ask merged into (mergedAsk) is the manual task
+              // of two asks, which may name different properties, and either
+              // run can finish first. So no draft replaces it: each draft gets
+              // its own bell, and the shared bell stays the task until a person
+              // closes it. A clarify resume is no merge: with one ask on the
+              // row, its draft still upgrades the row.
+              if (estimateId && !existingMeta.estimateId && existingMeta.mergedAsk === true) insertFresh = true;
             }
           }
           if (!insertFresh) {

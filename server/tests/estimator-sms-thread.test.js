@@ -67,14 +67,13 @@ jest.mock('../config/models', () => ({
 const mockRunDraftPipeline = jest.fn();
 const mockNotify = jest.fn();
 const mockEngineEnabled = jest.fn();
-let mockBellMerged = false;
 jest.mock('../services/estimator-engine/index', () => ({
   runDraftPipeline: (...args) => mockRunDraftPipeline(...args),
   notify: (...args) => mockNotify(...args),
   // The placeholder's call: the same recorder, plus the row id it landed on.
   notifyBell: async (...args) => {
     const ok = await mockNotify(...args);
-    return { ok: !!ok, bellId: ok ? 'bell-ask-1' : null, ...(ok && mockBellMerged ? { merged: true } : {}) };
+    return { ok: !!ok, bellId: ok ? 'bell-ask-1' : null };
   },
   estimatorEngineEnabled: () => mockEngineEnabled(),
 }));
@@ -118,7 +117,6 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockRecentBell = null;
   mockCooldownClauses.length = 0;
-  mockBellMerged = false;
   mockSmsLogRow = null;
   mockSmsLogThrows = false;
   mockSmsLogHangs = false;
@@ -204,17 +202,6 @@ describe('startSmsThreadDraft', () => {
     // The run's outcome updates the row this ask landed on (notifyBell reads
     // context.origin.bellId), open or done.
     expect(args.origin.bellId).toBe('bell-ask-1');
-    // It inserted its own bell, so it is no merged ask.
-    expect(args.origin.mergedAsk).toBeUndefined();
-  });
-
-  test('an ask that merged into the number\'s open bell marks its run, so its draft gets its own bell', async () => {
-    mockBellMerged = true;
-    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'quote for pest control please' });
-    await result.draftPromise;
-    const args = mockRunDraftPipeline.mock.calls[0][0];
-    expect(args.origin.bellId).toBe('bell-ask-1');
-    expect(args.origin.mergedAsk).toBe(true);
   });
 
   describe('the placeholder names who texted and links to the message', () => {

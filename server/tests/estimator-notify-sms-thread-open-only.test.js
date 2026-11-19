@@ -9,8 +9,8 @@
  *    between 11-10 and 11-18 got no bell this way, each behind a bell the
  *    72-hour quiet fall-off had closed.
  *  - A run's OUTCOME (`context.origin.bellId`) updates the row its own ask
- *    landed on, open or done. The draft of an ask that MERGED into a bell
- *    (`origin.mergedAsk`) gets its own bell, so the earlier ask's task stays.
+ *    landed on, open or done. A bell a later ask MERGED into (`mergedAsk` on
+ *    the row) stays the asks' task: every draft on it gets its own bell.
  *  - Anything else with the key (a clarify-reply resume) keeps the newest
  *    bell of the key, open or done, as before.
  * Every text-bell write holds one lock per number around its lookup and write.
@@ -125,9 +125,9 @@ const askPlaceholder = () => notifyBell({
 
 // A draft run's outcome: runDraftPipeline passes the run's context, whose
 // origin carries the row the ask landed on.
-const outcome = (bellId, { estimateId = null, lane = 'red', mergedAsk = false } = {}) => notifyBell({
+const outcome = (bellId, { estimateId = null, lane = 'red' } = {}) => notifyBell({
   call: null,
-  context: { origin: { channel: 'sms_thread', threadKey: KEY, bellId, ...(mergedAsk ? { mergedAsk: true } : {}) } },
+  context: { origin: { channel: 'sms_thread', threadKey: KEY, bellId } },
   lane,
   quotePromised: true,
   threadKey: KEY,
@@ -172,15 +172,16 @@ describe('a new ask matches the number\'s OPEN bell only', () => {
     const first = await askPlaceholder();
     const second = await askPlaceholder();
 
-    expect(second).toEqual({ ok: true, bellId: first.bellId, merged: true });
+    expect(second).toEqual({ ok: true, bellId: first.bellId });
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(mockRows.find((row) => row.id === first.bellId).metadata.mergedAsk).toBe(true);
   });
 
   test('a new ask merges into the open bell: no second ring, no rewrite, and the 72-hour quiet clock restarts', async () => {
     // 68 hours old: the quiet fall-off would close it within 4 hours.
     mockRows.push(bell('bell-open', { minutesAgo: 68 * 60 }));
 
-    await expect(askPlaceholder()).resolves.toEqual({ ok: true, bellId: 'bell-open', merged: true });
+    await expect(askPlaceholder()).resolves.toEqual({ ok: true, bellId: 'bell-open' });
 
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
     expect(mockUpdates).toHaveLength(1);
@@ -189,6 +190,7 @@ describe('a new ask matches the number\'s OPEN bell only', () => {
     expect(Object.keys(mockUpdates[0].patch)).toEqual(['metadata']);
     const row = mockRows.find((r) => r.id === 'bell-open');
     expect(Date.now() - Date.parse(row.metadata.observedAt)).toBeLessThan(5000);
+    expect(row.metadata.mergedAsk).toBe(true);
     expect(row.metadata.lane).toBe('red');
     expect(row.done_at).toBeNull();
   });
@@ -262,32 +264,35 @@ describe('a run\'s outcome updates the row its own ask landed on, open or done',
     expect(JSON.parse(mockUpdates[0].patch.metadata).estimateId).toBe('est-8');
   });
 
-  test('two runs on one bell: a second, different draft gets its own bell instead of overwriting the first', async () => {
+  test('two asks on one bell, two drafts: each draft gets its own bell, and the shared bell stays the task', async () => {
     const first = await askPlaceholder();
     const second = await askPlaceholder();
     expect(second.bellId).toBe(first.bellId);
-    await outcome(first.bellId, { estimateId: 'est-10', lane: 'green' });
 
-    // Under the lock the second run reads the row after the first run's write.
-    const late = await outcome(second.bellId, { estimateId: 'est-11', lane: 'green', mergedAsk: true });
+    await expect(outcome(first.bellId, { estimateId: 'est-10', lane: 'green' })).resolves.toEqual({ ok: true, bellId: 'bell-new-2' });
+    await expect(outcome(second.bellId, { estimateId: 'est-11', lane: 'green' })).resolves.toEqual({ ok: true, bellId: 'bell-new-3' });
 
-    expect(late).toEqual({ ok: true, bellId: 'bell-new-2' });
-    expect(mockRows.find((row) => row.id === first.bellId).metadata.estimateId).toBe('est-10');
-    expect(mockNotifyAdmin.mock.calls[1][3].metadata.estimateId).toBe('est-11');
+    const task = mockRows.find((row) => row.id === first.bellId);
+    expect(task.title).toBe('Quote asked by text — send it');
+    expect(task.metadata.estimateId).toBeNull();
+    expect(mockNotifyAdmin.mock.calls.map(([, , , opts]) => opts.metadata.estimateId)).toEqual([null, 'est-10', 'est-11']);
   });
 
-  test('two runs on one bell: a red after the first run\'s draft raises its own bell, so a second ask is never hidden', async () => {
-    const first = await askPlaceholder();
-    await askPlaceholder();
-    await outcome(first.bellId, { estimateId: 'est-10', lane: 'green' });
+  test.each([
+    ['the merged ask finds no draft first', ['b', 'a']],
+    ['the first ask drafts first', ['a', 'b']],
+  ])('two asks on one bell, one draft and one red (%s): the draft gets its own bell, the shared bell stays the "send it" task', async (_order, order) => {
+    // Ask A raised the bell; ask B merged into it.
+    const a = await askPlaceholder();
+    const b = await askPlaceholder();
+    const runs = { a: () => outcome(a.bellId, { estimateId: 'est-14', lane: 'green' }), b: () => outcome(b.bellId) };
+    for (const key of order) await runs[key]();
 
-    // The code cannot tell a repeat of the drafted ask from an ask about a
-    // second property, so the red keeps its own "send it" bell (as on main).
-    await outcome(first.bellId, { mergedAsk: true });
-
+    const task = mockRows.find((row) => row.id === a.bellId);
+    expect(task.title).toBe('Quote asked by text — send it');
+    expect(task.metadata.estimateId).toBeNull();
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(2);
-    expect(mockNotifyAdmin.mock.calls[1][1]).toBe('Quote asked by text — send it');
-    expect(mockRows.find((row) => row.id === first.bellId).metadata.estimateId).toBe('est-10');
+    expect(mockNotifyAdmin.mock.calls[1][3].metadata.estimateId).toBe('est-14');
   });
 
   test('red first, then a merged ask\'s draft: the draft gets its own bell and the "send it" task stays', async () => {
@@ -295,9 +300,9 @@ describe('a run\'s outcome updates the row its own ask landed on, open or done',
     // Ask 1's run finishes with no draft: the row stays its "send it" task.
     await outcome(first.bellId);
     const second = await askPlaceholder();
-    expect(second).toEqual({ ok: true, bellId: first.bellId, merged: true });
+    expect(second).toEqual({ ok: true, bellId: first.bellId });
 
-    await expect(outcome(second.bellId, { estimateId: 'est-12', lane: 'green', mergedAsk: true }))
+    await expect(outcome(second.bellId, { estimateId: 'est-12', lane: 'green' }))
       .resolves.toEqual({ ok: true, bellId: 'bell-new-2' });
 
     const task = mockRows.find((row) => row.id === first.bellId);
@@ -323,9 +328,9 @@ describe('a run\'s outcome updates the row its own ask landed on, open or done',
     mockRows.push(bell('bell-reopened', { minutesAgo: 5 * 24 * 60 }));
     mockRows.push(bell('bell-newer-closed', { minutesAgo: 2 * 24 * 60, done: true }));
     const ask = await askPlaceholder();
-    expect(ask).toEqual({ ok: true, bellId: 'bell-reopened', merged: true });
+    expect(ask).toEqual({ ok: true, bellId: 'bell-reopened' });
 
-    await expect(outcome(ask.bellId, { estimateId: 'est-9', lane: 'yellow', mergedAsk: true }))
+    await expect(outcome(ask.bellId, { estimateId: 'est-9', lane: 'yellow' }))
       .resolves.toEqual({ ok: true, bellId: 'bell-new-1' });
 
     // Only the ask's observedAt stamp touched the older bell.
