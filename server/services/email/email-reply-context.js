@@ -2,8 +2,6 @@ const db = require('../../models/db');
 const contextAggregator = require('../context-aggregator');
 const { extractTopReplyText, htmlReplyToText } = require('../newsletter-proof');
 const { normalizeAddress, domainFromAddress } = require('./spam-blocker');
-const { ownMailboxAddress } = require('./email-source-tag');
-const { extractEmailAddresses } = require('./email-customer-link');
 const { hasAlignedAuth } = require('./inbox-hygiene');
 const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
 const { savepointRead } = require('../../utils/savepoint-read');
@@ -118,25 +116,18 @@ function emailBody(row) {
   return { text: String(row.snippet || ''), status: 'unavailable_snippet' };
 }
 
-// The real recipients of a header (an address inside a display name never
-// counts), with our own tagged website address (contact+gbp-sarasota_home@)
-// read as the mailbox. Every other address, customers included, is compared
-// as written.
 function addressesOf(value) {
-  return extractEmailAddresses(value).map(ownMailboxAddress);
+  return (String(value || '').match(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [])
+    .map(normalizeAddress);
 }
 
 function belongsToConversation(row, email, mailboxAddress, customerId) {
   if (row.customer_id && String(row.customer_id) !== String(customerId)) return false;
   const sender = normalizeAddress(email.from_address);
-  const sent = labelsOf(row).includes('SENT');
-  // A tagged alias of the mailbox in From counts as ours only on a message
-  // Gmail labels SENT: anyone can write that header on a received copy.
-  const from = sent ? ownMailboxAddress(row.from_address) : normalizeAddress(row.from_address);
-  if (sent || from === mailboxAddress) {
-    return from === mailboxAddress && addressesOf(row.to_address).includes(sender);
+  if (labelsOf(row).includes('SENT') || normalizeAddress(row.from_address) === mailboxAddress) {
+    return normalizeAddress(row.from_address) === mailboxAddress && addressesOf(row.to_address).includes(sender);
   }
-  return from === sender && addressesOf(row.to_address).includes(mailboxAddress);
+  return normalizeAddress(row.from_address) === sender && addressesOf(row.to_address).includes(mailboxAddress);
 }
 
 function emailDirection(row, mailboxAddress, triggerId) {
@@ -157,51 +148,25 @@ function shapeEmail(row, email, mailboxAddress) {
   };
 }
 
-// LIKE pattern for the mailbox's tagged form: contact@x.com -> contact+%@x.com.
-function taggedMailboxPattern(mailboxAddress) {
-  const at = mailboxAddress.lastIndexOf('@');
-  return `${mailboxAddress.slice(0, at)}+%${mailboxAddress.slice(at)}`;
-}
-
-// The thread query's LIKE patterns can match a row that belongsToConversation
-// then rejects (a pattern can span two recipients in one header). The thread
-// is read in pages until enough verified messages are found or it ends, so a
-// rejected row never hides an older genuine message. THREAD_SCAN_ROWS bounds
-// the rows one draft reads; past it, `omitted` is a lower bound.
-const THREAD_PAGE_ROWS = LIMITS.email + 1;
-const THREAD_SCAN_ROWS = 100;
-
 async function loadThread(email, database, mailboxAddress, customerId) {
   try {
     const sender = normalizeAddress(email.from_address);
-    const tagged = taggedMailboxPattern(mailboxAddress);
-    const readPage = (offset, size) => savepointRead(database, (connection) => connection('emails')
+    const rows = await savepointRead(database, (connection) => connection('emails')
       .where({ gmail_thread_id: email.gmail_thread_id })
       .where('received_at', '<=', email.received_at)
       .whereRaw("NOT jsonb_exists(COALESCE(label_ids, '[]'::jsonb), 'DRAFT')")
       .whereRaw('(customer_id IS NULL OR customer_id = ?)', [customerId])
       .whereRaw(
-        '((LOWER(TRIM(from_address)) = ? AND (LOWER(COALESCE(to_address, \'\')) LIKE ? OR LOWER(COALESCE(to_address, \'\')) LIKE ?)) '
-        + 'OR ((LOWER(TRIM(from_address)) = ? OR LOWER(TRIM(from_address)) LIKE ?) AND LOWER(COALESCE(to_address, \'\')) LIKE ?))',
-        [sender, `%${mailboxAddress}%`, `%${tagged}%`, mailboxAddress, tagged, `%${sender}%`],
+        '((LOWER(TRIM(from_address)) = ? AND LOWER(COALESCE(to_address, \'\')) LIKE ?) '
+        + 'OR (LOWER(TRIM(from_address)) = ? AND LOWER(COALESCE(to_address, \'\')) LIKE ?))',
+        [sender, `%${mailboxAddress}%`, mailboxAddress, `%${sender}%`],
       )
       .orderBy('received_at', 'desc')
-      .orderBy('id', 'desc')
-      .offset(offset)
-      .limit(size)
+      .limit(LIMITS.email + 1)
       .select('id', 'gmail_thread_id', 'from_address', 'to_address', 'subject', 'body_text', 'body_html', 'snippet', 'label_ids', 'received_at', 'customer_id'));
-    const filtered = [];
-    let scanned = 0;
-    let exhausted = false;
-    while (filtered.length <= LIMITS.email && !exhausted && scanned < THREAD_SCAN_ROWS) {
-      const size = Math.min(THREAD_PAGE_ROWS, THREAD_SCAN_ROWS - scanned);
-      const rows = await readPage(scanned, size);
-      scanned += rows.length;
-      exhausted = rows.length < size;
-      filtered.push(...rows.filter((row) => !labelsOf(row).includes('DRAFT') && belongsToConversation(row, email, mailboxAddress, customerId)));
-    }
+    const filtered = rows.filter((row) => !labelsOf(row).includes('DRAFT') && belongsToConversation(row, email, mailboxAddress, customerId));
     if (!filtered.some((row) => String(row.id) === String(email.id))) filtered.unshift(email);
-    const sourceTruncated = !exhausted;
+    const sourceTruncated = filtered.length > LIMITS.email;
     const selected = filtered
       .sort((a, b) => new Date(b.received_at) - new Date(a.received_at))
       .slice(0, LIMITS.email);
@@ -384,7 +349,7 @@ function limitMetadata(prompt, untrusted) {
   return {
     ...LIMITS,
     promptChars: prompt.block.length,
-    truncated: prompt.truncated || sections.some((section) => section.omitted > 0 || section.omittedIsLowerBound === true)
+    truncated: prompt.truncated || sections.some((section) => section.omitted > 0)
       || items.some((item) => item.truncated || item.omittedByTotalLimit),
     omitted: sections.reduce((total, section) => total + section.omitted, prompt.omitted),
   };

@@ -161,4 +161,4 @@ function emailSourceEvidence(email = {}) {
   return null;
 }
 
-module.exports = { emailSourceEvidence, ownMailboxAddress, parseTaggedAddress };
+module.exports = { emailSourceEvidence, ownMailboxAddress };

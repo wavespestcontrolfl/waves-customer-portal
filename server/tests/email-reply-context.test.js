@@ -15,12 +15,6 @@ const EMAIL = {
 function queryFor(rows) {
   let result = rows.slice();
   let columns = null;
-  const sorts = [];
-  // Dates compare as times; anything else (ids) as strings.
-  const sortValue = (row, column) => {
-    const time = new Date(row[column]).getTime();
-    return Number.isNaN(time) ? String(row[column]) : time;
-  };
   const query = {
     where(arg, operator, value) {
       if (typeof arg === 'object') {
@@ -42,30 +36,23 @@ function queryFor(rows) {
         result = result.filter((row) => row.customer_id == null || String(row.customer_id) === String(bindings[0]));
       }
       if (/LOWER\(TRIM\(from_address\)\)/.test(sql)) {
-        const [sender, mailboxPattern, taggedPattern, mailbox, taggedFrom, senderPattern] = bindings;
-        // SQL LIKE: anchored, % = any run of characters.
-        const like = (value, pattern) => new RegExp(`^${String(pattern).replace(/[.+*?^${}()|[\]\\]/g, '\\$&').replaceAll('%', '.*')}$`, 'i').test(String(value || ''));
-        result = result.filter((row) => {
-          const from = String(row.from_address || '').trim().toLowerCase();
-          return (from === sender && (like(row.to_address, mailboxPattern) || like(row.to_address, taggedPattern)))
-            || ((from === mailbox || like(from, taggedFrom)) && like(row.to_address, senderPattern));
-        });
+        const [sender, mailboxPattern, mailbox, senderPattern] = bindings;
+        const includes = (value, pattern) => String(value || '').toLowerCase().includes(String(pattern).replaceAll('%', ''));
+        result = result.filter((row) => (
+          String(row.from_address || '').toLowerCase() === sender && includes(row.to_address, mailboxPattern)
+        ) || (
+          String(row.from_address || '').toLowerCase() === mailbox && includes(row.to_address, senderPattern)
+        ));
       }
       return query;
     },
     orderBy(column, direction = 'asc') {
-      sorts.push([column, direction]);
       result.sort((a, b) => {
-        for (const [key, order] of sorts) {
-          const left = sortValue(a, key);
-          const right = sortValue(b, key);
-          if (left !== right) return (left < right ? -1 : 1) * (order === 'desc' ? -1 : 1);
-        }
-        return 0;
+        const order = new Date(a[column]) - new Date(b[column]);
+        return direction === 'desc' ? -order : order;
       });
       return query;
     },
-    offset(count) { result = result.slice(count); return query; },
     limit(limit) { result = result.slice(0, limit); return query; },
     select(...selected) { columns = selected.length === 1 && selected[0] === '*' ? null : selected; return query; },
     then(resolve, reject) {
@@ -137,105 +124,6 @@ describe('assembleEmailReplyContext', () => {
       database, aggregator, mailboxAddress: MAILBOX, mode: 'replay',
     })).resolves.toMatchObject({ ok: false, reason: 'historical_context_unavailable' });
     expect(aggregator.getContextForCustomer).not.toHaveBeenCalled();
-  });
-
-  test('treats a plus-tagged website address as the mailbox, in the trigger and the thread', async () => {
-    const tagged = { ...EMAIL, to_address: 'Waves <Contact+GBP-Sarasota_home@wavespestcontrol.com>' };
-    const reply = {
-      ...EMAIL, id: 'email-reply', from_address: MAILBOX, to_address: CUSTOMER.email,
-      label_ids: ['SENT'], body_text: 'We can do Tuesday.', received_at: '2026-09-09T16:00:00Z',
-    };
-    const earlier = { ...tagged, id: 'email-earlier', body_text: 'First ask', received_at: '2026-09-08T16:00:00Z' };
-    const aggregator = { getContextForCustomer: jest.fn(async () => aggregatorContext()) };
-    const result = await assembleEmailReplyContext(tagged, {
-      customer: CUSTOMER, database: fakeDatabase({ emails: [earlier, reply, tagged] }), aggregator,
-      mailboxAddress: MAILBOX, now: '2026-09-10T17:00:00Z',
-    });
-    expect(result.ok).toBe(true);
-    expect(result.untrusted.emailThread.messages.map((m) => [m.id, m.direction])).toEqual([
-      ['email-earlier', 'inbound'], ['email-reply', 'outbound'], ['email-current', 'inbound'],
-    ]);
-  });
-
-  test('a staff reply sent from a tagged mailbox address stays in the thread', async () => {
-    const tagged = { ...EMAIL, to_address: 'contact+gads_home@wavespestcontrol.com' };
-    const reply = {
-      ...EMAIL, id: 'email-tagged-reply', from_address: 'contact+gads_home@wavespestcontrol.com', to_address: CUSTOMER.email,
-      label_ids: ['SENT'], body_text: 'Tuesday works.', received_at: '2026-09-09T16:00:00Z',
-    };
-    const aggregator = { getContextForCustomer: jest.fn(async () => aggregatorContext()) };
-    const result = await assembleEmailReplyContext(tagged, {
-      customer: CUSTOMER, database: fakeDatabase({ emails: [reply, tagged] }), aggregator,
-      mailboxAddress: MAILBOX, now: '2026-09-10T17:00:00Z',
-    });
-    expect(result.ok).toBe(true);
-    expect(result.untrusted.emailThread.messages.map((m) => [m.id, m.direction])).toEqual([
-      ['email-tagged-reply', 'outbound'], ['email-current', 'inbound'],
-    ]);
-  });
-
-  test('rows the thread query matches but the recipient check rejects never hide an older message', async () => {
-    // Each decoy's To header matches the tagged pattern across two recipients
-    // (contact+… in one address, @wavespestcontrol.com in another).
-    const decoys = Array.from({ length: LIMITS.email + 1 }, (_, index) => ({
-      ...EMAIL, id: `decoy-${index}`, body_text: `Decoy ${index}`,
-      to_address: 'billing.contact+x@example.test, office@wavespestcontrol.com',
-      received_at: `2026-09-10T${String(15 - index).padStart(2, '0')}:00:00Z`,
-    }));
-    const older = { ...EMAIL, id: 'email-older', body_text: 'An older question', received_at: '2026-09-01T16:00:00Z' };
-    const result = await assembleEmailReplyContext(EMAIL, {
-      customer: CUSTOMER, database: fakeDatabase({ emails: [...decoys, older, EMAIL] }),
-      aggregator: { getContextForCustomer: jest.fn(async () => aggregatorContext()) },
-      mailboxAddress: MAILBOX, now: '2026-09-10T17:00:00Z',
-    });
-    expect(result.ok).toBe(true);
-    expect(result.untrusted.emailThread.messages.map((m) => m.id)).toEqual(['email-older', 'email-current']);
-    expect(result.untrusted.emailThread).toMatchObject({ omitted: 0, omittedIsLowerBound: false });
-  });
-
-  test('a received copy with a tagged Waves From address is not a staff reply', async () => {
-    const received = {
-      ...EMAIL, id: 'email-tagged-received', from_address: 'contact+gads_home@wavespestcontrol.com', to_address: CUSTOMER.email,
-      label_ids: ['INBOX'], body_text: 'Not written by staff.', received_at: '2026-09-09T16:00:00Z',
-    };
-    const result = await assembleEmailReplyContext(EMAIL, {
-      customer: CUSTOMER, database: fakeDatabase({ emails: [received, EMAIL] }),
-      aggregator: { getContextForCustomer: jest.fn(async () => aggregatorContext()) },
-      mailboxAddress: MAILBOX, now: '2026-09-10T17:00:00Z',
-    });
-    expect(result.ok).toBe(true);
-    expect(result.untrusted.emailThread.messages.map((m) => m.id)).toEqual(['email-current']);
-  });
-
-  test('a thread scan that stops at its row cap marks the context truncated', async () => {
-    const decoys = Array.from({ length: 120 }, (_, index) => ({
-      ...EMAIL, id: `decoy-${String(index).padStart(3, '0')}`, body_text: `Decoy ${index}`,
-      to_address: 'billing.contact+x@example.test, office@wavespestcontrol.com',
-      received_at: new Date(Date.parse(EMAIL.received_at) - (index + 1) * 60000).toISOString(),
-    }));
-    const result = await assembleEmailReplyContext(EMAIL, {
-      customer: CUSTOMER, database: fakeDatabase({ emails: [...decoys, EMAIL] }),
-      aggregator: { getContextForCustomer: jest.fn(async () => aggregatorContext()) },
-      mailboxAddress: MAILBOX, now: '2026-09-10T17:00:00Z',
-    });
-    expect(result.untrusted.emailThread).toMatchObject({ omitted: 0, omittedIsLowerBound: true });
-    expect(result.limits.truncated).toBe(true);
-  });
-
-  test('a mailbox address that appears only in a display name is not a recipient', async () => {
-    const aggregator = { getContextForCustomer: jest.fn() };
-    await expect(assembleEmailReplyContext({ ...EMAIL, to_address: '"contact+gads_home@wavespestcontrol.com" <someone@example.test>' }, {
-      database: fakeDatabase(), aggregator, mailboxAddress: MAILBOX,
-    })).resolves.toMatchObject({ ok: false, reason: 'not_inbound' });
-  });
-
-  test('a tag on another mailbox or a foreign domain is still not inbound', async () => {
-    const aggregator = { getContextForCustomer: jest.fn() };
-    for (const to of ['info+gads_home@wavespestcontrol.com', 'contact+gads_home@example.test']) {
-      await expect(assembleEmailReplyContext({ ...EMAIL, to_address: to }, {
-        database: fakeDatabase(), aggregator, mailboxAddress: MAILBOX,
-      })).resolves.toMatchObject({ ok: false, reason: 'not_inbound' });
-    }
   });
 
   test.each([
