@@ -22,7 +22,6 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { safeErrorText } = require('../safe-error-text');
 const { deliveryClaimFresh } = require('../admin-estimate-persistence');
 const contextBuilder = require('./context-builder');
 const { buildCallContext, existingDraftForCall } = contextBuilder;
@@ -616,23 +615,6 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
   return { address, propertyRecord, enriched, parcelView, subdivisionMedian, permitFacts };
 }
 
-// WHERE for the placeholder-gives-way rewrite: still open, still a
-// placeholder, still no estimate. Raw (no bind values) so it adds nothing a
-// minimal query fake must support beyond whereRaw.
-const PLACEHOLDER_OPEN_SQL = "done_at IS NULL AND metadata->>'placeholder' = 'true' AND COALESCE(metadata->>'estimateId', '') = ''";
-
-// True when the existing thread bell is a still-open "drafting now"
-// placeholder and this call is an outcome with no estimate on either side.
-function openPlaceholderGivesWay(existing, existingMeta, { placeholder, estimateId }) {
-  return existingMeta.placeholder === true && !existing.done_at
-    && placeholder !== true && !estimateId && !existingMeta.estimateId;
-}
-
-// Metadata patch that clears the placeholder marker once an outcome replaced it.
-function placeholderClearPatch(existingMeta, placeholder) {
-  return existingMeta.placeholder === true && placeholder !== true ? { placeholder: false } : {};
-}
-
 // One-bell + durability: for PROMISED quotes the processor's generic
 // synchronous bell is the durable guarantee (this engine runs as a floating
 // promise — a restart mid-draft must not lose the owed-quote task). The
@@ -640,7 +622,7 @@ function placeholderClearPatch(existingMeta, placeholder) {
 // instead of adding a second one; when no bell exists (request-only calls,
 // or the generic path failed) it inserts fresh. Re-runs dedupe on the
 // estimator_engine marker.
-async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null, link = null, forceUpdate = false, updateOnly = false, retiredByReason = null, placeholder = false }) {
+async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null, link = null, forceUpdate = false, updateOnly = false, retiredByReason = null }) {
   const callSid = call?.twilio_call_sid ? String(call.twilio_call_sid) : null;
   // Callers may pass a specific link (the proposal builder deep-link);
   // otherwise derive the historical default from what the bell references.
@@ -657,9 +639,6 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
     quote_promised: quotePromised === true,
     lane: lane || null,
     estimateId,
-    // The durable "drafting now" bell written before the detached run. An
-    // outcome with no estimate (red, blocked, error) replaces it in place.
-    ...(placeholder === true ? { placeholder: true } : {}),
     // A quote we promised is a promise we owe the customer; a quote the customer asked
     // for is the customer reaching us. Either one rings once the gate is on (muted by the bell policy before).
     ...(quotePromised === true ? { promise: true } : { contact: true }),
@@ -727,7 +706,6 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
           existingMeta = typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : (existing.metadata || {});
         } catch { existingMeta = {}; }
         let insertFresh = false;
-        let yieldingPlaceholder = false;
         if (existingMeta.estimator_engine === true) {
           if (forceUpdate) {
             // The fail-closed reconciliation alerts REPLACE whatever the
@@ -751,38 +729,25 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
             // history: a new request or a different draft gets a FRESH
             // bell instead of overwriting it.
             const sameDraft = !!estimateId && existingMeta.estimateId === estimateId;
-            // An OPEN placeholder gives way to an outcome that has no
-            // estimate (red, blocked, composer failure, error): the row
-            // is rewritten with the real outcome. Two placeholders stand,
-            // and an outcome never regresses to a later placeholder.
-            const placeholderGivesWay = openPlaceholderGivesWay(existing, existingMeta, { placeholder, estimateId });
-            yieldingPlaceholder = placeholderGivesWay;
-            const bothOpen = !estimateId && !existingMeta.estimateId && !placeholderGivesWay;
+            const bothOpen = !estimateId && !existingMeta.estimateId;
             if (sameDraft || bothOpen) return true;
             if (existingMeta.estimateId && existingMeta.estimateId !== estimateId) insertFresh = true;
           }
         }
         if (!insertFresh) {
-          let rewrite = db('notifications').where({ id: existing.id });
-          // The placeholder rewrite is conditional in the UPDATE itself: a
-          // person closing the row, or the draft upgrade landing, between the
-          // read above and this write must not be overwritten or reopened.
-          if (yieldingPlaceholder) rewrite = rewrite.whereRaw(PLACEHOLDER_OPEN_SQL);
-          await rewrite
+          await db('notifications')
+            .where({ id: existing.id })
             .update({
               title,
               // body + detail together: "Show full text" must never keep the
               // story this rewrite replaces (admin body guard).
               ...require('../notification-service').adminBodyColumns('lead', body),
               link,
-              // placeholder: false clears the marker once an outcome replaced it.
-              metadata: JSON.stringify({ ...existingMeta, ...metadata, ...placeholderClearPatch(existingMeta, placeholder) }),
+              metadata: JSON.stringify({ ...existingMeta, ...metadata }),
               // The content changed materially — an already-read bell must
               // come back unread or the upgrade is invisible.
               read_at: null, done_at: null, done_by: null, resolution: null,
             });
-          // Zero rows on the placeholder path means a concurrent writer already
-          // changed the row: a bell exists, its version stands, nothing is cleared.
           return true;
         }
       }
@@ -801,7 +766,7 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
     const created = await require('../notification-service').notifyAdmin('lead', title, body, { link, metadata });
     return !!created;
   } catch (err) {
-    logger.warn(`[estimator-engine] admin notify failed: ${safeErrorText(err)}`);
+    logger.warn(`[estimator-engine] admin notify failed: ${err.message}`);
     return false;
   }
 }
@@ -862,12 +827,6 @@ async function retiredDraftBellsForCall(callSid, { reason }) {
     }
   }
   return parsed.filter((bell) => retired.has(bell.estimateId));
-}
-
-// Text-origin outcome bells open the same place the placeholder did (the
-// message that asked), looked up once when the placeholder was written. Call-origin and unset: null keeps the default link.
-function threadBellLink(origin) {
-  return origin?.threadKey && origin.bellLink ? origin.bellLink : null;
 }
 
 function callerLabel(intent, context) {
@@ -2453,7 +2412,6 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           threadKey,
           title: S.redTitle,
           body: S.composerFailBody(callerLabel(null, context)),
-          link: threadBellLink(origin),
         });
       }
       return result;
@@ -3208,7 +3166,6 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           threadKey,
           title: redCopy.title,
           body: redCopy.body,
-          link: threadBellLink(origin),
         });
         // Ask-the-customer loop (GATE_ESTIMATE_CLARIFY_ASKS): the two
         // machine-readable red causes are askable — park an approval-gated
@@ -3336,9 +3293,6 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           threadKey,
           title: S.blockedTitle,
           body: S.blockedBody(callerLabel(intent, context)),
-          // Text origin: the message link (never an estimate id: the duplicate
-          // guard matches on the last 10 digits, so it can name another sender's).
-          link: threadBellLink(origin),
         });
       }
       return result;
@@ -3410,7 +3364,6 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         threadKey,
         title: S.redTitle,
         body: S.errorBody,
-        link: threadBellLink(origin),
       });
     }
     return result;
@@ -3594,6 +3547,6 @@ module.exports = {
     classifyListingSuiteByLicense,
     addressFromContext, ownStreetForUnitAdoption, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality,
     parcelSignalsDescribeGatheredAddress, resolveAgreedPriceForCall, supersedeRowScopedDraftBlock,
-    clearDraftBlockOnCall, redBellCopy, CALL_ORIGIN, threadBellLink,
+    clearDraftBlockOnCall, redBellCopy, CALL_ORIGIN,
   },
 };

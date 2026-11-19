@@ -32,8 +32,6 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
 const { last10 } = require('../external-phone');
-const { phoneIdentityKey } = require('../../utils/phone');
-const { safeErrorText } = require('../safe-error-text');
 
 
 // Structured-output contracts (llm/call.js jsonSchema): the provider constrains
@@ -226,21 +224,20 @@ function smsOrigin(threadKey) {
   };
 }
 
-// Who texted, for the owed-quote bell. The sender is named by the shared
-// sender-identity rule (customerIdsBySenderIdentity: the canonical phone
-// identity on a customer's phone or service-contact phones, or a live lead's
-// customer), never by the last 10 digits alone: an international sender must
-// not be named as a US customer who shares them.
-// Exactly one live customer names the sender; none, several, an error or a
-// timeout fall back to the last four digits. The triggering text's Twilio SID
-// anchors the link. The phone number NEVER appears in a link (access logs and
-// referrers carry it), and neither does a customer id: the link is the
-// message SID alone (CommunicationsPageV2 opens the thread that holds that
-// message for any sender), because an id derived from a lead can belong to a
-// different conversation. Fail-soft and bounded: this must never block or
-// fail the durable bell (the Twilio webhook awaits it), so every failure
-// returns the fallback, and a failed SID read only drops the anchor.
+// Who texted, for the owed-quote bell: the sender's name when one is on file,
+// else the last four digits. The name comes from the codebase's own helper
+// (admin-alert-names nameOnFileForPhone, the way the inbound-text bell names a
+// texter, owner 2026-11-04): the customer's own phone only (a service-contact
+// number names the account holder, not the texter), then estimates, then
+// leads; null when two people share the number. The link is the triggering
+// text's Twilio SID alone (CommunicationsPageV2 opens the thread that holds
+// that message): never a phone number or a customer id, which access logs and
+// referrers would carry. Fail-soft and bounded: the Twilio webhook awaits this,
+// so every failure returns the fallback, each lookup has its own deadline (a
+// slow name only changes the label, a slow SID only drops the anchor), and a
+// log line never carries err.message (a knex message echoes the bound phone).
 const SENDER_LOOKUP_TIMEOUT_MS = 1000;
+const errorCode = (err) => (err && (err.code || err.name)) || 'error';
 
 async function triggerTextSid(triggerSmsLogId) {
   if (!triggerSmsLogId) return null;
@@ -253,40 +250,25 @@ async function triggerTextSid(triggerSmsLogId) {
       .first();
     return row?.twilio_sid ? String(row.twilio_sid) : null;
   } catch (err) {
-    logger.warn(`[estimator-sms] trigger text lookup failed (link without anchor): ${safeErrorText(err)}`);
+    logger.warn(`[estimator-sms] trigger text lookup failed (link without anchor): ${errorCode(err)}`);
     return null;
   }
 }
 
-// { name } of the ONE live customer behind the sender identity, else null.
-async function namedSender(senderIdentity) {
-  if (!senderIdentity) return null;
+async function senderNameOnFile(phone) {
   try {
     const db = require('../../models/db');
-    const { customerIdsBySenderIdentity } = require('../sender-identity-customers');
-    const ids = (await customerIdsBySenderIdentity(db, [senderIdentity], { timeoutMs: SENDER_LOOKUP_TIMEOUT_MS })).get(senderIdentity);
-    if (!ids || ids.size !== 1) return null;
-    const [id] = [...ids];
-    const row = await db('customers').where({ id }).whereNull('deleted_at')
-      .select('first_name', 'last_name')
-      .timeout(SENDER_LOOKUP_TIMEOUT_MS, { cancel: true })
-      .first();
-    const name = row ? [row.first_name, row.last_name].filter(Boolean).join(' ').trim() : '';
-    return name ? { name } : null;
+    const { nameOnFileForPhone } = require('../admin-alert-names');
+    const name = await nameOnFileForPhone((table) => db(table).timeout(SENDER_LOOKUP_TIMEOUT_MS, { cancel: true }), phone);
+    return typeof name === 'string' && name.trim() ? name.trim() : null;
   } catch (err) {
-    logger.warn(`[estimator-sms] sender lookup failed (using phone label): ${safeErrorText(err)}`);
+    logger.warn(`[estimator-sms] sender name lookup failed (using phone label): ${errorCode(err)}`);
     return null;
   }
-}
-
-// The message SID alone; the bare communications page when there is none.
-function threadBellLinkFor(sid) {
-  return sid ? `/admin/communications?message=${encodeURIComponent(sid)}` : '/admin/communications';
 }
 
 // Each lookup gets its OWN deadline (the knex timeouts bound the queries; this
-// also bounds a stuck pool wait): a slow name lookup only changes the label,
-// and a slow SID read only drops the anchor. The timer is always cleared.
+// also bounds a stuck pool wait). The timer is always cleared.
 function withDeadline(promise, fallback) {
   let timer;
   const guard = new Promise((resolve) => {
@@ -295,22 +277,15 @@ function withDeadline(promise, fallback) {
   return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
 }
 
-async function threadSenderInfo(digits, triggerSmsLogId = null, senderIdentity = null) {
-  const info = { label: `Texter …${digits.slice(-4)}`, link: threadBellLinkFor(null), named: false };
-  try {
-    const [sender, sid] = await Promise.all([
-      withDeadline(namedSender(senderIdentity), null),
-      withDeadline(triggerTextSid(triggerSmsLogId), null),
-    ]);
-    info.link = threadBellLinkFor(sid);
-    if (sender) {
-      info.label = sender.name;
-      info.named = true;
-    }
-  } catch (err) {
-    logger.warn(`[estimator-sms] sender info failed (using phone label): ${safeErrorText(err)}`);
-  }
-  return info;
+async function threadSenderInfo(phone, digits, triggerSmsLogId) {
+  const [name, sid] = await Promise.all([
+    withDeadline(senderNameOnFile(phone), null),
+    withDeadline(triggerTextSid(triggerSmsLogId), null),
+  ]);
+  return {
+    label: name || `Texter …${digits.slice(-4)}`,
+    link: sid ? `/admin/communications?message=${encodeURIComponent(sid)}` : '/admin/communications',
+  };
 }
 
 // The heavy detached phase: context build → shared pipeline. Non-throwing.
@@ -353,8 +328,6 @@ async function runThreadDraft({
           threadKey: origin.threadKey,
           title: origin.strings.redTitle,
           body: `A text thread asked for a quote the estimator engine could not read (${context.error}). Review the conversation and send the estimate manually.`,
-          // notify() defaults an unset link to null.
-          link: origin.bellLink,
         });
       }
       return result;
@@ -562,10 +535,7 @@ async function startSmsThreadDraft({
       // failed insert means NO durable artifact exists: report not-started
       // so callers keep their own fallback (lead-intake keeps the shell).
       const { notify } = require('./index');
-      const sender = await threadSenderInfo(digits, triggerSmsLogId, phoneIdentityKey(phone));
-      // Outcome bells (red, blocked, error) reuse this link: one lookup. The
-      // sender identity is used only to name the sender here; it is not stored.
-      origin.bellLink = sender.link;
+      const sender = await threadSenderInfo(phone, digits, triggerSmsLogId);
       const belled = await notify({
         call: null,
         context: null,
@@ -573,9 +543,8 @@ async function startSmsThreadDraft({
         quotePromised: true,
         threadKey: origin.threadKey,
         title: origin.strings.redTitle,
-        body: `${sender.label} asked for a quote by text. The estimator is drafting it; if no draft comes, send one by hand.`,
+        body: `${sender.label} asked for a quote by text. The estimator engine is drafting now — if no draft notification follows, review the thread and send the estimate manually.`,
         link: sender.link,
-        placeholder: true,
       });
       if (!belled) {
         result.skipped = 'durable_bell_failed';
@@ -608,11 +577,8 @@ async function startSmsThreadDraft({
       });
     return result;
   } catch (err) {
-    // A cooldown (or other) query error can echo the bound phone digits in its
-    // message: log and report a code-only summary.
-    const safe = safeErrorText(err);
-    logger.error(`[estimator-sms] start failed: ${safe}`);
-    result.skipped = result.skipped || `error: ${safe}`;
+    logger.error(`[estimator-sms] start failed: ${err.message}`);
+    result.skipped = result.skipped || `error: ${err.message}`;
     return result;
   }
 }
