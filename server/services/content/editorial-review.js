@@ -25,7 +25,7 @@ const { fetchSources } = require('./editorial-review-sources');
 // review of a long post (a live test aborted at 60 s). Read at call time.
 const MAC_RUNNER_TIMEOUT_MS = 15 * 60 * 1000;
 const modelTimeoutMs = () => (process.env.CONTENT_EDITORIAL_REVIEW_RUNNER === 'mac' ? MAC_RUNNER_TIMEOUT_MS : LIMITS.timeoutMs);
-const { validatePlanJson, validateReviewJson } = require('./editorial-review-validation');
+const { validatePlanJson, validateReviewJson, holdUnsourcedFigures } = require('./editorial-review-validation');
 
 function firstPassage(document, title) {
   const body = splitFrontmatter(document).body;
@@ -81,7 +81,7 @@ Output consistency rules:
 - sectionCoverage statuses evaluate ONLY answer_first, not sourcing or overall section quality. Every failed section requires answer_first=fail and a finding whose passage is its COMPLETE supplied lead (or exact heading when the lead is empty).
 - passageCoverage statuses evaluate ONLY standalone_passages. Every failed paragraph requires standalone_passages=fail and a finding whose passage is the COMPLETE supplied paragraph text.
 - Every unsupported claim, including model-added claims, requires source_support=fail and a separate finding with exactly the same passage as that claim. Do not collapse differently worded claims into one finding.
-- For non_external claims set verdict="non_external", claimKind="non_external", sourceSuitability="not_applicable", sourceIndex=-1, sourceQuote="". Unsupported claims also use sourceIndex=-1 and sourceQuote="". Preserve each supplied C-item passage exactly; add model: claims only for material claims the C-items miss. Attributed quotations use claimKind="expert_quote" even when they include numbers; otherwise claims containing numeric figures use claimKind="quantitative".
+- For non_external claims set verdict="non_external", claimKind="non_external", sourceSuitability="not_applicable", sourceIndex=-1, sourceQuote="". Unsupported claims also use sourceIndex=-1 and sourceQuote="". Preserve each supplied C-item passage exactly; add model: claims only for material claims the C-items miss. Attributed quotations use claimKind="expert_quote" even when they include numbers; otherwise claims containing numeric figures use claimKind="quantitative". A passage with a numeric figure is never non_external, link text included (digits in a link address or in a UF/IFAS publication number such as EENY-514 are not figures); the only exception is the visible "Last updated: Month Year" line. A number in an instruction ("Check 2 containers", "Look for larvae that hatch in 3 days") is a claim too. Mark every other numeric passage supported or unsupported.
 
 Every failing finding must quote an exact contiguous passage from the document (or the exact supplied title), explain the defect, and give a concrete edit action. A pass check has no findings; a fail check has at least one. Source indexes are zero-based. sourceQuote must be copied exactly from that source excerpt and must be empty when no source is cited. Return all five checks exactly once and cover every supplied section, paragraph, and C-item exactly once.`;
 }
@@ -146,7 +146,7 @@ async function review({ document, title, domain, sourceUrls = [], factsPack = nu
   try {
     response = await createDeepMessage(null, payload, {
       jsonSchema: REVIEW_SCHEMA, timeoutMs: modelTimeoutMs(), promptVersion: 'editorial-review-v1',
-      validate: (json) => validateReviewJson(json, analysis, document, title, evidence.records),
+      validate: (json) => validateReviewJson(holdUnsourcedFigures(json), analysis, document, title, evidence.records),
     });
   } catch (err) {
     return errorResult(document, title, `Editorial model dispatch failed: ${err.message}`, 'Retry the complete editorial review; do not publish this unreviewed document.', evidence.records, reviewedAt);
@@ -154,10 +154,11 @@ async function review({ document, title, domain, sourceUrls = [], factsPack = nu
   if (!response?.ok || !response.json || !String(response.model || '').trim()) {
     return errorResult(document, title, `Editorial model did not return a complete valid review (${response?.reason || 'invalid response'}).`, 'Retry the complete editorial review; do not publish this unreviewed document.', evidence.records, reviewedAt);
   }
-  const validationError = validateReviewJson(response.json, analysis, document, title, evidence.records);
+  const reviewed = holdUnsourcedFigures(response.json);
+  const validationError = validateReviewJson(reviewed, analysis, document, title, evidence.records);
   if (validationError) return errorResult(document, title, `Editorial response failed validation: ${validationError}.`, 'Retry the complete editorial review; do not publish from partial coverage.', evidence.records, reviewedAt);
 
-  const checks = addOperationalFindings(response.json.checks, analysis, evidence.errors, document, title);
+  const checks = addOperationalFindings(reviewed.checks, analysis, evidence.errors, document, title);
   return {
     pass: checks.every((check) => check.status === 'pass'),
     checks,

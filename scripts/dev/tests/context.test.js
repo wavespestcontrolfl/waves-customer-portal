@@ -81,6 +81,9 @@ test('runner identifies its checkout, rejects foreign stop requests, and release
   fs.mkdirSync(path.join(root, 'client'));
   fs.copyFileSync(path.join(sourceRoot, 'client/vite.config.js'), path.join(root, 'client/vite.config.js'));
   fs.copyFileSync(path.join(sourceRoot, 'client/coverage-floor-files.json'), path.join(root, 'client/coverage-floor-files.json'));
+  // vite.config.js loads the Field view build step from the client source.
+  fs.mkdirSync(path.join(root, 'client/src/lib'), { recursive: true });
+  fs.copyFileSync(path.join(sourceRoot, 'client/src/lib/fieldViewAssets.js'), path.join(root, 'client/src/lib/fieldViewAssets.js'));
   fs.cpSync(path.join(sourceRoot, 'shared'), path.join(root, 'shared'), { recursive: true });
   fs.writeFileSync(path.join(root, 'client/preview-estimate.html'), '<!doctype html><title>Runner fixture</title>');
   // This disposable test fixture only reads the installed dependencies.

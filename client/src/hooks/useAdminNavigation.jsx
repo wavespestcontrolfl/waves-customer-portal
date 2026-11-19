@@ -1,26 +1,31 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
+import { adminNavigationPreferenceKey as preferenceKey, warmFieldViewLanding } from '../lib/fieldView';
 import { ADMIN_WORKSPACE_DESTINATIONS, ADMIN_WORKSPACE_GROUP_IDS, getAdminWorkspaceGroups, getAdminWorkspaceSelection } from '../config/adminNavigation';
 
 export const AdminNavigationContext = createContext(null);
-const preferenceKey = (accountId) => `waves_admin_navigation:${accountId}`;
 // Version 1 also saved every group the menu opened for the page on screen, so
 // after a few days of use every group was open. Groups saved before version 2
 // are dropped once; pins carry over.
 const PREFERENCE_VERSION = 2;
 const destinationIds = new Set(ADMIN_WORKSPACE_DESTINATIONS.map(({ id }) => id));
 
-function readPreferences(accountId) {
-  const defaults = { groups: {}, pins: [] };
-  if (!accountId) return defaults;
+// This account's saved menu settings on this phone, or null when storage
+// cannot be read. Field view is not a menu group, so a version change never
+// drops it.
+function readSavedPreferences(accountId) {
   try {
     const saved = JSON.parse(localStorage.getItem(preferenceKey(accountId)) || '{}');
     const groups = saved?.version !== PREFERENCE_VERSION ? {} : Object.fromEntries(ADMIN_WORKSPACE_GROUP_IDS
       .filter((id) => typeof saved?.groups?.[id] === 'boolean')
       .map((id) => [id, saved.groups[id]]));
     const pins = Array.isArray(saved?.pins) ? [...new Set(saved.pins)].filter((id) => destinationIds.has(id)).slice(0, 3) : [];
-    return { groups, pins };
-  } catch { return defaults; }
+    return { groups, pins, fieldView: saved?.fieldView === true };
+  } catch { return null; }
+}
+
+function readPreferences(accountId) {
+  return (accountId && readSavedPreferences(accountId)) || { groups: {}, pins: [], fieldView: false };
 }
 
 export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, children }) {
@@ -52,13 +57,65 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
     setAutoOpen(selection.groupId);
   }, [enabled, location.key, selection.groupId, selection.itemId]);
 
-  const updatePreferences = (update) => setPreferences((current) => {
-    const next = update(current);
-    if (user?.id) {
-      try { localStorage.setItem(preferenceKey(user.id), JSON.stringify({ ...next, version: PREFERENCE_VERSION })); } catch { /* optional preference */ }
+  // Every tab on this phone saves to the same record. A change applies to the
+  // newest saved settings (this tab's own when storage cannot be read), so a
+  // tab that missed another tab's change never writes an old value back. A
+  // write can fail while reads still work (full storage). The pins that
+  // change added or removed and the groups it opened or closed then stay in
+  // this tab, by id, and each later change applies them to the newest saved
+  // settings (an added pin joins while there is room for 3), until a write
+  // succeeds or another tab's save arrives. Only what this tab changed stays:
+  // it never writes back an old copy of another tab's switch, pins or groups.
+  // The Field view switch never changes unsaved (onlyIfSaved): the shell
+  // remounts on every page change and a cold open reads storage, so an
+  // unsaved switch would turn itself off. The read and the write stay outside
+  // the state update: StrictMode runs a queued update twice in development,
+  // and a second pin toggle would undo the first. Returns true when the
+  // change reached storage.
+  const unsaved = useRef(null);
+  const updatePreferences = (update, { onlyIfSaved = false } = {}) => {
+    const stored = user?.id ? readSavedPreferences(user.id) : null;
+    const pending = unsaved.current;
+    let base = stored || preferences;
+    if (stored && pending) {
+      const kept = stored.pins.filter((id) => pending.pins[id] !== false);
+      const added = Object.keys(pending.pins).filter((id) => pending.pins[id] && !kept.includes(id));
+      base = { ...stored, pins: [...kept, ...added].slice(0, 3), groups: { ...stored.groups, ...pending.groups } };
     }
-    return next;
-  });
+    const next = update(base);
+    let saved = false;
+    if (user?.id) {
+      try {
+        localStorage.setItem(preferenceKey(user.id), JSON.stringify({ ...next, version: PREFERENCE_VERSION }));
+        saved = true;
+      } catch { /* full or blocked storage */ }
+    }
+    if (!saved && onlyIfSaved) return false;
+    unsaved.current = saved ? null : {
+      pins: {
+        ...pending?.pins,
+        ...Object.fromEntries(base.pins.filter((id) => !next.pins.includes(id)).map((id) => [id, false])),
+        ...Object.fromEntries(next.pins.filter((id) => !base.pins.includes(id)).map((id) => [id, true])),
+      },
+      groups: { ...pending?.groups, ...Object.fromEntries(Object.entries(next.groups).filter(([id, open]) => base.groups[id] !== open)) },
+    };
+    setPreferences(next);
+    return saved;
+  };
+  // Another tab's save shows here at once: pins, groups and the switch the
+  // tabs and the /admin landing read. It is newer than anything this tab
+  // could not save. A cleared storage reads as nothing saved.
+  useEffect(() => {
+    if (!user?.id) return undefined;
+    const key = preferenceKey(user.id);
+    const onStorage = (event) => {
+      if (event.key !== null && event.key !== key) return;
+      unsaved.current = null;
+      setPreferences(readPreferences(user.id));
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [user?.id]);
   const toggleGroup = (id) => {
     const open = Boolean(expanded[id]);
     if (open && id === autoOpen) setAutoOpen(null);
@@ -71,7 +128,32 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
     return visiblePins.length < 3 ? { ...current, pins: [...visiblePins, id] } : current;
   });
 
-  return <AdminNavigationContext.Provider value={enabled ? { groups, expanded, toggleGroup, selection, publishView, pinnedItems, togglePin } : null}>
+  // Only an admin login has Field view; any other role never sees it applied.
+  // The switch moves only when this phone saved it; false tells the Settings
+  // row the save failed, so the row can say why the switch did not move.
+  const fieldView = user?.role === 'admin' && preferences.fieldView === true;
+  const setFieldView = (on) => updatePreferences((current) => ({ ...current, fieldView: on === true }), { onlyIfSaved: true });
+  // A verified session with the switch on readies Today too: after a deploy
+  // the app can open on another page (a push tap), and the next open with no
+  // signal still lands on Today. Each mount reuses the page's try (see
+  // warmFieldViewLanding). The signal returning tries anew, as does a worker
+  // that takes control of the page: the app registers it after the page
+  // loads, and a new worker may hold other storage.
+  useEffect(() => {
+    if (!enabled || !fieldView) return undefined;
+    const warm = () => { void warmFieldViewLanding(); };
+    const warmAgain = () => { void warmFieldViewLanding({ again: true }); };
+    const worker = typeof navigator === 'undefined' ? null : navigator.serviceWorker;
+    warm();
+    window.addEventListener('online', warmAgain);
+    worker?.addEventListener?.('controllerchange', warmAgain);
+    return () => {
+      window.removeEventListener('online', warmAgain);
+      worker?.removeEventListener?.('controllerchange', warmAgain);
+    };
+  }, [enabled, fieldView]);
+
+  return <AdminNavigationContext.Provider value={enabled ? { groups, expanded, toggleGroup, selection, publishView, pinnedItems, togglePin, fieldView, setFieldView } : null}>
     {children}
   </AdminNavigationContext.Provider>;
 }
