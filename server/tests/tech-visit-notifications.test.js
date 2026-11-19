@@ -14,12 +14,33 @@ let mockBeforeLeg = null;
 // sender: a recheck before each leg, onDelivered for each device that has it.
 let mockLegs = null;
 let mockLegsSent = [];
+// What each device that got the push shows as its second line, in order.
+let mockLegBodies = [];
+// The device row the sender hands the per-device form: a leg's own (its
+// platform, default the staff app on an iPhone), or one default device.
+// A staff-app row's route data, as the sender reads it (subscription_data).
+const mockRouteData = JSON.stringify({ topic: 'com.wavespestcontrol.wavespay', environment: 'production', session_exp: 4102444800 });
+const mockDefaultDevice = { id: 'dev-1', platform: 'ios', device_token: 'tok-dev-1', subscription_data: mockRouteData };
+const mockDeviceOf = (leg) => (leg
+  ? { id: leg.id, platform: leg.platform === undefined ? 'ios' : leg.platform, device_token: leg.token || `tok-${leg.id}`, subscription_data: leg.data || mockRouteData }
+  : mockDefaultDevice);
+// The notification one device gets: the sender's per-device form (a function
+// of the staff id and the device row) or one notification for every device.
+const mockAsDevice = (id, notification, leg) => (typeof notification === 'function'
+  ? notification(id, mockDeviceOf(leg))
+  : notification);
+// The staff-app sign-ups namedDevices reads at a handoff: null = every iOS
+// device the mock sender presents; an Error = the read fails.
+let mockStaffAppRows = null;
 // Runs after a leg's beforeHandoff passed, while that leg is "in flight".
 let mockAfterCheck = null;
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The sender's two-step filter, as namedDevices reapplies it: none by default.
+let mockMfaFilter = (query) => query;
 jest.mock('../services/push-notifications', () => ({
+  staffMfaPushFilter: (query) => mockMfaFilter(query),
   // Options are recorded apart, so the copy assertions below stay about the
   // notification itself. Like the real sender, beforeHandoff runs at the
   // device's final boundary; false sends nothing.
@@ -33,14 +54,19 @@ jest.mock('../services/push-notifications', () => ({
           return { subscriptions: mockLegs.length, sent, superseded: true };
         }
         if (mockAfterCheck) await mockAfterCheck(leg);
-        if (leg.sent) { sent += 1; mockLegsSent.push(leg.id); if (opts.onDelivered) opts.onDelivered({ id: leg.id }); }
+        if (leg.sent) {
+          sent += 1;
+          mockLegsSent.push(leg.id);
+          mockLegBodies.push(mockAsDevice(id, notification, leg).body);
+          if (opts.onDelivered) opts.onDelivered({ id: leg.id });
+        }
       }
       if (!sent) return { subscriptions: mockLegs.length, sent: 0, failed: mockLegs.length };
-      return mockSendToAdminUser(id, notification);
+      return mockSendToAdminUser(id, mockAsDevice(id, notification));
     }
     if (mockBeforeLeg) await mockBeforeLeg();
     if (opts && typeof opts.beforeHandoff === 'function' && (await opts.beforeHandoff()) === false) return { superseded: true };
-    return mockSendToAdminUser(id, notification);
+    return mockSendToAdminUser(id, mockAsDevice(id, notification));
   },
 }));
 
@@ -58,6 +84,8 @@ const cardRows = [];
 let bundleLeaseCutoff = null;
 // How many bundle clears (payload - 'push_bundle') fail before one succeeds.
 let mockClearFailures = 0;
+// How many claim renewals (a bundle's handoff recheck) throw before one succeeds.
+let mockRenewFailures = 0;
 function cardsTable() {
   let runFilter = null;
   let idFilter = null;
@@ -111,6 +139,10 @@ function cardsTable() {
       const apply = () => {
         // A claim renewal: this owner's cards get a fresh claim time.
         if (sql.includes("jsonb_set(payload, '{push_claimed_at}'")) {
+          if (mockRenewFailures > 0) {
+            mockRenewFailures -= 1;
+            throw new Error('db down');
+          }
           const mine = cardRows.filter((r) => idFilter.includes(String(r.id)) && r.payload.push_claim === claimFilter);
           for (const r of mine) r.payload.push_claimed_at = claimedAt;
           return mine.map((r) => ({ id: r.id }));
@@ -210,6 +242,23 @@ function chain(first, firstImpl = null) {
   return c;
 }
 
+// namedDevices' read of a tech's staff-app sign-ups, as the query asked.
+let lastStaffAppQuery = null;
+function staffAppChain() {
+  const c = { calls: [] };
+  for (const m of ['join', 'where', 'whereIn', 'whereNull', 'whereRaw']) {
+    c[m] = jest.fn((...args) => { c.calls.push([m, ...args]); return c; });
+  }
+  c.select = jest.fn(async () => {
+    if (mockStaffAppRows instanceof Error) throw mockStaffAppRows;
+    if (mockStaffAppRows) return mockStaffAppRows;
+    const devices = mockLegs ? mockLegs.map(mockDeviceOf) : [mockDefaultDevice];
+    return devices.filter((d) => d.platform === 'ios').map((d) => ({ id: d.id, device_token: d.device_token, subscription_data: d.subscription_data }));
+  });
+  lastStaffAppQuery = c;
+  return c;
+}
+
 // technicians rows by id; one visit row for scheduled_services.
 // visits: rows by id (the loader's where('s.id', id)), for tests with several visits.
 function visitsChain(visits) {
@@ -230,6 +279,7 @@ function prime({ techs = { 'tech-1': TECH, [ADAM_ID]: ADAM }, visit = VISIT, vis
       return c;
     }
     if (table === 'scheduled_services as s') return visits ? visitsChain(visits) : chain(visit);
+    if (table === 'push_subscriptions as ps') return staffAppChain();
     if (table === 'tech_notifications') return cardsTable();
     if (table === 'tech_notifications as n') return newerCardsQuery();
     if (table === 'tech_notifications as o') {
@@ -280,7 +330,7 @@ describe('notifyTechVisitChange', () => {
     expect(mockWriteCard).not.toHaveBeenCalled();
   });
 
-  test('assigned: one feed row with the composed card + the one-line push', async () => {
+  test('assigned: one feed row with the composed card + the push naming the visit', async () => {
     const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
     expect(out).toEqual({ sent: true });
     expect(mockWriteCard).toHaveBeenCalledTimes(1);
@@ -291,12 +341,22 @@ describe('notifyTechVisitChange', () => {
     expect(row.payload).toMatchObject({
       kind: 'assigned', visit_id: 'visit-1', headline: 'New visit on your route', customer_name: 'Ruiz',
       service_type: 'Pest Control', when: 'Thu Sep 10, 9–11 AM', address: '4312 Cortez Rd W, Bradenton', actor: 'by Adam',
+      customer_full_name: 'Ana Ruiz', street: '4312 Cortez Rd W',
     });
-    // Owner ruling 2026-09-05: the push is one line, no details.
+    // Owner 2026-11-18 (replacing the one-line ruling of 2026-09-05): the
+    // push's second line names the customer in full, the service, the time
+    // and the street.
     await flushNow();
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
-      title: 'You have a new visit on your route', body: '', url: '/tech', tag: 'visit-visit-1',
+      title: 'You have a new visit on your route',
+      body: 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+      url: '/tech', tag: 'visit-visit-1',
     }));
+  });
+
+  test('an arrival-check push stays one line: the 2026-11-18 ruling covers visit changes only', async () => {
+    await notices.pushTrackingNotice({ technicianId: 'tech-1', visitId: 'visit-1', pushTitle: 'A visit needs an arrival check', cardId: null });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'A visit needs an arrival check', body: '' }));
   });
 
   test('unassigned names who has it now; rescheduled carries the previous slot; cancelled names the actor', async () => {
@@ -325,7 +385,9 @@ describe('notifyTechVisitChange', () => {
       payload: { headline: 'Visit cancelled', actor: 'by Adam' },
     });
     await flushNow();
-    expect(mockSendToAdminUser).toHaveBeenLastCalledWith('tech-1', expect.objectContaining({ title: 'A visit on your route was cancelled' }));
+    expect(mockSendToAdminUser).toHaveBeenLastCalledWith('tech-1', expect.objectContaining({
+      title: 'A visit on your route was cancelled', body: 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+    }));
   });
 
   test('a text-reply move (reschedule-sms actor customer_sms) reads "by text", not "online"', async () => {
@@ -518,7 +580,7 @@ describe('notifyTechVisitChange', () => {
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
 
-  test('a recheck ERROR still sends (a missed alert is worse than a rare misordered one) and never throws', async () => {
+  test('a recheck ERROR still sends (a missed alert is worse than a rare misordered one), as its first line only, and never throws', async () => {
     newerCard = null;
     const realFirst = newerCardsQuery;
     db.mockImplementation((table) => {
@@ -535,6 +597,8 @@ describe('notifyTechVisitChange', () => {
     const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: 'auto_dispatch' });
     expect(out).toEqual({ sent: true });
     expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+    // Unverified: the visit's details go only to a device whose recheck passed.
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'You have a new visit on your route', body: '' }));
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('recheck failed'));
   });
 
@@ -620,7 +684,11 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
     delete process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY;
     await move('auto_dispatch');
     expect(mockWriteCard.mock.calls[0][1].payload).not.toHaveProperty('push_held_run');
-    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'A visit on your route moved' }));
+    // A push sent at once says what its card was just written with.
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
+      title: 'A visit on your route moved',
+      body: 'Ana Ruiz · Pest Control · Was Wed Sep 9, 1–3 PM → Now Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+    }));
   });
 
   test('the run sends ONE push per tech for exactly the cards it held, opening /admin/today; a second run starts from zero', async () => {
@@ -748,9 +816,13 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     mockBeforeLeg = null;
     mockLegs = null;
     mockLegsSent = [];
+    mockLegBodies = [];
+    mockStaffAppRows = null;
+    mockMfaFilter = (query) => query;
     mockAfterCheck = null;
     bundleLeaseCutoff = null;
     mockClearFailures = 0;
+    mockRenewFailures = 0;
     prime({ techs, visits: visitRows });
   });
   afterAll(() => {
@@ -770,8 +842,11 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
     expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+    // Three visits listed, one line each, then the rest as a count.
+    const line = 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W';
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', {
-      title: '17 visits on your route moved', body: '', url: '/admin/today', tag: `route-changes-${cardRows[0].id}`, priority: 'high',
+      title: '17 visits on your route moved', body: [line, line, line, '+14 more'].join('\n'),
+      url: '/admin/today', tag: `route-changes-${cardRows[0].id}`, priority: 'high',
     });
     for (const r of cardRows) expect(r.payload).not.toHaveProperty('push_bundle');
     // Sent once: the next tick finds nothing.
@@ -784,9 +859,31 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     await officeMove('v-1');
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', {
-      title: 'A visit on your route moved', body: '', url: '/tech', tag: 'visit-v-1', priority: 'high',
+      title: 'A visit on your route moved',
+      body: 'Ana Ruiz · Pest Control · Was Wed Sep 9, 1–3 PM → Now Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+      url: '/tech', tag: 'visit-v-1', priority: 'high',
     });
     expect(mockSendOpts[mockSendOpts.length - 1]).toEqual(expect.objectContaining({ beforeHandoff: expect.any(Function) }));
+  });
+
+  test('a held push reads a stop still on the route as the visit is now; a moved-off stop keeps the words its card was written with (#7569)', async () => {
+    await officeMove('v-1');
+    // tech-2 held v-2; it now sits on tech-1's route.
+    visitRows['v-2'] = { ...VISIT, id: 'v-2', technician_id: 'tech-1' };
+    await notices.notifyTechVisitChange({ visitId: 'v-2', kind: 'unassigned', technicianId: 'tech-2', actorId: 'admin' });
+    // Both visits change again during the hold, with no card of their own.
+    Object.assign(visitRows['v-1'], { window_start: '13:00:00', window_end: '15:00:00' });
+    Object.assign(visitRows['v-2'], { scheduled_date: '2026-09-11', service_address_line1: '9 Example Ln' });
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 2 });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
+      title: 'A visit on your route moved',
+      body: 'Ana Ruiz · Pest Control · Was Wed Sep 9, 1–3 PM → Now Thu Sep 10, 1–3 PM · 4312 Cortez Rd W',
+    }));
+    // The former holder never reads the visit's new day or address.
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-2', expect.objectContaining({
+      title: 'A visit was moved off your route',
+      body: 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+    }));
   });
 
   test('a single held push the visit has since contradicted is skipped at send time (the later change speaks)', async () => {
@@ -806,14 +903,22 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ tag: 'visit-v-1' }));
   });
 
-  test('mixed kinds read as "changed"; each tech gets their own one push', async () => {
+  test('mixed kinds read as "changed", each line saying what happened, soonest first; each tech gets their own one push', async () => {
     await officeMove('v-1', { kind: 'assigned' });
     await officeMove('v-2');
+    // The moved visit is earlier that day, so it is listed first.
+    Object.assign(visitRows['v-2'], { window_start: '07:00:00', window_end: '08:00:00' });
     await officeMove('v-3', { tech: 'tech-2', kind: 'assigned' });
     await officeMove('v-4', { tech: 'tech-2', kind: 'assigned' });
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 2 });
-    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: '2 visits on your route changed' }));
-    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-2', expect.objectContaining({ title: 'You have 2 new visits on your route' }));
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
+      title: '2 visits on your route changed',
+      body: 'Moved: Ana Ruiz · Pest Control · Thu Sep 10, 7–8 AM · 4312 Cortez Rd W\nNew: Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+    }));
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-2', expect.objectContaining({
+      title: 'You have 2 new visits on your route',
+      body: 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W\nAna Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+    }));
   });
 
   test('nothing goes out while changes keep landing; the oldest waiting the longer bound sends anyway', async () => {
@@ -958,28 +1063,218 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'You have a new visit on your route', tag: 'visit-v-2' }));
   });
 
-  test('once a device has it, a change before the next device keeps that copy (no second push to the first device)', async () => {
+  test('once a device has it, a change to its copy before the next device skips the rest: no stale line, no second push to the first', async () => {
     await officeMove('v-1');
     await officeMove('v-2');
     mockLegs = [{ id: 'd1', sent: true }, { id: 'd2', sent: true }];
+    // The push names v-1, which completes before d2: d2 would show a stale line.
     mockBeforeLeg = async (leg) => { if (leg.id === 'd2') visitRows['v-1'].status = 'completed'; };
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
-    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: '2 visits on your route moved' }));
+    expect(mockLegsSent).toEqual(['d1']);
     for (const r of cardRows) expect(r.payload).not.toHaveProperty('push_bundle');
   });
 
-  test('after the first device got the push, a later device is skipped only once nothing stands (no second push to the first)', async () => {
+  test('a later device gets the same push while its copy still holds; nothing is retried', async () => {
     await officeMove('v-1');
     await officeMove('v-2');
     mockLegs = [{ id: 'd1', sent: true }, { id: 'd2', sent: true }, { id: 'd3', sent: true }];
-    mockBeforeLeg = async (leg) => {
-      if (leg.id === 'd2') visitRows['v-1'].status = 'completed';
-      if (leg.id === 'd3') visitRows['v-2'].status = 'completed';
-    };
+    mockBeforeLeg = async (leg) => { if (leg.id === 'd3') visitRows['v-2'].status = 'completed'; };
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
-    // d2 still gets it (v-2 stands); d3 is skipped (nothing stands); nothing is retried.
     expect(mockLegsSent).toEqual(['d1', 'd2']);
     for (const r of cardRows) expect(r.payload).not.toHaveProperty('push_bundle');
+  });
+
+  test('a visit that reads differently before the first handoff: nothing is sent, and the next tick sends the new words (pre-push audit P1)', async () => {
+    await officeMove('v-1');
+    // A move the card never heard of lands as the push is handed off.
+    mockBeforeLeg = async () => { Object.assign(visitRows['v-1'], { window_start: '13:00:00', window_end: '15:00:00' }); mockBeforeLeg = null; };
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 0 });
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    expect(cardRows[0].payload.push_bundle).toBeTruthy();
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
+      body: 'Ana Ruiz · Pest Control · Was Wed Sep 9, 1–3 PM → Now Thu Sep 10, 1–3 PM · 4312 Cortez Rd W',
+    }));
+  });
+
+  test('a handoff recheck ERROR still sends the bundle, as its first line only (pre-push audit P1)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    mockRenewFailures = 1;
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: '2 visits on your route moved', body: '' }));
+    for (const r of cardRows) expect(r.payload).not.toHaveProperty('push_bundle');
+  });
+
+  test('a visit whose recheck ERRORS stays in the bundle, unnamed: the push names no visit (pre-push audit P1)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    Object.defineProperty(visitRows, 'v-2', { get() { throw new Error('db down'); }, configurable: true });
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: '2 visits on your route moved', body: '' }));
+  });
+
+  test('a visit read that fails at a later handoff still reaches every device, as the first line only from there (pre-push audit P1)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    mockLegs = [{ id: 'd1', sent: true }, { id: 'd2', sent: true }];
+    mockBeforeLeg = async (leg) => {
+      if (leg.id === 'd2') Object.defineProperty(visitRows, 'v-1', { get() { throw new Error('db down'); }, configurable: true });
+    };
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockLegsSent).toEqual(['d1', 'd2']);
+    expect(mockLegBodies[0]).toMatch(/^Ana Ruiz · Pest Control · /);
+    expect(mockLegBodies[1]).toBe('');
+  });
+
+  test('a visit read that fails at the first handoff sends now, as the first line only, not on a later tick (pre-push audit P1)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    mockBeforeLeg = async () => {
+      Object.defineProperty(visitRows, 'v-1', { get() { throw new Error('db down'); }, configurable: true });
+      mockBeforeLeg = null;
+    };
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: '2 visits on your route moved', body: '' }));
+  });
+
+  test('a browser gets the first line only; the staff app gets the visit\'s details (pre-push audit P0: a shared browser)', async () => {
+    mockLegs = [{ id: 'phone', sent: true, platform: 'ios' }, { id: 'browser', sent: true, platform: null }];
+    await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
+    expect(mockLegBodies).toEqual(['Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W', '']);
+  });
+
+  test('a bundled push names its visits on the staff app only; a browser gets the count line', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    mockLegs = [{ id: 'browser', sent: true, platform: 'web' }, { id: 'phone', sent: true, platform: 'ios' }];
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    const line = 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W';
+    expect(mockLegBodies).toEqual(['', [line, line].join('\n')]);
+  });
+
+  test('a phone that a newer sign-in took over during the send gets the first line only (pre-push audit P0)', async () => {
+    mockLegs = [{ id: 'd1', sent: true }, { id: 'd2', sent: true }];
+    // d2's token was re-pointed to another sign-in after the sender read the rows.
+    mockBeforeLeg = async (leg) => { if (leg.id === 'd2') mockStaffAppRows = [{ id: 'd1', device_token: 'tok-d1', subscription_data: mockRouteData }]; };
+    await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
+    expect(mockLegBodies).toEqual(['Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W', '']);
+  });
+
+  test('only a staff-app sign-up of this tech is read as one: no customer on the row, the staff topic, the current sign-in (pre-push audit P0)', async () => {
+    mockStaffAppRows = [];
+    await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'You have a new visit on your route', body: '' }));
+    expect(lastStaffAppQuery.calls).toEqual(expect.arrayContaining([
+      ['where', { 'ps.admin_user_id': 'tech-1', 'ps.active': true, 'ps.platform': 'ios', 't.active': true }],
+      ['whereNull', 'ps.customer_id'],
+      ['whereRaw', 'ps.staff_token_version = t.auth_token_version'],
+      ['whereRaw', "ps.subscription_data::jsonb->>'topic' = ?", ['com.wavespestcontrol.wavespay']],
+      // A token another row holds, in any letter case and any state, is ambiguous.
+      ['whereRaw', 'NOT EXISTS (SELECT 1 FROM push_subscriptions o WHERE o.id <> ps.id AND lower(o.device_token) = lower(ps.device_token))'],
+      // The sign-in that registered the phone still stands.
+      ['whereRaw', expect.stringContaining("(ps.subscription_data::jsonb->>'session_exp')::numeric > extract(epoch FROM now())")],
+    ]));
+  });
+
+  test('a device read that fails sends the first line only; a bundle\'s too', async () => {
+    mockStaffAppRows = new Error('db down');
+    await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
+    expect(mockSendToAdminUser).toHaveBeenLastCalledWith('tech-1', expect.objectContaining({ title: 'You have a new visit on your route', body: '' }));
+    await officeMove('v-2');
+    await officeMove('v-3');
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenLastCalledWith('tech-1', expect.objectContaining({ title: '2 visits on your route moved', body: '' }));
+  });
+
+  test('a bundled push to a phone another sign-in took over shows that phone the count line only', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    mockLegs = [{ id: 'd1', sent: true }, { id: 'd2', sent: true }];
+    mockStaffAppRows = [{ id: 'd2', device_token: 'tok-d2', subscription_data: mockRouteData }];
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockLegBodies[0]).toBe('');
+    expect(mockLegBodies[1]).toMatch(/^Ana Ruiz · Pest Control · /);
+  });
+
+  test('a tech who left field work before the held push goes hears nothing, and the bundle closes (pre-push audit P1)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    const was = techs['tech-1'];
+    techs['tech-1'] = { ...TECH, field_dispatchable: false };
+    try {
+      expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 0 });
+      expect(mockSendToAdminUser).not.toHaveBeenCalled();
+      for (const r of cardRows) expect(r.payload).not.toHaveProperty('push_bundle');
+    } finally {
+      techs['tech-1'] = was;
+    }
+  });
+
+  test('an immediate push to a tech who left field work after the card is never sent (pre-push audit P1)', async () => {
+    const was = techs['tech-1'];
+    // The card is written while tech-1 does field work; the flag drops before the handoff.
+    mockBeforeLeg = async () => { techs['tech-1'] = { ...TECH, field_dispatchable: false }; };
+    try {
+      await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
+      expect(cardRows).toHaveLength(1);
+      expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    } finally {
+      techs['tech-1'] = was;
+    }
+  });
+
+  test('an immediate push reads a stop still on the route as the visit is at the handoff (pre-push audit P1)', async () => {
+    mockBeforeLeg = async () => { Object.assign(visitRows['v-1'], { service_address_line1: '9 Example Ln' }); };
+    await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
+    expect(cardRows[0].payload).toMatchObject({ street: '4312 Cortez Rd W' });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
+      body: 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 9 Example Ln',
+    }));
+  });
+
+  test('an immediate moved-off push keeps the words its card was written with (#7569)', async () => {
+    visitRows['v-1'] = { ...VISIT, id: 'v-1', technician_id: 'tech-2' };
+    mockBeforeLeg = async () => { Object.assign(visitRows['v-1'], { scheduled_date: '2026-09-11', service_address_line1: '9 Example Ln' }); };
+    await notices.notifyTechVisitChange({ visitId: 'v-1', kind: 'unassigned', technicianId: 'tech-1', actorId: 'auto_dispatch' });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
+      title: 'A visit was moved off your route',
+      body: 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+    }));
+  });
+
+  test('the handoff device read reapplies the sender\'s two-step filter (pre-push audit P0)', async () => {
+    mockMfaFilter = (query) => query.whereRaw('(t.mfa_enabled_at IS NULL OR ps.staff_mfa = true)');
+    await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
+    expect(lastStaffAppQuery.calls).toEqual(expect.arrayContaining([
+      ['whereRaw', '(t.mfa_enabled_at IS NULL OR ps.staff_mfa = true)'],
+    ]));
+  });
+
+  test('a phone whose row now routes differently than the row the sender read gets the first line only (pre-push audit P0)', async () => {
+    mockStaffAppRows = [{ id: 'dev-1', device_token: 'tok-dev-1', subscription_data: JSON.stringify({ topic: 'com.wavespestcontrol.wavespay', environment: 'sandbox', session_exp: 4102444800 }) }];
+    await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'You have a new visit on your route', body: '' }));
+  });
+
+  test('a single unverified visit gets its own first line only', async () => {
+    await officeMove('v-1', { kind: 'assigned' });
+    Object.defineProperty(visitRows, 'v-1', { get() { throw new Error('db down'); }, configurable: true });
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'You have a new visit on your route', body: '', tag: 'visit-v-1' }));
+  });
+
+  test('a cancelled visit sorts by the start its card was written with: an early cancel is listed, not folded into "+N more" (pre-push audit P1)', async () => {
+    for (const id of ['v-1', 'v-2', 'v-3']) await officeMove(id, { kind: 'assigned' });
+    visitRows['v-4'] = { ...VISIT, id: 'v-4', status: 'cancelled', window_start: '07:00:00', window_end: '08:00:00' };
+    await notices.notifyTechVisitChange({ visitId: 'v-4', kind: 'cancelled', technicianId: 'tech-1', actorId: 'admin' });
+    expect(cardRows[3].payload).toMatchObject({ window_start: '07:00' });
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    const added = 'New: Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W';
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
+      title: '4 visits on your route changed',
+      body: ['Cancelled: Ana Ruiz · Pest Control · Thu Sep 10, 7–8 AM · 4312 Cortez Rd W', added, added, '+1 more'].join('\n'),
+    }));
   });
 
   test('with the run summary off, an auto-dispatch move still pushes on its own and is never bundled (Codex #6459 r1 P2)', async () => {
@@ -1390,6 +1685,14 @@ describe('a visit handed to the customer to pick a day (Quick Move)', () => {
     const card = composeCard({ kind: 'rescheduled', visit: visit({ window_start: '09:00:00', window_end: '11:00:00' }), actorText: 'the office', previous: null });
     expect(card.payload.when).toBe('Wed Nov 11, 9–11 AM');
   });
+
+  test('its push says the customer is picking, and names the stamped street when the booking has one', () => {
+    const { pushDetail, partsFromVisit } = notices._test;
+    expect(pushDetail(partsFromVisit(visit(), 'assigned')))
+      .toBe('Pat Sample · Quarterly Pest Control Service · The customer picks a day by Wed 8 PM · 100 Example St');
+    expect(pushDetail(partsFromVisit(visit({ service_address_line1: '7 Sample Ct' }), 'rescheduled', 'Tue Nov 3, 9–10 AM')))
+      .toBe('Pat Sample · Quarterly Pest Control Service · Was Tue Nov 3, 9–10 AM → Now the customer picks a day by Wed 8 PM · 7 Sample Ct');
+  });
 });
 
 describe('an open card read against its visit as it is now (owner 2026-11-04)', () => {
@@ -1612,10 +1915,10 @@ describe('recordTrackingNotice (dedupe_key revival for an auto-superseded row)',
   // ORIGINAL created_at — a stage-2 tracking card re-alerted days after its
   // first occurrence would still sort/classify as stale, not the fresh
   // occurrence it actually is.
-  // The module's owner ruling (header, 2026-09-05) keeps push copy generic —
-  // a push lands on a lock screen, and the who/when wait inside the
-  // authenticated app. Round 1 put the customer's name in the tracking
-  // push title; round 5 took it back out and left it on the durable card.
+  // The arrival-check push stays generic: the owner's 2026-11-18 ruling put
+  // customer details on the visit-change pushes only. Round 1 put the
+  // customer's name in the tracking push title; round 5 took it back out and
+  // left it on the durable card.
   test('the push title stays generic — the customer name rides the card, not the lock screen', async () => {
     const mocks = fakeTrx({ insertRows: [{ id: 'row-1' }] });
     const stage2 = await recordTrackingNotice(mocks.trx, args);
@@ -1635,5 +1938,18 @@ describe('recordTrackingNotice (dedupe_key revival for an auto-superseded row)',
     expect(updateArg.updated_at).toBeInstanceOf(Date);
     // Same instant for both — one revive is one "this is now" stamp, not two.
     expect(updateArg.created_at.getTime()).toBe(updateArg.updated_at.getTime());
+  });
+});
+
+describe('the second line stays inside the providers\' payload (pre-push audit P1)', () => {
+  const { fitBody, BODY_BYTE_BUDGET } = require('../services/tech-visit-notifications')._test;
+  test('a short line is unchanged; a long multibyte one is cut to the byte budget, with "…"', () => {
+    expect(fitBody('Ana Ruiz · Pest Control')).toBe('Ana Ruiz · Pest Control');
+    expect(fitBody('')).toBe('');
+    const long = `${'Ñandú 🐜 '.repeat(400)}`;
+    const cut = fitBody(long);
+    expect(Buffer.byteLength(cut, 'utf8')).toBeLessThanOrEqual(BODY_BYTE_BUDGET);
+    expect(cut.endsWith('…')).toBe(true);
+    expect(long.startsWith(cut.slice(0, -1))).toBe(true);
   });
 });
