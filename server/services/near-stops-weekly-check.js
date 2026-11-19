@@ -191,11 +191,10 @@ function toVisit(row) {
     tech: row.technician_id ? String(row.technician_id) : null,
     done: row.status === SERVED_STATUS, // served: a pairing partner, never a split to report
     nightKind: nightKindOf(row),
-    // The board's order fields (route-reorder-window-fit.js currentOrder). A legacy
-    // window counts at its start, as the app's time fallback reads it, so a day with
-    // no route numbers runs by hour.
+    // The board's order fields (route-reorder-window-fit.js currentOrder, which
+    // mirrors the dispatch board: a visit with no window_start runs last).
     route_order: row.route_order ?? null,
-    window_start: windowStartOf(row),
+    window_start: row.window_start ?? null,
     created_at: row.created_at ?? null,
     row,
   };
@@ -214,51 +213,88 @@ function onePlace(x, y) {
   return !!(x.geo && y.geo) && haversine(x.geo.lat, x.geo.lng, y.geo.lat, y.geo.lng) <= SAME_PLACE_MILES;
 }
 
-const allOnePlace = (group) => group.every((x) => group.every((y) => x === y || onePlace(x, y)));
-
-// One customer's homes, judged on all its rows at once, so the order the rows come
-// in never changes them. Linked rows are one home per property. An unlinked row
-// joins the one property all of whose rows it agrees with. The other unlinked rows
-// group with every row they agree with, when those rows all agree with each other
-// too. A row that fits two properties, that agrees with two rows that differ (a
-// street line with no zip beside two zips, a pin-only visit beside two units), or
-// that joins a property beside a row it differs from, cannot be placed: it stays a
-// stop on its route but is never paired.
-function customerHomes(entries) {
-  const properties = new Map();
-  const loose = [];
-  for (const e of entries) {
-    if (!e.row.property_id) loose.push(e);
-    else {
-      const id = String(e.row.property_id);
-      if (!properties.has(id)) properties.set(id, []);
-      properties.get(id).push(e);
+// Every pair of one customer's rows compared once (onePlace), by index.
+function agreementOf(entries) {
+  const agree = entries.map(() => new Array(entries.length).fill(false));
+  entries.forEach((x, i) => {
+    agree[i][i] = true;
+    for (let j = i + 1; j < entries.length; j += 1) {
+      agree[i][j] = onePlace(x, entries[j]);
+      agree[j][i] = agree[i][j];
     }
-  }
-  const linked = [...properties.values()].map((rows) => ({ rows, joiners: [] }));
+  });
+  return agree;
+}
+
+// Unlinked rows against the customer's properties. A row joins the one property all
+// of whose rows it agrees with. One that agrees with only some of a property's rows
+// (a property stamped two ways) or with two properties cannot be placed, and neither
+// can two rows that join one property but differ from each other. The rest are free.
+function placeOnProperties(propertyRows, loose, agree) {
+  const properties = propertyRows.map((rows) => ({ rows, joiners: [] }));
   const free = [];
   const unplaced = [];
-  for (const e of loose) {
-    const fits = linked.filter((home) => home.rows.every((x) => onePlace(e, x)));
-    if (fits.length === 1) fits[0].joiners.push(e);
-    else (fits.length ? unplaced : free).push(e);
+  for (const i of loose) {
+    const agreed = properties.map((p) => p.rows.filter((h) => agree[i][h]).length);
+    const full = properties.filter((p, k) => agreed[k] === p.rows.length);
+    const partial = properties.some((p, k) => agreed[k] > 0 && agreed[k] < p.rows.length);
+    if (partial || full.length > 1) unplaced.push(i);
+    else if (full.length === 1) full[0].joiners.push(i);
+    else free.push(i);
   }
-  const homes = linked.map(({ rows, joiners }) => {
-    const clash = joiners.filter((e) => !allOnePlace([e, ...joiners]));
+  const homes = properties.map(({ rows, joiners }) => {
+    const clash = joiners.filter((i) => !joiners.every((j) => agree[i][j]));
     unplaced.push(...clash);
-    return [...rows, ...joiners.filter((e) => !clash.includes(e))];
+    return [...rows, ...joiners.filter((i) => !clash.includes(i))];
   });
-  const agrees = new Map(free.map((e) => [e, free.filter((o) => o === e || onePlace(e, o))]));
-  const placed = free.filter((e) => allOnePlace(agrees.get(e)));
-  unplaced.push(...free.filter((e) => !placed.includes(e)));
+  return { homes, free, unplaced };
+}
+
+// Free rows: each groups with every free row it agrees with, when those rows all
+// agree with each other too; each distinct group is checked once. A row that agrees
+// with two rows that differ (a street line with no zip beside two zips, a pin-only
+// visit beside two units) cannot be placed.
+function groupFree(free, agree) {
+  const groupOf = new Map(free.map((i) => [i, free.filter((j) => agree[i][j])]));
+  const verdicts = new Map();
+  const isHome = (group) => {
+    const key = group.join(',');
+    if (!verdicts.has(key)) verdicts.set(key, group.every((a) => group.every((b) => agree[a][b])));
+    return verdicts.get(key);
+  };
+  const placed = new Set(free.filter((i) => isHome(groupOf.get(i))));
+  const homes = [];
   const seen = new Set();
-  for (const e of placed) {
-    if (seen.has(e)) continue;
-    const home = agrees.get(e).filter((o) => placed.includes(o));
-    home.forEach((o) => seen.add(o));
+  for (const i of placed) {
+    if (seen.has(i)) continue;
+    const home = groupOf.get(i).filter((j) => placed.has(j));
+    home.forEach((j) => seen.add(j));
     homes.push(home);
   }
-  return { homes, unplaced };
+  return { homes, unplaced: free.filter((i) => !placed.has(i)) };
+}
+
+// One customer's homes, judged on all its rows at once, so the order the rows come
+// in never changes them: linked rows are one home per property, unlinked rows join
+// a property (placeOnProperties) or group among themselves (groupFree). A row that
+// cannot be placed stays a stop on its route but is never paired.
+function customerHomes(entries) {
+  const agree = agreementOf(entries);
+  const byProperty = new Map();
+  const loose = [];
+  entries.forEach((e, i) => {
+    if (!e.row.property_id) return loose.push(i);
+    const id = String(e.row.property_id);
+    if (!byProperty.has(id)) byProperty.set(id, []);
+    return byProperty.get(id).push(i);
+  });
+  const linked = placeOnProperties([...byProperty.values()], loose, agree);
+  const grouped = groupFree(linked.free, agree);
+  const pick = (ids) => ids.map((i) => entries[i]);
+  return {
+    homes: [...linked.homes, ...grouped.homes].map(pick),
+    unplaced: pick([...linked.unplaced, ...grouped.unplaced]),
+  };
 }
 
 // Every row's home, pinned or not (customerHomes). A home's pin, name and city come
@@ -373,7 +409,12 @@ function routeFor(routes, a, b) {
   const ids = day.some((v) => v.route_order != null)
     ? timeFallbackOrder(day.map((v) => v.row), { ...loose.row, technician_id: tech })
     : null;
-  if (!ids) return currentOrder([...day, loose]);
+  if (!ids) {
+    // On a day with no route numbers the unassigned service goes in by its own start,
+    // a legacy window included, as the time fallback reads it.
+    const placed = { ...loose, window_start: loose.windowStart };
+    return currentOrder([...day, placed]).map((v) => (v === placed ? loose : v));
+  }
   const byId = new Map([...day, loose].map((v) => [v.id, v]));
   return [...ids.map((id) => byId.get(String(id))), ...day.filter((v) => v.route_order == null)];
 }

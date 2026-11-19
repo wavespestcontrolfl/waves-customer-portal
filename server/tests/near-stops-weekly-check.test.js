@@ -496,6 +496,23 @@ describe('part 1: next-door stops booked apart', () => {
     expect(findApartPairs(rows)).toEqual([]);
   });
 
+  test('a visit that matches only one of a property\'s two stamps is never a home of its own', () => {
+    const row = (date, street, property) => stop({ customer: 'c-a', at: HOME_A, date, street, property, plan: true });
+    const rows = [row('2027-03-01', '100 Sample Way', 'prop-1'), row('2027-03-08', '102 Sample Way', 'prop-1'), row('2027-03-15', '100 Sample Way', null)];
+    // No second home at that pin: the property's own visits raise no split.
+    expect(buildPlaces(rows).filter((p) => !p.unplaced).map((p) => p.visits.map((v) => v.id))).toEqual([[rows[0].id, rows[1].id]]);
+    expect(findApartPairs(rows)).toEqual([]);
+  });
+
+  test('on a day with no route numbers, a visit on the board with only a legacy window runs last, as the board shows it', () => {
+    const rows = [
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '09:00' }),
+      { ...stop({ customer: 'c-x', at: north(20), date: '2027-03-01', start: null }), time_window: '10:00 am' },
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-01', start: '11:00' }),
+    ];
+    expect(findApartPairs(rows)).toEqual([]);
+  });
+
   test('on a day with no route numbers, an unassigned legacy visit runs at its window start', () => {
     const rows = [
       stop({ customer: 'c-x', at: north(20), date: '2027-03-01', start: '10:00' }),
