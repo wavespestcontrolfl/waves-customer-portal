@@ -4675,7 +4675,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       ];
       if (setupReviewPending) {
         showBookingWarnings(committedWarnings);
-        reportBackground();
+        if (results.length > 0) reportBackground();
         return;
       }
       if (firstError) {

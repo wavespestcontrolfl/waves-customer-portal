@@ -99,6 +99,7 @@ it('requires an explicit choice and retries the exact new-booking payload with t
   expect(reviewDialog).toHaveTextContent('$55.00');
   expect(reviewDialog).toHaveTextContent('$73.00');
   expect(posts).toHaveLength(1);
+  expect(onCreated).not.toHaveBeenCalled();
   expect(posts[0]).not.toHaveProperty('commercialSetupDecision');
   fireEvent.click(screen.getByRole('button', { name: 'Apply $55.00 prepayment to this booking' }));
 
@@ -107,5 +108,5 @@ it('requires an explicit choice and retries the exact new-booking payload with t
     ...posts[0],
     commercialSetupDecision: { ...setupFeeReview, resolution: 'covered' },
   });
-  await waitFor(() => expect(onCreated).toHaveBeenCalled());
+  await waitFor(() => expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: 'appointment-1' })), { timeout: 3000 });
 });
