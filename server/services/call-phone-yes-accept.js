@@ -97,7 +97,8 @@ const REASONS = {
   setup_fee_stamped: 'The booked visit carries a setup fee.',
   visit_prepaid: 'The booked visit already has a payment recorded.',
   has_addons: 'The booked visit has add-on lines.',
-  visit_priced: 'The booked visit has a price that is not the plan price.',
+  visit_priced: 'The booked visit has a price or a discount that is not the plan price.',
+  visit_invoiced: 'The booked visit already has an invoice.',
   visit_in_past: 'The booked visit date has passed. It may be done but not closed out.',
   existing_plan: 'The customer already has a live plan or a WaveGuard membership.',
   estimate_not_delivered: 'The estimate shows no delivery to the customer (each send was held back or failed), and they have not opened it.',
@@ -272,7 +273,11 @@ async function visitProblem(conn, visit, estimate, now) {
   const { etDateString, dateOnlyString } = require('../utils/datetime-et');
   if (dateOnlyString(visit.scheduled_date) < etDateString(now)) return 'visit_in_past';
   // A call booking against an open estimate lands unpriced (#3814); any price is not the plan's.
-  if (visit.estimated_price != null) return 'visit_priced';
+  // Any price decision the bill would honor over estimated_price (a primary-line price, a recorded discount), not only
+  // estimated_price itself, since the tap prices the plan by estimated_price alone.
+  if (visit.estimated_price != null || require('./completion-pricing').visitPriceDecisionRecorded(visit)) return 'visit_priced';
+  // An invoice completion would reuse (a pre-minted one) or park the visit on: the bill would not be the plan price.
+  if ((await require('./completion-invoice-candidate').completionInvoicesOnVisits(conn, [visit.id])).length) return 'visit_invoiced';
   const { estimateFamilyKeysForAdoption, appointmentMatchesEstimateFamily } = require('../routes/estimate-public');
   const families = estimateFamilyKeysForAdoption(estimate, parseJson(estimate.estimate_data), { serviceMode: 'recurring' });
   if (!families.size || !appointmentMatchesEstimateFamily(await withCatalog(conn, visit), families)) return 'service_mismatch';
@@ -719,6 +724,7 @@ const TAP_UNAVAILABLE = {
   card_changed: 'The card changed or was closed since it loaded. Reload and look again.',
   word_changed: "The caller's word changed since the card loaded. Reload and look again.",
   word_not_current: "The caller's words on the card are not the latest word about this estimate. Reload in 10 minutes, or accept it from the estimate.",
+  catalog_busy: 'The service catalog is being updated. Try again in a minute.',
   accept_failed: 'The accept failed. Try again, or accept it from the estimate.',
 };
 const whyNot = (reason) => TAP_UNAVAILABLE[reason] || REASONS[reason] || TAP_UNAVAILABLE.accept_failed;
@@ -816,11 +822,11 @@ function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdat
   const Manual = require('./estimate-manual-acceptance');
   const pin = Manual.bookedVisitsPinOf([visit]);
   return async (trx, { estimate }) => {
-    // The global lock order: property-preferences advisory, then customer-comms (the accept holds both already: they
-    // are reentrant), then the customers row, then the call's triage lock (admin-triage.js: the customer row before the
-    // call lock). The converter takes property-preferences again later in this transaction, so the row must not come
-    // before it. Under the triage lock no sweep rewrites or closes the card, and no other action settles it, until
-    // this accept commits or rolls back.
+    // Lock order inside the accept (which holds customer-comms already): property-preferences advisory before the
+    // customers row (the converter takes it later in this transaction, and row-then-advisory deadlocks against merges
+    // and address saves), then the call's triage lock (admin-triage.js: the customer row before the call lock). Under
+    // the triage lock no sweep rewrites or closes the card, and no other action settles it, until this accept commits
+    // or rolls back.
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
     await require('../utils/customer-comms-lock').lockCustomerComms(trx, customerId);
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
@@ -844,8 +850,17 @@ function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdat
     if (wordKeyOf(heardFields(heard.yes, { noYes: heard.noYes })) !== word.key) throw stop('word_changed');
     // A send that started since the check: which estimates are open is known only once it settles.
     if (await estimateBeingSent(trx, customerId, new Date())) throw stop('estimate_being_sent');
-    // The locked visit passes the evaluation's own visit checks again (family, property, price, add-ons, series and
-    // assessment flags), not only the pin.
+    // The catalog SHARE lock before any scheduled_services row lock (scheduling/catalog-lock.js): the converter takes
+    // it for a capacity-certified conversion after this step, and catalog migrations lock services first and then
+    // update visits, so taking the visit row first is an ABBA cycle. Bounded wait; a busy catalog refuses.
+    try {
+      await require('./scheduling/catalog-lock').lockCatalogIdentity(trx);
+    } catch (err) {
+      if (err.phoneYesRefusal) throw err;
+      throw stop('catalog_busy');
+    }
+    // The locked visit passes the evaluation's own visit checks again (family, property, price and discounts, invoice,
+    // add-ons, series and assessment flags), not only the pin.
     const row = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first();
     if (!row || Manual.bookedVisitsPinOf([row]) !== pin || await visitProblem(trx, row, estimate, new Date())) throw stop('changed_since_check');
     // The call still booked exactly this one visit: the only live one, and the only one on the calendar.
@@ -873,20 +888,25 @@ function priceSeriesStep({ customerId, visit, seen }) {
     // The series: the visit as a recurring parent linked to the estimate on a pest cadence catalog row, its next visits
     // on the same row, and no other visit linked to the estimate.
     const { PEST_CADENCE_CATALOG_KEYS } = require('./estimate-converter');
+    const { MONEY_FIELDS, visitPriceDecisionRecorded } = require('./completion-pricing');
     const parent = await trx('scheduled_services as s')
       .join('services as c', 'c.id', 's.service_id')
       .where({ 's.id': visit.id, 's.is_recurring': true, 's.source_estimate_id': estimate.id })
       .whereNull('s.recurring_parent_id').whereNotNull('s.recurring_pattern')
       .whereIn('c.service_key', Object.values(PEST_CADENCE_CATALOG_KEYS))
-      .first('s.id', 's.service_id', 's.estimated_price');
+      .first('s.id', 's.service_id', ...MONEY_FIELDS.map((f) => `s.${f}`));
     if (!parent) throw stop('series_not_booked');
-    const children = await trx('scheduled_services').where({ recurring_parent_id: parent.id }).select('id', 'service_id', 'estimated_price');
+    const children = await trx('scheduled_services').where({ recurring_parent_id: parent.id }).select('id', 'service_id', ...MONEY_FIELDS);
     const series = [parent, ...children];
     const seriesIds = new Set(series.map((r) => String(r.id)));
     const linked = await require('./estimate-manual-acceptance').estimateLinkedVisitsQuery(trx, estimate.id).select('id');
     const sameSeries = linked.length === seriesIds.size && linked.every((r) => seriesIds.has(String(r.id)));
     if (!children.length || !sameSeries || children.some((c) => c.service_id !== parent.service_id)) throw stop('series_not_booked');
-    if (series.some((r) => r.estimated_price != null && cents(r.estimated_price) !== cents(amount))) throw stop('visit_priced');
+    // Another price on any row of the series, or a price decision the bill honors over estimated_price (a primary-line
+    // price, a recorded discount): the visit would not bill the price stamped below.
+    if (series.some((r) => (r.estimated_price != null && cents(r.estimated_price) !== cents(amount)) || visitPriceDecisionRecorded(r))) {
+      throw stop('visit_priced');
+    }
     await trx('scheduled_services').whereIn('id', [...seriesIds]).update({ estimated_price: amount, updated_at: new Date() });
     Object.assign(seen, { seriesIds: [...seriesIds], amount });
   };

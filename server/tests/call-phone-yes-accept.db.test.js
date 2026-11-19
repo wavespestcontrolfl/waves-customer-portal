@@ -283,11 +283,32 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     expect(payloadOf(card)).toMatchObject({ yes_heard: false, auto_reason: 'no_yes_heard' });
   });
 
+  const invoiceOn = async (customerId, visitId, status = 'draft') => {
+    const id = randomUUID();
+    await trx('invoices').insert({
+      id, customer_id: customerId, scheduled_service_id: visitId, status, token: randomUUID(), invoice_number: `TEST-${id.slice(0, 8)}`,
+      subtotal: 99, total: 99, line_items: '[]',
+    });
+    return id;
+  };
+
+  test('a yes on a visit that already has an invoice (a pre-minted one): auto would accept no, visit_invoiced', async () => {
+    const { customerId, visitId, bookingCallId } = await phoneYes();
+    await invoiceOn(customerId, visitId);
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ auto_would_accept: false, auto_reason: 'visit_invoiced', auto_message: REASONS.visit_invoiced });
+  });
+
   test.each([
     ['the visit is already a series', { visitOver: { is_recurring: true, recurring_pattern: 'quarterly' } }, 'visit_not_one_off'],
     ['the visit is at another address', { visitOver: { service_address_line1: '200 Other Road' } }, 'property_mismatch'],
     ['the visit carries a setup fee', { visitOver: { pending_setup_fee: 99 } }, 'setup_fee_stamped'],
     ['the visit carries a price', { visitOver: { estimated_price: 99 } }, 'visit_priced'],
+    // Price decisions the bill honors over estimated_price (completion-pricing.js scheduledLines).
+    ['the visit carries a primary-line price', { visitOver: { primary_line_price: 99 } }, 'visit_priced'],
+    ['the visit carries a recorded line discount', { visitOver: { line_discount_type: 'fixed_amount', line_discount_dollars: 10 } }, 'visit_priced'],
+    ['the visit carries an appointment discount', { visitOver: { discount_type: 'fixed_amount', discount_amount: 10, discount_dollars: 10 } }, 'visit_priced'],
     ['the visit date has passed', { visitOver: { scheduled_date: inDays(-5) } }, 'visit_in_past'],
     ['the customer is already a WaveGuard member', { customerOver: { waveguard_tier: 'Silver' } }, 'existing_plan'],
     ['the estimate is a commercial proposal', { estimateOver: { estimate_data: JSON.stringify(planData({ proposal: { enabled: true } })) } }, 'commercial_estimate'],
@@ -1252,6 +1273,13 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       await trx('estimates').where({ id: draft.id }).update({ status: 'draft' });
       // The visit as read no longer matches the row.
       await expect(run({ visit: { ...ev.visit, window_start: '08:00' } })).rejects.toMatchObject({ phoneYesRefusal: 'changed_since_check' });
+      // A price decision the bill honors, or an invoice, on the visit since the check (read again under its lock).
+      await trx('scheduled_services').where({ id: visitId }).update({ primary_line_price: 99 });
+      await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'changed_since_check' });
+      await trx('scheduled_services').where({ id: visitId }).update({ primary_line_price: null });
+      const invoiceId = await invoiceOn(customerId, visitId);
+      await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'changed_since_check' });
+      await trx('invoices').where({ id: invoiceId }).del();
       // Another estimate was opened.
       const second = await estimate(customerId, { sent_at: new Date() });
       await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'more_than_one_estimate' });
@@ -1267,7 +1295,7 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBe(est.id);
     });
 
-    test('the price step refuses a price it cannot resolve and a series the converter did not book', async () => {
+    test('the price step refuses a price it cannot resolve, a series the converter did not book, and a price decision on the series', async () => {
       const { customerId, est, visitId } = await phoneYes();
       const visitRow = await trx('scheduled_services').where({ id: visitId }).first();
       const run = (conversion) => trx.transaction((t) => PhoneYesPrivate.priceSeriesStepForTest({ customerId, visit: visitRow, seen: {} })(t, { estimate: est, conversion }));
@@ -1279,6 +1307,22 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       // The visit is still a one-off: no series was booked from it.
       await expect(run(conversion)).rejects.toMatchObject({ phoneYesRefusal: 'series_not_booked' });
       expect((await trx('scheduled_services').where({ id: visitId }).first()).estimated_price).toBeNull();
+      // A series as the converter books it: the visit as the recurring parent on the pest cadence row, one next visit
+      // on the same row, both linked to the estimate.
+      const catalog = await trx('services').where({ service_key: 'pest_general_quarterly' }).first('id');
+      const series = { is_recurring: true, recurring_pattern: 'quarterly', source_estimate_id: est.id, service_id: catalog.id };
+      await trx('scheduled_services').where({ id: visitId }).update(series);
+      const childId = await visit(customerId, null, { ...series, recurring_parent_id: visitId, scheduled_date: inDays(100) });
+      // A price decision the bill honors over estimated_price, on any row of the series, refuses the stamp.
+      await trx('scheduled_services').where({ id: childId }).update({ primary_line_price: 99 });
+      await expect(run(conversion)).rejects.toMatchObject({ phoneYesRefusal: 'visit_priced' });
+      await trx('scheduled_services').where({ id: childId }).update({ primary_line_price: null, discount_type: 'fixed_amount', discount_amount: 10, discount_dollars: 10 });
+      await expect(run(conversion)).rejects.toMatchObject({ phoneYesRefusal: 'visit_priced' });
+      await trx('scheduled_services').where({ id: childId }).update({ discount_type: null, discount_amount: null, discount_dollars: null });
+      // A clean series is stamped at the plan price.
+      await run(conversion);
+      const stamped = await trx('scheduled_services').whereIn('id', [visitId, childId]).select('estimated_price');
+      expect(stamped.map((r) => Number(r.estimated_price))).toEqual([PER_VISIT, PER_VISIT]);
     });
   });
 });

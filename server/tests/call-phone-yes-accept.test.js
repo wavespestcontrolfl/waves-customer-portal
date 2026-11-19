@@ -64,6 +64,20 @@ describe('wiring', () => {
     }
   });
 
+  test('the tap\'s link step takes its locks in order: property-preferences, the customers row, the triage lock, the catalog, then the visit', () => {
+    const service = read('../services/call-phone-yes-accept.js');
+    const step = service.slice(service.indexOf('function linkVisitStep('), service.indexOf('function priceSeriesStep('));
+    const order = [
+      "['property-preferences', String(customerId)]",
+      "trx('customers').where({ id: customerId }).forUpdate()",
+      'await lockTriageCall(trx, bookingCallId);',
+      "require('./scheduling/catalog-lock').lockCatalogIdentity(trx)",
+      "trx('scheduled_services').where({ id: visit.id }).forUpdate()",
+    ].map((needle) => step.indexOf(needle));
+    expect(order.every((at) => at > 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+
   test("the caller's word comes from one module: the cards keep no copy of its rules", () => {
     const service = read('../services/call-phone-yes-accept.js');
     expect(service).toContain("require('./call-phone-yes-word')");

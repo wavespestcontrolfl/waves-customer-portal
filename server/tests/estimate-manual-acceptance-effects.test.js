@@ -87,10 +87,8 @@ function makeWorld({ estimateOverrides = {}, customerOverrides = {}, prefs = [],
     return q;
   });
   database.fn = { now: () => 'NOW' };
-  database.raw = jest.fn((sql, bindings) => {
-    if (/advisory/i.test(String(sql))) {
-      state.locks.push(Array.isArray(bindings) && bindings[0] === 'property-preferences' ? 'advisory:property-preferences' : 'advisory:customer-comms');
-    }
+  database.raw = jest.fn((sql) => {
+    if (/advisory/i.test(String(sql))) state.locks.push('advisory:customer-comms');
     return { rows: [], __raw: String(sql) };
   });
   database.schema = { hasTable: async () => true, hasColumn: async () => true };
@@ -1577,9 +1575,8 @@ describe('lock order: the dry run takes the real run\'s locks, in the real run\'
     await markEstimateManuallyAccepted(base(realWorld, fakeConverter(realWorld), { expected: { effectsKey: Effects.effectsFingerprint(effects) } }));
     expect(dryWorld.state.locks.length).toBeGreaterThan(0);
     expect(dryWorld.state.locks).toEqual(realWorld.state.locks);
-    // The global order: the property-preferences advisory lock, then customer-comms, then the estimate row (the
-    // converter takes property-preferences inside this transaction too, so comms must not come first).
-    expect(dryWorld.state.locks.slice(0, 3)).toEqual(['advisory:property-preferences', 'advisory:customer-comms', 'row:estimates']);
+    // Comms lock first, then the estimate row.
+    expect(dryWorld.state.locks.slice(0, 2)).toEqual(['advisory:customer-comms', 'row:estimates']);
   });
 });
 
