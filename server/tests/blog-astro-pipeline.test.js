@@ -2705,6 +2705,23 @@ describe('publishAstro catch persists an already-opened PR marker (Codex round 3
     }
   });
 
+  test('an editor-made hero on a post made an identification post since parks the run; a hero planned for it goes on (pre-push audit P1 on f7db98c765)', async () => {
+    const unmarked = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+    const publishWith = async (overrides) => {
+      db.mockImplementation(() => chain({ first: jest.fn().mockResolvedValue(validPost(overrides)) }));
+      return AstroPublisher.publishAstro('post-1').then(() => null, (err) => err);
+    };
+    const parked = await publishWith({ post_type: 'diagnostic', featured_image_url: unmarked });
+    expect(parked).toMatchObject({ code: 'BLOG_HERO_MEDIA_FAILED', message: expect.stringMatching(/before this post became an identification post/) });
+    expect(gh.createBranch).not.toHaveBeenCalled(); // parked before any branch
+    // The same bytes, marked as planned for an identification post, pass the hero step.
+    const marked = AstroPublisher._internals.stampIdentificationPlan(unmarked);
+    expect(AstroPublisher._internals.parseImageDataUrl(marked)).toMatchObject({ identificationPlan: true, logoReference: false });
+    expect(String((await publishWith({ post_type: 'diagnostic', featured_image_url: marked }))?.message || '')).not.toMatch(/identification post/);
+    // A post that is not an identification post never needs the marker.
+    expect(String((await publishWith({ featured_image_url: unmarked }))?.message || '')).not.toMatch(/identification post/);
+  });
+
   test('a failure BEFORE PR creation stamps publish_failed with NO marker — provably retryable', async () => {
     // FAQ on a rodent post = a guardrails P0 thrown well before any PR.
     const post = validPost({
@@ -2958,8 +2975,8 @@ describe('parseImageDataUrl (bounded data-URL header parse)', () => {
     const { stampLogoReference } = AstroPublisher._internals;
     const stamped = stampLogoReference('data:image/png;base64,AAAA');
     expect(stamped).toBe('data:image/png;waves-logo=1;base64,AAAA');
-    expect(parseImageDataUrl(stamped)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true, vanWrapReference: false });
-    expect(parseImageDataUrl('data:image/png;base64,AAAA')).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: false, vanWrapReference: false });
+    expect(parseImageDataUrl(stamped)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true, vanWrapReference: false, identificationPlan: false });
+    expect(parseImageDataUrl('data:image/png;base64,AAAA')).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: false, vanWrapReference: false, identificationPlan: false });
     expect(parseImageDataUrl('data:image/png;evil=1;base64,AAAA').logoReference).toBe(false);
     expect(stampLogoReference('https://example.com/x.png')).toBe('https://example.com/x.png');
     expect(parseImageDataUrl('data:image/png,rawdata')).toBeNull();
@@ -2970,12 +2987,15 @@ describe('parseImageDataUrl (bounded data-URL header parse)', () => {
     const { stampLogoReference, stampVanWrapReference } = AstroPublisher._internals;
     const vanStamped = stampVanWrapReference('data:image/png;base64,AAAA');
     expect(vanStamped).toBe('data:image/png;waves-van-wrap=1;base64,AAAA');
-    expect(parseImageDataUrl(vanStamped)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: false, vanWrapReference: true });
+    expect(parseImageDataUrl(vanStamped)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: false, vanWrapReference: true, identificationPlan: false });
     // Both markers stamped, in either order, both survive the parse.
     const both1 = stampVanWrapReference(stampLogoReference('data:image/png;base64,AAAA'));
     const both2 = stampLogoReference(stampVanWrapReference('data:image/png;base64,AAAA'));
-    expect(parseImageDataUrl(both1)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true, vanWrapReference: true });
-    expect(parseImageDataUrl(both2)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true, vanWrapReference: true });
+    expect(parseImageDataUrl(both1)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true, vanWrapReference: true, identificationPlan: false });
+    expect(parseImageDataUrl(both2)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true, vanWrapReference: true, identificationPlan: false });
+    // The identification marker stacks on top of both.
+    const all3 = AstroPublisher._internals.stampIdentificationPlan(both2);
+    expect(parseImageDataUrl(all3)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true, vanWrapReference: true, identificationPlan: true });
     expect(stampVanWrapReference('https://example.com/x.png')).toBe('https://example.com/x.png');
   });
 });

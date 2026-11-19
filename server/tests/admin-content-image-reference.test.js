@@ -19,7 +19,7 @@ jest.mock('../services/content-astro/astro-publisher', () => {
     generatePlannedImage: jest.fn(),
     // Real stamp/parse helpers — only generation is mocked, so the test
     // verifies the ACTUAL data-URL round trip, not a mocked stand-in.
-    _internals: { stampLogoReference: actual._internals.stampLogoReference, stampVanWrapReference: actual._internals.stampVanWrapReference, parseImageDataUrl: actual._internals.parseImageDataUrl },
+    _internals: { stampLogoReference: actual._internals.stampLogoReference, stampVanWrapReference: actual._internals.stampVanWrapReference, stampIdentificationPlan: actual._internals.stampIdentificationPlan, parseImageDataUrl: actual._internals.parseImageDataUrl },
   };
 });
 
@@ -60,6 +60,13 @@ describe('generateFeaturedImage: reference markers follow the hero flags', () =>
     mockHero({ logoReference: true, vanWrapReference: true });
     const url = await generateFeaturedImage({ title: 'T', slug: 's' });
     expect(AstroPublisher._internals.parseImageDataUrl(url)).toMatchObject({ logoReference: true, vanWrapReference: true });
+  });
+
+  test('a hero planned for an identification post carries the identification marker; any other hero does not', async () => {
+    mockHero({ logoReference: true, plan: { ...basePlan, identification: true } });
+    expect(AstroPublisher._internals.parseImageDataUrl(await generateFeaturedImage({ title: 'T', slug: 's', identification: true }))).toMatchObject({ identificationPlan: true, logoReference: true });
+    mockHero({ plan: { ...basePlan, identification: false } });
+    expect(AstroPublisher._internals.parseImageDataUrl(await generateFeaturedImage({ title: 'T', slug: 's' }))).toMatchObject({ identificationPlan: false });
   });
 
   test('identification is passed to the planner, so an identification post never gets a people-free hero', async () => {

@@ -237,6 +237,9 @@ async function generateFeaturedImage({ title, topic, keyword, slug, identificati
     let dataUrl = hero.dataUrl;
     if (hero.logoReference) dataUrl = AstroPublisher._internals.stampLogoReference(dataUrl);
     if (hero.vanWrapReference) dataUrl = AstroPublisher._internals.stampVanWrapReference(dataUrl);
+    // Publish refuses an unmarked editor hero on an identification post: the
+    // marker says this one was planned under that post type's rules.
+    if (hero.plan && hero.plan.identification === true) dataUrl = AstroPublisher._internals.stampIdentificationPlan(dataUrl);
     return dataUrl;
   } catch (err) {
     // Match the legacy throw contract — single-line Error the

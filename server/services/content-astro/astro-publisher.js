@@ -844,6 +844,10 @@ function imageExtFromSource(url) {
 // legitimate wrap text/branding gets reported as forbidden).
 const LOGO_REFERENCE_PARAM = 'waves-logo=1';
 const VAN_WRAP_REFERENCE_PARAM = 'waves-van-wrap=1';
+// An editor-made hero planned for an identification post (planFor's
+// identification flag) carries this marker; publish refuses an unmarked one
+// on an identification post (owner 2026-11-19 picture rules).
+const IDENTIFICATION_PLAN_PARAM = 'waves-id-plan=1';
 function stampDataUrlParam(dataUrl, param) {
   const s = String(dataUrl || '');
   const m = s.match(/^data:(image\/[a-z0-9.+-]+)((?:;[a-z0-9-]+=[a-z0-9-]+)*);base64,/i);
@@ -855,6 +859,9 @@ function stampLogoReference(dataUrl) {
 }
 function stampVanWrapReference(dataUrl) {
   return stampDataUrlParam(dataUrl, VAN_WRAP_REFERENCE_PARAM);
+}
+function stampIdentificationPlan(dataUrl) {
+  return stampDataUrlParam(dataUrl, IDENTIFICATION_PLAN_PARAM);
 }
 function parseImageDataUrl(url) {
   const s = String(url || '');
@@ -870,6 +877,7 @@ function parseImageDataUrl(url) {
     base64: s.slice(comma + 1),
     logoReference: params.includes(LOGO_REFERENCE_PARAM),
     vanWrapReference: params.includes(VAN_WRAP_REFERENCE_PARAM),
+    identificationPlan: params.includes(IDENTIFICATION_PLAN_PARAM),
   };
 }
 
@@ -1357,6 +1365,16 @@ async function publishAstro(postId, { humanApproved = false } = {}) {
     //     prior merged publish; reference it as-is, don't re-fetch.
     let heroImage = null;
     if (post.featured_image_url && !isCommittedHeroUrl(post.featured_image_url)) {
+      // A hero made in the editor was planned for the post type the row had
+      // then. A post made an identification post since must not ship a hero
+      // planned without that type's picture limits (no people-free hero, no
+      // pest close-up): the run parks, and the editor regenerates the hero.
+      const stored = parseImageDataUrl(post.featured_image_url);
+      if (stored && isIdentificationPost(post) && !stored.identificationPlan) {
+        const e = new Error('featured image was generated before this post became an identification post: regenerate it in the editor, then publish again');
+        e.code = 'BLOG_HERO_MEDIA_FAILED';
+        throw e;
+      }
       // Tagged BLOG_HERO_MEDIA_FAILED so the scheduler parks it with the
       // other deterministic publish errors: a curated featured_image_url
       // that 404s or isn't an image fails identically every attempt, and
@@ -5602,6 +5620,7 @@ module.exports = {
     parseImageDataUrl,
     stampLogoReference,
     stampVanWrapReference,
+    stampIdentificationPlan,
     defaultHeroForCategory,
     describeHeroFailure,
     inferServiceAreas,
