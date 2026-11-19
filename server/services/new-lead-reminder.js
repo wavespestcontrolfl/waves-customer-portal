@@ -5,16 +5,19 @@
  * In production (12 weeks to 2026-11-19) 82 of 437 leads never got a call, text, email or estimate from a person, and
  * none of them booked. A form lead gets one bell and one push; 44 of 129 form bells in 30 days were never opened.
  *
- * An OPEN new-lead bell (category `new_lead`, naming a lead) that no person has reached gets ONE more phone push 15
- * minutes after the bell's latest event. No gate: the push goes to admin users only. (A second step, a ring to the
- * owner's cell at 60 minutes behind its own gate, is a separate change.)
- * At most one push per bell row: it is stamped first, in one statement fenced on the row being open and unchanged since
- * it was read (metadata.newLeadRealertAt). Stamp first, then send: a send that fails after its stamp is lost, never
- * repeated.
+ * An OPEN new-lead bell (category `new_lead`, naming a lead) that no person has reached gets:
+ *   - ONE more phone push 15 minutes after the bell's latest event. No gate: the push goes to admin users only.
+ *   - ONE ring to the owner's cell 60 minutes after it (GATE_NEW_LEAD_CELL_RING, dark: it spends Twilio minutes). It is
+ *     the press-1 bridge of lead-call-reply-ring.js (press 1 and the lead's phone rings from their home line). A ring
+ *     nobody answers raises no bell: the original bell stays open.
+ * At most one push and one ring per bell row: each is stamped first, in one statement fenced on the row being open and
+ * unchanged since it was read (metadata.newLeadRealertAt, metadata.newLeadRingAt). Stamp first, then send: a send that
+ * fails after its stamp is lost, never repeated. The one exception is a ring held back because another call to the
+ * lead's phone is going, which releases its stamp so a later sweep can try (that call may be a person reaching them).
  *
  * - The clock counts only Monday to Saturday, 8:00 AM to 6:00 PM America/New_York (callback-cards staffedDeadline;
- *   holidays are not skipped). Nothing is sent outside those hours. A push more than 2 business hours past its due time
- *   is dropped, so a restart cannot burst old bells.
+ *   holidays are not skipped). Nothing is sent outside those hours. A send more than 2 business hours (push) or 3
+ *   (ring) past its due time is dropped, so a restart or a gate flip cannot burst old bells.
  * - Bells of the last 48 hours only (a 6 PM Saturday bell is due Monday morning).
  * - "Reached" (reachedLeads) is judged on the lead, whatever the close gates of admin-alert-relevance.js say, and NOT
  *   only after the bell: a "New call lead" bell is written minutes after a call a person already answered. Reached =
@@ -33,7 +36,7 @@
  *   scan across sweeps, so old reached bells cannot hide a due one.
  * - Sends nothing to a lead or a customer. Never throws into the sweep.
  *
- * Runs inside the alert-relevance sweep (every 10 minutes), after its closes. Read-only apart from its stamp.
+ * Runs inside the alert-relevance sweep (every 10 minutes), after its closes. Read-only apart from its two stamps.
  */
 
 const db = require('../models/db');
@@ -44,8 +47,11 @@ const { isOpenLeadRow } = require('./lead-statuses');
 
 const LABEL = 'new-lead-reminder';
 const PUSH_STAMP = 'newLeadRealertAt';
+const RING_STAMP = 'newLeadRingAt';
 const PUSH_AFTER_MINUTES = 15;
 const PUSH_LATE_MINUTES = 120;
+const RING_AFTER_MINUTES = 60;
+const RING_LATE_MINUTES = 180;
 const WINDOW_MS = 48 * 60 * 60 * 1000;
 const WITNESS_SLACK_MS = 5 * 60 * 1000;
 // A bell written within this long of the lead's creation was raised with the lead itself (the intake bell, or the call
@@ -65,6 +71,16 @@ const ESTIMATE_STATUSES = new Set(['estimate_sent', 'estimate_viewed']);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const relevance = () => require('./admin-alert-relevance');
+const safeError = (err) => require('./notification-service').safeErrorSummary(err);
+
+// The ring's gate, read at call time. A missing reader (a test that mocks feature-gates) or a throw reads as off.
+function ringLive() {
+  try {
+    return require('../config/feature-gates').newLeadCellRingLive?.() === true;
+  } catch {
+    return false;
+  }
+}
 
 // Monday to Saturday, 8:00 AM up to 6:00 PM Eastern, read in America/New_York for the instant given.
 function inBusinessHours(date) {
@@ -82,13 +98,14 @@ function dueNow(askedAt, now, afterMinutes, lateMinutes) {
   return due.getTime() <= now.getTime() && businessDueAt(due, lateMinutes).getTime() >= now.getTime();
 }
 
-// The open, unpushed new-lead bell rows: the shared read (lead-reminder-sweep.js) with this reminder's category.
+// The open new-lead bell rows with a send still to make: the shared read (lead-reminder-sweep.js) with this reminder's
+// category and stamps (the ring's too while its gate is on).
 const KIND = { category: 'new_lead', stamp: PUSH_STAMP };
-const candidateQuery = (since, cursor, pageSize) => sweep.__private.candidateQuery(KIND, since, cursor, pageSize);
+const candidateQuery = (since, cursor, pageSize, withRing = false) => sweep.__private.candidateQuery({ ...KIND, stamps: withRing ? [PUSH_STAMP, RING_STAMP] : [PUSH_STAMP] }, since, cursor, pageSize);
 
-// The rows with a push due now: { row, meta, askedAt, leadId }. A row that names no lead (a tracking-line
+// The rows with a send due now: { row, meta, askedAt, leadId, push, ring }. A row that names no lead (a tracking-line
 // text) cannot be judged, so it sends nothing.
-function dueItems(rows, now) {
+function dueItems(rows, now, withRing = false) {
   const { bellEventAt, parseMeta, refsFromRow } = relevance();
   const floor = now.getTime() - WINDOW_MS;
   const items = [];
@@ -97,7 +114,9 @@ function dueItems(rows, now) {
     const askedAt = bellEventAt(row);
     const leadId = refsFromRow(row).leadId;
     if (!leadId || !askedAt || askedAt.getTime() <= floor) continue;
-    if (!meta[PUSH_STAMP] && dueNow(askedAt, now, PUSH_AFTER_MINUTES, PUSH_LATE_MINUTES)) items.push({ row, meta, askedAt, leadId });
+    const push = !meta[PUSH_STAMP] && dueNow(askedAt, now, PUSH_AFTER_MINUTES, PUSH_LATE_MINUTES);
+    const ring = withRing && !meta[RING_STAMP] && dueNow(askedAt, now, RING_AFTER_MINUTES, RING_LATE_MINUTES);
+    if (push || ring) items.push({ row, meta, askedAt, leadId, push, ring });
   }
   return items;
 }
@@ -205,19 +224,74 @@ async function estimatesSent(items) {
     && ((lead.customer_id && String(e.customer_id) === String(lead.customer_id)) || (lead.estimate_id && String(e.id) === String(lead.estimate_id))));
 }
 
+// Takes a ring's stamp back, so a later sweep can try again.
+async function releaseRingStamp(item) {
+  await db('notifications').where({ id: item.row.id, recipient_type: 'admin' })
+    .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - ?", [RING_STAMP]) });
+}
+
+// The press-1 ring to the owner's cell. Returns the ring's result, or null when there is nobody to ring about. Never throws.
+async function ringOwner(item, now) {
+  try {
+    const { placeRing, newLeadRingBlocker, NEW_LEAD_CELL_RING_SOURCE } = require('./lead-call-reply-ring');
+    const customer = item.customerId ? await db('customers').where({ id: item.customerId }).whereNull('deleted_at').first() : null;
+    const digits = String(item.lead.phone || customer?.phone || '').replace(/\D/g, '').slice(-10);
+    if (!customer || digits.length !== 10 || !(await sweep.__private.rowStillOpen(item.row.id, LABEL))) return null;
+    return await placeRing({
+      customer: { ...customer, first_name: customer.first_name || item.lead.first_name, last_name: customer.last_name || item.lead.last_name },
+      fromPhone: `+1${digits}`,
+      now,
+      blocker: newLeadRingBlocker,
+      ring: {
+        source: NEW_LEAD_CELL_RING_SOURCE,
+        type: 'new_lead_cell_ring',
+        leadId: item.leadId,
+        eventLabel: 'New lead, nobody has reached them yet',
+        metadata: { notificationId: item.row.id },
+      },
+    });
+  } catch (err) {
+    logger.warn(`[${LABEL}] ring failed for notification ${item.row.id}: ${safeError(err)}`);
+    return null;
+  }
+}
+
+// One item's sends, in order: the push, then (once) the ring. `total.rang` is the sweep's ring count so far.
+async function deliver(_kind, item, now, total, ready) {
+  const out = { sent: 0, rang: 0, sends: [] };
+  if (item.push && await sweep.__private.stampOnce(PUSH_STAMP, item, now)) {
+    out.sent = 1;
+    out.sends.push(sweep.__private.sendPush(item, LABEL, ready));
+  }
+  if (item.ring && total.rang < 1 && await sweep.__private.stampOnce(RING_STAMP, item, now)) {
+    const result = await ringOwner(item, now);
+    if (result?.rang) out.rang = 1;
+    // A call to the lead's phone is going: a person may be reaching them. The next sweep judges it again.
+    else if (result?.reason === 'call_in_progress') await releaseRingStamp(item);
+  }
+  return out;
+}
+
 /**
- * One pass. Returns { skipped, reason } or { skipped: false, due, pushed, sends }; `sends` are the push sends, never
- * awaited here (tests await them). Throws only when a page cannot be read; the sweep catches it.
+ * One pass. Returns { skipped, reason } or { skipped: false, due, pushed, rang, sends }; `sends` are the push sends,
+ * never awaited here (tests await them). At most one ring per pass: the next sweep takes the next one. Throws only when
+ * a page cannot be read; the sweep catches it.
  */
 async function runNewLeadReminder({ now = new Date(), pageSize, clock } = {}) {
   if (!inBusinessHours(now)) return { skipped: true, reason: 'quiet_hours' };
-  const out = await sweep.runSweep({ ...KIND, label: LABEL, windowMs: WINDOW_MS, dueItems, waiting: reachedLeads, inHours: inBusinessHours }, { now, pageSize, clock });
-  if (out.sent) logger.info(`[${LABEL}] queued ${out.sent} push(es): a new lead nobody has reached`);
-  return { skipped: false, due: out.due, pushed: out.sent, sends: out.sends };
+  const withRing = ringLive();
+  const kind = {
+    ...KIND, stamps: withRing ? [PUSH_STAMP, RING_STAMP] : [PUSH_STAMP], label: LABEL, windowMs: WINDOW_MS, deliver,
+    dueItems: (rows, at) => dueItems(rows, at, withRing), waiting: reachedLeads, inHours: inBusinessHours,
+  };
+  const out = await sweep.runSweep(kind, { now, pageSize, clock });
+  if (out.sent || out.rang) logger.info(`[${LABEL}] ${out.sent} push(es), ${out.rang} ring(s): a new lead nobody has reached`);
+  return { skipped: false, due: out.due, pushed: out.sent, rang: out.rang, sends: out.sends };
 }
 
 module.exports = {
   runNewLeadReminder,
   PUSH_STAMP,
-  __private: { inBusinessHours, businessDueAt, dueNow, dueItems, reachedLeads, inquiryOf, emailReceivedAt, candidateQuery, ESTIMATE_STATUSES },
+  RING_STAMP,
+  __private: { inBusinessHours, businessDueAt, dueNow, dueItems, reachedLeads, inquiryOf, emailReceivedAt, releaseRingStamp, ringOwner, candidateQuery, ESTIMATE_STATUSES },
 };

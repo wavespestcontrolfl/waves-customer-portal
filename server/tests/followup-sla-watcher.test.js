@@ -556,7 +556,7 @@ test('only a call a person placed counts: an automated outbound call (collection
   mockDb({ activity: { call_log: true } });
   listOpenCommitments.mockResolvedValue([row('a')]);
   expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
-  expect(argsOf('call_log', 'whereIn')).toContainEqual(['source', ['admin-click', 'admin-callback', 'tech-click', 'lead-call-reply-ring']]);
+  expect(argsOf('call_log', 'whereIn')).toContainEqual(['source', ['admin-click', 'admin-callback', 'tech-click', 'lead-call-reply-ring', 'new-lead-cell-ring']]);
   mockDb({ activity: { call_log: { source: 'collections_voice' } } });
   expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
   mockDb({ activity: { call_log: { is_voicemail: 'true' } } });

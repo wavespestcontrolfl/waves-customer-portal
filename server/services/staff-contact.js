@@ -23,7 +23,9 @@ const operatorReply = (record) => record.operator_sent === true || STAFF_APPROVE
 // 'lead-call-reply-ring' is the same press-1 bridge, started by a lead's
 // CALL reply (services/lead-call-reply-ring.js): a person dials only after
 // pressing 1, so a connected one is a staff call back like a click.
-const STAFF_CALL_SOURCES = ['admin-click', 'admin-callback', 'tech-click', 'lead-call-reply-ring'];
+// 'new-lead-cell-ring' (lead-call-reply-ring.js NEW_LEAD_CELL_RING_SOURCE) is the same bridge, started at 60 minutes
+// for a new lead nobody had reached.
+const STAFF_CALL_SOURCES = ['admin-click', 'admin-callback', 'tech-click', 'lead-call-reply-ring', 'new-lead-cell-ring'];
 // A call back that reached the customer: placed through the staff bridge,
 // and the recording's reviewed extraction heard a live conversation, not
 // voicemail — the bar call-commitments.js sets for a returned callback. The

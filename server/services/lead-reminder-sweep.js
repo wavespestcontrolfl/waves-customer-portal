@@ -25,16 +25,17 @@ const resumeAfter = new Map();
 
 const safeError = (err) => require('./notification-service').safeErrorSummary(err);
 
-// Open, unstamped bell rows of `kind` ({ category, stamp, keyPrefixes? }) whose latest event is after `since`, one keyset
+// Open bell rows of `kind` ({ category, stamp, stamps?, keyPrefixes? }) with a stamp still unwritten (`stamps`, default
+// just `stamp`: a row is a candidate while ANY of them is missing) whose latest event is after `since`, one keyset
 // page after `cursor` ({ createdAt, id }; createdAt as the database's own text, so no microsecond is lost). A refreshed
 // bell keeps its first created_at and carries its latest ring in metadata.rungAt, so either may be recent. With
 // `keyPrefixes`, only rows whose dedupeKey starts with one of them (plain text: no LIKE wildcard in any).
-function candidateQuery({ category, stamp, keyPrefixes = null }, since, cursor, pageSize) {
+function candidateQuery({ category, stamp, stamps = [stamp], keyPrefixes = null }, since, cursor, pageSize) {
   const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
   return excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin', category }))
     .whereNull('done_at')
     .whereRaw("metadata->'retired' IS NULL")
-    .whereRaw(`metadata->>'${stamp}' IS NULL`)
+    .where((q) => { for (const key of stamps) q.orWhereRaw(`metadata->>'${key}' IS NULL`); })
     .where((q) => q.where('created_at', '>', since).orWhereRaw("metadata->>'rungAt' > ?", [since.toISOString()]))
     .modify((q) => {
       if (!keyPrefixes) return;
@@ -46,14 +47,18 @@ function candidateQuery({ category, stamp, keyPrefixes = null }, since, cursor, 
     .select('id', 'title', 'body', 'link', 'metadata', 'created_at', db.raw('created_at::text AS created_at_token'));
 }
 
-// The one stamp: this row, still open and unchanged since it was read. Returns true when it landed.
-async function stampOnce(stamp, { row, meta }, now) {
+// The one stamp: this row, still open and unchanged since it was read. Returns true when it landed; the item's `meta`
+// then carries it, so a second stamp of the same pass is fenced on the row as the first left it.
+async function stampOnce(stamp, item, now) {
+  const { row, meta } = item;
   const landed = await db('notifications')
     .where({ id: row.id, recipient_type: 'admin' })
     .whereNull('done_at')
     .whereRaw('metadata IS NOT DISTINCT FROM ?::jsonb', [JSON.stringify(meta)])
     .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [stamp]: now.toISOString() })]) });
-  return Number(landed) === 1;
+  if (Number(landed) !== 1) return false;
+  item.meta = { ...meta, [stamp]: now.toISOString() };
+  return true;
 }
 
 // Still open just before the push goes. A lookup that fails reads as closed: no push (the bell row stays).
@@ -88,20 +93,28 @@ async function sendPush({ row, customerId }, label, ready = () => true) {
   }
 }
 
+// The default delivery: stamp, then one push. Returns { sent, sends }.
+async function pushOnce(kind, item, now, _total, ready) {
+  if (!(await stampOnce(kind.stamp, item, now))) return { sent: 0, sends: [] };
+  return { sent: 1, sends: [sendPush(item, kind.label, ready)] };
+}
+
 /**
- * One scan for a reminder `kind`: { label, category, stamp, keyPrefixes?, windowMs, dueItems(rows, now),
- * waiting(items), inHours?(date) }. dueItems picks the rows due now; waiting(items) returns those that still wait on a
- * person and throws when a read fails (no verdict: nothing is sent on that page). `inHours(date)` is the reminder's own
- * hours rule, asked with a fresh clock (`clock`, default the real time) before each item is stamped and again just before
- * each push goes: the parent sweep's `now` can be old by the time its closes and the reads above have finished. When the
- * hours have closed the sweep stops with the rest unstamped, for the next open sweep while they are still inside their
- * late window. Returns { due, sent, sends }; `sends` are the
- * pushes, never awaited here. Throws only when a page cannot be read.
+ * One scan for a reminder `kind`: { label, category, stamp, stamps?, keyPrefixes?, windowMs, dueItems(rows, now),
+ * waiting(items), inHours?(date), deliver?(kind, item, now, total, ready) }. dueItems picks the rows due now;
+ * waiting(items) returns those that still wait on a person and throws when a read fails (no verdict: nothing is sent on
+ * that page). deliver sends for one waiting item and returns { sent, rang, sends } (default: stamp, then one push); `total`
+ * is the running count, so a reminder can cap a kind of send per sweep. `inHours(date)` is the reminder's own hours rule,
+ * asked with a fresh clock (`clock`, default the real time) before each item and passed on as `ready()` to be asked again
+ * just before each push goes: the parent sweep's `now` can be old by the time its closes and the reads above have finished.
+ * When the hours have closed the sweep stops with the rest unstamped, for the next open sweep while they are still inside
+ * their late window. Returns { due, sent, rang, sends }; `sends` are the pushes, never awaited here. Throws only when a
+ * page cannot be read.
  */
 async function runSweep(kind, { now, pageSize = PAGE_SIZE, clock = () => new Date() }) {
   const { label, stamp } = kind;
   const since = new Date(now.getTime() - kind.windowMs);
-  const total = { due: 0, sent: 0 };
+  const total = { due: 0, sent: 0, rang: 0 };
   const ready = () => !kind.inHours || kind.inHours(clock());
   const sends = [];
   let cursor = resumeAfter.get(stamp) || null;
@@ -125,11 +138,12 @@ async function runSweep(kind, { now, pageSize = PAGE_SIZE, clock = () => new Dat
         return { ...total, sends };
       }
       try {
-        if (!(await stampOnce(stamp, item, now))) continue;
-        total.sent += 1;
-        sends.push(sendPush(item, label, ready));
+        const out = await (kind.deliver || pushOnce)(kind, item, now, total, ready);
+        total.sent += out.sent || 0;
+        total.rang += out.rang || 0;
+        sends.push(...(out.sends || []));
       } catch (err) {
-        logger.warn(`[${label}] notification ${item.row.id} not stamped: ${safeError(err)}`);
+        logger.warn(`[${label}] notification ${item.row.id} not sent: ${safeError(err)}`);
       }
     }
     if (rows.length < pageSize) break;
@@ -141,4 +155,4 @@ async function runSweep(kind, { now, pageSize = PAGE_SIZE, clock = () => new Dat
   return { ...total, sends };
 }
 
-module.exports = { runSweep, TRIGGER_KEY, __private: { candidateQuery, stampOnce, rowStillOpen, sendPush, resumeAfter, PAGE_SIZE, MAX_PAGES } };
+module.exports = { runSweep, TRIGGER_KEY, __private: { candidateQuery, stampOnce, rowStillOpen, sendPush, pushOnce, resumeAfter, PAGE_SIZE, MAX_PAGES } };

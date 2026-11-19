@@ -609,16 +609,23 @@ and unchanged since it was read, so a row sends at most one banner. The stamp is
 still counts from the bell's own event. The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead
 still waits for a call") or by unsetting the gate. It sends nothing to a lead.
 
-New-lead re-alert (owner 2026-11-19, "do phase 1 first"; no gate: the push goes to admin users only): in the 12 weeks to
+New-lead re-alert (owner 2026-11-19, "do phase 1 first"; the push has no gate, the ring has `GATE_NEW_LEAD_CELL_RING`, dark): in the 12 weeks to
 2026-11-19, 82 of 437 leads never got a call, text, email or estimate from a person and none booked. A form lead gets one bell
 and one push; 44 of 129 form bells in 30 days were never opened. The alert-relevance sweep (every 10 minutes, after its
 closes) also runs `server/services/new-lead-reminder.js`. An open `new_lead` bell that names a lead and that no person has
 reached gets ONE more phone push 15 minutes after its latest event (`lead_call_reminder`, `pushOnly`, admin users only, the
-row's own title, body and link). The clock counts only Monday to Saturday, 8:00 AM to 6:00 PM ET (`staffedDeadline`; holidays
+row's own title, body and link) and, with the gate on, ONE ring to the owner's cell 60 minutes after it. The ring is the
+press-1 bridge of `lead-call-reply-ring.js` (`placeRing`, source `new-lead-cell-ring`): it rings the cell from the
+lead-alert line, says "New lead, nobody has reached them yet. Calling <first name>. Press 1 to connect.", and press 1 rings
+the lead from their home line. A ring nobody answers raises no bell: the original bell stays open. Guards: the lead's phone
+must be a valid US number (an international number or one with an extension is skipped), one ring per lead phone per 24 h
+counting a CALL-reply ring and a new-lead ring (both ring paths check both, under the phone lock), none while another call
+to that phone started in the last 10 minutes (the ring stamp is released and a later sweep judges again), at most one ring
+per sweep (a ring whose create timed out counts as that ring). The clock counts only Monday to Saturday, 8:00 AM to 6:00 PM ET (`staffedDeadline`; holidays
 are not skipped), and nothing is sent outside those hours: they are judged again with a fresh clock before each stamp and before
-each push goes, and a sweep that runs past 6 PM stops and leaves the rest unstamped. A push more than 2 business hours past due is dropped. Bells of
-the last 48 hours only. The push is stamped first, fenced on the row being open and unchanged (`metadata.newLeadRealertAt`),
-so a row gets at most one. The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead still waits for a
+each push goes, and a sweep that runs past 6 PM stops and leaves the rest unstamped. A send more than 2 business hours (push) or 3 (ring) past due is dropped. Bells of
+the last 48 hours only. Each send is stamped first, fenced on the row being open and unchanged (`metadata.newLeadRealertAt`,
+`metadata.newLeadRingAt`), so a row gets at most one push and one ring. The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead still waits for a
 call"). "Reached" is judged on the lead, whatever the close gates say, and not only after the bell (a "New call lead" bell
 is written minutes after a call a person already answered): a deleted lead, a lead outside the shared open-lead predicate
 (`lead-statuses.js`: status new, contacted, estimate_sent or estimate_viewed, and not converted, so spam, cancelled, won, lost and the

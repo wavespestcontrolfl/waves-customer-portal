@@ -25,7 +25,7 @@ describe('staff-contact is the one definition both callers use', () => {
   });
 
   test('the exports keep the reviewed contract', () => {
-    expect(staff.STAFF_CALL_SOURCES).toEqual(['admin-click', 'admin-callback', 'tech-click', 'lead-call-reply-ring']);
+    expect(staff.STAFF_CALL_SOURCES).toEqual(['admin-click', 'admin-callback', 'tech-click', 'lead-call-reply-ring', 'new-lead-cell-ring']);
     expect(staff.STAFF_APPROVED_SMS_TYPES).toEqual(['ai_approved', 'ai_revised']);
     // A bare 'manual' type is never a person's text: automations reuse it.
     expect(staff.operatorReply({ message_type: 'manual', operator_sent: false })).toBe(false);
@@ -51,7 +51,7 @@ describe('staff-contact is the one definition both callers use', () => {
     for (const sql of [staff.operatorReplySql('os'), staff.smsDeliveredSql('os'), staff.personCallBackSql('ev')]) expect(sql).not.toMatch(/\?/);
     expect(staff.operatorReplySql('os')).toContain("os.message_type IN ('ai_approved', 'ai_revised')");
     expect(staff.smsDeliveredSql('os')).toContain("os.status = 'delivered'");
-    expect(staff.personCallBackSql('ev')).toContain("ev.source IN ('admin-click', 'admin-callback', 'tech-click', 'lead-call-reply-ring')");
+    expect(staff.personCallBackSql('ev')).toContain("ev.source IN ('admin-click', 'admin-callback', 'tech-click', 'lead-call-reply-ring', 'new-lead-cell-ring')");
     expect(staff.personCallBackSql()).toContain('call_log.v2_extraction_status');
   });
 

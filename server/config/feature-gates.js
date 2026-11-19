@@ -187,6 +187,7 @@
  *   GATE_IN_PERSON_CARD=true (Book at the Table, owner 2026-11-02: when staff book a visit from an estimate at the customer's table, the booking window offers "Customer saves it here, now". After the booking saves, a Booked sheet lets staff hand the phone to the customer (the secure card page), show a QR code of it, text the link, or skip. POST /:id/card-request/in-person runs the normal card ask with the first-time-customers-only rule lifted for this trigger only; every other card rule stays. Card or wallet only, nothing is charged, no new texts, the booking stays if no card is saved. Read at call time via inPersonCardLive(); ships DARK; off = today's booking window, byte-identical, and the route answers 404)
  *   GATE_TAP_SAVE_CARD=true (owner ruling 2026-11-02, "Book at the Table", PR 2: a technician saves a customer's card for Auto Pay with Tap to Pay on iPhone and NO charge. On, an admin can POST /api/stripe/terminal/save-card-handoff with a texted secure-card token, the consent version the app showed and agreed=true; that creates a card_present SetupIntent for the request's Stripe customer, mints the 60-second wavespay://save-card handoff, and /validate-save-card-handoff and /complete-setup finish it through the same completion tail as the /secure page (card saved, consent recorded under admin_tap_to_pay, Auto Pay enrolled). A save-card terminal token can never reach /payment-intent or /apply-surcharge. Read via isEnabled('tapSaveCard') at boot, strict 'true', dark by default; off = the mint route answers 404 and nothing changes today. Costs no card charge and no extra service.)
  *   GATE_LEAD_CALL_REMINDER=true (owner 2026-11-05, "remind": a lead who replies CALL rings the owner's cell with press 1; a ring nobody answers raises one "Missed call request" bell, and a night call request that needs a person raises a "call them back" bell. Both reach only the portal bell, and nothing prompts the owner again. On: the alert-relevance sweep (every 10 minutes, after its closes) sends ONE phone banner for such a bell still open after one business hour (8 AM to 8 PM ET) when nobody has reached the lead since (services/lead-call-reminder.js, trigger lead_call_reminder, pushOnly, admin users only, 8 AM to 8 PM only). The bell row is only stamped metadata.leadCallReminderAt, never rewritten. Sends nothing to a lead. Free. Off = no reads, no banner. Kill: unset, no redeploy.)
+ *   GATE_NEW_LEAD_CELL_RING=true (owner 2026-11-19, "do phase 1 first": 82 of 437 leads in 12 weeks never got a call, text, email or estimate from a person, and none booked. An open new-lead bell that no person has reached gets ONE more phone push at 15 business minutes (live, no gate, admin users only) and, with this gate on, ONE ring to the owner's cell at 60 business minutes (Monday to Saturday, 8 AM to 6 PM ET). The ring is the press-1 bridge of lead-call-reply-ring.js: it rings the owner's cell from the lead-alert line, and press 1 connects the lead; a ring nobody answers raises no extra bell. At most one ring per bell row, one ring per lead phone per 24 h, none while another call to that phone is going, at most one ring per 10-minute sweep. The sweep that does this is services/new-lead-reminder.js inside the alert-relevance sweep. Sends nothing to a lead or a customer. Spends Twilio minutes when on (about 1 to 2 cents per ring, about one a day at most): owner flip only. Read at call time via newLeadCellRingLive(), strict 'true', dark by default; off = no ring and the push still goes. Kill: unset, no redeploy.)
  *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
@@ -1955,6 +1956,10 @@ const gates = {
   // GATE_LEAD_CALL_REMINDER: read at CALL time via leadCallReminderLive(); this entry is for logGateStatus, so the boot log
   // shows the flip.
   leadCallReminder: process.env.GATE_LEAD_CALL_REMINDER === 'true',
+
+  // GATE_NEW_LEAD_CELL_RING: read at CALL time via newLeadCellRingLive(); this entry is for logGateStatus, so the boot log
+  // shows the flip. Spends Twilio minutes (one press-1 ring to the owner's cell per unreached new lead).
+  newLeadCellRing: process.env.GATE_NEW_LEAD_CELL_RING === 'true',
 
   // Current Customer Quote Text — a current or past customer who sends the
   // website quote form gets the lead text's CALL or TEXT offer (at most one a
@@ -9384,6 +9389,16 @@ function leadCallReminderLive() {
 }
 // GATE_LEAD_CALL_REMINDER reader, on its own line so gate PRs never conflict.
 module.exports.leadCallReminderLive = leadCallReminderLive;
+
+// GATE_NEW_LEAD_CELL_RING read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
+// Owner 2026-11-19 "do phase 1 first": an open new-lead bell nobody has reached for 60 business minutes (Monday to
+// Saturday, 8 AM to 6 PM ET) rings the owner's cell once, press 1 to call the lead (services/new-lead-reminder.js). It
+// spends Twilio minutes, so the owner flips it. Off = no ring; the 15-minute push has no gate.
+function newLeadCellRingLive() {
+  return process.env.GATE_NEW_LEAD_CELL_RING === 'true';
+}
+// GATE_NEW_LEAD_CELL_RING reader, on its own line so gate PRs never conflict.
+module.exports.newLeadCellRingLive = newLeadCellRingLive;
 
 // GATE_DAY_REPLAN read at CALL time (so a flip needs no redeploy): exactly 'shadow' or 'true', anything else
 // (unset is the kill) is 'off'. Owner 2026-11-03. PR 1: 'true' behaves as 'shadow' (services/day-replan/index.js).

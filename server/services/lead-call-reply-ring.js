@@ -25,6 +25,9 @@ const { parseCallTextReply } = require('./sms-service-intent');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const SOURCE = 'lead-call-reply-ring';
+// The 60-minute ring for a new lead nobody has reached (new-lead-reminder.js). Its own source, so its status callbacks
+// raise no "Missed call request" bell, and staff-contact.js counts a pressed 1 as a person's call back.
+const NEW_LEAD_CELL_RING_SOURCE = 'new-lead-cell-ring';
 const ADAM_CELL = process.env.ADAM_PHONE || '+19415993489';
 const RING_TIMEOUT_SECONDS = 20;
 const LEAD_TEXT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -127,8 +130,12 @@ async function ringBlocker({ customer, digits, now }, conn) {
     .first('id');
   if (priorRing) return 'rang_today';
 
-  // The web-form auto-bridge (lead-webhook.js) stores Adam's cell in
-  // to_phone and the lead in metadata.leadPhone, so both are read.
+  return callInProgressBlocker({ digits, now }, conn);
+}
+
+// Another call to this phone started in the last 10 minutes. The web-form auto-bridge (lead-webhook.js) stores Adam's
+// cell in to_phone and the lead in metadata.leadPhone, so both are read.
+async function callInProgressBlocker({ digits, now }, conn) {
   const recentCall = await conn('call_log')
     .where({ direction: 'outbound' })
     .where('created_at', '>=', new Date(now.getTime() - RECENT_CALL_WINDOW_MS))
@@ -137,9 +144,19 @@ async function ringBlocker({ customer, digits, now }, conn) {
         .orWhereRaw("RIGHT(regexp_replace(COALESCE(metadata->>'leadPhone', ''), '[^0-9]', '', 'g'), 10) = ?", [digits]);
     })
     .first('id');
-  if (recentCall) return 'call_in_progress';
+  return recentCall ? 'call_in_progress' : null;
+}
 
-  return null;
+// The new-lead cell ring's guards (new-lead-reminder.js): one ring per phone per 24 h counting this ring AND a CALL-reply
+// ring, and none while another call to the phone is going. No lead-text rule: the lead never texted us CALL.
+async function newLeadRingBlocker({ digits, now }, conn) {
+  const priorRing = await conn('call_log')
+    .whereIn('source', [SOURCE, NEW_LEAD_CELL_RING_SOURCE]).where({ direction: 'outbound' })
+    .where('created_at', '>=', new Date(now.getTime() - ONE_RING_WINDOW_MS))
+    .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
+    .first('id');
+  if (priorRing) return 'rang_today';
+  return callInProgressBlocker({ digits, now }, conn);
 }
 
 async function newestLeadId(customerId, conn) {
@@ -222,8 +239,12 @@ async function ringForCallReply({ customer, body, fromPhone, smsLogId = null, no
  * slot (lead-call-text-followup.js, at its time). `blocker` runs under the
  * per-phone lock and returns a reason to skip, or null. Throws only on a
  * database error; the caller logs it.
+ *
+ * `ring` ({ source, type, leadId, eventLabel, metadata }) makes it a ring of
+ * another kind (the new-lead cell ring): its own call_log source and spoken
+ * label, no time-ask cancel, and a failed ring raises no bell.
  */
-async function placeRing({ customer, fromPhone, smsLogId = null, now = new Date(), blocker }) {
+async function placeRing({ customer, fromPhone, smsLogId = null, now = new Date(), blocker, ring = null }) {
   const digits = phoneDigits(fromPhone);
 
   // The per-phone lock covers only the checks and the claim: the ring's
@@ -236,13 +257,14 @@ async function placeRing({ customer, fromPhone, smsLogId = null, now = new Date(
   const firstName = String(customer.first_name || '').trim() || 'The lead';
   const name = displayName(customer);
   const from = homeLineCallerId(customer);
+  const kind = ringKind(ring, firstName);
   const claim = await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${SOURCE}:${digits}`]);
     const blocked = await blocker({ customer, digits, now }, trx);
     if (blocked) return { blocker: blocked };
-    const leadId = await newestLeadId(customer.id, trx);
-    const metadata = { type: 'lead_call_reply_ring', leadId, leadName: name, leadFirstName: firstName, leadPhone: fromPhone, smsLogId };
-    const callLogId = await insertBridgeRow({ to: fromPhone, from, customer, source: SOURCE, metadata }, trx);
+    const leadId = kind.leadId || await newestLeadId(customer.id, trx);
+    const metadata = { type: kind.type, leadId, leadName: name, leadFirstName: firstName, leadPhone: fromPhone, smsLogId, ...kind.metadata };
+    const callLogId = await insertBridgeRow({ to: fromPhone, from, customer, source: kind.source, metadata }, trx);
     return { leadId, metadata, callLogId };
   });
   if (claim.blocker) {
@@ -257,20 +279,15 @@ async function placeRing({ customer, fromPhone, smsLogId = null, now = new Date(
       from,
       bridgeFrom: TWILIO_NUMBERS.internalAlertCallerId(),
       customer,
-      source: SOURCE,
+      source: kind.source,
       metadata: claim.metadata,
       leadName: firstName,
-      eventLabel: `${firstName} asked for a call back`,
+      eventLabel: kind.eventLabel,
       ringTimeoutSeconds: RING_TIMEOUT_SECONDS,
       reservedCallLogId: claim.callLogId,
     });
     logger.info(`[lead-call-reply-ring] rang for customer ${customer.id} (call_log ${claim.callLogId})`);
-    // The ring answers the request: an open night time ask for this phone
-    // (lead-call-text-followup.js) is no longer needed.
-    await db('lead_callback_requests').where({ state: 'asked', kind: 'call_request' })
-      .whereRaw("RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ?", [digits])
-      .update({ state: 'cancelled', updated_at: new Date() })
-      .catch((err) => logger.warn(`[lead-call-reply-ring] time-ask close skipped for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`));
+    await kind.afterRing(digits, customer);
     return { rang: true, reason: 'rang', callLogId: claim.callLogId };
   } catch (err) {
     // A definite failure never rings: the claimed row closes as failed (it
@@ -278,6 +295,7 @@ async function placeRing({ customer, fromPhone, smsLogId = null, now = new Date(
     // create may be ringing: its callbacks decide, and a check after 3
     // minutes settles it as a miss if it never became a call.
     logger.error(`[lead-call-reply-ring] ring failed for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`);
+    if (ring) return quietRingFailure(err, claim.callLogId);
     // Twilio's 429 (20429) refuses the request outright: no call exists.
     const refused = err?.status === 429 || Number(err?.code) === 20429;
     if (err?.bridgeAmbiguous && !refused) {
@@ -294,7 +312,40 @@ async function placeRing({ customer, fromPhone, smsLogId = null, now = new Date(
   }
 }
 
+// The ring answers the request: an open night time ask for this phone (lead-call-text-followup.js) is no longer needed.
+async function cancelTimeAsk(digits, customer) {
+  await db('lead_callback_requests').where({ state: 'asked', kind: 'call_request' })
+    .whereRaw("RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ?", [digits])
+    .update({ state: 'cancelled', updated_at: new Date() })
+    .catch((err) => logger.warn(`[lead-call-reply-ring] time-ask close skipped for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`));
+}
+
+// What a ring is called in its call_log row and on the staff leg: the CALL reply's own, unless `ring` says otherwise.
+function ringKind(ring, firstName) {
+  return {
+    source: ring?.source || SOURCE,
+    type: ring?.type || 'lead_call_reply_ring',
+    leadId: ring?.leadId || null,
+    eventLabel: ring?.eventLabel || `${firstName} asked for a call back`,
+    metadata: ring?.metadata || {},
+    // A ring of another kind answers no CALL request.
+    afterRing: ring ? async () => {} : cancelTimeAsk,
+  };
+}
+
 const TERMINAL_CALL_STATUSES = new Set(['completed', 'busy', 'failed', 'no-answer', 'canceled']);
+
+// A failed ring of another kind (see placeRing's `ring`): a definite failure closes its claimed row as failed (the row
+// still holds the 24 h limit); an uncertain one is left to its callbacks. No bell either way.
+async function quietRingFailure(err, callLogId) {
+  const refused = err?.status === 429 || Number(err?.code) === 20429;
+  if (err?.bridgeAmbiguous && !refused) return { rang: false, reason: 'ring_uncertain' };
+  await db('call_log').where({ id: callLogId }).whereNull('twilio_call_sid')
+    .whereNotIn('status', [...TERMINAL_CALL_STATUSES])
+    .update({ status: 'failed', updated_at: new Date() })
+    .catch((closeErr) => logger.warn(`[lead-call-reply-ring] failed-ring close skipped for ${callLogId} (${String(closeErr?.code || closeErr?.name || 'error')})`));
+  return { rang: false, reason: 'ring_failed' };
+}
 
 /**
  * Called by /call-status after it saves a terminal status. A ring row that
@@ -359,6 +410,8 @@ async function settleUnstartedRing(callLogId) {
 module.exports = {
   ringForCallReply,
   placeRing,
+  newLeadRingBlocker,
+  NEW_LEAD_CELL_RING_SOURCE,
   settleUnstartedRing,
   leadTextBlocker,
   customerBlocker,

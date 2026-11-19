@@ -1,7 +1,7 @@
 // The new-lead re-alert (owner 2026-11-19, "do phase 1 first"): an open new-lead bell no person has reached gets ONE more
-// phone push 15 business minutes after its latest event. Business time is Monday to Saturday, 8 AM to 6 PM ET. The
-// database is a stub: the rows, the leads, the answered calls, the stamp results and the open check are set per test.
-// Synthetic names, phones and ids only.
+// phone push 15 business minutes after its latest event, and, behind GATE_NEW_LEAD_CELL_RING, ONE ring to the owner's cell
+// at 60. Business time is Monday to Saturday, 8 AM to 6 PM ET. The database is a stub: the rows, the leads, the answered
+// calls, the stamp results and the open check are set per test. Synthetic names, phones and ids only.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const mockState = {};
@@ -70,10 +70,17 @@ jest.mock('../services/call-commitments', () => ({
   whereEstimateCustomerOwnership: jest.fn((q) => q),
 }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: false, push: { sent: 1 } })) }));
+const mockPlaceRing = jest.fn(async () => ({ rang: true, reason: 'rang', callLogId: 'log-1' }));
+jest.mock('../services/lead-call-reply-ring', () => ({
+  placeRing: (...args) => mockPlaceRing(...args),
+  newLeadRingBlocker: 'the-blocker',
+  NEW_LEAD_CELL_RING_SOURCE: 'new-lead-cell-ring',
+}));
+
 const { triggerNotification } = require('../services/notification-triggers');
 const { loadContactBundles } = require('../services/admin-alert-contact-witnesses');
 const sweepShared = require('../services/lead-reminder-sweep');
-const { runNewLeadReminder: runReminder, PUSH_STAMP, __private: { inBusinessHours, businessDueAt } } = require('../services/new-lead-reminder');
+const { runNewLeadReminder: runReminder, PUSH_STAMP, RING_STAMP, __private: { inBusinessHours, businessDueAt } } = require('../services/new-lead-reminder');
 // The dispatch-time clock is the sweep's `now` unless a test sets one: the real clock is not part of these cases.
 const runNewLeadReminder = (opts = {}) => runReminder({ clock: () => opts.now, ...opts });
 
@@ -101,16 +108,19 @@ const run = async (now) => {
   await Promise.all(result.sends || []);
   return result;
 };
-// 15 minutes after a 10:00 AM Monday bell: the push is due.
+// 15 minutes after a 10:00 AM Monday bell: the push is due; the ring is not.
 const PUSH_NOW = est('09', '10:20');
+const RING_NOW = est('09', '11:10');
 
 beforeEach(() => {
   jest.clearAllMocks();
+  delete process.env.GATE_NEW_LEAD_CELL_RING;
   resetState();
   sweepShared.__private.resumeAfter.clear();
   Object.assign(mockState, { rows: [row('n-1')], leads: [lead()], customer: { id: CUST, first_name: 'Pat', last_name: 'Sample', phone: '+19415550100' } });
   Object.assign(mockBundles, { byId: {}, fail: false });
 });
+afterEach(() => { delete process.env.GATE_NEW_LEAD_CELL_RING; });
 
 describe('the clock: Monday to Saturday, 8 AM to 6 PM ET', () => {
   test.each([
@@ -192,7 +202,7 @@ describe('business hours are asked again at dispatch', () => {
 describe('the 15-minute push (no gate)', () => {
   test('an open bell nobody reached is stamped once and pushes once, with its own words, to admin users only', async () => {
     const result = await run(PUSH_NOW);
-    expect(result).toMatchObject({ skipped: false, due: 1, pushed: 1 });
+    expect(result).toMatchObject({ skipped: false, due: 1, pushed: 1, rang: 0 });
     expect(updates()).toHaveLength(1);
     expect(JSON.parse(updates()[0].update.metadata.bindings[0])).toEqual({ [PUSH_STAMP]: PUSH_NOW.toISOString() });
     expect(pushes()).toHaveLength(1);
@@ -201,6 +211,7 @@ describe('the 15-minute push (no gate)', () => {
       alertRowId: 'n-1', alertTitle: 'New lead', alertBody: 'Pat Sample via the website - Wants pest control', alertLink: `/admin/leads?lead=${LEAD}`, customerId: CUST,
     });
     expect(opts).toMatchObject({ pushOnly: true, adminOnly: true, bellAuthorized: true });
+    expect(mockPlaceRing).not.toHaveBeenCalled();
   });
 
   test('witnesses are read from before the lead came in, not only after the bell', async () => {
@@ -254,10 +265,12 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     ['a person answered an inbound call from the lead', { inAt: est('09', '10:05') }],
     ['a person emailed the lead', { replyAt: est('09', '10:05') }],
     ['a visit was booked', { visitAt: est('09', '10:05') }],
-  ])('%s: no push', async (_label, bundle) => {
+  ])('%s: no push, no ring', async (_label, bundle) => {
+    process.env.GATE_NEW_LEAD_CELL_RING = 'true';
     mockBundles.byId = { 'n-1': bundle };
-    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
+    expect(await run(RING_NOW)).toMatchObject({ due: 1, pushed: 0, rang: 0 });
     expect(triggerNotification).not.toHaveBeenCalled();
+    expect(mockPlaceRing).not.toHaveBeenCalled();
     expect(updates()).toEqual([]);
   });
 
@@ -421,8 +434,119 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
   });
 });
 
+describe('the 60-minute ring (GATE_NEW_LEAD_CELL_RING, dark)', () => {
+  test.each([[undefined], [''], ['1'], ['on'], ['TRUE'], ['shadow'], [' true']])('GATE_NEW_LEAD_CELL_RING = %j: no ring, no ring stamp; the push still goes', async (value) => {
+    if (value !== undefined) process.env.GATE_NEW_LEAD_CELL_RING = value;
+    expect(require('../config/feature-gates').newLeadCellRingLive()).toBe(false);
+    expect(await run(RING_NOW)).toMatchObject({ pushed: 1, rang: 0 });
+    expect(mockPlaceRing).not.toHaveBeenCalled();
+    expect(updates()).toHaveLength(1);
+  });
+
+  test('exactly "true" is live', () => {
+    process.env.GATE_NEW_LEAD_CELL_RING = 'true';
+    expect(require('../config/feature-gates').newLeadCellRingLive()).toBe(true);
+  });
+
+  test('on: a bell unreached after 60 business minutes rings the owner\'s cell once, stamped first, through the press-1 bridge', async () => {
+    process.env.GATE_NEW_LEAD_CELL_RING = 'true';
+    expect(await run(RING_NOW)).toMatchObject({ due: 1, pushed: 1, rang: 1 });
+    expect(updates()).toHaveLength(2);
+    expect(JSON.parse(updates()[1].update.metadata.bindings[0])).toEqual({ [RING_STAMP]: RING_NOW.toISOString() });
+    expect(mockPlaceRing).toHaveBeenCalledTimes(1);
+    const [arg] = mockPlaceRing.mock.calls[0];
+    expect(arg).toMatchObject({
+      fromPhone: '+19415550100',
+      blocker: 'the-blocker',
+      customer: { id: CUST, first_name: 'Pat' },
+      ring: { source: 'new-lead-cell-ring', type: 'new_lead_cell_ring', leadId: LEAD, eventLabel: 'New lead, nobody has reached them yet', metadata: { notificationId: 'n-1' } },
+    });
+  });
+
+  test('a row already pushed gets only the ring; a row already rung gets nothing more', async () => {
+    process.env.GATE_NEW_LEAD_CELL_RING = 'true';
+    mockState.rows = [row('n-1', { metadata: { [PUSH_STAMP]: est('09', '10:16').toISOString() } })];
+    expect(await run(RING_NOW)).toMatchObject({ pushed: 0, rang: 1 });
+    mockState.rows = [row('n-1', { metadata: { [PUSH_STAMP]: est('09', '10:16').toISOString(), [RING_STAMP]: est('09', '11:01').toISOString() } })];
+    mockPlaceRing.mockClear();
+    expect(await run(RING_NOW)).toMatchObject({ due: 0, rang: 0 });
+    expect(mockPlaceRing).not.toHaveBeenCalled();
+  });
+
+  test('before 60 minutes there is no ring', async () => {
+    process.env.GATE_NEW_LEAD_CELL_RING = 'true';
+    expect(await run(est('09', '10:50'))).toMatchObject({ pushed: 1, rang: 0 });
+    expect(mockPlaceRing).not.toHaveBeenCalled();
+  });
+
+  test('a ring more than 3 business hours past due is dropped (a gate flip cannot ring for old bells)', async () => {
+    process.env.GATE_NEW_LEAD_CELL_RING = 'true';
+    mockState.rows = [row('n-1', { metadata: { [PUSH_STAMP]: est('09', '10:16').toISOString() } })];
+    expect(await run(est('09', '14:10'))).toMatchObject({ due: 0, rang: 0 });
+    expect(await run(est('09', '14:00'))).toMatchObject({ due: 1, rang: 1 });
+  });
+
+  test('at most one ring per sweep, whatever is due', async () => {
+    process.env.GATE_NEW_LEAD_CELL_RING = 'true';
+    const second = '55555555-5555-4555-8555-555555555555';
+    mockState.rows = [row('n-1'), { ...row('n-2'), link: `/admin/leads?lead=${second}`, metadata: { triggerKey: 'new_lead', payload: { leadId: second } } }];
+    mockState.leads = [lead(), lead({ id: second, phone: '+19415550101' })];
+    expect(await run(RING_NOW)).toMatchObject({ due: 2, pushed: 2, rang: 1 });
+    expect(mockPlaceRing).toHaveBeenCalledTimes(1);
+  });
+
+  test('a reached lead is never rung', async () => {
+    process.env.GATE_NEW_LEAD_CELL_RING = 'true';
+    mockBundles.byId = { 'n-1': { backAt: est('09', '10:40') } };
+    expect(await run(RING_NOW)).toMatchObject({ rang: 0, pushed: 0 });
+    expect(mockPlaceRing).not.toHaveBeenCalled();
+  });
+
+  test('a call to the lead\'s phone is going: the ring stamp is released so a later sweep judges again', async () => {
+    process.env.GATE_NEW_LEAD_CELL_RING = 'true';
+    mockPlaceRing.mockResolvedValueOnce({ rang: false, reason: 'call_in_progress' });
+    expect(await run(RING_NOW)).toMatchObject({ rang: 0 });
+    const release = updates()[updates().length - 1].update.metadata;
+    expect(release.sql).toContain("- ?");
+    expect(release.bindings).toEqual([RING_STAMP]);
+  });
+
+  test.each([['rang_today'], ['ring_failed'], ['ring_uncertain']])('a ring held back or failed (%s) keeps its stamp: never repeated', async (reason) => {
+    process.env.GATE_NEW_LEAD_CELL_RING = 'true';
+    mockPlaceRing.mockResolvedValueOnce({ rang: false, reason });
+    await run(RING_NOW);
+    expect(updates()).toHaveLength(2);
+    expect(updates()[1].update.metadata.sql).not.toContain('- ?');
+  });
+
+  test('a ring stamp the fence refused rings nothing', async () => {
+    process.env.GATE_NEW_LEAD_CELL_RING = 'true';
+    mockState.stampResults = [1, 0];
+    expect(await run(RING_NOW)).toMatchObject({ pushed: 1, rang: 0 });
+    expect(mockPlaceRing).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['no customer on the lead', () => { mockState.leads = [lead({ customer_id: null })]; }],
+    ['customer row gone', () => { mockState.customer = null; }],
+    ['a phone that is not 10 digits', () => { mockState.leads = [lead({ phone: '555-0100' })]; mockState.customer = { id: CUST, first_name: 'Pat', phone: '555' }; }],
+    ['the row closed meanwhile', () => { mockState.open = { 'n-1': { done_at: new Date() } }; }],
+  ])('%s: no ring', async (_label, arrange) => {
+    process.env.GATE_NEW_LEAD_CELL_RING = 'true';
+    arrange();
+    await run(RING_NOW);
+    expect(mockPlaceRing).not.toHaveBeenCalled();
+  });
+
+  test('a ring error never throws into the sweep', async () => {
+    process.env.GATE_NEW_LEAD_CELL_RING = 'true';
+    mockPlaceRing.mockRejectedValueOnce(new Error('twilio down'));
+    await expect(run(RING_NOW)).resolves.toMatchObject({ pushed: 1, rang: 0 });
+  });
+});
+
 describe('what it never does', () => {
-  test('the push goes to admin users only: no customer or lead text, email or call is sent here', () => {
+  test('the ring and the push go to admin users and the owner\'s cell only: no customer or lead text, email or call is sent here', () => {
     const source = require('fs').readFileSync(require.resolve('../services/new-lead-reminder'), 'utf8');
     expect(source).not.toMatch(/sendSMS|sendEmail|twilio\.messages|sendCustomerMessage/);
     expect(require('fs').readFileSync(require.resolve('../services/lead-reminder-sweep'), 'utf8')).toMatch(/adminOnly: true/);

@@ -40,7 +40,8 @@ function mockQuery(table) {
     if (table === 'sms_log') return mockState.leadText;
     if (table === 'leads') return mockState.lead;
     if (table === 'call_log') {
-      const bySource = q.filters.some(([f]) => f && f.source === 'lead-call-reply-ring');
+      const bySource = q.filters.some(([f]) => f && f.source === 'lead-call-reply-ring')
+        || q.filters.some(([f, v]) => f === 'source' && Array.isArray(v));
       const bySid = q.filters.some(([f]) => f && f.twilio_call_sid);
       if (bySid) return mockState.ringRow;
       const byId = q.filters.some(([f]) => f && typeof f === 'object' && f.id);
@@ -50,6 +51,7 @@ function mockQuery(table) {
     return null;
   };
   q.whereNotIn = (...args) => { q.filters.push(args); return q; };
+  q.whereIn = (...args) => { q.filters.push(args); return q; };
   q.update = async (patch) => { mockState.updates.push({ table, patch, filters: q.filters }); return mockState.claimed; };
   return q;
 }
@@ -81,7 +83,7 @@ jest.mock('../config/twilio-numbers', () => ({ internalAlertCallerId: () => '+19
 const mockBell = jest.fn(async () => ({ id: 'notif-1', deduped: false }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...args) => mockBell(...args) }));
 
-const { ringForCallReply, noteRingEnded, inRingHours, _test } = require('../services/lead-call-reply-ring');
+const { ringForCallReply, placeRing, newLeadRingBlocker, noteRingEnded, inRingHours, _test } = require('../services/lead-call-reply-ring');
 
 const LEAD = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample', pipeline_stage: 'new_lead' };
 const PHONE = '+19415550100';
@@ -330,5 +332,67 @@ describe('Call on the lead call-back bells', () => {
     const { _shared: { raiseLeadBell } } = require('../services/lead-call-text-followup');
     await raiseLeadBell({ customer: { id: LEAD_CUSTOMER, first_name: 'Pat', last_name: 'Sample' }, leadId: 'lead-1', requestId: 'req-1', why: 'Asked for a call after hours and never sent a time.' }, [0]);
     expect(mockBell.mock.calls[0][3].metadata.buttons).toEqual(CALL);
+  });
+});
+
+// The new-lead cell ring (services/new-lead-reminder.js, GATE_NEW_LEAD_CELL_RING): the same press-1 bridge with its own
+// source and spoken label, no CALL-request side effects, and no bell when it fails.
+describe('a ring of another kind (the new-lead cell ring)', () => {
+  const kind = { source: 'new-lead-cell-ring', type: 'new_lead_cell_ring', leadId: 'lead-9', eventLabel: 'New lead, nobody has reached them yet', metadata: { notificationId: 'n-1' } };
+  const placeNewLeadRing = () => placeRing({ customer: LEAD, fromPhone: PHONE, now: AFTERNOON, blocker: newLeadRingBlocker, ring: kind });
+
+  test('rings the cell under its own source and label, and closes no night time ask', async () => {
+    const out = await placeNewLeadRing();
+    expect(out).toMatchObject({ rang: true, callLogId: 'log-1' });
+    // The same per-phone lock as the CALL-reply ring, so the two never ring one phone together.
+    expect(mockState.locks).toEqual([['lead-call-reply-ring:9415550100']]);
+    expect(mockInsertRow.mock.calls[0][0]).toMatchObject({ to: PHONE, source: 'new-lead-cell-ring' });
+    expect(mockBridge.mock.calls[0][0]).toMatchObject({
+      bridgePhone: '+19415993489',
+      source: 'new-lead-cell-ring',
+      leadName: 'Pat',
+      eventLabel: 'New lead, nobody has reached them yet',
+      ringTimeoutSeconds: 20,
+      metadata: { type: 'new_lead_cell_ring', leadId: 'lead-9', leadName: 'Pat Sample', leadPhone: PHONE, notificationId: 'n-1' },
+    });
+    expect(mockState.updates).toEqual([]);
+    expect(mockBell).not.toHaveBeenCalled();
+  });
+
+  test('its guards: one ring per phone per 24 h counting a CALL-reply ring too, and none while a call is going', async () => {
+    mockState.priorRing = { id: 'old' };
+    expect(await placeNewLeadRing()).toEqual({ rang: false, reason: 'rang_today' });
+    mockState.priorRing = null;
+    mockState.recentCall = { id: 'live' };
+    expect(await placeNewLeadRing()).toEqual({ rang: false, reason: 'call_in_progress' });
+    expect(mockBridge).not.toHaveBeenCalled();
+    mockState.recentCall = null;
+    await expect(newLeadRingBlocker({ digits: '9415550100', now: AFTERNOON }, (table) => mockQuery(table))).resolves.toBeNull();
+  });
+
+  test('needs no lead text: the lead never texted CALL', async () => {
+    mockState.leadText = null;
+    expect(await placeNewLeadRing()).toMatchObject({ rang: true });
+  });
+
+  test('a failed ring closes its row as failed and raises NO bell (the original bell stays open)', async () => {
+    mockBridge.mockRejectedValueOnce(Object.assign(new Error('rejected'), { bridgeAmbiguous: false }));
+    expect(await placeNewLeadRing()).toEqual({ rang: false, reason: 'ring_failed' });
+    expect(mockState.updates).toHaveLength(1);
+    expect(mockState.updates[0]).toEqual(expect.objectContaining({ table: 'call_log', patch: expect.objectContaining({ status: 'failed' }) }));
+    expect(mockBell).not.toHaveBeenCalled();
+  });
+
+  test('an uncertain ring is left to its callbacks, with no timer and no bell', async () => {
+    mockBridge.mockRejectedValueOnce(Object.assign(new Error('timeout'), { bridgeAmbiguous: true }));
+    expect(await placeNewLeadRing()).toEqual({ rang: false, reason: 'ring_uncertain' });
+    expect(mockState.updates).toEqual([]);
+    expect(mockBell).not.toHaveBeenCalled();
+  });
+
+  test('a status callback for its source raises no "Missed call request" bell', async () => {
+    mockState.ringRow = null; // noteRingEnded looks for source lead-call-reply-ring only
+    await expect(noteRingEnded({ callSid: 'CA-x', callStatus: 'no-answer' })).resolves.toBe(false);
+    expect(mockBell).not.toHaveBeenCalled();
   });
 });
