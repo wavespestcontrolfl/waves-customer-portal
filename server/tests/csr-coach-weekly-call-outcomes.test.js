@@ -25,3 +25,18 @@ test('the leaderboard does not load them', async () => {
   await CSRCoach.getLeaderboard();
   expect(mockLoad).not.toHaveBeenCalled();
 });
+
+// The Friday tip reads its scored-call recommendation over the same seven completed days as its call-outcomes line.
+test('a recommendation asked for a period reads scores for exactly those ET dates', async () => {
+  const db = require('../models/db');
+  const { completedWeekDates } = jest.requireActual('../services/csr/weekly-call-outcomes');
+  db.mockClear();
+  await CSRCoach.generateWeeklyTeamRecommendation({ between: completedWeekDates(new Date('2026-11-20T13:00:00Z')) });
+  const scoreReads = db.mock.calls.map(([table], i) => [table, db.mock.results[i].value]).filter(([table]) => table === 'csr_call_scores');
+  expect(scoreReads).toHaveLength(1);
+  const [narrow] = scoreReads[0][1].where.mock.calls[0];
+  const seen = [];
+  const q = { where: (...args) => { seen.push(args); return q; } };
+  narrow(q);
+  expect(seen).toEqual([['call_date', '>=', '2026-11-13'], ['call_date', '<', '2026-11-20']]);
+});

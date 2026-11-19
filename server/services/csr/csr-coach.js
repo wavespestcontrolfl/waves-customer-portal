@@ -905,9 +905,13 @@ Return JSON:
   /**
    * Generate the weekly team recommendation — single most impactful script change.
    */
-  async generateWeeklyTeamRecommendation() {
-    const allScores = await db('csr_call_scores')
-      .where('call_date', '>', etDateString(addETDays(new Date(), -7)));
+  // `between`: ET calendar dates { fromDate, toDate }, fromDate inclusive and toDate exclusive. The Friday tip passes the
+  // seven completed days its call-outcomes line reads (weekly-call-outcomes.js completedWeekDates), so the tip covers
+  // one period. Without it, scores dated after the day a week ago (the CSR page's on-demand tip).
+  async generateWeeklyTeamRecommendation({ between = null } = {}) {
+    const allScores = await db('csr_call_scores').where((q) => (between
+      ? q.where('call_date', '>=', between.fromDate).where('call_date', '<', between.toDate)
+      : q.where('call_date', '>', etDateString(addETDays(new Date(), -7)))));
 
     if (allScores.length < 5) {
       return { recommendation: 'Not enough data yet — need at least 5 scored calls.', dataPoint: '', estimatedImpact: '' };

@@ -1,6 +1,8 @@
 jest.mock('../models/db', () => jest.fn());
 
-const { loadWeeklyCallOutcomes, formatWeeklyCallOutcomes, NO_PROSPECT_OUTCOMES } = require('../services/csr/weekly-call-outcomes');
+const {
+  loadWeeklyCallOutcomes, formatWeeklyCallOutcomes, completedWeekDates, NO_PROSPECT_OUTCOMES, STAFF_NEW_LEAD_TAGS,
+} = require('../services/csr/weekly-call-outcomes');
 const { callStartedAtSql } = require('../services/sms-pending-conversations');
 
 // Chainable knex stand-in: records every builder call, `first` resolves the aggregate row.
@@ -29,17 +31,33 @@ describe('loadWeeklyCallOutcomes', () => {
     expect(out.from.toISOString()).toBe('2026-11-14T05:00:00.000Z');
     const wheres = conn.calls.filter(([m]) => m === 'whereRaw').map(([, sql]) => sql);
     expect(wheres).toContain("cl.direction LIKE 'inbound%'");
-    expect(wheres).toContain("cl.ai_extraction_enriched->>'call_nature' = 'new_lead'");
-    // Only a valid extraction classes a call: a payload that failed validation can still carry call_nature.
-    expect(conn.calls).toContainEqual(['where', 'cl.v2_extraction_status', 'valid']);
     // The AI's 'booked' and the staff tag 'new_lead_booked' are both booked on the call.
     const selects = conn.calls.filter(([m]) => m === 'select').flatMap(([, ...cols]) => cols).filter((c) => c && c.sql);
     expect(selects.map((c) => c.sql)).toContain('bool_or(cl.disposition IS NOT NULL) AS known');
     expect(selects.filter((c) => c.bindings).map((c) => [c.sql, c.bindings])).toEqual([
       ['bool_or(cl.disposition IN (?, ?)) AS booked', ['booked', 'new_lead_booked']],
-      ["bool_or(cl.disposition = ? OR cl.ai_extraction_enriched #> '{service_request,quote_requested}' = 'true'::jsonb"
-        + " OR cl.ai_extraction_enriched #> '{service_request,quote_promised}' = 'true'::jsonb) AS estimate", ['estimate_send']],
+      // Only a valid extraction's quote flags count: a payload that failed validation can still carry them.
+      ["bool_or(cl.disposition = ? OR (cl.v2_extraction_status = 'valid' AND (cl.ai_extraction_enriched #> '{service_request,quote_requested}' = 'true'::jsonb"
+        + " OR cl.ai_extraction_enriched #> '{service_request,quote_promised}' = 'true'::jsonb))) AS estimate", ['estimate_send']],
     ]);
+  });
+
+  // Which calls are new-customer calls: one condition, so its SQL and bindings are read together.
+  const qualification = (conn) => conn.calls.find(([m, sql]) => m === 'whereRaw' && sql.startsWith('(cl.disposition IN ('));
+
+  // Staff can tag a call whose extraction is missing, failed validation, or classed it otherwise: a week with a
+  // staff-confirmed booking must not read zero callers.
+  test('a staff new-lead tag qualifies a call on its own; otherwise a valid new_lead extraction does', async () => {
+    const conn = fakeConn({ total: 1, known: 1, booked: 1, estimates: 0 });
+    await loadWeeklyCallOutcomes({ now: new Date('2026-11-20T13:00:00Z'), conn });
+    expect(STAFF_NEW_LEAD_TAGS).toEqual(['new_lead_booked', 'new_lead_no_booking']);
+    const [, sql, bindings] = qualification(conn);
+    expect(sql).toBe("(cl.disposition IN (?, ?) OR (cl.v2_extraction_status = 'valid'"
+      + " AND cl.ai_extraction_enriched->>'call_nature' = 'new_lead'"
+      + ` AND (cl.disposition IS NULL OR cl.disposition NOT IN (${NO_PROSPECT_OUTCOMES.map(() => '?').join(', ')}))))`);
+    expect(bindings).toEqual([...STAFF_NEW_LEAD_TAGS, ...NO_PROSPECT_OUTCOMES]);
+    // No separate extraction filter remains to drop a staff-tagged call.
+    expect(conn.calls).not.toContainEqual(['where', 'cl.v2_extraction_status', 'valid']);
   });
 
   // Two prospects calling from one office line are two callers when the extraction says the number is not theirs.
@@ -49,7 +67,8 @@ describe('loadWeeklyCallOutcomes', () => {
     const [callerSelect] = conn.calls.filter(([m]) => m === 'select').flatMap(([, ...cols]) => cols)
       .filter((c) => c && typeof c.sql === 'string' && c.sql.endsWith(' AS caller'));
     const callerSql = callerSelect.sql.slice(0, -' AS caller'.length);
-    expect(callerSql.startsWith("CASE WHEN cl.ai_extraction_enriched #> '{caller,caller_id_disclaimed}' = 'true'::jsonb THEN cl.id::text ELSE COALESCE(")).toBe(true);
+    // Only a valid extraction's disclaimer counts (a staff-tagged call may have none).
+    expect(callerSql.startsWith("CASE WHEN cl.v2_extraction_status = 'valid' AND cl.ai_extraction_enriched #> '{caller,caller_id_disclaimed}' = 'true'::jsonb THEN cl.id::text ELSE COALESCE(")).toBe(true);
     // The group key is the same expression, so a disclaimed call never joins another call's group.
     expect(conn.calls).toContainEqual(['groupByRaw', callerSql]);
   });
@@ -91,12 +110,17 @@ describe('loadWeeklyCallOutcomes', () => {
     expect(NO_PROSPECT_OUTCOMES).toEqual(expect.arrayContaining(['existing_customer_routed', 'existing_service_q', 'existing_complaint', 'spam_discarded', 'wrong_number_closed']));
     // A real new-lead conversation can end 'no_action_needed' (an out-of-area caller): that caller did not book.
     expect(NO_PROSPECT_OUTCOMES).not.toContain('no_action_needed');
-    const grouped = conn.calls.find(([m, arg]) => m === 'where' && typeof arg === 'function');
-    const seen = [];
-    const recorder = new Proxy({}, { get: (_t, m) => (...args) => { seen.push([m, ...args]); return recorder; } });
-    grouped[1](recorder);
-    // No outcome yet still counts; any outcome but these counts.
-    expect(seen).toEqual([['whereNull', 'cl.disposition'], ['orWhereNotIn', 'cl.disposition', NO_PROSPECT_OUTCOMES]]);
+    // No outcome yet still counts; any outcome but these counts (a staff new-lead tag is never one of them).
+    const [, sql, bindings] = qualification(conn);
+    expect(sql).toContain(`(cl.disposition IS NULL OR cl.disposition NOT IN (${NO_PROSPECT_OUTCOMES.map(() => '?').join(', ')}))`);
+    expect(bindings.slice(STAFF_NEW_LEAD_TAGS.length)).toEqual(NO_PROSPECT_OUTCOMES);
+    expect(NO_PROSPECT_OUTCOMES.some((o) => STAFF_NEW_LEAD_TAGS.includes(o))).toBe(false);
+  });
+
+  test('completedWeekDates: the seven completed ET dates before today, today exclusive', () => {
+    expect(completedWeekDates(new Date('2026-11-20T13:00:00Z'))).toEqual({ fromDate: '2026-11-13', toDate: '2026-11-20' });
+    // Late Thursday evening ET is still Thursday's date (UTC has already moved to Friday).
+    expect(completedWeekDates(new Date('2026-11-20T03:00:00Z'))).toEqual({ fromDate: '2026-11-12', toDate: '2026-11-19' });
   });
 
   test('a quiet week reads zero, not NaN', async () => {
