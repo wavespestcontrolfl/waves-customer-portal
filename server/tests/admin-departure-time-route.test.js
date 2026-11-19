@@ -3,7 +3,7 @@
  * control. Drives the handlers on router.stack against a mocked db (the repo
  * convention for admin-schedule.js, see admin-schedule-checkout-stacking-gate).
  */
-const mockState = { row: undefined, readError: null, inserts: [], merges: [] };
+const mockState = { row: undefined, readError: null, inserts: [], merges: [], locks: [] };
 const mockDb = jest.fn((table) => {
   const q = {};
   q.where = jest.fn(() => q);
@@ -17,6 +17,15 @@ const mockDb = jest.fn((table) => {
   return q;
 });
 mockDb.fn = { now: jest.fn(() => 'NOW') };
+mockDb.raw = jest.fn(async (sql, bindings) => { mockState.locks.push({ sql, bindings }); return { rows: [] }; });
+mockDb.transaction = jest.fn(async (fn) => {
+  const trx = Object.assign((table) => mockDb(table), {
+    isTransaction: true,
+    raw: mockDb.raw,
+    fn: mockDb.fn,
+  });
+  return fn(trx);
+});
 jest.mock('../models/db', () => mockDb);
 
 const adminScheduleRouter = require('../routes/admin-schedule');
@@ -49,6 +58,7 @@ beforeEach(() => {
   mockState.readError = null;
   mockState.inserts = [];
   mockState.merges = [];
+  mockState.locks = [];
   jest.clearAllMocks();
 });
 afterEach(() => {
@@ -104,6 +114,10 @@ describe('PUT /departure-time', () => {
       key: 'schedule_departure_time', value: '"07:00"', category: 'scheduling',
     });
     expect(mockState.merges[0]).toEqual({ value: '"07:00"', updated_at: 'NOW' });
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+    expect(mockState.locks).toEqual([expect.objectContaining({
+      sql: 'SELECT pg_advisory_xact_lock(hashtext(?))', bindings: ['schedule-departure-time'],
+    })]);
   });
 
   it.each([

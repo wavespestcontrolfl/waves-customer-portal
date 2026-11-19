@@ -60,6 +60,7 @@ const TZ_START = (hhmm) => parseETDateTime(`${DAY}T${hhmm}`).getTime();
 
 maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)', () => {
   let database;
+  let contentionDatabase;
   let runDayReplanIfEnabled;
   let rebooker;
   let techId;
@@ -72,9 +73,10 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
     if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
     database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
+    contentionDatabase = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 3 } });
     for (const key of [
       'GATE_DAY_REPLAN', 'DAY_REPLAN_DAYS_AHEAD', 'GATE_MULTI_TECH_CONFIRM', 'GATE_SCHEDULING_CAPACITY',
-      'GATE_TECH_START_POINTS', 'GATE_AUTO_DISPATCH_DAY_RULES', 'GATE_SLOT_TRAVEL_GAP',
+      'GATE_TECH_START_POINTS', 'GATE_AUTO_DISPATCH_DAY_RULES', 'GATE_AUTO_DISPATCH_SHARED_MODEL', 'GATE_SLOT_TRAVEL_GAP',
     ]) saved[key] = process.env[key];
     ({ runDayReplanIfEnabled } = require('../services/day-replan'));
     rebooker = require('../services/rebooker');
@@ -82,6 +84,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
 
   afterAll(async () => {
     if (database) await database.destroy();
+    if (contentionDatabase) await contentionDatabase.destroy();
     for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
   });
 
@@ -94,6 +97,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     delete process.env.GATE_SCHEDULING_CAPACITY;
     delete process.env.GATE_TECH_START_POINTS;
     delete process.env.GATE_AUTO_DISPATCH_DAY_RULES;
+    delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
     delete process.env.GATE_SLOT_TRAVEL_GAP;
     mockConn = await database.transaction();
 
@@ -236,6 +240,32 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     expect(await mockConn('reschedule_log').where({ scheduled_service_id: mover.id }).first('id')).toBeUndefined();
   });
 
+  test('a second scoring pass refreshes the mover stop number with its source-day neighbors', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const { routeStamp } = require('../services/auto-dispatch/route-position');
+    const { routeCost } = require('../services/auto-dispatch/route-model');
+    const { computeCurrentPlacement, _internals: { loadDayStopRows } } = require('../services/auto-dispatch/candidate-slots');
+    const mover = visits[0];
+    const stale = await mockConn('scheduled_services').where({ id: mover.id }).first();
+    await mockConn('scheduled_services').where({ id: visits[1].id }).update({ route_order: 1 });
+    await mockConn('scheduled_services').where({ id: visits[2].id }).update({ route_order: 2 });
+    await mockConn('scheduled_services').where({ id: mover.id }).update({ route_order: 3 });
+    await mockConn('scheduled_services').where({ id: visits[3].id }).update({ route_order: 4 });
+
+    const rows = await loadDayStopRows(mockConn, { dates: [DAY], technicianIds: [techId] });
+    const fresh = rows.find((row) => row.id === mover.id);
+    const others = rows.filter((row) => row.id !== mover.id);
+    const expected = routeCost(others, fresh, HQ);
+    const staleCost = routeCost(others, { ...fresh, route_order: stale.route_order }, HQ);
+    expect(expected.detourMinutes).not.toBeCloseTo(staleCost.detourMinutes, 5);
+
+    const ctx = { db: mockConn, capabilityFor: () => 'qualified' };
+    const current = await computeCurrentPlacement(stale, { service_category: 'general' }, ctx);
+    expect(ctx.sourceRouteStamp).toBe(routeStamp(others, fresh));
+    expect(current.detour_minutes).toBeCloseTo(expected.detourMinutes, 5);
+    expect(current.total_drive_minutes).toBeCloseTo(expected.driveWithMinutes, 5);
+  });
+
   test('a destination with a windowless or completed stop is excluded before ranking and again at commit', async () => {
     const { date, mover, position } = await scoredCrossDay();
     const score = () => rankCrossDay(date, mover, position);
@@ -322,6 +352,48 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     await rebooker.reschedule(mover.id, date, { start: '08:00', end: '09:00' }, 'auto_dispatch', 'auto_dispatch',
       { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position });
     expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: date, route_order: 1 }).first('id')).toBeTruthy();
+  });
+
+  test('a first departure-time save waits for the route verifier lock', async () => {
+    const departure = require('../services/scheduling/departure-time');
+    const original = await contentionDatabase('system_settings').where({ key: departure.DEPARTURE_TIME_KEY }).first();
+    await contentionDatabase('system_settings').where({ key: departure.DEPARTURE_TIME_KEY }).delete();
+    let routeTrx;
+    let writerTrx;
+    try {
+      routeTrx = await contentionDatabase.transaction();
+      writerTrx = await contentionDatabase.transaction();
+      expect(await departure.lockedDayDepartureMinutes(routeTrx, { enabled: true }))
+        .toBe(departure.DEFAULT_DEPARTURE_MINUTES);
+      const pidResult = await writerTrx.raw('SELECT pg_backend_pid() AS pid');
+      const writerPid = pidResult.rows[0].pid;
+      const pendingWrite = departure.writeDepartureSetting(writerTrx, '08:00');
+      const deadline = Date.now() + 5000;
+      let waiting = false;
+      while (Date.now() < deadline && !waiting) {
+        const activity = await contentionDatabase('pg_stat_activity').where({ pid: writerPid }).first('wait_event_type', 'wait_event');
+        waiting = activity?.wait_event_type === 'Lock' && activity?.wait_event === 'advisory';
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBe(true);
+      await routeTrx.rollback();
+      routeTrx = null;
+      await pendingWrite;
+      expect(await writerTrx('system_settings').where({ key: departure.DEPARTURE_TIME_KEY }).first('value'))
+        .toEqual({ value: '"08:00"' });
+    } finally {
+      if (routeTrx) await routeTrx.rollback();
+      if (writerTrx) await writerTrx.rollback();
+      await contentionDatabase('system_settings').where({ key: departure.DEPARTURE_TIME_KEY }).delete();
+      if (original) {
+        await contentionDatabase('system_settings').insert({
+          key: original.key,
+          value: original.value,
+          category: original.category,
+          description: original.description,
+        });
+      }
+    }
   });
 
   test('the save refuses a start-point change that invalidates the priced route origin', async () => {

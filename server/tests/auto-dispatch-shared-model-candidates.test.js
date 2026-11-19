@@ -37,7 +37,7 @@ const {
   findValidCandidateSlots,
   computeCurrentPlacement,
   _internals: {
-    loadDayStops, loadGroupContext, filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder,
+    loadDayStops, loadGroupContext, filterAndScoreSharedModelCandidates, scoreOnSharedModel, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder,
   },
 } = require('../services/auto-dispatch/candidate-slots');
 
@@ -645,7 +645,7 @@ describe('visit-group exclusion (Codex pre-push P1)', () => {
       return c;
     };
     await computeCurrentPlacement(grouped, prefs, { ...ctxBase(), db: withVisit(db) });
-    expect(new Set(capturedExcludeIds)).toEqual(new Set(['s1', 'sib1']));
+    expect(new Set(capturedExcludeIds)).toEqual(new Set(['sib1']));
   });
 });
 
@@ -824,9 +824,10 @@ test('openMembers is read exactly once per evaluation; the current placement and
 
   await findValidCandidateSlots(grouped, prefs, { ...ctxBase(), db });
   expect(openMembers).toHaveBeenCalledTimes(1);
-  // Both sides' day-stop reads (the candidates' batch and the current day)
-  // exclude the same unit.
-  expect(dayStopExcludes).toEqual([['s1', 'sib1'], ['s1', 'sib1']]);
+  // Candidate-day scoring excludes the moving unit. The source-day read keeps
+  // the mover so its live route_order and its neighbors share one snapshot,
+  // but still excludes the sibling that moves with it.
+  expect(dayStopExcludes).toEqual([['sib1'], ['s1', 'sib1']]);
   expect([...probeMoveConflicts.mock.calls[0][0].excludeServiceIds].sort()).toEqual(['s1', 'sib1']);
 
   // A later evaluation (the retry re-evaluation) reads the group afresh, once.
@@ -887,6 +888,30 @@ test('a reservation_policy_version 2 day stop keeps its planning minutes with th
   const [v2] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand, { db: dbWith([pest(2)]) }, {});
   const [v1] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand, { db: dbWith([pest(1)]) }, {});
   expect(v1.route_minutes - v2.route_minutes).toBeCloseTo(60 - 35, 5); // v2 plans at the table's 35 (owner 2026-10-30), v1 at its 60 estimate
+});
+
+test('a version-2 moving stop keeps its planning minutes in the saved route simulation', () => {
+  delete process.env.GATE_SCHEDULING_CAPACITY;
+  const geo = { lat: 27.4, lng: -82.5 };
+  const service = {
+    ...SERVICE,
+    status: 'confirmed',
+    service_type: 'Quarterly Pest Control Service',
+    is_recurring: true,
+    reservation_policy_version: 2,
+    estimated_duration_minutes: 60,
+    created_at: '2026-07-01T00:00:00Z',
+  };
+  const candidate = { technician_id: 't1', date: '2026-08-06', start_time: '08:00', end_time: '09:00' };
+  const placement = { windows: [{ start: '08:00', end: '09:00' }], targets: [{ id: service.id, start: '08:00', end: '09:00' }] };
+  const ctx = { sourceRouteStamp: 'source-stamp', departureMinutes: 8 * 60 };
+  const blocks = [{ startMin: 8 * 60 + 40, endMin: 17 * 60 }];
+
+  const v2 = scoreOnSharedModel(service, geo, candidate, [], [], placement, geo, ctx, blocks);
+  const legacy = scoreOnSharedModel({ ...service, reservation_policy_version: 1 }, geo, candidate, [], [], placement, geo, ctx, blocks);
+  const { ROUTE_POSITION } = require('../services/auto-dispatch/route-position');
+  expect(v2[ROUTE_POSITION]).toBeTruthy();
+  expect(legacy).toBeNull();
 });
 
 // Codex pre-push P1: group siblings are excluded from the day's stops because

@@ -50,7 +50,7 @@ const { ROUTE_POSITION, routeStamp, targetStamp, routeFits, positionFor } = requ
 const {
   techStartPointsLive, techStartPoint, assertStartPointUnchanged, START_COLUMNS,
 } = require('../scheduling/tech-start-point');
-const { dayDepartureMinutes } = require('../scheduling/departure-time');
+const { lockedDayDepartureMinutes } = require('../scheduling/departure-time');
 const { ROAD_LEGS, roadLegsOf } = require('./road-check');
 const { occupiedRows, windowsOverlap } = require('../scheduling/occupancy');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
@@ -567,7 +567,7 @@ function candidateRouteOrder(service, cand) {
 function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home = HQ, ctx = {}, blocks = []) {
   const moved = movedSiblings(siblings, placement, cand);
   const target = { ...service, technician_id: cand.technician_id, window_start: cand.start_time, window_end: cand.end_time,
-    lat: geo.lat, lng: geo.lng, geo };
+    lat: geo.lat, lng: geo.lng, geo, preserveCapacity: preservesCapacity(service) };
   const otherDay = toDateStr(service.scheduled_date) !== cand.date || service.technician_id !== cand.technician_id;
   const position = otherDay && !siblings.length && service.technician_id && service.window_start
     ? positionFor(stops, target, {
@@ -615,7 +615,7 @@ async function verifyScoredPosition(trx, service, date, technicianId, window, po
   // DAY RULES is a run snapshot. When that run mode priced the configured
   // departure, re-read the effective setting on this transaction; otherwise
   // preserve the legacy 08:00 departure regardless of the ambient gate.
-  const departureMin = await dayDepartureMinutes(trx, { enabled: position.configuredDeparture === true });
+  const departureMin = await lockedDayDepartureMinutes(trx, { enabled: position.configuredDeparture === true });
 
   const sourceDate = toDateStr(service.scheduled_date);
   const rows = await loadDayStopRows(trx, { dates: [sourceDate, date], technicianIds: [service.technician_id, technicianId], lock: true });
@@ -886,15 +886,30 @@ async function sharedModelCurrentPlacement(service, geo, ctx, dateStr, category)
   if (!autoDispatchSharedModelLive()) return {};
   const { excludeIds, siblings } = await groupContextFor(service, ctx);
   const dayTechs = await currentDayTechs(service, ctx, dateStr, category);
-  const days = await Promise.all(dayTechs.map((technicianId) => loadDayStops(ctx.db, { technicianId, dateStr, excludeIds })));
-  if (service.technician_id && !siblings.length) ctx.sourceRouteStamp = routeStamp(days[0], service);
+  // Include the mover in the same source-day snapshot as its neighbors, then
+  // remove it in memory. Pass 2 deliberately evaluates the pass-1 service
+  // object again; an earlier move in this run can have renumbered this stop
+  // without changing its date/window/technician. Combining fresh neighbors
+  // with that stale route_order made both the removal saving and source stamp
+  // describe a route that never existed, so commit rejected a stable route.
+  const selfId = String(service.id);
+  const sourceExcludes = new Set([...excludeIds].filter((id) => String(id) !== selfId));
+  const snapshots = await Promise.all(dayTechs.map((technicianId) => loadDayStops(ctx.db, {
+    technicianId, dateStr, excludeIds: sourceExcludes,
+  })));
+  const freshMover = snapshots.flat().find((row) => String(row.id) === selfId);
+  const moving = freshMover
+    ? { ...service, ...freshMover, scheduled_date: freshMover.dateStr, geo: freshMover.geo || geo }
+    : { ...service, geo };
+  const days = snapshots.map((rows) => rows.filter((row) => String(row.id) !== selfId));
+  if (service.technician_id && !siblings.length) ctx.sourceRouteStamp = routeStamp(days[0], moving);
   await loadStartPoints(ctx, dayTechs);
-  const startMin = hhmmToMin(service.window_start) ?? DAY_OPEN;
+  const startMin = hhmmToMin(moving.window_start) ?? DAY_OPEN;
   return leastDrive(dayTechs.map((dayTech, i) => {
     const stops = days[i];
     // The unit as it stands: every member at its stored window and route_order
     // (route-model's groupUnit sequences it, as a candidate's is).
-    const cost = geo ? routeCost(stops, serviceToRouteStop(service, geo, startMin, siblings), homeFor(ctx, dayTech)) : null;
+    const cost = moving.geo ? routeCost(stops, serviceToRouteStop(moving, moving.geo, startMin, siblings), homeFor(ctx, dayTech)) : null;
     return {
       ...(cost ? { detour_minutes: cost.detourMinutes, total_drive_minutes: cost.driveWithMinutes, route_minutes: cost.routeTimeWithMinutes } : {}),
       stops_that_day: stops.length + 1,
@@ -1475,7 +1490,7 @@ module.exports = {
   violatesPreferredTime,
   _internals: {
     candidateFromSlot, unitTerritory, dropCoverWhenOwnerHas, NO_SINGLE_TERRITORY, searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
-    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
+    filterAndScoreSharedModelCandidates, scoreOnSharedModel, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };
 // Own lines: the day-replan job reads the same open/close bounds the after_hours filter uses.

@@ -21,6 +21,10 @@
 const logger = require('../logger');
 
 const DEPARTURE_TIME_KEY = 'schedule_departure_time';
+// Serializes the route-save reread with the Settings upsert. An advisory lock
+// covers the important first-save case too, where no system_settings row
+// exists yet and SELECT ... FOR UPDATE would lock nothing.
+const DEPARTURE_TIME_LOCK_NAMESPACE = 'schedule-departure-time';
 // Every reader's clock with the gate off, and on a failed or broken read.
 const LEGACY_DEPARTURE_MINUTES = 8 * 60;
 // The owner's ruling: the clock before anyone saves one in Settings.
@@ -85,8 +89,43 @@ async function dayDepartureMinutes(conn = require('../../models/db'), {
   }
 }
 
+/** Hold the departure setting stable through the caller's transaction. */
+async function lockDepartureTime(conn) {
+  if (!conn || !conn.isTransaction) throw new Error('departure time lock requires a transaction');
+  await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [DEPARTURE_TIME_LOCK_NAMESPACE]);
+}
+
+/** Commit-time route verification: lock first, then read without the ordinary
+ * fail-open fallback. A broken stored value still deliberately means 08:00;
+ * an unreadable setting aborts the route write instead of guessing. */
+async function lockedDayDepartureMinutes(conn, { enabled = true } = {}) {
+  if (enabled !== true) return LEGACY_DEPARTURE_MINUTES;
+  await lockDepartureTime(conn);
+  const setting = await readDepartureSetting(conn);
+  if (setting.saved && setting.minutes == null) logger.warn('[departure-time] the saved departure time is not valid; using 08:00');
+  return effectiveDepartureMinutes(setting);
+}
+
+/** Settings writer using the same transaction lock as route verification. */
+async function writeDepartureSetting(conn = require('../../models/db'), departureTime) {
+  const write = async (trx) => {
+    await lockDepartureTime(trx);
+    await trx('system_settings')
+      .insert({
+        key: DEPARTURE_TIME_KEY,
+        value: JSON.stringify(departureTime),
+        category: 'scheduling',
+        description: 'The time the van leaves its start point (HH:MM). Read by the night tool, the 04:20 route pass and the day reports while GATE_AUTO_DISPATCH_DAY_RULES is on.',
+      })
+      .onConflict('key')
+      .merge({ value: JSON.stringify(departureTime), updated_at: trx.fn.now() });
+  };
+  return conn.isTransaction ? write(conn) : conn.transaction(write);
+}
+
 module.exports = {
   DEPARTURE_TIME_KEY,
+  DEPARTURE_TIME_LOCK_NAMESPACE,
   LEGACY_DEPARTURE_MINUTES,
   DEFAULT_DEPARTURE_MINUTES,
   EARLIEST_DEPARTURE_MINUTES,
@@ -97,4 +136,7 @@ module.exports = {
   readDepartureSetting,
   effectiveDepartureMinutes,
   dayDepartureMinutes,
+  lockDepartureTime,
+  lockedDayDepartureMinutes,
+  writeDepartureSetting,
 };
