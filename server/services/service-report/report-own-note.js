@@ -15,6 +15,22 @@
  * The screens read the note, the text and the product catalog, and nothing
  * else about the visit, so the same text gets the same answer wherever it is
  * checked.
+ *
+ * What the trace holds a cleaned note to, word by word:
+ *   - every word that states something is a word of the note: the same word
+ *     in another form, a count written the other way (3 / three, exactly),
+ *     two words written as one, one letter changed in a word of five letters
+ *     or more (never a count), a short table of twins;
+ *   - a word the note only ever denies keeps a denial before it in its
+ *     sentence ("did not treat the kitchen" never becomes "I treated the
+ *     kitchen");
+ *   - "told me" needs the customer speaking or seeing in the note ("cust
+ *     said", "customer still seeing");
+ *   - one to three sentences of plain text in the Latin script.
+ * It does not judge which words go together beyond that: when the note says
+ * a word both ways ("treated the garage, not the kitchen"), a denial can move
+ * between the places it names. The technician reads the cleaned note before
+ * it is sent (owner pick *read first*).
  */
 const { redactAccessCodes } = require('../context-aggregator');
 const CompletionRecap = require('../completion-recap');
@@ -39,6 +55,11 @@ today visit service serviced`.split(/\s+/));
 // A denial in the cleaned note needs a denial in the note.
 const NEGATIONS = new Set(`no not never none nothing nowhere neither nor without
 didnt dont doesnt wasnt werent isnt arent couldnt cant wont wouldnt hasnt havent hadnt shouldnt`.split(/\s+/));
+// The denials that deny the next word that states something: "not treat",
+// "no roaches", "never seen". "Nothing", "none" and "nowhere" deny themselves.
+const SCOPED_NEGATIONS = new Set([...NEGATIONS].filter((word) => !['nothing', 'none', 'nowhere'].includes(word)));
+// Counts match exactly: "eighty" is one letter from "eight".
+const NUMBER_WORD_RE = /^(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)s?$/;
 // Forms the suffix rules below cannot reach, each with its base word.
 const SAME_WORD = Object.freeze({
   saw: 'see', seen: 'see', found: 'find', went: 'go', gone: 'go', goes: 'go', going: 'go', came: 'come',
@@ -68,8 +89,11 @@ const NUMBER_TWINS = new Map(NUMBER_WORDS.flatMap((word, n) => [[word, String(n)
 // Seeing is how a technician knows anything in the note: "ants in the kitchen"
 // may become "I saw ants in the kitchen".
 const SIGHT_WORDS = ['see', 'find', 'notice'];
-// "Said" may become "told me", only when the note has the customer speaking.
-const SPEECH_WORDS = ['tell', 'say', 'mention', 'report', 'ask'];
+// "Said" may become "told me", only when the note has the customer speaking:
+// a customer word with a word of speech or of seeing right after it ("cust
+// said", "customer still seeing"). "Customer had ants" is not the customer
+// speaking.
+const SPEECH_WORDS = ['tell', 'say', 'mention', 'report', 'ask', 'complain'];
 const CUSTOMER_WORDS = new Set(['customer', 'cust', 'homeowner', 'client', 'tenant', 'owner', 'resident', 'wife', 'husband', 'she', 'he', 'mr', 'mrs', 'ms']);
 // A dropped product name leaves "a treatment", and "sprayed" may become
 // "treated", only when the note itself says something was applied.
@@ -100,16 +124,17 @@ const APPLIED_STEMS = stemsOf(APPLIED_WORDS);
 
 // Words as the trace reads them: lower case, "didn't" as "did not", a
 // possessive or "'ll" dropped, split on anything that is not a letter or a
-// digit ("spot-treated" is two words).
+// digit in any script ("spot-treated" is two words), so no word goes unread.
 function traceWords(text) {
   return String(text || '')
+    .normalize('NFKC')
     .toLowerCase()
     .replace(/[‘’]/g, "'")
     .replace(/\bcan't\b/g, 'can not')
     .replace(/\bwon't\b/g, 'will not')
     .replace(/n't\b/g, ' not')
     .replace(/'(?:ll|ve|re|d|m|s)\b/g, ' ')
-    .match(/[a-z0-9]+/g) || [];
+    .match(/[\p{L}\p{N}]+/gu) || [];
 }
 
 // One letter changed, added, dropped or swapped with its neighbour: what a
@@ -125,21 +150,39 @@ function withinOneEdit(a, b) {
     || (restA.length >= 2 && restA[0] === restB[1] && restA[1] === restB[0] && restA.slice(2) === restB.slice(2));
 }
 
+const withTwins = (stem) => [stem, ...(ALSO_SAID_STEMS.get(stem) || [])];
+const statesSomething = (word) => !GLUE_WORDS.has(word) && !NEGATIONS.has(word);
+const isCount = (word) => /\d/.test(word) || NUMBER_WORD_RE.test(word);
+
+// The stems the note only ever denies: the word a denial is on ("did not
+// treat the kitchen": treat), when the note never says it plainly as well.
+function deniedOnlyStems(words) {
+  const denied = new Set();
+  const plain = new Set();
+  let inDenial = false;
+  for (const word of words) {
+    if (NEGATIONS.has(word)) {
+      inDenial = SCOPED_NEGATIONS.has(word);
+    } else if (!GLUE_WORDS.has(word)) {
+      withTwins(traceStem(word)).forEach((stem) => (inDenial ? denied : plain).add(stem));
+      inDenial = false;
+    }
+  }
+  return new Set([...denied].filter((stem) => !plain.has(stem)));
+}
+
 // What the note said, as the trace needs it.
 function readNote(note) {
   const words = traceWords(note);
   const stems = new Set();
   // Stems a fixed error may sit one letter away from: the note's own words
-  // that state something, never a number.
+  // that state something, never a count.
   const close = new Set();
-  const add = (stem) => {
-    stems.add(stem);
-    (ALSO_SAID_STEMS.get(stem) || []).forEach((also) => stems.add(also));
-  };
+  const add = (stem) => withTwins(stem).forEach((also) => stems.add(also));
   words.forEach((word, i) => {
     const stem = traceStem(word);
     add(stem);
-    if (!GLUE_WORDS.has(word) && stem.length >= 4 && !/\d/.test(stem)) close.add(stem);
+    if (!GLUE_WORDS.has(word) && stem.length >= 4 && !isCount(word)) close.add(stem);
     // Two words the clean-up may write as one ("web worms", "webworms").
     if (i + 1 < words.length) add(traceStem(`${word}${words[i + 1]}`));
     if (NUMBER_TWINS.has(word)) add(traceStem(NUMBER_TWINS.get(word)));
@@ -147,8 +190,11 @@ function readNote(note) {
   return {
     stems,
     close: [...close],
+    hasContent: words.some(statesSomething),
     denies: words.some((word) => NEGATIONS.has(word)),
-    customerSpoke: words.some((word) => CUSTOMER_WORDS.has(word)) || [...SPEECH_STEMS].some((stem) => stems.has(stem)),
+    deniedOnly: deniedOnlyStems(words),
+    customerSpoke: words.some((word, i) => CUSTOMER_WORDS.has(word)
+      && words.slice(i + 1, i + 3).some((next) => SPEECH_STEMS.has(traceStem(next)) || SIGHT_STEMS.has(traceStem(next)))),
     appliedWork: APPLIED_STEMS.some((stem) => stems.has(stem)),
   };
 }
@@ -164,14 +210,28 @@ function wordTraces(words, i, said) {
   // One word of the note written as two ("webworms", "web worms").
   if (i + 1 < words.length && said.stems.has(traceStem(`${word}${words[i + 1]}`))) return true;
   if (i > 0 && said.stems.has(traceStem(`${words[i - 1]}${word}`))) return true;
-  return stem.length >= 5 && !/\d/.test(stem) && said.close.some((other) => withinOneEdit(stem, other));
+  return stem.length >= 5 && !isCount(word) && said.close.some((other) => withinOneEdit(stem, other));
 }
 
-// The words of a cleaned note that are not in the note. Empty = it adds none.
+// A word the note only ever denies keeps a denial before it in its sentence:
+// "did not treat the kitchen" never becomes "I treated the kitchen".
+function undeniedWords(text, deniedOnly) {
+  if (!deniedOnly.size) return [];
+  return String(text || '').split(/[.!?]+/).flatMap((sentence) => {
+    let denied = false;
+    return traceWords(sentence).filter((word) => {
+      denied = denied || NEGATIONS.has(word);
+      return !denied && deniedOnly.has(traceStem(word));
+    });
+  });
+}
+
+// The words of a cleaned note that are not in the note, or that drop a
+// denial the note put on them. Empty = it adds none.
 function untracedWords(text, note) {
   const said = readNote(note);
   const words = traceWords(text);
-  return [...new Set(words.filter((word, i) => !wordTraces(words, i, said)))];
+  return [...new Set([...words.filter((word, i) => !wordTraces(words, i, said)), ...undeniedWords(text, said.deniedOnly)])];
 }
 
 // ── The screens ────────────────────────────────────────────────────────
@@ -180,6 +240,11 @@ const CONTACT_LINE_RE = /\b(?:text|call|contact|email|message)\s+(?:or\s+(?:text
 // The report adds the signature: "- Waves" or a name at the end is not text.
 const SIGN_OFF_RE = /\s[-–—]\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\.?$/;
 const REDACTED_RE = /\bredacted\b/i;
+// Latin letters, digits, spaces, plain punctuation and the marks a field
+// note uses (85°, 50%, station #4): no other symbol, emoji or script the
+// screens cannot read.
+const PLAIN_TEXT_RE = /^[\p{Script=Latin}\p{N}\s.,;:!?'’"“”()&/%#°–—-]+$/u;
+const MAX_OWN_NOTE_SENTENCES = 3;
 
 const oneLine = (value) => String(value || '').replace(/\s+/g, ' ').trim();
 // The note as the trace reads it: an access code is redacted first, so a code
@@ -195,9 +260,11 @@ function ownNoteText(value) {
 
 function shapeRejection(text) {
   if (!text) return { reason: 'empty' };
-  if (/[\r\n]/.test(text) || SIGN_OFF_RE.test(text)) return { reason: 'shape' };
+  if (REDACTED_RE.test(text)) return { reason: 'access_code' };
+  if (/[\r\n]/.test(text) || SIGN_OFF_RE.test(text) || !PLAIN_TEXT_RE.test(text)) return { reason: 'shape' };
   if (text.length > MAX_OWN_NOTE_CHARS) return { reason: 'too_long' };
-  return REDACTED_RE.test(text) ? { reason: 'access_code' } : null;
+  const sentences = text.split(/[.!?]+/).filter((sentence) => /[\p{L}\p{N}]/u.test(sentence));
+  return sentences.length > MAX_OWN_NOTE_SENTENCES ? { reason: 'sentences' } : null;
 }
 
 function wordRejection(text, { namesProduct, activeIngredients }) {
@@ -229,7 +296,11 @@ async function ownNoteScreen({ note, catalogRows = null, db = null } = {}) {
   const namesProduct = await CompletionRecap.buildReportTradeNameScreen({
     products: [], extraNames: mentioned.names, wholeCatalog: true, catalogRows: rows, mentionedText: said,
   });
+  // A note with no word that states something gives a clean-up nothing to
+  // trace: every text is refused, and the caller sends the fixed sentence.
+  const noteHasContent = readNote(said).hasContent;
   return (value) => {
+    if (!noteHasContent) return { reason: 'no_note' };
     const text = ownNoteText(value);
     const refused = shapeRejection(text) || wordRejection(text, { namesProduct, activeIngredients: mentioned.actives });
     if (refused) return refused;
@@ -244,9 +315,13 @@ async function reportNoteRejection({ note, text, catalogRows = null, db = null }
 }
 
 // The sentence code writes when there is no note to send: today's fallback
-// recap, from the service name and the areas on the record.
+// recap, from the service name and the areas on the record. Those are free
+// text, so the customer-copy screens run on it too; a sentence they refuse
+// gives way to the one sentence that names neither.
+const PLAIN_FIXED_NOTE = 'Today we completed your service.';
 function fixedReportNote({ serviceType, areasServiced } = {}) {
-  return CompletionRecap.deterministicRecap({ serviceType, areasTreated: areasServiced });
+  const text = CompletionRecap.deterministicRecap({ serviceType, areasTreated: areasServiced });
+  return text && !customerCopyViolations(text).length ? text : PLAIN_FIXED_NOTE;
 }
 
 module.exports = {

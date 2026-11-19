@@ -44,6 +44,7 @@ describe('the trace: a cleaned note adds no word', () => {
     ['a technician\'s short forms', 'treated ext perimeter and int baseboards, igr behind fridge',
       'I treated the outside perimeter and the inside baseboards, and put an insect growth regulator behind the refrigerator.'],
     ['what the customer said, said to the customer', 'cust said seeing roaches in garage', 'You told me you are seeing roaches in the garage.'],
+    ['what the customer sees, said to the customer', 'customer still seeing ghost ants in master bath', 'You told me you are still seeing ghost ants in the master bathroom.'],
     ['a denial the note holds', 'customer not home, did outside only', 'You were not home. I did the outside only.'],
     ['work the note states, in a plain verb', 'sprayed around the house, baited kitchen', 'I treated around the house and put out bait in the kitchen.'],
     ['a dropped product leaves a treatment', 'sprayed Borlux around the house', 'I sprayed a treatment around the house.'],
@@ -64,10 +65,31 @@ describe('the trace: a cleaned note adds no word', () => {
     ['a wider claim', 'treated the kitchen', 'I treated the whole home.', ['whole', 'home']],
     ['work the note does not state', 'checked stations, light feeding', 'I checked the stations and applied a treatment.', ['applied', 'treatment']],
     ['the customer speaking, when the note has no one speaking', 'ants in kitchen', 'You told me about ants in the kitchen.', ['told']],
+    ['the customer speaking, when the note only names the customer', 'customer had ants', 'You told me you had ants.', ['told']],
     ['another pest one letter from a short word', 'rats in attic', 'I saw ants in the attic.', ['ants']],
     ['another count', 'set 12 traps', 'I set 13 traps.', ['13']],
+    ['another count one letter from a count word', 'checked eight traps', 'I checked eighty traps.', ['eighty']],
+    ['a word in another script', 'checked the attic', 'I checked the attic. 危険です。', ['危険です']],
   ])('refuses %s the note does not have', (_label, note, text, added) => {
     expect(untracedWords(text, note)).toEqual(added);
+  });
+
+  test.each([
+    ['work the note denies', 'did not treat the kitchen', 'I treated the kitchen.', ['treated']],
+    ['a pest the note denies', 'no roaches in the garage', 'I saw roaches in the garage.', ['roaches']],
+    ['a short form of a denial', 'didnt spray the back yard dog out', 'I sprayed the back yard.', ['sprayed']],
+    ['a denial moved after the word', 'could not access the attic', 'I accessed the attic, not the garage.', ['garage', 'accessed']],
+  ])('refuses dropping %s', (_label, note, text, added) => {
+    expect(untracedWords(text, note)).toEqual(added);
+  });
+
+  test.each([
+    ['the denial kept', 'did not treat the kitchen', 'I did not treat the kitchen.'],
+    ['a contracted denial', 'couldnt treat the back yard', "I couldn't treat the back yard."],
+    ['a word the note says both ways', 'did not treat the kitchen treated the garage', 'I treated the garage. I did not treat the kitchen.'],
+    ['a self-denying word', 'nothing in the attic', 'I found nothing in the attic.'],
+  ])('keeps %s', (_label, note, text) => {
+    expect(untracedWords(text, note)).toEqual([]);
   });
 });
 
@@ -93,10 +115,23 @@ describe('the screens on a cleaned note', () => {
     ['a price', 'treated outside, invoice sent', 'I treated outside. The invoice was sent.', 'price'],
     ['a sign-off', 'treated outside', 'I treated outside. - Waves', 'shape'],
     ['a second line', 'treated outside swept webs', 'I treated outside.\nI swept webs.', 'shape'],
+    ['another script', 'checked the attic', 'I checked the attic. 危険です。', 'shape'],
+    ['a symbol', 'treated the kitchen', 'I treated the kitchen ☠', 'shape'],
+    ['a fourth sentence', 'checked the kitchen', 'I checked the kitchen. I checked the kitchen. I checked the kitchen. I checked the kitchen.', 'sentences'],
     ['a marked access code', 'gate code 4545 treated outside', 'The gate code is [redacted]. I treated outside.', 'access_code'],
     ['nothing', 'treated outside', '   ', 'empty'],
+    ['any text, when the note is blank', '', 'I serviced it today.', 'no_note'],
+    ['any text, when the note states nothing', 'it was the', 'It was the visit.', 'no_note'],
   ])('refuses %s', async (_label, note, text, reason) => {
     expect(await refusal(note, text)).toMatchObject({ reason });
+  });
+
+  test('the marks a field note uses are plain text', async () => {
+    expect(await refusal('soil 85° in back, station #4 full', 'The soil was 85° in the back, and station #4 is full.')).toBeNull();
+  });
+
+  test('three sentences are the most a note may have', async () => {
+    expect(await refusal('checked the kitchen', 'I checked the kitchen. I checked the kitchen. I checked the kitchen.')).toBeNull();
   });
 
   test('dollarweed is one word, so the price screen does not read "dollar"', async () => {
@@ -140,5 +175,12 @@ describe('the fixed sentence', () => {
   test("is today's fallback sentence, from the service name and the areas on the record", () => {
     expect(fixedReportNote({ serviceType: 'Quarterly Pest Control Service', areasServiced: ['Outside'] }))
       .toBe('Today we completed your Quarterly Pest Control Service. We treated Outside.');
+  });
+
+  test('runs the customer-copy screens on the labels it prints, and names neither when they fail', () => {
+    expect(fixedReportNote({ serviceType: 'Quarterly Pest Control Service', areasServiced: ['side gate code 1234'] }))
+      .toBe('Today we completed your service.');
+    expect(fixedReportNote({ serviceType: 'Safe pet treatment', areasServiced: ['Outside'] })).toBe('Today we completed your service.');
+    expect(fixedReportNote({})).toBe('Today we completed your service.');
   });
 });
