@@ -91,6 +91,8 @@ function paidEstimateVisitsQuery(database, { estimateId, customerId }) {
       'scheduled_services.source_estimate_id': estimateId,
       'scheduled_services.customer_id': customerId,
     })
+    .whereNotNull('scheduled_services.customer_id')
+    .whereRaw('scheduled_services.is_callback IS NOT TRUE')
     .whereNotIn('scheduled_services.status', RETAINED_HISTORY_STATUSES);
   return excludeAssessmentBookings(query)
     .orderBy('scheduled_services.scheduled_date', 'asc')

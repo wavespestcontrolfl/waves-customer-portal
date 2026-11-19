@@ -2692,7 +2692,7 @@ because of these fields.
 For annual prepay, `PUT /api/estimates/:token/accept` checks for an overlapping term
 using the first qualifying service booked for that customer and estimate. Conversion
 uses the same visit. A staff-booked service still qualifies after its old hold expires.
-Free assessments, unclaimed holds and cancelled, skipped, no-show or rescheduled visits
+Free assessments and callbacks, unclaimed holds and cancelled, skipped, no-show or rescheduled visits
 do not set the term start. When there is no qualifying visit, the overlap check uses today.
 
 Pay after the first visit, annual prepay (PR-D, `GATE_PAF_PREPAY`; live only when

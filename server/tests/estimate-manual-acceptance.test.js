@@ -97,7 +97,7 @@ const {
   estimateLinkedVisitsQuery,
 } = require('../services/estimate-manual-acceptance');
 
-function makeDb(estimate, claimedOverrides = null) {
+function makeDb(estimate, claimedOverrides = null, bookedStart = null) {
   const updates = [];
   const inserts = [];
   const database = jest.fn((table) => {
@@ -117,6 +117,10 @@ function makeDb(estimate, claimedOverrides = null) {
         this.statusList = { column, values };
         return this;
       },
+      leftJoin() { return this; },
+      whereNotNull() { return this; },
+      orderBy() { return this; },
+      select() { return this; },
       whereNotIn() {
         return this;
       },
@@ -133,6 +137,7 @@ function makeDb(estimate, claimedOverrides = null) {
       },
       first: async () => {
         if (table === 'estimates') return estimate;
+        if (table === 'scheduled_services' && bookedStart && builder.clause?.['scheduled_services.source_estimate_id']) return { scheduled_date: bookedStart };
         return null;
       },
       update(patch) {
@@ -1577,7 +1582,7 @@ describe('commercial proposal win paths (#1917)', () => {
 });
 
 describe('prepay-on-book (one-step annual prepay while booking)', () => {
-  test('threads the booked term start + coverage config to the converter and takes the atomic overlap lock', async () => {
+  test('checks the first paid visit for overlap even when the requested term starts later', async () => {
     const estimate = {
       id: 'estimate-prepay-onbook',
       status: 'viewed',
@@ -1596,7 +1601,7 @@ describe('prepay-on-book (one-step annual prepay while booking)', () => {
         oneTime: { total: 99, items: [{ service: 'waveguard_setup', name: 'WaveGuard Setup', price: 99 }] },
       },
     };
-    const { database } = makeDb(estimate);
+    const { database } = makeDb(estimate, null, '2026-07-12');
     const estimateConverter = {
       convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-onbook', billingTerm: 'prepay_annual', draftInvoiceId: 'inv-onbook' }),
     };
@@ -1630,7 +1635,7 @@ describe('prepay-on-book (one-step annual prepay while booking)', () => {
     // anchored to the booked date) before conversion.
     const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
     expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenCalledWith(
-      database, 'customer-onbook', '2026-07-30', false, expect.any(String), 'estimate-prepay-onbook',
+      database, 'customer-onbook', '2026-07-12', false, expect.any(String), 'estimate-prepay-onbook',
     );
   });
 

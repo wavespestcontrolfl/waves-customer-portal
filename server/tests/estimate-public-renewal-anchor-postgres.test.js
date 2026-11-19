@@ -77,6 +77,7 @@ postgres('public annual-prepay renewal anchor (real PostgreSQL)', () => {
       window_start: '08:00',
       window_end: '09:00',
     });
+    await visit({ scheduled_date: '2098-01-15', is_callback: true });
     const paid = await visit({ reservation_expires_at: trx.raw("NOW() - INTERVAL '1 day'") });
 
     const rows = await paidEstimateVisitsQuery(trx, { estimateId, customerId });
