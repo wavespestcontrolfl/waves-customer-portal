@@ -42,6 +42,13 @@ const extractionWith = (choice, intent = null) => ({
 const thirdParty = (choice, intent = null, caller = {}) => JSON.stringify({
   ...extractionWith(choice, intent), caller: { relationship_to_property: 'tenant', on_site_authorization: false, ...caller },
 });
+// The same extraction with a price staff stated that the caller said no to (the call reader's price.caller_response).
+const declinedPrice = (choice, serviceRequest = {}) => JSON.stringify({
+  ...extractionWith(choice),
+  service_request: {
+    ...extractionWith(choice).service_request, price: { unit: 'per_application', stated_by: 'agent', caller_response: 'declined' }, ...serviceRequest,
+  },
+});
 // A labeled two-speaker transcript: the caller says WORDS on a call that names the plan.
 const transcriptWith = (choice) => (choice
   ? `Agent: Thanks for calling Waves, how can I help?\nCaller: ${WORDS}\nAgent: You can bill each time. You are all set.`
@@ -236,6 +243,15 @@ describeDb("the caller's word (PostgreSQL)", () => {
     ['a spouse speaks for the account', [['per_application', {
       ai_extraction_enriched: thirdParty('per_application', null, { relationship_to_property: 'spouse_partner' }),
     }]], { yes: { callLogId: expect.any(String), at: expect.any(Date), quote: WORDS }, noYes: null }],
+    // A price the caller said no to (and no other price said yes to) is no yes, and it still hides an older yes.
+    ['the caller said no to the price on the yes call', [['per_application', { ai_extraction_enriched: declinedPrice('per_application') }]],
+      { yes: null, noYes: 'caller_declined_price' }],
+    ['a later call said no to the price', [['per_application', { created_at: hoursAgo(5) }], [null, {
+      created_at: hoursAgo(2), ai_extraction_enriched: declinedPrice(null),
+    }]], { yes: null, noYes: 'caller_declined_price' }],
+    ['a price said no to with another price said yes to is no decline', [['per_application', {
+      ai_extraction_enriched: declinedPrice('per_application', { prices: [{ unit: 'per_application', stated_by: 'agent', caller_response: 'accepted' }] }),
+    }]], { yes: { callLogId: expect.any(String), at: expect.any(Date), quote: WORDS }, noYes: null }],
     // The model's flag with no third party named is unsupported (the processor drops it too): the yes stands.
     ['a model flag with no third party named', [['per_application', {
       ai_extraction_enriched: JSON.stringify({ ...extractionWith('per_application'), triage_flags: ['caller_not_authorized'] }),
@@ -359,6 +375,28 @@ describeDb("the caller's word (PostgreSQL)", () => {
     await expect(laterWordProblem(trx, { customerId, yes: null, booking: await rowOf(bookingCallId) })).resolves.toBeNull();
     await call(customerId, null, { created_at: hoursAgo(1) });
     await expect(laterWordProblem(trx, { customerId, yes: null, booking: await rowOf(bookingCallId) })).resolves.toBe('newer_call');
+  });
+
+  test('start times compare at database precision: two calls in one millisecond keep their order', async () => {
+    const { callStartedAt } = require('../utils/call-timeline');
+    const at = (offset) => trx.raw(`date_trunc('second', now()) - interval '3 hours' + interval '${offset}'`);
+    // The yes began 300 microseconds after the booking call: in a JS Date the two are equal.
+    let customerId = await customer();
+    const bookingCallId = await call(customerId, null, { created_at: at('100 microseconds') });
+    const yesCallId = await call(customerId, 'per_application', { created_at: at('400 microseconds') });
+    const [bookingRow, yesRow] = [await rowOf(bookingCallId), await rowOf(yesCallId)];
+    expect(callStartedAt(yesRow).getTime()).toBe(callStartedAt(bookingRow).getTime());
+    const yes = { callLogId: yesCallId, at: callStartedAt(yesRow) };
+    await expect(laterWordProblem(trx, { customerId, yes, booking: bookingRow })).resolves.toBe('yes_after_booking');
+    // A call 300 microseconds before the yes is not after it; one 300 microseconds after it is.
+    customerId = await customer();
+    const firstYesId = await call(customerId, 'per_application', { created_at: at('400 microseconds') });
+    await call(customerId, null, { created_at: at('100 microseconds') });
+    const laterBookingId = await call(customerId, null, { created_at: at('1 hour') });
+    const firstYes = { callLogId: firstYesId, at: callStartedAt(await rowOf(firstYesId)) };
+    await expect(laterWordProblem(trx, { customerId, yes: firstYes, booking: await rowOf(laterBookingId) })).resolves.toBeNull();
+    await call(customerId, null, { created_at: at('700 microseconds') });
+    await expect(laterWordProblem(trx, { customerId, yes: firstYes, booking: await rowOf(laterBookingId) })).resolves.toBe('newer_call');
   });
 
   test("a later call from the customer's other number, linked to no one, is a newer call", async () => {

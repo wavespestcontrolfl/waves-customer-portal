@@ -3626,6 +3626,8 @@ module.exports = {
   sameHouseNumberStreet,
   SCHEDULING_CHANGE_REVIEW_FLAGS,
   isExplicitlyNonOwner,
+  // Shared with call-phone-yes-word.js: a price the caller said no to is no yes.
+  callerDeclinedThePrice,
   isAuthorizedWdoArrangerBooking,
   isAuthorizedFamilyMemberBooking,
   isWdoInspectionRequest,
