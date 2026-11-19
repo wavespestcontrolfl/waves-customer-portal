@@ -5198,10 +5198,11 @@ const StripeService = {
         // Stable-owner lock (codex r37 P1) — same contract as setup.
         await PayCombined.lockCombinedCustomerStable(trx, invoiceId, invoice.customer_id);
       }
-      const lockedInvoice = await trx('invoices')
-        .where({ id: invoiceId })
-        .forUpdate()
-        .first();
+      const { lockInvoicePaymentIntentAllocation } = require('./invoice-payment-intent-allocation');
+      const lockedInvoice = await lockInvoicePaymentIntentAllocation(trx, {
+        id: invoiceId, piId: oldPaymentIntentId, customerId: invoice.customer_id,
+        combinedCustomerLocked: true, targetForUpdate: true,
+      });
       if (!lockedInvoice) throw new Error('Invoice not found');
       assertInvoiceCollectible(lockedInvoice);
       await assertNoInvoiceChargeReconciliationPending(invoiceId, trx, { checkout: true });
@@ -5270,7 +5271,11 @@ const StripeService = {
         .where({ stripe_payment_intent_id: oldPaymentIntentId })
         .whereNotIn('id', [invoiceId])
         .whereNotIn('status', ['paid', 'processing', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
-        .update({ processor: 'stripe', stripe_payment_intent_id: newIntent.id, updated_at: new Date() });
+        .update({
+          processor: replacementAllocation ? 'stripe' : null,
+          stripe_payment_intent_id: replacementAllocation ? newIntent.id : null,
+          updated_at: new Date(),
+        });
       if (replacementAllocation && repointed !== replacementAllocation.length - 1) {
         const err = new Error('The account balance changed since this page loaded — refreshing to the latest amounts.');
         err.statusCode = 409;

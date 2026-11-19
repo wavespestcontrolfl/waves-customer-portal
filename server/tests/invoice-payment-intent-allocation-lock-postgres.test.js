@@ -17,7 +17,16 @@ postgres('invoice PaymentIntent allocation locking', () => {
   let invoiceIds;
   let piId;
 
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  async function waitForBlockedBackend(blocker) {
+    const { rows: [session] } = await blocker.raw('select pg_backend_pid() as pid');
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      const result = await database.raw('select exists(select 1 from pg_stat_activity a where ? = any(pg_blocking_pids(a.pid))) as waiting', [session.pid]);
+      if (result.rows[0].waiting) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error('No competing allocation query waited for the blocker');
+  }
 
   beforeAll(() => {
     const target = new URL(connection);
@@ -83,7 +92,7 @@ postgres('invoice PaymentIntent allocation locking', () => {
         waiterFinished = true;
         return locked;
       });
-      await sleep(200);
+      await waitForBlockedBackend(blocker);
       expect(waiterFinished).toBe(false);
 
       // The allocation query is blocked on the lower-id sibling and has not
@@ -105,19 +114,19 @@ postgres('invoice PaymentIntent allocation locking', () => {
   test('a page void that waited and finds changed status rejects without canceling or clearing the PI', async () => {
     const targetId = invoiceIds[1];
     const blocker = await database.transaction();
-    const retrieve = jest.spyOn(StripeService, 'retrievePaymentIntent');
-    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent');
+    const retrieve = jest.spyOn(StripeService, 'retrievePaymentIntent').mockRejectedValue(new Error('Unexpected simulated Stripe retrieval'));
+    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockRejectedValue(new Error('Unexpected simulated Stripe cancellation'));
     try {
       await blocker('invoices').where({ id: targetId }).forUpdate().first('id');
 
       // The outer snapshot sees `sent`; the transaction then waits for this
       // row lock. Commit a status-only change while retaining the exact PI.
-      const voidPromise = InvoiceService.voidInvoice(targetId);
-      await sleep(200);
+      const voidOutcome = InvoiceService.voidInvoice(targetId).then(() => null, (err) => err);
+      await waitForBlockedBackend(blocker);
       await blocker('invoices').where({ id: targetId }).update({ status: 'viewed' });
       await blocker.commit();
 
-      await expect(voidPromise).rejects.toThrow(/status changed while voiding/i);
+      expect((await voidOutcome)?.message).toMatch(/status changed while voiding/i);
       expect(retrieve).not.toHaveBeenCalled();
       expect(cancel).not.toHaveBeenCalled();
       await expect(database('invoices').where({ id: targetId }).first('status', 'stripe_payment_intent_id'))

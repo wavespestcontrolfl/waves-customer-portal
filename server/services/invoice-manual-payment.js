@@ -386,12 +386,7 @@ async function recordManualPayment(id, {
     // after the locked fence and before the paid flip.
     const PayCombined = require('./pay-combined');
     await PayCombined.lockCombinedCustomerStable(trx, id, invoice.customer_id);
-    // Match the other customer-money writers: advisory reservation →
-    // customer row → complete PI allocation. Locking only this target first
-    // let a gate-off checkout finalize hold its anchor while this path held a
-    // sibling; each then waited for the other during stale-stamp cleanup.
-    const lockedCustomer = await trx('customers').where({ id: invoice.customer_id })
-      .forUpdate().first('id', 'payer_id');
+    // Saved-card charging locks the invoice before its customer.
     const locked = await InvoiceService.lockInvoicePaymentIntentAllocation(trx, {
       id,
       piId: observedPiId,
@@ -400,6 +395,14 @@ async function recordManualPayment(id, {
       targetForUpdate: true,
     });
     if (!locked) return null;
+    // Credit draws may already own the customer before they need this invoice.
+    // Refuse contention before any provider or ledger write and release the
+    // allocation with the transaction, so either lock order can finish.
+    const lockedCustomer = await trx('customers').where({ id: invoice.customer_id })
+      .forUpdate().noWait().first('id', 'payer_id').catch((err) => {
+        if (err.code === '55P03') throw refusal(409, 'The customer balance is changing. Retry recording this payment.');
+        throw err;
+      });
     if (!lockedCustomer || locked.customer_id !== invoice.customer_id) return { ownerChanged: true };
     const lockedPiId = locked.stripe_payment_intent_id || null;
     if (lockedPiId && lockedPiId !== observedPiId) return { racedNewPaymentIntent: lockedPiId };
