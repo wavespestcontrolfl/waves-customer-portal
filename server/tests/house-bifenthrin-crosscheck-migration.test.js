@@ -15,9 +15,10 @@ const migration = require('../models/migrations/20261119010000_house_bifenthrin_
 const TALAK = 'aaaaaaaa-0000-4000-8000-000000000001';
 const CROSS = 'bbbbbbbb-0000-4000-8000-000000000002';
 const OTHER = 'cccccccc-0000-4000-8000-000000000003';
-const JSON_COLUMNS = { services: ['default_products'], products_catalog: ['application_zones'] };
+const JSON_COLUMNS = { services: ['default_products'], products_catalog: ['application_zones', 'target_pests', 'service_lines'] };
 
-function makeKnex(initial, { columns = {} } = {}) {
+// `defaults`: column defaults an insert takes, as Postgres applies them (production's products_catalog defaults, read 2026-11-18).
+function makeKnex(initial, { columns = {}, defaults = {} } = {}) {
   const tables = JSON.parse(JSON.stringify(initial));
   let counter = 0;
   // A JSON string compared with a parsed jsonb value matches by content, as jsonb equality does in Postgres.
@@ -65,7 +66,7 @@ function makeKnex(initial, { columns = {} } = {}) {
       insert(row) {
         checkForeignKey(table, row);
         counter += 1;
-        const made = { id: `gen-${counter}`, ...coerce(table, row) };
+        const made = { id: `gen-${counter}`, ...(defaults[table] || {}), ...coerce(table, row) };
         tables[table].push(made);
         const done = Promise.resolve([made.id]);
         done.returning = () => Promise.resolve([{ id: made.id }]);
@@ -656,6 +657,107 @@ describe('follow-up 20261119010100: the Crosscheck row gets the 10-27 label hold
     const knex = makeKnex(tables, { columns: { products_catalog: COLUMNS } });
     const before = snapshot(knex);
     await holds.up(knex);
+    expect(snapshot(knex)).toEqual(before);
+  });
+});
+
+// Follow-up 20261119010200: the Crosscheck row gets production's label and copy fields. Any Crosscheck row: NULL columns only.
+// The row step 0 added: also the columns that hold a Postgres default or the seed's spelling (never another row's office choice).
+describe('follow-up 20261119010200: the Crosscheck row gets production\'s label and copy fields', () => {
+  const holds = require('../models/migrations/20261119010100_crosscheck_seeded_row_holds');
+  const fill = require('../models/migrations/20261119010200_crosscheck_catalog_label_fill');
+  const PG_DEFAULTS = {
+    products_catalog: {
+      active: true, needs_pricing: true, restricted_use: false, customer_visibility: 'internal_only', content_status: 'draft',
+      best_price_status: 'needs_mapping', rate_public_visibility: 'hidden', local_rule_sensitivity: false, approved_for_public_page: false,
+      approved_for_estimate_packet: false, approved_for_service_report: false, auto_reorder_enabled: false, bid_list: false,
+    },
+  };
+  const FILLED = Object.fromEntries(fill.FILL_IF_NULL);
+  const COLUMNS = ['id', 'name', 'category', 'active_ingredient', 'formulation', 'container_size', 'unit_size_oz', 'epa_reg_number',
+    'default_rate_per_1000', 'rate_unit', 'active', 'needs_pricing', 'label_source_note', 'created_at', 'updated_at',
+    ...Object.keys(PG_DEFAULTS.products_catalog), ...fill.FILL_IF_NULL.map(([c]) => c), ...fill.SEEDED_ROW.map(([c]) => c),
+    'reentry_text', 'pet_kid_guidance_text', 'customer_safety_summary', 'common_name', 'public_summary', 'portal_summary',
+    'application_zones', 'product_type', 'signal_word', 'inventory_unit', 'low_stock_threshold', 'post_application_watering', 'mow_hold_days'];
+  const fillEvents = (knex) => knex.tables.audit_log.filter((e) => e.action === `migration:${fill.MIGRATION}:fill`);
+  const crosscheckRow = (knex) => knex.tables.products_catalog.find((r) => r.name === 'LESCO Crosscheck Plus');
+  // Production's Crosscheck row after 20261119010000 step 4 (read 2026-11-18): every FILL_IF_NULL value is there.
+  const productionRow = () => ({
+    ...baseCatalog()[1], ...FILLED, epa_reg_number: '10404-120', rate_unit: 'fl_oz', customer_visibility: null, content_status: null,
+    approved_for_service_report: true, label_verified_at: '2026-07-12T17:55:44.589Z', label_verified_by: 'label-rate-backfill-2026-07-12',
+  });
+
+  test('a repo-built catalog: the seeded row ends as production\'s, one audit row; a re-run and down() change nothing', async () => {
+    const tables = baseTables();
+    tables.products_catalog.splice(1, 1);
+    const knex = makeKnex(tables, { columns: { products_catalog: COLUMNS }, defaults: PG_DEFAULTS });
+    await migration.up(knex);
+    await holds.up(knex);
+    expect(crosscheckRow(knex)).toMatchObject({ customer_visibility: 'internal_only', content_status: 'draft', approved_for_service_report: false, rate_unit: 'fl oz' });
+    await fill.up(knex);
+    const row = crosscheckRow(knex);
+    expect(row).toMatchObject({
+      ...FILLED, rate_unit: 'fl_oz', customer_visibility: 'portal_only', content_status: 'approved_for_portal',
+      approved_for_service_report: true, approved_for_public_page: true, approved_for_estimate_packet: true,
+      label_verified_at: '2026-11-18T12:00:00.000Z', label_verified_by: 'label-check-2026-11-18', mow_hold_days: 1,
+    });
+    expect(row.target_pests).toEqual(['Fire ants', 'Big-headed ants', 'Southern chinch bugs', 'Fleas', 'Ticks']);
+    expect(row.service_lines).toEqual(['pest', 'lawn']);
+    const events = fillEvents(knex);
+    expect(events).toHaveLength(1);
+    expect(events[0].resource_id).toBe(String(row.id));
+    expect(events[0].metadata.before).toMatchObject({ moa_group: null, rate_unit: 'fl oz', customer_visibility: 'internal_only', approved_for_service_report: false });
+    expect(events[0].action.length).toBeLessThanOrEqual(96);
+    const after = snapshot(knex);
+    await fill.up(knex);
+    await fill.down(knex);
+    expect(snapshot(knex)).toEqual(after);
+  });
+
+  test('production\'s row (every value set) is never touched', async () => {
+    const tables = baseTables();
+    tables.products_catalog[1] = productionRow();
+    const knex = makeKnex(tables, { columns: { products_catalog: COLUMNS } });
+    const before = snapshot(knex);
+    await fill.up(knex);
+    expect(snapshot(knex)).toEqual(before);
+  });
+
+  test('a row step 0 did not add: NULL columns fill (a NULL EPA number among them); its visibility and approval stand', async () => {
+    const tables = baseTables();
+    Object.assign(tables.products_catalog[1], {
+      epa_reg_number: null, moa_group: null, rate_unit: 'fl oz', customer_visibility: 'internal_only', content_status: 'draft',
+      approved_for_service_report: false, label_verified_at: null, label_verified_by: null, label_url: 'https://example.test/office-label.pdf',
+    });
+    const knex = makeKnex(tables, { columns: { products_catalog: COLUMNS } });
+    await migration.up(knex);
+    await fill.up(knex);
+    const row = byId(knex, 'products_catalog', CROSS);
+    expect(row).toMatchObject({
+      epa_reg_number: '10404-120', moa_group: 'Group 3A', max_label_rate_per_1000: 1, label_url: 'https://example.test/office-label.pdf',
+      rate_unit: 'fl oz', customer_visibility: 'internal_only', content_status: 'draft', approved_for_service_report: false,
+      label_verified_at: null, label_verified_by: null,
+    });
+    expect(Object.keys(fillEvents(knex)[0].metadata.after)).not.toContain('label_url');
+  });
+
+  test('an office edit on the seeded row after step 0 stands', async () => {
+    const tables = baseTables();
+    tables.products_catalog.splice(1, 1);
+    const knex = makeKnex(tables, { columns: { products_catalog: COLUMNS }, defaults: PG_DEFAULTS });
+    await migration.up(knex);
+    Object.assign(crosscheckRow(knex), { content_status: 'archived', moa_group: 'Office Group' });
+    await fill.up(knex);
+    expect(crosscheckRow(knex)).toMatchObject({ content_status: 'archived', moa_group: 'Office Group', customer_visibility: 'portal_only' });
+  });
+
+  test('no audit_log table: nothing is written', async () => {
+    const tables = baseTables();
+    delete tables.audit_log;
+    tables.products_catalog[1].moa_group = null;
+    const knex = makeKnex(tables, { columns: { products_catalog: COLUMNS } });
+    const before = snapshot(knex);
+    await fill.up(knex);
     expect(snapshot(knex)).toEqual(before);
   });
 });
