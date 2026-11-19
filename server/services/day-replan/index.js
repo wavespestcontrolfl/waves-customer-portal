@@ -52,7 +52,7 @@ const { coVisitGroups, coVisitMinutes, appSimCheck, finalVerdict } = require('./
 const {
   openTime, planSims, packVerdict, hourChanges, lockedGaps, replayRecentBookings, recentGroups, serviceBlocks,
 } = require('./close-gaps');
-const { applyAcceptedDay, reconcileApplied } = require('./apply');
+const { applyAcceptedDay, reconcileApplied, finalRoute } = require('./apply');
 
 const DEFAULT_DAYS_AHEAD = 14;
 const MAX_DAYS_AHEAD = 30;
@@ -62,6 +62,9 @@ const MOVABLE_STATUSES = ['pending', 'confirmed'];
 const EXCLUDED_STATUSES = ['cancelled', 'completed', 'skipped', 'rescheduled', 'no_show'];
 const IN_PROGRESS_STATUSES = ['en_route', 'on_site'];
 const PLAN_TABLE = 'day_replan_plans';
+// Canonical booking occupancy: only a customer-NULL row can be an expiring hold. A customer-linked committed visit
+// remains live even when a stale reservation_expires_at stamp is non-null or already past.
+const LIVE_OCCUPANCY_SQL = '(scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at IS NULL OR scheduled_services.reservation_expires_at > NOW())';
 
 function daysAhead() {
   const raw = Number.parseInt(process.env.DAY_REPLAN_DAYS_AHEAD, 10);
@@ -112,7 +115,7 @@ const TOLD_LOCK_SELECT = [
 ];
 
 async function loadDayStops(conn, dateStr) {
-  const { _internals, CUSTOMER_PREMISE_ALIASES } = require('../route-reorder');
+  const { CUSTOMER_PREMISE_ALIASES } = require('../route-reorder');
   return dayStopsQuery(conn, {
     dateStr,
     excludeStatuses: EXCLUDED_STATUSES,
@@ -130,7 +133,8 @@ async function loadDayStops(conn, dateStr) {
       'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
       ...CUSTOMER_PREMISE_ALIASES,
       'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
-      'scheduled_services.reservation_expires_at', 'scheduled_services.route_order', 'scheduled_services.created_at',
+      'scheduled_services.reservation_expires_at', 'scheduled_services.source_estimate_id',
+      'scheduled_services.route_order', 'scheduled_services.created_at',
       // Apply mode's version hash reads these (the shadow plan ignores them).
       'scheduled_services.scheduled_date', 'scheduled_services.customer_confirmed', 'scheduled_services.updated_at',
       // The columns the move's CAS pins (apply mode): the stored location, not the guarded pin the planner reads.
@@ -139,7 +143,7 @@ async function loadDayStops(conn, dateStr) {
       ...guardedCoordSelects(conn),
       ...TOLD_LOCK_SELECT,
     ],
-  }).whereRaw(_internals.LIVE_HOLD_SQL);
+  }).whereRaw(LIVE_OCCUPANCY_SQL);
 }
 
 /** Ids whose 24-hour reminder is recorded as sent. Throws when the read fails (the caller skips the day). */
@@ -524,10 +528,21 @@ const keptWithBlocks = (plan, sims) => plan.check.planned?.kept === true && sims
  * ENDS earliest with no more drive than the current route (the planner's pack objective, packAllowanceMin 0).
  */
 function packPlan(env, plan, { rows, techId }) {
-  const planned = planEntries({ ...env, plannerOptions: { packAllowanceMin: 0 } }, {
-    rows, entries: plan.entries, blocks: plan.blocks, origin: plan.origin, techId, dayContext: plan.dayContext,
+  let missingDayPromise = 0;
+  const entries = plan.entries.map((entry) => {
+    if (entry.why) return entry;
+    if (!plan.dayContext.dayTold?.has(entry.row.id)) {
+      missingDayPromise += 1;
+      return { ...entry, why: 'no_recorded_day_promise' };
+    }
+    // The booked start remains available. P1 may only move this visit earlier, inside its own preference.
+    const latest = hhmmToMin(entry.row.window_start) + 1;
+    return { ...entry, pref: { startMin: entry.pref?.startMin ?? 0, endMin: Math.min(entry.pref?.endMin ?? latest, latest) } };
   });
-  return { ...planned, origin: plan.origin, blocks: plan.blocks };
+  const planned = planEntries({ ...env, plannerOptions: { packAllowanceMin: 0 } }, {
+    rows, entries, blocks: plan.blocks, origin: plan.origin, techId, dayContext: plan.dayContext,
+  });
+  return { ...planned, origin: plan.origin, blocks: plan.blocks, missingDayPromise };
 }
 
 /**
@@ -536,7 +551,7 @@ function packPlan(env, plan, { rows, techId }) {
  */
 function measurePack(env, plan, { rows, techId, nowFig, packed, sims, bounds }) {
   const lunchLost = (fig) => !!(nowFig && nowFig.lunch && fig && !fig.lunch);
-  if (plan.verdict.accepted) {
+  if (plan.verdict.accepted && plan.result.changes.length && finalRoute(plan, env, techId)) {
     const v = packVerdict({ now: nowFig, packed, kept: keptWithBlocks(plan, sims), driveRuleAccepts: true });
     return { ...v, plan: 'drive', packed, lunchLost: lunchLost(packed), changes: [] };
   }
@@ -544,7 +559,16 @@ function measurePack(env, plan, { rows, techId, nowFig, packed, sims, bounds }) 
   const altSims = simsOf(env, alt);
   const fig = openTime(altSims.planned, bounds);
   const v = packVerdict({ now: nowFig, packed: fig, kept: keptWithBlocks(alt, altSims), driveRuleAccepts: false });
-  return { ...v, plan: 'pack', packed: fig, lunchLost: lunchLost(fig), changes: v.wouldAccept ? hourChanges(alt.rowGroups, alt.result.best) : [] };
+  const changes = v.wouldAccept ? hourChanges(alt.rowGroups, alt.result.best) : [];
+  const numericChanges = changes.map((c) => ({ id: c.id, toMin: hhmmToMin(c.to) }));
+  let reason = v.reason;
+  if (v.wouldAccept) {
+    if (!changes.length) reason = 'no_eligible_hour_change';
+    else if (!finalRoute(alt, env, techId, numericChanges)) reason = 'route_order_not_coherent';
+  }
+  const wouldAccept = v.wouldAccept && reason === v.reason;
+  return { ...v, reason, wouldAccept, plan: 'pack', packed: fig, lunchLost: wouldAccept && lunchLost(fig),
+    missingDayPromise: alt.missingDayPromise, changes: wouldAccept ? changes : [] };
 }
 
 /**
@@ -579,7 +603,7 @@ async function measureCloseGaps(conn, env, plan, { rows, techId }) {
     // The drive-best plan: the one the live apply writes (the morning notification reads it for an applied day).
     const packed = openTime(sims.planned, bounds);
     return {
-      v: 2,
+      v: 3,
       now: nowFig,
       packed,
       p1: measurePack(env, plan, { rows, techId, nowFig, packed, sims, bounds }),
@@ -774,11 +798,10 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db, deps = null 
 
 /** Locks every live row of the date (in id order) before the day is read again: the scheduling fence's row locks. */
 async function lockDayRows(conn, dateStr) {
-  const { _internals } = require('../route-reorder');
   return conn('scheduled_services')
     .where('scheduled_date', dateStr)
     .whereNotIn('status', EXCLUDED_STATUSES)
-    .whereRaw(_internals.LIVE_HOLD_SQL)
+    .whereRaw(LIVE_OCCUPANCY_SQL)
     .orderBy('id')
     .forUpdate()
     .select('id');
@@ -825,6 +848,6 @@ function applyDeps() {
 
 module.exports = { runDayReplanIfEnabled, _internals: { applyDeps, lockDayRows, plannerStop, versionHash, loadDayContext, loadReminder24hOffIds, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, skipReason, horizonDates, LOCK_HOURS,
   // The booking-time make-room check (scheduling/booking-make-room.js) reads a day, a preference and a leg the same way.
-  loadDayStops, loadPref, legMin,
+  loadDayStops, loadPref, loadToldLevels, legMin,
   // The close-gaps measurement (owner 2026-11-18).
   measureCloseGaps } };
