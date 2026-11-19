@@ -228,7 +228,6 @@ describe('RecruitingPage offer flow: form', () => {
     const confirmDialog = screen.getByText('Send this offer to Jordan? It sends one text and one email.').closest('[role="dialog"]');
     fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Send offer' }));
     expect(await screen.findByText('Offer sent to Jordan.')).toBeInTheDocument();
-    expect(screen.getByText('Text sent. Email sent.')).toBeInTheDocument();
     const sends = calls.filter((c) => c.path.endsWith('/send'));
     expect(sends).toHaveLength(1);
     // Send names the draft the owner read, by the hash of that draft.
@@ -715,15 +714,51 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
   });
 
   it.each([
-    [{ sms: { outcome: 'failed' }, email: { outcome: 'blocked' } }, 'The offer is open, but the text and the email did not go out. Check his phone and email, then use Revise to send a new link.'],
-    [{ sms: { outcome: 'sent' }, email: { outcome: 'failed' } }, 'The offer is open. The text went out, but the email did not.'],
-    [{ sms: { outcome: 'blocked' }, email: { outcome: 'sent' } }, 'The offer is open. The email went out, but the text did not.'],
-    [{ sms: { outcome: 'sent' }, email: { outcome: 'sent' } }, 'Offer sent to Jordan.'],
-  ])('the send result tells which channels went out (%#)', async (comms, headline) => {
+    [{ sms: { outcome: 'failed' }, email: { outcome: 'blocked' } }, 'The offer is open.', ['The text did not go out.', 'The email did not go out.', 'Check his phone and email, then use Revise to send a new link.']],
+    [{ sms: { outcome: 'deferred' }, email: { outcome: 'failed' } }, 'The offer is open.', ['The text is queued.', 'The email did not go out.']],
+    [{ sms: { outcome: 'uncertain' }, email: { outcome: 'sent' } }, 'The offer is open.', ['The text may not have gone out.', 'The email went out.']],
+    [{ sms: { outcome: 'sent' }, email: { outcome: 'sent' } }, 'Offer sent to Jordan.', []],
+  ])('the send result tells which channels went out (%#)', async (comms, headline, lines) => {
     await openDraftForm({ 'POST /admin/careers/app-1/offer/offer-1/send': () => res(200, { offer: offerRecord({ status: 'sent' }), comms }) });
     fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
     const confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
     fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
     expect(await screen.findByText(headline)).toBeInTheDocument();
+    for (const line of lines) expect(screen.getByText(line)).toBeInTheDocument();
+    if (!lines.length) expect(screen.queryByText(/did not go out|is queued|may not/)).toBeNull();
+  });
+
+  it('DRAFT_CHANGED on a first save adopts the draft the other admin created, then saves against it', async () => {
+    let other = null;
+    const calls = [];
+    const theirs = offerRecord({ id: 'offer-9', draftHash: 'their-hash', hourlyRate: 24 });
+    setupFetch(
+      {
+        'POST /admin/careers/app-1/offer': () => {
+          if (!other) { other = theirs; return res(409, { error: 'x', code: 'DRAFT_CHANGED' }); }
+          return res(200, { offer: { ...theirs, hoursLine: 'Mon to Thu, 8 hours', draftHash: 'mine' } });
+        },
+      },
+      { offer: () => res(200, offerPayload({ current: other })) },
+    );
+    const base = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      if ((options.method || 'GET') === 'POST' && String(url).endsWith('/admin/careers/app-1/offer')) calls.push(JSON.parse(options.body));
+      return base(url, options);
+    }));
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    await screen.findByRole('heading', { name: /Jordan Rivera — / });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Offer' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Offer' }));
+    fireEvent.change(await screen.findByLabelText('Hours'), { target: { value: 'Mon to Thu, 8 hours' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    expect(await screen.findByText('This draft changed after you opened it. Review the new preview, then send.')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(24));
+    expect(calls[0].draftId).toBeUndefined();
+    fireEvent.change(screen.getByLabelText('Hours'), { target: { value: 'Mon to Thu, 8 hours' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1]).toMatchObject({ draftId: 'offer-9', draftHash: 'their-hash' });
   });
 });

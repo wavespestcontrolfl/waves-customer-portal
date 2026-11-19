@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  commsSummary,
+  describeSend,
   expiryLabel,
   formatDay,
   formatIssued,
@@ -51,9 +51,23 @@ describe('offer helpers', () => {
     expect(offerErrorMessage({ message: 'Start date must be in the future' })).toBe('Start date must be in the future');
   });
 
-  it('summarizes the two channels', () => {
-    expect(commsSummary({ sms: { outcome: 'sent' }, email: { outcome: 'failed', code: 'BOUNCED' } })).toBe(
-      'Text sent. Email failed (BOUNCED).',
-    );
+  it('describes a send plainly: every channel out, queued, unsure or failed', () => {
+    expect(describeSend({ sms: { outcome: 'sent' }, email: { outcome: 'handoff' } }, 'Jordan')).toEqual({ headline: 'Offer sent to Jordan.', lines: [] });
+    expect(describeSend({ sms: { outcome: 'deferred' }, email: { outcome: 'failed' } }, 'Jordan')).toEqual({
+      headline: 'The offer is open.',
+      lines: ['The text is queued.', 'The email did not go out.'],
+    });
+    expect(describeSend({ sms: { outcome: 'uncertain' }, email: {} }, 'Jordan').lines).toEqual([
+      'The text may not have gone out.',
+      'The email may not have gone out.',
+    ]);
+    expect(describeSend({ sms: { outcome: 'blocked' }, email: { outcome: 'skipped' } }, 'Jordan').lines).toEqual([
+      'The text did not go out.',
+      'The email did not go out.',
+      'Check his phone and email, then use Revise to send a new link.',
+    ]);
+    // Only the channel that was tried is described.
+    expect(describeSend({ email: { outcome: 'sent' } }, 'Jordan').headline).toBe('Offer sent to Jordan.');
+    expect(describeSend({}, 'Jordan')).toEqual({ headline: 'The offer is open.', lines: [] });
   });
 });

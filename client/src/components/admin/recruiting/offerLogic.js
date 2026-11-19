@@ -120,38 +120,36 @@ export function offerErrorMessage(err) {
   return ERROR_TEXT[code] || err?.message || "Something went wrong. Try again.";
 }
 
-const OUTCOME_TEXT = {
-  sent: "sent",
-  deferred: "held for the 8 AM to 8 PM window, sends by itself",
-  blocked: "blocked",
-  failed: "failed",
-  skipped: "skipped",
-  disabled: "off",
-  uncertain: "uncertain, may have been delivered",
-};
-
-const WENT_OUT = ["sent", "deferred", "uncertain"];
-
-// The headline after a send that answered 200. The offer is open either way;
-// the words say which channels went out (sent, held for the send window, or
-// possibly delivered) and never claim "sent" when neither did.
-export function sendHeadline(comms, firstName) {
-  if (!comms?.sms && !comms?.email) return `Offer sent to ${firstName}.`;
-  const text = WENT_OUT.includes(comms.sms?.outcome);
-  const email = WENT_OUT.includes(comms.email?.outcome);
-  if (text && email) return `Offer sent to ${firstName}.`;
-  if (!text && !email) {
-    return "The offer is open, but the text and the email did not go out. Check his phone and email, then use Revise to send a new link.";
-  }
-  return `The offer is open. The ${text ? "text" : "email"} went out, but the ${text ? "email" : "text"} did not.`;
+// What a send outcome means for the owner. 'sent' and 'handoff' went out;
+// 'deferred' is queued for the send window; 'uncertain' or no outcome may not
+// have gone out; anything else did not go out.
+function channelState(channel) {
+  const outcome = channel.outcome;
+  if (outcome === "sent" || outcome === "handoff") return "out";
+  if (outcome === "deferred") return "queued";
+  return !outcome || outcome === "uncertain" ? "maybe" : "failed";
 }
 
-// comms = { sms: {outcome, code}, email: {outcome, code} } -> "Text sent. Email sent."
-export function commsSummary(comms) {
-  const part = (label, c) => {
-    if (!c) return null;
-    const text = OUTCOME_TEXT[c.outcome] || c.outcome || "unknown";
-    return `${label} ${text}${c.code && c.outcome !== "sent" ? ` (${c.code})` : ""}.`;
-  };
-  return [part("Text", comms?.sms), part("Email", comms?.email)].filter(Boolean).join(" ");
+const STATE_TEXT = {
+  out: "went out",
+  queued: "is queued",
+  maybe: "may not have gone out",
+  failed: "did not go out",
+};
+
+/**
+ * The result of a send that answered 200: { headline, lines }.
+ * comms = { sms: {outcome, code}, email: {outcome, code} }. "Offer sent to X."
+ * only when every channel that was tried went out; otherwise "The offer is
+ * open." and one short line per channel.
+ */
+export function describeSend(comms, firstName) {
+  const channels = [["text", comms?.sms], ["email", comms?.email]].filter(([, c]) => c);
+  const states = channels.map(([label, c]) => [label, channelState(c)]);
+  if (states.length && states.every(([, st]) => st === "out")) return { headline: `Offer sent to ${firstName}.`, lines: [] };
+  const lines = states.map(([label, st]) => `The ${label} ${STATE_TEXT[st]}.`);
+  if (states.length && states.every(([, st]) => st === "failed")) {
+    lines.push("Check his phone and email, then use Revise to send a new link.");
+  }
+  return { headline: "The offer is open.", lines };
 }

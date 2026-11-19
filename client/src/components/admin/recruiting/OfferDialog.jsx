@@ -21,7 +21,7 @@ import {
 import SafeMarkdown from "../../SafeMarkdown";
 import { saveOfferDraft, sendOffer } from "./offerApi";
 import {
-  commsSummary,
+  describeSend,
   expiryLabel,
   formatIssued,
   isStartWeekday,
@@ -29,7 +29,6 @@ import {
   maskPhone,
   offerErrorMessage,
   sendChannels,
-  sendHeadline,
   stepDateFor,
 } from "./offerLogic";
 
@@ -154,6 +153,10 @@ function reviewedDraft(data, draftId) {
   return [data.draft, data.current].find((o) => o && o.id === draftId && o.status === "draft") || null;
 }
 
+function openDraft(data) {
+  return [data.draft, data.current].find((o) => o && o.status === "draft") || null;
+}
+
 function initialDraftId(draft, data) {
   if (draft) return draft.id;
   return data.current?.status === "draft" ? data.current.id : null;
@@ -242,9 +245,13 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
 
   // Re-read after a write. The form shows the result only once the read holds
   // the draft it expects; until then it stays read-only (Try again re-reads).
+  // With no expected id (another admin created the first draft meanwhile) the
+  // open draft in the read is adopted: its id and hash replace this form's.
   const refresh = async (expectId) => {
     const next = await onChanged();
-    if (next && reviewedDraft(next, expectId)) {
+    const found = next && (expectId ? reviewedDraft(next, expectId) : openDraft(next));
+    if (found) {
+      setDraftId(found.id);
       setNeedRead(false);
       setEdits({});
     }
@@ -271,7 +278,7 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
       await refresh(offer.id);
     } catch (err) {
       setError(offerErrorMessage(err));
-      if (reviewed && err?.body?.code === "DRAFT_CHANGED") await draftChanged(reviewed.id);
+      if (err?.body?.code === "DRAFT_CHANGED") await draftChanged(reviewed?.id || null);
     } finally {
       setBusy(false);
     }
@@ -296,11 +303,16 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
   };
 
   if (result) {
+    const sent = describeSend(result, firstName);
     return (
       <>
         <DialogBody>
-          <p className="text-14 text-zinc-800 mb-1">{sendHeadline(result, firstName)}</p>
-          <p className="text-14 text-zinc-600">{commsSummary(result)}</p>
+          <p className="text-14 text-zinc-800 mb-1">{sent.headline}</p>
+          {sent.lines.map((line) => (
+            <p key={line} className="text-14 text-zinc-600">
+              {line}
+            </p>
+          ))}
         </DialogBody>
         <DialogFooter>
           <Button size="sm" onClick={onClose}>
