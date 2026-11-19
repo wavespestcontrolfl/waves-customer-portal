@@ -161,6 +161,8 @@ export async function transcribeClipWithResend(blob, durationSeconds, clip, toke
       await pageVisible();
       if (!canResend()) throw e;
       if (!window.confirm(RESEND_QUESTION)) return null;
+      // Another tab can sign out or switch login while the question is open: check again.
+      if (!canResend()) throw e;
     }
   }
 }
