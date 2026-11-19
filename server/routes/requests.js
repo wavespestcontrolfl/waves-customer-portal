@@ -62,13 +62,16 @@ function cancellationCompleted(result) {
 }
 
 // What the CUSTOMER is told (the confirmation text + email and the post-submit
-// screen): done when the cancel completed, and also when the plan wound down
-// and the only errors are visits stuck "on site" from an earlier day (owner
-// 2026-10-30, the same rule as the admin Cancel plan path). The office side
-// still reads cancellationCompleted: the ticket stays 'new', the case stays
-// open and the review alert still fires, so the stuck visit gets closed out.
+// screen): done when the cancel completed, and also when a WHOLE-PLAN cancel
+// churned the account and the only errors are visits stuck "on site" from an
+// earlier day (owner 2026-10-30, the rule the admin Cancel plan path uses).
+// Whole-plan only here: a scoped cancel never churns, and its retry replies
+// cannot always name the families that stopped and stay, so a scoped run with
+// a stale visit keeps the by-hand copy. The office side still reads
+// cancellationCompleted: the ticket stays 'new', the case stays open and the
+// review alert still fires, so the stuck visit gets closed out.
 function cancellationConfirmedToCustomer(result) {
-  return cancellationCompleted(result) || onlyStaleVisitErrorsLeft(result);
+  return cancellationCompleted(result) || !!(result && result.churned && onlyStaleVisitErrorsLeft(result));
 }
 
 function cancellationOutcome(result, confirmation, effectiveAt, confirmationChannels = []) {
@@ -97,12 +100,6 @@ function cancellationOutcome(result, confirmation, effectiveAt, confirmationChan
     confirmation: confirmation || null,
     confirmationChannels: Array.isArray(confirmationChannels) ? confirmationChannels.filter(Boolean) : [],
     effectiveDate,
-    // Scoped cancels report exactly what stopped and what stays, on every
-    // reply (retries included): without them a processed scoped retry reads
-    // as a whole-plan cancel on the CancelFlow screen.
-    scope: Array.isArray(result?.scope) ? result.scope : [],
-    remaining: Array.isArray(result?.remaining) ? result.remaining : [],
-    ...(result?.tierAfter !== undefined ? { tierBefore: result.tierBefore, tierAfter: result.tierAfter } : {}),
   };
 }
 const {
@@ -970,12 +967,18 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       // account is already churned when `processed` is true.
       ...(isCancellation
         ? {
-            cancellation: cancellationOutcome(
-              cancellationResult,
-              confirmationSmsSent ? 'sms' : (confirmationEmailSent ? 'email' : null),
-              request.created_at,
-              [confirmationSmsSent ? 'sms' : null, confirmationEmailSent ? 'email' : null]
-            ),
+            cancellation: {
+              ...cancellationOutcome(
+                cancellationResult,
+                confirmationSmsSent ? 'sms' : (confirmationEmailSent ? 'email' : null),
+                request.created_at,
+                [confirmationSmsSent ? 'sms' : null, confirmationEmailSent ? 'email' : null]
+              ),
+              // Scoped cancels report exactly what stopped and what stays.
+              scope: Array.isArray(cancellationResult?.scope) ? cancellationResult.scope : [],
+              remaining: Array.isArray(cancellationResult?.remaining) ? cancellationResult.remaining : [],
+              ...(cancellationResult?.tierAfter !== undefined ? { tierBefore: cancellationResult.tierBefore, tierAfter: cancellationResult.tierAfter } : {}),
+            },
           }
         : {}),
     });
