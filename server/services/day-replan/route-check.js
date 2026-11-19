@@ -23,7 +23,8 @@
  * book online starts after today too.
  * Each day is measured as booked, from the start point at the departure minute, the way the 04:40 re-plan measures it
  * (close-gaps openTime). Drive minutes come from the scheduling drive clock (no paid map call). It runs every hour, so a
- * booking or a cancellation made during the day shows at the next hour.
+ * booking or a cancellation made during the day shows at the next hour. A day the dispatch picker would refuse as
+ * booked (scheduling/arrival-route.js) credits no job (noNewJob).
  *
  * Which tech-days count (the 07:05 notice's own rules, open-blocks-alert.js): an assignable technician who is not
  * marked absent (absences and weekly days off), on a day that is not a blackout day. A Sunday counts only when the
@@ -40,6 +41,7 @@ const { promisedWindowOrder, currentOrder, staleOrderReasons, effectiveWindowRan
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
+const { capacityEnabled, SHIFT } = require('../scheduling/policy');
 
 const TABLE = 'route_check_runs';
 const STAFFED_DAYS = 3;
@@ -163,12 +165,32 @@ function unmeasurable(rows) {
 }
 
 /**
+ * Why the dispatch picker would take no new job on a day as booked (pure; scheduling/arrival-route.js), or null.
+ * Adding a job to the day keeps each reason:
+ * - LATE_STOP: a stop already misses its arrival promise. Adding a job to that order can only delay it, and the
+ *   picker reports the day as day_overcommitted.
+ * - In capacity mode, where the picker checks the whole route:
+ *   - HOME_AFTER_SHIFT: the van gets home after the shift end (policy.js SHIFT).
+ *   - UNASSIGNED_WORK: unassigned work is booked that day (a window or a time band; done work is not read). The
+ *     picker refuses any route whose time, from the departure until the van is home, overlaps that work's whole
+ *     arrival promise plus its work (selectWinningOrder). Counting no job is a lower bound: a job done and driven
+ *     home before that time could still fit.
+ */
+function noNewJob(sim, { capacity, unassignedWork }) {
+  if (sim.arrivals.some((a) => a.lateMinutes > 0)) return 'LATE_STOP';
+  if (!capacity) return null;
+  if (sim.returnFinishMin > SHIFT.endMinutes) return 'HOME_AFTER_SHIFT';
+  return unassignedWork > 0 ? 'UNASSIGNED_WORK' : null;
+}
+
+/**
  * One tech-day's openings (pure). rows: the day's stops, in any order (they run in the order the technician drives,
  * routeOrder); blocks: the technician's schedule blocks; held: booked time, as intervals; origin: the start point,
  * where the van sets off and returns. slots: jobs that start on the hour after their drive (hourSlots);
- * noticeSlots: the 07:05 notice's own count (close-gaps: whole SLOT_MIN slots), so the two can be compared.
+ * noticeSlots: the 07:05 notice's own count (close-gaps: whole SLOT_MIN slots), so the two can be compared. capacity and
+ * unassignedWork: noNewJob's inputs.
  */
-function measureTechDay({ rows, blocks, held, origin, departureMin, openMin, closeMin }) {
+function measureTechDay({ rows, blocks, held, origin, departureMin, openMin, closeMin, capacity = false, unassignedWork = 0 }) {
   const skip = unmeasurable(rows);
   if (skip) return { stops: rows.length, skip };
   const sim = simulate(routeOrder(rows), { origin, departureMin, blockedIntervals: serviceBlocks(blocks) });
@@ -176,12 +198,15 @@ function measureTechDay({ rows, blocks, held, origin, departureMin, openMin, clo
   const open = openMin < closeMin
     ? gaps.openBlocks(sim, { departureMin, openMin, closeMin, unavailable: [...blocks, ...held], driveBlocks: serviceBlocks(blocks) })
     : [];
+  // A day the picker would refuse credits no job. Its openings stay listed with the notice's own count.
+  const refused = noNewJob(sim, { capacity, unassignedWork });
   // Kept: an opening that holds at least one whole job slot (the 07:05 notice's floor); `slots` then counts the jobs
   // in it that start on the hour.
   const openings = open.map((b) => ({ kind: b.kind, start: Math.round(b.startMin), min: Math.round(b.min) }))
-    .map((o) => ({ ...o, slots: hourSlots(o), noticeSlots: Math.floor(o.min / SLOT_MIN) }))
+    .map((o) => ({ ...o, slots: refused ? 0 : hourSlots(o), noticeSlots: Math.floor(o.min / SLOT_MIN) }))
     .filter((o) => o.noticeSlots > 0);
   return {
+    ...(refused ? { noNewJob: refused } : {}),
     stops: rows.length,
     driveMin: Math.round(sim.travelMin),
     endMin: Math.round(sim.serviceFinishMin),
@@ -313,8 +338,11 @@ async function measureOne(conn, env, { day, techId, rows, occupancy }) {
     // Time held for this technician: every booked span the booking surfaces count, exact to the minute
     // (listOccupiedWindows: make-room destinations included; a window may end off the hour).
     const held = heldSpans(occupancy, techId, env.techBlind);
+    // Unassigned work as the picker reads it in capacity mode: a window or a time band (the day read leaves out done work).
+    const unassignedWork = rows.filter((r) => r.technician_id == null && (r.window_start || r.time_window)).length;
     return measureTechDay({
       rows: own, blocks, held, origin: homeFromMap(env.homes, techId), departureMin: env.departureMin, openMin: DAY_OPEN, closeMin: DAY_CLOSE,
+      capacity: env.capacity, unassignedWork,
     });
   } catch (err) {
     logger.warn(`[route-check] ${day} tech ${techId}: measure failed (${err.message})`);
@@ -362,6 +390,7 @@ async function measureRun(conn, now) {
     homes: await loadTechStartPoints(conn),
     departureMin: await departureMinutes(conn),
     techBlind: !require('../scheduling/occupancy').techScopedConfirmActive(),
+    capacity: Boolean(capacityEnabled()),
   };
   const days = [];
   for (const day of datesToMeasure(elig, today, stopsOn)) {
@@ -392,13 +421,13 @@ async function measureRun(conn, now) {
     logger.warn(`[route-check] ad campaigns unread (${err.message})`);
     return null;
   });
-  return { status, days, totals, ad: { ...ad, live } };
+  return { status, days, totals, ad: { ...ad, capacity: env.capacity, live } };
 }
 
 module.exports = {
   runRouteCheck,
   _internals: {
-    recoverable, physicalStops, heldSpans, hourSlots, routeOrder, measureTechDay, staffed, datesToMeasure, summarize, unmeasurable,
+    recoverable, physicalStops, heldSpans, noNewJob, hourSlots, routeOrder, measureTechDay, staffed, datesToMeasure, summarize, unmeasurable,
     STAFFED_DAYS, DEMAND_DAYS,
   },
 };

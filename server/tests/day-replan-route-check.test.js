@@ -118,6 +118,28 @@ describe('one tech-day', () => {
     expect(rc.routeOrder([{ ...a, route_order: null }, b]).map((r) => r.id)).toEqual(['a', 'b']); // a null: clock order
   });
 
+  test('a day whose own stops already miss a promise takes no new job; the notice count stays', () => {
+    const a = stop('a', '09:00:00', '10:00:00', { estimated_duration_minutes: 150 });
+    const b = stop('b', '09:00:00', '10:00:00', { estimated_duration_minutes: 60, customer_id: 'cust-2', lat: 27.45, lng: -82.4 });
+    const fig = rc.measureTechDay({ ...open, rows: [a, b] }); // b is reached after 11:00, past its arrival promise
+    expect(fig).toMatchObject({ noNewJob: 'LATE_STOP', slots: 0 });
+    expect(fig.noticeSlots).toBeGreaterThan(0);
+    expect(fig.openings.every((o) => o.slots === 0)).toBe(true);
+    expect(rc.measureTechDay({ ...open, rows: [a] }).noNewJob).toBeUndefined();
+  });
+
+  test('capacity mode, as the picker: a van home after the shift end, or unassigned work that day, takes no new job', () => {
+    const late = stop('l', '16:00:00', '17:00:00', { estimated_duration_minutes: 120, lat: 27.5, lng: -82.3 }); // done 6 PM, then home
+    const morning = stop('m', '09:00:00', '10:00:00');
+    expect(rc.measureTechDay({ ...open, rows: [late], capacity: true })).toMatchObject({ noNewJob: 'HOME_AFTER_SHIFT', slots: 0 });
+    expect(rc.measureTechDay({ ...open, rows: [morning], capacity: true, unassignedWork: 1 })).toMatchObject({ noNewJob: 'UNASSIGNED_WORK', slots: 0 });
+    // Capacity off: neither rule applies; the openings count.
+    expect(rc.measureTechDay({ ...open, rows: [late] }).slots).toBeGreaterThan(0);
+    const hourMode = rc.measureTechDay({ ...open, rows: [morning], unassignedWork: 1 });
+    expect(hourMode.noNewJob).toBeUndefined();
+    expect(hourMode.slots).toBeGreaterThan(0);
+  });
+
   test('a schedule block takes its time out of the openings', () => {
     const fig = rc.measureTechDay({ ...open, rows: [], blocks: [{ startMin: 720, endMin: 1020 }] });
     expect(fig.openings).toEqual([{ kind: 'tail', start: 480, min: 240, slots: 2, noticeSlots: 3 }]); // 8:00, 10:00
@@ -322,6 +344,37 @@ describe('runRouteCheck', () => {
     expect(result).toMatchObject({ status: 'failed', ad: { decision: 'unknown' } });
     expect(writes).toHaveLength(1);
     expect(writes[0][1]).toMatchObject({ status: 'failed', service_date: '2026-11-19' });
+  });
+
+  test('capacity mode: unassigned work booked on a date takes no new job there, as the picker refuses it', async () => {
+    const saved = process.env.GATE_SCHEDULING_CAPACITY;
+    const unassigned = (id, extra) => ({ ...stop(id, '08:00:00', '09:00:00'), technician_id: null, ...extra });
+    replan.loadDayStops.mockImplementation(async (_c, date) => {
+      if (date === '2026-11-20') return [unassigned('u1')];
+      // A windowless placeholder is not work the picker reads.
+      if (date === '2026-11-21') return [unassigned('p1', { window_start: null, window_end: null })];
+      return [];
+    });
+    const run = async (mode) => {
+      process.env.GATE_SCHEDULING_CAPACITY = mode;
+      const { conn, writes } = fakeConn();
+      await runRouteCheck({ conn, now: NOW });
+      const days = JSON.parse(writes[0][1].days);
+      return { fri: days.find((d) => d.date === '2026-11-20'), sat: days.find((d) => d.date === '2026-11-21'), ad: JSON.parse(writes[0][1].ad_shadow) };
+    };
+    try {
+      const on = await run('true');
+      expect(on.ad.capacity).toBe(true);
+      expect(on.fri).toMatchObject({ noNewJob: 'UNASSIGNED_WORK', slots: 0 });
+      expect(on.sat.noNewJob).toBeUndefined();
+      expect(on.sat.slots).toBeGreaterThan(0);
+      const plan = await run('plan'); // production's value: planning minutes only, capacity mode off
+      expect(plan.ad.capacity).toBe(false);
+      expect(plan.fri.noNewJob).toBeUndefined();
+      expect(plan.fri.slots).toBeGreaterThan(0);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_SCHEDULING_CAPACITY; else process.env.GATE_SCHEDULING_CAPACITY = saved;
+    }
   });
 
   test('an unassigned booking ending off the hour holds only its own minutes', async () => {
