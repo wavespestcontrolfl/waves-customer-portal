@@ -37,6 +37,14 @@ function routeFits(rows, order, { origin, departureMin, dayEndMin, blocks = [] }
   if (order.length !== rows.length || byId.size !== rows.length || new Set(order).size !== rows.length) return false;
   const seq = order.map(id => byId.get(id));
   if (!Number.isFinite(dayEndMin) || seq.some(r => !r || !r.window_start || r.lat == null || r.lng == null)) return false;
+  // Route cost counts a visit group as one physical stop. A saved order must
+  // keep its members together or the technician would have to return to it.
+  const seenVisits = new Set();
+  for (const [index, stop] of seq.entries()) {
+    if (stop.visit_id == null) continue;
+    if (seenVisits.has(stop.visit_id) && seq[index - 1].visit_id !== stop.visit_id) return false;
+    seenVisits.add(stop.visit_id);
+  }
   return !!simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, seq, {
     origin, end: origin, startMin: departureMin, dayEndMin, blockedIntervals: blocks, legMinutes: driveMin,
   });

@@ -49,9 +49,10 @@
  *   - Overlap:  window_start < :end  AND
  *               COALESCE(window_end, window_start + COALESCE(NULLIF(
  *                 estimated_duration_minutes, 0), 60) minutes) > :start
- *   - Holds:    reservation_expires_at IS NULL OR > NOW() — a live
- *     estimate-slot hold occupies real route time; an expired one is dead
- *     weight awaiting cleanup and never blocks.
+ *   - Holds:    customer-linked rows are committed regardless of a leftover
+ *     reservation stamp; customer-NULL rows occupy when the stamp is NULL
+ *     (legacy committed row) or still live. An expired customer-NULL hold is
+ *     dead weight awaiting cleanup and never blocks.
  *   - Windowless rows (window_start IS NULL — converter/seeder placeholder
  *     rows): the SQL overlap predicate above evaluates NULL for them, so
  *     every existing gate ignores them. This module deliberately keeps that
@@ -472,6 +473,21 @@ const CONFLICT_COLUMNS = [
   'is_callback',
 ];
 
+// Canonical live scheduling-row predicate for both unqualified reads and the
+// customers-joined reads. A reservation stamp is expiry-bearing occupancy
+// only while the row has no customer; once linked, the visit is committed and
+// stays occupied even if a stale stamp remains. `includeHolds:false` removes
+// every stamped customer-NULL estimate hold while retaining committed linked
+// rows and legacy customer-NULL rows with no stamp.
+function applyLiveOccupancyPredicate(query, { qualified = false, includeHolds = true } = {}) {
+  const customerColumn = qualified ? 'scheduled_services.customer_id' : 'customer_id';
+  const expiryColumn = qualified ? 'scheduled_services.reservation_expires_at' : 'reservation_expires_at';
+  return query.where((q) => {
+    q.whereNotNull(customerColumn).orWhereNull(expiryColumn);
+    if (includeHolds) q.orWhereRaw(`${expiryColumn} > NOW()`);
+  });
+}
+
 // One log line each time a staff save's route check comes back with a warning
 // (arrivalWindow roads 'cache', or `detail`), so a live case can be told apart from the
 // numbers it left: why, what the placement did, which stops were late and where the drive times came
@@ -600,13 +616,11 @@ async function findConflictingVisits({
 
   const query = db('scheduled_services')
     .where('scheduled_date', String(date).split('T')[0])
-    .whereNotIn('status', excludeStatuses)
-    // Expired estimate-slot holds are dead weight until cleanup reclaims
-    // them — same active-reservation predicate every existing gate uses.
-    .where((q) => {
-      q.whereNull('reservation_expires_at')
-        .orWhereRaw('reservation_expires_at > NOW()');
-    })
+    .whereNotIn('status', excludeStatuses);
+  // Expired customer-NULL holds are dead weight until cleanup reclaims them;
+  // linked visits remain committed even with a leftover expiry stamp.
+  applyLiveOccupancyPredicate(query, { includeHolds });
+  query
     // COALESCE the nullable window_end (admin edits can leave a start with
     // no end) — same predicate as slot-reservation/rebooker/createSelfBooking.
     // window_start-NULL placeholder rows evaluate NULL here and stay inert.
@@ -621,13 +635,6 @@ async function findConflictingVisits({
     // bare whereNot would silently drop every hold — keep them explicitly.
     query.where((q) => {
       q.whereNull('customer_id').orWhereNot('customer_id', excludeCustomerId);
-    });
-  }
-  if (!includeHolds) {
-    // Hold rows are customer_id NULL with a reservation stamp; everything
-    // else (including committed customer-NULL legacy rows without one) stays.
-    query.where((q) => {
-      q.whereNotNull('customer_id').orWhereNull('reservation_expires_at');
     });
   }
   const rows = await query.select(CONFLICT_COLUMNS).orderBy('window_start', 'asc');
@@ -889,22 +896,14 @@ async function findConflictingVisitsWithTravel({
   const query = db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .where('scheduled_services.scheduled_date', String(date).split('T')[0])
-    .whereNotIn('scheduled_services.status', excludeStatuses)
-    .where((q) => {
-      q.whereNull('scheduled_services.reservation_expires_at')
-        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-    })
-    .whereNotNull('scheduled_services.window_start');
+    .whereNotIn('scheduled_services.status', excludeStatuses);
+  applyLiveOccupancyPredicate(query, { qualified: true, includeHolds });
+  query.whereNotNull('scheduled_services.window_start');
   if (excludeIds.length) query.whereNotIn('scheduled_services.id', excludeIds);
   if (scopeTechId) applyTechScope(query, 'scheduled_services.technician_id', scopeTechId);
   if (excludeCustomerId) {
     query.where((q) => {
       q.whereNull('scheduled_services.customer_id').orWhereNot('scheduled_services.customer_id', excludeCustomerId);
-    });
-  }
-  if (!includeHolds) {
-    query.where((q) => {
-      q.whereNotNull('scheduled_services.customer_id').orWhereNull('scheduled_services.reservation_expires_at');
     });
   }
   const rows = await query
@@ -970,30 +969,18 @@ async function listOccupiedWindows({
     const query = db('scheduled_services')
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
-      .whereNotIn('scheduled_services.status', excludeStatuses)
-      .where((q) => {
-        // Only customer-NULL rows are expiring estimate holds. A committed
-        // customer-linked visit stays occupied when a stale expiry stamp is
-        // non-null or already past (the same LIVE_OCCUPANCY_SQL contract as
-        // the day-route reader).
-        q.whereNotNull('scheduled_services.customer_id')
-          .orWhereNull('scheduled_services.reservation_expires_at')
-          .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-      })
-      .whereNotNull('scheduled_services.window_start');
+      .whereNotIn('scheduled_services.status', excludeStatuses);
+    applyLiveOccupancyPredicate(query, { qualified: true });
+    query.whereNotNull('scheduled_services.window_start');
     if (excludeIds.length) query.whereNotIn('scheduled_services.id', excludeIds);
     rows = await query.select(...CONFLICT_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(db));
   } else {
     const query = db('scheduled_services')
       .whereBetween('scheduled_date', [dateFrom, dateTo])
-      .whereNotIn('status', excludeStatuses)
-      .where((q) => {
-        q.whereNotNull('customer_id')
-          .orWhereNull('reservation_expires_at')
-          .orWhereRaw('reservation_expires_at > NOW()');
-      })
-      // Windowless placeholder rows are inert to conflicts (see header).
-      .whereNotNull('window_start');
+      .whereNotIn('status', excludeStatuses);
+    applyLiveOccupancyPredicate(query);
+    // Windowless placeholder rows are inert to conflicts (see header).
+    query.whereNotNull('window_start');
     if (excludeIds.length) query.whereNotIn('id', excludeIds);
     rows = await query.select(CONFLICT_COLUMNS);
   }

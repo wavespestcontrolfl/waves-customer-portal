@@ -72,7 +72,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
     if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
     database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
-    for (const key of ['GATE_DAY_REPLAN', 'DAY_REPLAN_DAYS_AHEAD', 'GATE_MULTI_TECH_CONFIRM', 'GATE_SCHEDULING_CAPACITY', 'GATE_BOOKING_MAKE_ROOM']) saved[key] = process.env[key];
+    for (const key of ['GATE_DAY_REPLAN', 'DAY_REPLAN_DAYS_AHEAD', 'GATE_MULTI_TECH_CONFIRM', 'GATE_SCHEDULING_CAPACITY', 'GATE_BOOKING_MAKE_ROOM', 'GATE_SLOT_TRAVEL_GAP']) saved[key] = process.env[key];
     ({ runDayReplanIfEnabled } = require('../services/day-replan'));
     rebooker = require('../services/rebooker');
   });
@@ -90,6 +90,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     delete process.env.GATE_MULTI_TECH_CONFIRM;
     delete process.env.GATE_SCHEDULING_CAPACITY;
     delete process.env.GATE_BOOKING_MAKE_ROOM;
+    delete process.env.GATE_SLOT_TRAVEL_GAP;
     mockConn = await database.transaction();
 
     techId = randomUUID();
@@ -170,10 +171,10 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     return { date, left, right, mover, position };
   }
 
-  async function rankCrossDay(date, mover, position) {
+  async function rankCrossDay(date, mover, position, start = '14:00', end = '15:00') {
     const { filterAndScoreSharedModelCandidates } = require('../services/auto-dispatch/candidate-slots')._internals;
     const service = await mockConn('scheduled_services').where({ id: mover.id }).first();
-    const candidate = { date, technician_id: techId, start_time: '14:00', end_time: '15:00' };
+    const candidate = { date, technician_id: techId, start_time: start, end_time: end };
     return filterAndScoreSharedModelCandidates(service, { lat: HQ.lat, lng: HQ.lng + mover.lngOffset },
       [candidate], { db: mockConn, sourceRouteStamp: position.sourceStamp, departureMinutes: 450 }, {});
   }
@@ -193,6 +194,25 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
         { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: { ...position, order } })).rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
     }
     expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
+  });
+
+  test('dispatch keeps a grouped visit together when ranking a route and when saving it', async () => {
+    const { ROUTE_POSITION } = require('../services/auto-dispatch/route-position');
+    const { date, left, right, mover, position } = await scoredCrossDay();
+    const visitId = randomUUID();
+    await mockConn('service_visits').insert({ id: visitId, customer_id: left.customerId, scheduled_date: date,
+      technician_id: techId, stop_base_key: visitId, created_by: 'test' });
+    await mockConn('scheduled_services').whereIn('id', [left.id, right.id]).update({
+      visit_id: visitId, customer_id: left.customerId, lng: HQ.lng + left.lngOffset,
+    });
+    const [early] = await rankCrossDay(date, mover, position, '09:00', '10:00');
+    expect(early[ROUTE_POSITION].order).toEqual([mover.id, left.id, right.id]);
+    expect(await rankCrossDay(date, mover, position)).toHaveLength(0);
+    const split = { ...position, destinationStamp: early[ROUTE_POSITION].destinationStamp };
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: split })).rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
+    expect(await mockConn('reschedule_log').where({ scheduled_service_id: mover.id }).first('id')).toBeUndefined();
   });
 
   test('a different writer cannot use a cross-day dispatch position', async () => {
@@ -290,10 +310,43 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     await mockConn('scheduled_services').insert(ids.map(id => ({ id, customer_id: visits[0].customerId, technician_id: techId,
       scheduled_date: date, service_type: 'Quarterly Pest Control Service', status: 'pending', lat: HQ.lat, lng: HQ.lng,
       window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, reservation_service_mix: mix })));
-    const cards = ['10', '12'].map(h => ({ date, techId, windowStart: h + ':00', windowEnd: (Number(h) + 1) + ':00' }));
-    const result = await observeOffers(mockConn, cards,
-      { lat: HQ.lat, lng: HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 }, { now: NOW })();
-    expect(result.map(m => Number.isFinite(m.driveMin))).toEqual([false, true]);
+    const cards = ['10', '12', '14'].map(h => ({ date, techId, windowStart: h + ':00', windowEnd: (Number(h) + 1) + ':00' }));
+    const target = { lat: HQ.lat, lng: HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
+    const measuredHours = async () => (await observeOffers(mockConn, cards, target, { now: NOW })()).map(m => Number.isFinite(m.driveMin));
+    expect(await measuredHours()).toEqual([false, true, true]);
+    const interviewAt = parseETDateTime(date + 'T12:00');
+    await mockConn('job_applications').insert({ status: 'interview', interview_at: interviewAt,
+      interview_end_at: new Date(new Date(interviewAt).getTime() + 30 * 60000) });
+    expect(await measuredHours()).toEqual([false, false, true]);
+  });
+
+  test('plain and travel-aware admission and both availability reads agree on committed visits and expiring holds', async () => {
+    const { findConflictingVisits, listOccupiedWindows } = require('../services/scheduling/occupancy');
+    const date = '2097-06-11';
+    const [linked, expired, live, legacy] = Array.from({ length: 4 }, () => randomUUID());
+    const past = '2001-01-01T00:00Z';
+    const future = date + 'T22:00Z';
+    for (const [id, customer, expiry] of [[linked, visits[0].customerId, past], [expired, null, past], [live, null, future], [legacy, null, null]]) {
+      await mockConn('scheduled_services').insert({ id, customer_id: customer, reservation_expires_at: expiry, technician_id: techId,
+        scheduled_date: date, window_start: '09:00', window_end: '10:00', service_type: 'Quarterly Pest Control Service',
+        estimated_duration_minutes: 60, status: 'pending', lat: HQ.lat, lng: HQ.lng });
+    }
+    const expected = [linked, live, legacy].sort();
+    const ids = rows => rows.map(row => row.id).sort();
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    for (const travel of [undefined, HQ]) {
+      const args = { db: mockConn, date, windowStart: '09:00', windowEnd: '10:00', travel };
+      expect(ids(await findConflictingVisits(args))).toEqual(expected);
+      expect(ids(await findConflictingVisits({ ...args, includeHolds: false }))).toEqual([linked, legacy].sort());
+    }
+    for (const withCoords of [false, true]) {
+      expect(ids(await listOccupiedWindows({ db: mockConn, dateFrom: date, dateTo: date, withCoords }))).toEqual(expected);
+    }
+    await mockConn('scheduled_services').whereIn('id', [expired, live, legacy]).del();
+    const mover = visits[1];
+    await expect(rebooker.reschedule(mover.id, date, { start: '09:00', end: '10:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false })).rejects.toMatchObject({ code: 'SLOT_TAKEN' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
   });
 
   test('the office notice shows the verified series and two feasible starts, and a live customer pick stays quiet', async () => {

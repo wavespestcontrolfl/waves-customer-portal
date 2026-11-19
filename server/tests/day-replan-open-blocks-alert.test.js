@@ -17,6 +17,7 @@ jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: je
 jest.mock('../services/scheduling/occupancy', () => ({
   DEFAULT_EXCLUDE_STATUSES: ['cancelled', 'skipped', 'no_show', 'rescheduled'],
   techScopedConfirmActive: jest.fn(() => false), listOccupiedWindows: jest.fn(async () => []),
+  findInterviewConflicts: jest.fn(async () => []),
   occupiedRows: jest.requireActual('../services/scheduling/occupancy').occupiedRows,
 }));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60 }));
@@ -260,6 +261,35 @@ test('booking fit holds the full summed span of a version-2 allocation before sc
   const target = { lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
 
   await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar })).resolves.toEqual([]);
+});
+
+test('booking fit caches the writer buffered interviews once per day and blocks every technician', async () => {
+  const occupancy = require('../services/scheduling/occupancy');
+  const { assessOfferedHours } = require('../services/day-replan/booking-fit');
+  const RouteOptimizer = require('../services/route-optimizer');
+  const date = '2026-11-20';
+  const conn = jest.fn();
+  const slots = ['tech-1', 'tech-2'].map(techId => ({ date, techId, windowStart: '10:00', windowEnd: '11:00' }));
+  const target = { lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
+  const calendar = new Map([
+    ['homes', new Map()], ['departure', 8 * 60], [date, []],
+    [`${date}|tech-1`, []], [`${date}|tech-2`, []],
+  ]);
+  occupancy.techScopedConfirmActive.mockReturnValueOnce(true).mockReturnValueOnce(true);
+  occupancy.findInterviewConflicts.mockResolvedValueOnce([{
+    id: 'interview:application-1', scheduled_date: date,
+    window_start: '09:45', window_end: '10:45', estimated_duration_minutes: 60,
+    status: 'interview', conflict_reason: 'interview', technician_id: null,
+  }]);
+
+  await expect(assessOfferedHours(conn, slots, target, { now: NOW, calendar })).resolves.toEqual([]);
+  await expect(assessOfferedHours(conn, slots, target, { now: NOW, calendar })).resolves.toEqual([]);
+
+  expect(occupancy.findInterviewConflicts).toHaveBeenCalledTimes(1);
+  expect(occupancy.findInterviewConflicts).toHaveBeenCalledWith({
+    db: conn, date, windowStart: '00:00', windowEnd: '24:00',
+  });
+  expect(occupancy.listOccupiedWindows).toHaveBeenCalledTimes(1);
 });
 
 test('a route-aware alternate preserves the first card, technician, day, rain priority and five-minute driving limit', () => {

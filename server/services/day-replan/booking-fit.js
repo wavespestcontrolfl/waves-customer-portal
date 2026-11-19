@@ -6,7 +6,7 @@ const { preferredFit, fitOfferedHour } = require('./close-gaps');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
 const { dayDepartureMinutes } = require('../scheduling/departure-time');
 const {
-  DEFAULT_EXCLUDE_STATUSES, listOccupiedWindows, occupiedRows, techScopedConfirmActive,
+  DEFAULT_EXCLUDE_STATUSES, findInterviewConflicts, listOccupiedWindows, occupiedRows, techScopedConfirmActive,
 } = require('../scheduling/occupancy');
 const { isHoldStop } = require('../scheduling/travel-gap');
 const { etDateString } = require('../../utils/datetime-et');
@@ -111,7 +111,15 @@ async function assessOfferedHours(conn, offered, target, {
       db: conn, dateFrom: date, dateTo: date, excludeServiceIds: targetIds,
       excludeStatuses: DEFAULT_EXCLUDE_STATUSES,
     }));
-    const occupancyRows = withoutOwnEstimateHold(occupiedRows(listed), ownEstimateId);
+    // The reservation writer's interview guard is separate from listOccupiedWindows.
+    // Read its actual buffered spans once for the whole calendar day; the morning
+    // matcher shares `calendar` across all 20 estimates, so every estimate and
+    // technician reuses this promise. Interviews are office-wide occupancy and
+    // therefore intentionally carry no technician scope here.
+    const interviews = await read(`interviews|${date}`, () => findInterviewConflicts({
+      db: conn, date, windowStart: '00:00', windowEnd: '24:00',
+    }));
+    const occupancyRows = withoutOwnEstimateHold(occupiedRows([...listed, ...interviews]), ownEstimateId);
     const occupiedById = occupancyById(occupancyRows);
     for (const [techId, slots] of techs) {
       // A linked appointment with a leftover reservation stamp is committed, not a hold: route and simulate it.
