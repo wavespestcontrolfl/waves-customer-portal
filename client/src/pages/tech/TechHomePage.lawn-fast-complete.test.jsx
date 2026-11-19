@@ -3,14 +3,15 @@
 // (handleComplete): a regular lawn visit, or a typed one-time lawn treatment,
 // opens the lawn Fast Complete sheet (GATE_LAWN_FAST_COMPLETE,
 // `lawnFastCompleteEnabled` on the schedule row) at once, with the product
-// catalog read at the tap, and with Dispatch's request; a visit that completes
-// through a project opens the project editor; a whole-visit closeout and any
-// other visit open the Dispatch completion form, never the project editor.
+// catalog read at the tap; a visit that completes through a project opens the
+// project editor; a whole-visit closeout and any other visit open the Dispatch
+// completion form (on the visit's own day), never the project editor.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { completionFailureOutcome } from '../../hooks/useFastCompleteSubmit';
 
 const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), lawnRequest: null }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), off: vi.fn(), disconnect: vi.fn() }) }));
@@ -56,7 +57,7 @@ vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({
 import TechHomePage from './TechHomePage';
 
 const CATALOG = [{ id: 'prod-fixture', name: 'Fixture granular' }];
-const DISPATCH_FORM = (id) => `/admin/dispatch?tab=schedule&completeService=${id}`;
+const DISPATCH_FORM = (id) => `/admin/dispatch?tab=schedule&date=2099-01-01&completeService=${id}`;
 const row = (id, overrides = {}) => ({
   id,
   technicianId: 'tech-fixture',
@@ -228,13 +229,15 @@ it('a catalog reply lands only on the sheet its tap opened, never on one opened 
   await waitFor(() => expect(catalogOnSheet()).toEqual(CATALOG));
 });
 
-it('the lawn sheet gets Dispatch\'s request: a 2xx it cannot read is no success, and a refusal keeps its details', async () => {
+it('the lawn sheet\'s request: a 2xx it cannot read is no success, and a refusal keeps its details', async () => {
   rows = [row('svc-lawn')];
   mount();
   await openFromTools();
   await lawnSheet();
   // A resolved {} would read as a saved completion and clear the attempt kept for a same-key retry.
-  await expect(mocks.lawnRequest('/admin/dispatch/svc-lawn/unreadable-2xx', { method: 'POST', body: '{}' })).rejects.toThrow();
+  const err = await mocks.lawnRequest('/admin/dispatch/svc-lawn/unreadable-2xx', { method: 'POST', body: '{}' }).catch((error) => error);
+  expect(err).toBeInstanceOf(Error);
+  expect(completionFailureOutcome(err)).toBe('retry');
   // The sheet marks the refused product and place from err.details.
   await expect(mocks.lawnRequest('/admin/dispatch/svc-lawn/refused', { method: 'POST', body: '{}' }))
     .rejects.toMatchObject({ status: 422, code: 'lawn_product_limit', details: { productId: 'prod-fixture', place: 'front' } });

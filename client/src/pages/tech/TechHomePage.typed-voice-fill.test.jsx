@@ -13,8 +13,9 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { completionFailureOutcome } from '../../hooks/useFastCompleteSubmit';
 
-const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), stationMap: { enabled: false, ready: true, known: true } }));
+const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), stationMap: { enabled: false, ready: true, known: true }, sheetRequest: null }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), off: vi.fn(), disconnect: vi.fn() }) }));
 vi.mock('../../hooks/useFeatureFlag', () => ({
   useFeatureFlag: () => false,
@@ -32,11 +33,14 @@ vi.mock('../../components/tech/TechTreatmentZoneModal', () => ({ default: () => 
 vi.mock('../../components/tech/FieldLeadModal', () => ({ default: () => null }));
 vi.mock('../../components/ServiceRecapModal', () => ({ default: ({ service }) => <div>Existing recap form for {service.id}</div> }));
 vi.mock('../../components/tech/FastCompleteSheet', () => ({
-  default: ({ service, onFullForm }) => (
-    <div data-testid="sheet" data-service={JSON.stringify(service)}>
-      <button type="button" onClick={onFullForm}>Full form</button>
-    </div>
-  ),
+  default: ({ service, request, onFullForm }) => {
+    mocks.sheetRequest = request;
+    return (
+      <div data-testid="sheet" data-service={JSON.stringify(service)}>
+        <button type="button" onClick={onFullForm}>Full form</button>
+      </div>
+    );
+  },
 }));
 import TechHomePage from './TechHomePage';
 
@@ -86,6 +90,8 @@ beforeEach(() => {
   vi.stubGlobal('location', { ...window.location, assign });
   vi.stubGlobal('fetch', vi.fn(async (path) => {
     if (path.includes('/admin/schedule?')) return { ok: true, status: 200, json: async () => ({ services: rows }) };
+    // A 2xx whose body is not JSON (a captive portal page).
+    if (path.endsWith('/unreadable-2xx')) return { ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token <'); } };
     return { ok: true, status: 200, json: async () => ({}) };
   }));
 });
@@ -95,7 +101,7 @@ async function openFromTools() {
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
 }
 const sheetService = async () => JSON.parse((await screen.findByTestId('sheet')).getAttribute('data-service'));
-const TYPED_FORM = (id) => `/admin/dispatch?tab=schedule&completeService=${id}`;
+const TYPED_FORM = (id) => `/admin/dispatch?tab=schedule&date=2099-01-01&completeService=${id}`;
 
 it('opens a typed visit in the report flow, reading its own form, with no trace on the sheet', async () => {
   rows = [row('svc-roach')];
@@ -196,6 +202,18 @@ it.each(STATION_VISITS.slice(0, 2))('with the station map on, %s under GATE_STAT
     id: 'svc-station', reportFlow: true, typedFlow: true, stationsFlow: true, typedType: overrides.completionProfile.findingsType,
   });
   expect(assign).not.toHaveBeenCalled();
+});
+
+it('a station sheet\'s /complete answered by a 2xx it cannot read keeps the saved attempt for a same-key retry', async () => {
+  mocks.stationMap = { enabled: true, ready: true, known: true };
+  rows = [row('svc-station', { ...STATION_VISITS[0][1], stationFastCompleteEnabled: true })];
+  mount();
+  await openFromTools();
+  await sheetService();
+  const err = await mocks.sheetRequest('/admin/dispatch/svc-station/unreadable-2xx', { method: 'POST', body: '{}' }).catch((error) => error);
+  expect(err).toBeInstanceOf(Error);
+  // An open outcome, never a save: the submit hook keeps the body and its key.
+  expect(completionFailureOutcome(err)).toBe('retry');
 });
 
 it('with the station map on, a trap check keeps the typed form under GATE_STATION_FAST_COMPLETE', async () => {

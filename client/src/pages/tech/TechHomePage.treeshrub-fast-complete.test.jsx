@@ -82,7 +82,7 @@ it('keeps today\'s Dispatch deep link when the flag is false or absent', async (
   rows = [row('svc-ts-off', { treeShrubFastCompleteEnabled: false })];
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
-  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-ts-off'));
+  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&date=2099-01-01&completeService=svc-ts-off'));
   expect(screen.queryByText(/Tree and shrub sheet/)).not.toBeInTheDocument();
 });
 
@@ -90,7 +90,7 @@ it('keeps the deep link for a typed visit that is not tree & shrub even with the
   rows = [row('svc-other-typed', { treeShrubFastCompleteEnabled: true, completionProfile: { category: 'pest_control', findingsType: 'palm_injection' } })];
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
-  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-other-typed'));
+  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&date=2099-01-01&completeService=svc-other-typed'));
   expect(screen.queryByText(/Tree and shrub sheet/)).not.toBeInTheDocument();
 });
 
@@ -99,7 +99,7 @@ it('sends the sheet\'s full-form escape to the Dispatch typed completion', async
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   fireEvent.click(await screen.findByRole('button', { name: 'Sheet full form' }));
-  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-ts-escape'));
+  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&date=2099-01-01&completeService=svc-ts-escape'));
   expect(screen.queryByText(/Tree and shrub sheet/)).not.toBeInTheDocument();
 });
 

@@ -85,7 +85,6 @@ import useTechEstimateSetup from '../../components/tech/useTechEstimates';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag, useFeatureFlagReady } from '../../hooks/useFeatureFlag';
 import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
-import { adminFetch } from '../../utils/admin-fetch';
 import { etDateString } from '../../lib/timezone';
 import {
   PICK_KEY, customerFirstName, customerLastName, readOptionsAnswer, summarizeCustomerPickResult, summarizeQuickMoveResult, usablePick,
@@ -187,7 +186,15 @@ function openTypedCompletion(service) {
     alert(`This visit is already ${status} — nothing to complete.`);
     return;
   }
-  window.location.assign(`/admin/dispatch?tab=schedule&completeService=${encodeURIComponent(service.id)}`);
+  // On the visit's own day: Dispatch looks for the visit in the day it loads,
+  // and a Today page left open past midnight would send it to the next day.
+  window.location.assign(`/admin/dispatch?tab=schedule&date=${encodeURIComponent(dispatchDayOf(service))}&completeService=${encodeURIComponent(service.id)}`);
+}
+
+// The day a Dispatch deep link opens for a visit: its own date, else today.
+function dispatchDayOf(service) {
+  const day = String(service?.scheduledDate || '').split('T')[0];
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : etDateString();
 }
 
 // The appointment details sheet's Dispatch-only destinations (edit, checkout,
@@ -195,8 +202,7 @@ function openTypedCompletion(service) {
 // them: ?appointment= is the detail-sheet deep link DispatchPageV2 consumes,
 // on the visit's own day.
 function openDispatchDetails(service) {
-  const date = String(service?.scheduledDate || '').split('T')[0] || etDateString();
-  window.location.assign(`/admin/dispatch?tab=schedule&date=${encodeURIComponent(date)}&appointment=${encodeURIComponent(service.id)}`);
+  window.location.assign(`/admin/dispatch?tab=schedule&date=${encodeURIComponent(dispatchDayOf(service))}&appointment=${encodeURIComponent(service.id)}`);
 }
 
 // adminFetch-style helper for the tech portal: bearer-token fetch against
@@ -226,6 +232,12 @@ async function readRoute(date, token, signal) {
   return { kind: res.status === 401 || res.status === 403 ? 'refused' : 'failed', message };
 }
 
+// The page's request (the adminFetch-style helper described above readRoute).
+// A 2xx whose body is not JSON (a captive portal page, a body cut off) throws
+// with no status, as utils/admin-fetch does: its outcome is unknown, so a Fast
+// Complete sheet keeps its saved attempt for a same-key retry instead of
+// reading {} as saved. A refusal keeps its body as err.details (the lawn sheet
+// marks a refused product and place from it). A 204 has no body: {}.
 async function techRequest(path, options = {}) {
   const token = getAdminAuthToken();
   const res = await fetch(`${API}/api${path}`, {
@@ -237,13 +249,17 @@ async function techRequest(path, options = {}) {
       ...(options.headers || {}),
     },
   });
-  const data = await res.json().catch(() => ({}));
+  if (res.status === 204) return {};
+  let unreadable = false;
+  const data = await res.json().catch(() => { unreadable = true; return {}; });
   if (!res.ok) {
     const error = new Error(data?.error || `Request failed (${res.status})`);
     error.status = res.status;
     error.code = data?.code;
+    if (data && typeof data === 'object') error.details = data;
     throw error;
   }
+  if (unreadable) throw new Error('The server\'s answer could not be read.');
   return data;
 }
 
@@ -1292,10 +1308,7 @@ export default function TechHomePage({ section = 'today' }) {
         <FastCompleteLawnSheet
           key={lawnFastService.id}
           service={lawnSheetService(lawnFastService)}
-          // Dispatch's request (utils/admin-fetch), as there: a 2xx whose body
-          // cannot be read is an unknown outcome that keeps the saved attempt,
-          // and a refusal keeps its details (the refused product and place).
-          request={adminFetch}
+          request={techRequest}
           operatorId={staffIdForDevice}
           catalog={lawnFast.catalog}
           catalogError={lawnFast.catalogError}

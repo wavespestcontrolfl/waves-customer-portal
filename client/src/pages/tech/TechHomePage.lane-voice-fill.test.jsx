@@ -101,7 +101,7 @@ it('the sheet\'s Full form opens the visit\'s own completion form, never the pro
   mount();
   await openFromTools();
   fireEvent.click(await screen.findByRole('button', { name: 'Full form' }));
-  expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-fire-ant');
+  expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&date=2099-01-01&completeService=svc-fire-ant');
   expect(screen.queryByText(/Project editor for/)).not.toBeInTheDocument();
 });
 
@@ -141,7 +141,7 @@ it.each([
   rows = [row('svc-old-path', overrides)];
   mount();
   await openFromTools();
-  await vi.waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-old-path'));
+  await vi.waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&date=2099-01-01&completeService=svc-old-path'));
   expect(screen.queryByText(/Project editor for/)).not.toBeInTheDocument();
   expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
 });
