@@ -18,6 +18,13 @@
  * field, and the website-lead draft, the customer price assistant, the tech
  * estimate tool and the moving re-price read it too. Small, Large and
  * Oversized stay selectable by hand in the estimate tool.
+ *
+ * GATE_CAGE_TWO_SIZES (owner 2026-11-19, "cage 1000") supersedes the Medium
+ * start: with it on the lookup's own answer is two sizes (Medium up to 1,000
+ * sq ft, Large above), so officeCageStartSize returns null and no
+ * meta.poolCageStartSize is stamped. The call-agent draft still drops a cage
+ * on a home with no decided pool (GATE_CAGE_START_MEDIUM). The estimate tool is
+ * told to offer two sizes by meta.poolCageTwoSizes (stampEstimateToolCageStart).
  */
 
 // A cage over this area is no longer the lookup's Medium (classifyPoolCageSize).
@@ -28,13 +35,15 @@ const CAGE_START_MAX_SQFT = 2000;
 // `?.()`: a whole-module feature-gates mock without the reader reads as off.
 const gateLive = () => require('../../config/feature-gates').cageStartMediumLive?.() === true;
 
+const twoSizesLive = () => require('../../config/feature-gates').cageTwoSizesLive?.() === true;
+
 const up = (value) => String(value || '').toUpperCase();
 
 // 'MEDIUM' when the office tools start this cage at Medium, else null (the
 // lookup's own size stands). Keyed on the county's assessed area only: a
 // cage sized from the satellite image has no area and keeps its size.
 function officeCageStartSize(enriched) {
-  if (!gateLive()) return null;
+  if (!gateLive() || twoSizesLive()) return null;
   const sqft = Number(enriched?.poolCageSqft);
   return sqft > CAGE_START_ABOVE_SQFT && sqft <= CAGE_START_MAX_SQFT ? 'MEDIUM' : null;
 }
@@ -54,8 +63,10 @@ function agentDraftCageProfile(enriched) {
 // The estimate tool's half: names the starting size BESIDE the profile, never
 // in it (enriched.poolCageSize stays the lookup's own size, and the profile is
 // what the estimate saves). The tool's first fill reads meta.poolCageStartSize.
-// Absent while the gate is off.
+// Absent while the gate is off. GATE_CAGE_TWO_SIZES: also names meta.poolCageTwoSizes
+// (the tool then offers Medium and Large only), absent while that gate is off.
 function stampEstimateToolCageStart(result) {
+  if (twoSizesLive() && result?.meta) result.meta.poolCageTwoSizes = true;
   const startSize = officeCageStartSize(result?.enriched);
   if (startSize && result.meta) result.meta.poolCageStartSize = startSize;
   return result;

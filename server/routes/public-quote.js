@@ -239,6 +239,14 @@ function trustedTreeShrubFootprintSqFt(trustedTurf = {}, propertyRecord = null) 
   return null;
 }
 
+// GATE_CAGE_TWO_SIZES website hold. The lookup profile carries poolCageLegacySize
+// (the four-size answer) only while the gate is on; `?.()` so a whole-module
+// feature-gates mock without the reader reads as off.
+function pestCageHeldByLegacySize(ep) {
+  if (require('../config/feature-gates').cageTwoSizesLive?.() !== true) return false;
+  return ['LARGE', 'OVERSIZED'].includes(String(ep?.poolCageLegacySize || '').toUpperCase());
+}
+
 function isPublicCommercialQuote(body = {}, enriched = {}) {
   const enrichedCommercial = isCommercialProperty({
     propertyType: enriched.propertyType,
@@ -1716,6 +1724,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         poolCageSize: ['small', 'medium', 'large', 'oversized'].includes(String(ep.poolCageSize || '').toLowerCase())
           ? String(ep.poolCageSize).toLowerCase()
           : undefined,
+        // GATE_CAGE_TWO_SIZES: the lookup now says Medium or Large, so a cage that
+        // today's four sizes call Large or Oversized keeps its manual-quote hold
+        // (the engine adds large_pool_cage for the flag). Absent while the gate is off.
+        ...(pestCageHeldByLegacySize(ep) ? { poolCageReview: true } : {}),
         shrubs: (ep.shrubDensity || ep.shrubs || '').toString().toLowerCase() || undefined,
         trees: (ep.treeDensity || ep.trees || '').toString().toLowerCase() || undefined,
         complexity: (ep.landscapeComplexity || ep.complexity || '').toString().toLowerCase() || undefined,

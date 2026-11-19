@@ -1192,6 +1192,21 @@ function InputV2({ k, id = `estimate-${k}`, ...rest }) {
   return <Input id={id} value={form[k] ?? ""} onChange={(e) => set(k, e.target.value)} {...rest} />;
 }
 
+const POOL_CAGE_SIZE_OPTIONS = [
+  { value: "SMALL", label: "Small (+$5)" },
+  { value: "MEDIUM", label: "Medium (+$8)" },
+  { value: "LARGE", label: "Large (+$12)" },
+  { value: "OVERSIZED", label: "Oversized (+$18)" },
+];
+
+// GATE_CAGE_TWO_SIZES: when the lookup said meta.poolCageTwoSizes the box offers
+// Medium and Large only. A saved Small or Oversized (an old estimate) stays
+// listed, so it is never silently changed. Absent = all four, as before.
+function poolCageSizeOptions(current, twoSizes) {
+  if (!twoSizes) return POOL_CAGE_SIZE_OPTIONS;
+  return POOL_CAGE_SIZE_OPTIONS.filter((o) => o.value === "MEDIUM" || o.value === "LARGE" || o.value === current);
+}
+
 function SelectV2({ k, options, id = `estimate-${k}`, ...rest }) {
   const { form, set } = useContext(FormCtx);
   return <Select id={id} value={form[k] ?? ""} onChange={(e) => set(k, e.target.value)} {...rest}>
@@ -3924,6 +3939,8 @@ export default function EstimateToolViewV2({
         businessIdentityBypassed: data.meta?.businessIdentityBypassed === true,
         addressStatus: data.meta?.addressStatus || null,
         campusParcel: data.meta?.campusParcel || null,
+        // GATE_CAGE_TWO_SIZES: the lookup sizes a cage Medium or Large only.
+        poolCageTwoSizes: data.meta?.poolCageTwoSizes === true,
       });
       setVerifySaveState({});
       unitLookupAddressRef.current = ep.unitScopedLookup ? address : "";
@@ -6649,12 +6666,7 @@ export default function EstimateToolViewV2({
                 <Field label="Pool Cage Size" id="estimate-poolCageSize" className="mb-4">
                   <SelectV2
                     k="poolCageSize"
-                    options={[
-                      { value: "SMALL", label: "Small (+$5)" },
-                      { value: "MEDIUM", label: "Medium (+$8)" },
-                      { value: "LARGE", label: "Large (+$12)" },
-                      { value: "OVERSIZED", label: "Oversized (+$18)" },
-                    ]}
+                    options={poolCageSizeOptions(form.poolCageSize, lookupMeta?.poolCageTwoSizes === true)}
                   />
                 </Field>
               )}

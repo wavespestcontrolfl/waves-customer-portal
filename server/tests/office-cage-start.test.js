@@ -84,18 +84,22 @@ const { SQFT_SOURCES } = require('../services/estimator-engine/source-arbitratio
 const { generateEstimate: priceForReal } = require('../services/pricing-engine/estimate-engine');
 
 const GATE = 'GATE_CAGE_START_MEDIUM';
+const TWO_SIZES = 'GATE_CAGE_TWO_SIZES';
 let priorGate;
-beforeAll(() => { priorGate = process.env[GATE]; });
+let priorTwoSizes;
+beforeAll(() => { priorGate = process.env[GATE]; priorTwoSizes = process.env[TWO_SIZES]; });
 afterAll(() => {
   // process.env persists across files on one worker — restore, never leak.
   if (priorGate === undefined) delete process.env[GATE];
   else process.env[GATE] = priorGate;
+  if (priorTwoSizes === undefined) delete process.env[TWO_SIZES];
+  else process.env[TWO_SIZES] = priorTwoSizes;
 });
 const gate = (value) => {
   if (value === undefined) delete process.env[GATE];
   else process.env[GATE] = value;
 };
-beforeEach(() => gate(undefined));
+beforeEach(() => { gate(undefined); delete process.env[TWO_SIZES]; });
 
 const ADDRESS = '123 Example St, Testville, FL 34200';
 // The lookup's own sizes for these areas (classifyPoolCageSize).
@@ -172,6 +176,55 @@ describe('agentDraftCageProfile (the call-agent draft)', () => {
       expect(agentDraftCageProfile(profile)).toEqual({ ...profile, poolCage: 'NO', poolCageSize: 'NONE' });
       expect(profile.poolCage).toBe('YES');
     }
+  });
+});
+
+describe('GATE_CAGE_TWO_SIZES supersedes the Medium start', () => {
+  test('on: no start size even with the start gate on; the lookup\'s two-size answer stands', () => {
+    gate('true');
+    process.env[TWO_SIZES] = 'true';
+    expect(officeCageStartSize(cagedHome(1300, 'LARGE'))).toBeNull();
+    expect(officeCageStartSize(cagedHome(812, 'MEDIUM'))).toBeNull();
+    const profile = cagedHome(1300, 'LARGE');
+    expect(agentDraftCageProfile(profile)).toBe(profile);
+  });
+
+  test('on: the draft still drops a cage on a home with no decided pool (start gate rule)', () => {
+    gate('true');
+    process.env[TWO_SIZES] = 'true';
+    const noPool = cagedHome(704, 'MEDIUM', { pool: 'NO' });
+    expect(agentDraftCageProfile(noPool)).toEqual({ ...noPool, poolCage: 'NO', poolCageSize: 'NONE' });
+  });
+
+  test('on: the estimate tool is told to offer two sizes, beside the profile', () => {
+    process.env[TWO_SIZES] = 'true';
+    const result = { enriched: cagedHome(1300, 'LARGE'), meta: { cache: 'miss' } };
+    expect(stampEstimateToolCageStart(result)).toBe(result);
+    expect(result.meta).toEqual({ cache: 'miss', poolCageTwoSizes: true });
+    expect(result.enriched.poolCageSize).toBe('LARGE');
+  });
+
+  test('off or unset: no poolCageTwoSizes, and the 2,000 sq ft Medium start is as before', () => {
+    for (const value of [undefined, 'false', '1']) {
+      if (value === undefined) delete process.env[TWO_SIZES]; else process.env[TWO_SIZES] = value;
+      gate('true');
+      const result = { enriched: cagedHome(1300, 'OVERSIZED'), meta: {} };
+      expect(stampEstimateToolCageStart(result).meta).toEqual({ poolCageStartSize: 'MEDIUM' });
+    }
+    gate(undefined);
+    const off = { enriched: cagedHome(1300, 'OVERSIZED'), meta: {} };
+    expect(stampEstimateToolCageStart(off).meta).toEqual({});
+  });
+
+  test('a whole-module feature-gates mock without the reader reads as off', () => {
+    process.env[TWO_SIZES] = 'true';
+    jest.isolateModules(() => {
+      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false }));
+      const isolated = require('../services/property-lookup/office-cage-start');
+      const result = { enriched: cagedHome(1300, 'LARGE'), meta: {} };
+      expect(isolated.stampEstimateToolCageStart(result).meta).toEqual({});
+    });
+    jest.dontMock('../config/feature-gates');
   });
 });
 

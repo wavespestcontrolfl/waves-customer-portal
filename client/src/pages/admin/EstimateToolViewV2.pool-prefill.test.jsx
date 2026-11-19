@@ -146,4 +146,32 @@ describe('lookup cage size prefill', () => {
     await waitFor(() => expect(sizeBox()).toHaveValue('OVERSIZED'));
     expect(await pricedProfile()).toMatchObject({ poolCageSize: 'OVERSIZED' });
   });
+
+  // GATE_CAGE_TWO_SIZES (owner 2026-11-19): the lookup says meta.poolCageTwoSizes.
+  it('two sizes: the box offers Medium and Large only, and the lookup\'s Large fills and prices', async () => {
+    lookupMeta = { poolCageTwoSizes: true };
+    render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Pest Control', exact: true }));
+    await lookUp();
+    const sizeBox = screen.getByLabelText('Pool Cage Size');
+    expect([...sizeBox.options].map((o) => o.value)).toEqual(['MEDIUM', 'LARGE']);
+    expect([...sizeBox.options].map((o) => o.textContent)).toEqual(['Medium (+$8)', 'Large (+$12)']);
+    expect(sizeBox).toHaveValue('LARGE');
+    expect(await pricedProfile()).toMatchObject({ poolCage: 'YES', poolCageSize: 'LARGE' });
+  });
+
+  it('two sizes: a saved Oversized or Small value stays listed and is not changed', async () => {
+    lookupMeta = { poolCageTwoSizes: true };
+    for (const [saved, expected] of [['OVERSIZED', ['MEDIUM', 'LARGE', 'OVERSIZED']], ['SMALL', ['SMALL', 'MEDIUM', 'LARGE']]]) {
+      cageSize = saved;
+      render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Pest Control', exact: true }));
+      await lookUp();
+      const sizeBox = screen.getByLabelText('Pool Cage Size');
+      expect(sizeBox).toHaveValue(saved);
+      expect([...sizeBox.options].map((o) => o.value)).toEqual(expected);
+      expect(await pricedProfile()).toMatchObject({ poolCageSize: saved });
+      cleanup();
+    }
+  });
 });

@@ -3104,6 +3104,8 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     poolCageSize: classifyPoolCageSize(rc?.poolCageSqft) || normalizePoolCageSize(ai?.poolCageSize, ai?.poolCage),
     poolCageSizeInferred: !rc?.poolCageSqft
       && ai?.poolCage === 'YES' && !['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED'].includes(String(ai?.poolCageSize || '').toUpperCase()),
+    // GATE_CAGE_TWO_SIZES only: the four-size answer, for the website hold.
+    ...(cageTwoSizesLive() ? { poolCageLegacySize: poolCageLegacySize(rc, ai) } : {}),
     // County permit evidence (positive-only; _poolPermits rides the cached
     // record). A permit proves a pool/cage the annual roll hasn't caught up
     // to; absence proves nothing — open-permit layers, new-construction-only
@@ -4310,7 +4312,15 @@ function poolRecordContext(propertyRecord) {
 // sqft is on the tax roll, so the classification becomes deterministic.
 // Positive-only: no cage row never downgrades a vision-detected cage
 // (attached lanais are sometimes rolled into the building areas).
-function classifyPoolCageSize(sqft) {
+//
+// GATE_CAGE_TWO_SIZES (owner 2026-11-19, "cage 1000"): two sizes, Medium up to
+// 1,000 sq ft and Large above. Read at call time; `?.()` so a whole-module
+// feature-gates mock without the reader reads as off. The engine still reads
+// all four sizes (saved estimates keep their price).
+const cageTwoSizesLive = () => require('../config/feature-gates').cageTwoSizesLive?.() === true;
+const CAGE_TWO_SIZES_MEDIUM_MAX_SQFT = 1000;
+
+function classifyPoolCageSizeFourBands(sqft) {
   if (!Number.isFinite(sqft) || sqft <= 0) return null;
   if (sqft < 300) return 'SMALL';
   if (sqft <= 600) return 'MEDIUM';
@@ -4318,11 +4328,35 @@ function classifyPoolCageSize(sqft) {
   return 'OVERSIZED';
 }
 
+function classifyPoolCageSize(sqft) {
+  if (!cageTwoSizesLive()) return classifyPoolCageSizeFourBands(sqft);
+  if (!Number.isFinite(sqft) || sqft <= 0) return null;
+  return sqft <= CAGE_TWO_SIZES_MEDIUM_MAX_SQFT ? 'MEDIUM' : 'LARGE';
+}
 
-function normalizePoolCageSize(value, poolCage) {
+function normalizePoolCageSizeFourSizes(value, poolCage) {
   const raw = String(value || '').toUpperCase();
   if (['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED'].includes(raw)) return raw;
   return poolCage === 'YES' ? 'MEDIUM' : 'NONE';
+}
+
+// The satellite answer. The AI prompt still answers four sizes; with two sizes
+// on, Small and Medium read Medium and Large and Oversized read Large (this
+// also covers a stored answer rebuilt on a cache hit).
+function normalizePoolCageSize(value, poolCage) {
+  const size = normalizePoolCageSizeFourSizes(value, poolCage);
+  if (!cageTwoSizesLive()) return size;
+  if (size === 'SMALL') return 'MEDIUM';
+  return size === 'OVERSIZED' ? 'LARGE' : size;
+}
+
+// Two sizes on only: the four-size answer today's rule gives, so the website
+// quote can keep holding a cage the four sizes call Large or Oversized.
+// Undefined with the gate off (the key is then absent from the profile).
+function poolCageLegacySize(rc, ai) {
+  if (!cageTwoSizesLive()) return undefined;
+  return classifyPoolCageSizeFourBands(rc?.poolCageSqft)
+    || normalizePoolCageSizeFourSizes(ai?.poolCageSize, ai?.poolCage);
 }
 
 function inferFoundation(rc, ai) {
