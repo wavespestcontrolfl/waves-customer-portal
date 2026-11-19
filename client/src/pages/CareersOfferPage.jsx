@@ -400,7 +400,7 @@ function NoteField({ id, label, value, onChange }) {
 // Shared submit wrapper for the three actions: one in-flight request at a
 // time, a 404 means the link is dead, a 409 means the offer changed under the
 // applicant (re-read it), a lost response is re-checked before saying failed.
-function useOfferAction({ token, onApplied, onReload, onInvalid }) {
+function useOfferAction({ token, onApplied, onReload, onInvalid, onUnknown }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -414,7 +414,7 @@ function useOfferAction({ token, onApplied, onReload, onInvalid }) {
       if (res.status >= 500) throw new Error('unknown outcome'); // may have committed: re-read below
       if (res.status === 409) {
         const after = await onReload();
-        if (after === 'failed') setError(REFRESH_ERROR);
+        if (after === 'failed') onUnknown();
         else if (after === 'open') setError(NOT_SAVED_ERROR);
         return;
       }
@@ -425,11 +425,12 @@ function useOfferAction({ token, onApplied, onReload, onInvalid }) {
       onApplied(res.body);
     } catch {
       const after = await onReload();
-      if (after !== 'changed') setError(CONNECTION_ERROR);
+      if (after === 'failed') onUnknown();
+      else if (after === 'open') setError(CONNECTION_ERROR);
     } finally {
       setBusy(false);
     }
-  }, [busy, token, onApplied, onReload, onInvalid]);
+  }, [busy, token, onApplied, onReload, onInvalid, onUnknown]);
 
   return { busy, error, setError, run };
 }
@@ -507,11 +508,22 @@ function SignBlock({ name, onName, onAccept, busy }) {
 function OpenOffer({ token, data, onApplied, onReload, onInvalid }) {
   const [name, setName] = useState('');
   const [panel, setPanel] = useState('none'); // none | date | decline
-  const accept = useOfferAction({ token, onApplied: (b) => onApplied({ ...b, signedName: name.trim() }), onReload, onInvalid });
-  const dateReq = useOfferAction({ token, onApplied, onReload, onInvalid });
-  const decline = useOfferAction({ token, onApplied, onReload, onInvalid });
+  const [unknown, setUnknown] = useState(false);
+  const [rechecking, setRechecking] = useState(false);
+  const markUnknown = useCallback(() => setUnknown(true), []);
+  const accept = useOfferAction({ token, onApplied: (b) => onApplied({ ...b, signedName: name.trim() }), onReload, onInvalid, onUnknown: markUnknown });
+  const dateReq = useOfferAction({ token, onApplied, onReload, onInvalid, onUnknown: markUnknown });
+  const decline = useOfferAction({ token, onApplied, onReload, onInvalid, onUnknown: markUnknown });
   const [consentPending, setConsentPending] = useState(false);
-  const anyBusy = accept.busy || dateReq.busy || decline.busy || consentPending;
+  // The last write may or may not have gone through and the offer could not be
+  // read: every action stays locked until a read works.
+  const recheck = async () => {
+    setRechecking(true);
+    const after = await onReload();
+    setRechecking(false);
+    if (after === 'open') setUnknown(false);
+  };
+  const anyBusy = accept.busy || dateReq.busy || decline.busy || consentPending || unknown;
 
   return (
     <Column>
@@ -535,6 +547,16 @@ function OpenOffer({ token, data, onApplied, onReload, onInvalid }) {
           onAccept={() => accept.run('/accept', { signedName: name.trim() })}
         />
         {accept.error && <div style={ERROR_BANNER_STYLE} role="alert">{accept.error}</div>}
+        {unknown && (
+          <div style={ERROR_BANNER_STYLE} role="alert">
+            {REFRESH_ERROR}
+            <div style={{ marginTop: 8 }}>
+              <BrandButton variant="secondary" disabled={rechecking} onClick={recheck}>
+                {rechecking ? 'Checking…' : 'Check again'}
+              </BrandButton>
+            </div>
+          </div>
+        )}
 
         <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
           <BrandButton fullWidth variant="secondary" disabled={anyBusy} onClick={() => setPanel(panel === 'date' ? 'none' : 'date')}>

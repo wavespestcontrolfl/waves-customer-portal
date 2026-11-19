@@ -281,7 +281,22 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     expect(await screen.findByText(/We could not refresh this offer/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Decline' })).toBeDisabled();
+  });
+
+  it('keeps actions locked after a lost reply until a re-read works, then shows the result', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockRejectedValueOnce(new Error('offline')) // sign: reply lost
+      .mockRejectedValueOnce(new Error('offline')) // re-read lost
+      .mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' })));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Check again' }));
+    expect(await screen.findByText(/You signed this offer/)).toBeInTheDocument();
   });
 
   it('locks the other panel while the accept request is pending', async () => {
