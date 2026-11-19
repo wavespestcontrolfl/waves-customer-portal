@@ -1131,9 +1131,13 @@ function stopPromise(members = [], eventsByVisit = new Map(), now = new Date()) 
     .filter(Boolean);
   // A withdrawn promise (the pick hand-off text, `withdrawn: true`) speaks for the one service it named: a service
   // that joins a stop after its hand-off never takes back a sibling's time. It stands for the stop only when no
-  // member holds anything else (still an unknown window there: no card, and the levels reader fails closed).
-  const unwithdrawn = latestHeld.filter((promise) => promise.withdrawn !== true);
-  const held = unwithdrawn.length ? unwithdrawn : latestHeld;
+  // candidate is left but withdrawals (still an unknown window there: no card, and the levels reader fails closed).
+  // It still REPLACES a grouped send for its own service below: that member no longer holds the grouped window.
+  const withoutWithdrawn = (list) => {
+    const kept = list.filter((promise) => promise.withdrawn !== true);
+    return kept.length ? kept : list;
+  };
+  const held = withoutWithdrawn(latestHeld);
   // Anything communicated BEFORE the newest grouped send is gone: that send
   // quoted one window for every member, so a member's older per-service
   // confirmation no longer stands even if another member's confirmation came
@@ -1152,10 +1156,10 @@ function stopPromise(members = [], eventsByVisit = new Map(), now = new Date()) 
   // round 24, fifth and sixth passes).
   if (!held.length && !newestGrouped) return null;
   const after = newestGrouped
-    ? held.filter((promise) => instant(promise.communicated_at) > instant(newestGrouped.communicated_at)) : [];
+    ? latestHeld.filter((promise) => instant(promise.communicated_at) > instant(newestGrouped.communicated_at)) : [];
   const replaced = new Set(after.map((promise) => String(promise.visit_id)));
   const stillHolding = newestGrouped && awaited.some((member) => !replaced.has(String(member.id)));
-  const own = newestGrouped ? [...(stillHolding ? [newestGrouped] : []), ...after] : held;
+  const own = newestGrouped ? withoutWithdrawn([...(stillHolding ? [newestGrouped] : []), ...after]) : held;
   if (!own.length) return null;
   // An UNKNOWN window still wins when it is the newest thing the customer
   // heard: that is the legacy move-notice rule — coverage became unknown and
