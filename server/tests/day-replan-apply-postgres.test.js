@@ -225,6 +225,37 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     expect(await mockConn('reschedule_log').where({ scheduled_service_id: mover.id }).first('id')).toBeUndefined();
   });
 
+  test('dispatch simulates and saves a version-2 allocation as one physical arrival', async () => {
+    const { positionFor, routeStamp } = require('../services/auto-dispatch/route-position');
+    const { DAY_CLOSE, _internals: { loadDayStopRows } } = require('../services/auto-dispatch/candidate-slots');
+    const { date, left, right, mover } = await scoredCrossDay();
+    const mix = { version: 2, allocatedServiceIds: [left.id, right.id], durations: [121, 1], durationMinutes: 122 };
+    await mockConn('scheduled_services').where({ id: left.id }).update({
+      customer_id: left.customerId, window_start: '09:00', window_end: '10:00',
+      estimated_duration_minutes: 121, route_order: 1, reservation_service_mix: mix,
+      lat: HQ.lat, lng: HQ.lng,
+    });
+    await mockConn('scheduled_services').where({ id: right.id }).update({
+      customer_id: left.customerId, window_start: '09:00', window_end: '09:01',
+      estimated_duration_minutes: 1, route_order: 2, reservation_service_mix: mix,
+      lat: HQ.lat, lng: HQ.lng,
+    });
+    await mockConn('scheduled_services').where({ id: mover.id }).update({ lat: HQ.lat, lng: HQ.lng });
+    const rows = await loadDayStopRows(mockConn, { dates: [DAY, date], technicianIds: [techId] });
+    const source = rows.find((row) => row.id === mover.id);
+    const sourceDay = rows.filter((row) => row.dateStr === DAY && row.id !== mover.id);
+    const destination = rows.filter((row) => row.dateStr === date);
+    const target = { ...source, technician_id: techId, window_start: '13:00', window_end: '14:00' };
+    const scoredPosition = positionFor(destination, target, {
+      sourceStamp: routeStamp(sourceDay, source), origin: HQ, departureMin: 450, dayEndMin: DAY_CLOSE,
+    });
+    expect(scoredPosition.order).toEqual([left.id, right.id, mover.id]);
+    await rebooker.reschedule(mover.id, date, { start: '13:00', end: '14:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: scoredPosition });
+    const ordered = await mockConn('scheduled_services').where({ technician_id: techId, scheduled_date: date }).orderBy('route_order');
+    expect(ordered.map((row) => row.id)).toEqual([left.id, right.id, mover.id]);
+  });
+
   test('a different writer cannot use a cross-day dispatch position', async () => {
     const { date, mover, position } = await scoredCrossDay();
     await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'admin', 'admin',
@@ -277,6 +308,38 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     expect(await score()).toHaveLength(0);
     await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
       { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position })).rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+  });
+
+  test('a graduated customer-linked hold keeps blocking its occupied window after its expiry stamp', async () => {
+    const { date, left, mover, position } = await scoredCrossDay();
+    await mockConn('scheduled_services').where({ id: left.id }).update({
+      window_start: '14:00', window_end: '15:00', reservation_expires_at: '2001-01-01T00:00:00Z',
+    });
+    expect(await rankCrossDay(date, mover, position, '14:00', '15:00')).toHaveLength(0);
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false }))
+      .rejects.toMatchObject({ code: 'SLOT_TAKEN' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
+  });
+
+  test('a booked interview blocks an insertion that would delay the following stop through it', async () => {
+    const { date, mover, position } = await scoredCrossDay();
+    const [before] = await rankCrossDay(date, mover, position, '14:00', '15:00');
+    expect(before).toBeTruthy();
+    const applicationId = randomUUID();
+    await mockConn('job_applications').insert({
+      id: applicationId,
+      status: 'interview',
+      contact_snapshot: {},
+      interview_at: parseETDateTime(`${date}T15:15`),
+      interview_end_at: parseETDateTime(`${date}T16:45`),
+    });
+
+    expect(await rankCrossDay(date, mover, position, '14:00', '15:00')).toHaveLength(0);
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: before[require('../services/auto-dispatch/route-position').ROUTE_POSITION] }))
+      .rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
   });
 
   test('a late calendar block that pushes the last job past closing aborts the priced move', async () => {
@@ -356,13 +419,25 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
 
   test('a first departure-time save waits for the route verifier lock', async () => {
     const departure = require('../services/scheduling/departure-time');
-    const original = await contentionDatabase('system_settings').where({ key: departure.DEPARTURE_TIME_KEY }).first();
-    await contentionDatabase('system_settings').where({ key: departure.DEPARTURE_TIME_KEY }).delete();
+    const schemaName = `route_departure_${randomUUID().replaceAll('-', '')}`;
+    await contentionDatabase.schema.createSchema(schemaName);
+    await contentionDatabase.schema.withSchema(schemaName).createTable('system_settings', (table) => {
+      table.text('key').primary();
+      table.text('value');
+      table.text('category');
+      table.text('description');
+      table.timestamp('updated_at');
+    });
     let routeTrx;
     let writerTrx;
     try {
       routeTrx = await contentionDatabase.transaction();
       writerTrx = await contentionDatabase.transaction();
+      // Both real connections see only this test's empty settings table. The
+      // global advisory lock still collides, while shared QA state is never
+      // read, deleted or restored even if the test is interrupted.
+      await routeTrx.raw("SELECT set_config('search_path', ?, true)", [schemaName]);
+      await writerTrx.raw("SELECT set_config('search_path', ?, true)", [schemaName]);
       expect(await departure.lockedDayDepartureMinutes(routeTrx, { enabled: true }))
         .toBe(departure.DEFAULT_DEPARTURE_MINUTES);
       const pidResult = await writerTrx.raw('SELECT pg_backend_pid() AS pid');
@@ -384,15 +459,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     } finally {
       if (routeTrx) await routeTrx.rollback();
       if (writerTrx) await writerTrx.rollback();
-      await contentionDatabase('system_settings').where({ key: departure.DEPARTURE_TIME_KEY }).delete();
-      if (original) {
-        await contentionDatabase('system_settings').insert({
-          key: original.key,
-          value: original.value,
-          category: original.category,
-          description: original.description,
-        });
-      }
+      await contentionDatabase.schema.dropSchema(schemaName, true);
     }
   });
 

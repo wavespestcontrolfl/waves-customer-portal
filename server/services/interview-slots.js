@@ -9,6 +9,7 @@
  * scheduled_services with no technician filter.
  */
 
+const { liveServiceOrHold } = require('./scheduling/reservation-occupancy');
 const db = require('../models/db');
 const logger = require('./logger');
 const { etParts, parseETDateTime, addETDays, formatETTime } = require('../utils/datetime-et');
@@ -189,7 +190,7 @@ async function listInterviewSlots({ now = new Date(), excludeApplicationId, conn
       .whereNotNull('window_start')
       // Same active-hold predicate as the canonical occupancy readers: an
       // expired estimate-slot hold has released its window (Codex r6 P2).
-      .where((q) => { q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'); })
+      .where(liveServiceOrHold)
       .select('id', 'customer_id', 'technician_id', 'scheduled_date', 'window_start', 'window_end',
         'estimated_duration_minutes', 'reservation_service_mix');
 
@@ -258,25 +259,21 @@ async function listInterviewSlots({ now = new Date(), excludeApplicationId, conn
  */
 /**
  * The reciprocal check (Codex r3 P1): booked interviews as occupied
- * intervals for ONE ET calendar date, in the shape the availability engine
+ * intervals for ET calendar dates, in the shape the availability engine
  * merges into its `occupied` set ({ start, end } as 'HH:MM' wall-clock,
  * BUFFER_MINUTES either side). Customer slot building and the estimate
  * confirm path read this so a visit is never offered or confirmed over the
  * owner's interview.
  */
-async function bookedInterviewWindowsForDate(dateStr, { conn = db } = {}) {
+function interviewDayBounds(dateStr) {
   const dayStart = parseETDateTime(`${dateStr}T00:00`);
   // Next ET calendar date at ITS midnight (addETDays alone lands at noon UTC).
   const np = etParts(addETDays(dayStart, 1));
   const dayEnd = parseETDateTime(`${np.year}-${String(np.month).padStart(2, '0')}-${String(np.day).padStart(2, '0')}T00:00`);
-  const rows = await conn('job_applications')
-    .whereIn('status', INTERVIEW_BLOCKING_STATUSES)
-    .whereNotNull('interview_at')
-    // Bounds widened by the buffer on both sides so a near-midnight interview
-    // still blocks the adjacent day's edge (windows are clipped below).
-    .where('interview_at', '>=', new Date(dayStart.getTime() - (SLOT_MINUTES + BUFFER_MINUTES) * 60 * 1000))
-    .where('interview_at', '<', new Date(dayEnd.getTime() + BUFFER_MINUTES * 60 * 1000))
-    .select('id', 'interview_at', 'interview_end_at');
+  return { dayStart, dayEnd };
+}
+
+function windowsOnInterviewDay(rows, { dayStart, dayEnd }) {
   return rows.filter((r) => {
     const startMs = new Date(r.interview_at).getTime() - BUFFER_MINUTES * 60 * 1000;
     const endMs = (r.interview_end_at ? new Date(r.interview_end_at).getTime() : new Date(r.interview_at).getTime() + SLOT_MINUTES * 60 * 1000)
@@ -290,6 +287,32 @@ async function bookedInterviewWindowsForDate(dateStr, { conn = db } = {}) {
     const ep = etParts(new Date(Math.min(endMs, dayEnd.getTime() - 60 * 1000)));
     return { start: `${pad2(sp.hour)}:${pad2(sp.minute)}`, end: `${pad2(ep.hour)}:${pad2(ep.minute)}`, applicationId: r.id };
   });
+}
+
+// One batched read for route scoring across many candidate dates. The
+// per-date result uses the exact same clipping/buffer rule as the public
+// single-date reader below.
+async function bookedInterviewWindowsForDates(dateStrs, { conn = db } = {}) {
+  const dates = [...new Set((dateStrs || []).filter(Boolean))].sort();
+  const result = new Map(dates.map((dateStr) => [dateStr, []]));
+  if (!dates.length) return result;
+  const bounds = new Map(dates.map((dateStr) => [dateStr, interviewDayBounds(dateStr)]));
+  const first = bounds.get(dates[0]);
+  const last = bounds.get(dates[dates.length - 1]);
+  const rows = await conn('job_applications')
+    .whereIn('status', INTERVIEW_BLOCKING_STATUSES)
+    .whereNotNull('interview_at')
+    // Bounds widened by the buffer on both sides so a near-midnight interview
+    // still blocks the adjacent day's edge (windows are clipped below).
+    .where('interview_at', '>=', new Date(first.dayStart.getTime() - (SLOT_MINUTES + BUFFER_MINUTES) * 60 * 1000))
+    .where('interview_at', '<', new Date(last.dayEnd.getTime() + BUFFER_MINUTES * 60 * 1000))
+    .select('id', 'interview_at', 'interview_end_at');
+  for (const dateStr of dates) result.set(dateStr, windowsOnInterviewDay(rows, bounds.get(dateStr)));
+  return result;
+}
+
+async function bookedInterviewWindowsForDate(dateStr, opts = {}) {
+  return (await bookedInterviewWindowsForDates([dateStr], opts)).get(dateStr) || [];
 }
 
 async function isOfferedSlot(startIso, opts = {}) {
@@ -307,6 +330,7 @@ module.exports = {
   listInterviewSlots,
   isOfferedSlot,
   bookedInterviewWindowsForDate,
+  bookedInterviewWindowsForDates,
   formatSlotLabel: slotLabel,
   _internals: { loadWindows, timeToMinutes, isoWeekdayOf, overlaps, hhmmFromDbTime, slotLabel, isValidHHMM },
 };

@@ -914,6 +914,21 @@ test('a version-2 moving stop keeps its planning minutes in the saved route simu
   expect(legacy).toBeNull();
 });
 
+test('an allocation-only moving member is rejected instead of priced as a standalone stop', () => {
+  const geo = { lat: 27.4, lng: -82.5 };
+  const service = {
+    ...SERVICE,
+    status: 'confirmed',
+    created_at: '2026-07-01T00:00:00Z',
+    reservation_service_mix: { version: 2, allocatedServiceIds: ['s1', 's2'], durationMinutes: 70 },
+  };
+  const candidate = { technician_id: 't1', date: '2026-08-06', start_time: '08:00', end_time: '09:00' };
+  const placement = { windows: [{ start: '08:00', end: '09:00' }], targets: [{ id: service.id, start: '08:00', end: '09:00' }] };
+  expect(scoreOnSharedModel(service, geo, candidate, [], [], placement, geo, {
+    sourceRouteStamp: 'source-stamp', departureMinutes: 8 * 60,
+  })).toBeNull();
+});
+
 // Codex pre-push P1: group siblings are excluded from the day's stops because
 // they move with the visit, so both the current placement and every candidate
 // must charge their work as part of the moving unit.

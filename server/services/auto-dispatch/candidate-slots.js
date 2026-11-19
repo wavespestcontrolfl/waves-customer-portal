@@ -94,6 +94,7 @@ const DAY_STOP_COLUMNS = [
   'scheduled_services.route_order',
   'scheduled_services.created_at',
   'scheduled_services.reservation_policy_version',
+  'scheduled_services.reservation_service_mix',
   'scheduled_services.time_window',
   'scheduled_services.window_start',
   'scheduled_services.window_end',
@@ -143,6 +144,8 @@ function rowToDayStop(r) {
     created_at: r.created_at,
     time_window: r.time_window,
     preserveCapacity: preservesCapacity(r),
+    scheduled_date: r.scheduled_date,
+    reservation_service_mix: r.reservation_service_mix,
     // The co-visit merge (isCoVisitPair) reads the stop's coordinates and
     // premise under the canonical column names.
     lat: geo ? geo.lat : null,
@@ -252,12 +255,20 @@ async function loadPositionConstraints(conn, dates, technicianIds) {
     .distinct('scheduled_date', 'technician_id');
   const calendar = conn('tech_schedule_blocks').whereIn('date', dayList).whereNot('block_type', 'available')
     .where(q => q.whereIn('technician_id', techList).orWhereNull('technician_id')).select('date', 'technician_id', 'start_time', 'end_time');
-  const [rows, calendarRows] = await Promise.all([hidden, calendar]);
+  // Recruiting interviews occupy the owner's calendar too. The direct
+  // candidate probe catches an interview overlapping the moved window; these
+  // canonical buffered intervals additionally keep an earlier insertion
+  // from delaying a later route stop through an interview.
+  const interviews = require('../interview-slots').bookedInterviewWindowsForDates(dayList, { conn });
+  const [rows, calendarRows, interviewDays] = await Promise.all([hidden, calendar, interviews]);
   return {
     unpricedDays: new Set(rows.map(r => `${r.technician_id}|${toDateStr(r.scheduled_date)}`)),
-    blocks: calendarRows.map(r => ({ dateStr: toDateStr(r.date), technician_id: r.technician_id,
+    blocks: [...calendarRows.map(r => ({ dateStr: toDateStr(r.date), technician_id: r.technician_id,
       startMin: hhmmToMin(r.start_time), endMin: hhmmToMin(r.end_time) }))
       .filter(r => Number.isFinite(r.startMin) && Number.isFinite(r.endMin) && r.endMin > r.startMin),
+    ...dayList.flatMap(dateStr => (interviewDays.get(dateStr) || []).map((w) => ({
+      dateStr, technician_id: null, startMin: hhmmToMin(w.start), endMin: hhmmToMin(w.end),
+    }))).filter(r => Number.isFinite(r.startMin) && Number.isFinite(r.endMin) && r.endMin > r.startMin)],
   };
 }
 

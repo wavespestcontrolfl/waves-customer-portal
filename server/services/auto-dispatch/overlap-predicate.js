@@ -22,7 +22,8 @@ const { isHoldStop } = require('../scheduling/travel-gap');
 const OVERLAP_EXCLUDED_STATUSES = new Set([...NOT_A_ROUTE_STOP_STATUSES, 'completed']);
 
 /** Whether `row` is a LIVE route stop at all: not a non-route-stop status or
- *  completed, and not an expired estimate-slot hold. */
+ * completed, and not an expired customer-NULL estimate-slot hold. A
+ * customer-linked row is committed even when a stale expiry stamp remains. */
 function isActiveRouteStop(row) {
   if (!row) return false;
   if (OVERLAP_EXCLUDED_STATUSES.has(String(row.status))) return false;
