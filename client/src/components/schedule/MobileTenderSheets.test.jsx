@@ -1,0 +1,40 @@
+// @vitest-environment jsdom
+
+// Owner 2026-11-18: a check taken at the dispatch checkout got no receipt. The Cash and Check sheets keep
+// sendReceipt: false and add checkoutTender: true; with GATE_CHECKOUT_TENDER_RECEIPT on, the server then queues the
+// receipt and leaves the visit open for the checkout's completion. Gate off, the server ignores the marker.
+
+import '@testing-library/jest-dom/vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import React from 'react';
+import MobileCashTenderSheet from './MobileCashTenderSheet';
+import MobileCheckTenderSheet from './MobileCheckTenderSheet';
+
+function stubRecordPayment() {
+  vi.stubGlobal('localStorage', { getItem: vi.fn(() => 'test-token') });
+  const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true, invoice: { id: 'inv-1', status: 'paid' } }) }));
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
+
+describe('checkout Cash and Check sheets mark the payment as a checkout tender', () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    ['Check', MobileCheckTenderSheet, 'Record Payment', 'check'],
+    ['Cash', MobileCashTenderSheet, 'Tender', 'cash'],
+  ])('%s posts checkoutTender: true and still asks for no receipt itself', async (_name, Sheet, button, method) => {
+    const fetchMock = stubRecordPayment();
+    const onRecorded = vi.fn();
+    render(<Sheet desktopVisible invoiceId="inv-1" amount={125} onRecorded={onRecorded} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByText(button));
+    await waitFor(() => expect(onRecorded).toHaveBeenCalled());
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toMatch(/\/admin\/invoices\/inv-1\/record-payment$/);
+    expect(JSON.parse(options.body)).toEqual(expect.objectContaining({ method, sendReceipt: false, checkoutTender: true }));
+  });
+});

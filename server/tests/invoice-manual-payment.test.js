@@ -752,6 +752,34 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       expect(calls.paymentsInsert).toBeNull();
     });
 
+    // GATE_CHECKOUT_TENDER_RECEIPT (owner 2026-11-18): a check taken at the checkout closed the visit quietly, so the completion
+    // screen never opened and no receipt, report or completion text went out. The checkout tender queues the receipt (the queue
+    // honors the customer's receipt choices) and leaves the visit to the checkout's completion, both IN the settlement transaction.
+    test('checkoutTender: the receipt is queued, the deferral row is written, and the closeout does not run', async () => {
+      const { recordAuditEvent } = require('../services/audit-log');
+      settle({ pre: card({ scheduled_service_id: 'sv-1' }), locked: card({ scheduled_service_id: 'sv-1' }) });
+      const closed = jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: true });
+      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: true, checkoutTender: true, recordedByTechnicianId: 'staff-1' });
+      expect(out.receipt).toEqual({ queued: true });
+      expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).toHaveBeenCalledWith({ invoiceId: 'inv-1', source: 'dispatch_checkout', customerInitiated: true, database: expect.any(Function) });
+      expect(ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain).toHaveBeenCalled();
+      // Not the operator send: that writer skips the automatic receipt opt-out by design.
+      expect(sendReceiptEmail).not.toHaveBeenCalled();
+      expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+      expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'visit.completion_on_invoice_issued_refused', resource_type: 'scheduled_services', resource_id: 'sv-1', critical: true,
+        metadata: expect.objectContaining({ invoiceId: 'inv-1', trigger: 'paid', code: 'checkout_completes_visit' }), trx: expect.any(Function),
+      }));
+      expect(out.closeout).toEqual({ closed: false, reason: 'checkout_completes_visit' });
+      expect(closed).not.toHaveBeenCalled();
+      // Without the option the same payment runs the closeout and queues nothing.
+      ReceiptDeliveryQueue.enqueueReceiptDelivery.mockClear();
+      settle();
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: false, recordedByTechnicianId: 'staff-1' });
+      expect(closed).toHaveBeenCalledTimes(1);
+      expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).not.toHaveBeenCalled();
+    });
+
     test('the page path (no fence, or the Zelle fence with no target) passes no approved target', async () => {
       settle();
       const closed = jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: false });

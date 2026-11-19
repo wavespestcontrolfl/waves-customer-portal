@@ -67,7 +67,9 @@ export default function MobileCashTenderSheet({
           'Content-Type': 'application/json',
           Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
         },
-        body: JSON.stringify({ method: 'cash', note: null, sendReceipt: false }),
+        // checkoutTender: with GATE_CHECKOUT_TENDER_RECEIPT on, the server queues the receipt and leaves the
+        // visit open for the completion the checkout opens next. Gate off, sendReceipt: false stands, as before.
+        body: JSON.stringify({ method: 'cash', note: null, sendReceipt: false, checkoutTender: true }),
       });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));

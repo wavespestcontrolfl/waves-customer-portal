@@ -19,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const { recordAuditEvent } = require('../services/audit-log');
 const { completeScheduledService } = require('../services/complete-scheduled-service');
-const { closeOutVisitForIssuedInvoice, retryIssuedInvoiceCloseouts, recordApprovedCloseoutTarget, recordApprovedCloseoutDelivery, pinDecisionFor, approvedVisitChanged } = require('../services/invoice-issued-closeout');
+const { closeOutVisitForIssuedInvoice, retryIssuedInvoiceCloseouts, recordApprovedCloseoutTarget, recordApprovedCloseoutDelivery, pinDecisionFor, approvedVisitChanged, CHECKOUT_DEFERRAL_CODE } = require('../services/invoice-issued-closeout');
 
 const rows = {
   invoices: { id: 'inv-1', invoice_number: 'WPC-2099-0001', status: 'paid', scheduled_service_id: 'visit-live', paid_at: '2021-03-01T15:00:00Z' },
@@ -208,6 +208,54 @@ describe('the sweep and a send-only refusal (round 14)', () => {
     const out = await retryIssuedInvoiceCloseouts({ conn: mismatchConn('sent'), today: '2099-01-01' });
     expect(out).toMatchObject({ retried: 0, closed: 0 });
     expect(completeScheduledService).not.toHaveBeenCalled();
+  });
+});
+
+// GATE_CHECKOUT_TENDER_RECEIPT (owner 2026-11-18): a cash / check payment at the dispatch checkout writes a checkout_completes_visit
+// refusal row with the payment, and the checkout's completion closes the visit. The sweep holds off through the visit's own ET day.
+describe('the sweep and a dispatch checkout hand-off', () => {
+  function deferredConn(visitDate) {
+    const invoiceRow = { id: 'inv-1', invoice_number: 'WPC-2099-0001', status: 'paid', send_claim_token: null, scheduled_service_id: 'visit-live', paid_at: '2021-03-01T15:00:00Z' };
+    const candidate = { invoice_id: 'inv-1', invoice_status: 'paid', visit_id: 'visit-live', visit_status: 'on_site', visit_date: visitDate, own_attempt_parked: false, issued_after_service_day: false };
+    const connFor = (table) => {
+      const state = { audit: false };
+      const b = new Proxy({}, {
+        get: (_t, prop) => {
+          if (prop === 'then') return (res, rej) => Promise.resolve(table === 'invoices as i' ? [candidate] : null).then(res, rej);
+          if (prop === 'where') return (arg) => { if (arg && arg.resource_type === 'scheduled_services') state.audit = true; return b; };
+          if (prop === 'first') {
+            return async () => {
+              if (table === 'audit_log') {
+                return state.audit ? { action: 'visit.completion_on_invoice_issued_refused', metadata: { invoiceId: 'inv-1', trigger: 'paid', code: CHECKOUT_DEFERRAL_CODE } } : null;
+              }
+              if (table === 'invoices') return invoiceRow;
+              return rows[table] || null;
+            };
+          }
+          return () => b;
+        },
+      });
+      return b;
+    };
+    connFor.raw = (sql) => sql;
+    return connFor;
+  }
+
+  test('on the visit\'s own day the sweep leaves the visit to the checkout', async () => {
+    const out = await retryIssuedInvoiceCloseouts({ conn: deferredConn('2099-01-01'), today: '2099-01-01' });
+    expect(out).toMatchObject({ candidates: 1, retried: 0, closed: 0 });
+    expect(completeScheduledService).not.toHaveBeenCalled();
+  });
+
+  test('an unreadable visit date holds too', async () => {
+    const out = await retryIssuedInvoiceCloseouts({ conn: deferredConn(null), today: '2099-01-01' });
+    expect(out).toMatchObject({ retried: 0, closed: 0 });
+  });
+
+  test('from the next day an unfinished checkout is retried like any arrived visit', async () => {
+    const out = await retryIssuedInvoiceCloseouts({ conn: deferredConn(new Date('2098-12-31T12:00:00Z')), today: '2099-01-01' });
+    expect(out).toMatchObject({ retried: 1, closed: 1 });
+    expect(completeScheduledService).toHaveBeenCalledTimes(1);
   });
 });
 
