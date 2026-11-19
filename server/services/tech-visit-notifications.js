@@ -10,8 +10,10 @@
  *
  * Delivery = one `tech_notifications` row (the tech home feed polls it and
  * keeps the card until the tech clears it) + one best-effort push through
- * PushService. Push copy is a single line (owner ruling 2026-09-05: "You have
- * a new visit on your route"); the details wait in the app.
+ * PushService. The push's first line is generic ("You have a new visit on
+ * your route"); its second line names the visit: the customer's first and
+ * last name, the service, the day and time, and the street (owner 2026-11-18,
+ * replacing the one-line ruling of 2026-09-05; pushDetail below).
  *
  * Silent by design:
  *   - GATE_TECH_VISIT_NOTIFICATIONS is not exactly on → nothing (dark; unset
@@ -101,7 +103,7 @@ const TYPE_BY_KIND = Object.freeze({
   cancelled: 'visit_cancelled',
 });
 
-// Push copy: one line each, no customer details on the lock screen.
+// The push's first line. The second names the visit (pushDetail).
 const PUSH_TITLE_BY_KIND = Object.freeze({
   assigned: 'You have a new visit on your route',
   unassigned: 'A visit was moved off your route',
@@ -233,6 +235,58 @@ function placeLabel(visit) {
   return stamped.join(', ') || null;
 }
 
+// The customer as a visit push names them: first and last name (owner
+// 2026-11-18, "first and last name"). The card keeps its own short label.
+function customerFullName(visit) {
+  return [visit.cust_first_name, visit.cust_last_name]
+    .map((part) => String(part || '').trim()).filter(Boolean).join(' ') || null;
+}
+
+// The street a visit push shows (owner 2026-11-18, "every visit push"): line 1
+// of the address the truck goes to, by placeLabel's stamped-address-first rule.
+function streetLine(visit) {
+  return String(visit.service_address_line1 || visit.cust_address || '').trim() || null;
+}
+
+// What a visit push's second line says, from one of two sources: the visit
+// row as it is now, or the card as it was written. A move keeps the slot it
+// left (previousWhen) for its "Was … → Now …".
+function partsFromVisit(visit, kind, previousWhen = null) {
+  return {
+    name: customerFullName(visit),
+    service: visit.service_type || null,
+    when: visitWhen(visit),
+    previousWhen: kind === 'rescheduled' ? previousWhen : null,
+    street: streetLine(visit),
+    date: dateOnly(visit.scheduled_date),
+    start: visit.window_start ? String(visit.window_start).slice(0, 5) : null,
+  };
+}
+
+function partsFromCard(payload, kind) {
+  return {
+    // A card written before the full name was stored names the last name only.
+    name: payload.customer_full_name || payload.customer_name || null,
+    service: payload.service_type || null,
+    when: payload.when || null,
+    previousWhen: kind === 'rescheduled' ? payload.previous_when || null : null,
+    street: payload.street || null,
+    date: payload.date || null,
+    start: null,
+  };
+}
+
+// "the customer picks a day by …" opens the line it starts.
+const capitalized = (text) => (text ? `${text.charAt(0).toUpperCase()}${text.slice(1)}` : null);
+
+// One visit's line: "Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312
+// Cortez Rd W". A move puts "Was Wed Sep 9, 1–3 PM → Now Thu Sep 10, 9–11 AM"
+// in the time's place.
+function pushDetail(parts) {
+  const slot = parts.previousWhen && parts.when ? `Was ${parts.previousWhen} → Now ${parts.when}` : capitalized(parts.when);
+  return [parts.name, parts.service, slot, parts.street].filter(Boolean).join(' · ');
+}
+
 /**
  * Compose the card's headline / message / payload for one kind. Pure.
  * `previous` is { date, windowStart, windowEnd } for rescheduled;
@@ -293,6 +347,11 @@ function composeCard({ kind, visit, actorText, previous, newTechnicianName, ende
         ? formatWhen(previous.date, previous.windowStart, previous.windowEnd)
         : null,
       address: where,
+      // The visit push's own words, as written (partsFromCard): a push that
+      // must not read the visit as it is now still names the customer in full
+      // and the street.
+      customer_full_name: customerFullName(visit),
+      street: streetLine(visit),
       now_with: kind === 'unassigned' && !ended ? (newTechnicianName || null) : null,
       ended: kind === 'unassigned' ? (ended || null) : null,
       actor: actorText,
@@ -452,18 +511,23 @@ async function writeCard(notice) {
       payload: JSON.stringify(heldPayload(notice, card.payload)),
     }).returning('id');
     // The inserted row's id: the push recheck asks whether a NEWER card for
-    // the same tech and visit exists (pushStillCurrent).
-    return { id: inserted && typeof inserted === 'object' ? inserted.id : inserted };
+    // the same tech and visit exists (pushStillCurrent). The payload is what
+    // the card's own push says.
+    return { id: inserted && typeof inserted === 'object' ? inserted.id : inserted, payload: card.payload };
   });
 }
 
-// Does the visit row still satisfy cardStands for this visit_* notice (the
-// same rules that admitted the card — reused, not forked)? Read plainly,
-// never FOR SHARE: a push in flight must not block a schedule write. Rejects
-// on a DB error (pushCard then sends anyway).
-async function pushStillCurrent(notice, conn) {
+// The visit row while it still satisfies cardStands for this visit_* notice
+// (the same rules that admitted the card — reused, not forked), else null.
+// Read plainly, never FOR SHARE: a push in flight must not block a schedule
+// write. Rejects on a DB error (pushCard then sends anyway).
+async function standingRow(notice, conn) {
   const row = await loadVisit(notice.visitId, conn);
-  return !!row && !!cardStands(notice, row);
+  return row && cardStands(notice, row) ? row : null;
+}
+
+async function pushStillCurrent(notice, conn) {
+  return !!(await standingRow(notice, conn));
 }
 
 // Every card type whose push shares the `visit-<id>` collapse tag: a newer
@@ -511,7 +575,8 @@ async function pushCard(notice, { checkCurrent = null } = {}) {
     };
     await PushService.sendToAdminUser(notice.technicianId, {
       title: notice.pushTitle,
-      body: '',
+      // A tracking notice carries no detail: its push stays one line.
+      body: notice.pushBody || '',
       url: '/tech',
       tag: `visit-${notice.visitId}`,
       priority: 'high',
@@ -546,7 +611,8 @@ async function deliver(notices) {
     else if (raw.actorText !== AUTO_DISPATCH_ACTOR_TEXT) n = { ...raw, holdForBundle: true };
     try {
       const card = await writeCard(n);
-      if (card) written.push({ ...n, cardId: card.id || null });
+      // A push that goes out now says what its card was just written with.
+      if (card) written.push({ ...n, cardId: card.id || null, pushBody: pushDetail(partsFromCard(card.payload, n.kind)) });
       else dropped += 1;
     } catch (err) {
       logger.error(`[tech-visit-notifications] ${n.kind} card not written for visit ${n.visitId} (${errorTag(err)})`);
@@ -861,7 +927,7 @@ async function pushAutoDispatchSummary({ runId } = {}) {
   }
 }
 
-// One line, no customer details on the lock screen (PUSH_TITLE_BY_KIND).
+// The count line; bundleDetail lists the visits under it.
 function bundleTitle(kinds) {
   const n = kinds.length;
   const only = new Set(kinds).size === 1 ? kinds[0] : null;
@@ -883,12 +949,17 @@ function bundledNotice(technicianId, row) {
     previousStatus: held.previous_status || null,
     cardId: row.id,
     pushTitle: PUSH_TITLE_BY_KIND[held.kind],
+    parts: partsFromCard(row.payload, held.kind),
   };
 }
 
 // When two cards of one visit both still stand (a new visit, then a time
 // change on it), the push names the one that matters most to the tech.
 const KIND_RANK = Object.freeze({ assigned: 0, unassigned: 1, cancelled: 2, rescheduled: 3 });
+
+// The kinds cardStands admits only while the visit is on the recipient's
+// route: their push reads the visit as it is now (visitNotice).
+const ON_ROUTE_KINDS = new Set(['assigned', 'rescheduled']);
 
 // What a bundle may still say about ONE visit, read fresh each time it is
 // asked (when the push is composed, and again at each device's provider
@@ -913,7 +984,16 @@ async function visitNotice(technicianId, visitId, cards, conn) {
   for (const card of cards) {
     if (!open.has(String(card.id))) continue;
     const notice = bundledNotice(technicianId, card);
-    if (await pushStillCurrent(notice, conn)) standing.push(notice);
+    const row = await standingRow(notice, conn);
+    if (!row) continue;
+    // A held push can wait minutes, so a stop still on this tech's route
+    // reads as the visit is now (a pick-a-day deadline, a time a snapshot did
+    // not carry). A moved-off or cancelled stop keeps what its card was
+    // written with: its former holder reads nothing of the visit as it is
+    // now (#7569).
+    standing.push(ON_ROUTE_KINDS.has(notice.kind)
+      ? { ...notice, parts: partsFromVisit(row, notice.kind, card.payload.previous_when || null) }
+      : notice);
   }
   standing.sort((a, b) => (KIND_RANK[a.kind] ?? 9) - (KIND_RANK[b.kind] ?? 9));
   return standing[0] || null;
@@ -943,14 +1023,30 @@ async function bundlePlan(technicianId, rows, conn) {
 
 const planSignature = (plan) => plan.map((notice) => `${notice.visitId}:${notice.kind}`).sort().join('|');
 
+// Several visits under one count line: one line each, soonest first, at most
+// BUNDLE_LISTED, then "+N more". A mixed bundle says what happened to each.
+const BUNDLE_LISTED = 3;
+const KIND_WORD = Object.freeze({ assigned: 'New', unassigned: 'Moved off', rescheduled: 'Moved', cancelled: 'Cancelled' });
+const slotKey = ({ parts }) => `${parts.date || '9999-12-31'} ${parts.start || '99:99'}`;
+function bundleDetail(plan) {
+  const mixed = new Set(plan.map((notice) => notice.kind)).size > 1;
+  const sorted = [...plan].sort((a, b) => slotKey(a).localeCompare(slotKey(b)));
+  const lines = sorted.slice(0, BUNDLE_LISTED).map(({ kind, parts }) => {
+    const line = [parts.name, capitalized(parts.when), parts.street].filter(Boolean).join(' · ');
+    return mixed ? `${KIND_WORD[kind]}: ${line}` : line;
+  });
+  if (sorted.length > BUNDLE_LISTED) lines.push(`+${sorted.length - BUNDLE_LISTED} more`);
+  return lines.join('\n');
+}
+
 // The push for a plan: one visit = exactly its own per-visit push; more = one count.
 function bundlePush(plan) {
   if (plan.length === 1) {
-    return { title: plan[0].pushTitle, body: '', url: '/tech', tag: `visit-${plan[0].visitId}`, priority: 'high' };
+    return { title: plan[0].pushTitle, body: pushDetail(plan[0].parts), url: '/tech', tag: `visit-${plan[0].visitId}`, priority: 'high' };
   }
   return {
     title: bundleTitle(plan.map((notice) => notice.kind)),
-    body: '',
+    body: bundleDetail(plan),
     url: '/admin/today',
     tag: `route-changes-${[...plan].map((notice) => String(notice.cardId)).sort()[0]}`,
     priority: 'high',
@@ -1148,14 +1244,14 @@ async function recordTrackingNotice(trx, { visitId, technicianId, stage, dedupeK
       .returning('id');
     row = revived;
   }
-  // GENERIC on the push, like every PUSH_TITLE_BY_KIND line above: a push
-  // lands on a lock screen, and this module's owner ruling (see the header)
-  // keeps identifying detail out of it — the tech opens the app for the who
-  // and when. The customer name and promised window ride on the durable card
-  // instead (payload.customer_name / payload.when, rendered by the feed), so
-  // a tech with more than one open stop still knows which visit this is as
-  // soon as they are authenticated (codex P1 round 5, correcting the round-1
-  // fix that put the name in the push title).
+  // GENERIC on the push, unlike the visit-change pushes above: the owner's
+  // 2026-11-18 ruling put the customer, the time and the street on those
+  // pushes only and left this one as it was. The customer name and promised
+  // window ride on the durable card instead (payload.customer_name /
+  // payload.when, rendered by the feed), so a tech with more than one open
+  // stop still knows which visit this is as soon as they are authenticated
+  // (codex P1 round 5, correcting the round-1 fix that put the name in the
+  // push title).
   const pushTitle = stage === 2 ? 'A visit needs an arrival check' : 'A visit window is underway';
   // cardId: the push recheck's newer-card comparison (newerCardExists).
   return row ? { technicianId, visitId, pushTitle, cardId: (row && typeof row === 'object' ? row.id : row) || null } : null;
@@ -1480,5 +1576,5 @@ module.exports = {
   staleVisitCardSql,
   rankedVisitCards,
   refreshVisitCards,
-  _test: { setCurrentAutoDispatchRun: (id) => { currentAutoDispatchRun = id; }, formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists, liveCard, moverText },
+  _test: { setCurrentAutoDispatchRun: (id) => { currentAutoDispatchRun = id; }, formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists, liveCard, moverText, pushDetail, partsFromVisit },
 };
