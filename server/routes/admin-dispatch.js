@@ -3646,7 +3646,7 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
 router.get('/:serviceId/default-products', async (req, res, next) => {
   try {
     const scheduled = await technicianCurrentVisitFilter(req,
-      db('scheduled_services').where({ id: req.params.serviceId })).first('id', 'service_type', 'customer_id', 'property_id');
+      db('scheduled_services').where({ id: req.params.serviceId })).first('id', 'service_type', 'customer_id', 'property_id', 'scheduled_date');
     if (!scheduled) return res.status(404).json({ error: 'Service not found' });
     const { resolveCompletionProductDefaults } = require('../services/completion-product-defaults');
     const result = await resolveCompletionProductDefaults({ db, serviceId: req.params.serviceId });
@@ -3967,6 +3967,7 @@ router.get('/:serviceId/pest-recap/context', async (req, res, next) => {
     // Unknown (no key) leaves Taurus off the house mix; the count never blocks the sheet.
     const taurusYearly = await require('../services/taurus-yearly-count').taurusYearlyCount({
       id: ctx.service?.id, customer_id: ctx.service?.customerId, property_id: ctx.service?.propertyId,
+      scheduled_date: ctx.service?.scheduledDate,
     });
     res.json({
       ...ctx,

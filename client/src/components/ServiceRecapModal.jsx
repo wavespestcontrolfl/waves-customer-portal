@@ -272,7 +272,7 @@ export default function ServiceRecapModal({
 
   // Taurus SC's label limit: a warning (never a block) when it is selected over the limit, else the line
   // saying the house mix left it off (over the limit, or this year's count unavailable). Null when the count is under the limit.
-  const taurusNote = taurusYearlyNote(taurusYearlyOf(ctx?.taurusYearly), [...selected].map((id) => productById.get(id)), { mixVisit: houseMixSeeded });
+  const taurusNote = taurusYearlyNote(taurusYearlyOf(ctx?.taurusYearly), [...selected].map((id) => ({ ...productById.get(id), rate: rates[id]?.rate, rateUnit: rates[id]?.unit })), { mixVisit: houseMixSeeded });
 
   const [restoredNames, setRestoredNames] = useState({});
   const draft = useServiceRecapDraft({

@@ -37,6 +37,20 @@ describe('taurusEligible (label scenarios for another 0.03% application)', () =>
   });
 });
 
+describe("taurusEligible for another 0.06% application ({ rate: 'high' })", () => {
+  it.each([
+    [{ high: 0, low: 0 }, true],
+    [{ high: 0, low: 2 }, true],
+    [{ high: 0, low: 3 }, false],
+    [{ high: 1, low: 0 }, true],
+    [{ high: 1, low: 1 }, false],
+    [{ high: 2, low: 0 }, false],
+    [{ high: 0, low: 4 }, false],
+  ])('%j -> %s', (counts, expected) => {
+    expect(taurusEligible(counts, { rate: 'high' })).toBe(expected);
+  });
+});
+
 describe('applicationConcentration', () => {
   it('counts every row before the 0.03% ruling as 0.06%, whatever the row says', () => {
     expect(TAURUS_LOW_RATE_SINCE).toBe('2026-11-20');
@@ -46,7 +60,7 @@ describe('applicationConcentration', () => {
 
   it('counts a row from the ruling date on as 0.03% unless it says otherwise', () => {
     expect(applicationConcentration(row({ application_date: '2026-11-20' }))).toBe('low');
-    expect(applicationConcentration(row({ application_rate: '4', rate_unit: 'oz' }))).toBe('low');
+    expect(applicationConcentration(row({ application_rate: '1.6', rate_unit: 'oz' }))).toBe('low');
     expect(applicationConcentration(row({ application_rate: '0.4', rate_unit: 'fl_oz/gal' }))).toBe('low');
   });
 
@@ -57,6 +71,18 @@ describe('applicationConcentration', () => {
     expect(applicationConcentration(row({ dilution_rate: '0.1' }))).toBe('high');
     expect(applicationConcentration(row({ dilution_rate: '0.03%' }))).toBe('low');
     expect(applicationConcentration(row({ dilution_rate: 'unknown' }))).toBe('low');
+  });
+
+  it('reads a later amount above the house mix (1.6 fl oz, one 4-gal tank) as the old 0.06% tank', () => {
+    expect(applicationConcentration(row({ quantity_applied: '3.2', quantity_unit: 'fl_oz' }))).toBe('high');
+    expect(applicationConcentration(row({ quantity_applied: 4, quantity_unit: 'oz' }))).toBe('high');
+    expect(applicationConcentration(row({ application_rate: '3.2', rate_unit: 'oz' }))).toBe('high');
+    expect(applicationConcentration(row({ application_rate: 4, rate_unit: 'fl oz' }))).toBe('high');
+    // The house amount itself, a smaller one, or an amount in another unit stays 0.03%.
+    expect(applicationConcentration(row({ quantity_applied: '1.600', quantity_unit: 'fl_oz' }))).toBe('low');
+    expect(applicationConcentration(row({ application_rate: 1.6, rate_unit: 'oz' }))).toBe('low');
+    expect(applicationConcentration(row({ quantity_applied: 2, quantity_unit: 'gal' }))).toBe('low');
+    expect(applicationConcentration(row({ quantity_applied: 3.2 }))).toBe('low');
   });
 });
 
@@ -75,7 +101,7 @@ describe('taurusYearlyCount', () => {
   it('passes the home, the visit to leave out, the ET year window and the name rule; one read-only query', async () => {
     const knex = ledger([]);
     const out = await taurusYearlyCount(VISIT, { knex, now: new Date('2027-01-01T04:00:00Z') });
-    expect(out).toEqual({ high: 0, low: 0, count: 0, eligible: true, year: 2026 });
+    expect(out).toEqual({ high: 0, low: 0, count: 0, eligible: true, eligibleHigh: true, year: 2026 });
     expect(knex.raw).toHaveBeenCalledTimes(1);
     const [sql, bindings] = knex.raw.mock.calls[0];
     expect(bindings).toEqual({
@@ -103,7 +129,7 @@ describe('taurusYearlyCount', () => {
       row({ service_record_id: null, application_date: NEW }),
     ]);
     // rec-a: one 0.06%; rec-b: two rows, one 0.06% -> one 0.06%; the record-less row is its own 0.03% application.
-    expect(await taurusYearlyCount(VISIT, { knex, now: new Date('2026-12-10T15:00:00Z') })).toEqual({ high: 2, low: 1, count: 3, eligible: false, year: 2026 });
+    expect(await taurusYearlyCount(VISIT, { knex, now: new Date('2026-12-10T15:00:00Z') })).toEqual({ high: 2, low: 1, count: 3, eligible: false, eligibleHigh: false, year: 2026 });
   });
 
   it.each([
@@ -114,6 +140,29 @@ describe('taurusYearlyCount', () => {
     ['two 0.06% use the year up', [row({ application_date: OLD }), row({ application_date: OLD })], { high: 2, low: 0, eligible: false }],
   ])('%s', async (_name, rows, expected) => {
     expect(await taurusYearlyCount(VISIT, { knex: ledger(rows) })).toMatchObject(expected);
+  });
+
+  it('checks both years for a visit scheduled in another year than today, and is eligible only when both are', async () => {
+    const answers = { '2026-01-01': [row({ application_date: OLD }), row({ application_date: OLD })], '2027-01-01': [] };
+    const knex = { raw: jest.fn(async (sql, b) => ({ rows: answers[b.yearStart] })) };
+    // A December 2026 visit recapped on 2027-01-04: December's year is used up (two 0.06%), January's is empty.
+    const out = await taurusYearlyCount({ ...VISIT, scheduled_date: '2026-12-30' }, { knex, now: new Date('2027-01-04T15:00:00Z') });
+    expect(knex.raw).toHaveBeenCalledTimes(2);
+    expect(knex.raw.mock.calls.map(([, b]) => b.yearStart).sort()).toEqual(['2026-01-01', '2027-01-01']);
+    expect(out).toMatchObject({ eligible: false, eligibleHigh: false, high: 2, year: 2026 });
+    // Both years with room: eligible.
+    const roomy = { raw: jest.fn().mockResolvedValue({ rows: [] }) };
+    expect(await taurusYearlyCount({ ...VISIT, scheduled_date: new Date('2026-12-30T05:00:00Z') }, { knex: roomy, now: new Date('2027-01-04T15:00:00Z') }))
+      .toMatchObject({ eligible: true, eligibleHigh: true });
+    expect(roomy.raw).toHaveBeenCalledTimes(2);
+  });
+
+  it('runs one query when the scheduled date is in the same year as today, or missing', async () => {
+    for (const scheduled_date of ['2026-12-10', null, undefined, 'not a date']) {
+      const knex = ledger([]);
+      await taurusYearlyCount({ ...VISIT, scheduled_date }, { knex, now: new Date('2026-12-10T15:00:00Z') });
+      expect(knex.raw).toHaveBeenCalledTimes(1);
+    }
   });
 
   it('answers unknown (null) with no customer, without a query', async () => {
@@ -127,5 +176,8 @@ describe('taurusYearlyCount', () => {
     const failing = { raw: jest.fn().mockRejectedValue(Object.assign(new Error('boom: SELECT ...'), { code: '57014' })) };
     expect(await taurusYearlyCount(VISIT, { knex: failing })).toBeNull();
     expect(await taurusYearlyCount(VISIT, { knex: { raw: jest.fn().mockResolvedValue({}) } })).toBeNull();
+    // One of two years failing leaves the whole answer unknown.
+    const half = { raw: jest.fn().mockResolvedValueOnce({ rows: [] }).mockRejectedValueOnce(new Error('x')) };
+    expect(await taurusYearlyCount({ ...VISIT, scheduled_date: '2025-12-30' }, { knex: half, now: new Date('2026-12-10T15:00:00Z') })).toBeNull();
   });
 });

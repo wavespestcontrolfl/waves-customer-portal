@@ -11,7 +11,7 @@ import FastCompleteSheet from './FastCompleteSheet';
 beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
-const UNKNOWN_LINE = "Taurus left out: this year's count is unavailable. Add it only if this home has had fewer than 4 this year.";
+const UNKNOWN_LINE = "Taurus left out: this year's count is unavailable. Add it only if this home is still within the label's yearly limit.";
 
 const FULL = { high: 0, low: 4, count: 4, eligible: false, year: 2026 };
 const ROOM = { high: 0, low: 3, count: 3, eligible: true, year: 2026 };

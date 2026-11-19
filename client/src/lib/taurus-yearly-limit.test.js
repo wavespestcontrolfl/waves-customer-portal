@@ -19,7 +19,7 @@ const ROOM = { high: 0, low: 3, count: 3, eligible: true, year: 2026 };
 const FULL = { high: 0, low: 4, count: 4, eligible: false, year: 2026 };
 const TWO_HIGH = { high: 2, low: 0, count: 2, eligible: false, year: 2026 };
 const WITHOUT_TAURUS = ['LESCO Crosscheck Plus', 'LESCO 90/10 Nonionic Surfactant'];
-const UNKNOWN_LINE = "Taurus left out: this year's count is unavailable. Add it only if this home has had fewer than 4 this year.";
+const UNKNOWN_LINE = "Taurus left out: this year's count is unavailable. Add it only if this home is still within the label's yearly limit.";
 
 describe('applyTaurusYearlyLimit', () => {
   const mix = pestDefaultMixSelections(CATALOG);
@@ -70,6 +70,25 @@ describe('notes', () => {
   it('warns on a manual Taurus when no application fits', () => {
     expect(taurusOverLimitWarning(FULL, [{ name: 'Taurus SC' }])).toBe("Over the label's yearly Taurus limit at this home.");
     expect(taurusOverLimitWarning(TWO_HIGH, [{ name: 'Taurus SC' }])).toBe("Over the label's yearly Taurus limit at this home.");
+  });
+
+  it('judges a manual Taurus row mixed above 0.4 fl_oz/gal (0.06%) by whether another 0.06% application fits', () => {
+    // Three at 0.03%: another 0.03% fits, another 0.06% does not.
+    const THREE_LOW = { high: 0, low: 3, count: 3, eligible: true, eligibleHigh: false, year: 2026 };
+    const strong = { name: 'Taurus SC', rate: '0.8', rateUnit: 'fl_oz/gal' };
+    expect(taurusOverLimitWarning(THREE_LOW, [strong])).toBe("Over the label's yearly Taurus limit at this home.");
+    expect(taurusOverLimitWarning(THREE_LOW, [{ name: 'Taurus SC', rate: '0.4', rateUnit: 'fl_oz/gal' }])).toBeNull();
+    expect(taurusOverLimitWarning(THREE_LOW, [{ name: 'Taurus SC', rate: '1.6', rateUnit: 'oz' }])).toBeNull();
+    expect(taurusOverLimitWarning(THREE_LOW, [{ name: 'Taurus SC' }])).toBeNull();
+    // Room for a 0.06% application (none at 0.03%, one 0.06%): the strong row is fine too.
+    const ONE_HIGH = { high: 1, low: 0, count: 1, eligible: true, eligibleHigh: true, year: 2026 };
+    expect(taurusOverLimitWarning(ONE_HIGH, [strong])).toBeNull();
+    // An older server without eligibleHigh falls back to `eligible`.
+    expect(taurusOverLimitWarning(ROOM, [strong])).toBeNull();
+    expect(taurusOverLimitWarning(FULL, [strong])).toBe("Over the label's yearly Taurus limit at this home.");
+    // The left-out line and the house-mix filter still follow the low-rate answer.
+    expect(taurusLeftOutLine(THREE_LOW)).toBeNull();
+    expect(names(applyTaurusYearlyLimit(pestDefaultMixSelections(CATALOG), THREE_LOW))).toEqual(['Taurus SC', ...WITHOUT_TAURUS]);
   });
 
   it('does not warn without Taurus selected, with room under the label, or with an unknown answer', () => {

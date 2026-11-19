@@ -34,20 +34,26 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
   // One completed visit with one ledger row (more rows on the same record through `extra`).
   async function application({
     cust, property = null, date = NEW, product = taurusId, ledgerProperty = null, rate = null, unit = null, dilution = null,
-    retracted = false, withVisit = true,
+    quantity = null, quantityUnit = null, retracted = false, withVisit = true,
   }) {
     const ssId = randomUUID();
     const srId = randomUUID();
     if (withVisit) await db('scheduled_services').insert({ id: ssId, customer_id: cust, property_id: property });
     await db('service_records').insert({ id: srId, customer_id: cust, scheduled_service_id: withVisit ? ssId : null, service_date: date });
-    await ledgerRow({ cust, srId, date, product, ledgerProperty, rate, unit, dilution, retracted });
+    await ledgerRow({ cust, srId, date, product, ledgerProperty, rate, unit, dilution, quantity, quantityUnit, retracted });
     return { ssId, srId };
   }
-  const ledgerRow = ({ cust, srId, date = NEW, product = taurusId, ledgerProperty = null, rate = null, unit = null, dilution = null, retracted = false }) => db('property_application_history').insert({
+  const ledgerRow = ({
+    cust, srId, date = NEW, product = taurusId, ledgerProperty = null, rate = null, unit = null, dilution = null,
+    quantity = null, quantityUnit = null, retracted = false, serviceProductId = null,
+  }) => db('property_application_history').insert({
     customer_id: cust, service_record_id: srId, product_id: product, application_date: date, property_id: ledgerProperty,
-    application_rate: rate, rate_unit: unit, dilution_rate: dilution, retracted_at: retracted ? new Date() : null,
+    application_rate: rate, rate_unit: unit, dilution_rate: dilution, quantity_applied: quantity, quantity_unit: quantityUnit,
+    service_product_id: serviceProductId, retracted_at: retracted ? new Date() : null,
   });
-  const count = (cust, property, visitId = randomUUID(), now = NOW) => taurusYearlyCount({ id: visitId, customer_id: cust, property_id: property }, { knex: db, now });
+  const count = (cust, property, visitId = randomUUID(), now = NOW, scheduledDate = undefined) => taurusYearlyCount({
+    id: visitId, customer_id: cust, property_id: property, scheduled_date: scheduledDate,
+  }, { knex: db, now });
 
   beforeAll(async () => {
     const url = new URL(process.env.DATABASE_URL);
@@ -63,8 +69,10 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
     await db.raw(`CREATE TABLE property_application_history (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL, service_record_id uuid, product_id uuid,
       application_date date NOT NULL, application_rate numeric(8,4), rate_unit varchar(30), dilution_rate varchar(100),
+      quantity_applied numeric(8,3), quantity_unit varchar(20), service_product_id uuid,
       property_id uuid, retracted_at timestamptz
     )`);
+    await db.raw('CREATE TABLE service_products (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), service_record_id uuid, product_name text)');
     [taurusId] = (await db('products_catalog').insert({ name: 'Taurus SC' }).returning('id')).map((r) => r.id);
     [retiredTaurusId] = (await db('products_catalog').insert({ name: '  TAURUS SC 9.7%  ', active: false }).returning('id')).map((r) => r.id);
     [otherId] = (await db('products_catalog').insert([{ name: 'LESCO Crosscheck Plus' }]).returning('id')).map((r) => r.id);
@@ -86,7 +94,7 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
     await application({ cust, property: propB, date: NEW }); // another home
     await application({ cust, property: propA, date: '2025-12-31' }); // last year
     await application({ cust, property: propA, date: '2027-01-01' }); // next year
-    expect(await count(cust, propA)).toEqual({ high: 1, low: 1, count: 2, eligible: true, year: 2026 });
+    expect(await count(cust, propA)).toEqual({ high: 1, low: 1, count: 2, eligible: true, eligibleHigh: false, year: 2026 });
   });
 
   it('leaves out only the rows of the visit being completed', async () => {
@@ -132,7 +140,7 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
     const cust = randomUUID();
     await application({ cust, property: propA, rate: 0.8, unit: 'fl_oz/gal' });
     await application({ cust, property: propA, dilution: '0.06%' });
-    await application({ cust, property: propA, rate: 4, unit: 'oz' });
+    await application({ cust, property: propA, rate: 1.6, unit: 'oz' });
     expect(await count(cust, propA)).toMatchObject({ high: 2, low: 1, eligible: false });
   });
 
@@ -172,5 +180,38 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
     const [{ id: lookalike }] = await db('products_catalog').where({ name: 'Taurus SCX' }).select('id');
     await application({ cust, property: propA, product: lookalike });
     expect((await count(cust, propA)).count).toBe(2);
+  });
+
+  it('counts a legacy ledger row with no product_id through its service product row\'s name', async () => {
+    const cust = randomUUID();
+    const legacy = await application({ cust, property: propA, product: null });
+    const [{ id: spId }] = await db('service_products').insert({ service_record_id: legacy.srId, product_name: ' taurus sc ' }).returning('id');
+    await db('property_application_history').where({ service_record_id: legacy.srId }).update({ service_product_id: spId });
+    // A null-product row whose product row names something else is not Taurus.
+    const other = await application({ cust, property: propA, product: null });
+    const [{ id: otherSp }] = await db('service_products').insert({ service_record_id: other.srId, product_name: 'LESCO Crosscheck Plus' }).returning('id');
+    await db('property_application_history').where({ service_record_id: other.srId }).update({ service_product_id: otherSp });
+    await application({ cust, property: propA, product: null }); // no product row at all
+    expect((await count(cust, propA)).count).toBe(1);
+  });
+
+  it('reads an amount above the house mix (after the cutoff) as the old 0.06% tank', async () => {
+    const cust = randomUUID();
+    await application({ cust, property: propA, quantity: 3.2, quantityUnit: 'fl_oz' });
+    await application({ cust, property: propA, rate: 4, unit: 'oz' });
+    await application({ cust, property: propA, quantity: 1.6, quantityUnit: 'fl_oz' });
+    expect(await count(cust, propA)).toMatchObject({ high: 2, low: 1, eligible: false });
+  });
+
+  it('checks both years for a visit scheduled in the year before today', async () => {
+    const cust = randomUUID();
+    await application({ cust, property: propA, date: '2025-03-03' });
+    await application({ cust, property: propA, date: '2025-04-04' });
+    await application({ cust, property: propA, date: '2025-05-05' });
+    await application({ cust, property: propA, date: '2025-06-06' });
+    const now = new Date('2026-01-05T15:00:00Z');
+    // 2025's rows read as 0.06% (before the cutoff), so 2025 is used up; 2026 is empty. Today alone says eligible, both years say not.
+    expect(await count(cust, propA, undefined, now)).toMatchObject({ count: 0, eligible: true });
+    expect(await count(cust, propA, undefined, now, '2025-12-30')).toMatchObject({ eligible: false, year: 2025 });
   });
 });

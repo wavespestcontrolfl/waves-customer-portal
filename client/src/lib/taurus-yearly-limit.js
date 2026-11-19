@@ -5,9 +5,9 @@
 // used (owner ruling 2026-11-19, "A": the house mix is 1.6 fl oz per 4 gal,
 // 0.03%). The server reads the compliance ledger
 // (server/services/taurus-yearly-count.js) and sends
-// `taurusYearly: { high, low, count, eligible, year }` with the close-out's
-// product context, where `eligible` says whether another 0.03% application
-// fits. This module turns that into: the house mix without Taurus when it does
+// `taurusYearly: { high, low, count, eligible, eligibleHigh, year }` with the
+// close-out's product context, where `eligible` says whether another 0.03%
+// application fits and `eligibleHigh` whether another 0.06% one does. This module turns that into: the house mix without Taurus when it does
 // not fit, a plain line saying so, and a warning when Taurus is added back.
 //
 // It filters the selections pestDefaultMixSelections returns, by product name;
@@ -29,13 +29,19 @@ export function taurusYearlyOf(taurusYearly) {
 const known = (taurusYearly) => taurusYearlyOf(taurusYearly) !== null;
 const exhausted = (taurusYearly) => known(taurusYearly) && taurusYearly.eligible === false;
 
+// A selected row mixed stronger than the house mix: a fl_oz/gal rate above 0.4 (1.6 fl oz per 4 gal is 0.4, 0.03%).
+const HOUSE_FL_OZ_PER_GAL = 0.4;
+export const isHighTaurusRate = (row) => (
+  String(row?.rateUnit ?? '').trim().toLowerCase().replace(/\s+/g, '_') === 'fl_oz/gal' && Number(row?.rate) > HOUSE_FL_OZ_PER_GAL
+);
+
 // pestDefaultMixSelections(...) rows, minus Taurus SC unless the home is known to have room under the label.
 export function applyTaurusYearlyLimit(selections, taurusYearly) {
   const list = Array.isArray(selections) ? selections : [];
   return known(taurusYearly) && taurusYearly.eligible ? list : list.filter(({ product }) => !isTaurusProduct(product));
 }
 
-const UNKNOWN_LINE = "Taurus left out: this year's count is unavailable. Add it only if this home has had fewer than 4 this year.";
+const UNKNOWN_LINE = "Taurus left out: this year's count is unavailable. Add it only if this home is still within the label's yearly limit.";
 
 // The line under the house mix when Taurus was left out; null when the answer says it stays.
 export function taurusLeftOutLine(taurusYearly) {
@@ -45,12 +51,18 @@ export function taurusLeftOutLine(taurusYearly) {
     : null;
 }
 
-// The warning when Taurus is on the list although the home has no room under the label; null otherwise.
-// `products` are the selected product rows or catalog entries, in any shape isTaurusProduct reads.
+// The warning when a Taurus row is on the list although the label has no room for it at this home; null otherwise.
+// A row mixed above 0.4 fl_oz/gal is a 0.06% application and is judged by `eligibleHigh`, any other by `eligible`.
+// `products` are the selected rows ({ name, rate, rateUnit }) or catalog entries; warns only, never blocks.
 export function taurusOverLimitWarning(taurusYearly, products) {
-  if (!exhausted(taurusYearly)) return null;
+  if (!known(taurusYearly)) return null;
   const list = Array.isArray(products) ? products : [];
-  return list.some((p) => p && isTaurusProduct(p)) ? "Over the label's yearly Taurus limit at this home." : null;
+  const over = list.some((p) => {
+    if (!p || !isTaurusProduct(p)) return false;
+    const fits = isHighTaurusRate(p) && typeof taurusYearly.eligibleHigh === 'boolean' ? taurusYearly.eligibleHigh : taurusYearly.eligible;
+    return fits === false;
+  });
+  return over ? "Over the label's yearly Taurus limit at this home." : null;
 }
 
 // The one note a close-out shows: the warning when Taurus is selected over the limit, else, on a visit that

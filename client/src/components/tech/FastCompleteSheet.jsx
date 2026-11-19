@@ -894,7 +894,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
             onToggleEdit={() => setEditAmounts((on) => !on)}
             other={picker.button}
             popover={picker.popover}
-            taurusNote={taurusNoteFor(ctx, rows.filter((row) => row.active))}
+            taurusNote={taurusNoteFor(ctx, rows.filter((row) => row.active), form.method)}
           />
           <PestsSection form={form} setField={setField} locked={formLocked} />
           <ChoiceSection title="Where" columns={3}>
@@ -1491,8 +1491,10 @@ function writerSources({ productCount, photoCount, marked, rated }) {
 
 // Taurus SC's yearly label limit at this home: the line saying it was left off the house mix, or the warning when it
 // is on the sheet over the limit. Warns only; null when the count is under the limit.
-function taurusNoteFor(ctx, active) {
-  return taurusYearlyNote(ctx?.taurusYearly, active, { mixVisit: ctx?.houseMix === true });
+function taurusNoteFor(ctx, active, sprayMethod) {
+  // A typed Taurus rate above the house mix's 0.4 fl oz/gal is a 0.06% application: judged on its own label scenario.
+  const rows = active.map((row) => ({ name: row.name, ...rowRate(row, sprayMethod) }));
+  return taurusYearlyNote(ctx?.taurusYearly, rows, { mixVisit: ctx?.houseMix === true });
 }
 
 // The products as one line ("Taurus SC 4 fl oz · …"), opened to the full
@@ -2397,10 +2399,10 @@ function VisitStep({
               other={picker.button}
               popover={picker.popover}
               onCollapse={() => setProductsOpen(false)}
-              taurusNote={taurusNoteFor(ctx, active)}
+              taurusNote={taurusNoteFor(ctx, active, sprayMethod)}
             />
           ) : (
-            <ProductsLine active={active} locked={locked} onOpen={() => setProductsOpen(true)} taurusNote={taurusNoteFor(ctx, active)} />
+            <ProductsLine active={active} locked={locked} onOpen={() => setProductsOpen(true)} taurusNote={taurusNoteFor(ctx, active, sprayMethod)} />
           )}
           {stockNotices}
           {/* A clip being recorded keeps recording behind the photo manager, so
