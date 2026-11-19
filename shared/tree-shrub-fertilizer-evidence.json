@@ -1,5 +1,6 @@
 {
   "nutriRoot": {
+    "namePattern": "\\bnutriroot\\b",
     "soilTestBasis": "P-deficient soil documented by soil test",
     "alreadyAppliedBasis": "Already applied — office review"
   }

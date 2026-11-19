@@ -2347,7 +2347,7 @@ const FINDING_WHY = {
   [tsOrnamental.UNCHECKED_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
   [tsOrnamental.HISTORY_UNCHECKED_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
   [tsOrnamental.AUDIT_UNAVAILABLE_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
-  [tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE]: (name, f) => `${name} was recorded as already applied: ${f.reason}.`,
+  [tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE]: () => 'A technician reported an earlier NutriRoot application that needs an ordinance review.',
   [areaAddOnLimits.YEARLY_LIMIT_TYPE]: (name, f) => `${name} is over its add-on yearly limit: ${f.current} before it in 12 months, limit ${f.max}.`,
 };
 // The long form (the "Show full text" detail) of the same.
@@ -2364,7 +2364,7 @@ const tsUncheckedDetail = (fullName, f, svc) => (f.reason === 'history_unavailab
 FINDING_DETAIL[tsOrnamental.UNCHECKED_LIMIT_TYPE] = tsUncheckedDetail;
 FINDING_DETAIL[tsOrnamental.HISTORY_UNCHECKED_LIMIT_TYPE] = tsUncheckedDetail;
 FINDING_DETAIL[tsOrnamental.AUDIT_UNAVAILABLE_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was submitted on a ${svc.service_type || 'tree & shrub'} visit, but its ${tsOrnamental.uncheckedClause(f.reason)}: the record's products could not be read back. Check the 13-0-13 amount, treated area and history on the application record and report it if needed.`;
-FINDING_DETAIL[tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded as already applied on a ${svc.service_type || 'tree & shrub'} visit, although ${f.reason.charAt(0).toLowerCase()}${f.reason.slice(1)} The application remains in the ledger; review the record and follow up with the technician if needed.`;
+FINDING_DETAIL[tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded as already applied on a ${svc.service_type || 'tree & shrub'} visit. ${f.reason}. Review the application with the technician.`;
 for (const type of [areaAddOnGovernedRate.LIMIT_TYPE, 'min_interval_days', 'annual_max_rate', 'annual_max_apps']) {
   FINDING_DETAIL[type] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${FINDING_LIMIT_LABELS[type]} (${limitFigure(f)}). Review it and report it if needed.`;
 }
@@ -2389,7 +2389,7 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
       const dedupeKey = limitFindingDedupeKey(record, finding);
       const created = await raiseAdminAlert('service', {
         area: 'Schedule',
-        action: unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : nutriRootReview ? `review ${name} application` : over ? `review ${name} over its limit` : 'review product limits not checked',
+        action: unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : nutriRootReview ? 'review NutriRoot application' : over ? `review ${name} over its limit` : 'review product limits not checked',
         why,
         severity: 'needs-you',
         who: 'person',
@@ -6332,6 +6332,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         } });
       }
       const resumedStructuredNotes = parseJsonObject(record.structured_notes);
+      treeShrubCloseoutSummary = resumedStructuredNotes.treeShrubCloseout || null;
       servicePhotoVisit = resumedStructuredNotes.servicePhotoVisit || null;
       // An authorized correction can land after the packet committed its
       // records but before an effects replay. Its durable revision and notes
@@ -10083,7 +10084,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         database: db,
         advisory: applicationLimitAdvisory,
         notify: notifyOfficeOfLimitFindings,
-        basis: treeShrubComplianceValues?.[tsFertilizerEvidence.NUTRIROOT_FIELD],
+        basis: treeShrubCloseoutSummary?.[tsFertilizerEvidence.NUTRIROOT_FIELD]
+          || treeShrubComplianceValues?.[tsFertilizerEvidence.NUTRIROOT_FIELD],
         zone: inferTreeShrubOrdinanceZone(svc),
         submittedProductNames,
       });

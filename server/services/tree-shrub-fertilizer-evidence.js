@@ -12,7 +12,7 @@
 // approved recommendation.
 const EVIDENCE = require('../../shared/tree-shrub-fertilizer-evidence.json');
 
-const NUTRIROOT_PRODUCT = /\bnutriroot\b/i;
+const NUTRIROOT_PRODUCT = new RegExp(EVIDENCE.nutriRoot.namePattern, 'i');
 const NUTRIROOT_SOIL_TEST_BASIS = EVIDENCE.nutriRoot.soilTestBasis;
 const NUTRIROOT_ALREADY_APPLIED_BASIS = EVIDENCE.nutriRoot.alreadyAppliedBasis;
 const NUTRIROOT_FIELD = 'nutriroot_application_basis';
@@ -80,6 +80,13 @@ function nutriRootDecision({ zone = 'other_unknown', serviceDate, basis } = {}) 
     return { state: 'eligible', basis: normalized, reason: '' };
   }
   return { state: 'held', basis: normalized, reason };
+}
+
+function nutriRootPickerEvidence({ zone, serviceDate }) {
+  return {
+    nutriRootHoldReason: nutriRootHoldReason({ zone, serviceDate }),
+    nutriRootSoilTestEligible: nutriRootDecision({ zone, serviceDate, basis: NUTRIROOT_SOIL_TEST_BASIS }).state === 'eligible',
+  };
 }
 
 function validateNutriRootEvidence(values, { zone, serviceDate, productNames = [] } = {}) {
@@ -187,6 +194,7 @@ module.exports = {
   normalizeBasis,
   nutriRootHoldReason,
   nutriRootDecision,
+  nutriRootPickerEvidence,
   validateNutriRootEvidence,
   nutriRootReviewFinding,
   flagNutriRootApplication,

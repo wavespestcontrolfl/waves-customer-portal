@@ -3,7 +3,7 @@ const { resolveOrdinanceJurisdiction } = require('./fertilizer-jurisdiction');
 
 const TREE_SHRUB_CLOSEOUT_VERSION = 'tree_shrub_closeout_v1';
 const { validatePestTreatmentEvidence } = require('./tree-shrub-pest-check');
-const { isNutriRootName, validateNutriRootEvidence } = require('./tree-shrub-fertilizer-evidence');
+const { NUTRIROOT_FIELD, NUTRIROOT_SOIL_TEST_REFERENCE_FIELD, isNutriRootName, validateNutriRootEvidence } = require('./tree-shrub-fertilizer-evidence');
 
 const TREE_SHRUB_SERVICE_LINES = new Set(['tree_shrub', 'palm']);
 const BLACKOUT_ZONES = new Set(['sarasota_venice', 'manatee_parrish', 'other_unknown']);
@@ -490,6 +490,10 @@ function pushInjectionRecordBlocks(blocks, injection, productRefs) {
   if (!injection.followUpDate) pushBlock(blocks, 'tree_shrub_injection_follow_up_required', 'Injection record requires follow-up date.', 'injectionRecord.followUpDate');
 }
 
+function ordinaryNpFertilizer(ref) {
+  return productHasNpFertilizer(ref) && !isNutriRootName(productName(ref));
+}
+
 function validateTreeShrubCloseout({
   service = {},
   serviceLine,
@@ -518,6 +522,18 @@ function validateTreeShrubCloseout({
   if (!TREE_SHRUB_SERVICE_LINES.has(serviceLine)) {
     return { ok: true, blocks: [], warnings: [], normalized: null, productFlags };
   }
+
+  // A manually selected zone cannot grant the Manatee soil-test exception.
+  const propertyZone = inferTreeShrubOrdinanceZone(service);
+  const visitDate = serviceDate || service.scheduled_date;
+  const evidence = validateNutriRootEvidence(completion, {
+    zone: propertyZone, serviceDate: visitDate,
+    productNames: productRefs.map(productName),
+  });
+  blocks.push(...evidence.blocks);
+  warnings.push(...evidence.warnings);
+  if (evidence.decision?.basis) normalized[NUTRIROOT_FIELD] = evidence.decision.basis;
+  if (evidence.decision?.soilTestReference) normalized[NUTRIROOT_SOIL_TEST_REFERENCE_FIELD] = evidence.decision.soilTestReference;
 
   if (!normalized.ordinanceZone) {
     pushBlock(blocks, 'tree_shrub_ordinance_zone_required', 'Select the ordinance zone for this Tree/Shrub visit.', 'ordinanceZone');
@@ -578,8 +594,9 @@ function validateTreeShrubCloseout({
     );
   }
   if (
-    productFlags.hasNpFertilizer &&
-    isSummerBlackoutForZone(serviceDate || service.scheduled_date, normalized.ordinanceZone)
+    productRefs.some(ordinaryNpFertilizer) &&
+    (isSummerBlackoutForZone(visitDate, normalized.ordinanceZone)
+      || (evidence.decision && isSummerBlackoutForZone(visitDate, propertyZone)))
   ) {
     pushBlock(
       blocks,
@@ -774,7 +791,7 @@ function validateTreeShrubTypedCompliance({
   }
 
   if (
-    productRefs.some((ref) => productHasNpFertilizer(ref) && !isNutriRootName(productName(ref)))
+    productRefs.some(ordinaryNpFertilizer)
     && isSummerBlackoutForZone(serviceDate || service.scheduled_date, zone)
   ) {
     pushBlock(

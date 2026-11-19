@@ -118,6 +118,7 @@ import {
   normalizeApplicationMethod,
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
+import FERTILIZER_EVIDENCE from "../../../../shared/tree-shrub-fertilizer-evidence.json";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
 import {
   TYPED_INSECT_EVIDENCE_KEYS,
@@ -10537,31 +10538,12 @@ const TREE_SHRUB_LIFE_STAGE_OPTIONS = [
   { value: "unknown", label: "Unknown" },
 ];
 
-function treeShrubLocationText(service = {}) {
-  return [
-    service.city,
-    service.address,
-    service.serviceAddress,
-    service.propertyAddress,
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-}
+const { soilTestBasis, alreadyAppliedBasis, namePattern } = FERTILIZER_EVIDENCE.nutriRoot;
+const NUTRIROOT_NAME = new RegExp(namePattern, "i");
 
-function inferTreeShrubOrdinanceZoneClient(service = {}) {
-  const location = treeShrubLocationText(service);
-  if (/\bnorth\s*port\b/.test(location)) return "north_port";
-  if (/\b(parrish|manatee|bradenton|palmetto|ellenton|lakewood\s*ranch)\b/.test(location)) {
-    return "manatee_parrish";
-  }
-  if (/\b(sarasota|venice|nokomis|osprey|englewood)\b/.test(location)) return "sarasota_venice";
-  return "other_unknown";
-}
-
-function defaultTreeShrubCloseout(service = {}) {
+function defaultTreeShrubCloseout() {
   return {
-    ordinanceZone: inferTreeShrubOrdinanceZoneClient(service),
+    ordinanceZone: "",
     bedSqft: "",
     palmCount: "",
     palmRootZoneSqft: "",
@@ -10586,8 +10568,8 @@ function defaultTreeShrubCloseout(service = {}) {
   };
 }
 
-function normalizeTreeShrubCloseoutDraft(value = {}, service = {}) {
-  const defaults = defaultTreeShrubCloseout(service);
+function normalizeTreeShrubCloseoutDraft(value = {}) {
+  const defaults = defaultTreeShrubCloseout();
   return {
     ...defaults,
     ...(value || {}),
@@ -10645,7 +10627,13 @@ function treeShrubProductFlagsClient(selectedProducts = [], catalog = []) {
     /\b(herbicide|pre[\s-]?emergent|post[\s-]?emergent|weeds?|glyphosate|prodiamine|dithiopyr|isoxaben|oxadiazon|pendimethalin|indaziflam|barricade|dimension|gallery|ronstar|snapshot|specticle|marengo|freehand|roundup|finale|reward|sedgehammer)\b/.test(productsText(product)),
   );
   const hasSnapshot = selectedProducts.some((product) => /\bsnapshot\b/.test(productsText(product)));
+  const isNutriRoot = (product) => {
+    const catalogRow = catalog.find((row) => String(row.id) === String(product.productId));
+    return NUTRIROOT_NAME.test(catalogRow?.name || product.name || "");
+  };
+  const hasNutriRoot = selectedProducts.some(isNutriRoot);
   const hasNpFertilizer = selectedProducts.some((product) => {
+    if (isNutriRoot(product)) return false; // Its evidence rule permits recording an already-applied exception.
     const textValue = productsText(product);
     const analysis = textValue.match(/\b(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\b/);
     if (analysis) return Number(analysis[1]) > 0 || Number(analysis[2]) > 0;
@@ -10668,6 +10656,7 @@ function treeShrubProductFlagsClient(selectedProducts = [], catalog = []) {
     hasHerbicideProduct,
     needsIracFracLog: hasInsectProduct || hasFungicideProduct || hasHerbicideProduct,
     hasSnapshot,
+    hasNutriRoot,
     hasNpFertilizer,
     hasInjectionProduct,
     injectionRows,
@@ -10720,6 +10709,7 @@ function isNoneLikeTreeShrubValue(value = "") {
 export function treeShrubCloseoutBlocksClient({
   closeout,
   productFlags,
+  fertilizerContext,
   injectionProducts = [],
   servicePhotos,
   service,
@@ -10736,6 +10726,16 @@ export function treeShrubCloseoutBlocksClient({
   const snapshotYtd = treeShrubNumber(closeout.snapshotAppliedYtd);
 
   if (!closeout.ordinanceZone) push("Select ordinance zone.", "ordinanceZone");
+  if (productFlags.hasNutriRoot) {
+    const basis = closeout.nutriroot_application_basis;
+    if (basis === soilTestBasis && fertilizerContext?.nutriRootSoilTestEligible) {
+      if (!String(closeout.nutriroot_soil_test_reference || "").trim()) {
+        push("Enter the phosphorus-deficiency soil-test report date or file reference.", "nutriroot_soil_test_reference");
+      }
+    } else if (basis !== alreadyAppliedBasis) {
+      push("Record an eligible NutriRoot application basis or remove the product.", "nutriroot_application_basis");
+    }
+  }
   if (!bedSqft || bedSqft <= 0) push("Enter bed square footage.", "bedSqft");
   if (palmCount === null || palmCount < 0 || !Number.isInteger(palmCount)) push("Enter palm count, even if it is 0.", "palmCount");
   if (palmCount > 0 && (!palmRootZoneSqft || palmRootZoneSqft <= 0)) push("Enter palm canopy/root-zone square footage.", "palmRootZoneSqft");
@@ -10775,7 +10775,8 @@ export function treeShrubCloseoutBlocksClient({
       "products",
     );
   }
-  if (productFlags.hasNpFertilizer && treeShrubDateInBlackout(service, closeout.ordinanceZone)) {
+  if (productFlags.hasNpFertilizer && (treeShrubDateInBlackout(service, closeout.ordinanceZone)
+    || (productFlags.hasNutriRoot && treeShrubDateInBlackout(service, fertilizerContext?.ordinanceZone || "other_unknown")))) {
     push("N/P fertilizer is blocked for this ordinance zone from June 1 through September 30.", "ordinanceZone");
   }
 
@@ -11119,6 +11120,7 @@ export function TreeShrubCloseoutBlock({
   onChange,
   blocks,
   productFlags,
+  fertilizerContext,
   injectionProducts = [],
   inputStyle: baseInputStyle,
   selectStyle,
@@ -11162,7 +11164,7 @@ export function TreeShrubCloseoutBlock({
         Closeout is locked until ordinance, plant inventory, pollinator status, pest/life stage, YTD Snapshot/fertilizer, product actuals, and photos are recorded.
       </div>
       <select
-        value={value.ordinanceZone || ""}
+        value={value.ordinanceZone || fertilizerContext?.ordinanceZone || "other_unknown"}
         onChange={(e) => setField("ordinanceZone", e.target.value)}
         style={select}
       >
@@ -11172,6 +11174,31 @@ export function TreeShrubCloseoutBlock({
           </option>
         ))}
       </select>
+      {productFlags.hasNutriRoot && (
+        <fieldset style={{ minWidth: 0, margin: 0, padding: "8px 12px", border: `1px solid ${colors.border}`, borderRadius: 10, fontSize: 14, lineHeight: 1.4 }}>
+          <legend style={{ padding: "0 4px", fontWeight: 600 }}>NutriRoot application</legend>
+          <p style={{ margin: "0 0 10px" }}>{fertilizerContext?.nutriRootHoldReason || "Confirm the service property's fertilizer rules before applying NutriRoot."}</p>
+          <label>
+            Application basis
+            <select
+              value={value.nutriroot_application_basis === soilTestBasis && !fertilizerContext?.nutriRootSoilTestEligible ? "" : value.nutriroot_application_basis || ""}
+              onChange={(event) => setField("nutriroot_application_basis", event.target.value)}
+              style={select}
+            >
+              <option value="">Choose a basis</option>
+              {fertilizerContext?.nutriRootSoilTestEligible && <option value={soilTestBasis}>{soilTestBasis}</option>}
+              <option value={alreadyAppliedBasis}>{alreadyAppliedBasis}</option>
+            </select>
+          </label>
+          {fertilizerContext?.nutriRootSoilTestEligible && value.nutriroot_application_basis === soilTestBasis && (
+            <label>
+              Soil-test report date or file reference
+              <input value={value.nutriroot_soil_test_reference || ""} maxLength={240} style={input}
+                onChange={(event) => setField("nutriroot_soil_test_reference", event.target.value)} />
+            </label>
+          )}
+        </fieldset>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
         <input
           type="number"
@@ -12701,7 +12728,7 @@ export function CompletionPanel({
   const { enabled: pestRecapFlag, ready: pestRecapReady } = useFeatureFlagReady("pest-recap-v1");
   const [turfHeight, setTurfHeight] = useState({ heightIn: null });
   const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
-    defaultTreeShrubCloseout(service),
+    defaultTreeShrubCloseout(),
   );
   const lawnDefaultAreas = completionImprovements && visitServiceLine(service, service.serviceType || service.service_type) === "lawn" && !service.findingsSchema
     ? LAWN_DEFAULT_AREAS : [];
@@ -14752,10 +14779,16 @@ export function CompletionPanel({
       rate: injectionLabelRate({ ...(catalogRow || {}), name: catalogRow?.name || row.name }),
     };
   });
+  const treeShrubFertilizer = protocolCompletionDefaults?.serviceId === service.id ? protocolCompletionDefaults?.treeShrubFertilizer : null;
+  const effectiveTreeShrubCloseout = {
+    ...treeShrubCloseout,
+    ordinanceZone: treeShrubCloseout.ordinanceZone || treeShrubFertilizer?.ordinanceZone || "other_unknown",
+  };
   const treeShrubCloseoutBlocks = treeShrubCloseoutRequired
     ? treeShrubCloseoutBlocksClient({
-        closeout: treeShrubCloseout,
+        closeout: effectiveTreeShrubCloseout,
         productFlags: treeShrubProductFlags,
+        fertilizerContext: treeShrubFertilizer,
         injectionProducts,
         servicePhotos,
         service,
@@ -15256,7 +15289,7 @@ export function CompletionPanel({
   }, [completionFlagReady, calibrationRequired, completionImprovements, isLawn, service.id, lawnAssessmentRevision, lawnPlanArea, lawnPlanReloadKey]);
 
   useEffect(() => {
-    setTreeShrubCloseout(defaultTreeShrubCloseout(service));
+    setTreeShrubCloseout(defaultTreeShrubCloseout());
   }, [service.id]);
 
   function saveDraftSnapshot(draft) {
@@ -15425,7 +15458,7 @@ export function CompletionPanel({
       oneTimeRecapOnly ||
       reviewTiming !== REVIEW_TIMING_DEFAULT ||
       reviewCustomAt.trim() ||
-      JSON.stringify(treeShrubCloseout) !== JSON.stringify(defaultTreeShrubCloseout(service)) ||
+      JSON.stringify(treeShrubCloseout) !== JSON.stringify(defaultTreeShrubCloseout()) ||
       Object.keys(findingsValues).length ||
       typedActivityScore != null ||
       typedRecommendations.trim() ||
@@ -16053,7 +16086,7 @@ export function CompletionPanel({
     setNextVisitNote(savedDraft.nextVisitNote || "");
     setShowNextVisitNote(!!savedDraft.showNextVisitNote);
     setTreeShrubCloseout(
-      normalizeTreeShrubCloseoutDraft(savedDraft.treeShrubCloseout, service),
+      normalizeTreeShrubCloseoutDraft(savedDraft.treeShrubCloseout),
     );
     // Type-aware pruning against the CURRENT schema — see
     // pruneRestoredFindingsValues for why key presence alone isn't enough.
@@ -18654,7 +18687,7 @@ export function CompletionPanel({
             } : null,
         treeShrubCompletion: treeShrubCloseoutRequired
           ? {
-              ...treeShrubCloseout,
+              ...effectiveTreeShrubCloseout,
               // Don't fall back to the hidden customerRecap state (auto-generated /
               // restored, never reviewed) — use the tech's note or the typed notes.
               customerNote:
@@ -20311,9 +20344,10 @@ export function CompletionPanel({
               <Field label="Tree & Shrub protocol closeout">
                 <TreeShrubCloseoutBlock
                   value={treeShrubCloseout}
+                  fertilizerContext={treeShrubFertilizer}
                   onChange={(next) =>
                     setTreeShrubCloseout(
-                      normalizeTreeShrubCloseoutDraft(next, service),
+                      normalizeTreeShrubCloseoutDraft(next),
                     )
                   }
                   blocks={treeShrubCloseoutBlocks}
@@ -22724,9 +22758,10 @@ export function CompletionPanel({
               <label style={labelStyle}>Tree & Shrub Protocol Closeout</label>
               <TreeShrubCloseoutBlock
                 value={treeShrubCloseout}
+                fertilizerContext={treeShrubFertilizer}
                 onChange={(next) =>
                   setTreeShrubCloseout(
-                    normalizeTreeShrubCloseoutDraft(next, service),
+                    normalizeTreeShrubCloseoutDraft(next),
                   )
                 }
                 blocks={treeShrubCloseoutBlocks}

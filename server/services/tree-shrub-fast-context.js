@@ -36,7 +36,7 @@ const { watchListForMonth } = require('../config/tree-shrub-watch-list');
 const { tsWatchListLive, visitWatchMonth } = require('./tree-shrub-watch-items');
 const { tsPestCheckLive } = require('./tree-shrub-pest-check');
 const {
-  NUTRIROOT_SOIL_TEST_BASIS, isNutriRootName, nutriRootDecision, nutriRootHoldReason,
+  isNutriRootName, nutriRootPickerEvidence,
 } = require('./tree-shrub-fertilizer-evidence');
 const { tsNeonicCapLive, buildNeonicCapContext } = require('./tree-shrub-neonic-ledger');
 const PEST_CHECK_TYPES = require('../../shared/tree-shrub-pest-check.json').insectTypes;
@@ -84,10 +84,7 @@ function treeShrubProductFlags(row, { serviceDate, zone }) {
     // so an application that already happened can still be recorded.
     npBlackout: !nutriRoot && productHasNpFertilizer(ref) && isSummerBlackoutForZone(serviceDate, zone),
     nutriRoot,
-    ...(nutriRoot ? {
-      nutriRootHoldReason: nutriRootHoldReason({ zone, serviceDate }),
-      nutriRootSoilTestEligible: nutriRootDecision({ zone, serviceDate, basis: NUTRIROOT_SOIL_TEST_BASIS }).state === 'eligible',
-    } : {}),
+    ...(nutriRoot ? nutriRootPickerEvidence({ zone, serviceDate }) : {}),
     injection: isInjectionProduct(ref),
   };
 }

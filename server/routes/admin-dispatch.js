@@ -3646,16 +3646,28 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
 router.get('/:serviceId/default-products', async (req, res, next) => {
   try {
     const scheduled = await technicianCurrentVisitFilter(req,
-      db('scheduled_services').where({ id: req.params.serviceId })).first('id');
+      db('scheduled_services').where({ id: req.params.serviceId })).first('id', 'service_type');
     if (!scheduled) return res.status(404).json({ error: 'Service not found' });
     const { resolveCompletionProductDefaults } = require('../services/completion-product-defaults');
     const result = await resolveCompletionProductDefaults({ db, serviceId: req.params.serviceId });
     // The resolution reads the visit's application history; a reassignment
     // during that read must not hand it to the former technician (same
     // before-and-after check as the Job Card route).
-    const stillInScope = await technicianCurrentVisitFilter(req,
-      db('scheduled_services').where({ id: req.params.serviceId })).first('id');
+    const recheck = technicianCurrentVisitFilter(req, db('scheduled_services').where('scheduled_services.id', req.params.serviceId));
+    const includeFertilizer = ['tree_shrub', 'palm'].includes(detectServiceLine(scheduled.service_type));
+    const stillInScope = includeFertilizer
+      ? await recheck.leftJoin('customers', 'customers.id', 'scheduled_services.customer_id')
+        .first('scheduled_services.id', 'scheduled_services.scheduled_date', 'scheduled_services.service_address_line1',
+          'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+          'customers.address_line1', 'customers.city', 'customers.zip')
+      : await recheck.first('id');
     if (!stillInScope) return res.status(404).json({ error: 'Service not found' });
+    if (includeFertilizer) {
+      const { inferTreeShrubOrdinanceZone } = require('../services/tree-shrub-closeout');
+      const { nutriRootPickerEvidence } = require('../services/tree-shrub-fertilizer-evidence');
+      const zone = inferTreeShrubOrdinanceZone(stillInScope);
+      return res.json({ ...result, treeShrubFertilizer: { ordinanceZone: zone, ...nutriRootPickerEvidence({ zone, serviceDate: stillInScope.scheduled_date }) } });
+    }
     res.json(result);
   } catch (err) { next(err); }
 });
