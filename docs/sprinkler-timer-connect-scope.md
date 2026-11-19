@@ -18,6 +18,10 @@ day and time they set.
 - About 90% of lawn customers have a Hunter or a Rain Bird timer.
 - The common Hunter in Lakewood Ranch is the **X2** (identified from the
   Home Depot listing for the 6-station model).
+- Most of the customers he talks to already have the Wi-Fi module and use
+  the timer's app. This is a read from the field, not a count, and it is
+  not split by brand: a Hunter on Hydrawise can be reached, a Rain Bird on
+  Rain Bird's app cannot.
 - Scope the build and show the screens in the app.
 - Can the weekly watering email drive the timer: when it says water 20
   minutes this week, the timer runs 20 minutes at a set time, with no tap.
@@ -39,7 +43,8 @@ guides until Rain Bird offers a way in.
 - Step 1 (record which timer each customer has) needs no vendor and ships
   on its own. It also gives the number that decides how much the later
   steps are worth: nothing on file today says how many homes are on
-  Hydrawise.
+  Hydrawise. The owner's read is that most customers already have a Wi-Fi
+  module and the app; step 1 confirms that and splits it by brand.
 - Step 4 is the one that makes the weekly plan run itself. It is also the
   only step where Waves starts water with nobody watching, so it comes
   last and carries the most conditions.
@@ -367,8 +372,9 @@ established.
 - Hunter may decline or limit access, or its sign-in may have the customer
   type their Hydrawise password into a Waves page. The connect sheet's
   wording depends on the answer, and a password would never be stored.
-- Reach is unknown until step 1 has run for a few weeks. It covers only
-  homes on Hydrawise.
+- Reach rests on the owner's field read (most customers already on a
+  Wi-Fi module and app) until step 1 has run for a few weeks. It covers
+  only the Hunter share of those homes.
 - A zone marked wrong pauses a bed, or leaves a turf zone running.
 - A timer that has lost Wi-Fi cannot be paused. The card says so, and the
   customer's text still carries the instruction.
