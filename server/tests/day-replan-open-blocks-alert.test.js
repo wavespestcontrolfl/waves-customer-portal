@@ -330,17 +330,58 @@ test('a certified rival hold stays in the capacity route exactly once', async ()
   ]);
 
   // The original hold remains in the route; its same-id destination remains
-  // an exact block. Earlier work delays the 10 AM candidate to 10:15; the
-  // rival's 10:45 destination postpones it rather than allowing a crossing.
+  // an exact block. The writer refuses this nominal overlap even though the
+  // route simulator could wait until the destination clears.
   occupancy.listOccupiedWindows.mockResolvedValueOnce([original, destination(645, 705)]);
   await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar: calendar() }))
-    .resolves.toEqual([expect.objectContaining({ slot, startMin: 600, finishMin: 765 })]);
+    .resolves.toEqual([]);
+
+  // An exact nominal handoff at 11:00 passes that guard, but the 10:15
+  // delayed arrival still cannot cross the destination; waiting until noon
+  // would miss its arrival promise, so the replay refuses it.
+  occupancy.listOccupiedWindows.mockResolvedValueOnce([original, destination(660, 720)]);
+  await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar: calendar() }))
+    .resolves.toEqual([]);
 
   // Both intervals remain represented, and an exact destination handoff at
   // the delayed candidate's 11:15 departure is still valid.
   occupancy.listOccupiedWindows.mockResolvedValueOnce([original, destination(675, 735)]);
   await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar: calendar() }))
     .resolves.toEqual([expect.objectContaining({ slot, startMin: 600, finishMin: 675 })]);
+});
+
+test('capacity replay ignores other-technician visits but keeps unassigned work fixed', async () => {
+  const occupancy = require('../services/scheduling/occupancy');
+  const { CAPACITY_PLACEMENT, _internals: { assessOfferedHours } } = require('../services/day-replan/booking-fit');
+  const RouteOptimizer = require('../services/route-optimizer');
+  const date = '2026-11-20';
+  const tech = 'tech-1';
+  const blocker = {
+    id: 'parallel-route', customer_id: 'customer-other', technician_id: 'tech-2', status: 'confirmed', scheduled_date: date,
+    window_start: '10:00', window_end: '17:00', estimated_duration_minutes: 420,
+    lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, route_order: 1,
+  };
+  const slot = { date, techId: tech, windowStart: '10:00', windowEnd: '11:00',
+    [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: ['__candidate__'], workMinutes: 60 } };
+  const target = { lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng,
+    planning_exempt: true, estimated_duration_minutes: 60 };
+  const calendar = row => new Map([
+    ['homes', new Map()], ['departure', 8 * 60], [date, [row]], [`${date}|${tech}`, []],
+  ]);
+
+  occupancy.listOccupiedWindows.mockResolvedValueOnce([blocker]);
+  await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar: calendar(blocker) }))
+    .resolves.toEqual([expect.objectContaining({ slot, finishMin: 660 })]);
+
+  const unassigned = { ...blocker, technician_id: null };
+  occupancy.listOccupiedWindows.mockResolvedValueOnce([unassigned]);
+  await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar: calendar(unassigned) }))
+    .resolves.toEqual([]);
+
+  // The ordinary hour path retains its existing tech-blind rule.
+  occupancy.listOccupiedWindows.mockResolvedValueOnce([blocker]);
+  await expect(assessOfferedHours(jest.fn(), [{ ...slot, [CAPACITY_PLACEMENT]: undefined }], target,
+    { now: NOW, calendar: calendar(blocker) })).resolves.toEqual([]);
 });
 
 test.each(['visit_id', 'v2 allocation'])(

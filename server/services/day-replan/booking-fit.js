@@ -79,6 +79,20 @@ function scopedOccupancy(rows, techId, techBlind, routeIds) {
   });
 }
 
+// Capacity routing is technician-specific even while the legacy hour writer
+// is tech-blind: only unassigned work is a fixed route block. Make-room
+// destinations are a separate writer guard and retain its own scope — all
+// technicians while tech-blind, or this technician plus unassigned rows when
+// multi-tech confirmation is active.
+function capacityScopedOccupancy(rows, techId, techBlind) {
+  return rows.filter((row) => {
+    if (row.conflict_reason === 'make_room_destination') {
+      return row.technician_id == null || techBlind || sameTech(row, techId);
+    }
+    return row.technician_id == null;
+  });
+}
+
 function occupiedBlockedHours(rows) {
   const hours = new Set(rows.flatMap(spanHours));
   return [...hours].sort((a, b) => a - b);
@@ -144,7 +158,8 @@ function fitCertifiedCapacity(input, slot, proposed) {
   // mid-window interview ends and still keep the two-hour arrival promise,
   // producing an advisory card the writer refuses. Boundaries remain valid
   // handoffs; the simulation below separately catches delayed actual work.
-  if ((input.interviewBlocks || []).some(block => startMin < block.endMin && offeredEndMin > block.startMin)) return null;
+  const nominalGuards = [...(input.interviewBlocks || []), ...(input.makeRoomBlocks || [])];
+  if (nominalGuards.some(block => startMin < block.endMin && offeredEndMin > block.startMin)) return null;
   // The public card's end is its reserved/display width. The scoring target
   // carries the catalog's actual expected work; a certified longer placement
   // may safely be re-simulated at that shorter duration, but never vice versa.
@@ -228,20 +243,15 @@ async function technicianProof({ conn, date, techId, day, read, replan, homes, d
   const groups = coVisitGroups(ordered);
   const capacityRows = day.rows.filter(row => sameTech(row, techId));
   const capacityGroups = groupRouteStops(capacityRows);
-  const capacityRouteIds = new Set(capacityRows.map(row => String(row.id)));
   const blocks = await read(`${date}|${techId}`, () => replan.loadBlocks(conn, date, techId));
   const routeIds = new Set(own.map(row => String(row.id)));
   const blocked = scopedOccupancy(day.occupancyRows, techId, techBlind, routeIds);
   const blockedHours = occupiedBlockedHours(blocked);
   const occupancyBlocks = blocked.map(({ startMin, endMin }) => ({ startMin, endMin }));
   const routeBlocks = [...blocks, ...day.interviewBlocks, ...occupancyBlocks];
-  const capacityOccupancyBlocks = blocked
-    // A live make-room destination deliberately shares its reservation id
-    // with the hold that remains in the certified route at the original
-    // interval. Remove that original interval from exact blocks (the route
-    // simulates it once), but retain the rival destination as unavailable.
-    .filter(row => row.conflict_reason === 'make_room_destination'
-      || !(sameTech(row, techId) && capacityRouteIds.has(String(row.id))))
+  const capacityFixed = capacityScopedOccupancy(day.occupancyRows, techId, techBlind);
+  const capacityOccupancyBlocks = capacityFixed.map(({ startMin, endMin }) => ({ startMin, endMin }));
+  const makeRoomBlocks = capacityFixed.filter(row => row.conflict_reason === 'make_room_destination')
     .map(({ startMin, endMin }) => ({ startMin, endMin }));
   const capacityBlocks = [...blocks, ...day.interviewBlocks, ...capacityOccupancyBlocks];
   const unavailable = [...routeBlocks, ...blockedHours.map(hour => ({ startMin: hour * 60, endMin: hour * 60 + 60 }))];
@@ -249,7 +259,7 @@ async function technicianProof({ conn, date, techId, day, read, replan, homes, d
   const before = simulate(ordered, { origin, departureMin });
   const bounds = { openMin: dayOpen, closeMin: dayClose, departureMin, unavailable, driveBlocks: routeBlocks };
   const rowHours = row => routeRowHours(row, day.occupiedById, replan.rowHours);
-  return { before, groups, capacityGroups, pref, origin, bounds, routeBlocks, capacityBlocks,
+  return { before, groups, capacityGroups, pref, origin, bounds, routeBlocks, capacityBlocks, makeRoomBlocks,
     interviewBlocks: day.interviewBlocks, blockedHours, rowHours };
 }
 
@@ -260,6 +270,7 @@ function fitOneOfferedSlot(slot, target, techId, proof) {
   const input = { groups: proof.groups, capacityGroups: proof.capacityGroups, group, leaderId: proposed.id,
     pref: proof.pref, origin: proof.origin, marginMin: DEFAULT_OPTIONS.marginMin, bounds: proof.bounds,
     blocks: proof.routeBlocks, capacityBlocks: proof.capacityBlocks, interviewBlocks: proof.interviewBlocks,
+    makeRoomBlocks: proof.makeRoomBlocks,
     blockedHours: proof.blockedHours, rowHours: proof.rowHours, requireClose: true };
   const capacityFit = fitCertifiedCapacity(input, slot, proposed);
   const fit = capacityFit || (slot?.[CAPACITY_PLACEMENT] ? null : (proof.before && fitOfferedHour(

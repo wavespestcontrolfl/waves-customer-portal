@@ -247,21 +247,43 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     });
   });
 
-  test('live make-room destinations block delayed work under the writer technician scope', async () => {
+  test('capacity measurement ignores another technician but keeps unassigned work fixed', async () => {
+    const { CAPACITY_PLACEMENT, _internals: { assessOfferedHours } } = require('../services/day-replan/booking-fit');
+    const date = '2097-06-11';
+    const booked = visits[1];
+    const otherTech = randomUUID();
+    await mockConn('technicians').insert({ id: otherTech, name: 'Parallel capacity tech', employment_status: 'active', field_dispatchable: true });
+    await mockConn('scheduled_services').where({ id: booked.id }).update({
+      scheduled_date: date, window_start: '10:00', window_end: '17:00', estimated_duration_minutes: 420,
+      technician_id: otherTech, reservation_expires_at: null, route_order: 1, lat: HQ.lat, lng: HQ.lng,
+    });
+    const slot = { date, techId, windowStart: '10:00', windowEnd: '11:00',
+      [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: ['__candidate__'], workMinutes: 60 } };
+    const target = { lat: HQ.lat, lng: HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
+
+    await withOfficeEnv('GATE_SCHEDULING_CAPACITY', 'true', async () => {
+      await expect(assessOfferedHours(mockConn, [slot], target, { now: NOW }))
+        .resolves.toEqual([expect.objectContaining({ slot, finishMin: 660 })]);
+      await mockConn('scheduled_services').where({ id: booked.id }).update({ technician_id: null });
+      await expect(assessOfferedHours(mockConn, [slot], target, { now: NOW })).resolves.toEqual([]);
+    });
+  });
+
+  test('live make-room destinations reject nominal and delayed capacity work under writer scope', async () => {
     const { _internals: { assessOfferedHours } } = require('../services/day-replan/booking-fit');
     const date = '2097-06-11';
     const [earlier] = visits;
     const otherTech = randomUUID();
     await mockConn('technicians').insert({ id: otherTech, name: 'Make-room synthetic tech', employment_status: 'active', field_dispatchable: true });
     await mockConn('scheduled_services').where({ id: earlier.id }).update({
-      scheduled_date: date, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 90,
+      scheduled_date: date, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60,
       route_order: 1, lat: HQ.lat, lng: HQ.lng,
     });
     const [hold] = await mockConn('scheduled_services').insert({ customer_id: null, technician_id: otherTech, scheduled_date: date,
       service_type: 'Quarterly Pest Control Service', status: 'pending', reservation_expires_at: date + 'T22:00Z',
       lat: HQ.lat, lng: HQ.lng, estimated_duration_minutes: 60, route_order: 2,
       window_start: '14:00', window_end: '15:00', make_room_moves: {
-        v: 1, date, techId: otherTech, moves: [{ id: visits[1].id, from: '12:00', to: '11:00', widthMin: 60 }],
+        v: 1, date, techId: otherTech, moves: [{ id: visits[1].id, from: '12:00', to: '10:30', widthMin: 60 }],
       } }).returning('id');
     const slot = { date, techId, windowStart: '10:00', windowEnd: '11:00' };
     const target = { lat: HQ.lat, lng: HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
@@ -275,9 +297,29 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
         await expect(assess()).resolves.toEqual([]); // unassigned destination blocks everyone
       });
 
+      // Capacity routing ignores another technician's ordinary visits, but
+      // the make-room writer's destination guard keeps its own scope: every
+      // technician while tech-blind, this technician plus unassigned when
+      // multi-tech confirmation is active.
+      await mockConn('scheduled_services').where({ id: hold.id }).update({ technician_id: otherTech });
+      const scopedCapacitySlot = { ...slot,
+        [require('../services/day-replan/booking-fit').CAPACITY_PLACEMENT]: {
+          routeMode: 'arrival_windows', order: [earlier.id, '__candidate__'], workMinutes: 60,
+        } };
+      await withOfficeEnv('GATE_SCHEDULING_CAPACITY', 'true', async () => {
+        await expect(assessOfferedHours(mockConn, [scopedCapacitySlot], target, { now: NOW })).resolves.toEqual([]);
+        await withOfficeEnv('GATE_MULTI_TECH_CONFIRM', 'true', async () => {
+          await expect(assessOfferedHours(mockConn, [scopedCapacitySlot], target, { now: NOW }))
+            .resolves.toEqual([expect.objectContaining({ slot: scopedCapacitySlot, finishMin: 660 })]);
+          await mockConn('scheduled_services').where({ id: hold.id }).update({ technician_id: null });
+          await expect(assessOfferedHours(mockConn, [scopedCapacitySlot], target, { now: NOW })).resolves.toEqual([]);
+        });
+      });
+
       // Capacity replay includes the rival hold at its original 14:00
-      // interval and must independently retain its same-id destination. The
-      // earlier 90-minute visit delays the candidate to 10:30-11:30.
+      // interval and independently retains its same-id destination. First
+      // the destination overlaps the requested hour itself; then an
+      // exact nominal boundary is valid until earlier work delays the route.
       await mockConn('scheduled_services').where({ id: hold.id }).update({ technician_id: techId });
       const capacitySlot = { ...slot,
         [require('../services/day-replan/booking-fit').CAPACITY_PLACEMENT]: {
@@ -290,9 +332,18 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
         expect(occupied.filter(row => String(row.id) === String(hold.id))
           .map(row => [String(row.window_start).slice(0, 5), String(row.window_end).slice(0, 5), row.conflict_reason || null])
           .sort()).toEqual([
-          ['11:00', '12:00', 'make_room_destination'],
+          ['10:30', '11:30', 'make_room_destination'],
           ['14:00', '15:00', null],
         ]);
+        await expect(assessOfferedHours(mockConn, [capacitySlot], target, { now: NOW })).resolves.toEqual([]);
+
+        await mockConn('scheduled_services').where({ id: hold.id }).update({ make_room_moves: {
+          v: 1, date, techId, moves: [{ id: visits[1].id, from: '12:00', to: '11:00', widthMin: 60 }],
+        } });
+        await expect(assessOfferedHours(mockConn, [capacitySlot], target, { now: NOW }))
+          .resolves.toEqual([expect.objectContaining({ slot: capacitySlot, finishMin: 660 })]);
+
+        await mockConn('scheduled_services').where({ id: earlier.id }).update({ estimated_duration_minutes: 90 });
         await expect(assessOfferedHours(mockConn, [capacitySlot], target, { now: NOW })).resolves.toEqual([]);
 
         await mockConn('scheduled_services').where({ id: hold.id }).update({ make_room_moves: {
