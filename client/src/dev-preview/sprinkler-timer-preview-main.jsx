@@ -10,7 +10,9 @@
  *   pick       no timer on file: brand and model picker (default)
  *   x2         Hunter X2 still on the dial
  *   ready      on Hydrawise, not connected yet
- *   consent    ready, with the connect sheet open
+ *   consent    ready, with the connect sheet open (sign-in shape)
+ *   request    ready, with the connect sheet open (emailed-request shape)
+ *   approve    request sent: waiting for the customer to approve it
  *   zones      just connected: choose the turf zones
  *   connected  normal week, Run this week's plan
  *   confirm    connected, with the run sheet open
@@ -19,6 +21,10 @@
  *   offline    timer unreachable
  *   rainbird   Rain Bird (cannot connect yet): guide only
  *   xcore      Hunter X-Core (cannot connect): guide only
+ *   autosetup  connected, with the automatic-runs sheet open (step 4)
+ *   auto       automatic runs on, showing the next run (step 4)
+ *   rainskip   an automatic run skipped for rain (step 4)
+ *   missed     an automatic run that did not start (step 4)
  *
  * The card is a second React root portalled into a slot kept right after the
  * plan card. PropertyTab has no slot of its own, and this harness must not

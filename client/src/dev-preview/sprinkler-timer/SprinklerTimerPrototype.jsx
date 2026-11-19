@@ -36,6 +36,7 @@ const duration = (minutes) => {
   return `${Math.floor(minutes / 60)} hr ${minutes % 60} min`;
 };
 const weekday = (offset) => formatETDateOnly(etDateString(addETDays(new Date(), offset)), { weekday: 'long' });
+const weekdayShort = (offset) => formatETDateOnly(etDateString(addETDays(new Date(), offset)), { weekday: 'short' });
 const shortDay = (offset) => formatETDateOnly(etDateString(addETDays(new Date(), offset)), { weekday: 'short', month: 'short', day: 'numeric' });
 
 const GUIDE = {
@@ -80,6 +81,30 @@ function ChipButton({ children, onClick, icon }) {
       background: '#fff', color: B.glassNavy, fontSize: 14, fontWeight: 700,
       display: 'inline-flex', alignItems: 'center', gap: 8,
     }}>{icon && <Icon name={icon} size={16} strokeWidth={2} />}{children}</button>
+  );
+}
+
+function ChoiceChip({ active, onClick, children }) {
+  return (
+    <button type="button" aria-pressed={active} onClick={onClick}
+      {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })} style={{
+        ...buttonBase, minHeight: 44, padding: '8px 14px', borderRadius: 8, fontSize: 14, fontWeight: 700,
+        background: active ? '#F8FCFE' : '#fff', color: B.glassNavy, border: `1px solid ${active ? B.yellow : '#D8D0C0'}`,
+      }}>{children}</button>
+  );
+}
+
+function ChoiceGroup({ heading, hint, options, value, onChange }) {
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ fontSize: 14, fontWeight: 700 }}>{heading}</div>
+      <div style={{ ...meta, margin: '2px 0 8px' }}>{hint}</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        {options.map((option) => (
+          <ChoiceChip key={option} active={value === option} onClick={() => onChange(option)}>{option}</ChoiceChip>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -195,14 +220,14 @@ function ActivityList({ rows }) {
   );
 }
 
-function AutoPauseRow({ checked, onChange }) {
+function SettingRow({ label, detail, checked, onChange }) {
   return (
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '12px 14px', border: `1px solid ${RULE}`, borderRadius: 8 }}>
       <div>
-        <div style={{ fontSize: 14, fontWeight: 700 }}>Pause the lawn after treatments</div>
-        <div style={{ ...meta, marginTop: 2 }}>When your service report says to skip turf watering after a treatment, we pause your turf zones until that time.</div>
+        <div style={{ fontSize: 14, fontWeight: 700 }}>{label}</div>
+        <div style={{ ...meta, marginTop: 2 }}>{detail}</div>
       </div>
-      <Toggle checked={checked} onChange={onChange} label="Pause the lawn after treatments" />
+      <Toggle checked={checked} onChange={onChange} label={label} />
     </div>
   );
 }
@@ -224,16 +249,9 @@ function PickView({ go }) {
     <>
       <p style={prose}>Tell us which timer runs your sprinklers and we'll show the right steps for this week's plan.</p>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
-        {BRANDS.map((option) => {
-          const active = brand === option.value;
-          return (
-            <button key={option.value} type="button" aria-pressed={active} onClick={() => setBrand(option.value)}
-              {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })} style={{
-                ...buttonBase, minHeight: 44, padding: '8px 14px', borderRadius: 8, fontSize: 14, fontWeight: 700,
-                background: active ? '#F8FCFE' : '#fff', color: B.glassNavy, border: `1px solid ${active ? B.yellow : '#D8D0C0'}`,
-              }}>{option.label}</button>
-          );
-        })}
+        {BRANDS.map((option) => (
+          <ChoiceChip key={option.value} active={brand === option.value} onClick={() => setBrand(option.value)}>{option.label}</ChoiceChip>
+        ))}
       </div>
       {brand === 'hunter' && (
         <div style={{ display: 'grid', gap: 10, marginBottom: 16 }}>
@@ -317,6 +335,18 @@ function ReadyView({ go, openSheet }) {
   );
 }
 
+// Connect by request: Waves asks through Hydrawise, the customer approves the email.
+function ApproveView({ go }) {
+  return (
+    <>
+      <StatusLine label="Hunter X2 on Hydrawise" detail="Waiting for your approval" />
+      <p style={prose}>We sent a request through Hydrawise. Open the email from Hydrawise and approve Waves. This page updates once you do.</p>
+      <ChipButton onClick={() => go('zones')} icon="check">I approved it</ChipButton>
+      <div style={{ marginTop: 4 }}><TextButton onClick={() => go('ready')}>Cancel the request</TextButton></div>
+    </>
+  );
+}
+
 function ZonesView({ go, zones, setZones, turfCount }) {
   const flip = (id) => setZones((list) => list.map((item) => (item.id === id ? { ...item, turf: !item.turf } : item)));
   return (
@@ -391,7 +421,45 @@ function RunningCallout({ go, turfCount, totalMinutes }) {
   );
 }
 
-const LIVE_CALLOUT = { connected: RunCallout, paused: PausedCallout, running: RunningCallout };
+// Step 4: the timer follows the weekly plan at the day and time the customer set.
+function AutoCallout({ openSheet, turfCount, totalMinutes }) {
+  return (
+    <Callout>
+      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>Next run: {weekday(2)} at 5:00 AM</div>
+      <div style={{ color: BODY }}>About 30 minutes per turf zone, from this week's plan. {turfCount} zones, about {duration(totalMinutes)} in all.</div>
+      <div style={{ marginTop: 4 }}><TextButton onClick={() => openSheet('auto')}>Change day or time</TextButton></div>
+    </Callout>
+  );
+}
+
+function RainSkipCallout() {
+  return (
+    <>
+      <Callout>
+        <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>{weekday(-1)}'s run was skipped for rain</div>
+        <div style={{ color: BODY }}>About 0.8 inches of rain fell at your home since your last watering day. The plan skips a run after half an inch or more.</div>
+      </Callout>
+      <p style={{ ...meta, margin: '0 0 16px' }}>Your next run follows next week's plan.</p>
+    </>
+  );
+}
+
+function MissedCallout({ openSheet }) {
+  return (
+    <Callout>
+      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>{weekday(-1)}'s run did not start</div>
+      <div style={{ color: BODY, marginBottom: 14 }}>We couldn't reach your timer at 5:00 AM, so your lawn was not watered. Check that your home Wi-Fi reaches the timer.</div>
+      <PrimaryButton onClick={() => openSheet('run')}>Run this week's plan</PrimaryButton>
+      <div style={{ ...meta, marginTop: 10 }}>Only on your permitted watering day, during your area's allowed hours.</div>
+    </Callout>
+  );
+}
+
+const LIVE_CALLOUT = {
+  connected: RunCallout, paused: PausedCallout, running: RunningCallout,
+  auto: AutoCallout, rainskip: RainSkipCallout, missed: MissedCallout,
+};
+const AUTO_RUN_VIEWS = ['auto', 'rainskip', 'missed'];
 const ACTIVITY = {
   paused: () => [
     { when: 'Today', what: `Paused your turf zones after weed control, until ${weekday(1)} at 10:14 AM.` },
@@ -402,29 +470,96 @@ const ACTIVITY = {
     { when: shortDay(-13), what: 'Pause ended. Watering is back on your schedule.' },
     { when: shortDay(-14), what: 'Paused your turf zones after weed control.' },
   ],
+  auto: () => [
+    { when: shortDay(-5), what: 'Ran the weekly plan at 5:00 AM: 4 zones, 30 minutes each.' },
+    { when: shortDay(-12), what: 'No run. The weekly plan said skip.' },
+    { when: shortDay(-14), what: 'Paused your turf zones after weed control.' },
+  ],
+  rainskip: () => [
+    { when: shortDay(-1), what: 'Skipped the 5:00 AM run. About 0.8 inches of rain since your last watering day.' },
+    { when: shortDay(-8), what: 'Ran the weekly plan at 5:00 AM: 4 zones, 30 minutes each.' },
+  ],
+  missed: () => [
+    { when: shortDay(-1), what: 'The 5:00 AM run did not start. We could not reach your timer.' },
+    { when: shortDay(-8), what: 'Ran the weekly plan at 5:00 AM: 4 zones, 30 minutes each.' },
+  ],
 };
 
-// connected | paused | running
+// connected | paused | running | auto | rainskip | missed
 function LiveView({ view, go, openSheet, turfCount, totalMinutes }) {
   const [autoPause, setAutoPause] = useState(true);
+  const autoRun = AUTO_RUN_VIEWS.includes(view);
   const LiveCallout = LIVE_CALLOUT[view];
   return (
     <>
       <StatusLine tone="ok" label="Connected" detail={`Hunter X2 · ${turfCount} turf zones`} />
       <LiveCallout go={go} openSheet={openSheet} turfCount={turfCount} totalMinutes={totalMinutes} />
-      <AutoPauseRow checked={autoPause} onChange={() => setAutoPause((on) => !on)} />
+      <div style={{ display: 'grid', gap: 10 }}>
+        <SettingRow label="Pause the lawn after treatments" checked={autoPause} onChange={() => setAutoPause((on) => !on)}
+          detail="When your service report says to skip turf watering after a treatment, we pause your turf zones until that time." />
+        <SettingRow label="Run the weekly plan for me" checked={autoRun} onChange={() => (autoRun ? go('connected') : openSheet('auto'))}
+          detail="Each week we start your turf zones for that week's minutes, on the day and time you pick." />
+      </div>
       <ActivityList rows={(ACTIVITY[view] || ACTIVITY.usual)()} />
       <ManageRow onZones={() => go('zones')} onDisconnect={() => go('ready')} />
     </>
   );
 }
 
+// The connect step has two possible shapes, and Hunter decides which: a sign-in
+// on Hunter's page, or a request the customer approves from a Hydrawise email.
+function ConnectSheet({ byRequest, onClose, onContinue }) {
+  return (
+    <Sheet label="Connect your sprinkler timer" onClose={onClose}>
+      <PointList icon="check" tone={GREEN} heading="When you connect, Waves can" points={[
+        'Pause your turf zones when a treatment\'s instructions say to skip watering. The pause ends on its own.',
+        'Start this week\'s watering plan when you tap Run.',
+      ]} />
+      <PointList icon="close" tone="#B91C1C" heading="Waves will never" points={[
+        'Start watering on its own, unless you turn on automatic runs and pick the day and time.',
+        'Change the schedule you set in the Hydrawise app.',
+        'Touch your beds or drip zones.',
+      ]} />
+      <p style={{ ...meta, margin: 0 }}>
+        {byRequest
+          ? 'We send a request through Hydrawise, and you approve it from the email Hydrawise sends you. You can disconnect any time from this page.'
+          : 'You sign in with your Hydrawise account, and you can disconnect any time from this page.'}
+      </p>
+      <SheetActions primary={byRequest ? 'Send the request' : 'Continue to Hydrawise'} onPrimary={onContinue} secondary="Not now" onSecondary={onClose} />
+    </Sheet>
+  );
+}
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const START_TIMES = ['4 AM', '5 AM', '6 AM', '8 PM'];
+
+function AutoRunSheet({ onClose, onSave }) {
+  const [day, setDay] = useState(weekdayShort(2));
+  const [time, setTime] = useState('5 AM');
+  return (
+    <Sheet label="Run the weekly plan for me" onClose={onClose}>
+      <p style={{ margin: '0 0 16px', color: BODY }}>Each week we start your turf zones for that week's minutes, on the day and time you pick. No run in a week the plan says skip.</p>
+      <ChoiceGroup heading="Your watering day" hint="From your Irrigation settings. It must be a day your address may water." options={WEEKDAYS} value={day} onChange={setDay} />
+      <ChoiceGroup heading="Start time" hint="Pick a time inside your area's allowed hours." options={START_TIMES} value={time} onChange={setTime} />
+      <PointList icon="alert" tone={AMBER} heading="Before you turn this on" points={[
+        'Clear the lawn schedule in your Hydrawise app first, or your lawn gets watered twice.',
+        'We skip a run after half an inch or more of rain.',
+        'If we can\'t reach your timer, the run does not happen. You can start it from this page.',
+      ]} />
+      <SheetActions primary="Turn on automatic runs" onPrimary={onSave} secondary="Not now" onSecondary={onClose} />
+    </Sheet>
+  );
+}
+
 const VIEWS = {
-  pick: PickView, x2: X2View, xcore: GuideOnlyView, rainbird: GuideOnlyView, ready: ReadyView,
+  pick: PickView, x2: X2View, xcore: GuideOnlyView, rainbird: GuideOnlyView, ready: ReadyView, approve: ApproveView,
   zones: ZonesView, offline: OfflineView, connected: LiveView, paused: LiveView, running: LiveView,
+  auto: LiveView, rainskip: LiveView, missed: LiveView,
 };
-// ?timer=consent and ?timer=confirm open a screen with its sheet already up.
-const SHEET_VIEWS = { consent: ['ready', 'consent'], confirm: ['connected', 'run'] };
+// These ?timer= values open a screen with its sheet already up.
+const SHEET_VIEWS = {
+  consent: ['ready', 'consent'], request: ['ready', 'request'], confirm: ['connected', 'run'], autosetup: ['connected', 'auto'],
+};
 
 export default function SprinklerTimerCard({ initialView = 'pick' }) {
   const [start, startSheet] = SHEET_VIEWS[initialView] || [VIEWS[initialView] ? initialView : 'pick', null];
@@ -443,21 +578,12 @@ export default function SprinklerTimerCard({ initialView = 'pick' }) {
         <View view={view} go={setView} openSheet={setSheet} zones={zones} setZones={setZones} turfCount={turfCount} totalMinutes={totalMinutes} />
       </section>
 
-      {sheet === 'consent' && (
-        <Sheet label="Connect your sprinkler timer" onClose={closeSheet}>
-          <PointList icon="check" tone={GREEN} heading="When you connect, Waves can" points={[
-            'Pause your turf zones when a treatment\'s instructions say to skip watering. The pause ends on its own.',
-            'Start this week\'s watering plan when you tap Run.',
-          ]} />
-          <PointList icon="close" tone="#B91C1C" heading="Waves will never" points={[
-            'Start watering on its own.',
-            'Change the schedule you set in the Hydrawise app.',
-            'Touch your beds or drip zones.',
-          ]} />
-          <p style={{ ...meta, margin: 0 }}>You sign in with your Hydrawise account, and you can disconnect any time from this page.</p>
-          <SheetActions primary="Continue to Hydrawise" onPrimary={() => { closeSheet(); setView('zones'); }} secondary="Not now" onSecondary={closeSheet} />
-        </Sheet>
+      {(sheet === 'consent' || sheet === 'request') && (
+        <ConnectSheet byRequest={sheet === 'request'} onClose={closeSheet}
+          onContinue={() => { closeSheet(); setView(sheet === 'request' ? 'approve' : 'zones'); }} />
       )}
+
+      {sheet === 'auto' && <AutoRunSheet onClose={closeSheet} onSave={() => { closeSheet(); setView('auto'); }} />}
 
       {sheet === 'run' && (
         <Sheet label="Run this week's plan?" onClose={closeSheet}>
