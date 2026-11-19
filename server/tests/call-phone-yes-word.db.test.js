@@ -38,6 +38,10 @@ const extractionWith = (choice, intent = null) => ({
     { field_path: '/service_request/billing_choice', quote: WORDS, speaker: 'caller', transcript_offset_ms: 1200 },
   ] : [],
 });
+// The same extraction from a tenant with no authority on the account, and no model flag (the flag is derived).
+const thirdParty = (choice, intent = null) => JSON.stringify({
+  ...extractionWith(choice, intent), caller: { relationship_to_property: 'tenant', on_site_authorization: false },
+});
 // A labeled two-speaker transcript: the caller says WORDS on a call that names the plan.
 const transcriptWith = (choice) => (choice
   ? `Agent: Thanks for calling Waves, how can I help?\nCaller: ${WORDS}\nAgent: You can bill each time. You are all set.`
@@ -111,6 +115,8 @@ describeDb("the caller's word (PostgreSQL)", () => {
       // long ago (a dead claim) does not.
       [{ processing_status: 'processing', created_at: old, updated_at: old, processing_heartbeat_at: recent }, true],
       [{ processing_status: 'processing', created_at: old, updated_at: old, processing_heartbeat_at: old }, false],
+      // A failed read past the processor's 7-day retry window is final, even with a recent row change.
+      [{ processing_status: 'extraction_failed', extraction_attempts: 1, created_at: new Date(Date.now() - 8 * DAY), updated_at: recent }, false],
       // A final row is never owed, however recently it changed.
       [{ processing_status: 'processed', created_at: old, updated_at: recent }, false],
     ];
@@ -166,19 +172,22 @@ describeDb("the caller's word (PostgreSQL)", () => {
     ["the transcript does not hold the caller's words", [['per_application', { transcription: transcriptWith(null) }]], { yes: null, noYes: 'yes_without_words' }],
     // A call with no recording keeps its live text, which can cut a turn with no mark: never the caller's words.
     ['the words are only in the live-text backup', [['per_application', { transcription_provider: 'twilio_realtime' }]], { yes: null, noYes: 'yes_without_words' }],
-    // A third party with no authority (the call reader's caller_not_authorized) speaks for no one, and their word
-    // still hides an older yes.
-    ['the caller on the yes call is not authorized', [['per_application', {
-      ai_extraction_enriched: JSON.stringify({ ...extractionWith('per_application'), triage_flags: ['caller_not_authorized'] }),
-    }]], { yes: null, noYes: 'caller_not_authorized' }],
+    // A third party with no authority speaks for no one, and their word still hides an older yes. The verdict is the
+    // routing one (canAutoRoute's merge): derived from the caller fields with no model flag, and a model flag the
+    // fields do not support is dropped.
+    ['the caller on the yes call is a third party with no authority', [['per_application', { ai_extraction_enriched: thirdParty('per_application') }]],
+      { yes: null, noYes: 'caller_not_authorized' }],
     ['an unauthorized caller after a yes', [['per_application', { created_at: hoursAgo(5) }], ['per_application', {
-      created_at: hoursAgo(2), ai_extraction_enriched: JSON.stringify({ ...extractionWith('per_application'), triage_flags: ['caller_not_authorized'] }),
+      created_at: hoursAgo(2), ai_extraction_enriched: thirdParty('per_application'),
     }]], { yes: null, noYes: 'caller_not_authorized' }],
     ["an unauthorized caller's cancel closes nothing", [['per_application', { created_at: hoursAgo(5) }], [null, {
-      created_at: hoursAgo(2), ai_extraction_enriched: JSON.stringify({ ...extractionWith(null, 'cancellation_request'), triage_flags: ['caller_not_authorized'] }),
+      created_at: hoursAgo(2), ai_extraction_enriched: thirdParty(null, 'cancellation_request'),
     }]], { yes: null, noYes: 'caller_not_authorized' }],
     ['an unauthorized call with no word is no word', [['per_application', { created_at: hoursAgo(5) }], [null, {
-      created_at: hoursAgo(2), ai_extraction_enriched: JSON.stringify({ ...extractionWith(null), triage_flags: ['caller_not_authorized'] }),
+      created_at: hoursAgo(2), ai_extraction_enriched: thirdParty(null),
+    }]], { yes: { callLogId: expect.any(String), at: expect.any(Date), quote: WORDS }, noYes: null }],
+    ['a model flag the caller fields do not support is dropped: the yes stands', [['per_application', {
+      ai_extraction_enriched: JSON.stringify({ ...extractionWith('per_application'), triage_flags: ['caller_not_authorized'] }),
     }]], { yes: { callLogId: expect.any(String), at: expect.any(Date), quote: WORDS }, noYes: null }],
   ])('%s', async (_name, calls, expected) => {
     const customerId = await customer();

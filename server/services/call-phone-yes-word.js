@@ -15,7 +15,6 @@
  * bounded time, for any recent call that is not read yet (owedReadSql).
  */
 
-const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
 const { callStartedAt } = require('../utils/call-timeline');
 
 // A call's columns, with what callStartedAt reads: a row inserted after the call (a recording recovery, a terminal
@@ -42,17 +41,17 @@ const UNAUTHORIZED_FLAG = 'caller_not_authorized';
 const OWED_READ_HOURS = 2;
 
 // A call that still owes a read: one not in a final state whose row changed in the last OWED_READ_HOURS. Final: read
-// ('processed'), judged not a conversation ('voicemail', 'spam'), or failed at its retry cap (the exhaustedExtractionSql
-// rule in call-commitments; its 7-day window never applies inside 2 hours). The row's last change is its insert, a
+// ('processed'), judged not a conversation ('voicemail', 'spam'), or a failed read no pass revisits (call-commitments'
+// exhaustedExtractionSql: a failed extraction at its retry cap or past its 7-day creation window, a missing transcript
+// at its cap). The row's last change is its insert, a
 // claim, the heartbeat a running pass writes every minute (processing_heartbeat_at only), or replaced audio (the
 // recording webhook sets the status back to NULL and bumps updated_at), so a long read and an old call with new audio
 // are waited for too. Bounded in time on purpose, so no processor path is copied here: a row no pass will finish (a
 // missed call with nothing to read, a dead claim) delays a card by at most OWED_READ_HOURS after its last change and
 // never blocks it. Never NULL, so NOT owed is exact.
 function owedReadSql(t) {
-  const atCap = `COALESCE(${t}.extraction_attempts, 0) >= ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)}`;
-  const final = `(${t}.processing_status IN ('processed', 'voicemail', 'spam')`
-    + ` OR (${t}.processing_status IN ('extraction_failed', 'no_transcription') AND ${atCap}))`;
+  const { exhaustedExtractionSql } = require('./call-commitments');
+  const final = `(${t}.processing_status IN ('processed', 'voicemail', 'spam') OR ${exhaustedExtractionSql(t)})`;
   // GREATEST skips NULLs: a row with no update or no heartbeat counts from its insert.
   const changed = `GREATEST(${t}.created_at, ${t}.updated_at, ${t}.processing_heartbeat_at)`;
   return `COALESCE(((${t}.processing_status IS NULL OR NOT ${final})`
@@ -103,7 +102,10 @@ function wordOfCall(row) {
   const { parseExtraction, isRealConversation } = require('./call-held-visits');
   const extraction = parseExtraction(row.ai_extraction_enriched);
   if (!extraction || !isRealConversation(row, extraction)) return null;
-  const flags = Array.isArray(extraction.triage_flags) ? extraction.triage_flags : [];
+  // The routing verdict's flags, merged the way canAutoRoute merges them: the stored triage_flags are the model's own,
+  // so a flag its fields do not support is dropped and the derived flags are added.
+  const { suppressUnsupportedModelFlags, computeDeterministicTriageFlags, mergeTriageFlags } = require('./call-triage-flags');
+  const flags = mergeTriageFlags(suppressUnsupportedModelFlags(extraction.triage_flags, extraction), computeDeterministicTriageFlags(extraction));
   const contrary = flags.includes(CANCEL_FLAG) || CONTRARY_INTENTS.has(extraction.service_request?.service_intent);
   const choice = require('./call-prepay-choice').billingChoiceOf(extraction);
   if (!contrary && !choice) return null;
