@@ -1,6 +1,6 @@
 jest.mock('../models/db', () => jest.fn());
 
-const { loadLeadReachStats, judgeReach, reachCohort } = require('../services/lead-reach-stats');
+const { loadLeadReachStats, judgeReach, reachCohort, NOT_JUDGED } = require('../services/lead-reach-stats');
 
 const T0 = new Date('2026-11-10T15:00:00Z').getTime();
 const at = (minutes) => T0 + minutes * 60000;
@@ -121,6 +121,46 @@ describe('judgeReach', () => {
     expect(result.get('1')).toBe(0);
     expect(result.get('2')).toBeNull();
   });
+
+  // Round 2, finding 1: a call the processor settled onto one lead is that lead's, whatever sid or phone says.
+  test('a call settled onto another lead does not credit the lead that kept its sid; the assigned lead is credited', () => {
+    const oldLead = lead(1, { twilio_call_sid: 'CA-moved' });
+    const newLead = lead(2, { phone: '+19415550222' });
+    const result = judgeReach([oldLead, newLead], {
+      ...none,
+      calls: [
+        // Same call row: the old lead keeps the sid and the phone; the stamp points at lead 2, on a third number.
+        { key: phoneKey(oldLead), scope: 'phone', customerId: null, sid: 'CA-moved', stampedTo: '2', at: at(-1) },
+        { key: 'phone:9415550777', scope: 'phone', customerId: null, sid: 'CA-moved', stampedTo: '2', at: at(6) },
+        // A call with no settled stamp still counts by phone.
+        { key: phoneKey(oldLead), scope: 'phone', customerId: null, sid: 'CA-later', stampedTo: null, at: at(50) },
+      ],
+    });
+    expect(result.get('1')).toBe(50);
+    expect(result.get('2')).toBe(6);
+  });
+
+  // Round 2, finding 4: no record names who made each delivery.
+  test('an automated estimate delivered again is not judged unless something else reached the lead in time', () => {
+    const a = lead(1);
+    const b = lead(2);
+    const c = lead(3);
+    const d = lead(4);
+    const result = judgeReach([a, b, c, d], {
+      ...none,
+      texts: [{ key: phoneKey(c), scope: 'phone', customerId: null, at: at(5) }, { key: phoneKey(d), scope: 'phone', customerId: null, at: at(40) }],
+      estimates: [
+        { leadId: '1', at: at(2), automated: true, deliveries: 2 }, // automated, then sent again by someone unknown
+        { leadId: '2', at: at(2), automated: true, deliveries: 1 }, // automated only: no person reached the lead
+        { leadId: '3', at: at(2), automated: true, deliveries: 2 }, // a person's text inside 15 minutes settles it
+        { leadId: '4', at: at(2), automated: true, deliveries: 3 }, // a later text does not
+      ],
+    });
+    expect(result.get('1')).toBe(NOT_JUDGED);
+    expect(result.get('2')).toBeNull();
+    expect(result.get('3')).toBe(5);
+    expect(result.get('4')).toBe(NOT_JUDGED);
+  });
 });
 
 // A chainable stand-in for knex: every builder method returns the builder, awaiting it
@@ -157,26 +197,26 @@ describe('loadLeadReachStats', () => {
       sms_log: [{ peer: leads[0].phone.replace('+1', ''), at: new Date(at(6)) }],
       call_log: [{ peer: leads[1].phone.replace('+1', ''), sid: 'CA-x', at: new Date(at(90)) }],
       emails: [],
-      // 1st read: the linked estimates' first real delivery; 2nd read: other open leads sharing identity.
-      leads: { queue: [[{ lead_id: leads[2].id, at: new Date(at(4)).toISOString() }], []] },
+      // The estimates read: a linked estimate's first real delivery.
+      estimates: [{ id: 'e1', linked_lead_id: leads[2].id, at: new Date(at(4)).toISOString(), automated: false, deliveries: 1 }],
+      // The identity read: other open leads sharing identity.
+      leads: [],
     });
     const stats = await loadLeadReachStats(leads, { conn });
-    expect(stats).toEqual({ cohort: 4, reachedWithin: 2, reachedLater: 1, neverReached: 1, withinMinutes: 15 });
+    expect(stats).toEqual({ cohort: 4, reachedWithin: 2, reachedLater: 1, neverReached: 1, notJudged: 0, withinMinutes: 15 });
     // Batched: one query per kind for the whole cohort (the leads have no email, so none for email).
-    expect(conn.calls.sort()).toEqual(['call_log', 'leads', 'leads', 'sms_log']);
+    expect(conn.calls.sort()).toEqual(['call_log', 'estimates', 'leads', 'sms_log']);
   });
 
   // Finding 1: the estimate witness is the first REAL delivery. A suppressed send, a website
   // self-service publication and the lead's 'estimate_sent' activity row (written even when every
   // channel was suppressed) all leave deliveryState.firstDeliveredAt empty or are not read at all.
   test('estimate evidence is the first real delivery by a person, not an activity row or sent_at', async () => {
-    const conn = fakeConn({ leads: { queue: [[], []] } });
+    const conn = fakeConn({});
     await loadLeadReachStats([lead(1)], { conn });
     expect(conn.calls).not.toContain('lead_activities');
-    const sql = conn.raws.leads.join(' | ');
+    const sql = conn.raws.estimates.join(' | ');
     expect(sql).toContain("deliveryState,firstDeliveredAt}' IS NOT NULL");
-    expect(sql).toContain("'automation'->'autoSend'->>'result'");
-    expect(sql).toContain("'automation'->'moveAutoSend'->>'result'");
     expect(sql).not.toContain('sent_at');
   });
 
@@ -185,10 +225,57 @@ describe('loadLeadReachStats', () => {
     const conn = fakeConn({
       sms_log: [{ peer: mine.phone.replace('+1', ''), customer_id: null, at: new Date(at(3)) }],
       // The identity read finds a second open lead on the same phone.
-      leads: { queue: [[], [{ id: 'other-open', customer_id: null, email: null, peer: mine.phone.replace('+1', '') }]] },
+      leads: [{ id: 'other-open', customer_id: null, email: null, peer: mine.phone.replace('+1', '') }],
     });
     const stats = await loadLeadReachStats([mine], { conn });
     expect(stats).toMatchObject({ cohort: 1, reachedWithin: 0, reachedLater: 0, neverReached: 1 });
+  });
+
+  // Round 2, finding 2: office mail leaves emails.customer_id empty, so the owner is read from the
+  // thread and the recipients, for the whole batch.
+  test('an outbound email in another customer\'s thread does not credit a lead with the same address', async () => {
+    const addr = 'pat.fixture@example.invalid';
+    const mine = lead(1, { email: addr, phone: '+19415550301', customer_id: 'cust-b' });
+    const sent = { id: 'm1', gmail_thread_id: 't1', to_address: addr, cc_address: '', bcc_address: '', customer_id: null, at: new Date(at(5)) };
+    const run = (threadCustomer, customers = []) => loadLeadReachStats([mine], {
+      conn: fakeConn({
+        emails: { queue: [[sent], [{ id: 'in1', gmail_thread_id: 't1', customer_id: threadCustomer }]] },
+        customers,
+      }),
+    });
+    expect(await run('cust-a')).toMatchObject({ reachedWithin: 0, neverReached: 1 });
+    expect(await run('cust-b')).toMatchObject({ reachedWithin: 1, neverReached: 0 });
+    // The thread says one customer and the recipient address another: ambiguous, never a guess.
+    expect(await run('cust-b', [{ id: 'cust-c', address: addr }])).toMatchObject({ reachedWithin: 0, neverReached: 1 });
+  });
+
+  // Round 2, finding 3: the public-quote mirror carries the lead id only in estimate_data.lead_id.
+  test('an estimate named by estimate_data.lead_id counts under the ownership checks', async () => {
+    const named = lead(1, { phone: '+19415550401', email: 'pat.fixture@example.invalid' });
+    const linkedElsewhere = lead(2, { phone: '+19415550402', estimate_id: 'e-other' });
+    const wrongContact = lead(3, { phone: '+19415550403' });
+    const delivered = new Date(at(3)).toISOString();
+    const row = (leadId, extra = {}) => ({
+      id: `e-${leadId}`, customer_id: null, customer_phone: '(941) 555-0401', customer_email: null,
+      linked_lead_id: null, data_lead_id: String(leadId), at: delivered, automated: false, deliveries: 1, ...extra,
+    });
+    const conn = fakeConn({
+      estimates: [
+        row(1),
+        row(2, { customer_phone: '(941) 555-0402' }), // named lead already belongs to another estimate
+        row(3), // the estimate's contact is not this lead's
+      ],
+    });
+    const stats = await loadLeadReachStats([named, linkedElsewhere, wrongContact], { conn });
+    expect(stats).toMatchObject({ cohort: 3, reachedWithin: 1, neverReached: 2 });
+  });
+
+  test('a lead whose only estimate was automated and then sent again is left out of every count', async () => {
+    const conn = fakeConn({
+      estimates: [{ id: 'e1', linked_lead_id: 1, at: new Date(at(2)).toISOString(), automated: true, deliveries: 2 }],
+    });
+    const stats = await loadLeadReachStats([lead(1), lead(2)], { conn });
+    expect(stats).toEqual({ cohort: 1, reachedWithin: 0, reachedLater: 0, neverReached: 1, notJudged: 1, withinMinutes: 15 });
   });
 
   test('an empty cohort runs no query', async () => {

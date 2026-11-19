@@ -640,7 +640,7 @@ MORE['/admin/leads/:id'] = [...under('lead', [...LEAD_MORE, 'id', 'source_channe
 MORE['/admin/leads/analytics/by-source'] = [
   ...under('sources.0', ['costPerAcquisition', 'channelSpend', 'avgResponseTime', 'startDate', 'endDate']), ...under('sources.0.source', ['id'])];
 MORE['/admin/leads/analytics/overview'] = ['recentMedianResponseTime', 'speedToLeadSince', 'avgResponseTime',
-  ...under('leadReach', ['cohort', 'reachedWithin', 'reachedLater', 'neverReached', 'withinMinutes'])];
+  ...under('leadReach', ['cohort', 'reachedWithin', 'reachedLater', 'neverReached', 'notJudged', 'withinMinutes'])];
 MORE['/admin/schedule/list'] = under('services.0', ['customerId', 'serviceTypeRaw', 'windowEnd', 'estimatedDuration', 'estimatedPrice', 'serviceKey', 'primaryLinePrice', 'prepaidAmount', 'prepaidMethod', 'prepaidAt',
   'technicianId', 'zone', 'city', 'recurringPattern', 'recurringParentId', 'sourceEstimateId', 'payerId', 'poNumber', 'selfPayOverride', 'serviceAddons']);
 

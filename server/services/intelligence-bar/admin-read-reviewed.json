@@ -1682,7 +1682,7 @@
     },
     {
       "endpoint": "/admin/leads/analytics/overview",
-      "reviewed": "Handler: counts, median and mean response times, speed-to-lead backlog gauge and sourced cost and revenue totals for a date window (default: this ET month), from leads aggregates and leadAttribution.calculateAllSourceROI. No lead row is returned. The leads router no longer runs DDL on a request: ensureLeadsTables was removed in e457629744 (#6325), so the earlier write:sql_text lock is gone. Re-reviewed 2026-11-19 (honest speed to lead): the handler also returns leadReach, four counts (cohort, reached by a person within 15 minutes, reached later, never reached) from services/lead-reach-stats.js, which runs five batched read-only selects (sms_log, call_log, emails, leads joined to estimates for a linked estimate's first real delivery by a person, and leads again for other open leads sharing a cohort phone or email, through lead-contact-sync openLeadIdentities, whose dbi parameter is the knex handle the caller passes in) matched to the cohort's own phones, emails, call sids and ids; contactSkipReason is a pure check; only the counts leave it, no row, name, phone, address or message text. extractEmailAddresses is a pure parse of an address string through the addressparser package (unresolved, no I/O). The read is fail-soft. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
+      "reviewed": "Handler: counts, median and mean response times, speed-to-lead backlog gauge and sourced cost and revenue totals for a date window (default: this ET month), from leads aggregates and leadAttribution.calculateAllSourceROI. No lead row is returned. The leads router no longer runs DDL on a request: ensureLeadsTables was removed in e457629744 (#6325), so the earlier write:sql_text lock is gone. Re-reviewed 2026-11-19 (honest speed to lead): the handler also returns leadReach, five counts (cohort, reached by a person within 15 minutes, reached later, never reached, not judged) from services/lead-reach-stats.js, which runs five batched read-only selects (sms_log, call_log, emails, estimates left-joined to leads for a lead's estimate at its first real delivery, and leads for other open leads sharing a cohort phone or email; a sent email adds two set reads, emails in the same thread and customers by recipient address, to find whose mail it is; through lead-contact-sync openLeadIdentities, whose dbi parameter is the knex handle the caller passes in) matched to the cohort's own phones, emails, call sids and ids; contactSkipReason is a pure check; only the counts leave it, no row, name, phone, address or message text. extractEmailAddresses is a pure parse of an address string through the addressparser package (unresolved, no I/O). The read is fail-soft. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
       "scope": "broad",
       "query": [
         "end_date",
@@ -1713,6 +1713,7 @@
         "leadReach.reachedWithin",
         "leadReach.reachedLater",
         "leadReach.neverReached",
+        "leadReach.notJudged",
         "leadReach.withinMinutes",
         "costTotal",
         "revenue",
@@ -1729,7 +1730,7 @@
         "services/email/email-customer-link.js#addressparser",
         "services/lead-contact-sync.js#dbi"
       ],
-      "hash": "19e2dd888065be88dc1b012cfbf93693"
+      "hash": "a7e6381a7fc58a47951ec53bb4225e16"
     },
     {
       "endpoint": "/admin/neighborhood-access/customers/:customerId/properties",
