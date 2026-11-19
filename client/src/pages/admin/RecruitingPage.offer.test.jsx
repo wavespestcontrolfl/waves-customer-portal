@@ -265,19 +265,78 @@ describe('RecruitingPage offer flow: form', () => {
     expect(await screen.findByText(/Send this offer to Jordan/)).toBeInTheDocument();
   });
 
-  it('a failed refresh after a save keeps the dialog open and keeps Send off', async () => {
+  it('after a save whose re-read fails the dialog is read-only with Try again that re-reads and never re-saves', async () => {
     let failRead = false;
-    setupFetch(
-      { 'POST /admin/careers/app-1/offer': () => { failRead = true; return res(200, { offer: offerRecord({ startDate: '2027-01-11' }) }); } },
-      { offer: () => (failRead ? res(500, { error: 'boom' }) : res(200, offerPayload())) },
+    let readOk = false;
+    const saved = offerRecord({ startDate: '2027-01-11', stepEffectiveOn: '2027-04-12', draftHash: 'hash-after' });
+    const { calls } = setupFetch(
+      { 'POST /admin/careers/app-1/offer': () => { failRead = true; return res(200, { offer: saved }); } },
+      { offer: () => (failRead && !readOk ? res(500, { error: 'boom' }) : res(200, offerPayload({ current: readOk ? saved : null }))) },
     );
     await openForm();
     fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2027-01-11' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
-    expect(await screen.findByText(/could not refresh/)).toBeInTheDocument();
-    expect(screen.getByLabelText('Hourly rate ($)')).toBeInTheDocument();
-    expect(screen.getByText('Letter preview')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Send offer' })).toBeDisabled();
+    expect(await screen.findByText(/could not be loaded after your last change/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Hourly rate ($)')).toBeDisabled();
+    expect(screen.getByLabelText('Start date')).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Send offer' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save draft' })).toBeDisabled();
+    // Try again re-reads; the read now holds the saved draft.
+    readOk = true;
+    const dialog = screen.getByLabelText('Hourly rate ($)').closest('[role="dialog"]');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).not.toBeDisabled());
+    expect(screen.getByLabelText('Start date')).toHaveValue('2027-01-11');
+    expect(screen.getByRole('button', { name: 'Send offer' })).not.toBeDisabled();
+    expect(calls.filter((c) => c.method === 'POST' && c.path === '/admin/careers/app-1/offer')).toHaveLength(1);
+  });
+
+  it('disables every field and button while a save runs, so no edit can be overwritten', async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const saved = offerRecord({ startDate: '2027-01-11' });
+    let current = null;
+    setupFetch({}, { offer: () => res(200, offerPayload({ current })) });
+    const base = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      if ((options.method || 'GET') === 'POST' && String(url).endsWith('/admin/careers/app-1/offer')) {
+        return gate.then(() => { current = saved; return res(200, { offer: saved }); });
+      }
+      return base(url, options);
+    }));
+    await openForm();
+    fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2027-01-11' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).toBeDisabled());
+    for (const label of ['Job', 'Start date', 'Step rate ($)', 'Step date', 'Hours']) expect(screen.getByLabelText(label)).toBeDisabled();
+    const saving = screen.getByLabelText('Hourly rate ($)').closest('[role="dialog"]');
+    expect(within(saving).getByRole('button', { name: 'Close' })).toBeDisabled();
+    release();
+    await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).not.toBeDisabled());
+    expect(screen.getByLabelText('Start date')).toHaveValue('2027-01-11');
+  });
+
+  it.each([
+    [{ name: 'Jordan Rivera', phone: '9415550123', email: 'j@example.com' }, 'It sends one text and one email.'],
+    [{ name: 'Jordan Rivera', phone: '9415550123' }, 'It sends one text.'],
+    [{ name: 'Jordan Rivera', email: 'j@example.com' }, 'It sends one email.'],
+  ])('the send confirm names only the contact methods on file (%#)', async (contact, sentence) => {
+    setupFetch({}, { offer: offerPayload({ current: offerRecord() }), detail: detailFixture({ contact_snapshot: contact }) });
+    await openForm();
+    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
+    expect(await screen.findByText(`Send this offer to Jordan? ${sentence}`)).toBeInTheDocument();
+  });
+
+  it('with no phone or email the confirm promises nothing and the server NO_CONTACT sentence shows', async () => {
+    setupFetch(
+      { 'POST /admin/careers/app-1/offer/offer-1/send': () => res(409, { error: 'x', code: 'NO_CONTACT' }) },
+      { offer: offerPayload({ current: offerRecord() }), detail: detailFixture({ contact_snapshot: { name: 'Jordan Rivera' } }) },
+    );
+    await openForm();
+    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
+    const confirm = (await screen.findByText('Send this offer to Jordan?')).closest('[role="dialog"]');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
+    expect(await screen.findAllByText('This applicant has no phone or email on file, so nothing can be sent.')).not.toHaveLength(0);
   });
 
   it('shows the terms blockers and keeps Send off when the terms are not issued', async () => {
@@ -372,9 +431,10 @@ describe('RecruitingPage offer flow: timeline card', () => {
       timeline: [{ at: '2026-12-12T13:15:00Z', kind: 'date_requested', label: 'Asked for another start date' }],
     });
     const draft = offerRecord({ id: 'offer-2', startDate: '2027-01-11' });
+    let revised = false;
     const { calls } = setupFetch(
-      { 'POST /admin/careers/app-1/offer/offer-1/revise': () => res(200, { offer: draft }) },
-      { offer: offerPayload({ current: asked }), detail: detailFixture({ status: 'offer' }) },
+      { 'POST /admin/careers/app-1/offer/offer-1/revise': () => { revised = true; return res(200, { offer: draft }); } },
+      { offer: () => res(200, offerPayload({ current: asked, draft: revised ? draft : null })), detail: detailFixture({ status: 'offer' }) },
     );
     const card = await openCard();
     expect(within(card).getByText(/Need two more weeks/)).toBeInTheDocument();
@@ -551,5 +611,47 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     releaseRevise();
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.queryByLabelText('Hourly rate ($)')).toBeNull();
+  });
+});
+
+describe('RecruitingPage offer flow: one source of truth', () => {
+  const sent = offerRecord({ status: 'sent', timeline: [] });
+  const draft = offerRecord({ id: 'offer-2', startDate: '2027-01-11', supersedesId: 'offer-1' });
+
+  it('Revise opens the new draft only after a read that holds it; a failed read leaves Try again and no form', async () => {
+    let revised = false;
+    let failRead = false;
+    setupFetch(
+      { 'POST /admin/careers/app-1/offer/offer-1/revise': () => { revised = true; failRead = true; return res(200, { offer: draft }); } },
+      { offer: () => (failRead ? res(500, { error: 'Read failed' }) : res(200, offerPayload({ current: sent, draft: revised ? draft : null }))), detail: detailFixture({ status: 'offer' }) },
+    );
+    await openDetail();
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Revise' }));
+    expect(await screen.findByText('Read failed')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Hourly rate ($)')).toBeNull();
+    failRead = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open the updated draft' }));
+    expect(await screen.findByLabelText('Start date')).toHaveValue('2027-01-11');
+  });
+
+  it('a failed re-read with no offer yet shows Try again in the section after the dialog is closed', async () => {
+    let failRead = false;
+    setupFetch(
+      { 'POST /admin/careers/app-1/offer': () => { failRead = true; return res(200, { offer: offerRecord() }); } },
+      { offer: () => (failRead ? res(500, { error: 'Read failed' }) : res(200, offerPayload())), detail: detailFixture({ status: 'offer' }) },
+    );
+    await openDetail();
+    fireEvent.click(await screen.findByRole('button', { name: 'Make an offer' }));
+    await screen.findByLabelText('Hourly rate ($)');
+    fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2027-01-11' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    await screen.findByText(/could not be loaded after your last change/);
+    const dlg = screen.getByLabelText('Hourly rate ($)').closest('[role="dialog"]');
+    fireEvent.click(within(dlg).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByLabelText('Hourly rate ($)')).toBeNull());
+    expect(await screen.findByText('Read failed')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
   });
 });

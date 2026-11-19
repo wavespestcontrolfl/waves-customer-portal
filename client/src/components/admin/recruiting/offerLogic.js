@@ -89,6 +89,16 @@ export function maskEmail(email) {
   return `${local[0]}***@${domain}`;
 }
 
+// What Send will do, from the contact methods on file: "one text and one
+// email", "one text", "one email", or null when the applicant has neither.
+export function sendChannels(contact) {
+  const text = Boolean(maskPhone(contact?.phone));
+  const email = Boolean(maskEmail(contact?.email));
+  if (text && email) return "one text and one email";
+  if (text) return "one text";
+  return email ? "one email" : null;
+}
+
 export function money(value) {
   const n = Number(value);
   return Number.isFinite(n) ? `$${n.toFixed(2)}` : "";

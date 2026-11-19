@@ -30,14 +30,20 @@ export default function OfferSection({ detail, offerFlow }) {
   // offer to act on: none yet, or the last one was withdrawn or closed unsigned.
   const stillInOffer = detail.status === "offer";
   const canMakeOffer = stillInOffer && !refreshError && (!data.current || REOFFER_STATES.includes(data.current.status));
+  const stale = refreshError ? (
+    <ActionFeedback error className="mb-3" onRetry={retry}>
+      {refreshError}
+    </ActionFeedback>
+  ) : null;
   if (data.current) {
     return (
+      <>
+        {stale}
       <OfferTimeline
         key={detail.id}
         applicationId={detail.id}
         ownerActions={ownerActions}
         refreshError={refreshError}
-        onRetry={retry}
         firstName={firstName}
         offer={data.current}
         draft={data.draft || null}
@@ -48,6 +54,7 @@ export default function OfferSection({ detail, offerFlow }) {
         onOpenDraft={(draft) => openForm(draft, detail.id)}
         onEdit={() => openForm(data.current, detail.id)}
       />
+      </>
     );
   }
   const viewSigned = async (offer) => {
@@ -60,6 +67,7 @@ export default function OfferSection({ detail, offerFlow }) {
   }
   return (
     <div className="mb-4">
+      {stale}
       {canMakeOffer && (
         <Button size="sm" variant="secondary" onClick={() => openForm(null, detail.id)}>
           Make an offer

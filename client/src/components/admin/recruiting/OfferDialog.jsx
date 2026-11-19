@@ -28,6 +28,7 @@ import {
   maskEmail,
   maskPhone,
   offerErrorMessage,
+  sendChannels,
   stepDateFor,
 } from "./offerLogic";
 
@@ -84,40 +85,40 @@ function Row({ label, children }) {
   );
 }
 
-function OfferFields({ fields, onChange, startError, sendTo }) {
+function OfferFields({ fields, onChange, startError, sendTo, disabled }) {
   const set = (key) => (e) => onChange(key, e.target.value);
   return (
     <div className="flex flex-col gap-3">
       <Field label="Job">
-        <Input value={fields.jobTitle} onChange={set("jobTitle")} maxLength={100} />
+        <Input value={fields.jobTitle} onChange={set("jobTitle")} disabled={disabled} maxLength={100} />
       </Field>
       <Field label="Start date" error={startError} help="Monday to Thursday only.">
-        <Input type="date" value={fields.startDate} onChange={set("startDate")} />
+        <Input type="date" value={fields.startDate} onChange={set("startDate")} disabled={disabled} />
       </Field>
       <Row label="Offer open until">
         <span className="text-14 text-zinc-800">{expiryLabel()}</span>
         <span className="text-14 text-zinc-400"> · 7 days from the day you send</span>
       </Row>
       <Field label="Hourly rate ($)">
-        <Input type="number" inputMode="decimal" step="0.01" min="0" value={fields.hourlyRate} onChange={set("hourlyRate")} />
+        <Input type="number" inputMode="decimal" step="0.01" min="0" value={fields.hourlyRate} onChange={set("hourlyRate")} disabled={disabled} />
       </Field>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <Field label="Step rate ($)">
-          <Input type="number" inputMode="decimal" step="0.01" min="0" value={fields.stepRate} onChange={set("stepRate")} />
+          <Input type="number" inputMode="decimal" step="0.01" min="0" value={fields.stepRate} onChange={set("stepRate")} disabled={disabled} />
         </Field>
         <Field label="Step date" help="First Monday after day 90.">
-          <Input type="date" value={fields.stepEffectiveOn} onChange={set("stepEffectiveOn")} />
+          <Input type="date" value={fields.stepEffectiveOn} onChange={set("stepEffectiveOn")} disabled={disabled} />
         </Field>
       </div>
       <Field label="Hours">
-        <Input value={fields.hoursLine} onChange={set("hoursLine")} maxLength={300} />
+        <Input value={fields.hoursLine} onChange={set("hoursLine")} disabled={disabled} maxLength={300} />
       </Field>
       {sendTo && <Row label="Send to">{<span className="text-14 text-zinc-800">{sendTo}</span>}</Row>}
     </div>
   );
 }
 
-function ConfirmSend({ open, firstName, busy, error, onCancel, onConfirm }) {
+function ConfirmSend({ open, firstName, sends, busy, error, onCancel, onConfirm }) {
   return (
     <Dialog open={open} onClose={busy ? undefined : onCancel} size="sm" layer={140}>
       <DialogHeader>
@@ -125,7 +126,7 @@ function ConfirmSend({ open, firstName, busy, error, onCancel, onConfirm }) {
       </DialogHeader>
       <DialogBody>
         <p className="text-14 text-zinc-800">
-          Send this offer to {firstName}? It sends one text and one email.
+          Send this offer to {firstName}?{sends ? ` It sends ${sends}.` : ""}
         </p>
         {error && (
           <ActionFeedback error className="mt-3">
@@ -148,85 +149,116 @@ function ConfirmSend({ open, firstName, busy, error, onCancel, onConfirm }) {
 // The draft (by id) the letter preview in `data` was built from. Its draftHash
 // is what Send carries, so Send can only name a draft the owner has read.
 function reviewedDraft(data, draftId) {
+  if (!draftId) return null;
   return [data.draft, data.current].find((o) => o && o.id === draftId && o.status === "draft") || null;
 }
 
-function formView({ fields, reviewed, data, contact, busy }) {
-  const phone = maskPhone(contact?.phone);
-  const email = maskEmail(contact?.email);
+function initialDraftId(draft, data) {
+  if (draft) return draft.id;
+  return data.current?.status === "draft" ? data.current.id : null;
+}
+
+function isLocked(needRead, draftId, reviewed) {
+  return needRead || Boolean(draftId && !reviewed);
+}
+
+function fieldChecks(fields) {
   const startError = fields.startDate && !isStartWeekday(fields.startDate) ? "Pick a Monday to Thursday." : null;
   const fieldsOk = Boolean(fields.startDate) && !startError && fields.hourlyRate !== "" && fields.hoursLine.trim() !== "";
-  const shown = fieldsFrom(reviewed);
-  const dirty = !reviewed || FIELD_KEYS.some((k) => fields[k] !== shown[k]);
+  return { startError, fieldsOk };
+}
+
+// The step date follows the start date whenever a step rate is set, and is
+// recomputed when a cleared rate is restored. It stays editable after that.
+function applyEdit(cur, key, value) {
+  const next = { ...cur, [key]: value };
+  if (key === "startDate" && next.stepRate !== "") next.stepEffectiveOn = stepDateFor(value);
+  if (key === "stepRate") next.stepEffectiveOn = value === "" ? "" : cur.stepRate === "" ? stepDateFor(cur.startDate) : cur.stepEffectiveOn;
+  return next;
+}
+
+function sendNote(ownerActions, sends, firstName) {
+  if (!ownerActions) return "Only the owner can send this offer. You can save the draft.";
+  const who = sends ? `Sends ${sends} to ${firstName}.` : offerErrorMessage({ body: { code: "NO_CONTACT" } });
+  return `${who} Nothing goes out until you press Send offer.`;
+}
+
+// Everything on screen comes from `data`, the latest successful read: the
+// draft (`reviewed`), its letter preview and its draftHash. `edits` are only
+// what the owner typed since that read.
+function formView({ edits, reviewed, data, contact, busy, locked }) {
+  const phone = maskPhone(contact?.phone);
+  const email = maskEmail(contact?.email);
+  const base = fieldsFrom(reviewed || data.defaults);
+  const fields = { ...base, ...edits };
+  const { startError, fieldsOk } = fieldChecks(fields);
+  const dirty = !reviewed || FIELD_KEYS.some((k) => fields[k] !== base[k]);
   return {
+    base,
+    fields,
     firstName: String(contact?.name || "the applicant").trim().split(/\s+/)[0],
     sendTo: [phone && `Text ${phone}`, email && `Email ${email}`].filter(Boolean).join(" · "),
     startError,
     fieldsOk,
     dirty,
-    canSend: data.viewer?.ownerActions === true && Boolean(reviewed?.draftHash) && !dirty && fieldsOk && data.termsIssued && !busy,
+    canSend: data.viewer?.ownerActions === true && Boolean(reviewed?.draftHash) && !dirty && fieldsOk && data.termsIssued && !busy && !locked,
   };
 }
 
 function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged, onSent }) {
-  const start = draft || (data.current?.status === "draft" ? data.current : null);
-  const [fields, setFields] = useState(() => fieldsFrom(start || data.defaults));
-  const [draftId, setDraftId] = useState(start?.id || null);
+  const [edits, setEdits] = useState({});
+  const [draftId, setDraftId] = useState(() => initialDraftId(draft, data));
+  const [needRead, setNeedRead] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [confirming, setConfirming] = useState(false);
   const [result, setResult] = useState(null);
   const reviewed = reviewedDraft(data, draftId);
-  const { firstName, sendTo, startError, fieldsOk, dirty, canSend } = formView({ fields, reviewed, data, contact, busy });
+  // Read-only until a read has succeeded and holds the draft this form is about.
+  const locked = isLocked(needRead, draftId, reviewed);
+  const { base, fields, firstName, sendTo, startError, fieldsOk, dirty, canSend } = formView({ edits, reviewed, data, contact, busy, locked });
   const ownerActions = data.viewer?.ownerActions === true;
+  const sends = sendChannels(contact);
 
-  const onChange = (key, value) => {
-    setFields((prev) => {
-      const next = { ...prev, [key]: value };
-      // The step date follows the start date whenever a step rate is set, and is
-      // recomputed when a cleared rate is restored. It stays editable after that.
-      if (key === "startDate" && next.stepRate !== "") next.stepEffectiveOn = stepDateFor(value);
-      if (key === "stepRate") next.stepEffectiveOn = value === "" ? "" : prev.stepRate === "" ? stepDateFor(prev.startDate) : prev.stepEffectiveOn;
-      return next;
-    });
-  };
+  const onChange = (key, value) => setEdits((prev) => applyEdit({ ...base, ...prev }, key, value));
 
   const run = async (work) => {
     setBusy(true);
     setError(null);
     try {
       await work();
-      return true;
     } catch (err) {
       setError(offerErrorMessage(err));
-      return false;
     } finally {
       setBusy(false);
     }
   };
 
-  // The draft in the refreshed read replaces the form, so the owner reviews
-  // the preview that matches the hash Send will carry.
-  const adopt = (next) => {
-    const d = next && reviewedDraft(next, draftId);
-    if (!d) return false;
-    setFields(fieldsFrom(d));
-    return true;
+  // Re-read after a write. The form shows the result only once the read holds
+  // the draft it expects; until then it stays read-only (Try again re-reads).
+  const refresh = async (expectId) => {
+    const next = await onChanged();
+    if (next && reviewedDraft(next, expectId)) {
+      setNeedRead(false);
+      setEdits({});
+    }
+    return next;
   };
 
   const save = () =>
     run(async () => {
       const { offer } = await saveOfferDraft(applicationId, toPayload(fields));
       setDraftId(offer.id);
-      setFields(fieldsFrom(offer));
-      const next = await onChanged();
-      if (!next) setError("The draft was saved, but the letter preview could not refresh. Press Save draft again to retry.");
+      setNeedRead(true);
+      await refresh(offer.id);
     });
 
+  const retryRead = () => run(() => refresh(draftId));
+
   const send = async () => {
+    setBusy(true);
+    setError(null);
     try {
-      setBusy(true);
-      setError(null);
       const out = await sendOffer(applicationId, reviewed.id, reviewed.draftHash);
       setResult(out.comms || {});
       await onSent();
@@ -235,7 +267,8 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
       setError(offerErrorMessage(err));
       if (err?.body?.code === "DRAFT_CHANGED") {
         setConfirming(false);
-        adopt(await onChanged());
+        setNeedRead(true);
+        await refresh(reviewed.id);
       }
     } finally {
       setBusy(false);
@@ -262,7 +295,12 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
     <>
       <DialogBody>
         <div className="flex flex-col gap-4">
-          <OfferFields fields={fields} onChange={onChange} startError={startError} sendTo={sendTo} />
+          {locked && !busy && (
+            <ActionFeedback error onRetry={retryRead}>
+              The offer could not be loaded after your last change. Fields and Send stay off until it loads.
+            </ActionFeedback>
+          )}
+          <OfferFields fields={fields} onChange={onChange} startError={startError} sendTo={sendTo} disabled={busy || locked} />
           <Row label="Shared terms attached">
             <TermsBlock data={data} />
           </Row>
@@ -274,9 +312,7 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
             <div className="text-14 text-zinc-400 mt-1">Shows the saved draft. Save the draft to refresh it.</div>
           </div>
           <div className="text-14 text-zinc-500">
-            {ownerActions
-              ? `Sends one text and one email to ${firstName}. Nothing goes out until you press Send offer.`
-              : "Only the owner can send this offer. You can save the draft."}
+            {sendNote(ownerActions, sends, firstName)}
           </div>
           {error && !confirming && <ActionFeedback error>{error}</ActionFeedback>}
         </div>
@@ -285,10 +321,10 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
         <Button size="sm" variant="ghost" onClick={onClose} disabled={busy}>
           Close
         </Button>
-        <Button size="sm" variant="secondary" onClick={save} disabled={busy || !fieldsOk || !dirty}>
+        <Button size="sm" variant="secondary" onClick={save} disabled={busy || locked || !fieldsOk || !dirty}>
           {busy && !confirming ? "Saving…" : "Save draft"}
         </Button>
-        {ownerActions && (
+        {ownerActions && !locked && (
           <Button size="sm" onClick={() => setConfirming(true)} disabled={!canSend}>
             Send offer
           </Button>
@@ -297,6 +333,7 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
       <ConfirmSend
         open={confirming}
         firstName={firstName}
+        sends={sends}
         busy={busy}
         error={error}
         onCancel={() => {

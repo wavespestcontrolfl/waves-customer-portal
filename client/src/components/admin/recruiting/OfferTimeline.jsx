@@ -232,7 +232,7 @@ function OfferActions({ offer, draft, busy, stale, canAct, canMakeOffer, onMakeO
   );
 }
 
-export default function OfferTimeline({ applicationId, firstName, offer, draft, history, canMakeOffer, ownerActions, refreshError, onRetry, onMakeOffer, onChanged, onOpenDraft, onEdit }) {
+export default function OfferTimeline({ applicationId, firstName, offer, draft, history, canMakeOffer, ownerActions, refreshError, onMakeOffer, onChanged, onOpenDraft, onEdit }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [closing, setClosing] = useState(null); // the offer record being withdrawn or discarded
@@ -259,8 +259,11 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
   const revise = (startDate) =>
     act(async () => {
       const { offer: draft } = await reviseOffer(applicationId, offer.id, startDate);
-      await onChanged();
-      onOpenDraft(draft);
+      // Open the new draft only after a read that holds it; on a failed read the
+      // section's Try again stays on screen.
+      const next = await onChanged();
+      if (next && [next.draft, next.current].some((o) => o?.id === draft.id)) onOpenDraft(draft);
+      else if (next) setError("The new draft could not be loaded. Try again.");
     });
 
   const closeTarget = async () => {
@@ -285,11 +288,6 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
       <Terms offer={offer} />
       <Timeline entries={offer.timeline} />
       <DateRequestNote offer={offer} busy={busy || Boolean(draft)} canAct={canAct} onUpdate={revise} />
-      {refreshError && (
-        <ActionFeedback error className="mb-3" onRetry={onRetry}>
-          {refreshError}
-        </ActionFeedback>
-      )}
       {error && !closing && (
         <ActionFeedback error className="mb-3">
           {error}
