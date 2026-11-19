@@ -1,31 +1,41 @@
 /**
- * Text-quote bells dedupe on the phone's thread key for 7 days. A NEW ASK
- * (the placeholder startSmsThreadDraft raises, `newAsk: true`) matches OPEN
- * bells only. Before, a done bell inside the window still matched: a new ask
- * with no draft "stood" on it (both sides draft-less), so the ask raised
- * nothing. In production 3 asks between 11-10 and 11-18 got no bell this way,
- * each behind a bell the 72-hour quiet fall-off had closed.
+ * Text-quote bells dedupe on the phone's thread key for 7 days, three ways
+ * (notifyBell in services/estimator-engine/index.js):
+ *  - A NEW ASK (the placeholder startSmsThreadDraft raises for a fresh quote
+ *    text, `newAsk: true`) matches OPEN bells only, under one lock per number.
+ *    Before, a done bell inside the window still matched: a new ask with no
+ *    draft "stood" on it, so the ask raised nothing. In production 3 asks
+ *    between 11-10 and 11-18 got no bell this way, each behind a bell the
+ *    72-hour quiet fall-off had closed.
+ *  - A run's OUTCOME (`context.origin.bellId`) updates the row its own ask
+ *    landed on, open or done.
+ *  - Anything else with the key (a clarify-reply resume) keeps the newest
+ *    bell of the key, open or done, as before.
  *
- * A run's OUTCOME (no `newAsk`) still matches its own placeholder, open or
- * done: a person who closed the placeholder while the composer ran must not
- * get a second "send it" bell for the same ask, and a real draft still
- * reopens it in place, as before.
- *
- * Drives the real notify() over a fake notifications table that applies the
- * same filters the query asks for (thread key, the 7-day window, done_at).
- * Fixtures are fictitious; no real customer data.
+ * Drives the real notifyBell() over a fake notifications table that applies
+ * the filters the query asks for (thread key or row id, the 7-day window,
+ * done_at). Fixtures are fictitious; no real customer data.
  */
 
 const mockRows = [];
 const mockUpdates = [];
-const mockNotifyAdmin = jest.fn(async () => ({ id: 'bell-new' }));
+const mockLog = [];
+let mockInserted = 0;
+const mockNotifyAdmin = jest.fn(async (_category, title, _body, opts) => {
+  mockInserted += 1;
+  mockLog.push(`insert:${opts.trx ? 'trx' : 'db'}`);
+  const row = { id: `bell-new-${mockInserted}`, created_at: new Date(), done_at: null, title, metadata: opts.metadata };
+  mockRows.push(row);
+  return row;
+});
 
 jest.mock('../models/db', () => {
-  const db = (table) => {
+  const handle = (name) => (table) => {
     const filters = [];
     const b = {};
     b.whereRaw = (clause, args) => {
       if (/smsThreadKey/.test(clause)) filters.push((row) => row.metadata.smsThreadKey === args[0]);
+      if (clause === 'id = ?') filters.push((row) => row.id === args[0]);
       return b;
     };
     b.where = (col, op, value) => {
@@ -42,16 +52,21 @@ jest.mock('../models/db', () => {
       .filter((row) => filters.every((keep) => keep(row)))
       .sort((x, y) => y.created_at - x.created_at);
     b.first = async () => {
+      mockLog.push(`lookup:${name}`);
       const row = matches()[0];
       return row ? { ...row, metadata: JSON.stringify(row.metadata) } : undefined;
     };
     b.update = async (patch) => {
       const hit = matches();
-      mockUpdates.push({ ids: hit.map((row) => row.id), patch });
+      mockUpdates.push({ ids: hit.map((row) => row.id), patch, on: name });
       return hit.length;
     };
     return b;
   };
+  const db = handle('db');
+  const trx = handle('trx');
+  trx.raw = async (_sql, args) => { mockLog.push(`lock:${args[0]}`); };
+  db.transaction = async (work) => work(trx);
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -60,7 +75,7 @@ jest.mock('../services/notification-service', () => ({
   adminBodyColumns: (_category, body) => ({ body, detail: null }),
 }));
 
-const { notify } = require('../services/estimator-engine/index');
+const { notifyBell, notify } = require('../services/estimator-engine/index');
 
 const KEY = 'sms:9415550123';
 const MINUTE = 60e3;
@@ -75,7 +90,7 @@ function bell(id, { minutesAgo, done = false, estimateId = null }) {
 }
 
 // The placeholder startSmsThreadDraft raises for each fresh ask, before the draft runs.
-const askPlaceholder = () => notify({
+const askPlaceholder = () => notifyBell({
   call: null,
   context: null,
   lane: 'red',
@@ -87,17 +102,32 @@ const askPlaceholder = () => notify({
   newAsk: true,
 });
 
+// A draft run's outcome: runDraftPipeline passes the run's context, whose
+// origin carries the row the ask landed on.
+const outcome = (bellId, { estimateId = null, lane = 'red' } = {}) => notifyBell({
+  call: null,
+  context: { origin: { channel: 'sms_thread', threadKey: KEY, bellId } },
+  lane,
+  quotePromised: true,
+  threadKey: KEY,
+  estimateId,
+  title: estimateId ? 'AI estimate draft ready — $39/mo' : 'Quote asked by text — send it',
+  body: estimateId ? 'Drafted from the text thread.' : 'Texter …0123: quote requested over SMS, no auto-draft (thin thread). Reply with pricing manually.',
+});
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockRows.length = 0;
   mockUpdates.length = 0;
+  mockLog.length = 0;
+  mockInserted = 0;
 });
 
 describe('a new ask matches the number\'s OPEN bell only', () => {
   test('after the number\'s bell was closed, a new ask rings a fresh bell (it used to stand on the closed one)', async () => {
     mockRows.push(bell('bell-closed', { minutesAgo: 100 * 60, done: true }));
 
-    await expect(askPlaceholder()).resolves.toBe(true);
+    await expect(askPlaceholder()).resolves.toEqual({ ok: true, bellId: 'bell-new-1' });
 
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
     const [category, title, , opts] = mockNotifyAdmin.mock.calls[0];
@@ -109,10 +139,24 @@ describe('a new ask matches the number\'s OPEN bell only', () => {
     expect(mockUpdates).toHaveLength(0);
   });
 
+  test('the lookup and the insert run on one transaction that first takes the number\'s lock', async () => {
+    await askPlaceholder();
+
+    expect(mockLog).toEqual([`lock:estimator-ask:${KEY}`, 'lookup:trx', 'insert:trx']);
+  });
+
+  test('a second ask after the first one\'s insert stands on that bell: one bell for both runs', async () => {
+    const first = await askPlaceholder();
+    const second = await askPlaceholder();
+
+    expect(second).toEqual({ ok: true, bellId: first.bellId });
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
   test('while the bell is still open, a new ask stands on it: no second ring, no rewrite', async () => {
     mockRows.push(bell('bell-open', { minutesAgo: 20 * 60 }));
 
-    await expect(askPlaceholder()).resolves.toBe(true);
+    await expect(askPlaceholder()).resolves.toEqual({ ok: true, bellId: 'bell-open' });
 
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
     expect(mockUpdates).toHaveLength(0);
@@ -126,45 +170,63 @@ describe('a new ask matches the number\'s OPEN bell only', () => {
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
     expect(mockUpdates).toHaveLength(0);
   });
-});
 
-describe('a run\'s outcome still finds its own placeholder, open or done', () => {
-  test('a no-draft outcome after a person closed the placeholder stands: no second "send it" bell', async () => {
-    mockRows.push(bell('bell-placeholder', { minutesAgo: 0.5, done: true }));
-
+  test('notify() keeps its boolean answer for every other caller', async () => {
     await expect(notify({
       call: null, context: null, lane: 'red', quotePromised: true, threadKey: KEY,
-      title: 'Quote asked by text — send it', body: 'Texter …0123: quote requested over SMS, no auto-draft (thin thread). Reply with pricing manually.',
+      title: 'Quote asked by text — send it', body: 'Texter …0123 asked for a quote by text.', newAsk: true,
     })).resolves.toBe(true);
+  });
+});
+
+describe('a run\'s outcome updates the row its own ask landed on, open or done', () => {
+  test('a no-draft outcome after a person closed that row stands: no second "send it" bell', async () => {
+    mockRows.push(bell('bell-ask', { minutesAgo: 0.5, done: true }));
+
+    await expect(outcome('bell-ask')).resolves.toEqual({ ok: true, bellId: 'bell-ask' });
 
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
     expect(mockUpdates).toHaveLength(0);
+    // An outcome takes no lock: it writes only its own ask's row.
+    expect(mockLog).toEqual(['lookup:db']);
   });
 
-  test('a draft outcome reopens its closed placeholder in place, with the draft (unchanged)', async () => {
-    mockRows.push(bell('bell-placeholder', { minutesAgo: 0.5, done: true }));
+  test('a draft outcome reopens that closed row in place, with the draft (unchanged)', async () => {
+    mockRows.push(bell('bell-ask', { minutesAgo: 0.5, done: true }));
 
-    await notify({
-      call: null, context: null, lane: 'green', quotePromised: true, threadKey: KEY,
-      estimateId: 'est-8', title: 'AI estimate draft ready — $39/mo', body: 'Drafted from the text thread.',
-    });
+    await outcome('bell-ask', { estimateId: 'est-8', lane: 'green' });
 
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
     expect(mockUpdates).toHaveLength(1);
-    expect(mockUpdates[0].ids).toEqual(['bell-placeholder']);
+    expect(mockUpdates[0].ids).toEqual(['bell-ask']);
     expect(mockUpdates[0].patch.done_at).toBeNull();
     expect(JSON.parse(mockUpdates[0].patch.metadata).estimateId).toBe('est-8');
   });
 
-  test('an outcome for an open placeholder upgrades it in place', async () => {
-    mockRows.push(bell('bell-placeholder', { minutesAgo: 0.5 }));
+  test('an ask that merged into an older open bell gets its draft there, not on a newer closed bell', async () => {
+    // A person reopened the older bell; the newer one stays closed.
+    mockRows.push(bell('bell-reopened', { minutesAgo: 5 * 24 * 60 }));
+    mockRows.push(bell('bell-newer-closed', { minutesAgo: 2 * 24 * 60, done: true }));
+    const ask = await askPlaceholder();
+    expect(ask.bellId).toBe('bell-reopened');
 
-    await notify({
-      call: null, context: null, lane: 'yellow', quotePromised: true, threadKey: KEY,
-      estimateId: 'est-9', title: 'AI estimate draft needs review — $49/mo', body: 'Drafted from the text thread.',
-    });
+    await outcome(ask.bellId, { estimateId: 'est-9', lane: 'yellow' });
 
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
-    expect(mockUpdates.map((u) => u.ids)).toEqual([['bell-placeholder']]);
+    expect(mockUpdates.map((u) => u.ids)).toEqual([['bell-reopened']]);
+  });
+});
+
+describe('a clarify-reply resume keeps the newest bell of the number, open or done', () => {
+  test('it stands on a closed draftless bell, as before: no ring', async () => {
+    mockRows.push(bell('bell-closed', { minutesAgo: 30 * 60, done: true }));
+
+    await expect(notifyBell({
+      call: null, context: null, lane: 'red', quotePromised: true, threadKey: KEY, newAsk: false,
+      title: 'Quote asked by text — send it', body: 'Texter …0123 asked for a quote by text.',
+    })).resolves.toEqual({ ok: true, bellId: 'bell-closed' });
+
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockLog).toEqual(['lookup:db']);
   });
 });

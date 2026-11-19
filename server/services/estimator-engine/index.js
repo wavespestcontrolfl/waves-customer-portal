@@ -622,7 +622,16 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
 // instead of adding a second one; when no bell exists (request-only calls,
 // or the generic path failed) it inserts fresh. Re-runs dedupe on the
 // estimator_engine marker.
-async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null, link = null, forceUpdate = false, updateOnly = false, retiredByReason = null, newAsk }) {
+async function notify(args) {
+  return (await notifyBell(args)).ok;
+}
+
+// notify() that also names the row this event landed on: { ok, bellId }.
+// bellId is null when no single row is known (a suppressed insert, or a
+// retirement that rewrote several bells). startSmsThreadDraft keeps its
+// placeholder's id on the run's origin (`origin.bellId`), so the run's
+// outcome updates that same row (the thread-key dedupe below).
+async function notifyBell({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null, link = null, forceUpdate = false, updateOnly = false, retiredByReason = null, newAsk }) {
   const callSid = call?.twilio_call_sid ? String(call.twilio_call_sid) : null;
   // Callers may pass a specific link (the proposal builder deep-link);
   // otherwise derive the historical default from what the bell references.
@@ -654,18 +663,26 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
   // person's Done, the 72-hour quiet fall-off, any closer), a later ask is
   // news and gets a fresh bell. Matching a done bell let a new no-draft ask
   // "stand" on it, so the ask raised nothing (prod 11-10 to 11-18: 3 asks,
-  // all behind a bell the quiet fall-off had closed). A run's OUTCOME still
-  // matches its own placeholder open or done: a person who closed it during
-  // the composer run gets no second "send it" bell for the same ask.
+  // all behind a bell the quiet fall-off had closed). A text run's OUTCOME
+  // matches the row its own ask landed on (`context.origin.bellId`), open
+  // or done: a person who closed it during the composer run gets no second
+  // "send it" bell, and the draft lands on the ask's row, not a newer one.
+  // Anything else with a thread key (a clarify-reply resume, which
+  // continues the ask the number's bell already tells) keeps the newest
+  // bell of the key in the window, open or done.
   const SMS_BELL_DEDUPE_MS = 7 * 86400000;
+  const askBellId = !callSid && threadKey ? (context?.origin?.bellId || null) : null;
   const dedupe = callSid
     ? { clause: "metadata->>'callSid' = ?", value: callSid, since: null, openOnly: false }
-    : (threadKey
-      ? { clause: "metadata->>'smsThreadKey' = ?", value: threadKey, since: new Date(Date.now() - SMS_BELL_DEDUPE_MS), openOnly: newAsk === true }
-      : null);
-  // Returns true only when a bell durably exists for this event (fresh
-  // insert, in-place upgrade, or a standing prior bell) — callers that
-  // treat the bell as their restart-loss artifact must know it landed.
+    : (askBellId
+      ? { clause: 'id = ?', value: askBellId, since: null, openOnly: false }
+      : (threadKey
+        ? { clause: "metadata->>'smsThreadKey' = ?", value: threadKey, since: new Date(Date.now() - SMS_BELL_DEDUPE_MS), openOnly: newAsk === true }
+        : null));
+  // ok only when a bell durably exists for this event (fresh insert,
+  // in-place upgrade, or a standing prior bell) — callers that treat the
+  // bell as their restart-loss artifact must know it landed.
+  const landed = (id) => ({ ok: true, bellId: id || null });
   try {
     // Retirement targets the bell(s) that ADVERTISE the retired draft
     // (codex #4815 r9 P2), not merely the newest bell for the call: when
@@ -694,89 +711,108 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
               read_at: null, done_at: null, done_by: null, resolution: null,
             });
         }
-        return true;
+        return landed(null);
       }
     }
-    if (dedupe) {
-      // Any prior bell for this call counts: the generic promised bell OR a
-      // prior estimator bell (request-only bells carry quote_promised=false
-      // but still have the estimator_engine marker — matching only promised
-      // bells would duplicate on every reprocess).
-      let existingQuery = db('notifications')
-        .whereRaw(dedupe.clause, [dedupe.value])
-        .whereRaw("(metadata->>'quote_promised' = 'true' OR metadata->>'estimator_engine' = 'true')")
-        .orderBy('created_at', 'desc');
-      if (dedupe.since) existingQuery = existingQuery.where('created_at', '>=', dedupe.since);
-      if (dedupe.openOnly) existingQuery = existingQuery.whereNull('done_at');
-      const existing = await existingQuery.first();
-      if (existing) {
-        let existingMeta = {};
-        try {
-          existingMeta = typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : (existing.metadata || {});
-        } catch { existingMeta = {}; }
-        let insertFresh = false;
-        if (existingMeta.estimator_engine === true) {
-          if (forceUpdate) {
-            // The fail-closed reconciliation alerts REPLACE whatever the
-            // bell said (codex P1, PR #3304 r18): the prior ready-to-send
-            // title/link can point at a wrong-lead draft, and the dedupe's
-            // stand rules would keep it there.
-          } else if (callSid) {
-            // Same callSid = same request. A prior estimator bell stands
-            // UNLESS this run now has a draft the old bell doesn't know
-            // about (transient red → later success), OR the bell tells a
-            // DIFFERENT draft's story — after an invalidation+rebuild the
-            // old link points at the archived stale draft and must
-            // upgrade to the replacement (codex P1, PR #3304 r13).
-            if (!estimateId) return true;
-            if (existingMeta.estimateId === estimateId) return true;
-          } else {
-            // A thread key spans REQUESTS on one phone. Only a true retry
-            // stands (same draft again, or both sides still-open
-            // owed-quotes). An open placeholder upgrades to its outcome —
-            // but a bell that already tells a COMPLETED draft's story is
-            // history: a new request or a different draft gets a FRESH
-            // bell instead of overwriting it.
-            const sameDraft = !!estimateId && existingMeta.estimateId === estimateId;
-            const bothOpen = !estimateId && !existingMeta.estimateId;
-            if (sameDraft || bothOpen) return true;
-            if (existingMeta.estimateId && existingMeta.estimateId !== estimateId) insertFresh = true;
+    // The lookup and the write it decides, on `conn`: db, or the fresh
+    // ask's locked transaction below.
+    const standOrRaise = async (conn) => {
+      if (dedupe) {
+        // Any prior bell for this call counts: the generic promised bell OR a
+        // prior estimator bell (request-only bells carry quote_promised=false
+        // but still have the estimator_engine marker — matching only promised
+        // bells would duplicate on every reprocess).
+        let existingQuery = conn('notifications')
+          .whereRaw(dedupe.clause, [dedupe.value])
+          .whereRaw("(metadata->>'quote_promised' = 'true' OR metadata->>'estimator_engine' = 'true')")
+          .orderBy('created_at', 'desc');
+        if (dedupe.since) existingQuery = existingQuery.where('created_at', '>=', dedupe.since);
+        if (dedupe.openOnly) existingQuery = existingQuery.whereNull('done_at');
+        const existing = await existingQuery.first();
+        if (existing) {
+          let existingMeta = {};
+          try {
+            existingMeta = typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : (existing.metadata || {});
+          } catch { existingMeta = {}; }
+          let insertFresh = false;
+          if (existingMeta.estimator_engine === true) {
+            if (forceUpdate) {
+              // The fail-closed reconciliation alerts REPLACE whatever the
+              // bell said (codex P1, PR #3304 r18): the prior ready-to-send
+              // title/link can point at a wrong-lead draft, and the dedupe's
+              // stand rules would keep it there.
+            } else if (callSid) {
+              // Same callSid = same request. A prior estimator bell stands
+              // UNLESS this run now has a draft the old bell doesn't know
+              // about (transient red → later success), OR the bell tells a
+              // DIFFERENT draft's story — after an invalidation+rebuild the
+              // old link points at the archived stale draft and must
+              // upgrade to the replacement (codex P1, PR #3304 r13).
+              if (!estimateId) return landed(existing.id);
+              if (existingMeta.estimateId === estimateId) return landed(existing.id);
+            } else {
+              // A thread key spans REQUESTS on one phone. Only a true retry
+              // stands (same draft again, or both sides still-open
+              // owed-quotes). An open placeholder upgrades to its outcome —
+              // but a bell that already tells a COMPLETED draft's story is
+              // history: a new request or a different draft gets a FRESH
+              // bell instead of overwriting it.
+              const sameDraft = !!estimateId && existingMeta.estimateId === estimateId;
+              const bothOpen = !estimateId && !existingMeta.estimateId;
+              if (sameDraft || bothOpen) return landed(existing.id);
+              if (existingMeta.estimateId && existingMeta.estimateId !== estimateId) insertFresh = true;
+            }
+          }
+          if (!insertFresh) {
+            await conn('notifications')
+              .where({ id: existing.id })
+              .update({
+                title,
+                // body + detail together: "Show full text" must never keep the
+                // story this rewrite replaces (admin body guard).
+                ...require('../notification-service').adminBodyColumns('lead', body),
+                link,
+                metadata: JSON.stringify({ ...existingMeta, ...metadata }),
+                // The content changed materially — an already-read bell must
+                // come back unread or the upgrade is invisible.
+                read_at: null, done_at: null, done_by: null, resolution: null,
+              });
+            return landed(existing.id);
           }
         }
-        if (!insertFresh) {
-          await db('notifications')
-            .where({ id: existing.id })
-            .update({
-              title,
-              // body + detail together: "Show full text" must never keep the
-              // story this rewrite replaces (admin body guard).
-              ...require('../notification-service').adminBodyColumns('lead', body),
-              link,
-              metadata: JSON.stringify({ ...existingMeta, ...metadata }),
-              // The content changed materially — an already-read bell must
-              // come back unread or the upgrade is invisible.
-              read_at: null, done_at: null, done_by: null, resolution: null,
-            });
-          return true;
-        }
       }
+      // updateOnly (codex #4815 r2 P2): retiring a stale bell in place must
+      // never manufacture a FRESH one where none existed to update — every
+      // path above that would otherwise fall through to a new insert (no
+      // dedupe match, or a dedupe match that decided to insertFresh) is
+      // refused here instead. Not ok, not the durable-bell sentinel:
+      // nothing to retire is not the same as a failed retirement.
+      if (updateOnly) return { ok: false, bellId: null };
+      // notifyAdmin catches insert failures and returns null — that is NOT a
+      // durable bell, and callers gating detached work on durability (the SMS
+      // handoff) must hear about it. Intentional suppression returns a truthy
+      // sentinel (no row id) and correctly counts as handled.
+      const created = await require('../notification-service').notifyAdmin('lead', title, body, {
+        link,
+        metadata,
+        ...(conn === db ? {} : { trx: conn }),
+      });
+      return created ? landed(created.id) : { ok: false, bellId: null };
+    };
+    // A fresh ask's lookup and the insert it may lead to hold one lock per
+    // number, as notifyAdmin's dedupeKey path does: two texts that both pass
+    // the cooldown cannot both find no open bell and both ring. An outcome
+    // needs none: it updates its own ask's row.
+    if (dedupe?.openOnly) {
+      return await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`estimator-ask:${threadKey}`]);
+        return standOrRaise(trx);
+      });
     }
-    // updateOnly (codex #4815 r2 P2): retiring a stale bell in place must
-    // never manufacture a FRESH one where none existed to update — every
-    // path above that would otherwise fall through to a new insert (no
-    // dedupe match, or a dedupe match that decided to insertFresh) is
-    // refused here instead. false, not the durable-bell truthy sentinel:
-    // nothing to retire is not the same as a failed retirement.
-    if (updateOnly) return false;
-    // notifyAdmin catches insert failures and returns null — that is NOT a
-    // durable bell, and callers gating detached work on durability (the SMS
-    // handoff) must hear about it. Intentional suppression returns a truthy
-    // sentinel and correctly counts as handled.
-    const created = await require('../notification-service').notifyAdmin('lead', title, body, { link, metadata });
-    return !!created;
+    return await standOrRaise(db);
   } catch (err) {
     logger.warn(`[estimator-engine] admin notify failed: ${err.message}`);
-    return false;
+    return { ok: false, bellId: null };
   }
 }
 
@@ -3552,6 +3588,7 @@ module.exports = {
   // bell plumbing instead of re-implementing the lane/notify contract.
   runDraftPipeline,
   notify,
+  notifyBell,
   _private: {
     classifyListingSuiteByLicense,
     addressFromContext, ownStreetForUnitAdoption, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality,

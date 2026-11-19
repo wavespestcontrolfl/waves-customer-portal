@@ -59,6 +59,11 @@ const mockEngineEnabled = jest.fn();
 jest.mock('../services/estimator-engine/index', () => ({
   runDraftPipeline: (...args) => mockRunDraftPipeline(...args),
   notify: (...args) => mockNotify(...args),
+  // The placeholder's call: the same recorder, plus the row id it landed on.
+  notifyBell: async (...args) => {
+    const ok = await mockNotify(...args);
+    return { ok: !!ok, bellId: ok ? 'bell-ask-1' : null };
+  },
   estimatorEngineEnabled: () => mockEngineEnabled(),
 }));
 
@@ -182,6 +187,9 @@ describe('startSmsThreadDraft', () => {
     expect(args.origin.threadKey).toBe('sms:9415550123');
     expect(args.quotePromised).toBe(true);
     expect(args.context.origin).toBe(args.origin);
+    // The run's outcome updates the row this ask landed on (notifyBell reads
+    // context.origin.bellId), open or done.
+    expect(args.origin.bellId).toBe('bell-ask-1');
   });
 
   describe('the placeholder names who texted and links to the message', () => {
@@ -271,6 +279,10 @@ describe('startSmsThreadDraft', () => {
       supersedeEstimateId: 'est-1', supersedeReason: 'clarify_bedroom_reply', supersedeAttempt: 'att-1', bedroomCountOverride: 2,
     });
     await result.draftPromise;
+    // A clarify reply continues the ask the number's bell already tells: not
+    // a new ask, so it keeps the any-state lookup (no fresh bell behind a
+    // bell a person closed).
+    expect(mockNotify.mock.calls[0][0].newAsk).toBe(false);
     const args = mockRunDraftPipeline.mock.calls[0][0];
     expect(args.context.supersedeEstimateId).toBe('est-1');
     expect(args.context.supersedeAttempt).toBe('att-1');
@@ -303,10 +315,12 @@ describe('startSmsThreadDraft', () => {
       lane: 'red',
       body: expect.stringContaining('ambiguous_phone'),
     }));
-    // An outcome is not a new ask: it still finds its own placeholder open or
-    // done, so a person who closed it during the run gets no second bell.
+    // An outcome is not a new ask: it finds its own ask's row open or done
+    // (context.origin.bellId), so a person who closed it during the run gets
+    // no second bell.
     const outcome = mockNotify.mock.calls.map(([args]) => args).find((args) => /ambiguous_phone/.test(args.body));
     expect(outcome.newAsk).toBeUndefined();
+    expect(outcome.context.origin.bellId).toBe('bell-ask-1');
     expect(mockRunDraftPipeline).not.toHaveBeenCalled();
   });
 

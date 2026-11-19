@@ -314,6 +314,9 @@ async function runThreadDraft({
       groundedOvercap,
       groundedUnverifiableLocality,
     });
+    // Before the error check: the unreadable-thread red below is an outcome
+    // too, and finds the ask's own bell through context.origin.
+    context.origin = origin;
     if (context.error) {
       result.lane = 'red';
       result.reasons = [context.error];
@@ -332,7 +335,6 @@ async function runThreadDraft({
       }
       return result;
     }
-    context.origin = origin;
     // A clarify reply re-draft names the stale draft it replaces; the
     // draft builder retires it atomically with the replacement insert.
     if (supersedeEstimateId) {
@@ -534,9 +536,9 @@ async function startSmsThreadDraft({
       // blocked outcomes leave it standing (same manual instruction). A
       // failed insert means NO durable artifact exists: report not-started
       // so callers keep their own fallback (lead-intake keeps the shell).
-      const { notify } = require('./index');
+      const { notifyBell } = require('./index');
       const sender = await threadSenderInfo(phone, digits, triggerSmsLogId);
-      const belled = await notify({
+      const bell = await notifyBell({
         call: null,
         context: null,
         lane: 'red',
@@ -545,14 +547,18 @@ async function startSmsThreadDraft({
         title: origin.strings.redTitle,
         body: `${sender.label} asked for a quote by text. The estimator engine is drafting now — if no draft notification follows, review the thread and send the estimate manually.`,
         link: sender.link,
-        // A fresh ask: it merges only into an OPEN bell of the number, so an
-        // ask after that bell was closed raises a new one (notify in ./index).
-        newAsk: true,
+        // A fresh quote text merges only into an OPEN bell of the number, so
+        // an ask after that bell was closed raises a new one. A clarify-reply
+        // resume (skipCooldown) continues the ask that bell already tells and
+        // keeps the any-state lookup (notifyBell in ./index).
+        newAsk: !skipCooldown,
       });
-      if (!belled) {
+      if (!bell.ok) {
         result.skipped = 'durable_bell_failed';
         return result;
       }
+      // The run's outcome updates the row this ask landed on, open or done.
+      origin.bellId = bell.bellId;
     }
     result.started = true;
     result.draftPromise = runThreadDraft({
