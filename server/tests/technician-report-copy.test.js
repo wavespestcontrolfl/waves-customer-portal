@@ -227,10 +227,45 @@ describe('summaryCopySignature — PDF cache-key component', () => {
       process.env.GATE_REPORT_WRITER_RULES = 'true';
       expect(summaryCopySignature(record({ bodyFormat: 'four_section' }))).toBe(keyed);
       process.env.GATE_REPORT_WRITER_RULES = 'false';
-      expect(summaryCopySignature(record({ bodyFormat: 'four_section' }))).toBe('');
-      expect(summaryCopySignature(record({ bodyFormat: 'four_section', reconcileConfirmed: true }))).toBe('');
+      // The summary drops with the card's body; the card suffix marks the switch.
+      expect(summaryCopySignature(record({ bodyFormat: 'four_section' }))).toBe('-fsoff');
+      expect(summaryCopySignature(record({ bodyFormat: 'four_section', reconcileConfirmed: true }))).toBe('-fsoff');
       expect(summaryCopySignature(record({}))).toBe(keyed);
       expect(summaryCopySignature(record({}, { technicianReportBodyRejected: 'trade_name' }))).toBe('');
+    } finally {
+      if (gate === undefined) delete process.env.GATE_REPORT_WRITER_RULES;
+      else process.env.GATE_REPORT_WRITER_RULES = gate;
+    }
+  });
+
+  // The PDF prints the cards too: a flip of the switch changes the key of a
+  // record whose printed card has a four-section body, whatever the summary
+  // does (pre-push P1 on 5a14ba712b).
+  test('a flip of the switch changes the key of a printed four-section card, also when the summary is rejected', () => {
+    const gate = process.env.GATE_REPORT_WRITER_RULES;
+    const card = { headline: 'Service completed.', body: 'x', bodySource: 'technician_report', bodyFormat: 'four_section' };
+    const rejected = {
+      technician_notes: AI_REPORT,
+      service_data: JSON.stringify({
+        typedReportSnapshot: { type: 'one_time_pest_treatment', todaysResult: card },
+        technicianReportBodyRejected: 'trade_name',
+      }),
+    };
+    const companionCard = (delivery) => ({
+      technician_notes: 'wiped webs, treated perimeter',
+      service_data: JSON.stringify({ companionReportSnapshots: [{ type: 'rodent_trapping', delivery, todaysResult: card }] }),
+    });
+    try {
+      process.env.GATE_REPORT_WRITER_RULES = 'true';
+      expect(summaryCopySignature(rejected)).toBe('');
+      expect(summaryCopySignature(companionCard('auto_send'))).toBe('');
+      process.env.GATE_REPORT_WRITER_RULES = 'false';
+      expect(summaryCopySignature(rejected)).toBe('-fsoff');
+      expect(summaryCopySignature(companionCard('auto_send'))).toBe('-fsoff');
+      // A customer render never prints an internal companion.
+      expect(summaryCopySignature(companionCard('internal_only'))).toBe('');
+      // A card in another format keeps its key with the switch off.
+      expect(summaryCopySignature({ technician_notes: AI_REPORT })).toMatch(/^-tr[0-9a-f]{8}$/);
     } finally {
       if (gate === undefined) delete process.env.GATE_REPORT_WRITER_RULES;
       else process.env.GATE_REPORT_WRITER_RULES = gate;

@@ -344,8 +344,29 @@ function technicianReportCustomerCopy(notes) {
  * Returns '' when the summary is recap/template-driven (keys unchanged, so
  * every existing cached PDF stays a valid hit) and a content-hashed suffix
  * when the technician report drives the rendered summary, by the report's
- * own rule (technicianReportDrivesSummary).
+ * own rule (technicianReportDrivesSummary). A card suffix follows the
+ * four-section kill switch on the cards the PDF prints
+ * (darkFourSectionCardSuffix).
  */
+// The four-section kill switch on the Today's Result cards a customer render
+// prints (the primary card and auto_send companions): while
+// GATE_REPORT_WRITER_RULES is off, such a card with a four-section body prints
+// without it (activity-indicators withoutDarkFourSectionBody), whatever the
+// summary does. '-fsoff' then, so a flip changes the key both ways and a
+// cached PDF never keeps a body the switch dropped. Gate on: no suffix, so
+// cached keys stay.
+function darkFourSectionCardSuffix(serviceData = {}) {
+  const cards = [
+    serviceData.typedReportSnapshot,
+    ...(Array.isArray(serviceData.companionReportSnapshots)
+      ? serviceData.companionReportSnapshots.filter((snap) => snap?.delivery === 'auto_send')
+      : []),
+  ];
+  const printsFourSectionCard = cards.some((snap) => snap && typeof snap === 'object' && snap.type
+    && snap.todaysResult?.bodyFormat === 'four_section');
+  return printsFourSectionCard && !reportWriterRulesLive() ? '-fsoff' : '';
+}
+
 function summaryCopySignature(service = {}) {
   let serviceData = {};
   try {
@@ -363,8 +384,9 @@ function summaryCopySignature(service = {}) {
   // and the trapping screens. The key then changes whenever the printed
   // summary does, a gate flip included, and a cached PDF never keeps a
   // summary the live report dropped (codex r35 #3420).
-  if (!parsed?.body || !require('./activity-indicators').technicianReportDrivesSummary({ serviceData, body: parsed.body })) return '';
-  return `-tr${crypto.createHash('sha256').update(parsed.body).digest('hex').slice(0, 8)}`;
+  const cards = darkFourSectionCardSuffix(serviceData);
+  if (!parsed?.body || !require('./activity-indicators').technicianReportDrivesSummary({ serviceData, body: parsed.body })) return cards;
+  return `-tr${crypto.createHash('sha256').update(parsed.body).digest('hex').slice(0, 8)}${cards}`;
 }
 
 // The full customer-copy screen the notes parser applies — shared banned
