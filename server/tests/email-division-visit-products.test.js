@@ -388,6 +388,23 @@ describe('PRODUCT_FAMILIES customer-facing text carries no fabricated timeline',
     expect(product.noTimeline).toBe(noTimeline);
   });
 
+  // Owner 2026-11-18: the job-log aliases moved from Talak to LESCO Crosscheck Plus, so the product the visit row stored decides
+  // which bottle an alias names. Production holds 147 "Talstar P" rows stored under Talak (read 2026-11-18).
+  test.each([
+    ['Talstar P', 'Atticus Talak 7.9 F', 'fact-bifenthrin-talak-label'],
+    ['Talstar P', 'LESCO Crosscheck Plus', 'fact-bifenthrin-crosscheck-label'],
+    ['Bifen I/T', 'LESCO Crosscheck Plus', 'fact-bifenthrin-crosscheck-label'],
+    ['Talstar P', null, 'fact-bifenthrin-talak-label'], // no stored product: the alias reaches Talak's label, as before
+    ['Talstar P', 'Bifen XTS', null], // another registration stored: neither label
+    // An own name is not an alias: "Gentrol IGR" lines stored under Gentrol Complete EC3 keep the Gentrol IGR label (above).
+    ['Gentrol IGR', 'Gentrol Complete EC3', 'fact-gentrol-igr-hydroprene'],
+  ])('%s stored as %s -> slug %s', async (productName, catalogName, slug) => {
+    const activeIngredient = productName === 'Gentrol IGR' ? '(S)-Hydroprene 9.0%' : 'bifenthrin';
+    const product = await readOne({ product_name: productName, catalog_name: catalogName, active_ingredient: activeIngredient });
+    expect(product.factSlugs).toEqual(slug ? [slug] : []);
+    expect(product.verified).toBe(Boolean(slug));
+  });
+
   test('every family phrase is target-neutral: no pest name, and no pest word outside a sourced label phrase', () => {
     for (const [family, def] of Object.entries(PRODUCT_FAMILIES)) {
       if (!def.phrase) continue;

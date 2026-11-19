@@ -6,8 +6,15 @@
  * Both products are found by exact catalog name: LESCO Crosscheck Plus, and every Talak row: Atticus Talak 7.9 F (production's one
  * row, read 2026-11-18) and Atticus Talak (the mosquito seed's name; a repo-built catalog can hold both, the lawn v13 seed adding the
  * longer one). Steps 1, 3 and 5 run for each Talak row, and each event records the row it moved from; step 2 swaps either name.
- * Steps 1, 2, 3 and 5 need Crosscheck and a Talak row. If either is missing (a repo-built or test database) they do nothing and
- * never throw. Step 4 needs only Crosscheck.
+ * Steps 1, 2, 3 and 5 need Crosscheck and a Talak row. If both are missing (a test database) nothing runs, and nothing throws.
+ * Step 4 needs only Crosscheck.
+ *
+ *   0. products_catalog: a catalog with a Talak row and no Crosscheck row gets one first, price pending (active, needs_pricing), so
+ *      the protocols, defaults and aliases follow in every database. Every repo-built catalog is that case: no migration adds
+ *      Crosscheck (server/data/pricing.csv is imported at runtime); production has it (read 2026-11-18). This is what the v13 seed
+ *      (20261005130000) does for a product its recipe names. The row holds only label facts (EPA Reg. No. 10404-120, bifenthrin
+ *      7.9%, 1 gal = 128 fl oz, 0.5 fl oz per 1,000 sq ft); step 4 then fills it. One audit_log event records it. down() keeps it,
+ *      as that seed's down() keeps its rows: other rows may point at it by then. Two rows named Crosscheck stop everything.
  *
  *   1. lawn_protocol_products: every row linked to Talak (15 in production) takes the Crosscheck product_id and product_name.
  *      Nothing else on the row changes (not its rate, role, gates or updated_at). One lawn_protocol_audit_log row per protocol
@@ -55,7 +62,7 @@ const MIGRATION = '20261119010000_house_bifenthrin_crosscheck';
 const LOG = '[house-bifenthrin-crosscheck]';
 const ACTOR = 'migration 20261119010000';
 const LAWN_ACTION = 'house_bifenthrin_crosscheck'; // lawn_protocol_audit_log.action is varchar(40)
-const STEPS = { services: 'services', aliases: 'aliases', catalog: 'catalog', usage: 'usage' };
+const STEPS = { seed: 'seed', services: 'services', aliases: 'aliases', catalog: 'catalog', usage: 'usage' };
 const actionFor = (step) => `migration:${MIGRATION}:${step}`;
 const rollbackActionFor = (step) => `${actionFor(step)}:rollback`;
 
@@ -86,6 +93,12 @@ const JSON_COLUMNS = new Set(['application_zones']);
 const EPA = { from: '279-3206-10404', to: '10404-120' };
 const LABEL_RATE_PER_1000 = { from: 0.18, to: 0.5 };
 const APPROVAL_FLAGS = ['approved_for_estimate_packet', 'approved_for_public_page'];
+// Step 0: the Crosscheck row a repo-built catalog lacks, label facts only (SiteOne D00001542 label; server/data/pricing.csv wording).
+const SEED = {
+  name: CROSSCHECK, category: 'insecticide', active_ingredient: '7.9% Bifenthrin', formulation: 'liquid', container_size: '1 gal',
+  unit_size_oz: 128, epa_reg_number: EPA.to, default_rate_per_1000: LABEL_RATE_PER_1000.to, rate_unit: 'fl oz', active: true,
+  needs_pricing: true, label_source_note: 'Added by migration 20261119010000 (owner 2026-11-18: the house bifenthrin); price pending.',
+};
 
 const norm = (value) => String(value == null ? '' : value).trim().toLowerCase();
 const asArray = (value) => {
@@ -288,16 +301,38 @@ async function fillCatalog(knex, crosscheck) {
   if (Object.keys(written).length) await writeAudit(knex, actionFor(STEPS.catalog), 'products_catalog', crosscheck.id, { product: CROSSCHECK, changes: written });
 }
 
+// Step 0. Returns the new row, or null when the catalog has no Talak row either (nothing would follow it).
+async function seedCrosscheck(knex) {
+  let talak = null;
+  for (const name of TALAK_NAMES) talak = talak || await findCatalogRow(knex, [name]);
+  if (!talak) return null;
+  const facts = {};
+  for (const [column, value] of Object.entries(SEED)) {
+    if (column === 'name' || await knex.schema.hasColumn('products_catalog', column)) facts[column] = value;
+  }
+  const row = { ...facts };
+  for (const column of ['created_at', 'updated_at']) if (await knex.schema.hasColumn('products_catalog', column)) row[column] = knex.fn.now();
+  const [made] = await knex('products_catalog').insert(row).returning('id');
+  const id = made && typeof made === 'object' ? made.id : made;
+  await writeAudit(knex, actionFor(STEPS.seed), 'products_catalog', id, { product: CROSSCHECK, created: facts });
+  console.log(`${LOG} added the "${CROSSCHECK}" catalog row, price pending (this catalog had none)`);
+  return { id, name: CROSSCHECK };
+}
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('products_catalog'))) return;
-  const crosscheck = await findCatalogRow(knex, [CROSSCHECK]);
-  if (!crosscheck) {
-    console.log(`${LOG} no catalog row named "${CROSSCHECK}": nothing to do`);
+  if (!(await knex.schema.hasTable('audit_log'))) {
+    console.log(`${LOG} audit_log table is missing: nothing to do (no snapshot, no change)`);
     return;
   }
-  const canAudit = await knex.schema.hasTable('audit_log');
-  if (!canAudit) {
-    console.log(`${LOG} audit_log table is missing: nothing to do (no snapshot, no change)`);
+  const named = await knex('products_catalog').where({ name: CROSSCHECK }).select('id', 'name');
+  if (named.length > 1) {
+    console.log(`${LOG} ${named.length} catalog rows are named "${CROSSCHECK}": nothing to do`);
+    return;
+  }
+  const crosscheck = named[0] || await seedCrosscheck(knex);
+  if (!crosscheck) {
+    console.log(`${LOG} no catalog row named "${CROSSCHECK}" or "${TALAK_NAMES.join('" or "')}": nothing to do`);
     return;
   }
   const talaks = await findTalakRows(knex, crosscheck);

@@ -707,6 +707,41 @@ describe('updateProductPage', () => {
     expect(outcomeOps).toContainEqual(['service_record_id IN (SELECT service_record_id FROM service_products WHERE product_id = ?)', ['pc-cross']]);
   });
 
+  test('a variant page under a name another product carried is kept: the Crosscheck refresh folds only its own names', async () => {
+    const pageOf = (rec) => rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0]?.slug;
+    const state = useDb({
+      products_catalog: (rec) => (rec.ops.some(([m, a]) => m === 'whereRaw' && a[1]?.[0] === 'lesco crosscheck plus')
+        ? [{ id: 'pc-cross', name: 'LESCO Crosscheck Plus' }] : []),
+      product_aliases: (rec) => (rec.ops.some(([m, a]) => m === 'where' && a[0]?.product_id === 'pc-cross')
+        ? [{ alias_name: 'Talstar P' }, { alias_name: 'Crosscheck Plus' }] : []),
+      // The visits that recorded "Talstar P" stored Talak (production: 147 rows, read 2026-11-18).
+      service_products: [{ product_id: 'pc-talak', product_name: 'Talstar P' }],
+      treatment_outcomes: [{ id: 'o-1', service_record_id: null, treatment_date: '2026-12-04', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO Crosscheck Plus' }] }],
+      knowledge_entries: (rec) => (['product/talstar-p', 'product/crosscheck-plus'].includes(pageOf(rec)) ? [{ id: `ke-${pageOf(rec)}`, slug: pageOf(rec) }] : []),
+      knowledge_base: [],
+      knowledge_bridge: [],
+      knowledge_contradictions: [],
+    });
+    await wiki.updateProductPage('LESCO Crosscheck Plus');
+    const merged = (state.inserts.knowledge_update_log || []).filter((r) => r.action === 'merge').map((r) => JSON.stringify(r));
+    expect(merged.some((r) => r.includes('product/crosscheck-plus'))).toBe(true);
+    expect(merged.some((r) => r.includes('product/talstar-p'))).toBe(false);
+    expect(state.deletes.knowledge_entries).toBe(1); // only the Crosscheck-only page
+  });
+
+  test('when the shared-name check fails, no variant page merges (a merge deletes)', async () => {
+    const responses = productResponses();
+    const aliases = responses.product_aliases;
+    responses.product_aliases = (rec, idx) => {
+      if (rec.ops.some(([m, a]) => m === 'whereRaw' && String(a[0]).includes('ANY'))) throw new Error('db down');
+      return aliases(rec, idx);
+    };
+    const state = useDb(responses);
+    const entry = await wiki.updateProductPage(RAW_NAME);
+    expect(entry).toEqual(expect.objectContaining({ slug: 'product/lesco-high-manganese-combo' })); // the refresh itself still succeeds
+    expect(state.deletes.knowledge_entries).toBeUndefined();
+  });
+
   test('a recorded name counts only whole: an outcome that names only Headway G is not on the Headway page', async () => {
     const state = useDb({
       products_catalog: [{ id: 'pc-headway', name: 'Headway' }],

@@ -398,9 +398,39 @@ describe('house bifenthrin crosscheck migration: missing products and tables', (
     expect(byId(knex, 'products_catalog', CROSS).signal_word).toBe('CAUTION');
   });
 
-  test('no Crosscheck row: nothing changes at all', async () => {
+  test('a repo-built catalog (Talak, no Crosscheck): up() adds Crosscheck, price pending, and the links follow; down() moves them back and keeps the row', async () => {
     const tables = baseTables();
     tables.products_catalog.splice(1, 1);
+    const columns = ['id', 'name', 'category', 'active_ingredient', 'formulation', 'container_size', 'unit_size_oz', 'epa_reg_number',
+      'default_rate_per_1000', 'rate_unit', 'active', 'needs_pricing', 'label_source_note', 'created_at', 'updated_at', 'best_price',
+      'cost_per_unit', 'public_summary', 'approved_for_public_page'];
+    const knex = makeKnex(tables, { columns: { products_catalog: columns } });
+    await migration.up(knex);
+    const added = knex.tables.products_catalog.filter((row) => row.name === 'LESCO Crosscheck Plus');
+    expect(added).toHaveLength(1);
+    expect(added[0]).toMatchObject({
+      category: 'insecticide', active_ingredient: '7.9% Bifenthrin', container_size: '1 gal', unit_size_oz: 128, epa_reg_number: '10404-120',
+      default_rate_per_1000: 0.5, rate_unit: 'fl oz', active: true, needs_pricing: true,
+    });
+    expect(added[0].best_price).toBeUndefined(); // price pending: never a price or cost
+    expect(added[0].cost_per_unit).toBeUndefined();
+    expect(added[0].public_summary).toBeTruthy(); // step 4 filled it
+    expect(knex.tables.lawn_protocol_products.filter((row) => row.product_id === added[0].id).map((row) => row.id).sort()).toEqual(['r1', 'r2', 'r3']);
+    expect(knex.tables.audit_log.filter((e) => e.action === `migration:${migration.MIGRATION}:seed`)).toHaveLength(1);
+    const afterUp = snapshot(knex);
+    await migration.up(knex);
+    expect(snapshot(knex)).toEqual(afterUp); // a second run adds nothing
+    await migration.down(knex);
+    expect(knex.tables.lawn_protocol_products.filter((row) => row.product_id === TALAK).map((row) => row.id).sort()).toEqual(['r1', 'r2', 'r3']);
+    expect(knex.tables.products_catalog.filter((row) => row.name === 'LESCO Crosscheck Plus')).toHaveLength(1); // kept, as the v13 seed keeps its rows
+  });
+
+  test.each([
+    ['two rows named Crosscheck', (tables) => tables.products_catalog.push({ ...tables.products_catalog[1], id: 'dddddddd-0000-4000-8000-000000000009' })],
+    ['no Crosscheck row and no Talak row', (tables) => tables.products_catalog.splice(0, 2)],
+  ])('%s: nothing changes at all', async (_name, edit) => {
+    const tables = baseTables();
+    edit(tables);
     const knex = makeKnex(tables);
     const before = snapshot(knex);
     await expect(migration.up(knex)).resolves.toBeUndefined();

@@ -52,8 +52,9 @@ const LABELS = {
     // them to Talak). LESCO Crosscheck Plus (its own label below) and Bifen XTS are different
     // registrations and never match. The label states NO residual duration
     // and no mode-of-action description, so the family's neutral phrase is
-    // used; only the rain / dry-surface instruction is quoted.
-    name: ['talak', 'talstar p', 'bifen i/t', 'bifen it'], ai: ['bifenthrin'], source: 'Talak 7.9 F label (EPA 91234-145)',
+    // used; only the rain / dry-surface instruction is quoted. Owner 2026-11-18: those aliases resolve to
+    // LESCO Crosscheck Plus now, so an alias reaches the label of the bottle its visit row stored (labelFor).
+    name: ['talak'], aliases: ['talstar p', 'bifen i/t', 'bifen it'], ai: ['bifenthrin'], source: 'Talak 7.9 F label (EPA 91234-145)',
     phrase: null,
     dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.', source: 'Talak 7.9 F label (EPA 91234-145)' },
     notes: [],
@@ -63,7 +64,7 @@ const LABELS = {
     // Owner ruling 2026-11-18: LESCO Crosscheck Plus (EPA 10404-120) is the house bifenthrin now. It is its own label, never
     // merged with Talak above: a "Talak" name never matches it and it never matches Talak. Same rule as Talak: only the rain /
     // dry-surface instruction is quoted, with no residual claim and no mode-of-action description.
-    name: ['lesco crosscheck plus', 'crosscheck plus'], ai: ['bifenthrin'], source: 'LESCO Crosscheck Plus label (EPA 10404-120)',
+    name: ['lesco crosscheck plus', 'crosscheck plus'], aliases: ['talstar p', 'bifen i/t', 'bifen it'], ai: ['bifenthrin'], source: 'LESCO Crosscheck Plus label (EPA 10404-120)',
     phrase: null,
     dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.', source: 'LESCO Crosscheck Plus label (EPA 10404-120)' },
     notes: [],
@@ -274,13 +275,19 @@ function classifyProduct({ productName, activeIngredient, productCategory, catal
 // the labeled product; a recorded active ingredient must also agree (a
 // brand name never pulls a different chemistry into a label claim — e.g.
 // a "Taurus SC" row recorded as imidacloprid). A blank AI leaves the name
-// as the only evidence.
-function labelFor(family, productName, activeIngredient) {
+// as the only evidence. An alias ("Talstar P") names the bottle the visit row
+// stored: with a stored catalog product it reaches only the label whose own name
+// that product carries (the aliases moved from Talak to LESCO Crosscheck Plus,
+// owner 2026-11-18); with none it reaches the first label listing it, as before.
+function labelFor(family, productName, activeIngredient, catalogName) {
   const name = String(productName || '').toLowerCase();
   const ai = String(activeIngredient || '').trim().toLowerCase();
+  const catalog = String(catalogName || '').toLowerCase();
   for (const key of FAMILIES[family].labels) {
     const label = LABELS[key];
-    if (!label.name.some((s) => name.includes(s))) continue;
+    const ownName = (text) => label.name.some((s) => text.includes(s));
+    const alias = (label.aliases || []).some((s) => name.includes(s)) && (!catalog || ownName(catalog));
+    if (!ownName(name) && !alias) continue;
     if (ai && !label.ai.some((s) => ai.includes(s))) continue;
     return label;
   }
@@ -300,14 +307,14 @@ async function readVisitProducts(serviceRecordId, { conn = db } = {}) {
     // is primary/secondary on repeated reads of the same visit. `sp.id` is a
     // stable secondary key (codex round 8 P2 on #5164).
     .orderBy([{ column: 'sp.applied_at', order: 'asc' }, { column: 'sp.id', order: 'asc' }])
-    .select('sp.*', 'pc.category as catalog_category', 'pc.product_type as catalog_product_type');
+    .select('sp.*', 'pc.name as catalog_name', 'pc.category as catalog_category', 'pc.product_type as catalog_product_type');
   const products = rows.map((row) => {
     const family = classifyProduct({
       productName: row.product_name, activeIngredient: row.active_ingredient, productCategory: row.product_category,
       catalogCategory: row.catalog_category, catalogProductType: row.catalog_product_type,
     });
     const def = FAMILIES[family];
-    const label = labelFor(family, row.product_name, row.active_ingredient);
+    const label = labelFor(family, row.product_name, row.active_ingredient, row.catalog_name);
     const phrase = label?.phrase || (family === 'nutrition' ? nutritionPhrase(row.active_ingredient) : def.phrase);
     return {
       productName: row.product_name, activeIngredient: row.active_ingredient || null, family,

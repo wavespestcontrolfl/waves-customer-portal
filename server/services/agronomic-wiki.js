@@ -951,7 +951,7 @@ const AgronomicWiki = {
       const mergeSafe = result && ['generated', 'skipped'].includes(result.writeState)
         && entry && !entry.content?.includes('*Pending AI generation');
       if (mergeSafe) {
-        await mergeVariantProductPages(entry, variants, slug);
+        await mergeVariantProductPages(entry, await mergeableVariants(variants, resolved.productId), slug);
 
         // The merge re-points variant contradictions onto the canonical page —
         // a page stamped trusted moments ago may have inherited an open
@@ -1980,6 +1980,34 @@ function extractSummary(content) {
     return true;
   });
   return line?.trim()?.substring(0, 500) || '';
+}
+
+// The variant names whose leftover pages may fold into this product's page: never a name another product carries (its catalog
+// name or an alias) or that a visit stored under another product's id. An alias can move (owner 2026-11-18: "Talstar P" named the
+// Talak bottle, then LESCO Crosscheck Plus), and a page under such a name may hold the other product's history, which the merge
+// deletes. The lookup names (variants) stay whole for outcome matching. When the check fails, nothing merges: a merge deletes.
+async function mergeableVariants(variants, productId) {
+  if (!productId) return variants;
+  const key = (name) => String(name || '').trim().toLowerCase();
+  const names = [...new Set(variants.map(key))];
+  const otherProduct = (id) => id != null && String(id) !== String(productId);
+  const shared = new Set();
+  const carriers = [
+    ['products_catalog', 'name', 'id'],
+    ['product_aliases', 'alias_name', 'product_id'],
+    ['service_products', 'product_name', 'product_id'],
+  ];
+  try {
+    for (const [table, nameColumn, idColumn] of carriers) {
+      const rows = await db(table).whereRaw('LOWER(TRIM(??)) = ANY(?)', [nameColumn, names])
+        .groupBy(idColumn, nameColumn).select(idColumn, nameColumn);
+      for (const row of rows || []) if (otherProduct(row[idColumn])) shared.add(key(row[nameColumn]));
+    }
+  } catch (err) {
+    logger.warn(`[agronomic-wiki] Variant merge skipped: could not check which names other products carry: ${err.message}`);
+    return [];
+  }
+  return variants.filter((name) => !shared.has(key(name)));
 }
 
 // Delete leftover product pages that were keyed on a non-canonical name
