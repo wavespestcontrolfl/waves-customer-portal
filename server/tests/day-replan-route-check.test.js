@@ -9,7 +9,7 @@ jest.mock('../services/technician-eligibility', () => ({
   applyAssignable: jest.fn((q) => q), absentTechDays: jest.fn(async () => new Set()),
 }));
 jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: jest.fn(async () => new Set()) }));
-jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false) }));
+jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false), listOccupiedWindows: jest.fn(async () => []) }));
 jest.mock('../services/scheduling/departure-time', () => ({ dayDepartureMinutes: jest.fn(async () => 480) }));
 jest.mock('../services/scheduling/tech-start-point', () => ({
   loadTechStartPoints: jest.fn(async () => new Map()), homeFromMap: jest.fn(() => ({ lat: 27.4, lng: -82.45 })),
@@ -21,6 +21,8 @@ jest.mock('../services/day-replan/index', () => ({
 const { _internals: replan } = require('../services/day-replan/index');
 const { getBlackoutDates } = require('../services/scheduling/blackout-dates');
 const { absentTechDays } = require('../services/technician-eligibility');
+const { listOccupiedWindows } = require('../services/scheduling/occupancy');
+const { occupiedRows } = require('../services/scheduling/visit-capacity');
 const { runRouteCheck, _internals: rc } = require('../services/day-replan/route-check');
 
 const TECH = '00000000-0000-4000-8000-000000000001';
@@ -34,15 +36,14 @@ const open = { blocks: [], held: [], origin: HQ, departureMin: 480, openMin: 480
 
 beforeEach(() => jest.clearAllMocks());
 
+// A span as listOccupiedWindows returns it.
+const span = (id, technician_id, startMin, endMin) => ({ id, technician_id, startMin, endMin });
+
 describe('dispatch held time', () => {
-  test("other rows' booked spans, never this technician's own; another technician's only while tech-blind", () => {
-    const rows = [
-      { id: 'o1', technician_id: TECH, customer_id: 'c1', scheduled_date: MONDAY, window_start: '09:00:00', window_end: '10:00:00' },
-      { id: 'u1', technician_id: null, customer_id: 'c2', scheduled_date: MONDAY, window_start: '13:00:00', window_end: '14:00:00' },
-      { id: 'x1', technician_id: 'other-tech', customer_id: 'c3', scheduled_date: MONDAY, window_start: '15:00:00', window_end: '16:00:00' },
-    ];
-    expect(rc.heldSpans(rows, TECH, false)).toEqual([{ startMin: 780, endMin: 840 }]);
-    expect(rc.heldSpans(rows, TECH, true)).toEqual([{ startMin: 780, endMin: 840 }, { startMin: 900, endMin: 960 }]);
+  test("this technician's own booked spans and unassigned ones; another technician's only while tech-blind", () => {
+    const rows = [span('o1', TECH, 540, 600), span('u1', null, 780, 840), span('x1', 'other-tech', 900, 960)];
+    expect(rc.heldSpans(rows, TECH, false)).toEqual([{ startMin: 540, endMin: 600 }, { startMin: 780, endMin: 840 }]);
+    expect(rc.heldSpans(rows, TECH, true)).toHaveLength(3);
   });
 
   test('a version-2 allocation holds its whole combined span (occupiedRows), not each service alone', () => {
@@ -51,7 +52,7 @@ describe('dispatch held time', () => {
       id, technician_id: null, customer_id: 'cust-2', scheduled_date: MONDAY, window_start: '09:00:00', window_end: '10:00:00',
       estimated_duration_minutes: 60, reservation_service_mix: mix,
     }));
-    expect(rc.heldSpans(pair, TECH, false)[0]).toEqual({ startMin: 540, endMin: 660 });
+    expect(rc.heldSpans(occupiedRows(pair), TECH, false)[0]).toEqual({ startMin: 540, endMin: 660 });
   });
 });
 
@@ -125,6 +126,8 @@ describe('one tech-day', () => {
     const pinned = rc.measureTechDay({ ...open, rows: [a], first: [b] });
     expect(pinned.stops).toBe(2);
     expect(pinned.endMin).toBeGreaterThan(plain.endMin); // b at 1 PM, then a: the day ends later
+    expect(plain.openings.map((o) => o.kind)).toContain('start');
+    expect(pinned.openings.map((o) => o.kind)).not.toContain('start'); // no job goes ahead of the customer en route
   });
 
   test('a schedule block takes its time out of the openings', () => {
@@ -277,8 +280,10 @@ describe('runRouteCheck', () => {
       id, technician_id: null, customer_id: 'cust-2', scheduled_date: '2026-11-20', window_start: '09:00:00', window_end: '10:00:00',
       estimated_duration_minutes: 60, reservation_service_mix: mix,
     }));
-    const { conn, writes } = fakeConn({ occupancy: pair });
+    listOccupiedWindows.mockImplementation(async ({ dateFrom }) => (dateFrom === '2026-11-20' ? occupiedRows(pair) : []));
+    const { conn, writes } = fakeConn();
     await runRouteCheck({ conn, now: NOW });
+    listOccupiedWindows.mockResolvedValue([]);
     const friday = JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-20');
     expect(friday.openings.map((o) => [o.start, o.min])).toEqual([[660, 360]]); // 8-9 is under a job slot; 9-11 is held
   });
@@ -314,6 +319,18 @@ describe('runRouteCheck', () => {
     const today = JSON.parse(writes[0][1].days)[0];
     expect(today).toMatchObject({ stops: 0, van: 'on_site' });
     expect(today.openings[0].start).toBeGreaterThanOrEqual(690);
+  });
+
+  test('a stop done early still holds its booked window; the read is the booking surfaces\' own', async () => {
+    replan.loadDayStops.mockResolvedValue([]);
+    // Booked 10 AM-noon, finished at 10:15: the hour to noon is not room.
+    listOccupiedWindows.mockImplementation(async ({ dateFrom }) => (dateFrom === '2026-11-19' ? [span('d1', TECH, 600, 720)] : []));
+    const { conn, writes } = fakeConn({ progress: [{ id: 'd1', technician_id: TECH, status: 'completed', completed_at: '2026-11-19T15:15:00Z', lat: 27.5, lng: -82.4 }] });
+    await runRouteCheck({ conn, now: NOW });
+    const today = JSON.parse(writes[0][1].days)[0];
+    expect(today.openings[0].start).toBeGreaterThanOrEqual(720);
+    expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({ db: conn, dateFrom: '2026-11-19', dateTo: '2026-11-19' }));
+    listOccupiedWindows.mockResolvedValue([]);
   });
 
   test('two stops en route at once leave today unmeasured', async () => {

@@ -40,8 +40,6 @@ const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
 const { dayDepartureMinutes } = require('../scheduling/departure-time');
-const { occupiedRows } = require('../scheduling/visit-capacity');
-const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { guardedCoordSelects } = require('../scheduling/day-stops');
 
 const TABLE = 'route_check_runs';
@@ -128,27 +126,21 @@ function blindSlots(openings) {
 }
 
 /**
- * Booked spans other rows hold for one technician (pure): an unassigned row's, and any other technician's while
- * tech-blind (scheduling/occupancy.js); each from occupiedRows (a version-2 allocation's combined span).
+ * Booked time that holds one technician (pure), from the booking surfaces' own occupancy read: the technician's own
+ * rows (a stop done early still holds its booked window), unassigned rows, and every other technician's while
+ * tech-blind (scheduling/occupancy.js). Each span is as listOccupiedWindows gives it (a version-2 allocation's
+ * combined span, a live make-room hold's destination hours).
  */
 function heldSpans(occupancy, techId, techBlind) {
   const mine = (r) => r.technician_id != null && String(r.technician_id) === String(techId);
-  const inScope = occupancy.filter((r) => r.window_start && !mine(r) && (r.technician_id == null || techBlind));
-  return occupiedRows(inScope)
+  return occupancy.filter((r) => mine(r) || r.technician_id == null || techBlind)
     .filter((r) => Number.isFinite(r.startMin) && Number.isFinite(r.endMin) && r.endMin > r.startMin)
     .map((r) => ({ startMin: r.startMin, endMin: r.endMin }));
 }
 
-/** Every row holding booked time on a date (completed included, expired holds out), with occupiedRows' fields. */
+/** Every span holding booked time on a date: the offer side's own read (completed rows in, expired holds out). */
 async function loadOccupancy(conn, day) {
-  const { _internals: reorder } = require('../route-reorder');
-  return conn('scheduled_services')
-    .where('scheduled_services.scheduled_date', day)
-    .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-    .whereRaw(reorder.LIVE_HOLD_SQL)
-    .select('scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.customer_id',
-      'scheduled_services.scheduled_date', 'scheduled_services.window_start', 'scheduled_services.window_end',
-      'scheduled_services.estimated_duration_minutes', 'scheduled_services.reservation_service_mix');
+  return require('../scheduling/occupancy').listOccupiedWindows({ db: conn, dateFrom: day, dateTo: day });
 }
 
 /** Why a tech-day cannot be simulated, or null. A stop with no time or no place leaves the day out. */
@@ -160,8 +152,10 @@ function unmeasurable(rows) {
 
 /**
  * One tech-day's openings (pure). rows: the stops still to do, in any order (simulated in promised-window order, the
- * clock baseline), after `first` (the stop the van is driving to now); blocks: the technician's schedule blocks; held:
- * time other rows hold, as intervals; origin: where the van sets off; end: where it returns (the start point).
+ * clock baseline), after `first` (the stop the van is driving to now: no opening before it, since a job there would
+ * go ahead of that customer); blocks: the technician's schedule blocks; held: booked time, as intervals; origin:
+ * where the van sets off; end: where it returns (the start point). The count per opening is the 07:05 notice's own
+ * (close-gaps: whole SLOT_MIN slots), so the two can be compared.
  */
 function measureTechDay({ rows, first = [], blocks, held, origin, end = origin, departureMin, openMin, closeMin }) {
   const all = [...first, ...rows];
@@ -173,7 +167,7 @@ function measureTechDay({ rows, first = [], blocks, held, origin, end = origin, 
   const open = openMin < closeMin
     ? gaps.openBlocks(sim, { departureMin, openMin, closeMin, unavailable: [...blocks, ...held], driveBlocks: serviceBlocks(blocks) })
     : [];
-  const openings = open.filter((b) => b.min >= SLOT_MIN)
+  const openings = open.filter((b) => b.min >= SLOT_MIN && !(first.length && b.kind === 'start'))
     .map((b) => ({ kind: b.kind, start: Math.round(b.startMin), min: Math.round(b.min), slots: Math.floor(b.min / SLOT_MIN) }));
   return {
     stops: all.length,
@@ -305,8 +299,8 @@ async function measureOne(conn, env, { day, techId, rows, progress, occupancy })
   try {
     const own = rows.filter((r) => String(r.technician_id) === techId);
     const blocks = await replan.loadBlocks(conn, day, techId);
-    // Time other rows hold for this technician: the re-plan's whole hours (blockedHoursFor) and their booked spans
-    // (occupiedRows: a version-2 allocation's combined span, completed rows included).
+    // Time held for this technician: the re-plan's whole hours (blockedHoursFor) and every booked span the booking
+    // surfaces count (listOccupiedWindows: completed rows and make-room destinations included).
     const held = [
       ...replan.blockedHoursFor(rows, techId, env.techBlind).map((h) => ({ startMin: h * 60, endMin: h * 60 + 60 })),
       ...heldSpans(occupancy, techId, env.techBlind),
