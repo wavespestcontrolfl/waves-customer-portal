@@ -135,6 +135,32 @@ jest.setTimeout(30000);
     expect((await stored(ordinary)).metadata.repushed_at).toBeDefined();
   });
 
+  // The bell's own quiet decision (payload.pushQuieted) decides, not the call's
+  // marker, which an earlier undelivered pass can leave behind (pre-push audit r17).
+  const decided = (row, quieted) => database('notifications').where({ id: row.id })
+    .update({ metadata: database.raw("jsonb_set(metadata, '{payload,pushQuieted}', ?::jsonb)", [JSON.stringify(quieted)]) });
+
+  test('a bell that says its push went is re-pushed even when its call carries a quiet marker from an earlier pass', async () => {
+    const row = await bell(45);
+    await decided(row, false);
+    await missedCallFor(row, { missed_call_spam_wave: 'repeat_quiet' });
+    expect(await run()).toBe(1);
+    expect((await stored(row)).metadata.repushed_at).toBeDefined();
+  });
+
+  test('a bell that says its push was quieted is never re-pushed, and does not fill the batch, even with no marker on its call', async () => {
+    const quiet = await bell(120);
+    const ordinary = await bell(45);
+    await decided(quiet, true);
+    await decided(ordinary, false);
+    await missedCallFor(quiet);
+    await missedCallFor(ordinary);
+    // limit 1: the older quiet bell would be picked first if it were a candidate.
+    expect(await run({ limit: 1 })).toBe(1);
+    expect((await stored(quiet)).metadata.repushed_at).toBeUndefined();
+    expect((await stored(ordinary)).metadata.repushed_at).toBeDefined();
+  });
+
   test('a call that turns block_quiet between the read and the claim is not re-pushed (callStillMissed)', async () => {
     const row = await bell(45);
     await missedCallFor(row);

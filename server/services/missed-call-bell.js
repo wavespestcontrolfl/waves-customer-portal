@@ -234,9 +234,11 @@ const NOT_ON_LIVE_LEAD_SQL = `NOT EXISTS (SELECT 1 FROM leads ld WHERE ld.delete
 // minute after a hang-up is judged minutes later, when the first call's
 // recording would have landed. Both callers sit in front of a delivery (the
 // ring or the bell), so the read is bounded and its caller fails open.
-function silentHangupsBefore(at, days, checkedAt = new Date()) {
-  return db('call_log')
-    .modify((qb) => whereNotSandboxCall(qb))
+// The conditions apply to a read of call_log with no alias, so an inner read
+// names its own row (the repeat rule's record conditions run it as one).
+function whereSilentHangupBefore(qb, at, days, checkedAt) {
+  return qb
+    .modify((q) => whereNotSandboxCall(q))
     .where('direction', 'inbound')
     .whereNull('customer_id')
     .where('created_at', '>=', new Date(at.getTime() - days * 86400 * 1000))
@@ -255,7 +257,11 @@ function silentHangupsBefore(at, days, checkedAt = new Date()) {
       .orWhere((screened) => screened.whereRaw(FAILED_SCREEN_SQL).where('recording_duration_seconds', '<=', FAILED_SCREEN_SILENT_SECONDS)))
     .whereRaw(calledBackSql({ retire: true }))
     .whereRaw(NOT_ON_CUSTOMER_SLOT_SQL)
-    .whereRaw(NOT_ON_LIVE_LEAD_SQL)
+    .whereRaw(NOT_ON_LIVE_LEAD_SQL);
+}
+
+function silentHangupsBefore(at, days, checkedAt = new Date()) {
+  return db('call_log').modify((qb) => whereSilentHangupBefore(qb, at, days, checkedAt))
     .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true });
 }
 
@@ -384,11 +390,33 @@ function settledSilentSql(checkedAt) {
   return [`(${sql} AND COALESCE(call_log.updated_at, call_log.created_at) < ?)`, [...bindings, new Date(checkedAt.getTime() - VOICEMAIL_GRACE_MS)]];
 }
 
+// The judged call's qualifying history, on a read of call_log with no alias:
+// the number's settled silent hang-ups before the call in the last
+// REPEAT_DAYS, the carrier fully attested. The history read and the record
+// conditions the stamp applies share it (pre-push audit r17).
+function wherePriorSilentHangup(qb, row, key, at, checkedAt) {
+  const [settledSql, settledBindings] = settledSilentSql(checkedAt);
+  return qb.modify((q) => whereSilentHangupBefore(q, at, REPEAT_DAYS, checkedAt))
+    .whereNot('call_log.id', row.id)
+    .whereRaw(`${CALLER_KEY} = ?`, [key])
+    .whereRaw("call_log.metadata->>'stir_verstat' = ?", [FULL_ATTESTATION])
+    .whereRaw(settledSql, settledBindings);
+}
+
+// A history call on a GBP line other than the judged call's: [sql, bindings].
+function otherGbpLineSql(row) {
+  const lines = gbpLines().filter((d) => d !== String(row.to_phone || '').replace(/\D/g, '').slice(-10));
+  return lines.length ? [`${LAST10_SQL('call_log.to_phone')} IN (${lines.map(() => '?').join(', ')})`, lines] : ['false', []];
+}
+
 // The number's whole record, as conditions on the judged call's own row. The
 // check's read and the repeat quiet stamp's update both apply them, so nothing
 // the check read can change before the stamp: a change that lands in between
 // leaves the stamp matching no row, and the push goes (pre-push audit r13,
 // r14). Bounded like the history read (14 days). The conditions:
+//  - the history that qualified the call still holds: a prior settled silent
+//    hang-up on another GBP line, or REPEAT_MIN_PRIOR of them on any line
+//    (wherePriorSilentHangup; pre-push audit r17);
 //  - the judged call is still a silent call (a late write can mark it
 //    answered after the bell read it; pre-push audit r10), with no grace test:
 //    the bell itself rings 5 minutes after the terminal status;
@@ -404,17 +432,20 @@ function settledSilentSql(checkedAt) {
 //    contactState reads contact; pre-push audit r11);
 //  - in the unified inbox, which the SMS webhook writes first and the text log
 //    only as best effort (pre-push audit r14), nothing in the window but
-//    mirrors of silent calls and our text-back. A message is the number's by
-//    its own SMS address, else its thread's phone, or as the mirror of one of
-//    the number's calls (by the call's sid): promoting an unknown thread to a
-//    customer clears the thread's phone and keeps both (messageOfNumber;
-//    pre-push audit r16). A mirror of a silent call holds only the columns
+//    mirrors of silent calls and our text-back, on threads linked to no
+//    customer. A message is the number's by its own SMS address, else its
+//    thread's phone; a call's mirror is found from the number's calls by the
+//    call's sid, since a voice mirror carries no phone and promoting an
+//    unknown thread to a customer clears the thread's (pre-push audit r16).
+//    Both reads stay in the window and start from indexed columns where one
+//    exists: the calls by created_at, their mirrors by twilio_sid (pre-push
+//    audit r17). A mirror of a silent call holds only the columns
 //    the matched numbers' mirrors of the 90 days to 2026-11-19 hold
 //    (SILENT_MIRROR_COLUMNS; body, recording, duration and the rest NULL), no
 //    media, the voicemail or no answer, a customer author, and only a silent
 //    call's metadata keys: a transcript in the body or audio in the media is
-//    a message (pre-push audit r15). And no conversation linked to a customer
-//    has the number's phone or holds a message of the number;
+//    a message (pre-push audit r15). And no thread with the number's phone is
+//    linked to a customer, at any time;
 //  - the number is on no customer slot and no live lead, as in the history
 //    read: staff can save the caller between the check and the stamp
 //    (pre-push audit r15).
@@ -437,16 +468,18 @@ const INBOX_SILENT_SQL = "((m.channel = 'voice' AND m.direction = 'inbound'"
 // address first, then its thread's, as admin-alert-contact-witnesses.js and
 // sms-response-policy.js read it.
 const MESSAGE_PEER_SQL = phoneKeySql("COALESCE(NULLIF(m.metadata->>'sms_contact_phone', ''), NULLIF(c.contact_phone, ''))");
-// A message of the number: by that phone, or as the mirror of one of the
-// number's calls (a voice mirror carries the call's sid, not a phone).
-const messageOfNumber = (key) => [`(${MESSAGE_PEER_SQL} = ?`
-  + " OR (m.channel = 'voice' AND m.twilio_sid IN (SELECT vc.twilio_call_sid FROM call_log vc"
-  + ` WHERE ${phoneKeySql('vc.from_phone')} = ? OR ${phoneKeySql('vc.to_phone')} = ?)))`, [key, key, key]];
-function silentRecordClauses(row, key, since, checkedAt) {
+function silentRecordClauses(row, key, at, checkedAt) {
+  const since = new Date(at.getTime() - REPEAT_DAYS * 86400 * 1000);
   const [settledSql, settledBindings] = settledSilentSql(checkedAt);
+  const [otherLineSql, otherLines] = otherGbpLineSql(row);
   const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+  const priorSilent = (qb) => wherePriorSilentHangup(qb.select(1).from('call_log'), row, key, at, checkedAt);
   return (qb) => qb
     .whereRaw(...silentCallSql())
+    // EXISTS with an OFFSET: at least REPEAT_MIN_PRIOR rows.
+    .where((qualified) => qualified
+      .whereExists(function crossLine() { priorSilent(this).whereRaw(otherLineSql, otherLines); })
+      .orWhereExists(function enough() { priorSilent(this).offset(REPEAT_MIN_PRIOR - 1); }))
     .whereNotExists(function staffPhone() {
       this.select(1).from('technicians').whereRaw(`${phoneKeySql('technicians.phone')} = ?`, [key]);
     })
@@ -471,17 +504,23 @@ function silentRecordClauses(row, key, since, checkedAt) {
     .whereNotExists(function inboxMessage() {
       this.select(1).from('messages as m').join('conversations as c', 'c.id', 'm.conversation_id')
         .where('m.created_at', '>=', since)
-        .whereRaw(...messageOfNumber(key))
-        .whereRaw(`${INBOX_SILENT_SQL} IS NOT TRUE`);
+        .whereRaw(`${MESSAGE_PEER_SQL} = ?`, [key])
+        .whereRaw(`(${INBOX_SILENT_SQL} AND c.customer_id IS NULL) IS NOT TRUE`);
+    })
+    .whereNotExists(function callMirror() {
+      this.select(1).from('call_log as vc')
+        .join('messages as m', 'm.twilio_sid', 'vc.twilio_call_sid')
+        .join('conversations as c', 'c.id', 'm.conversation_id')
+        .where('vc.created_at', '>=', since)
+        .where((number) => number
+          .whereRaw(`${phoneKeySql('vc.from_phone')} = ?`, [key])
+          .orWhereRaw(`${phoneKeySql('vc.to_phone')} = ?`, [key]))
+        .whereRaw(`(${INBOX_SILENT_SQL} AND c.customer_id IS NULL) IS NOT TRUE`);
     })
     .whereNotExists(function linkedConversation() {
       this.select(1).from('conversations as c')
         .whereNotNull('c.customer_id')
-        .where((linked) => linked
-          .whereRaw(`${phoneKeySql('c.contact_phone')} = ?`, [key])
-          .orWhereExists(function heldMessage() {
-            this.select(1).from('messages as m').whereRaw('m.conversation_id = c.id').whereRaw(...messageOfNumber(key));
-          }));
+        .whereRaw(`${phoneKeySql('c.contact_phone')} = ?`, [key]);
     })
     .whereRaw(NOT_ON_CUSTOMER_SLOT_SQL)
     .whereRaw(NOT_ON_LIVE_LEAD_SQL);
@@ -492,8 +531,7 @@ function silentRecordClauses(row, key, since, checkedAt) {
 // database; pre-push audit r11) is never a robocaller.
 async function recordIsSilent(row, key, at, checkedAt) {
   if (require('../config/twilio-numbers').isInternalNumber(`+${key}`)) return null;
-  const since = new Date(at.getTime() - REPEAT_DAYS * 86400 * 1000);
-  const clauses = silentRecordClauses(row, key, since, checkedAt);
+  const clauses = silentRecordClauses(row, key, at, checkedAt);
   const judged = await db('call_log').where('id', row.id).modify(clauses)
     .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true }).first('id');
   return judged ? clauses : null;
@@ -509,18 +547,13 @@ async function repeatSilentCaller(row) {
   if (!(plus ? /^1[2-9]\d{9}$/ : /^1?[2-9]\d{9}$/).test(raw)) return null;
   const key = `1${raw.slice(-10)}`;
   const at = new Date(row.created_at || Date.now());
-  const otherLines = gbpLines().filter((d) => d !== String(row.to_phone || '').replace(/\D/g, '').slice(-10));
-  const otherLineSql = otherLines.length ? `${LAST10_SQL('to_phone')} IN (${otherLines.map(() => '?').join(', ')})` : 'false';
   const checkedAt = new Date();
   // The shared read also admits a short recording (0 s included, with no
   // grace) and a failed screen; the settled silent test admits neither.
-  const [settledSql, settledBindings] = settledSilentSql(checkedAt);
-  const found = await silentHangupsBefore(at, REPEAT_DAYS, checkedAt)
-    .whereNot('id', row.id)
-    .whereRaw(`${CALLER_KEY} = ?`, [key])
-    .whereRaw("metadata->>'stir_verstat' = ?", [FULL_ATTESTATION])
-    .whereRaw(settledSql, settledBindings)
+  const [otherLineSql, otherLines] = otherGbpLineSql(row);
+  const found = await db('call_log').modify((qb) => wherePriorSilentHangup(qb, row, key, at, checkedAt))
     .select(db.raw('COUNT(*) AS n'), db.raw(`COALESCE(bool_or(${otherLineSql}), false) AS other_line`, otherLines))
+    .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
     .first();
   if (!(found?.other_line || Number(found?.n || 0) >= REPEAT_MIN_PRIOR)) return null;
   return recordIsSilent(row, key, at, checkedAt);
@@ -789,10 +822,10 @@ async function quietRobodialerPush(row, fenced) {
     else quietAs = quietAs || rule.quiet;
   }
   if (quietAs) stamps.missed_call_spam_wave = quietAs;
-  // This pass's decision replaces one an earlier pass of the call left: a pass
-  // whose delivery failed, or that died before its bell, must not leave its
-  // quiet marker on a call a later pass pushes, since the re-push skips a call
-  // by that marker (pre-push audit r16). A failed clear never holds the push.
+  // This pass's decision replaces one an earlier pass of the call left (its
+  // delivery failed, or it died before its bell), so the call's marker is the
+  // latest decision (pre-push audit r16). The re-push reads each bell's own
+  // decision (payload.pushQuieted), so a failed clear changes no push (r17).
   await fenced().whereRaw("metadata->>'missed_call_spam_wave' IS NOT NULL")
     .update({ metadata: db.raw("metadata - 'missed_call_spam_wave'") }).catch(() => 0);
   if (!Object.keys(stamps).length) return false;
@@ -1049,6 +1082,10 @@ async function ringMissedCallIfUnanswered(callSid) {
         phone: row.from_phone,
         callLogId: row.id,
         at: row.created_at,
+        // This bell's own quiet decision. The re-push reads it from the bell row,
+        // so a marker an earlier pass left on the call never decides for this
+        // bell (pre-push audit r17).
+        pushQuieted: Boolean(quiet),
         // GATE_MISSED_CALL_ALERT_DETAIL: line, call length, next visit; {} with the gate off.
         ...(await require('./missed-call-alert-detail').detailPayload(row)),
       }, {

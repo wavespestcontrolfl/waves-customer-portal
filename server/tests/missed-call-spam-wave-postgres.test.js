@@ -105,6 +105,7 @@ jest.setTimeout(30000);
     expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
     expect(triggerNotification).toHaveBeenCalledTimes(1);
     const { beforePush } = triggerNotification.mock.calls[0][2];
+    expect(triggerNotification.mock.calls[0][1].pushQuieted).toBe(true);
     expect(await beforePush({ dispatching: false })).toBe(false);
     expect(await beforePush({ dispatching: true })).toBe(false);
     const { metadata } = await stored(row);
@@ -623,6 +624,8 @@ jest.setTimeout(30000);
       expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
       const [, payload, opts] = triggerNotification.mock.calls[0];
       expect(payload.name).toBe('likely robocall (GBP — Parrish)');
+      // The bell row carries its own decision, which the re-push reads (pre-push audit r17).
+      expect(payload.pushQuieted).toBe(true);
       expect(await opts.beforePush({ dispatching: true })).toBe(false);
       const { metadata } = await stored(row);
       expect(metadata.missed_call_spam_wave).toBe('repeat_quiet');
@@ -635,6 +638,24 @@ jest.setTimeout(30000);
     // stamp, leaves the stamp unwritten, and the push goes (pre-push audit r13,
     // r14). The stamp write below runs the late change first, then the update.
     const LINKED_CUSTOMER = '00000000-0000-4000-8000-000000000611';
+    // A lease-fenced write that runs `lateWrite` once, before the first fenced
+    // write of the pass: every read of the check is done by then, the stamp
+    // still to come. landed() says whether it ran.
+    const fencedAfter = (row, lateWrite) => {
+      let pending = lateWrite;
+      let ran = false;
+      const fenced = () => {
+        const stamp = database('call_log').where({ id: row.id });
+        const run = stamp.then.bind(stamp);
+        stamp.then = (resolve, reject) => {
+          const write = pending;
+          pending = null;
+          return Promise.resolve(write && write()).then(() => { ran = ran || Boolean(write); return run(resolve, reject); }, reject);
+        };
+        return stamp;
+      };
+      return { fenced, landed: () => ran };
+    };
     test.each([
       ['a staff note on the judged call', (row) => database('call_log').where({ id: row.id }).update({ notes: 'called back, it was a person' })],
       ['a customer link on the judged call', (row) => database('call_log').where({ id: row.id }).update({ customer_id: LINKED_CUSTOMER })],
@@ -652,22 +673,31 @@ jest.setTimeout(30000);
       const inserted = judged();
       await database('call_log').insert(inserted);
       const row = await stored(inserted);
-      // The late write runs once, before the first lease-fenced write of the
-      // pass: every read of the check is done by then, the stamp still to come.
-      let landed = false;
-      let pending = lateWrite;
-      const fenced = () => {
-        const stamp = database('call_log').where({ id: row.id });
-        const run = stamp.then.bind(stamp);
-        stamp.then = (resolve, reject) => {
-          const write = pending;
-          pending = null;
-          return Promise.resolve(write && write(row)).then(() => { landed = landed || Boolean(write); return run(resolve, reject); }, reject);
-        };
-        return stamp;
-      };
+      const { fenced, landed } = fencedAfter(row, () => lateWrite(row));
       expect(await quietRobodialerPush(row, fenced)).toBe(false);
-      expect(landed).toBe(true);
+      expect(landed()).toBe(true);
+      expect((await stored(row)).metadata.missed_call_spam_wave).toBeUndefined();
+    });
+
+    // The stamp applies the qualifying history too: history that stops
+    // qualifying after the check leaves no stamp (pre-push audit r17).
+    test.each([
+      ['one of the two qualifying hang-ups, deleted', 'same line', (history) => database('call_log').where({ id: history[0].id }).del()],
+      ['one of the two qualifying hang-ups, no longer fully attested', 'same line', (history) => database('call_log').where({ id: history[0].id }).update({ metadata: { stir_verstat: 'TN-Validation-Passed-B' } })],
+      ['the only qualifying hang-up, on another GBP line, deleted', 'other line', (history) => database('call_log').where({ id: history[0].id }).del()],
+    ])('%s after the check leaves the push alone (%s; pre-push audit r17)', async (label, lines, lateWrite) => {
+      isEnabled.mockImplementation((name) => name === 'missedCallSpamRepeat' || name === 'missedCallUnknownCallers');
+      const history = lines === 'same line'
+        ? [prior(CALLER, 60 * 24 * 3), prior(CALLER, 60 * 24)]
+        : [prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE })];
+      await database('call_log').insert(history);
+      const inserted = judged();
+      await database('call_log').insert(inserted);
+      const row = await stored(inserted);
+      expect(await repeat(row)).toBe(true);
+      const { fenced, landed } = fencedAfter(row, () => lateWrite(history));
+      expect(await quietRobodialerPush(row, fenced)).toBe(false);
+      expect(landed()).toBe(true);
       expect((await stored(row)).metadata.missed_call_spam_wave).toBeUndefined();
     });
 
@@ -698,8 +728,11 @@ jest.setTimeout(30000);
       await inbox(CALLER, { channel: 'sms', direction: 'inbound', body: 'who is this' });
       reports({ bellWritten: true, push: { sent: 1, subscriptions: 1 } });
       expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
+      expect(triggerNotification.mock.calls[0][1].pushQuieted).toBe(true);
       const [, payload, opts] = triggerNotification.mock.calls[1];
       expect(payload.name).toBe('unknown caller (GBP — Parrish)');
+      // The bell this pass writes says its push went: the re-push reads that (pre-push audit r17).
+      expect(payload.pushQuieted).toBe(false);
       expect(await opts.beforePush({ dispatching: true })).toBe(true);
       ({ metadata } = await stored(row));
       expect(metadata.missed_call_spam_wave).toBeUndefined();
@@ -719,6 +752,7 @@ jest.setTimeout(30000);
       const [, payload, opts] = triggerNotification.mock.calls[0];
       expect(opts.pushOnly).toBe(true);
       expect(payload.name).toBe('unknown caller (GBP — Parrish)');
+      expect(payload.pushQuieted).toBe(false);
       expect(await opts.beforePush({ dispatching: true })).toBe(true);
       const { metadata } = await stored(row);
       expect(metadata.missed_call_spam_wave).toBeUndefined();
@@ -735,6 +769,7 @@ jest.setTimeout(30000);
       await ringMissedCallIfUnanswered(row.twilio_call_sid);
       const [, payload, opts] = triggerNotification.mock.calls[0];
       expect(payload.name).toBe('unknown caller (GBP — Parrish)');
+      expect(payload.pushQuieted).toBe(false);
       expect(await opts.beforePush({ dispatching: true })).toBe(true);
       const { metadata } = await stored(row);
       expect(metadata.missed_call_spam_wave).toBeUndefined();
@@ -1002,7 +1037,7 @@ jest.setTimeout(30000);
       expect(await repeat(row)).toBe(false);
     });
 
-    test('silent call mirrors and our text-back in the unified inbox leave a repeat; an older inbox text, and a customer thread with other numbers only, do not count (pre-push audit r14, r16)', async () => {
+    test('silent call mirrors and our text-back in the unified inbox leave a repeat; an older text, on any thread, and a customer thread with other numbers only do not count (pre-push audit r14, r16, r17)', async () => {
       const earlier = prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE });
       await database('call_log').insert(earlier);
       const row = judged();
@@ -1017,11 +1052,14 @@ jest.setTimeout(30000);
         delivery_status: 'no-answer', twilio_sid: `CA${randomUUID().replaceAll('-', '')}`, is_read: false, media: '[]',
         metadata: { domain: 'x', location: 'GBP — Parrish', numberType: 'mobile' }, created_at: ago(minutes), updated_at: ago(minutes), ...extra,
       });
-      // A customer's thread holding another number's text and another call's mirror.
+      // A customer's thread holding another number's text and another call's
+      // mirror, and a text of the number from before the window: every inbox
+      // read stays in the window, as the text log read does (pre-push audit r17).
       const customerThread = randomUUID();
       await database('conversations').insert({ id: customerThread, channel: 'sms', customer_id: OTHER_CUSTOMER, unknown_contact: false, created_at: new Date() });
       await database('messages').insert([
         { id: randomUUID(), conversation_id: customerThread, channel: 'sms', direction: 'inbound', body: 'see you Tuesday', metadata: { sms_contact_phone: '+19415550199' }, created_at: ago(30) },
+        { id: randomUUID(), conversation_id: customerThread, channel: 'sms', direction: 'inbound', body: 'an old reply', metadata: { sms_contact_phone: CALLER }, created_at: ago(60 * 24 * 15) },
         { id: randomUUID(), conversation_id: customerThread, channel: 'voice', direction: 'inbound', answered_by: 'human', twilio_sid: `CA${randomUUID().replaceAll('-', '')}`, created_at: ago(40) },
       ]);
       await database('messages').insert([
