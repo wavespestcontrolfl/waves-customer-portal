@@ -23,6 +23,7 @@ let serverIgnores = [];
 let hold = null;
 let jobCardOff = false;
 let jobCardDown = false;
+let jobCardEmpty = false;
 let holdCard = null;
 const idsOf = (url) => (new URL(url, "http://x").searchParams.get("selectedConditionalProductIds") || "").split(",").filter(Boolean);
 
@@ -89,6 +90,7 @@ beforeEach(() => {
   hold = null;
   jobCardOff = false;
   jobCardDown = false;
+  jobCardEmpty = false;
   holdCard = null;
   vi.stubGlobal("fetch", vi.fn((url) => {
     const u = String(url);
@@ -96,6 +98,7 @@ beforeEach(() => {
     if (holdCard && u.includes(`/protocols/job-card/${service.id}`)) return holdCard.promise.then(() => reply(fixture(u)));
     // A safety-data outage: the visit's job card read answers 503.
     if (jobCardDown && u.includes(`/protocols/job-card/${service.id}`)) return reply({ error: "Safety data unavailable" }, 503);
+    if (jobCardEmpty && u.includes(`/protocols/job-card/${service.id}`)) return reply({});
     // A held read of the job card or the plan with ticks: the panel waits on it, as on a slow network.
     if (hold && /\/(protocols\/job-card|treatment-plans)\/[^/?]+\?/.test(u)) return hold.promise.then(() => reply(fixture(u)));
     return reply(fixture(u));
@@ -175,6 +178,14 @@ describe("the legacy Lawn tab", () => {
     await openLawnTab();
     expect(await screen.findByText("Legacy mix product")).toBeInTheDocument();
     expect(screen.queryByText("Amounts show on the Job tab.")).toBeNull();
+  });
+
+  it("an answer with no enabled flag (an empty 200) is no answer: the Lawn tab shows no mix amounts", async () => {
+    jobCardEmpty = true;
+    await openLawnTab();
+    expect(await screen.findByText("Amounts show once the job card loads.")).toBeInTheDocument();
+    expect(screen.queryByText("Legacy mix product")).toBeNull();
+    expect(screen.queryByText(/7 fl oz|14 fl oz/)).toBeNull();
   });
 
   it("with no job card answer (a failed read), the Lawn tab shows no mix amounts and the Plan tab does not send the tech there", async () => {

@@ -7718,15 +7718,19 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
     adminFetch(`/admin/protocols/job-card/${service.id}${selectedQuery}`)
       .then((data) => {
         if (cancelled) return;
+        // Only the server's literal word opens a path: `enabled: true` with a card, or `enabled: false` (the Job tab is
+        // off, the one answer that shows the legacy Lawn tab's mix amounts). Any other answer fails closed below.
+        if (typeof data?.enabled !== "boolean") throw new Error("Job card answer has no enabled flag");
         jobCardShownFor.current = service.id;
         setJobCardQuery(selectedQuery);
-        setJobCard(data && data.enabled ? data : { enabled: false });
+        setJobCard(data.enabled ? data : { enabled: false });
       })
       .catch(() => {
         if (cancelled) return;
-        // A failed request (503 safety-data outage, network) keeps the tab
-        // and shows its unavailable state — never a silent fall-back to
-        // the legacy view. Only a successful { enabled: false } hides it.
+        // A failed request (503 safety-data outage, network, an answer with
+        // no enabled flag) keeps the tab and shows its unavailable state —
+        // never a silent fall-back to the legacy view. Only a successful
+        // { enabled: false } hides it.
         jobCardShownFor.current = null;
         setJobCard(null);
         setJobCardError(true);
