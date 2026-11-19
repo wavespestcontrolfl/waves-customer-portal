@@ -2616,14 +2616,19 @@ router.post('/messages/read', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/communications/messages/read-all — the inbox's Mark all read (owner 2026-11-19): every unread
-// inbound text the inbox can show up to readBefore (the newest text the caller's list showed), through the one read
+// POST /api/admin/communications/messages/read-all — the inbox's Mark all read (owner 2026-11-19), and with
+// contactPhone a row's Mark read (that sender only): every unread inbound text the inbox can show up to readBefore (the newest text the caller's list showed), through the one read
 // writer. Internal admin-phone traffic stays out, as in /log. A technician reads only texts from the customers on its
 // own route.
 router.post('/messages/read-all', async (req, res, next) => {
   try {
     const readBefore = req.body?.readBefore ? new Date(req.body.readBefore) : null;
     if (!readBefore || Number.isNaN(readBefore.getTime())) return res.status(400).json({ error: 'readBefore required' });
+    // contactPhone: one inbox row's Mark read (that sender's texts only).
+    const contactPhone = req.body?.contactPhone ?? null;
+    if (contactPhone !== null && (typeof contactPhone !== 'string' || !phoneIdentityKey(contactPhone))) {
+      return res.status(400).json({ error: 'contactPhone must be a phone number' });
+    }
     const { markAllInboundSmsRead } = require('../services/inbound-sms-read');
     const { updated, notificationsCleared } = await markAllInboundSmsRead({
       readBefore,
@@ -2631,6 +2636,7 @@ router.post('/messages/read-all', async (req, res, next) => {
       role: req.techRole,
       customerIds: isTechnicianRequest(req) ? technicianCustomerIdsSubquery(req, db) : null,
       excludePhones: ADMIN_PHONES,
+      contactPhone,
     });
     res.json({ success: true, updated, notificationsCleared });
   } catch (err) { next(err); }

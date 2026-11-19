@@ -251,9 +251,13 @@ const LIST_READ_UNDO_MS = 5000;
 
 // Does a list read cover this loaded text? Mark all read covers every inbound
 // text up to its boundary except recruiting replies and blocked senders (the
-// server leaves both unread); a row's Mark read covers that row's texts.
+// server leaves both unread); a row's Mark read covers that sender's texts up
+// to the row's newest one (a row with no phone: its loaded texts).
 function pendingReadCovers(pending, m) {
   if (!pending || m.direction !== "inbound") return false;
+  if (pending.senderKey) {
+    return smsMessageThreadKey(m) === pending.senderKey && new Date(m.createdAt) <= new Date(pending.readBefore);
+  }
   if (pending.all) {
     return !String(m.messageType || "").startsWith("job_")
       && !pending.blockedKeys?.has(smsMessageThreadKey(m))
@@ -1780,14 +1784,17 @@ export function SmsTab({
     setSendingReads((prev) => [...prev, pending]);
     setPendingRead((current) => (current === pending ? null : current));
     try {
-      if (pending.all) {
+      if (pending.all || pending.senderKey) {
+        // A row's sender read covers that sender's older texts on pages not loaded.
         await adminFetch("/admin/communications/messages/read-all", {
           method: "POST",
           keepalive,
-          body: JSON.stringify({ readBefore: pending.readBefore }),
+          body: JSON.stringify(pending.senderKey
+            ? { readBefore: pending.readBefore, contactPhone: pending.contactPhone }
+            : { readBefore: pending.readBefore }),
         });
       } else {
-        // The row's own texts only: a customer's two phones can share one conversation.
+        // A row with no phone: its loaded texts only.
         await adminFetch("/admin/communications/messages/read", {
           method: "POST",
           keepalive,
@@ -1829,9 +1836,16 @@ export function SmsTab({
     setPendingRead(null);
   };
   const markThreadReadFromList = (thread) => {
-    const { unreadIds } = threadReadScope(thread);
+    const { unreadIds, readBefore } = threadReadScope(thread);
     if (!unreadIds.length) return;
-    startListRead({ messageIds: unreadIds, label: "Marked read" });
+    // The row is one sender: read by that phone (not the conversation, which a
+    // customer's second phone can share), up to the row's newest text.
+    const senderKey = smsThreadKey(thread.contactPhone);
+    if (senderKey !== "unknown" && readBefore) {
+      startListRead({ senderKey, contactPhone: thread.contactPhone, readBefore, label: "Marked read" });
+    } else {
+      startListRead({ messageIds: unreadIds, label: "Marked read" });
+    }
   };
   const markAllReadFromList = () => {
     // The cutoff comes from the whole list only, never from search or Unanswered results still on screen.

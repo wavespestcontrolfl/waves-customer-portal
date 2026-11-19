@@ -150,6 +150,12 @@ describe('routes', () => {
   test('POST /messages/read-all needs a boundary; a technician reads only its own customers, an admin every text', async () => {
     expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', {})).status).toBe(400);
     expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: 'nope' })).status).toBe(400);
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: new Date().toISOString(), contactPhone: 'front desk' })).status).toBe(400);
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: new Date().toISOString(), contactPhone: 4155550100 })).status).toBe(400);
+    expect(mockMarkAllRead).not.toHaveBeenCalled();
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: new Date().toISOString(), contactPhone: '+19415550100' })).status).toBe(200);
+    expect(mockMarkAllRead).toHaveBeenLastCalledWith(expect.objectContaining({ contactPhone: '+19415550100' }));
+    mockMarkAllRead.mockClear();
     expect(mockMarkAllRead).not.toHaveBeenCalled();
     const readBefore = '2026-11-19T12:00:00.000Z';
     const tech = await call('POST', '/api/admin/communications/messages/read-all', 'tech', { readBefore });

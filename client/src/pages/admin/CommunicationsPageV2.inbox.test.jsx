@@ -1188,15 +1188,15 @@ it("Mark read on a row clears the dot at once, writes 5 s later, and Undo takes 
   fireEvent.click(screen.getByRole("button", { name: "Undo" }));
   expect(screen.getByLabelText("Unread")).toBeInTheDocument();
   await tick(6000);
-  expect(readPosts("/messages/read")).toHaveLength(0);
+  expect(readPosts("/messages/read-all")).toHaveLength(0);
 
   fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
   await tick(4900);
-  expect(readPosts("/messages/read")).toHaveLength(0);
+  expect(readPosts("/messages/read-all")).toHaveLength(0);
   await tick(200);
-  const [[, init]] = readPosts("/messages/read");
-  // The row's own texts only: a customer's two phones can share one conversation.
-  expect(JSON.parse(init.body)).toEqual({ messageIds: ["a"] });
+  const [[, init]] = readPosts("/messages/read-all");
+  // The row is one sender: its phone and newest text, so its older texts on pages not loaded are read too.
+  expect(JSON.parse(init.body)).toEqual({ readBefore: "2024-07-01T12:00:00Z", contactPhone: "+19415550100" });
   expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();
   expect(screen.queryByRole("status")).not.toBeInTheDocument();
 });
@@ -1210,9 +1210,9 @@ it("a second Mark read sends the first one at once", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
   fireEvent.click(screen.getByRole("button", { name: "Mark +19415550101 read" }));
   await tick(0);
-  expect(readPosts("/messages/read").map(([, init]) => JSON.parse(init.body).messageIds)).toEqual([["a"]]);
+  expect(readPosts("/messages/read-all").map(([, init]) => JSON.parse(init.body).contactPhone)).toEqual(["+19415550100"]);
   await tick(5000);
-  expect(readPosts("/messages/read").map(([, init]) => JSON.parse(init.body).messageIds)).toEqual([["a"], ["b"]]);
+  expect(readPosts("/messages/read-all").map(([, init]) => JSON.parse(init.body).contactPhone)).toEqual(["+19415550100", "+19415550101"]);
 });
 
 it("Mark all read reads every text up to the newest loaded one, and only shows on the whole list", async () => {
@@ -1238,7 +1238,7 @@ it("Mark all read reads every text up to the newest loaded one, and only shows o
 it("a failed list read says so and the text stays unread", async () => {
   messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
   const okFetch = fetch.getMockImplementation();
-  fetch.mockImplementation(async (url, init) => (String(url).endsWith("/messages/read") && init?.method === "POST"
+  fetch.mockImplementation(async (url, init) => (String(url).endsWith("/messages/read-all") && init?.method === "POST"
     ? response({ error: "Unavailable" }, 503)
     : okFetch(url, init)));
   setup(); await tick();
@@ -1253,20 +1253,20 @@ it("leaving the inbox inside the 5 s sends the read instead of dropping it", asy
   const view = setup(); await tick();
   fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
   view.unmount(); await tick(0);
-  expect(readPosts("/messages/read")).toHaveLength(1);
+  expect(readPosts("/messages/read-all")).toHaveLength(1);
 });
 
 it("Undo ends when the write starts, and the dot stays hidden while the write is out", async () => {
   messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
   let answer;
   const okFetch = fetch.getMockImplementation();
-  fetch.mockImplementation(async (url, init) => (String(url).endsWith("/messages/read") && init?.method === "POST"
+  fetch.mockImplementation(async (url, init) => (String(url).endsWith("/messages/read-all") && init?.method === "POST"
     ? new Promise((resolve) => { answer = () => resolve(response({ success: true })); })
     : okFetch(url, init)));
   setup(); await tick();
   fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
   await tick(5000);
-  expect(readPosts("/messages/read")).toHaveLength(1);
+  expect(readPosts("/messages/read-all")).toHaveLength(1);
   expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
   expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();
   await act(async () => { answer(); });
@@ -1315,12 +1315,27 @@ it("closing or reloading the tab inside the Undo window sends the waiting read w
   messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
   setup(); await tick();
   fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
-  expect(readPosts("/messages/read")).toHaveLength(0);
+  expect(readPosts("/messages/read-all")).toHaveLength(0);
   await act(async () => { window.dispatchEvent(new Event("pagehide")); });
-  const posts = readPosts("/messages/read");
+  const posts = readPosts("/messages/read-all");
   expect(posts).toHaveLength(1);
   expect(posts[0][1]).toMatchObject({ method: "POST", keepalive: true });
-  expect(JSON.parse(posts[0][1].body)).toEqual({ messageIds: ["a"] });
+  expect(JSON.parse(posts[0][1].body)).toEqual({ readBefore: "2024-07-01T12:00:00Z", contactPhone: "+19415550100" });
   await tick(5000);
-  expect(readPosts("/messages/read")).toHaveLength(1);
+  expect(readPosts("/messages/read-all")).toHaveLength(1);
+});
+
+it("a row's Mark read leaves another sender's dot, and Undo brings the row's dot back", async () => {
+  messages = [
+    { ...inbound("a", "Please check the gate"), isRead: false },
+    { ...inbound("a2", "Also the side door", "+19415550100"), isRead: false, createdAt: "2024-06-30T12:00:00Z" },
+    { ...inbound("b", "Another request", "+19415550101"), isRead: false },
+  ];
+  setup(); await tick();
+  expect(screen.getAllByLabelText("Unread")).toHaveLength(2);
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  expect(screen.getAllByLabelText("Unread")).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "Mark +19415550101 read" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+  expect(screen.getAllByLabelText("Unread")).toHaveLength(2);
 });

@@ -208,4 +208,25 @@ postgres('public SMS needs-response count (PostgreSQL)', () => {
     expect(await markInboundSmsRead({ messageIds: [otherText], role: 'technician', customerIds: scope() })).toEqual({ updated: 0, notificationsCleared: 0 });
     expect((await readIds()).has(otherText)).toBe(false);
   });
+
+  test("a row's Mark read reads that sender on every line, never a second phone sharing the thread; a digitless block hides no contactless text", async () => {
+    await readColumns();
+    const customerId = randomUUID();
+    await mockPg('customers').insert({ id: customerId, phone: '+19415550120' });
+    const fromPrimary = await text('from the primary phone', { phone: '+19415550120', customerId, sid: 'SM-primary', createdAt: '2026-11-19T11:30:00Z' });
+    const fromSecond = await text('from the second phone', { phone: '+19415550120', customerId, sid: 'SM-second-phone', createdAt: '2026-11-19T11:20:00Z' });
+    await mockPg('sms_log').insert({ id: randomUUID(), customer_id: customerId, direction: 'inbound', from_phone: '+19415550121', to_phone: '+19415550190', twilio_sid: 'SM-second-phone', created_at: '2026-11-19T11:20:00Z' });
+    const otherLine = await text('older, on another business line', { phone: '+19415550120', ours: '+19415550191', createdAt: '2026-11-01T09:00:00Z' });
+    const contactless = await text('no phone on the thread', { phone: null, createdAt: '2026-11-19T10:00:00Z' });
+    await mockPg('blocked_numbers').insert({ id: randomUUID(), number: 'anonymous' });
+
+    expect((await markAllInboundSmsRead({ readBefore: new Date('2026-11-19T11:30:00Z'), role: 'admin', contactPhone: '+19415550120' })).updated).toBe(2);
+    let read = await readIds();
+    expect([fromPrimary, otherLine, fromSecond, contactless].map((id) => read.has(id))).toEqual([true, true, false, false]);
+
+    expect((await markAllInboundSmsRead({ readBefore: new Date('2026-11-19T11:30:00Z'), role: 'admin' })).updated).toBe(2);
+    read = await readIds();
+    expect([fromSecond, contactless].map((id) => read.has(id))).toEqual([true, true]);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
 });

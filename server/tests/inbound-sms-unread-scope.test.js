@@ -2,6 +2,7 @@
 const mockQueries = [];
 let mockCountRows = [];
 let mockPluck = () => [];
+let mockDistinct = () => [];
 jest.mock('../models/db', () => {
   const knex = require('knex')({ client: 'pg' });
   const db = (table) => {
@@ -11,7 +12,7 @@ jest.mock('../models/db', () => {
       mockQueries.push(compiled);
       const result = compiled.method === 'update' ? 0
         : compiled.method === 'pluck' ? mockPluck(compiled)
-          : (compiled.sql.startsWith('select distinct') ? [] : { conversations: 2, messages: 5 });
+          : (compiled.sql.startsWith('select distinct') ? mockDistinct(compiled) : { conversations: 2, messages: 5 });
       return Promise.resolve(result).then(resolve, reject);
     };
     return query;
@@ -27,7 +28,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ warn: jest.fn() }));
 const { countUnreadInboundSms, markInboundSmsRead, markAllInboundSmsRead } = require('../services/inbound-sms-read');
-beforeEach(() => { mockQueries.length = 0; mockCountRows = []; mockPluck = () => []; });
+beforeEach(() => { mockQueries.length = 0; mockCountRows = []; mockPluck = () => []; mockDistinct = () => []; });
 test('global count dedupes actionable endpoint threads by peer and ignores read state', async () => {
   mockCountRows = [
     { peer: '9415550100', endpoint: '9415550190', message_body: 'Can you call me?' },
@@ -103,6 +104,8 @@ test('Mark all read selects unread inbound texts up to the boundary, never recru
   // The sender is the inbox's per-text identity: the linked legacy row's sender first.
   expect(select.sql).toContain(') legacy ON true');
   expect(select.sql).toMatch(/not exists \(select 1 from "blocked_numbers" as "b" where .*b\.number.* = .*COALESCE\(NULLIF\(legacy\.from_phone, ''\)/s);
+  // A digitless legacy block normalizes to '' like a contactless text, so it never matches one.
+  expect(select.sql).toMatch(/not exists \(select 1 from "blocked_numbers" as "b" where .*b\.number.*<> ''/s);
   // A backlog-reset tagged row joins the scope so the writer strips its rollback tag.
   expect(select.sql).toContain(`or jsonb_exists(COALESCE(m.metadata, '{}'::jsonb), 'backlog_reset')`);
   const read = mockQueries.find((q) => q.method === 'update' && q.sql.includes('"read_by_admin_user_id" = ?'));
@@ -144,4 +147,25 @@ test('Mark all read never reaches past now, and a technician scope reads only it
   // Nothing unread: no write at all.
   expect(mockQueries.some((q) => q.method === 'update')).toBe(false);
   await expect(markAllInboundSmsRead({ readBefore: new Date('nope'), role: 'admin' })).rejects.toThrow('readBefore required');
+});
+
+test("a technician's read checks its customers inside the write and inside each bell step, not from the id snapshot", async () => {
+  mockPluck = (compiled) => (compiled.sql.startsWith('select "id" from "messages" where "id" in') ? ['m-1'] : []);
+  mockDistinct = (compiled) => (compiled.sql.includes('"conversation_id"') ? [{ conversation_id: 'conv-1' }] : []);
+  await markInboundSmsRead({ messageIds: ['m-1'], role: 'technician', customerIds: ['owned-customer'] });
+  const owned = '"conversation_id" in (select "id" from "conversations" where "customer_id" in (?))';
+  expect(mockQueries.find((q) => q.method === 'update' && q.sql.includes('"read_by_admin_user_id" = ?')).sql).toContain(owned);
+  expect(mockQueries.find((q) => q.sql.includes('"conversations" as "cv"')).sql).toContain('"cv"."customer_id" in (?)');
+  // The backlog-marker strip's customer list.
+  expect(mockQueries.find((q) => /^select distinct "customer_id".* from "conversations" where "id" in/.test(q.sql)).sql)
+    .toContain('and "customer_id" in (?)');
+});
+
+test("a row's Mark read reads one sender's texts by the inbox's sender identity, recruiting replies included", async () => {
+  await markAllInboundSmsRead({ readBefore: new Date('2026-11-19T12:00:00Z'), role: 'admin', contactPhone: '(941) 555-0100' });
+  const select = mockQueries.find((q) => q.method === 'pluck' && q.sql.includes('"messages" as "m"'));
+  expect(select.sql).toMatch(/COALESCE\(NULLIF\(legacy\.from_phone, ''\).* = \?/s);
+  expect(select.bindings).toContain('9415550100');
+  expect(select.sql).not.toContain('"m"."message_type" not like ?');
+  await expect(markAllInboundSmsRead({ readBefore: new Date(), role: 'admin', contactPhone: 'front desk' })).rejects.toThrow('contactPhone');
 });
