@@ -59,22 +59,30 @@ jest.mock('../models/db', () => {
     b.update = async (patch) => {
       const hit = matches();
       mockUpdates.push({ ids: hit.map((row) => row.id), patch, on: name });
+      // Applied, so a later lookup in the same test sees the upgrade.
+      for (const row of hit) Object.assign(row, { ...patch, metadata: JSON.parse(patch.metadata) });
       return hit.length;
     };
     return b;
   };
   const db = handle('db');
   const trx = handle('trx');
-  trx.raw = async (_sql, args) => { mockLog.push(`lock:${args[0]}`); };
+  trx.raw = async (sql, args) => {
+    if (mockLockError) throw mockLockError;
+    mockLog.push(`lock:${args[0]}`);
+  };
   db.transaction = async (work) => work(trx);
   return db;
 });
+let mockLockError = null;
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: (...args) => mockNotifyAdmin(...args),
   adminBodyColumns: (_category, body) => ({ body, detail: null }),
+  safeErrorSummary: jest.requireActual('../services/notification-service').safeErrorSummary,
 }));
 
+const logger = require('../services/logger');
 const { notifyBell, notify } = require('../services/estimator-engine/index');
 
 const KEY = 'sms:9415550123';
@@ -121,6 +129,7 @@ beforeEach(() => {
   mockUpdates.length = 0;
   mockLog.length = 0;
   mockInserted = 0;
+  mockLockError = null;
 });
 
 describe('a new ask matches the number\'s OPEN bell only', () => {
@@ -171,6 +180,21 @@ describe('a new ask matches the number\'s OPEN bell only', () => {
     expect(mockUpdates).toHaveLength(0);
   });
 
+  test('a failed lock is not a bell, and its log line carries a code, never the phone digits', async () => {
+    // Knex puts the SQL and its bound values in err.message.
+    mockLockError = Object.assign(
+      new Error(`SELECT pg_advisory_xact_lock(hashtext('estimator-ask:${KEY}')) - canceling statement due to lock timeout`),
+      { code: '55P03' },
+    );
+
+    await expect(askPlaceholder()).resolves.toEqual({ ok: false, bellId: null });
+
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    const lines = logger.warn.mock.calls.map(([line]) => String(line));
+    expect(lines.some((line) => line.includes('55P03'))).toBe(true);
+    expect(lines.join('\n')).not.toContain('9415550123');
+  });
+
   test('notify() keeps its boolean answer for every other caller', async () => {
     await expect(notify({
       call: null, context: null, lane: 'red', quotePromised: true, threadKey: KEY,
@@ -201,6 +225,22 @@ describe('a run\'s outcome updates the row its own ask landed on, open or done',
     expect(mockUpdates[0].ids).toEqual(['bell-ask']);
     expect(mockUpdates[0].patch.done_at).toBeNull();
     expect(JSON.parse(mockUpdates[0].patch.metadata).estimateId).toBe('est-8');
+  });
+
+  test('two texts on one bell: a late no-draft outcome keeps the first run\'s draft there and raises no second bell', async () => {
+    const first = await askPlaceholder();
+    const second = await askPlaceholder();
+    expect(second.bellId).toBe(first.bellId);
+    // Run 1 puts its draft on the shared bell.
+    await outcome(first.bellId, { estimateId: 'est-10', lane: 'green' });
+
+    // Run 2 finishes red on the same row.
+    await expect(outcome(second.bellId)).resolves.toEqual({ ok: true, bellId: first.bellId });
+
+    // One insert (the first ask) and one rewrite (the draft): no new "send it" bell.
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(mockUpdates).toHaveLength(1);
+    expect(mockRows.find((row) => row.id === first.bellId).metadata.estimateId).toBe('est-10');
   });
 
   test('an ask that merged into an older open bell gets its draft there, not on a newer closed bell', async () => {

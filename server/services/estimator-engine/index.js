@@ -759,7 +759,13 @@ async function notifyBell({ call, context, title, body, lane, estimateId = null,
               // bell instead of overwriting it.
               const sameDraft = !!estimateId && existingMeta.estimateId === estimateId;
               const bothOpen = !estimateId && !existingMeta.estimateId;
-              if (sameDraft || bothOpen) return landed(existing.id);
+              // A run bound to its ask's row (askBellId) that brings no draft
+              // leaves the row as it is. The row had no draft when the ask
+              // landed on it, so a draft there now came from a run for the
+              // same row (two texts merged under the ask lock): it is not a
+              // new task, and a fresh "send it" bell would duplicate it.
+              const boundNoDraft = !!askBellId && !estimateId;
+              if (sameDraft || bothOpen || boundNoDraft) return landed(existing.id);
               if (existingMeta.estimateId && existingMeta.estimateId !== estimateId) insertFresh = true;
             }
           }
@@ -811,7 +817,9 @@ async function notifyBell({ call, context, title, body, lane, estimateId = null,
     }
     return await standOrRaise(db);
   } catch (err) {
-    logger.warn(`[estimator-engine] admin notify failed: ${err.message}`);
+    // A code, never err.message: a Knex error echoes its bound values, and
+    // the thread key and the ask lock both carry the sender's phone digits.
+    logger.warn(`[estimator-engine] admin notify failed: ${require('../notification-service').safeErrorSummary(err)}`);
     return { ok: false, bellId: null };
   }
 }
