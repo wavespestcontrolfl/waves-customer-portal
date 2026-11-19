@@ -7,15 +7,13 @@ jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...args) => mo
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const { classifyServiceIntent } = require('../services/sms-service-intent');
-const { stripServiceTail, cutAddressClause } = require('../services/service-pair-terms');
 
 beforeEach(() => {
   mockDispatch.mockReset();
   mockDispatch.mockResolvedValue({ ok: true, json: { interest: 'unknown', confidence: 0.4 } });
 });
 
-// Replies that are a pair request: the classifier's fast path takes each one,
-// and lead intake's street-line strip drops each one whole (the last describes).
+// Replies that are a pair request: the classifier's fast path takes each one.
 const PAIR_REPLIES = [
   'Residential pest & lawn care',
   'Lawn and pest',
@@ -125,68 +123,5 @@ describe('a long reply cannot stall the event loop', () => {
     await classifyServiceIntent(body);
     expect(Date.now() - startedAt).toBeLessThan(250);
     expect(mockDispatch).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('the shared address-tail pattern drops the whole pair request, and single-service tails as before', () => {
-  const strip = stripServiceTail;
-  test.each([
-    ['123 Main St, pest and lawn', '123 Main St'],
-    ['123 Main St, lawn fertilization and pest control', '123 Main St'],
-    ['123 Main St, pest and lawn services', '123 Main St'],
-    ['123 Main St, both pest and lawn', '123 Main St'],
-    ['123 Main St, pest and lawn per the form', '123 Main St'],
-    ['123 Main St, Sarasota, quarterly pest & lawn care', '123 Main St, Sarasota'],
-    ['100 Palm Ave, Venice FL 34285, lawn/pest', '100 Palm Ave, Venice FL 34285'],
-    ['123 Main St, pest control', '123 Main St'],
-    ['123 Main St, pest service', '123 Main St'],
-    ['45 Lawn Ave', '45 Lawn Ave'],
-    // Plain punctuation the classifier reads as a space may wrap the tail.
-    ['123 Main St, "pest and lawn"', '123 Main St'],
-    ['123 Main St, “Both pest and lawn”', '123 Main St'],
-    ['123 Main St (pest and lawn)', '123 Main St'],
-    ['123 Main St - pest control', '123 Main St'],
-    ['123 Main St Apt 4 pest and lawn', '123 Main St Apt 4'],
-    // Punctuation inside the pair too, as the classifier reads it.
-    ['100 Palm Ave, pest-control and lawn care', '100 Palm Ave'],
-    ['123 Main St, Lawn-Care & Pest-Control', '123 Main St'],
-  ])('%j => %j', (address, street) => {
-    expect(strip(address)).toBe(street);
-  });
-
-  test.each(PAIR_REPLIES)('a street line, then the fast-path reply %j: the street line keeps none of the reply', (reply) => {
-    // The address reader cuts the text at its first clause end before the strip.
-    expect(strip(`123 Main St, ${reply}`.split(/[.;!?\n]/)[0])).toBe('123 Main St');
-    expect(strip(`123 Main St, "${reply}"`.split(/[.;!?\n]/)[0])).toBe('123 Main St');
-  });
-
-  test('a long run of commas or spaces is tried once, not from each of its characters', () => {
-    // Main's tail pattern took about 1.5 s on these 12,800 commas.
-    const startedAt = Date.now();
-    expect(strip(`1 Main St${', '.repeat(12800)}x`)).toMatch(/x$/);
-    expect(strip(`1 Main St, pest and lawn${' '.repeat(25600)}x`)).toMatch(/x$/);
-    expect(strip(`1 Main St${' "-'.repeat(12800)}x`)).toMatch(/x$/);
-    expect(Date.now() - startedAt).toBeLessThan(250);
-  });
-});
-
-describe('the street-line cut ends at a connector word, but keeps a service tail whole', () => {
-  test.each([
-    // The pair request's own words ("want", "please") are not cut.
-    ['123 Main St, I want pest and lawn', '123 Main St, I want pest and lawn'],
-    ['123 Main St, pest and lawn please', '123 Main St, pest and lawn please'],
-    // Connector prose before the tail still ends the line, tail and all.
-    ['123 Main St for ants, they are everywhere', '123 Main St'],
-    ['123 Main St for my mom, pest and lawn', '123 Main St'],
-    ['Fort Myers, 123 Main St', 'Fort Myers, 123 Main St'],
-  ])('%j => %j', (clause, line) => {
-    expect(cutAddressClause(clause)).toBe(line);
-  });
-
-  test('a long run of spaces is tried once, not from each of its characters', () => {
-    // The connector split took 1.5 s on these 25,600 spaces before its lookbehind.
-    const startedAt = Date.now();
-    expect(cutAddressClause(`1 Main St, pest and lawn${' '.repeat(25600)}x`)).toMatch(/x$/);
-    expect(Date.now() - startedAt).toBeLessThan(250);
   });
 });

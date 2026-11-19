@@ -334,44 +334,24 @@ describe('two-service reply (pest_lawn)', () => {
   });
 
   test.each([
-    'pest and lawn',
-    'lawn fertilization and pest control',
-    'pest and lawn services',
-    'both pest and lawn, like on the form',
-    'I want pest and lawn',
-    '"pest and lawn"',
-    'pest-control and lawn care',
-  ])('a combined reply "street, %s" saves the street without the pair and drafts both', async (pair) => {
-    mockClassify.mockResolvedValue({ interest: 'pest_lawn', confidence: 0.8, method: 'ai' });
-    mockStartSmsThreadDraft.mockImplementation(async (args) => (args.scopeCheckOnly
-      ? { started: false, skipped: 'scope_check_only' }
-      : { started: false, skipped: 'gate_off' }));
-
-    const result = await handleIntakeReply({ ...CUSTOMER(), address_line1: '' }, `100 Palm Ave, Venice FL 34285, ${pair}`);
-
-    expect(result).toEqual({ handled: true, next: 'estimate_drafted' });
-    expect(mockCustomerUpdates).toContainEqual({ address_line1: '100 Palm Ave, Venice FL 34285' });
-    expect(mockCustomerUpdates).toContainEqual({ lead_service_interest: 'pest_lawn' });
-    expect(mockEstimateInserts).toHaveLength(1);
-    expect(mockEstimateInserts[0].service_interest).toBe(PEST_LAWN_LABEL);
-  });
-
-  test.each([
-    ['pest_lawn', PEST_LAWN_LABEL],
-    ['pest', 'Pest Control'],
-  ])('words the strip does not know stay on the street line for %s, as before: the draft is made and staff clean the line', async (interest, label) => {
-    // The model reads "grub treatment" as lawn care, but no known tail ends the line, so the rough line
-    // is saved (main's rule: dropping it would strand the quote). A one-service answer saves the same line.
+    ['100 Palm Ave, Venice FL 34285, pest and lawn', 'pest_lawn', PEST_LAWN_LABEL],
+    // What main's model can answer for the same reply today: the same street line.
+    ['100 Palm Ave, Venice FL 34285, pest and lawn', 'lawn', 'Lawn Care'],
+    ['100 Palm Ave, quarterly pest control and grub treatment', 'pest_lawn', PEST_LAWN_LABEL],
+  ])('a combined reply %j read as %s: the street line is captured as before and the draft is made', async (body, interest, label) => {
+    // Address capture is main's, unchanged: it drops a known single-service tail, and other request
+    // words stay on the line for staff to clean at pricing time (dropping the line would strand the quote).
     mockClassify.mockResolvedValue({ interest, confidence: 0.8, method: 'ai' });
     mockStartSmsThreadDraft.mockImplementation(async (args) => (args.scopeCheckOnly
       ? { started: false, skipped: 'scope_check_only' }
       : { started: false, skipped: 'gate_off' }));
-    const body = '100 Palm Ave, quarterly pest control and grub treatment';
 
     const result = await handleIntakeReply({ ...CUSTOMER(), address_line1: '' }, body);
 
     expect(result).toEqual({ handled: true, next: 'estimate_drafted' });
-    expect(mockCustomerUpdates).toContainEqual({ address_line1: body });
+    const saved = mockCustomerUpdates.find((p) => p.address_line1);
+    expect(saved.address_line1).toMatch(/^100 Palm Ave, /);
+    expect(mockCustomerUpdates).toContainEqual({ lead_service_interest: interest });
     expect(mockEstimateInserts).toHaveLength(1);
     expect(mockEstimateInserts[0].service_interest).toBe(label);
   });

@@ -25,7 +25,6 @@ const db = require('../models/db');
 const crypto = require('crypto');
 const logger = require('./logger');
 const { classifyServiceIntent, parseCallTextReply } = require('./sms-service-intent');
-const { stripServiceTail, cutAddressClause } = require('./service-pair-terms');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -64,11 +63,15 @@ function looksLikeAddress(body) {
 // the awaiting_address state still handles a follow-up reply.
 // A KNOWN-service tail on a captured address ("123 Main St, pest control")
 // belongs to the service, not the address — the classifier reads the full
-// body separately, so the tail is simply dropped here (stripServiceTail in
-// ./service-pair-terms). The pest + lawn pair request ("…, lawn fertilization
-// and pest control", "…, both pest and lawn services") is one tail, read the
-// way the classifier's fast path reads it, so no part of it stays on the
-// street line. Other words stay, as before, for staff to clean at pricing.
+// body separately, so the tail is simply dropped here.
+const SERVICE_TAIL_RE = /[,\s]+((?:quarterly\s+|monthly\s+|recurring\s+|one[-\s]?time\s+)?(?:pest|lawn|mosquito(?:es)?|termites?|bed\s?bugs?|fleas?|ticks?|rodents?|mice|rats?|ants?|roach(?:es)?|wasps?|spiders?)(?:\s+(?:control|care|service|treatment|program|removal))?)\s*$/i;
+function stripServiceTailFromAddress(address) {
+  let out = String(address || '').trim();
+  while (SERVICE_TAIL_RE.test(out)) {
+    out = out.replace(SERVICE_TAIL_RE, '').replace(/[,\s]+$/, '').trim();
+  }
+  return out;
+}
 
 function extractAddressCandidate(body) {
   const text = String(body || '');
@@ -79,16 +82,15 @@ function extractAddressCandidate(body) {
     // address_line1 — commas stay (city/zip live after them).
     // Clause boundary first, then service-introducing prose ("123 Main St
     // for ants") — connector words end the address ("Fort Myers" survives:
-    // \bfor\b never matches inside Fort), except inside a service tail
-    // (cutAddressClause in ./service-pair-terms: "…, I want pest and lawn").
+    // \bfor\b never matches inside Fort).
     const clause = text.slice(match.index).split(/[.;!?\n]/)[0];
-    const candidate = cutAddressClause(clause);
+    const candidate = clause.split(/\s+(?:for|about|regarding|because|since|need|want|please|thanks)\b/i)[0].trim();
     if (candidate.length >= 6 && candidate.length <= 160 && STREET_SUFFIX_RE.test(candidate)) {
       best = candidate;
     }
   }
   if (best) {
-    const stripped = stripServiceTail(best);
+    const stripped = stripServiceTailFromAddress(best);
     best = stripped.length >= 6 ? stripped : null;
   }
   return best;
