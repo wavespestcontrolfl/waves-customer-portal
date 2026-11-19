@@ -1203,6 +1203,17 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
   const LAWN = { name: 'Lawn Care', mo: 69.75 };
   const PEST = { name: 'Pest Control', mo: 45 };
 
+  test('the server-rendered page: pest alone shows the setup fee; a second service in the root block removes it', () => {
+    const control = renderPage('prepay-ssr-fee-one', lead(), data([{ name: 'Pest Control', mo: 45 }]), null);
+    expect(control).toContain('<span>WaveGuard Membership Setup</span>');
+    const split = renderPage('prepay-ssr-fee-split', lead(), {
+      ...data([{ name: 'Pest Control', mo: 45 }]),
+      recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', mo: 69.75 }] },
+    }, null);
+    expect(split).not.toContain('<span>WaveGuard Membership Setup</span>');
+    expect(split).not.toContain('data-payment-setup="prepay_annual"');
+  });
+
   test('the server-rendered page offers it for one service and not for two', () => {
     expect(renderPage('prepay-ssr-one', lead(), data([LAWN]), null)).toContain('data-payment-setup="prepay_annual"');
     const html = renderPage('prepay-ssr-two', lead(), data([LAWN, PEST]), null);
@@ -1260,5 +1271,13 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
     // Two services carry no setup fee (accept reads the same supplemented rows), and nothing promises a prepay waiver.
     expect(JSON.stringify(legacy)).not.toContain('"waveguard_setup"');
     expect(JSON.stringify(legacy)).not.toContain('"waivedWithPrepay":true');
+  });
+
+  test('a priced engine line beside the stored rows counts as a second service, as the converter reads it', async () => {
+    const withEngineLawn = await buildPricingBundle(mosquitoEstimate('with-engine-lawn', {
+      engineResult: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 900, monthly: 75 }] },
+    }));
+    expect(offersPrepay(withEngineLawn)).toBe(false);
+    expect(JSON.stringify(withEngineLawn)).not.toContain('"waveguard_setup"');
   });
 });

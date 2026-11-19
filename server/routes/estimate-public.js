@@ -6213,8 +6213,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // Older v1 estimates may not have oneTime.membershipFee cached, so fall back
   // to the pricing constant when a qualifying recurring line is present.
   const explicitMembershipFee = Number(estResult?.oneTime?.membershipFee || 0);
+  // The mix comes from the rows accept reads (planRecurringRowsAsAccepted), not the rendered list alone: a legacy
+  // estimate can keep a second service in the root recurring block or the engine lines.
   const hasWaveGuardMembership = require('../services/estimate-converter')
-    .recurringMixHasMembershipFeeService(recurring);
+    .recurringMixHasMembershipFeeService(planRecurringRowsAsAccepted(estData));
   // Operator-stated waiver removes the fee outright (no strike-through, no
   // invoice) — zeroing it here keeps every downstream SSR figure (fee row,
   // pay-per-application invoice copy, prepay math) consistent.
@@ -28189,10 +28191,10 @@ function estimateDataRecurringServices(estData = {}) {
 
 function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}) {
   const converter = require('../services/estimate-converter');
-  // The supplemented rows, as accept and the converter read them: a legacy estimate can keep a second service in
-  // the root recurring block, and that plan carries no setup fee (owner 2026-10-21: the fee is pest-only).
+  // The rows accept reads (planRecurringRowsAsAccepted): a legacy estimate can keep a second service in the root
+  // recurring block or the engine lines, and that plan carries no setup fee (owner 2026-10-21: the fee is pest-only).
   const membershipFeeMixApplies = converter
-    .recurringMixHasMembershipFeeService(estimateDataRecurringServices(withSupplementedRecurringServices(estData || {}) || estData || {}));
+    .recurringMixHasMembershipFeeService(planRecurringRowsAsAccepted(estData));
   // Operator-stated waiver strips the fee even when the mix carries it —
   // this finalize choke point is what removes it from snapshot/cached
   // bundles frozen before the waiver was applied.
@@ -28368,6 +28370,16 @@ function applyPresentationOverridesToBundle(payload = {}, estData = {}) {
 // service in the root recurring block, and the page prefers a frequency's flag
 // over the estimate-level one. The server-rendered page applies the same count
 // (renderPage showAnnualPrepayOption).
+// The plan's recurring rows as accept and the converter read them: the supplemented rows, through the converter's
+// own reader (it merges result, engineResult and the root recurring block). Every page decision about the WaveGuard
+// setup fee reads this one list (stripStaleWaveGuardSetupFromBundle for /data, renderPage for the server-rendered
+// page), and the unit count below is the converter's own function over the same rows, so no storage shape can make
+// the page and accept disagree.
+function planRecurringRowsAsAccepted(estData) {
+  return require('../services/estimate-converter')
+    .recurringServicesFromEstimateData(withSupplementedRecurringServices(estData || {}) || estData || {});
+}
+
 function multiServicePrepayUnits(estData) {
   try {
     return require('../services/estimate-converter')
