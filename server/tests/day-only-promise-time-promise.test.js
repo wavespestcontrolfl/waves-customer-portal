@@ -76,10 +76,21 @@ describe('shouldPromiseDayOnly', () => {
 
   test('the cutoff: exactly 24.25 h is inside (false); a hair beyond is day-only', () => {
     expect(DAY_PROMISE_CUTOFF_HOURS).toBe(24.25);
-    expect(call({ startAt: at(24.25) })).toBe(false);
-    expect(call({ startAt: new Date(at(24.25).getTime() + 1) })).toBe(true);
+    // 11:50 PM ET: 24.25 h later is 12:05 AM two ET days on, so only the cutoff decides.
+    const now = new Date('2026-11-11T04:50:00Z');
+    const from = (h) => new Date(now.getTime() + h * 3600000);
+    expect(call({ now, startAt: from(24.25) })).toBe(false);
+    expect(call({ now, startAt: new Date(from(24.25).getTime() + 1) })).toBe(true);
     expect(call({ startAt: at(24) })).toBe(false);
     expect(call({ startAt: at(72) })).toBe(true);
+  });
+
+  test('a visit tomorrow on the ET calendar names the window, even beyond the cutoff (owner 2026-11-19)', () => {
+    // Booked Thu 4:30 PM ET for Fri 5:00 PM ET (24.5 h out): "the day before" is today.
+    const now = new Date('2026-11-19T21:30:00Z');
+    expect(call({ now, startAt: new Date('2026-11-20T22:00:00Z') })).toBe(false);
+    expect(call({ now, startAt: new Date('2026-11-21T04:59:00Z') })).toBe(false); // Fri 11:59 PM ET
+    expect(call({ now, startAt: new Date('2026-11-21T05:00:00Z') })).toBe(true); // Sat 12:00 AM ET
   });
 
   test('a windowless or invalid time is false (today\'s windowless copy stays)', () => {
