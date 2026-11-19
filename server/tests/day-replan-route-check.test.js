@@ -1,7 +1,7 @@
 /**
- * Hourly route check, shadow (services/day-replan/route-check.js, owner 2026-11-19): the openings dispatch can fill
- * on the staffed days after today, from the live schedule; which tech-days count; the ad rule's shadow decision; one
- * route_check_runs row and no other write. Fake knex, synthetic ids only.
+ * Hourly route check, shadow (services/day-replan/route-check.js, owner 2026-11-19): the room in each route on the
+ * staffed days after today, from the live schedule; which tech-days count; the totals; one route_check_runs row and no
+ * other write. Fake knex, synthetic ids only.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -118,28 +118,6 @@ describe('one tech-day', () => {
     expect(rc.routeOrder([{ ...a, route_order: null }, b]).map((r) => r.id)).toEqual(['a', 'b']); // a null: clock order
   });
 
-  test('a day whose own stops already miss a promise takes no new job; the notice count stays', () => {
-    const a = stop('a', '09:00:00', '10:00:00', { estimated_duration_minutes: 150 });
-    const b = stop('b', '09:00:00', '10:00:00', { estimated_duration_minutes: 60, customer_id: 'cust-2', lat: 27.45, lng: -82.4 });
-    const fig = rc.measureTechDay({ ...open, rows: [a, b] }); // b is reached after 11:00, past its arrival promise
-    expect(fig).toMatchObject({ noNewJob: 'LATE_STOP', slots: 0 });
-    expect(fig.noticeSlots).toBeGreaterThan(0);
-    expect(fig.openings.every((o) => o.slots === 0)).toBe(true);
-    expect(rc.measureTechDay({ ...open, rows: [a] }).noNewJob).toBeUndefined();
-  });
-
-  test('capacity mode, as the picker: a van home after the shift end, or unassigned work that day, takes no new job', () => {
-    const late = stop('l', '16:00:00', '17:00:00', { estimated_duration_minutes: 120, lat: 27.5, lng: -82.3 }); // done 6 PM, then home
-    const morning = stop('m', '09:00:00', '10:00:00');
-    expect(rc.measureTechDay({ ...open, rows: [late], capacity: true })).toMatchObject({ noNewJob: 'HOME_AFTER_SHIFT', slots: 0 });
-    expect(rc.measureTechDay({ ...open, rows: [morning], capacity: true, unassignedWork: 1 })).toMatchObject({ noNewJob: 'UNASSIGNED_WORK', slots: 0 });
-    // Capacity off: neither rule applies; the openings count.
-    expect(rc.measureTechDay({ ...open, rows: [late] }).slots).toBeGreaterThan(0);
-    const hourMode = rc.measureTechDay({ ...open, rows: [morning], unassignedWork: 1 });
-    expect(hourMode.noNewJob).toBeUndefined();
-    expect(hourMode.slots).toBeGreaterThan(0);
-  });
-
   test('a schedule block takes its time out of the openings', () => {
     const fig = rc.measureTechDay({ ...open, rows: [], blocks: [{ startMin: 720, endMin: 1020 }] });
     expect(fig.openings).toEqual([{ kind: 'tail', start: 480, min: 240, slots: 2, noticeSlots: 3 }]); // 8:00, 10:00
@@ -175,26 +153,26 @@ describe('which days count', () => {
   });
 });
 
-describe('the totals and the ad rule shadow', () => {
+describe('the totals', () => {
   const day = (date, fig) => ({ date, technician_id: TECH, staffed: true, slots: 0, openings: [], ...fig });
-  test('full budget while dispatch room exists in the next 3 staffed days', () => {
-    const { totals, ad } = rc.summarize([
+  test('the next 3 staffed days and the 7-day view', () => {
+    const totals = rc.summarize([
       day('2026-11-20'), day('2026-11-21'), day('2026-11-23', { slots: 1 }), day('2026-11-24', { slots: 3 }),
     ], '2026-11-19');
-    expect(totals).toEqual({ next: { dates: ['2026-11-20', '2026-11-21', '2026-11-23'], slots: 1 }, week: { through: '2026-11-26', slots: 4 } });
-    expect(ad).toEqual({ decision: 'full', slotsAhead: 1, techBlind: false, unmeasured: 0 });
+    expect(totals).toEqual({
+      next: { dates: ['2026-11-20', '2026-11-21', '2026-11-23'], slots: 1, unmeasured: 0 }, week: { through: '2026-11-26', slots: 4 }, techBlind: false,
+    });
     // Today is not measured: a row dated today never counts.
-    expect(rc.summarize([day('2026-11-19', { slots: 5 }), day('2026-11-20'), day('2026-11-21'), day('2026-11-23')], '2026-11-19').ad)
-      .toMatchObject({ decision: 'floor', slotsAhead: 0 });
+    expect(rc.summarize([day('2026-11-19', { slots: 5 }), day('2026-11-20'), day('2026-11-21'), day('2026-11-23')], '2026-11-19').next.slots).toBe(0);
   });
 
   test('tech-blind: a date counts the most any one technician can take, in any order, never the sum', () => {
     const TECH2 = '00000000-0000-4000-8000-000000000002';
     const a = day('2026-11-20', { slots: 2 });
     const b = { ...day('2026-11-20', { slots: 1 }), technician_id: TECH2 };
-    expect(rc.summarize([a, b], '2026-11-19').totals.next.slots).toBe(3);
-    expect(rc.summarize([a, b], '2026-11-19', { techBlind: true }).totals.next.slots).toBe(2);
-    expect(rc.summarize([b, a], '2026-11-19', { techBlind: true }).totals.next.slots).toBe(2);
+    expect(rc.summarize([a, b], '2026-11-19').next.slots).toBe(3);
+    expect(rc.summarize([a, b], '2026-11-19', { techBlind: true }).next.slots).toBe(2);
+    expect(rc.summarize([b, a], '2026-11-19', { techBlind: true }).next.slots).toBe(2);
   });
 
   test("the first job's drive starts with the working day: an earlier departure is not credited (a lower bound)", () => {
@@ -214,24 +192,24 @@ describe('the totals and the ad rule shadow', () => {
     expect(rc.hourSlots({ start: 480, min: 240 })).toBe(2); // 8-12: 9:00 and 11:00
   });
 
-  test('the 1% floor when no dispatch room exists in that window', () => {
-    const { ad } = rc.summarize([
+  test('no room in the window counts 0; a day past the window is not counted there', () => {
+    const totals = rc.summarize([
       day('2026-11-20'), day('2026-11-21'), day('2026-11-23'), day('2026-11-24', { slots: 4 }),
       day('2026-11-25', { skip: 'UNTIMED_STOP' }), // past the window: not counted
     ], '2026-11-19');
-    expect(ad).toEqual({ decision: 'floor', slotsAhead: 0, techBlind: false, unmeasured: 0 });
+    expect(totals.next).toEqual({ dates: ['2026-11-20', '2026-11-21', '2026-11-23'], slots: 0, unmeasured: 0 });
+    expect(totals.week.slots).toBe(4);
   });
 
-  test('unknown, never a floor, when no room is found and a day in the window could not be measured', () => {
-    const { ad } = rc.summarize([
+  test('a staffed day in the window that could not be measured is counted as unmeasured, never as room', () => {
+    const totals = rc.summarize([
       day('2026-11-20', { skip: 'UNTIMED_STOP', slots: 3 }), day('2026-11-21'), day('2026-11-23'),
     ], '2026-11-19');
-    expect(ad).toEqual({ decision: 'unknown', slotsAhead: 0, techBlind: false, unmeasured: 1 });
-    // A long closure: the scan found only 2 staffed days, so no room is not a measured floor.
-    expect(rc.summarize([day('2026-11-20'), day('2026-11-21')], '2026-11-19').ad.decision).toBe('unknown');
-    // Room found elsewhere: full, with the unmeasured day named.
-    expect(rc.summarize([day('2026-11-20', { slots: 1 }), day('2026-11-21', { skip: 'FAILED' })], '2026-11-19').ad)
-      .toMatchObject({ decision: 'full', unmeasured: 1 });
+    expect(totals.next).toEqual({ dates: ['2026-11-20', '2026-11-21', '2026-11-23'], slots: 0, unmeasured: 1 });
+    // A long closure: the scan found only 2 staffed days, and the dates say so.
+    expect(rc.summarize([day('2026-11-20'), day('2026-11-21')], '2026-11-19').next.dates).toHaveLength(2);
+    expect(rc.summarize([day('2026-11-20', { slots: 1 }), day('2026-11-21', { skip: 'FAILED' })], '2026-11-19').next)
+      .toMatchObject({ slots: 1, unmeasured: 1 });
   });
 });
 
@@ -281,11 +259,12 @@ describe('runRouteCheck', () => {
     const totals = JSON.parse(row.totals);
     expect(totals.next.dates).toEqual(['2026-11-20', '2026-11-21', '2026-11-23']);
     expect(totals.today).toBeUndefined();
-    expect(JSON.parse(row.ad_shadow)).toMatchObject({ decision: 'full', live: [{ id: 'c1', status: 'paused', mode: 'stop' }] });
+    // No budget decision: the live rule's campaigns only, to compare the counts with.
+    expect(JSON.parse(row.ad_shadow)).toEqual({ live: [{ id: 'c1', status: 'paused', mode: 'stop' }] });
     // Only the measured dates and the Sundays are read: never today, never the whole 14-day scan.
     expect(replan.loadDayStops.mock.calls.map(([, d]) => d)).toEqual(['2026-11-22', '2026-11-29', '2026-11-20', '2026-11-21', '2026-11-23', '2026-11-24', '2026-11-25', '2026-11-26']);
     expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({ db: conn, dateFrom: '2026-11-20', dateTo: '2026-11-20' }));
-    expect(JSON.parse(row.ad_shadow)).toEqual(expect.objectContaining({ slotsAhead: expect.any(Number) }));
+    expect(totals.next).toMatchObject({ slots: expect.any(Number), unmeasured: 0 });
     expect(result).toMatchObject({ status: 'completed', days: 5 });
   });
 
@@ -337,44 +316,14 @@ describe('runRouteCheck', () => {
     expect(days.find((d) => d.date === '2026-11-22')).toMatchObject({ skip: 'FAILED' }); // staffed when unknown
   });
 
-  test('a run-wide read failing still writes the hour, as unknown', async () => {
+  test('a run-wide read failing still writes the hour, as failed with its error', async () => {
     getBlackoutDates.mockRejectedValueOnce(new Error('timeout'));
     const { conn, writes } = fakeConn();
     const result = await runRouteCheck({ conn, now: NOW });
-    expect(result).toMatchObject({ status: 'failed', ad: { decision: 'unknown' } });
+    expect(result).toMatchObject({ status: 'failed', totals: { error: 'timeout' } });
     expect(writes).toHaveLength(1);
     expect(writes[0][1]).toMatchObject({ status: 'failed', service_date: '2026-11-19' });
-  });
-
-  test('capacity mode: unassigned work booked on a date takes no new job there, as the picker refuses it', async () => {
-    const saved = process.env.GATE_SCHEDULING_CAPACITY;
-    const unassigned = (id, extra) => ({ ...stop(id, '08:00:00', '09:00:00'), technician_id: null, ...extra });
-    replan.loadDayStops.mockImplementation(async (_c, date) => {
-      if (date === '2026-11-20') return [unassigned('u1')];
-      // A windowless placeholder is not work the picker reads.
-      if (date === '2026-11-21') return [unassigned('p1', { window_start: null, window_end: null })];
-      return [];
-    });
-    const run = async (mode) => {
-      process.env.GATE_SCHEDULING_CAPACITY = mode;
-      const { conn, writes } = fakeConn();
-      await runRouteCheck({ conn, now: NOW });
-      const days = JSON.parse(writes[0][1].days);
-      return { fri: days.find((d) => d.date === '2026-11-20'), sat: days.find((d) => d.date === '2026-11-21'), ad: JSON.parse(writes[0][1].ad_shadow) };
-    };
-    try {
-      const on = await run('true');
-      expect(on.ad.capacity).toBe(true);
-      expect(on.fri).toMatchObject({ noNewJob: 'UNASSIGNED_WORK', slots: 0 });
-      expect(on.sat.noNewJob).toBeUndefined();
-      expect(on.sat.slots).toBeGreaterThan(0);
-      const plan = await run('plan'); // production's value: planning minutes only, capacity mode off
-      expect(plan.ad.capacity).toBe(false);
-      expect(plan.fri.noNewJob).toBeUndefined();
-      expect(plan.fri.slots).toBeGreaterThan(0);
-    } finally {
-      if (saved === undefined) delete process.env.GATE_SCHEDULING_CAPACITY; else process.env.GATE_SCHEDULING_CAPACITY = saved;
-    }
+    expect(JSON.parse(writes[0][1].totals)).toEqual({ error: 'timeout' });
   });
 
   test('an unassigned booking ending off the hour holds only its own minutes', async () => {
@@ -402,14 +351,14 @@ describe('runRouteCheck', () => {
     bookedInterviewWindowsForDate.mockResolvedValue([]);
   });
 
-  test('an unreadable departure time (day rules on) records the run as unknown, never an 08:00 guess', async () => {
+  test('an unreadable departure time (day rules on) records the run as failed, never an 08:00 guess', async () => {
     const saved = process.env.GATE_AUTO_DISPATCH_DAY_RULES;
     process.env.GATE_AUTO_DISPATCH_DAY_RULES = 'true';
     departure.readDepartureSetting.mockRejectedValueOnce(new Error('timeout'));
     const { conn, writes } = fakeConn();
     const result = await runRouteCheck({ conn, now: NOW });
     if (saved === undefined) delete process.env.GATE_AUTO_DISPATCH_DAY_RULES; else process.env.GATE_AUTO_DISPATCH_DAY_RULES = saved;
-    expect(result).toMatchObject({ status: 'failed', ad: { decision: 'unknown' } });
+    expect(result).toMatchObject({ status: 'failed' });
     expect(writes[0][1]).toMatchObject({ status: 'failed' });
   });
 

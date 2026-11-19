@@ -145,10 +145,10 @@ describe('hourly route check, shadow (owner 2026-11-19): measures the openings, 
     const [expression, task, options] = routeCheckJob();
     expect(expression).toBe('30 7-19 * * *');
     expect(options).toEqual({ timezone: 'America/New_York' });
-    runRouteCheck.mockResolvedValueOnce({ status: 'completed', ad: { decision: 'full' } });
+    runRouteCheck.mockResolvedValueOnce({ status: 'completed', totals: { next: { slots: 2 } } });
     await task();
     expect(runExclusive.mock.calls.map(([name]) => name)).toEqual(['route-check']);
-    expect(logger.info).toHaveBeenCalledWith('[route-check] completed ad=full');
+    expect(logger.info).toHaveBeenCalledWith('[route-check] completed slots=2');
   });
 
   test('a failure is logged, never thrown out of the tick', async () => {
@@ -158,7 +158,7 @@ describe('hourly route check, shadow (owner 2026-11-19): measures the openings, 
   });
 
   test.each(['failed', 'completed_with_errors'])('a run recorded as %s still fails the health lock, and the tick does not throw', async (status) => {
-    runRouteCheck.mockResolvedValueOnce({ status, ad: { decision: 'unknown' } });
+    runRouteCheck.mockResolvedValueOnce({ status, totals: {} });
     let lockOutcome;
     runExclusive.mockImplementationOnce(async (_key, task) => {
       lockOutcome = task().then(() => 'ok', (err) => err.message);

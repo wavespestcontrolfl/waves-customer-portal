@@ -2164,14 +2164,13 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // HOURLY 7:30 AM-7:30 PM — route check, shadow (owner 2026-11-19, "do whatever you reccomend"). Recalculates the
-  // next staffed days from the live schedule, counts the openings dispatch can fill and records what the ad budget
-  // rule would do, in route_check_runs. It changes no visit, budget or message. Every hour, so a booking or a
-  // cancellation made during the day shows at the next hour.
+  // next staffed days from the live schedule and records the room in each route, in route_check_runs. It changes no
+  // visit, budget or message. Every hour, so a booking or a cancellation made during the day shows at the next hour.
   cron.schedule('30 7-19 * * *', async () => {
     try {
       await runExclusive('route-check', async () => {
         const result = await require('./day-replan/route-check').runRouteCheck();
-        logger.info(`[route-check] ${result.status} ad=${result.ad.decision}`);
+        logger.info(`[route-check] ${result.status} slots=${result.totals?.next?.slots ?? 'n/a'}`);
         // A failed run or a failed date read is recorded first; it still counts as a failed run in job health.
         if (result.status !== 'completed') throw new Error(`route check ${result.status} (recorded)`);
       });
