@@ -149,6 +149,24 @@ describe('extractDeadline', () => {
     expect(extractDeadline('Offer ends 2/1', december)).toBe('2027-02-01');
   });
 
+  test("an offer's validity range counts only its end date, also when the offer opens after the email", () => {
+    expect(extractDeadline('Offers valid November 1 – November 30, 2026.', received)).toBe('2026-11-30');
+    // SiteOne's text part keeps the HTML entity.
+    expect(extractDeadline('*Offer valid at participating locations November 1 &ndash; November 30, 2026.', received)).toBe('2026-11-30');
+    expect(extractDeadline('Valid 11/1 - 11/30', received)).toBe('2026-11-30');
+    expect(extractDeadline('Promotion runs Monday, Nov 2 through Friday, Nov 6', received)).toBe('2026-11-06');
+    expect(extractDeadline('Valid Nov 1-30, 2026', received)).toBe('2026-11-30');
+    expect(extractDeadline('Fall program Nov 2 to Dec 15; order by Nov 20', received)).toBe('2026-11-20');
+  });
+
+  test('a range outside an offer sentence, or a dash with no later date or day, keeps the first date', () => {
+    expect(extractDeadline("I'll be on PTO Thursday Nov 19-Tuesday Nov 24.", received)).toBe('2026-11-19');
+    expect(extractDeadline('Sale ends Nov 20 - 25% off select items', received)).toBe('2026-11-20');
+    expect(extractDeadline('Promo through Nov 20 - 2 free cases', received)).toBe('2026-11-20');
+    expect(extractDeadline('Special pickup Nov 2 - 3 PM', received)).toBe('2026-11-02');
+    expect(extractDeadline('Offer ends Nov 20 - order now', received)).toBe('2026-11-20');
+  });
+
   test('ignores quoted reply history', () => {
     const forms = [
       'Thanks, ordering now.\n\nFrom: Sam Rep <srep@siteone.com>\nSent: Monday\nProgram ends Nov 20',
@@ -363,7 +381,8 @@ describe('runSiteOneDealsDigest', () => {
       emails: [
         // HTML only: the candidate query cuts it at HTML_CHARS.
         email({ id: 34, subject: 'Fall promo', received_at: new Date('2026-10-31T15:00:00Z'), body_html: `<p>${'<span>Shop now</span>'.repeat(1500)}</p><p>*Offer valid through Nov 25, 2026.</p>` }),
-        email({ id: 31, subject: 'Last Chance for 10% Off Select Items', received_at: new Date('2026-10-30T15:00:00Z'), body_text: `${LINKS}*Offers valid October 1 – November 30, 2026.` }),
+        // Sent before the offer opens: the range's end is the deadline, not its start.
+        email({ id: 31, subject: 'Last Chance for 10% Off Select Items', received_at: new Date('2026-10-30T15:00:00Z'), body_text: `${LINKS}*Offers valid November 1 – November 30, 2026.` }),
         // The excerpt names a date: it is kept, and the earlier footnote date is never read.
         email({ id: 32, subject: 'Pest Specials', received_at: new Date('2026-10-29T15:00:00Z'), body_text: `On special through Nov 20.\n${LINKS}*Offer valid through November 5, 2026.` }),
         // Short: nothing was cut, so nothing is read again.

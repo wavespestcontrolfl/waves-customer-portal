@@ -167,11 +167,28 @@ const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8,
 const MONTH_DAY = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b(?:,?\s+(20\d{2})\b)?/gi;
 // m/d, m/d/yy, m/d/yyyy. Not part of a longer number or path, and not a fraction of a unit ("1/2 gal").
 const NUMERIC_DATE = /(?<![\d/.])(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?(?![\d/])(?!\s*(?:oz|lbs?|gal|gallons?|inch|in\b|"|%|cups?|pt|qt|tons?|acres?|ac\b))/gi;
+// An offer's validity range ("Offers valid March 1 &ndash; April 30, 2026", "valid 11/1 - 11/30",
+// "Valid Nov 1-30"): its first date is when the offer opens, so only its end can be the deadline.
+// A range counts only in a sentence that names a validity period or holds a deal word. Any other
+// range keeps both dates: a rep's "on PTO May 21-May 26" is no offer, and the earlier date is the
+// safer one to show. RANGE_JOIN is the whole text between the two dates: a dash or
+// to/through/thru/until, maybe a weekday.
+const RANGE_JOIN = /^\s*(?:-|–|—|&ndash;|&mdash;|to|through|thru|until|till)\s*(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s*)?$/i;
+// "Nov 1-30, 2026": the range ends on a later day of the same month. Not "Nov 20 - 25% off",
+// a clock time ("3 PM", "3:00") or the start of a numeric date ("11/30").
+const SAME_MONTH_END = /\s*(?:-|–|—|&ndash;|&mdash;|to|through|thru|until|till)\s*(\d{1,2})(?:st|nd|rd|th)?\b(?![%/:.]\d|\s*(?:%|am\b|pm\b))(?:,?\s+(20\d{2})\b)?/iy;
 const QUOTED_HISTORY = [
   /^[ \t]*From:/im,
   /^[ \t>]*-{2,}[ \t]*Original Message[ \t]*-{2,}/im,
   /^[ \t>]*On\s[\s\S]{0,250}?\swrote:/im,
 ];
+
+/** True when the sentence before `at` (80 chars at most) names a validity period or holds a deal word. */
+function inOfferSentence(text, at) {
+  const before = text.slice(Math.max(0, at - 80), at);
+  const sentence = before.slice(before.search(/[^.!?\n]*$/));
+  return /\b(?:valid|runs?|programs?|period)\b/i.test(sentence) || dealWordsIn(sentence) > 0;
+}
 
 /** Drops quoted reply history: everything from its first marker line on. */
 function stripQuotedHistory(text) {
@@ -195,8 +212,9 @@ const dayNumber = (iso) => Math.floor(Date.parse(`${iso}T00:00:00Z`) / 86400000)
 /**
  * The earliest explicit date in `text` that falls on or after receivedAt's ET date
  * and within 180 days, as YYYY-MM-DD; null when there is none. Quoted reply
- * history is ignored. A date with no year takes receivedAt's year, or the next
- * year when that date has already passed. Weekday-only phrases give null.
+ * history is ignored, and so is the first date of an offer's validity range (RANGE_JOIN).
+ * A date with no year takes receivedAt's year, or the next year when that date
+ * has already passed. Weekday-only phrases give null.
  */
 function extractDeadline(text, receivedAt) {
   const received = receivedAt instanceof Date ? receivedAt : new Date(receivedAt);
@@ -225,8 +243,20 @@ function extractDeadline(text, receivedAt) {
     if (away >= 0 && away <= DEADLINE_MAX_DAYS) candidates.push(iso);
   };
 
-  for (const m of body.matchAll(MONTH_DAY)) consider(MONTHS[m[1].slice(0, 3).toLowerCase()], Number(m[2]), m[3]);
-  for (const m of body.matchAll(NUMERIC_DATE)) consider(Number(m[1]), Number(m[2]), m[3]);
+  const dates = [
+    ...Array.from(body.matchAll(MONTH_DAY), (m) => ({ m, named: true, month: MONTHS[m[1].slice(0, 3).toLowerCase()], day: Number(m[2]), year: m[3] })),
+    ...Array.from(body.matchAll(NUMERIC_DATE), (m) => ({ m, named: false, month: Number(m[1]), day: Number(m[2]), year: m[3] })),
+  ].sort((a, b) => a.m.index - b.m.index);
+  dates.forEach((date, i) => {
+    const end = date.m.index + date.m[0].length;
+    const offer = inOfferSentence(body, date.m.index);
+    const next = dates[i + 1];
+    if (offer && next && RANGE_JOIN.test(body.slice(end, next.m.index))) return; // the offer opens: its end counts on its own
+    SAME_MONTH_END.lastIndex = end;
+    const sameMonth = offer && date.named ? SAME_MONTH_END.exec(body) : null;
+    if (sameMonth && Number(sameMonth[1]) > date.day) consider(date.month, Number(sameMonth[1]), sameMonth[2] || date.year);
+    else consider(date.month, date.day, date.year);
+  });
   return candidates.length ? candidates.sort()[0] : null;
 }
 
