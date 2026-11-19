@@ -6,9 +6,9 @@ The build waits on the owner decisions at the bottom and on Hunter granting
 API access.
 
 The idea: a lawn customer connects the sprinkler timer on their wall to the
-Waves app. After a treatment that has to stay dry, Waves pauses the lawn
-zones on its own. When the weekly plan says water, the customer starts it
-with one tap.
+Waves app. After a treatment whose instruction is to skip watering for a
+time, Waves pauses the lawn zones on its own. When the weekly plan says
+water, the customer starts it with one tap.
 
 ## What the owner said (2026-11-19)
 
@@ -235,6 +235,11 @@ Its own gate. About 3 days.
   a failure surfaces. Each lane has its env kill switch, and the customer
   can disconnect in one tap.
 - No change to customer texts or emails in these steps.
+- Wording for a pause repeats the visit's own instruction ("Skip your turf
+  watering until <time>",
+  `server/services/service-report/lawn-watering-instruction.js:644`). Never
+  a fixed drying or re-entry figure, and no product is ever called safe
+  (AGENTS.md, compliance language on customer surfaces).
 - This is the first outside credential stored per customer: encrypted,
   never logged, destroyed on disconnect and on account deletion.
 - New public route: allowlist and contract entry in the same PR. New

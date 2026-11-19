@@ -6,7 +6,9 @@
  * sprinkler-timer-preview-main.jsx (/preview-sprinkler-timer.html); nothing in
  * the app imports it, so it is not part of the production bundle.
  *
- * Every string here is draft copy for owner review, not approved copy.
+ * Every string here is draft copy for owner review, not approved copy. A
+ * pause is worded as the visit's own "skip your turf watering until <time>"
+ * instruction: never a fixed drying or re-entry figure (AGENTS.md).
  */
 import { useState } from 'react';
 import Icon from '../../components/Icon';
@@ -198,7 +200,7 @@ function AutoPauseRow({ checked, onChange }) {
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '12px 14px', border: `1px solid ${RULE}`, borderRadius: 8 }}>
       <div>
         <div style={{ fontSize: 14, fontWeight: 700 }}>Pause the lawn after treatments</div>
-        <div style={{ ...meta, marginTop: 2 }}>When a treatment has to stay dry, we pause your turf zones until it's safe to water.</div>
+        <div style={{ ...meta, marginTop: 2 }}>When your service report says to skip turf watering after a treatment, we pause your turf zones until that time.</div>
       </div>
       <Toggle checked={checked} onChange={onChange} label="Pause the lawn after treatments" />
     </div>
@@ -308,7 +310,7 @@ function ReadyView({ go, openSheet }) {
   return (
     <>
       <StatusLine label="Hunter X2 on Hydrawise" detail="Not connected" />
-      <p style={prose}>Connect your timer and we'll keep the lawn dry after treatments that need it. You can also start this week's plan from here.</p>
+      <p style={prose}>Connect your timer and we'll pause your turf watering after treatments that call for it. You can also start this week's plan from here.</p>
       <PrimaryButton onClick={() => openSheet('consent')}>Connect my timer</PrimaryButton>
       <div style={{ marginTop: 4 }}><TextButton onClick={() => go('pick')}>Change my timer</TextButton></div>
     </>
@@ -366,7 +368,7 @@ function PausedCallout({ go }) {
     <>
       <Callout>
         <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>Lawn watering is paused until {weekday(1)} at 10:14 AM</div>
-        <div style={{ color: BODY }}>Today's weed control needs 24 hours to dry. Your beds and drip zones keep running as usual, and the pause ends on its own.</div>
+        <div style={{ color: BODY }}>This follows today's weed control visit. Your beds and drip zones keep running as usual, and the pause ends on its own.</div>
         <div style={{ marginTop: 4 }}><TextButton onClick={() => go('connected')}>End the pause early</TextButton></div>
       </Callout>
       <p style={{ ...meta, margin: '0 0 16px' }}>You can run this week's plan once the pause ends.</p>
@@ -392,13 +394,13 @@ function RunningCallout({ go, turfCount, totalMinutes }) {
 const LIVE_CALLOUT = { connected: RunCallout, paused: PausedCallout, running: RunningCallout };
 const ACTIVITY = {
   paused: () => [
-    { when: 'Today', what: 'Paused your turf zones for 24 hours after weed control.' },
+    { when: 'Today', what: `Paused your turf zones after weed control, until ${weekday(1)} at 10:14 AM.` },
     { when: shortDay(-6), what: 'You ran the weekly plan: 4 zones, 30 minutes each.' },
   ],
   usual: () => [
     { when: shortDay(-2), what: 'You ran the weekly plan: 4 zones, 30 minutes each.' },
     { when: shortDay(-13), what: 'Pause ended. Watering is back on your schedule.' },
-    { when: shortDay(-14), what: 'Paused your turf zones for 24 hours after weed control.' },
+    { when: shortDay(-14), what: 'Paused your turf zones after weed control.' },
   ],
 };
 
@@ -444,7 +446,7 @@ export default function SprinklerTimerCard({ initialView = 'pick' }) {
       {sheet === 'consent' && (
         <Sheet label="Connect your sprinkler timer" onClose={closeSheet}>
           <PointList icon="check" tone={GREEN} heading="When you connect, Waves can" points={[
-            'Pause your turf zones after a treatment that has to stay dry. The pause ends on its own.',
+            'Pause your turf zones when a treatment\'s instructions say to skip watering. The pause ends on its own.',
             'Start this week\'s watering plan when you tap Run.',
           ]} />
           <PointList icon="close" tone="#B91C1C" heading="Waves will never" points={[
