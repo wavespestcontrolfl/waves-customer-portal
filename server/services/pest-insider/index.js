@@ -15,7 +15,7 @@
 
 const { planIssue } = require('./plan');
 const { checkIssueCopy } = require('./claim-check');
-const { renderIssue, toolAllowed } = require('./render');
+const { renderIssue, toolAllowed, homeDetailsDropped } = require('./render');
 const { sendDateET } = require('./facts');
 const { validateNewsletterDraft } = require('../newsletter-validator');
 
@@ -44,7 +44,7 @@ function sendGateErrors(issue) {
  *   recheckedFactIds?: string[], blogUrl?: string|null, areaLine?: string|null, tool?: object|null,
  *   home?: object|null, plan?: Function }} input   `plan` is the planner (injectable for tests).
  */
-function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], blogUrl = null, areaLine = null, tool = null, home = null, plan = planIssue }) {
+function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], blogUrl, areaLine, tool, home, plan = planIssue }) {
   const dateET = sendDateET(sendDate);
   const diagnostics = { sendDate: dateET, factId: null, speciesSlug: null, problems: [], fallbacks: [] };
 
@@ -66,6 +66,7 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], blogUrl = nu
   if (!copy.ok) return { ok: false, reason: copyFailReason(copy), issue: null, diagnostics };
 
   if (tool && !toolAllowed(tool)) diagnostics.fallbacks.push('tool_dropped_affiliate');
+  if (homeDetailsDropped(home)) diagnostics.fallbacks.push('home_detail_dropped');
   const issue = renderIssue({
     subject: copy.subject,
     preview: copy.preview,

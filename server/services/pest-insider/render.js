@@ -108,16 +108,39 @@ function toolBlock({ tool }) {
   return { html, text };
 }
 
+// A visit detail (an area covered, the next service) is free text from the
+// visit record, so it runs the complete customer-copy screen (AGENTS.md)
+// before it renders, and one that fails is left out. One with a digit is
+// left out too: an area or a service name needs none, and an access code the
+// screen can miss ("gate #1234") always has one (pre-push round 5). The
+// screen loads the report-copy modules, so it is required only when a home
+// block is given.
+function homeDetail(value) {
+  if (typeof value !== 'string') return '';
+  const text = value.replace(/\s+/g, ' ').trim();
+  if (!text || /\d/.test(text)) return '';
+  const { customerCopyViolations } = require('../service-report/technician-report-copy');
+  return customerCopyViolations(text).length ? '' : text;
+}
+
+// True when renderIssue leaves a given visit detail out (for the build's diagnostics).
+function homeDetailsDropped(home) {
+  const areas = home && home.lastVisit && Array.isArray(home.lastVisit.areas) ? home.lastVisit.areas : [];
+  const service = home && home.nextVisit ? [home.nextVisit.service] : [];
+  return [...areas, ...service].some((value) => value != null && String(value).trim() !== '' && !homeDetail(value));
+}
+
 // home: { lastVisit: { date, areas: [] }, nextVisit: { date, service }, sinceDate, visitCount }
 function homeLines(home) {
   const lines = [];
   const last = home.lastVisit;
   if (last && dateText(last.date)) {
-    const areas = (Array.isArray(last.areas) ? last.areas : []).map((a) => String(a).trim()).filter(Boolean);
+    const areas = (Array.isArray(last.areas) ? last.areas : []).map(homeDetail).filter(Boolean);
     lines.push(`Last visit: ${dateText(last.date)}${areas.length ? `. We covered ${areas.join(', ')}.` : '.'}`);
   }
   const next = home.nextVisit;
-  if (next && dateText(next.date)) lines.push(`Next visit: ${dateText(next.date)}${String(next.service || '').trim() ? ` (${String(next.service).trim()})` : ''}.`);
+  const service = next ? homeDetail(next.service) : '';
+  if (next && dateText(next.date)) lines.push(`Next visit: ${dateText(next.date)}${service ? ` (${service})` : ''}.`);
   const count = Number(home.visitCount);
   if (dateText(home.sinceDate)) {
     lines.push(`With us since ${dateText(home.sinceDate)}${Number.isInteger(count) && count > 0 ? `, ${count} visit${count === 1 ? '' : 's'} so far` : ''}.`);
@@ -165,4 +188,4 @@ function wrapIssueHtml(issue, { unsubscribeUrl }) {
   });
 }
 
-module.exports = { renderIssue, wrapIssueHtml, toolAllowed, escapeHtml, FORWARD_LINE, IDENTIFIER_URL };
+module.exports = { renderIssue, wrapIssueHtml, toolAllowed, homeDetailsDropped, escapeHtml, FORWARD_LINE, IDENTIFIER_URL };

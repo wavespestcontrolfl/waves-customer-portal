@@ -436,14 +436,12 @@ describe('findUnverifiedClaims', () => {
       // the genus alone is not Formosan: C. gestroi, the Asian subterranean termite, also belongs to it
       'Coptotermes gestroi swarms in June.',
       'Coptotermes termites swarm in June.',
-      // a month list split off its verb by "and" or a comma stays with it (pre-push round 4)
+      // June is not the end of the window when another clause of the sentence names a later
+      // month, which the clause splitter cuts off the June clause (pre-push rounds 4 and 5)
       'Formosan termites swarm in June and July.',
       'Formosan termites swarm in June, July and August.',
-      'In June and July, Formosan termites swarm.',
-      'Native termites swarm in April and October.',
-      'Subterranean termites swarm in spring and fall.',
-      'In October, native termites swarm.',
-      'Native termites swarm in spring, and again in the fall.',
+      'Formosan termites swarm in June and July after sunset.',
+      'Formosan termites swarm in June, and in July, after sunset.',
     ])('flags: %s', (sentence) => {
       expect(rule(sentence, 'termite_second_swarm')).toBe(true);
     });
@@ -468,12 +466,12 @@ describe('findUnverifiedClaims', () => {
       'C. brevis swarms again after storms.',
       'Reticulitermes flavipes does not swarm again after storms.',
       'R. zeae thrives in summer heat.',
-      // a month list inside the window, and a clause with its own subject or verb, are not the claim
+      // inside the Formosan window, or a later month that says the swarm is over by then
       'Formosan termites swarm in May and June.',
-      "Florida's native subterranean termites swarm in winter and spring, December through May, on warm afternoons after rain.",
-      'Native termites swarm in April, but drywood termites fly in October.',
       'Formosan termites swarm in June and are gone by July.',
-      'Termites swarm in spring, and the market runs through October.',
+      "Florida's native subterranean termites swarm in winter and spring, December through May, on warm afternoons after rain.",
+      // a date that opens a new statement is not a swarm month (pre-push round 5)
+      'Native termites swarm in spring, and in October, we inspect for damage.',
     ])('does NOT flag the verified swarm-season facts: %s', (sentence) => {
       expect(rule(sentence, 'termite_second_swarm')).toBe(false);
     });

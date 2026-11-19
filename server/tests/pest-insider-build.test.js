@@ -71,6 +71,17 @@ describe('buildIssue', () => {
     expect(r.issue.html_body).toContain('Your home');
   });
 
+  test('a visit detail that fails the customer-copy screen is left out and reported', () => {
+    const home = { lastVisit: { date: '2026-11-04', areas: ['lanai', 'gate code 4512'] }, nextVisit: { date: '2027-01-06', service: 'pest control' } };
+    const r = buildIssue({ sendDate: '2026-12-03', plan: planOf(A01), home });
+    expect(r.ok).toBe(true);
+    expect(r.issue.text_body).toContain('We covered lanai.');
+    expect(r.issue.text_body).not.toContain('4512');
+    expect(r.diagnostics.fallbacks).toEqual(['home_detail_dropped']);
+    const clean = buildIssue({ sendDate: '2026-12-03', plan: planOf(A01), home: { ...home, lastVisit: { date: '2026-11-04', areas: ['lanai'] } } });
+    expect(clean.diagnostics.fallbacks).toEqual([]);
+  });
+
   test('an impossible send date is refused before any plan is made', () => {
     const plan = jest.fn();
     expect(() => buildIssue({ sendDate: '2027-02-30', plan })).toThrow(/not a real calendar date/);

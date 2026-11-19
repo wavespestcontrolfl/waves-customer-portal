@@ -46,6 +46,13 @@ describe('renderIssue', () => {
     const rolled = renderIssue({ ...BASE, home: { nextVisit: { date: '2027-02-30', service: 'pest control' }, sinceDate: '2024-03-12' } });
     expect(rolled.text_body).not.toMatch(/Next visit|March 2/);
     expect(rolled.text_body).toContain('With us since March 12, 2024');
+    // a visit detail runs the complete customer-copy screen; an access code or a banned word is left out (pre-push round 5)
+    const screened = renderIssue({ ...BASE, home: { lastVisit: { date: '2026-11-04', areas: ['front beds', 'gate code 4512', 'gate #1234', 'pet-safe barrier', 42] }, nextVisit: { date: '2027-01-06', service: 'infestation treatment' } } });
+    const homeText = screened.text_body.split('YOUR HOME')[1];
+    const homeHtml = screened.html_body.split('Your home')[1];
+    expect(homeText).toContain('Last visit: November 4, 2026. We covered front beds.');
+    expect(homeText).toContain('Next visit: January 6, 2027.');
+    for (const part of [homeText, homeHtml]) expect(part).not.toMatch(/4512|1234|safe|infestation|42/);
     expect(renderIssue({ ...BASE, tool: { name: 'No link', why: 'x', url: 'http://insecure.example.com' } }).html_body).not.toContain('No link');
   });
 
