@@ -134,20 +134,25 @@ export function termiticideProductOptions(kind, selectedKey) {
 // check (the form's set()), so on a marked form a check is always for the product selected.
 export const BIFENTHRIN_LABEL_BOTTLE = "lesco_crosscheck_plus";
 const BIFENTHRIN_OPTION_KEYS = new Set(["talstar_p", "bifen_it"]);
+// A pre-slab ingredient name names no product: the server takes it only from a legacy payload and otherwise holds the quote for
+// review, so a reopen keeps it as saved (trenching takes ingredient names, and they resolve).
+const PRE_SLAB_INGREDIENT_NAMES = new Set(["bifenthrin", "fipronil"]);
+const productToken = (value) => String(value).trim().toLowerCase().replace(/[\s/-]+/g, "_").replace(/_+/g, "_");
 // Each termiticide product field and the label check made for the product it selects.
 const LABEL_CHECKS = [
-  { productField: "preslabProductKey", checkField: "preslabLabelConfirmed", name: "pre-slab", resolve: normalizePreSlabProductKey },
+  { productField: "preslabProductKey", checkField: "preslabLabelConfirmed", name: "pre-slab", resolve: normalizePreSlabProductKey, keepAsSaved: PRE_SLAB_INGREDIENT_NAMES },
   { productField: "trenchingProductKey", checkField: "trenchingLabelConfirmed", name: "trenching", resolve: normalizeTrenchingProductKey },
 ];
 const LABEL_CHECK_FOR_PRODUCT = Object.fromEntries(LABEL_CHECKS.map(({ productField, checkField }) => [productField, checkField]));
 
 // A saved alias ("talak", "Crosscheck Plus") becomes its option key, so the picker shows the product the engine prices and the label
-// panel shows that product's warning. A blank or unrecognized value is left as saved.
+// panel shows that product's warning. A blank or unrecognized value, or a pre-slab ingredient name, is left as saved.
 export function canonicalTermiticideProducts(form) {
   let next = form;
-  for (const { productField, resolve } of LABEL_CHECKS) {
+  for (const { productField, resolve, keepAsSaved } of LABEL_CHECKS) {
     const value = form[productField];
-    const key = typeof value === "string" && value.trim() ? resolve(value, { fallback: null }) : null;
+    if (typeof value !== "string" || !value.trim() || keepAsSaved?.has(productToken(value))) continue;
+    const key = resolve(value, { fallback: null });
     if (key && key !== value) next = { ...next, [productField]: key };
   }
   return next;

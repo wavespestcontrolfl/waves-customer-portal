@@ -99,9 +99,11 @@ function storedMistingRows(estimateData, options = {}) {
   return mistingRowsIn(storedEstimateContainer(data, options) || data);
 }
 
-// The stored rows of the pre-slab termiticide line: the mapped one-time item, its quote-required copy and the raw engine line,
-// from the same authoritative container. Each keeps the product it quoted and the container cost it priced with.
-const isPreSlabTermiticideRow = (row) => isRecord(row) && row.service === 'pre_slab_termiticide';
+// The stored rows of the pre-slab termiticide line (a legacy pre_slab_termidor row included): the mapped one-time item, its
+// quote-required copy and the raw engine line, from the same authoritative container. Each keeps the product it quoted and the
+// container cost it priced with.
+const PRE_SLAB_ROW_SERVICES = new Set(['pre_slab_termiticide', 'pre_slab_termidor']);
+const isPreSlabTermiticideRow = (row) => isRecord(row) && PRE_SLAB_ROW_SERVICES.has(row.service);
 function preSlabTermiticideRowsIn(container) {
   const nested = container.results && container.results.oneTime;
   return [

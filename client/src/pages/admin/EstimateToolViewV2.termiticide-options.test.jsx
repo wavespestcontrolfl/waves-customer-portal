@@ -67,6 +67,13 @@ describe("label checks saved for the earlier bifenthrin bottle", () => {
     expect(canonicalTermiticideProducts(unknown)).toBe(unknown);
   });
 
+  it("keeps a pre-slab ingredient name as saved, so the server still holds it for review; trenching resolves it", () => {
+    expect(canonicalTermiticideProducts({ preslabProductKey: "bifenthrin", trenchingProductKey: "bifenthrin" }))
+      .toEqual({ preslabProductKey: "bifenthrin", trenchingProductKey: "bifen_it" });
+    expect(canonicalTermiticideProducts({ preslabProductKey: " Fipronil ", trenchingProductKey: "fipronil" }))
+      .toEqual({ preslabProductKey: " Fipronil ", trenchingProductKey: "taurus_sc" });
+  });
+
   it("clears only the bifenthrin check when the other key is fipronil", () => {
     const inputs = saved({ trenchingProductKey: "taurus_sc" });
     const { form, cleared } = clearPriorBottleLabelChecks(inputs, inputs);

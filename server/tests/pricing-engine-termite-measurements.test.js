@@ -982,7 +982,7 @@ describe('a sent pre-slab quote keeps the container cost it priced with', () => 
   const PROFILE = { homeSqFt: 2400, stories: 1, lotSqFt: 9000, propertyType: 'single_family' };
   const input = (extra = {}) => ({ ...PROFILE, services: { preSlabTermiticide: { productKey: 'talstar_p', slabSqFt: 6832, ...extra } } });
   const TALAK = { productKey: 'talstar_p', containerCost: 41.57, containerOz: 96 };
-  const slabLine = (estimate) => estimate.lineItems.find((line) => line.service === 'pre_slab_termiticide');
+  const slabLine = (estimate) => estimate.lineItems.find((line) => ['pre_slab_termiticide', 'pre_slab_termidor'].includes(line.service));
   // A quote priced before the swap: the engine line under the Talak cost basis, as the engine wrote it then.
   const oldQuote = () => generateEstimate({ ...input(), preSlabTermiticidePricingKnobs: TALAK });
 
@@ -994,6 +994,22 @@ describe('a sent pre-slab quote keeps the container cost it priced with', () => 
     expect(slabLine(generateEstimate({ ...custom, preSlabTermiticidePricingKnobs: TALAK })).price).toBe(743);
   });
 
+  test.each([['preSlabTermidor'], ['pre_slab_termidor']])('the legacy %s service keeps the earlier price too, on the engine and the public replay', (key) => {
+    const { extractEngineInputs } = require('../routes/estimate-public');
+    const legacy = { ...PROFILE, services: { [key]: { productKey: 'talstar_p', slabSqFt: 6832 } } };
+    expect(slabLine(generateEstimate(legacy)).price).toBe(743);
+    const sent = generateEstimate({ ...legacy, preSlabTermiticidePricingKnobs: TALAK });
+    expect(slabLine(sent).price).toBe(993);
+    expect(slabLine(generateEstimate(extractEngineInputs({ engineInputs: legacy, engineResult: sent }))).price).toBe(993);
+  });
+
+  test('a legacy ingredient name resolves as the legacy pricer resolves it, so its pin still applies', () => {
+    const legacy = { ...PROFILE, services: { preSlabTermidor: { productKey: 'bifenthrin', slabSqFt: 6832 } } };
+    const pin = { ...TALAK, productKey: 'bifen_it' };
+    expect(slabLine(generateEstimate(legacy)).price).toBe(743);
+    expect(slabLine(generateEstimate({ ...legacy, preSlabTermiticidePricingKnobs: pin })).price).toBe(993);
+  });
+
   test('the signal reads the cost basis from the raw engine line and from the mapped one-time item', () => {
     const engineResult = oldQuote();
     expect(replay.preSlabTermiticideKnobSignalForReplay({ engineInputs: input(), engineResult })).toEqual(TALAK);
@@ -1001,6 +1017,9 @@ describe('a sent pre-slab quote keeps the container cost it priced with', () => 
     expect(replay.preSlabTermiticideKnobSignalForReplay({ result: mapV1ToLegacyShape(generateEstimate({ ...PROFILE, services: {} })) })).toBeNull();
     expect(replay.preSlabTermiticideKnobSignalForReplay({ engineResult: { lineItems: [{ service: 'pre_slab_termiticide', productKey: 'talstar_p' }] } })).toBeNull();
     expect(replay.preSlabTermiticideKnobSignalForReplay({})).toBeNull();
+    const legacyRow = { service: 'pre_slab_termidor', productKey: 'termidor_sc', containerCost: 174.72, containerOz: 78 };
+    expect(replay.preSlabTermiticideKnobSignalForReplay({ engineResult: { lineItems: [legacyRow] } }))
+      .toEqual({ productKey: 'termidor_sc', containerCost: 174.72, containerOz: 78 });
   });
 
   test('the public replay of an old quote keeps its price; a copy of the pin inside the stored inputs never prices', () => {
