@@ -16,6 +16,7 @@ jest.mock('../services/route-optimizer', () => ({
   haversine: (lat1, lng1, lat2, lng2) => Math.abs(lat1 - lat2) + Math.abs(lng1 - lng2),
   fallbackLegMetrics: (miles) => ({ meters: Math.round(miles * 1000), minutes: 0 }),
   optimizeRoute: jest.fn(),
+  nearestNeighborOptimize: jest.fn(),
 }));
 jest.mock('../services/auto-dispatch/route-tiers', () => ({
   ...jest.requireActual('../services/auto-dispatch/route-tiers'),
@@ -162,6 +163,13 @@ beforeEach(() => {
     totalDurationSeconds: 600,
     unoptimizedDistanceMeters: 99999,
     source: 'google_routes_api',
+  }));
+  RouteOptimizer.nearestNeighborOptimize.mockImplementation((stops) => ({
+    orderedStops: [...stops].sort((p, q) => p.lng - q.lng),
+    totalDistanceMeters: 12345,
+    totalDurationSeconds: 600,
+    unoptimizedDistanceMeters: 99999,
+    source: 'nearest_neighbor_fallback',
   }));
 });
 
@@ -434,6 +442,22 @@ test('savings above the floor rewrite route_order transactionally in optimized o
   // (route_order asc): B(1), A(2), C(3).
   const fed = RouteOptimizer.optimizeRoute.mock.calls[0][0].map((s) => s.id);
   expect(fed).toEqual(['B', 'A', 'C']);
+});
+
+test('a customer-linked stamped visit keeps its day on the local optimizer', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay('', {
+    customer_id: 'customer-1',
+    reservation_expires_at: '2026-08-12T12:00:00.000Z',
+  });
+
+  const res = await runRouteReorder({ now: NOW });
+
+  expect(res.applied).toBe(1);
+  expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
+  expect(RouteOptimizer.nearestNeighborOptimize).toHaveBeenCalledWith(
+    expect.arrayContaining([expect.objectContaining({ id: 'A' })]),
+    expect.objectContaining({ techId: 't1', endAtStart: true }),
+  );
 });
 
 test('an order violating window chronology is SKIPPED, never written', async () => {

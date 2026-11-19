@@ -13227,6 +13227,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         try {
           const committedAppointment = await slotReservation.commitReservation({
             scheduledServiceId: reservationRow.id,
+            expectUnclaimed: true,
             customerId,
             paymentMethodPreference,
             estimatedPrice: visitEstimatedPrice,
@@ -13299,6 +13300,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           try {
             const committedAppointment = await slotReservation.commitReservation({
               scheduledServiceId: existingAppointmentRow.id,
+              expectUnclaimed: true,
               customerId,
               paymentMethodPreference,
               estimatedPrice: visitEstimatedPrice,

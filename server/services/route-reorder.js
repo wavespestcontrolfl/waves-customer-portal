@@ -1694,15 +1694,24 @@ async function runRouteReorder(opts = {}, conn = db) {
             summary.skipped.push({ ...entryBase, reason: clockFrozen ? 'WITHIN_72H' : 'REMINDER_SENT_FROZEN', repair: 'NO_SAFE_INSERTION' });
             continue;
           }
+          // A customer-linked row that still carries its former hold stamp
+          // was previously absent once the stamp expired. Keep affected days
+          // entirely local so correcting that classification never starts a
+          // paid provider call that the old reader would not have made.
+          const hasBookedHoldStamp = techStops.some(stop => stop.customer_id != null
+            && stop.reservation_expires_at != null);
+          const routeInput = ordered.map((s) => ({
+            id: s.id, lat: parseFloat(s.lat) || null, lng: parseFloat(s.lng) || null, serviceType: s.service_type,
+          }));
+          const routeOptions = { startLat: home.lat, startLng: home.lng, endAtStart: true, techId };
           const result = repair ? {
             orderedStops: repair.orderedStops,
             totalDistanceMeters: modelDistanceMeters(RouteOptimizer, repair.orderedStops, home, home),
             totalDurationSeconds: Math.round(repair.simulation.travelMin * 60),
             source: 'chronological_repair',
-          } : await RouteOptimizer.optimizeRoute(
-            ordered.map((s) => ({ id: s.id, lat: parseFloat(s.lat) || null, lng: parseFloat(s.lng) || null, serviceType: s.service_type })),
-            { startLat: home.lat, startLng: home.lng, endAtStart: true, techId },
-          );
+          } : hasBookedHoldStamp
+            ? RouteOptimizer.nearestNeighborOptimize(routeInput, routeOptions)
+            : await RouteOptimizer.optimizeRoute(routeInput, routeOptions);
           // PERMUTATION GUARD (uncapped audit P1): orderedStops is built from
           // the external API's waypoint-index list, and route-optimizer
           // defaults a missing list to [] — a missing/partial/duplicated

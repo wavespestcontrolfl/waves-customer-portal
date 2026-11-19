@@ -2001,6 +2001,7 @@ async function commitReservation({
   preLockedDate = null,
   preLockedTechId = null,
   preparedCapacity = null,
+  expectUnclaimed = false,
   trx,
 }) {
   // One booking_config read (lunch interval + day-end override, 60s TTL) for
@@ -2158,6 +2159,12 @@ async function commitReservation({
     if (row.customer_id != null && String(row.customer_id) !== String(customerId)) {
       const err = new Error('reservation not found');
       err.code = 'RESERVATION_NOT_FOUND';
+      throw err;
+    }
+    if (expectUnclaimed && row.customer_id != null) {
+      // Acceptance priced an unclaimed hold. A staff booking now needs the normal adoption checks.
+      const err = new Error('the held appointment was booked before confirmation');
+      err.code = 'SLOT_UNAVAILABLE';
       throw err;
     }
     if (!row.reservation_expires_at) return row;

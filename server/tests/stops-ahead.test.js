@@ -155,8 +155,10 @@ describe('computeStopsAhead', () => {
     expect(countSql).toContain('AND NOT g.has_live');
     expect(countSql).toContain('g.has_enroute AND NOT g.has_at');
     expect(countSql).toMatch(/progressed_beyond/);
-    // Dead estimate-slot holds must not count (live-hold predicate).
-    expect(countSql).toContain('(s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())');
+    // Dead unclaimed estimate-slot holds must not count. A booked row remains
+    // a route stop even when its old hold stamp has expired.
+    expect(countSql.match(/s\.customer_id IS NOT NULL/g)).toHaveLength(2);
+    expect(countSql.match(/s\.reservation_expires_at > NOW\(\)/g)).toHaveLength(2);
     // Tracker-terminal rows drop out of the LIVE flag by track_state too,
     // NULL-safely (track_state can diverge from status).
     expect(countSql).toContain("(dr.track_state IS NULL OR dr.track_state NOT IN ('complete', 'cancelled'))");
