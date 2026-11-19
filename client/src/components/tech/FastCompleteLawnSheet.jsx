@@ -1472,6 +1472,20 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   );
 }
 
+// An off-route saved attempt's row holds only the visit id and the attempt's
+// summary: no customer, day, property or billing facts for a fresh completion.
+// Past the saved-attempt view, an error is the server's refusal of its retry
+// (refused for good, or a correctable rejection that cleared the copy): its
+// reason stays above the way back to the schedule.
+function RecoveryOnlyView({ submission }) {
+  return (
+    <>
+      {submission.error && <ActionFeedback error className="tech-visit-feedback">{submission.error}</ActionFeedback>}
+      <ActionFeedback className="tech-visit-feedback">{RECOVERY_ONLY_NOTICE}</ActionFeedback>
+    </>
+  );
+}
+
 function SheetBody({ service, request, catalog, catalogError, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile, refreshPlaces, onWrapChecking, collectOnSheet }) {
   if (submission.done) {
     return (
@@ -1482,9 +1496,7 @@ function SheetBody({ service, request, catalog, catalogError, ctx, propertyAreas
   }
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;
-  // An off-route saved attempt's row holds only the visit id and the attempt's
-  // summary: no customer, day, property or billing facts for a fresh completion.
-  if (service.recoveryOnly) return <ActionFeedback className="tech-visit-feedback">{RECOVERY_ONLY_NOTICE}</ActionFeedback>;
+  if (service.recoveryOnly) return <RecoveryOnlyView submission={submission} />;
   const refusal = refusalWithoutContext(submission, ctx);
   if (refusal) return refusal;
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;

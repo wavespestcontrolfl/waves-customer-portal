@@ -230,6 +230,32 @@ for (const [name, Sheet] of [['tree/shrub', FastCompleteTreeShrubSheet], ['lawn 
 // Today's off-route saved attempt (`recoveryOnly`): the row holds only the
 // visit id and summary, so a discard leaves a notice: no fresh form, and no
 // full-form hand-off with no day or premise to open it on.
+// A retry the server refuses clears the saved copy: the off-route view keeps
+// the server's reason above the way back to the schedule, for a refusal for
+// good (409) and a correctable rejection (422) alike.
+test.each([
+  ['refused for good', 409, 'visit_closed', 'This visit is closed.'],
+  ['a correctable rejection', 422, 'invalid_product', 'A product on this completion is not on the lawn list.'],
+])('the lawn visit sheet on an off-route saved attempt keeps the reason when its retry is %s', async (_label, status, code, message) => {
+  const body = { idempotencyKey: `lawn-off-${status}`, technicianNotes: 'Lawn work' };
+  await putFastCompletionAttempt('visit-off', 'tech-a', { body, summary: 'Lawn visit', sheet: 'lawn_visit' });
+  const request = vi.fn(async (path) => {
+    if (!path.endsWith('/complete')) throw Object.assign(new Error('Not this sheet'), { status: 404 });
+    throw Object.assign(new Error(message), { status, code });
+  });
+  const onFullForm = vi.fn();
+  render(<FastCompleteLawnSheet service={{ id: 'visit-off', recoveryOnly: true }} operatorId="tech-a" request={request} catalog={[]}
+    onClose={vi.fn()} onCompleted={vi.fn()} onFullForm={onFullForm} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry', exact: true }));
+  expect(await screen.findByText(message)).toBeInTheDocument();
+  expect(screen.getByText(/No saved completion is left for this visit/)).toBeInTheDocument();
+  await waitFor(async () => expect((await getFastCompletionAttempt('visit-off', 'tech-a')).attempt).toBeNull());
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(onFullForm).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', { name: /Complete/ })).not.toBeInTheDocument();
+  expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(1);
+});
+
 test('the lawn visit sheet on an off-route saved attempt shows a notice after a discard, never a fresh form or the hand-off', async () => {
   const body = { idempotencyKey: 'lawn-off-key', technicianNotes: 'Lawn work' };
   await putFastCompletionAttempt('visit-off', 'tech-a', { body, summary: 'Lawn visit', sheet: 'lawn_visit' });
