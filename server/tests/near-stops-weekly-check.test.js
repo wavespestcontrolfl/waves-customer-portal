@@ -73,11 +73,12 @@ const TECH = { id: 'tech-1', name: 'Tech One' };
 // ------------------------------------------------------------------ part 1
 
 let seq = 0;
-function stop({ customer, first = 'Avery', last = 'Sample', city = 'Lakewood Ranch', at, date, start = '09:00', plan = false, status = 'pending' }) {
+function stop({ customer, first = 'Avery', last = 'Sample', city = 'Lakewood Ranch', at, date, start = '09:00', plan = false, status = 'pending', property = null, street = null }) {
   seq += 1;
   return {
     id: `svc-${seq}`,
     customer_id: customer,
+    property_id: property,
     status,
     scheduled_date: date,
     window_start: start ? `${start}:00` : null,
@@ -86,7 +87,7 @@ function stop({ customer, first = 'Avery', last = 'Sample', city = 'Lakewood Ran
     recurring_parent_id: plan ? `plan-${customer}` : null,
     lat: at.lat,
     lng: at.lng,
-    service_address_line1: null,
+    service_address_line1: street,
     service_address_zip: null,
     service_address_city: city,
     first_name: first,
@@ -300,6 +301,64 @@ describe('part 1: next-door stops booked apart', () => {
     expect(findApartPairs(rows)).toHaveLength(1);
   });
 
+  test("one customer's two units at one map pin are two homes: booked apart, they are a split", () => {
+    const rows = [
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', property: 'prop-1', plan: true }),
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-08', property: 'prop-2', plan: true }),
+    ];
+    const pairs = findApartPairs(rows);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]).toMatchObject({ sameCustomer: true, gap: 7 });
+  });
+
+  test('one home under two map pins is one home: its own visits are never a split', () => {
+    const fiftyFeet = north(50 / 5280, HOME_A);
+    // One linked property...
+    expect(findApartPairs([
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', property: 'prop-1', plan: true }),
+      stop({ customer: 'c-a', at: fiftyFeet, date: '2027-03-08', property: 'prop-1', plan: true }),
+    ])).toEqual([]);
+    // ...or one service address on rows with no property link.
+    expect(findApartPairs([
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', street: '100 Sample Way', plan: true }),
+      stop({ customer: 'c-a', at: fiftyFeet, date: '2027-03-08', street: '100 Sample Way', plan: true }),
+    ])).toEqual([]);
+  });
+
+  test('a combined stop stays live while any of its services is open, in either id order', () => {
+    for (const [doneId, openId] of [['svc-x1', 'svc-x2'], ['svc-x2', 'svc-x1']]) {
+      const rows = [
+        { ...stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', plan: true, status: 'completed' }), id: doneId },
+        { ...stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', plan: true }), id: openId },
+        stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', plan: true }),
+      ];
+      const pairs = findApartPairs(rows);
+      expect(pairs).toHaveLength(1);
+      expect(pairs[0].first.id).toBe(openId); // the open service stands for the stop and gives its reason
+    }
+  });
+
+  test('services back to back at one home are one trip: a later visit next door is no split', () => {
+    const rows = [
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '09:00', plan: true }),
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '10:00', plan: true }),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-01', start: '11:00', plan: true }),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', start: '11:00', plan: true }),
+    ];
+    expect(findApartPairs(rows)).toEqual([]);
+  });
+
+  test("one day: the two homes' nearest services decide, so a home's second trip never hides a back-to-back pair", () => {
+    const rows = [
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '09:00' }),
+      stop({ customer: 'c-x', at: north(20), date: '2027-03-01', start: '10:00' }),
+      stop({ customer: 'c-y', at: north(22), date: '2027-03-01', start: '11:00' }),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-01', start: '14:00' }),
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '15:00' }),
+    ];
+    expect(findApartPairs(rows)).toEqual([]);
+  });
+
   test('a visit with no time yet on the same day is not judged', () => {
     const rows = [
       stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '09:00' }),
@@ -310,12 +369,21 @@ describe('part 1: next-door stops booked apart', () => {
 });
 
 describe('what holds each visit, in plain words', () => {
-  const planVisit = { id: 'svc-9', planChild: true };
+  const planVisit = { id: 'svc-9', nightKind: 'cadence' };
 
   test('a first or one-time visit never enters the night run', () => {
-    expect(holdFor({ id: 'svc-8', planChild: false }, new Map())).toBe('first or one-time visit');
+    expect(holdFor({ id: 'svc-8', nightKind: 'first' }, new Map())).toBe('first or one-time visit');
+    expect(buildPlaces([stop({ customer: 'c-b', at: HOME_A, date: '2027-03-01' })])[0].visits[0].nightKind).toBe('first');
+  });
+
+  test('a booster has a plan but is never a cadence visit, so the night run never moves it', () => {
+    // auto-dispatch/eligibility.js: is_recurring true AND a recurring_parent_id, children only.
     const booster = { ...stop({ customer: 'c-b', at: HOME_A, date: '2027-03-01' }), recurring_parent_id: 'plan-c-b' };
-    expect(buildPlaces([booster])[0].visits[0].planChild).toBe(true);
+    const visit = buildPlaces([booster])[0].visits[0];
+    expect(visit.nightKind).toBe('booster');
+    const log = new Map([[visit.id, { reason_code: 'NO_SCORE_IMPROVEMENT' }]]);
+    expect(holdFor(visit, log)).toBe('booster visit, which the night run never moves');
+    expect(buildPlaces([stop({ customer: 'c-b', at: HOME_A, date: '2027-03-01', plan: true })])[0].visits[0].nightKind).toBe('cadence');
   });
 
   test("the night run's own reason for the visit", () => {

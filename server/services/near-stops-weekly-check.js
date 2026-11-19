@@ -7,7 +7,9 @@
  *
  *   1. Next-door stops booked apart in the next 30 days: two stops 0.1 mile or
  *      closer (any customers), or one customer's two homes half a mile or
- *      closer. Each line says what holds each visit where it is: for two days,
+ *      closer. A home is the app's own same-place rule (one linked property, else
+ *      one service address); a stop is one home's day, every service there that
+ *      day. Each line says what holds each visit where it is: for two days,
  *      the newest night run's own log line for that visit (auto_dispatch_audit_logs,
  *      a dry run marked as one); for one day, the 4:40 AM day re-plan's own reason
  *      the visit keeps its hour (day_replan_plans.fixed, the visit's own technician).
@@ -40,6 +42,8 @@ const logger = require('./logger');
 const { alertEpisodesLive } = require('../config/feature-gates');
 const { composeAdminAlert, raiseAdminAlert, cutAtWord, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { haversine, resolveGeo, milesToDriveMinutes } = require('./auto-dispatch/geo');
+const { samePlace } = require('./auto-dispatch/current-conflict');
+const { effectivePremise } = require('./route-reorder-window-fit');
 const { daysBetween } = require('./auto-dispatch/route-tiers');
 const { FLEX_TIER_RADIUS_DAYS } = require('./auto-dispatch/flex-tier');
 const { NIGHT_TRIGGERS, FINISHED_STATUSES } = require('./auto-dispatch/catch-up');
@@ -158,7 +162,15 @@ function distanceLabel(miles) {
 
 // ------------------------------------------------- part 1: next-door splits
 
-function toVisit(row, geo) {
+// The night run moves only a plan's later cadence visits (auto-dispatch/eligibility.js:
+// is_recurring true and a recurring_parent_id). A booster carries the parent but is
+// stored is_recurring false; a first or one-time visit has no parent.
+function nightKindOf(row) {
+  if (row.recurring_parent_id == null) return 'first';
+  return row.is_recurring === true ? 'cadence' : 'booster';
+}
+
+function toVisit(row) {
   return {
     id: String(row.id),
     customerId: String(row.customer_id),
@@ -166,47 +178,64 @@ function toVisit(row, geo) {
     windowStart: hhmm(row.window_start),
     tech: row.technician_id ? String(row.technician_id) : null,
     done: row.status === SERVED_STATUS, // served: a pairing partner, never a split to report
-    planChild: row.recurring_parent_id != null, // a plan's own later visit or booster
-    lat: geo.lat,
-    lng: geo.lng,
+    nightKind: nightKindOf(row),
   };
 }
 
-// One place per home: a customer's stops within SAME_PLACE_MILES share one.
+// A street line on the visit or, for an unstamped visit, on the customer: the
+// address the app's same-place rule compares.
+const addressKnown = (row) => !!effectivePremise(row).service_address_line1;
+
+// One customer's two rows are one home under the app's own same-place rule
+// (auto-dispatch/current-conflict.js samePlace: one linked property, else one
+// service address, unit included). Two linked properties, or two known addresses,
+// that differ are two homes even at one map pin (two units of one building). Only
+// when an address is unknown do the map pins decide.
+function sameHome(home, row, geo) {
+  if (samePlace(home.row, row)) return true;
+  if ((home.row.property_id && row.property_id) || (addressKnown(home.row) && addressKnown(row))) return false;
+  return !!(home.geo && geo) && haversine(home.geo.lat, home.geo.lng, geo.lat, geo.lng) <= SAME_PLACE_MILES;
+}
+
+// Every row's home, pinned or not: a row with no pin still belongs to its home,
+// and only a home with a pin can be paired.
 function buildPlaces(rows) {
   const places = [];
+  const byCustomer = new Map();
   for (const row of rows) {
     const geo = resolveGeo(row);
-    if (!geo) continue;
-    const visit = toVisit(row, geo);
-    let place = places.find((p) => p.customerId === visit.customerId
-      && haversine(p.lat, p.lng, geo.lat, geo.lng) <= SAME_PLACE_MILES);
+    const customerId = String(row.customer_id);
+    if (!byCustomer.has(customerId)) byCustomer.set(customerId, []);
+    const own = byCustomer.get(customerId);
+    let place = own.find((home) => sameHome(home, row, geo));
     if (!place) {
       place = {
-        customerId: visit.customerId,
-        lat: geo.lat,
-        lng: geo.lng,
+        key: `home-${places.length + 1}`,
+        customerId,
+        row,
+        geo,
         name: shortName(row),
         city: row.service_address_city || row.customer_city || null,
         visits: [],
       };
       places.push(place);
+      own.push(place);
     }
-    visit.placeName = place.name;
-    visit.city = place.city;
-    place.visits.push(visit);
+    if (!place.geo && geo) place.geo = geo;
+    place.visits.push({ ...toVisit(row), home: place.key, placeName: place.name, city: place.city });
   }
   return places;
 }
 
 function nearPairs(places) {
+  const pinned = places.filter((p) => p.geo);
   const pairs = [];
-  for (let i = 0; i < places.length; i += 1) {
-    for (let j = i + 1; j < places.length; j += 1) {
-      const a = places[i];
-      const b = places[j];
+  for (let i = 0; i < pinned.length; i += 1) {
+    for (let j = i + 1; j < pinned.length; j += 1) {
+      const a = pinned[i];
+      const b = pinned[j];
       const sameCustomer = a.customerId === b.customerId;
-      const miles = haversine(a.lat, a.lng, b.lat, b.lng);
+      const miles = haversine(a.geo.lat, a.geo.lng, b.geo.lat, b.geo.lng);
       if (miles <= (sameCustomer ? OWN_HOMES_MILES : NEXT_DOOR_MILES)) pairs.push({ a, b, miles, sameCustomer });
     }
   }
@@ -218,63 +247,82 @@ const slotKey = (v) => `${v.date} ${v.windowStart || '99:99'}`;
 // resolve the same way, so a split keeps its key from week to week.
 const visitOrder = (x, y) => slotKey(x).localeCompare(slotKey(y)) || x.id.localeCompare(y.id);
 
-// One stop per home, day and time: a combined visit (several services at one home
-// and hour) is one stop, and its first row (visitOrder) stands for it.
-function physicalStops(place) {
-  const stops = new Map();
+// One stop per home and day: every service there that day (a combined visit, or
+// services back to back) is one trip. A stop stays live while any of its services
+// is outstanding, and its first live service (visitOrder) stands for it; it is
+// served only when every service is.
+function homeDays(place) {
+  const days = new Map();
   for (const visit of [...place.visits].sort(visitOrder)) {
-    const key = `${visit.date}|${visit.windowStart || ''}`;
-    if (!stops.has(key)) stops.set(key, visit);
+    if (!days.has(visit.date)) days.set(visit.date, []);
+    days.get(visit.date).push(visit);
   }
-  return [...stops.values()];
+  return [...days.values()].map((visits) => ({
+    key: `${place.key}|${visits[0].date}`,
+    date: visits[0].date,
+    visits,
+    lead: visits.find((v) => !v.done) || visits[0],
+    done: visits.every((v) => v.done),
+  }));
 }
 
 // An unassigned stop (no technician) may be on either route, so it counts.
 const sameRoute = (a, b) => !a || !b || a === b;
 
-// A stop at one of the two paired homes is part of the pair; any other stop on
-// the route between them splits them, a third home of the same customer too.
-function atPairHome(stop, pair) {
-  return [pair.a, pair.b].some((home) => home.customerId === stop.customerId && stop.geo
-    && haversine(home.lat, home.lng, stop.geo.lat, stop.geo.lng) <= SAME_PLACE_MILES);
-}
-
+// Any stop on the route between the two services splits them, a third home of the
+// same customer too; a stop at one of the two paired homes is part of the pair.
 // A combined visit (two services at one home and hour) is one stop.
 function stopsBetween(dayStops, first, second, pair) {
   const routeTech = first.tech || second.tech;
-  const between = dayStops.filter((s) => sameRoute(s.tech, routeTech) && !atPairHome(s, pair)
+  const between = dayStops.filter((s) => sameRoute(s.tech, routeTech) && s.home !== pair.a.key && s.home !== pair.b.key
     && s.windowStart > first.windowStart && s.windowStart < second.windowStart);
-  return new Set(between.map((s) => `${s.customerId}|${s.windowStart}`)).size;
+  return new Set(between.map((s) => `${s.home}|${s.windowStart}`)).size;
 }
 
-// Every timed stop by day, with or without a map pin: a stop between two homes
-// splits them even when it cannot be placed on the map.
-function stopsByDayOf(rows) {
+// Every timed service by day, pinned or not: a stop between two homes splits them
+// even when it cannot be placed on the map.
+function stopsByDayOf(places) {
   const byDay = new Map();
-  for (const row of rows) {
-    const windowStart = hhmm(row.window_start);
-    if (!windowStart) continue;
-    const date = dateOnlyString(row.scheduled_date);
-    if (!byDay.has(date)) byDay.set(date, []);
-    byDay.get(date).push({
-      customerId: String(row.customer_id), tech: row.technician_id ? String(row.technician_id) : null, windowStart,
-      geo: resolveGeo(row),
-    });
+  for (const place of places) {
+    for (const visit of place.visits) {
+      if (!visit.windowStart) continue;
+      if (!byDay.has(visit.date)) byDay.set(visit.date, []);
+      byDay.get(visit.date).push(visit);
+    }
   }
   return byDay;
 }
 
-// How one matched pair sits on the calendar. Null = not a split to report: together
-// (one day, one technician, back to back) or not judged (a visit has no time yet).
-// A same-day split is reported for any two customers: the 4:40 AM day re-plan keeps
-// most stops at their hours (a told time, a first visit, a staff pick, 24 hours out),
-// so it cannot be left to join them.
-function splitOf(first, second, pair, stopsByDay) {
-  if (first.date !== second.date) return { gap: daysBetween(first.date, second.date) };
-  if (!first.windowStart || !second.windowStart) return null;
-  if (first.tech && second.tech && first.tech !== second.tech) return { twoTechs: true };
-  const between = stopsBetween(stopsByDay.get(first.date) || [], first, second, pair);
-  return between === 0 ? null : { between };
+// How two homes' stops sit on the calendar, with the two services that show it.
+// A null split is not one to report: together (one day, one technician, back to
+// back) or not judged (no times yet). Two days: each stop's lead service. One day:
+// the two homes' nearest open services on one route decide, so a home's second trip
+// that day never hides a back-to-back pair. A same-day split is reported for any two
+// customers: the 4:40 AM day re-plan keeps most stops at their hours (a told time, a
+// first visit, a staff pick, 24 hours out), so it cannot be left to join them.
+function splitOf(x, y, pair, stopsByDay) {
+  if (x.date !== y.date) {
+    const [first, second] = [x.lead, y.lead].sort(visitOrder);
+    return { first, second, split: { gap: daysBetween(first.date, second.date) } };
+  }
+  let near = null;
+  let twoTechs = null;
+  for (const a of x.visits) {
+    for (const b of y.visits) {
+      if (a.done || b.done || !a.windowStart || !b.windowStart) continue;
+      const [first, second] = [a, b].sort(visitOrder);
+      if (first.tech && second.tech && first.tech !== second.tech) {
+        twoTechs = twoTechs || { first, second };
+        continue;
+      }
+      const between = stopsBetween(stopsByDay.get(first.date) || [], first, second, pair);
+      if (!near || between < near.between) near = { first, second, between };
+    }
+  }
+  if (near) return { first: near.first, second: near.second, split: near.between === 0 ? null : { between: near.between } };
+  if (twoTechs) return { ...twoTechs, split: { twoTechs: true } };
+  const [first, second] = [x.lead, y.lead].sort(visitOrder);
+  return { first, second, split: null };
 }
 
 const gapOf = (p) => p.gap ?? 0;
@@ -287,11 +335,14 @@ const pairKey = (p) => [p.first.id, p.second.id].sort().join('|');
 // door, and a round with no partner pairs with nothing. Returns the pairs apart.
 function pairSplits(pair, stopsByDay) {
   const candidates = [];
-  for (const x of physicalStops(pair.a)) {
-    for (const y of physicalStops(pair.b)) {
-      const [first, second] = [x, y].sort(visitOrder);
-      const days = Math.abs(daysBetween(first.date, second.date));
-      candidates.push({ first, second, days, split: splitOf(first, second, pair, stopsByDay) });
+  for (const x of homeDays(pair.a)) {
+    for (const y of homeDays(pair.b)) {
+      candidates.push({
+        keys: [x.key, y.key],
+        done: x.done || y.done,
+        days: Math.abs(daysBetween(x.date, y.date)),
+        ...splitOf(x, y, pair, stopsByDay),
+      });
     }
   }
   candidates.sort((p, q) => Number(p.split != null) - Number(q.split != null) || p.days - q.days
@@ -299,25 +350,24 @@ function pairSplits(pair, stopsByDay) {
   const used = new Set();
   const splits = [];
   for (const c of candidates) {
-    if (used.has(c.first.id) || used.has(c.second.id)) continue;
-    used.add(c.first.id);
-    used.add(c.second.id);
+    if (c.keys.some((k) => used.has(k))) continue;
+    c.keys.forEach((k) => used.add(k));
     if (c.split) splits.push(c);
   }
   return splits;
 }
 
-// Every split of two live visits that both fall between `from` (today) and `until`
+// Every split of two live stops that both fall between `from` (today) and `until`
 // (the report's last day). The rows reach further on both sides (PAIR_DAYS_BACK,
 // PAIR_DAYS_AHEAD) only so each round meets its own partner: a split with a served
-// visit is over, and one whose partner is past `until` reports in a later week.
+// stop is over, and one whose partner is past `until` reports in a later week.
 function findApartPairs(rows, { from = null, until = null } = {}) {
   const places = buildPlaces(rows);
-  const stopsByDay = stopsByDayOf(rows);
+  const stopsByDay = stopsByDayOf(places);
   const apart = [];
   for (const pair of nearPairs(places)) {
     for (const hit of pairSplits(pair, stopsByDay)) {
-      if (hit.first.done || hit.second.done || hit.days > LOOKAHEAD_DAYS) continue;
+      if (hit.done || hit.days > LOOKAHEAD_DAYS) continue;
       if ((from && hit.first.date < from) || (until && hit.second.date > until)) continue;
       apart.push({ ...pair, first: hit.first, second: hit.second, ...hit.split });
     }
@@ -327,7 +377,8 @@ function findApartPairs(rows, { from = null, until = null } = {}) {
 }
 
 function holdFor(visit, nightLog) {
-  if (!visit.planChild) return 'first or one-time visit';
+  if (visit.nightKind === 'first') return 'first or one-time visit';
+  if (visit.nightKind === 'booster') return 'booster visit, which the night run never moves';
   if (!nightLog) return 'no night run to read';
   const row = nightLog.get(visit.id);
   if (!row) return 'not in the night run';
@@ -536,9 +587,10 @@ async function loadStops(fromDate, untilDate, conn = db) {
     .orderBy([{ column: 's.scheduled_date' }, { column: 's.window_start' }, { column: 's.id' }])
     .select(
       's.id', 's.customer_id', 's.scheduled_date', 's.window_start', 's.technician_id', 's.status',
-      's.is_recurring', 's.recurring_parent_id', 's.lat', 's.lng',
-      's.service_address_line1', 's.service_address_zip', 's.service_address_city',
-      'c.first_name', 'c.last_name', 'c.address_line1 as customer_address_line1', 'c.zip as customer_zip',
+      's.is_recurring', 's.recurring_parent_id', 's.lat', 's.lng', 's.property_id',
+      's.service_address_line1', 's.service_address_line2', 's.service_address_zip', 's.service_address_city',
+      'c.first_name', 'c.last_name', 'c.address_line1 as customer_address_line1',
+      'c.address_line2 as customer_address_line2', 'c.zip as customer_zip', 'c.state as customer_state',
       'c.city as customer_city', 'c.latitude as customer_latitude', 'c.longitude as customer_longitude',
     );
   return rows.filter((row) => !isInternalTestCustomerId(row.customer_id));
