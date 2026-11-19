@@ -55,6 +55,7 @@ jest.mock('../services/payment-lifecycle-email', () => ({
 jest.mock('../services/customer-credit', () => ({
   round2: (v) => Math.round((Number(v) || 0) * 100) / 100,
   getBalance: jest.fn(async () => 500),
+  spendableAccountCreditForInvoice: jest.fn(async ({ balance }) => balance),
   postCreditMovement: jest.fn(async () => ({ balanceAfter: 400 })),
 }));
 
@@ -124,7 +125,9 @@ describe('active payment plans auto-complete when the invoice settles', () => {
     // The payments insert is chained to returning('id') so the Undo marker can name the ledger row.
     trxPayments = makeRecorder({ insert: jest.fn(() => Object.assign(Promise.resolve(1), { returning: jest.fn(async () => [{ id: 'pay-1' }]) })) });
     trxPlans = makeRecorder();
-    trxCustomers = makeRecorder({ first: jest.fn(async () => ({ id: INVOICE.customer_id })) });
+    trxCustomers = makeRecorder({
+      first: jest.fn(async () => ({ id: INVOICE.customer_id, account_credits: 500 })),
+    });
     trxChargeAttempts = makeRecorder();
     trx = jest.fn((table) => {
       if (table === 'invoices') return trxInvoices;
@@ -253,6 +256,57 @@ describe('active payment plans auto-complete when the invoice settles', () => {
         status: 'completed',
         completed_at: expect.any(Date),
       }));
+    });
+  });
+
+  test('apply-credit leaves another invoice\'s unposted saved-card allocation reserved', async () => {
+    const CustomerCredit = require('../services/customer-credit');
+    trxCustomers.first.mockResolvedValue({ id: INVOICE.customer_id, account_credits: 100 });
+    CustomerCredit.spendableAccountCreditForInvoice
+      .mockResolvedValueOnce(500)
+      .mockResolvedValueOnce(75);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/apply-credit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toEqual({
+        error: 'Insufficient account credit. $75.00 is available for this invoice, which needs $100.00.',
+      });
+      expect(CustomerCredit.spendableAccountCreditForInvoice).toHaveBeenNthCalledWith(2, {
+        customerId: INVOICE.customer_id,
+        invoiceId: INVOICE.id,
+        balance: 100,
+      }, trx);
+      expect(CustomerCredit.postCreditMovement).not.toHaveBeenCalled();
+      expect(trxInvoices.update).not.toHaveBeenCalled();
+    });
+  });
+
+  test('apply-credit checks available credit before retiring a payment session', async () => {
+    const CustomerCredit = require('../services/customer-credit');
+    CustomerCredit.spendableAccountCreditForInvoice.mockResolvedValueOnce(75);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/apply-credit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toEqual({
+        error: 'Insufficient account credit. $75.00 is available for this invoice, which needs $100.00.',
+      });
+      expect(CustomerCredit.spendableAccountCreditForInvoice).toHaveBeenCalledWith({
+        customerId: INVOICE.customer_id,
+        invoiceId: INVOICE.id,
+        balance: 500,
+      }, db);
+      expect(db.transaction).not.toHaveBeenCalled();
+      expect(CustomerCredit.postCreditMovement).not.toHaveBeenCalled();
     });
   });
 });

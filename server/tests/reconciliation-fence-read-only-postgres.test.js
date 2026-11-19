@@ -300,6 +300,11 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     await settle({ ...paid, metadata: { ...paid.metadata, saved_card_attempt_id: randomUUID() } });
     await settle({ ...paid, status: 'processing' });
     expect((await attempt()).status).toBe('failed');
+    const payment = () => app('payments').where({ stripe_payment_intent_id: paid.id });
+    await payment().update({ metadata: { invoice_id: randomUUID() } });
+    await settle();
+    expect((await attempt()).status).toBe('failed');
+    await payment().update({ metadata: { invoice_id: invoiceId } });
     await expect(app.transaction(async (trx) => {
       await recordAuthenticationSettlement(paid, trx);
       throw new Error('settlement rolled back');

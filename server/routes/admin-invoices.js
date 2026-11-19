@@ -3155,11 +3155,15 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'Invoice is already fully covered by credit' });
     }
     const balance = (await CustomerCredit.getBalance(invoice.customer_id)) || 0;
-    if (balance + 0.005 < amountDue) {
-      return res.status(400).json({
-        error: `Insufficient account credit — balance is $${balance.toFixed(2)}, `
-          + `invoice needs $${amountDue.toFixed(2)}. Issue more credit first, or lower the invoice.`,
-      });
+    const spendableBalance = await CustomerCredit.spendableAccountCreditForInvoice({
+      customerId: invoice.customer_id,
+      invoiceId: id,
+      balance,
+    }, db);
+    const insufficientCreditMessage = (available, due) =>
+      `Insufficient account credit. $${available.toFixed(2)} is available for this invoice, which needs $${due.toFixed(2)}.`;
+    if (spendableBalance + 0.005 < amountDue) {
+      return res.status(400).json({ error: insufficientCreditMessage(spendableBalance, amountDue) });
     }
 
     // ── Cancel any open collection session (pre-lock Stripe triage) ──
@@ -3179,7 +3183,8 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         // customer order could deadlock against the customer-first order
         // settleZeroBalance now uses (server/services/invoice.js). The
         // pre-transaction `invoice` read above already carries customer_id.
-        await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
+        const lockedCustomer = await trx('customers').where({ id: invoice.customer_id })
+          .forUpdate().first('id', 'account_credits');
         const locked = await trx('invoices').where({ id }).forUpdate().first();
         if (!locked) {
           const err = new Error('Invoice not found'); err.statusCode = 404; err.isOperational = true; throw err;
@@ -3245,6 +3250,16 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         const lockedDue = invoiceAmountDue(locked);
         if (lockedDue <= 0) {
           const err = new Error('Invoice is already fully covered by credit'); err.statusCode = 400; err.isOperational = true; throw err;
+        }
+        const lockedSpendableBalance = await CustomerCredit.spendableAccountCreditForInvoice({
+          customerId: locked.customer_id,
+          invoiceId: id,
+          balance: lockedCustomer?.account_credits || 0,
+        }, trx);
+        if (lockedSpendableBalance + 0.005 < lockedDue) {
+          throw Object.assign(new Error(insufficientCreditMessage(lockedSpendableBalance, lockedDue)), {
+            code: 'INSUFFICIENT_CREDIT', statusCode: 400, isOperational: true,
+          });
         }
         // Visit fence under the same lock (mirrors recordManualPayment): a
         // cancelled / no-show / skipped visit's invoice takes no credit —

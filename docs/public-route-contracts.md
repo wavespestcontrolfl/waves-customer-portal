@@ -803,13 +803,17 @@ amount. Setup, tender changes, and finalization check the affected invoices
 under lock. Staff and automated saved-card retries also check the hold under
 the invoice lock before recording a new charge attempt. On a held invoice,
 staff credit application returns HTTP 409 and automatic credit application
-leaves the balance available.
+skips the invoice. On another invoice for the same customer, staff and
+automatic applications can draw the balance above the earlier attempt's
+unposted credit. Amount edits to the held invoice wait for the challenge to resolve.
 A verified cancellation for the same attempt and PaymentIntent clears that
 attempt's authentication hold. After webhook history expires, an operator can
 verify the PaymentIntent directly using the saved-card cancellation command
-in `ops/agents/README.md`. A successful challenge closes its attempt when
-the matching Stripe payment and paid invoice are recorded. A later dispute
-can reopen that invoice without restoring the old authentication hold.
+in `ops/agents/README.md`. A successful challenge settles the matching card
+payment and any missing portion of its submitted account credit in one invoice
+transaction. A funding shortfall or amount mismatch records the captured
+payment for reconciliation and keeps the invoice open. A later dispute can
+reopen a settled invoice after the original authentication hold has cleared.
 The `/confirm` endpoint can still record money the processor has already accepted.
 
 Off-Stripe tender block (2026-08-29; ZELLE-ONLY since 2026-09-02 — owner

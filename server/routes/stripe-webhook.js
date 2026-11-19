@@ -1904,6 +1904,11 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   } else {
     const fallbackOutcome = await db.transaction(async (trx) => {
       await lockPaymentIntentPaymentRow(trx, piId);
+      if (authenticatingAttempt) {
+        // A merge locks the customer before its ledger rows. Recovery can
+        // update an existing payment and debit credit in this transaction.
+        await trx('customers').where({ id: invoiceForTenderGuard.customer_id }).forUpdate().first('id');
+      }
       const existingPayment = await trx('payments')
         .where({ stripe_payment_intent_id: piId })
         .forUpdate()
@@ -1936,7 +1941,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         return;
       }
 
-      const invoice = await findInvoiceForPaymentIntent(paymentIntent);
+      const invoice = authenticatingAttempt ? invoiceForTenderGuard : await findInvoiceForPaymentIntent(paymentIntent);
       if (!invoice?.customer_id) {
         await recordOrphanSucceededPaymentIntent(
           paymentIntent,
@@ -1955,7 +1960,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       // customer-first order (server/services/invoice.js). invoice.customer_id
       // is already known from the unlocked findInvoiceForPaymentIntent read
       // above.
-      await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
+      if (!authenticatingAttempt) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
       const lockedInvoice = await trx('invoices')
         .where({ id: invoice.id })
         .forUpdate()

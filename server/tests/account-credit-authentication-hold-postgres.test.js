@@ -67,6 +67,9 @@ postgres('account credit authentication hold (PostgreSQL)', () => {
       table.string('stripe_payment_intent_id');
       table.string('stripe_payment_method_id');
       table.string('idempotency_key');
+      table.decimal('amount', 12, 2);
+      table.decimal('credit_applied_delta', 12, 2).notNullable().defaultTo(0);
+      table.decimal('credit_applied_total', 12, 2).notNullable().defaultTo(0);
       table.string('decline_code');
       table.string('authentication_canceled_intent_id');
       table.timestamp('submitted_at');
@@ -102,6 +105,16 @@ postgres('account credit authentication hold (PostgreSQL)', () => {
       table.string('created_by');
       table.timestamp('created_at').defaultTo(app.fn.now());
     });
+  });
+
+  beforeEach(async () => {
+    await app('customer_credit_ledger').del();
+    await app('stripe_invoice_charge_attempts').del();
+    await app('payment_plans').del();
+    await app('stripe_orphan_charges').del();
+    await app('payments').del();
+    await app('invoices').del();
+    await app('customers').del();
   });
 
   afterAll(async () => {
@@ -275,5 +288,179 @@ postgres('account credit authentication hold (PostgreSQL)', () => {
       .toMatchObject({ account_credits: '0.00' });
     expect(await app('invoices').where({ id: invoiceId }).first('status', 'credit_applied'))
       .toMatchObject({ status: 'prepaid', credit_applied: '100.00' });
+  });
+
+  test('another invoice can spend only excess credit across submission, authentication transition and cancellation', async () => {
+    const customerId = randomUUID();
+    const heldInvoiceId = randomUUID();
+    const otherInvoiceId = randomUUID();
+    const attemptId = randomUUID();
+    const paymentMethodId = randomUUID();
+    const stripePaymentMethodId = 'pm_cross_invoice_auth_hold';
+    const intentId = `pi_${attemptId.replaceAll('-', '')}`;
+
+    await app('customers').insert({
+      id: customerId,
+      account_credits: 100,
+      auto_apply_account_credit: true,
+    });
+    await app('invoices').insert([
+      {
+        id: heldInvoiceId,
+        customer_id: customerId,
+        invoice_number: `HELD-${heldInvoiceId.slice(0, 8)}`,
+        status: 'sent',
+        total: 100,
+        subtotal: 100,
+        credit_applied: 0,
+        amount_paid: 0,
+      },
+      {
+        id: otherInvoiceId,
+        customer_id: customerId,
+        invoice_number: `OTHER-${otherInvoiceId.slice(0, 8)}`,
+        status: 'sent',
+        total: 100,
+        subtotal: 100,
+        credit_applied: 0,
+        amount_paid: 0,
+      },
+    ]);
+    await app('stripe_invoice_charge_attempts').insert({
+      id: attemptId,
+      invoice_id: heldInvoiceId,
+      payment_method_id: paymentMethodId,
+      stripe_payment_method_id: stripePaymentMethodId,
+      idempotency_key: `cross-invoice-${attemptId}`,
+      status: 'claimed',
+      amount: 75,
+      credit_applied_delta: 25,
+      credit_applied_total: 25,
+      submitted_at: new Date(),
+      created_at: new Date(),
+    });
+
+    const reservedForOther = () => app.transaction(async (trx) => {
+      await trx('customers').where({ id: customerId }).forUpdate().first('id');
+      return CustomerCredit.unpostedSavedCardCreditForOtherInvoices({
+        customerId,
+        invoiceId: otherInvoiceId,
+      }, trx);
+    });
+
+    await expect(reservedForOther()).resolves.toBe(25);
+    await expect(CustomerCredit.applyAccountCreditToInvoice({
+      invoiceId: otherInvoiceId,
+      createdBy: 'system:test',
+    }, app)).resolves.toMatchObject({
+      applied: 75,
+      fullyCovered: false,
+      balanceAfter: 25,
+    });
+    expect(await app('invoices').where({ id: otherInvoiceId }).first('status', 'credit_applied'))
+      .toMatchObject({ status: 'sent', credit_applied: '75.00' });
+
+    // The request transaction rolled back. Whether recovery first labels the
+    // submitted claim ambiguous or resolves it as an authentication hold, its
+    // reservation stays continuous.
+    await app('stripe_invoice_charge_attempts').where({ id: attemptId }).update({
+      status: 'ambiguous',
+    });
+    await expect(reservedForOther()).resolves.toBe(25);
+    await expect(CustomerCredit.applyAccountCreditToInvoice({
+      invoiceId: otherInvoiceId,
+      createdBy: 'system:test',
+    }, app)).resolves.toEqual({ applied: 0, skipped: 'no_balance' });
+
+    await app('stripe_invoice_charge_attempts').where({ id: attemptId }).update({
+      status: 'failed',
+      decline_code: 'authentication_required',
+      stripe_payment_intent_id: intentId,
+      resolved_at: new Date(),
+    });
+    await expect(reservedForOther()).resolves.toBe(25);
+
+    await recordAuthenticationCancellation({
+      id: intentId,
+      status: 'canceled',
+      payment_method: stripePaymentMethodId,
+      metadata: {
+        source: 'admin_card_on_file',
+        saved_card_attempt_id: attemptId,
+        waves_invoice_id: heldInvoiceId,
+        waves_customer_id: customerId,
+      },
+    }, app);
+
+    await expect(reservedForOther()).resolves.toBe(0);
+    await expect(CustomerCredit.applyAccountCreditToInvoice({
+      invoiceId: otherInvoiceId,
+      createdBy: 'system:test',
+    }, app)).resolves.toMatchObject({
+      applied: 25,
+      fullyCovered: true,
+      balanceAfter: 0,
+    });
+    expect(await app('invoices').where({ id: otherInvoiceId }).first('status', 'credit_applied'))
+      .toMatchObject({ status: 'prepaid', credit_applied: '100.00' });
+  });
+
+  test('the sibling reservation counts only the submitted delta not already posted', async () => {
+    const customerId = randomUUID();
+    const heldInvoiceId = randomUUID();
+    const otherInvoiceId = randomUUID();
+    const attemptId = randomUUID();
+    await app('customers').insert({
+      id: customerId,
+      account_credits: 90,
+      auto_apply_account_credit: true,
+    });
+    await app('invoices').insert([
+      {
+        id: heldInvoiceId,
+        customer_id: customerId,
+        status: 'sent',
+        total: 100,
+        credit_applied: 10,
+        amount_paid: 0,
+      },
+      {
+        id: otherInvoiceId,
+        customer_id: customerId,
+        status: 'sent',
+        total: 75,
+        credit_applied: 0,
+        amount_paid: 0,
+      },
+    ]);
+    await app('stripe_invoice_charge_attempts').insert({
+      id: attemptId,
+      invoice_id: heldInvoiceId,
+      payment_method_id: randomUUID(),
+      stripe_payment_method_id: 'pm_partly_posted_auth_hold',
+      status: 'claimed',
+      amount: 75,
+      credit_applied_delta: 25,
+      credit_applied_total: 25,
+      submitted_at: new Date(),
+      created_at: new Date(),
+    });
+
+    await expect(app.transaction(async (trx) => {
+      await trx('customers').where({ id: customerId }).forUpdate().first('id');
+      return CustomerCredit.unpostedSavedCardCreditForOtherInvoices({
+        customerId,
+        invoiceId: otherInvoiceId,
+      }, trx);
+    })).resolves.toBe(15);
+
+    await expect(CustomerCredit.applyAccountCreditToInvoice({
+      invoiceId: otherInvoiceId,
+      createdBy: 'system:test',
+    }, app)).resolves.toMatchObject({
+      applied: 75,
+      fullyCovered: true,
+      balanceAfter: 15,
+    });
   });
 });

@@ -291,6 +291,7 @@ jobs:
             tests/intelligence-bar-manual-sms-reservation-postgres.test.js \
             tests/intelligence-bar-multi-card-db.test.js \
             tests/intelligence-bar-property-access-postgres.test.js \
+            tests/invoice-edit-authentication-hold-postgres.test.js \
             tests/invoice-settlement-lock-order-postgres.test.js \
             tests/lawn-copy-v6.db.test.js \
             tests/lawn-notification-deferred.db.test.js \
@@ -299,6 +300,8 @@ jobs:
             tests/newsletter-bounce-mailbox-postgres.test.js \
             tests/newsletter-merge-deliveries-postgres.test.js \
             tests/pest-recap-common-products-postgres.test.js \
+            tests/saved-card-authentication-credit-settlement-postgres.test.js \
+            tests/saved-card-authentication-success-backfill-postgres.test.js \
             tests/schedule-estimates-pending-postgres.test.js \
             tests/series-extension-own-stop-postgres.test.js \
             tests/tree-shrub-field-guide.postgres.test.js \

@@ -13,6 +13,7 @@ const {
   isVariableOrCustomDiscountPreset,
 } = require("./discount-stack");
 const { discountStackingLive } = require("../config/feature-gates");
+const { whereAwaitingAuthentication } = require("./invoice-payment-authentication");
 // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
 // billing-lane's one resolver (lazy, so no require cycle).
 const stampedZeroFreeLive = () => require("./billing-lane").stampedZeroFreeLive();
@@ -1082,6 +1083,25 @@ async function assertNoActivePlanForEdit(id) {
     throw new Error(`Could not verify the active payment plan state — refusing to edit (${err.message})`);
   }
   if (activePlan) throw new Error("This invoice has an active payment plan — cancel the plan before editing the invoice");
+}
+
+// A retotal must freeze while a saved-card attempt can still settle against
+// the old amount. The ordinary claimed/ambiguous window and the resolved
+// authentication_required hold are one predicate at both edit fences: the
+// unlocked actionable preflight and the final correlated check under the
+// invoice row lock. Exact cancellation evidence is owned by the shared
+// authentication predicate (a recorded settlement leaves its failed/auth
+// shape); other resolved failures remain inactive.
+function whereInvoiceEditSavedCardMaySettle(query) {
+  const table = "stripe_invoice_charge_attempts";
+  return query.where(function savedCardMaySettle() {
+    this.where(function unresolvedActiveAttempt() {
+      this.whereNull(`${table}.resolved_at`)
+        .whereIn(`${table}.status`, ["claimed", "ambiguous"]);
+    }).orWhere(function awaitingAuthentication() {
+      whereAwaitingAuthentication(this, table);
+    });
+  });
 }
 
 function isInvoiceNumberCollision(err) {
@@ -11303,24 +11323,22 @@ const InvoiceService = {
         );
       }
       // Saved-card (charge-card) attempts commit a durable claimed/ambiguous
-      // row BEFORE the charge reconciles — in that window there may be no
-      // payments row and no invoice PI yet, but an off-session charge may
-      // still settle. A retotal would let the webhook/reconciler bind
-      // collected money to a different live total. Same unresolved-attempt
-      // shape the pay page's cross-rail fence uses.
-      let unresolvedChargeAttempt = null;
+      // row BEFORE the charge reconciles. An authentication_required decline
+      // resolves that local claim, but its bound PI can still settle until an
+      // exact cancellation is recorded. In either window there may be no
+      // payments row and no invoice PI yet. A retotal would let the webhook/
+      // reconciler bind collected money to a different live total.
+      let chargeAttemptMaySettle = null;
       try {
-        unresolvedChargeAttempt = await db("stripe_invoice_charge_attempts")
-          .where({ invoice_id: id })
-          .whereNull("resolved_at")
-          .whereIn("status", ["claimed", "ambiguous"])
-          .first("id");
+        chargeAttemptMaySettle = await whereInvoiceEditSavedCardMaySettle(
+          db("stripe_invoice_charge_attempts").where({ invoice_id: id }),
+        ).first("id");
       } catch (err) {
         throw new Error(
           `Could not verify the saved-card charge state — refusing to edit (${err.message})`,
         );
       }
-      if (unresolvedChargeAttempt) {
+      if (chargeAttemptMaySettle) {
         throw new Error(
           "A saved-card charge for this invoice is still processing or awaiting reconciliation — wait for it to resolve before editing amounts",
         );
@@ -11725,16 +11743,14 @@ const InvoiceService = {
               .whereIn("payments.status", ["paid", "processing", "disputed"]);
           })
           .whereNotExists(function () {
-            this.select(db.raw("1"))
+            const attempts = this.select(db.raw("1"))
               .from("stripe_invoice_charge_attempts")
               .whereRaw(
                 "stripe_invoice_charge_attempts.invoice_id = invoices.id",
-              )
-              .whereNull("stripe_invoice_charge_attempts.resolved_at")
-              .whereIn("stripe_invoice_charge_attempts.status", [
-                "claimed",
-                "ambiguous",
-              ]);
+              );
+            whereInvoiceEditSavedCardMaySettle(
+              attempts,
+            );
           });
       }
       const [edited] = await require("./invoice-bar-expected").applyInvoiceVersion(editQuery, expected).update(data).returning("*");

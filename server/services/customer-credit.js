@@ -12,6 +12,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { customerHasActiveCollectionHoldChecked } = require('./collections/collection-hold');
+const { whereAwaitingAuthentication } = require('./invoice-payment-authentication');
 
 const VALID_SOURCES = Object.freeze([
   'manual', 'adjustment', 'invoice_application', 'invoice_prepaid', 'referral',
@@ -253,6 +254,51 @@ async function customerAutoApplyEnabled(customerId, dbh = db, { lock = false } =
   return row?.auto_apply_account_credit === true;
 }
 
+// A submitted saved-card attempt can roll its invoice transaction back for
+// authentication while the same PI still owns the reduced charge amount.
+// Until that PI is canceled or settles, leave the attempt's not-yet-posted
+// credit available for its original invoice. Credit-moving callers hold the
+// customer row while reading this; an unlocked affordability preflight is only
+// an early refusal and repeats the calculation under that lock before writing.
+// Sibling invoices are deliberately not locked: every credit consumer
+// serializes on the customer row, and both sides of a claimed -> failed/
+// ambiguous transition match this predicate, so the reservation cannot vanish
+// at that seam.
+async function unpostedSavedCardCreditForOtherInvoices({ customerId, invoiceId }, dbh) {
+  const attempts = await dbh('stripe_invoice_charge_attempts as attempt')
+    .join('invoices as held_invoice', 'held_invoice.id', 'attempt.invoice_id')
+    .where('held_invoice.customer_id', customerId)
+    .whereNot('attempt.invoice_id', invoiceId)
+    .whereNotNull('attempt.submitted_at')
+    .where('attempt.credit_applied_delta', '>', 0)
+    .where(function savedCardMaySettle() {
+      this.where(function unresolvedAttempt() {
+        this.whereNull('attempt.resolved_at')
+          .whereIn('attempt.status', ['claimed', 'ambiguous']);
+      }).orWhere(function awaitingAuthentication() {
+        whereAwaitingAuthentication(this, 'attempt');
+      });
+    })
+    .select(
+      'attempt.credit_applied_delta',
+      'attempt.credit_applied_total',
+      'held_invoice.credit_applied',
+    );
+
+  return round2(attempts.reduce((sum, attempt) => {
+    const submittedDelta = Math.max(0, round2(attempt.credit_applied_delta));
+    const submittedTarget = Math.max(0, round2(attempt.credit_applied_total));
+    const alreadyPosted = Math.max(0, round2(attempt.credit_applied));
+    const stillUnposted = Math.max(0, round2(submittedTarget - alreadyPosted));
+    return sum + Math.min(submittedDelta, stillUnposted);
+  }, 0));
+}
+
+async function spendableAccountCreditForInvoice({ customerId, invoiceId, balance }, dbh) {
+  const reserved = await unpostedSavedCardCreditForOtherInvoices({ customerId, invoiceId }, dbh);
+  return Math.max(0, round2(round2(balance || 0) - reserved));
+}
+
 async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, refuseWhenCollectionHold = false, requireNoAppointmentCardLane = false, customerRequested = false, currentChargeAttemptId = null }, trx = null) {
   const run = async (t) => {
     // The lane check lives inside the visit-lock block — without a visit
@@ -445,6 +491,11 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     if (!customerRequested && customer?.auto_apply_account_credit !== true) {
       return { applied: 0, skipped: 'customer_opt_out' };
     }
+    const spendableBalance = await spendableAccountCreditForInvoice({
+      customerId: invoice.customer_id,
+      invoiceId,
+      balance: customer?.account_credits || 0,
+    }, t);
     // Partial application is now safe: every charge path (Stripe PI / autopay /
     // Terminal) and the webhook amount-verification price from amount due
     // (total − credit_applied − amount_paid) via invoiceAmountDue, so a collectible invoice
@@ -454,7 +505,7 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
       total: invoice.total,
       creditApplied: invoice.credit_applied,
       amountPaid: invoice.amount_paid,
-      balance: customer?.account_credits || 0,
+      balance: spendableBalance,
       fullCoverageOnly,
     });
     if (applyAmt <= 0) return { applied: 0, skipped: skipReason || 'nothing_to_apply' };
@@ -837,6 +888,8 @@ module.exports = {
   afterCommit,
   outermostTransaction,
   customerAutoApplyEnabled,
+  unpostedSavedCardCreditForOtherInvoices,
+  spendableAccountCreditForInvoice,
   VALID_SOURCES,
   CREDIT_DISPLAY_TYPE_BY_SOURCE,
   WAVEGUARD_EXTENSION_CREDIT_BY,

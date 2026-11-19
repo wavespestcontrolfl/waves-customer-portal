@@ -77,10 +77,10 @@ async function recordAuthenticationSettlement(intent, trx) {
   if (!match) return;
   const { query, methodId } = match;
   if (!methodId) query.where({ stripe_payment_intent_id: intent.id });
-  return query.where({ status: 'failed', decline_code: 'authentication_required' }).whereNotNull('resolved_at')
+  return whereAwaitingAuthentication(query, 'stripe_invoice_charge_attempts')
     .whereExists(trx('payments').select('id').where({
       customer_id: intent.metadata.waves_customer_id, stripe_payment_intent_id: intent.id, status: 'paid',
-    }))
+    }).whereRaw("(metadata->>'invoice_id' IS NULL OR metadata->>'invoice_id' = ?)", [intent.metadata.waves_invoice_id]))
     .update({
       status: 'succeeded', stripe_payment_intent_id: intent.id, decline_code: null, error_message: null,
       resolved_at: trx.fn.now(), updated_at: trx.fn.now(),
