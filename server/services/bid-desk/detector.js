@@ -538,7 +538,8 @@ function groupKeys(fields) {
 // hand never holds the key a later solicitation of the same number would join.
 function mfmpKeys(fields, lines) {
   const org = normalizeTitle(fields.gc_or_agency);
-  const number = normalizeTitle(fields.solicitation_number);
+  // Read from its own label: a notice missing the Organization or Title line still names its advertisement.
+  const number = normalizeTitle(labelledValues(lines, 'Advertisement Number')[0]?.value);
   const type = labelledValues(lines, 'Advertisement Type')[0]?.value;
   if (!number || !type || !MFMP_SOLICITATION.test(type)) return { org: org || null, group_base: null, group_key: null };
   const key = `mfmp|${keyPart(number)}`;

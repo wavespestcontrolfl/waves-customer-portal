@@ -535,6 +535,11 @@ describe('MyFloridaMarketPlace advertisement notices', () => {
     expect(parseBidEmail(mfmpNotice({}, { close: 'December 3, 2026' })).due_at.toISOString()).toBe('2026-12-04T04:59:00.000Z');
   });
 
+  test('the key reads the advertisement number from its own line, even with the Organization line missing', () => {
+    const noOrg = MFMP_BODY().replace(/^ Organization:.*\n/m, '');
+    expect(parseBidEmail(mfmpNotice({ body_text: noOrg }))).toMatchObject({ gc_or_agency: null, group_key: 'mfmp|itb 17200' });
+  });
+
   test('only a solicitation takes the key; a decision notice keeps its fields but no key', () => {
     const decision = parseBidEmail(mfmpNotice({}, { type: 'Agency Decision' }));
     expect(decision).toMatchObject({ template: 'mfmp', solicitation_number: 'ITB-17200', group_key: null, group_base: null });

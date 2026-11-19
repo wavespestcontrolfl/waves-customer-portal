@@ -113,8 +113,8 @@ const MFMP_SENDER_DOMAIN = 'dms.myflorida.com';
 // while the template no longer parses).
 async function mfmpRepeatBid(trx, groupKey) {
   const keyed = await trx('bid_opportunities').where({ group_key: groupKey }).select('id', 'status', 'created_at');
-  const keyless = await trx('bid_opportunities as b')
-    .join('bid_opportunity_emails as l', 'l.bid_id', 'b.id').join('emails as e', 'e.id', 'l.email_id')
+  // Only the notice that created the bid names it (a later email the old thread rule attached does not).
+  const keyless = await trx('bid_opportunities as b').join('emails as e', 'e.id', 'b.first_email_id')
     .whereNull('b.group_key').whereRaw('lower(e.from_address) like ?', [`%${MFMP_SENDER_DOMAIN}`])
     .select('b.id', 'b.status', 'b.created_at', 'e.from_address', 'e.subject', 'e.body_text', 'e.body_html', 'e.authentication_results');
   // A legacy notice counts only as a solicitation of this advertisement (an Agency Decision the old subject rule
