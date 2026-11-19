@@ -450,5 +450,19 @@ suite('public accept — billing lane of the customer the accept creates', () =>
       expect(row.annual_plan_activation_status == null).toBe(true);
       expect(row.customer_id == null).toBe(true);
     });
+
+    // The plan's one unit must be the termite row: a mapped plan whose only recurring row is pest counts one unit, and
+    // without this check accept would park a termite agreement for pest coverage.
+    test('a mapped termite annual plan whose only recurring row is pest is refused before it parks', async () => {
+      const mapped = termitePlan([PEST_ROW]);
+      mapped.result.results = { tmBait: { plan: 'annual_protection', annual: 250 } };
+      const est = await estimateFixture(mockTransaction, { estimateData: mapped, monthly: 15, annual: 180 });
+      const res = await putAccept(est.token, { paymentMethodPreference: 'prepay_annual' });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe('annual prepay is not available for this estimate');
+      const row = await mockTransaction('estimates').where({ id: est.estimateId }).first();
+      expect(row.annual_plan_activation_status == null).toBe(true);
+      expect(row.customer_id == null).toBe(true);
+    });
   });
 });

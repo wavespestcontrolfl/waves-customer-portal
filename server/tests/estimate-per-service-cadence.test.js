@@ -1526,6 +1526,21 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
       })).toBe(true);
     });
 
+    // The plan's one unit must be the termite row: a mapped plan whose only recurring row is pest would park a termite
+    // agreement for pest coverage.
+    test('a mapped termite annual plan whose only recurring row is pest is refused; its termite row alone keeps prepay', () => {
+      const mappedWith = (services) => ({
+        result: { results: { tmBait: { plan: 'annual_protection', annual: 250 } }, recurring: { services } },
+      });
+      const run = (estData, recurringSvcList, selectedFrequency) => acceptPrepayAvailable({
+        selectedFrequency, recurringSvcList, oneTimeList: [], estData, estimate: {},
+      });
+      const tier = { key: 'quarterly', annualPrepayEligible: true };
+      expect(run(mappedWith([pestRow]), [pestRow], tier)).toBe(false);
+      expect(run(mappedWith([pestRow]), [pestRow], null)).toBe(false);
+      expect(run(mappedWith([termiteRow]), [termiteRow], tier)).toBe(true);
+    });
+
     test('a tier flag still decides for one unit, and never re-opens two', () => {
       const one = { result: { recurring: { services: [pestRow] } } };
       expect(check([pestRow], one, { key: 'quarterly', annualPrepayEligible: false })).toBe(false);

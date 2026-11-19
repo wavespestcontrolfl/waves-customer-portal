@@ -28384,15 +28384,18 @@ function recurringDataAsAccepted(estData, estimate, { frequencyResolves = true }
 // may refuse.
 function prepayUnitCountClosed(estData, estimate, { frequencyResolves = true } = {}) {
   try {
-    const count = (opts) => require('../services/estimate-converter')
-      .annualPrepayRecurringUnitCount(recurringDataAsAccepted(estData, estimate, opts));
-    // A termite annual plan is counted on every recurring row it carries before the pest-only filter applies: the filter
-    // drops the termite row while the estimate still names the annual plan (the converter's own
-    // selectedTermiteAnnualPlanRows test, mapped tmBait included), so termite plus pest would read as one pest unit and
-    // park a termite agreement for it.
-    if (require('../services/estimate-termite-program-rows').selectedTermiteAnnualPlanRows(estData || {}).length > 0
-      && count({ frequencyResolves: false }) !== 1) return true;
-    return count({ frequencyResolves }) !== 1;
+    const converter = require('../services/estimate-converter');
+    // A termite annual plan prepays only its own termite unit. When the estimate names the plan (the converter's
+    // selectedTermiteAnnualPlanRows test, mapped tmBait included), its rows before any pest-only filter must fold to
+    // exactly one unit, the termite row. Bundled with another service, activation refuses two units; with only a pest
+    // row, or once the pest-only filter drops the termite row, the agreement would park for coverage that is not termite.
+    if (require('../services/estimate-termite-program-rows').selectedTermiteAnnualPlanRows(estData || {}).length > 0) {
+      const asStored = recurringDataAsAccepted(estData, estimate, { frequencyResolves: false });
+      const rows = converter.foldTermiteRentalIntoBait(converter.recurringServicesFromEstimateData(asStored));
+      if (converter.annualPrepayRecurringUnitCount(asStored) !== 1 || rows.length !== 1
+        || converter.recurringServiceKey(rows[0]) !== 'termite_bait') return true;
+    }
+    return converter.annualPrepayRecurringUnitCount(recurringDataAsAccepted(estData, estimate, { frequencyResolves })) !== 1;
   } catch (err) {
     logger.warn(`[estimate-public] prepay unit count failed (${err?.name || 'Error'}); prepay closed`);
     return true;
