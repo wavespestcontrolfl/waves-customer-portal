@@ -1195,6 +1195,8 @@ it("Mark read on a row clears the dot at once, writes 5 s later, and Undo takes 
   expect(readPosts("/messages/read-all")).toHaveLength(0);
   await tick(200);
   const [[, init]] = readPosts("/messages/read-all");
+  // A timer-sent read outlives a tab that closes while it is in flight.
+  expect(init.keepalive).toBe(true);
   // The row is one sender: its phone and newest text, so its older texts on pages not loaded are read too.
   expect(JSON.parse(init.body)).toEqual({ readBefore: "2024-07-01T12:00:00Z", contactPhone: "+19415550100" });
   expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();

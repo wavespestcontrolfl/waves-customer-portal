@@ -1787,7 +1787,9 @@ export function SmsTab({
   const [listReadError, setListReadError] = useState("");
   const pendingReadRef = useRef(null);
   const pendingReadTimerRef = useRef(null);
-  const commitPendingRead = useCallback(async ({ keepalive = false } = {}) => {
+  // Every list read goes out with keepalive: a tab that closes while it is in
+  // flight (after Undo is gone) still delivers it.
+  const commitPendingRead = useCallback(async () => {
     const pending = pendingReadRef.current;
     window.clearTimeout(pendingReadTimerRef.current);
     pendingReadRef.current = null;
@@ -1799,7 +1801,7 @@ export function SmsTab({
         // A row's sender read covers that sender's older texts on pages not loaded.
         await adminFetch("/admin/communications/messages/read-all", {
           method: "POST",
-          keepalive,
+          keepalive: true,
           body: JSON.stringify(pending.senderKey
             ? { readBefore: pending.readBefore, contactPhone: pending.contactPhone }
             : { readBefore: pending.readBefore }),
@@ -1808,7 +1810,7 @@ export function SmsTab({
         // A row with no phone: its loaded texts only.
         await adminFetch("/admin/communications/messages/read", {
           method: "POST",
-          keepalive,
+          keepalive: true,
           body: JSON.stringify({ messageIds: pending.messageIds }),
         });
       }
@@ -1827,9 +1829,9 @@ export function SmsTab({
   const commitPendingReadRef = useRef(commitPendingRead);
   commitPendingReadRef.current = commitPendingRead;
   // Leaving the inbox sends a waiting read; closing or reloading the tab does
-  // too (pagehide), with keepalive so the request outlives the page.
+  // too (pagehide).
   useEffect(() => {
-    const onPageHide = () => { void commitPendingReadRef.current({ keepalive: true }); };
+    const onPageHide = () => { void commitPendingReadRef.current(); };
     window.addEventListener("pagehide", onPageHide);
     return () => {
       window.removeEventListener("pagehide", onPageHide);
