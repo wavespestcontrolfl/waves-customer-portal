@@ -247,14 +247,14 @@ describe('which days count', () => {
 
 describe('the totals and the ad rule shadow', () => {
   const day = (date, fig) => ({ date, technician_id: TECH, staffed: true, slots: 0, online: 0, ...fig });
-  test('full budget while an online opening exists today or in the next 3 staffed days', () => {
+  test('full budget while dispatch room exists today or in the next 3 staffed days; the online upper bound beside it', () => {
     const { totals, ad } = rc.summarize([
       day('2026-11-19', { online: 0, slots: 1 }), day('2026-11-20'), day('2026-11-21'), day('2026-11-23', { online: 1, slots: 1 }),
       day('2026-11-24', { online: 2, slots: 3 }),
     ], '2026-11-19');
     expect(totals.next).toEqual({ dates: ['2026-11-20', '2026-11-21', '2026-11-23'], slots: 1, online: 1 });
     expect(totals.week).toMatchObject({ through: '2026-11-26', slots: 4, online: 3 });
-    expect(ad).toEqual({ decision: 'full', onlineAhead: 1, slotsAhead: 2, techBlind: false, unmeasured: 0 });
+    expect(ad).toEqual({ decision: 'full', slotsAhead: 2, onlineAhead: 1, techBlind: false, unmeasured: 0 });
   });
 
   test('tech-blind: two technicians free at the same hours count that room once', () => {
@@ -277,12 +277,12 @@ describe('the totals and the ad rule shadow', () => {
     expect(rc.summarize(days, '2026-11-19', { techBlind: true }).totals.next.online).toBe(2);
   });
 
-  test('the 1% floor when no online opening exists; an unmeasured day is counted, never as room', () => {
+  test('the 1% floor when no dispatch room exists in that window; an unmeasured day is counted, never as room', () => {
     const { ad } = rc.summarize([
-      day('2026-11-19', { slots: 2 }), day('2026-11-20', { skip: 'UNTIMED_STOP', online: 0 }), day('2026-11-21'), day('2026-11-23'),
-      day('2026-11-24', { online: 4 }),
+      day('2026-11-19'), day('2026-11-20', { skip: 'UNTIMED_STOP', slots: 3 }), day('2026-11-21'), day('2026-11-23'),
+      day('2026-11-24', { slots: 4, online: 4 }),
     ], '2026-11-19');
-    expect(ad).toEqual({ decision: 'floor', onlineAhead: 0, slotsAhead: 2, techBlind: false, unmeasured: 1 });
+    expect(ad).toEqual({ decision: 'floor', slotsAhead: 0, onlineAhead: 0, techBlind: false, unmeasured: 1 });
   });
 });
 
@@ -408,6 +408,19 @@ describe('runRouteCheck', () => {
     const today = JSON.parse(writes[0][1].days)[0];
     expect(today).toMatchObject({ stops: 0, van: 'completed' });
     expect(today.openings[0]).toMatchObject({ kind: 'tail', start: 630 });
+    expect(today.driveMin).toBeGreaterThan(0); // the drive home from the last stop, not a return to that customer
+  });
+
+  test('co-visit siblings: one on site and one not yet moved are one stop on site, never a second visit', async () => {
+    const sib = (id, status) => stop(id, '09:00:00', null, {
+      status, visit_id: null, customer_id: 'cust-9', lat: 27.5, lng: -82.4, service_address_line1: '1 Test St',
+    });
+    replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-19' ? [sib('s1', 'on_site'), sib('s2', 'confirmed')] : []));
+    const { conn, writes } = fakeConn({ progress: [{ id: 's1', technician_id: TECH, status: 'on_site', arrived_at: '2026-11-19T15:00:00Z', lat: 27.5, lng: -82.4 }] });
+    await runRouteCheck({ conn, now: NOW }); // arrived 10:00, two 45-minute services: busy to 11:30
+    const today = JSON.parse(writes[0][1].days)[0];
+    expect(today).toMatchObject({ stops: 0, van: 'on_site' });
+    expect(today.openings[0].start).toBeGreaterThanOrEqual(690);
   });
 
   test('an unreadable interview list holds no time and the run still completes', async () => {

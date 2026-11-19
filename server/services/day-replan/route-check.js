@@ -6,13 +6,14 @@
  * and every staffed day up to STAFFED_DAYS staffed days ahead (at least DEMAND_DAYS calendar days, for the 7-day demand
  * view), for each technician who works that day. It records one row in route_check_runs:
  *   - each opening that holds a new job and its drive (close-gaps SLOT_MIN), counted two ways: jobs dispatch can
- *     place (`slots`), and jobs a customer can book online (`online`: a start the /book page's own rules admit, clear
- *     of every booked span and the owner's interviews; see onlineAdmit); while the occupancy check
- *     is tech-blind, a date's room is counted once across technicians, not per technician;
- *   - what the ad budget rule WOULD do (`ad_shadow`): full budget while an online-bookable opening exists today or in
- *     the next STAFFED_DAYS staffed days, the 1% floor when none, with the dispatch count beside it. It changes no
- *     budget. The online count is strict on purpose (a grid hour with the whole job slot after it); every opening's
- *     start, length and online starts are stored, so a looser rule can be recounted from the rows.
+ *     place (`slots`), and AT MOST how many a customer could book online (`online`: starts that pass every /book rule
+ *     that does not depend on the customer's address, clear of every booked span and the owner's interviews; see
+ *     onlineAdmit). It is an upper bound: /book offers only starts packed against the route's stops for the
+ *     customer's own address, which a count with no address cannot replay. While the occupancy check is tech-blind,
+ *     a date's room is counted once across technicians, not per technician;
+ *   - what the ad budget rule WOULD do (`ad_shadow`): full budget while dispatch room exists today or in the next
+ *     STAFFED_DAYS staffed days, the 1% floor when none, with the online upper bound beside it. It changes no budget.
+ *     Every opening's start, length and online starts are stored, so another rule can be recounted from the rows.
  * It measures only: nothing here changes a visit, a time, a budget or a message.
  * It runs every hour, not only while a technician is clocked in: no technician clocks in yet (time_entries had no row
  * in the 30 days to 2026-11-19). Today's figures come from the visits' own progress instead.
@@ -236,12 +237,13 @@ function unmeasurable(rows) {
 
 /**
  * One tech-day's openings (pure). rows: the stops still to do, in any order (simulated in promised-window order, the
- * clock baseline); blocks: the technician's schedule blocks; held: hours other rows hold, as intervals.
+ * clock baseline); blocks: the technician's schedule blocks; held: hours other rows hold, as intervals; origin: where
+ * the van sets off; end: where it returns (the start point).
  */
-function measureTechDay({ rows, blocks, held, origin, departureMin, openMin, closeMin, admit, needMin = SLOT_MIN, appendOnly = false }) {
+function measureTechDay({ rows, blocks, held, origin, end = origin, departureMin, openMin, closeMin, admit, needMin = SLOT_MIN, appendOnly = false }) {
   const skip = unmeasurable(rows);
   if (skip) return { stops: rows.length, skip };
-  const sim = simulate(promisedWindowOrder(rows), { origin, departureMin, blockedIntervals: serviceBlocks(blocks) });
+  const sim = simulate(promisedWindowOrder(rows), { origin, end, departureMin, blockedIntervals: serviceBlocks(blocks) });
   if (!sim) return { stops: rows.length, skip: 'NO_SIMULATION' };
   const open = openMin < closeMin
     ? gaps.openBlocks(sim, { departureMin, openMin, closeMin, unavailable: [...blocks, ...held], driveBlocks: serviceBlocks(blocks) })
@@ -306,12 +308,12 @@ function summarize(days, today, { techBlind = false, needMin = SLOT_MIN } = {}) 
   const next = pick((d) => staffedDates.includes(d.date));
   const lastDemand = dayAfter(today, DEMAND_DAYS);
   const week = pick((d) => d.date > today && d.date <= lastDemand);
-  const ahead = todayFig.online + next.online;
+  const ahead = todayFig.slots + next.slots;
   return {
     totals: { today: todayFig, next: { dates: staffedDates, ...next }, week: { through: lastDemand, ...week } },
-    // slotsAhead: the same window by dispatch openings, so the rule can be judged both ways later.
+    // onlineAhead: the same window's online upper bound, so the rule can be judged both ways later.
     ad: {
-      decision: ahead > 0 ? 'full' : 'floor', onlineAhead: ahead, slotsAhead: todayFig.slots + next.slots, techBlind,
+      decision: ahead > 0 ? 'full' : 'floor', slotsAhead: ahead, onlineAhead: todayFig.online + next.online, techBlind,
       unmeasured: days.filter((d) => d.staffed && d.skip).length,
     },
   };
@@ -389,8 +391,13 @@ async function measureOne(conn, env, { day, techId, rows, progress, occupancy, i
     const now = new Map(mine.map((p) => [String(p.id), p.status]));
     const live = own.filter((r) => now.get(String(r.id)) !== 'completed')
       .map((r) => (now.get(String(r.id)) === 'on_site' ? { ...r, status: 'on_site' } : r));
+    // One physical stop is on site when any of its co-visit siblings is (tracking moves rows one at a time): the
+    // whole stop is the van's stay, never a second visit later.
+    const groups = coVisitGroups(promisedWindowOrder(live));
+    const active = groups.filter((g) => g.some((r) => r.status === 'on_site'));
+    const onSiteRows = active.flat();
+    const remaining = groups.filter((g) => !active.includes(g)).flat();
     // On site now: the van is there, so a stop with no place leaves the day unmeasured (never free time from home).
-    const onSiteRows = live.filter((r) => r.status === 'on_site');
     if (onSiteRows.some((r) => !hasCoords(r))) return { stops: live.length, skip: 'ON_SITE_WITHOUT_COORDINATES' };
     const van = vanNow({
       completed: mine.filter((p) => p.status === 'completed'),
@@ -398,7 +405,7 @@ async function measureOne(conn, env, { day, techId, rows, progress, occupancy, i
       home, departureMin: env.departureMin, nowMin: env.nowMin, day,
     });
     const fig = measureTechDay({
-      ...common, rows: live.filter((r) => r.status !== 'on_site'), origin: van.origin,
+      ...common, rows: remaining, origin: van.origin, end: home,
       departureMin: Math.max(env.nowMin, van.clockMin), openMin: Math.max(DAY_OPEN, env.nowMin),
     });
     return { ...fig, van: van.source };

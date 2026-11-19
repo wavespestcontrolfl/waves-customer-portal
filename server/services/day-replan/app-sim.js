@@ -58,9 +58,11 @@ function withHour(row, slotMin) {
 
 // blockedIntervals: the technician's schedule blocks, which no drive or service may cross. Only the close-gaps
 // measurement passes them; the live verdict (appSimCheck) does not, as before.
-function simulate(seq, { origin, departureMin, blockedIntervals = [] }) {
+// end: where the van goes after the last stop; the start point unless a caller starts the van elsewhere (the hourly
+// route check starts it at the last stop done, and the van still returns to the start point).
+function simulate(seq, { origin, departureMin, blockedIntervals = [], end = origin }) {
   return simulateArrivalRoute(RouteOptimizer, rangeFor, seq, {
-    startMin: departureMin, origin, end: origin, reportLate: true, blockedIntervals,
+    startMin: departureMin, origin, end, reportLate: true, blockedIntervals,
   });
 }
 
