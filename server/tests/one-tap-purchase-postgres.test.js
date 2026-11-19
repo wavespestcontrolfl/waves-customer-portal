@@ -343,8 +343,7 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
       window_start: '13:00',
       window_end: '14:00',
       status: 'confirmed',
-      is_recurring: true,
-      recurring_pattern: 'every_6_weeks',
+      is_recurring: false,
       estimated_price: 73,
       reservation_expires_at: null,
     });
@@ -359,10 +358,48 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
       bookedVisitIds: [competitorId],
     });
 
+    const fixtureCounts = async () => {
+      const draftIds = await trx('estimates')
+        .where({ customer_id: ids.customer, source: 'one_tap_purchase' })
+        .pluck('id');
+      const count = async (query) => Number((await query.count('* as count').first()).count);
+      return {
+        drafts: draftIds.length,
+        purchases: await count(trx('one_tap_purchases').where({ customer_id: ids.customer })),
+        invoices: await count(trx('invoices').where({ customer_id: ids.customer })),
+        bookings: await count(trx('scheduled_services').where((q) => {
+          q.where({ customer_id: ids.customer });
+          if (draftIds.length) q.orWhereIn('source_estimate_id', draftIds);
+        })),
+      };
+    };
+    const expectOriginalReview = (reopened) => {
+      expect(reopened).toMatchObject({
+        purchaseId: init.purchaseId,
+        estimateId: init.estimateId,
+        serviceKey: 'lawn_care',
+        officeReviewRequired: true,
+        perVisit: init.perVisit,
+      });
+    };
+
+    const markedCounts = await fixtureCounts();
+    expect(markedCounts).toMatchObject({ drafts: 1, purchases: 1, invoices: 0 });
+    const beforeCleanup = await initPurchaseFor('lawn_care');
+    expectOriginalReview(beforeCleanup);
+    expect(await fixtureCounts()).toEqual(markedCounts);
+    expect(Number((await trx('one_tap_purchases').where({ id: init.purchaseId }).first('per_visit')).per_visit))
+      .toBe(init.perVisit);
+
     await trx('scheduled_services').where({ id: purchase.scheduled_service_id })
       .update({ reservation_expires_at: trx.raw("NOW() - INTERVAL '1 hour'") });
     await require('../services/slot-reservation').releaseExpiredReservations();
     expect(await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).first()).toBeUndefined();
+    const afterCleanupCounts = await fixtureCounts();
+    expect(afterCleanupCounts).toEqual({ ...markedCounts, bookings: markedCounts.bookings - 1 });
+    const afterCleanup = await initPurchaseFor('lawn_care');
+    expectOriginalReview(afterCleanup);
+    expect(await fixtureCounts()).toEqual(afterCleanupCounts);
     await expect(oneTap.release({ customerId: ids.customer, purchaseId: init.purchaseId }))
       .resolves.toEqual({ released: false, preservedForOfficeReview: true });
     await expect(oneTap.reserve({
@@ -371,6 +408,11 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
 
     const next = await initPurchaseFor('tree_shrub');
     expect(next.purchaseId).not.toBe(init.purchaseId);
+    expect(await fixtureCounts()).toEqual({
+      ...afterCleanupCounts,
+      drafts: afterCleanupCounts.drafts + 1,
+      purchases: afterCleanupCounts.purchases + 1,
+    });
     expect(await trx('one_tap_purchases').where({ id: init.purchaseId }).first('status', 'scheduled_service_id'))
       .toEqual({ status: 'reserved', scheduled_service_id: purchase.scheduled_service_id });
     expect(await trx('estimates').where({ id: init.estimateId }).first('status', 'archived_at'))

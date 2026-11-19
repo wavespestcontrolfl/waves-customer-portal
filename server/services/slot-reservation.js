@@ -2598,9 +2598,9 @@ function uncommittedHoldQuery(client, { scheduledServiceId, estimateId }) {
   return estimateId && scheduledServiceId ? q.where({ source_estimate_id: estimateId }) : q;
 }
 
-async function releaseReservation({ scheduledServiceId, estimateId }) {
+async function releaseReservation({ scheduledServiceId, estimateId, database = null }) {
   if (!scheduledServiceId) return { released: false };
-  const count = await uncommittedHoldQuery(db, { scheduledServiceId, estimateId }).del();
+  const count = await uncommittedHoldQuery(database || db, { scheduledServiceId, estimateId }).del();
   return { released: count > 0 };
 }
 
@@ -3157,6 +3157,7 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
 
 module.exports = {
   reserveSlot,
+  parseSlotId,
   prepareReservationCommit,
   commitReservation,
   releaseReservation,

@@ -2061,7 +2061,10 @@ before preparing capacity and again under the reservation lock. If a live hold a
 separate current office booking both qualify, the API records the conflict on the draft
 and returns HTTP 422 `APPOINTMENT_OFFICE_REVIEW_REQUIRED`. The portal shows the frozen
 visit, price and office phone number. Closing the review or opening another offer preserves
-the office booking and its draft. The physical hold still expires on its normal schedule.
+the office booking and its draft. Reopening the same service returns the existing purchase
+with `officeReviewRequired: true`, its frozen price and the original selected time when available.
+An explicit release can be retried after a database error. The physical hold still expires
+on its normal schedule.
 An en-route or on-site visit counts while it is in progress across Eastern midnight.
 When the selected hold has already expired, disappeared or been claimed, the customer can
 choose another time. A concurrent completed purchase returns its original frozen receipt.

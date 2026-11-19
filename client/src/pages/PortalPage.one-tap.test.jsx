@@ -258,6 +258,27 @@ describe('one-tap purchase CTA gating', () => {
     await vi.waitFor(() => expect(api.oneTapRelease.mock.calls).toEqual([['p-2']]));
   });
 
+  it('reopens the office quote for the same service without reserving another visit', async () => {
+    api.getPropertyRecommendations.mockResolvedValue(recommendations());
+    api.oneTapInit.mockResolvedValue({
+      purchaseId: 'original', estimateId: 'original-estimate', serviceKey: 'lawn_care',
+      label: 'Lawn Care', perVisit: 73, hasCardOnFile: true, officeReviewRequired: true,
+      officeReviewMessage: 'The office is reviewing your existing appointment.',
+      slot: { date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00' },
+    });
+    renderDashboard();
+    fireEvent.click(await screen.findByText('Add now — $84.00 per application'));
+
+    expect(await screen.findByText('The office is reviewing your existing appointment.')).toBeInTheDocument();
+    expect(screen.getAllByText('$73.00 per application').length).toBeGreaterThan(0);
+    expect(screen.getByText('Thursday, Aug 20, 8:00 AM–10:00 AM')).toBeInTheDocument();
+    expect(screen.queryByText('Agree and choose a time')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('Close purchase'));
+    expect(api.oneTapRelease).not.toHaveBeenCalled();
+    expect(api.oneTapReserve).not.toHaveBeenCalled();
+    expect(api.oneTapConfirm).not.toHaveBeenCalled();
+  });
+
   it('ordinary close still releases an incomplete purchase', async () => {
     api.getPropertyRecommendations.mockResolvedValue(recommendations());
     api.oneTapInit.mockResolvedValue({

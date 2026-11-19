@@ -1401,6 +1401,11 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
   const releaseRef = useRef({});
   releaseRef.current = { purchaseId: init?.purchaseId || null, done: step === 'done' };
 
+  const keepForOfficeReview = (message) => {
+    preserveOfficeReviewRef.current = true;
+    setOfficeReviewMessage(message || 'Call Waves so we can confirm the right appointment before you continue.');
+  };
+
   useEffect(() => {
     if (!open || (!card && !resume)) return undefined;
     let stale = false;
@@ -1433,7 +1438,10 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
         holdMinutes: resume.holdMinutes,
       });
       setCardSaved(!!resume.cardJustSaved);
-      if (resume.holdLive && resume.slot) {
+      if (resume.officeReviewRequired) {
+        setSelectedSlot(resume.slot || null);
+        keepForOfficeReview(resume.officeReviewMessage);
+      } else if (resume.holdLive && resume.slot) {
         setSelectedSlot({ slotId: null, ...resume.slot });
         setStep('confirm');
       } else {
@@ -1453,11 +1461,16 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
         // saw no purchase id, so this late success is the only holder of the
         // new id — release it or its draft sits in the admin pipeline until
         // the 24h expiry sweep.
-        if (d?.purchaseId) api.oneTapRelease(d.purchaseId).catch(() => {});
+        if (d?.purchaseId && !d.officeReviewRequired) api.oneTapRelease(d.purchaseId).catch(() => {});
         return;
       }
       setInit(d);
-      setSlots(d.slots || null);
+      if (d.officeReviewRequired) {
+        setSelectedSlot(d.slot || null);
+        keepForOfficeReview(d.officeReviewMessage);
+      } else {
+        setSlots(d.slots || null);
+      }
     }).catch((err) => {
       if (stale) return;
       setInitError(err?.status === 409 ? 'stale' : (err?.message || 'Something went wrong — please try again.'));
@@ -1509,8 +1522,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
 
   const showOfficeReview = (err) => {
     if (err?.status !== 422 || err.code !== 'APPOINTMENT_OFFICE_REVIEW_REQUIRED') return false;
-    preserveOfficeReviewRef.current = true;
-    setOfficeReviewMessage(err.message || 'Call Waves so we can confirm the right appointment before you continue.');
+    keepForOfficeReview(err.message);
     return true;
   };
 

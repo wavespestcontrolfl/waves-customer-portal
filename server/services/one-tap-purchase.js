@@ -175,6 +175,43 @@ async function loadPurchaseForCustomer(customerId, purchaseId) {
   return row;
 }
 
+async function protectedPurchaseForReopen(customerId, serviceKey) {
+  const possible = await db('one_tap_purchases')
+    .where({ customer_id: customerId, service_key: serviceKey })
+    .whereIn('status', ['initiated', 'reserved'])
+    .first('id');
+  if (!possible) return null;
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`one_tap_init:${customerId}`]);
+    await lockCustomerComms(trx, customerId);
+    const purchases = await trx('one_tap_purchases')
+      .where({ customer_id: customerId, service_key: serviceKey })
+      .whereIn('status', ['initiated', 'reserved'])
+      .forUpdate()
+      .select();
+    for (const purchase of purchases) {
+      const state = await oneTapOfficeReviewState(trx, {
+        estimateId: purchase.estimate_id,
+        customerId,
+        selectedId: purchase.scheduled_service_id,
+        lockEstimate: true,
+        lockSelected: true,
+      });
+      if (state.officeReviewProtected) return purchase.id;
+    }
+    return null;
+  });
+}
+
+async function officeReviewInitResponse(customerId, purchaseId) {
+  const snapshot = await getPurchaseState({ customerId, purchaseId });
+  return {
+    ...snapshot,
+    officeReviewRequired: true,
+    officeReviewMessage: appointmentOfficeReviewRequired().message,
+  };
+}
+
 function estimateExpired(estimate) {
   return !!(estimate?.expires_at && new Date(estimate.expires_at) < new Date());
 }
@@ -293,6 +330,14 @@ async function initPurchase({ customerId, clicked }) {
   // unprovable or unpriced. A family outside the purchase list (termite) is
   // never sold here.
   const targetKey = PURCHASE_FAMILIES.find((key) => key === clicked?.serviceKey);
+  if (!targetKey) throw httpError(409, OFFER_CHANGED);
+  // A durable office-review purchase is the one authoritative attempt for
+  // its service. Reopen its frozen state before repricing: the office visit
+  // can be non-recurring (and therefore absent from the ownership offer
+  // fence), and a fresh estimate would let the customer book a duplicate.
+  // The advisory + comms locks are the same serialization used by creation.
+  const protectedPurchaseId = await protectedPurchaseForReopen(customerId, targetKey);
+  if (protectedPurchaseId) return officeReviewInitResponse(customerId, protectedPurchaseId);
   const basis = targetKey ? await buildPortalPurchaseBasis(customerId, db, { targetKey }) : null;
   if (!basis) throw httpError(409, OFFER_CHANGED);
   const offer = basis.payload;
@@ -494,15 +539,18 @@ async function initPurchase({ customerId, clicked }) {
   // transitioned (releaseReservation only deletes live customer-less
   // holds, so a committed visit is untouchable either way).
   const token = crypto.randomBytes(16).toString('hex');
-  const { superseded, estimate, purchase } = await db.transaction(async (trx) => {
+  const {
+    reopenedPurchaseId, superseded, estimate, purchase,
+  } = await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`one_tap_init:${customerId}`]);
     await lockCustomerComms(trx, customerId);
     const priorRows = await trx('one_tap_purchases')
       .where({ customer_id: customerId })
       .whereIn('status', ['initiated', 'reserved'])
       .forUpdate()
-      .select('id', 'customer_id', 'estimate_id', 'scheduled_service_id', 'status');
+      .select('id', 'customer_id', 'estimate_id', 'scheduled_service_id', 'service_key', 'status');
     const supersedableIds = [];
+    let protectedMatch = null;
     for (const prior of priorRows) {
       const state = await oneTapOfficeReviewState(trx, {
         estimateId: prior.estimate_id,
@@ -511,7 +559,17 @@ async function initPurchase({ customerId, clicked }) {
         lockEstimate: true,
         lockSelected: true,
       });
-      if (!state.officeReviewProtected) supersedableIds.push(prior.id);
+      if (state.officeReviewProtected) {
+        if (!protectedMatch && prior.service_key === targetKey) protectedMatch = prior;
+      } else {
+        supersedableIds.push(prior.id);
+      }
+    }
+    // The marker may have committed after the early advisory probe and while
+    // pricing was recomputed. Decide again under the creation lock, before
+    // voiding any other attempt or inserting a fresh draft.
+    if (protectedMatch) {
+      return { reopenedPurchaseId: protectedMatch.id, superseded: [], estimate: null, purchase: null };
     }
     const priorOpen = supersedableIds.length
       ? await trx('one_tap_purchases')
@@ -568,8 +626,10 @@ async function initPurchase({ customerId, clicked }) {
       // consent evidence. Confirm records them alongside accepted_at.
     }).returning('*');
 
-    return { superseded: priorOpen, estimate: estimateRow, purchase: purchaseRow };
+    return { reopenedPurchaseId: null, superseded: priorOpen, estimate: estimateRow, purchase: purchaseRow };
   });
+
+  if (reopenedPurchaseId) return officeReviewInitResponse(customerId, reopenedPurchaseId);
 
   // Hold release AFTER commit — a rolled-back init must not have freed a
   // hold that still belongs to the (still-open) prior purchase.
@@ -715,7 +775,7 @@ async function reserve({ customerId, purchaseId, slotId }) {
 async function release({ customerId, purchaseId }) {
   const purchase = await loadPurchaseForCustomer(customerId, purchaseId);
   if (purchase.status === 'completed') throw httpError(409, 'This purchase is already confirmed.');
-  const outcome = await voidPurchase(purchase);
+  const outcome = await voidPurchase(purchase, { atomicHoldRelease: true });
   return {
     released: outcome.voided,
     ...(outcome.protected ? { preservedForOfficeReview: true } : {}),
@@ -742,14 +802,35 @@ async function getPurchaseState({ customerId, purchaseId }) {
     ...shown,
     existingServices: publicMembershipView(estData.membershipSnapshot)?.existingServices || [],
   };
+  const purchaseOpen = ['initiated', 'reserved'].includes(purchase.status)
+    && estimate?.status === 'draft' && !estimateExpired(estimate);
+  const markerActive = !!estData.oneTapPurchase?.officeReview?.requiredAt;
+  const officeReviewRequired = markerActive && purchaseOpen
+    && (await reviewableOneTapBookedVisits(db, {
+      estimateId: purchase.estimate_id,
+      customerId,
+    })).some((row) => String(row.id) !== String(purchase.scheduled_service_id || ''));
 
   let slot = null;
   let holdLive = false;
-  if (purchase.scheduled_service_id) {
+  const originalSlot = purchase.slot_id ? slotReservation.parseSlotId?.(purchase.slot_id) : null;
+  if (officeReviewRequired && originalSlot) {
+    slot = {
+      date: originalSlot.date,
+      windowStart: hhmm(originalSlot.windowStart),
+      windowEnd: arrivalEndFor(originalSlot.windowStart),
+      holdExpiresAt: null,
+    };
+  }
+  if (!slot && purchase.scheduled_service_id) {
     const hold = await db('scheduled_services')
       .where({ id: purchase.scheduled_service_id })
-      .first('scheduled_date', 'window_start', 'reservation_expires_at');
-    if (hold) {
+      .first('scheduled_date', 'window_start', 'reservation_expires_at', 'source_estimate_id', 'customer_id');
+    const ownedHold = hold
+      && String(hold.source_estimate_id || '') === String(purchase.estimate_id || '')
+      && hold.customer_id == null
+      && !!hold.reservation_expires_at;
+    if (ownedHold) {
       holdLive = !!(hold.reservation_expires_at && new Date(hold.reservation_expires_at) > new Date());
       slot = {
         date: dateOnly(hold.scheduled_date),
@@ -758,6 +839,18 @@ async function getPurchaseState({ customerId, purchaseId }) {
         holdExpiresAt: hold.reservation_expires_at || null,
       };
     }
+  }
+  // The physical hold can expire before the office resolves the durable
+  // review marker. Its signed slot id still safely carries the original day
+  // and start time; use the canonical parser so a malformed/legacy id simply
+  // omits the time instead of inventing one.
+  if (!slot && originalSlot) {
+      slot = {
+        date: originalSlot.date,
+        windowStart: hhmm(originalSlot.windowStart),
+        windowEnd: arrivalEndFor(originalSlot.windowStart),
+        holdExpiresAt: null,
+      };
   }
 
   const { findConsentedChargeableCard } = require('./payment-method-consents');
@@ -770,8 +863,7 @@ async function getPurchaseState({ customerId, purchaseId }) {
     purchaseId: purchase.id,
     estimateId: purchase.estimate_id,
     status: purchase.status,
-    open: ['initiated', 'reserved'].includes(purchase.status)
-      && estimate?.status === 'draft' && !estimateExpired(estimate),
+    open: purchaseOpen,
     serviceKey: purchase.service_key,
     label: line?.name || String(purchase.service_key || 'service').replace(/_/g, ' '),
     perVisit: Number(purchase.per_visit),
@@ -783,6 +875,10 @@ async function getPurchaseState({ customerId, purchaseId }) {
     slot,
     holdLive,
     holdMinutes: HOLD_MINUTES,
+    ...(officeReviewRequired ? {
+      officeReviewRequired: true,
+      officeReviewMessage: appointmentOfficeReviewRequired().message,
+    } : {}),
   };
 }
 
@@ -954,7 +1050,7 @@ async function assertTargetStillPurchasable(database, customer, serviceKey) {
   }
 }
 
-async function voidPurchase(purchase) {
+async function voidPurchase(purchase, { atomicHoldRelease = false } = {}) {
   let customerId = purchase.customer_id || null;
   if (!customerId) {
     customerId = (await db('one_tap_purchases').where({ id: purchase.id }).first('customer_id'))?.customer_id || null;
@@ -982,6 +1078,17 @@ async function voidPurchase(purchase) {
       if (state.officeReviewProtected) {
         return { voided: false, protected: true, hold: null };
       }
+      // An explicit customer release is retryable as one unit: delete only
+      // this still-uncommitted hold on the SAME transaction, then void and
+      // archive. Any database/delete failure rolls all three back. Internal
+      // cleanup retains its post-commit best-effort release below.
+      if (atomicHoldRelease && fresh.scheduled_service_id) {
+        await slotReservation.releaseReservation({
+          scheduledServiceId: fresh.scheduled_service_id,
+          estimateId: fresh.estimate_id,
+          database: trx,
+        });
+      }
       const voided = await trx('one_tap_purchases')
         .where({ id: fresh.id })
         .whereIn('status', ['initiated', 'reserved'])
@@ -999,12 +1106,13 @@ async function voidPurchase(purchase) {
       return {
         voided: true,
         protected: false,
-        hold: fresh.scheduled_service_id
+        hold: !atomicHoldRelease && fresh.scheduled_service_id
           ? { scheduledServiceId: fresh.scheduled_service_id, estimateId: fresh.estimate_id }
           : null,
       };
     });
   } catch (err) {
+    if (atomicHoldRelease) throw err;
     logger.warn(`[one-tap-purchase] void cleanup incomplete (code=${err?.code || 'none'})`);
     return outcome;
   }
@@ -1145,7 +1253,7 @@ async function oneTapOfficeReviewState(database, {
   selectedId,
   lockEstimate = false,
   lockSelected = false,
-  now = new Date(),
+  now = null,
 }) {
   let estimateQuery = database('estimates').where({ id: estimateId });
   if (lockEstimate) estimateQuery = estimateQuery.forUpdate();
@@ -1157,12 +1265,16 @@ async function oneTapOfficeReviewState(database, {
   const selected = selectedQuery
     ? await selectedQuery.first('id', 'source_estimate_id', 'customer_id', 'reservation_expires_at')
     : null;
+  // A reconciliation can wait behind either row lock. Judge strict liveness
+  // against the wall clock only after those waits finish; otherwise a hold
+  // that expired while blocked could still earn a durable office marker.
+  const holdJudgedAt = now || new Date();
   const selectedMatches = !!selected
     && String(selected.source_estimate_id || '') === String(estimateId || '');
   const selectedHoldLive = selectedMatches
     && selected.customer_id == null
     && !!selected.reservation_expires_at
-    && new Date(selected.reservation_expires_at).getTime() > new Date(now).getTime();
+    && new Date(selected.reservation_expires_at).getTime() > new Date(holdJudgedAt).getTime();
   const selectedRecoveryCode = selectedMatches
     && (selected.customer_id != null || !selected.reservation_expires_at)
     ? 'SLOT_UNAVAILABLE'
@@ -2059,6 +2171,7 @@ module.exports = {
     oneTapVariantStillOffered,
     rejectRetiredOneTapVariant,
     voidPurchase,
+    oneTapOfficeReviewState,
     oneTapBookedVisitIsCurrent,
     isReviewableOneTapBookedVisit,
   },
