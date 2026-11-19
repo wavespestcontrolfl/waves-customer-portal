@@ -78,6 +78,7 @@ const { CUSTOMER_STAGES } = require('./customer-stages');
 const { QUIET_AGED_RULE, cardIsNewer } = require('./triage-auto-resolve');
 const { etParts, parseETDateTime, etDateString, addETDays, formatETTime } = require('../utils/datetime-et');
 const { callEndedAt } = require('../utils/call-timeline');
+const { aniCannotText } = require('./call-triage-flags');
 
 // How far back each run looks. Four days: a Friday-evening call still sits
 // inside Monday morning's window even after a full weekend of gated-off or
@@ -290,16 +291,18 @@ function callerOptedOut(call) {
     || readJson(call.ai_extraction)?.do_not_contact_request === true;
 }
 
-// When a held call's wait starts: when the call ended. An outbound bridge's own customer-leg
-// receipt (metadata.customer_leg.ended_at, stamped by /outbound-dial-complete) is exact and
-// wins, as in call-booking-link-text's callEndFor: the row's length can count the staff leg's
-// ringing before the customer connected. Else callEndedAt (Twilio's end stamp, or start +
-// length), else created_at: a post-call row is written after the call.
+// When a held call's wait starts: when the call ended, as the latest end the row gives, so the
+// wait never starts early. call-booking-link-text's callEndFor reads an outbound bridge's
+// customer-leg receipt, else bridged_at + length, else start + length; callEndedAt reads
+// Twilio's end stamp, else start + length; a post-call row's created_at is after the call. On a
+// bridge, the row's start can precede the staff answer and its length can count staff ringing,
+// so any one estimate alone can run early.
 function heldWaitStart(call, createdAt) {
-  const legEndedAt = String(call.direction || '').startsWith('outbound') ? readJson(call.metadata)?.customer_leg?.ended_at : null;
-  const legEnded = legEndedAt ? new Date(legEndedAt) : null;
-  if (legEnded && !Number.isNaN(legEnded.getTime())) return legEnded;
-  return callEndedAt(call) || createdAt;
+  const { callEndFor } = require('./call-booking-link-text');
+  const ends = [callEndFor(call), callEndedAt(call), createdAt]
+    .map((d) => (d ? d.getTime() : NaN))
+    .filter((t) => !Number.isNaN(t));
+  return new Date(Math.max(...ends));
 }
 
 // The stored decision of the call's last pass, or null. A reprocess keeps the old decision
@@ -421,8 +424,8 @@ function clearingRow(call, slot, bookedRows, sameName) {
 // customer_id, direction, created_at, from_phone, to_phone,
 // source, ai_extraction_enriched, ai_extraction, ai_validation,
 // processing_status, processing_started_at, metadata, duration_seconds,
-// recording_duration_seconds }); a call the call agent held (callHoldReason)
-// waits HELD_GRACE_MINUTES from the call's end (callEndedAt) instead of
+// recording_duration_seconds, bridged_at }); a call the call agent held (callHoldReason)
+// waits HELD_GRACE_MINUTES from the call's end (heldWaitStart) instead of
 // GRACE_MINUTES from created_at, and its miss carries that `holdReason` (else
 // null). `bookedRows` are scheduled_services rows
 // ({ customer_id, status, sched_date ('YYYY-MM-DD' via to_char — never a JS
@@ -743,16 +746,19 @@ async function loadBookingRows(entries, namesakes) {
 
 // The call facts both bell texts name in `detail`: when it was (ET), the
 // number to reach the customer on, and which way it went. The number is the
-// processor's own (resolveCallContactPhone, with the V1 extraction's spoken number as
-// call-last-name-lookup passes it): a form-callback bridge's lead number, not its staff
-// leg; never one of our lines, a staff phone, or a withheld caller ID ("anonymous").
+// processor's own (resolveCallContactPhone): a form-callback bridge's lead number, not its
+// staff leg; never one of our lines, a staff phone, or a withheld caller ID ("anonymous").
+// The V1 extraction's dictated number takes part (as call-last-name-lookup passes it) except
+// on a no-text call (ani_cannot_text): there the processor keeps every number that is not one
+// of the call's own legs off the caller, and its hard-veto exit stores V1 before that scrub.
 function callFacts(call) {
   const { resolveCallContactPhone } = require('./call-recording-processor');
+  const dictated = aniCannotText(readJson(call.ai_extraction_enriched)?.caller) ? null : readJson(call.ai_extraction)?.phone;
   return {
     callAtET: new Date(call.created_at).toLocaleString('en-US', {
       timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
     }),
-    contactPhone: resolveCallContactPhone(call, readJson(call.ai_extraction)?.phone || null),
+    contactPhone: resolveCallContactPhone(call, dictated || null),
     direction: call.direction || 'unknown-direction',
   };
 }
@@ -967,7 +973,7 @@ async function runInner({ now }) {
     .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched', 'ai_validation',
       // callHoldReason's inputs, then callEndedAt's, for a held call's wait; then callFacts' and
       // callerOptedOut's (metadata serves both).
-      'processing_status', 'processing_started_at', 'metadata', 'duration_seconds', 'recording_duration_seconds',
+      'processing_status', 'processing_started_at', 'metadata', 'duration_seconds', 'recording_duration_seconds', 'bridged_at',
       'source', 'ai_extraction',
       db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
   // A call whose held row the office dismissed on Dispatch never rings (owner 2026-11-01).

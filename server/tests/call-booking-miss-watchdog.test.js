@@ -312,8 +312,12 @@ describe('a visit the call agent held', () => {
       // length, which can count the staff leg's ringing: the customer hung up 5, then 11, minutes ago.
       call({ id: 'bridge-leg', created_at: minutesAgo(30), duration_seconds: 60, metadata: { customer_leg: { ended_at: ended(5) } }, ai_validation: held() }),
       call({ id: 'bridge-leg-done', created_at: minutesAgo(30), duration_seconds: 60, metadata: { customer_leg: { ended_at: ended(11) } }, ai_validation: held() }),
+      // Pre-push P1 (2026-11-18): an admin bridge with no end receipt ends at bridged_at + length,
+      // not created_at + length (created_at can precede the staff answer): 9, then 11, minutes ago.
+      call({ id: 'bridged', created_at: minutesAgo(30), bridged_at: minutesAgo(14), duration_seconds: 5 * 60, ai_validation: held() }),
+      call({ id: 'bridged-done', created_at: minutesAgo(30), bridged_at: minutesAgo(16), duration_seconds: 5 * 60, ai_validation: held() }),
     ], [], { now: NOW });
-    expect(misses.map((m) => m.call.id)).toEqual(['long-call-done', 'post-call-row', 'bridge-leg-done']);
+    expect(misses.map((m) => m.call.id)).toEqual(['long-call-done', 'post-call-row', 'bridge-leg-done', 'bridged-done']);
     // An unheld call keeps its wait from created_at.
     expect(computeBookingMisses([call({ duration_seconds: 120 * 60 })], [], { now: NOW })).toHaveLength(1);
   });
@@ -400,6 +404,12 @@ describe('a visit the call agent held', () => {
     // A form-callback bridge dials staff first: the lead's number is the customer's, not the staff leg.
     const bridge = detailOf({ source: 'lead-webhook-auto-bridge', to_phone: '+19415550177', metadata: { type: 'lead_auto_bridge', leadPhone: '+19415550188' } });
     expect(bridge).toMatch(/^Pat Sample \(\+19415550188\) confirmed /);
+    // Pre-push P1 (2026-11-18): a dictated number counts where the processor would adopt it, but
+    // never on a no-text call (the hard-veto exit stores V1 before the processor's scrub).
+    const dictated = { ai_extraction: { phone: '+19415557788' } };
+    expect(detailOf(dictated)).toMatch(/^Pat Sample \(\+19415557788\) confirmed /);
+    const noText = detailOf({ ...dictated, ai_extraction_enriched: extraction({ caller: { name_full: 'Pat Sample', ani_cannot_text: true } }) });
+    expect(noText).toMatch(/^Pat Sample \(\+19415550111\) confirmed /);
   });
 
   // Pre-push P1 (2026-11-18): the date check follows the same contact rule as "book it".

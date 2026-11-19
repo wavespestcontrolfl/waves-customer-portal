@@ -146,7 +146,7 @@ describe('a visit the call agent held', () => {
     expect(opts.bell).toBe(true);
     // callHoldReason's inputs (the decision, the pass's status and claim time), callEndedAt's
     // (where a held call's wait starts), and callFacts' and callerOptedOut's.
-    const needed = ['ai_validation', 'processing_status', 'processing_started_at', 'metadata', 'duration_seconds', 'recording_duration_seconds', 'source', 'ai_extraction'];
+    const needed = ['ai_validation', 'processing_status', 'processing_started_at', 'metadata', 'duration_seconds', 'recording_duration_seconds', 'bridged_at', 'source', 'ai_extraction'];
     expect(mockState.callLogSelects.some((cols) => needed.every((col) => cols.includes(col)))).toBe(true);
   });
 
