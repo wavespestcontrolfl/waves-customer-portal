@@ -1892,9 +1892,9 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
       // No score claim for no_draft_90 / no_draft_70; the hold gives its slot back.
       expect(order).toEqual(['written_a', 'written_b', 'held_a']);
       expect(runner.runNext.mock.calls.map(([args]) => args)).toEqual([
-        { excludeIds: [], onlyIds: ['written_a', 'written_b'] },
-        { excludeIds: [], onlyIds: ['written_b'] },
-        { excludeIds: [], onlyIds: ['held_a'], terminalHoldPass: true },
+        { minScore: 0, excludeIds: [], onlyIds: ['written_a', 'written_b'] },
+        { minScore: 0, excludeIds: [], onlyIds: ['written_b'] },
+        { minScore: 0, excludeIds: [], onlyIds: ['held_a'], terminalHoldPass: true },
       ]);
       expect(runner._sendDailyDigestSms).not.toHaveBeenCalled();
       expect(runner._reportBlogDrought).not.toHaveBeenCalled();
@@ -1910,15 +1910,15 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
       runner._withEngineLock = jest.fn((label, fn) => fn());
       await runner.runTerminalDrafts({ limit: 5 });
       expect(runner.runNext.mock.calls.map(([args]) => args)).toEqual([
-        { excludeIds: [], onlyIds: ['written_a', 'written_b'], availableNowIds: ['written_b'] },
-        { excludeIds: [], onlyIds: ['written_b'], availableNowIds: ['written_b'] },
+        { minScore: 0, excludeIds: [], onlyIds: ['written_a', 'written_b'], availableNowIds: ['written_b'] },
+        { minScore: 0, excludeIds: [], onlyIds: ['written_b'], availableNowIds: ['written_b'] },
       ]);
       // A hold pushed during the handoff wait is taken the same way.
       const holds = queueRunner(rows(), { held: ['held_a'], handoff: ['held_a'] });
       holds.runner._withEngineLock = jest.fn((label, fn) => fn());
       await holds.runner.runTerminalDrafts({ limit: 5 });
       expect(holds.runner.runNext.mock.calls.map(([args]) => args)).toEqual([
-        { excludeIds: [], onlyIds: ['held_a'], terminalHoldPass: true, availableNowIds: ['held_a'] },
+        { minScore: 0, excludeIds: [], onlyIds: ['held_a'], terminalHoldPass: true, availableNowIds: ['held_a'] },
       ]);
     });
 
@@ -5861,12 +5861,18 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
       expect(briefBuilder.compose).not.toHaveBeenCalled();
       expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
       expect(queue.defer).toHaveBeenCalledWith('opp_tw', expect.any(Date), { claimToken: claimedAt });
-      // Off the Mac the same failure still reads as "no handed brief" (compose), as before.
+      // The server in Mac mode (a Run now) keeps the wait too: a new brief would orphan the pushed draft.
       delete process.env.CONTENT_EDITORIAL_REVIEW_RUNNER;
       const server = setup({ handed: city('brief_handed') });
       server.terminalWriter.waitingBriefId.mockRejectedValue(new Error('connection terminated'));
-      await server.runner.runNext();
-      expect(server.briefBuilder.compose).toHaveBeenCalledTimes(1);
+      await expect(server.runner.runNext()).resolves.toMatchObject({ outcome: 'failed_terminal_brief_lookup' });
+      expect(server.briefBuilder.compose).not.toHaveBeenCalled();
+      // Out of Mac mode the same failure still reads as "no handed brief" (compose), as before.
+      delete process.env.CONTENT_EDITORIAL_REVIEW_HOST;
+      const plain = setup({ handed: city('brief_handed') });
+      plain.terminalWriter.waitingBriefId.mockRejectedValue(new Error('connection terminated'));
+      await plain.runner.runNext();
+      expect(plain.briefBuilder.compose).toHaveBeenCalledTimes(1);
     });
 
     test('a handed brief the terminal does not write waits instead of starting the agent', async () => {

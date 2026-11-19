@@ -341,10 +341,11 @@ class AutonomousRunner {
     const macJob = !dryRun && terminalWriter.runningOnMac();
     let handedBrief;
     try {
-      handedBrief = await this._briefHandedToTerminal(opp.id, { dryRun, throwOnError: macJob });
+      // Mac mode, on either side: a replacement brief would orphan a draft already pushed for the old one.
+      handedBrief = await this._briefHandedToTerminal(opp.id, { dryRun, throwOnError: macJob || terminalWriter.editorialReviewOnMac() });
     } catch (err) {
-      // The Mac job: a lookup that failed is no answer. No run is stored, so the row keeps its wait on
-      // the same brief and draft; it counts as a failure of the pass.
+      // A lookup that failed is no answer. No run is stored, so the row keeps its wait on the same
+      // brief and draft; it counts as a failure of the pass.
       await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.recheckMs()), { claimToken });
       return finalize(run, t0, { outcome: 'failed_terminal_brief_lookup', failure_message: err.message }, { persist: false });
     }
@@ -2075,7 +2076,9 @@ class AutonomousRunner {
       if (!scope) break;
       // A draft or hold pushed after a handoff wait is taken now, not at the wait's recheck time.
       const handoff = scope.ids.filter((id) => terminalFirst.handoff?.includes(id));
-      const run = await this.runNext({ excludeIds: [...failedOppIds], ...terminalScopeArgs(scope), ...(handoff.length ? { availableNowIds: handoff } : {}) });
+      // minScore 0: every listed row was handed to the terminal by a run that passed its own floor (an
+      // admin Run now may pass a lower one), so the default floor would strand its draft.
+      const run = await this.runNext({ minScore: 0, excludeIds: [...failedOppIds], ...terminalScopeArgs(scope), ...(handoff.length ? { availableNowIds: handoff } : {}) });
       takeFromTerminalScope(terminalFirst, scope, run);
       if (run.outcome === 'skipped_no_opportunity') { i -= 1; continue; }
       runs.push(run);
