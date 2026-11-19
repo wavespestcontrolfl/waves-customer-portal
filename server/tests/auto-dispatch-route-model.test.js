@@ -313,6 +313,33 @@ describe('routeCost: co-visits vs visit groups', () => {
     expect(cost.driveWithoutMinutes).toBeCloseTo(chainDriveMinutes([FAR]), 5);
     expect(cost.routeTimeWithoutMinutes - cost.driveWithoutMinutes).toBe(120);
   });
+
+  test('nonadjacent version-2 allocation members retain the physical A -> B -> A route', () => {
+    const mix = { version: 2, allocatedServiceIds: ['p', 'l'] };
+    const allocated = (id, routeOrder) => coVisitRow(id, {
+      scheduled_date: '2026-08-06', technician_id: 't1',
+      reservation_service_mix: mix, route_order: routeOrder,
+    });
+    const between = {
+      id: 'b', geo: NEAR_HQ, lat: NEAR_HQ.lat, lng: NEAR_HQ.lng,
+      window_start: '09:00', window_end: '10:00', route_order: 2,
+      estimated_duration_minutes: 30,
+    };
+    const cost = routeCost([allocated('p', 1), between, allocated('l', 3)], null);
+    expect(cost.driveWithoutMinutes).toBeCloseTo(chainDriveMinutes([FAR, NEAR_HQ, FAR]), 5);
+    expect(cost.routeTimeWithoutMinutes - cost.driveWithoutMinutes).toBe(180);
+  });
+
+  test('adjacent version-2 allocation members still collapse to one physical stop', () => {
+    const mix = { version: 2, allocatedServiceIds: ['p', 'l'] };
+    const rows = ['p', 'l'].map((id, index) => coVisitRow(id, {
+      scheduled_date: '2026-08-06', technician_id: 't1',
+      reservation_service_mix: mix, route_order: index + 1,
+    }));
+    const after = { id: 'b', geo: NEAR_HQ, window_start: '11:00', route_order: 3 };
+    expect(routeCost([...rows, after], null).driveWithoutMinutes)
+      .toBeCloseTo(chainDriveMinutes([FAR, NEAR_HQ]), 5);
+  });
 });
 
 describe('clusterShare', () => {

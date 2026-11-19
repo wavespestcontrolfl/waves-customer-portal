@@ -320,6 +320,7 @@ function skipEvaluation(code, message, cause) {
 // the tapped row — so the evaluation is abandoned (GROUP_CONTEXT_UNAVAILABLE,
 // which the orchestrator records as a no-change skip).
 const GROUP_CONTEXT_UNAVAILABLE = 'GROUP_CONTEXT_UNAVAILABLE';
+const SOURCE_SNAPSHOT_STALE = 'SOURCE_SNAPSHOT_STALE';
 async function loadGroupContext(db, service) {
   const selfId = String(service.id);
   const standalone = { excludeIds: new Set([selfId]), siblings: [], visitWindowStart: null };
@@ -1229,19 +1230,49 @@ async function unitTerritory(service, geo, ctx) {
   return { techId: siblingIds.length ? [...named][0] : members[0].techId, coverId: sameCover ? covers[0] : null };
 }
 
-// One source-day read supplies both the moving row's current placement fields
-// and its neighbours. Candidate discovery, current scoring and candidate
-// scoring then share this exact mover snapshot.
+// An identity-only read supplies the mover's current placement fields, even
+// when route-day predicates would omit it; a separate source-day read supplies
+// its neighbours. Candidate discovery, current scoring and candidate scoring
+// then share the same validated mover snapshot.
 async function sourceSnapshot(service, grouped) {
+  // Read the mover by identity, outside the route-day predicates. In
+  // particular, a windowless mover, a cancelled mover, or one staff moved to
+  // another day must still be visible here; falling back to the scan's stale
+  // object can otherwise discover and score candidates with an obsolete pin.
+  const rows = await grouped.db('scheduled_services')
+    .where('scheduled_services.id', service.id)
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .select(...DAY_STOP_COLUMNS, ...DAY_STOP_KEY_COLUMNS);
+  const liveRow = rows && rows[0];
+  if (!liveRow) {
+    throw skipEvaluation(SOURCE_SNAPSHOT_STALE, 'The source visit no longer exists');
+  }
+  const live = {
+    ...rowToDayStop(liveRow),
+    dateStr: toDateStr(liveRow.scheduled_date),
+    technician_id: liveRow.technician_id ?? null,
+  };
+  const sameTechnician = String(live.technician_id ?? '') === String(service.technician_id ?? '');
+  if (!isActiveRouteStop(live)
+    || live.dateStr !== toDateStr(service.scheduled_date)
+    || !sameTechnician) {
+    throw skipEvaluation(SOURCE_SNAPSHOT_STALE, 'The source visit changed placement or is no longer an active route stop');
+  }
+  if (String(live.visit_id ?? '') !== String(service.visit_id ?? '')) {
+    throw skipEvaluation(SOURCE_SNAPSHOT_STALE, 'The source visit changed visit groups while it was being evaluated');
+  }
+
   const excludeIds = new Set(grouped.groupContext.excludeIds);
   excludeIds.delete(String(service.id));
   const sourceDay = await loadDayStops(grouped.db, {
     technicianId: service.technician_id, dateStr: toDateStr(service.scheduled_date), excludeIds,
   });
-  const mover = sourceDay.find(row => String(row.id) === String(service.id));
-  if (!mover) return { service, geo: resolveGeo(service), sourceDay };
-  const geo = mover.geo;
-  return { service: { ...service, ...mover, lat: geo?.lat, lng: geo?.lng }, geo, sourceDay };
+  const geo = live.geo;
+  return {
+    service: { ...service, ...live, lat: geo?.lat ?? null, lng: geo?.lng ?? null },
+    geo,
+    sourceDay: [live, ...sourceDay.filter(row => String(row.id) !== String(service.id))],
+  };
 }
 
 async function findValidCandidateSlots(service, prefs, baseCtx) {
@@ -1413,6 +1444,7 @@ module.exports = {
   SCORE_CAP,
   GROUP_CONTEXT_UNAVAILABLE,
   CURRENT_DAY_TECH_UNRESOLVED,
+  SOURCE_SNAPSHOT_STALE,
   findValidCandidateSlots,
   computeCurrentPlacement,
   territoryTechnicianForVisit,
@@ -1421,7 +1453,7 @@ module.exports = {
   violatesPreferredDay,
   violatesPreferredTime,
   _internals: {
-    candidateFromSlot, unitTerritory, dropCoverWhenOwnerHas, NO_SINGLE_TERRITORY, searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
+    candidateFromSlot, unitTerritory, dropCoverWhenOwnerHas, NO_SINGLE_TERRITORY, searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext, sourceSnapshot,
     filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };

@@ -65,11 +65,20 @@ const SERVICE = { id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', tec
 const PREFS = { service_category: 'general', blackout: null };
 
 function emptyDb() {
-  const c = {};
-  ['where', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
-    .forEach((m) => { c[m] = () => c; });
-  c.select = async () => [];
-  return () => c;
+  return () => {
+    const c = {};
+    let sourceRead = false;
+    ['whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
+      .forEach((m) => { c[m] = () => c; });
+    c.where = (field, value) => {
+      sourceRead ||= field === 'scheduled_services.id' && String(value) === String(SERVICE.id);
+      return c;
+    };
+    c.select = async () => (sourceRead
+      ? [{ ...SERVICE, status: 'confirmed', svc_lat: SERVICE.lat, svc_lng: SERVICE.lng }]
+      : []);
+    return c;
+  };
 }
 
 const ctx = (over = {}) => ({

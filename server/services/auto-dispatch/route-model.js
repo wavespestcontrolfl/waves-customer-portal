@@ -101,7 +101,8 @@ function groupUnit(members) {
  * (route-reorder-window-fit.js currentOrder — Codex r4). Each carries
  * `minutes`, its on-site time. Rows collapse into one physical stop two
  * ways, each with the canonical duration rule:
- *   - a visit_id group or version-2 capacity allocation — groupUnit;
+ *   - a visit_id group or contiguous version-2 capacity-allocation run —
+ *     groupUnit;
  *   - a legacy null-visit_id co-visit — a row adjacent to the previous row
  *     that isCoVisitPair accepts (same customer, promised window, premise and
  *     coordinates) — merged with the co-visit duration rule
@@ -112,8 +113,19 @@ function groupUnit(members) {
 function physicalStops(stops) {
   const units = [];
   const groups = new Map();
-  for (const row of (stops || []).filter(Boolean).map(withSequenceKeys)) {
-    const key = row.visit_id != null ? `visit:${row.visit_id}` : allocationKey(row);
+  let previousAllocation = null;
+  let allocationRun = 0;
+  // Capacity allocations are one physical stop only while their members are
+  // adjacent in the order dispatch will actually drive. Staff can reorder a
+  // member between two visits to the same property; in that case A -> B -> A
+  // has two real A legs and must not be flattened to A -> B. Visit groups keep
+  // their established whole-group behavior below.
+  for (const row of currentOrder((stops || []).filter(Boolean).map(withSequenceKeys))) {
+    const allocation = row.visit_id == null ? allocationKey(row) : null;
+    if (allocation !== previousAllocation) allocationRun += 1;
+    previousAllocation = allocation;
+    const key = row.visit_id != null ? `visit:${row.visit_id}`
+      : (allocation ? `allocation:${allocation}:run:${allocationRun}` : null);
     if (!key) { units.push(row); continue; }
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(row);

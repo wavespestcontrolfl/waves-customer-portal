@@ -37,8 +37,9 @@ const { ROAD_LEGS } = require('../services/auto-dispatch/road-check');
 const {
   findValidCandidateSlots,
   computeCurrentPlacement,
+  SOURCE_SNAPSHOT_STALE,
   _internals: {
-    loadDayStops, loadGroupContext, filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder,
+    loadDayStops, loadGroupContext, filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, sourceSnapshot,
   },
 } = require('../services/auto-dispatch/candidate-slots');
 
@@ -74,11 +75,18 @@ function ctxBase() {
 // queries) returns []. The SLOT_TAKEN occupancy check no longer touches
 // ctx.db at all — it goes through the mocked rebooker probeMoveConflicts above.
 function emptyDb() {
-  const c = {};
-  ['where', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
-    .forEach((m) => { c[m] = () => c; });
-  c.select = async () => [];
-  return () => c;
+  return () => {
+    const c = {};
+    let sourceRead = false;
+    ['whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
+      .forEach((m) => { c[m] = () => c; });
+    c.where = (field, value) => {
+      sourceRead ||= field === 'scheduled_services.id' && String(value) === String(SERVICE.id);
+      return c;
+    };
+    c.select = async () => (sourceRead ? [{ ...SERVICE, status: 'confirmed', svc_lat: SERVICE.lat, svc_lng: SERVICE.lng }] : []);
+    return c;
+  };
 }
 
 // A conflicting row shaped just enough for scheduling/occupancy.js's
@@ -89,6 +97,58 @@ function emptyDb() {
 function conflictRow(windowStart, windowEnd) {
   return { id: 'occupied-1', window_start: windowStart, window_end: windowEnd, estimated_duration_minutes: 60 };
 }
+
+describe('source snapshot drift fence', () => {
+  const liveRow = (extra = {}) => ({
+    ...SERVICE,
+    status: 'confirmed',
+    window_end: '10:00',
+    svc_lat: 27.41,
+    svc_lng: -82.51,
+    lat: null,
+    lng: null,
+    ...extra,
+  });
+  const sourceDb = (row, dayRows = []) => {
+    let read = 0;
+    return () => {
+      read += 1;
+      const c = {};
+      ['where', 'whereIn', 'whereNotIn', 'whereNotNull', 'leftJoin'].forEach((method) => { c[method] = () => c; });
+      c.select = async () => (read === 1 ? (row ? [row] : []) : dayRows);
+      return c;
+    };
+  };
+  const grouped = (db) => ({
+    db,
+    groupContext: { excludeIds: new Set(['s1']), siblings: [], visitWindowStart: '09:00' },
+  });
+
+  test.each([
+    ['corrected', { svc_lat: 27.42, svc_lng: -82.52 }, { lat: 27.42, lng: -82.52 }],
+    ['cleared', { svc_lat: null, svc_lng: null }, null],
+  ])('a windowless mover is read by id and its %s live pin wins', async (_label, pin, expectedGeo) => {
+    const row = liveRow({ window_start: null, window_end: null, ...pin });
+    const result = await sourceSnapshot(SERVICE, grouped(sourceDb(row)));
+    expect(result.geo).toEqual(expectedGeo);
+    expect(result.service.window_start).toBeNull();
+    expect(result.sourceDay[0]).toMatchObject({ id: 's1', window_start: null, geo: expectedGeo });
+  });
+
+  test.each([
+    ['moved to another day', { scheduled_date: '2026-08-05' }],
+    ['moved to another technician', { technician_id: 't2' }],
+    ['cancelled', { status: 'cancelled' }],
+  ])('%s source row fails closed instead of using the scan snapshot', async (_label, change) => {
+    await expect(sourceSnapshot(SERVICE, grouped(sourceDb(liveRow(change)))))
+      .rejects.toMatchObject({ code: SOURCE_SNAPSHOT_STALE, skipEvaluation: true });
+  });
+
+  test('a visit id changed after group loading fails closed before scoring mixed memberships', async () => {
+    await expect(sourceSnapshot({ ...SERVICE, visit_id: 'old' }, grouped(sourceDb(liveRow({ visit_id: 'new' })))))
+      .rejects.toMatchObject({ code: SOURCE_SNAPSHOT_STALE, skipEvaluation: true });
+  });
+});
 
 // The tech-day a batched day-stop row belongs to (the 2026-08-06 / t1 slot
 // most tests use).
@@ -170,14 +230,21 @@ function singleCandidateDb(dayStops) {
     const c = {};
     let dates = [];
     let timedOnly = false;
-    ['where', 'whereNot', 'whereNotIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
+    let sourceRead = false;
+    ['whereNot', 'whereNotIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
       .forEach(m => { c[m] = () => c; });
+    c.where = (field, value) => {
+      sourceRead ||= field === 'scheduled_services.id' && String(value) === String(SERVICE.id);
+      return c;
+    };
     c.whereIn = (field, values) => {
       if (field === 'scheduled_services.scheduled_date') dates = values;
       return c;
     };
     c.whereNotNull = field => { timedOnly ||= field === 'scheduled_services.window_start'; return c; };
-    c.select = async () => dayStops.filter(row => dates.includes(row.scheduled_date) && (!timedOnly || row.window_start != null));
+    c.select = async () => (sourceRead
+      ? [{ ...SERVICE, status: 'confirmed', svc_lat: SERVICE.lat, svc_lng: SERVICE.lng }]
+      : dayStops.filter(row => dates.includes(row.scheduled_date) && (!timedOnly || row.window_start != null)));
     return c;
   };
 }
@@ -799,16 +866,24 @@ test('openMembers is read exactly once per evaluation; the current placement and
   });
   // A second read would see a different unit (sib2 joined).
   openMembers.mockResolvedValueOnce([{ id: 's1' }, { id: 'sib1' }]).mockResolvedValue([{ id: 's1' }, { id: 'sib1' }, { id: 'sib2' }]);
+  const grouped = { ...SERVICE, visit_id: 'v1', window_start: '09:00', window_end: '10:00' };
   const dayStopExcludes = [];
   const db = withVisit(() => {
     const c = {};
-    ['where', 'whereIn', 'whereNot', 'whereNotNull', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first'].forEach((m) => { c[m] = () => c; });
+    let sourceRead = false;
+    ['whereIn', 'whereNot', 'whereNotNull', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first'].forEach((m) => { c[m] = () => c; });
+    c.where = (field, value) => {
+      sourceRead ||= field === 'scheduled_services.id' && String(value) === 's1';
+      return c;
+    };
     c.whereNotIn = (field, ids) => { if (field === 'scheduled_services.id') dayStopExcludes.push([...ids].sort()); return c; };
-    c.select = async (...cols) => (cols[0] === 'id' ? [{ id: 'sib1', window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 }] : []);
+    c.select = async (...cols) => {
+      if (cols[0] === 'id') return [{ id: 'sib1', window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 }];
+      if (sourceRead) return [{ ...grouped, status: 'confirmed', svc_lat: grouped.lat, svc_lng: grouped.lng }];
+      return [];
+    };
     return c;
   });
-  const grouped = { ...SERVICE, visit_id: 'v1', window_start: '09:00', window_end: '10:00' };
-
   await findValidCandidateSlots(grouped, prefs, { ...ctxBase(), db });
   expect(openMembers).toHaveBeenCalledTimes(1);
   // The source snapshot includes the mover and excludes its sibling. The
