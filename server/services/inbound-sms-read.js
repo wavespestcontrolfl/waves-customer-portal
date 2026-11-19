@@ -18,7 +18,9 @@ const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
-const { inboundSmsReceiptProjectionSql, phoneIdentitySql } = require('./sms-response-policy');
+const {
+  inboundSmsReceiptProjectionSql, phoneIdentitySql, canonicalSmsAddressProjectionSql, canonicalSmsLegacyLinkSql,
+} = require('./sms-response-policy');
 
 const LEGACY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -190,9 +192,17 @@ async function clearBacklogResetMarkers({ scope, ids, convs }) {
 // its bell as soon as it rings.
 async function markInboundSmsRead({
   messageIds = [], conversationIds = [], applicationId = null, replyMessageIds = null, replyEntryIds = [],
-  readBefore = null, adminUserId = null, role,
+  readBefore = null, adminUserId = null, role, customerIds = null,
 } = {}) {
-  const ids = messageIds.filter((id) => typeof id === 'string' && id.trim());
+  // `customerIds` (a subquery of customer ids; Mark all read for a
+  // technician) is checked inside every statement below, the write included,
+  // so a route change after the caller's selection never reads another
+  // technician's customer texts or reconciles their bells.
+  const ownedConversations = () => db('conversations').select('id').whereIn('customer_id', customerIds);
+  const ids = customerIds
+    ? await db('messages').whereIn('id', messageIds.filter((id) => typeof id === 'string' && id.trim()))
+      .whereIn('conversation_id', ownedConversations()).pluck('id')
+    : messageIds.filter((id) => typeof id === 'string' && id.trim());
   const convs = conversationIds.filter((id) => typeof id === 'string' && id.trim());
   if (!ids.length && !convs.length && !applicationId) return { updated: 0, notificationsCleared: 0 };
   if ((convs.length || applicationId) && !(readBefore instanceof Date && !Number.isNaN(readBefore.getTime()))) {
@@ -205,7 +215,7 @@ async function markInboundSmsRead({
   const appEntryIds = applicationId ? (replyEntryIds || []).filter((id) => typeof id === 'string' && id.trim()) : [];
   if (!ids.length && !convs.length && applicationId && !appReplyIds.length) return { updated: 0, notificationsCleared: 0 };
   const now = new Date();
-  const scope = function scope() {
+  const requested = function requested() {
     if (ids.length) this.whereIn('id', ids);
     if (convs.length) this.orWhere(function conv() { this.whereIn('conversation_id', convs).where('created_at', '<=', readBefore); });
     if (applicationId && appReplyIds.length) {
@@ -217,6 +227,9 @@ async function markInboundSmsRead({
       });
     }
   };
+  const scope = customerIds
+    ? function ownedScope() { this.where(requested).whereIn('conversation_id', ownedConversations()); }
+    : requested;
 
   // 1. Strip backlog-reset markers across the request scope regardless of
   //    read state (rows the reset already read are exactly the ones a human
@@ -300,18 +313,25 @@ async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, cus
   const cutoff = nextMillisecondBoundary(new Date(Math.min(readBefore.getTime(), Date.now())));
   // The inbox shows a text at its effective time (an opt-out receipt can date
   // it earlier than the row), so the cutoff compares that same time.
-  const receipt = inboundSmsReceiptProjectionSql({ messageAlias: 'm', legacyAlias: 'm', receiptAlias: 'r' });
+  const receipt = inboundSmsReceiptProjectionSql({ messageAlias: 'm', legacyAlias: 'legacy', receiptAlias: 'r' });
   // A blocked sender is hidden from the inbox (and the badge), so its texts
-  // keep their read state for the day it is unblocked. Same peer identity as
-  // the badge: the thread's contact phone, else the customer's phone.
-  const peer = phoneIdentitySql("COALESCE(NULLIF(c.contact_phone, ''), cu.phone, '')");
+  // keep their read state for the day it is unblocked. The sender is the
+  // inbox's per-text identity (/log): the linked legacy row's sender first,
+  // as a customer's two phones can share one conversation.
+  const address = canonicalSmsAddressProjectionSql({ messageAlias: 'm', conversationAlias: 'c', customerAlias: 'cu', legacyAlias: 'legacy' });
   const eligible = () => db('messages as m')
     .join('conversations as c', 'c.id', 'm.conversation_id')
     .leftJoin('customers as cu', 'cu.id', 'c.customer_id')
+    .joinRaw(`LEFT JOIN LATERAL (${canonicalSmsLegacyLinkSql({ messageAlias: 'm', conversationAlias: 'c' })}) legacy ON true`)
     .joinRaw(receipt.joinSql)
     .modify((q) => { if (customerIds) q.whereIn('c.customer_id', customerIds); })
     .where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
-    .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
+    // A backlog reset read a text and tagged it for rollback; the writer strips
+    // that tag, so a later rollback cannot reopen a text staff marked read.
+    .andWhere(function unreadOrResetTagged() {
+      this.where({ 'm.is_read': false }).orWhereNull('m.is_read')
+        .orWhereRaw("jsonb_exists(COALESCE(m.metadata, '{}'::jsonb), 'backlog_reset')");
+    })
     .whereRaw(`${receipt.effectiveCreatedAtSql} < ?`, [cutoff])
     .modify((q) => excludeRecruitingSmsLog(q, 'm.message_type'))
     .modify((q) => {
@@ -322,19 +342,20 @@ async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, cus
       }
     })
     .whereNotExists(function blockedSender() {
-      this.select(1).from('blocked_numbers as b').whereRaw(`${phoneIdentitySql('b.number')} = ${peer}`);
+      this.select(1).from('blocked_numbers as b').whereRaw(`${phoneIdentitySql('b.number')} = ${address.peerSql}`);
     });
   const ids = await eligible().pluck('m.id');
   // The writer binds each id (and its SIDs); batches keep a long backlog
   // under PostgreSQL's bind-parameter limit. A later batch rechecks every
-  // rule first (a technician's route can change while a backlog runs), so
-  // only texts still in scope are written and their bells reconciled.
+  // rule first, and the writer checks a technician's customers inside its
+  // own statements, so a route change mid-run never reads a former
+  // customer's texts or reconciles their bells.
   const total = { updated: 0, notificationsCleared: 0 };
   for (let i = 0; i < ids.length; i += MARK_ALL_BATCH) {
     const chunk = ids.slice(i, i + MARK_ALL_BATCH);
     const batch = i === 0 ? chunk : await eligible().whereIn('m.id', chunk).pluck('m.id');
     if (!batch.length) continue;
-    const done = await markInboundSmsRead({ messageIds: batch, adminUserId, role });
+    const done = await markInboundSmsRead({ messageIds: batch, adminUserId, role, customerIds });
     total.updated += done.updated;
     total.notificationsCleared += done.notificationsCleared;
   }
