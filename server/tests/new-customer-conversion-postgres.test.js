@@ -184,6 +184,59 @@ jest.setTimeout(30000);
     );
   });
 
+  test("the acquisition is the customer's first win: its time and click id, not a later add-on's", async () => {
+    const c = await customer({ member_since: null });
+    await lead(c, { converted_at: new Date('2026-11-20T15:00:00Z'), gclid: 'g-addon' });
+    await lead(c, { converted_at: new Date('2026-11-12T15:00:00Z'), gclid: 'g-first' });
+    const out = await collect();
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ eventTimestamp: '2026-11-12T15:00:00.000Z', gclid: 'g-first' });
+  });
+
+  test('a first win before the window means no event, even with a later win inside it', async () => {
+    const c = await customer({ member_since: null });
+    await lead(c, {
+      first_contact_at: new Date('2026-09-28T12:00:00Z'), created_at: new Date('2026-09-28T12:00:00Z'),
+      converted_at: new Date('2026-10-01T15:00:00Z'),
+    });
+    await lead(c, {
+      first_contact_at: new Date('2026-11-18T12:00:00Z'), created_at: new Date('2026-11-18T12:00:00Z'),
+      converted_at: new Date('2026-11-20T15:00:00Z'),
+    });
+    expect(await collect()).toHaveLength(0);
+  });
+
+  test('a prospect stamped member_since at its first form is still new when a later call wins', async () => {
+    const c = await customer({ member_since: '2026-11-01' });
+    await lead(c, {
+      status: 'lost', converted_at: null,
+      first_contact_at: new Date('2026-11-01T14:00:00Z'), created_at: new Date('2026-11-01T14:00:00Z'),
+    });
+    await lead(c, {
+      first_contact_at: new Date('2026-11-20T14:00:00Z'), created_at: new Date('2026-11-20T14:00:00Z'),
+      converted_at: new Date('2026-11-22T15:00:00Z'),
+    });
+    const out = await collect();
+    expect(out.map((x) => x.eventTimestamp)).toEqual(['2026-11-22T15:00:00.000Z']);
+  });
+
+  test('an upload run pages past customers its destination already has', async () => {
+    const ids = [];
+    for (const day of ['20', '18', '16']) {
+      const c = await customer({ member_since: null });
+      await lead(c, { converted_at: new Date(`2026-11-${day}T15:00:00Z`) });
+      ids.push(`waves_new_customer:${c.id}`);
+    }
+    const sentOf = (sent) => async (batch) => new Set(batch.filter((id) => sent.includes(id)));
+    const tx = (out) => out.map((x) => x.transactionId);
+    // Readiness (no sent check) reads one page.
+    expect(tx(await collect({ limit: 1 }))).toEqual([ids[0]]);
+    // An upload run returns the sent ones too, and at most `limit` unsent ones.
+    expect(tx(await collect({ limit: 1, sentTransactionIds: sentOf([ids[0]]) }))).toEqual([ids[0], ids[1]]);
+    expect(tx(await collect({ limit: 1, sentTransactionIds: sentOf([ids[0], ids[1]]) }))).toEqual(ids);
+    expect(tx(await collect({ limit: 1, sentTransactionIds: sentOf(ids) }))).toEqual(ids);
+  });
+
   test("an opted-out email on the customer's deleted or open lead strips the upload", async () => {
     const c = await customer({ member_since: null });
     await lead(c);

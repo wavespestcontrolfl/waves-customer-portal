@@ -256,7 +256,12 @@ async function uploadConversions({ conversionType = 'completed_job_revenue', per
   return runExclusive(`meta-capi-upload:${conversionType}`, async () => {
     const range = dateRange(periodDays);
     const cap = Math.min(Math.max(parseInt(limit, 10) || 200, 1), MAX_EVENTS_PER_REQUEST, MAX_LIMIT);
-    const candidates = await collectCandidates(conversionType, { ...range, limit: cap });
+    const candidates = await collectCandidates(conversionType, {
+      ...range,
+      limit: cap,
+      // The new-customer collector pages past these; a forced run re-sends the newest page.
+      sentTransactionIds: (ids) => (force ? new Set() : existingSent(conversionType, ids)),
+    });
     const alreadySent = force ? new Set() : await existingSent(conversionType, candidates.map((c) => c.transactionId));
 
     const sendable = [];

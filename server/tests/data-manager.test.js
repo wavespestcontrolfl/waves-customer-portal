@@ -739,8 +739,9 @@ describe('test records, junk leads and the new_customer conversion (owner 2026-1
     first_name: 'Pat', last_name: 'Sample', status: 'qualified',
   };
 
-  test('a qualified lead later marked disqualified / duplicate / spam is skipped as lead_closed', () => {
-    for (const status of ['disqualified', 'DUPLICATE', ' spam ']) {
+  test('a qualified lead later marked junk or non-engaged is skipped as lead_closed', () => {
+    // The shared non-engaged set (cancelled, spam, duplicate, handled) plus disqualified.
+    for (const status of ['disqualified', 'DUPLICATE', ' spam ', 'cancelled', 'handled']) {
       const c = mapLeadCandidate({ ...baseLead, status });
       expect(exclusionReason(c)).toBe('lead_closed');
       expect(skipReason(c)).toBe('lead_closed');
@@ -853,7 +854,7 @@ describe('test records, junk leads and the new_customer conversion (owner 2026-1
       const sqls = [];
       // Like knex, a callback argument (grouped where, whereNotExists subquery)
       // runs against the builder, so its SQL is recorded too.
-      const methods = ['leftJoin', 'join', 'from', 'whereNull', 'whereNotNull', 'orWhereNotNull', 'where', 'whereIn', 'whereRaw', 'whereNotExists', 'groupBy', 'orderByRaw', 'limit'];
+      const methods = ['leftJoin', 'join', 'from', 'distinctOn', 'whereNull', 'whereNotNull', 'orWhereNotNull', 'where', 'whereIn', 'whereRaw', 'whereNotExists', 'orderBy', 'orderByRaw', 'limit', 'offset'];
       for (const m of methods) {
         chain[m] = jest.fn((...args) => {
           if (typeof args[0] === 'function') args[0].call(chain, chain);
@@ -875,10 +876,14 @@ describe('test records, junk leads and the new_customer conversion (owner 2026-1
       expect(text).toContain("::timestamp AT TIME ZONE 'America/New_York'");
       // A completed visit before first contact (minus the slack) makes it an existing customer.
       expect(text).toContain('sr.service_date <');
-      // The limit counts customers: the newest customers are picked first, then their leads load.
-      expect(chain.groupBy).toHaveBeenCalledWith('l.customer_id');
+      // member_since is judged against the customer's first contact over all its leads.
+      expect(text).toContain('MIN(COALESCE(fl.first_contact_at, fl.created_at))');
+      // One row per customer (its first win), newest customers first, one page without a sent check.
+      expect(chain.distinctOn).toHaveBeenCalledWith('l.customer_id');
+      expect(chain.whereIn).toHaveBeenCalledWith('l.id', chain);
       expect(chain.limit).toHaveBeenCalledWith(500);
-      expect(chain.whereIn).toHaveBeenCalledWith('l.customer_id', chain);
+      expect(chain.offset).toHaveBeenCalledTimes(1);
+      expect(chain.offset).toHaveBeenCalledWith(0);
     });
   });
 });
