@@ -150,6 +150,9 @@ describe('routes', () => {
   test('POST /messages/read-all needs a boundary and is office-only; a technician reads thread by thread', async () => {
     expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', {})).status).toBe(400);
     expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: 'nope' })).status).toBe(400);
+    // A bare wall-clock time would be read in the server's zone: refused.
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: '2026-11-19T12:00:00' })).status).toBe(400);
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: 1763553600000 })).status).toBe(400);
     expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: new Date().toISOString(), contactPhone: 'front desk' })).status).toBe(400);
     expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: new Date().toISOString(), contactPhone: 4155550100 })).status).toBe(400);
     // A present but empty phone is refused, never widened to the whole inbox.

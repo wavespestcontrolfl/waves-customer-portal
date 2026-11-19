@@ -2616,6 +2616,8 @@ router.post('/messages/read', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+const READ_BEFORE_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})$/;
+
 // POST /api/admin/communications/messages/read-all — the inbox's Mark all read (owner 2026-11-19), and with
 // contactPhone a row's Mark read (that sender only): every unread inbound text the inbox can show up to readBefore
 // (the newest text the caller's list showed), through the one read writer. Internal admin-phone traffic stays out,
@@ -2624,8 +2626,10 @@ router.post('/messages/read', async (req, res, next) => {
 router.post('/messages/read-all', async (req, res, next) => {
   try {
     if (isTechnicianRequest(req)) return res.status(403).json({ error: 'Mark all read is for the office' });
-    const readBefore = req.body?.readBefore ? new Date(req.body.readBefore) : null;
-    if (!readBefore || Number.isNaN(readBefore.getTime())) return res.status(400).json({ error: 'readBefore required' });
+    // An ISO instant with Z or an offset: a bare wall-clock time would be read in the server's zone.
+    const rawBefore = req.body?.readBefore;
+    const readBefore = typeof rawBefore === 'string' && READ_BEFORE_INSTANT_RE.test(rawBefore) ? new Date(rawBefore) : null;
+    if (!readBefore || Number.isNaN(readBefore.getTime())) return res.status(400).json({ error: 'readBefore required (an ISO time with Z or an offset)' });
     // contactPhone: one inbox row's Mark read (that sender's texts only). Only a request without the field reads the
     // whole inbox; a present but empty or invalid phone is refused, never widened.
     const hasSender = Object.prototype.hasOwnProperty.call(req.body || {}, 'contactPhone');

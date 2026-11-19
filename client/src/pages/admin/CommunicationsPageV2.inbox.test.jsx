@@ -1386,3 +1386,31 @@ it("a second Mark all read tap during the Undo window is ignored, so Undo still 
   expect(readPosts("/messages/read-all")).toHaveLength(0);
   expect(screen.getByLabelText("Unread")).toBeInTheDocument();
 });
+
+it("Mark all read stays disabled while its write is out, so a slow write cannot be tapped twice", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  let answer;
+  const okFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, init) => (String(url).endsWith("/messages/read-all") && init?.method === "POST"
+    ? new Promise((resolve) => { answer = () => resolve(response({ success: true })); })
+    : okFetch(url, init)));
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+  await tick(5000);
+  expect(readPosts("/messages/read-all")).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "Mark all read" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+  expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+  await act(async () => { answer(); });
+  await tick(0);
+  expect(screen.getByRole("button", { name: "Mark all read" })).not.toBeDisabled();
+});
+
+it("a technician's large row read goes out in batches of 200 ids", async () => {
+  messages = Array.from({ length: 450 }, (_, i) => ({ ...inbound(`m${i}`, `Text ${i}`), isRead: false, createdAt: new Date(Date.UTC(2024, 6, 1, 12, 0, i)).toISOString() }));
+  render(<MemoryRouter><Routes><Route element={<Outlet context={{ user: { id: "tech-1", role: "technician" } }} />}><Route path="*" element={<SmsTab active />} /></Route></Routes></MemoryRouter>);
+  await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  await tick(5000); await tick(0); await tick(0);
+  expect(readPosts("/messages/read").map(([, init]) => JSON.parse(init.body).messageIds.length)).toEqual([200, 200, 50]);
+});

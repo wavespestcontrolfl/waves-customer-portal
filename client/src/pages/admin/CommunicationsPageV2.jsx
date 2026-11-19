@@ -248,6 +248,8 @@ function newestCreatedAt(list) {
 
 // A list Mark read waits this long so its Undo can take it back.
 const LIST_READ_UNDO_MS = 5000;
+// Message ids per keepalive request (about 8 KB of JSON).
+const LIST_READ_ID_BATCH = 200;
 
 // Does a list read cover this loaded text? Mark all read covers every inbound
 // text up to its boundary except recruiting replies and blocked senders (the
@@ -1784,6 +1786,8 @@ export function SmsTab({
   const [pendingRead, setPendingRead] = useState(null);
   const [sendingReads, setSendingReads] = useState([]);
   const hiddenReads = useMemo(() => (pendingRead ? [pendingRead, ...sendingReads] : sendingReads), [pendingRead, sendingReads]);
+  // Mark all read waits until its first one is sent and answered.
+  const bulkReadBusy = !!pendingRead?.all || sendingReads.some((read) => read.all);
   const [listReadError, setListReadError] = useState("");
   const pendingReadRef = useRef(null);
   const pendingReadTimerRef = useRef(null);
@@ -1807,12 +1811,15 @@ export function SmsTab({
             : { readBefore: pending.readBefore }),
         });
       } else {
-        // A row with no phone: its loaded texts only.
-        await adminFetch("/admin/communications/messages/read", {
-          method: "POST",
-          keepalive: true,
-          body: JSON.stringify({ messageIds: pending.messageIds }),
-        });
+        // A row with no phone, or a technician's row: its loaded texts, in
+        // batches that stay well under the browser's 64 KiB keepalive limit.
+        for (let i = 0; i < pending.messageIds.length; i += LIST_READ_ID_BATCH) {
+          await adminFetch("/admin/communications/messages/read", {
+            method: "POST",
+            keepalive: true,
+            body: JSON.stringify({ messageIds: pending.messageIds.slice(i, i + LIST_READ_ID_BATCH) }),
+          });
+        }
       }
       const readAt = new Date().toISOString();
       readCommitSeqRef.current += 1;
@@ -1864,8 +1871,8 @@ export function SmsTab({
     }
   };
   const markAllReadFromList = () => {
-    // A second tap during the Undo window would send the first and leave Undo nothing to take back.
-    if (pendingReadRef.current?.all) return;
+    // A second tap while one waits or is out would send or repeat the first and leave Undo nothing to take back.
+    if (bulkReadBusy) return;
     // The cutoff comes from the whole list only, never from search or Unanswered results still on screen.
     if (smsLoadedSearchRef.current !== "" || smsLoadedStatusFilterRef.current === "unanswered") return;
     const readBefore = newestCreatedAt(messages);
@@ -4325,7 +4332,7 @@ export function SmsTab({
               <button
                 type="button"
                 onClick={markAllReadFromList}
-                disabled={!!pendingRead?.all}
+                disabled={bulkReadBusy}
                 className="u-focus-ring rounded-sm border-hairline border-zinc-300 bg-white px-3 min-h-[44px] md:min-h-[32px] text-14 text-zinc-900 hover:bg-zinc-50 disabled:opacity-50 disabled:hover:bg-white"
               >
                 Mark all read
