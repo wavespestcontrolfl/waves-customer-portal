@@ -147,6 +147,21 @@ postgres('hold grace + extend (real Postgres)', () => {
     else process.env.RESERVATION_COMMIT_GRACE_MINUTES = originalGrace;
   });
 
+  test.each([false, true])('a hold linked after preflight must be adopted before accepting its price (stamp cleared: %s)', async (cleared) => {
+    await withHold({}, async ({ trx, holdId, customerId }) => {
+      expect((await holdRow(trx, holdId)).customer_id).toBeNull();
+      const staffBooking = { customer_id: customerId, estimated_price: '79.00', status: 'confirmed' };
+      await trx('scheduled_services').where({ id: holdId }).update({
+        ...staffBooking, ...(cleared ? { reservation_expires_at: null } : {}),
+      });
+      await expect(slotReservation.commitReservation({
+        trx, scheduledServiceId: holdId, customerId, estimatedPrice: 45, expectUnclaimed: true,
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      expect(await trx('scheduled_services').where({ id: holdId }).first('customer_id', 'status', 'estimated_price'))
+        .toEqual(staffBooking);
+    });
+  });
+
   describe('commitGraceMinutes()', () => {
     test('defaults to 10 and clamps to [0, 30]', () => {
       delete process.env.RESERVATION_COMMIT_GRACE_MINUTES;

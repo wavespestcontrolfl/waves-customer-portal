@@ -1342,6 +1342,14 @@ fields only: /api/booking/availability builds each public slot field by field
 (`routes/booking.js`) and the estimate routes build theirs through
 `classifySlot`, so neither field reaches a customer response. Gate-off availability is unchanged apart from the
 shared grid / day-end rules above, which apply in both modes.
+Booking and estimate availability treat a customer-linked appointment as
+booked even when an older staff path left its reservation expiry stamp behind.
+Estimate acceptance may recover that appointment only when exactly one paid,
+adoptable visit still matches the submitted estimate, customer, date, start,
+and technician; those coordinates and its service family are checked again
+under the row lock. An expired unclaimed hold remains available only to its
+own estimate's commit-grace path.
+
 Commit-time capacity re-check (`GATE_BOOK_CAPACITY_COMMIT`, owner-approved
 2026-09-26; needs `GATE_SCHEDULING_CAPACITY` live too): every `createSelfBooking`
 commit — `/api/booking/confirm` here and the re-service commit below — prepares

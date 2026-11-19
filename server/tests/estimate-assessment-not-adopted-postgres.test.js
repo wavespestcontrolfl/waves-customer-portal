@@ -231,6 +231,110 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     expect(acceptance.appointment.id).toBe(lawnId);
   });
 
+  test.each([false, true])('a booked visit with an old hold expiry is offered once (already linked: %s)', async (linked) => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    const id = await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: {
+        source_estimate_id: linked ? estimateId : null,
+        reservation_expires_at: mockTransaction.raw("NOW() - INTERVAL '1 day'"),
+      },
+    });
+    const acceptance = await getAcceptance(token);
+    expect(acceptance.mode).toBe('existing_appointment');
+    expect(acceptance.appointment.id).toBe(id);
+    expect(acceptance.appointment).not.toHaveProperty('reservationExpiresAt');
+  });
+
+  test('an open picker and its retry reuse the exact visit staff already booked', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    // A separate legacy hold can still coexist briefly when staff created a
+    // booking instead of linking the hold. The booked row wins; the hold can
+    // never become a second first visit.
+    await visit(mockTransaction, {
+      customerId: null, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: {
+        source_estimate_id: estimateId,
+        status: 'pending',
+        reservation_expires_at: mockTransaction.raw("NOW() + INTERVAL '10 minutes'"),
+      },
+    });
+    const id = await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: {
+        source_estimate_id: estimateId,
+        reservation_expires_at: mockTransaction.raw("NOW() - INTERVAL '1 day'"),
+      },
+    });
+    const body = { slotId: `${CHOSEN_DATE}_09-00_unassigned`, paymentMethodPreference: 'pay_at_visit' };
+    const response = await putAccept(token, body);
+    expect({ status: response.status, error: (await response.json()).error }).toEqual({ status: 200, error: undefined });
+    expect((await mockTransaction('estimates').where({ id: estimateId }).first()).status).toBe('accepted');
+    const firstVisits = await mockTransaction('scheduled_services')
+      .where({ customer_id: customerId, source_estimate_id: estimateId, scheduled_date: CHOSEN_DATE }).pluck('id');
+    expect(firstVisits).toEqual([id]);
+
+    const beforeRetry = await mockTransaction('scheduled_services').where({ source_estimate_id: estimateId }).pluck('id');
+    const retry = await putAccept(token, body);
+    expect(retry.status).toBe(200);
+    expect(await mockTransaction('scheduled_services').where({ source_estimate_id: estimateId }).pluck('id'))
+      .toEqual(beforeRetry);
+  });
+
+  test('an open picker cannot adopt a moved hour or assigned technician', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: { source_estimate_id: estimateId, window_start: '11:00', window_end: '13:00' },
+    });
+    const movedHour = await putAccept(token, { slotId: `${CHOSEN_DATE}_09-00_unassigned` });
+    expect(movedHour.status).toBe(409);
+    expect(await movedHour.json()).toMatchObject({ code: 'RESERVATION_EXPIRED' });
+
+    const technicianId = randomUUID();
+    await mockTransaction('technicians').insert({
+      id: technicianId, name: 'Assigned fixture', role: 'technician', active: true,
+      employment_status: 'active', field_dispatchable: true,
+    });
+    await mockTransaction('scheduled_services').where({ source_estimate_id: estimateId })
+      .update({ window_start: '09:00', window_end: '11:00', technician_id: technicianId });
+    const movedTech = await putAccept(token, { slotId: `${CHOSEN_DATE}_09-00_unassigned` });
+    expect(movedTech.status).toBe(409);
+    expect(await movedTech.json()).toMatchObject({ code: 'RESERVATION_EXPIRED' });
+    expect((await mockTransaction('estimates').where({ id: estimateId }).first()).status).toBe('sent');
+  });
+
+  test('an open picker refuses an ambiguous duplicate or a free assessment at the submitted coordinates', async () => {
+    const ambiguous = await fixture(mockTransaction);
+    for (let i = 0; i < 2; i += 1) {
+      await visit(mockTransaction, {
+        customerId: ambiguous.customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+        extra: { source_estimate_id: ambiguous.estimateId },
+      });
+    }
+    expect((await putAccept(ambiguous.token, { slotId: `${CHOSEN_DATE}_09-00_unassigned` })).status).toBe(409);
+    expect((await mockTransaction('estimates').where({ id: ambiguous.estimateId }).first()).status).toBe('sent');
+
+    const free = await fixture(mockTransaction);
+    await assessmentVisit(mockTransaction, free.customerId, {
+      source_estimate_id: free.estimateId, scheduled_date: CHOSEN_DATE,
+    });
+    expect((await putAccept(free.token, { slotId: `${CHOSEN_DATE}_09-00_unassigned` })).status).toBe(409);
+    expect((await mockTransaction('estimates').where({ id: free.estimateId }).first()).status).toBe('sent');
+  });
+
+  test('an open picker never adopts another customer\'s visit even when the estimate and hour stamps match', async () => {
+    const owner = await fixture(mockTransaction);
+    const other = await fixture(mockTransaction);
+    const id = await visit(mockTransaction, {
+      customerId: other.customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: { source_estimate_id: owner.estimateId },
+    });
+    expect((await putAccept(owner.token, { slotId: `${CHOSEN_DATE}_09-00_unassigned` })).status).toBe(409);
+    expect((await mockTransaction('estimates').where({ id: owner.estimateId }).first()).status).toBe('sent');
+    expect((await mockTransaction('scheduled_services').where({ id }).first()).customer_id).toBe(other.customerId);
+  });
+
   test('/data: a booked assessment is not offered — the normal slot-picker flow renders', async () => {
     const { customerId, token } = await fixture(mockTransaction);
     await assessmentVisit(mockTransaction, customerId);

@@ -8161,6 +8161,7 @@ describe('public estimate one-time breakdown', () => {
 
   test('existing appointment accepts distinguish reservation-held rows', () => {
     expect(isReservationHeldAppointment({ reservation_expires_at: '2026-06-06T12:15:00.000Z' })).toBe(true);
+    expect(isReservationHeldAppointment({ customer_id: 'booked-customer', reservation_expires_at: '2026-06-06T12:15:00.000Z' })).toBe(false);
     expect(isReservationHeldAppointment({ reservation_expires_at: null })).toBe(false);
     expect(isReservationHeldAppointment({})).toBe(false);
   });

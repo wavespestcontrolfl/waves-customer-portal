@@ -2006,6 +2006,10 @@ async function commitReservation({
   preLockedDate = null,
   preLockedTechId = null,
   preparedCapacity = null,
+  // The estimate accept priced an unclaimed hold. If staff linked it after
+  // preflight, acceptance must restart through the booked-appointment
+  // adoption path instead of overwriting that booking's identity or price.
+  expectUnclaimed = false,
   trx,
 }) {
   // One booking_config read (lunch interval + day-end override, 60s TTL) for
@@ -2158,6 +2162,11 @@ async function commitReservation({
       || (preparedCapacity && (row.technician_id || null) !== (preRow.technician_id || null))) {
       const err = new Error('reservation moved to another date');
       err.code = 'RESERVATION_EXPIRED';
+      throw err;
+    }
+    if (expectUnclaimed && row.customer_id != null) {
+      const err = new Error('the held appointment was booked before confirmation');
+      err.code = 'SLOT_UNAVAILABLE';
       throw err;
     }
     if (!row.reservation_expires_at) {

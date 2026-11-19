@@ -179,7 +179,8 @@ describe('accept-path wiring (source pins)', () => {
     // app/DB skew a JS-side comparison could refuse a hold commitReservation
     // would graduate — the same wrongly-declined-by-seconds failure.
     expect(src).toMatch(/\.select\('\*', db\.raw\('\(reservation_expires_at < NOW\(\) - make_interval\(mins => \?\)\) AS _beyond_grace', \[holdGraceMinutes\]\)\)/);
-    expect(src).toMatch(/if \(reservationRow\._beyond_grace\) \{\s*\n\s*return res\.status\(409\)\.json\(HOLD_EXPIRED_409\)/);
+    expect(src).toContain('if (!reservationRow || reservationRow._beyond_grace)');
+    expect(src).toContain('if (!(await recoverBookedAppointment())) return res.status(409).json(HOLD_EXPIRED_409)');
     expect(src).not.toMatch(/Date\.now\(\) - holdGraceMinutes/);
   });
 
@@ -363,7 +364,7 @@ describe('accept refuses a no-booking reshape on the adopted-hold path', () => {
   const src = fs.readFileSync(path.join(__dirname, '../routes/estimate-public.js'), 'utf8');
   const guard = src.slice(
     src.indexOf('if (slotId && isRodentGuaranteeOnlyEstimate(estimate, estData))'),
-    src.indexOf('const acceptAdoptableStatuses = adoptableAppointmentStatuses();'),
+    src.indexOf('const existingAppointmentRow = existingAppointmentId'),
   );
 
   test('an UNCOMMITTED adopted hold is refused for both no-booking shapes', () => {
