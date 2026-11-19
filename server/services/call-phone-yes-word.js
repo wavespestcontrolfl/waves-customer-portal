@@ -9,10 +9,10 @@
  * "okay" after a price question and an unclear word are no choice; the caller must name or plainly pick the plan; a
  * changed mind takes the final choice. This module judges no words itself, because a word screen cannot keep up with
  * free speech. It checks only what code can check: the choice's evidence is the caller's own words, word for word in a
- * caller turn of the call's recording transcript (the shared grounding tools; the voice agent's own text is never
- * evidence). It gives the office the caller's latest turn that says them, whole, so any condition or "no" is in front
- * of the person who decides, and that person decides every card. And it waits, for a bounded time, for any recent
- * call that is not read yet (owedReadSql).
+ * caller turn of the call's recording transcript (the shared grounding tools; the voice agent's own text and the
+ * live-text backup are never evidence). It gives the office the caller's latest turn that says them, whole, so any
+ * condition or "no" is in front of the person who decides, and that person decides every card. And it waits, for a
+ * bounded time, for any recent call that is not read yet (owedReadSql).
  */
 
 const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
@@ -57,17 +57,6 @@ function owedReadSql(t) {
 // When the call began, as SQL (the twin of callStartedAt).
 const startedSql = () => require('./sms-pending-conversations').callStartedAtSql('call_log');
 
-// The transcript the caller's words are grounded in: a recording's, or null. The voice agent's own text is never
-// evidence: its writer (voice-agent/relay-transcript.js) clips a long turn and the whole text without a mark, so a turn
-// can look whole when it is not. A call it handed to staff keeps its recorded part whole after its own text, and only
-// that part is read (the processor's recordedPartOfComposite); a call it handled alone has no recording transcript.
-function recordingTranscriptOf(row) {
-  const text = String(row.transcription || '');
-  const { TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
-  if (row.transcription_provider === TRANSCRIPTION_PROVIDER && !text.startsWith('[AI segment]')) return null;
-  return require('./call-recording-processor').recordedPartOfComposite(text);
-}
-
 // The caller's own words for the plan choice (a string), or null. The shared grounding tools ground each billing_choice
 // evidence quote labeled the caller's in a recording transcript (a short quote must be a whole caller turn), with
 // outbound labels oriented the way the triage flags read them. Nothing is grounded in an unlabeled or one-speaker
@@ -104,8 +93,12 @@ function wordOfCall(row) {
   if (cancelFlag || CONTRARY_INTENTS.has(extraction.service_request?.service_intent)) return { contrary: true, callLogId: row.id, at: callStartedAt(row) };
   const choice = require('./call-prepay-choice').billingChoiceOf(extraction);
   if (!choice) return null;
-  const { isOutboundCall } = require('./call-recording-processor');
-  const quote = callerWordsOf(extraction, { transcript: recordingTranscriptOf(row), outbound: isOutboundCall(row) });
+  // Only the recording's transcript is evidence (the processor's recordedFallbackOf). The voice agent's own text and
+  // the live-text backup are not: their writers (voice-agent/relay-transcript.js, live-call-transcription.js) cut a
+  // long turn at 4,000 characters with no mark, so a cut turn can look whole. A call the agent handed to staff is read
+  // in its recorded part only.
+  const { isOutboundCall, recordedFallbackOf } = require('./call-recording-processor');
+  const quote = callerWordsOf(extraction, { transcript: recordedFallbackOf(row), outbound: isOutboundCall(row) });
   return { choice, callLogId: row.id, at: callStartedAt(row), quote };
 }
 

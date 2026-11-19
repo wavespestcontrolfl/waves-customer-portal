@@ -160,6 +160,8 @@ describeDb("the caller's word (PostgreSQL)", () => {
       processing_status: 'extraction_failed', extraction_attempts: 3, ...RECORDED,
     }]], { yes: null, noYes: 'no_yes_heard' }],
     ["the transcript does not hold the caller's words", [['per_application', { transcription: transcriptWith(null) }]], { yes: null, noYes: 'yes_without_words' }],
+    // A call with no recording keeps its live text, which can cut a turn with no mark: never the caller's words.
+    ['the words are only in the live-text backup', [['per_application', { transcription_provider: 'twilio_realtime' }]], { yes: null, noYes: 'yes_without_words' }],
   ])('%s', async (_name, calls, expected) => {
     const customerId = await customer();
     for (const [choice, over, intent] of calls) await call(customerId, choice, over, intent);
