@@ -75,31 +75,45 @@ export function markPageNavigating(reload = () => window.location.reload()) {
 // A background preload readies a page's code before anyone opens the page
 // (Field view loads Today's code when its switch turns on, for a later open
 // with no signal). With no signal it fails, and that failure is not a stale
-// page: while one runs, the handler leaves each failure to the import that
-// made it. The preload then resolves false. A page opened in that moment
-// still reloads once through lazyWithRetry's own guard; only its CSS-only
-// failure shows the error screen instead. The window stays open until every
-// loader settles, so a late failure cannot reload the page either. Resolves
-// true when every loader returned a module (a held chunk returns none).
+// page, so it must not reload the page the person is on. Vite rejects the
+// import with the same error object it put on the vite:preloadError event,
+// so the preload keeps the errors its own imports rejected with. While one
+// runs, the handler leaves each failure to its import and decides on the
+// next task, when the preload has kept its errors: a kept one is ignored,
+// any other (a page opened in that moment, CSS or JS, or any other import)
+// reloads once as usual. Resolves true when every loader returned a module
+// (a held chunk returns none).
+const backgroundFailures = new WeakSet();
+const canKeep = (value) => value !== null && (typeof value === 'object' || typeof value === 'function');
+
 export async function preloadInBackground(loaders) {
   backgroundPreloads += 1;
   try {
-    const results = await Promise.allSettled(loaders.map(async (load) => load()));
+    const results = await Promise.allSettled(loaders.map(async (load) => {
+      try {
+        return await load();
+      } catch (err) {
+        if (canKeep(err)) backgroundFailures.add(err);
+        throw err;
+      }
+    }));
     return results.every((result) => result.status === 'fulfilled' && Boolean(result.value));
   } finally {
     backgroundPreloads -= 1;
   }
 }
 
+// A chunk that did not load: the import's own failure (Chrome's or Safari's
+// wording, or a ChunkLoadError) or Vite's CSS preload failure, which reaches
+// the page's import whenever the handler did not hold it.
+const CHUNK_LOAD_ERROR = /Failed to fetch dynamically imported module|Importing a module script failed|ChunkLoadError|Unable to preload CSS/i;
+export function isChunkLoadError(err) {
+  return CHUNK_LOAD_ERROR.test(String(err?.message || ''));
+}
+
 // One-shot guard (App.jsx clears the flag on a successful lazy load) so a
 // genuine outage still surfaces instead of reload-looping.
-export function handleVitePreloadError(event, reload = () => window.location.reload()) {
-  if (pageNavigating()) {
-    chunkHeld = true;
-    event.preventDefault();
-    return;
-  }
-  if (backgroundPreloads > 0) return;
+function reloadOnce(event, reload) {
   try {
     if (sessionStorage.getItem(CHUNK_RELOAD_FLAG)) return;
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
@@ -107,8 +121,30 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
     return;
   }
   markStaleChunkReloadPending();
-  event.preventDefault();
+  event?.preventDefault();
   reload();
+}
+
+export function handleVitePreloadError(event, reload = () => window.location.reload()) {
+  if (pageNavigating()) {
+    chunkHeld = true;
+    event.preventDefault();
+    return;
+  }
+  if (backgroundPreloads > 0) {
+    const failure = event.payload;
+    setTimeout(() => {
+      if (canKeep(failure) && backgroundFailures.has(failure)) return;
+      // A navigation that started meanwhile holds it, as above.
+      if (pageNavigating()) {
+        chunkHeld = true;
+        return;
+      }
+      reloadOnce(null, reload);
+    }, 0);
+    return;
+  }
+  reloadOnce(event, reload);
 }
 
 // Test-only reset; module state otherwise lives for the page's lifetime.
