@@ -3,6 +3,7 @@ const contextAggregator = require('../context-aggregator');
 const { extractTopReplyText, htmlReplyToText } = require('../newsletter-proof');
 const { normalizeAddress, domainFromAddress } = require('./spam-blocker');
 const { ownMailboxAddress } = require('./email-source-tag');
+const { extractEmailAddresses } = require('./email-customer-link');
 const { hasAlignedAuth } = require('./inbox-hygiene');
 const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
 const { savepointRead } = require('../../utils/savepoint-read');
@@ -117,11 +118,12 @@ function emailBody(row) {
   return { text: String(row.snippet || ''), status: 'unavailable_snippet' };
 }
 
-// Our own tagged website address (contact+gbp-sarasota_home@) is the mailbox;
-// every other address, customers included, is compared as written.
+// The real recipients of a header (an address inside a display name never
+// counts), with our own tagged website address (contact+gbp-sarasota_home@)
+// read as the mailbox. Every other address, customers included, is compared
+// as written.
 function addressesOf(value) {
-  return (String(value || '').match(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [])
-    .map(ownMailboxAddress);
+  return extractEmailAddresses(value).map(ownMailboxAddress);
 }
 
 function belongsToConversation(row, email, mailboxAddress, customerId) {
@@ -151,15 +153,16 @@ function shapeEmail(row, email, mailboxAddress) {
   };
 }
 
-// LIKE pattern for the mailbox's tagged form: contact@x.com -> %contact+%@x.com%.
-function taggedMailboxLike(mailboxAddress) {
+// LIKE pattern for the mailbox's tagged form: contact@x.com -> contact+%@x.com.
+function taggedMailboxPattern(mailboxAddress) {
   const at = mailboxAddress.lastIndexOf('@');
-  return `%${mailboxAddress.slice(0, at)}+%${mailboxAddress.slice(at)}%`;
+  return `${mailboxAddress.slice(0, at)}+%${mailboxAddress.slice(at)}`;
 }
 
 async function loadThread(email, database, mailboxAddress, customerId) {
   try {
     const sender = normalizeAddress(email.from_address);
+    const tagged = taggedMailboxPattern(mailboxAddress);
     const rows = await savepointRead(database, (connection) => connection('emails')
       .where({ gmail_thread_id: email.gmail_thread_id })
       .where('received_at', '<=', email.received_at)
@@ -167,8 +170,8 @@ async function loadThread(email, database, mailboxAddress, customerId) {
       .whereRaw('(customer_id IS NULL OR customer_id = ?)', [customerId])
       .whereRaw(
         '((LOWER(TRIM(from_address)) = ? AND (LOWER(COALESCE(to_address, \'\')) LIKE ? OR LOWER(COALESCE(to_address, \'\')) LIKE ?)) '
-        + 'OR (LOWER(TRIM(from_address)) = ? AND LOWER(COALESCE(to_address, \'\')) LIKE ?))',
-        [sender, `%${mailboxAddress}%`, taggedMailboxLike(mailboxAddress), mailboxAddress, `%${sender}%`],
+        + 'OR ((LOWER(TRIM(from_address)) = ? OR LOWER(TRIM(from_address)) LIKE ?) AND LOWER(COALESCE(to_address, \'\')) LIKE ?))',
+        [sender, `%${mailboxAddress}%`, `%${tagged}%`, mailboxAddress, tagged, `%${sender}%`],
       )
       .orderBy('received_at', 'desc')
       .limit(LIMITS.email + 1)

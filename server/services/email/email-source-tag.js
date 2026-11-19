@@ -63,9 +63,10 @@ function evidence(kind, label, detail, basis) {
 }
 
 // Resolve a tag code to { kind, label, detail } or null for an unknown code.
+// Own-property lookups only: a code such as `constructor` must never match an
+// inherited Object property.
 function describeCode(code) {
-  const fixed = FIXED_CODES[code];
-  if (fixed) return fixed;
+  if (Object.hasOwn(FIXED_CODES, code)) return FIXED_CODES[code];
   const dash = code.indexOf('-');
   if (dash < 1) return null;
   const family = code.slice(0, dash);
@@ -77,11 +78,11 @@ function describeCode(code) {
     if (!location || location.id !== name) return null;
     return { kind: 'google_business', label: 'Google Business Profile', detail: `GBP — ${location.name}` };
   }
-  if (family === 'search' && SEARCH_ENGINE_HOSTS[name]) {
+  if (family === 'search' && Object.hasOwn(SEARCH_ENGINE_HOSTS, name)) {
     const engine = SEARCH_HOSTS.get(SEARCH_ENGINE_HOSTS[name]);
     return { kind: 'organic_search', label: 'Organic search', detail: engine };
   }
-  if (family === 'social' && SOCIAL_NETWORK_HOSTS[name]) {
+  if (family === 'social' && Object.hasOwn(SOCIAL_NETWORK_HOSTS, name)) {
     const network = SOCIAL_HOSTS.get(SOCIAL_NETWORK_HOSTS[name]);
     return { kind: 'organic_social', label: 'Organic social', detail: network };
   }

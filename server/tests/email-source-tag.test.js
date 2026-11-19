@@ -83,6 +83,15 @@ describe('emailSourceEvidence: tagged website email links', () => {
   });
 });
 
+describe('emailSourceEvidence: inherited property names', () => {
+  test('are not codes, and do not hide a later valid tag', () => {
+    for (const code of ['constructor', 'search-constructor', 'social-constructor', 'gbp-constructor']) {
+      expect(to(`contact+${code}_home@${HUB}`)).toBeNull();
+    }
+    expect(to(`contact+constructor_home@${HUB}, contact+gads_home@${HUB}`)).toMatchObject({ kind: 'google_ads' });
+  });
+});
+
 describe('emailSourceEvidence: no tag', () => {
   test('spoke and lawn-care domains read as that website', () => {
     for (const domain of ['contact@palmettoexterminator.com', 'contact@veniceflpestcontrol.com', 'contact@waveslawncare.com']) {
