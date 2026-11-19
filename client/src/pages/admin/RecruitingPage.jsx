@@ -14,6 +14,9 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { UserPlus, Phone, MessageSquare, Mail } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import OfferDialog from "../../components/admin/recruiting/OfferDialog";
+import OfferSection from "../../components/admin/recruiting/OfferSection";
+import useOfferFlow from "../../components/admin/recruiting/useOfferFlow";
 import {
   Button,
   Badge,
@@ -822,8 +825,12 @@ function SamePhoneBlock({ records, onOpenApplication }) {
 // own right (derives contact/screen from `detail`, owns the interview-block
 // branching) rather than a one-use helper — moving it out is what actually
 // removes those decisions from RecruitingPage.
-function ApplicationDetailContent({ detail, replyMedia, samePhone, onOpenStageDialog, onOpenApplication, onClose }) {
+// The Offer button opens the Offer form only while the offer flow is on for
+// a technician application; otherwise it is today's status-only move.
+function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, onOpenStageDialog, onOpenApplication, onClose }) {
   const contact = detail?.contact_snapshot || {};
+  const offerForm = offerFlow.enabled && detail.role === "technician";
+  const onStageButton = (key) => (key === "offer" && offerForm ? offerFlow.openForm() : onOpenStageDialog(key));
   const screen = detail?.ai_screen || null;
 
   return (
@@ -908,6 +915,8 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, onOpenStageDi
 
         <InterviewSchedulingBlock detail={detail} onOpenStageDialog={onOpenStageDialog} />
 
+        <OfferSection detail={detail} offerFlow={offerFlow} />
+
         <StatusHistoryList history={detail.status_history} />
 
         <MessagesList history={detail.comms_history} replyMedia={replyMedia} />
@@ -920,7 +929,8 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, onOpenStageDi
                 key={key}
                 size="sm"
                 variant="secondary"
-                onClick={() => onOpenStageDialog(key)}
+                onClick={() => onStageButton(key)}
+                disabled={key === "offer" && offerFlow.loading}
               >
                 {label}
               </Button>
@@ -991,6 +1001,7 @@ export default function RecruitingPage() {
   const detailSeq = useRef(0);
 
   const stageWorkflow = useStageChangeWorkflow(detail, tab, load, setDetail);
+  const offerFlow = useOfferFlow(detail?.id);
 
   const openDetail = useCallback(async (id) => {
     const seq = ++detailSeq.current;
@@ -1166,12 +1177,28 @@ export default function RecruitingPage() {
             detail={detail}
             replyMedia={replyMedia}
             samePhone={samePhone}
+            offerFlow={offerFlow}
             onOpenStageDialog={stageWorkflow.openStageDialog}
             onOpenApplication={openDetail}
             onClose={closeDetail}
           />
         )}
       </Dialog>
+
+      <OfferDialog
+        open={Boolean(offerFlow.form) && Boolean(detail)}
+        applicationId={detail?.id}
+        contact={detail?.contact_snapshot}
+        data={offerFlow.data}
+        draft={offerFlow.form?.draft}
+        onClose={offerFlow.closeForm}
+        onChanged={offerFlow.reload}
+        onSent={async () => {
+          await offerFlow.reload();
+          await openDetail(detail.id);
+          load(tab);
+        }}
+      />
 
       <StageChangeDialog
         open={Boolean(stageWorkflow.stageDialog)}

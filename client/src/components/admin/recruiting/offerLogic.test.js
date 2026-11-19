@@ -1,0 +1,56 @@
+import { describe, expect, it } from 'vitest';
+import {
+  commsSummary,
+  expiryLabel,
+  formatDay,
+  formatTimelineTime,
+  isStartWeekday,
+  maskEmail,
+  maskPhone,
+  offerErrorMessage,
+  stepDateFor,
+} from './offerLogic';
+
+describe('offer helpers', () => {
+  it('puts the pay step on the first Monday after day 90 (day 1 = start date)', () => {
+    expect(stepDateFor('2027-01-04')).toBe('2027-04-05');
+    // Start Tue 2027-01-05: day 90 = Sun 04-04, so the next day (Mon 04-05) is the step.
+    expect(stepDateFor('2027-01-05')).toBe('2027-04-05');
+    // Start Wed 2027-01-06: day 90 is itself Mon 04-05, which is not "after" it; the next Monday wins.
+    expect(stepDateFor('2027-01-06')).toBe('2027-04-12');
+    expect(stepDateFor('')).toBe('');
+  });
+
+  it('accepts Monday to Thursday start dates only', () => {
+    expect(['2027-01-04', '2027-01-05', '2027-01-06', '2027-01-07'].map(isStartWeekday)).toEqual([true, true, true, true]);
+    expect(['2027-01-03', '2027-01-08', '2027-01-09', 'nope'].map(isStartWeekday)).toEqual([false, false, false, false]);
+  });
+
+  it('formats days without a time-zone shift and times in Eastern', () => {
+    expect(formatDay('2027-01-04')).toBe('Mon, Jan 4, 2027');
+    expect(formatTimelineTime('2026-12-11T15:20:00Z')).toBe('Fri Dec 11, 10:20 AM');
+    expect(expiryLabel(new Date('2026-12-11T15:20:00Z'))).toBe('Fri, Dec 18, 2026');
+  });
+
+  it('masks phone and email', () => {
+    expect(maskPhone('9415551234')).toBe('(941) ***-1234');
+    expect(maskPhone('12')).toBe('');
+    expect(maskEmail('jordan@example.com')).toBe('j***@example.com');
+    expect(maskEmail('x')).toBe('');
+  });
+
+  it('turns each 409 code into a plain sentence', () => {
+    for (const code of ['TERMS_NOT_ISSUED', 'OFFER_NOT_DRAFT', 'NO_CONTACT', 'APPLICATION_CLOSED', 'ROLE_NOT_SUPPORTED']) {
+      const text = offerErrorMessage({ message: 'HTTP 409', body: { code } });
+      expect(text).not.toBe('HTTP 409');
+      expect(text).not.toContain(code);
+    }
+    expect(offerErrorMessage({ message: 'Start date must be in the future' })).toBe('Start date must be in the future');
+  });
+
+  it('summarizes the two channels', () => {
+    expect(commsSummary({ sms: { outcome: 'sent' }, email: { outcome: 'failed', code: 'BOUNCED' } })).toBe(
+      'Text sent. Email failed (BOUNCED).',
+    );
+  });
+});
