@@ -7,6 +7,10 @@ const mockCreate = jest.fn();
 const mockCancelCreated = jest.fn();
 const mockRetrieve = jest.fn();
 const mockCancelPi = jest.fn();
+const mockChargeFence = jest.fn();
+const mockLockCombinedCustomer = jest.fn();
+const mockVerifyAllocation = jest.fn();
+const mockReleaseCombined = jest.fn();
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -26,12 +30,25 @@ jest.mock('../services/audit-log', () => ({
 }));
 jest.mock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn() }));
 jest.mock('../services/pay-combined', () => ({
-  releaseCombinedSessionBeforeCollection: jest.fn(async () => ({ released: false })),
+  lockCombinedCustomerStable: (...args) => mockLockCombinedCustomer(...args),
+  isCombinedPiMetadata: (metadata) => !!metadata?.combined_allocation,
+  parseCombinedAllocation: (metadata) => String(metadata.combined_allocation).split(',').map((entry) => {
+    const [invoiceId, cents] = entry.split(':');
+    return { invoiceId, cents: Number(cents) };
+  }),
+  verifyAllocationLocked: (...args) => mockVerifyAllocation(...args),
+  releaseCombinedSessionBeforeCollection: (...args) => mockReleaseCombined(...args),
   clearPaymentIntentStamps: jest.fn(async () => 0),
 }));
 jest.mock('../services/stripe', () => ({
-  assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined),
+  assertNoInvoiceChargeReconciliationPending: (...args) => mockChargeFence(...args),
   parkInvoiceForSavedCardReconciliation: jest.fn(),
+  savedCardChargeSuppressesAlternateCollection: (err) => [
+    'STRIPE_CHARGE_IN_PROGRESS',
+    'STRIPE_AMBIGUOUS_OUTCOME',
+    'STRIPE_CHARGED_DB_FAILED',
+    'DEPOSIT_RECONCILIATION_REQUIRED',
+  ].includes(err?.code),
   retrievePaymentIntent: (...args) => mockRetrieve(...args),
   cancelPaymentIntent: (...args) => mockCancelPi(...args),
 }));
@@ -67,6 +84,10 @@ function setup({ invoice, handoff }) {
   jest.clearAllMocks();
   invoiceUpdates = [];
   handoffUpdates = [];
+  mockChargeFence.mockResolvedValue(undefined);
+  mockLockCombinedCustomer.mockResolvedValue('cust-1');
+  mockVerifyAllocation.mockResolvedValue([invoice]);
+  mockReleaseCombined.mockResolvedValue({ released: false });
   mockCreate.mockResolvedValue(TERMINAL_PI);
   mockCancelCreated.mockResolvedValue({});
   mockCancelPi.mockResolvedValue({});
@@ -117,6 +138,180 @@ async function postPaymentIntent() {
 const boundPointer = () => invoiceUpdates.find((u) => u.stripe_payment_intent_id === TERMINAL_PI.id);
 
 describe('POST /payment-intent retires the open pay-page PaymentIntent (B07)', () => {
+  test('checkout-aware preflight holds an earlier authentication attempt before minting a Terminal PI', async () => {
+    setup({ invoice: baseInvoice(), handoff: baseHandoff() });
+    mockChargeFence.mockRejectedValueOnce(Object.assign(new Error('awaiting authentication verification'), {
+      code: 'STRIPE_CHARGE_IN_PROGRESS',
+      savedCardPending: true,
+      reconciliationRequired: false,
+    }));
+
+    const { status, body } = await postPaymentIntent();
+
+    expect(status).toBe(409);
+    expect(body).toMatchObject({
+      code: 'payment_charge_in_progress',
+      reconciliationRequired: false,
+    });
+    expect(mockChargeFence).toHaveBeenCalledWith('inv-1', db, { checkout: true });
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(mockCancelCreated).not.toHaveBeenCalled();
+  });
+
+  test('a received card payment awaiting local posting returns the reconciliation hold before mint', async () => {
+    setup({ invoice: baseInvoice({ stripe_payment_intent_id: 'pi_pay_page' }), handoff: baseHandoff() });
+    const fence = Object.assign(new Error('received payment has no local posting'), {
+      code: 'STRIPE_CHARGED_DB_FAILED',
+      reconciliationRequired: true,
+    });
+    mockChargeFence.mockRejectedValueOnce(fence);
+
+    const { status, body } = await postPaymentIntent();
+
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ code: 'payment_reconciliation_pending', reconciliationRequired: true });
+    expect(require('../services/stripe').parkInvoiceForSavedCardReconciliation).not.toHaveBeenCalled();
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(invoiceUpdates).toEqual([]);
+    expect(handoffUpdates).toEqual([]);
+  });
+
+  test('checkout-aware locked bind holds a racing attempt and retires only the new Terminal PI', async () => {
+    setup({ invoice: baseInvoice({ stripe_payment_intent_id: 'pi_pay_page' }), handoff: baseHandoff() });
+    mockRetrieve.mockResolvedValue({ id: 'pi_pay_page', status: 'requires_payment_method', metadata: {} });
+    mockChargeFence
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(Object.assign(new Error('awaiting authentication verification'), {
+        code: 'STRIPE_CHARGE_IN_PROGRESS',
+        savedCardPending: true,
+        reconciliationRequired: false,
+      }));
+
+    const { status, body } = await postPaymentIntent();
+
+    expect(status).toBe(409);
+    expect(body).toMatchObject({
+      code: 'payment_charge_in_progress',
+      reconciliationRequired: false,
+      newHandoffRequired: true,
+    });
+    expect(mockChargeFence).toHaveBeenNthCalledWith(1, 'inv-1', db, { checkout: true });
+    expect(mockChargeFence).toHaveBeenNthCalledWith(2, 'inv-1', db, { checkout: true });
+    expect(boundPointer()).toBeUndefined();
+    expect(handoffUpdates.some((u) => u.stripe_payment_intent_id === TERMINAL_PI.id)).toBe(false);
+    expect(handoffUpdates.some((u) => 'expires_at' in u)).toBe(true);
+    expect(mockCancelCreated).toHaveBeenCalledWith(TERMINAL_PI.id, { cancellation_reason: 'abandoned' });
+    expect(mockCancelPi).not.toHaveBeenCalled();
+    expect(mockReleaseCombined).not.toHaveBeenCalled();
+  });
+
+  test('a racing orphan hold preserves the live standalone checkout pointer', async () => {
+    setup({
+      invoice: baseInvoice({ stripe_payment_intent_id: 'pi_pay_page' }),
+      handoff: baseHandoff(),
+    });
+    mockRetrieve.mockResolvedValue({ id: 'pi_pay_page', status: 'requires_confirmation', metadata: {} });
+    mockChargeFence
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(Object.assign(new Error('received payment has no local posting'), {
+        code: 'STRIPE_CHARGED_DB_FAILED',
+        stripePaymentIntentId: 'pi_orphan',
+        reconciliationRequired: true,
+      }));
+
+    const { status, body } = await postPaymentIntent();
+
+    expect(status).toBe(409);
+    expect(body).toMatchObject({
+      code: 'payment_reconciliation_pending',
+      reconciliationRequired: true,
+      newHandoffRequired: true,
+    });
+    expect(mockReleaseCombined).not.toHaveBeenCalled();
+    expect(mockCancelPi).not.toHaveBeenCalled();
+    expect(invoiceUpdates).toEqual([]);
+  });
+
+  test('takes the combined reservation and allocation locks before a racing hold and preserves the shared checkout', async () => {
+    const invoice = baseInvoice({ stripe_payment_intent_id: 'pi_combined' });
+    setup({ invoice, handoff: baseHandoff() });
+    mockRetrieve.mockResolvedValue({
+      id: 'pi_combined',
+      status: 'requires_confirmation',
+      metadata: { combined_allocation: 'inv-1:10000,inv-2:5000' },
+    });
+    mockChargeFence
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(Object.assign(new Error('awaiting authentication verification'), {
+        code: 'STRIPE_CHARGE_IN_PROGRESS',
+        reconciliationRequired: false,
+      }));
+
+    const { status, body } = await postPaymentIntent();
+
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ code: 'payment_charge_in_progress', newHandoffRequired: true });
+    expect(mockLockCombinedCustomer).toHaveBeenCalledWith(db, 'inv-1', 'cust-1');
+    expect(mockVerifyAllocation).toHaveBeenCalledWith(
+      db,
+      [{ invoiceId: 'inv-1', cents: 10000 }, { invoiceId: 'inv-2', cents: 5000 }],
+      { anchorInvoiceId: 'inv-1', expectPaymentIntentId: 'pi_combined' },
+    );
+    expect(mockVerifyAllocation.mock.invocationCallOrder[0])
+      .toBeLessThan(mockChargeFence.mock.invocationCallOrder[1]);
+    expect(mockReleaseCombined).not.toHaveBeenCalled();
+    expect(mockCancelPi).not.toHaveBeenCalled();
+    expect(invoiceUpdates).toEqual([]);
+  });
+
+  test('retires a clear combined checkout only after the locked hold check', async () => {
+    const invoice = baseInvoice({ stripe_payment_intent_id: 'pi_combined' });
+    setup({ invoice, handoff: baseHandoff() });
+    mockRetrieve.mockResolvedValue({
+      id: 'pi_combined',
+      status: 'requires_confirmation',
+      metadata: { combined_allocation: 'inv-1:10000,inv-2:5000' },
+    });
+    mockReleaseCombined.mockImplementationOnce(async () => {
+      invoice.stripe_payment_intent_id = null;
+      return { released: true };
+    });
+
+    const { status, body } = await postPaymentIntent();
+
+    expect(status).toBe(200);
+    expect(body.paymentIntentId).toBe(TERMINAL_PI.id);
+    expect(mockChargeFence).toHaveBeenCalledTimes(2);
+    expect(mockChargeFence.mock.invocationCallOrder[1])
+      .toBeLessThan(mockReleaseCombined.mock.invocationCallOrder[0]);
+    expect(mockCancelPi).not.toHaveBeenCalled();
+    expect(boundPointer()).toBeTruthy();
+  });
+
+  test('a combined allocation refusal retires only the new Terminal PI and requires a fresh handoff', async () => {
+    const invoice = baseInvoice({ stripe_payment_intent_id: 'pi_combined' });
+    setup({ invoice, handoff: baseHandoff() });
+    mockRetrieve.mockResolvedValue({
+      id: 'pi_combined',
+      status: 'requires_confirmation',
+      metadata: { combined_allocation: 'inv-1:10000,inv-2:5000' },
+    });
+    mockVerifyAllocation.mockRejectedValueOnce(Object.assign(
+      new Error('The account balance changed since this page loaded — refreshing.'),
+      { statusCode: 409, staleBalance: true },
+    ));
+
+    const { status, body } = await postPaymentIntent();
+
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ code: 'combined_session_release_failed', newHandoffRequired: true });
+    expect(mockReleaseCombined).not.toHaveBeenCalled();
+    expect(mockCancelPi).not.toHaveBeenCalled();
+    expect(mockCancelCreated).toHaveBeenCalledWith(TERMINAL_PI.id, { cancellation_reason: 'abandoned' });
+    expect(handoffUpdates.some((update) => 'expires_at' in update)).toBe(true);
+    expect(invoiceUpdates).toEqual([]);
+  });
+
   test('an open pay-page PI is cancelled before the card-present PI is bound', async () => {
     setup({ invoice: baseInvoice({ stripe_payment_intent_id: 'pi_pay_page' }), handoff: baseHandoff() });
     mockRetrieve.mockResolvedValue({ id: 'pi_pay_page', status: 'requires_payment_method', metadata: {} });
