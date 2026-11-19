@@ -8263,9 +8263,10 @@ function initScheduledJobs() {
       // (services/owner-alerts.js). One row per week.
       if (rec.recommendation) {
         const { recordOwnerAlert, whyFromFreeText } = require('./owner-alerts');
-        // The week's new-customer call outcomes lead the tip; a failed read drops the line, never the tip.
+        // The week's new-customer call outcomes lead the tip; a failed read drops the line, never the tip. The seven
+        // completed days before today, so one Friday's tip starts where the last one ended (no Friday-afternoon gap).
         const { loadWeeklyCallOutcomes, formatWeeklyCallOutcomes } = require('./csr/weekly-call-outcomes');
-        const outcomesLine = await loadWeeklyCallOutcomes().then(formatWeeklyCallOutcomes).catch(() => '');
+        const outcomesLine = await loadWeeklyCallOutcomes({ completedDays: true }).then(formatWeeklyCallOutcomes).catch(() => '');
         await recordOwnerAlert('csr-weekly-tip', {
           action: 'read the weekly call coaching tip',
           why: whyFromFreeText(rec.recommendation),

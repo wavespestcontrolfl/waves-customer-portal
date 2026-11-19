@@ -822,7 +822,8 @@ Return JSON:
   /**
    * Get team overview stats for the CSR Coach dashboard.
    */
-  async getTeamOverview(days = 30) {
+  // `withWeeklyCallOutcomes: false` skips the week's call aggregate for a caller that does not show it (the leaderboard).
+  async getTeamOverview(days = 30, { withWeeklyCallOutcomes = true } = {}) {
     const since = etDateString(addETDays(new Date(), -days));
 
     const scores = await db('csr_call_scores').where('call_date', '>=', since);
@@ -881,7 +882,7 @@ Return JSON:
     const fixableRevenue = fixableLosses.reduce((sum, s) => sum + parseFloat(s.estimated_job_value || 0), 0);
     const totaled = scores.filter(s => s.total_score != null);
 
-    const weeklyCallOutcomes = await loadWeeklyCallOutcomesFailSoft();
+    const weeklyCallOutcomes = withWeeklyCallOutcomes ? await loadWeeklyCallOutcomesFailSoft() : null;
 
     return {
       weeklyCallOutcomes,
@@ -979,7 +980,7 @@ Return JSON:
     const periodStart = day <= 15 ? `${ym}-01` : `${ym}-16`;
     const periodEnd = day <= 15 ? `${ym}-15` : `${ym}-${String(lastDay).padStart(2, '0')}`;
 
-    const overview = await this.getTeamOverview(15);
+    const overview = await this.getTeamOverview(15, { withWeeklyCallOutcomes: false });
 
     // Determine winners
     const csrs = overview.csrStats;

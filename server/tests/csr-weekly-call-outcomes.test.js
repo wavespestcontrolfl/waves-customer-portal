@@ -54,6 +54,25 @@ describe('loadWeeklyCallOutcomes', () => {
     expect(conn.calls.some(([m, col, op]) => m === 'where' && col === 'cl.created_at' && op === '<=')).toBe(false);
   });
 
+  // The Friday 8 AM tip runs every seven days: each report must start where the last one ended, or a Friday-afternoon
+  // call falls between two tips.
+  test('completedDays: two successive Friday tips cover the seven completed days each, back to back', async () => {
+    const started = callStartedAtSql('cl');
+    const boundsOf = (conn) => conn.calls.filter(([m, sql]) => m === 'whereRaw' && sql.startsWith(started)).map(([, sql, bindings]) => [sql.slice(started.length), bindings]);
+    const first = fakeConn({ total: 0, known: 0, booked: 0, estimates: 0 });
+    const a = await loadWeeklyCallOutcomes({ now: new Date('2026-11-20T13:00:00Z'), conn: first, completedDays: true }); // Fri 8 AM ET
+    const second = fakeConn({ total: 0, known: 0, booked: 0, estimates: 0 });
+    const b = await loadWeeklyCallOutcomes({ now: new Date('2026-11-27T13:00:00Z'), conn: second, completedDays: true });
+    // Fri Nov 13 00:00 ET to Fri Nov 20 00:00 ET, then Fri Nov 20 00:00 ET to Fri Nov 27 00:00 ET: the end is exclusive.
+    expect([a.from.toISOString(), a.to.toISOString()]).toEqual(['2026-11-13T05:00:00.000Z', '2026-11-20T05:00:00.000Z']);
+    expect([b.from.toISOString(), b.to.toISOString()]).toEqual(['2026-11-20T05:00:00.000Z', '2026-11-27T05:00:00.000Z']);
+    expect(boundsOf(first)).toEqual([[' >= ?', [a.from]], [' < ?', [a.to]]]);
+    // A call at 3 PM ET on Friday Nov 20 is after the first tip's end and inside the second tip's window: counted once.
+    const fridayAfternoon = new Date('2026-11-20T20:00:00Z').getTime();
+    expect(fridayAfternoon >= a.to.getTime()).toBe(true);
+    expect(fridayAfternoon >= b.from.getTime() && fridayAfternoon < b.to.getTime()).toBe(true);
+  });
+
   test('a call whose outcome says it was no prospect is not a new-customer call (staff tags count too)', async () => {
     const conn = fakeConn({ total: 0, known: 0, booked: 0, estimates: 0 });
     await loadWeeklyCallOutcomes({ now: new Date('2026-11-20T13:00:00Z'), conn });

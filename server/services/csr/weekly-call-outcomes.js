@@ -38,18 +38,24 @@ const NO_PROSPECT_OUTCOMES = Object.freeze([
 // The valid extraction's own quote flags, JSON true only (call-disposition.js tests `=== true`).
 const QUOTE_FLAGS_SQL = "cl.ai_extraction_enriched #> '{service_request,quote_requested}' = 'true'::jsonb"
   + " OR cl.ai_extraction_enriched #> '{service_request,quote_promised}' = 'true'::jsonb";
-// The last seven ET calendar days ending today, the window generateWeeklyTeamRecommendation uses.
+// Seven ET calendar days: by default the last seven ending now (the CSR overview's live view); for a report run every
+// seven days (`completedDays`), the seven completed days before today, so successive reports cover every call once.
 const WEEK_DAYS = 7;
 
 /**
  * Each caller counts once for the week, however many times they rang: a caller who booked on any call
  * is booked; one who did not book but asked for or was promised an estimate is estimate; the rest only
  * add to the total. A caller has a known outcome when any of their calls carries a disposition.
+ * `completedDays`: the window is the seven completed ET dates before today, midnight to midnight (the Friday 8 AM
+ * tip covers Friday through Thursday, and the next tip starts where it ended). Without it the window is the seven
+ * ET dates ending now.
  * @returns {Promise<{from: Date, to: Date, newCustomerCallers: number, callersWithOutcome: number,
  *   bookedOnCall: number, bookedPct: number|null, estimateRequestedOrPromised: number}>}
  */
-async function loadWeeklyCallOutcomes({ now = new Date(), conn = db } = {}) {
-  const from = parseETDateTime(`${etDateString(addETDays(now, 1 - WEEK_DAYS))}T00:00`);
+async function loadWeeklyCallOutcomes({ now = new Date(), conn = db, completedDays = false } = {}) {
+  const from = parseETDateTime(`${etDateString(addETDays(now, completedDays ? -WEEK_DAYS : 1 - WEEK_DAYS))}T00:00`);
+  // A completed window ends at today's ET midnight, exclusive; the live window ends now.
+  const to = completedDays ? parseETDateTime(`${etDateString(now)}T00:00`) : now;
   // A caller is their phone identity; a call with no number stands alone.
   const caller = `COALESCE(NULLIF(${phoneIdentitySql('cl.from_phone')}, ''), cl.id::text)`;
   const started = callStartedAtSql('cl');
@@ -62,7 +68,7 @@ async function loadWeeklyCallOutcomes({ now = new Date(), conn = db } = {}) {
     // started in the week (and lets the index narrow the scan); the start time decides the week.
     .where('cl.created_at', '>=', from)
     .whereRaw(`${started} >= ?`, [from])
-    .whereRaw(`${started} <= ?`, [now])
+    .whereRaw(`${started} ${completedDays ? '<' : '<='} ?`, [to])
     // A street-level hold is a visit the caller took on the call; the office confirms it later and only
     // then stamps 'booked' (outbound-review-confirm.js stampBookedDispositionForStreetLevelHold). The
     // hold is made by the call's own booking, so a later confirm still counts as booked on the call.
@@ -89,7 +95,7 @@ async function loadWeeklyCallOutcomes({ now = new Date(), conn = db } = {}) {
   const booked = Number(row?.booked) || 0;
   return {
     from,
-    to: now,
+    to,
     newCustomerCallers: total,
     callersWithOutcome: known,
     bookedOnCall: booked,
