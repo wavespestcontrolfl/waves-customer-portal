@@ -51,6 +51,10 @@ const DEMAND_DAYS = 7;
 const SCAN_DAYS = 14;
 
 const weekday = (day) => new Date(`${day}T12:00:00Z`).getUTCDay();
+const toMin = (value) => {
+  const [h, m] = String(value).slice(0, 5).split(':').map(Number);
+  return h * 60 + (m || 0);
+};
 const ceilHour = (min) => Math.ceil(min / 60) * 60;
 const sum = (list, pick) => list.reduce((total, item) => total + pick(item), 0);
 
@@ -70,22 +74,24 @@ const hasCoords = (row) => {
 };
 
 /**
- * Where the van is and when it is free on `day` (pure). completed: the day's completed rows (one with no place sets
- * no place); onSite: the stops on site now, one per physical stop ({ arrived_at, stayMin, lat, lng }; stayMin = the
+ * Where the van is and when it is free on `day` (pure). completed: the day's completed rows; onSite: the stops on site now, one per physical stop ({ arrived_at, stayMin, lat, lng }; stayMin = the
  * services not yet done). The van is at that stop since its arrival, so a service finished after the arrival was
  * done there: the rest starts then. Busy until the stay ends and never before now (a job running long). Returns
- * { origin, clockMin, source }; source 'start_point' when nothing is done or under way.
+ * { origin, clockMin, source }; source 'start_point' when nothing is done or under way, 'unknown' (origin null)
+ * when the latest stop done has no place.
  */
 function vanNow({ completed, onSite, home, departureMin, nowMin, day }) {
   const doneMins = completed.map((row) => etMinuteOn(row.completed_at, day)).filter((m) => m != null);
   const lastDone = doneMins.length ? Math.max(...doneMins) : -Infinity;
   const onSiteClock = (row) => Math.max(nowMin, Math.max(etMinuteOn(row.arrived_at, day) ?? nowMin, lastDone) + row.stayMin);
   const seen = [
-    ...completed.filter(hasCoords).map((row) => ({ row, clockMin: etMinuteOn(row.completed_at, day), source: 'completed' })),
+    ...completed.map((row) => ({ row, clockMin: etMinuteOn(row.completed_at, day), source: 'completed' })),
     ...onSite.map((row) => ({ row, clockMin: onSiteClock(row), source: 'on_site' })),
   ].filter((s) => s.clockMin != null);
   const best = seen.reduce((top, s) => (!top || s.clockMin > top.clockMin ? s : top), null);
   if (!best) return { origin: home, clockMin: departureMin, source: 'start_point' };
+  // The latest stop done has no place: the van's place is unknown (never an earlier customer's, never home).
+  if (!hasCoords(best.row)) return { origin: null, clockMin: best.clockMin, source: 'unknown' };
   return { origin: { lat: Number(best.row.lat), lng: Number(best.row.lng) }, clockMin: best.clockMin, source: best.source };
 }
 
@@ -182,7 +188,11 @@ function measureTechDay({ rows, first = [], blocks, held, origin, end = origin, 
   const all = [...first, ...rows];
   const skip = unmeasurable(all);
   if (skip) return { stops: all.length, skip };
-  const seq = [...first, ...promisedWindowOrder(rows)];
+  // Each physical stop at its own promised start (a visit's afternoon service is not pulled up to its morning one),
+  // each stop's rows together.
+  const startOf = (stop) => Math.min(...stop.flat().map((r) => toMin(r.window_start)));
+  const seq = [...first, ...physicalStops(rows).map((stop, i) => ({ stop, i })).sort((a, b) => startOf(a.stop) - startOf(b.stop) || a.i - b.i)
+    .flatMap(({ stop }) => stop.flat())];
   const sim = simulate(seq, { origin, end, departureMin, blockedIntervals: serviceBlocks(blocks) });
   if (!sim) return { stops: all.length, skip: 'NO_SIMULATION' };
   const open = openMin < closeMin
@@ -213,7 +223,8 @@ const scanDates = (today) => Array.from({ length: SCAN_DAYS }, (_, i) => dayAfte
 /**
  * The dates to measure (pure): today, every date through the STAFFED_DAYS-th staffed date after today, and at least
  * DEMAND_DAYS calendar days. A date is staffed when some technician counts on it. stopsOn: date -> the ids of the
- * technicians with a stop that day; only Sundays read it, so the caller loads the Sundays only.
+ * technicians with a stop that day, or null when the read failed; only Sundays read it, so the caller loads the
+ * Sundays only.
  */
 function datesToMeasure(elig, today, stopsOn) {
   const dates = [today];
@@ -221,8 +232,9 @@ function datesToMeasure(elig, today, stopsOn) {
   for (const [i, day] of scanDates(today).entries()) {
     if (found >= STAFFED_DAYS && i + 1 > DEMAND_DAYS) break;
     dates.push(day);
-    const withStops = stopsOn.get(day) || new Set();
-    if (elig.techIds.some((t) => staffed(elig, day, t, withStops.has(t)))) found += 1;
+    // A Sunday whose read failed counts as staffed: its room is then unknown (FAILED), never left out.
+    const withStops = stopsOn.get(day);
+    if (elig.techIds.some((t) => staffed(elig, day, t, withStops === null || Boolean(withStops && withStops.has(t))))) found += 1;
   }
   return dates;
 }
@@ -295,11 +307,18 @@ async function eligibility(conn, from, to) {
   return { blackout, techIds, absent };
 }
 
-/** A date's live rows (the re-plan's own read: expired holds out), read once per run. */
+/** A date's live rows (the re-plan's own read: expired holds out), read once per run; null when the read failed. */
 function rowReader(conn) {
   const cache = new Map();
   return async (day) => {
-    if (!cache.has(day)) cache.set(day, await replan.loadDayStops(conn, day));
+    if (!cache.has(day)) {
+      try {
+        cache.set(day, await replan.loadDayStops(conn, day));
+      } catch (err) {
+        logger.warn(`[route-check] ${day}: stops read failed (${err.message})`);
+        cache.set(day, null);
+      }
+    }
     return cache.get(day);
   };
 }
@@ -340,6 +359,7 @@ async function measureOne(conn, env, { day, techId, rows, progress, occupancy })
     if (day !== env.today) {
       return measureTechDay({ ...common, rows: own, origin: home, departureMin: env.departureMin, openMin: DAY_OPEN });
     }
+    if (!progress) return { stops: own.length, skip: 'FAILED' };
     const mine = progress.filter((p) => String(p.technician_id) === techId);
     const { live, onSite, enRoute, rest } = todaysStops(own, mine);
     // The van is at the stop on site, so one with no place leaves the day unmeasured (never free time from home).
@@ -351,6 +371,7 @@ async function measureOne(conn, env, { day, techId, rows, progress, occupancy })
       onSite: onSiteStays(onSite, new Map(mine.map((p) => [String(p.id), p.arrived_at]))),
       home, departureMin: env.departureMin, nowMin: env.nowMin, day,
     });
+    if (!van.origin) return { stops: live.length, skip: 'LAST_STOP_WITHOUT_COORDINATES' };
     const fig = measureTechDay({
       ...common, rows: rest, first: enRoute.flatMap((s) => s.flat()), origin: van.origin, end: home,
       departureMin: Math.max(env.nowMin, van.clockMin), openMin: Math.max(DAY_OPEN, env.nowMin),
@@ -368,10 +389,21 @@ async function runRouteCheck({ conn = db, now = new Date() } = {}) {
   const elig = await eligibility(conn, today, dayAfter(today, SCAN_DAYS));
   const rowsOn = rowReader(conn);
   // Today's rows first, then the progress: a stop finished between the two reads shows as done, never in neither.
+  // A failed read marks what it affects (FAILED), never loses the hour's row.
   await rowsOn(today);
-  const progress = await loadProgress(conn, today);
-  // A technician with a stop that day; today counts the stops already done too (a Sunday stays staffed after its last stop).
-  const withStopsOn = async (day) => techsWithStops(day === today ? [...(await rowsOn(day)), ...progress] : await rowsOn(day));
+  let progress = null;
+  try {
+    progress = await loadProgress(conn, today);
+  } catch (err) {
+    logger.warn(`[route-check] ${today}: progress read failed (${err.message})`);
+  }
+  // A technician with a stop that day (null when the read failed); today counts the stops already done too (a Sunday
+  // stays staffed after its last stop).
+  const withStopsOn = async (day) => {
+    const rows = await rowsOn(day);
+    if (!rows) return null;
+    return techsWithStops(day === today ? [...rows, ...(progress || [])] : rows);
+  };
   const stopsOn = new Map();
   for (const day of [today, ...scanDates(today)].filter((d) => weekday(d) === 0)) stopsOn.set(day, await withStopsOn(day));
   const env = {
@@ -385,7 +417,11 @@ async function runRouteCheck({ conn = db, now = new Date() } = {}) {
   for (const day of datesToMeasure(elig, today, stopsOn)) {
     const rows = await rowsOn(day);
     const withStops = await withStopsOn(day);
-    const working = elig.techIds.filter((techId) => staffed(elig, day, techId, withStops.has(techId)));
+    const working = elig.techIds.filter((techId) => staffed(elig, day, techId, !withStops || withStops.has(techId)));
+    if (!rows) {
+      for (const techId of working) days.push({ date: day, technician_id: techId, staffed: true, skip: 'FAILED' });
+      continue;
+    }
     let occupancy = [];
     try {
       if (working.length) occupancy = await loadOccupancy(conn, day);

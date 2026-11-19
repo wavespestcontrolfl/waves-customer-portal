@@ -119,9 +119,18 @@ describe('where the van is now (today)', () => {
     expect(rc.todaysStops(own, [{ id: 'c', status: 'on_site' }]).onSite.flat(2).map((r) => r.id)).toEqual(['c']);
   });
 
-  test('nothing done yet: the start point at the departure minute; a completed row with no place is ignored', () => {
-    const van = rc.vanNow({ day, home, departureMin: 480, nowMin: 450, onSite: [], completed: [{ completed_at: '2026-11-19T13:00:00Z', lat: null, lng: null }] });
-    expect(van).toEqual({ origin: home, clockMin: 480, source: 'start_point' });
+  test('nothing done yet: the start point at the departure minute', () => {
+    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 450, onSite: [], completed: [] })).toEqual({ origin: home, clockMin: 480, source: 'start_point' });
+  });
+
+  test("the latest stop done has no place: the van's place is unknown, never an earlier customer's", () => {
+    const completed = [
+      { completed_at: '2026-11-19T13:50:00Z', lat: 27.3, lng: -82.5 }, // 8:50, placed
+      { completed_at: '2026-11-19T14:45:00Z', lat: null, lng: null }, // 9:45, no place
+    ];
+    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 630, onSite: [], completed })).toMatchObject({ origin: null, source: 'unknown' });
+    // An earlier stop with no place does not matter.
+    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 630, onSite: [], completed: completed.slice().reverse().map((r, i) => (i ? { ...r, lat: 27.5, lng: -82.4 } : { ...r, completed_at: '2026-11-19T13:00:00Z' })) }).source).toBe('completed');
   });
 });
 
@@ -133,6 +142,17 @@ describe('one tech-day', () => {
     expect(fig.openings.find((o) => o.kind === 'tail')).toEqual({ kind: 'tail', start: 840, min: 180, slots: 1, noticeSlots: 2 });
     expect(fig).toMatchObject({ stops: 2, noticeSlots: 4 });
     expect(fig.slots).toBe(fig.openings.reduce((n, o) => n + o.slots, 0));
+  });
+
+  test("a visit's afternoon service runs at its own time, after another customer's noon stop", () => {
+    const am = stop('v1', '09:00:00', '10:00:00', { visit_id: 'visit-1', customer_id: 'cust-1' });
+    const pm = stop('v2', '15:00:00', '16:00:00', { visit_id: 'visit-1', customer_id: 'cust-1' });
+    const noon = stop('n1', '12:00:00', '13:00:00', { customer_id: 'cust-2', lat: 27.45, lng: -82.4 });
+    const fig = rc.measureTechDay({ ...open, rows: [am, pm, noon] });
+    // In window order the day ends when the 3 PM service does; pulled together, the noon stop would run last and late.
+    const pulled = rc.measureTechDay({ ...open, rows: [noon], first: [am, pm] });
+    expect(fig.endMin).toBeLessThanOrEqual(960);
+    expect(pulled.endMin).toBeGreaterThan(fig.endMin);
   });
 
   test('the stop the van is driving to comes first, even with a later window', () => {
@@ -375,6 +395,19 @@ describe('runRouteCheck', () => {
     const { conn, writes } = fakeConn();
     await runRouteCheck({ conn, now: NOW });
     expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ date: '2026-11-19', skip: 'SEVERAL_ON_SITE' });
+  });
+
+  test("a failed stops read (a Sunday's or a date's) marks that date and the row is still written", async () => {
+    replan.loadDayStops.mockImplementation(async (_c, date) => {
+      if (date === '2026-11-22' || date === '2026-11-20') throw new Error('timeout');
+      return [];
+    });
+    const { conn, writes } = fakeConn();
+    const result = await runRouteCheck({ conn, now: NOW });
+    expect(result.status).toBe('completed_with_errors');
+    const days = JSON.parse(writes[0][1].days);
+    expect(days.find((d) => d.date === '2026-11-20')).toMatchObject({ skip: 'FAILED' });
+    expect(days.find((d) => d.date === '2026-11-22')).toMatchObject({ skip: 'FAILED' }); // staffed when unknown
   });
 
   test("one date's occupancy read failing marks that date and the row is still written", async () => {
