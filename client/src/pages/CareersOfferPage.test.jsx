@@ -231,26 +231,48 @@ describe('CareersOfferPage — open state', () => {
     expect(JSON.parse(fetchMock.mock.calls[4][1].body)).toEqual({ consent: false });
   });
 
-  it('shows a closed offer straight from the 409, with no re-read, for an action and for the text choice', async () => {
-    const closed = { state: 'withdrawn', message: 'This offer is no longer open. Please call Sam.', contactPhone: '(941) 297-5749' };
-    for (const act of ['sign', 'consent']) {
-      const fetchMock = vi.fn()
-        .mockResolvedValueOnce(jsonResponse(openPayload()))
-        .mockResolvedValueOnce(jsonResponse(closed, 409))
-        .mockRejectedValueOnce(new Error('offline')); // a re-read would fail
-      globalThis.fetch = fetchMock;
-      const { unmount } = renderPage();
-      if (act === 'sign') {
-        fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-        fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
-      } else {
-        fireEvent.click(await screen.findByLabelText('Text me about this offer'));
-      }
-      expect(await screen.findByText('This offer is no longer open. Please call Sam.')).toBeInTheDocument();
-      expect(screen.queryByText(/an hour/)).toBeNull();
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-      unmount();
+  // The 409 says where the offer stands. A closed offer comes back whole, with
+  // no read. An answer given in another tab names only its state: the page
+  // shows it at once, and a failed read for its details does not hide it.
+  it.each([
+    ['sign', { state: 'withdrawn', message: 'This offer is no longer open. Please call Sam.', contactPhone: '(941) 297-5749' }, 'This offer is no longer open. Please call Sam.', 2],
+    ['consent', { state: 'withdrawn', message: 'This offer is no longer open. Please call Sam.', contactPhone: '(941) 297-5749' }, 'This offer is no longer open. Please call Sam.', 2],
+    ['sign', { state: 'signed' }, /You signed this offer\. Welcome to Waves\./, 3],
+    ['consent', { state: 'declined' }, 'You declined this offer. Thank you for your time.', 3],
+    ['date', { state: 'date_requested' }, /will look at your new date/, 3],
+  ])('after a %s refused with %o, shows where the offer stands even when the next read fails', async (act, refusal, text, calls) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse(refusal, 409))
+      .mockRejectedValueOnce(new Error('offline')); // the read for details fails
+    globalThis.fetch = fetchMock;
+    renderPage();
+    if (act === 'sign') {
+      fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    } else if (act === 'consent') {
+      fireEvent.click(await screen.findByLabelText('Text me about this offer'));
+    } else {
+      fireEvent.click(await screen.findByRole('button', { name: 'Ask for another start date' }));
+      fireEvent.change(screen.getByLabelText(/Another start date/), { target: { value: '2027-01-11' } }); // Monday
+      fireEvent.click(screen.getByRole('button', { name: 'Send this date' }));
     }
+    expect(await screen.findByText(text)).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(calls));
+    expect(screen.queryByRole('button', { name: 'Accept and sign' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Check again' })).toBeNull();
+  });
+
+  it('fills in the sign time from a read after a 409 that names the signed state', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ state: 'signed' }, 409))
+      .mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' })));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026/)).toBeInTheDocument();
   });
 
   it('the text box follows a fresh read of the open offer, such as a choice made in another tab', async () => {

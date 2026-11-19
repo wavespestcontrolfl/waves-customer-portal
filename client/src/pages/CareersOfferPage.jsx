@@ -306,7 +306,7 @@ function TermsSection({ terms }) {
   );
 }
 
-function TextConsent({ token, initial, onPending, onStale, onSnapshot, onInvalid, locked }) {
+function TextConsent({ token, initial, onPending, onStale, onSnapshot, onRefused, onInvalid, locked }) {
   const [checked, setChecked] = useState(Boolean(initial));
   const [saving, setSaving] = useState(false);
   const [unconfirmed, setUnconfirmed] = useState(false);
@@ -372,14 +372,15 @@ function TextConsent({ token, initial, onPending, onStale, onSnapshot, onInvalid
       onSnapshot({ textConsent: stored }); // the page's copy follows, so a later read can correct the box
     } else setChecked(!next);
     if (res.status === 404) onInvalid();
-    // A closed offer comes back whole in the 409: show it now, with no re-read.
-    else if (res.status === 409 && isClosedAnswer(res.body)) onSnapshot(res.body);
-    else if (res.status === 409 && (await onStale()) === 'failed') {
-      // The offer changed but the new state could not be read: stay locked.
-      setUnconfirmed(true);
-      setSaving(false);
-      return;
-    } else if (!res.ok && res.status !== 409) setError(res.body?.error || CONNECTION_ERROR);
+    else if (res.status === 409) {
+      // The 409 says where the offer stands, or the page reads it.
+      if (!onRefused(res.body) && (await onStale()) === 'failed') {
+        // The offer changed but the new state could not be read: stay locked.
+        setUnconfirmed(true);
+        setSaving(false);
+        return;
+      }
+    } else if (!res.ok) setError(res.body?.error || CONNECTION_ERROR);
     setSaving(false);
     onPending(false);
   };
@@ -429,7 +430,7 @@ function NoteField({ id, label, value, onChange }) {
 // Shared submit wrapper for the three actions: one in-flight request at a
 // time, a 404 means the link is dead, a 409 means the offer changed under the
 // applicant (re-read it), a lost response is re-checked before saying failed.
-function useOfferAction({ token, onApplied, onReload, onInvalid, onUnknown }) {
+function useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUnknown }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -442,9 +443,9 @@ function useOfferAction({ token, onApplied, onReload, onInvalid, onUnknown }) {
       if (res.status === 404) return onInvalid();
       if (res.status >= 500) throw new Error('unknown outcome'); // may have committed: re-read below
       if (res.status === 409) {
-        // A closed offer comes back whole in the 409: show it now. A re-read
-        // could fail and leave the old pay and terms on screen.
-        if (isClosedAnswer(res.body)) return onApplied(res.body);
+        // The 409 says where the offer stands: the page shows it at once, so
+        // a failed read cannot leave the old offer on screen.
+        if (onRefused(res.body)) return;
         const after = await onReload();
         if (after === 'failed') onUnknown();
         else if (after === 'open') setError(NOT_SAVED_ERROR);
@@ -462,7 +463,7 @@ function useOfferAction({ token, onApplied, onReload, onInvalid, onUnknown }) {
     } finally {
       setBusy(false);
     }
-  }, [busy, token, onApplied, onReload, onInvalid, onUnknown]);
+  }, [busy, token, onApplied, onRefused, onReload, onInvalid, onUnknown]);
 
   return { busy, error, setError, run };
 }
@@ -537,16 +538,16 @@ function SignBlock({ name, onName, onAccept, busy }) {
   );
 }
 
-function OpenOffer({ token, data, onApplied, onReload, onInvalid }) {
+function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid }) {
   const [name, setName] = useState('');
   const [panel, setPanel] = useState('none'); // none | date | decline
   const [unknown, setUnknown] = useState(false);
   const [rechecking, setRechecking] = useState(false);
   const markUnknown = useCallback(() => setUnknown(true), []);
-  const accept = useOfferAction({ token, onApplied: (b) => onApplied({ ...b, signedName: name.trim() }), onReload, onInvalid, onUnknown: markUnknown });
+  const accept = useOfferAction({ token, onApplied: (b) => onApplied({ ...b, signedName: name.trim() }), onRefused, onReload, onInvalid, onUnknown: markUnknown });
   const askedDate = useRef('');
-  const dateReq = useOfferAction({ token, onApplied: (b) => onApplied({ requestedStartDate: askedDate.current, ...b }), onReload, onInvalid, onUnknown: markUnknown });
-  const decline = useOfferAction({ token, onApplied, onReload, onInvalid, onUnknown: markUnknown });
+  const dateReq = useOfferAction({ token, onApplied: (b) => onApplied({ requestedStartDate: askedDate.current, ...b }), onRefused, onReload, onInvalid, onUnknown: markUnknown });
+  const decline = useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUnknown: markUnknown });
   const [consentPending, setConsentPending] = useState(false);
   // The last write may or may not have gone through and the offer could not be
   // read: every action stays locked until a read works.
@@ -572,7 +573,7 @@ function OpenOffer({ token, data, onApplied, onReload, onInvalid }) {
         <p style={{ ...BODY_STYLE, borderTop: '1px solid var(--border, #E2E8F0)', paddingTop: 12 }}>
           Please don&rsquo;t give notice at your current job until you have signed this offer.
         </p>
-        <TextConsent token={token} initial={data.textConsent} onPending={setConsentPending} onStale={onReload} onSnapshot={onApplied} onInvalid={onInvalid} locked={accept.busy || dateReq.busy || decline.busy || unknown} />
+        <TextConsent token={token} initial={data.textConsent} onPending={setConsentPending} onStale={onReload} onSnapshot={onApplied} onRefused={onRefused} onInvalid={onInvalid} locked={accept.busy || dateReq.busy || decline.busy || unknown} />
         <SignBlock
           name={name}
           onName={setName}
@@ -634,7 +635,8 @@ function OpenOffer({ token, data, onApplied, onReload, onInvalid }) {
 const CLOSED_STATES = ['expired', 'withdrawn', 'superseded'];
 
 // A refused action on a closed offer (withdrawn, expired, replaced) answers 409
-// with the closed page itself: { state, message, contactPhone }.
+// with the closed page itself: { state, message, contactPhone }. On an answered
+// offer (signed, declined, date asked) it names only the state: { state }.
 const isClosedAnswer = (body) => Boolean(body) && CLOSED_STATES.includes(body.state) && typeof body.message === 'string';
 const ANSWERED_STATES = ['signed', 'declined', 'date_requested'];
 
@@ -707,6 +709,22 @@ function OfferPage({ token }) {
 
   const invalid = useCallback(() => setError('notfound'), []);
 
+  // A 409 that says where the offer stands: show it now, so a failed read can
+  // never hide an answer the server already gave. A closed offer comes whole.
+  // An answered one names only its state, so a read fills in the details (the
+  // sign time, the date asked for); if that read fails, the answer stays shown
+  // without them. Returns false when the 409 does not say, so the caller reads.
+  const refused = useCallback((body) => {
+    if (isClosedAnswer(body)) {
+      applied(body);
+      return true;
+    }
+    if (!ANSWERED_STATES.includes(body?.state)) return false;
+    applied({ state: body.state });
+    reload();
+    return true;
+  }, [applied, reload]);
+
   if (loading) return <LoadingState />;
   if (error === 'notfound') return <NotValidState />;
   if (error === 'temporary' || !data) {
@@ -714,5 +732,5 @@ function OfferPage({ token }) {
   }
   if (CLOSED_STATES.includes(data.state)) return <ClosedState data={data} />;
   if (ANSWERED_STATES.includes(data.state)) return <ResultState data={data} />;
-  return <OpenOffer token={token} data={data} onApplied={applied} onReload={reload} onInvalid={invalid} />;
+  return <OpenOffer token={token} data={data} onApplied={applied} onRefused={refused} onReload={reload} onInvalid={invalid} />;
 }
