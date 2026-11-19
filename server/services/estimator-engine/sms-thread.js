@@ -227,9 +227,9 @@ function smsOrigin(threadKey) {
 // Who texted, for the owed-quote bell: the sender's name when one is on file,
 // else the last four digits. The name comes from the codebase's own helper
 // (admin-alert-names nameOnFileForPhone, the way the inbound-text bell names a
-// texter, owner 2026-11-04): the customer's own phone only (a service-contact
-// number names the account holder, not the texter), then estimates, then
-// leads; null when two people share the number. The link is the triggering
+// texter, owner 2026-11-04): customers by their own phone only (a match on a
+// service-contact number would name the account holder, not the texter), then
+// estimates, then leads; null when two people share the number. The link is the triggering
 // text's Twilio SID alone (CommunicationsPageV2 opens the thread that holds
 // that message): never a phone number or a customer id, which access logs and
 // referrers would carry. Fail-soft and bounded: the Twilio webhook awaits this,
