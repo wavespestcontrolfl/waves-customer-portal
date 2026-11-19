@@ -276,6 +276,52 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     });
   });
 
+  test('capacity measurement honors assigned and unassigned legacy arrival bands', async () => {
+    const { CAPACITY_PLACEMENT, _internals: { assessOfferedHours } } = require('../services/day-replan/booking-fit');
+    const date = '2097-06-11';
+    const legacy = visits[1];
+    await mockConn('scheduled_services').where({ id: legacy.id }).update({
+      technician_id: techId, scheduled_date: date, window_start: null, window_end: null, time_window: 'morning',
+      estimated_duration_minutes: 60, reservation_expires_at: null, route_order: 1, lat: HQ.lat, lng: HQ.lng,
+    });
+    const target = { lat: HQ.lat, lng: HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
+    const assigned = { date, techId, windowStart: '10:00', windowEnd: '11:00',
+      [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: [legacy.id, '__candidate__'], workMinutes: 60 } };
+
+    await withOfficeEnv('GATE_SCHEDULING_CAPACITY', 'true', async () => {
+      await expect(assessOfferedHours(mockConn, [assigned], target, { now: NOW }))
+        .resolves.toEqual([expect.objectContaining({ slot: assigned })]);
+      await mockConn('scheduled_services').where({ id: legacy.id }).update({ technician_id: null });
+      const unassigned = { ...assigned,
+        [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: ['__candidate__'], workMinutes: 60 } };
+      await expect(assessOfferedHours(mockConn, [unassigned], target, { now: NOW })).resolves.toEqual([]);
+    });
+  });
+
+  test('capacity measurement invalidates a certificate after dispatch swaps existing stops', async () => {
+    const { CAPACITY_PLACEMENT, _internals: { assessOfferedHours } } = require('../services/day-replan/booking-fit');
+    const date = '2097-06-11';
+    const [first, second] = visits;
+    await mockConn('scheduled_services').where({ id: first.id }).update({
+      technician_id: techId, scheduled_date: date, window_start: '09:00', window_end: '10:00',
+      estimated_duration_minutes: 30, route_order: 1,
+    });
+    await mockConn('scheduled_services').where({ id: second.id }).update({
+      technician_id: techId, scheduled_date: date, window_start: '09:00', window_end: '10:00',
+      estimated_duration_minutes: 30, route_order: 2,
+    });
+    const slot = { date, techId, windowStart: '10:00', windowEnd: '11:00',
+      [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: [first.id, second.id, '__candidate__'], workMinutes: 60 } };
+    const target = { lat: HQ.lat, lng: HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
+
+    await withOfficeEnv('GATE_SCHEDULING_CAPACITY', 'true', async () => {
+      await expect(assessOfferedHours(mockConn, [slot], target, { now: NOW })).resolves.toHaveLength(1);
+      await mockConn('scheduled_services').where({ id: first.id }).update({ route_order: 2 });
+      await mockConn('scheduled_services').where({ id: second.id }).update({ route_order: 1 });
+      await expect(assessOfferedHours(mockConn, [slot], target, { now: NOW })).resolves.toEqual([]);
+    });
+  });
+
   test('live make-room destinations reject nominal and delayed capacity work under writer scope', async () => {
     const { _internals: { assessOfferedHours } } = require('../services/day-replan/booking-fit');
     const date = '2097-06-11';
@@ -399,6 +445,8 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     });
     expect(conflicts.map(row => [String(row.window_start).slice(0, 5), String(row.window_end).slice(0, 5)])).toEqual([['11:00', '12:00']]);
     await expect(assessOfferedHours(mockConn, [slot], target, { now: NOW })).resolves.toEqual([]);
+    await expect(assessOfferedHours(mockConn, [slot], { ...target, estimated_duration_minutes: 30 }, { now: NOW }))
+      .resolves.toEqual([expect.objectContaining({ slot, finishMin: 660 })]);
   });
 
   test('capacity replay uses a v2 group’s summed work, accepts a boundary, and rejects nominal interview overlap', async () => {

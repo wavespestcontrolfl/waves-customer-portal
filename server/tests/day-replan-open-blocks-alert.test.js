@@ -279,6 +279,44 @@ test('booking fit scores an overlapping capacity card only from its certified li
   }
 });
 
+test('capacity proof follows the freshly loaded order and admits an assigned legacy arrival band', async () => {
+  const occupancy = require('../services/scheduling/occupancy');
+  const { CAPACITY_PLACEMENT, _internals: { assessOfferedHours } } = require('../services/day-replan/booking-fit');
+  const RouteOptimizer = require('../services/route-optimizer');
+  const date = '2026-11-20';
+  const tech = 'tech-1';
+  const row = (id, routeOrder, lng, extra = {}) => ({
+    id, customer_id: `customer-${id}`, technician_id: tech, status: 'confirmed', scheduled_date: date,
+    window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 30,
+    lat: RouteOptimizer.HQ.lat, lng, route_order: routeOrder, ...extra,
+  });
+  const first = row('first', 1, RouteOptimizer.HQ.lng);
+  const second = row('second', 2, RouteOptimizer.HQ.lng + 0.001);
+  const target = { lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng,
+    planning_exempt: true, estimated_duration_minutes: 60 };
+  const orderedSlot = { date, techId: tech, windowStart: '10:00', windowEnd: '11:00',
+    [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: ['first', 'second', '__candidate__'], workMinutes: 60 } };
+  const calendar = rows => new Map([
+    ['homes', new Map()], ['departure', 8 * 60], [date, rows], [`${date}|${tech}`, []],
+  ]);
+
+  await expect(assessOfferedHours(jest.fn(), [orderedSlot], target, { now: NOW, calendar: calendar([first, second]) }))
+    .resolves.toHaveLength(1);
+  occupancy.listOccupiedWindows.mockClear();
+  await expect(assessOfferedHours(jest.fn(), [orderedSlot], target, {
+    now: NOW, calendar: calendar([{ ...first, route_order: 2 }, { ...second, route_order: 1 }]),
+  })).resolves.toEqual([]);
+
+  const legacy = row('legacy-band', 1, RouteOptimizer.HQ.lng, {
+    window_start: null, window_end: null, time_window: 'morning', estimated_duration_minutes: 60,
+  });
+  const legacySlot = { ...orderedSlot,
+    [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: [legacy.id, '__candidate__'], workMinutes: 60 } };
+  occupancy.listOccupiedWindows.mockClear();
+  await expect(assessOfferedHours(jest.fn(), [legacySlot], target, { now: NOW, calendar: calendar([legacy]) }))
+    .resolves.toHaveLength(1);
+});
+
 test('capacity cards reject nominal interview overlap but keep exact handoffs', async () => {
   const occupancy = require('../services/scheduling/occupancy');
   const { CAPACITY_PLACEMENT, _internals: { assessOfferedHours } } = require('../services/day-replan/booking-fit');
@@ -403,10 +441,43 @@ test('capacity replay ignores other-technician visits but keeps unassigned work 
   occupancy.listOccupiedWindows.mockResolvedValueOnce([promised]);
   await expect(assessOfferedHours(jest.fn(), [eleven], target, { now: NOW, calendar: calendar(promised) }))
     .resolves.toEqual([]);
+
+  // listOccupiedWindows omits window_start=NULL rows. The loaded route is
+  // authoritative, so an unassigned legacy morning promise still blocks.
+  const legacyUnassigned = { ...promised, window_start: null, window_end: null, time_window: 'morning' };
+  occupancy.listOccupiedWindows.mockResolvedValueOnce([]);
+  await expect(assessOfferedHours(jest.fn(), [slot], target, {
+    now: NOW, calendar: calendar(legacyUnassigned),
+  })).resolves.toEqual([]);
   // The ordinary hour path retains its existing tech-blind rule.
   occupancy.listOccupiedWindows.mockResolvedValueOnce([blocker]);
   await expect(assessOfferedHours(jest.fn(), [{ ...slot, [CAPACITY_PLACEMENT]: undefined }], target,
     { now: NOW, calendar: calendar(blocker) })).resolves.toEqual([]);
+});
+
+test('fixed-hour replay reserves the full hour but simulates only expected service work', async () => {
+  const occupancy = require('../services/scheduling/occupancy');
+  const { _internals: { assessOfferedHours } } = require('../services/day-replan/booking-fit');
+  const RouteOptimizer = require('../services/route-optimizer');
+  const date = '2026-11-20';
+  const tech = 'tech-1';
+  const earlier = {
+    id: 'earlier', customer_id: 'customer-earlier', technician_id: tech, status: 'confirmed', scheduled_date: date,
+    window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 90,
+    lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, route_order: 1,
+  };
+  const slot = { date, techId: tech, windowStart: '10:00', windowEnd: '11:00' };
+  const target = { lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng,
+    planning_exempt: true, estimated_duration_minutes: 30 };
+  occupancy.findInterviewConflicts.mockResolvedValueOnce([{
+    id: 'interview-boundary', window_start: '11:00', window_end: '12:00',
+  }]);
+  const calendar = new Map([
+    ['homes', new Map()], ['departure', 8 * 60], [date, [earlier]], [`${date}|${tech}`, []],
+  ]);
+
+  await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar }))
+    .resolves.toEqual([expect.objectContaining({ slot, finishMin: 660 })]);
 });
 
 test.each(['visit_id', 'v2 allocation'])(

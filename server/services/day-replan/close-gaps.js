@@ -190,9 +190,10 @@ function lastHour(row, closeMin) {
  */
 function hourFree(input, hour) {
   const { group, groups, rowHours, blockedHours = [], blocks = [] } = input;
+  const occupancyGroup = input.occupancyGroup || group;
   const held = new Set(blockedHours);
   for (const g of groups) if (g !== group) for (const r of g) for (const h of rowHours(r)) held.add(h);
-  const width = widthOf(group[0]);
+  const width = widthOf(occupancyGroup[0]);
   for (let h = hour; h < hour + Math.ceil(width / 60); h += 1) if (held.has(h)) return false;
   return !blocks.some((b) => hour * 60 < b.endMin && hour * 60 + width > b.startMin);
 }
@@ -217,7 +218,8 @@ function tryStart(input, startMin) {
 
 const prefOk = (pref, startMin) => !pref || (startMin >= pref.startMin && startMin < pref.endMin);
 function fitOfferedHour(input, hour) {
-  if (!Number.isInteger(hour) || hour * 60 < input.bounds.openMin || hour > lastHour(input.group[0], input.bounds.closeMin)) return null;
+  const occupancyGroup = input.occupancyGroup || input.group;
+  if (!Number.isInteger(hour) || hour * 60 < input.bounds.openMin || hour > lastHour(occupancyGroup[0], input.bounds.closeMin)) return null;
   return prefOk(input.pref, hour * 60) && hourFree(input, hour) ? tryStart(input, hour * 60) : null;
 }
 

@@ -177,6 +177,10 @@ function exemptFromPlanning(rows, planningMinutes) {
   return planningMinutes === false ? rows.map(row => ({ ...row, planning_exempt: true })) : rows;
 }
 
+function capacityRouteRowEligible(row) {
+  return !!(row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status));
+}
+
 async function loadArrivalRouteContext({
   conn = db, serviceId, prospective, date, technicianId, excludeServiceIds = [], excludeEstimateId,
   changes = {}, now = new Date(), travel, preserveCapacity = false, unit = false, alone = false,
@@ -277,7 +281,7 @@ async function loadArrivalRouteContext({
   (movedTarget?.memberIds || []).forEach(id => excluded.add(String(id)));
   const activeTarget = dateOnly(stored.scheduled_date) === date && ['en_route', 'on_site'].includes(stored.status);
   const dayRows = exemptFromPlanning(rows.filter(row => !excluded.has(String(row.id))
-    && (!capacity || row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status))
+    && (!capacity || capacityRouteRowEligible(row))
     && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && row.reservation_expires_at)), planningMinutes);
   const activeStop = fromActiveStop && date === etDateString(now) ? await loadActiveStop(conn, dayRows, techId) : null;
   return { target: movedTarget || target, rows: dayRows,
@@ -413,6 +417,10 @@ function storedOrderStale(rows, members = rows) {
  *  stale-order baseline) — identical behavior. */
 function clockOrder(rows) {
   return promisedWindowOrder(rows);
+}
+
+function placementSequencers(groupedPending, pending, mayRepairOrder) {
+  return mayRepairOrder && storedOrderStale(groupedPending, pending) ? [currentOrder, clockOrder] : [currentOrder];
 }
 
 function routeDriveMinutes(stops, origin, end = RouteOptimizer.HQ) {
@@ -1013,7 +1021,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   // staff route insertion a staff move follows the same rule, and so does
   // the visit where it is saved, so its own hour reads like every other hour
   // (nothing is written for it: only a move's result carries an order).
-  const sequencers = (capacity || placement) && storedOrderStale(groupedPending, pending) ? [currentOrder, clockOrder] : [currentOrder];
+  const sequencers = placementSequencers(groupedPending, pending, capacity || placement);
   const rangeForStop = row => row.arrivalRange || effectiveWindowRange(row);
   const simulate = (order, usedLegs, extra = {}) => {
     const travel = context.travel || (capacity ? RouteOptimizer.createSchedulingTravel({ maxRequests: 0 }) : null);
@@ -1534,6 +1542,7 @@ module.exports = {
   arrivalWindowRoutingEnabled, pickerRoadCheckLive, saveRoadBuyLive, buySaveRoads, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
   enumerateArrivalPlacements,
   groupRouteStops, workDuration, capacityFixedIntervals, capacityRouteHitsFixed,
+  capacityRouteRowEligible, placementSequencers,
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
   placeMovedVisit, INSERTION_MARGIN_MINUTES,
   _internals: { clockOrder, storedOrderStale, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget, laterStopTooTight, staffSaveTravel },

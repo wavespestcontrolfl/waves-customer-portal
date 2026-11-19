@@ -5,7 +5,9 @@ const { coVisitGroups, simulate, promisesKept } = require('./app-sim');
 const { openTime, fitOfferedHour, serviceBlocks } = require('./close-gaps');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
 const { dayDepartureMinutes } = require('../scheduling/departure-time');
-const { groupRouteStops, capacityFixedIntervals, capacityRouteHitsFixed } = require('../scheduling/arrival-route');
+const {
+  groupRouteStops, capacityFixedIntervals, capacityRouteHitsFixed, capacityRouteRowEligible, placementSequencers,
+} = require('../scheduling/arrival-route');
 const {
   DEFAULT_EXCLUDE_STATUSES, findInterviewConflicts, listOccupiedWindows, occupiedRows, techScopedConfirmActive,
 } = require('../scheduling/occupancy');
@@ -113,7 +115,7 @@ function routeOrderFor(rows, allowStaleOrderFallback) {
 // writer certified it. The only unknown id must be its prospective marker.
 // Added/removed leaders or duplicates make the evidence stale, so the
 // advisory score is suppressed instead of inventing an order.
-function certifiedSequence(slot, groups, proposed) {
+function certifiedSequence(slot, groups, proposed, baseOrders = []) {
   const proof = slot?.[CAPACITY_PLACEMENT];
   const actualDuration = Number(proposed.estimated_duration_minutes);
   if (!Array.isArray(groups) || proof?.routeMode !== 'arrival_windows' || !Array.isArray(proof.order)
@@ -127,6 +129,7 @@ function certifiedSequence(slot, groups, proposed) {
   }
   const seen = new Set();
   let candidate = 0;
+  const existingOrder = [];
   const orderedGroups = [];
   for (const rawId of proof.order) {
     const id = String(rawId);
@@ -138,9 +141,12 @@ function certifiedSequence(slot, groups, proposed) {
     const group = byMember.get(id);
     if (!group || seen.has(group)) return null;
     seen.add(group);
+    existingOrder.push(id);
     orderedGroups.push(group);
   }
   if (candidate !== 1 || seen.size !== groups.length) return null;
+  if (!baseOrders.some(order => order.length === existingOrder.length
+    && order.every((id, index) => String(id) === existingOrder[index]))) return null;
   return orderedGroups;
 }
 
@@ -171,7 +177,7 @@ function fitCertifiedCapacity(input, slot, proposed) {
   // target's exact expected work, whether longer or shorter than the picker
   // planned, and accepts it only when that complete order still fits.
   const actual = { ...proposed, window_end: hhmm(startMin + Number(proposed.estimated_duration_minutes)) };
-  const seq = certifiedSequence(slot, input.capacityGroups, actual);
+  const seq = certifiedSequence(slot, input.capacityGroups, actual, input.capacityBaseOrders);
   if (!seq) return null;
   const sim = simulate(seq, {
     origin: input.origin,
@@ -242,13 +248,16 @@ async function loadDateProof({ conn, date, target, ownEstimateId, read, replan }
 async function technicianProof({ conn, date, techId, day, read, replan, homes, departureMin,
   techBlind, mayRepairStaleOrder, pref, dayOpen, dayClose }) {
   const own = day.rows.filter(row => sameTech(row, techId) && !isHoldStop(row));
-  if (own.some(row => !row.window_start || !hasPin(row) || !['confirmed', 'pending'].includes(row.status))) return null;
-  const { ordered } = routeOrderFor(own, mayRepairStaleOrder);
-  if (!ordered) return null;
+  const fixedHourEligible = own.every(row => row.window_start && hasPin(row)
+    && ['confirmed', 'pending'].includes(row.status));
+  const { ordered } = fixedHourEligible ? routeOrderFor(own, mayRepairStaleOrder) : { ordered: null };
 
-  const groups = coVisitGroups(ordered);
-  const capacityRows = day.rows.filter(row => sameTech(row, techId));
+  const groups = ordered ? coVisitGroups(ordered) : [];
+  const capacityRows = day.rows.filter(row => sameTech(row, techId) && capacityRouteRowEligible(row));
   const capacityGroups = groupRouteStops(capacityRows);
+  const capacityBaseOrders = Array.isArray(capacityGroups)
+    ? placementSequencers(capacityGroups, capacityRows, true)
+      .map(sequence => sequence(capacityGroups).map(row => String(row.id))) : [];
   const blocks = await read(`${date}|${techId}`, () => replan.loadBlocks(conn, date, techId));
   const routeIds = new Set(own.map(row => String(row.id)));
   const blocked = scopedOccupancy(day.occupancyRows, techId, techBlind, routeIds);
@@ -259,33 +268,37 @@ async function technicianProof({ conn, date, techId, day, read, replan, homes, d
     .filter(row => row.conflict_reason === 'make_room_destination');
   // Synthetic make-room destinations stay exact. Ordinary unassigned work
   // uses the capacity writer's wider promise-end-plus-work reservation.
-  const fixedIntervals = capacityFixedIntervals(day.occupancyRows
-    .filter(row => row.conflict_reason !== 'make_room_destination'));
+  const fixedIntervals = capacityFixedIntervals(day.rows);
   const capacityOccupancyBlocks = capacityDestinations.map(({ startMin, endMin }) => ({ startMin, endMin }));
   const makeRoomBlocks = capacityDestinations
     .map(({ startMin, endMin }) => ({ startMin, endMin }));
   const capacityBlocks = [...blocks, ...day.interviewBlocks, ...capacityOccupancyBlocks];
   const unavailable = [...routeBlocks, ...blockedHours.map(hour => ({ startMin: hour * 60, endMin: hour * 60 + 60 }))];
   const origin = homeFromMap(homes, techId);
-  const before = simulate(ordered, { origin, departureMin });
+  const before = ordered ? simulate(ordered, { origin, departureMin }) : null;
   const bounds = { openMin: dayOpen, closeMin: dayClose, departureMin, unavailable, driveBlocks: routeBlocks };
   const rowHours = row => routeRowHours(row, day.occupiedById, replan.rowHours);
-  return { before, groups, capacityGroups, pref, origin, bounds, routeBlocks, capacityBlocks, fixedIntervals, makeRoomBlocks,
+  return { before, groups, capacityGroups, capacityBaseOrders, pref, origin, bounds,
+    routeBlocks, capacityBlocks, fixedIntervals, makeRoomBlocks,
     interviewBlocks: day.interviewBlocks, blockedHours, rowHours };
 }
 
 function fitOneOfferedSlot(slot, target, techId, proof) {
   const proposed = { ...target, id: target.id || '__new_booking__', technician_id: techId,
     window_start: slot.windowStart, window_end: slot.windowEnd };
-  const group = [proposed];
-  const input = { groups: proof.groups, capacityGroups: proof.capacityGroups, group, leaderId: proposed.id,
+  const occupancyGroup = [proposed];
+  const expectedEnd = hhmm(minute(slot.windowStart) + Number(proposed.estimated_duration_minutes));
+  const simulatedGroup = [{ ...proposed, window_end: expectedEnd }];
+  const input = { groups: proof.groups, capacityGroups: proof.capacityGroups,
+    capacityBaseOrders: proof.capacityBaseOrders, group: occupancyGroup, leaderId: proposed.id,
     pref: proof.pref, origin: proof.origin, marginMin: DEFAULT_OPTIONS.marginMin, bounds: proof.bounds,
     blocks: proof.routeBlocks, capacityBlocks: proof.capacityBlocks, interviewBlocks: proof.interviewBlocks,
     makeRoomBlocks: proof.makeRoomBlocks, capacityFixedIntervals: proof.fixedIntervals,
     blockedHours: proof.blockedHours, rowHours: proof.rowHours, requireClose: true };
   const capacityFit = fitCertifiedCapacity(input, slot, proposed);
   const fit = capacityFit || (slot?.[CAPACITY_PLACEMENT] ? null : (proof.before && fitOfferedHour(
-    { ...input, groups: [...proof.groups, group] }, minute(slot.windowStart) / 60)));
+    { ...input, group: simulatedGroup, occupancyGroup, groups: [...proof.groups, simulatedGroup] },
+    minute(slot.windowStart) / 60)));
   const baselineDriveMin = capacityFit?.baselineDriveMin ?? proof.before?.travelMin;
   return fit && Number.isFinite(baselineDriveMin)
     ? { ...fit, addedDriveMin: fit.driveMin - baselineDriveMin, slot } : null;
