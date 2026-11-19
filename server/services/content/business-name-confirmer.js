@@ -337,7 +337,7 @@ function ownerListError(code, message, fields) {
 }
 
 /**
- * assertOwnerListForCommit({ draft, brief, frontmatter, body, humanApproved })
+ * assertOwnerListForCommit({ draft, brief, frontmatter, body, humanApproved, liveProtectedMetaTitle })
  * — the owner-list check at the ONE chokepoint every unattended blog commit
  * passes: astro-publisher publishOrUpdatePage / publishRefresh, right before
  * the branch is cut, on the FINAL frontmatter + body (after hero / body-image
@@ -374,8 +374,18 @@ function ownerListError(code, message, fields) {
  * human-merge stamp instead of throwing. Returns { extraction,
  * requiresHumanMerge }.
  */
-async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, body = '', humanApproved = false, humanMergeFallback = false } = {}) {
+async function assertOwnerListForCommit({ draft, brief = {}, frontmatter: committedFrontmatter = {}, body = '', humanApproved = false, humanMergeFallback = false, liveProtectedMetaTitle } = {}) {
   const gate = require('./comparison-table-gate');
+  // liveProtectedMetaTitle (publishRefresh on a service/location page): the
+  // live page's metaTitle, which automation never edits (owner rule
+  // 2026-07-16), so the commit carries it over as the owner wrote it. Those
+  // long near-me lists hold ranking words ("Best Lawn Care Near Me in
+  // Parrish, FL") the comparison gate reads as self-ranking, and judging
+  // them parked every refresh of about half the service pages for text no
+  // draft wrote or may change. Only a metaTitle identical to the live one is
+  // left out of both checks; any other value is judged as usual.
+  const frontmatter = { ...committedFrontmatter };
+  if (liveProtectedMetaTitle !== undefined && frontmatter.metaTitle === liveProtectedMetaTitle) delete frontmatter.metaTitle;
   const finalDraft = {
     frontmatter, body, title: frontmatter.title, meta_description: frontmatter.meta_description,
   };

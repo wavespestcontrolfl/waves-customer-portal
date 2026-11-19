@@ -345,6 +345,23 @@ describe('assertOwnerListForCommit', () => {
     expect(draft.competitors_approved_by_list).toEqual(['Aptive Environmental', 'Orkin', 'Terminix']);
   });
 
+  test('an unchanged protected service metaTitle is left out of the final check; any other metaTitle is still judged (owner rule 2026-07-16)', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: [] } });
+    const liveTitle = 'Lawn Care Near Me in Parrish, FL | Best Lawn Care Near Me in Parrish, FL';
+    const serviceFm = { title: 'Lawn Care in Parrish, FL', metaTitle: liveTitle, metaDescription: 'Lawn care in Parrish.' };
+    const body = 'Plain body about lawn care in Parrish.';
+    // Without the live value the ranking word in the metaTitle refuses the commit.
+    await expect(assertOwnerListForCommit({ draft: {}, brief: {}, frontmatter: serviceFm, body }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'comparison_table_failed' });
+    // The live metaTitle carried over unchanged: neither check reads it.
+    await expect(assertOwnerListForCommit({ draft: {}, brief: {}, frontmatter: serviceFm, body, liveProtectedMetaTitle: liveTitle })).resolves.toBeTruthy();
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).not.toContain('Best Lawn Care');
+    expect(serviceFm.metaTitle).toBe(liveTitle);
+    // A metaTitle that differs from the live one is judged as usual.
+    await expect(assertOwnerListForCommit({ draft: {}, brief: {}, frontmatter: { ...serviceFm, metaTitle: `${liveTitle} | Best Lawn Service Near Me` }, body, liveProtectedMetaTitle: liveTitle }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'comparison_table_failed' });
+  });
+
   test('a failed check refuses the commit', async () => {
     dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
     await expect(assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, frontmatter: finalFm, body: 'Plain body.' }))
