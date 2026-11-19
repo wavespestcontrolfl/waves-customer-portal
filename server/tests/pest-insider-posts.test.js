@@ -78,6 +78,45 @@ describe('the reviewed post list', () => {
   });
 });
 
+// The year run uses the real reviewed list, every post assumed live (no web
+// request): a month the list leaves short of facts, inside the six-issue
+// rotation, fails here (pre-push r3). The builder suite gives every fact a
+// post, so it cannot see the list's coverage.
+describe('a year of issues with the reviewed post list', () => {
+  test('the first and third Thursdays from December 2026 through 2027 all build, in order', () => {
+    const { buildIssue } = require('../services/pest-insider');
+    const { RECENT_WINDOW } = require('../services/pest-insider/plan');
+    const { factById } = require('../services/pest-insider/facts');
+    const days = ['2026-12-03', '2026-12-17'];
+    for (let month = 0; month < 12; month += 1) {
+      const thursdays = [];
+      for (let day = 1; day <= 31; day += 1) {
+        const d = new Date(Date.UTC(2027, month, day));
+        if (d.getUTCMonth() === month && d.getUTCDay() === 4) thursdays.push(d.toISOString().slice(0, 10));
+      }
+      days.push(thursdays[0], thursdays[2]);
+    }
+    const recent = { factIds: [], speciesSlugs: [] };
+    const built = days.map((sendDate) => {
+      const r = buildIssue({ sendDate, livePostFactIds: Object.keys(POSTS), recent: { factIds: recent.factIds.slice(-RECENT_WINDOW), speciesSlugs: recent.speciesSlugs.slice(-RECENT_WINDOW) } });
+      if (r.ok) {
+        recent.factIds.push(r.diagnostics.factId);
+        recent.speciesSlugs.push(r.diagnostics.speciesSlug);
+        expect(r.issue.text_body).toContain(postUrl(r.diagnostics.factId));
+      }
+      return { sendDate, reason: r.reason };
+    });
+    expect(built).toHaveLength(26);
+    expect(built.filter((b) => b.reason)).toEqual([]);
+    // Only facts with a reviewed post lead, and with no recheck recorded,
+    // no fact marked for one ever leads.
+    recent.factIds.forEach((id) => expect(POSTS).toHaveProperty([id]));
+    expect(recent.factIds.filter((id) => factById(id).recheck_before_send)).toEqual([]);
+    // The two default sample dates (ops/agents/pest-insider-sample.js).
+    expect(recent.factIds.slice(0, 2)).toEqual(['T03', 'A01']);
+  });
+});
+
 describe('checkLivePosts', () => {
   // four facts with four different posts (D02 and D03 share one)
   const ids = Object.keys(POSTS).filter((id, i, all) => all.findIndex((x) => postUrl(x) === postUrl(id)) === i).slice(0, 4);

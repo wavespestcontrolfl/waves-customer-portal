@@ -26,7 +26,7 @@ jest.mock('../services/pest-insider/posts', () => {
 });
 const { buildIssue } = require('../services/pest-insider');
 const { FACTS, factById, factsForSend } = require('../services/pest-insider/facts');
-const { SPECIES, RECENT_WINDOW, planIssue } = require('../services/pest-insider/plan');
+const { SPECIES, planIssue } = require('../services/pest-insider/plan');
 const { postUrl } = require('../services/pest-insider/posts');
 const { POST_LINK_TEXT } = require('../services/pest-insider/render');
 
@@ -175,32 +175,6 @@ describe('every issue the bank can make', () => {
     expect(failed).toEqual([]);
   });
 
-  test('the first and third Thursdays from December 2026 through 2027 all build, in order', () => {
-    const days = ['2026-12-03', '2026-12-17'];
-    for (let month = 0; month < 12; month += 1) {
-      const thursdays = [];
-      for (let day = 1; day <= 31; day += 1) {
-        const d = new Date(Date.UTC(2027, month, day));
-        if (d.getUTCMonth() === month && d.getUTCDay() === 4) thursdays.push(d.toISOString().slice(0, 10));
-      }
-      days.push(thursdays[0], thursdays[2]);
-    }
-    const recent = { factIds: [], speciesSlugs: [] };
-    const built = days.map((sendDate) => {
-      const r = buildIssue({ sendDate, livePostFactIds: LIVE, recent: { factIds: recent.factIds.slice(-RECENT_WINDOW), speciesSlugs: recent.speciesSlugs.slice(-RECENT_WINDOW) } });
-      if (r.ok) {
-        recent.factIds.push(r.diagnostics.factId);
-        recent.speciesSlugs.push(r.diagnostics.speciesSlug);
-      }
-      return { sendDate, reason: r.reason };
-    });
-    expect(built).toHaveLength(26);
-    expect(built.filter((b) => b.reason)).toEqual([]);
-    // With no recheck recorded, no fact marked for one ever leads.
-    expect(recent.factIds.filter((id) => factById(id).recheck_before_send)).toEqual([]);
-    // The two default sample dates (ops/agents/pest-insider-sample.js).
-    expect(recent.factIds.slice(0, 2)).toEqual(['T03', 'A01']);
-  });
 });
 
 describe('the sample script (ops/agents/pest-insider-sample.js)', () => {
