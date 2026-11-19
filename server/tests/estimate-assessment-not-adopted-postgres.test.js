@@ -24,8 +24,22 @@ if (!SKIP && !['localhost', '127.0.0.1'].includes(new URL(process.env.DATABASE_U
 }
 
 let mockTransaction;
+let mockAfterActiveEstimateRead;
 jest.mock('../models/db', () => {
-  const database = (...args) => mockTransaction(...args);
+  const database = (...args) => {
+    const query = mockTransaction(...args);
+    if (args[0] === 'estimates' && mockAfterActiveEstimateRead) {
+      const first = query.first.bind(query);
+      query.first = async (...columns) => {
+        const row = await first(...columns);
+        const afterRead = mockAfterActiveEstimateRead;
+        mockAfterActiveEstimateRead = null;
+        await afterRead();
+        return row;
+      };
+    }
+    return query;
+  };
   database.transaction = (...args) => mockTransaction.transaction(...args);
   database.raw = (...args) => mockTransaction.raw(...args);
   database.fn = { now: () => new Date() };
@@ -57,6 +71,7 @@ jest.mock('../services/estimate-accepted-email', () => ({
   sendEstimateAcceptedOnboarding: jest.fn(async () => ({})),
 }));
 jest.mock('../services/appointment-tagger', () => ({
+  classifyAppointmentType: jest.requireActual('../services/appointment-tagger').classifyAppointmentType,
   onServiceScheduled: jest.fn(async () => ({})),
 }));
 jest.mock('../services/lead-estimate-link', () => ({
@@ -100,7 +115,11 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
   });
 
   beforeEach(async () => { mockTransaction = await db.transaction(); });
-  afterEach(async () => { await mockTransaction?.rollback(); mockTransaction = null; });
+  afterEach(async () => {
+    mockAfterActiveEstimateRead = null;
+    await mockTransaction?.rollback();
+    mockTransaction = null;
+  });
   afterAll(async () => {
     if (server) await new Promise((resolve) => server.close(resolve));
     await db?.destroy();
@@ -229,6 +248,86 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     const acceptance = await getAcceptance(token);
     expect(acceptance.mode).toBe('existing_appointment');
     expect(acceptance.appointment.id).toBe(lawnId);
+  });
+
+  test.each([
+    ['after the active estimate read, before the slot lookup', 'slot'],
+    ['after reservation preparation, before the acceptance CAS', 'prepared'],
+  ])('a competing confirmation completing %s returns the same durable receipt', async (_when, interleaving) => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    const today = new Date();
+    const days = Array.from({ length: 14 }, (_, offset) => etDateString(addETDays(today, 10 + offset)));
+    const closed = await require('../services/scheduling/blackout-dates')
+      .getBlackoutDates(days[0], days.at(-1), mockTransaction);
+    const date = days.find((day) => !closed.has(day));
+    expect(date).toBeDefined();
+    const visitId = await visit(mockTransaction, {
+      customerId: null,
+      key: 'lawn_care_monthly',
+      type: 'Monthly Lawn Care Service',
+      date,
+      extra: {
+        source_estimate_id: estimateId,
+        reservation_expires_at: mockTransaction.raw("NOW() + INTERVAL '15 minutes'"),
+      },
+    });
+    const checkout = {
+      ...(interleaving === 'slot'
+        ? { slotId: `${date}_09-00_unassigned` }
+        : { existingAppointmentId: visitId }),
+      paymentMethodPreference: 'pay_at_visit',
+    };
+    const reservations = require('../services/slot-reservation');
+    const prepareReservationCommit = reservations.prepareReservationCommit;
+    let winnerReceipt;
+    const completeWinner = async () => {
+      const response = await putAccept(token, checkout);
+      winnerReceipt = await response.json();
+      expect([response.status, winnerReceipt.error]).toEqual([200, undefined]);
+      expect(await mockTransaction('invoices').where({ customer_id: customerId })).toHaveLength(1);
+    };
+    const prepare = jest.spyOn(reservations, 'prepareReservationCommit');
+    if (interleaving === 'slot') {
+      mockAfterActiveEstimateRead = completeWinner;
+    } else {
+      prepare.mockImplementationOnce(async (...args) => {
+        const prepared = await prepareReservationCommit(...args);
+        await completeWinner();
+        return prepared;
+      });
+    }
+
+    try {
+      const replay = await putAccept(token, checkout);
+      const receipt = await replay.json();
+      expect([replay.status, receipt.error]).toEqual([200, undefined]);
+      expect(receipt.alreadyAccepted).toBe(true);
+      expect(new URL(receipt.invoicePayUrl, winnerReceipt.invoicePayUrl).href)
+        .toBe(winnerReceipt.invoicePayUrl);
+      expect(prepare).toHaveBeenCalledTimes(interleaving === 'slot' ? 1 : 2);
+      expect(await mockTransaction('invoices').where({ customer_id: customerId }))
+        .toEqual([expect.objectContaining({ scheduled_service_id: visitId, total: '55.00' })]);
+    } finally {
+      prepare.mockRestore();
+    }
+  }, 180000);
+
+  test('a missing hold with no accepted winner keeps the existing expiry response', async () => {
+    const { estimateId, token } = await fixture(mockTransaction);
+    const date = etDateString(addETDays(new Date(), 12));
+    const estimateBefore = await mockTransaction('estimates').where({ id: estimateId }).first();
+
+    const response = await putAccept(token, {
+      slotId: `${date}_09-00_unassigned`,
+      paymentMethodPreference: 'pay_at_visit',
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: 'Your time-slot hold expired — pick a time again to finish signing up',
+      code: 'RESERVATION_EXPIRED',
+    });
+    expect(await mockTransaction('estimates').where({ id: estimateId }).first()).toEqual(estimateBefore);
   });
 
   test('/data: a booked assessment is not offered — the normal slot-picker flow renders', async () => {

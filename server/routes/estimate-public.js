@@ -10423,6 +10423,38 @@ function logAcceptRefusals(req, res, next) {
   next();
 }
 
+async function sendAcceptedEstimateReplay(res, estimate) {
+  if (!isEstimateCustomerViewable(estimate)) {
+    const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+    return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
+  }
+  if (estimate.customer_id) {
+    try {
+      const acceptedVisits = await db('scheduled_services')
+        .where({ source_estimate_id: estimate.id })
+        .whereNotIn('status', ['cancelled', 'canceled', 'skipped', 'no_show'])
+        .whereRaw('COALESCE(is_callback, false) = false')
+        .limit(5)
+        .select('id');
+      for (const visit of acceptedVisits) {
+        await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+          customerId: estimate.customer_id,
+          scheduledServiceId: visit.id,
+          createdBy: 'system:inspection_credit_estimate_accept_replay',
+        });
+      }
+    } catch (replayErr) {
+      logger.warn(`[estimate-accept] replay credit redemption deferred to sweep for estimate ${estimate.id}: ${replayErr.message}`);
+    }
+  }
+  try {
+    return res.json(await buildAlreadyAcceptedSuccessPayload(estimate));
+  } catch (e) {
+    logger.error(`[estimate-accept] already-accepted payload rebuild failed for estimate ${estimate.id}: ${e.message}`);
+    return res.json({ success: true, alreadyAccepted: true });
+  }
+}
+
 router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req, res, next) => {
   // A captured SetupIntent a reloadable in-transaction refusal drops: retired
   // AFTER the transaction rolls back (never Stripe I/O under the row locks, and
@@ -10454,56 +10486,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // an ALREADY-accepted estimate stay untouched (that acceptance happened).
     // (The Bermuda gate itself now answers AFTER the blocking-state decision below - see "ORDER" after the inactive check.)
     if (estimate.status === 'accepted') {
-      // An archived accepted estimate is no longer customer-viewable (the
-      // /:token/data gate rejects archived_at outright), so never rebuild
-      // invoice amounts or the bearer /pay link for it — return the same
-      // 409 the active gate below hands every other archived estimate.
-      // Pre-payload-rebuild this token got only the bare
-      // { success, alreadyAccepted } shape; blocking outright is strictly
-      // tighter and consistent with the rest of the route.
-      if (!isEstimateCustomerViewable(estimate)) {
-        const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
-      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
-      }
-      // Retry of an already-accepted estimate (e.g. the first response was
-      // lost in transit): rebuild the FULL success payload from persisted
-      // state so the customer still sees their real next step (pay link /
-      // booking link / site-confirmation copy) instead of generic confirmed
-      // copy that hides it. Read-only — no side effects re-run here (no
-      // conversion, no invoice mint, no sends). Best-effort: a rebuild
-      // failure degrades to the legacy bare payload rather than blocking
-      // the retry.
-      // Fast-redeem on the already-accepted RETRY too (Codex #3178 r38
-      // P2): the first accept can commit bookings + evidence + invoice and
-      // die before its own redemption block, and this retry still hands
-      // back the persisted pay link — so the credit must be in the balance
-      // before the customer can use it. Idempotent and best-effort; the
-      // payload rebuild stays read-only otherwise.
-      if (estimate.customer_id) {
-        try {
-          const acceptedVisits = await db('scheduled_services')
-            .where({ source_estimate_id: estimate.id })
-            .whereNotIn('status', ['cancelled', 'canceled', 'skipped', 'no_show'])
-            .whereRaw('COALESCE(is_callback, false) = false')
-            .limit(5)
-            .select('id');
-          for (const visit of acceptedVisits) {
-            await require('../services/inspection-credit').redeemInspectionCreditForBooking({
-              customerId: estimate.customer_id,
-              scheduledServiceId: visit.id,
-              createdBy: 'system:inspection_credit_estimate_accept_replay',
-            });
-          }
-        } catch (replayErr) {
-          logger.warn(`[estimate-accept] replay credit redemption deferred to sweep for estimate ${estimate.id}: ${replayErr.message}`);
-        }
-      }
-      try {
-        return res.json(await buildAlreadyAcceptedSuccessPayload(estimate));
-      } catch (e) {
-        logger.error(`[estimate-accept] already-accepted payload rebuild failed for estimate ${estimate.id}: ${e.message}`);
-        return res.json({ success: true, alreadyAccepted: true });
-      }
+      return await sendAcceptedEstimateReplay(res, estimate);
     }
     // The documented re-price response first (codex r6 P0 on #3804): a
     // browser opened before the hold landed must see the contract's 409
@@ -10762,6 +10745,10 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       error: 'Your time-slot hold expired — pick a time again to finish signing up',
       code: 'RESERVATION_EXPIRED',
     };
+    const holdExpiredError = () => Object.assign(new Error(HOLD_EXPIRED_409.error), {
+      status: 409,
+      code: HOLD_EXPIRED_409.code,
+    });
 
     let reservationRow = null;
     if (slotId) {
@@ -10801,10 +10788,10 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       // either way, the customer re-picks. Both 409s carry the code the
       // client keys its "hold expired" banner on.
       if (!reservationRow) {
-        return res.status(409).json(HOLD_EXPIRED_409);
+        throw holdExpiredError();
       }
       if (reservationRow._beyond_grace) {
-        return res.status(409).json(HOLD_EXPIRED_409);
+        throw holdExpiredError();
       }
     }
 
@@ -10904,7 +10891,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         .whereRaw('reservation_expires_at < NOW()')
         .first('id');
       if (ownLapsedHold) {
-        return res.status(409).json(HOLD_EXPIRED_409);
+        throw holdExpiredError();
       }
       // The row can be GONE rather than lapsed: releaseExpiredReservations
       // deletes an uncommitted hold once it is past the grace, so a page that
@@ -10919,7 +10906,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         .first('id');
       const estimateOwnedThatHold = String(estData?.scheduled_service_id || '') === String(existingAppointmentId);
       if (!rowStillExists && estimateOwnedThatHold) {
-        return res.status(409).json(HOLD_EXPIRED_409);
+        throw holdExpiredError();
       }
       return res.status(409).json({ error: 'existing appointment is not linked to this active estimate' });
     }
@@ -12531,6 +12518,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       if (!acceptedCount) {
         const err = new Error('Estimate is no longer active');
         err.status = 409;
+        err.checkAcceptedReceipt = true;
         throw err;
       }
       // The add-ons' yearly limits, rechecked HERE: after the estimate row lock above (the order the reserve takes its locks in)
@@ -16974,6 +16962,26 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         ? { annualChargeAfterInstallation: true } : {}),
     });
   } catch (err) {
+    // A competing confirmation may finish after this request read an active
+    // estimate. Only its durable acceptance can turn a refused hold or a
+    // zero-row acceptance CAS into a successful receipt replay.
+    if (err?.checkAcceptedReceipt || ['RESERVATION_EXPIRED', 'SLOT_UNAVAILABLE'].includes(err?.code)) {
+      try {
+        const accepted = await db('estimates').where({
+          id: res.locals.acceptEstimateId,
+          token: req.params.token,
+          status: 'accepted',
+        }).first();
+        if (accepted?.status === 'accepted') {
+          if (await callSideBlockForEstimateData(db, parseEstimateDataSafe(accepted), { estimateStatus: accepted.status })) {
+            return res.status(404).json({ error: 'Estimate not found' });
+          }
+          return await sendAcceptedEstimateReplay(res, accepted);
+        }
+      } catch {
+        logger.warn('[estimate-accept] could not confirm a concurrent acceptance');
+      }
+    }
     // Translate user-visible 4xx errors thrown from inside the transaction
     // (e.g. reservation expiring between the pre-tx check and the commit).
     // The transaction has rolled back: retire the capture an in-transaction

@@ -2143,6 +2143,13 @@ name and the estimate name begins with that customer's surname (or is a single w
 and the surname is unknown), it is `null`, and the page greets "there". Unlinked
 estimates, a linked customer with a first name, or a failed lookup keep the first word
 of `customer_name` as before. The linked customer's name fields are never returned.
+When two confirmations overlap on `PUT /api/estimates/:token/accept`, the second
+can find that the first already graduated the hold or accepted the estimate. Once
+the first acceptance has committed, the second returns the persisted receipt
+for that same estimate and token, with `alreadyAccepted: true`. A missing or
+expired hold on an estimate that is still awaiting acceptance returns HTTP 409
+with `RESERVATION_EXPIRED`.
+
 `PUT /api/estimates/:token/accept` accepts optional `contactFirstName`, `contactLastName`
 (trimmed, whitespace-collapsed, ≤50 chars — the customers.last_name width) and `contactEmail` (lowercased,
 ≤150 chars — the customers.email width — `EMAIL_RE`). A malformed non-empty value answers 400

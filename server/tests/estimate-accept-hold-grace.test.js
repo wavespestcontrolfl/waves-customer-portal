@@ -179,7 +179,7 @@ describe('accept-path wiring (source pins)', () => {
     // app/DB skew a JS-side comparison could refuse a hold commitReservation
     // would graduate — the same wrongly-declined-by-seconds failure.
     expect(src).toMatch(/\.select\('\*', db\.raw\('\(reservation_expires_at < NOW\(\) - make_interval\(mins => \?\)\) AS _beyond_grace', \[holdGraceMinutes\]\)\)/);
-    expect(src).toMatch(/if \(reservationRow\._beyond_grace\) \{\s*\n\s*return res\.status\(409\)\.json\(HOLD_EXPIRED_409\)/);
+    expect(src).toMatch(/if \(reservationRow\._beyond_grace\) \{\s*\n\s*throw holdExpiredError\(\)/);
     expect(src).not.toMatch(/Date\.now\(\) - holdGraceMinutes/);
   });
 
@@ -207,7 +207,7 @@ describe('accept-path wiring (source pins)', () => {
     const start = src.indexOf('const ownLapsedHold');
     const block = src.slice(start, src.indexOf("error: 'existing appointment is not linked to this active estimate'", start) + 80);
     expect(block).toContain(".whereRaw('reservation_expires_at < NOW()')");
-    expect(block).toContain("return res.status(409).json(HOLD_EXPIRED_409)");
+    expect(block).toContain('throw holdExpiredError()');
     expect(block).toContain("error: 'existing appointment is not linked to this active estimate'");
   });
 
@@ -256,9 +256,9 @@ describe('accept: a swept hold still answers RESERVATION_EXPIRED', () => {
     expect(branch).toContain('const rowStillExists = await db(\'scheduled_services\')');
     expect(branch).toMatch(/estimateOwnedThatHold = String\(estData\?\.scheduled_service_id \|\| ''\) === String\(existingAppointmentId\)/);
     expect(branch).toContain('if (!rowStillExists && estimateOwnedThatHold) {');
-    // Both refusals carry the coded body, so the client's banner is chosen by
-    // code and never by prose.
-    expect(branch.match(/HOLD_EXPIRED_409/g).length).toBeGreaterThanOrEqual(2);
+    // Both refusals throw the same coded error through the receipt-recovery
+    // catch, which preserves the negative response when no accept won.
+    expect(branch.match(/throw holdExpiredError\(\)/g)).toHaveLength(2);
   });
 
   test('a still-present row is NOT treated as swept (the linkage message survives)', () => {
