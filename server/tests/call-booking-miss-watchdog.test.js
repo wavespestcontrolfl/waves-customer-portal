@@ -18,6 +18,7 @@ const {
   confirmedWallClockET,
   rowClearsSlot,
   bookItAlert,
+  dateCheckAlert,
   agentHoldReason,
   GRACE_MINUTES,
   HELD_GRACE_MINUTES,
@@ -41,12 +42,16 @@ function extraction(over = {}) {
   };
 }
 
+// A settled call stores the call agent's decision; this one let the booking through.
+const ALLOWED = { mode: 'enforce', routing: { allowed: true, reason: null, flags: [], appointment_blocking_flags: [] } };
+
 function call(over = {}) {
   return {
     id: 'call-1', twilio_call_sid: 'CAsynthetic001', customer_id: 'cust-1',
     direction: 'outbound', created_at: OLD_ENOUGH,
     from_phone: '+19415550100', to_phone: '+19415550111',
     ai_extraction_enriched: extraction(),
+    ai_validation: ALLOWED,
     ...over,
   };
 }
@@ -331,6 +336,44 @@ describe('a visit the call agent held', () => {
     expect(noNumber.detail).not.toContain('or call back');
     // The routing-reason form of the opt-out reads the same.
     expect(agentHoldReason({ mode: 'enforce', routing: { allowed: false, reason: 'do_not_contact', appointment_blocking_flags: [] } })).toBe('the caller asked not to be contacted');
+  });
+
+  // Pre-push P1 (2026-11-18): the processor writes ai_validation last, and its hard-veto exit
+  // (spam, out of area, an opt-out) returns before that write.
+  test('a call with no stored decision is held: it rings after HELD_GRACE_MINUTES and names no reason', () => {
+    const [miss] = computeBookingMisses([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ai_validation: null })], [], { now: NOW });
+    expect(miss.holdReason).toBeNull();
+    const text = bookItAlert(miss, false);
+    expect(text.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; nothing is on the calendar.');
+    expect(text.detail).not.toContain('The call agent held');
+    expect(computeBookingMisses([call({ created_at: minutesAgo(HELD_GRACE_MINUTES - 1), ai_validation: null })], [], { now: NOW })).toHaveLength(0);
+  });
+
+  test('a confirmed opt-out with no stored decision rings fast, says why, and never asks for a call', () => {
+    const optedOut = call({
+      created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ai_validation: null,
+      ai_extraction_enriched: extraction({ consent: { do_not_contact_request: true } }),
+    });
+    const [miss] = computeBookingMisses([optedOut], [], { now: NOW });
+    expect(miss.holdReason).toBe('the caller asked not to be contacted');
+    const text = bookItAlert(miss, false);
+    expect(text.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because the caller asked not to be contacted.');
+    expect(text.detail).toContain('Review it in dispatch before booking, and do not call or text the caller.');
+    expect(text.detail).not.toContain('call back');
+  });
+
+  // Pre-push P1 (2026-11-18): the date check follows the same contact rule as "book it".
+  test('a date check never asks staff to contact an opted-out caller, or to confirm on a call with no number', () => {
+    const slot = { dateET: '2026-08-01', minutes: 12 * 60 };
+    const mismatch = { visit_id: 'visit-9', date: '2026-08-03', time: '09:00' };
+    const check = (c, holdReason = null) => dateCheckAlert({ name: 'Pat Sample', slot, call: c, mismatch, service: 'Waves Assessment', holdReason }).detail;
+    expect(check(call())).toMatch(/Move it to the agreed day, or confirm the new day with the customer, then tap Done\.$/);
+    const optedOut = check(call({ ai_extraction_enriched: extraction({ consent: { do_not_contact_request: true } }) }));
+    expect(optedOut).toMatch(/Move it to the agreed day or keep the booked day, then tap Done; do not call or text the caller\.$/);
+    expect(optedOut).not.toContain('confirm the new day with the customer');
+    expect(check(call(), 'the caller asked not to be contacted')).toContain('do not call or text the caller');
+    expect(check(call({ to_phone: null }))).toMatch(/the call left no number to confirm a new day\.$/);
+    expect(check(call(), 'the call has no callback number')).toMatch(/the call left no number to confirm a new day\.$/);
   });
 
   test('every blocking triage flag has a phrase', () => {

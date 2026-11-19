@@ -87,9 +87,9 @@ const LOOKBACK_HOURS = 96;
 // extraction → booking can take a while, and the office may be booking it
 // by hand right now.
 const GRACE_MINUTES = 90;
-// A call the call agent itself held is not in flight: its stored routing decision
-// (enforce mode) blocked the booking, processing is done, and only a person will book
-// it. It waits this long, for the office booking it by hand right after the call, then
+// A call the call agent itself held (callHold) is not in flight: processing is done and
+// the call agent did not book it, so only a person will. It waits this long after the
+// call ends, for the office booking it by hand right after the call, then
 // rings (owner 2026-11-18, option A of the call booking holds scope: a visit held that
 // day on the address check would have waited 1 hour 42 minutes for its first alert).
 const HELD_GRACE_MINUTES = 10;
@@ -104,7 +104,7 @@ const HELD_GRACE_MINUTES = 10;
 const NO_CONTACT_REASON = 'the caller asked not to be contacted';
 const NO_NUMBER_REASON = 'the call has no callback number';
 const HOLD_REASONS = [
-  // A reason that changes what staff should do (STEP_WITHOUT_CALLBACK) comes first.
+  // A reason that changes what staff should do (contactLimit) comes first.
   ['do_not_contact_requested', NO_CONTACT_REASON],
   ['caller_phone_missing', NO_NUMBER_REASON],
   ['spam_or_wrong_number', 'the call may be spam or misdialed'],
@@ -128,12 +128,20 @@ const HOLD_REASONS = [
   ['low_extraction_confidence', 'the call details are unclear'],
   ['on_file_house_number_conflict', 'a different house number was given'],
 ];
-// The detail's last step when a callback is wrong (the caller opted out) or impossible (no
-// number). Every other miss keeps "Book it in dispatch or call back to reset expectations."
-const STEP_WITHOUT_CALLBACK = new Map([
-  [NO_CONTACT_REASON, 'Review it in dispatch before booking, and do not call or text the caller.'],
-  [NO_NUMBER_REASON, 'Book it in dispatch; the call left no number to call back.'],
-]);
+// The detail's last step, by alert and by what the call allows (contactLimit): no bell tells
+// staff to contact a caller who opted out, or to call back a call that left no number.
+const LAST_STEP = {
+  book: {
+    none: 'Book it in dispatch or call back to reset expectations.',
+    opted_out: 'Review it in dispatch before booking, and do not call or text the caller.',
+    no_number: 'Book it in dispatch; the call left no number to call back.',
+  },
+  check: {
+    none: 'Move it to the agreed day, or confirm the new day with the customer, then tap Done.',
+    opted_out: 'Move it to the agreed day or keep the booked day, then tap Done; do not call or text the caller.',
+    no_number: 'Move it to the agreed day or keep the booked day, then tap Done; the call left no number to confirm a new day.',
+  },
+};
 // The house-number hold (the processor's houseNumberDisputed) blocks an allowed decision
 // after the fact: it stores no routing reason and no blocking flag, only this flag in
 // routing.flags.
@@ -250,14 +258,18 @@ function extractConfirmedSlot(extractionRaw) {
   };
 }
 
+// A jsonb column as an object: pg returns jsonb parsed, and a value stored as JSON text
+// reads the same. Unreadable text is null.
+function readJson(raw) {
+  if (typeof raw !== 'string') return raw && typeof raw === 'object' ? raw : null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
 // Did the call agent hold the booking? Its stored V2 validation (call_log.ai_validation)
 // says so when the routing decision, made in enforce mode (the mode that decides
 // bookings), was not allowed. Returns the HOLD_REASONS phrase, or null when it did not.
 function agentHoldReason(validationRaw) {
-  let validation = validationRaw;
-  if (typeof validation === 'string') {
-    try { validation = JSON.parse(validation); } catch { return null; }
-  }
+  const validation = readJson(validationRaw);
   const routing = validation && validation.mode === 'enforce' ? validation.routing : null;
   if (!routing || routing.allowed !== false) return null;
   if (HOLD_REASONS_BY_ROUTING.has(routing.reason)) return HOLD_REASONS_BY_ROUTING.get(routing.reason);
@@ -265,6 +277,34 @@ function agentHoldReason(validationRaw) {
   if (routing.reason == null && Array.isArray(routing.flags) && routing.flags.includes(HOUSE_NUMBER_FLAG)) flags.add(HOUSE_NUMBER_FLAG);
   const hit = HOLD_REASONS.find(([flag]) => flags.has(flag));
   return hit ? hit[1] : HOLD_REASON_FALLBACK;
+}
+
+// The caller opted out of contact: the V2 extraction's consent.do_not_contact_request, the
+// field behind the router's do_not_contact_requested flag and do_not_contact reason. It is
+// read from the extraction, so it holds where the pass stored no decision.
+function callerOptedOut(call) {
+  return readJson(call.ai_extraction_enriched)?.consent?.do_not_contact_request === true;
+}
+
+// The call agent's hold on a call: { reason } (reason may be null), or null when it did not
+// hold it. An opt-out always holds (the router blocks on it). A stored enforce decision that
+// blocked holds with its reason. A call with no stored decision holds with no reason: the
+// processor writes ai_validation last, and its hard-veto exit (spam, out of area, an opt-out)
+// returns before that write, so nothing but a person will book the call.
+function callHold(call) {
+  if (callerOptedOut(call)) return { reason: NO_CONTACT_REASON };
+  if (readJson(call.ai_validation) == null) return { reason: null };
+  const reason = agentHoldReason(call.ai_validation);
+  return reason ? { reason } : null;
+}
+
+// What the call lets staff do next (LAST_STEP): 'opted_out' (the extraction or the hold says
+// so), 'no_number' (the router held it for no callback number, or the call row has none), or
+// 'none'.
+function contactLimit(call, holdReason) {
+  if (holdReason === NO_CONTACT_REASON || callerOptedOut(call)) return 'opted_out';
+  if (holdReason === NO_NUMBER_REASON || !callFacts(call).contactPhone) return 'no_number';
+  return 'none';
 }
 
 function windowStartMinutes(windowStart) {
@@ -354,9 +394,10 @@ function clearingRow(call, slot, bookedRows, sameName) {
 // call-linked booking? `calls` are call_log rows ({ id, twilio_call_sid,
 // customer_id, direction, created_at, from_phone, to_phone,
 // ai_extraction_enriched, ai_validation, metadata, duration_seconds,
-// recording_duration_seconds }); a call the call agent held (agentHoldReason)
+// recording_duration_seconds }); a call the call agent held (callHold)
 // waits HELD_GRACE_MINUTES from the call's end (callEndedAt) instead of
-// GRACE_MINUTES from created_at, and its miss carries `holdReason`. `bookedRows` are scheduled_services rows
+// GRACE_MINUTES from created_at, and its miss carries `holdReason` (null when
+// the hold has no stored reason). `bookedRows` are scheduled_services rows
 // ({ customer_id, status, sched_date ('YYYY-MM-DD' via to_char — never a JS
 // Date round-trip), window_start, created_at, source_call_log_id, notes }),
 // ANY status: cancelled/rescheduled rows clear only on call provenance
@@ -372,16 +413,16 @@ function computeBookingMisses(calls, bookedRows, { now = new Date(), namesakes =
   const misses = [];
   for (const call of calls) {
     const createdAt = call.created_at ? new Date(call.created_at) : null;
-    const holdReason = agentHoldReason(call.ai_validation);
+    const hold = callHold(call);
     // A held call's wait starts when the call ends, so the office gets its 10 minutes after
     // hanging up: a row inserted at pickup holds the call's start in created_at. A post-call
     // row with no end stamp has no callEndedAt, and its created_at is already after the call.
-    const clock = holdReason ? (callEndedAt(call) || createdAt) : createdAt;
-    if (!createdAt || clock > (holdReason ? heldGraceCutoff : graceCutoff)) continue;
+    const clock = hold ? (callEndedAt(call) || createdAt) : createdAt;
+    if (!createdAt || clock > (hold ? heldGraceCutoff : graceCutoff)) continue;
     const slot = extractConfirmedSlot(call.ai_extraction_enriched);
     if (!slot) continue;
     if (clearingRow(call, slot, bookedRows, namesakes.get(call.id))) continue;
-    misses.push({ call, slot, serviceDateET: slot.dateET, holdReason });
+    misses.push({ call, slot, serviceDateET: slot.dateET, holdReason: hold ? hold.reason : null });
   }
   return misses;
 }
@@ -691,7 +732,7 @@ function callFacts(call) {
 // pass raises when a visit lands on another day: the office booked a visit, but not on the day the call agreed. `name`
 // is null when only the old bell's slot is known. Headline and why follow
 // docs/admin-notifications.md (composeAdminAlert checks them).
-function dateCheckAlert({ name, slot, call, mismatch, service = null }) {
+function dateCheckAlert({ name, slot, call, mismatch, service = null, holdReason = null }) {
   const agreedAt = spokenSlot(slot.dateET, slot.minutes);
   const bookedAt = spokenSlot(mismatch.date, windowStartMinutes(mismatch.time));
   const { callAtET, contactPhone, direction } = callFacts(call);
@@ -700,7 +741,7 @@ function dateCheckAlert({ name, slot, call, mismatch, service = null }) {
     why: `Booked ${bookedAt}; the call agreed ${agreedAt}.`,
     detail: `${name || 'The caller'} (${contactPhone || 'no number'}) agreed ${service || 'a visit'} for ${agreedAt} ` +
       `on a ${direction} call at ${callAtET} ET. The visit on the calendar is ${bookedAt}. ` +
-      'Move it to the agreed day, or confirm the new day with the customer, then tap Done.',
+      LAST_STEP.check[contactLimit(call, holdReason)],
     link: `/admin/dispatch?tab=schedule&date=${encodeURIComponent(mismatch.date)}`,
   };
 }
@@ -720,7 +761,7 @@ function bookItAlert(m, repeat) {
       `for that date${m.call.customer_id ? '' : ' — and the call is not linked to any customer'}. ` +
       (m.holdReason ? `The call agent held this visit and did not book it, because ${m.holdReason}. ` : '') +
       likelyAccountSentence(m.likelyAccount) +
-      (STEP_WITHOUT_CALLBACK.get(m.holdReason) || 'Book it in dispatch or call back to reset expectations.') +
+      LAST_STEP.book[contactLimit(m.call, m.holdReason)] +
       (repeat ? ' This keeps ringing until the visit is booked or the call\'s cards are dismissed.' : ''),
   };
 }
@@ -777,7 +818,7 @@ async function planOpenBookingMissBells({ now = new Date() } = {}) {
     // scan's own test: NULL or 'processing'): a pass writes the new extraction before the new
     // ai_validation, so the two may come from different passes.
     const settled = call.processing_status != null && call.processing_status !== 'processing';
-    if (slot) entries.push({ call, slot, rows, holdReason: ownSlot && settled ? agentHoldReason(call.ai_validation) : null });
+    if (slot) entries.push({ call, slot, rows, holdReason: ownSlot && settled ? (callHold(call)?.reason ?? null) : null });
   }
   if (!entries.length) return [];
 
@@ -991,7 +1032,7 @@ async function ringMiss(m, { dedupeKey, repeat }) {
   // Headline and why follow docs/admin-notifications.md. The office booked a visit,
   // but not on the agreed day: the date check says the dates differ.
   const text = m.mismatch
-    ? dateCheckAlert({ name: m.slot.name, slot: m.slot, call: m.call, mismatch: m.mismatch, service: m.slot.service })
+    ? dateCheckAlert({ name: m.slot.name, slot: m.slot, call: m.call, mismatch: m.mismatch, service: m.slot.service, holdReason: m.holdReason })
     : bookItAlert(m, repeat);
   const created = await raiseAdminAlert(
     'alert',

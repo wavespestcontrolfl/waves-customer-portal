@@ -67,6 +67,8 @@ function missCall(over = {}) {
     id: CALL_ID, twilio_call_sid: 'CAsynthetic900', customer_id: 'cust-9',
     direction: 'inbound', created_at: '2026-09-28T21:30:00Z',
     from_phone: '+19415550199', to_phone: '+19415550100',
+    // A settled call stores the call agent's decision; this one let the booking through.
+    ai_validation: { mode: 'enforce', routing: { allowed: true, reason: null, flags: [], appointment_blocking_flags: [] } },
     ai_extraction_enriched: {
       caller: { name_full: 'Robin Example' },
       service_request: { specific_service_name: 'Wasp Nest Removal' },
