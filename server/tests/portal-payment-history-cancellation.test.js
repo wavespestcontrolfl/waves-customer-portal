@@ -109,6 +109,56 @@ test('parked, superseded and never-attempted failures carry their own states on 
   expect(result.payments.every((row) => row.recoveryInvoice === null)).toBe(true);
 });
 
+test.each([
+  { billed_month: '2026-11', deferred_resolution: 'absorbed_annual_prepay' },
+  JSON.stringify({ billed_month: '2026-11', deferred_resolution: 'absorbed_annual_prepay' }),
+])('an annual-prepay-absorbed retry is resolved, not pending verification (%p)', async (metadata) => {
+  stripe.getPaymentHistory.mockResolvedValueOnce([{
+    id: 'absorbed-retry',
+    status: 'failed',
+    amount: 50,
+    superseded_by_payment_id: 'absorbed-retry',
+    next_retry_at: null,
+    metadata,
+  }]);
+
+  const result = await listPortalPayments('customer-1', {
+    database: emptyReader(), cursor: 100, includeRecoveryInvoices: true,
+  });
+
+  expect(result.payments[0]).toMatchObject({
+    id: 'absorbed-retry',
+    recoveryInvoice: null,
+    recoveryState: 'recovery_inactive',
+  });
+});
+
+test.each([
+  [
+    'the marker without the cron self-supersession',
+    { metadata: { deferred_resolution: 'absorbed_annual_prepay' } },
+    'recovery_unchecked',
+  ],
+  [
+    'a self-superseded row with malformed metadata',
+    { superseded_by_payment_id: 'uncertain-retry', metadata: '{' },
+    'authentication_unknown',
+  ],
+])('%s is not treated as annual-prepay resolution', async (_label, fields, recoveryState) => {
+  stripe.getPaymentHistory.mockResolvedValueOnce([{
+    id: 'uncertain-retry', status: 'failed', amount: 50, ...fields,
+  }]);
+
+  const result = await listPortalPayments('customer-1', {
+    database: emptyReader(), cursor: 100, includeRecoveryInvoices: true,
+  });
+
+  expect(result.payments[0]).toMatchObject({
+    recoveryInvoice: null,
+    recoveryState,
+  });
+});
+
 test('cancellation on the first payer read cannot start count or payment queries', async () => {
   const failure = Object.assign(new Error('cancelled'), { code: '57014' });
   const database = jest.fn(reader(failure));

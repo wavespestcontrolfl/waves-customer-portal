@@ -23,12 +23,17 @@ const { whereAwaitingAuthentication } = require('./invoice-payment-authenticatio
 //      the payment-success SMS/email uses). View-only, no PDF.
 // Customer-scoped lookup: a token is only ever returned for an invoice
 // belonging to the requesting customer.
-const stripeReceiptOf = (p) => {
+const paymentMetadataOf = (payment) => {
   try {
-    const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-    return m?.stripe_receipt_url || p.receipt_url || null;
-  } catch { return p.receipt_url || null; }
+    const metadata = typeof payment?.metadata === 'string'
+      ? JSON.parse(payment.metadata)
+      : payment?.metadata;
+    return metadata && typeof metadata === 'object' ? metadata : null;
+  } catch {
+    return null;
+  }
 };
+const stripeReceiptOf = (p) => paymentMetadataOf(p)?.stripe_receipt_url || p.receipt_url || null;
 // Invoice resolution mirrors the canonical webhook resolver
 // (stripe-webhook.js): metadata.invoice_id, then the dispute/legacy
 // aliases, then the payment's Stripe PaymentIntent matched against
@@ -50,6 +55,16 @@ const RECOVERY_INVOICE_COLUMNS = [
   'stripe_payment_intent_id', 'stripe_charge_id',
 ];
 const RECOVERY_PAYMENT_LIMIT = 10;
+const ABSORBED_ANNUAL_PREPAY_RESOLUTION = 'absorbed_annual_prepay';
+
+function absorbedByAnnualPrepay(payment) {
+  // billing-cron writes both pieces atomically. The marker alone could be
+  // stale/conflicting metadata; self-supersession alone is also how an
+  // uncertain Stripe outcome is parked.
+  return payment?.superseded_by_payment_id != null
+    && String(payment.superseded_by_payment_id) === String(payment.id)
+    && paymentMetadataOf(payment)?.deferred_resolution === ABSORBED_ANNUAL_PREPAY_RESOLUTION;
+}
 
 // The Waves receipt (token) for each visible payment's invoice, indexed by
 // every linkage a payment row can carry.
@@ -401,6 +416,7 @@ function recoveryFieldsFor(payment, { recoveryByPaymentId, recoveryStateByPaymen
   const id = String(payment.id);
   if (payment.status === 'failed') {
     if (isNeverAttemptedDeferral(payment)
+      || absorbedByAnnualPrepay(payment)
       || (payment.superseded_by_payment_id != null && String(payment.superseded_by_payment_id) !== id)) {
       return { recoveryInvoice: null, recoveryState: 'recovery_inactive' };
     }
@@ -634,10 +650,7 @@ async function listPortalPayments(customerId, {
   // legacy fallback for rows written before the stamp existed. Description
   // wording alone (e.g. a row that merely says "Monthly") is NOT a signal.
   const isRecurringPayment = (p) => {
-    try {
-      const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-      if (m && m.billed_month) return true;
-    } catch { /* unparseable metadata — fall through to the marker */ }
+    if (paymentMetadataOf(p)?.billed_month) return true;
     return (p.description || '').includes('WaveGuard Monthly');
   };
 
