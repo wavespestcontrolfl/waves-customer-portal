@@ -10,8 +10,7 @@
  * changed mind takes the final choice. This module judges no words itself, because a word screen cannot keep up with
  * free speech. It checks only what code can check: the choice's evidence is the caller's own words, word for word in a
  * caller turn of that call (the shared grounding tools). It gives the office the caller's latest turn that says them,
- * whole or cut around the quote, so any condition or "no" is in front of the person who decides, and that person
- * decides every card. And it waits, for a bounded time, for any recent call that is not read yet (owedReadSql).
+ * whole, so any condition or "no" is in front of the person who decides, and that person decides every card. And it waits, for a bounded time, for any recent call that is not read yet (owedReadSql).
  */
 
 const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
@@ -21,11 +20,16 @@ const CALL_COLUMNS = ['id', 'customer_id', 'created_at', 'direction', 'processin
 const WORD_COLUMNS = [...CALL_COLUMNS, 'transcription'];
 // The extraction's evidence pointer for the caller's plan choice (JSON pointer; a dotted path in older rows).
 const BILLING_CHOICE_PATHS = new Set(['/service_request/billing_choice', 'service_request.billing_choice']);
-const CALLER_WORDS_CHARS = 200;
 const CHOICE_SCAN_LIMIT = 50;
 // A later call with one of these intents takes back an earlier yes: the customer asked to cancel, or for a one-time
 // visit instead of the plan. It is the latest word even with no billing choice.
 const CONTRARY_INTENTS = new Set(['cancellation_request', 'preventative_one_time']);
+// The call reader's cancel flag (triage_flags) takes it back the same way, whatever service_intent says.
+const CANCEL_FLAG = 'cancellation_request';
+// A call the voice agent answered and handed on is stored as segments under these header lines
+// (voice-agent/relay-segments.js). Each segment's lines are labeled, so only the exact headers are dropped; any other
+// unlabeled line still makes the transcript ungroundable.
+const SEGMENT_HEADER = /^\s*\[(?:AI|Staff|Voicemail) segment\]\s*$/;
 
 // How long a call can still be read for the first time or retried: the processor reads a call within minutes, its
 // retries come 10 minutes apart, and a call with no recording is recovered from its live text soon after it ends.
@@ -45,50 +49,24 @@ function owedReadSql(t) {
     + ` OR (${t}.processing_status = 'processing' AND ${recent('updated_at')})), false)`;
 }
 
-const wordsOf = (text) => [...String(text || '').matchAll(/[a-z0-9]+/gi)].map((m) => ({ w: m[0].toLowerCase(), at: m.index, end: m.index + m[0].length }));
-
-// Where a turn first says the quote, as [start, end] in its text, or null (then the whole turn is shown).
-function spanOf(text, quote) {
-  const tokens = wordsOf(text);
-  const q = wordsOf(quote).map((t) => t.w);
-  for (let i = 0; q.length && i + q.length <= tokens.length; i += 1) {
-    if (q.every((w, k) => tokens[i + k].w === w)) return [tokens[i].at, tokens[i + q.length - 1].end];
-  }
-  return null;
-}
-
-// The words to show: the caller's whole turn, or, past CALLER_WORDS_CHARS, a cut around the quote. The quote's own
-// words are never cut, so the office always sees what the caller chose; with no span, nothing is cut.
-function excerptOf(text, span) {
-  const tidy = (x) => x.replace(/\s+/g, ' ').trim();
-  if (!span || tidy(text).length <= CALLER_WORDS_CHARS) return tidy(text);
-  const [qs, qe] = span;
-  const room = Math.max(0, CALLER_WORDS_CHARS - 2 - (qe - qs));
-  const start = Math.max(0, qs - Math.floor(room / 2));
-  const end = Math.min(text.length, Math.max(qe, start + (qe - qs) + room));
-  return `${start > 0 ? '…' : ''}${tidy(text.slice(start, end))}${end < text.length ? '…' : ''}`;
-}
-
 // The caller's own words for the plan choice (a string), or null. The shared grounding tools ground each billing_choice
 // evidence quote labeled the caller's (a short one must be a whole caller turn), with outbound labels oriented the way
-// the triage flags read them; an unlabeled or one-speaker transcript grounds nothing. The words are the caller's latest
-// turn that says a grounded quote at any length, found with the tools' own normalization ("9am" = "9 a.m."), so a
-// later turn that takes the choice back is the one the office sees.
+// the triage flags read them and segment headers dropped; an unlabeled or one-speaker transcript grounds nothing. The
+// words are the caller's latest turn that says a grounded quote at any length, found with the tools' own normalization
+// ("9am" = "9 a.m."), and always the whole turn: a later turn, or a later sentence, that takes the choice back is in
+// front of the office.
 function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   const quotes = (Array.isArray(extraction?.evidence) ? extraction.evidence : [])
     .filter((e) => BILLING_CHOICE_PATHS.has(e?.field_path) && e.speaker === 'caller' && typeof e.quote === 'string' && e.quote.trim());
   if (!quotes.length) return null;
   const { parseTurns, turnsHolding, normalize } = require('./call-reschedule-agreement').groundingTools;
   const { orientTranscriptForOutbound } = require('./call-triage-flags');
-  const turns = parseTurns(orientTranscriptForOutbound(transcript, outbound));
+  const labeled = String(transcript || '').split(/\r?\n/).filter((line) => !SEGMENT_HEADER.test(line)).join('\n');
+  const turns = parseTurns(orientTranscriptForOutbound(labeled, outbound));
   if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return null;
-  const grounded = quotes.filter((e) => turnsHolding(turns, e.quote, 'caller').length).map((e) => ({ quote: e.quote, ns: normalize(e.quote) }));
-  for (const turn of turns.filter((t) => !t.agent).reverse()) {
-    const hit = grounded.find((g) => g.ns && ` ${turn.ns} `.includes(` ${g.ns} `));
-    const text = String(turn.raw || '');
-    if (hit) return excerptOf(text, spanOf(text, hit.quote));
-  }
-  return null;
+  const grounded = quotes.filter((e) => turnsHolding(turns, e.quote, 'caller').length).map((e) => normalize(e.quote)).filter(Boolean);
+  const turn = turns.filter((t) => !t.agent).reverse().find((t) => grounded.some((ns) => ` ${t.ns} `.includes(` ${ns} `)));
+  return turn ? String(turn.raw || '').replace(/\s+/g, ' ').trim() : null;
 }
 
 // One call's word (row: WORD_COLUMNS, one read): a cancellation or one-time ask ({ contrary: true, callLogId, at }), a
@@ -101,7 +79,8 @@ function wordOfCall(row) {
   const extraction = parseExtraction(row.ai_extraction_enriched);
   if (!extraction || !isRealConversation(row, extraction)) return null;
   // Checked before the choice: a call that both names a plan and asks to cancel or for a one-time visit is no yes.
-  if (CONTRARY_INTENTS.has(extraction.service_request?.service_intent)) return { contrary: true, callLogId: row.id, at: row.created_at };
+  const cancelFlag = Array.isArray(extraction.triage_flags) && extraction.triage_flags.includes(CANCEL_FLAG);
+  if (cancelFlag || CONTRARY_INTENTS.has(extraction.service_request?.service_intent)) return { contrary: true, callLogId: row.id, at: row.created_at };
   const choice = require('./call-prepay-choice').billingChoiceOf(extraction);
   if (!choice) return null;
   const quote = callerWordsOf(extraction, { transcript: row.transcription, outbound: String(row.direction || '').startsWith('outbound') });
@@ -109,7 +88,7 @@ function wordOfCall(row) {
 }
 
 // The customer's latest word on a call since `since`: the newest read, valid, two-party call whose extraction names a
-// billing choice or a cancellation or one-time ask, as wordOfCall gives it, or null. SQL keeps only rows that name a
+// billing choice or a cancellation (intent or flag) or one-time ask, as wordOfCall gives it, or null. SQL keeps only rows that name a
 // word; pages of CHOICE_SCAN_LIMIT follow until one is a two-party conversation, so voicemails never hide the last
 // word. Sandbox calls do not count.
 async function latestBillingChoice(conn, { customerId, since }) {
@@ -121,7 +100,8 @@ async function latestBillingChoice(conn, { customerId, since }) {
     .whereRaw(`NOT ${owedReadSql('call_log')}`)
     .where((qb) => qb
       .whereRaw("ai_extraction_enriched -> 'service_request' ->> 'billing_choice' = ANY(?)", [[...BILLING_CHOICES]])
-      .orWhereRaw("ai_extraction_enriched -> 'service_request' ->> 'service_intent' = ANY(?)", [[...CONTRARY_INTENTS]]))
+      .orWhereRaw("ai_extraction_enriched -> 'service_request' ->> 'service_intent' = ANY(?)", [[...CONTRARY_INTENTS]])
+      .orWhereRaw("ai_extraction_enriched -> 'triage_flags' @> ?::jsonb", [JSON.stringify([CANCEL_FLAG])]))
     .modify((qb) => whereNotSandboxCall(qb))
     .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
     .select(WORD_COLUMNS);

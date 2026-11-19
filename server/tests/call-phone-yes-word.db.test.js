@@ -143,6 +143,12 @@ describeDb("the caller's word (PostgreSQL)", () => {
     ['the newest word is annual prepay', [['per_application', { created_at: hoursAgo(5) }], ['annual_prepay', { created_at: hoursAgo(2) }]], { skip: 'chose_annual_prepay' }],
     ['a later call asked to cancel', [['per_application', { created_at: hoursAgo(5) }], [null, { created_at: hoursAgo(2) }, 'cancellation_request']], { skip: 'took_back' }],
     ['the yes call also asked for a one-time visit', [['per_application', { created_at: hoursAgo(5) }, 'preventative_one_time']], { skip: 'took_back' }],
+    ["a later call carries the call reader's cancel flag, whatever its intent", [['per_application', { created_at: hoursAgo(5) }], [null, {
+      created_at: hoursAgo(2), ai_extraction_enriched: JSON.stringify({ ...extractionWith(null, 'follow_up_existing_service'), triage_flags: ['cancellation_request'] }),
+    }]], { skip: 'took_back' }],
+    ['the yes call itself carries the cancel flag', [['per_application', {
+      created_at: hoursAgo(5), ai_extraction_enriched: JSON.stringify({ ...extractionWith('per_application'), triage_flags: ['cancellation_request'] }),
+    }]], { skip: 'took_back' }],
     ['the choice came before the send', [['per_application', { created_at: new Date(Date.now() - 3 * DAY) }]], { yes: null, noYes: 'no_yes_heard' }],
     ['the choice call is a voicemail', [['per_application', { answered_by: 'voicemail' }]], { yes: null, noYes: 'no_yes_heard' }],
     ['the choice call is still being read', [['per_application', { processing_status: 'processing' }]], { yes: null, noYes: 'no_yes_heard' }],

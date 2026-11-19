@@ -57,9 +57,19 @@ describe("the caller's words", () => {
       .toBe("Don't bill me each time at 9 a.m.");
   });
 
-  test('a long turn whose spelling differs from the quote is shown whole, so the quote is never lost', () => {
-    const line = `${'so we talked about it and '.repeat(10)}bill me each time at 9 a.m. please.`;
-    expect(callerWordsOf(evidence(choice('bill me each time at 9am')), talk(line))).toBe(line);
+  test('a long turn is shown whole, so a later sentence that takes the choice back is never cut off', () => {
+    const line = `Bill me each time.${' So we talked about it and'.repeat(10)} actually, don't bill me each time.`;
+    expect(callerWordsOf(evidence(choice('bill me each time')), talk(line))).toBe(line);
+    const spelled = `${'so we talked about it and '.repeat(10)}bill me each time at 9 a.m. please.`;
+    expect(callerWordsOf(evidence(choice('bill me each time at 9am')), talk(spelled))).toBe(spelled);
+  });
+
+  test('a call the voice agent handed to staff is read across its labeled segments; any other unlabeled line is not', () => {
+    const segments = (recorded) => ({ transcript: `[AI segment]\nAgent: Thanks for calling Waves.\nCaller: I have a quote from you.\n\n[Staff segment]\n${recorded}` });
+    expect(callerWordsOf(evidence(choice('Just bill me each time.')), segments('Agent: This is Sam.\nCaller: Just bill me each time.')))
+      .toBe('Just bill me each time.');
+    expect(callerWordsOf(evidence(choice('Just bill me each time.')), segments('Just bill me each time.'))).toBeNull();
+    expect(callerWordsOf(evidence(choice('Just bill me each time.')), { transcript: '[Note]\nAgent: Hi.\nCaller: Just bill me each time.' })).toBeNull();
   });
 
   test('a quote across two sentences is found', () => {
@@ -88,17 +98,7 @@ describe("the caller's words", () => {
     expect(callerWordsOf({ evidence: 'not a list' }, talk('x'))).toBeNull();
   });
 
-  test('a long turn is cut around the quote, so the choice always shows', () => {
-    const line = `${'so we talked about it and '.repeat(10)}just bill me each time${' and that is fine'.repeat(6)}.`;
-    const words = callerWordsOf(evidence(choice('just bill me each time')), talk(line));
-    expect(words).toContain('just bill me each time');
-    expect(words.length).toBeLessThanOrEqual(202);
-    expect(words.startsWith('\u2026')).toBe(true);
-    expect(words.endsWith('\u2026')).toBe(true);
-  });
-
-  test('a quote longer than the cut is shown whole', () => {
-    const long = `${'word '.repeat(80)}done`;
-    expect(callerWordsOf(evidence(choice(long)), talk(long))).toBe(long);
+  test("the turn's spacing is tidied, never its words", () => {
+    expect(callerWordsOf(evidence(choice('bill me each time')), talk('  Just   bill me each time,    please. '))).toBe('Just bill me each time, please.');
   });
 });
