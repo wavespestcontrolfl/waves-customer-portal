@@ -129,6 +129,9 @@ const PLAN_UNAVAILABLE = 'terminal_plan_review_unavailable';
 const REVIEW_UNAVAILABLE = 'terminal_review_unavailable';
 // A Mac process without the Max-plan adapter (draftSourceFor): the draft is not read.
 const MAX_PLAN_MISSING = 'terminal_max_plan_missing';
+// The Mac job's run on a row with no handed brief, or one the terminal does not write (autonomous-runner runNext).
+const MAC_BRIEF_MISSING = 'terminal_mac_brief_missing';
+const MAC_NO_AGENT = 'terminal_mac_no_agent';
 const MAX_PLAN_REASON_CHARS = 700;
 // In Mac mode a wait is rechecked soon, not after RECHECK_MS: the Mac job takes a
 // draft the terminal wrote after the server's look at the row, and its claim
@@ -200,7 +203,8 @@ function draftProblem(parsed, opportunityId, expectedBriefId) {
   if (parsed.schema != null && !isObject(parsed.schema)) return 'schema must be an object';
   if (parsed.claims_ledger != null && !Array.isArray(parsed.claims_ledger)) return 'claims_ledger must be an array';
   if (parsed.notes_for_reviewer != null && typeof parsed.notes_for_reviewer !== 'string') return 'notes_for_reviewer must be text';
-  return answerPlanProblem(parsed.answer_plan);
+  // The plan is read only while the blog fact check reviews it; with the gate off a bad plan is ignored.
+  return require('./editorial-evidence').enabled() ? answerPlanProblem(parsed.answer_plan) : null;
 }
 
 // Shape only (no model): the validate_answer_plan input, when the file has one,
@@ -362,6 +366,11 @@ function draftSourceFor(opportunityId, brief, { handed = false, dryRun = false, 
       return fetched.code === HELD ? { ...fetched, held: true } : { ...fetched, wait: true };
     },
   };
+}
+
+// The Mac job's draft source for a row the terminal does not write: a wait, never an agent session.
+function macNoAgentSource() {
+  return { runWithBrief: async () => waitResult(MAC_NO_AGENT, 'the Mac job starts no agent session; the server drafts this row') };
 }
 
 /**
@@ -748,7 +757,7 @@ module.exports = {
   terminalWriterLive, editorialReviewOnMac, runningOnMac, editorialPlanRequired, needsEditorialPlan, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, draftSourceFor, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue, closeTerminalItems, blogDraftRequested, macHoldsBlogDraft,
   raiseHoldQuestion, syncHoldQuestions, holdSkipReason,
   branchFor, draftPathFor, draftProblem, holdProblem,
-  AWAITS_MAC, PLAN_UNAVAILABLE, REVIEW_UNAVAILABLE, MAX_PLAN_MISSING, MAC_RECHECK_MS, recheckMs, MAC_MODEL_LANES, maxPlanAdapterCovers,
+  AWAITS_MAC, PLAN_UNAVAILABLE, REVIEW_UNAVAILABLE, MAX_PLAN_MISSING, MAC_BRIEF_MISSING, MAC_NO_AGENT, macNoAgentSource, MAC_RECHECK_MS, recheckMs, MAC_MODEL_LANES, maxPlanAdapterCovers,
   AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID, MISSING, INVALID, UNREADABLE, RECHECK_MS, MAX_BRIEF_AGE_MS, BRANCH_PREFIX, DRAFT_DIR, DRAFT_FIELDS,
   HELD, HOLD_OUTCOME, HOLD_MS, HOLD_REASONS,
 };

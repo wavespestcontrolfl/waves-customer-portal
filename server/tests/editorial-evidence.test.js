@@ -405,7 +405,7 @@ test.each([
   }, {
     page_type: 'refresh',
     action_type: 'refresh_existing_page',
-  })).rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
+  })).rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE', transient: _label === 'throws' });
   expect(reviewer.review).not.toHaveBeenCalled();
 });
 test('a repair whose model did not answer is a transient outage; any other repair error is not', async () => {

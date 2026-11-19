@@ -339,6 +339,16 @@ class AutonomousRunner {
     // written from. Null (gate off, dry run, nothing waiting) = compose.
     const terminalWriter = require('./terminal-writer');
     const handedBrief = await this._briefHandedToTerminal(opp.id, { dryRun });
+    // The Mac job takes only a row whose brief was handed to the terminal: it composes none, since a new
+    // brief can route the row to a paid agent. The server briefs the row again after the deferral.
+    if (!handedBrief && !dryRun && terminalWriter.runningOnMac()) {
+      const finalized = await finalize(run, t0, {
+        outcome: 'skipped_mac_brief_missing', skip_reason: terminalWriter.MAC_BRIEF_MISSING,
+        reviewer_notes: 'the brief this row was listed with could not be loaded; the server briefs it again',
+      });
+      await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.recheckMs()), { claimToken });
+      return finalized;
+    }
     let brief;
     try {
       brief = handedBrief || await briefBuilder.compose(opp.id, {
@@ -707,7 +717,9 @@ class AutonomousRunner {
     // with the dispatcher's own runWithBrief contract, or null (gate off,
     // dry run, a title/meta rewrite) = the agent. Only this step changes:
     // the claim, the brief and every gate below are the same.
-    const draftSource = terminalWriter.draftSourceFor(opp.id, brief, { handed: Boolean(handedBrief), dryRun }) || dispatcher;
+    // The Mac job never starts an agent session (a paid API call): a row the terminal does not write waits.
+    const draftSource = terminalWriter.draftSourceFor(opp.id, brief, { handed: Boolean(handedBrief), dryRun })
+      || (terminalWriter.runningOnMac() ? terminalWriter.macNoAgentSource() : dispatcher);
     const dispatchOnce = () => draftSource.runWithBrief(brief, dispatchOptions).catch((err) => ({
       ok: false, reason: `dispatch_threw:${err.message}`,
     }));

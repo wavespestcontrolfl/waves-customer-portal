@@ -5813,6 +5813,31 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     expect(onward.mock.calls[0][2]).toMatchObject({ brief_id: 'brief_handed', agent_id: 'terminal-writer', draft_payload: draft, terminal_draft_revision: 'sha_read' });
   });
 
+  describe('the Mac job composes no brief and starts no agent session', () => {
+    const saved = { ...process.env };
+    afterEach(() => { process.env = { ...saved }; });
+    test('a row with no handed brief is deferred, with nothing composed and no agent', async () => {
+      process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
+      process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = 'mac';
+      const { queue, dispatcher, briefBuilder, runner, terminalWriter } = setup({ handed: null });
+      const result = await runner.runNext();
+      expect(result).toMatchObject({ outcome: 'skipped_mac_brief_missing', skip_reason: 'terminal_mac_brief_missing' });
+      expect(briefBuilder.compose).not.toHaveBeenCalled();
+      expect(terminalWriter.draftSourceFor).not.toHaveBeenCalled();
+      expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+      expect(queue.defer).toHaveBeenCalledWith('opp_tw', expect.any(Date), { claimToken: claimedAt });
+    });
+    test('a handed brief the terminal does not write waits instead of starting the agent', async () => {
+      process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
+      process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = 'mac';
+      const { queue, dispatcher, runner } = setup({ source: null, handed: city('brief_handed') });
+      const result = await runner.runNext();
+      expect(result).toMatchObject({ outcome: 'deferred_terminal_draft', skip_reason: 'terminal_mac_no_agent', brief_id: 'brief_handed' });
+      expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+      expect(queue.defer).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('the Mac job: an editorial review that could not run is no verdict on the terminal draft', () => {
     const saved = { ...process.env };
     afterEach(() => { process.env = { ...saved }; });

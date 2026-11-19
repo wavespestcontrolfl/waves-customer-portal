@@ -428,6 +428,10 @@ describe('blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST / _RUNNER)',
     const conn = { raw: jest.fn(async () => ({ rows: [{ opportunity_id: ID, brief_id: BRIEF, outcome: tw.AWAITING_OUTCOME, brief_created_at: new Date(), score: 50 }] })) };
     const listing = await tw.awaitingTerminalDrafts({ deps: { db: conn, gh: ghWith(withPlan()) } });
     expect(listing.written).toHaveLength(1);
+    // The fact check turned off: the plan is not read, so a malformed one no longer holds the body back.
+    mockEditorialOn = false;
+    const off = await tw.fetchTerminalDraft(ID, { gh: ghWith(withPlan({ answer_plan: { sections: [{}] } })), expectedBriefId: BRIEF });
+    expect(off).toMatchObject({ ok: true });
     expect(reviewPlan).not.toHaveBeenCalled();
   });
 

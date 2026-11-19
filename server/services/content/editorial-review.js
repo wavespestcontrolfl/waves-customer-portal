@@ -51,6 +51,9 @@ function errorResult(document, title, detail, action, sources = [], reviewedAt =
   };
 }
 
+// The dispatcher marks a leg whose answer the caller's validator refused (llm/call.js legFailure).
+const validatorRejected = (response) => (response?.failures || []).some((failure) => failure?.validator === true);
+
 function boundedJson(value, maxChars) {
   if (value == null) return '(none supplied)';
   let json;
@@ -155,11 +158,11 @@ async function review({ document, title, domain, sourceUrls = [], factsPack = nu
     return errorResult(document, title, `Editorial model dispatch failed: ${err.message}`, 'Retry the complete editorial review; do not publish this unreviewed document.', evidence.records, reviewedAt);
   }
   if (!response?.ok || !response.json || !String(response.model || '').trim()) {
-    return errorResult(document, title, `Editorial model did not return a complete valid review (${response?.reason || 'invalid response'}).`, 'Retry the complete editorial review; do not publish this unreviewed document.', evidence.records, reviewedAt);
+    return errorResult(document, title, `Editorial model did not return a complete valid review (${response?.reason || 'invalid response'}).`, 'Retry the complete editorial review; do not publish this unreviewed document.', evidence.records, reviewedAt, !validatorRejected(response));
   }
   const reviewed = holdUnsourcedFigures(response.json);
   const validationError = validateReviewJson(reviewed, analysis, document, title, evidence.records);
-  if (validationError) return errorResult(document, title, `Editorial response failed validation: ${validationError}.`, 'Retry the complete editorial review; do not publish from partial coverage.', evidence.records, reviewedAt);
+  if (validationError) return errorResult(document, title, `Editorial response failed validation: ${validationError}.`, 'Retry the complete editorial review; do not publish from partial coverage.', evidence.records, reviewedAt, false);
 
   const checks = addOperationalFindings(reviewed.checks, analysis, evidence.errors, document, title);
   return {
@@ -219,8 +222,9 @@ async function repair({ document, findings = [], sources = [], title = '', domai
     validate: (json) => repairViolation(split.body, json?.body),
   });
   if (!response?.ok || !response.json) {
-    // The model did not answer (a timeout, a limit): the same findings may repair on a retry.
-    throw Object.assign(new Error(`editorial repair failed: ${response?.reason || 'invalid response'}`), { transient: true });
+    // The model did not answer (a timeout, a limit): the same findings may repair on a retry. A repair
+    // the validator rejected was an answer, so it is not an outage.
+    throw Object.assign(new Error(`editorial repair failed: ${response?.reason || 'invalid response'}`), { transient: !validatorRejected(response) });
   }
   const violation = repairViolation(split.body, response.json.body);
   if (violation) throw new Error(`editorial repair rejected: ${violation}`);

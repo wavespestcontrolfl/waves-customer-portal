@@ -283,6 +283,20 @@ Vague filler about {{brandName}}.
     await expect(editorial.repair({ document: repairDocument, findings: [] })).rejects.toThrow(/editorial repair rejected/);
   });
 
+  test('a repair the model did not answer is transient; one the validator refused is not', async () => {
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed', failures: [{ provider: 'anthropic', reason: 'anthropic_timeout' }] });
+    await expect(editorial.repair({ document: repairDocument, findings: [] })).rejects.toMatchObject({ message: expect.stringMatching(/editorial repair failed/), transient: true });
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed', failures: [{ provider: 'anthropic', reason: 'component_removed', validator: true }, { provider: 'openai', reason: 'openai_403' }] });
+    await expect(editorial.repair({ document: repairDocument, findings: [] })).rejects.toMatchObject({ transient: false });
+  });
+
+  test('a review the validator refused is not transient; a model that did not answer is', async () => {
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed', failures: [{ provider: 'anthropic', reason: 'claim_kind_mismatch:C1', validator: true }] });
+    expect(await editorial.review({ document: DOCUMENT, title: 'Stop Mosquito Breeding' })).toMatchObject({ pass: false, transient: false });
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed', failures: [{ provider: 'anthropic', reason: 'anthropic_timeout' }] });
+    expect(await editorial.review({ document: DOCUMENT, title: 'Stop Mosquito Breeding' })).toMatchObject({ pass: false, transient: true });
+  });
+
   test('preserves original source indexes after rejecting invalid repair evidence', async () => {
     const body = inventory.splitFrontmatter(repairDocument).body;
     const excerpt = 'Empty standing water from containers once a week.';

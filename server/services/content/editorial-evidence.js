@@ -170,15 +170,17 @@ async function refreshReviewFrontmatter(draft, brief) {
   // conversely, applying the review to every refresh would pull service and
   // location pages into a blog-only contract).
   const target = draft.file_path || brief.target_url || brief.page_url || draft.page_url;
+  if (!target) throw reviewError(null);
   let resolved;
   try {
     // Dynamic to avoid the load-time cycle: astro-publisher imports this
     // module for final evidence generation.
     const publisher = require('../content-astro/astro-publisher');
-    if (!target || typeof publisher.resolveExistingAstroFileForTarget !== 'function') throw new Error('refresh target resolver unavailable');
+    if (typeof publisher.resolveExistingAstroFileForTarget !== 'function') throw new Error('refresh target resolver unavailable');
     resolved = await publisher.resolveExistingAstroFileForTarget(target);
   } catch {
-    throw reviewError(null);
+    // A read that failed (GitHub, the resolver) may pass later; a target with no file below does not.
+    throw reviewError({ checks: [{ name: 'source_support', status: 'error', findings: [{ action: 'The refresh target could not be read; retry the review.' }] }], transient: true });
   }
   if (!resolved?.path) throw reviewError(null);
   if (!applicable(resolved.path)) return null;
