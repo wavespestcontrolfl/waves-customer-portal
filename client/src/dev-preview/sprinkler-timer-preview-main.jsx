@@ -27,6 +27,7 @@
 import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import { createPortal } from 'react-dom';
+import '../index.css';
 import './portal-preview-main';
 import api from '../utils/api';
 import { etDateString, addETDays } from '../lib/timezone';
