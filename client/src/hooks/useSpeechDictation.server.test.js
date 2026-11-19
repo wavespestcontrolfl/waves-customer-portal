@@ -348,15 +348,19 @@ describe("useSpeechDictation with server dictation on", () => {
     Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
     try {
       failFirstPost(fetchMock, () => { visibility = "hidden"; throw new TypeError("Load failed"); });
-      await recordAndStop(onTranscript);
+      const result = await recordAndStop(onTranscript);
       await waitFor(() => expect(postsTo(fetchMock)).toHaveLength(1));
       await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
       expect(confirm).not.toHaveBeenCalled();
+      // `uploading` holds while the question waits: callers lock their field on it (the SMS
+      // composer refuses every recipient change while it is true), so the words keep their draft.
+      expect(result.current.uploading).toBe(true);
       visibility = "visible";
       await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
       await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("Treated the lanai for roaches."));
       expect(confirm).toHaveBeenCalledTimes(1);
       expect(postsTo(fetchMock)).toHaveLength(2);
+      await waitFor(() => expect(result.current.uploading).toBe(false));
     } finally {
       delete document.visibilityState;
     }
