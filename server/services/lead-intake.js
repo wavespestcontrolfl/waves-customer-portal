@@ -67,7 +67,8 @@ function looksLikeAddress(body) {
 // body separately, so the tail is simply dropped here (stripServiceTail in
 // ./service-pair-terms). The pest + lawn pair request ("…, lawn fertilization
 // and pest control", "…, both pest and lawn services") is one tail, read the
-// way the classifier reads it, so no part of it stays on the street line.
+// way the classifier's fast path reads it, so no part of it stays on the
+// street line. Other words stay, as before, for staff to clean at pricing.
 
 function extractAddressCandidate(body) {
   const text = String(body || '');

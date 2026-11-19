@@ -355,6 +355,26 @@ describe('two-service reply (pest_lawn)', () => {
     expect(mockEstimateInserts).toHaveLength(1);
     expect(mockEstimateInserts[0].service_interest).toBe(PEST_LAWN_LABEL);
   });
+
+  test.each([
+    ['pest_lawn', PEST_LAWN_LABEL],
+    ['pest', 'Pest Control'],
+  ])('words the strip does not know stay on the street line for %s, as before: the draft is made and staff clean the line', async (interest, label) => {
+    // The model reads "grub treatment" as lawn care, but no known tail ends the line, so the rough line
+    // is saved (main's rule: dropping it would strand the quote). A one-service answer saves the same line.
+    mockClassify.mockResolvedValue({ interest, confidence: 0.8, method: 'ai' });
+    mockStartSmsThreadDraft.mockImplementation(async (args) => (args.scopeCheckOnly
+      ? { started: false, skipped: 'scope_check_only' }
+      : { started: false, skipped: 'gate_off' }));
+    const body = '100 Palm Ave, quarterly pest control and grub treatment';
+
+    const result = await handleIntakeReply({ ...CUSTOMER(), address_line1: '' }, body);
+
+    expect(result).toEqual({ handled: true, next: 'estimate_drafted' });
+    expect(mockCustomerUpdates).toContainEqual({ address_line1: body });
+    expect(mockEstimateInserts).toHaveLength(1);
+    expect(mockEstimateInserts[0].service_interest).toBe(label);
+  });
 });
 
 describe('successful handoff', () => {

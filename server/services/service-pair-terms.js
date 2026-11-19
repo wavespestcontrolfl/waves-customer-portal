@@ -6,9 +6,13 @@
  *  - lead-intake.js drops a known service tail from a street line captured
  *    from the same reply ("100 Palm Ave, pest and lawn services").
  * Both read the text through the same normalization (normalizePairText), so
- * the street line loses exactly the pair request the classifier reads,
- * whatever plain punctuation the customer typed around or inside it
- * ("pest-control and lawn care", `"pest and lawn"`).
+ * the street line loses exactly the pair request the classifier's fast path
+ * reads, whatever plain punctuation the customer typed around or inside it
+ * ("pest-control and lawn care", `"pest and lawn"`). Words the model reads as
+ * a request ("…, quarterly pest control and grub treatment") are no known
+ * tail: they stay on the street line, as any unknown words do on main.
+ * lead-intake.js keeps that rough line, and staff clean it at pricing time;
+ * dropping the line would strand the quote.
  * estimate-clarify-asks.js keeps its own tail pattern: there a tail is the
  * service answer itself, with no classifier.
  *

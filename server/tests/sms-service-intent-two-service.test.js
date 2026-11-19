@@ -53,8 +53,8 @@ describe('a pair inside other words, or both keyword sets without a pair, goes t
     ['I have got bugs in my yard', 'pest'],
     // The lawn-line turf-pest product, not two services.
     ['Lawn pest control', 'lawn'],
-    // A turf insect is a lawn signal, so a pest word beside it is no
-    // pest-only answer: the model reads the request.
+    // A turf insect sends the reply to the model, so a pest word beside it
+    // is no pest-only answer: the model reads the request.
     ['Quarterly pest control and grub treatment', 'pest_lawn'],
     ['quarterly pest control and army worm treatment', 'pest_lawn'],
     ['roaches inside and armyworms in the grass', 'pest_lawn'],
@@ -98,14 +98,21 @@ describe('unchanged single-service and one-time answers', () => {
   });
 });
 
-describe('turf insects are lawn signals (the Lawn Pest Knockdown list)', () => {
+describe('a turf insect (the Lawn Pest Knockdown list) sends the reply to the model, never to a fast-path answer', () => {
   test.each([
-    'grubs', 'Grub treatment please', 'sod webworms', 'armyworms all over', 'chinch damage',
-    // Two-word names collapse first, so "bug" is no pest word here.
-    'chinch bugs in the lawn', 'sod web worms', 'army worms in the grass',
-  ])('%j => lawn, no model call', async (body) => {
-    await expect(classifyServiceIntent(body)).resolves.toEqual({ interest: 'lawn', confidence: 0.9, method: 'regex' });
-    expect(mockDispatch).not.toHaveBeenCalled();
+    ['grubs', 'lawn'], ['Grub treatment please', 'lawn'], ['sod webworms', 'lawn'], ['armyworms all over', 'lawn'],
+    // Main read "chinch" as lawn with no model call; now the model reads it as it reads the other turf insects.
+    ['chinch damage', 'lawn'],
+    // Two-word names collapse to the turf word first.
+    ['chinch bugs in the lawn', 'lawn'], ['sod web worms', 'lawn'], ['army worms in the grass', 'lawn'],
+    // A refusal is the model's to read, not a lawn request.
+    ["I don't need grub treatment", 'unknown'],
+    ['no chinch bug spray please', 'unknown'],
+  ])('%j => the model decides (%s)', async (body, modelInterest) => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { interest: modelInterest, confidence: 0.8 } });
+    const result = await classifyServiceIntent(body);
+    expect(result).toEqual({ interest: modelInterest === 'unknown' ? null : modelInterest, confidence: 0.8, method: 'ai' });
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 });
 

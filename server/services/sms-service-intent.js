@@ -54,8 +54,11 @@ const PEST_KEYWORDS = [
 ];
 
 // Turf insects, the Lawn Pest Knockdown list (chinch bugs, sod webworms,
-// armyworms, grubs): lawn words for the service pick and the photo pick.
-// Two-word names collapse to these first (normalizeLawnPests).
+// armyworms, grubs). The service pick sends a reply that names one to the
+// model, never to a fast-path answer: the model reads the request ("quarterly
+// pest control and grub treatment", "I don't need grub treatment") with its
+// turf-insect rule. The photo pick counts them as lawn words. Two-word names
+// collapse to these first (normalizeLawnPests).
 const TURF_PEST_WORDS = ['grub', 'grubs', 'webworm', 'webworms', 'armyworm', 'armyworms', 'chinch'];
 
 const LAWN_KEYWORDS = [
@@ -63,10 +66,6 @@ const LAWN_KEYWORDS = [
   'fertilization', 'mow', 'mowing', 'plug', 'plugs', 'plugging',
   'sod', 'dethatch', 'dethatching', 'top dress', 'top-dress', 'top dressing',
   'yard', 'yellow grass', 'brown grass', 'crabgrass',
-  // With a pest word in the same reply ("quarterly pest control and grub
-  // treatment") the reply goes to the model, whose prompt reads turf insects
-  // as lawn care.
-  ...TURF_PEST_WORDS,
 ];
 
 // "one time" / "one-time" / "just once" / "single visit"
@@ -101,8 +100,8 @@ function escapeRe(s) {
 
 function regexClassify(body) {
   if (!body || typeof body !== 'string') return null;
-  // "chinch bug" counts as the lawn word alone, and "army worm" matches
-  // "armyworm" (the photo pick's rule, codex #4810 r11/r14).
+  // "chinch bug", "army worm" and "sod web worm" collapse to the turf word
+  // (the photo pick's rule, codex #4810 r11/r14).
   const lower = normalizeLawnPests(body.toLowerCase());
 
   const hasPest = tokenMatches(lower, PEST_KEYWORDS);
@@ -116,7 +115,9 @@ function regexClassify(body) {
 
   if (SERVICE_PAIR_RE.test(normalizePairText(lower))) return { interest: 'pest_lawn', confidence: 0.9, method: 'regex' };
   // Both pest + lawn words but no explicit pair → ambiguous, let Claude decide.
+  // So does a turf insect (TURF_PEST_WORDS).
   if (hasPest && hasLawn) return null;
+  if (tokenMatches(lower, TURF_PEST_WORDS)) return null;
   if (hasPest) return { interest: 'pest', confidence: 0.9, method: 'regex' };
   if (hasLawn) return { interest: 'lawn', confidence: 0.9, method: 'regex' };
 
