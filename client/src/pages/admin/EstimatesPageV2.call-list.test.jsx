@@ -155,6 +155,13 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// The pipeline's draft read runs once per load, so it counts loads.
+const draftReadCount = () => globalThis.fetch.mock.calls.filter(([url, init = {}]) => {
+  const parsed = new URL(String(url), "http://fixture.invalid");
+  return parsed.pathname === "/api/admin/estimates" && init.method !== "PATCH" && parsed.searchParams.get("status") === "draft";
+}).length;
+const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+
 const rowIds = (container) =>
   Array.from(container.querySelectorAll("[data-estimate-id]")).map((n) => n.getAttribute("data-estimate-id"));
 
@@ -213,12 +220,35 @@ it.each([
   const { container } = renderPage(width, "?tab=estimates&view=call_today");
   await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
   await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
-  const draftReads = () => globalThis.fetch.mock.calls.filter(([url, init = {}]) => {
-    const parsed = new URL(String(url), "http://fixture.invalid");
-    return parsed.pathname === "/api/admin/estimates" && init.method !== "PATCH" && parsed.searchParams.get("status") === "draft";
-  }).length;
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
-  expect(draftReads()).toBe(1);
+  await settle();
+  expect(draftReadCount()).toBe(1);
+});
+
+// React StrictMode replays each mount effect in development (the mount fetch too, so two loads either way). The link
+// a list opens on is still taken once: the same reads as a list opened without the link.
+it("(desktop) under StrictMode, the link a list opens on adds no pipeline load", async () => {
+  const mount = (search) => {
+    window.innerWidth = 1440;
+    return render(
+      <React.StrictMode>
+        <MemoryRouter initialEntries={[`/admin/pipeline${search}`]}>
+          <RouterProbe />
+          <EstimatesPageV2 />
+        </MemoryRouter>
+      </React.StrictMode>,
+    );
+  };
+  const plain = mount("?tab=estimates");
+  await screen.findByText("Fresh View");
+  await settle();
+  const plainLoads = draftReadCount();
+  plain.unmount();
+  globalThis.fetch.mockClear();
+  const { container } = mount("?tab=estimates&view=call_today");
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
+  await settle();
+  expect(draftReadCount()).toBe(plainLoads);
 });
 
 // With Call today already selected, a new link changes no filter: the list must still load fresh rows, or it keeps

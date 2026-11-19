@@ -24,7 +24,7 @@ import React, {
   useMemo,
   useRef,
 } from "react";
-import { useSearchParams, useNavigate } from "react-router-dom";
+import { useSearchParams, useNavigate, useLocation } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { useIntelligenceBarActions } from "../../hooks/useIntelligenceBarPageData";
 import {
@@ -284,31 +284,32 @@ const CALL_LIST_MATCHERS = {
 // The list filter, with ?view=call_today (the 9 AM push links here) selecting "Call today". Any other value does
 // nothing. The list takes the parameter once and drops it from the URL (replace: no new history entry), so a later
 // filter change, a refresh, or leaving and coming back is not pinned to it. The effect watches the URL, so the link
-// also works on a list that is already open. The third value counts the links taken: the list clears its search, date
-// filter and page when it changes (useClearControlsOnCallTodayLink), so nothing left from earlier hides a row the push
-// counted. The fourth value counts only the links taken on a list that was already open: each one reloads the rows
-// (with the filter already on Call today, the filter alone would not), while the link a list opens on is loaded by
-// the mount's own fetch, so the first tap never loads the pipeline twice.
+// also works on a list that is already open. The third value counts the links taken on an open list: each one clears
+// the search, date filter and page (useClearControlsOnCallTodayLink), so nothing left from earlier hides a row the push
+// counted, and reloads the rows (with the filter already on Call today, the filter alone would not). The link a list
+// opens on belongs to the mount: its controls start clear and its own fetch loads it. Each navigation (location.key) is
+// taken once, so an effect replay (React StrictMode) never counts a link twice.
 function useCallTodayLinkFilter() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const { key: navigationKey } = useLocation();
   const linked = searchParams.get("view") === "call_today";
   const [filter, setFilter] = useState(linked ? "call_today" : "all");
   const [linksTaken, setLinksTaken] = useState(0);
-  const [linkReloads, setLinkReloads] = useState(0);
-  const openedByLink = useRef(linked);
+  const takenNavigation = useRef(linked ? navigationKey : null);
   useEffect(() => {
     if (!linked) return;
-    setFilter("call_today");
-    setLinksTaken((n) => n + 1);
-    if (openedByLink.current) openedByLink.current = false;
-    else setLinkReloads((n) => n + 1);
+    if (takenNavigation.current !== navigationKey) {
+      takenNavigation.current = navigationKey;
+      setFilter("call_today");
+      setLinksTaken((n) => n + 1);
+    }
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
       next.delete("view");
       return next;
     }, { replace: true });
-  }, [linked, setSearchParams]);
-  return [filter, setFilter, linksTaken, linkReloads];
+  }, [linked, navigationKey, setSearchParams]);
+  return [filter, setFilter, linksTaken];
 }
 // Each Call today link the list takes clears the controls that narrow it beyond the filter. Called after the paging
 // hook, with the state setters (stable) and the paging page setter (stable, a useState setter).
@@ -2085,7 +2086,7 @@ function EstimatePipelineViewV2({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [customerPanelId, setCustomerPanelId] = useState(null);
-  const [filter, setFilter, callTodayLinksTaken, callTodayLinkReloads] = useCallTodayLinkFilter();
+  const [filter, setFilter, callTodayLinksTaken] = useCallTodayLinkFilter();
   const [dateRange, setDateRange] = useState("all");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState("newest");
@@ -2165,14 +2166,14 @@ function EstimatePipelineViewV2({
     estimates,
     refresh: refreshEstimates,
   });
-  // A Call today link taken on the open list (callTodayLinkReloads) loads it fresh too: with the filter already
+  // A Call today link taken on the open list (callTodayLinksTaken) loads it fresh too: with the filter already
   // selected, the filter alone does not change, and the rows the push counted may have moved since the last load.
   useEffect(() => {
     refreshEstimates();
     return () => {
       estimatesRequestRef.current += 1;
     };
-  }, [filter, refreshEstimates, estimatesRefresh, callTodayLinkReloads]);
+  }, [filter, refreshEstimates, estimatesRefresh, callTodayLinksTaken]);
   const archiveEstimate = useCallback(
     async (e) => {
       if (
@@ -4163,7 +4164,7 @@ function EstimatesMobileListView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [search, setSearch] = useState("");
-  const [filter, setFilter, callTodayLinksTaken, callTodayLinkReloads] = useCallTodayLinkFilter();
+  const [filter, setFilter, callTodayLinksTaken] = useCallTodayLinkFilter();
   const [dateFilter, setDateFilter] = useState("all");
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
@@ -4207,7 +4208,7 @@ function EstimatesMobileListView({
       estimatesRequestRef.current += 1;
     };
     // A Call today link taken on the open list loads it fresh, as on desktop.
-  }, [filter, refreshEstimates, estimatesRefresh, callTodayLinkReloads]);
+  }, [filter, refreshEstimates, estimatesRefresh, callTodayLinksTaken]);
   const markEstimateAccepted = useCallback(
     async (e) => {
       // A commercial proposal win auto-creates the customer when none is linked.
