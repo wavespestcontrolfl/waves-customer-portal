@@ -45,6 +45,7 @@ const { buildCancellationImpact } = require('./cancellation-resolution/impact');
 const { processCancellationRequest, planScopedWindDown } = require('./cancellation-processor');
 const { hasCancellableWork } = require('./cancellation-eligibility');
 const { sendCancellationConfirmations, familyLabelOf } = require('./cancellation-confirmations');
+const { onlyStaleVisitErrorsLeft } = require('./cancellation-stale-visit-verdict');
 
 const EFFECTIVE_DATES = ['now', 'end_of_coverage'];
 const PREPAY_DISPOSITIONS = ['end_at_term', 'end_now_refund'];
@@ -2276,11 +2277,8 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // out) still bells the office, but the plan itself wound down (churned,
   // or the scoped families pulled): a run whose ONLY errors are such visits
   // confirms as done, not "a team member will confirm" (owner 2026-10-30).
-  const staleVisitErrors = new Set((result && Array.isArray(result.staleInProgressVisitIds) ? result.staleInProgressVisitIds : [])
-    .map((id) => `in_progress_visit:${id}`));
-  const onlyStaleVisitErrors = errors.length > 0 && errors.every((e) => staleVisitErrors.has(e));
   const confirmationVerdict = (processed && errors.length === 0)
-    || (onlyStaleVisitErrors && !!result && !!(result.churned || result.scopedWoundDown));
+    || onlyStaleVisitErrorsLeft(result, errors);
   let confirmations = { smsSent: false, emailSent: false, channels: [] };
   if (input.sendConfirmation) {
     confirmations = await sendCancellationConfirmations({
