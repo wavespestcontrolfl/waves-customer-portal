@@ -244,6 +244,9 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
       customer_id: ids.customer,
       status: 'confirmed',
       reservation_expires_at: staleStamp,
+      // A staff-side value is not the checkout's authorized amount. Adoption
+      // must overwrite it before the recurring children copy their parent.
+      estimated_price: 999,
     });
 
     const resumed = await oneTap.getPurchaseState({ customerId: ids.customer, purchaseId: init.purchaseId });
@@ -261,6 +264,7 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
     const series = await trx('scheduled_services').where({ source_estimate_id: init.estimateId });
     expect(series).toHaveLength(4);
     expect(series.every((row) => row.is_recurring === true)).toBe(true);
+    expect(money(series)).toEqual(Array(4).fill(Number(init.perVisit)));
     expect(series.filter((row) => !row.recurring_parent_id)).toEqual([
       expect.objectContaining({ id: purchase.scheduled_service_id, customer_id: ids.customer,
         reservation_expires_at: null, window_start: expect.stringMatching(/^10:00/) }),
@@ -272,6 +276,78 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
       termsAccepted: true, ip: '203.0.113.9', userAgent: 'staff-claim-retry' });
     expect(retried).toMatchObject({ success: true, firstVisit: { windowStart: '10:00' } });
     expect(await trx('scheduled_services').where({ source_estimate_id: init.estimateId })).toHaveLength(4);
+  });
+
+  test('confirm also adopts the exact staff claim when staff already cleared its hold stamp', async () => {
+    await seedOwnedService('lawn_care');
+    const { init } = await startPurchase('pest_control');
+    const purchase = await trx('one_tap_purchases').where({ id: init.purchaseId }).first();
+    await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).update({
+      customer_id: ids.customer,
+      status: 'confirmed',
+      reservation_expires_at: null,
+      estimated_price: null,
+    });
+
+    await expect(oneTap.confirm({ customerId: ids.customer, purchaseId: init.purchaseId,
+      termsAccepted: true, ip: '203.0.113.9', userAgent: 'staff-claim-cleared-stamp' }))
+      .resolves.toMatchObject({ success: true, firstVisit: { windowStart: '10:00' } });
+    const series = await trx('scheduled_services').where({ source_estimate_id: init.estimateId });
+    expect(series).toHaveLength(4);
+    expect(series.filter((row) => !row.recurring_parent_id)).toEqual([
+      expect.objectContaining({ id: purchase.scheduled_service_id, reservation_expires_at: null }),
+    ]);
+    expect(money(series)).toEqual(Array(4).fill(Number(init.perVisit)));
+  });
+
+  test('a claimed appointment cannot clear its stale stamp over another linked stale-stamp booking', async () => {
+    await seedOwnedService('lawn_care');
+    const { init } = await startPurchase('pest_control');
+    const purchase = await trx('one_tap_purchases').where({ id: init.purchaseId }).first();
+    const claimed = await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).first();
+    const staleStamp = new Date(Date.now() - 60 * 60 * 1000);
+    await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).update({
+      customer_id: ids.customer, status: 'confirmed', reservation_expires_at: staleStamp,
+    });
+    const rival = await trx('scheduled_services').whereIn('source_estimate_id', ids.ownedEstimates).first('id');
+    await trx('scheduled_services').where({ id: rival.id }).update({
+      scheduled_date: claimed.scheduled_date,
+      window_start: claimed.window_start,
+      window_end: claimed.window_end,
+      technician_id: ids.technician,
+      customer_id: ids.customer,
+      status: 'confirmed',
+      reservation_expires_at: staleStamp,
+    });
+
+    await expect(oneTap.confirm({ customerId: ids.customer, purchaseId: init.purchaseId,
+      termsAccepted: true, ip: '203.0.113.9', userAgent: 'stale-claim-conflict' }))
+      .rejects.toMatchObject({ status: 409, code: 'SLOT_UNAVAILABLE' });
+    expect(await trx('one_tap_purchases').where({ id: init.purchaseId })
+      .first('status', 'scheduled_service_id')).toEqual({
+      status: 'reserved', scheduled_service_id: purchase.scheduled_service_id,
+    });
+    expect(await trx('scheduled_services').where({ id: purchase.scheduled_service_id })
+      .first('reservation_expires_at')).toEqual({ reservation_expires_at: staleStamp });
+  });
+
+  test('a stale overlapping reserve snapshot cannot replace the purchase pointer or mint another hold', async () => {
+    await seedOwnedService('lawn_care');
+    const { init, slotId } = await startPurchase('pest_control');
+    const purchase = await trx('one_tap_purchases').where({ id: init.purchaseId }).first();
+    const before = await trx('scheduled_services').where({ source_estimate_id: init.estimateId });
+
+    await expect(require('../services/slot-reservation').reserveSlot({
+      estimateId: init.estimateId,
+      slotId,
+      purchaseReservation: { purchaseId: init.purchaseId, expectedScheduledServiceId: null },
+    })).rejects.toMatchObject({ code: 'PURCHASE_RESERVATION_CHANGED' });
+
+    expect(await trx('one_tap_purchases').where({ id: init.purchaseId })
+      .first('status', 'scheduled_service_id')).toEqual({
+      status: 'reserved', scheduled_service_id: purchase.scheduled_service_id,
+    });
+    expect(await trx('scheduled_services').where({ source_estimate_id: init.estimateId })).toHaveLength(before.length);
   });
 
   test.each([

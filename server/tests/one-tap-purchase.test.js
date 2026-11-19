@@ -45,6 +45,17 @@ jest.mock('../models/db', () => {
         });
         return q;
       },
+      whereNotExists(subFn) {
+        filters.push(() => {
+          let captured = null;
+          const fake = { select: () => fake, from: (t) => { captured = builder(t); return captured; } };
+          try {
+            subFn.call(fake, fake);
+            return captured ? captured._rows().length === 0 : true;
+          } catch { return false; }
+        });
+        return q;
+      },
       whereNotNull(col) { filters.push((r) => r[col] != null); return q; },
       orderBy() { return q; },
       forUpdate() { state.events.push({ type: 'row', table }); return q; },
@@ -630,11 +641,20 @@ describe('reserve / release', () => {
   });
 
   test('reserve holds the slot and moves the purchase to reserved', async () => {
-    slotReservation.reserveSlot.mockResolvedValue({ scheduledServiceId: 'ss-1', expiresAt: futureIso() });
+    slotReservation.reserveSlot.mockImplementation(async ({ purchaseReservation }) => {
+      expect(purchaseReservation).toEqual({ purchaseId: 'p-1', expectedScheduledServiceId: null });
+      Object.assign(db.__state.tables.one_tap_purchases[0], {
+        status: 'reserved', scheduled_service_id: 'ss-1', slot_id: SLOT.slotId,
+      });
+      return { scheduledServiceId: 'ss-1', expiresAt: futureIso() };
+    });
     const out = await oneTap.reserve({ customerId: 'cust-1', purchaseId: 'p-1', slotId: SLOT.slotId });
     expect(out.scheduledServiceId).toBe('ss-1');
     expect(out.holdMinutes).toBe(15);
-    expect(slotReservation.reserveSlot).toHaveBeenCalledWith({ estimateId: 'est-1', slotId: SLOT.slotId });
+    expect(slotReservation.reserveSlot).toHaveBeenCalledWith({
+      estimateId: 'est-1', slotId: SLOT.slotId,
+      purchaseReservation: { purchaseId: 'p-1', expectedScheduledServiceId: null },
+    });
     const purchase = db.__state.tables.one_tap_purchases[0];
     expect(purchase.status).toBe('reserved');
     expect(purchase.scheduled_service_id).toBe('ss-1');
@@ -647,7 +667,13 @@ describe('reserve / release', () => {
       { id: 'ss-old', customer_id: null, reservation_expires_at: futureIso() },
       { id: 'ss-1', customer_id: null, reservation_expires_at: futureIso() },
     ];
-    slotReservation.reserveSlot.mockResolvedValue({ scheduledServiceId: 'ss-1', expiresAt: futureIso() });
+    slotReservation.reserveSlot.mockImplementation(async ({ purchaseReservation }) => {
+      expect(purchaseReservation).toEqual({ purchaseId: 'p-1', expectedScheduledServiceId: 'ss-old' });
+      Object.assign(db.__state.tables.one_tap_purchases[0], {
+        status: 'reserved', scheduled_service_id: 'ss-1', slot_id: SLOT.slotId,
+      });
+      return { scheduledServiceId: 'ss-1', expiresAt: futureIso() };
+    });
 
     await oneTap.reserve({ customerId: 'cust-1', purchaseId: 'p-1', slotId: SLOT.slotId });
 
@@ -655,6 +681,7 @@ describe('reserve / release', () => {
       estimateId: 'est-1',
       slotId: SLOT.slotId,
       previousScheduledServiceId: 'ss-old',
+      purchaseReservation: { purchaseId: 'p-1', expectedScheduledServiceId: 'ss-old' },
     });
     expect(db.__state.tables.one_tap_purchases[0]).toMatchObject({
       status: 'reserved',
@@ -1179,6 +1206,23 @@ describe('confirm', () => {
       .rejects.toMatchObject({ status: 409, code: 'RESERVATION_EXPIRED' });
     expect(db.__state.tables.one_tap_purchases[0].scheduled_service_id).toBe('ss-9');
     expect(db.__state.tables.one_tap_purchases[0].status).toBe('reserved');
+  });
+
+  test('the expired-hold reset preserves a pointer staff claimed and moved during confirm', async () => {
+    const err = new Error('reservation moved off the pre-locked date');
+    err.code = 'RESERVATION_EXPIRED';
+    slotReservation.commitReservation.mockImplementation(async () => {
+      Object.assign(db.__state.tables.scheduled_services[0], {
+        customer_id: 'cust-1', scheduled_date: '2026-08-21', technician_id: 'tech-2',
+      });
+      throw err;
+    });
+
+    await expect(oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true }))
+      .rejects.toMatchObject({ status: 409, code: 'RESERVATION_EXPIRED' });
+    expect(db.__state.tables.one_tap_purchases[0]).toMatchObject({
+      status: 'reserved', scheduled_service_id: 'ss-1',
+    });
   });
 });
 

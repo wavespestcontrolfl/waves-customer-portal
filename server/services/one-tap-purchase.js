@@ -647,44 +647,21 @@ async function reserve({ customerId, purchaseId, slotId }) {
   try {
     // Re-reserving the same estimate deletes the prior hold in-txn
     // (slot-reservation's own semantics) — re-picks need no explicit release.
-    // NO outer transaction here (P1): reserveSlot opens its own
-    // db.transaction, and holding a pool connection while waiting for a
-    // second one starves the pool under a reservation wave. The concurrent-
-    // reserve interleave (B replaces A's hold, then A's later pointer write
-    // lands a DELETED hold id) is closed by the CAS below instead: the
-    // pointer only persists while its hold row is still a LIVE reservation.
+    // The purchase pointer is locked, compared with this snapshot, and
+    // advanced inside that SAME transaction. This serializes overlapping
+    // re-picks and prevents a losing request from replacing a staff-claimed
+    // winner or leaving the purchase pointed at a deleted hold.
     const { scheduledServiceId, expiresAt } = await slotReservation.reserveSlot({
       estimateId: estimate.id,
       slotId,
       ...(purchase.scheduled_service_id
         ? { previousScheduledServiceId: purchase.scheduled_service_id }
         : {}),
+      purchaseReservation: {
+        purchaseId: purchase.id,
+        expectedScheduledServiceId: purchase.scheduled_service_id || null,
+      },
     });
-    // CAS: still-open purchase (a concurrent re-init can void it — a blind
-    // update would revive the voided row) AND the just-created hold must
-    // still exist as a live reservation (a concurrent reserve may have
-    // replaced it). Either miss ⇒ release our hold (a no-op if already
-    // replaced) and bounce the client to re-pick.
-    const reserved = await db('one_tap_purchases')
-      .where({ id: purchase.id })
-      .whereIn('status', ['initiated', 'reserved'])
-      .whereExists((qb) => qb.select(1).from('scheduled_services')
-        .where({ id: scheduledServiceId })
-        .whereNotNull('reservation_expires_at'))
-      .update({
-        scheduled_service_id: scheduledServiceId,
-        slot_id: String(slotId),
-        status: 'reserved',
-        updated_at: db.fn.now(),
-      });
-    if (!reserved) {
-      try {
-        await slotReservation.releaseReservation({ scheduledServiceId, estimateId: estimate.id });
-      } catch (releaseErr) {
-        logger.warn(`[one-tap-purchase] lost-CAS hold release failed (code=${releaseErr?.code || 'none'})`);
-      }
-      throw httpError(409, OFFER_CHANGED);
-    }
     return { scheduledServiceId, expiresAt, holdMinutes: HOLD_MINUTES };
   } catch (err) {
     if (err.code === 'INVALID_SLOT_ID') throw httpError(400, 'invalid slotId format');
@@ -694,6 +671,7 @@ async function reserve({ customerId, purchaseId, slotId }) {
     if (err.code === 'RESERVATION_CLAIMED') {
       throw httpError(409, OFFER_CHANGED, { code: 'RESERVATION_CLAIMED' });
     }
+    if (err.code === 'PURCHASE_RESERVATION_CHANGED') throw httpError(409, OFFER_CHANGED);
     if (['ESTIMATE_NOT_FOUND', 'ESTIMATE_EXPIRED', 'ESTIMATE_TERMINAL'].includes(err.code)) {
       throw httpError(409, OFFER_CHANGED);
     }
@@ -1330,6 +1308,14 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
       // and a blind reset would erase their newly held slot.
       await db('one_tap_purchases')
         .where({ id: purchase.id, status: 'reserved', scheduled_service_id: purchase.scheduled_service_id })
+        // A date/technician fence can report expiry after staff claimed and
+        // moved the exact row. Reset only while no claimed appointment still
+        // owns this pointer; missing/deleted and still-unclaimed rows remain
+        // recoverable, while every customer-linked row is preserved for the
+        // strict identity check on the next confirm/resume.
+        .whereNotExists((qb) => qb.select(1).from('scheduled_services')
+          .where({ id: purchase.scheduled_service_id })
+          .whereNotNull('customer_id'))
         .update({ status: 'initiated', scheduled_service_id: null, slot_id: null, updated_at: db.fn.now() })
         .catch(() => {});
     }
