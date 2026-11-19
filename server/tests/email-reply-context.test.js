@@ -15,6 +15,12 @@ const EMAIL = {
 function queryFor(rows) {
   let result = rows.slice();
   let columns = null;
+  const sorts = [];
+  // Dates compare as times; anything else (ids) as strings.
+  const sortValue = (row, column) => {
+    const time = new Date(row[column]).getTime();
+    return Number.isNaN(time) ? String(row[column]) : time;
+  };
   const query = {
     where(arg, operator, value) {
       if (typeof arg === 'object') {
@@ -48,12 +54,18 @@ function queryFor(rows) {
       return query;
     },
     orderBy(column, direction = 'asc') {
+      sorts.push([column, direction]);
       result.sort((a, b) => {
-        const order = new Date(a[column]) - new Date(b[column]);
-        return direction === 'desc' ? -order : order;
+        for (const [key, order] of sorts) {
+          const left = sortValue(a, key);
+          const right = sortValue(b, key);
+          if (left !== right) return (left < right ? -1 : 1) * (order === 'desc' ? -1 : 1);
+        }
+        return 0;
       });
       return query;
     },
+    offset(count) { result = result.slice(count); return query; },
     limit(limit) { result = result.slice(0, limit); return query; },
     select(...selected) { columns = selected.length === 1 && selected[0] === '*' ? null : selected; return query; },
     then(resolve, reject) {
@@ -160,6 +172,25 @@ describe('assembleEmailReplyContext', () => {
     expect(result.untrusted.emailThread.messages.map((m) => [m.id, m.direction])).toEqual([
       ['email-tagged-reply', 'outbound'], ['email-current', 'inbound'],
     ]);
+  });
+
+  test('rows the thread query matches but the recipient check rejects never hide an older message', async () => {
+    // Each decoy's To header matches the tagged pattern across two recipients
+    // (contact+… in one address, @wavespestcontrol.com in another).
+    const decoys = Array.from({ length: LIMITS.email + 1 }, (_, index) => ({
+      ...EMAIL, id: `decoy-${index}`, body_text: `Decoy ${index}`,
+      to_address: 'billing.contact+x@example.test, office@wavespestcontrol.com',
+      received_at: `2026-09-10T${String(15 - index).padStart(2, '0')}:00:00Z`,
+    }));
+    const older = { ...EMAIL, id: 'email-older', body_text: 'An older question', received_at: '2026-09-01T16:00:00Z' };
+    const result = await assembleEmailReplyContext(EMAIL, {
+      customer: CUSTOMER, database: fakeDatabase({ emails: [...decoys, older, EMAIL] }),
+      aggregator: { getContextForCustomer: jest.fn(async () => aggregatorContext()) },
+      mailboxAddress: MAILBOX, now: '2026-09-10T17:00:00Z',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.untrusted.emailThread.messages.map((m) => m.id)).toEqual(['email-older', 'email-current']);
+    expect(result.untrusted.emailThread).toMatchObject({ omitted: 0, omittedIsLowerBound: false });
   });
 
   test('a mailbox address that appears only in a display name is not a recipient', async () => {

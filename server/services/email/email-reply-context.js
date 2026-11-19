@@ -159,11 +159,19 @@ function taggedMailboxPattern(mailboxAddress) {
   return `${mailboxAddress.slice(0, at)}+%${mailboxAddress.slice(at)}`;
 }
 
+// The thread query's LIKE patterns can match a row that belongsToConversation
+// then rejects (a pattern can span two recipients in one header). The thread
+// is read in pages until enough verified messages are found or it ends, so a
+// rejected row never hides an older genuine message. THREAD_SCAN_ROWS bounds
+// the rows one draft reads; past it, `omitted` is a lower bound.
+const THREAD_PAGE_ROWS = LIMITS.email + 1;
+const THREAD_SCAN_ROWS = 100;
+
 async function loadThread(email, database, mailboxAddress, customerId) {
   try {
     const sender = normalizeAddress(email.from_address);
     const tagged = taggedMailboxPattern(mailboxAddress);
-    const rows = await savepointRead(database, (connection) => connection('emails')
+    const readPage = (offset) => savepointRead(database, (connection) => connection('emails')
       .where({ gmail_thread_id: email.gmail_thread_id })
       .where('received_at', '<=', email.received_at)
       .whereRaw("NOT jsonb_exists(COALESCE(label_ids, '[]'::jsonb), 'DRAFT')")
@@ -174,11 +182,21 @@ async function loadThread(email, database, mailboxAddress, customerId) {
         [sender, `%${mailboxAddress}%`, `%${tagged}%`, mailboxAddress, tagged, `%${sender}%`],
       )
       .orderBy('received_at', 'desc')
-      .limit(LIMITS.email + 1)
+      .orderBy('id', 'desc')
+      .offset(offset)
+      .limit(THREAD_PAGE_ROWS)
       .select('id', 'gmail_thread_id', 'from_address', 'to_address', 'subject', 'body_text', 'body_html', 'snippet', 'label_ids', 'received_at', 'customer_id'));
-    const filtered = rows.filter((row) => !labelsOf(row).includes('DRAFT') && belongsToConversation(row, email, mailboxAddress, customerId));
+    const filtered = [];
+    let scanned = 0;
+    let exhausted = false;
+    while (filtered.length <= LIMITS.email && !exhausted && scanned < THREAD_SCAN_ROWS) {
+      const rows = await readPage(scanned);
+      scanned += rows.length;
+      exhausted = rows.length < THREAD_PAGE_ROWS;
+      filtered.push(...rows.filter((row) => !labelsOf(row).includes('DRAFT') && belongsToConversation(row, email, mailboxAddress, customerId)));
+    }
     if (!filtered.some((row) => String(row.id) === String(email.id))) filtered.unshift(email);
-    const sourceTruncated = filtered.length > LIMITS.email;
+    const sourceTruncated = !exhausted;
     const selected = filtered
       .sort((a, b) => new Date(b.received_at) - new Date(a.received_at))
       .slice(0, LIMITS.email);
