@@ -1676,8 +1676,9 @@ function linesFromProtocolText(visit, catalog) {
 
 // Dosing values never ride in the descriptive line text: a rate shown there
 // would survive every withhold (unverified, held, blocked). Rates come only
-// from the resolved, permitted mix (`planned`).
-const RATE_TOKEN_RE = /\b\d+(?:[.,]\d+)?(?:\s*[-–]\s*\d+(?:[.,]\d+)?)?\s*(?:(?:fl\.?\s?oz|oz|lbs?|pounds?|gal(?:lons?)?|ml|l|g|kg|pts?|qts?|tsp|tbsp|cc)\b\.?)(?:\s*(?:\/|per)\s*(?:\d[\d,]*\s*)?(?:sq\.?\s?ft|k|m|gal(?:lons?)?|acre|1,?000|100)\b)?/gi;
+// from the resolved, permitted mix (`planned`). A range goes whole, hyphenated or
+// written with "to" ("0.3 to 0.5 oz per 1,000 sq ft", the v13 protocol's form).
+const RATE_TOKEN_RE = /\b\d+(?:[.,]\d+)?(?:(?:\s*[-–]\s*|\s+to\s+)\d+(?:[.,]\d+)?)?\s*(?:(?:fl\.?\s?oz|oz|lbs?|pounds?|gal(?:lons?)?|ml|l|g|kg|pts?|qts?|tsp|tbsp|cc)\b\.?)(?:\s*(?:\/|per)\s*(?:\d[\d,]*\s*)?(?:sq\.?\s?ft|k|m|gal(?:lons?)?|acre|1,?000|100)\b)?/gi;
 // A percentage in a product line is a dose ("TriTek spray oil: 1.0% standard", "0.25% of the spray volume") or a bag
 // analysis, so it goes, except a threshold: one after a comparison (the irrigation audit's "VWC >40%") or after "reduce"
 // ("= reduce 20%"), the forms no dose is written in.

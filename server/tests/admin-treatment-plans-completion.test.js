@@ -166,6 +166,23 @@ test.each([true, false])('a protocol line keeps its irrigation thresholds and lo
   expect(protocol.conditional[1].description).not.toMatch(/0\.25|%/);
 });
 
+// A dose range written with "to" goes whole: the v13 protocol writes its ranges that way ("0.3 to 0.5 oz per 1,000 sq ft"),
+// and a hyphen-only rule left the first endpoint ("rust on zoysia, 0.3 to every 14 days"). An interval range stays. Real v13 lines.
+test.each([true, false])('a dose range written with "to" leaves no endpoint; an interval range stays (technician=%s)', async tech => {
+  const lines = [];
+  const walk = (o) => (typeof o === 'string' ? lines.push(...o.split('\n')) : o && typeof o === 'object' && Object.values(o).forEach(walk));
+  walk(require('../config/lawn-protocol-v13.json'));
+  const velista = lines.find((l) => /^Velista — fairy ring, 0\.5 to 0\.7 oz .*rust on zoysia, 0\.3 to 0\.5 oz per 1,000 sq ft every 14 days/.test(l));
+  const acelepryn = lines.find((l) => /^Acelepryn Insecticide — caterpillars, 0\.046 to 0\.092 fl oz per 1,000 sq ft/.test(l));
+  expect([typeof velista, typeof acelepryn]).toEqual(['string', 'string']);
+  buildPlanForService.mockResolvedValue({ propertyGate: { service: 'Lawn Care' }, protocol: { base: [], conditional: [{ raw: velista, matched: true }, { raw: acelepryn, matched: true }] } });
+  const [v, a] = (await run({ tech })).body.plan.protocol.conditional.map((item) => item.description);
+  expect(v).toContain('rust on zoysia, every 14 days');
+  expect(v).toContain('every 14 to 21 days');
+  expect(v).not.toMatch(/0\.[357]|\boz\b|\d to (?!\d)/);
+  expect(a).toBe('Acelepryn Insecticide — caterpillars, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application');
+});
+
 // The Plan tab's address rule is the Job card's own (its SQL, its block): at a non-primary address the plan on file is
 // the primary home's. The plan still comes back for the completion form; an unchecked address fails closed.
 test.each([true, false])('a visit at a non-primary address carries the Job card\'s address block; an unchecked address fails closed (technician=%s)', async tech => {
