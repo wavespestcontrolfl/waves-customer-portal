@@ -10,9 +10,9 @@
  *      the night run's own log line for that visit (auto_dispatch_audit_logs).
  *   2. Last week's office and phone bookings (first or one-time visits) that took
  *      an hour adding 6+ more drive minutes than an hour open the same day or up
- *      to 7 days sooner. The offer rules of booking links and self-booking
- *      (notice, hours) are not modeled, so a customer-picked booking is counted
- *      but not replayed. The replay feeds the booking engine's own per-day gap math
+ *      to 7 days sooner. The offer rules of booking links, self-booking and
+ *      estimates (notice, hours) are not modeled, so a booking from one of them
+ *      is counted but not replayed. The replay feeds the booking engine's own per-day gap math
  *      (find-time.js candidatesForDay: each stop's real length, drive
  *      feasibility, on-the-hour starts, the model drive minutes) the calendar
  *      as it stood when the booking was made (scheduled_services rows plus the
@@ -162,7 +162,7 @@ function toVisit(row, geo) {
     date: dateOnlyString(row.scheduled_date),
     windowStart: hhmm(row.window_start),
     tech: row.technician_id ? String(row.technician_id) : null,
-    planChild: row.is_recurring === true && row.recurring_parent_id != null,
+    planChild: row.recurring_parent_id != null, // a plan's own later visit or booster
     lat: geo.lat,
     lng: geo.lng,
   };
@@ -340,24 +340,36 @@ function splitWindow(value) {
 }
 
 // One row as it stood at instant T: null when it was not on the calendar then (made
-// later, or cancelled by then), else its date and window then. The first move logged
-// after T carries the slot the row held at T (reschedule_log original_date/_window).
+// later, or off the route by then), else its date and window then. The first move
+// logged after T carries the slot the row held at T (reschedule_log original_date/_window).
 function stateAt(row, T, moves = []) {
   if (ms(row.created_at) > T) return null;
   // A row now off the route (cancelled, skipped, no-show, rescheduled) left it
-  // when it changed: cancelled_at for a cancel, else its last update stands in
-  // (no log keeps the others' change time). A hold that had expired by T was
-  // off the calendar too, as find-time's loader drops one at NOW().
-  if (OFF_ROUTE.has(row.status) && ms((row.status === 'cancelled' && row.cancelled_at) || row.updated_at) <= T) return null;
+  // when it changed: cancelled_at for a cancel, else the status log's time
+  // (off_at: job_status_history or service_status_log). With neither, a row not
+  // edited since T was off then already; one edited after T is `unknown`. A hold
+  // that had expired by T was off the calendar too, as find-time's loader drops
+  // one at NOW().
+  let unknown = false;
+  if (OFF_ROUTE.has(row.status)) {
+    const offAt = (row.status === 'cancelled' && row.cancelled_at) || row.off_at || null;
+    if (ms(offAt || row.updated_at) <= T) return null;
+    unknown = !offAt;
+  }
   if (row.reservation_expires_at && ms(row.reservation_expires_at) <= T) return null;
   const later = moves.find((m) => ms(m.created_at) > T);
-  if (!later) return { date: dateOnlyString(row.scheduled_date), windowStart: row.window_start, windowEnd: row.window_end };
-  const [windowStart, windowEnd] = splitWindow(later.original_window);
-  return { date: dateOnlyString(later.original_date || row.scheduled_date), windowStart, windowEnd };
+  let state;
+  if (!later) state = { date: dateOnlyString(row.scheduled_date), windowStart: row.window_start, windowEnd: row.window_end };
+  else {
+    const [windowStart, windowEnd] = splitWindow(later.original_window);
+    state = { date: dateOnlyString(later.original_date || row.scheduled_date), windowStart, windowEnd };
+  }
+  return unknown ? { ...state, unknown } : state;
 }
 
 const withState = (row, state) => ({
   ...row, scheduled_date: state.date, window_start: state.windowStart, window_end: state.windowEnd,
+  ...(state.unknown ? { uncertain: true } : {}),
 });
 
 // The calendar at T in the row shape find-time's day builder reads.
@@ -394,9 +406,9 @@ function toBooking(rows) {
     customerName: shortName(head),
     city: head.city || null,
     technicianId: head.technician_id ? String(head.technician_id) : null,
-    // Staff picked the hour on the office screen (a phone booking included);
-    // a link or self-booking row means the customer picked it.
-    staffPicked: rows.every((r) => r.source === 'admin' && !r.self_booking_id),
+    // The hour came from the office screen (a phone booking included). A link,
+    // self-booking or estimate row offered its hours by its own rules.
+    officeScreen: rows.every((r) => r.source === 'admin' && !r.self_booking_id && !r.source_estimate_id),
     day: head.atBooking.date,
     startMin,
     durationMinutes: endMin > startMin ? endMin - startMin : 60,
@@ -474,13 +486,14 @@ function bookedDetour(booking, tech, params) {
   return Math.max(0, driveMin(prev, booking.stop) + driveMin(booking.stop, next) - driveMin(prev, next));
 }
 
-// One route only when that day's rows show one: every assigned stop on the
-// booked day and the days it is compared with is this technician's. A stop on
-// another technician's route (one who has since left) makes it ambiguous.
-function oneRoute(booking, calendar, days, tech) {
+// The replay needs each compared day (the booked day and the days it is compared
+// with) known as it stood: one route, where every assigned stop is this
+// technician's (a stop on the route of one who has since left makes it
+// ambiguous), and no stop whose place on the calendar at booking is unknown.
+function daysKnown(booking, calendar, days, tech) {
   const own = (id) => !id || String(id) === String(tech.id);
-  return own(booking.technicianId)
-    && calendar.every((row) => !days.has(dateOnlyString(row.scheduled_date)) || own(row.technician_id));
+  return own(booking.technicianId) && calendar.every((row) => !days.has(dateOnlyString(row.scheduled_date))
+    || (own(row.technician_id) && !row.uncertain));
 }
 
 // The technician was off that day as the schedule stood at T: a work-days off
@@ -496,7 +509,7 @@ function replayBooking(booking, ctx) {
   const calendar = calendarAt(ctx.rows, booking.createdAt.getTime(), ctx.movesById, booking.ids);
   const first = laterDate(booking.bookingDay, shiftDateStr(booking.day, -SOONER_DAYS));
   const offerDays = findTime._internals.enumerateDates(first, booking.day, { includeWeekends: true });
-  if (!oneRoute(booking, calendar, new Set([booking.day, ...offerDays]), tech)) return null;
+  if (!daysKnown(booking, calendar, new Set([booking.day, ...offerDays]), tech)) return null;
   // One technician serves every stop, so the day is one route: an unassigned
   // visit is a stop on it too (find-time's own rule for a committed stop with
   // no technician, on its customer-facing path).
@@ -584,12 +597,12 @@ function fitDetail(lines) {
   return text.length <= DETAIL_MAX ? text : `${text.slice(0, DETAIL_MAX - 1)}…`;
 }
 
-function bookingSection({ costly, replayed, customerPicked, techCount }) {
+function bookingSection({ costly, replayed, notReplayed, techCount }) {
   if (techCount !== 1) {
     return [`Bookings last week: not replayed. The replay needs one technician to know whose route each stop was on; the schedule has ${techCount}.`];
   }
-  const links = customerPicked
-    ? ` (${plural(customerPicked, 'customer-picked booking')} not replayed: links and self-booking have their own offer rules)` : '';
+  const links = notReplayed
+    ? ` (not replayed: ${notReplayed} from links, self-booking or estimates, which offer hours by their own rules)` : '';
   return [
     `Office and phone bookings last week that took a costlier hour: ${costly.length} of ${replayed} replayed${links}`,
     ...capped(costly.map(bookingLine)),
@@ -598,7 +611,7 @@ function bookingSection({ costly, replayed, customerPicked, techCount }) {
 }
 
 function composeWeeklyCheck(data) {
-  const { apart = [], costly = [], replayed = 0, customerPicked = 0, techCount = 1, nightLog = null, weekStart } = data;
+  const { apart = [], costly = [], replayed = 0, notReplayed = 0, techCount = 1, nightLog = null, weekStart } = data;
   const drives = data.drives || { week: [], total: 0, median: null, since: null };
   const items = apart.length + costly.length;
   if (!items) return { items: 0 };
@@ -608,7 +621,7 @@ function composeWeeklyCheck(data) {
     `Next-door stops apart in the next ${LOOKAHEAD_DAYS} days: ${apart.length}`,
     ...capped(apart.map((p) => pairLine(p, nightLog))),
     '',
-    ...bookingSection({ costly, replayed, customerPicked, techCount }),
+    ...bookingSection({ costly, replayed, notReplayed, techCount }),
     '',
     gpsLine(drives),
   ];
@@ -621,7 +634,7 @@ function composeWeeklyCheck(data) {
       weekOf: weekStart,
       pairsApart: apart.length,
       bookingsReplayed: replayed,
-      customerPicked,
+      notReplayed,
       bookingsCostly: costly.length,
       costlyMinutes: costly.reduce((sum, r) => sum + r.saving, 0),
       shortDrivesWeek: drives.week.length,
@@ -678,7 +691,7 @@ function calendarQuery(conn) {
       's.id', 's.customer_id', 's.scheduled_date', 's.technician_id', 's.window_start', 's.window_end',
       's.service_type', 's.estimated_duration_minutes', 's.reservation_service_mix', 's.is_recurring',
       's.recurring_parent_id', 's.status', 's.created_at', 's.updated_at', 's.cancelled_at',
-      's.reservation_expires_at', 's.source', 's.booking_source', 's.self_booking_id',
+      's.reservation_expires_at', 's.source', 's.booking_source', 's.self_booking_id', 's.source_estimate_id',
       's.lat as svc_lat', 's.lng as svc_lng', 'c.first_name', 'c.last_name', 'c.city',
       conn.raw(`CASE WHEN NOT ${diverges} THEN c.latitude END as cust_lat`),
       conn.raw(`CASE WHEN NOT ${diverges} THEN c.longitude END as cust_lng`),
@@ -714,13 +727,33 @@ async function loadDayRules(range, tech, conn) {
   return { tech, closed, offDays, absences, techStartPoints: techStartPointsLive() };
 }
 
-// Office and phone bookings only: staff picked those hours on the screens this
-// replays. A customer-picked booking's offer rules are not modeled; it is counted.
+// Office and phone bookings only: their hours came from the screens this
+// replays. A link, self-booking or estimate booking's offer rules are not
+// modeled; it is counted.
 function replayAll(bookings, ctx) {
-  const staff = bookings.filter((b) => b.staffPicked);
-  const results = staff.map((b) => replayBooking(b, ctx)).filter(Boolean);
+  const office = bookings.filter((b) => b.officeScreen);
+  const results = office.map((b) => replayBooking(b, ctx)).filter(Boolean);
   const costly = results.filter((r) => r.best && r.saving >= MIN_SAVING_MINUTES).sort((a, b) => b.saving - a.saving);
-  return { costly, replayed: results.length, customerPicked: bookings.length - staff.length };
+  return { costly, replayed: results.length, notReplayed: bookings.length - office.length };
+}
+
+// When each row now off the route left it: the newest logged change into its
+// current status (job_status_history, or the older service_status_log).
+async function loadOffRouteTimes(rows, conn) {
+  const status = new Map(rows.filter((r) => OFF_ROUTE.has(r.status)).map((r) => [String(r.id), r.status]));
+  const out = new Map();
+  if (!status.size) return out;
+  const ids = [...status.keys()];
+  const history = await conn('job_status_history').whereIn('job_id', ids)
+    .select('job_id as id', 'to_status as status', 'transitioned_at as at');
+  const legacy = await conn('service_status_log').whereIn('scheduled_service_id', ids)
+    .select('scheduled_service_id as id', 'status', 'created_at as at');
+  for (const entry of [...history, ...legacy]) {
+    const id = String(entry.id);
+    if (status.get(id) !== entry.status) continue;
+    if (!out.has(id) || ms(entry.at) > ms(out.get(id))) out.set(id, entry.at);
+  }
+  return out;
 }
 
 // A series move (rebooker) logs one reschedule_log row for its anchor and carried
@@ -749,15 +782,19 @@ async function loadBookingReplay(weekStart, conn = db) {
     // A follow-up placed from its first visit (package_followup_auto, the call
     // pipeline's follow-up) is not a booking choice; it stays a stop on the calendar.
     .whereNull('s.parent_service_id')
-    .whereNot((q) => q.where('s.is_recurring', true).whereNotNull('s.recurring_parent_id'));
+    // A plan's own visits (its later visits and boosters, linked by
+    // recurring_parent_id) are not booking choices either.
+    .whereNull('s.recurring_parent_id');
   if (!created.length) return { costly: [], replayed: 0 };
   // Every move after the week began: each booking was made after `start`, so a
   // move after any booking's instant is in this set.
   const logged = await conn('reschedule_log')
     .where('created_at', '>=', start)
     .select('scheduled_service_id', 'original_date', 'original_window', 'created_at');
+  // A superseded move was applied too: a later move on the same key retired it
+  // and kept its snapshots (rebooker). A failed one moved nothing.
   const series = await conn('series_moves')
-    .where({ status: 'committed' })
+    .whereIn('status', ['committed', 'superseded'])
     .where('created_at', '>=', start)
     .select('rows', 'created_at');
   const moves = [...logged, ...seriesSiblingMoves(series)].sort((a, b) => ms(a.created_at) - ms(b.created_at));
@@ -773,7 +810,9 @@ async function loadBookingReplay(weekStart, conn = db) {
     q.whereBetween('s.scheduled_date', [range.from, range.to]);
     if (movedIn.length) q.orWhereIn('s.id', movedIn);
   });
-  const ctx = { rows, movesById, ...(await loadDayRules(range, techs[0], conn)) };
+  const offAt = await loadOffRouteTimes(rows, conn);
+  const withOffAt = rows.map((r) => (offAt.has(String(r.id)) ? { ...r, off_at: offAt.get(String(r.id)) } : r));
+  const ctx = { rows: withOffAt, movesById, ...(await loadDayRules(range, techs[0], conn)) };
   return replayAll(bookings, ctx);
 }
 
@@ -794,9 +833,9 @@ async function loadWeek(now = new Date(), conn = db) {
   const stops = await loadUpcomingStops(etDateString(now), etDateString(addETDays(now, LOOKAHEAD_DAYS)), conn);
   const apart = findApartPairs(stops);
   const nightLog = await loadNightLog(apart.flatMap((p) => [p.first.id, p.second.id]), now, conn);
-  const { costly, replayed, customerPicked = 0, techCount = 1 } = await loadBookingReplay(weekStart, conn);
+  const { costly, replayed, notReplayed = 0, techCount = 1 } = await loadBookingReplay(weekStart, conn);
   const drives = await loadShortDrives(weekStart, conn);
-  return { weekStart, apart, nightLog, costly, replayed, customerPicked, techCount, drives };
+  return { weekStart, apart, nightLog, costly, replayed, notReplayed, techCount, drives };
 }
 
 // ------------------------------------------------------------- run + marker

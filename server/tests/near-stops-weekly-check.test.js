@@ -31,7 +31,8 @@ const {
   runNearStopsWeeklyCheck,
   weekIsMissing,
   _private: {
-    findApartPairs, holdFor, stateAt, groupBookings, replayBooking, replayAll, seriesSiblingMoves, shortDriveSummary, composeWeeklyCheck, sentRecently, noEmail, OPS_KEY,
+    buildPlaces, findApartPairs, holdFor, stateAt, groupBookings, replayBooking, replayAll, seriesSiblingMoves, shortDriveSummary,
+    composeWeeklyCheck, sentRecently, noEmail, OPS_KEY,
   },
 } = require('../services/near-stops-weekly-check');
 
@@ -195,6 +196,8 @@ describe('what holds each visit, in plain words', () => {
 
   test('a first or one-time visit never enters the night run', () => {
     expect(holdFor({ id: 'svc-8', planChild: false }, new Map())).toBe('first or one-time visit');
+    const booster = { ...stop({ customer: 'c-b', at: HOME_A, date: '2027-03-01' }), recurring_parent_id: 'plan-c-b' };
+    expect(buildPlaces([booster])[0].visits[0].planChild).toBe(true);
   });
 
   test("the night run's own reason for the visit", () => {
@@ -316,8 +319,18 @@ describe('part 2: the booking replay', () => {
   test('a stop skipped before the booking was off the route; one skipped after was still on it', () => {
     const skippedBefore = { ...besideStop(), status: 'skipped', updated_at: before(30) };
     expect(replay({ rows: [skippedBefore, acrossStop()] }).saving).toBe(0);
-    const skippedAfter = { ...besideStop(), status: 'skipped', updated_at: after(30) };
+    const skippedAfter = { ...besideStop(), status: 'skipped', updated_at: after(30), off_at: after(30) };
     expect(replay({ rows: [skippedAfter, acrossStop()] }).saving).toBe(56);
+  });
+
+  test('the status log dates a skip: skipped before the booking, then edited, was off the route', () => {
+    const loggedEarly = { ...besideStop(), status: 'skipped', updated_at: after(90), off_at: before(30) };
+    expect(replay({ rows: [loggedEarly, acrossStop()] }).saving).toBe(0);
+  });
+
+  test('a skip with no logged time, edited after the booking, makes that day unknown: skipped', () => {
+    const unlogged = { ...besideStop(), status: 'skipped', updated_at: after(90) };
+    expect(replay({ rows: [unlogged, acrossStop()] })).toBeNull();
   });
 
   test('a booking moved after it was made is judged at the hour it took', () => {
@@ -341,16 +354,17 @@ describe('part 2: the booking replay', () => {
     const created = [bookingRow(), link];
     const ctx = { rows: [...rows, ...created], movesById: new Map(), tech: TECH, closed: new Set(), offDays: new Set(), absences: [], techStartPoints: false };
     const out = replayAll(groupBookings(created, new Map()), ctx);
-    expect(out).toMatchObject({ replayed: 1, customerPicked: 1 });
+    expect(out).toMatchObject({ replayed: 1, notReplayed: 1 });
     expect(out.costly.map((r) => r.saving)).toEqual([56]);
     const { detail } = composeWeeklyCheck({ ...out, weekStart: '2027-03-01' });
-    expect(detail).toContain('Office and phone bookings last week that took a costlier hour: 1 of 1 replayed (1 customer-picked booking not replayed: links and self-booking have their own offer rules)');
+    expect(detail).toContain('Office and phone bookings last week that took a costlier hour: 1 of 1 replayed (not replayed: 1 from links, self-booking or estimates, which offer hours by their own rules)');
   });
 
-  test('a self-booking is customer-picked even when its source reads admin', () => {
-    const [booking] = groupBookings([bookingRow({ self_booking_id: 'sb-1' })], new Map());
-    expect(booking.staffPicked).toBe(false);
-    expect(groupBookings([bookingRow()], new Map())[0].staffPicked).toBe(true);
+  test('a self-booking or an estimate booking is not an office-screen booking, even when its source reads admin', () => {
+    const office = (extra) => groupBookings([bookingRow(extra)], new Map())[0].officeScreen;
+    expect(office({ self_booking_id: 'sb-1' })).toBe(false);
+    expect(office({ source_estimate_id: 'est-1' })).toBe(false);
+    expect(office({})).toBe(true);
   });
 
   test("a sibling moved by a series move held its old hour at booking (series_moves.rows)", () => {
