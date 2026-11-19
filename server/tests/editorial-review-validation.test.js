@@ -91,6 +91,7 @@ describe('editorial review coverage validation', () => {
     'Look for larvae that hatch in 3 days.',
     'Remove 2 ounces of bait from each station.',
     'Remove 2 bags of mulch from the bed.',
+    'Adults grow to about 38mm long.',
     'See https://example.org/guide,40% of homes have roaches.',
     'Check 3 days later for new droppings.',
     'Check 2 traps, since 40% of roaches hide there.',

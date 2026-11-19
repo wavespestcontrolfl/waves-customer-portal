@@ -62,8 +62,9 @@ function trimTrailingUrlNoise(url) {
   return out;
 }
 
-// A URL read from article text. A Markdown link destination ("](https://...)")
-// or an autolink ("<https://...>") is delimited, so it is read exactly as
+// A URL read from article text. A Markdown link destination ("](https://...)"),
+// an autolink ("<https://...>") or an HTML attribute value ('href="https://..."')
+// is delimited, so it is read exactly as
 // written, up to the destination's own closing ")" (a title after a space is
 // already outside the match). A bare URL also drops a trailing colon, which
 // is the sentence's ("See https://a.org/x: it lists ..."). Live post
@@ -72,7 +73,7 @@ function trimTrailingUrlNoise(url) {
 function bodyUrl(body, match) {
   const raw = match[0];
   const before = body.slice(Math.max(0, match.index - 2), match.index);
-  if (before.endsWith('<')) return raw;
+  if (/["'<]$/.test(before)) return raw; // an autolink or an HTML attribute value is delimited too
   if (before === '](') {
     let depth = 0;
     for (let i = 0; i < raw.length; i += 1) {
