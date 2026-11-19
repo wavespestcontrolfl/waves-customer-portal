@@ -44,7 +44,9 @@
  *
  * Audit: every changed row writes one audit_log event through recordAuditEvent (action migration:<name>:<step>), the before and
  * after in its metadata. Up is idempotent: every write is guarded by the value it replaces, so a second run writes nothing. The rows
- * a step decides on are read FOR UPDATE (the migration runs in one transaction).
+ * a step decides on are read FOR UPDATE, and the usage table is locked against other writers (SHARE ROW EXCLUSIVE) before a step
+ * inspects a service type, in up() and in down(), so an office insert cannot land between a check and the write it decides. The
+ * migration runs in one transaction.
  *
  * Down restores exactly what up() recorded and nothing else, each item only while it still holds the value up() wrote (a value changed
  * since is kept and logged). The usage step reverses a whole service type or none of it: down() first checks that every row up() wrote
@@ -161,6 +163,12 @@ async function recordRollback(knex, step, event, resourceType, extra = {}) {
   await writeAudit(knex, rollbackActionFor(step), resourceType, event.resource_id, { from_audit_id: String(event.id), ...extra });
 }
 
+// Blocks other transactions' inserts, updates and deletes on the table (reads go on) until this migration commits, so a row the office
+// adds through the admin inventory screen cannot slip in between the check a step makes and the write it decides.
+async function lockUsageTable(knex) {
+  if (typeof knex.raw === 'function') await knex.raw('LOCK TABLE service_product_usage IN SHARE ROW EXCLUSIVE MODE');
+}
+
 const keptLog = (what) => console.log(`${LOG} ${what} no longer holds what up() wrote: kept`);
 
 // The one catalog row of a name, or null (logged) when there is none or more than one.
@@ -196,6 +204,7 @@ function usageMatches(rows, names, expected) {
 
 async function swapUsage(knex) {
   if (!(await hasTables(knex, ['products_catalog', 'audit_log', 'service_product_usage']))) return;
+  await lockUsageTable(knex);
   const house = new Map();
   for (const name of FULL_MIX) {
     const row = await onlyCatalogRow(knex, name);
@@ -249,6 +258,7 @@ async function canRestoreRow(knex, row) {
 // One service type at a time, whole or not at all: every row up() wrote must still hold what it wrote, and every row it removed
 // must be able to go back. Otherwise the service type's current mapping stays exactly as it is.
 async function restoreUsage(knex) {
+  await lockUsageTable(knex);
   const byType = new Map();
   for (const event of await pendingEvents(knex, STEPS.usage)) {
     const { kind, service_type: serviceType, row } = asObject(event.metadata);
@@ -355,6 +365,7 @@ async function repointRoachUsage(knex) {
   if (!(await hasTables(knex, ['products_catalog', 'audit_log', 'service_product_usage']))) return;
   const live = await liveGelRow(knex);
   if (!live) return;
+  await lockUsageTable(knex);
   const olds = (await knex('products_catalog').where({ name: GEL_CATALOG_OLD }).select('id', 'active')).filter((row) => row.active === false);
   const gentrol = await knex('products_catalog').where({ name: GENTROL }).select('id');
   const oldIds = new Set(olds.map((row) => String(row.id)));
@@ -383,6 +394,7 @@ async function repointRoachUsage(knex) {
 }
 
 async function restoreRoachUsage(knex) {
+  await lockUsageTable(knex);
   for (const event of await pendingEvents(knex, STEPS.roachUsage)) {
     const { kind, from, to, before, after } = asObject(event.metadata);
     let restored = 0;

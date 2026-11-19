@@ -73,6 +73,8 @@ function makeKnex(initial) {
     hasColumn: async () => true,
   };
   knex.fn = { now: () => 'now()' };
+  knex.raws = [];
+  knex.raw = async (sql) => { knex.raws.push(sql); };
   knex.tables = tables;
   knex.locks = locks;
   return knex;
@@ -351,9 +353,11 @@ describe('pest regular protocol products migration: up', () => {
     await expect(migration.down(bare)).resolves.toBeUndefined();
   });
 
-  test('the rows a step decides on are read FOR UPDATE', async () => {
+  test('the rows a step decides on are read FOR UPDATE, and the usage table is locked against concurrent writers first', async () => {
     await migration.up(knex);
     expect(knex.locks).toEqual(expect.arrayContaining(['service_product_usage', 'services']));
+    expect(knex.raws.length).toBeGreaterThanOrEqual(2);
+    for (const sql of knex.raws) expect(sql).toMatch(/^LOCK TABLE service_product_usage IN SHARE ROW EXCLUSIVE MODE$/);
   });
 });
 
@@ -426,11 +430,14 @@ describe('pest regular protocol products migration: down', () => {
     }
   });
 
-  test('the rows are read FOR UPDATE before the rollback decides', async () => {
+  test('the rows are read FOR UPDATE, and the usage table is locked against concurrent writers, before the rollback decides', async () => {
     await migration.up(knex);
     knex.locks.length = 0;
+    knex.raws.length = 0;
     await migration.down(knex);
     expect(knex.locks).toContain('service_product_usage');
+    expect(knex.raws.length).toBeGreaterThanOrEqual(1);
+    expect(knex.raws[0]).toMatch(/LOCK TABLE service_product_usage IN SHARE ROW EXCLUSIVE MODE/);
   });
 
   test('an old row that cannot go back (its product is gone) keeps that service type\'s whole current mapping, never a part of it', async () => {
