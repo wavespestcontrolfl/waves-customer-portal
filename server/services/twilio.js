@@ -1307,8 +1307,11 @@ const TwilioService = {
           // Any other line returns at once, with no read. Read on the
           // caller's handoff transaction when there is one. Fails CLOSED: an
           // unreadable check refuses, and the send may be tried again. It
-          // does not repeat after the attempt marker below: a contact is
-          // never taken back, so a pass here cannot turn into a refusal.
+          // runs BEFORE the suppression gates, so the disclaimed-number hold
+          // stays the last read before the SDK (a hold committed during this
+          // read is still seen). It does not repeat after the attempt marker
+          // below: a contact is never taken back, so a pass here cannot turn
+          // into a refusal.
           const { websiteLineRefusal } = require('./website-line-contact');
           let refusal;
           try {
@@ -1356,9 +1359,9 @@ const TwilioService = {
             throw err;
           }
         }
+        await runWebsiteLineGate();
         await runAnnualGate();
         await runDisclaimedGate();
-        await runWebsiteLineGate();
         // Pre-push audit P1 (round 5): the guard above just awaited its own
         // DB reads — real time the send-window boundary re-check (the
         // caller's own preSendCheck, run once, earlier, before this

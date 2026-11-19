@@ -54,6 +54,7 @@ jest.mock('../services/website-line-contact', () => ({
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const { websiteLineRefusal } = require('../services/website-line-contact');
+const { disclaimedNumberBlocksSend } = require('../services/disclaimed-number-holds');
 
 const TO = '+19415550123';
 const WEB_LINE = '+19412542617';
@@ -64,7 +65,11 @@ describe('TwilioService.sendSMS — the website-only line rule at the provider b
     jest.clearAllMocks();
     mockValidateOutbound.mockReturnValue({ ok: true });
     mockTwilioCreate.mockResolvedValue({ sid: 'SM_ok' });
+    // mockReset, not only clearAllMocks: an unused once-value must not leak into the next test.
+    websiteLineRefusal.mockReset();
     websiteLineRefusal.mockResolvedValue(null);
+    disclaimedNumberBlocksSend.mockReset();
+    disclaimedNumberBlocksSend.mockResolvedValue(false);
   });
 
   test('a text from a website-only line to a number that never contacted it never reaches Twilio, and is not retried', async () => {
@@ -91,6 +96,16 @@ describe('TwilioService.sendSMS — the website-only line rule at the provider b
     expect(result.success).toBe(true);
     expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
     expect(mockTwilioCreate.mock.calls[0][0]).toMatchObject({ from: WEB_LINE, to: TO });
+  });
+
+  test('the line check runs before the suppression gates: the disclaimed-number hold stays the last read before the SDK', async () => {
+    const events = [];
+    websiteLineRefusal.mockImplementationOnce(async () => { events.push('line'); return null; });
+    disclaimedNumberBlocksSend.mockImplementationOnce(async () => { events.push('hold'); return true; });
+    const result = await TwilioService.sendSMS(TO, 'Thanks for reaching out', { messageType: 'manual', fromNumber: WEB_LINE });
+    expect(events).toEqual(['line', 'hold']);
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, code: 'CALLBACK_NUMBER_HOLD' });
   });
 
   test('inside a caller withSmsHandoff lock the check reads on the held transaction, and a refusal is not retried', async () => {
