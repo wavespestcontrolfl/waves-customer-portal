@@ -1,6 +1,7 @@
 const db = require('../models/db');
-const { findGbpLocationByUtmContent, isGbpUtmCampaign } = require('../config/locations');
-const { findAiAssistant, AI_ASSISTANT_SOURCE_TYPE, AI_ASSISTANT_LEAD_SOURCE_NAME } = require('./ai-referral-sources');
+const { findGbpLocationByUtmContent } = require('../config/locations');
+const { AI_ASSISTANT_SOURCE_TYPE, AI_ASSISTANT_LEAD_SOURCE_NAME } = require('./ai-referral-sources');
+const { classifyAttributionSignals } = require('./lead-source-evidence');
 
 const MAIN_SITE_NAME = 'Main Site (wavespestcontrol.com)';
 // Seeded by migration 20260827000001. Web-form paid-Google leads go here so
@@ -63,27 +64,11 @@ async function resolveLeadSource(attribution) {
   let metaPaid = false;
   let googlePaid = false;
   let aiReferral = false;
+  let organicSocialSource = null;
 
-  const utmSrc = String(utm.source || '').toLowerCase();
-  const utmMed = String(utm.medium || '').toLowerCase();
-  const isMetaClick = utmSrc === 'facebook' || utmSrc === 'fb'
-    || !!attribution?.fbclid || !!attribution?.fbc;
-  // Google auto-tagging appends gclid (or wbraid/gbraid for iOS/web-to-app) to
-  // ad-click landing URLs WITHOUT utm_source/medium, so a click-only paid click
-  // would otherwise fall through to Main Site and never count as Google Ads. The
-  // Google analog of the Meta branch below — mirrors the webhook's
-  // determineLeadSource. (Explicit utm_source=google&cpc also qualifies.)
-  const isGoogleAdsClick = (utmSrc === 'google' && utmMed === 'cpc')
-    || !!attribution?.gclid || !!attribution?.wbraid || !!attribution?.gbraid;
-  // AI-assistant referral (owner-approved 2026-09-27) — SHARED detection
-  // table with lead-source-classify.js (see ./ai-referral-sources.js) so the
-  // quote-wizard (property-lookup / quote-calculate) judges the same ChatGPT/
-  // Perplexity/Gemini/Copilot/Claude visit the same way the /api/leads
-  // webhook does. Checked by BOTH utm_source and the referrer host, same as
-  // the webhook path.
-  const aiAssistant = findAiAssistant(utmSrc, referrerHost);
+  const classified = classifyAttributionSignals(attribution);
 
-  if (isGbpUtmCampaign({ source: utm.source, medium: utm.medium, campaign: utm.campaign })) {
+  if (classified.bucket === 'google_business' && classified.reason === 'gbp_tags') {
     const loc = findGbpLocationByUtmContent(utm.content);
     if (loc) {
       targetName = `GBP — ${loc.name}`;
@@ -91,17 +76,19 @@ async function resolveLeadSource(attribution) {
     } else {
       detail = `GBP website link: ${utm.content || 'unknown profile'}`;
     }
-  } else if (isGoogleAdsClick) {
+  } else if (classified.bucket === 'google_business') {
+    targetName = 'Google Business Profile';
+    detail = 'Google Maps referral';
+  } else if (classified.bucket === 'google_ads') {
     // Paid Google click — attribute to Google Ads, NOT the Main Site / spoke it
     // landed on. Resolved by source_type (a stable column) so it finds whatever
     // Google Ads lead_sources row exists (or leaves it null — never Main Site).
     googlePaid = true;
     targetName = 'Google Ads';
-    detail = attribution?.gclid ? 'Google Ads click (gclid)'
-      : attribution?.wbraid ? 'Google Ads click (wbraid)'
-        : attribution?.gbraid ? 'Google Ads click (gbraid)'
-          : `google ${utm.medium || ''} ${utm.campaign || ''}`.trim();
-  } else if (isMetaClick) {
+    detail = classified.reason === 'paid_tags'
+      ? `Google paid campaign${utm.campaign ? `: ${String(utm.campaign).slice(0, 80)}` : ''}`
+      : `Google Ads click (${classified.reason})`;
+  } else if (classified.bucket === 'meta_ads') {
     // Meta paid click (fbclid/_fbc, or utm_source=facebook) — attribute to
     // Facebook, NOT the Main Site / spoke landing it happened to land on. Mirrors
     // the webhook's determineLeadSource. Resolves the FK by a LIKE lookup so it
@@ -109,27 +96,39 @@ async function resolveLeadSource(attribution) {
     // Main Site).
     metaPaid = true;
     targetName = 'Facebook';
-    detail = attribution?.fbclid ? 'Meta click (fbclid)'
-      : attribution?.fbc ? 'Meta click (_fbc)'
-        : `facebook ${utm.medium || ''} ${utm.campaign || ''}`.trim();
-  } else if (aiAssistant) {
+    detail = classified.reason === 'paid_tags'
+      ? `Meta paid campaign${utm.campaign ? `: ${String(utm.campaign).slice(0, 80)}` : ''}`
+      : `Meta click (${classified.reason === 'fbc' ? '_fbc' : 'fbclid'})`;
+  } else if (classified.bucket === 'ai') {
     // Organic, not paid — checked before the spoke/Main-Site fallback so an
     // AI-referred visit isn't silently folded into a spoke or "Main Site"
     // row. Resolved by source_type below (stable even if the office renames
     // the seeded row), mirroring the google/meta paid lookups above.
     aiReferral = true;
     targetName = AI_ASSISTANT_LEAD_SOURCE_NAME;
-    detail = `AI assistant referral (${aiAssistant.detail})${referrer ? `: ${referrer}` : ''}`;
+    detail = `AI assistant referral (${classified.ai.detail})`;
+  } else if (classified.bucket === 'organic_social') {
+    // An unpaid facebook/instagram campaign is organic social. Do not resolve
+    // it to the paid Facebook call-extension row merely because the platform
+    // name is shared. There is no dedicated organic lead_sources seed, so the
+    // evidence stays in extracted_data and the FK deliberately remains null.
+    organicSocialSource = classified.socialName;
+    targetName = classified.socialName === 'Nextdoor' ? 'Nextdoor' : `${classified.socialName} (organic)`;
+    detail = `Organic ${classified.socialName} referral`;
   } else if (referrerHost && SPOKE_DOMAIN_TO_SOURCE_NAME[referrerHost]) {
     targetName = SPOKE_DOMAIN_TO_SOURCE_NAME[referrerHost];
     detail = `Spoke referrer: ${referrer}`;
   } else if (landingHost && SPOKE_DOMAIN_TO_SOURCE_NAME[landingHost]) {
     targetName = SPOKE_DOMAIN_TO_SOURCE_NAME[landingHost];
     detail = `Spoke landing: ${landing}`;
+  } else if (classified.bucket === 'organic_search') {
+    detail = `${classified.searchName} organic search`;
+  } else if (classified.bucket === 'referral') {
+    detail = `Referral host: ${classified.referrerHost}`;
   } else if (referrer) {
-    detail = `Referrer: ${referrer}`;
+    detail = 'Recorded website referrer';
   } else if (landing) {
-    detail = `Landing: ${landing}`;
+    detail = 'Recorded website landing';
   }
 
   let row = null;
@@ -151,7 +150,9 @@ async function resolveLeadSource(attribution) {
       // even if the office renames the row, mirroring the google/meta paid
       // lookups above.
       row = await db('lead_sources').where({ source_type: AI_ASSISTANT_SOURCE_TYPE }).first();
-    } else {
+    } else if (organicSocialSource === 'Nextdoor') {
+      row = await db('lead_sources').where({ name: 'Nextdoor' }).first();
+    } else if (!organicSocialSource) {
       row = await db('lead_sources').where({ name: targetName }).first();
     }
   } catch { /* swallow — caller still gets the classified strings even if FK lookup fails */ }
@@ -161,9 +162,7 @@ async function resolveLeadSource(attribution) {
   // social included) into the Facebook channel, and the funnel map marks that
   // channel paid. Mirrors the webhook's determineLeadSource, where facebook is
   // channel='paid' only for cpc/click-id traffic.
-  const isPaidClick = googlePaid
-    || !!attribution?.fbclid || !!attribution?.fbc
-    || (isMetaClick && utmMed === 'cpc');
+  const isPaidClick = googlePaid || metaPaid;
 
   return {
     leadSourceId: row?.id || null,
@@ -175,7 +174,7 @@ async function resolveLeadSource(attribution) {
     // anything else without a row stays null (no funnel row, fail-closed).
     // AI referrals mirror that same "keep the type even if the row lookup
     // ever misses" shape, though the seed migration means it normally won't.
-    sourceType: row?.source_type || (googlePaid ? 'google_ads' : metaPaid ? 'facebook' : aiReferral ? AI_ASSISTANT_SOURCE_TYPE : null),
+    sourceType: row?.source_type || (googlePaid ? 'google_ads' : metaPaid ? 'facebook' : ['Facebook', 'Instagram'].includes(organicSocialSource) ? 'facebook_organic' : aiReferral ? AI_ASSISTANT_SOURCE_TYPE : null),
     isPaidClick,
   };
 }

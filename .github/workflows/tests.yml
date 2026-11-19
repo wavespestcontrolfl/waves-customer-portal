@@ -439,6 +439,17 @@ jobs:
         env:
           CALL_BOOKING_LINK_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/call-booking-link-text-postgres.test.js
+      - name: Call and lead attribution transaction tests
+        working-directory: server
+        env:
+          CALL_ANALYTICS_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+          LEAD_OUTCOMES_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+          INTAKE_SOURCE_EVIDENCE_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: >-
+          npx jest --ci --silent --runInBand --runTestsByPath
+          tests/call-log-analytics-postgres.test.js
+          tests/admin-leads-related-visits-postgres.test.js
+          tests/intake-source-evidence-preservation-postgres.test.js
       - name: First-application sibling-divergence sweep tests
         working-directory: server
         env:
