@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 
 // Owner 2026-11-18: a check taken at the dispatch checkout got no receipt. The Cash and Check sheets keep
-// sendReceipt: false and add checkoutTender: true; with GATE_CHECKOUT_TENDER_RECEIPT on, the server then queues the
-// receipt and leaves the visit open for the checkout's completion. Gate off, the server ignores the marker.
+// sendReceipt: false and add checkoutTender: true with totalSeen; with GATE_CHECKOUT_TENDER_RECEIPT on, the server then
+// queues the receipt and records exactly that amount. Gate off, the server ignores the marker.
 
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -35,6 +35,7 @@ describe('checkout Cash and Check sheets mark the payment as a checkout tender',
     await waitFor(() => expect(onRecorded).toHaveBeenCalled());
     const [url, options] = fetchMock.mock.calls[0];
     expect(url).toMatch(/\/admin\/invoices\/inv-1\/record-payment$/);
-    expect(JSON.parse(options.body)).toEqual(expect.objectContaining({ method, sendReceipt: false, checkoutTender: true }));
+    // totalSeen: the amount this sheet showed, so the server refuses a balance that moved since.
+    expect(JSON.parse(options.body)).toEqual(expect.objectContaining({ method, sendReceipt: false, checkoutTender: true, totalSeen: 125 }));
   });
 });

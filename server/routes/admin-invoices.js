@@ -2902,9 +2902,10 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
 //   amount?:      number  — dollars received (owner 2026-10-29). Absent = the whole balance owed, as before. Equal to the balance owed =
 //                 the same. Less = a PART payment, only behind GATE_PARTIAL_PAYMENTS (no receipt, the invoice stays open). More = 400.
 //                 Ignored for the Intelligence Bar card, which records the whole balance only.
-//   checkoutTender?: true  — sent by the dispatch checkout's Cash / Check sheet. With GATE_CHECKOUT_TENDER_RECEIPT on it overrides
-//                 sendReceipt (the receipt goes through the automatic receipt queue, which honors the customer's receipt choices) and
-//                 leaves the visit to the checkout's completion. Ignored for the Intelligence Bar card.
+//   checkoutTender?: true  — sent by the dispatch checkout's Cash / Check sheet, with totalSeen (the amount in dollars the sheet showed).
+//                 With GATE_CHECKOUT_TENDER_RECEIPT on it overrides sendReceipt (the receipt goes through the automatic receipt queue,
+//                 which honors the customer's receipt choices) and records exactly that amount as amount + owedSeen (a balance that
+//                 moved since is the usual 409). Cash and check only; ignored for the Intelligence Bar card.
 // }
 //
 // Settlement semantics (refusals, tenders, ledger, receipt) are documented on
@@ -2971,6 +2972,22 @@ const cardPinsOf = (req) => (req.ibApprovedPayment
 const cardResultOf = (req, closeout) => (req.ibApprovedPayment ? { closeout: closeout || null } : {});
 
 // Named so the Intelligence Bar's record_payment card (recordPaymentFromBar, below) runs this very handler.
+// The dispatch checkout's Cash or Check sheet marks its body `checkoutTender: true` with `totalSeen`, the amount owed it showed and the
+// technician took (GATE_CHECKOUT_TENDER_RECEIPT, owner 2026-11-18, after a check paid at the visit got no receipt): the receipt is queued
+// with the payment, and that amount is recorded through the page's own amount + owedSeen fence (checked before any Stripe session is
+// retired and again under the invoice lock), so the receipt never confirms a sum nobody took. Cash and check only (the two tenders the
+// sheets take), never the Intelligence Bar card. Returns null (not a checkout tender: the body stands, as before), { totalSeenCents },
+// or { invalid: true } (a marked tender with no usable amount, or one that is not a JSON number: refused, nothing recorded).
+const CHECKOUT_TENDER_METHODS = ['cash', 'check'];
+function checkoutTenderOf(req) {
+  const { checkoutTender, method, totalSeen } = req.body || {};
+  if (checkoutTender !== true || !CHECKOUT_TENDER_METHODS.includes(method) || req.ibApprovedPayment || !checkoutTenderReceiptLive()) return null;
+  if (typeof totalSeen !== 'number') return { invalid: true };
+  const totalSeenCents = Math.round(totalSeen * 100);
+  const usable = Number.isFinite(totalSeen) && totalSeenCents > 0 && Math.abs(totalSeen * 100 - totalSeenCents) < 1e-6;
+  return usable ? { totalSeenCents } : { invalid: true };
+}
+
 const recordPaymentHandler = async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -2982,7 +2999,6 @@ const recordPaymentHandler = async (req, res, next) => {
       via = 'both',
       amount,
       owedSeen,
-      checkoutTender,
     } = req.body || {};
 
     if (!method || !VALID_PAYMENT_METHODS.includes(method)) {
@@ -3013,10 +3029,12 @@ const recordPaymentHandler = async (req, res, next) => {
       const dollars = Number(owedSeen);
       owedCentsSeen = Number.isFinite(dollars) ? Math.round(dollars * 100) : null;
     }
-    // The dispatch checkout's Cash or Check sheet marks its body `checkoutTender: true` (GATE_CHECKOUT_TENDER_RECEIPT, owner 2026-11-18,
-    // after a check paid at the visit got no receipt): the receipt is queued with the payment, and the visit is left to the completion
-    // screen the checkout opens next (its report and text). Gate off, or any other caller: the body stands, as before.
-    const fromCheckout = checkoutTender === true && !req.ibApprovedPayment && checkoutTenderReceiptLive();
+    const checkout = checkoutTenderOf(req);
+    if (checkout?.invalid) return res.status(400).json({ error: 'Open the visit again and take the payment again. Nothing was recorded.' });
+    if (checkout) {
+      amountCents = checkout.totalSeenCents;
+      owedCentsSeen = checkout.totalSeenCents;
+    }
     if (sendReceipt && !['email', 'sms', 'both'].includes(via)) {
       return res.status(400).json({ error: "via must be 'email', 'sms', or 'both'" });
     }
@@ -3027,8 +3045,8 @@ const recordPaymentHandler = async (req, res, next) => {
     // — the one manual-settlement path (shared with the Zelle notice
     // reconciler). Refusals arrive as statusCode-shaped errors.
     const { invoice, receipt, closeout, partial } = await recordManualPayment(id, {
-      method, reference, note, recordedBy, sendReceipt: fromCheckout || sendReceipt, via, recordedByTechnicianId: req.technicianId || null,
-      ...(fromCheckout ? { checkoutTender: true } : {}),
+      method, reference, note, recordedBy, sendReceipt: Boolean(checkout) || sendReceipt, via, recordedByTechnicianId: req.technicianId || null,
+      ...(checkout ? { checkoutTender: true } : {}),
       ...(amountCents != null ? { amountCents, owedCentsSeen } : {}),
       ...cardPinsOf(req),
     });

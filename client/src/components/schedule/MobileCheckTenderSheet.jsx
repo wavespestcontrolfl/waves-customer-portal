@@ -42,9 +42,10 @@ export default function MobileCheckTenderSheet({
           note: note.trim() || null,
           reference: note.trim() || null,
           sendReceipt: false,
-          // With GATE_CHECKOUT_TENDER_RECEIPT on, the server queues the receipt and leaves the visit open for
-          // the completion the checkout opens next. Gate off, sendReceipt: false stands, as before.
+          // With GATE_CHECKOUT_TENDER_RECEIPT on, the server queues the receipt and records exactly the amount this
+          // sheet showed (a balance that moved since is refused). Gate off, sendReceipt: false stands, as before.
           checkoutTender: true,
+          totalSeen: Number(amount || 0),
         }),
       });
       if (!r.ok) {

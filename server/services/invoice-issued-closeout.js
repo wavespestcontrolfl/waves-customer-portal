@@ -13,7 +13,6 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
-const { dateOnlyString } = require('../utils/date-only');
 
 // A visit the technician has NOT started (job-status.js live vocabulary,
 // minus the in-progress states). A NULL status counts too — see
@@ -386,24 +385,6 @@ const SEND_ONLY_REFUSAL_CODES = ['approved_target_mismatch'];
 
 const refusedForTheMoment = (last) => Boolean(last) && last.action === 'visit.completion_on_invoice_issued_refused' && isTransientRefusal(last.meta);
 
-// The dispatch checkout took the money and completes the visit itself, with its report and text (GATE_CHECKOUT_TENDER_RECEIPT,
-// owner 2026-11-18). recordManualPayment writes this refusal row IN the settlement transaction, so the sweep leaves the visit to
-// the checkout through the visit's own ET day; from the next day an unfinished checkout is retried like any arrived visit.
-const CHECKOUT_DEFERRAL_CODE = 'checkout_completes_visit';
-async function recordCheckoutCloseoutDeferral({ trx, invoiceId, visitId, actorTechnicianId = null }) {
-  if (!visitId) return;
-  await require('./audit-log').recordAuditEvent({
-    actor_type: actorTechnicianId ? 'admin' : 'system',
-    actor_id: actorTechnicianId,
-    action: 'visit.completion_on_invoice_issued_refused',
-    resource_type: 'scheduled_services',
-    resource_id: visitId,
-    metadata: { invoiceId: String(invoiceId), trigger: 'paid', resumed: false, status: null, code: CHECKOUT_DEFERRAL_CODE },
-    critical: true,
-    trx,
-  });
-}
-
 // The visit an Intelligence Bar send's card said would be closed (a visit id) or 'none', kept as audit rows on the
 // INVOICE (no new column). The send's own closeout is handed the target directly; these rows let the retry sweep, which
 // re-enters with no caller, enforce the same target. Two rows make a pin:
@@ -625,23 +606,17 @@ async function loadRetryCandidates(conn, today, sinceDays) {
     .where((q) => retryableVisitFilter(q, today, "i.status IN ('paid', 'prepaid')"))
     .orderBy('i.id')
     .select('i.id as invoice_id', 'i.status as invoice_status', 's.id as visit_id', 's.status as visit_status',
-      's.scheduled_date as visit_date',
       conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${ISSUED_AFTER_SERVICE_DAY_SQL} as issued_after_service_day`));
 }
 
 // Does the visit's own state say this candidate should not be retried? A parked attempt of this closeout is always resumed;
 // otherwise a prepaid-and-nobody-arrived visit is left to a person, and so is one whose latest audit row is a real refusal.
 // An audit lookup that fails skips the row (logged), as the sweep always did.
-async function skipByVisitState(conn, row, trigger, today) {
+async function skipByVisitState(conn, row, trigger) {
   if (row.own_attempt_parked) return false;
   if (prepaidAndNobodyArrived(row)) return true;
   try {
     const last = await latestCloseoutAudit(conn, { visitId: row.visit_id, invoiceId: row.invoice_id, ...(trigger === 'paid' ? { ignoreCodes: SEND_ONLY_REFUSAL_CODES } : {}) });
-    // A checkout's hand-off holds through the visit's own day; an unreadable date holds too (the safe side).
-    if (last?.meta?.code === CHECKOUT_DEFERRAL_CODE) {
-      const visitDay = dateOnlyString(row.visit_date);
-      return !visitDay || visitDay >= today;
-    }
     return Boolean(last) && !refusedForTheMoment(last);
   } catch (err) {
     logger.error(`[invoice-issued-closeout] issued-invoice retry: audit lookup failed for invoice ${row.invoice_id}: ${err.message}`);
@@ -686,7 +661,7 @@ async function recordUnboundPin(row) {
 async function retryOneIssuedInvoice(row, { conn, today }) {
   const skipped = { retried: 0, closed: 0 };
   const trigger = SETTLED_INVOICE_STATUSES.includes(String(row.invoice_status)) ? 'paid' : 'sent';
-  if (await skipByVisitState(conn, row, trigger, today)) return skipped;
+  if (await skipByVisitState(conn, row, trigger)) return skipped;
   const decision = await pinDecisionFor(conn, row, trigger);
   if (decision.action === 'skip') {
     if (decision.reason === 'pin_unbound') await recordUnboundPin(row);
@@ -997,8 +972,6 @@ module.exports = {
   recordApprovedPaidCloseoutTarget,
   recordApprovedCloseoutDelivery,
   recordApprovedCloseoutRetired,
-  recordCheckoutCloseoutDeferral,
-  CHECKOUT_DEFERRAL_CODE,
   pinNoLongerHeld,
   CLOSEOUT_PIN_STALE_MS,
 };

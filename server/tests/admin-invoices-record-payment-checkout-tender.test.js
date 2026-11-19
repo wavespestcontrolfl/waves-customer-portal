@@ -1,9 +1,10 @@
 /**
- * POST /admin/invoices/:id/record-payment — the dispatch checkout's Cash / Check sheet marks its body `checkoutTender: true`
- * (GATE_CHECKOUT_TENDER_RECEIPT, owner 2026-11-18). On 11-18 a check taken at the checkout got no receipt: the sheet sends
- * `sendReceipt: false`, and the payment's quiet closeout completed the visit, so the completion screen never opened.
- * Gate on: the marker asks for the receipt (recordManualPayment queues it) and passes checkoutTender, which leaves the visit open.
- * Gate off, no marker, or the Intelligence Bar card: the body stands exactly as before.
+ * POST /admin/invoices/:id/record-payment — the dispatch checkout's Cash / Check sheet marks its body `checkoutTender: true` with
+ * `totalSeen` (GATE_CHECKOUT_TENDER_RECEIPT, owner 2026-11-18). On 11-18 a check taken at the checkout got no receipt: the sheet
+ * sends `sendReceipt: false`, and nothing sent one after.
+ * Gate on: the marker asks for the receipt (recordManualPayment queues it) and records exactly the amount the sheet showed through
+ * the page's amount + owedSeen fence. A marked tender with no usable amount is refused.
+ * Gate off, no marker, another tender, or the Intelligence Bar card: the body stands exactly as before.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -48,7 +49,7 @@ async function post(body) {
   }
 }
 
-const CHECKOUT_BODY = { method: 'check', note: null, reference: null, sendReceipt: false, checkoutTender: true };
+const CHECKOUT_BODY = { method: 'check', note: null, reference: null, sendReceipt: false, checkoutTender: true, totalSeen: 125 };
 
 describe('record-payment from the dispatch checkout (GATE_CHECKOUT_TENDER_RECEIPT)', () => {
   const saved = process.env.GATE_CHECKOUT_TENDER_RECEIPT;
@@ -57,13 +58,25 @@ describe('record-payment from the dispatch checkout (GATE_CHECKOUT_TENDER_RECEIP
     jest.clearAllMocks();
   });
 
-  test('gate on: the checkout sheet asks for the receipt and passes checkoutTender to the settlement', async () => {
+  test('gate on: the checkout sheet asks for the receipt and records exactly the amount it showed', async () => {
     process.env.GATE_CHECKOUT_TENDER_RECEIPT = 'true';
     const res = await post(CHECKOUT_BODY);
     expect(res.status).toBe(200);
     expect(recordManualPayment).toHaveBeenCalledWith('inv-1', expect.objectContaining({
-      method: 'check', sendReceipt: true, checkoutTender: true, recordedByTechnicianId: 'admin-1',
+      method: 'check', sendReceipt: true, checkoutTender: true, amountCents: 12500, owedCentsSeen: 12500, recordedByTechnicianId: 'admin-1',
     }));
+  });
+
+  test('gate on, a marked cash or check tender with no usable amount is refused and records nothing', async () => {
+    process.env.GATE_CHECKOUT_TENDER_RECEIPT = 'true';
+    const { totalSeen: _drop, ...noTotal } = CHECKOUT_BODY;
+    // Only a JSON number counts: true and [125] would convert to an amount, and '125' is not what the sheet sends.
+    const bad = [0, 'abc', '125', true, [125], null, -5].map((totalSeen) => ({ ...CHECKOUT_BODY, totalSeen }));
+    for (const body of [noTotal, ...bad, { ...CHECKOUT_BODY, method: 'cash', totalSeen: 12.345 }]) {
+      const res = await post(body);
+      expect(res.status).toBe(400);
+    }
+    expect(recordManualPayment).not.toHaveBeenCalled();
   });
 
   test('gate off (read at call time): the sheet body stands, no receipt and the closeout runs', async () => {
@@ -74,15 +87,18 @@ describe('record-payment from the dispatch checkout (GATE_CHECKOUT_TENDER_RECEIP
     for (const [, args] of recordManualPayment.mock.calls) {
       expect(args).toEqual(expect.objectContaining({ sendReceipt: false, via: 'both' }));
       expect(args).not.toHaveProperty('checkoutTender');
+      expect(args).not.toHaveProperty('amountCents');
     }
   });
 
-  test('gate on, any other caller: the Invoices page body (no marker, or a non-boolean one) is unchanged', async () => {
+  test('gate on, any other caller: the Invoices page body (no marker, a non-boolean one, or another tender) is unchanged', async () => {
     process.env.GATE_CHECKOUT_TENDER_RECEIPT = 'true';
     await post({ method: 'check', sendReceipt: false });
     await post({ method: 'check', sendReceipt: true, via: 'email' });
     await post({ method: 'check', sendReceipt: false, checkoutTender: 'true' });
+    // The checkout sheets take cash and check only: another method with the marker keeps its own body.
+    await post({ method: 'venmo', sendReceipt: false, checkoutTender: true });
     const calls = recordManualPayment.mock.calls.map(([, args]) => [args.sendReceipt, args.via, 'checkoutTender' in args]);
-    expect(calls).toEqual([[false, 'both', false], [true, 'email', false], [false, 'both', false]]);
+    expect(calls).toEqual([[false, 'both', false], [true, 'email', false], [false, 'both', false], [false, 'both', false]]);
   });
 });

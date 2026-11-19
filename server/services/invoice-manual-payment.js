@@ -72,15 +72,14 @@
  * the commit and a swept-and-RECLAIMED worker can never commit a second
  * invoice for one transfer. false → 409, nothing written.
  *
- * checkoutTender (optional, the dispatch checkout's Cash / Check sheet with GATE_CHECKOUT_TENDER_RECEIPT on, owner 2026-11-18): the
- * payment is a step of the technician's checkout, and the completion screen the checkout opens next is what completes the visit (its
- * report and its text). Two things follow, both written IN the settlement transaction:
- *   - the receipt nobody tapped for goes through the automatic receipt queue, as for `automated` (the customer's payment_receipt
- *     opt-out, the billing email choice, the text channel choice, the send window and the retries all live there); `receipt` then
- *     reads { queued: true };
- *   - the post-payment closeout below does not run (`closeout` reads { closed: false, reason: 'checkout_completes_visit' }), and a
- *     refusal row with that code (recordCheckoutCloseoutDeferral) keeps the daily retry sweep off the visit through its own ET day.
- *     From the next day a checkout left unfinished is closed by the sweep like any arrived visit with a paid invoice.
+ * checkoutTender (optional, the dispatch checkout's Cash / Check sheet with GATE_CHECKOUT_TENDER_RECEIPT on, owner 2026-11-18): a
+ * receipt nobody tapped for. It goes through the automatic receipt queue, as for `automated`: the job row is inserted IN the
+ * settlement transaction, and the queue honors the customer's payment_receipt opt-out, the billing email choice, the text channel
+ * choice, the send window and the retries. Staff recorded the payment, so the job is not customer-initiated and its text keeps the
+ * send window. `receipt` then reads { queued: true }. The caller fences the amount with amountCents + owedCentsSeen (the figure the
+ * sheet showed), so the receipt never confirms a sum the technician did not take. A part-paid invoice (amount_paid > 0 on the locked
+ * row) gets no automatic checkout receipt: the receipt reads the whole bill (above), which would name more than this final payment;
+ * `receipt` reads null, and the office sends it (the paid-visit receipt check asks for it).
  *
  * Refusals throw an Error carrying `statusCode` (400 / 404 / 409) and
  * `isOperational`; the lost-race 409 also carries `currentStatus`. Anything
@@ -215,11 +214,13 @@ async function recordManualPayment(id, {
   // Staff user id behind an operator-recorded payment (audit attribution
   // for the invoice-issued closeout); null for automated settlements.
   recordedByTechnicianId = null,
-  // The dispatch checkout's tender (see checkoutTender above): queue the receipt, and leave the visit to the checkout's completion.
+  // The dispatch checkout's Cash / Check tender (see checkoutTender above): its receipt goes through the automatic receipt queue.
   checkoutTender = false,
 } = {}) {
   // A receipt nobody tapped for (the Zelle reconciler, or the dispatch checkout) goes through the automatic receipt queue.
   const queueReceipt = sendReceipt && (automated || checkoutTender);
+  // Whether the settlement transaction inserted that job (a part-paid checkout tender does not; see checkoutTender above).
+  let receiptQueued = false;
   if (expectedAmountCents != null && !(Number.isSafeInteger(expectedAmountCents) && expectedAmountCents > 0)) {
     throw refusal(400, 'expectedAmountCents must be a positive integer number of cents');
   }
@@ -601,17 +602,15 @@ async function recordManualPayment(id, {
     // collect. Complete it on the SAME trx so a paid invoice never keeps
     // an `active` plan that blocks edits / credit reversal.
     await PaymentPlans.completeActivePlansForInvoice(row.id, trx);
-    if (queueReceipt) {
+    if (queueReceipt && !(checkoutTender && Number(locked.amount_paid) > 0)) {
       // Same transaction as the paid flip: the receipt job is durable the
-      // moment the payment is. The customer paid themselves (a Zelle
-      // transfer minutes ago, or cash / a check handed to the technician),
-      // so the receipt is customer-initiated for the send-window decision.
+      // moment the payment is. A Zelle transfer is the customer's own act
+      // minutes ago (customer-initiated for the send-window decision); a
+      // checkout tender is recorded by staff, so its text keeps the window.
       await require('./receipt-delivery-queue').enqueueReceiptDelivery({
-        invoiceId: id, source: automated ? 'zelle_notice_reconciler' : 'dispatch_checkout', customerInitiated: true, database: trx,
+        invoiceId: id, source: automated ? 'zelle_notice_reconciler' : 'dispatch_checkout', customerInitiated: Boolean(automated), database: trx,
       });
-    }
-    if (checkoutTender) {
-      await require('./invoice-issued-closeout').recordCheckoutCloseoutDeferral({ trx, invoiceId: id, visitId: row.scheduled_service_id, actorTechnicianId: recordedByTechnicianId });
+      receiptQueued = true;
     }
     return row;
   });
@@ -761,11 +760,11 @@ async function recordManualPayment(id, {
   let emailResult = null;
   let smsResult = null;
   let queued = false;
-  if (queueReceipt) {
+  if (receiptQueued) {
     // The job row committed with the payment above; just nudge the drain.
     require('./receipt-delivery-queue').scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
     queued = true;
-  } else if (sendReceipt) {
+  } else if (sendReceipt && !queueReceipt) {
     const { sendReceiptEmail } = require('./invoice-email');
     const { claimReceiptJobForOperatorSend, recordOperatorReceiptDelivered, releaseOperatorReceiptClaim } = require('./receipt-delivery-queue');
     // The payment is already recorded: a claim failure only skips the
@@ -820,11 +819,9 @@ async function recordManualPayment(id, {
   // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
   // GATE_INVOICE_ISSUED_CLOSES_VISIT): money received by hand proves the
   // visit happened — close it out quietly. Best-effort after the payment
-  // is recorded. Not for a checkout payment: its own completion closes the visit, with the report and text the quiet closeout skips.
-  const { closeOutVisitForIssuedInvoice, CHECKOUT_DEFERRAL_CODE } = require('./invoice-issued-closeout');
-  const closeout = checkoutTender
-    ? { closed: false, reason: CHECKOUT_DEFERRAL_CODE }
-    : await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId: recordedByTechnicianId, approvedTarget: approvedCloseoutTarget, approvedVisit: approvedCloseoutVisit });
+  // is recorded.
+  const { closeOutVisitForIssuedInvoice } = require('./invoice-issued-closeout');
+  const closeout = await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId: recordedByTechnicianId, approvedTarget: approvedCloseoutTarget, approvedVisit: approvedCloseoutVisit });
 
   // Every post-commit effect has finished: Undo may now consider this payment. Best-effort by design (recordAuditEvent logs and swallows):
   // the payment is committed, so a lost marker only leaves it un-undoable, the safe direction. A crash before this line does the same.
@@ -840,7 +837,8 @@ async function recordManualPayment(id, {
   const final = await db('invoices').where({ id }).first();
   return {
     invoice: final,
-    receipt: !sendReceipt ? null : queued ? { queued: true } : { email: emailResult, sms: smsResult },
+    // A queue receipt the settlement skipped (a part-paid checkout tender) reads null: nothing was sent or queued.
+    receipt: !sendReceipt || (queueReceipt && !receiptQueued) ? null : queued ? { queued: true } : { email: emailResult, sms: smsResult },
     // What the post-payment closeout did (the Intelligence Bar card reports it; the Invoices page route does not forward it).
     closeout,
   };
