@@ -35,6 +35,7 @@ const {
   perTruckLive,
   offerFunnelView,
   funnelOfferPool,
+  truckMayTakeDate,
   funnelZoneRows,
   rowInFunnelZones,
   isFunnelZone,
@@ -68,17 +69,37 @@ function zoneStopRow(overrides = {}) {
   };
 }
 
-function scheduledServicesChain(rows) {
-  return {
+// `realStopDates`: the chain also answers estimate-slot-availability's stopDatesInRange read (the packing rule: a stop
+// day keeps only route openings, no synthetic hours) from `rows`, as Postgres would: per truck one
+// {scheduled_date, technician_id} row per timed stop, else the distinct dates. Without it that read throws here and
+// fails open (no day packed).
+function scheduledServicesChain(rows, { realStopDates = false } = {}) {
+  const chain = {
     leftJoin: jest.fn().mockReturnThis(),
     whereBetween: jest.fn().mockReturnThis(),
     whereNotIn: jest.fn().mockReturnThis(),
     andWhere: jest.fn().mockReturnThis(),
     select: jest.fn().mockResolvedValue(rows),
   };
+  if (realStopDates) {
+    const timed = rows.filter((r) => r.window_start != null);
+    Object.assign(chain, {
+      whereNotNull: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      whereNot: jest.fn().mockReturnThis(),
+      distinct: jest.fn(() => {
+        const perTruck = timed.map((r) => ({ scheduled_date: r.scheduled_date, technician_id: r.technician_id ?? null }));
+        return {
+          then: (ok, err) => Promise.resolve(perTruck).then(ok, err),
+          pluck: jest.fn().mockResolvedValue([...new Set(timed.map((r) => r.scheduled_date))]),
+        };
+      }),
+    });
+  }
+  return chain;
 }
 
-function mockDb({ scheduledRows = [], estimateRow = ESTIMATE_ROW, failFirstScheduledCall = false, techs = [{ id: 'tech-1', name: 'Adam Benetti' }], coords = true } = {}) {
+function mockDb({ scheduledRows = [], estimateRow = ESTIMATE_ROW, failFirstScheduledCall = false, techs = [{ id: 'tech-1', name: 'Adam Benetti' }], coords = true, realStopDates = false } = {}) {
   let scheduledCalls = 0;
   db.mockImplementation((table) => {
     if (table === 'scheduled_services' && failFirstScheduledCall && scheduledCalls++ === 0) {
@@ -119,7 +140,7 @@ function mockDb({ scheduledRows = [], estimateRow = ESTIMATE_ROW, failFirstSched
       return { select: jest.fn().mockResolvedValue([VENICE_ZONE, SARASOTA_ZONE]) };
     }
     if (table === 'scheduled_services') {
-      return scheduledServicesChain(scheduledRows);
+      return scheduledServicesChain(scheduledRows, { realStopDates });
     }
     if (table === 'technician_absences') {
       // buildAsapCapacitySlots' absentTechDays read (technician-eligibility.js)
@@ -396,11 +417,24 @@ describe('getAvailableSlots — funnel end to end', () => {
   };
   const offered = (result) => [...(result.primary || []), ...(result.expander || [])];
 
-  // Owner rule B (GATE_MULTI_TECH_CONFIRM on): tech-2 drives south on 05-20, so tech-1 (the only truck with open
-  // time here) is not offered 05-20: the page opens one new day instead. Off: the fleet's zone day, as before.
+  const TWO_TRUCKS = [{ id: 'tech-1', name: 'Adam Benetti' }, { id: 'tech-2', name: 'Second Tech' }];
+  // find-time route openings at 10:00: [date, technician, detour minutes].
+  const routeOpenings = (list) => ({
+    slots: list.map(([date, techId, detour]) => ({
+      date, start_time: '10:00', end_time: '11:00', technician: { id: techId, name: techId === 'tech-1' ? 'Adam Benetti' : 'Second Tech' },
+      detour_minutes: detour, stops_that_day: 1,
+    })),
+    evaluated: list.length,
+    total_feasible: list.length,
+  });
+
+  // Owner rule B (GATE_MULTI_TECH_CONFIRM on): tech-2 drives south on 05-20 with no open time there (the packing rule
+  // keeps a stop day's route openings only, and find-time found none for tech-2), so tech-1's route opening on 05-20
+  // is not offered: the page opens one new day instead. Off: the fleet's zone day, as before.
   test.each([[undefined, 'clustered'], ['true', 'seeded']])('another technician\'s Venice stop, GATE_MULTI_TECH_CONFIRM=%s: %s', async (gate, mode) => {
     await withGates({ GATE_MULTI_TECH_CONFIRM: gate }, async () => {
-      mockDb({ scheduledRows: [zoneStopRow({ technician_id: 'tech-2' })] });
+      mockDb({ realStopDates: true, scheduledRows: [zoneStopRow({ technician_id: 'tech-2' })], techs: TWO_TRUCKS });
+      findAvailableSlots.mockResolvedValue(routeOpenings([['2027-05-20', 'tech-1', 3], ['2027-05-21', 'tech-1', 3]]));
       const result = await getAvailableSlots('est-funnel-1', WINDOW);
       const dates = new Set(offered(result).map((s) => s.date));
       expect(dates.size).toBe(1);
@@ -409,41 +443,16 @@ describe('getAvailableSlots — funnel end to end', () => {
     });
   });
 
-  // Two trucks, one hour each: the one-per-hour collapse keeps one slot per start (tie: the slot id, so tech-1's).
-  // Per truck the filter runs first, so on tech-2's zone day every start is tech-2's, never lost to tech-1's slot.
-  test.each([[undefined, 'tech-1'], ['true', 'tech-2']])('two trucks with GATE_ESTIMATE_SLOT_ONE_PER_HOUR on, GATE_MULTI_TECH_CONFIRM=%s: the zone day\'s hours are %s\'s', async (gate, techId) => {
+  // Both trucks open at 10:00 on the zone day; the one-per-hour collapse keeps one slot per start (the closer route
+  // first: tech-1's). Per truck the filter runs before the collapse, so the zone day's 10:00 is tech-2's, never lost
+  // to tech-1's slot.
+  test.each([[undefined, 'tech-1'], ['true', 'tech-2']])('two trucks with GATE_ESTIMATE_SLOT_ONE_PER_HOUR on, GATE_MULTI_TECH_CONFIRM=%s: the zone day\'s 10:00 is %s\'s', async (gate, techId) => {
     await withGates({ GATE_MULTI_TECH_CONFIRM: gate, GATE_ESTIMATE_SLOT_ONE_PER_HOUR: 'true' }, async () => {
-      mockDb({
-        scheduledRows: [zoneStopRow({ technician_id: 'tech-2' })],
-        techs: [{ id: 'tech-1', name: 'Adam Benetti' }, { id: 'tech-2', name: 'Second Tech' }],
-      });
+      mockDb({ realStopDates: true, scheduledRows: [zoneStopRow({ technician_id: 'tech-2' })], techs: TWO_TRUCKS });
+      findAvailableSlots.mockResolvedValue(routeOpenings([['2027-05-20', 'tech-1', 3], ['2027-05-20', 'tech-2', 40]]));
       const result = await getAvailableSlots('est-funnel-1', WINDOW);
-      const slots = offered(result);
-      expect(slots.length).toBeGreaterThan(0);
       expect(result.metadata.zoneDayFunnel).toEqual({ mode: 'clustered' });
-      expect(new Set(slots.map((s) => s.date))).toEqual(new Set(['2027-05-20']));
-      expect(new Set(slots.map((s) => s.techId))).toEqual(new Set([techId]));
-    });
-  });
-
-  // Route candidates take the same filter: tech-1's cheaper find-time slot on tech-2's zone day is not offered.
-  test('per truck, a route candidate of another truck on the zone day is dropped before the funnel', async () => {
-    await withGates({ GATE_MULTI_TECH_CONFIRM: 'true' }, async () => {
-      mockDb({
-        scheduledRows: [zoneStopRow({ technician_id: 'tech-2' })],
-        techs: [{ id: 'tech-2', name: 'Second Tech' }],
-      });
-      findAvailableSlots.mockResolvedValue({
-        slots: [
-          { date: '2027-05-20', start_time: '13:00', technician: { id: 'tech-1', name: 'Adam Benetti' }, detour_minutes: 2, stops_that_day: 3 },
-          { date: '2027-05-20', start_time: '15:00', technician: { id: 'tech-2', name: 'Second Tech' }, detour_minutes: 9, stops_that_day: 1 },
-        ],
-        evaluated: 2,
-        total_feasible: 2,
-      });
-      const slots = offered(await getAvailableSlots('est-funnel-1', WINDOW));
-      expect(slots.some((s) => s.windowStart === '15:00' && s.techId === 'tech-2')).toBe(true);
-      expect(slots.filter((s) => s.techId === 'tech-1')).toEqual([]);
+      expect(offered(result).map((s) => [s.date, s.windowStart, s.techId])).toEqual([['2027-05-20', '10:00', techId]]);
     });
   });
 
@@ -471,20 +480,19 @@ describe('getAvailableSlots — funnel end to end', () => {
     }
   });
 
-  // No coordinates (the ASAP-only path) runs the same filter before its own collapse.
-  test.each([[undefined, 'tech-1'], ['true', 'tech-2']])('no coordinates, two trucks, GATE_MULTI_TECH_CONFIRM=%s: the zone day\'s hours are %s\'s', async (gate, techId) => {
-    await withGates({ GATE_MULTI_TECH_CONFIRM: gate, GATE_ESTIMATE_SLOT_ONE_PER_HOUR: 'true' }, async () => {
-      mockDb({
-        scheduledRows: [zoneStopRow({ technician_id: 'tech-2' })],
-        techs: [{ id: 'tech-1', name: 'Adam Benetti' }, { id: 'tech-2', name: 'Second Tech' }],
-        coords: false,
-      });
+  // No coordinates (the ASAP-only path, synthetic hours only): the packing rule drops a stop day's hours for the stop's
+  // truck (per truck) or the fleet (off), and per truck the filter drops the other truck's hours on the zone day
+  // before the funnel. Either way the zone day is not offered and one new day opens.
+  test.each([undefined, 'true'])('no coordinates, two trucks, GATE_MULTI_TECH_CONFIRM=%s: one new day, never the zone day', async (gate) => {
+    await withGates({ GATE_MULTI_TECH_CONFIRM: gate }, async () => {
+      mockDb({ realStopDates: true, scheduledRows: [zoneStopRow({ technician_id: 'tech-2' })], techs: TWO_TRUCKS, coords: false });
       const result = await getAvailableSlots('est-funnel-1', WINDOW);
       const slots = offered(result);
-      expect(slots.length).toBeGreaterThan(0);
       expect(findAvailableSlots).not.toHaveBeenCalled();
-      expect(new Set(slots.map((s) => s.date))).toEqual(new Set(['2027-05-20']));
-      expect(new Set(slots.map((s) => s.techId))).toEqual(new Set([techId]));
+      expect(slots.length).toBeGreaterThan(0);
+      expect(result.metadata.zoneDayFunnel.mode).toBe('seeded');
+      expect(new Set(slots.map((s) => s.date)).size).toBe(1);
+      expect(slots.some((s) => s.date === '2027-05-20')).toBe(false);
     });
   });
 
@@ -699,6 +707,43 @@ describe('offerFunnelView + funnelOfferPool (assessment link pool, same helpers 
     expect(await funnelFor(pool, VENICE_ADDRESS)).toBe(pool);
     db.mockImplementation(() => ({ select: jest.fn().mockRejectedValue(new Error('zones down')) }));
     expect(await offerFunnelView({ address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db })).toBeNull();
+  });
+
+  // The assessment link's re-check on its booking transaction, under the date lock (createSelfBooking
+  // callbackVisit.slotGuard): the first of two racing commits' stop decides the second.
+  describe('truckMayTakeDate (rule B at commit)', () => {
+    const take = (technicianId, address = VENICE_ADDRESS) => truckMayTakeDate(db, { address, date: '2027-05-20', technicianId });
+
+    test('per truck: a day another truck drives south refuses; its own truck, an unassigned stop or no stop takes it', async () => {
+      await withTruckGate('true', async () => {
+        mockDb({ scheduledRows: [zoneStopRow({ technician_id: 'tech-2' })] });
+        expect(await take('tech-1')).toBe(false);
+        expect(await take('tech-2')).toBe(true);
+        mockDb({ scheduledRows: [zoneStopRow({ technician_id: null })] });
+        expect(await take('tech-1')).toBe(true);
+        mockDb({ scheduledRows: [] });
+        expect(await take('tech-1')).toBe(true);
+      });
+    });
+
+    test('the fleet view, no technician, no address or another zone: true with no stop read', async () => {
+      mockDb({ scheduledRows: [zoneStopRow({ technician_id: 'tech-2' })] });
+      expect(await withTruckGate(null, () => take('tech-1'))).toBe(true);
+      await withTruckGate('true', async () => {
+        expect(await take(null)).toBe(true);
+        expect(await take('tech-1', null)).toBe(true);
+        expect(await take('tech-1', '55 Main St, Sarasota, FL, 34231')).toBe(true);
+      });
+      expect(scheduledReads()).toBe(0);
+    });
+
+    // Not fail-open like the offer: the booking transaction refuses rather than books past a read it could not do.
+    test('a stop-read failure throws, so the booking transaction fails closed', async () => {
+      await withTruckGate('true', async () => {
+        mockDb({ failFirstScheduledCall: true });
+        await expect(take('tech-1')).rejects.toThrow('transient outage');
+      });
+    });
   });
 
   test('gate off: no view and no query at all, also for funnelZoneRows', async () => {

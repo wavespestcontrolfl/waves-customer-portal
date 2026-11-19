@@ -60,6 +60,14 @@ jest.mock('../services/scheduling/parse-when', () => ({
   summarizeWindow: (...args) => mockSummarizeWindow(...args),
 }));
 
+// The commit's far-south truck re-check (owner rule B per truck): its own behavior is
+// estimate-slots-zone-day-funnel.test.js's; here only what the commit hands it.
+const mockTruckMayTakeDate = jest.fn(async () => true);
+jest.mock('../services/scheduling/zone-day-funnel', () => ({
+  ...jest.requireActual('../services/scheduling/zone-day-funnel'),
+  truckMayTakeDate: (...args) => mockTruckMayTakeDate(...args),
+}));
+
 const mockBookingConfig = jest.fn(async () => ({}));
 const mockBuildAvailability = jest.fn(async () => ({ slots: [], days: [] }));
 const mockCreateSelfBooking = jest.fn(async () => ({ ok: true, body: { booking: { id: 'sb-1' } } }));
@@ -483,9 +491,16 @@ describe('Codex #4737 r5 P1: the booking is bound to the validated location', ()
       days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
     });
     await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
-    expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.expectedLocation).toEqual({ lat: 27.4, lng: -82.5 });
+    const { callbackVisit } = mockCreateSelfBooking.mock.calls[0][0];
+    expect(callbackVisit.expectedLocation).toEqual({ lat: 27.4, lng: -82.5 });
     // The lead link carries no estimate re-check (only the estimate-token page passes one).
-    expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit).not.toHaveProperty('estimateGuard');
+    expect(callbackVisit).not.toHaveProperty('estimateGuard');
+    // Its far-south truck re-check runs on the booking transaction for the booked address, date and technician.
+    const trx = jest.fn();
+    await callbackVisit.slotGuard(trx);
+    expect(mockTruckMayTakeDate).toHaveBeenCalledWith(trx, {
+      address: '123 Palm Ave, Bradenton, FL, 34209', date: FUTURE_DATE, technicianId: 'tech-1',
+    });
   });
 
   test('bookAssessmentVisit hands an estimate page\'s guard to the booking transaction unchanged', async () => {
@@ -499,6 +514,8 @@ describe('Codex #4737 r5 P1: the booking is bound to the validated location', ()
       bookingLocation: { lat: 27.4, lng: -82.5 }, source: 'estimate_assessment_link', alertLabel: 'x', estimateGuard,
     });
     expect(createSelfBooking.mock.calls[0][0].callbackVisit.estimateGuard).toBe(estimateGuard);
+    // The estimate page books its signed technician with no far-south re-check (offer-time funnel only).
+    expect(createSelfBooking.mock.calls[0][0].callbackVisit).not.toHaveProperty('slotGuard');
   });
 
   test('booking.js checks expectedLocation under the customer-comms fence, before any insert', () => {

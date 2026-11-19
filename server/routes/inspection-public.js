@@ -216,6 +216,7 @@ const ASSESSMENT_EXPECTED_IDENTITY = Object.freeze({ catalogServiceKey: ASSESSME
 const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
 const { parseRawAddress, leadAddressFields, premiseUnitKey } = require('../utils/address-normalizer');
 const { buildRescheduleLink } = require('../services/reschedule-link');
+const { truckMayTakeDate } = require('../services/scheduling/zone-day-funnel');
 
 // Per-lead advisory-lock namespace for the commit's provisioning/booking
 // critical section (see the file header and the commit handler below).
@@ -2296,7 +2297,7 @@ function parseCommitBody(body) {
 // own and no leadDedupe (its dedupe is the per-customer assessment lane below).
 async function bookAssessmentVisit({
   booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe,
-  source = 'inspection_link', alertLabel = '🔁 Free consultation self-booked:', estimateGuard = null,
+  source = 'inspection_link', alertLabel = '🔁 Free consultation self-booked:', estimateGuard = null, slotGuard = null,
 }) {
   const { createSelfBooking } = booking._internals;
   return createSelfBooking({
@@ -2332,6 +2333,8 @@ async function bookAssessmentVisit({
       leadDedupe,
       // The estimate-token page's in-transaction re-check (estimate-assessment-public.js); absent for a lead link.
       ...(estimateGuard ? { estimateGuard } : {}),
+      // The lead link's far-south truck re-check under the booking's date lock (owner rule B per truck).
+      ...(slotGuard ? { slotGuard } : {}),
     },
   });
 }
@@ -2682,8 +2685,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // always uses the global `db` connection and can do real network I/O
     // of its own (a gated weather-outlook call), neither of which may run
     // while that lock is held.
+    const bookingAddress = locationMoved ? customerAddressFields(custRow) : resolved.address;
     const bookingSlot = locationMoved
-      ? await revalidateSlotAt(bookingLocation, { date, time, config, catalog, leadId: lead.id, address: customerAddressFields(custRow) })
+      ? await revalidateSlotAt(bookingLocation, { date, time, config, catalog, leadId: lead.id, address: bookingAddress })
       : slot;
     if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: customerAddressFields(custRow), range, config, catalog, leadId: lead.id });
 
@@ -2713,7 +2717,12 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // addresses never both book.
     const resolveCustomerIds = (conn, opts) => trustedLeadProfileIds(conn, lead.id, verified, custRow.id, opts);
     let fencedUniverse = null;
-    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), fenceIds: async (conn) => { fencedUniverse = await leadFenceIds(conn, lead.id, verified, custRow.id); return fencedUniverse; }, revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id, fencedUniverse) } });
+    // Owner rule B per truck, under the booking's date lock: two commits can rebuild the same new far-south day
+    // before either inserts, each with a different truck; the second finds the first's stop and gets SLOT_TAKEN.
+    const slotGuard = (conn) => truckMayTakeDate(conn, {
+      address: zoneFunnelText(bookingAddress), date, technicianId: bookingSlot.technician_id ?? null,
+    });
+    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, slotGuard, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), fenceIds: async (conn) => { fencedUniverse = await leadFenceIds(conn, lead.id, verified, custRow.id); return fencedUniverse; }, revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id, fencedUniverse) } });
 
     if (!result.ok) {
       return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, verified });

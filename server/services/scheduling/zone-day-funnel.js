@@ -60,7 +60,10 @@
  * day has an opening). The assessment link's commit rebuild drops the same
  * openings, because that commit books whichever truck its rebuild finds at
  * the picked date and start (the estimate page books the signed slot's own
- * technician). Off, every zone day is the fleet's, as with one truck.
+ * technician); its booking transaction re-checks the truck under the date
+ * lock (truckMayTakeDate), because two commits can rebuild the same new day
+ * before either inserts. Off, every zone day is the fleet's, as with one
+ * truck.
  *
  * Fail-open like blackout-dates: any lookup failure disables the funnel for
  * that request (full pool offered) — a scattered offer beats no offer.
@@ -288,6 +291,20 @@ function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [] } = 
   };
 }
 
+// Owner rule B at commit, under the caller's date lock (the lead assessment link's booking transaction, through
+// createSelfBooking's callbackVisit.slotGuard): may `technicianId` still take `date` for a booking at `address`? Two
+// commits can rebuild the same new day before either inserts; the date lock serializes them, and this read on the
+// locked transaction sees the first one's stop. true when the rule does not apply (gate off, fleet view, no address
+// or technician, no funneled zone). Reads on `conn`; a query failure throws, so the caller's transaction fails
+// closed like its other reads.
+async function truckMayTakeDate(conn, { address, date, technicianId }) {
+  if (!address || technicianId == null || !isEnabled('southZoneDayFunnel') || !perTruckLive()) return true;
+  const estimateZone = await resolveEstimateZone(conn, { address });
+  if (!isFunnelZone(estimateZone)) return true;
+  const { dates, techs } = await zoneStopDays(conn, estimateZone, date, date);
+  return !dates.has(date) || onZoneDay(date, technicianId, dates, techs);
+}
+
 // The funnel for an offer pool that is not built by the estimate page (the lead assessment link:
 // routes/booking.js buildBookingAvailability, fed the lead's address text), read in two steps because that
 // builder keeps one technician per date and start: offerFunnelView before its claims (per truck,
@@ -348,6 +365,7 @@ module.exports = {
   getZoneFunnelDays,
   applyZoneDayFunnel,
   dropOtherTruckDays,
+  truckMayTakeDate,
   offerFunnelView,
   funnelOfferPool,
   funnelZoneRows,

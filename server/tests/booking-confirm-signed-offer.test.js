@@ -768,6 +768,59 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     });
   });
 
+  // The lead assessment link's per-truck re-check (owner rule B, GATE_MULTI_TECH_CONFIRM): callbackVisit.slotGuard
+  // runs on the booking transaction itself, after its date lock and the idempotent replay, before the insert. Two
+  // commits that rebuilt the same new far-south day are serialized by that lock; the second reads the first's stop.
+  describe('slot guard (callbackVisit.slotGuard)', () => {
+    const { occupancyLockKey } = require('../services/scheduling/occupancy')._internals;
+    const assessment = (slotGuard) => callbackPayload({
+      source: 'inspection_link',
+      callbackVisit: {
+        serviceKey: 'lawn_inspection', serviceId: null, serviceType: 'Waves Assessment', durationMinutes: 60,
+        isCallback: false, dedupeLane: false, slotGuard,
+      },
+    });
+    function captureTrx() {
+      const seen = { trx: null, raws: [] };
+      const runTransaction = db.transaction.getMockImplementation();
+      db.transaction.mockImplementation((fn) => runTransaction((trx) => {
+        seen.trx = trx;
+        const raw = trx.raw;
+        trx.raw = jest.fn((...args) => { seen.raws.push(args); return raw(...args); });
+        return fn(trx);
+      }));
+      return seen;
+    }
+
+    test('false refuses as a taken slot before the insert, read on the booking transaction after its date lock', async () => {
+      const seen = captureTrx();
+      let dateLockedFirst = false;
+      const slotGuard = jest.fn(async () => {
+        dateLockedFirst = seen.raws.some(([sql, bindings]) => /pg_advisory_xact_lock/.test(sql) && bindings?.[1] === occupancyLockKey(SLOT_DATE));
+        return false;
+      });
+      await expect(createSelfBooking(assessment(slotGuard))).resolves.toMatchObject({ ok: false, status: 409, code: 'SLOT_TAKEN' });
+      expect(slotGuard).toHaveBeenCalledTimes(1);
+      expect(slotGuard.mock.calls[0][0]).toBe(seen.trx);
+      expect(dateLockedFirst).toBe(true);
+      expect(capturedScheduledInsert).toBeUndefined();
+    });
+
+    test('true books as before', async () => {
+      const slotGuard = jest.fn().mockResolvedValue(true);
+      await expect(createSelfBooking(assessment(slotGuard))).rejects.toThrow(SENTINEL);
+      expect(slotGuard).toHaveBeenCalledTimes(1);
+      expect(capturedScheduledInsert).toBeDefined();
+    });
+
+    test('an idempotent replay returns the first booking without the re-check', async () => {
+      replayExisting = { id: 'sb-1', confirmation_code: 'WAV-1' };
+      const slotGuard = jest.fn().mockResolvedValue(false);
+      await expect(createSelfBooking(assessment(slotGuard))).resolves.toMatchObject({ ok: true, body: { replayed: true } });
+      expect(slotGuard).not.toHaveBeenCalled();
+    });
+  });
+
   test("someone ELSE's estimate UUID books UNLINKED (no source_estimate_id stamp) with a warn", async () => {
     const row = await runToScheduledInsert({ source_estimate_id: OTHER_EST });
     expect(row.source_estimate_id).toBeNull();

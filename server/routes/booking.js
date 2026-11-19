@@ -2662,6 +2662,9 @@ async function createSelfBooking(payload = {}) {
     // revalidate(trx) }): a booking made from an estimate's page
     // (commercial-first-visit.js, estimate-assessment-public.js) re-checks
     // that estimate inside the booking transaction (see the lock below).
+    // callbackVisit.slotGuard(trx) (the lead assessment link): the caller's
+    // own re-check of this slot on the booking transaction, under the date
+    // lock; false refuses it as a taken slot.
     const paidInternalVisit = callbackVisit && callbackVisit.isCallback === false
       && Number.isFinite(Number(callbackVisit.billing?.estimatedPrice)) && Number(callbackVisit.billing.estimatedPrice) > 0
       ? { estimatedPrice: Math.round(Number(callbackVisit.billing.estimatedPrice) * 100) / 100 }
@@ -4218,7 +4221,6 @@ async function createSelfBooking(payload = {}) {
           });
         }
       }
-
       // Idempotent replay: same customer, same day, same start time →
       // return the original booking instead of creating a duplicate. A
       // callback commit additionally requires the existing row to be THIS
@@ -4386,6 +4388,18 @@ async function createSelfBooking(payload = {}) {
       }
       const conflict = await conflictQuery.first('scheduled_services.id');
       if (conflict) {
+        throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'SLOT_TAKEN',
+        });
+      }
+
+      // callbackVisit.slotGuard (the lead assessment link, owner rule B per truck): under the date lock taken first,
+      // after the idempotent replay, the caller re-checks its slot on THIS transaction. Two commits that rebuilt the
+      // same new far-south day before either inserted would otherwise send a second truck south
+      // (zone-day-funnel.js truckMayTakeDate).
+      if (typeof callbackVisit?.slotGuard === 'function' && !(await callbackVisit.slotGuard(trx))) {
         throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
           statusCode: 409,
           isOperational: true,

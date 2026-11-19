@@ -1400,7 +1400,10 @@ the day has an unassigned far-south stop (`zone-day-funnel.js`
 `dropOtherTruckDays`, run before either page chooses among technicians). When
 no such opening is left, the page opens one new day, as with one technician.
 The assessment link's commit rebuild drops the same openings, so it books that
-zone-day technician or answers `SLOT_TAKEN`. No field or status changes.
+zone-day technician or answers `SLOT_TAKEN`. Its booking transaction checks the
+technician again under the date lock (`truckMayTakeDate`), so two commits that
+rebuilt the same new day before either booked never send two technicians south:
+the second answers `SLOT_TAKEN`. No field or status changes.
 Callers that never pass `technicianId` — the zone-engine confirm, auto-dispatch's
 all-day read and some follow-up seeders — are unchanged. The
 date-wide occupancy advisory lock (rung 1) that every one of these writers takes
@@ -7575,7 +7578,10 @@ check: a time the funnel hid can still be committed by a request built by hand.
 Per truck (`GATE_MULTI_TECH_CONFIRM` on, owner rule B 2026-11-19) every list,
 the commit build included, first drops each opening of a technician on another
 technician's far-south day (`dropOtherTruckDays`), so a zone day's start books
-its own technician, or answers `SLOT_TAKEN` when that technician lost the hour. No
+its own technician, or answers `SLOT_TAKEN` when that technician lost the hour.
+The booking transaction checks it again under the date lock (`createSelfBooking`
+`callbackVisit.slotGuard`, `truckMayTakeDate`): when another commit booked a
+different technician south on that day first, it answers `SLOT_TAKEN`. No
 field, status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search
 reservice uses, READ-ONLY, same booking-window clamp on both ends, and
 (same P1) is likewise routed through `finalizeBookingLocation` rather than
