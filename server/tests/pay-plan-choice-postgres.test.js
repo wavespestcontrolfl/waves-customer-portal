@@ -207,13 +207,34 @@ postgres('plan choice on the first invoice of an accepted per-application plan',
     expect(await trx('scheduled_services').where({ customer_id: f.customerId })).toHaveLength(4);
   });
 
-  test('paying the first invoice instead keeps per application: the choice is gone and nothing is covered', async () => {
+  test('paying the first invoice after picking the year keeps per application: the unpaid prepay is voided and the choice is gone', async () => {
     const f = await acceptedPlan();
-    await trx('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: new Date() });
+    await PayPlanChoice.selectAnnualPrepay(await firstInvoice(f));
+    const [paid] = await trx('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: new Date() }).returning('*');
+    await AnnualPrepayRenewals.syncTermForInvoicePayment(paid);
+    // The prepay's pay link can no longer collect a year on top of the
+    // invoice just paid, and its pending term is gone with it.
+    const [prepay] = await prepayInvoices(f);
+    expect(prepay.status).toBe('void');
+    expect(await termOf(f)).toMatchObject({ status: 'cancelled' });
     expect(await PayPlanChoice.planChoiceForInvoice(await firstInvoice(f))).toBeNull();
     expect(await PayPlanChoice.selectAnnualPrepay(await firstInvoice(f))).toEqual({ refused: true });
-    expect(await prepayInvoices(f)).toHaveLength(0);
+    expect(await prepayInvoices(f)).toHaveLength(1);
+    expect((await visit(f.laterVisitIds[0])).prepaid_method).toBeNull();
     expect((await trx('customers').where({ id: f.customerId }).first()).billing_mode).toBe('per_application');
+  });
+
+  test('a close that stopped after the void finishes the visit stamp on the next sync', async () => {
+    const f = await acceptedPlan();
+    await PayPlanChoice.selectAnnualPrepay(await firstInvoice(f));
+    const [prepay] = await prepayInvoices(f);
+    await payPrepay(prepay.id);
+    // The state a crash between the void and the stamp leaves behind.
+    await trx('scheduled_services').where({ id: f.visitId })
+      .update({ prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null });
+    await AnnualPrepayRenewals.syncTermForInvoicePayment(await trx('invoices').where({ id: prepay.id }).first());
+    expect(await visit(f.visitId)).toMatchObject({ status: 'completed', prepaid_method: 'annual_prepay_invoice' });
+    expect(await trx('activity_log').where({ customer_id: f.customerId, action: 'invoice_replaced_by_annual_prepay' })).toHaveLength(1);
   });
 
   test('a first invoice with money on it is left for the office when the prepay is paid', async () => {

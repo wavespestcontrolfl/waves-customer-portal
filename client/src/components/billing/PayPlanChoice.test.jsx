@@ -7,7 +7,7 @@ import PayPlanChoice from './PayPlanChoice';
 
 afterEach(() => cleanup());
 
-// Quarterly pest control: four $128 visits and a $99 setup fee, or $512 for
+// Quarterly pest control: four $128 applications and a $99 setup fee, or $512 for
 // the year with the fee waived.
 const offer = {
   selected: false,
@@ -27,8 +27,8 @@ describe('PayPlanChoice', () => {
     const choosePrepay = vi.fn(async () => ({ ok: true, payUrl: 'https://portal.example/pay/prepay' }));
     const onChosen = vi.fn();
     render(<PayPlanChoice planChoice={offer} choosePrepay={choosePrepay} onChosen={onChosen} />);
-    expect(screen.getByText(/\$128\.00 each visit, 4 visits a year, plus the one-time \$99\.00 setup fee: \$611\.00 for the year/)).toBeInTheDocument();
-    expect(screen.getByText(/\$512\.00 today covers all 4 visits, including the one on this invoice\. The \$99\.00 setup fee is waived\./)).toBeInTheDocument();
+    expect(screen.getByText(/\$128\.00 per application, 4 applications a year, plus the one-time \$99\.00 setup fee: \$611\.00 for the year/)).toBeInTheDocument();
+    expect(screen.getByText(/\$512\.00 today covers all 4 applications, including the one on this invoice\. The \$99\.00 setup fee is waived\./)).toBeInTheDocument();
     // Paying per application is paying this invoice: the one button is the prepay pick.
     expect(screen.getAllByRole('button')).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: 'Prepay the year for $512.00' }));
@@ -45,6 +45,8 @@ describe('PayPlanChoice', () => {
     />);
     expect(screen.getByText(/You save \$45\.00 \(5% off\)\./)).toBeInTheDocument();
     expect(screen.queryByText(/setup fee/)).not.toBeInTheDocument();
+    // AGENTS.md: customer price units read "per application", never "per visit".
+    expect(screen.queryByText(/visit/)).not.toBeInTheDocument();
   });
 
   it('a refused or failed pick stays on the page, says so and can be retried', async () => {

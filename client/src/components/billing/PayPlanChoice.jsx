@@ -95,7 +95,7 @@ export default function PayPlanChoice({ planChoice, choosePrepay, onChosen, pane
       <div style={{ marginTop: SP.sm }}>
         <div style={heading}>Pay per application</div>
         <p style={prose}>
-          {fmtMoney(perApplication.perVisit)} each visit, {visitsPerYear} visits a year
+          {fmtMoney(perApplication.perVisit)} per application, {visitsPerYear} applications a year
           {perApplication.setupFee > 0 ? `, plus the one-time ${fmtMoney(perApplication.setupFee)} setup fee` : ''}
           : {fmtMoney(perApplication.yearTotal)} for the year. This invoice is the first of those.
         </p>
@@ -103,7 +103,7 @@ export default function PayPlanChoice({ planChoice, choosePrepay, onChosen, pane
       <div style={{ marginTop: SP.sm }}>
         <div style={heading}>Prepay the year</div>
         <p style={prose}>
-          {fmtMoney(prepay.total)} today covers all {visitsPerYear} visits, including the one on this invoice.
+          {fmtMoney(prepay.total)} today covers all {visitsPerYear} applications, including the one on this invoice.
           {saving ? ` ${saving}` : ''}
         </p>
         {button(`Prepay the year for ${fmtMoney(prepay.total)}`)}
