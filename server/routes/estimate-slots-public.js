@@ -72,6 +72,8 @@ const {
   resolveEstimateAcceptance,
   estimateRendersMonthlyBilling,
   verifyEstimateAskToken,
+  findLinkedUpcomingAppointment,
+  adoptionServiceModesForContract,
 } = require('./estimate-public');
 
 // Termite trenching review-before-booking 409 — mirrors the accept-time gate so a
@@ -414,6 +416,23 @@ function lockedAreaAddOnRuleRefusal(row, requestedServiceMode) {
   const body = gatedAddOnRefusal(row)
     || (requestedServiceMode === undefined ? null : recurringAreaAddOnRefusalBody(row, resolveSlotServiceMode(row, requestedServiceMode)));
   return body ? { status: 409, body } : null;
+}
+// The page's automatic re-hold (rehold: true) after an expired accept, on the LOCKED estimate row: a visit staff booked for
+// the estimate meanwhile is the appointment its accept adopts (/data offers it as existing_appointment, with this same
+// finder), so re-holding the old time would let the next confirm book a second visit. Refused instead, and the page
+// reloads onto the booked visit. A live hold the finder returns is no booked visit (shapeLinkedAppointment's isHold: no
+// customer, an expiry): the service's OTHER_LIVE_HOLD check judges it.
+const BOOKED_VISIT_REFUSAL = {
+  status: 409,
+  body: { error: 'a visit is already booked for this estimate', code: 'BOOKED_VISIT' },
+};
+async function lockedBookedVisitRefusal(row, trx) {
+  const estData = parseEstimateData(row);
+  const linked = await findLinkedUpcomingAppointment(row, estData, {
+    database: trx,
+    serviceModes: adoptionServiceModesForContract(row, estData),
+  });
+  return linked && (linked.customer_id || !linked.reservation_expires_at) ? BOOKED_VISIT_REFUSAL : null;
 }
 // Answer a no-booking refusal; a park refusal first runs the park side effects (deduped office alert, hold release).
 async function respondNoBookingRefusal(res, estimate, refusal) {
@@ -802,7 +821,9 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
           // add-on (or a gate turned off) after the pre-transaction read must not take a hold the accept would refuse.
           return (await lockedContactReviewRefusal(row, trx))
             || lockedAreaAddOnRuleRefusal(row, requestedServiceMode)
-            || lockedAreaAddOnLimitRefusal(row, trx, date);
+            || (await lockedAreaAddOnLimitRefusal(row, trx, date))
+            // The automatic re-hold only: never over a visit staff booked meanwhile.
+            || (req.body?.rehold === true ? await lockedBookedVisitRefusal(row, trx) : null);
         },
       });
       stuckAlert.noteHoldStarted(req, estimate, { scheduledServiceId, expiresAt });

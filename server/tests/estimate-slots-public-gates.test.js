@@ -84,6 +84,9 @@ jest.mock('../routes/estimate-public', () => ({
   acceptOfficeReviewBody: jest.fn(() => ({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review', error: 'parked' })),
   verifyEstimateAskToken: jest.fn(() => true),
   handleEstimateAsk: jest.fn((req, res) => res.json({})),
+  // /data's linked-visit finder (the re-hold's booked-visit check): no linked visit unless a case sets one.
+  findLinkedUpcomingAppointment: jest.fn(async () => null),
+  adoptionServiceModesForContract: jest.fn(() => ['recurring']),
 }));
 
 const express = require('express');
@@ -367,6 +370,56 @@ describe('reserve: the page\'s own re-hold', () => {
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ error: 'another time is held for this estimate', code: 'OTHER_LIVE_HOLD' });
     expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  // Staff can book the estimate's visit while the customer's hold runs out. The accept adopts that visit, so a re-held
+  // old time would let the next confirm book a second one: the re-hold is refused on the locked row (the service's
+  // ESTIMATE_NO_BOOKING path), with /data's own finder, and the page reloads onto the booked visit.
+  describe('a visit staff booked meanwhile', () => {
+    const { findLinkedUpcomingAppointment, adoptionServiceModesForContract } = require('../routes/estimate-public');
+    // The service's behavior: the locked-row callback runs, and a refusal is thrown as ESTIMATE_NO_BOOKING.
+    const reserveThroughCallback = () => slotReservation.reserveSlot.mockImplementationOnce(async (args) => {
+      const refusal = await args.revalidateEstimate({ ...currentEstimate, estimate_data: {} }, undefined, { date: '2027-05-20' });
+      if (refusal) throw Object.assign(new Error('estimate cannot be self-booked'), { code: 'ESTIMATE_NO_BOOKING', response: refusal });
+      return { scheduledServiceId: 'scheduled-1', expiresAt: '2027-05-20T13:15:00.000Z' };
+    });
+    afterEach(() => {
+      findLinkedUpcomingAppointment.mockReset();
+      findLinkedUpcomingAppointment.mockResolvedValue(null);
+    });
+
+    test.each([
+      ['booked to the customer', { id: 'ss-booked', customer_id: 'cust-1', reservation_expires_at: null }],
+      ['booked before the customer exists', { id: 'ss-booked', customer_id: null, reservation_expires_at: null }],
+    ])('a visit %s: the re-hold is refused with its own code, and nothing is held', async (_label, row) => {
+      findLinkedUpcomingAppointment.mockResolvedValue(row);
+      reserveThroughCallback();
+      const res = await post({ slotId: '2027-05-20_09-00_tech-1', rehold: true });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'a visit is already booked for this estimate', code: 'BOOKED_VISIT' });
+      // /data's finder, on the locked row's transaction, with /data's own service modes.
+      expect(findLinkedUpcomingAppointment).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'est-1' }), {}, { database: undefined, serviceModes: ['recurring'] },
+      );
+      expect(adoptionServiceModesForContract).toHaveBeenCalled();
+      expect(getAvailableSlots).not.toHaveBeenCalled();
+    });
+
+    test('a live hold the finder returns is no booked visit (the OTHER_LIVE_HOLD check judges it); no visit, the re-hold goes on', async () => {
+      findLinkedUpcomingAppointment.mockResolvedValue({ id: 'ss-hold', customer_id: null, reservation_expires_at: '2027-05-20T13:10:00.000Z' });
+      reserveThroughCallback();
+      expect((await post({ slotId: '2027-05-20_09-00_tech-1', rehold: true })).status).toBe(201);
+      findLinkedUpcomingAppointment.mockResolvedValue(null);
+      reserveThroughCallback();
+      expect((await post({ slotId: '2027-05-20_09-00_tech-1', rehold: true })).status).toBe(201);
+    });
+
+    test('an ordinary reserve never asks: the check is the automatic re-hold\'s only', async () => {
+      findLinkedUpcomingAppointment.mockResolvedValue({ id: 'ss-booked', customer_id: 'cust-1', reservation_expires_at: null });
+      reserveThroughCallback();
+      expect((await post({ slotId: '2027-05-20_09-00_tech-1' })).status).toBe(201);
+      expect(findLinkedUpcomingAppointment).not.toHaveBeenCalled();
+    });
   });
 });
 

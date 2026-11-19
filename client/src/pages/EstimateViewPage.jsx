@@ -4844,6 +4844,8 @@ async function reserveForRehold({ token, serviceMode, selectedFrequency, service
   if (isNoBookingRefusal(body)) return { answer: { noBooking: true } };
   // Another window or device holds a newer time: the server kept it, and the caller shows it.
   if (r.status === 409 && body.code === 'OTHER_LIVE_HOLD') return { answer: { otherHold: true } };
+  // Staff booked the visit meanwhile: the accept adopts it, so the caller reloads onto it.
+  if (r.status === 409 && body.code === 'BOOKED_VISIT') return { answer: { bookedVisit: true } };
   if (r.status === 409 && /slot no longer available/i.test(body.error || '')) return { lapsedOrTaken: true };
   return { answer: { failed: true } };
 }
@@ -7352,17 +7354,19 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           recoveryStuckRef.current = false;
           setRecoveryInFlight(false);
           recoveryInFlightRef.current = false;
-          // This page's own hold is released, so a live hold the refreshed contract still offers is another window's
-          // or device's (OTHER_LIVE_HOLD, or a re-hold that failed before reaching that check). Whatever started the
-          // recovery, the page follows the server: the normal step adopts that hold, and the notice says why. Without
-          // this, an expiry phase would say "Pick a time below" over a picker the held appointment hides.
+          // This page's own hold is released, so an appointment the refreshed contract offers is a live hold (another
+          // window's or device's, or this page's own re-hold whose answer was lost) or a visit staff booked meanwhile.
+          // Whatever started the recovery, the page follows the server: the normal step adopts that appointment. A live
+          // hold gets a notice saying why (recoveredHoldNotice); a booked visit gets none (its card says it is scheduled,
+          // and nothing ran out on it). Without this, an expiry phase would say nothing was booked and "Pick a time
+          // below" over a picker the appointment card hides.
           const refreshed = body?.estimate?.acceptance;
           const picked = pendingRecoveryPickRef.current;
           pendingRecoveryPickRef.current = null;
-          if (refreshed?.mode === 'existing_appointment' && refreshed.appointment?.isHold) {
+          if (refreshed?.mode === 'existing_appointment' && refreshed.appointment) {
             setCtaPhase('configure');
             setDeadHoldNote(null);
-            setOtherHoldNotice(recoveredHoldNotice(refreshed.appointment, picked));
+            setOtherHoldNotice(refreshed.appointment.isHold ? recoveredHoldNotice(refreshed.appointment, picked) : false);
           }
         });
       })
@@ -8207,10 +8211,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(null);
       return true;
     }
-    if (again.otherHold) {
-      // The server kept another window's newer hold. The recovery releases only this page's own expired hold and
-      // reloads; the reload shows that hold with its notice (recoverFromDeadHold), or, if it is gone too, the plain
-      // expiry copy with the picker back.
+    if (again.otherHold || again.bookedVisit) {
+      // The server kept another window's newer hold, or refused because staff booked the visit meanwhile. The recovery
+      // releases only this page's own expired hold and reloads; the reload shows that hold with its notice, or the
+      // booked visit (recoverFromDeadHold), or, if neither is there any more, the plain expiry copy with the picker back.
       recoverFromDeadHold('reservation_expired');
       return true;
     }

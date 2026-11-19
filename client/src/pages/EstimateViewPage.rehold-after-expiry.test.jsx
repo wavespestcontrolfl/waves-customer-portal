@@ -150,6 +150,16 @@ const heldElsewhereFrom = (base, at = {}) => () => {
   } } };
   return payload;
 };
+// /data after staff booked the estimate's visit: a committed appointment (no isHold, no expiry), which the accept adopts.
+const bookedVisitFrom = (base) => () => {
+  const payload = base();
+  payload.estimate = { ...payload.estimate, acceptance: { mode: 'existing_appointment', appointment: {
+    id: 'ss-booked', scheduledDate: '2026-07-16', windowStart: '13:00', windowEnd: '15:00', windowDisplay: '1:00 PM - 3:00 PM',
+    serviceType: 'Pest Control', status: 'confirmed',
+  } } };
+  return payload;
+};
+const BOOKED_VISIT_409 = () => jsonResponse({ error: 'a visit is already booked for this estimate', code: 'BOOKED_VISIT' }, { ok: false, status: 409 });
 // The picked time (the first slot, 2026-07-15 at 9:00), held: what a reload finds after the page's own re-hold commits.
 const PICKED_TIME_HOLD = { id: 'ss-own-rehold', scheduledDate: '2026-07-15', windowStart: '09:00', windowEnd: '11:00', windowDisplay: '9:00 AM - 11:00 AM' };
 
@@ -351,6 +361,59 @@ describe('the accept says the hold expired', () => {
     expect(screen.queryByText(/Your held time ran out and nothing was booked/)).toBeNull();
     expect(screen.queryByText(/Pick a time below/)).toBeNull();
     expect(screen.queryByText(/just taken/i)).toBeNull();
+  }, TEST_TIMEOUT_MS);
+
+  // Staff can book the estimate's visit while the customer's hold runs out. The server refuses the re-hold (the accept
+  // adopts the booked visit, so a re-held old time would book a second one), and the page reloads onto that visit.
+  it('staff booked the visit meanwhile: the re-hold is refused, and the page shows the booked visit with no expiry copy', async () => {
+    stubLocalStorage();
+    let booked = false;
+    const fetchMock = makeFetchMock({
+      reserveImpl: (n) => {
+        if (n === 1) return jsonResponse({ scheduledServiceId: 'ss-1', expiresAt: inFifteenMinutes() });
+        booked = true;
+        return BOOKED_VISIT_409();
+      },
+      acceptImpl: () => EXPIRED_409(),
+      data: () => (booked ? bookedVisitFrom(recurringPayload)() : recurringPayload()),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<EstimateViewPage />);
+
+    await pickTimeAndConfirm();
+
+    expect(await screen.findByText('Existing appointment', {}, SLOW)).toBeInTheDocument();
+    expect(screen.queryByText(/Your held time ran out and nothing was booked/)).toBeNull();
+    expect(screen.queryByText(/Pick a time below/)).toBeNull();
+    expect(screen.queryByText(/a different time is held for you/)).toBeNull();
+    expect(screen.queryByText(/it is held for you again/)).toBeNull();
+    expect(screen.queryByText(REHELD)).toBeNull();
+    expect(reserveCalls(fetchMock)).toHaveLength(2);
+  }, TEST_TIMEOUT_MS);
+
+  // Whatever ends the re-hold, a reload that finds a booked visit leaves the expiry step: it never says nothing was
+  // booked over the booked visit's card.
+  it('a re-hold that fails another way, with a booked visit on the reload: the booked visit, never "nothing was booked"', async () => {
+    stubLocalStorage();
+    let booked = false;
+    const fetchMock = makeFetchMock({
+      reserveImpl: (n) => {
+        if (n === 1) return jsonResponse({ scheduledServiceId: 'ss-1', expiresAt: inFifteenMinutes() });
+        booked = true;
+        throw new TypeError('Failed to fetch');
+      },
+      acceptImpl: () => EXPIRED_409(),
+      data: () => (booked ? bookedVisitFrom(recurringPayload)() : recurringPayload()),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<EstimateViewPage />);
+
+    await pickTimeAndConfirm();
+
+    expect(await screen.findByText('Existing appointment', {}, SLOW)).toBeInTheDocument();
+    expect(screen.queryByText(/Your held time ran out and nothing was booked/)).toBeNull();
+    expect(screen.queryByText(/Pick a time below/)).toBeNull();
+    expect(screen.queryByText(/a different time is held for you/)).toBeNull();
   }, TEST_TIMEOUT_MS);
 
   // The re-hold can commit on the server while its answer is lost: the reload then finds a hold at the very time the

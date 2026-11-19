@@ -6340,10 +6340,15 @@ That `POST /reserve` carries one OPTIONAL body field, `rehold: true` (only the l
 the service refuses, under the estimate lock and before any delete, when the estimate has a live hold other than one
 for the same time: the page's own hold is gone, so such a hold is newer (another tab or device took it), and an
 ordinary reserve would delete it. The refusal is `409 { error: 'another time is held for this estimate', code:
-'OTHER_LIVE_HOLD' }`. The page then releases only its own expired hold and reloads. Whenever such a reload (after
-this refusal, or after a re-hold that failed for another reason) finds `GET /data` offering a live hold as
-`existing_appointment` with `isHold`, the page follows it: it returns to its normal step and shows that hold (the card
-says the time is held, in the standard and the website layout alike), and a notice says why. The notice names another
+'OTHER_LIVE_HOLD' }`. With the field, the route also refuses, on the locked estimate row before any hold, when
+`GET /data`'s own linked-visit finder (`findLinkedUpcomingAppointment`, with `adoptionServiceModesForContract`)
+returns a booked visit (one with a customer or with no hold expiry): staff booked the estimate's visit meanwhile, the
+accept adopts it, and a re-held old time would book a second visit. That refusal is `409 { error: 'a visit is already
+booked for this estimate', code: 'BOOKED_VISIT' }`; a reserve without the field never asks. On either refusal the page
+releases only its own expired hold and reloads. Whenever such a reload (after these refusals, or after a re-hold that
+failed for another reason) finds `GET /data` offering an `existing_appointment`, the page follows it and returns to its
+normal step. A booked visit shows as the existing appointment, with no notice. A live hold (`isHold`) shows as the held
+time (the card says the time is held, in the standard and the website layout alike), and a notice says why. The notice names another
 window or device only when the hold's date or start time differs from the customer's pick; a hold at the picked time
 (the page's own re-hold can commit with its answer lost) gets a neutral "held for you again". If the reload finds no
 live hold, the plain expiry copy shows with the picker back. A reserve without the field keeps the supersede-on-reselect semantics above. When a signed offer has
