@@ -60,8 +60,10 @@ function memoryConn(rows) {
           filters.push((row) => anyOf.some((match) => match(row)));
         } else if (column && typeof column === 'object') {
           filters.push((row) => Object.entries(column).every(([key, val]) => row[key] === val));
-        } else if (op === '>') {
-          filters.push((row) => sortable(row[column]) > sortable(value));
+        } else if (op === '>' || op === '>=') {
+          filters.push((row) => op === '>'
+            ? sortable(row[column]) > sortable(value)
+            : sortable(row[column]) >= sortable(value));
         } else {
           throw new Error(`memoryConn: unsupported where(${column}, ${op})`);
         }
@@ -306,6 +308,20 @@ describe('public next-visit date scope', () => {
     ];
     await expect(nextPlanVisitDate(memoryConn(rows), row, '2027-03-20', { requireServiceAndProperty: true }))
       .resolves.toBe('2027-06-21');
+  });
+
+  test('does not name an overdue open occurrence as the public next visit', async () => {
+    const { addETDays, etDateString } = require('../utils/datetime-et');
+    const skippedDate = etDateString(addETDays(new Date(), -5));
+    const overdueDate = etDateString(addETDays(new Date(), -2));
+    const futureDate = etDateString(addETDays(new Date(), 5));
+    const row = planVisit({ scheduled_date: skippedDate });
+    const overdue = planVisit({ id: 'overdue', scheduled_date: overdueDate });
+    const upcoming = planVisit({ id: 'upcoming', scheduled_date: futureDate });
+
+    await expect(nextPlanVisitDate(memoryConn([overdue, upcoming]), row, skippedDate, {
+      requireServiceAndProperty: true,
+    })).resolves.toBe(futureDate);
   });
 
   test('filters both marked unplaced shapes before the bounded date scan', async () => {

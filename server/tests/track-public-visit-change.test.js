@@ -244,7 +244,7 @@ describe('public tracker changed-visit recovery', () => {
 
 test('the read endpoint clears the old arrival window while the office rebooks', async () => {
   const row = {
-    id: 'visit-1', customer_id: 'customer-1', status: 'rescheduled', track_state: 'en_route',
+    id: 'visit-1', customer_id: 'customer-1', status: 'rescheduled', track_state: 'complete',
     scheduled_date: '2026-11-18', window_start: '09:00:00', window_end: '11:00:00',
   };
   mockDb.raw = jest.fn();

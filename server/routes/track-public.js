@@ -225,8 +225,9 @@ function allowsScheduledRouteTracking(row, customerState) {
 
 function publicTrackState(row) {
   const state = customerTrackState(row);
-  const terminal = ['cancelled', 'no_show', 'complete'].includes(state);
-  return !terminal && (row.status === 'rescheduled' || isUnplacedCustomerPick(row)) ? 'scheduled' : state;
+  const operationalTerminal = ['cancelled', 'skipped', 'no_show', 'completed'].includes(row.status);
+  if (operationalTerminal) return state;
+  return row.status === 'rescheduled' || isUnplacedCustomerPick(row) ? 'scheduled' : state;
 }
 
 function unverifiedUnplacedVisitChange(service) {

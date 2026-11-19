@@ -17,6 +17,7 @@ function baseSvc(overrides = {}) {
     scheduled_date: TODAY,
     status: 'confirmed',
     track_state: 'scheduled',
+    customer_pick_by: null,
     route_order: null,
     window_start: '10:00:00',
     created_at: '2026-08-01T12:00:00.000Z',
@@ -78,7 +79,7 @@ function makeDb({
     }
     if (rawError) return Promise.reject(rawError);
     if (rawFloor === null) return Promise.resolve({ rows: [] }); // guarded no-op write
-    const stored = rawFloor !== undefined ? rawFloor : bindings[1];
+    const stored = rawFloor !== undefined ? rawFloor : bindings[bindings.length - 4];
     return Promise.resolve({ rows: [{ stops_ahead_min_shown: stored }] });
   });
   dbFn.countCall = () => dbFn.raw.mock.calls.find(([sql]) => /WITH target/.test(sql));
@@ -110,13 +111,22 @@ describe('computeStopsAhead', () => {
     const db = makeDb({ svcRow: baseSvc(), countN: 2, beforeAll: 5, othersAll: 7, doneBefore: 3 });
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY }))
       .toEqual({ stopsAhead: 2, yourStop: 6, totalStops: 8, currentStop: 3, atStop: false, headingToStop: false });
-    // Single conditional group UPDATE — (id, clamped, today) feed the
-    // grp/floor_val CTEs, (today, today) the SET stamp + date guard. The
+    // Single conditional group UPDATE — the original placement and target
+    // eligibility feed grp before (clamped, today) feed floor_val; the last
+    // two dates are the SET stamp + date guard. The
     // floor lands on EVERY sibling row, not just the requested one.
     expect(db.updateCalls()).toHaveLength(1);
-    expect(db.updateCalls()[0][1]).toEqual(['svc-self', 2, TODAY, TODAY, TODAY]);
+    expect(db.updateCalls()[0][1]).toEqual([
+      'svc-self', 'tech-1', TODAY, '10:00:00',
+      ...NOT_A_STOP_STATUSES,
+      2, TODAY, TODAY, TODAY,
+    ]);
     const [updateSql] = db.updateCalls()[0];
     expect(updateSql).toContain('WITH grp AS');
+    expect(updateSql).toContain('technician_id = ?::uuid');
+    expect(updateSql).toContain('scheduled_date = ?::date');
+    expect(updateSql).toContain('window_start IS NOT DISTINCT FROM ?::time');
+    expect(updateSql).toContain('(customer_pick_by IS NULL OR window_start IS NOT NULL)');
     expect(updateSql).toContain('u.window_start IS NOT DISTINCT FROM g.window_start');
     expect(updateSql).toContain('RETURNING f.v AS stops_ahead_min_shown');
     // Single-snapshot CTE aggregate: bound to (target id, group-floor
@@ -125,6 +135,10 @@ describe('computeStopsAhead', () => {
     const [countSql, countBindings] = db.countCall();
     expect(countBindings).toEqual([
       'svc-self',
+      'tech-1',
+      TODAY,
+      '10:00:00',
+      ...NOT_A_STOP_STATUSES,          // target eligibility at this slot
       TODAY,                           // group_floor display date
       ...NOT_A_ROUTE_STOP_STATUSES,    // sibling-anchor lateral
       ...NOT_A_ROUTE_STOP_STATUSES,    // day_rows route filter
@@ -189,7 +203,11 @@ describe('computeStopsAhead', () => {
     // date guard re-stamps it.
     const db = makeDb({ svcRow: baseSvc(), countN: 3, groupFloor: null });
     expect((await computeStopsAhead(db, 'svc-self', { today: TODAY }))?.stopsAhead).toBe(3);
-    expect(db.updateCalls()[0][1]).toEqual(['svc-self', 3, TODAY, TODAY, TODAY]);
+    expect(db.updateCalls()[0][1]).toEqual([
+      'svc-self', 'tech-1', TODAY, '10:00:00',
+      ...NOT_A_STOP_STATUSES,
+      3, TODAY, TODAY, TODAY,
+    ]);
   });
 
   test('floor only lowers: stored 3, truth 1 → 1', async () => {
@@ -212,6 +230,7 @@ describe('computeStopsAhead', () => {
     ['no technician assigned', baseSvc({ technician_id: null })],
     ['terminal status', baseSvc({ status: 'completed' })],
     ['rescheduled placeholder (still track_state=scheduled)', baseSvc({ status: 'rescheduled' })],
+    ['unplaced customer-pick handoff', baseSvc({ customer_pick_by: '2026-08-14T22:00:00Z', window_start: null })],
     ['en route to this stop (scheduled card owns the count)', baseSvc({ track_state: 'en_route' })],
     ['on the property already', baseSvc({ track_state: 'on_property' })],
     ['scheduled for a future date', baseSvc({ scheduled_date: '2026-08-15' })],

@@ -6756,14 +6756,19 @@ no polling while the office chooses a time. The tracker gives office call/text
 actions. An intentional plan skip preserves the existing top-level `cancelled` state for
 older clients and adds `visitChange.kind = skipped`, with the next regular
 date only when the same service and property can be proven; it returns no
-picker action and no make-up promise.
+picker action and no make-up promise. The bounded public lookup also floors
+the candidate date at the current ET day, so an overdue open occurrence is
+never announced as the next visit.
 Treat the track token and any change
 to its payload, in any state, as security-critical. The GET stays strictly
 read-only; it has exactly TWO write companions, both bounded.
 `POST /api/public/track/:token/stops-ahead` — same token gate + rate limit,
 ignores its body, and only persists the stops-ahead display-clamp floor
 (monotone LEAST, skip-unchanged) via `computeStopsAhead` before returning the
-displayable count. `POST /api/public/track/:token/view` — same token format
+displayable count. The floor write and its no-op reread are bound to the exact
+technician/date/window used for the count and recheck that the visit is still
+placed and eligible, so a concurrent Quick Move cannot stamp its parked row.
+`POST /api/public/track/:token/view` — same token format
 gate, expiry fence (unknown / malformed / expired = the same generic 404, no
 write), privacy headers and router rate limit; ignores its body; records ONE
 `customer_page_views` row (`page: 'track'`, subject = the visit, bots / staff

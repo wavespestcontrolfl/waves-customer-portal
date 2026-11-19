@@ -22,6 +22,7 @@
 
 const db = require('../models/db');
 const { dateOnlyString } = require('../utils/date-only');
+const { etDateString } = require('../utils/datetime-et');
 
 const SKIPPABLE_FROM_STATUSES = ['pending', 'confirmed'];
 // A cancel may book a make-up visit; a skip never does, so this refusal is not about a skip.
@@ -123,7 +124,8 @@ async function nextPlanVisitDate(conn, row, date, { requireServiceAndProperty = 
     // after this bounded read; a batch containing only boosters/callbacks
     // conservatively returns no date rather than issuing an unbounded query.
     const { customerVisibleBookingWhere } = require('./call-booking-source-actions');
-    query.where(customerVisibleBookingWhere);
+    query.where(customerVisibleBookingWhere)
+      .where('scheduled_date', '>=', etDateString());
   }
   const later = await query
     .orderBy('scheduled_date', 'asc')
