@@ -530,6 +530,8 @@ module.exports = {
   REASON_CODE,
   MOOT_RULE,
   REFUSALS,
+  // Shared with call-phone-yes-word.js: the choices a call can name.
+  BILLING_CHOICES,
   billingChoiceOf,
   quotePlanOf,
   derivePrepayCoverage,

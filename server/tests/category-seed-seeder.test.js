@@ -61,13 +61,13 @@ const VALID_BRIEF = {
 };
 
 describe('category-seed-seeder: shipped manifest', () => {
-  test('the shipped manifest loads and validates (24 lawn + 8 tree-shrub + 11 pest-ID + 1 mosquito-ID + 3 customer-question how-tos: Q01 pest, Q02 + Q03 lawn)', () => {
+  test('the shipped manifest loads and validates (24 lawn + 8 tree-shrub + 11 pest-ID + 1 mosquito-ID + 4 customer-question how-tos: Q01 pest, Q02 + Q03 + Q04 lawn)', () => {
     const m = seeder.loadManifest();
-    expect(m.briefs.length).toBe(47);
+    expect(m.briefs.length).toBe(48);
     const ids = m.briefs.map((b) => b.id);
     expect(new Set(ids).size).toBe(ids.length);
     const services = m.briefs.map((b) => seeder._internals.serviceForBrief(b));
-    expect(services.filter((s) => s === 'lawn').length).toBe(26);
+    expect(services.filter((s) => s === 'lawn').length).toBe(27);
     expect(services.filter((s) => s === 'tree-shrub').length).toBe(8);
     expect(services.filter((s) => s === 'pest').length).toBe(12);
     expect(services.filter((s) => s === 'mosquito').length).toBe(1);
