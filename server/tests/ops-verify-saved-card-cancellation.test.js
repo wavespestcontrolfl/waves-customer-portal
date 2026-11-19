@@ -1,6 +1,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawnSync } = require('node:child_process');
 
 const { databaseConfig } = require('../../ops/agents/verify-saved-card-cancellation');
 
@@ -36,9 +37,14 @@ test('remote config verifies with Node public roots and ignores URL downgrade op
   const config = withEnv({ PGHOST: undefined, PG_CA_FILE: undefined, PGSSLROOTCERT: undefined, PGSSL_SERVER_NAME: undefined }, () =>
     databaseConfig('postgres://url-user:url-password@db.example:6543/app?sslmode=no-verify&ssl=false'));
 
-  expect(config.connection).toMatchObject({ host: 'db.example', port: 6543, ssl: { rejectUnauthorized: true } });
+  expect(config.connection).toMatchObject({
+    host: 'db.example', port: 6543,
+    ssl: { rejectUnauthorized: true, servername: 'db.example', checkServerIdentity: expect.any(Function) },
+  });
   expect(config.connection.ssl.ca).toBeUndefined();
-  expect(config.connection.ssl.checkServerIdentity).toBeUndefined();
+  expect(config.connection.ssl.checkServerIdentity('ignored.example', {
+    subjectaltname: 'DNS:db.example',
+  })).toBeUndefined();
 });
 
 test('a provider root can come from PGSSLROOTCERT or URL sslrootcert', () => {
@@ -77,4 +83,37 @@ test('a provider proxy can verify its database certificate name without weakenin
   } finally {
     fs.unlinkSync(root);
   }
+});
+
+test('a remote IP verifies its IP SAN without sending an IP literal as SNI', () => {
+  const config = withEnv({ PGSSL_SERVER_NAME: undefined }, () =>
+    databaseConfig('postgres://u:p@203.0.113.8/app'));
+
+  expect(config.connection.ssl).toMatchObject({
+    rejectUnauthorized: true,
+    checkServerIdentity: expect.any(Function),
+  });
+  expect(config.connection.ssl.servername).toBeUndefined();
+  expect(config.connection.ssl.checkServerIdentity('ignored.example', {
+    subjectaltname: 'IP Address:203.0.113.8',
+  })).toBeUndefined();
+  expect(config.connection.ssl.checkServerIdentity('ignored.example', {
+    subjectaltname: 'IP Address:203.0.113.9',
+  })).toHaveProperty('message', expect.stringContaining('does not match'));
+});
+
+test('the CLI refuses ambient DATABASE_URL in place of its verifier-specific URL', () => {
+  const script = path.resolve(__dirname, '../../ops/agents/verify-saved-card-cancellation.js');
+  const run = spawnSync(process.execPath, [script, '--attempt', '00000000-0000-4000-8000-000000000000', '--intent', 'pi_synthetic'], {
+    encoding: 'utf8',
+    env: {
+      PATH: process.env.PATH,
+      DATABASE_URL: 'postgresql://must-not-be-used.invalid/app',
+      STRIPE_SECRET_KEY: 'sk_test_not_used',
+    },
+  });
+
+  expect(run.status).toBe(1);
+  expect(run.stderr).toContain('Supply SAVED_CARD_CANCELLATION_DATABASE_URL and STRIPE_SECRET_KEY');
+  expect(run.stderr).not.toContain('must-not-be-used');
 });

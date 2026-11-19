@@ -546,7 +546,10 @@ async function resolveNoFundsSavedCardChargeAttempt({
         status: 'failed',
         error_message: String(failureMessage || 'Pre-charge setup failed').slice(0, 1000),
         decline_code: declineCode,
-        ...(authenticationIntentId ? { stripe_payment_intent_id: authenticationIntentId } : {}),
+        ...(authenticationIntentId ? {
+          stripe_payment_intent_id: authenticationIntentId,
+          stripe_payment_intent_bound_at: new Date(),
+        } : {}),
         resolved_at: new Date(),
         updated_at: new Date(),
       });

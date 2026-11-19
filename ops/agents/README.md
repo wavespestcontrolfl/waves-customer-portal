@@ -120,23 +120,25 @@ what was asked; never dump full tables or the variable store.
 
 ### Verify a historical saved-card cancellation
 
-Find the saved-card attempt UUID on the held invoice's `stripe_invoice_charge_attempts` row. Use its `stripe_payment_intent_id` if present. For an older row without that ID, find the PaymentIntent in the same Stripe account by its `saved_card_attempt_id` metadata. Supply a reachable `DATABASE_URL` and the corresponding account's `STRIPE_SECRET_KEY` in the operator environment. Apply the cancellation-evidence migration first.
+Find the saved-card attempt UUID on the held invoice's `stripe_invoice_charge_attempts` row. The row must already contain the exact `stripe_payment_intent_id` recorded by the original charge worker and a non-null `stripe_payment_intent_bound_at`; Stripe metadata or cancellation history cannot create that binding. Supply a reachable `SAVED_CARD_CANCELLATION_DATABASE_URL` and the corresponding account's `STRIPE_SECRET_KEY` in the operator environment. The verifier deliberately ignores the application's ambient `DATABASE_URL`. Apply both cancellation-evidence migrations first.
 
 ```sh
-node ops/agents/verify-saved-card-cancellation.js --attempt <attempt-uuid> --intent <pi_id>
+SAVED_CARD_CANCELLATION_DATABASE_URL=<postgres-url> \
+  node ops/agents/verify-saved-card-cancellation.js --attempt <attempt-uuid> --intent <pi_id>
 ```
 
-The verifier uses the effective PostgreSQL host (including a URL `host` override and `PGHOST` when the URL host is empty): loopback synthetic databases stay plain, while every remote host uses verified TLS with Node's public roots by default. A private provider root may be supplied via `PG_CA_FILE`, `PGSSLROOTCERT`, or URL `sslrootcert`; URL downgrade options are ignored. Do not put credentials in diagnostic output.
+The verifier uses the effective PostgreSQL host (including a URL `host` override and `PGHOST` when the URL host is empty): loopback synthetic databases stay plain, while every remote DNS name or IP address gets explicit certificate-identity verification with Node's public roots by default. A private provider root may be supplied via `PG_CA_FILE`, `PGSSLROOTCERT`, or URL `sslrootcert`; URL downgrade options are ignored. Do not put credentials in diagnostic output.
 
 For a provider TCP proxy whose certificate names the database rather than the proxy, set both the provider root and the certificate DNS name; the chain remains verified and hostname checking uses that explicit name:
 
 ```sh
 PG_CA_FILE=~/ops-oneshots/certs/provider-root.pem \
 PGSSL_SERVER_NAME=database.provider.example \
+SAVED_CARD_CANCELLATION_DATABASE_URL=<postgres-url> \
   node ops/agents/verify-saved-card-cancellation.js --attempt <attempt-uuid> --intent <pi_id>
 ```
 
-A preview returning `cancellation_verified` leaves the hold in place. After approval, repeat with `--execute` to retrieve the payment again and record the evidence on that attempt. The command requires a canceled PaymentIntent with the matching source, attempt, invoice, customer and payment method. When Stripe omits the method, the attempt must already name that PaymentIntent. Missing or conflicting proof leaves the hold in place. Other attempts on the invoice are checked independently. [Stripe webhook resend windows](https://docs.stripe.com/webhooks#manual-retries)
+A preview returning `cancellation_verified` leaves the hold in place. After approval, repeat with `--execute` to retrieve the payment again and record the evidence on that attempt. The command requires a canceled PaymentIntent with the matching merchant account, source, attempt, invoice, customer and payment method, and rechecks the exact charge-worker binding under the invoice lock. A signed cancellation may be retained as a candidate, but it never manufactures that binding. Missing, unproven or conflicting proof leaves the hold in place. Other attempts on the invoice are checked independently. [Stripe webhook resend windows](https://docs.stripe.com/webhooks#manual-retries)
 
 If a customer merge changed the invoice owner, each transfer from the original owner to the current owner must identify that invoice in the active merge journal. An undone merge, counts without row IDs, or a conflicting transfer leaves the hold in place. Use the same preview for older cancellations skipped by the original migration.
 
