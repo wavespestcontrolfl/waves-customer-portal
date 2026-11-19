@@ -109,3 +109,29 @@ describe('reopening an estimate saved before the lookup guards', () => {
     expect(reviewAndSend()).toBeEnabled();
   });
 });
+
+// Owner 2026-11-18: talstar_p / bifen_it became LESCO Crosscheck Plus under the same keys, so a pre-slab label check saved
+// before the swap was made for the earlier bottle.
+describe('reopening a bifenthrin pre-slab estimate saved before the Crosscheck Plus swap', () => {
+  const PRESLAB = { svcPreslab: true, preslabSqft: '4500', preslabProductKey: 'talstar_p', preslabLabelConfirmed: true, homeSqFt: '2400', lotSqFt: '9000', stories: '2' };
+  const labelCheck = () => screen.getByLabelText('Label rate and finished dilution confirmed');
+
+  it('clears the label check, says why, and sends it unchecked on regenerate', async () => {
+    reopen(PRESLAB, HOUSE);
+    expect(await screen.findByText(/pre-slab label check was for the earlier bifenthrin bottle/)).toBeInTheDocument();
+    expect(screen.getByText(NOTICE)).toBeInTheDocument();
+    expect(labelCheck()).not.toBeChecked();
+    expect(reviewAndSend()).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ }));
+    await waitFor(() => expect(callsTo('/calculate-estimate')).toHaveLength(1));
+    expect(JSON.parse(callsTo('/calculate-estimate')[0][1].body).options.preslabLabelConfirmed).toBe(false);
+  });
+
+  it('keeps a label check the form made for Crosscheck Plus', async () => {
+    reopen({ ...PRESLAB, _bifenthrinLabelBottle: 'lesco_crosscheck_plus' }, HOUSE);
+    await waitFor(() => expect(labelCheck()).toBeChecked());
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    expect(reviewAndSend()).toBeEnabled();
+  });
+});

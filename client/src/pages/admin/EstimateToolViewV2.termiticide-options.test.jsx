@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { termiticideProductOptions } from "./EstimateToolViewV2";
+import { BIFENTHRIN_LABEL_BOTTLE, clearPriorBottleLabelChecks, termiticideProductOptions } from "./EstimateToolViewV2";
 
 // bifen_it is the same bottle as talstar_p (owner 2026-10-25; LESCO Crosscheck Plus since 2026-11-18), so the
 // pre-slab and trenching dropdowns list the bottle once (LESCO Crosscheck Plus since 2026-11-18); a saved bifen_it selection keeps a match.
@@ -22,5 +22,35 @@ describe("termiticide product options", () => {
       expect(match).toHaveLength(1);
       expect(match[0].label).toMatch(/^Crosscheck Plus - Bifenthrin/);
     }
+  });
+});
+
+// A label check saved before the swap was made for the earlier bottle under the same key, so a reopen clears it.
+describe("label checks saved for the earlier bifenthrin bottle", () => {
+  const saved = (extra) => ({ preslabProductKey: "talstar_p", preslabLabelConfirmed: true, trenchingProductKey: "bifen_it", trenchingLabelConfirmed: true, ...extra });
+
+  it("clears both bifenthrin label checks on a form saved without the bottle mark", () => {
+    const inputs = saved();
+    const { form, cleared } = clearPriorBottleLabelChecks(inputs, { ...inputs, notes: "kept" });
+    expect(cleared).toEqual(["pre-slab", "trenching"]);
+    expect(form).toMatchObject({ preslabLabelConfirmed: false, trenchingLabelConfirmed: false, preslabProductKey: "talstar_p", trenchingProductKey: "bifen_it", notes: "kept" });
+  });
+
+  it("keeps the checks a form made for Crosscheck Plus, and fipronil checks, and unchecked boxes", () => {
+    const marked = saved({ _bifenthrinLabelBottle: BIFENTHRIN_LABEL_BOTTLE });
+    expect(clearPriorBottleLabelChecks(marked, marked)).toEqual({ form: marked, cleared: [] });
+    const fipronil = saved({ preslabProductKey: "termidor_sc", trenchingProductKey: "taurus_sc" });
+    expect(clearPriorBottleLabelChecks(fipronil, fipronil)).toEqual({ form: fipronil, cleared: [] });
+    const unchecked = saved({ preslabLabelConfirmed: false, trenchingLabelConfirmed: false });
+    expect(clearPriorBottleLabelChecks(unchecked, unchecked)).toEqual({ form: unchecked, cleared: [] });
+    const form = { preslabProductKey: "talstar_p", preslabLabelConfirmed: true };
+    expect(clearPriorBottleLabelChecks(null, form)).toEqual({ form, cleared: [] });
+  });
+
+  it("clears only the bifenthrin check when the other key is fipronil", () => {
+    const inputs = saved({ trenchingProductKey: "taurus_sc" });
+    const { form, cleared } = clearPriorBottleLabelChecks(inputs, inputs);
+    expect(cleared).toEqual(["pre-slab"]);
+    expect(form).toMatchObject({ preslabLabelConfirmed: false, trenchingLabelConfirmed: true });
   });
 });

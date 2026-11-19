@@ -124,6 +124,28 @@ export function termiticideProductOptions(kind, selectedKey) {
   return selectedKey === "bifen_it" ? [...options, LEGACY_BIFEN_OPTION] : options;
 }
 
+// The bottle the bifenthrin keys name. Since 2026-11-18 talstar_p and bifen_it are LESCO Crosscheck Plus (was Atticus Talak
+// 7.9 F under the same keys), so every form carries this mark and a saved estimate shows which bottle its label checks were
+// made for. An estimate saved without the mark predates the swap: its bifenthrin label check was made for the earlier bottle,
+// so a reopen clears it and the quote asks for the Crosscheck Plus label again.
+export const BIFENTHRIN_LABEL_BOTTLE = "lesco_crosscheck_plus";
+const BIFENTHRIN_OPTION_KEYS = new Set(["talstar_p", "bifen_it"]);
+const BIFENTHRIN_LABEL_CHECKS = [
+  { productField: "preslabProductKey", checkField: "preslabLabelConfirmed", name: "pre-slab" },
+  { productField: "trenchingProductKey", checkField: "trenchingLabelConfirmed", name: "trenching" },
+];
+
+// savedInputs = the stored form snapshot as saved; form = the form a reopen restores from it.
+export function clearPriorBottleLabelChecks(savedInputs, form) {
+  if (!savedInputs || savedInputs._bifenthrinLabelBottle === BIFENTHRIN_LABEL_BOTTLE) return { form, cleared: [] };
+  const stale = BIFENTHRIN_LABEL_CHECKS.filter(({ productField, checkField }) =>
+    BIFENTHRIN_OPTION_KEYS.has(form[productField]) && !!form[checkField]);
+  if (stale.length === 0) return { form, cleared: [] };
+  const next = { ...form };
+  for (const { checkField } of stale) next[checkField] = false;
+  return { form: next, cleared: stale.map(({ name }) => name) };
+}
+
 const PRE_SLAB_JOB_CONTEXT_OPTIONS = [
   { value: "standalone", label: "Standalone one-off job" },
   { value: "builderBatch", label: "Builder batch / same site" },
@@ -1775,6 +1797,8 @@ export default function EstimateToolViewV2({
     trenchingDepthFt: "0.5",
     trenchingWarrantyTier: "one_year_retreat",
     trenchingLabelConfirmed: false,
+    // The bottle the two label checks above are made for when the key is bifenthrin (clearPriorBottleLabelChecks).
+    _bifenthrinLabelBottle: BIFENTHRIN_LABEL_BOTTLE,
     foamPoints: "5",
     foamRecurringPoints: "5",
     foamRecurringFreq: "quarterly",
@@ -2228,11 +2252,15 @@ export default function EstimateToolViewV2({
   // out unchanged).
   function reopenEditSource(d) {
     const restored = formFromEditSource(d);
-    const { form: seeded, cleared } = scrubReopenedEstimateForm(restored, d.engineProfile);
+    const { form: scrubbed, cleared } = scrubReopenedEstimateForm(restored, d.engineProfile);
+    const { form: seeded, cleared: labelChecks } = clearPriorBottleLabelChecks(d.inputs, scrubbed);
     const guessedHomeSize = linesPricedOnGuessedHomeSize(d.result).length > 0;
     const notice = [
       cleared.length > 0
         ? `This estimate was saved before a pricing fix. Removed values the lookup filled in: ${cleared.join(", ")}.`
+        : null,
+      labelChecks.length > 0
+        ? `Its ${labelChecks.join(" and ")} label check was for the earlier bifenthrin bottle. The bottle is now LESCO Crosscheck Plus: confirm its label again.`
         : null,
       // An association aggregate's missing input is the story count, as in
       // the Generate guard (codex r1 P2).
