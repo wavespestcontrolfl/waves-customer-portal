@@ -275,7 +275,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
     const { routeStamp } = require('../services/auto-dispatch/route-position');
     const { routeCost } = require('../services/auto-dispatch/route-model');
-    const { computeCurrentPlacement, _internals: { loadDayStopRows } } = require('../services/auto-dispatch/candidate-slots');
+    const { computeCurrentPlacement, _internals: { loadDayStopRows, filterAndScoreSharedModelCandidates } } = require('../services/auto-dispatch/candidate-slots');
     const mover = visits[0];
     const stale = await mockConn('scheduled_services').where({ id: mover.id }).first();
     await mockConn('scheduled_services').where({ id: visits[1].id }).update({ route_order: 1 });
@@ -295,6 +295,16 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     expect(ctx.sourceRouteStamp).toBe(routeStamp(others, fresh));
     expect(current.detour_minutes).toBeCloseTo(expected.detourMinutes, 5);
     expect(current.total_drive_minutes).toBeCloseTo(expected.driveWithMinutes, 5);
+
+    // A same-day retime keeps its route number. Candidate scoring must reuse
+    // the refreshed number above, not the pass-1 row's stale number.
+    const [sameDay] = await filterAndScoreSharedModelCandidates(stale, fresh.geo, [{
+      date: DAY, technician_id: techId,
+      start_time: String(fresh.window_start).slice(0, 5),
+      end_time: String(fresh.window_end).slice(0, 5),
+    }], ctx, {});
+    expect(sameDay.detour_minutes).toBeCloseTo(expected.detourMinutes, 5);
+    expect(sameDay.total_drive_minutes).toBeCloseTo(expected.driveWithMinutes, 5);
   });
 
   test('a destination with a windowless or completed stop is excluded before ranking and again at commit', async () => {

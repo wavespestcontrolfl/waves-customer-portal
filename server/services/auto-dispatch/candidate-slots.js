@@ -576,6 +576,11 @@ function candidateRouteOrder(service, cand) {
 // routeCost/clusterShare computeCurrentPlacement uses — over that tech-day's
 // active stops.
 function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home = HQ, ctx = {}, blocks = []) {
+  // A version-2 allocation is one physical arrival, but auto-dispatch only
+  // has a writer for a standalone row or a visit_id unit. Never choose a
+  // cheaper scoring branch (same-day/same-tech or an unassigned source) that
+  // would move one allocation member on its own.
+  if (service.reservation_service_mix?.version === 2) return null;
   const moved = movedSiblings(siblings, placement, cand);
   const target = { ...service, technician_id: cand.technician_id, window_start: cand.start_time, window_end: cand.end_time,
     lat: geo.lat, lng: geo.lng, geo, preserveCapacity: preservesCapacity(service) };
@@ -652,8 +657,20 @@ async function verifyScoredPosition(trx, service, date, technicianId, window, po
  * (one batched day-stop read). Nothing here writes.
  */
 async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx, drops) {
-  const { excludeIds, siblings, visitWindowStart } = await groupContextFor(service, ctx);
-  const group = { members: unitMembers(service, siblings), visitWindowStart };
+  // computeCurrentPlacement reads the mover together with its source-day
+  // neighbours. An earlier move in this run may have renumbered it since the
+  // pass-1 service object was loaded, so candidates must use that same fresh
+  // row too (especially a same-day/same-tech candidate, which keeps its
+  // route_order). It also makes a newly-visible allocation fail closed here.
+  const scoringService = ctx.refreshedRouteMover
+    && String(ctx.refreshedRouteMover.id) === String(service.id)
+    ? ctx.refreshedRouteMover : service;
+  if (scoringService.reservation_service_mix?.version === 2) {
+    if (drops) drops.route_window = (drops.route_window || 0) + candidates.length;
+    return [];
+  }
+  const { excludeIds, siblings, visitWindowStart } = await groupContextFor(scoringService, ctx);
+  const group = { members: unitMembers(scoringService, siblings), visitWindowStart };
   const dates = candidates.map((c) => c.date);
   const technicianIds = candidates.map(c => c.technician_id).filter(Boolean);
   const [occupiedByDate, dayStops, constraints] = await Promise.all([
@@ -665,7 +682,7 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
   const stopsByTechDay = new Map();
   const kept = [];
   for (const cand of candidates) {
-    const placement = planUnitPlacement(service, group, cand);
+    const placement = planUnitPlacement(scoringService, group, cand);
     if (slotTaken(placement, occupiedByDate.get(cand.date) || [])) {
       if (drops) drops.slot_taken = (drops.slot_taken || 0) + 1;
       continue;
@@ -673,7 +690,7 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
     const key = `${cand.technician_id}|${cand.date}`;
     if (!stopsByTechDay.has(key)) stopsByTechDay.set(key, stopsForTechDay(dayStops, cand.technician_id, cand.date));
     const blocks = constraints ? stopsForTechDay(constraints.blocks, cand.technician_id, cand.date) : [];
-    const scored = scoreOnSharedModel(service, geo, cand, stopsByTechDay.get(key), siblings, placement,
+    const scored = scoreOnSharedModel(scoringService, geo, cand, stopsByTechDay.get(key), siblings, placement,
       homeFor(ctx, cand.technician_id), ctx, blocks);
     if (scored && !(scored[ROUTE_POSITION] && constraints?.unpricedDays.has(key))) kept.push(scored);
     else if (drops) drops.route_window = (drops.route_window || 0) + 1;
@@ -912,6 +929,9 @@ async function sharedModelCurrentPlacement(service, geo, ctx, dateStr, category)
   const moving = freshMover
     ? { ...service, ...freshMover, scheduled_date: freshMover.dateStr, geo: freshMover.geo || geo }
     : { ...service, geo };
+  // Reuse this exact mover snapshot when candidates are scored below. The
+  // evaluation-local ctx prevents it leaking to another visit.
+  ctx.refreshedRouteMover = moving;
   const days = snapshots.map((rows) => rows.filter((row) => String(row.id) !== selfId));
   if (service.technician_id && !siblings.length) ctx.sourceRouteStamp = routeStamp(days[0], moving);
   await loadStartPoints(ctx, dayTechs);

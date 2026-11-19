@@ -353,6 +353,13 @@ function makeMoveGuard({ service, best, config = {} }) {
     trx, technicianId, service: movingRow, destination,
   }) => {
     const row = movingRow || service;
+    // Version-2 allocation members share one arrival and occupied span, but
+    // auto-dispatch has no allocation-unit writer. Fence the committed row as
+    // well as candidate scoring so a same-day/unassigned path, stale input,
+    // or direct apply cannot split the allocation.
+    if (row.reservation_service_mix?.version === 2) {
+      throw refuse(row.id, 'belongs to a version-2 allocation that must move as one unit');
+    }
     if (row.customer_confirmed === true) {
       throw refuse(row.id, 'was confirmed by the customer');
     }

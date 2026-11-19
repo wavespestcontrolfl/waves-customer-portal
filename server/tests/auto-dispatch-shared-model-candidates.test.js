@@ -914,15 +914,20 @@ test('a version-2 moving stop keeps its planning minutes in the saved route simu
   expect(legacy).toBeNull();
 });
 
-test('an allocation-only moving member is rejected instead of priced as a standalone stop', () => {
+test.each([
+  ['cross-day assigned', { scheduled_date: '2026-08-04', technician_id: 't1' }, { date: '2026-08-06', technician_id: 't1' }],
+  ['same-day same-tech', { scheduled_date: '2026-08-06', technician_id: 't1' }, { date: '2026-08-06', technician_id: 't1' }],
+  ['unassigned source', { scheduled_date: '2026-08-06', technician_id: null }, { date: '2026-08-06', technician_id: 't1' }],
+])('an allocation-only moving member is rejected before the %s scoring branch', (_label, source, destination) => {
   const geo = { lat: 27.4, lng: -82.5 };
   const service = {
     ...SERVICE,
+    ...source,
     status: 'confirmed',
     created_at: '2026-07-01T00:00:00Z',
     reservation_service_mix: { version: 2, allocatedServiceIds: ['s1', 's2'], durationMinutes: 70 },
   };
-  const candidate = { technician_id: 't1', date: '2026-08-06', start_time: '08:00', end_time: '09:00' };
+  const candidate = { ...destination, start_time: '08:00', end_time: '09:00' };
   const placement = { windows: [{ start: '08:00', end: '09:00' }], targets: [{ id: service.id, start: '08:00', end: '09:00' }] };
   expect(scoreOnSharedModel(service, geo, candidate, [], [], placement, geo, {
     sourceRouteStamp: 'source-stamp', departureMinutes: 8 * 60,
@@ -994,6 +999,35 @@ test('day-stop rows carry route_order/created_at and the co-visit inputs — a l
   const [single] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand, { db: dbWith([coVisit('p')]) }, {});
   expect(pair.route_minutes).toBeCloseTo(single.route_minutes, 5);
   expect(pair.detour_minutes).toBeCloseTo(single.detour_minutes, 5);
+});
+
+test('routeFits keeps two estimate-less legacy co-visits to their one shared hour', () => {
+  const { routeFits } = require('../services/auto-dispatch/route-position');
+  const { groupRouteStops } = require('../services/scheduling/arrival-route');
+  const origin = { lat: 27.4, lng: -82.5 };
+  const coVisit = (id, routeOrder) => ({
+    id, visit_id: null, customer_id: 'c9', technician_id: 't1', scheduled_date: '2026-08-06', status: 'confirmed',
+    window_start: '08:00', window_end: '09:00', estimated_duration_minutes: null,
+    route_order: routeOrder, created_at: '2026-07-01T12:00:00Z', lat: origin.lat, lng: origin.lng,
+    service_address_line1: '12 Palm Way', service_address_line2: null,
+    service_address_city: 'Bradenton', service_address_zip: '34203',
+  });
+  const rows = [coVisit('pest', 1), coVisit('lawn', 2)];
+  expect(groupRouteStops(rows).map((row) => row.raw_estimate_minutes)).toEqual([null, null]);
+
+  // Depart at 08:00 and close at 09:30. One shared 60-minute visit fits;
+  // the former phantom 120 minutes does not.
+  expect(routeFits(rows, rows.map((row) => row.id), {
+    origin, departureMin: 8 * 60, dayEndMin: 9 * 60 + 30,
+  })).toBe(true);
+
+  // A real allocation remains additive when folded to one arrival.
+  const mix = { version: 2, allocatedServiceIds: ['pest', 'lawn'] };
+  const allocation = rows.map((row) => ({ ...row, window_end: '08:30', estimated_duration_minutes: 45,
+    reservation_service_mix: mix }));
+  expect(groupRouteStops(allocation)).toEqual([expect.objectContaining({
+    memberIds: ['pest', 'lawn'], estimated_duration_minutes: 90, raw_estimate_minutes: 90,
+  })]);
 });
 
 // Codex r1 (PRRT_kwDOR3YQi86mPzgn): the owner planning minutes of the day's
