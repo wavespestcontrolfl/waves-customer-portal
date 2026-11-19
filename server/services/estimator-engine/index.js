@@ -648,7 +648,12 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
   // bell instead of ringing per message. Unlike a callSid, the thread key
   // is permanent for the phone, so its dedupe is TIME-BOUNDED to the open
   // life of an estimate: an independent quote request months later must
-  // mint a fresh bell, not vanish behind a long-read one.
+  // mint a fresh bell, not vanish behind a long-read one. It is also
+  // OPEN-ONLY: once the bell is done (a person's Done, the 72-hour quiet
+  // fall-off, any closer), a later ask from the number is news and gets a
+  // fresh bell. Matching a done bell let a new no-draft ask "stand" on it,
+  // so the ask raised nothing (prod 11-10 to 11-18: 3 asks, all behind a
+  // bell the quiet fall-off had closed).
   const SMS_BELL_DEDUPE_MS = 7 * 86400000;
   const dedupe = callSid
     ? { clause: "metadata->>'callSid' = ?", value: callSid, since: null }
@@ -698,7 +703,7 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
         .whereRaw(dedupe.clause, [dedupe.value])
         .whereRaw("(metadata->>'quote_promised' = 'true' OR metadata->>'estimator_engine' = 'true')")
         .orderBy('created_at', 'desc');
-      if (dedupe.since) existingQuery = existingQuery.where('created_at', '>=', dedupe.since);
+      if (dedupe.since) existingQuery = existingQuery.where('created_at', '>=', dedupe.since).whereNull('done_at');
       const existing = await existingQuery.first();
       if (existing) {
         let existingMeta = {};

@@ -334,8 +334,10 @@ customer's message by this rule.
    the call's `call_log` row, not the bell's `created_at`: a quote can go out between the call and the bell).
    The lead is the bell's own and the one the call is stamped with or that carries the call's sid
    (`call_log.metadata` `lead_id` or `relay_lead_id`; `leads.twilio_call_sid`; an estimator bell links to the estimate and carries no `leadId`). No call row, or a call
-   with no customer and no lead, leaves the bell open. A text-origin bell (a
-   `smsThreadKey`, no `callSid`) is not in the class. Re-armed like every class if the evidence goes.
+   with no customer and no lead, leaves the bell open. Re-armed like every class if the evidence goes.
+   A text-origin bell (a `smsThreadKey`, no `callSid`) is not in the class. It merges the number's asks
+   for 7 days into its OPEN bell only (`notify` in `server/services/estimator-engine/index.js`): a new
+   ask after that bell is done (a person's Done, the quiet fall-off) gets a fresh bell.
    A new text from the same sender rings a fresh bell: the thread row is rewritten, rung and
    re-opened. The sweep never contacts a customer.
 3. **Budget.** Rows that are not a customer reaching out should ring at most 10 times a
