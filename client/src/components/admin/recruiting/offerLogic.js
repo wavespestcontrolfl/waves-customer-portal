@@ -123,6 +123,14 @@ export function offerErrorMessage(err) {
 // What a send outcome means for the owner. 'sent' and 'handoff' went out;
 // 'deferred' is queued for the send window; 'uncertain' or no outcome may not
 // have gone out; anything else did not go out.
+// A channel the offer never tried (no phone or email on file, not requested)
+// is left out of the result.
+const NOT_TRIED = ["not_requested", "no_phone", "no_email"];
+
+function wasTried(channel) {
+  return !NOT_TRIED.includes(channel.outcome) && !NOT_TRIED.includes(channel.code);
+}
+
 function channelState(channel) {
   const outcome = channel.outcome;
   if (outcome === "sent" || outcome === "handoff") return "out";
@@ -144,7 +152,7 @@ const STATE_TEXT = {
  * open." and one short line per channel.
  */
 export function describeSend(comms, firstName) {
-  const channels = [["text", comms?.sms], ["email", comms?.email]].filter(([, c]) => c);
+  const channels = [["text", comms?.sms], ["email", comms?.email]].filter(([, c]) => c && wasTried(c));
   const states = channels.map(([label, c]) => [label, channelState(c)]);
   if (states.length && states.every(([, st]) => st === "out")) return { headline: `Offer sent to ${firstName}.`, lines: [] };
   const lines = states.map(([label, st]) => `The ${label} ${STATE_TEXT[st]}.`);
@@ -152,4 +160,11 @@ export function describeSend(comms, firstName) {
     lines.push("Check his phone and email, then use Revise to send a new link.");
   }
   return { headline: "The offer is open.", lines };
+}
+
+// A 'sent' offer past its expiresAt reads as closed unsigned even before the
+// server's own status says so.
+export function shownOffer(offer, now = new Date()) {
+  const lapsed = offer?.status === "sent" && offer.expiresAt && new Date(offer.expiresAt) < now;
+  return lapsed ? { ...offer, status: "expired" } : offer;
 }

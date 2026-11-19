@@ -279,12 +279,24 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
     } catch (err) {
       setError(offerErrorMessage(err));
       if (err?.body?.code === "DRAFT_CHANGED") await draftChanged(reviewed?.id || null);
+      if (err?.body?.code === "OFFER_NOT_DRAFT") await notDraft();
     } finally {
       setBusy(false);
     }
   };
 
-  const retryRead = () => run(() => refresh(draftId));
+  // Re-read. If the read shows this draft is gone (another admin sent or
+  // discarded it), close the form: the card shows the offer's current state.
+  const reread = async () => {
+    const next = await refresh(draftId);
+    if (next && draftId && !reviewedDraft(next, draftId)) onClose();
+  };
+  const retryRead = () => run(reread);
+  const notDraft = async () => {
+    setConfirming(false);
+    setNeedRead(true);
+    await reread();
+  };
 
   const send = async () => {
     setBusy(true);
@@ -297,6 +309,7 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
     } catch (err) {
       setError(offerErrorMessage(err));
       if (err?.body?.code === "DRAFT_CHANGED") await draftChanged(reviewed.id);
+      if (err?.body?.code === "OFFER_NOT_DRAFT") await notDraft();
     } finally {
       setBusy(false);
     }

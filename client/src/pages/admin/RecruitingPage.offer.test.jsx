@@ -761,4 +761,42 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     await waitFor(() => expect(calls).toHaveLength(2));
     expect(calls[1]).toMatchObject({ draftId: 'offer-9', draftHash: 'their-hash' });
   });
+
+  it('OFFER_NOT_DRAFT on send closes the confirm and the form, re-reads, and the card shows the sent offer', async () => {
+    let current = offerRecord();
+    await openDraftForm(
+      { 'POST /admin/careers/app-1/offer/offer-1/send': () => { current = offerRecord({ status: 'sent', timeline: [{ at: '2026-12-11T15:20:00Z', kind: 'sent', label: 'Offer sent by someone else' }] }); return res(409, { error: 'x', code: 'OFFER_NOT_DRAFT' }); } },
+      () => res(200, offerPayload({ current })),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
+    const confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
+    expect(await screen.findByText('Offer sent by someone else')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Hourly rate ($)')).toBeNull();
+    expect(screen.queryByText(/Send this offer to Jordan/)).toBeNull();
+  });
+
+  it('OFFER_NOT_DRAFT on save closes the form and shows the card state', async () => {
+    let current = offerRecord();
+    await openDraftForm(
+      { 'POST /admin/careers/app-1/offer': () => { current = offerRecord({ status: 'withdrawn', timeline: [{ at: '2026-12-11T15:20:00Z', kind: 'withdrawn', label: 'Withdrawn by someone else' }] }); return res(409, { error: 'x', code: 'OFFER_NOT_DRAFT' }); } },
+      () => res(200, offerPayload({ current })),
+    );
+    fireEvent.change(screen.getByLabelText('Hours'), { target: { value: 'Mon to Thu, 8 hours' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    expect(await screen.findByText('Withdrawn by someone else')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Hours')).toBeNull();
+  });
+
+  it('a sent offer past its expiry shows as closed, with Make an offer and no Revise or Withdraw', async () => {
+    const lapsed = offerRecord({ status: 'sent', expiresAt: '2020-01-01T04:59:59Z', timeline: [] });
+    setupFetch({}, { offer: offerPayload({ current: lapsed }), detail: detailFixture({ status: 'offer' }) });
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    const card = await screen.findByTestId('offer-card');
+    expect(within(card).getByText('Closed unsigned')).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: 'Make an offer' })).toBeInTheDocument();
+    expect(within(card).queryByRole('button', { name: 'Revise' })).toBeNull();
+    expect(within(card).queryByRole('button', { name: 'Withdraw offer' })).toBeNull();
+  });
 });

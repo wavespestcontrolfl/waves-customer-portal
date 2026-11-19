@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   describeSend,
+  shownOffer,
   expiryLabel,
   formatDay,
   formatIssued,
@@ -69,5 +70,18 @@ describe('offer helpers', () => {
     // Only the channel that was tried is described.
     expect(describeSend({ email: { outcome: 'sent' } }, 'Jordan').headline).toBe('Offer sent to Jordan.');
     expect(describeSend({}, 'Jordan')).toEqual({ headline: 'The offer is open.', lines: [] });
+    // A channel that was never tried (nothing on file, not requested) is left out.
+    expect(describeSend({ sms: { outcome: 'sent' }, email: { outcome: 'not_requested' } }, 'Jordan')).toEqual({ headline: 'Offer sent to Jordan.', lines: [] });
+    expect(describeSend({ sms: { outcome: 'skipped', code: 'no_phone' }, email: { outcome: 'failed' } }, 'Jordan').lines).toEqual([
+      'The email did not go out.',
+      'Check his phone and email, then use Revise to send a new link.',
+    ]);
+  });
+
+  it('reads a sent offer past its expiry as expired', () => {
+    const now = new Date('2026-12-20T15:00:00Z');
+    expect(shownOffer({ status: 'sent', expiresAt: '2026-12-19T04:59:59Z' }, now).status).toBe('expired');
+    expect(shownOffer({ status: 'sent', expiresAt: '2026-12-21T04:59:59Z' }, now).status).toBe('sent');
+    expect(shownOffer({ status: 'accepted', expiresAt: '2026-12-19T04:59:59Z' }, now).status).toBe('accepted');
   });
 });

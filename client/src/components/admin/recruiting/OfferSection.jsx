@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { ActionFeedback, Button } from "../../ui";
 import { fetchSignedCopy } from "./offerApi";
 import OfferTimeline, { History, SignedCopyView } from "./OfferTimeline";
-import { offerErrorMessage } from "./offerLogic";
+import { offerErrorMessage, shownOffer } from "./offerLogic";
 
 // The offer part of the application detail. Nothing renders while the
 // offer flow is off for this application (today's status-only behavior).
@@ -28,14 +28,15 @@ export default function OfferSection({ detail, offerFlow }) {
   const history = Array.isArray(data.history) ? data.history : [];
   // A new offer is allowed while the application is in Offer and there is no
   // offer to act on: none yet, or the last one was withdrawn or closed unsigned.
+  const current = shownOffer(data.current);
   const stillInOffer = detail.status === "offer";
-  const canMakeOffer = stillInOffer && !refreshError && (!data.current || REOFFER_STATES.includes(data.current.status));
+  const canMakeOffer = stillInOffer && !refreshError && (!current || REOFFER_STATES.includes(current.status));
   const stale = refreshError ? (
     <ActionFeedback error className="mb-3" onRetry={retry}>
       {refreshError}
     </ActionFeedback>
   ) : null;
-  if (data.current) {
+  if (current) {
     return (
       <>
         {stale}
@@ -45,7 +46,7 @@ export default function OfferSection({ detail, offerFlow }) {
         ownerActions={ownerActions}
         refreshError={refreshError}
         firstName={firstName}
-        offer={data.current}
+        offer={current}
         draft={data.draft || null}
         history={history}
         canMakeOffer={canMakeOffer}
