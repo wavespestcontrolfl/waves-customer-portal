@@ -102,8 +102,12 @@ function wasRecentlyOpened(est, hours = 2, nowMs = Date.now()) {
 // dropped: the callers send it later if the customer does not finish. A lookup
 // failure fails OPEN, like the reply-pause check beside it (a held email only
 // delays; this guard must not stop every follow-up on a database error).
+// The deferred-text REPLAY passes throwOnError: it authorizes a one-shot send
+// after quiet hours, so an unverifiable checkout state must hold the row (the
+// caller's catch turns the throw into the retryable recheck-failed verdict),
+// the same as the reply-pause check beside it.
 const CHECKOUT_ACTIVE_MINUTES = 20;
-async function estimateMidCheckout(estimateId) {
+async function estimateMidCheckout(estimateId, { throwOnError = false } = {}) {
   try {
     const hold = await db("scheduled_services")
       .where({ source_estimate_id: estimateId })
@@ -116,6 +120,7 @@ async function estimateMidCheckout(estimateId) {
       .first("id");
     return !!card;
   } catch (e) {
+    if (throwOnError) throw e;
     logger.warn(`[est-followup] mid-checkout check skipped for estimate ${estimateId}: ${(e && (e.code || e.name)) || "error"}`);
     return false;
   }
@@ -274,7 +279,7 @@ async function safetyGate(est, now = new Date(), { replay = false } = {}) {
   if (await hasRepliedRecently(est, 14, { throwOnError: replay }))
     return { skip: true, reason: "customer-replied-recently" };
   // Mid-checkout: held for later, not dropped (see estimateMidCheckout).
-  if (await estimateMidCheckout(est.id))
+  if (await estimateMidCheckout(est.id, { throwOnError: replay }))
     return { skip: true, reason: "customer-mid-checkout" };
   return { skip: false };
 }
@@ -296,6 +301,20 @@ async function deferredFollowupStillEligible(estimateId) {
     // here (codex r27) instead of the cron path's fail-open false, so an
     // unverifiable reply state lands in the catch below and holds the row.
     const gate = await safetyGate(est, new Date(), { replay: true });
+    // Mid-checkout is a wait, not a verdict: the customer may abandon the
+    // card step, so the queued text must come back instead of being settled
+    // as stale. retryAt = now + CHECKOUT_ACTIVE_MINUTES, the whole
+    // card-step window (a visit-time hold lapses sooner, in 15 minutes), so
+    // the next pass finds the checkout either lapsed or the estimate
+    // accepted (which the terminal-status check then ends).
+    if (gate.skip && gate.reason === "customer-mid-checkout") {
+      return {
+        eligible: false,
+        reason: gate.reason,
+        retryable: true,
+        retryAt: new Date(Date.now() + CHECKOUT_ACTIVE_MINUTES * 60000),
+      };
+    }
     if (gate.skip) return { eligible: false, reason: gate.reason };
     return { eligible: true };
   } catch (e) {

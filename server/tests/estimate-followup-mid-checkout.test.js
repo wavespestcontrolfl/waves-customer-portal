@@ -109,6 +109,11 @@ describe('estimateMidCheckout', () => {
     expect(logged).toContain('42P01');
     expect(logged).not.toContain('5551234');
   });
+
+  test('with throwOnError (the deferred replay) a lookup error propagates instead of reading "not booking"', async () => {
+    arrange({ hold: Object.assign(new Error('db down'), { code: '57P01' }) });
+    await expect(_private.estimateMidCheckout('est-1', { throwOnError: true })).rejects.toThrow('db down');
+  });
 });
 
 describe('safetyGate', () => {
@@ -124,5 +129,62 @@ describe('safetyGate', () => {
     arrange();
     const gate = await _private.safetyGate(est, new Date('2026-11-19T15:00:00Z'));
     expect(gate).toEqual({ skip: false });
+  });
+});
+
+describe('deferredFollowupStillEligible (quiet-hours text replay)', () => {
+  const { deferredFollowupStillEligible } = require('../services/estimate-follow-up');
+  const NOW = new Date('2026-11-19T15:00:00Z');
+
+  // The estimates row comes from the stub for 'estimates'; the checkout tables
+  // from arrange()-style stubs. customer id, phone and email are all null so
+  // the reply check (which throws on replay) has nothing to look up.
+  // Any other table (the reply-pause reads) answers "no rows" to any chain.
+  function emptyBuilder() {
+    const b = new Proxy(() => {}, {
+      get: (_t, prop) => (prop === 'then' ? (resolve) => resolve(undefined) : () => b),
+    });
+    return b;
+  }
+
+  function arrangeReplay({ hold, card } = {}) {
+    const est = { id: 'est-1', status: 'viewed', customer_id: null, customer_phone: null, customer_email: null };
+    const stubs = {
+      estimates: tableStub(est),
+      scheduled_services: tableStub(hold),
+      estimate_checkout_events: tableStub(card),
+    };
+    db.mockImplementation((table) => stubs[table] || emptyBuilder());
+  }
+
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(NOW);
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  test('a customer who is mid-checkout gets a retryable verdict that returns after the 20-minute window', async () => {
+    arrangeReplay({ hold: { id: 'hold-1' } });
+
+    const verdict = await deferredFollowupStillEligible('est-1');
+
+    expect(verdict).toMatchObject({ eligible: false, reason: 'customer-mid-checkout', retryable: true });
+    expect(verdict.retryAt).toEqual(new Date(NOW.getTime() + 20 * 60000));
+  });
+
+  test('a lookup error on the checkout check fails closed and retryable (never authorizes the replay)', async () => {
+    arrangeReplay({ hold: Object.assign(new Error('db down'), { code: '57P01' }) });
+
+    await expect(deferredFollowupStillEligible('est-1')).resolves.toEqual({
+      eligible: false,
+      reason: 'recheck-failed',
+      retryable: true,
+    });
+  });
+
+  test('no checkout activity: the replay stays eligible', async () => {
+    arrangeReplay();
+    await expect(deferredFollowupStillEligible('est-1')).resolves.toEqual({ eligible: true });
   });
 });

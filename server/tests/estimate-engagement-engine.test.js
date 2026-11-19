@@ -949,6 +949,30 @@ describe('processDueJobs', () => {
     },
   );
 
+  test('checkout that starts AFTER the claim and link minting releases the claim and defers, never emails', async () => {
+    // First look (before the claim): idle. Second look (right before dispatch):
+    // the customer reserved a visit time or opened the card step in between.
+    followupShared.estimateMidCheckout.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    enqueueProcessorHappyPath({
+      job: pendingJob({ rule_key: 'return_visit_hot' }),
+      est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 1 * MIN) }),
+      rules: RULE_ROWS,
+    });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    expect(followupShared.estimateMidCheckout).toHaveBeenCalledTimes(2);
+    expect(followupShared.claimFollowupSend).toHaveBeenCalledTimes(1);
+    expect(followupShared.releaseFollowupSend).toHaveBeenCalledWith('est-1', 'return_visit_hot');
+    expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
+    expect(followupShared.bumpFollowupCounters).not.toHaveBeenCalled();
+    // Held, not dropped: still pending, due again after the 15-minute defer.
+    const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(defer.payload.status).toBeUndefined();
+    expect(defer.payload.due_at.getTime()).toBe(NOW.getTime() + 15 * MIN);
+  });
+
   test('once the customer is no longer booking, the same job sends', async () => {
     followupShared.estimateMidCheckout.mockResolvedValue(false);
     enqueueProcessorHappyPath({

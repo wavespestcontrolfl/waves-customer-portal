@@ -850,6 +850,16 @@ async function processDueBatch(now = new Date()) {
         }
         consultationUrl = offerStillValid ? minted : '';
       }
+      // Last look before dispatch: the customer can reserve a visit time or
+      // open the card step while the claim is held and the links are minted,
+      // and neither write touches the estimate row the snapshot above
+      // compares. Give the claim back and look again later, as the checks above do.
+      if (await followupShared.estimateMidCheckout(est.id)) {
+        await followupShared.releaseFollowupSend(est.id, rule.rule_key);
+        claimed = false;
+        await deferJob(job.id, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000));
+        continue;
+      }
       const ok = await followupShared.sendDualChannel(est, {
         email: {
           templateKey: rule.template_key,
