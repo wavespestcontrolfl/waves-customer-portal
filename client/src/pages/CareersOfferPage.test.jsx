@@ -192,12 +192,12 @@ describe('CareersOfferPage — open state', () => {
     expect(await screen.findByRole('heading', { name: 'This link is not valid.' })).toBeInTheDocument();
   });
 
-  it('re-reads the stored consent when a consent reply is lost, and keeps signing locked until it can', async () => {
+  it('keeps signing locked when a consent reply is lost and the read fails, and Try again sends the same choice', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
-      .mockRejectedValueOnce(new Error('offline')) // POST: reply lost
-      .mockRejectedValueOnce(new Error('offline')) // re-read fails
-      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true }))); // retry works
+      .mockRejectedValueOnce(new Error('offline')) // POST consent true: reply lost
+      .mockRejectedValueOnce(new Error('offline')) // the read fails
+      .mockResolvedValueOnce(jsonResponse({ textConsent: true })); // Try again: the same choice, saved
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
@@ -207,28 +207,31 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
     expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
+    expect(fetchMock.mock.calls[3][0]).toMatch(/\/text-consent$/);
+    expect(bodyOf(fetchMock, 3)).toEqual({ consent: true });
   });
 
-  it('says an unticked text choice was not confirmed when the read after a lost reply still holds the old one', async () => {
+  it('keeps the choice and the lock when the read after a lost reply still holds the old value, until the choice is sent again', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true })))
       .mockRejectedValueOnce(new Error('offline')) // POST consent false: reply lost
-      .mockRejectedValueOnce(new Error('offline')) // re-read fails
-      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true }))) // Try again: the old choice is stored
-      .mockResolvedValueOnce(jsonResponse({ textConsent: false })); // the second tap saves
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true }))) // the read: the lost save has not landed yet
+      .mockResolvedValueOnce(jsonResponse({ textConsent: false })); // Try again: the same choice, saved
     globalThis.fetch = fetchMock;
     renderPage();
-    const box = await screen.findByLabelText('Text me about this offer');
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    const box = screen.getByLabelText('Text me about this offer');
     expect(box).toBeChecked();
     fireEvent.click(box);
     expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Text me about this offer')).not.toBeChecked(); // still the applicant's choice
+    expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    expect(await screen.findByText('We could not confirm that change. The box shows the choice we have on file. Tap it again if that is not what you want.')).toBeInTheDocument();
-    expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
-    fireEvent.click(screen.getByLabelText('Text me about this offer'));
-    await waitFor(() => expect(screen.getByLabelText('Text me about this offer')).not.toBeChecked());
-    expect(screen.queryByText(/We could not confirm that change/)).toBeNull();
-    expect(JSON.parse(fetchMock.mock.calls[4][1].body)).toEqual({ consent: false });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
+    expect(screen.getByLabelText('Text me about this offer')).not.toBeChecked();
+    expect(screen.queryByText(/We could not confirm that choice/)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(bodyOf(fetchMock, 3)).toEqual({ consent: false });
   });
 
   // The 409 says where the offer stands. A closed offer comes back whole, with

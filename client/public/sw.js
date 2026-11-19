@@ -597,8 +597,17 @@ self.addEventListener('install', event => {
   event.waitUntil(precacheCompleteShell().then(() => self.skipWaiting()));
 });
 
+// An older worker stored any same-origin GET in its catch-all branch, so it
+// could hold a job-offer URL as a request key. Drop those when this worker
+// takes over. The shell needs nothing: install just stored a fresh one from '/'.
+async function purgePrivateLinkEntries() {
+  const cache = await caches.open(CACHE_NAME);
+  const requests = await cache.keys();
+  await Promise.all(requests.filter(request => isPrivateLinkPage(new URL(request.url).pathname)).map(request => cache.delete(request)));
+}
+
 self.addEventListener('activate', event => {
-  event.waitUntil(sweepStaleCaches().then(() => self.clients.claim()));
+  event.waitUntil(sweepStaleCaches().then(() => purgePrivateLinkEntries().catch(() => {})).then(() => self.clients.claim()));
 });
 
 // A job-offer link page: its URL is the applicant's private signing link.

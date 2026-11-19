@@ -414,6 +414,16 @@ describe('service-worker private link pages', () => {
     expect([...cache.store.keys()].some(url => /careers/i.test(url))).toBe(false);
   });
 
+  it('drops job-offer URLs an older worker stored when this worker activates, and keeps everything else', async () => {
+    const cache = fakeCache();
+    const asset = fakeResponse('asset');
+    for (const key of [...offerPaths, '/manifest.json', '/assets/index-AAA.js', '/careers/offers']) await cache.put(key, asset);
+    const worker = loadWorker(cache);
+    await worker.dispatchActivate();
+    expect([...cache.store.keys()].map(url => url.replace('https://portal.test', '')).sort()).toEqual(['/assets/index-AAA.js', '/careers/offers', '/manifest.json']);
+    expect(worker.workerClients.claim).toHaveBeenCalledTimes(1);
+  });
+
   it('still serves and refreshes the shell for every other page', async () => {
     const cache = fakeCache();
     const { cacheCompleteShellResponse, dispatchFetch, setFetch } = loadWorker(cache);

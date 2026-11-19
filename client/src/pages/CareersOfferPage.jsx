@@ -108,8 +108,6 @@ const ERROR_BANNER_STYLE = {
 const REFRESH_ERROR = 'We could not refresh this offer. Check your connection and try again.';
 const NOT_SAVED_ERROR = 'That did not go through. Please try again.';
 const CONNECTION_ERROR = 'Could not save that. Check your connection and try again.';
-// A text choice whose save had no answer, then read back as the other value.
-const CONSENT_NOT_CONFIRMED = 'We could not confirm that change. The box shows the choice we have on file. Tap it again if that is not what you want.';
 
 function ownerFirstName(data) {
   const first = String(data.owner?.name || '').trim().split(/\s+/)[0];
@@ -312,7 +310,7 @@ function TextConsent({ token, initial, onPending, onStale, onSnapshot, onRefused
   const [unconfirmed, setUnconfirmed] = useState(false);
   const [error, setError] = useState('');
   // The choice the applicant just made, while its save has no answer yet. It
-  // survives a failed read and the Try again that follows.
+  // survives a failed read, and Try again sends it again.
   const wanted = useRef(null);
 
   // A fresh read of the offer (another tab changed the choice, or an action
@@ -323,19 +321,24 @@ function TextConsent({ token, initial, onPending, onStale, onSnapshot, onRefused
   }, [initial]);
 
   // After a write whose reply was lost, ask the server what it stored. Signing
-  // stays locked until that read works. If the stored choice is not the one the
-  // applicant made, the box shows what is stored and the page says the change
-  // was not confirmed, so nobody signs believing a choice that did not save.
+  // stays locked until the stored choice is the one the applicant made. The read
+  // can run before the lost save commits, so a read of the other value keeps the
+  // choice and the lock, and Try again sends the same choice again (setting it
+  // twice changes nothing).
   const confirm = async () => {
     setSaving(true);
     onPending(true);
     try {
       const body = await readOffer(token);
       const stored = Boolean(body.textConsent);
+      if (body.state === 'open' && wanted.current !== null && stored !== wanted.current) {
+        setUnconfirmed(true);
+        return;
+      }
+      wanted.current = null;
       setChecked(stored);
       setUnconfirmed(false);
-      setError(wanted.current !== null && stored !== wanted.current ? CONSENT_NOT_CONFIRMED : '');
-      wanted.current = null;
+      setError('');
       onPending(false);
       onSnapshot(body);
     } catch (err) {
@@ -351,6 +354,7 @@ function TextConsent({ token, initial, onPending, onStale, onSnapshot, onRefused
     setChecked(next);
     setSaving(true);
     onPending(true);
+    setUnconfirmed(false);
     setError('');
     let res;
     try {
@@ -401,7 +405,7 @@ function TextConsent({ token, initial, onPending, onStale, onSnapshot, onRefused
         <div style={ERROR_BANNER_STYLE} role="alert">
           We could not confirm that choice. Check your connection and try again.
           <div style={{ marginTop: 8 }}>
-            <BrandButton variant="secondary" disabled={saving} onClick={() => confirm()}>Try again</BrandButton>
+            <BrandButton variant="secondary" disabled={saving} onClick={() => (wanted.current === null ? confirm() : toggle(wanted.current))}>Try again</BrandButton>
           </div>
         </div>
       )}
