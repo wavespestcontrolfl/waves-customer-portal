@@ -2141,6 +2141,13 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
     expect(owns).toHaveBeenCalledWith(null, 'cust-lead');
   });
 
+  test('never lists a mosquito option: a mosquito-only plan adds a setup fee its line does not declare', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const result = await ask(plain(), null, 'I am interested in adding mosquito service');
+    expect(result.options.some((o) => o.serviceKey === 'mosquito' && o.monthly > 0 && !o.manualReview)).toBe(true);
+    expect((result.planStart?.optionIds || []).filter((id) => id.startsWith('mosquito'))).toEqual([]);
+  });
+
   test('absent when the gate is off, so the pricing answer is byte-identical to today', async () => {
     const result = await ask(plain());
     expect('planStart' in result).toBe(false);

@@ -257,8 +257,10 @@ const recompute = jest.fn();
 // The frozen bundle in the real builder's shape (frequencies[] plus services[], each section with
 // defaultFrequencyKey and frequencies[]): one section for the minted family whose opening entry
 // carries the row's own totals and one treatment row at the per-application price the card
-// derives from the stored engine line. A test that moves the page's opening entry passes `entry`.
-function openingBundle(row, entry = {}) {
+// derives from the stored engine line. Its one-time money itemizes the stored result's one-time
+// items plus the WaveGuard setup fee, as the real page does. A test that moves the page's opening
+// entry passes `entry`; one that moves the bundle's one-time money passes `extra`.
+function openingBundle(row, entry = {}, extra = {}) {
   const data = JSON.parse(row.estimate_data);
   const family = data.planStart?.families?.[0];
   const line = data.result?.lineItems?.[0] || null;
@@ -268,9 +270,22 @@ function openingBundle(row, entry = {}) {
     perServiceTreatments: [{ service: family, perTreatment: perApplication, displayPrice: perApplication, visitsPerYear: line?.visitsPerYear ?? null }],
     ...entry,
   };
-  return { frequencies: [opening], services: [{ key: family, defaultFrequencyKey: 'opening', frequencies: [opening] }] };
+  const oneTime = data.result?.oneTime || {};
+  const setupFee = Number(oneTime.membershipFee || 0) > 0
+    ? { service: 'waveguard_setup', amount: oneTime.membershipFee, label: 'WaveGuard setup' } : null;
+  const items = [
+    ...(oneTime.items || []).map((item) => ({ service: item.service, label: item.name, amount: item.price, kind: 'charge', quoteRequired: false })),
+    ...(setupFee ? [{ ...setupFee, kind: 'charge', quoteRequired: false }] : []),
+  ];
+  return {
+    frequencies: [opening],
+    services: [{ key: family, defaultFrequencyKey: 'opening', frequencies: [opening] }],
+    oneTimeBreakdown: { items, total: oneTime.total ?? 0, quoteRequired: false },
+    setupFee,
+    ...extra,
+  };
 }
-const snapshotWith = (entry) => async (row) => ({ ...JSON.parse(row.estimate_data), sendSnapshot: { pricingBundle: openingBundle(row, entry) } });
+const snapshotWith = (entry, extra) => async (row) => ({ ...JSON.parse(row.estimate_data), sendSnapshot: { pricingBundle: openingBundle(row, entry, extra) } });
 function deps(overrides = {}) {
   const pricingAi = require('../services/customer-pricing-ai');
   return {
@@ -333,12 +348,22 @@ function shownOf(line) {
   const amount = require('../services/customer-pricing-ai').quoteAmountFromLine(line);
   return { monthly: amount.monthly ?? null, perVisit: amount.perVisit ?? null, dueAtStart: amount.dueAtStart ?? null, oneTime: amount.oneTime ?? null };
 }
-function pricedAs(line) {
+// The server's quote for one engine line. Its one-time money is the line's own one-time amounts
+// (what the card shows as due at start and one-time) plus `setupFee`, the WaveGuard setup fee the
+// engine adds on its own (result.oneTime.membershipFee), as in a real recompute.
+function pricedAs(line, { setupFee = 0 } = {}) {
+  const card = require('../services/customer-pricing-ai').quoteAmountFromLine(line);
+  const charges = Number(card.dueAtStart || 0) + Number(card.oneTime || 0);
+  const oneTime = {
+    items: charges > 0 ? [{ service: `${line.service}_installation`, name: 'Installation', price: charges }] : [],
+    total: charges + setupFee,
+    membershipFee: setupFee,
+  };
   return {
     recomputed: true,
-    serverResult: { engineVersion: 'v9.9', lineItems: [line] },
+    serverResult: { engineVersion: 'v9.9', lineItems: [line], oneTime },
     rawEngineResult: { waveGuard: { tier: 'Bronze' }, lineItems: [line] },
-    serverTotals: { monthlyTotal: line.monthlyAfterDiscount, annualTotal: line.annualAfterDiscount, onetimeTotal: 0 },
+    serverTotals: { monthlyTotal: line.monthlyAfterDiscount, annualTotal: line.annualAfterDiscount, onetimeTotal: oneTime.total },
   };
 }
 const PEST_LINE = engineLine('pest_control', 31.67);
@@ -404,6 +429,8 @@ describe('mintPlanStartEstimate', () => {
     await mint({ serviceKey: 'termite', optionId: 'termite-basic', shown: shownOf(termite) });
     expect(recompute.mock.calls[0][0].engineInputs.services.termite).toEqual({ system: 'trelona', monitoringTier: 'basic' });
     expect(JSON.parse(tables.estimates[0].estimate_data).planStart.families).toEqual(['termite_bait']);
+    // The setup the card shows as due at start is the quote's one-time money.
+    expect(tables.estimates[0].onetime_total).toBe(199);
   });
 
   describe('eligibility refusals (fail closed, never a mint)', () => {
@@ -511,6 +538,8 @@ describe('mintPlanStartEstimate', () => {
       await refused('not_eligible', { optionId: 'pest-weekly' });
       await refused('not_eligible', { optionId: 'lawn-enhanced' });
       await refused('not_eligible', { serviceKey: 'rodent_bait', optionId: 'rodent-bait' });
+      // Mosquito keeps the request flow: its plan adds a setup fee its line does not declare.
+      await refused('not_eligible', { serviceKey: 'mosquito', optionId: 'mosquito-seasonal' });
       await refused('not_eligible', { shown: { ...shownOf(PEST_LINE), monthly: 0 } });
       await refused('not_eligible', { shown: { ...shownOf(PEST_LINE), monthly: 'abc' } });
       await refused('not_eligible', { shown: undefined });
@@ -588,6 +617,43 @@ describe('mintPlanStartEstimate', () => {
     });
   });
 
+  // codex pre-push P0: the card shows due-at-start and one-time amounts; the quote may carry no
+  // other one-time money except the WaveGuard setup fee, which the page itemizes on its own line.
+  describe('one-time money matches the card; the WaveGuard setup fee is counted on its own', () => {
+    const TERMITE = engineLine('termite_bait', 35, { installation: { price: 199 } });
+    const termite = { serviceKey: 'termite', optionId: 'termite-basic', shown: shownOf(TERMITE) };
+    const charge = (service, amount, more = {}) => ({ service, amount, kind: 'charge', quoteRequired: false, ...more });
+    const setup = (amount) => ({ service: 'waveguard_setup', amount, label: 'WaveGuard setup' });
+    // The pest line declares its setup fee (initialFee), as the real engine's pest line does.
+    const withSetupFee = pricedAs({ ...PEST_LINE, initialFee: 99 }, { setupFee: 99 });
+
+    test('the setup fee the option\'s line declares, itemized on the page, mints at the card\'s other amounts', async () => {
+      recompute.mockResolvedValue(withSetupFee);
+      await mint();
+      expect(tables.estimates[0].onetime_total).toBe(99);
+    });
+
+    test.each([
+      ['the quote drops the station setup the card shows (one-time total $0)', termite,
+        { ...pricedAs(TERMITE), serverTotals: { ...pricedAs(TERMITE).serverTotals, onetimeTotal: 0 } }, {}],
+      ['the page charges another station setup', termite, pricedAs(TERMITE),
+        { oneTimeBreakdown: { items: [charge('termite_bait_installation', 249)], total: 249 } }],
+      ['the page adds a charge the card does not show', termite, pricedAs(TERMITE),
+        { oneTimeBreakdown: { items: [charge('termite_bait_installation', 199), charge('pest_initial', 50)], total: 249 } }],
+      ['the page prices the station setup by quote', termite, pricedAs(TERMITE),
+        { oneTimeBreakdown: { items: [charge('termite_bait_installation', 199, { quoteRequired: true })], total: 199 } }],
+      ['the engine adds a setup fee the option\'s line does not declare (a mosquito-only plan)', {}, pricedAs(PEST_LINE, { setupFee: 99 }), {}],
+      ['the page does not itemize the setup fee', {}, withSetupFee, { oneTimeBreakdown: { items: [], total: 99 } }],
+      ['the page shows another setup fee', {}, withSetupFee, { setupFee: setup(129) }],
+      ['the page shows a setup fee the quote does not carry', {}, pricedAs(PEST_LINE),
+        { oneTimeBreakdown: { items: [charge('waveguard_setup', 99)], total: 99 }, setupFee: setup(99) }],
+    ])('%s: refused (priced by hand)', async (_label, option, quote, pageOneTime) => {
+      recompute.mockResolvedValue(quote);
+      await expect(mint(option, { buildEstimateSendSnapshot: snapshotWith({}, pageOneTime) }))
+        .rejects.toMatchObject({ code: 'pricing_unavailable', restartUnavailable: true });
+    });
+  });
+
   describe('reuse and lineage', () => {
     test('a live plan_start estimate for the same option at today\'s identical offer is handed back, not re-minted', async () => {
       const first = await mint();
@@ -603,6 +669,21 @@ describe('mintPlanStartEstimate', () => {
       await expect(mint({ shown: { ...shownOf(PEST_LINE), perVisit: 90 } })).rejects.toMatchObject({ code: 'offer_changed' });
       expect(tables.estimates).toHaveLength(1);
       expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeFalsy();
+    });
+
+    test.each([
+      // The page's tier handlers delete sendSnapshot.pricingBundle and leave inputs, result and totals.
+      ['the page dropped its frozen snapshot', ({ pricingBundle, ...rest }) => rest],
+      ['its frozen snapshot no longer carries the card\'s one-time money',
+        (snapshot) => ({ ...snapshot, pricingBundle: { ...snapshot.pricingBundle, oneTimeBreakdown: { items: [], total: 50 } } })],
+    ])('a live quote whose %s is archived and re-minted, never handed back (codex pre-push P0)', async (_label, editSnapshot) => {
+      const first = await mint();
+      const stored = JSON.parse(tables.estimates[0].estimate_data);
+      tables.estimates[0].estimate_data = JSON.stringify({ ...stored, sendSnapshot: editSnapshot(stored.sendSnapshot) });
+      const next = await mint({ randomBytes: () => Buffer.from('0123456789abcdef') });
+      expect(next.reused).toBe(false);
+      expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeTruthy();
+      expect(JSON.parse(tables.estimates.find((r) => r.id === next.estimateId).estimate_data).sendSnapshot.pricingBundle).toBeTruthy();
     });
 
     test('a quote for ANOTHER option is archived and a fresh one minted', async () => {

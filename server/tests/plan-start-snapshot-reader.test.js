@@ -77,6 +77,22 @@ describe('a plan-start quote reopens on its frozen snapshot', () => {
     expect(sentSnapshotServesAsIs(frozen, planStartRow('ps-moved', sentData, moved), sentData)).toBe(false);
   });
 
+  test('the mint\'s own check passes this page at the card\'s amounts and catches moved one-time money', () => {
+    // The card shows the quarterly price and no one-time amount; the $99 WaveGuard setup fee
+    // (result.oneTime.membershipFee) is itemized on the page on its own line.
+    const CARD = { monthly: 37.67, perVisit: 113, dueAtStart: null, oneTime: null };
+    const { planStartQuoteMismatch } = require('../services/cancellation-resolution/restart')._test;
+    const check = (row, { bundle = frozen, shown = CARD } = {}) => planStartQuoteMismatch({
+      bundle, row, data: sentData, family: 'pest_control', shown, servesAsIs: sentSnapshotServesAsIs,
+    });
+    expect(frozen.oneTimeBreakdown).toMatchObject({ total: 99, items: [expect.objectContaining({ service: 'waveguard_setup', amount: 99, kind: 'charge' })] });
+    expect(check(planStartRow('ps-check', sentData))).toBeNull();
+    expect(check(planStartRow('ps-check-row', sentData, { onetime_total: 0 }))).toBe('one-time charges differ from the card');
+    expect(check(planStartRow('ps-check-card', sentData), { shown: { ...CARD, dueAtStart: 50 } })).toBe('one-time charges differ from the card');
+    expect(check(planStartRow('ps-check-price', sentData), { shown: { ...CARD, perVisit: 112 } })).toBe('opening entry quarterly shows another price');
+    expect(check(planStartRow('ps-check-gone', sentData), { bundle: null })).toBe('no page snapshot');
+  });
+
   test('after the price behind it moves, the page still opens on the frozen price', async () => {
     // A rebuild now prices $125 per application; the row and its snapshot stay as minted.
     const movedData = planStartData({ pa: 125, ann: 500, mo: 41.67 });

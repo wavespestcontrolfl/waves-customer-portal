@@ -2084,8 +2084,9 @@ predicate also accepts the snapshot when the entry the page opens on carries the
 row's `annual_total` to the cent (`planStartSnapshotMatchesTotals`,
 `server/services/estimate-pricing-bundle-utils.js`). Without it, a quarterly pest quote misses the
 generic check (its entry shows monthly x 12, cents off the per-application total) and the page
-rebuilds the offer on live pricing. The plan-start mint publishes a quote only when this predicate
-serves its snapshot. Every other source keeps the generic check.
+rebuilds the offer on live pricing. The plan-start mint publishes a quote, and hands back a live
+one, only when this predicate serves its snapshot: a live quote whose snapshot a page handler deleted
+(`invalidateSendSnapshotPricingBundle`) is re-minted. Every other source keeps the generic check.
 
 `PUT /api/estimates/:token/accept` answers 409
 `{ error, reason: 'retired_lawn_cadence_selection' }` when a recurring lawn

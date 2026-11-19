@@ -144,3 +144,16 @@ it.each([
     vi.useRealTimers();
   }
 });
+
+it('a fallback request that lands after the customer picked another option never marks that option as sent', async () => {
+  api.startPlan.mockRejectedValue(Object.assign(new Error('The price changed.'), { status: 409 }));
+  const settle = {};
+  api.createRequest.mockReturnValue(new Promise((resolve) => Object.assign(settle, { resolve })));
+  await priceIt(pricedTwo());
+  fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
+  await waitFor(() => expect(api.createRequest).toHaveBeenCalledOnce());
+  fireEvent.change(optionSelect(), { target: { value: 'pest-bimonthly' } });
+  await act(async () => { settle.resolve({ success: true }); });
+  expect(screen.queryByText('Request sent')).toBeNull();
+  expect(await screen.findByRole('button', { name: 'Request This' })).toBeEnabled();
+});

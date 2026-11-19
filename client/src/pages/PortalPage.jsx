@@ -11008,7 +11008,8 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   const [planStartUrl, setPlanStartUrl] = useState('');
   const planStartTimer = useRef(null);
   // Bumped whenever the answer or the option changes, and when the card goes away: a start still
-  // in flight for the old one is dropped, never opened (codex pre-push P1).
+  // in flight for the old one is dropped, never opened, and a request that lands for the old one
+  // never marks the new one as sent (codex pre-push P1s).
   const planStartSeq = useRef(0);
   const dropPendingPlanStart = () => {
     planStartSeq.current += 1;
@@ -11049,12 +11050,13 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
 
   const submitRequest = async () => {
     if (requesting) return;
+    const seq = planStartSeq.current;
     setRequesting(true);
     try {
       const subject = selected?.requestSubject || 'Service pricing review requested';
       const description = selected?.requestDescription || `Customer asked WAVES AI: "${prompt}". ${result?.message || ''}`;
       await api.createRequest?.({ category: 'add_service', subject, description });
-      setRequested(true);
+      if (seq === planStartSeq.current) setRequested(true);
     } catch (err) {
       showCustomerAlert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
     } finally {

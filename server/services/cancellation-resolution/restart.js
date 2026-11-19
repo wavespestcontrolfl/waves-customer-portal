@@ -40,7 +40,10 @@ const RESTARTABLE_FAMILIES = ['pest_control', 'lawn_care', 'mosquito', 'tree_shr
 // Plan start (GATE_PORTAL_PLAN_START): the portal pricing card's first-plan estimate for an account with NO live
 // recurring service. Same mint core as restart; its own estimates.source lineage.
 const PLAN_START_SOURCE = 'plan_start';
-const PLAN_START_SERVICE_KEYS = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite'];
+// No mosquito: a mosquito-only plan adds the $99 WaveGuard setup fee with no
+// fee declared on its line, so the offer check would refuse every mosquito
+// start (the card cannot show that fee). Mosquito keeps the request flow.
+const PLAN_START_SERVICE_KEYS = ['pest_control', 'lawn_care', 'tree_shrub', 'termite'];
 const HAND_PRICED_PLAN_START = 'This plan needs to be priced by hand — please call or text us and we will take care of it.';
 // Billing lanes that are a plan (a row in hand resolves through billing-lane's resolveBillingLane).
 const PLAN_BILLING_LANES = ['monthly_membership', 'per_application', 'annual_prepay'];
@@ -58,6 +61,44 @@ const toCents = (value) => Math.round(Number(value || 0) * 100);
 function planStartOptionBookable(serviceKey, option) {
   return PLAN_START_SERVICE_KEYS.includes(serviceKey) && Boolean(option)
     && (serviceKey !== 'pest_control' || option.frequency === 'quarterly');
+}
+
+// Why a stored plan-start quote does not sell exactly what the card showed,
+// or null when it does (codex pre-push P0s). The mint checks a fresh quote
+// before it publishes and a live quote before it hands it back.
+//   - The entry the page opens on shows the card's monthly and the
+//     per-application price the page's price card leads with.
+//   - One-time money is the card's setup and one-time amounts plus the
+//     WaveGuard setup fee (result.oneTime.membershipFee), on the row, in the
+//     stored result and itemized on the page. The offer check holds that fee
+//     to the one the option's line declares; the page itemizes it before
+//     acceptance, as for click-estimate-mint's card, and the accept invoices it.
+//   - The page serves this snapshot as is (its own sentSnapshotServesAsIs).
+function planStartQuoteMismatch({ bundle, row, data, family, shown, servesAsIs }) {
+  if (!bundle) return 'no page snapshot';
+  const { openingEntryForService, displayedPerApplication } = require('../estimate-pricing-bundle-utils');
+  const entry = openingEntryForService(bundle, family);
+  const perApplication = displayedPerApplication(entry);
+  if (!perApplication || toCents(entry.monthly) !== toCents(shown.monthly)
+    || toCents(perApplication.amount) !== toCents(shown.perVisit)) {
+    return `opening entry ${entry?.key || 'none'} shows another price`;
+  }
+  const setupFee = toCents(data?.result?.oneTime?.membershipFee);
+  const cardOneTime = toCents(shown.dueAtStart) + toCents(shown.oneTime);
+  const breakdown = bundle.oneTimeBreakdown || {};
+  const items = Array.isArray(breakdown.items) ? breakdown.items : [];
+  const itemized = (setup) => items
+    .filter((item) => (item?.service === 'waveguard_setup') === setup)
+    .reduce((sum, item) => sum + toCents(item?.amount), 0);
+  if ([row.onetime_total, data?.result?.oneTime?.total, breakdown.total]
+    .some((amount) => toCents(amount) !== cardOneTime + setupFee)
+    || breakdown.quoteRequired === true
+    || items.some((item) => item?.kind !== 'charge' || item?.quoteRequired === true)
+    || itemized(true) !== setupFee || itemized(false) !== cardOneTime
+    || toCents(bundle.setupFee?.amount) !== setupFee) {
+    return 'one-time charges differ from the card';
+  }
+  return servesAsIs(bundle, row, data) ? null : 'the page would rebuild the snapshot';
 }
 // Pricing-ai speaks 'termite' for the termite_bait family (LINE_SERVICE_KEYS).
 const pricingKeyFor = (family) => (family === 'termite_bait' ? 'termite' : family);
@@ -587,21 +628,26 @@ function resolveMintDeps(deps) {
 //   assertOffer       optional ({ monthlyTotal, annualTotal, onetimeTotal,
 //                     rawEngineResult }) => throws when the server's price is
 //                     not the offer the entry expects
-//   assertSnapshot    optional (pricingBundle, createdRow, estimateData) =>
-//                     throws when the frozen bundle is not the offer; default
-//                     = the bundle carries the minted totals
-//                     (pricingBundleMatchesEstimateTotals)
+//   snapshotSells     optional (pricingBundle, row, estimateData) => true when
+//                     the frozen page bundle sells exactly this offer. A fresh
+//                     mint that fails it refuses (priced by hand); a live
+//                     quote that fails it is re-minted, never handed back.
+//                     Default: the bundle carries the row's totals
+//                     (pricingBundleMatchesEstimateTotals); a fresh mint that
+//                     fails the default is a publication failure
 //   note              (estimateId) => { subject, body } for the timeline
 //   logTag / logDetail / handMessage   wording that stays per-source
 // Returns { estimateId, token, url, reused }.
 async function mintPricedEstimate({
   trx, fresh, source, families, ownedFamilies, optionFor, estimateBlock, matchesLive,
-  assertOffer = null, assertSnapshot = null, note, logTag, logDetail = '', handMessage,
+  assertOffer = null, snapshotSells = null, note, logTag, logDetail = '', handMessage,
   assertNotCommercial, nowDate, now, randomBytes, deps, mintDeps,
 }) {
   const {
     persistence, pricingAi, pricingBundleMatchesEstimateTotals, buildEstimateSendSnapshot,
   } = mintDeps;
+  const sells = snapshotSells
+    || ((bundle, row) => Boolean(bundle) && pricingBundleMatchesEstimateTotals(bundle, row));
   const toPrice = families.map(pricingKeyFor);
 
   // Single-premises proof BEFORE any URL is handed out (codex GH r4 P1):
@@ -834,7 +880,12 @@ async function mintPricedEstimate({
       && cents(monthlyTotal) === cents(live.monthly_total)
       && cents(annualTotal) === cents(live.annual_total)
       && cents(onetimeTotal) === cents(live.onetime_total)
-      && offerFingerprint(liveData) === offerFingerprint(estimateData)) {
+      && offerFingerprint(liveData) === offerFingerprint(estimateData)
+      // The page still sells its frozen snapshot (codex pre-push P0): the
+      // fingerprint omits sendSnapshot, and the page's tier selection can
+      // clear the bundle while inputs, result and totals stay the same. Such
+      // a quote would reprice on live rules, so it is re-minted instead.
+      && sells(liveData?.sendSnapshot?.pricingBundle, live, liveData)) {
       return { estimateId: live.id, token: live.token, url: `/estimate/${live.token}`, reused: true };
     }
   }
@@ -915,10 +966,9 @@ async function mintPricedEstimate({
   if (!withSnapshot?.sendSnapshot || withSnapshot.sendSnapshot.pricingBundleError) {
     throw new Error(`${logTag} send snapshot did not freeze pricing${withSnapshot?.sendSnapshot?.pricingBundleError ? `: ${withSnapshot.sendSnapshot.pricingBundleError}` : ''}`);
   }
-  if (assertSnapshot) {
-    assertSnapshot(withSnapshot.sendSnapshot.pricingBundle, created, withSnapshot);
-  } else if (!pricingBundleMatchesEstimateTotals(withSnapshot.sendSnapshot.pricingBundle, created)) {
-    throw new Error(`${logTag} send snapshot does not match the minted totals`);
+  if (!sells(withSnapshot.sendSnapshot.pricingBundle, created, withSnapshot)) {
+    if (!snapshotSells) throw new Error(`${logTag} send snapshot does not match the minted totals`);
+    throw new RestartUnavailableError('pricing_unavailable', handMessage);
   }
   await trx('estimates').where({ id: created.id }).update({
     estimate_data: JSON.stringify(withSnapshot),
@@ -1123,32 +1173,33 @@ async function mintPlanStartEstimate({
       // estimate's monthly total, and the card's own derivation
       // (quoteAmountFromLine) on TODAY's engine line for this service. Runs
       // before both a fresh mint and a reuse.
-      assertOffer: ({ monthlyTotal, rawEngineResult }) => {
+      assertOffer: ({ monthlyTotal, onetimeTotal, rawEngineResult }) => {
         const { quoteAmountFromLine, findLineItem } = mintDeps.pricingAi;
-        const today = quoteAmountFromLine(findLineItem(rawEngineResult, serviceKey));
+        const line = findLineItem(rawEngineResult, serviceKey);
+        const today = quoteAmountFromLine(line);
         const drifted = toCents(monthlyTotal) !== toCents(shownMonthly)
           || PLAN_START_SHOWN_KEYS.some((key) => toCents(today[key]) !== toCents(shown[key]));
         if (drifted) {
           throw new RestartUnavailableError('offer_changed', 'The price changed since you last looked. Please check the new price.');
         }
-      },
-      // The page must sell exactly this frozen offer (codex pre-push P0s).
-      // The entry it opens on shows the card's monthly and the card's
-      // per-application price to the cent, read as the page's price card
-      // reads it (displayedPerApplication). The public reader also serves
-      // the snapshot as is (its own sentSnapshotServesAsIs), so a quote the
-      // page would rebuild on live pricing is never published.
-      assertSnapshot: (bundle, created, estimateData) => {
-        const { openingEntryForService, displayedPerApplication } = require('../estimate-pricing-bundle-utils');
-        const entry = openingEntryForService(bundle, family);
-        const perApplication = displayedPerApplication(entry);
-        const pageShowsCard = Boolean(perApplication)
-          && toCents(entry.monthly) === toCents(shownMonthly)
-          && toCents(perApplication.amount) === toCents(shown.perVisit);
-        if (!pageShowsCard || !mintDeps.sentSnapshotServesAsIs(bundle, created, estimateData)) {
-          logger.warn(`[plan-start] estimate page would not sell option ${option.id} as shown (opening entry ${entry?.key || 'none'}${pageShowsCard ? ', page rebuilds the snapshot' : ''}) — refusing`);
+        // One-time money (codex pre-push P0): the card's setup and one-time
+        // amounts plus only the setup fee the option's own line declares
+        // (initialFee, the card option's setupFee), as click-estimate-mint
+        // allows. Any other one-time charge is priced by hand.
+        const declaredSetupFee = Number(line?.initialFee) > 0 ? Number(line.initialFee) : 0;
+        if (toCents(onetimeTotal) !== toCents(shown.dueAtStart) + toCents(shown.oneTime) + toCents(declaredSetupFee)) {
+          logger.warn(`[plan-start] option ${option.id} carries one-time money the card does not show (${onetimeTotal}) — refusing`);
           throw new RestartUnavailableError('pricing_unavailable', HAND_PRICED_PLAN_START);
         }
+      },
+      // The page must sell exactly the card's offer, on a fresh quote and on
+      // a live one before reuse (planStartQuoteMismatch).
+      snapshotSells: (bundle, row, data) => {
+        const mismatch = planStartQuoteMismatch({
+          bundle, row, data, family, shown, servesAsIs: mintDeps.sentSnapshotServesAsIs,
+        });
+        if (mismatch) logger.warn(`[plan-start] estimate ${row?.id || 'new'} does not sell option ${option.id} as shown: ${mismatch}`);
+        return !mismatch;
       },
       note: (estimateId) => ({
         subject: `Plan estimate opened from portal — ${FAMILY_LABELS[family] || family}`,
@@ -1321,5 +1372,5 @@ module.exports = {
   ownsAnyRecurringService,
   mintPlanStartEstimate,
   assertPlanStartAcceptEligible,
-  _test: { liveRestartEstimate, ownedResidualFamilies },
+  _test: { liveRestartEstimate, ownedResidualFamilies, planStartQuoteMismatch },
 };

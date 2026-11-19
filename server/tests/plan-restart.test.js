@@ -401,6 +401,22 @@ describe('mintRestartEstimate', () => {
     expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).not.toBeNull();
   });
 
+  test.each([
+    // The page's tier handlers delete sendSnapshot.pricingBundle and leave inputs, result and totals.
+    ['the page dropped its frozen snapshot', (stored) => { delete stored.sendSnapshot.pricingBundle; }, {}],
+    ['its frozen snapshot no longer carries the row\'s totals', () => {},
+      { bundleUtils: { pricingBundleMatchesEstimateTotals: (_bundle, row) => row.id !== 'estimates-1' } }],
+  ])('a live quote whose %s is re-minted, never handed back (codex pre-push P0)', async (_label, editStored, depOverrides) => {
+    const first = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(first.estimateId).toBe('estimates-1');
+    const stored = JSON.parse(tables.estimates[0].estimate_data);
+    editStored(stored);
+    tables.estimates[0].estimate_data = JSON.stringify(stored);
+    const again = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(depOverrides), randomBytes: () => Buffer.from('bbcdef0123456789') });
+    expect(again.reused).toBe(false);
+    expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).not.toBeNull();
+  });
+
   test('a live estimate whose price no longer recomputes to its frozen totals is archived and re-priced (codex pre-push P0)', async () => {
     tables.estimates.push({
       id: 'est-old-price', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'old-price', expires_at: '2099-01-01', archived_at: null,
