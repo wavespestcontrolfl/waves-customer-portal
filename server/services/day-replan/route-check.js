@@ -39,7 +39,7 @@ const { etDateString, etParts, addETDays } = require('../../utils/datetime-et');
 const { _internals: replan } = require('./index');
 const { SLOT_MIN, serviceBlocks, _internals: gaps } = require('./close-gaps');
 const { simulate, coVisitGroups, coVisitMinutes } = require('./app-sim');
-const { promisedWindowOrder, workDuration } = require('../route-reorder-window-fit');
+const { promisedWindowOrder, workDuration, currentOrder, staleOrderReasons } = require('../route-reorder-window-fit');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
@@ -51,6 +51,10 @@ const STAFFED_DAYS = 3;
 const DEMAND_DAYS = 7;
 // How far ahead to look for STAFFED_DAYS staffed days (a holiday week can close several in a row).
 const SCAN_DAYS = 14;
+// A job slot's parts (close-gaps SLOT_MIN: the 60-minute median job and its added drive). The drive comes first, so
+// the service can start on the hour (AGENTS.md).
+const JOB_MIN = 60;
+const DRIVE_MIN = SLOT_MIN - JOB_MIN;
 
 const weekday = (day) => new Date(`${day}T12:00:00Z`).getUTCDay();
 const toMin = (value) => {
@@ -76,8 +80,8 @@ const hasCoords = (row) => {
 };
 
 /**
- * Where the van is and when it is free on `day` (pure). completed: the day's completed rows; onSite: the stops on site now, one per physical stop ({ arrived_at, stayMin, lat, lng }; stayMin = the
- * services not yet done). The van is at that stop since its arrival, so a service finished after the arrival was
+ * Where the van is and when it is free on `day` (pure). completed: the day's completed rows; onSite: the stops on site now, one per physical stop ({ arrived_at, stayMin, workMin, lat, lng }: the
+ * services not yet done, as the simulator charges them and as work alone). The van is at that stop since its arrival, so a service finished after the arrival was
  * done there: the rest starts then. Busy until the stay ends and never before now (a job running long). Returns
  * { origin, clockMin, source }; source 'start_point' when nothing is done or under way, 'unknown' (origin null)
  * when the latest stop done has no place.
@@ -87,7 +91,12 @@ function vanNow({ completed, onSite, home, departureMin, nowMin, day }) {
   const done = completed.filter((row) => etMinuteOn(row.completed_at, day) != null)
     .reduce((top, row) => (!top || new Date(row.completed_at) > new Date(top.completed_at) ? row : top), null);
   const lastDone = done ? etMinuteOn(done.completed_at, day) : -Infinity;
-  const onSiteClock = (row) => Math.max(nowMin, Math.max(etMinuteOn(row.arrived_at, day) ?? nowMin, lastDone) + row.stayMin);
+  // Busy until the stay as the simulator charges it from the arrival (a shared window counted once), and, when a
+  // service of the stop finished after the arrival, until the work still to do after that finish.
+  const onSiteClock = (row) => {
+    const arrived = etMinuteOn(row.arrived_at, day) ?? nowMin;
+    return Math.max(nowMin, arrived + row.stayMin, lastDone > arrived ? lastDone + row.workMin : -Infinity);
+  };
   const seen = [
     ...(done ? [{ row: done, clockMin: lastDone, source: 'completed' }] : []),
     ...onSite.map((row) => ({ row, clockMin: onSiteClock(row), source: 'on_site' })),
@@ -125,20 +134,39 @@ function physicalStops(rows) {
 /** A physical stop's stay as the simulator charges it: each co-visit group's combined minutes, one after another. */
 const stayOf = (stop) => sum(stop, (group) => (group.length > 1 ? coVisitMinutes(group) : workDuration(group[0])));
 
-/** The stops on site now ({ arrived_at, stayMin, lat, lng } each), from physical stops and row id -> arrived_at. */
+/**
+ * The stops on site now, from physical stops and row id -> arrived_at: { arrived_at, stayMin (as the simulator
+ * charges it, a shared window's floor included), workMin (the services' own minutes, no window floor), lat, lng }.
+ */
 function onSiteStays(stops, arrivedById) {
   return stops.map((stop) => {
     const rows = stop.flat();
     const arrivals = rows.map((r) => arrivedById.get(String(r.id))).filter(Boolean).map((v) => new Date(v).getTime());
-    return { lat: rows[0].lat, lng: rows[0].lng, arrived_at: arrivals.length ? new Date(Math.min(...arrivals)) : null, stayMin: stayOf(stop) };
+    return {
+      lat: rows[0].lat, lng: rows[0].lng, arrived_at: arrivals.length ? new Date(Math.min(...arrivals)) : null,
+      stayMin: stayOf(stop), workMin: sum(rows, (r) => workDuration({ ...r, window_end: null })),
+    };
   });
 }
 
-/** Jobs that fit one opening (pure): each a whole SLOT_MIN slot (job and drive) whose service starts on the hour. */
+/** Jobs that fit one opening (pure): for each, the drive, then a JOB_MIN service that starts on the hour. */
 function hourSlots(o) {
   let count = 0;
-  for (let at = ceilHour(o.start); at + SLOT_MIN <= o.start + o.min; at = ceilHour(at + SLOT_MIN)) count += 1;
+  const end = o.start + o.min;
+  for (let at = ceilHour(o.start + DRIVE_MIN); at + JOB_MIN <= end; at = ceilHour(at + JOB_MIN + DRIVE_MIN)) count += 1;
   return count;
+}
+
+/**
+ * The order the technician drives (pure), the app's own rule (arrival-route.js, the 04:40 re-plan's stored baseline):
+ * the stored route_order when it is a real plan (staleOrderReasons finds none; today may resume past its first
+ * numbers), else each physical stop at its own promised start, each stop's rows together.
+ */
+function routeOrder(rows, { today = false } = {}) {
+  if (rows.length && !staleOrderReasons(rows, rows, { futureDay: !today }).length) return currentOrder(rows);
+  const startOf = (stop) => Math.min(...stop.flat().map((r) => toMin(r.window_start)));
+  return physicalStops(rows).map((stop, i) => ({ stop, i })).sort((a, b) => startOf(a.stop) - startOf(b.stop) || a.i - b.i)
+    .flatMap(({ stop }) => stop.flat());
 }
 
 /**
@@ -170,18 +198,15 @@ function unmeasurable(rows) {
  * One tech-day's openings (pure). rows: the stops still to do, in any order (simulated in promised-window order, the
  * clock baseline), after `first` (the stop the van is driving to now: no opening before it, since a job there would
  * go ahead of that customer); blocks: the technician's schedule blocks; held: booked time, as intervals; origin:
- * where the van sets off; end: where it returns (the start point). slots: jobs that start on the hour (hourSlots);
+ * where the van sets off; end: where it returns (the start point); the rest run in the order the technician drives
+ * (routeOrder). slots: jobs that start on the hour after their drive (hourSlots);
  * noticeSlots: the 07:05 notice's own count (close-gaps: whole SLOT_MIN slots), so the two can be compared.
  */
-function measureTechDay({ rows, first = [], blocks, held, origin, end = origin, departureMin, openMin, closeMin }) {
+function measureTechDay({ rows, first = [], blocks, held, origin, end = origin, departureMin, openMin, closeMin, today = false }) {
   const all = [...first, ...rows];
   const skip = unmeasurable(all);
   if (skip) return { stops: all.length, skip };
-  // Each physical stop at its own promised start (a visit's afternoon service is not pulled up to its morning one),
-  // each stop's rows together.
-  const startOf = (stop) => Math.min(...stop.flat().map((r) => toMin(r.window_start)));
-  const seq = [...first, ...physicalStops(rows).map((stop, i) => ({ stop, i })).sort((a, b) => startOf(a.stop) - startOf(b.stop) || a.i - b.i)
-    .flatMap(({ stop }) => stop.flat())];
+  const seq = [...first, ...routeOrder(rows, { today })];
   const sim = simulate(seq, { origin, end, departureMin, blockedIntervals: serviceBlocks(blocks) });
   if (!sim) return { stops: all.length, skip: 'NO_SIMULATION' };
   const open = openMin < closeMin
@@ -393,7 +418,7 @@ async function measureOne(conn, env, { day, techId, rows, progress, occupancy })
     const first = enRoute.flatMap((s) => s.flat());
     const departureMin = enRouteDeparture({ first, mine, van, origin: van.origin, nowMin: env.nowMin, day });
     const fig = measureTechDay({
-      ...common, rows: rest, first, origin: van.origin, end: home, departureMin, openMin: Math.max(DAY_OPEN, env.nowMin),
+      ...common, rows: rest, first, origin: van.origin, end: home, departureMin, openMin: Math.max(DAY_OPEN, env.nowMin), today: true,
     });
     return { ...fig, van: van.source };
   } catch (err) {
@@ -468,7 +493,7 @@ async function runRouteCheck({ conn = db, now = new Date() } = {}) {
 module.exports = {
   runRouteCheck,
   _internals: {
-    vanNow, physicalStops, onSiteStays, todaysStops, heldSpans, hourSlots, enRouteDeparture, measureTechDay, staffed, datesToMeasure, summarize, unmeasurable,
+    vanNow, physicalStops, onSiteStays, todaysStops, heldSpans, hourSlots, routeOrder, enRouteDeparture, measureTechDay, staffed, datesToMeasure, summarize, unmeasurable,
     etMinuteOn, STAFFED_DAYS, DEMAND_DAYS,
   },
 };

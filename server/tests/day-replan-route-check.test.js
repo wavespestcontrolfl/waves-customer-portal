@@ -128,6 +128,13 @@ describe('where the van is now (today)', () => {
     expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 630, onSite: [], completed: completed.slice().reverse() }).origin).toEqual({ lat: 27.5, lng: -82.4 });
   });
 
+  test('co-visit siblings sharing a window: one done early, the other is charged its own work, the window once', () => {
+    const share = (id) => ({ ...sibling(id), window_start: '10:00:00', window_end: '11:00:00', estimated_duration_minutes: 30 });
+    const onSite = rc.onSiteStays(rc.physicalStops([share('s2')]), new Map([['s2', '2026-11-19T15:00:00Z']])); // arrived 10:00
+    const completed = [{ completed_at: '2026-11-19T15:30:00Z', lat: 27.5, lng: -82.4 }]; // s1 done at 10:30
+    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 640, completed, onSite }).clockMin).toBe(660); // 11:00, not 11:30
+  });
+
   test('nothing done yet: the start point at the departure minute', () => {
     expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 450, onSite: [], completed: [] })).toEqual({ origin: home, clockMin: 480, source: 'start_point' });
   });
@@ -162,6 +169,13 @@ describe('one tech-day', () => {
     const pulled = rc.measureTechDay({ ...open, rows: [noon], first: [am, pm] });
     expect(fig.endMin).toBeLessThanOrEqual(960);
     expect(pulled.endMin).toBeGreaterThan(fig.endMin);
+  });
+
+  test("the stored route order when it is a real plan, else each stop at its own promised time", () => {
+    const a = stop('a', '09:00:00', '12:00:00', { route_order: 2 });
+    const b = stop('b', '09:00:00', '12:00:00', { route_order: 1, customer_id: 'cust-2', lat: 27.45, lng: -82.4 });
+    expect(rc.routeOrder([a, b]).map((r) => r.id)).toEqual(['b', 'a']);
+    expect(rc.routeOrder([{ ...a, route_order: null }, b]).map((r) => r.id)).toEqual(['a', 'b']); // a null: clock order
   });
 
   test('the stop the van is driving to comes first, even with a later window', () => {
@@ -230,9 +244,10 @@ describe('the totals and the ad rule shadow', () => {
     expect(rc.summarize([b, a], '2026-11-19', { techBlind: true }).totals.next.slots).toBe(2);
   });
 
-  test('a job starts on the hour: a 10:30-11:50 opening holds none', () => {
-    expect(rc.hourSlots({ start: 630, min: 80 })).toBe(0);
-    expect(rc.hourSlots({ start: 600, min: 80 })).toBe(1);
+  test('a job is the drive, then a service that starts on the hour', () => {
+    expect(rc.hourSlots({ start: 630, min: 80 })).toBe(0); // 10:30-11:50: an 11:00 service runs to noon
+    expect(rc.hourSlots({ start: 640, min: 80 })).toBe(1); // 10:40-12:00: drive to 11:00, service 11-12
+    expect(rc.hourSlots({ start: 480, min: 240 })).toBe(2); // 8-12: 9:00 and 11:00
   });
 
   test('the 1% floor when no dispatch room exists in that window', () => {
