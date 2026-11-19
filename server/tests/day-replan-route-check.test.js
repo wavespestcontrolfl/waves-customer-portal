@@ -34,6 +34,9 @@ const stop = (id, start, end, extra = {}) => ({
 // A Monday well ahead: only the customer window rule decides (the booking notice is far behind).
 const MONDAY = '2026-11-23';
 const AHEAD = new Date('2026-11-20T12:00:00Z');
+// The live booking_config row's shape (Nov 19): book from tomorrow, 8 AM to 6 PM, 60-minute visits.
+const CONFIG = { advance_days_min: 1, advance_days_max: 14, slot_duration_minutes: 60, day_start: '08:00:00', day_end: '18:00:00' };
+const SAME_DAY = { ...CONFIG, advance_days_min: 0 };
 const open = { blocks: [], held: [], origin: HQ, departureMin: 480, openMin: 480, closeMin: 1020, admit: null };
 
 const savedEnv = { gate: process.env.GATE_CUSTOMER_LAST_START_16, notice: process.env.SELF_SERVE_NOTICE_HOURS };
@@ -42,7 +45,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   process.env.GATE_CUSTOMER_LAST_START_16 = 'true';
   process.env.SELF_SERVE_NOTICE_HOURS = '1';
-  open.admit = rc.onlineAdmit(MONDAY, AHEAD);
+  open.admit = rc.onlineAdmit(MONDAY, AHEAD, [], CONFIG);
 });
 afterAll(() => {
   restore('GATE_CUSTOMER_LAST_START_16', savedEnv.gate);
@@ -51,48 +54,69 @@ afterAll(() => {
 
 describe('online count: the customer booking rules', () => {
   test('an opening holds an online job only on the hour grid, with a full job slot inside it', () => {
-    const admit = rc.onlineAdmit(MONDAY, AHEAD);
+    const admit = rc.onlineAdmit(MONDAY, AHEAD, [], CONFIG);
     expect(rc.onlineStarts({ startMin: 560, min: 80 }, admit)).toEqual([]); // 9:20-10:40: dispatch fits one, no hourly start does
     expect(rc.onlineStarts({ startMin: 540, min: 480 }, admit)).toEqual([540, 600, 660, 720, 780, 840, 900]); // 4 PM would run past 5
     expect(rc.spaced(rc.onlineStarts({ startMin: 540, min: 480 }, admit))).toEqual([540, 660, 780, 900]); // 4 jobs
-    expect(rc.onlineAdmit('2026-11-22', AHEAD)).toBeNull(); // a Sunday: the picker offers no day
+    expect(rc.onlineAdmit('2026-11-22', AHEAD, [], CONFIG)).toBeNull(); // a Sunday: the picker offers no day
+  });
+
+  test("the /book page's own rules: its first day and its configured opening hour", () => {
+    const now = new Date('2026-11-23T13:00:00Z'); // Monday 8 AM ET
+    expect(rc.onlineAdmit(MONDAY, now, [], CONFIG)).toBeNull(); // advance_days_min 1: not today
+    expect(rc.onlineAdmit(MONDAY, now, [], { ...CONFIG, advance_days_min: null })).toBeNull(); // null keeps the 1-day default
+    expect(rc.onlineAdmit(MONDAY, now, [], SAME_DAY)).not.toBeNull();
+    const tenOpen = rc.onlineAdmit(MONDAY, AHEAD, [], { ...CONFIG, day_start: '10:00:00' });
+    expect(rc.onlineStarts({ startMin: 540, min: 240 }, tenOpen)).toEqual([600, 660]); // no 9 AM before a 10 AM opening
   });
 
   test('a 5 PM start counts only while GATE_CUSTOMER_LAST_START_16 is off', () => {
-    expect(rc.onlineStarts({ startMin: 1020, min: 80 }, rc.onlineAdmit(MONDAY, AHEAD))).toEqual([]);
+    expect(rc.onlineStarts({ startMin: 1020, min: 80 }, rc.onlineAdmit(MONDAY, AHEAD, [], CONFIG))).toEqual([]);
     process.env.GATE_CUSTOMER_LAST_START_16 = 'false';
-    expect(rc.onlineStarts({ startMin: 1020, min: 80 }, rc.onlineAdmit(MONDAY, AHEAD))).toEqual([1020]);
+    expect(rc.onlineStarts({ startMin: 1020, min: 80 }, rc.onlineAdmit(MONDAY, AHEAD, [], CONFIG))).toEqual([1020]);
   });
 
   test('a start inside the self-serve booking notice is not online room, but stays dispatch room', () => {
     const now = new Date('2026-11-23T15:30:00Z'); // Monday 10:30 AM ET, notice 1 h: the first online start is noon
-    const fig = rc.measureTechDay({ ...open, rows: [], departureMin: 630, openMin: 630, admit: rc.onlineAdmit(MONDAY, now) });
+    const fig = rc.measureTechDay({ ...open, rows: [], departureMin: 630, openMin: 630, admit: rc.onlineAdmit(MONDAY, now, [], SAME_DAY) });
     // 4 PM would need the job slot to 5:20; the opening ends at 5.
     expect(fig.openings).toEqual([{ kind: 'tail', start: 630, min: 390, slots: 4, online: 2, starts: [720, 780, 840, 900] }]);
     process.env.SELF_SERVE_NOTICE_HOURS = '24';
-    expect(rc.measureTechDay({ ...open, rows: [], departureMin: 630, openMin: 630, admit: rc.onlineAdmit(MONDAY, now) })).toMatchObject({ slots: 4, online: 0 });
+    expect(rc.measureTechDay({ ...open, rows: [], departureMin: 630, openMin: 630, admit: rc.onlineAdmit(MONDAY, now, [], SAME_DAY) })).toMatchObject({ slots: 4, online: 0 });
   });
 
-  test("a completed visit's booked window and the owner's interviews hold time against online starts", () => {
+  test("booked spans and the owner's interviews hold time against online starts", () => {
+    const row = (id, extra) => ({ id, technician_id: TECH, customer_id: 'cust-1', scheduled_date: MONDAY, estimated_duration_minutes: 60, ...extra });
     const busy = rc.onlineBusy({
       techId: TECH, techBlind: false,
-      completed: [
-        { technician_id: TECH, window_start: '09:00:00', window_end: '11:00:00' },
-        { technician_id: 'other-tech', window_start: '13:00:00', window_end: null, estimated_duration_minutes: 60 },
+      occupancy: [
+        row('v1', { window_start: '09:00:00', window_end: '11:00:00' }),
+        row('v2', { technician_id: 'other-tech', window_start: '13:00:00', window_end: null }),
       ],
       interviews: [{ start: '14:45', end: '16:15' }],
     });
     expect(busy).toEqual([{ startMin: 540, endMin: 660 }, { startMin: 885, endMin: 975 }]); // another tech's visit holds nothing
     // 2 PM would run to 3, into the interview's 2:45 buffer.
-    expect(rc.onlineStarts({ startMin: 540, min: 480 }, rc.onlineAdmit(MONDAY, AHEAD, busy))).toEqual([660, 720, 780]);
-    // Tech-blind: another technician's completed visit holds its window too.
-    const blind = rc.onlineBusy({ techId: TECH, techBlind: true, completed: [{ technician_id: 'other-tech', window_start: '13:00:00', window_end: null }], interviews: [] });
+    expect(rc.onlineStarts({ startMin: 540, min: 480 }, rc.onlineAdmit(MONDAY, AHEAD, busy, CONFIG))).toEqual([660, 720, 780]);
+    // Tech-blind: another technician's visit holds its span too.
+    const blind = rc.onlineBusy({ techId: TECH, techBlind: true, occupancy: [row('v2', { technician_id: 'other-tech', window_start: '13:00:00', window_end: null })], interviews: [] });
     expect(blind).toEqual([{ startMin: 780, endMin: 840 }]);
+  });
+
+  test('a version-2 allocation holds its whole combined span (occupiedRows), not each service alone', () => {
+    const mix = { version: 2, allocatedServiceIds: ['a1', 'a2'] };
+    const pair = ['a1', 'a2'].map((id) => ({
+      id, technician_id: null, customer_id: 'cust-2', scheduled_date: MONDAY, window_start: '09:00:00', window_end: '10:00:00',
+      estimated_duration_minutes: 60, reservation_service_mix: mix,
+    }));
+    const busy = rc.onlineBusy({ techId: TECH, techBlind: false, occupancy: pair, interviews: [] });
+    expect(busy[0]).toEqual({ startMin: 540, endMin: 660 });
+    expect(rc.onlineStarts({ startMin: 540, min: 240 }, rc.onlineAdmit(MONDAY, AHEAD, busy, CONFIG))).toEqual([660]); // 10 AM is held
   });
 
   test("booking_config's day end bounds the customer's visit", async () => {
     const late = { startMin: 900, min: 120 }; // 3:00-5:00 PM
-    expect(rc.onlineStarts(late, rc.onlineAdmit(MONDAY, AHEAD))).toEqual([900]); // default close 6 PM
+    expect(rc.onlineStarts(late, rc.onlineAdmit(MONDAY, AHEAD, [], CONFIG))).toEqual([900]); // default close 6 PM
     // A fresh module copy, so the booking-window cache this sets never reaches the other tests.
     let fresh;
     let windows;
@@ -103,7 +127,7 @@ describe('online count: the customer booking rules', () => {
     await windows.refreshCustomerBookingWindowConfig(() => ({ first: async () => ({ lunch_start: '12:00:00', lunch_end: '12:00:00', day_end: '15:00:00' }) }));
     expect(windows.currentDayEndMinutes()).toBe(900);
     // A 3 PM close: a 3 PM visit would run to 4.
-    expect(fresh.onlineStarts(late, fresh.onlineAdmit(MONDAY, AHEAD))).toEqual([]);
+    expect(fresh.onlineStarts(late, fresh.onlineAdmit(MONDAY, AHEAD, [], CONFIG))).toEqual([]);
   });
 });
 
@@ -232,14 +256,16 @@ describe('the totals and the ad rule shadow', () => {
 describe('runRouteCheck', () => {
   const NOW = new Date('2026-11-19T15:30:00Z'); // Thu 10:30 AM ET
 
-  function fakeConn({ progress = [], campaigns = [{ id: 'c1', status: 'paused', budget_mode: 'stop' }], bookingConfig = { advance_days_min: 1 } } = {}) {
+  function fakeConn({ progress = [], occupancy = [], campaigns = [{ id: 'c1', status: 'paused', budget_mode: 'stop' }], bookingConfig = CONFIG } = {}) {
     const writes = [];
     const conn = (table) => {
+      let joined = false;
       const q = {
-        leftJoin() { return q; }, where() { return q; }, whereIn() { return q; },
+        leftJoin() { joined = true; return q; }, where() { return q; }, whereIn() { return q; }, whereNotIn() { return q; }, whereRaw() { return q; },
         select: async () => {
           if (table === 'technicians') return [{ id: TECH }];
-          if (table === 'scheduled_services') return progress;
+          // The progress read joins customers for the place; the occupancy read does not.
+          if (table === 'scheduled_services') return joined ? progress : occupancy;
           if (table === 'ad_campaigns') return campaigns;
           return [];
         },
@@ -306,9 +332,11 @@ describe('runRouteCheck', () => {
 
   test("today's completed visit keeps its booked window out of the online starts; interviews are read per date", async () => {
     replan.loadDayStops.mockResolvedValue([]);
+    const done = { id: 'd1', technician_id: TECH, customer_id: 'cust-3', scheduled_date: '2026-11-19', status: 'completed', window_start: '11:00:00', window_end: '13:00:00' };
     const { conn, writes } = fakeConn({
-      bookingConfig: { advance_days_min: 0 },
-      progress: [{ id: 'd1', technician_id: TECH, status: 'completed', completed_at: '2026-11-19T15:00:00Z', window_start: '11:00:00', window_end: '13:00:00', lat: 27.5, lng: -82.4 }],
+      bookingConfig: SAME_DAY,
+      occupancy: [done],
+      progress: [{ ...done, completed_at: '2026-11-19T15:00:00Z', lat: 27.5, lng: -82.4 }],
     });
     await runRouteCheck({ conn, now: NOW }); // 10:30 AM, notice 1 h; the 11-1 visit finished at 10
     const today = JSON.parse(writes[0][1].days)[0];

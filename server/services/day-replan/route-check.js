@@ -6,10 +6,9 @@
  * and every staffed day up to STAFFED_DAYS staffed days ahead (at least DEMAND_DAYS calendar days, for the 7-day demand
  * view), for each technician who works that day. It records one row in route_check_runs:
  *   - each opening that holds a new job and its drive (close-gaps SLOT_MIN), counted two ways: jobs dispatch can
- *     place (`slots`), and jobs a customer can book online (`online`: a start the customer booking rules admit, from
- *     customerWindowAdmits and the self-serve booking notice, clear of today's completed windows and the owner's
- *     interviews, Monday to Saturday, from the /book page's first day); while the occupancy check is tech-blind, a
- *     date's room is counted once across technicians, not per technician;
+ *     place (`slots`), and jobs a customer can book online (`online`: a start the /book page's own rules admit, clear
+ *     of every booked span and the owner's interviews, Monday to Saturday; see onlineAdmit); while the occupancy check
+ *     is tech-blind, a date's room is counted once across technicians, not per technician;
  *   - what the ad budget rule WOULD do (`ad_shadow`): full budget while an online-bookable opening exists today or in
  *     the next STAFFED_DAYS staffed days, the 1% floor when none, with the dispatch count beside it. It changes no
  *     budget. The online count is strict on purpose (a grid hour with the whole job slot after it); every opening's
@@ -44,6 +43,8 @@ const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-p
 const { dayDepartureMinutes } = require('../scheduling/departure-time');
 const { CUSTOMER_GRID_MINUTES, customerWindowAdmits, refreshCustomerBookingWindowConfig } = require('../scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../scheduling/self-serve-notice');
+const { occupiedRows } = require('../scheduling/visit-capacity');
+const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { guardedCoordSelects } = require('../scheduling/day-stops');
 
 const TABLE = 'route_check_runs';
@@ -107,9 +108,8 @@ function onSiteStays(rows, arrivedById) {
 }
 
 const GRID = [...CUSTOMER_GRID_MINUTES].sort((a, b) => a - b);
-// The customer's own visit inside a job slot: the median job (close-gaps SLOT_MIN = this job plus its drive). The
-// booking paths test the visit, not the drive, against the day end (find-time.js customerWindowAdmits call).
-const JOB_MIN = 60;
+// The /book page's own slot rules (routes/booking.js, shared by its offer builder and its commit check).
+const booking = () => require('../../routes/booking')._internals;
 const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
 
 /** A start list with no two closer than one job slot, earliest first (pure). */
@@ -120,15 +120,21 @@ function spaced(starts) {
 }
 
 /**
- * The online booking test for one date at `now`, or null when the customer picker offers no day (a Sunday, find-time's
- * default). A start counts when the customer window rule admits the visit from it (customerWindowAdmits: the hour
- * grid, the customer last start, booking_config's day end) and it is outside the self-serve booking notice
- * (violatesSelfServeNotice, SELF_SERVE_NOTICE_HOURS). Read at call time.
+ * The online booking test for one date at `now`, or null when no customer can book the date online: a Sunday
+ * (find-time's default), or a date the /book page refuses (validateBookingSlotDate: before today + advance_days_min,
+ * default 1). A start counts when the /book page would take the visit there: its slot rules
+ * (validateBookingSlotGeometry: grid, booking_config day start and end, the shift while capacity mode is on), the
+ * customer window rule (customerWindowAdmits: the hour grid, the customer last start, the customer close), the
+ * self-serve booking notice (violatesSelfServeNotice), and no booked time (`busy`) under the visit. The visit is
+ * the /book default length (resolveBookingDuration: slot_duration_minutes, else 60). Read at call time.
  */
-function onlineAdmit(day, now, busy = []) {
-  if (weekday(day) === 0) return null;
-  return (startMin) => customerWindowAdmits({ startMin, endMin: startMin + JOB_MIN })
-    && !busy.some((b) => startMin < b.endMin && startMin + JOB_MIN > b.startMin)
+function onlineAdmit(day, now, busy, config) {
+  const rules = booking();
+  if (weekday(day) === 0 || rules.validateBookingSlotDate(day, config, now)) return null;
+  const visitMin = rules.resolveBookingDuration(undefined, config);
+  return (startMin) => customerWindowAdmits({ startMin, endMin: startMin + visitMin })
+    && !rules.validateBookingSlotGeometry({ startMin, duration: visitMin, config })
+    && !busy.some((b) => startMin < b.endMin && startMin + visitMin > b.startMin)
     && !violatesSelfServeNotice({ date: day, startTime: hhmm(startMin) }, now);
 }
 
@@ -157,37 +163,38 @@ function blindSlots(openings) {
   }
 }
 
-const windowOf = (start, end) => ({ startMin: toMin(start), endMin: toMin(end) });
-
 /**
- * What else holds time against an online booking on one date (the booking surfaces' own occupancy): today's completed
- * visits keep their booked windows (occupancy excludes only cancelled, skipped, no-show and rescheduled rows), this
- * technician's, an unassigned one's, or any while tech-blind; and the owner's booked interviews with their buffer
- * (interview-slots.js, the same read availability.js makes).
+ * The booked time that holds against an online booking for one technician on one date: every occupying row's booked
+ * span (visit-capacity occupiedRows: a version-2 allocation holds its whole combined span; completed visits keep their
+ * windows, occupancy excludes only NOT_A_ROUTE_STOP_STATUSES), this technician's, an unassigned one's, or any while
+ * tech-blind (scheduling/occupancy.js); and the owner's booked interviews with their buffer (interview-slots.js, the
+ * read availability.js makes). Booked spans, not the simulated route: the booking surfaces test the windows.
  */
-function onlineBusy({ completed, techId, techBlind, interviews }) {
-  const visits = completed
-    .filter((p) => p.window_start && (p.technician_id == null || techBlind || String(p.technician_id) === String(techId)))
-    .map((p) => {
-      const startMin = toMin(p.window_start);
-      return { startMin, endMin: p.window_end ? toMin(p.window_end) : startMin + (Number(p.estimated_duration_minutes) || 60) };
-    });
-  return [...visits, ...interviews.map((w) => windowOf(w.start, w.end))];
+function onlineBusy({ occupancy, techId, techBlind, interviews }) {
+  const inScope = occupancy.filter((r) => r.window_start && (r.technician_id == null || techBlind || String(r.technician_id) === String(techId)));
+  const visits = occupiedRows(inScope)
+    .filter((r) => Number.isFinite(r.startMin) && Number.isFinite(r.endMin) && r.endMin > r.startMin)
+    .map((r) => ({ startMin: r.startMin, endMin: r.endMin }));
+  return [...visits, ...interviews.map((w) => ({ startMin: toMin(w.start), endMin: toMin(w.end) }))];
 }
 
-/**
- * The first date a customer can book online: today + booking_config.advance_days_min, the /book page's own bound
- * (booking.js validateBookingSlotDate, default 1 day). Read once per run; an unreadable row keeps that default.
- */
-async function firstOnlineDay(conn, today) {
-  try {
-    const row = await conn('booking_config').first('advance_days_min');
-    const min = Number(row?.advance_days_min);
-    return dayAfter(today, Number.isInteger(min) && min >= 0 ? min : 1);
-  } catch (err) {
-    logger.warn(`[route-check] booking_config unread (${err.message}); online booking from tomorrow`);
-    return dayAfter(today, 1);
-  }
+/** Every row holding booked time on a date (completed included, expired holds out), with occupiedRows' fields. */
+async function loadOccupancy(conn, day) {
+  const { _internals: reorder } = require('../route-reorder');
+  return conn('scheduled_services')
+    .where('scheduled_services.scheduled_date', day)
+    .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
+    .whereRaw(reorder.LIVE_HOLD_SQL)
+    .select('scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.customer_id',
+      'scheduled_services.scheduled_date', 'scheduled_services.window_start', 'scheduled_services.window_end',
+      'scheduled_services.estimated_duration_minutes', 'scheduled_services.reservation_service_mix');
+}
+
+/** The /book page's booking_config row, read once per run (no row: the page's own defaults, booking.js loadBookingConfig). */
+async function bookingConfig(conn) {
+  return (await conn('booking_config').first()) || {
+    advance_days_min: 1, advance_days_max: 14, slot_duration_minutes: 60, day_start: '08:00', day_end: '18:00',
+  };
 }
 
 /** The owner's booked interviews on a date, best-effort like the booking surface: a failed read holds no time. */
@@ -304,8 +311,8 @@ async function liveAdModes(conn) {
 }
 
 /**
- * Today's stops done or on site, per technician (the van's progress): a completed stop's place, finish and booked
- * window, and an on-site stop's arrival (its other fields come from the live rows).
+ * Today's stops done or on site, per technician (the van's progress): a completed stop's place and finish, and an
+ * on-site stop's arrival (its other fields come from the live rows).
  */
 async function loadProgress(conn, day) {
   return conn('scheduled_services')
@@ -313,8 +320,7 @@ async function loadProgress(conn, day) {
     .where('scheduled_services.scheduled_date', day)
     .whereIn('scheduled_services.status', ['completed', 'on_site'])
     .select('scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.status',
-      'scheduled_services.completed_at', 'scheduled_services.arrived_at', 'scheduled_services.window_start',
-      'scheduled_services.window_end', 'scheduled_services.estimated_duration_minutes', ...guardedCoordSelects(conn));
+      'scheduled_services.completed_at', 'scheduled_services.arrived_at', ...guardedCoordSelects(conn));
 }
 
 async function eligibility(conn, from, to) {
@@ -338,16 +344,14 @@ function rowReader(conn) {
 const techsWithStops = (rows) => new Set(rows.filter((r) => r.technician_id).map((r) => String(r.technician_id)));
 
 /** One technician on one date: today from the van's progress, a later day as booked. Never throws. */
-async function measureOne(conn, env, { day, techId, rows, progress, interviews }) {
+async function measureOne(conn, env, { day, techId, rows, progress, occupancy, interviews }) {
   try {
     const own = rows.filter((r) => String(r.technician_id) === techId);
     const blocks = await replan.loadBlocks(conn, day, techId);
     const held = replan.blockedHoursFor(rows, techId, env.techBlind).map((h) => ({ startMin: h * 60, endMin: h * 60 + 60 }));
     const home = homeFromMap(env.homes, techId);
-    const completed = day === env.today ? progress.filter((p) => p.status === 'completed') : [];
-    const busy = onlineBusy({ completed, techId, techBlind: env.techBlind, interviews });
-    const admit = day >= env.firstOnlineDay ? onlineAdmit(day, env.now, busy) : null;
-    const common = { blocks, held, closeMin: DAY_CLOSE, admit };
+    const busy = onlineBusy({ occupancy, techId, techBlind: env.techBlind, interviews });
+    const common = { blocks, held, closeMin: DAY_CLOSE, admit: onlineAdmit(day, env.now, busy, env.bookingConfig) };
     if (day !== env.today) {
       return measureTechDay({ ...common, rows: own, origin: home, departureMin: env.departureMin, openMin: DAY_OPEN });
     }
@@ -385,7 +389,7 @@ async function runRouteCheck({ conn = db, now = new Date() } = {}) {
   const env = {
     today,
     now,
-    firstOnlineDay: await firstOnlineDay(conn, today),
+    bookingConfig: await bookingConfig(conn),
     nowMin: p.hour * 60 + p.minute,
     homes: await loadTechStartPoints(conn),
     departureMin: await dayDepartureMinutes(conn),
@@ -397,8 +401,9 @@ async function runRouteCheck({ conn = db, now = new Date() } = {}) {
     const withStops = await withStopsOn(day);
     const working = elig.techIds.filter((techId) => staffed(elig, day, techId, withStops.has(techId)));
     const interviews = working.length ? await interviewsOn(conn, day) : [];
+    const occupancy = working.length ? await loadOccupancy(conn, day) : [];
     for (const techId of working) {
-      days.push({ date: day, technician_id: techId, staffed: true, ...(await measureOne(conn, env, { day, techId, rows, progress, interviews })) });
+      days.push({ date: day, technician_id: techId, staffed: true, ...(await measureOne(conn, env, { day, techId, rows, progress, occupancy, interviews })) });
     }
   }
   const { totals, ad } = summarize(days, today, { techBlind: env.techBlind });
