@@ -571,6 +571,13 @@ describe('mintPlanStartEstimate', () => {
       await refused('pricing_unavailable', {}, { customerHasOnlyPrimaryPremises: async () => { throw new Error('boom'); } });
     });
 
+    test('the mint runs the strict premises proof: a visit whose property link cannot be resolved is priced by hand (codex pre-push P1)', async () => {
+      // An account the lenient proof passes and the strict one fails: an unresolvable link.
+      const proof = jest.fn(async (_db, _id, _customer, _street, options) => options?.unresolvedFails !== true);
+      await refused('pricing_unavailable', {}, { customerHasOnlyPrimaryPremises: proof });
+      expect(proof).toHaveBeenCalledWith(expect.anything(), LEAD.id, expect.objectContaining({ id: LEAD.id }), expect.any(String), { unresolvedFails: true });
+    });
+
     test('no property measurement, or a verified correction the price did not carry, is priced by hand', async () => {
       await refused('pricing_unavailable', {}, { pricingAi: { ...deps().pricingAi, missingPropertyFor: () => 'home_sqft' } });
       await refused('pricing_unavailable', {}, { hasVerifiedOverrides: async () => true });
@@ -869,6 +876,19 @@ describe('assertPlanStartAcceptEligible', () => {
   ])('an account that %s refuses: the mint\'s bar again (codex pre-push P1s)', async (_label, arrange) => {
     arrange();
     await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
+  });
+
+  test('the accept runs the strict premises proof: a visit whose property link cannot be resolved refuses (codex pre-push P1)', async () => {
+    // The accept's own proof (cross-sell's export); an account the lenient proof passes and the strict one fails.
+    const crossSell = require('../services/service-report/cross-sell');
+    const proof = jest.spyOn(crossSell, 'customerHasOnlyPrimaryPremises')
+      .mockImplementation(async (_db, _id, _customer, _street, options) => options?.unresolvedFails !== true);
+    try {
+      await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
+      expect(proof).toHaveBeenCalledWith(expect.anything(), 'cust-1', expect.objectContaining({ id: 'cust-1' }), expect.any(String), { unresolvedFails: true });
+    } finally {
+      proof.mockRestore();
+    }
   });
 
   test('a quoted family that went live since the mint refuses (409 PLAN_START_STATE_CHANGED)', async () => {

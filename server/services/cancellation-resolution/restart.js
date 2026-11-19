@@ -627,13 +627,18 @@ function resolveMintDeps(deps) {
 // without provable locality is priced by hand. Same proof as the portal
 // offer (customerHasOnlyPrimaryPremises, cross-sell); an unreadable proof
 // throws and each caller refuses. The plan-start hint runs it too, so a
-// multi-home account keeps the request (codex pre-push P1).
-async function singlePremisesStreet(dbh, customer, premisesProof) {
+// multi-home account keeps the request (codex pre-push P1). strict (plan
+// start's hint, mint and accept; codex pre-push P1): a visit whose property
+// row or creating estimate cannot be resolved fails the proof
+// (unresolvedFails, as the other fail-closed callers pass it), because it may
+// be a second premises. Plan restart keeps the portal offer's default, as on
+// main.
+async function singlePremisesStreet(dbh, customer, { proof, strict = false } = {}) {
   const linkage = require('../estimate-property-linkage');
   const street = linkage.normalizedStampedStreet(customer.address_line1, customer.address_line2, customer.city, customer.zip);
   if (!street || linkage.scopeKeyLacksLocality(street)) return null;
-  const proof = premisesProof || require('../service-report/cross-sell').customerHasOnlyPrimaryPremises;
-  return (await proof(dbh, customer.id, customer, street)) ? street : null;
+  const premisesProof = proof || require('../service-report/cross-sell').customerHasOnlyPrimaryPremises;
+  return (await premisesProof(dbh, customer.id, customer, street, { unresolvedFails: strict })) ? street : null;
 }
 
 // True when an engine result must be priced by hand, never shown as an
@@ -689,6 +694,8 @@ function disclosedSetupFeeQuote(estimateData) {
 //   matchesLive       (liveEstimateData) => the entry's own scope/identity
 //                     test for reusing a live quote (the core adds the
 //                     cent-exact totals + full-offer fingerprint checks)
+//   strictPremises    optional; true fails the single-premises proof on an
+//                     unresolvable visit link (plan start, singlePremisesStreet)
 //   assertOffer       optional ({ monthlyTotal, annualTotal, onetimeTotal,
 //                     rawEngineResult }) => throws when the server's price is
 //                     not the offer the entry expects
@@ -703,7 +710,7 @@ function disclosedSetupFeeQuote(estimateData) {
 //   logTag / logDetail / handMessage   wording that stays per-source
 // Returns { estimateId, token, url, reused }.
 async function mintPricedEstimate({
-  trx, fresh, source, families, ownedFamilies, optionFor, estimateBlock, matchesLive,
+  trx, fresh, source, families, ownedFamilies, optionFor, estimateBlock, matchesLive, strictPremises,
   assertOffer = null, snapshotSells = null, note, logTag, logDetail = '', handMessage,
   assertNotCommercial, nowDate, now, randomBytes, deps, mintDeps,
 }) {
@@ -727,7 +734,7 @@ async function mintPricedEstimate({
   const linkage = require('../estimate-property-linkage');
   let primaryStreet = null;
   try {
-    primaryStreet = await singlePremisesStreet(trx, fresh, deps.customerHasOnlyPrimaryPremises);
+    primaryStreet = await singlePremisesStreet(trx, fresh, { proof: deps.customerHasOnlyPrimaryPremises, strict: strictPremises });
   } catch (err) {
     logger.warn(`[${logTag}] single-premises proof failed for ${fresh.id} — refusing: ${err.message}`);
   }
@@ -1263,6 +1270,7 @@ async function mintPlanStartEstimate({
       logTag,
       logDetail: `option ${option.id}`,
       handMessage: HAND_PRICED_PLAN_START,
+      strictPremises: true,
       assertNotCommercial,
       nowDate,
       now,
@@ -1410,7 +1418,7 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
     if (fresh) {
       commercial = require('../pricing-engine/commercial-helpers').isCommercialProperty({ propertyType: fresh.property_type });
       ownsPlan = await ownsAnyRecurringService(trx, fresh.id);
-      premisesStreet = await singlePremisesStreet(trx, fresh);
+      premisesStreet = await singlePremisesStreet(trx, fresh, { strict: true });
     }
   } catch (err) {
     logger.warn(`[plan-start] accept revalidation could not read state for estimate ${estimate.id} — refusing: ${err.message}`);

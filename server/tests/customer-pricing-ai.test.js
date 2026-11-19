@@ -2146,14 +2146,15 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
     expect(result.planStart).toEqual({ optionIds: bookable });
     // The account-wide read (rodent and commercial rows, prepay terms) runs only for a plain account.
     expect(owns).toHaveBeenCalledWith(null, 'cust-lead');
-    expect(premises).toHaveBeenCalledWith(null, 'cust-lead', expect.objectContaining({ id: 'cust-lead' }), expect.any(String));
+    // The strict proof, as the mint runs it: an unresolvable visit link fails it (codex pre-push P1).
+    expect(premises).toHaveBeenCalledWith(null, 'cust-lead', expect.objectContaining({ id: 'cust-lead' }), expect.any(String), { unresolvedFails: true });
   });
 
   test('absent for a multi-home account: the mint prices only an account on one provable premises (codex pre-push P1)', async () => {
     process.env.GATE_PORTAL_PLAN_START = 'true';
     premises.mockImplementation(realPremisesProof);
     expect('planStart' in await ask(plain({ has_multi_home: true }))).toBe(false);
-    expect(premises).toHaveBeenCalledWith(null, 'cust-lead', expect.objectContaining({ has_multi_home: true }), expect.any(String));
+    expect(premises).toHaveBeenCalledWith(null, 'cust-lead', expect.objectContaining({ has_multi_home: true }), expect.any(String), { unresolvedFails: true });
   });
 
   test('absent when the premises proof says no or fails, or the account has no street with a city or zip', async () => {

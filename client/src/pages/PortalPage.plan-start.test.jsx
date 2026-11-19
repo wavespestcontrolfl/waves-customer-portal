@@ -112,6 +112,26 @@ it('turns the button off while a new answer loads: the option on screen is the o
   expect(api.createRequest).not.toHaveBeenCalled();
 });
 
+// One render per case (see above).
+it.each([
+  ['"Request This"', priced(), 'Request This'],
+  ['"Request Manual Review" (an answer with no option)', { ok: true, message: 'We need a closer look.', currentServices: [], options: [] }, 'Request Manual Review'],
+])('turns %s off while a new answer loads: a request for the old answer never marks the new one as sent (codex pre-push P1)', async (_label, first, name) => {
+  await priceIt(first);
+  const request = await screen.findByRole('button', { name });
+  const next = {};
+  api.queryCustomerPricing.mockReturnValue(new Promise((resolve) => Object.assign(next, { resolve })));
+  fireEvent.click(screen.getByRole('button', { name: 'Get Pricing' }));
+  expect(await screen.findByRole('button', { name: 'Pricing...' })).toBeDisabled();
+  expect(request).toBeDisabled();
+  fireEvent.click(request);
+  expect(api.createRequest).not.toHaveBeenCalled();
+  // The new answer lists the same option: booking shows, never "Request sent".
+  await act(async () => { next.resolve(priced(OFFER)); });
+  expect(await screen.findByRole('button', { name: 'See my price and book' })).toBeEnabled();
+  expect(screen.queryByText('Request sent')).toBeNull();
+});
+
 it('offers the button per option: another option the server did not list keeps today\'s request', async () => {
   await priceIt(pricedTwo());
   expect(await screen.findByRole('button', { name: 'See my price and book' })).toBeInTheDocument();

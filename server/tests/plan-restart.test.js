@@ -1036,6 +1036,13 @@ describe('mintRestartEstimate', () => {
     expect(tables.estimates).toHaveLength(0);
   });
 
+  test('a restart keeps main\'s premises proof: an unresolvable visit link is not a second premises (plan start alone runs the strict one)', async () => {
+    const proof = jest.fn(async (_db, _id, _customer, _street, options) => options?.unresolvedFails !== true);
+    const minted = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps({ customerHasOnlyPrimaryPremises: proof }), randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(minted.url).toEqual(expect.any(String));
+    expect(proof).toHaveBeenCalledWith(expect.anything(), 'cust-1', expect.anything(), expect.any(String), { unresolvedFails: false });
+  });
+
   test('multi-premises also blocks REUSE of a live restart estimate (no URL of any kind)', async () => {
     tables.estimates.push({
       id: 'est-live', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'live-tok', expires_at: '2099-01-01', archived_at: null,

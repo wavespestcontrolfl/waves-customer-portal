@@ -11061,8 +11061,11 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
     }
   };
 
+  // Off while a new answer loads, as the start is: the option on screen is the old answer's, and
+  // the request would capture the new answer's sequence, so it could mark the new answer as sent
+  // (codex pre-push P1).
   const submitRequest = async () => {
-    if (requesting) return;
+    if (requesting || loading) return;
     const seq = planStartSeq.current;
     setRequesting(true);
     try {
@@ -11334,7 +11337,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                       </div>
                     </div>
                   ) : (
-                    <PricingActionButton onClick={submitRequest} busy={requesting} label="Request This" busyLabel="Sending..." compact={compact} primaryButton={primaryButton} />
+                    <PricingActionButton onClick={submitRequest} busy={requesting} disabled={loading} label="Request This" busyLabel="Sending..." compact={compact} primaryButton={primaryButton} />
                   )}
                 </div>
               )}
@@ -11342,7 +11345,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
           )}
 
           {options.length === 0 && result && (
-            <button data-glass-accent="" type="button" onClick={submitRequest} disabled={requesting || requested} style={{
+            <button data-glass-accent="" type="button" onClick={submitRequest} disabled={requesting || requested || loading} style={{
               ...secondaryButton,
               width: compact ? '100%' : 'fit-content',
               display: 'inline-flex',

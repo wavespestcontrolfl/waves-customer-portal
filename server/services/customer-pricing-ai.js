@@ -1417,8 +1417,10 @@ async function buildCustomerPricingResponse({
 // The pricing answer's plan-start fields: { planStart: { optionIds } }, the options the
 // start-plan route can book for this account, or none. It mirrors the mint's bar without
 // its locks: an account with no plan (planStartAccountOpen), no live recurring service
-// of any kind and one provable premises (singlePremisesStreet: a multi-home account keeps
-// the request, codex pre-push P1), and per option an id on today's ladder that the route books
+// of any kind, a stored type that is not commercial, and one provable premises
+// (singlePremisesStreet, strict as the mint runs it: a multi-home account or a visit whose
+// property link cannot be resolved keeps the request, codex pre-push P1s), and per option an
+// id on today's ladder that the route books
 // (planStartOptionBookable: pest quarterly only), a monthly price, and an engine result the
 // mint's own review check passes (engineResultNeedsReview: review markers, heuristic turf,
 // low confidence, field verification; codex pre-push P1s).
@@ -1442,7 +1444,7 @@ async function planStartHint(db, customer, options, currentServiceKeys, ownedSer
     // A live row the pricing loaders skip (a rodent plan, a commercial row) or a prepay
     // term still covering today owns a plan: no offer.
     if (await restart.ownsAnyRecurringService(db, customer.id)) return {};
-    if (!(await restart.singlePremisesStreet(db, customer))) return {};
+    if (!(await restart.singlePremisesStreet(db, customer, { strict: true }))) return {};
   } catch (err) {
     logger.warn(`[customer-pricing-ai] plan-start account read failed — no offer: ${err.message}`);
     return {};
