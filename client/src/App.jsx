@@ -1,5 +1,5 @@
 import React, { Component, useEffect, useRef, useState } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useLocation, useOutletContext, useParams } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { reportError } from './lib/reportError';
 import { CHUNK_RELOAD_FLAG, isStaleChunkReloadPending, markStaleChunkReloadPending } from './lib/staleChunkReload';
 import { AuthProvider, useAuth } from './hooks/useAuth';
@@ -252,6 +252,8 @@ import AdminChangePasswordPage from './pages/AdminChangePasswordPage';
 import AdminForgotPasswordPage from './pages/AdminForgotPasswordPage';
 import AdminResetPasswordPage from './pages/AdminResetPasswordPage';
 import AdminLayout from './components/AdminLayoutV2';
+import AdminFieldViewEntry from './components/AdminFieldViewEntry';
+import AdminIndexRedirect from './components/AdminIndexRedirect';
 import TechPortalRedirect from './components/tech/TechPortalRedirect';
 import TechNavigationLock from './components/tech/TechNavigationLock';
 import InstallPrompt from './components/InstallPrompt';
@@ -456,13 +458,6 @@ const AdminTodayShell = lazyWithRetry(() => import('./pages/admin/TodayShell'));
 const PublicBookingPage = lazyWithRetry(() => import('./pages/PublicBookingPage'));
 const ServiceOutlinePage = lazyWithRetry(() => import('./pages/ServiceOutlinePage'));
 const NewsletterArchivePage = lazyWithRetry(() => import('./pages/NewsletterArchivePage'));
-
-// /admin lands technicians on their field workspace; everyone else on the
-// dashboard (a requireAdmin page that would be a wall of 403s for a technician).
-function AdminIndexRedirect() {
-  const role = useOutletContext()?.user?.role;
-  return <Navigate to={role === 'technician' ? 'today' : 'dashboard'} replace />;
-}
 
 // Route-tree error boundary: keyed on pathname so navigating away from a
 // crashed page automatically clears the fallback. Customer routes previously
@@ -746,7 +741,7 @@ export default function App() {
               /admin/today. Installed PWAs, push notifications and bookmarks still
               open /tech/*, so every such URL redirects there permanently. */}
           <Route path="/tech/*" element={<TechPortalRedirect />} />
-          <Route path="/admin" element={isNativeApp() ? <Navigate to="/" replace /> : <PageErrorBoundary><AdminLayout /></PageErrorBoundary>}>
+          <Route path="/admin" element={isNativeApp() ? <Navigate to="/" replace /> : <PageErrorBoundary><AdminFieldViewEntry><AdminLayout /></AdminFieldViewEntry></PageErrorBoundary>}>
             <Route index element={<AdminIndexRedirect />} />
             <Route path="dashboard" element={<Suspense fallback={<RouteFallback label="Loading dashboard..." />}><AdminDashboardPage /></Suspense>} />
             <Route path="customers" element={<Suspense fallback={<RouteFallback label="Loading customers..." />}><AdminCustomersPage /></Suspense>} />

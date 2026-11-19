@@ -1,0 +1,55 @@
+// @vitest-environment jsdom
+import React from 'react';
+import '@testing-library/jest-dom/vitest';
+import { act, cleanup, render } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import { afterEach, describe, expect, it } from 'vitest';
+import useAdminNavigation, { AdminNavigationProvider } from './useAdminNavigation';
+
+let navigation;
+function Probe() { navigation = useAdminNavigation(); return null; }
+const mount = (user) => render(<MemoryRouter><AdminNavigationProvider user={user} enabled><Probe /></AdminNavigationProvider></MemoryRouter>);
+const saved = (id) => JSON.parse(localStorage.getItem(`waves_admin_navigation:${id}`) || 'null');
+
+afterEach(() => { cleanup(); localStorage.clear(); navigation = null; });
+
+describe('Field view preference', () => {
+  it('is off by default', () => {
+    mount({ id: 'acct-1', role: 'admin' });
+    expect(navigation.fieldView).toBe(false);
+  });
+  it('round-trips through this phone\'s storage and keeps the other saved settings', () => {
+    mount({ id: 'acct-1', role: 'admin' });
+    act(() => navigation.togglePin('today'));
+    act(() => navigation.setFieldView(true));
+    expect(navigation.fieldView).toBe(true);
+    expect(saved('acct-1')).toMatchObject({ fieldView: true, version: 2 });
+    expect(saved('acct-1').pins).toEqual(['today']);
+    cleanup();
+    mount({ id: 'acct-1', role: 'admin' });
+    expect(navigation.fieldView).toBe(true);
+    act(() => navigation.setFieldView(false));
+    expect(saved('acct-1').fieldView).toBe(false);
+  });
+  it('survives the version change that drops saved groups', () => {
+    localStorage.setItem('waves_admin_navigation:acct-1', JSON.stringify({ version: 1, groups: { sales: true }, fieldView: true }));
+    mount({ id: 'acct-1', role: 'admin' });
+    expect(navigation.fieldView).toBe(true);
+    expect(navigation.expanded.sales).toBeUndefined();
+  });
+  it('is saved per account id', () => {
+    localStorage.setItem('waves_admin_navigation:acct-1', JSON.stringify({ version: 2, fieldView: true }));
+    mount({ id: 'acct-2', role: 'admin' });
+    expect(navigation.fieldView).toBe(false);
+  });
+  it('reads a missing or non-boolean value as off', () => {
+    localStorage.setItem('waves_admin_navigation:acct-1', JSON.stringify({ version: 2, fieldView: 'yes' }));
+    mount({ id: 'acct-1', role: 'admin' });
+    expect(navigation.fieldView).toBe(false);
+  });
+  it('never applies to a login that is not an admin', () => {
+    localStorage.setItem('waves_admin_navigation:acct-3', JSON.stringify({ version: 2, fieldView: true }));
+    mount({ id: 'acct-3', role: 'technician' });
+    expect(navigation.fieldView).toBe(false);
+  });
+});

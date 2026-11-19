@@ -16,7 +16,7 @@ import { ADMIN_MOBILE_MORE_SECTIONS, ADMIN_MOBILE_TABS, getAdminMobileTabs } fro
 import { MOBILE_SETTINGS_SECTIONS } from "../../config/mobileSettingsSections";
 import { clearEmailDrafts } from "../../lib/emailDrafts";
 import { clearScheduleSaveNotices } from "../../components/schedule/ScheduleSaveNotice";
-import { UiSurface } from "../../components/ui";
+import { Switch, UiSurface } from "../../components/ui";
 import { PinnedWorkspaceLinks, WorkspaceGroup, WorkspaceLink } from "../../components/admin/AdminWorkspaceNavigation";
 import useAdminNavigation from "../../hooks/useAdminNavigation";
 import { releaseInAppPush } from "../../native/wavesAdminPush";
@@ -72,7 +72,8 @@ export default function MorePage() {
   // Today tab, so Today is listed). A group whose main page is a tab
   // (Schedule, Customers) shows its other pages as plain rows, so no row
   // repeats a tab's name.
-  const tabIds = new Set(getAdminMobileTabs(currentRole).map(({ id }) => id));
+  const fieldView = navigation?.fieldView === true;
+  const tabIds = new Set(getAdminMobileTabs(currentRole, { fieldView }).map(({ id }) => id));
   const mobileWorkspaces = navigation?.groups.filter(({ id }) => id !== 'settings').map((group) => {
     const items = group.items.filter(({ id }) => !tabIds.has(id));
     const flat = Boolean(group.target && tabIds.has(group.target.id));
@@ -95,6 +96,19 @@ export default function MorePage() {
           </WorkspaceLink>;
         }) : <WorkspaceGroup key={group.id} group={group} source="more" />))}
       </UiSurface>}
+      {navigation && currentRole === "admin" && (
+        <section className="mt-2">
+          <ul className="list-none pl-0 my-0 bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
+            <li className="flex items-center gap-3 px-4 py-3">
+              <div className="min-w-0 flex-1">
+                <div id="field-view-label" className="text-14 text-zinc-900">Field view</div>
+                <div id="field-view-hint" className="text-14 text-zinc-500">Opens on Today. Today takes the Dashboard tab.</div>
+              </div>
+              <Switch checked={fieldView} onChange={navigation.setFieldView} aria-labelledby="field-view-label" aria-describedby="field-view-hint" />
+            </li>
+          </ul>
+        </section>
+      )}
       {visibleSettingsLeaves.length > 0 && (
         <section className="mt-2">
           {" "}

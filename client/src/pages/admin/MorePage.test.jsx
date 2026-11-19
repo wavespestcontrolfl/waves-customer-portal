@@ -125,4 +125,34 @@ describe("MorePage — the mobile Settings tab", () => {
     window.dispatchEvent(leaving);
     expect(leaving.defaultPrevented).toBe(false);
   });
+
+  describe("Field view switch", () => {
+    it("shows for an admin, off by default, with the one-line explanation", () => {
+      renderMore("admin");
+      const toggle = screen.getByRole("switch", { name: "Field view" });
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+      expect(screen.getByText("Opens on Today. Today takes the Dashboard tab.")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Today", exact: true })).toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "Dashboard", exact: true })).not.toBeInTheDocument();
+    });
+
+    it("saves on this phone and swaps Dashboard and Today in the page list", () => {
+      renderMore("admin");
+      fireEvent.click(screen.getByRole("switch", { name: "Field view" }));
+      expect(screen.getByRole("switch", { name: "Field view" })).toHaveAttribute("aria-checked", "true");
+      expect(JSON.parse(localStorage.getItem("waves_admin_navigation:fixture")).fieldView).toBe(true);
+      expect(screen.getByRole("link", { name: "Dashboard", exact: true })).toHaveAttribute("href", "/admin/dashboard");
+      expect(screen.queryByRole("link", { name: "Today", exact: true })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("switch", { name: "Field view" }));
+      expect(JSON.parse(localStorage.getItem("waves_admin_navigation:fixture")).fieldView).toBe(false);
+    });
+
+    it("never shows for a technician or with no navigation context", () => {
+      renderMore("technician");
+      expect(screen.queryByRole("switch", { name: "Field view" })).not.toBeInTheDocument();
+      cleanup();
+      renderMore("admin", false);
+      expect(screen.queryByRole("switch", { name: "Field view" })).not.toBeInTheDocument();
+    });
+  });
 });

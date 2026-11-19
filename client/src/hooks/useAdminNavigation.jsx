@@ -1,9 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { useLocation } from 'react-router-dom';
+import { adminNavigationPreferenceKey as preferenceKey, readFieldViewPreference } from '../lib/fieldView';
 import { ADMIN_WORKSPACE_DESTINATIONS, ADMIN_WORKSPACE_GROUP_IDS, getAdminWorkspaceGroups, getAdminWorkspaceSelection } from '../config/adminNavigation';
 
 export const AdminNavigationContext = createContext(null);
-const preferenceKey = (accountId) => `waves_admin_navigation:${accountId}`;
 // Version 1 also saved every group the menu opened for the page on screen, so
 // after a few days of use every group was open. Groups saved before version 2
 // are dropped once; pins carry over.
@@ -11,7 +11,7 @@ const PREFERENCE_VERSION = 2;
 const destinationIds = new Set(ADMIN_WORKSPACE_DESTINATIONS.map(({ id }) => id));
 
 function readPreferences(accountId) {
-  const defaults = { groups: {}, pins: [] };
+  const defaults = { groups: {}, pins: [], fieldView: false };
   if (!accountId) return defaults;
   try {
     const saved = JSON.parse(localStorage.getItem(preferenceKey(accountId)) || '{}');
@@ -19,7 +19,8 @@ function readPreferences(accountId) {
       .filter((id) => typeof saved?.groups?.[id] === 'boolean')
       .map((id) => [id, saved.groups[id]]));
     const pins = Array.isArray(saved?.pins) ? [...new Set(saved.pins)].filter((id) => destinationIds.has(id)).slice(0, 3) : [];
-    return { groups, pins };
+    // Field view is not a menu group, so a version change never drops it.
+    return { groups, pins, fieldView: readFieldViewPreference(accountId) };
   } catch { return defaults; }
 }
 
@@ -71,7 +72,11 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
     return visiblePins.length < 3 ? { ...current, pins: [...visiblePins, id] } : current;
   });
 
-  return <AdminNavigationContext.Provider value={enabled ? { groups, expanded, toggleGroup, selection, publishView, pinnedItems, togglePin } : null}>
+  // Only an admin login has Field view; any other role never sees it applied.
+  const fieldView = user?.role === 'admin' && preferences.fieldView === true;
+  const setFieldView = (on) => updatePreferences((current) => ({ ...current, fieldView: on === true }));
+
+  return <AdminNavigationContext.Provider value={enabled ? { groups, expanded, toggleGroup, selection, publishView, pinnedItems, togglePin, fieldView, setFieldView } : null}>
     {children}
   </AdminNavigationContext.Provider>;
 }
