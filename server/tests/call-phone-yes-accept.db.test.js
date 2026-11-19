@@ -25,14 +25,28 @@ jest.mock('../services/account-membership-email', () => ({
   isEmailLike: (value) => /@/.test(String(value || '')),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
+// The tap's route runs through the real admin-triage router; only the login is stubbed (x-test-role picks the role).
+jest.mock('../middleware/admin-auth', () => ({
+  ...jest.requireActual('../middleware/admin-auth'),
+  adminAuthenticate: (req, _res, next) => {
+    req.technicianId = null;
+    req.techRole = req.headers['x-test-role'] || 'admin';
+    next();
+  },
+  requireTechOrAdmin: (_req, _res, next) => next(),
+}));
 
 const knex = require('knex');
+const express = require('express');
 const { randomUUID } = require('crypto');
+const AppointmentReminders = require('../services/appointment-reminders');
 const acceptance = require('../services/estimate-manual-acceptance');
 const { sendMembershipStarted } = require('../services/account-membership-email');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { notifyAdmin } = require('../services/notification-service');
-const { runCallPhoneYesSweep, evaluatePhoneYes, REASON_CODE, REASONS } = require('../services/call-phone-yes-accept');
+const {
+  runCallPhoneYesSweep, evaluatePhoneYes, REASON_CODE, REASONS, ACCEPT_SOURCE, TAP_REFUSALS, _private: PhoneYesPrivate,
+} = require('../services/call-phone-yes-accept');
 
 const GATE = 'GATE_CALL_PHONE_YES_ACCEPT';
 const describeDb = SKIP ? describe.skip : describe;
@@ -72,7 +86,7 @@ const transcriptWith = (choice) => (choice
 const RECORDED = { recording_url: 'https://example.test/recording.mp3', recording_duration_seconds: 60 };
 
 describeDb('call phone yes cards (PostgreSQL)', () => {
-  let database; let trx;
+  let database; let trx; let server; let base;
   const savedGate = process.env[GATE];
 
   beforeAll(async () => {
@@ -81,8 +95,14 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
     if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
+    const app = express();
+    app.use(express.json());
+    app.use('/admin/triage', require('../routes/admin-triage'));
+    await new Promise((resolve) => { server = app.listen(0, '127.0.0.1', resolve); });
+    base = `http://127.0.0.1:${server.address().port}`;
   });
   afterAll(async () => {
+    await new Promise((resolve) => server.close(resolve));
     await database.destroy();
     if (savedGate === undefined) delete process.env[GATE]; else process.env[GATE] = savedGate;
   });
@@ -924,5 +944,193 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     delete process.env[GATE];
     await expect(sweep()).resolves.toEqual({ skipped: true, scanned: 0, filed: 0, closed: 0 });
     expect(await cards(bookingCallId)).toEqual([]);
+  });
+
+  // The card's tap, "Accept as pay per application": the office's own accept (the real converter, the real accept),
+  // with the visit the call booked linked inside it so the plan is booked from that visit.
+  describe('the tap (POST /:id/accept-call-phone-yes)', () => {
+    // planData: quarterly pest at $45 a visit.
+    const PER_VISIT = 45;
+    let reminderSpy;
+    beforeEach(() => { reminderSpy = jest.spyOn(AppointmentReminders, 'registerAppointment').mockResolvedValue({}); });
+    afterEach(() => { reminderSpy.mockRestore(); });
+    async function post(path, body, headers = {}) {
+      const res = await fetch(`${base}/admin/triage/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+      return { status: res.status, body: await res.json() };
+    }
+    // The card as the list shows it, with what the tap can do now.
+    async function listed(cardId, headers = {}) {
+      const { items } = await (await fetch(`${base}/admin/triage?status=open`, { headers })).json();
+      return items.find((i) => i.id === cardId) || null;
+    }
+    async function filed(opts) {
+      const ctx = await phoneYes(opts);
+      await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+      const [card] = await cards(ctx.bookingCallId);
+      return { ...ctx, card };
+    }
+    const unchanged = async ({ est, visitId, card }) => {
+      expect(await statusOf('estimates', est.id)).toBe('sent');
+      expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBeNull();
+      expect(await statusOf('triage_items', card.id)).toBe('open');
+      expect(sendMembershipStarted).not.toHaveBeenCalled();
+    };
+
+    test('accepts as Mark accepted does, books the plan from the visit the call booked, prices it and resolves the card; only the membership email goes out', async () => {
+      const { customerId, est, visitId, bookingCallId, card } = await filed();
+      const row = await listed(card.id);
+      expect(row.call_phone_yes).toMatchObject({ can_accept: true, estimate_id: est.id, visit_id: visitId, visit_date: inDays(9), message: null });
+      expect(row.call_phone_yes.preview_token).toMatch(/^[0-9a-f]{32}$/);
+
+      const out = await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: card.updated_at, preview_token: row.call_phone_yes.preview_token });
+      expect(out.status).toBe(200);
+      expect(out.body).toMatchObject({ ok: true, status: 'resolved', estimate_id: est.id, visit_id: visitId, amount: PER_VISIT });
+
+      expect(await statusOf('estimates', est.id)).toBe('accepted');
+      const cust = await trx('customers').where({ id: customerId }).first('billing_mode', 'per_application_fee');
+      expect(cust.billing_mode).toBe('per_application');
+      expect(Number(cust.per_application_fee)).toBe(PER_VISIT);
+      // The booked visit is the plan's first visit, on the pest cadence catalog row, with its label as booked.
+      const catalog = await trx('services').where({ service_key: 'pest_general_quarterly' }).first('id');
+      const first = await trx('scheduled_services').where({ id: visitId }).first();
+      expect(first).toMatchObject({
+        is_recurring: true, recurring_pattern: 'quarterly', source_estimate_id: est.id, service_id: catalog.id, service_type: 'General Pest Control', status: 'confirmed',
+      });
+      expect(Number(first.estimated_price)).toBe(PER_VISIT);
+      const next = await trx('scheduled_services').where({ recurring_parent_id: visitId }).orderBy('scheduled_date').select('*');
+      expect(next.length).toBeGreaterThan(0);
+      for (const r of next) {
+        expect(r).toMatchObject({ source_estimate_id: est.id, service_id: catalog.id });
+        expect(Number(r.estimated_price)).toBe(PER_VISIT);
+      }
+      // Every visit linked to the estimate is this one series.
+      const linked = await trx('scheduled_services').where({ source_estimate_id: est.id }).select('id');
+      expect(linked.map((r) => r.id).sort()).toEqual([visitId, ...next.map((r) => r.id)].sort());
+      expect(out.body.plan_visits).toBe(linked.length);
+
+      // The plan visits' reminders: registered once the accept committed, with no confirmation text.
+      const followUps = reminderSpy.mock.calls.filter((c) => c[4] === 'estimate_followup');
+      expect(followUps.map((c) => c[0]).sort()).toEqual(next.filter((r) => r.window_start).map((r) => r.id).sort());
+      expect(followUps.every((c) => c[5]?.sendConfirmation === false)).toBe(true);
+
+      // What Mark accepted sends: the membership email. No text, no welcome text queued.
+      expect(sendMembershipStarted).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(await trx('sms_sequences').where({ customer_id: customerId }).first('id')).toBeUndefined();
+      const audit = await trx('activity_log').where({ estimate_id: est.id, action: 'estimate_manual_accept' }).first('metadata');
+      expect(JSON.parse(typeof audit.metadata === 'string' ? audit.metadata : JSON.stringify(audit.metadata)).source).toBe(ACCEPT_SOURCE);
+      expect(await cards(bookingCallId)).toEqual([expect.objectContaining({ status: 'resolved', resolution_source: 'human' })]);
+    });
+
+    test('no yes heard: the tap is still offered (the person decides) and accepts the same way', async () => {
+      const { est, card } = await filed({ yesChoice: null });
+      expect(payloadOf(card).yes_heard).toBe(false);
+      const row = await listed(card.id);
+      expect(row.call_phone_yes).toMatchObject({ can_accept: true });
+      const out = await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: card.updated_at, preview_token: row.call_phone_yes.preview_token });
+      expect(out.status).toBe(200);
+      expect(await statusOf('estimates', est.id)).toBe('accepted');
+    });
+
+    test('a visit moved since the list loaded is refused with a plain message: nothing accepted, the card stays open', async () => {
+      const ctx = await filed();
+      const row = await listed(ctx.card.id);
+      await trx('scheduled_services').where({ id: ctx.visitId }).update({ window_start: '16:00', window_end: '18:00' });
+      const out = await post(`${ctx.card.id}/accept-call-phone-yes`, { expected_updated_at: ctx.card.updated_at, preview_token: row.call_phone_yes.preview_token });
+      expect(out.status).toBe(409);
+      expect(out.body).toEqual({ code: 'changed_since_check', error: TAP_REFUSALS.changed_since_check });
+      await unchanged(ctx);
+    });
+
+    test('when the accept would not go ahead, the list says why and the tap refuses with that reason', async () => {
+      const ctx = await filed();
+      // Since the card was filed, the customer got a live plan.
+      await visit(ctx.customerId, null, { source_action: 'admin', is_recurring: true, recurring_pattern: 'quarterly', scheduled_date: inDays(30) });
+      const row = await listed(ctx.card.id);
+      expect(row.call_phone_yes).toMatchObject({ can_accept: false, preview_token: null });
+      expect(row.call_phone_yes.message).toContain(REASONS.existing_plan);
+      const out = await post(`${ctx.card.id}/accept-call-phone-yes`, { expected_updated_at: ctx.card.updated_at, preview_token: 'tok' });
+      expect(out.status).toBe(409);
+      expect(out.body).toEqual({ code: 'existing_plan', error: `Nothing was accepted. ${REASONS.existing_plan}` });
+      await unchanged(ctx);
+    });
+
+    test('an estimate the office accepted by hand (the visit still unlinked): the card stays open and offers no tap', async () => {
+      const ctx = await filed();
+      await trx('estimates').where({ id: ctx.est.id }).update({ status: 'accepted', accepted_at: new Date() });
+      await sweep();
+      expect(await statusOf('triage_items', ctx.card.id)).toBe('open');
+      const row = await listed(ctx.card.id);
+      expect(row.call_phone_yes).toEqual({
+        can_accept: false, preview_token: null, message: 'The tap cannot accept this one. The customer has no open estimate that was sent before the call.',
+      });
+      const out = await post(`${ctx.card.id}/accept-call-phone-yes`, { expected_updated_at: row.updated_at, preview_token: 'tok' });
+      expect(out).toMatchObject({ status: 409, body: { code: 'no_open_estimate', error: TAP_REFUSALS.no_open_estimate } });
+      expect(TAP_REFUSALS.no_open_estimate).toMatch(/^Nothing was accepted\. /);
+      expect((await trx('scheduled_services').where({ id: ctx.visitId }).first()).source_estimate_id).toBeNull();
+    });
+
+    test('a non-admin, a stale card, a card of another reason, a closed card and a gate that is off all refuse and accept nothing', async () => {
+      const spy = jest.spyOn(acceptance, 'markEstimateManuallyAccepted');
+      try {
+        const ctx = await filed();
+        const { card } = ctx;
+        const tech = await listed(card.id, { 'x-test-role': 'technician' });
+        expect(tech).toBeNull();
+        expect((await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: card.updated_at }, { 'x-test-role': 'technician' })).status).toBe(403);
+        expect((await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: '2020-01-01T00:00:00Z' })).status).toBe(409);
+        expect((await post(`${card.id}/accept-call-phone-yes`, {})).status).toBe(409);
+        const other = randomUUID();
+        await trx('triage_items').insert({ id: other, call_log_id: ctx.bookingCallId, category: 'service_unknown', reason_code: 'quote_promised', status: 'open', payload: '{}' });
+        expect((await post(`${other}/accept-call-phone-yes`, { expected_updated_at: new Date().toISOString() })).status).toBe(400);
+        process.env[GATE] = 'false';
+        expect((await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: card.updated_at })).status).toBe(404);
+        process.env[GATE] = 'true';
+        // Without a token the tap refuses before the accept.
+        const noToken = await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: card.updated_at });
+        expect(noToken).toMatchObject({ status: 409, body: { code: 'changed_since_check' } });
+        await trx('triage_items').where({ id: card.id }).update({ status: 'resolved' });
+        expect((await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: card.updated_at })).status).toBe(409);
+        expect(spy).not.toHaveBeenCalled();
+      } finally { spy.mockRestore(); }
+    });
+
+    // The two steps inside the accept read every fact again under their locks (a change between the list and the
+    // accept's locks). Driven directly here, each inside its own savepoint.
+    test('the link step reads the call, the visit, the estimate links, the other open estimates and the plan again, then links', async () => {
+      const { customerId, est, bookingCallId, visitId } = await phoneYes();
+      const ev = await evaluatePhoneYes({ callLogId: bookingCallId, customerId });
+      expect(ev).toMatchObject({ card: true, acceptProblem: null });
+      const run = (visitRow) => trx.transaction((t) => PhoneYesPrivate.linkVisitStepForTest({ visit: visitRow, customerId, bookingCallId })(t, { estimate: est }));
+      // The visit as read no longer matches the row.
+      await expect(run({ ...ev.visit, window_start: '08:00' })).rejects.toMatchObject({ phoneYesRefusal: 'changed_since_check' });
+      // Another estimate was opened.
+      const second = await estimate(customerId, { sent_at: new Date() });
+      await expect(run(ev.visit)).rejects.toMatchObject({ phoneYesRefusal: 'more_than_one_estimate' });
+      await trx('estimates').where({ id: second.id }).update({ status: 'declined' });
+      // The call moved to another customer.
+      const otherCustomer = await customer();
+      await trx('call_log').where({ id: bookingCallId }).update({ customer_id: otherCustomer });
+      await expect(run(ev.visit)).rejects.toMatchObject({ phoneYesRefusal: 'customer_changed' });
+      await trx('call_log').where({ id: bookingCallId }).update({ customer_id: customerId });
+      // Nothing was linked by a refused run; a clean run links the visit.
+      expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBeNull();
+      await run(ev.visit);
+      expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBe(est.id);
+    });
+
+    test('the price step refuses a price it cannot resolve and a series the converter did not book', async () => {
+      const { customerId, est, visitId } = await phoneYes();
+      const visitRow = await trx('scheduled_services').where({ id: visitId }).first();
+      const run = (conversion) => trx.transaction((t) => PhoneYesPrivate.priceSeriesStepForTest({ customerId, visit: visitRow, seen: {} })(t, { estimate: est, conversion }));
+      const conversion = { membershipEmail: { perApplicationAmount: PER_VISIT } };
+      // The customer-level fee was not stamped at the conversion's amount.
+      await expect(run(conversion)).rejects.toMatchObject({ phoneYesRefusal: 'price_unresolved' });
+      await trx('customers').where({ id: customerId }).update({ billing_mode: 'per_application', per_application_fee: PER_VISIT });
+      await expect(run({ membershipEmail: { perApplicationAmount: null } })).rejects.toMatchObject({ phoneYesRefusal: 'price_unresolved' });
+      // The visit is still a one-off: no series was booked from it.
+      await expect(run(conversion)).rejects.toMatchObject({ phoneYesRefusal: 'series_not_booked' });
+      expect((await trx('scheduled_services').where({ id: visitId }).first()).estimated_price).toBeNull();
+    });
   });
 });

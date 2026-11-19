@@ -462,8 +462,10 @@ export function CallPrepayEvidence({ payload, callPrepay, isOpenView, isAdmin, b
 // call_phone_yes (GATE_CALL_PHONE_YES_ACCEPT, admin only): a call booked a pest visit while the customer had an open
 // estimate, and nothing accepted the estimate. The card says what the call reader heard: the caller's yes in their own
 // words, or "No yes heard" (the sweep keeps it current). The shadow line is what an automatic accept would have done
-// when the card was filed.
-export function PhoneYesEvidence({ payload, isOpenView }) {
+// when the card was filed. The server reads what the tap can do right now (phoneYes: can_accept, visit_date, message),
+// so this screen holds no copy of the rule. The tap runs the office's own accept, as Mark accepted does: the visit the
+// call booked becomes the plan's first visit, and the customer gets what Mark accepted sends (the membership email).
+export function PhoneYesEvidence({ payload, isOpenView, isAdmin = false, busy = false, phoneYes = null, onAcceptPhoneYes = null }) {
   const p = parsePayload(payload) || {};
   // The card's one estimate, or (with more than one open) each estimate sent before the call.
   const estimateIds = p.estimate_id ? [p.estimate_id] : (Array.isArray(p.estimate_ids) ? p.estimate_ids.filter(Boolean) : []);
@@ -482,6 +484,10 @@ export function PhoneYesEvidence({ payload, isOpenView }) {
     ["Caller's words", p.yes_heard === true && p.caller_words ? `\u201c${p.caller_words}\u201d` : null],
     ["Auto would accept (when filed)", p.auto_would_accept === true ? "Yes" : ["No.", p.auto_message].filter(Boolean).join(" ")],
   ].filter(([, value]) => value);
+  // What the tap area shows, decided once: nothing on a closed card, the admin-only note, the server's reason, or the
+  // button.
+  const live = phoneYes || {};
+  const tap = !isOpenView ? null : !isAdmin ? "admin" : live.can_accept ? "accept" : "refused";
   return (
     <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
       {/* A closed card (resolved, or dismissed when the estimate was accepted) shows its evidence as history. */}
@@ -499,6 +505,19 @@ export function PhoneYesEvidence({ payload, isOpenView }) {
             </a>
           ))}
         </div>
+      )}
+      {tap === "admin" && <div className="mt-1 text-12 text-ink-tertiary">Accepting needs an admin.</div>}
+      {tap === "refused" && live.message && <div className="mt-1 text-14 text-zinc-900">{live.message}</div>}
+      {tap === "accept" && (
+        <>
+          <div className="mt-1 text-14 text-ink-secondary">
+            {`The visit on ${live.visit_date} becomes the plan's first visit, and the plan's next visits are booked. The customer gets what Mark accepted sends (the membership email). No text goes out.`}
+          </div>
+          <Button size="sm" variant="primary" className="mt-2" disabled={busy} onClick={onAcceptPhoneYes}
+            title="Accepts the customer's estimate as pay per application, as Mark accepted does, and books the plan from the visit this call booked.">
+            {busy ? "Accepting…" : "Accept as pay per application"}
+          </Button>
+        </>
       )}
     </div>
   );
@@ -1233,6 +1252,30 @@ export default function TriageInboxTabV2({ isAdmin }) {
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Accept failed — try again.");
       });
   };
+  // GATE_CALL_PHONE_YES_ACCEPT: Accept as pay per application. Version-bound like the other card actions; the server refuses
+  // with a plain message (estimate already accepted, visit moved, another estimate open) and changes nothing.
+  const acceptCallPhoneYes = (item) => {
+    setActioning(item.id);
+    adminFetch(`/admin/triage/${item.id}/accept-call-phone-yes`, {
+      method: "POST",
+      // preview_token: the estimate and the visit this card shows; an edit or a reschedule since the list loaded is refused.
+      body: JSON.stringify({ expected_updated_at: item.updated_at, preview_token: item.call_phone_yes?.preview_token || null }),
+    })
+      .then((res) => {
+        setActioning(null);
+        load(mode, status);
+        if (Array.isArray(res?.warnings) && res.warnings.length) setError(res.warnings.join(" "));
+      })
+      .catch((err) => {
+        setActioning(null);
+        if (err?.status === 409 || err?.status === 400) {
+          load(mode, status);
+          setError(err.message || "This card changed since it loaded — review it and try again.");
+          return;
+        }
+        setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Accept failed — try again.");
+      });
+  };
   const attachContact = (item, customerId, role) => familyCardAction(item, "attach-contact", { customer_id: customerId, role }, "Attach failed — try again.");
   const newCustomerFromCard = (item) => familyCardAction(item, "new-customer", {}, "New customer failed — try again.");
 
@@ -1580,7 +1623,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
 
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
-                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids, livePhone: item.customer_phone, isOpenView, isAdmin, canSave: item.can_save_contact_note === true, canAttach: item.can_attach_contact === true, canNewCustomer: item.can_new_customer === true, busy: actioning === busyKey, onSave: () => saveContactNote(item), onAttach: (customerId, role) => attachContact(item, customerId, role), onNewCustomer: () => newCustomerFromCard(item), callPrepay: item.call_prepay || null, onAcceptPrepay: () => acceptCallPrepay(item) })}
+                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids, livePhone: item.customer_phone, isOpenView, isAdmin, canSave: item.can_save_contact_note === true, canAttach: item.can_attach_contact === true, canNewCustomer: item.can_new_customer === true, busy: actioning === busyKey, onSave: () => saveContactNote(item), onAttach: (customerId, role) => attachContact(item, customerId, role), onNewCustomer: () => newCustomerFromCard(item), callPrepay: item.call_prepay || null, onAcceptPrepay: () => acceptCallPrepay(item), phoneYes: item.call_phone_yes || null, onAcceptPhoneYes: () => acceptCallPhoneYes(item) })}
                     {isTriage && <ClosedNoTextAction item={item} onLineCanText={() => setLineCanTextFor(item)} />}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
                     {isEmailDisagreementCard && isOpenView && !isAdmin && (

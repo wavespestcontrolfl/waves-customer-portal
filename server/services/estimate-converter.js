@@ -9481,6 +9481,8 @@ module.exports.recurringServiceKey = recurringServiceKey;
 // The office's manual accept registers, after its commit, the reminders this converter deferred for the visits it
 // seeded inside the accept's transaction (deferFollowUpReminderRegistration; estimate-manual-acceptance.js).
 module.exports.registerSeededFollowUpReminders = registerSeededFollowUpReminders;
+// The phone-yes card's tap (call-phone-yes-accept.js) checks that the plan it priced is on a pest cadence catalog row.
+module.exports.PEST_CADENCE_CATALOG_KEYS = PEST_CADENCE_CATALOG_KEYS;
 module.exports.seedingFamilyKey = seedingFamilyKey;
 module.exports.isCommercialRecurringLine = isCommercialRecurringLine;
 module.exports.seedRecurringFollowUpsForParent = seedRecurringFollowUpsForParent;

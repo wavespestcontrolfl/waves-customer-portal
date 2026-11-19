@@ -4,8 +4,10 @@
  * A caller with an open estimate sometimes says yes on a call and chooses pay per application. The call pipeline
  * books the visit, but nothing accepts the estimate: the visit stays a one-off with no price and no link to the
  * estimate, and the plan never starts (2026-11-12). This module files ONE admin card (call_phone_yes) for each call
- * that booked a pest visit while the customer had an open estimate, so a person accepts it. It accepts nothing and
- * sends nothing: the booking text keeps the estimate's accept link, and the customer can still accept alone.
+ * that booked a pest visit while the customer had an open estimate, so a person accepts it. Filing accepts nothing and
+ * sends nothing: the booking text keeps the estimate's accept link, and the customer can still accept alone. The
+ * card's tap, "Accept as pay per application" (acceptPhoneYesCard), runs the office's own accept and books the plan
+ * from the visit the call booked; it sends what the office's Mark accepted sends (the membership email), nothing more.
  *
  * The card has two states. "Caller said yes" carries the caller's own words: service_request.billing_choice is
  * per_application on that call or an earlier one since the estimate was sent, and its evidence quote is found word for
@@ -678,6 +680,190 @@ async function sweepCandidates({ now, after, pageSize }) {
     .select('id', 'customer_id', 'ai_extraction_enriched', db.raw('created_at::text AS created_key'));
 }
 
+// ── The tap: "Accept as pay per application" ──
+//
+// A person accepts the estimate from the card, the way the office's Mark accepted does (markEstimateManuallyAccepted,
+// standard billing), and the visit the call booked becomes the plan's first visit. The accept links that visit to the
+// estimate before the conversion (beforeConvert), so the converter books the plan from it (its reserved-visit path) and
+// seeds the next visits; its last step before the commit checks that series and prices it at the plan's per-visit
+// amount. The accept, the link, the series and the prices are one transaction: a refusal at any step changes nothing.
+// The tap needs no yes: the card shows the evidence, and the person decides.
+
+const ACCEPT_SOURCE = 'call_phone_yes';
+const cents = (n) => Math.round(Number(n) * 100);
+
+// Why the tap cannot accept, in plain words. The list shows it on the card before any tap; a refused tap leads with
+// "Nothing was accepted." A reason from the accept's own checks (REASONS) reads the same way.
+const TAP_UNAVAILABLE = {
+  changed_since_check: 'The estimate, the visit or the call changed since the card loaded. Reload and look again.',
+  series_not_booked: 'The plan could not be booked from the visit. Accept it from the estimate instead.',
+  price_unresolved: "The plan's per-visit price could not be set. Accept it from the estimate instead.",
+  customer_changed: 'The call no longer belongs to this customer.',
+  no_booked_visit: 'The visits the call booked are off the calendar.',
+  no_pest_visit: 'No unlinked pest visit the call booked is left on the calendar.',
+  no_open_estimate: 'The customer has no open estimate that was sent before the call.',
+  estimate_being_sent: "One of the customer's estimates is being sent. Reload in a minute.",
+  call_still_processing: 'A call since the estimate was sent is still being read. Reload in a few minutes.',
+  chose_annual_prepay: 'The caller chose annual prepay on the booking call. Use the annual prepay card.',
+  accept_failed: 'The accept failed. Try again, or accept it from the estimate.',
+};
+const whyNot = (reason) => TAP_UNAVAILABLE[reason] || REASONS[reason] || TAP_UNAVAILABLE.accept_failed;
+// The message of a refused tap, by reason.
+const TAP_REFUSALS = {
+  ...Object.fromEntries(Object.entries(TAP_UNAVAILABLE).map(([k, why]) => [k, `Nothing was accepted. ${why}`])),
+  already_accepted: 'The estimate is already accepted. Nothing changed.',
+};
+function tapRefusal(reason) {
+  return { ok: false, reason, message: TAP_REFUSALS[reason] || `Nothing was accepted. ${whyNot(reason)}` };
+}
+const stop = (reason) => Object.assign(new Error(reason), { phoneYesRefusal: reason });
+
+// What the card showed, as one opaque token: the estimate and its row version, and the booked visit as read. The list
+// stamps it (tapStateOf) and the tap sends it back, so an edit or a reschedule since asks for a fresh look.
+function tapPreviewTokenOf(evaluation) {
+  const Manual = require('./estimate-manual-acceptance');
+  const facts = [
+    String(evaluation.estimate.id), Manual.estimateRowPin(evaluation.estimate),
+    String(evaluation.visit.id), Manual.bookedVisitsPinOf([evaluation.visit]),
+  ];
+  return require('crypto').createHash('sha256').update(JSON.stringify(facts)).digest('hex').slice(0, 32);
+}
+
+/**
+ * What the tap on an open card can do now, read live: the server decides, so the screen holds no copy of the rule.
+ * @returns {{can_accept:true, preview_token, estimate_id, visit_id, visit_date, message:null}
+ *   |{can_accept:false, preview_token:null, message}}
+ */
+async function tapStateOf(card, { now = new Date() } = {}) {
+  const payload = parseJson(card.payload);
+  const evaluation = await evaluatePhoneYes({
+    callLogId: card.call_log_id, customerId: payload.customer_id || card.related_customer_id || null, now,
+  });
+  // No tap has run yet: the card says why the tap is not offered, never "Nothing was accepted" (the office may have
+  // accepted the estimate by hand).
+  if (!evaluation.card) return { can_accept: false, preview_token: null, message: `The tap cannot accept this one. ${whyNot(evaluation.reason)}` };
+  if (evaluation.acceptProblem) {
+    const why = REASONS[evaluation.acceptProblem] || 'The accept would not go ahead.';
+    return { can_accept: false, preview_token: null, message: `The tap cannot accept this one. ${why} Accept it from the estimate.` };
+  }
+  const { dateOnlyString } = require('../utils/datetime-et');
+  return {
+    can_accept: true,
+    preview_token: tapPreviewTokenOf(evaluation),
+    estimate_id: String(evaluation.estimate.id),
+    visit_id: String(evaluation.visit.id),
+    visit_date: dateOnlyString(evaluation.visit.scheduled_date),
+    message: null,
+  };
+}
+
+// Step 1, inside the accept's transaction before the conversion: lock and read again every fact the tap read outside it
+// (the call, the booked visit and the call's other visits, the estimate's links, the customer's other open estimates and
+// plan), then link the visit to the estimate.
+function linkVisitStep({ visit, customerId, bookingCallId }) {
+  const Manual = require('./estimate-manual-acceptance');
+  const pin = Manual.bookedVisitsPinOf([visit]);
+  return async (trx, { estimate }) => {
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
+    if (!(await trx('call_log').where({ id: bookingCallId, customer_id: customerId }).forShare().first('id'))) throw stop('customer_changed');
+    // The locked visit passes the evaluation's own visit checks again (family, property, price, add-ons, series and
+    // assessment flags), not only the pin.
+    const row = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first();
+    if (!row || Manual.bookedVisitsPinOf([row]) !== pin || await visitProblem(trx, row, estimate, new Date())) throw stop('changed_since_check');
+    // The call still booked exactly this one visit: the only live one, and the only one on the calendar.
+    const live = await require('./call-prepay-choice').liveVisitsOfCall(trx, bookingCallId, customerId);
+    const onCalendar = await callVisitsOnCalendar(trx, bookingCallId, customerId);
+    if (live.map((v) => String(v.id)).join() !== String(visit.id) || onCalendar.length !== 1) throw stop('changed_since_check');
+    if (await Manual.estimateLinkedVisitsQuery(trx, estimate.id).first('id')) throw stop('estimate_has_visits');
+    // The accept claimed this estimate (no longer open): any open estimate left is another one.
+    if ((await openEstimatesOf(trx, customerId, new Date())).some((e) => String(e.id) !== String(estimate.id))) throw stop('more_than_one_estimate');
+    if (await existingPlan(trx, customerId, visit.id)) throw stop('existing_plan');
+    const n = await trx('scheduled_services').where({ id: visit.id }).whereNull('source_estimate_id')
+      .update({ source_estimate_id: estimate.id, updated_at: new Date() });
+    if (Number(n) !== 1) throw stop('changed_since_check');
+  };
+}
+
+// Step 2, the accept's last step before the commit: check the series the converter booked from the visit, and price
+// it. The per-visit price is this acceptance's own per-application amount (the converter's figure, the one the
+// customer-level fee carries), never a guess. The label stays as booked (the converter never relabels service_type).
+function priceSeriesStep({ customerId, visit, seen }) {
+  return async (trx, { estimate, conversion }) => {
+    const amount = Number(conversion?.membershipEmail?.perApplicationAmount);
+    const customer = await trx('customers').where({ id: customerId, billing_mode: 'per_application' }).first('per_application_fee');
+    if (!(amount > 0) || cents(customer?.per_application_fee) !== cents(amount)) throw stop('price_unresolved');
+    // The series: the visit as a recurring parent linked to the estimate on a pest cadence catalog row, its next visits
+    // on the same row, and no other visit linked to the estimate.
+    const { PEST_CADENCE_CATALOG_KEYS } = require('./estimate-converter');
+    const parent = await trx('scheduled_services as s')
+      .join('services as c', 'c.id', 's.service_id')
+      .where({ 's.id': visit.id, 's.is_recurring': true, 's.source_estimate_id': estimate.id })
+      .whereNull('s.recurring_parent_id').whereNotNull('s.recurring_pattern')
+      .whereIn('c.service_key', Object.values(PEST_CADENCE_CATALOG_KEYS))
+      .first('s.id', 's.service_id', 's.estimated_price');
+    if (!parent) throw stop('series_not_booked');
+    const children = await trx('scheduled_services').where({ recurring_parent_id: parent.id }).select('id', 'service_id', 'estimated_price');
+    const series = [parent, ...children];
+    const seriesIds = new Set(series.map((r) => String(r.id)));
+    const linked = await require('./estimate-manual-acceptance').estimateLinkedVisitsQuery(trx, estimate.id).select('id');
+    const sameSeries = linked.length === seriesIds.size && linked.every((r) => seriesIds.has(String(r.id)));
+    if (!children.length || !sameSeries || children.some((c) => c.service_id !== parent.service_id)) throw stop('series_not_booked');
+    if (series.some((r) => r.estimated_price != null && cents(r.estimated_price) !== cents(amount))) throw stop('visit_priced');
+    await trx('scheduled_services').whereIn('id', [...seriesIds]).update({ estimated_price: amount, updated_at: new Date() });
+    Object.assign(seen, { seriesIds: [...seriesIds], amount });
+  };
+}
+
+// What a failed accept tells the office: a step's own reason, a pin that moved, the accept's own 4xx message, or a
+// plain failure. Nothing was accepted in every case.
+function tapErrorRefusal(err) {
+  if (err.phoneYesRefusal) return tapRefusal(err.phoneYesRefusal);
+  if (err.code === 'preview_changed') return tapRefusal('changed_since_check');
+  if (err.statusCode && err.statusCode < 500 && err.message) return { ok: false, reason: 'accept_refused', message: `Nothing was accepted. ${err.message}` };
+  return tapRefusal('accept_failed');
+}
+
+/**
+ * The tap on an open card. The caller (the route) has checked the gate, the admin, the card and its version.
+ * Reads the card's call again, checks the token, then runs the office's own accept with the two steps above.
+ * @returns {{ok:true, estimateId, visitId, seriesIds, amount, warnings}|{ok:false, reason, message}}
+ */
+async function acceptPhoneYesCard({ item, adminUserId = null, previewToken = null, now = new Date() }) {
+  const payload = parseJson(item.payload);
+  const customerId = payload.customer_id || item.related_customer_id || null;
+  const evaluation = await evaluatePhoneYes({ callLogId: item.call_log_id, customerId, now });
+  if (!evaluation.card) return tapRefusal(evaluation.reason);
+  if (evaluation.acceptProblem) return tapRefusal(evaluation.acceptProblem);
+  if (!previewToken || previewToken !== tapPreviewTokenOf(evaluation)) return tapRefusal('changed_since_check');
+  const Manual = require('./estimate-manual-acceptance');
+  const { estimate, visit } = evaluation;
+  const seen = {};
+  let result;
+  try {
+    result = await Manual.markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      // Checked inside the accept's transaction before the claim: the estimate row and the booked visit as read, with
+      // no add-on line. A change since refuses (preview_changed) before anything is written.
+      expected: { ...Manual.estimateRowPin(estimate), bookedVisits: { ids: [visit.id], pin: Manual.bookedVisitsPinOf([visit]), noAddons: true } },
+      beforeConvert: linkVisitStep({ visit, customerId, bookingCallId: item.call_log_id }),
+      beforeCommit: priceSeriesStep({ customerId, visit, seen }),
+      bookedAppointmentIds: [visit.id],
+      adminUserId,
+      source: ACCEPT_SOURCE,
+      billingTerm: 'standard',
+    });
+  } catch (err) {
+    logger.warn(`[call-phone-yes] tap accept refused for estimate ${estimate.id}: ${err.phoneYesRefusal || err.code || err.name || 'error'}`);
+    return tapErrorRefusal(err);
+  }
+  // Another session accepted it between the read and the accept: the short-circuit changed nothing.
+  if (result?.alreadyAccepted) return tapRefusal('already_accepted');
+  return {
+    ok: true, estimateId: String(estimate.id), visitId: String(visit.id), seriesIds: seen.seriesIds || [], amount: seen.amount ?? null,
+    warnings: Array.isArray(result?.warnings) ? result.warnings : [],
+  };
+}
+
 module.exports = {
   REASON_CODE,
   MOOT_RULE,
@@ -687,6 +873,15 @@ module.exports = {
   runCallPhoneYesSweep,
   closeMootCards,
   cardSummary,
+  ACCEPT_SOURCE,
+  TAP_REFUSALS,
+  tapStateOf,
+  tapPreviewTokenOf,
+  acceptPhoneYesCard,
   // Tests only: the two writes under the lock, without the sweep's own reads first.
-  _private: { fileCardForTest: fileCard, applyCardStateForTest: applyCardState },
+  _private: {
+    fileCardForTest: fileCard, applyCardStateForTest: applyCardState,
+    // The tap's two steps inside the accept, driven directly.
+    linkVisitStepForTest: linkVisitStep, priceSeriesStepForTest: priceSeriesStep,
+  },
 };

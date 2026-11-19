@@ -47,11 +47,20 @@ describe('wiring', () => {
     expect(read('../services/call-recording-processor.js')).not.toContain('call-phone-yes-accept');
   });
 
-  test('the cards accept nothing and send nothing', () => {
+  test("filing accepts nothing and sends nothing; the tap runs only the office's own accept and sends nothing itself", () => {
     const service = read('../services/call-phone-yes-accept.js');
+    const at = service.indexOf('// ── The tap: "Accept as pay per application" ──');
+    expect(at).toBeGreaterThan(0);
+    const filing = service.slice(0, at);
+    const tap = service.slice(at);
     for (const word of ['markEstimateManuallyAccepted', 'convertEstimate', 'sendSms', 'sendEmail', 'twilio', 'sendgrid', 'sendInvoice',
       'notifyAdmin', 'sendCustomerMessage', 'sendMembershipStarted', '.update({ source_estimate_id', 'estimated_price:']) {
-      expect(service).not.toContain(word);
+      expect(filing).not.toContain(word);
+    }
+    // The tap: the office's own accept (it sends the membership email itself, as Mark accepted does), no send of its own.
+    expect(tap).toContain('Manual.markEstimateManuallyAccepted({');
+    for (const word of ['convertEstimate', 'sendSms', 'sendEmail', 'twilio', 'sendgrid', 'sendInvoice', 'notifyAdmin', 'sendCustomerMessage', 'sendMembershipStarted']) {
+      expect(tap).not.toContain(word);
     }
   });
 
