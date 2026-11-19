@@ -20,9 +20,11 @@ describe('stopForecastZone', () => {
     expect(stopForecastZone(row('venice', 'North Port', '34287'))).toBe('venice_north_port');
   });
 
-  it('falls back to the zone the location id names, never the Lakewood Ranch default', () => {
+  it('falls back to the stored zone read as a place name, never the Lakewood Ranch default', () => {
     expect(stopForecastZone(row('venice', null, '34285'))).toBe('venice_north_port');
     expect(stopForecastZone(row('bradenton', null, null))).toBe('bradenton_north');
+    // Self-booking stores the "Port Charlotte" service zone as 'port charlotte'.
+    expect(stopForecastZone(row('port charlotte', null, '33980'))).toBe('venice_north_port');
   });
 
   it('places a row with no stored zone by its city and ZIP only, not the display default', () => {

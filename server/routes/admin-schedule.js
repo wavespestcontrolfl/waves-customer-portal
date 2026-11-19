@@ -5982,26 +5982,24 @@ const ZONE_COORDS = {
   venice_north_port: { lat: 27.0998, lng: -82.4543 },
 };
 
-// Some booking paths store a location id as the zone. Each one's forecast
-// zone, used when the stop's city and ZIP match no zone rule.
-const LOCATION_ZONE_FORECAST = { bradenton: 'bradenton_north', venice: 'venice_north_port' };
-
 // The forecast zone of a day-board stop, read from its scheduled_services row:
 // the stored zone, never the card's display zone, which defaults to Lakewood
 // Ranch for a city and ZIP no rule places. A stored zone with a forecast point
-// stays; else the row's city and ZIP place the stop, else the zone its stored
-// location id names; a stop none of these place has no forecast zone (owner
-// 2026-11-02, "leave the rain for all"; 11-19: 18 of 84 stops, stored
-// 'bradenton', showed no rain). The day query fills each missing stamp field
-// from the primary address, so a stamp for another property reads only its
-// own city and ZIP ("no pin beats a wrong pin", services/stamped-address.js).
+// stays; else the row's city and ZIP place the stop, else the stored zone read
+// as a place name by the same rules (self-booking stores the service zone's
+// first name: 'bradenton', 'venice', 'port charlotte'); a stop none of these
+// place has no forecast zone (owner 2026-11-02, "leave the rain for all";
+// 11-19: 18 of 84 stops, stored 'bradenton', showed no rain). The day query
+// fills each missing stamp field from the primary address, so a stamp for
+// another property reads only its own city and ZIP ("no pin beats a wrong
+// pin", services/stamped-address.js).
 function stopForecastZone(row) {
   if (ZONE_COORDS[row.zone]) return row.zone;
   const ownAddress = require('../services/stamped-address').stampedAddressDiverges(row);
   const city = ownAddress ? row.service_address_city : row.city;
   // getZone matches 5-digit ZIPs exactly: '34211-1234' reads as '34211'.
   const zip = require('../services/customer-properties').normalizeZip(ownAddress ? row.service_address_zip : row.zip);
-  return getZone(city, zip, LOCATION_ZONE_FORECAST[row.zone] || null);
+  return getZone(city, zip, getZone(row.zone, null, null));
 }
 
 // Completion reuses a non-void invoice already attached to the visit
