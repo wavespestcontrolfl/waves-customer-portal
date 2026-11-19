@@ -353,8 +353,10 @@ async function runThreadDraft({
       quotePromised: true,
     });
   } catch (err) {
-    logger.error(`[estimator-sms] thread draft failed: ${err.message}`);
-    result.skipped = result.skipped || `error: ${err.message}`;
+    // errorCode, never err.message: a knex message echoes its bound values,
+    // and this run's lookups bind the sender's phone digits.
+    logger.error(`[estimator-sms] thread draft failed: ${errorCode(err)}`);
+    result.skipped = result.skipped || `error: ${errorCode(err)}`;
     return result;
   }
 }
@@ -591,13 +593,15 @@ async function startSmsThreadDraft({
       bedroomCountOverride,
     })
       .catch((err) => {
-        logger.error(`[estimator-sms] detached draft failed: ${err.message}`);
+        logger.error(`[estimator-sms] detached draft failed: ${errorCode(err)}`);
         return null;
       });
     return result;
   } catch (err) {
-    logger.error(`[estimator-sms] start failed: ${err.message}`);
-    result.skipped = result.skipped || `error: ${err.message}`;
+    // The cooldown and bell lookups bind the sender's phone digits: a code
+    // only, in the log and in the skip reason lead-intake logs.
+    logger.error(`[estimator-sms] start failed: ${errorCode(err)}`);
+    result.skipped = result.skipped || `error: ${errorCode(err)}`;
     return result;
   }
 }

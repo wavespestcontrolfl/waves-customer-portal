@@ -27,7 +27,7 @@ let mockInserted = 0;
 const mockNotifyAdmin = jest.fn(async (_category, title, _body, opts) => {
   mockInserted += 1;
   mockLog.push(`insert:${opts.trx ? 'trx' : 'db'}`);
-  const row = { id: `bell-new-${mockInserted}`, created_at: new Date(), done_at: null, title, metadata: opts.metadata };
+  const row = { id: `bell-new-${mockInserted}`, created_at: new Date(), done_at: null, title, link: opts.link, metadata: opts.metadata };
   mockRows.push(row);
   return row;
 });
@@ -126,15 +126,27 @@ const askPlaceholder = () => notifyBell({
 
 // A draft run's outcome: runDraftPipeline passes the run's context, whose
 // origin carries the row the ask landed on.
-const outcome = (bellId, { estimateId = null, lane = 'red' } = {}) => notifyBell({
+const outcome = (bellId, { estimateId = null, lane = 'red', existingDraft, title, link } = {}) => notifyBell({
   call: null,
   context: { origin: { channel: 'sms_thread', threadKey: KEY, bellId } },
   lane,
   quotePromised: true,
   threadKey: KEY,
   estimateId,
-  title: estimateId ? 'AI estimate draft ready — $39/mo' : 'Quote asked by text — send it',
+  existingDraft,
+  link,
+  title: title || (estimateId ? 'AI estimate draft ready — $39/mo' : 'Quote asked by text — send it'),
   body: estimateId ? 'Drafted from the text thread.' : 'Texter …0123: quote requested over SMS, no auto-draft (thin thread). Reply with pricing manually.',
+});
+
+// The commercial lane's two outcomes for one estimate: the run that created
+// the proposal scaffold, and a run the builder blocked behind it.
+const PROPOSAL_TITLE = 'Commercial prospect by text — proposal scaffold ready';
+const proposalCreated = (bellId, estimateId) => outcome(bellId, {
+  estimateId, lane: 'yellow', title: PROPOSAL_TITLE, link: `/admin/estimates/${estimateId}/proposal`,
+});
+const draftBlocked = (bellId, estimateId) => outcome(bellId, {
+  estimateId, lane: 'yellow', existingDraft: true, title: 'Quote asked by text — estimate already open',
 });
 
 beforeEach(() => {
@@ -296,17 +308,38 @@ describe('a run\'s outcome updates the row its own ask landed on, open or done',
     expect(mockNotifyAdmin.mock.calls[1][3].metadata.estimateId).toBe('est-14');
   });
 
-  test('two asks on one bell, both runs end on one estimate: that draft gets one bell', async () => {
+  test.each([
+    ['the created run first', ['created', 'blocked']],
+    ['the blocked run first', ['blocked', 'created']],
+  ])('two asks on one bell, both runs end on one estimate (%s): one draft bell, with the created run\'s title and link', async (_order, order) => {
     // Ask A raised the bell; ask B merged into it. The builder blocked B's
-    // draft behind A's open one, so B's run returns A's estimate.
+    // draft behind A's, so B's run returns A's estimate.
     const a = await askPlaceholder();
     const b = await askPlaceholder();
-    await expect(outcome(a.bellId, { estimateId: 'est-15', lane: 'green' })).resolves.toEqual({ ok: true, bellId: 'bell-new-2' });
-
-    await expect(outcome(b.bellId, { estimateId: 'est-15', lane: 'green' })).resolves.toEqual({ ok: true, bellId: 'bell-new-2' });
+    const runs = { created: () => proposalCreated(a.bellId, 'est-15'), blocked: () => draftBlocked(b.bellId, 'est-15') };
+    for (const key of order) await expect(runs[key]()).resolves.toEqual({ ok: true, bellId: 'bell-new-2' });
 
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(2);
+    const draftBell = mockRows.find((row) => row.id === 'bell-new-2');
+    expect(draftBell.title).toBe(PROPOSAL_TITLE);
+    expect(draftBell.link).toBe('/admin/estimates/est-15/proposal');
+    expect(draftBell.metadata.existingDraft).toBeUndefined();
     expect(mockRows.find((row) => row.id === a.bellId).metadata.estimateId).toBeNull();
+  });
+
+  test('a later ask\'s run returns the draft an older bell shows: it stands on that bell, and the ask\'s bell stays its task', async () => {
+    mockRows.push(bell('bell-older', { minutesAgo: 2 * 24 * 60, done: true, estimateId: 'est-16' }));
+    const ask = await askPlaceholder();
+    expect(ask).toEqual({ ok: true, bellId: 'bell-new-1' });
+
+    await expect(draftBlocked(ask.bellId, 'est-16')).resolves.toEqual({ ok: true, bellId: 'bell-older' });
+
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(mockUpdates).toHaveLength(0);
+    const task = mockRows.find((row) => row.id === ask.bellId);
+    expect(task.title).toBe('Quote asked by text — send it');
+    expect(task.metadata.estimateId).toBeNull();
+    expect(mockRows.find((row) => row.id === 'bell-older').done_at).not.toBeNull();
   });
 
   test('red first, then a merged ask\'s draft: the draft gets its own bell and the "send it" task stays', async () => {

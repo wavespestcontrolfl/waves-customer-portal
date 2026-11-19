@@ -631,12 +631,19 @@ async function notify(args) {
 // ./sms-thread bounds its lookup by it.
 const SMS_BELL_DEDUPE_MS = 7 * 86400000;
 
+// A notifications row's metadata, parsed; {} when it cannot be read.
+function bellMetadata(raw) {
+  try {
+    return typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+  } catch { return {}; }
+}
+
 // notify() that also names the row this event landed on: { ok, bellId }.
 // bellId is null when no single row is known (a suppressed insert, or a
 // retirement that rewrote several bells). startSmsThreadDraft keeps its
 // placeholder's id on the run's origin (`origin.bellId`), so the run's
 // outcome updates that same row (the thread-key dedupe below).
-async function notifyBell({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null, link = null, forceUpdate = false, updateOnly = false, retiredByReason = null, newAsk }) {
+async function notifyBell({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null, link = null, forceUpdate = false, updateOnly = false, retiredByReason = null, newAsk, existingDraft }) {
   const callSid = call?.twilio_call_sid ? String(call.twilio_call_sid) : null;
   // Callers may pass a specific link (the proposal builder deep-link);
   // otherwise derive the historical default from what the bell references.
@@ -656,6 +663,10 @@ async function notifyBell({ call, context, title, body, lane, estimateId = null,
     // A quote we promised is a promise we owe the customer; a quote the customer asked
     // for is the customer reaching us. Either one rings once the gate is on (muted by the bell policy before).
     ...(quotePromised === true ? { promise: true } : { contact: true }),
+    // true from a run the builder blocked behind a draft that already exists
+    // ("estimate already open"): that draft's own run may rewrite this bell
+    // (the thread-key branch below). Unset, JSON leaves the key out.
+    existingDraft,
   };
   // SMS-origin bells dedupe on the phone-scoped thread key the way call
   // bells dedupe on callSid — repeated quote-flavored texts upgrade ONE
@@ -732,12 +743,9 @@ async function notifyBell({ call, context, title, body, lane, estimateId = null,
           .orderBy('created_at', 'desc');
         if (dedupe.since) existingQuery = existingQuery.where('created_at', '>=', dedupe.since);
         if (dedupe.openOnly) existingQuery = existingQuery.whereNull('done_at');
-        const existing = await existingQuery.first();
+        let existing = await existingQuery.first();
         if (existing) {
-          let existingMeta = {};
-          try {
-            existingMeta = typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : (existing.metadata || {});
-          } catch { existingMeta = {}; }
+          let existingMeta = bellMetadata(existing.metadata);
           let insertFresh = false;
           if (existingMeta.estimator_engine === true) {
             if (forceUpdate) {
@@ -791,17 +799,28 @@ async function notifyBell({ call, context, title, body, lane, estimateId = null,
               // a clarify resume's draft does.
               if (existingMeta.estimateId || existingMeta.mergedAsk === true) insertFresh = true;
               // A draft that one of the number's bells already shows stands on
-              // that bell: on a shared bell, the twin run whose draft the
-              // builder blocked returns the first run's estimate
-              // (existingEstimateId).
-              const shown = insertFresh && estimateId
+              // that bell, whether this outcome would raise a fresh bell or
+              // upgrade its own draftless row: that row stays its own ask's
+              // task. A run gets a shown draft when the builder blocked it
+              // behind one (existingDraft, "estimate already open"): the twin
+              // run on a shared bell, or a later ask's run. The one rewrite:
+              // the run that created the draft takes over the bell its blocked
+              // twin raised first, so the draft's own title and link land.
+              const shown = estimateId
                 ? await conn('notifications')
                   .whereRaw("metadata->>'smsThreadKey' = ?", [threadKey])
                   .whereRaw("metadata->>'estimateId' = ?", [String(estimateId)])
                   .where('created_at', '>=', new Date(Date.now() - SMS_BELL_DEDUPE_MS))
-                  .first('id')
+                  .first('id', 'metadata')
                 : null;
-              if (shown) return landed(shown.id);
+              if (shown && (existingDraft || bellMetadata(shown.metadata).existingDraft !== true)) return landed(shown.id);
+              if (shown) {
+                // The rewrite drops the twin's mark: this run's metadata
+                // leaves existingDraft unset, and JSON leaves the key out.
+                existing = shown;
+                existingMeta = bellMetadata(shown.metadata);
+                insertFresh = false;
+              }
             }
           }
           if (!insertFresh) {
@@ -3236,6 +3255,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
                 quotePromised,
                 threadKey,
                 estimateId: commercialOutcome.existingEstimateId || null,
+                existingDraft: true,
                 title: S.blockedTitle,
                 body: S.blockedBody(callerLabel(intent, context)),
               });

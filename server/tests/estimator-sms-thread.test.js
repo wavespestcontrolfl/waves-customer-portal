@@ -13,6 +13,8 @@
 // Chainable stub for the cooldown lookup (notifications table); tests set
 // mockRecentBell to simulate a run inside the cooldown window.
 let mockRecentBell = null;
+// An error the cooldown lookup throws, when set.
+let mockCooldownError = null;
 // The grouped where() the cooldown builds, as [method, ...args].
 const mockCooldownClauses = [];
 // sms_log row (the triggering text's Twilio SID) for the placeholder link anchor.
@@ -44,6 +46,7 @@ jest.mock('../models/db', () => {
         if (mockSmsLogThrows) throw new Error('sms_log down');
         return mockSmsLogRow;
       }
+      if (mockCooldownError) throw mockCooldownError;
       return mockRecentBell;
     },
   };
@@ -119,6 +122,7 @@ const PHONE = '+19415550123';
 beforeEach(() => {
   jest.clearAllMocks();
   mockRecentBell = null;
+  mockCooldownError = null;
   mockCooldownClauses.length = 0;
   mockSmsLogRow = null;
   mockSmsLogThrows = false;
@@ -364,6 +368,18 @@ describe('startSmsThreadDraft', () => {
     // The same instant as the created_at bound, as ISO text.
     expect(stamped[2]).toEqual([created[3].toISOString()]);
     expect(Date.now() - created[3].getTime()).toBeGreaterThanOrEqual(10 * 60 * 1000);
+  });
+
+  test('a cooldown lookup that throws: the log and the skip reason carry a code, not the phone digits', async () => {
+    const logger = require('../services/logger');
+    mockCooldownError = Object.assign(new Error("select * from notifications where metadata->>'smsThreadKey' = 'sms:9415550123' - canceling statement"), { code: '57014' });
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'quote for pest control please' });
+    expect(result.started).toBe(false);
+    expect(result.skipped).toBe('error: 57014');
+    const logged = logger.error.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logged).toContain('start failed: 57014');
+    expect(logged).not.toMatch(/9415550123/);
+    expect(mockRunDraftPipeline).not.toHaveBeenCalled();
   });
 
   test('a bell a person already closed still holds the cooldown: no bell, no paid call', async () => {
