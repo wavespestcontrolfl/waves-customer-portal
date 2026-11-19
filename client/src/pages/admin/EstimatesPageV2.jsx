@@ -281,10 +281,24 @@ const CALL_LIST_MATCHERS = {
   call_today: (e) => isCallTodayEstimate(e),
   pick_reason: (e) => isPickReasonEstimate(e),
 };
-// ?view=call_today opens the list on its "Call today" filter (the 9 AM push links here). Any other value
-// does nothing: the list opens on "all", as before.
-function filterFromView(searchParams) {
-  return searchParams.get("view") === "call_today" ? "call_today" : "all";
+// The list filter, with ?view=call_today (the 9 AM push links here) selecting "Call today". Any other value does
+// nothing. The list takes the parameter once and drops it from the URL (replace: no new history entry), so a later
+// filter change, a refresh, or leaving and coming back is not pinned to it. The effect watches the URL, so the link
+// also works on a list that is already open.
+function useCallTodayLinkFilter() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const linked = searchParams.get("view") === "call_today";
+  const [filter, setFilter] = useState(linked ? "call_today" : "all");
+  useEffect(() => {
+    if (!linked) return;
+    setFilter("call_today");
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete("view");
+      return next;
+    }, { replace: true });
+  }, [linked, setSearchParams]);
+  return [filter, setFilter];
 }
 function withCallListChips(chips, afterKey) {
   const at = chips.findIndex((c) => c.key === afterKey);
@@ -2046,13 +2060,12 @@ function EstimatePipelineViewV2({
   const sendEstimateFromPipeline = useEstimateSend();
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
   const [estimates, setEstimates] = useState([]);
   const [estimatesTruncated, setEstimatesTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [customerPanelId, setCustomerPanelId] = useState(null);
-  const [filter, setFilter] = useState(() => filterFromView(searchParams));
+  const [filter, setFilter] = useCallTodayLinkFilter();
   const [dateRange, setDateRange] = useState("all");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState("newest");
@@ -4122,10 +4135,8 @@ function EstimatesMobileListView({
   const [estimatesTruncated, setEstimatesTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [searchParams] = useSearchParams();
   const [search, setSearch] = useState("");
-  const viewFilterRef = useRef(filterFromView(searchParams));
-  const [filter, setFilter] = useState(viewFilterRef.current);
+  const [filter, setFilter] = useCallTodayLinkFilter();
   const [dateFilter, setDateFilter] = useState("all");
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
@@ -4399,10 +4410,10 @@ function EstimatesMobileListView({
   }, [estimates, v3Flag]);
   const filterOptions = mobileFilterOptions(v3Flag, filterCounts);
 
-  // Reset filter when the v3 flag flips; keep chronological ordering stable. The reset goes back to the
-  // filter the URL asked for (?view=call_today), so the flag loading after mount does not undo that link.
+  // Reset filter when the v3 flag flips; keep chronological ordering stable. "Call today" is in both chip
+  // sets, so it stays: the flag loads after mount and must not undo the 9 AM push link (useCallTodayLinkFilter).
   useEffect(() => {
-    setFilter(viewFilterRef.current);
+    setFilter((current) => (current === "call_today" ? current : "all"));
   }, [v3Flag]);
 
   // Flat list across all days — mirrors CustomersPageV2 directory layout.

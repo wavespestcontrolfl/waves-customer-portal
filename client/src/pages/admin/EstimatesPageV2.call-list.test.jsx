@@ -3,7 +3,7 @@
 // two Needs-attention cards and the reason-only decline modal.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import {
   act,
   cleanup,
@@ -107,13 +107,24 @@ function response(body) {
 
 let patches;
 
+// The page's current URL and a navigate function, read from inside the router.
+const routerProbe = { search: null, navigate: null };
+function RouterProbe() {
+  routerProbe.search = useLocation().search;
+  routerProbe.navigate = useNavigate();
+  return null;
+}
+
 function renderPage(width = 1440, search = "?tab=estimates") {
   window.innerWidth = width;
-  return render(
+  const tree = () => (
     <MemoryRouter initialEntries={[`/admin/pipeline${search}`]}>
+      <RouterProbe />
       <EstimatesPageV2 />
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+  const view = render(tree());
+  return { ...view, rerenderSame: () => view.rerender(tree()) };
 }
 
 beforeEach(() => {
@@ -162,9 +173,36 @@ it("(desktop) the Call today card counts only the 2h-48h, uncalled viewed offers
 it.each([
   ["desktop", 1440],
   ["mobile", 390],
-])("(%s) ?view=call_today opens the list on the Call today filter", async (_label, width) => {
+])("(%s) ?view=call_today opens the list on the Call today filter, then drops view from the URL", async (_label, width) => {
   const { container } = renderPage(width, "?tab=estimates&view=call_today");
   await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  // Taken once: a later filter change, a refresh or a return to the page is not pinned to Call today.
+  expect(routerProbe.search).toBe("?tab=estimates");
+});
+
+it("(desktop) the link also works on a list that is already open", async () => {
+  const { container } = renderPage(1440, "?tab=estimates");
+  await screen.findByText("Fresh View");
+  expect(rowIds(container)).toContain("v-1h");
+  act(() => routerProbe.navigate("/admin/pipeline?tab=estimates&view=call_today"));
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
+});
+
+it("(mobile) the status-pills flag loading after the link keeps Call today; after the customer picks All it stays All", async () => {
+  flags.estimates_v2_status_pills = false;
+  const { container, rerenderSame } = renderPage(390, "?tab=estimates&view=call_today");
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  flags.estimates_v2_status_pills = true; // the flag resolves after mount
+  rerenderSame();
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  fireEvent.click(screen.getByRole("button", { name: /^Filter: / }));
+  fireEvent.click(await screen.findByText(/^All \(\d+\)$/));
+  await waitFor(() => expect(rowIds(container)).toContain("v-1h"));
+  flags.estimates_v2_status_pills = false; // a flag refetch flips it again
+  rerenderSame();
+  await waitFor(() => expect(rowIds(container)).toContain("v-1h"));
+  expect(routerProbe.search).toBe("?tab=estimates");
 });
 
 it.each([

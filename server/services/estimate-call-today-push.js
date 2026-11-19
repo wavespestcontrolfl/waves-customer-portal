@@ -94,8 +94,10 @@ async function releaseDay(day) {
 // failure counted) is a skip: the claim is released so a later run may try. Anything else (a device failed, a retry is
 // pending, or a result shape we do not recognize, such as missing counters) is uncertain: the claim stays, so there is
 // never a second banner that day. The dispatcher's own `pushFailed` marker (its recipient lookup or push dispatch
-// threw, which also leaves push null) is a failure, not a disabled push: the claim stays and the run reports an error.
-// A claim release that fails is reported as claim_release_failed, never as a released claim. The log lines are fixed text.
+// threw, which also leaves push null) is a failure, not a disabled push, and the run reports an error. A failed
+// recipient lookup comes before any push is handed off, so its claim is released (a same-day rerun may send once the
+// database recovers); a thrown push dispatch may have reached a device, so its claim stays. A claim release that
+// fails is reported as claim_release_failed, never as a released claim. The log lines are fixed text.
 function isRecognizedNoDelivery(push) {
   if (push === null) return true;
   if (!push || typeof push !== 'object' || push.sent !== 0) return false;
@@ -110,6 +112,11 @@ async function settle(day, count, result) {
     const released = await releaseDay(day);
     logger.error(`[estimate-call-today] ${day}: banner not sent (${result?.error ? 'dispatch error' : result?.prefsUnavailable ? 'preferences unavailable' : 'no result'})${released ? '' : '; claim release failed'}`);
     return { count, sent: false, error: released ? 'dispatch_failed' : 'claim_release_failed' };
+  }
+  if (result.pushFailed === 'recipient_lookup') {
+    const released = await releaseDay(day);
+    logger.error(`[estimate-call-today] ${day}: recipient lookup failed before any push; ${released ? 'claim released' : 'claim release failed'}`);
+    return { count, sent: false, error: released ? 'recipient_lookup_failed' : 'claim_release_failed' };
   }
   if (result.pushFailed) {
     logger.error(`[estimate-call-today] ${day}: push dispatch failed (${String(result.pushFailed)}); claim kept`);

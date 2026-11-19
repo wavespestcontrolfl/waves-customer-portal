@@ -276,17 +276,31 @@ describe('the banner', () => {
       expect([...claimed]).toEqual([]);
     });
 
-    test('the dispatcher says its recipient lookup or push dispatch threw (pushFailed): an error, the claim stays, a rerun does not dispatch', async () => {
-      for (const marker of ['recipient_lookup', 'push_dispatch']) {
-        claimed.clear();
-        mockTrigger.mockClear();
-        mockTrigger.mockResolvedValue({ bellWritten: false, push: null, pushFailed: marker });
-        await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'push_dispatch_failed' });
-        expect([...claimed]).toEqual(['estimate_call_today:2026-11-19']);
-        expect(logger.error).toHaveBeenCalledWith(`[estimate-call-today] 2026-11-19: push dispatch failed (${marker}); claim kept`);
-        await expect(run()).resolves.toMatchObject({ skipped: 'already_claimed' });
-        expect(mockTrigger).toHaveBeenCalledTimes(1);
-      }
+    test('the dispatcher says its push dispatch threw (pushFailed push_dispatch): an error, the claim stays, a rerun does not dispatch', async () => {
+      mockTrigger.mockResolvedValue({ bellWritten: false, push: null, pushFailed: 'push_dispatch' });
+      await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'push_dispatch_failed' });
+      expect([...claimed]).toEqual(['estimate_call_today:2026-11-19']);
+      expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] 2026-11-19: push dispatch failed (push_dispatch); claim kept');
+      await expect(run()).resolves.toMatchObject({ skipped: 'already_claimed' });
+      expect(mockTrigger).toHaveBeenCalledTimes(1);
+    });
+
+    test('the dispatcher says its recipient lookup threw before any push: an error, the claim is released, a rerun sends', async () => {
+      mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null, pushFailed: 'recipient_lookup' });
+      await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'recipient_lookup_failed' });
+      expect([...claimed]).toEqual([]);
+      expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] 2026-11-19: recipient lookup failed before any push; claim released');
+      // The database is back: the same-day rerun takes the claim and sends.
+      await expect(run()).resolves.toMatchObject({ count: 1, sent: true });
+      expect(mockTrigger).toHaveBeenCalledTimes(2);
+    });
+
+    test('a failed recipient lookup whose claim release fails is claim_release_failed', async () => {
+      mockTrigger.mockResolvedValue({ bellWritten: false, push: null, pushFailed: 'recipient_lookup' });
+      releaseFails = true;
+      await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'claim_release_failed' });
+      expect([...claimed]).toEqual(['estimate_call_today:2026-11-19']);
+      expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] 2026-11-19: recipient lookup failed before any push; claim release failed');
     });
 
     test('a skip whose claim release fails is claim_release_failed, and the log says the release failed', async () => {
