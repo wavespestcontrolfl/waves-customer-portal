@@ -70,6 +70,22 @@ async function assertNoConflictingAuthenticationSettlement(intent, invoice, veri
   if (verifiedAttempt) query.whereNot({ id: verifiedAttempt.id });
   const conflict = await whereAwaitingAuthentication(query, 'stripe_invoice_charge_attempts').first('id');
   if (conflict) {
+    // An earlier lookup may have seen this attempt as claimed/ambiguous (or
+    // just missed its transition), while this read sees the worker's committed
+    // authentication_required state. Re-run the complete identity matcher on
+    // the same database handle. Only the exact attempt/invoice/customer/method/
+    // PI match is retryable; wrong-card/source/binding challenges keep the
+    // ordinary conflict quarantine below. A retry authorizes nothing itself.
+    const metadataAttemptId = intent.metadata?.saved_card_attempt_id;
+    const transitioned = metadataAttemptId && String(conflict.id) === String(metadataAttemptId)
+      ? await findSettlingAuthenticationAttempt(intent, invoice, database)
+      : null;
+    if (transitioned && String(transitioned.id) === String(conflict.id)) {
+      throw Object.assign(new Error(`Saved-card attempt ${conflict.id} changed state during succeeded settlement; retry`), {
+        code: 'SAVED_CARD_SETTLEMENT_STATE_CHANGED',
+        attemptId: conflict.id,
+      });
+    }
     throw Object.assign(new Error(`Captured PI ${intent.id} conflicts with pending saved-card authentication ${conflict.id} on invoice ${invoice.id}`), {
       code: 'SAVED_CARD_SETTLEMENT_IDENTITY_CONFLICT', invoice,
     });

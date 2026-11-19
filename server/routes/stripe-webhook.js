@@ -2179,7 +2179,10 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
         processor: 'stripe',
         stripe_payment_intent_id: piId,
         stripe_charge_id: paymentIntent.latest_charge || null,
-        payment_date: etDateString(),
+        // Cash-basis day follows Stripe's signed settlement event, not a
+        // delayed delivery/retry. An absent event timestamp is the only case
+        // that falls back to the current Eastern date.
+        payment_date: etDateString(eventCreated == null ? undefined : new Date(Number(eventCreated) * 1000)),
         amount: chargedTotal ?? centsToDollars(paymentIntent.amount),
         base_amount_cents: Math.round(metadataBaseAmount * 100),
         surcharge_amount_cents: Math.round(Number(paymentIntent.metadata?.card_surcharge || 0) * 100),

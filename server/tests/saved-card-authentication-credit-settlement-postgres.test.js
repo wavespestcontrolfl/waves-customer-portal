@@ -84,6 +84,20 @@ jest.setTimeout(20000);
     await expectSettled('15.00', '-25.00');
   });
 
+  test('a delayed authenticated success records Stripe settlement time and its Eastern cash-basis day', async () => {
+    // 2026-10-01 02:30 UTC was still September 30 in New York (EDT).
+    const eventCreated = Date.parse('2026-10-01T02:30:00.000Z') / 1000;
+
+    await settle(intent, eventCreated);
+
+    await expectSettled('15.00', '-25.00');
+    const payment = await mockDatabase('payments').where({ stripe_payment_intent_id: intent.id }).first();
+    expect(payment).toMatchObject({
+      metadata: expect.objectContaining({ settled_event_at: '2026-10-01T02:30:00.000Z' }),
+    });
+    expect(payment.payment_date.toISOString().slice(0, 10)).toBe('2026-09-30');
+  });
+
   test('settlement replaces the checkout this attempt retired, including its sibling stamps', async () => {
     const retired = `pi_old_${attemptId}`;
     const sibling = randomUUID();
@@ -109,6 +123,41 @@ jest.setTimeout(20000);
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
+
+  test('an exact ambiguous attempt becoming authentication-required is retried, then settles on fresh classification', async () => {
+    await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).update({
+      status: 'ambiguous',
+      decline_code: null,
+      resolved_at: null,
+    });
+    const holder = await mockDatabase.transaction();
+    let outcome;
+    try {
+      const { rows: [session] } = await holder.raw('SELECT pg_backend_pid() AS pid');
+      await holder('invoices').where({ id: invoiceId }).forUpdate().first('id');
+      outcome = settle(intent);
+      await waitForBlockedSettlement(session.pid);
+      await holder('stripe_invoice_charge_attempts').where({ id: attemptId }).update({
+        status: 'failed',
+        decline_code: 'authentication_required',
+        resolved_at: new Date(),
+      });
+      await holder.commit();
+
+      await expect(outcome).rejects.toMatchObject({ code: 'SAVED_CARD_SETTLEMENT_STATE_CHANGED' });
+      expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({
+        status: 'sent', credit_applied: '0.00', stripe_payment_intent_id: null,
+      });
+      expect(await mockDatabase('payments').where({ stripe_payment_intent_id: intent.id })).toHaveLength(0);
+      expect(await mockDatabase('stripe_orphan_charges').where({ stripe_payment_intent_id: intent.id })).toHaveLength(0);
+
+      await settle(intent);
+      await expectSettled('15.00', '-25.00');
+    } finally {
+      if (!holder.isCompleted()) await holder.rollback();
+      if (outcome) await outcome.catch(() => {});
+    }
+  });
 
   test('an unrelated checkout attached after the preliminary lookup is preserved', async () => {
     const retired = `pi_old_${attemptId}`;
