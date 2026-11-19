@@ -146,6 +146,25 @@ test('a visit already well placed (tight, clustered current day) does NOT move t
   expect(result.audit.routeMetrics.model).toBe('shared_v1');
 });
 
+test('ranking uses the identity-read booked window, never the stale windowless scan row', async () => {
+  const stale = { id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1',
+    window_start: null, window_end: null, recurring_dispatch_due_date: '2026-08-04',
+    estimated_duration_minutes: 60, lat: 27.40, lng: -82.50, auto_dispatch_change_count: 0 };
+  const live = { ...stale, window_start: '09:00', window_end: '10:00' };
+  const currentStops = [
+    stopRow('n1', '08:00', '09:00', 27.401, -82.501, { date: '2026-08-04', tech: 't1' }),
+    stopRow('n2', '10:00', '11:00', 27.399, -82.499, { date: '2026-08-04', tech: 't1' }),
+  ];
+  findAvailableSlots.mockResolvedValue({
+    slots: [{ date: '2026-08-11', technician: { id: 't2', name: 'B' }, start_time: '09:00', end_time: '10:00',
+      detour_minutes: 0, total_drive_minutes: 0, stops_that_day: 0, score: 0 }],
+  });
+  const result = await evaluatePlacement(stale, PREFS, ctxWith(routeDaysDb([], currentStops, [], live)), CONFIG, '2026-06-20');
+  expect(result.service.window_start).toBe('09:00');
+  expect(result.kind).toBe('no_change');
+  expect(result.reason_code).toBe('NO_SCORE_IMPROVEMENT');
+});
+
 test('a clearly better clustered day wins over a poorly-placed current day', async () => {
   const SVC = { id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1',
     window_start: '12:00', estimated_duration_minutes: 60, lat: 27.50, lng: -82.50,

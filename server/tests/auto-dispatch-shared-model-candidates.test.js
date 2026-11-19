@@ -148,6 +148,11 @@ describe('source snapshot drift fence', () => {
     await expect(sourceSnapshot({ ...SERVICE, visit_id: 'old' }, grouped(sourceDb(liveRow({ visit_id: 'new' })))))
       .rejects.toMatchObject({ code: SOURCE_SNAPSHOT_STALE, skipEvaluation: true });
   });
+
+  test.each(['auto_dispatch_locked', 'auto_dispatch_excluded'])('%s set after the scan fails closed', async (field) => {
+    await expect(sourceSnapshot(SERVICE, grouped(sourceDb(liveRow({ [field]: true })))))
+      .rejects.toMatchObject({ code: SOURCE_SNAPSHOT_STALE, skipEvaluation: true });
+  });
 });
 
 // The tech-day a batched day-stop row belongs to (the 2026-08-06 / t1 slot

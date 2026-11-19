@@ -252,6 +252,13 @@ function noSlotReason(drops, skipped) {
     : { code: 'NO_VALID_SLOT', description: 'No valid candidate slot found' };
 }
 
+// Candidate discovery returns the shared model's identity-read mover. Mocks
+// and the gate-off path may omit it; keep that compatibility out of the
+// already complexity-budgeted orchestration functions.
+function serviceSnapshotOf(result, fallback) {
+  return result.service ? result.service : fallback;
+}
+
 // Slots the far-south day rule (south-day-kept.js) kept out of this evaluation's candidates.
 const southKept = (drops) => !!drops && drops.south_day_kept > 0;
 
@@ -387,10 +394,14 @@ async function settleConflicts(run) {
   }
 }
 
-async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
+async function evaluatePlacement(inputService, prefs, ctx, config, lockBoundary) {
+  const found = await findSlotsOrSkip(inputService, prefs, ctx);
   const {
     current, candidates, drops, skipped, search, shadow_candidates: dryShadowCandidates = [], mowing, mowing_shadow_candidates: mowingShadowCandidates = null,
-  } = await findSlotsOrSkip(service, prefs, ctx);
+  } = found;
+  // Shared-model discovery point-reads the mover. Qualification, dry-run
+  // ranking and downstream checks all use that same anchored row.
+  const service = serviceSnapshotOf(found, inputService);
   const prefsSnapshot = prefs.raw_snapshot;
   const scoreCtx = { currentTechnicianId: service.technician_id, changeCount: service.auto_dispatch_change_count || 0 };
   // Already-moved visits must clear a higher bar (defeats the stability penalty)
@@ -408,7 +419,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
       : null;
     const reason = staleAnchorReason(noSlotReason(drops, skipped), ctx.tierMeta);
     return {
-      kind: 'no_change',
+      kind: 'no_change', service,
       reason_code: reason.code,
       reason_description: reason.description,
       conflict: (current && current.conflict) || null,
@@ -461,11 +472,11 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
 
   if (!ranked.qualifies) {
     return {
-      kind: 'no_change', ...withSouthNote(noMoveReason(ranked, improvement, threshold, routeMetrics, config), drops), conflict: current.conflict || null, audit: auditCtx,
+      kind: 'no_change', service, ...withSouthNote(noMoveReason(ranked, improvement, threshold, routeMetrics, config), drops), conflict: current.conflict || null, audit: auditCtx,
     };
   }
   return {
-    kind: 'move', improvement, best, rankedCandidates, current, currentScore, threshold, audit: auditCtx,
+    kind: 'move', service, improvement, best, rankedCandidates, current, currentScore, threshold, audit: auditCtx,
     withoutConflict: ordinaryMoveOf(ranked, { current, currentScore, service, prefs, lockBoundary, ctx, threshold, prefsSnapshot }),
   };
 }
@@ -1285,22 +1296,23 @@ async function evaluateServiceForRun(service, run) {
   if (limited) return logSkip(run, service, limited);
 
   const evalResult = await evaluatePlacement(service, prefs, ctx, config, run.lockBoundary);
-  await noteArrivalShadow(evalResult, { service, prefs, ctx, config, lockBoundary: run.lockBoundary });
+  const evaluatedService = serviceSnapshotOf(evalResult, service);
+  await noteArrivalShadow(evalResult, { service: evaluatedService, prefs, ctx, config, lockBoundary: run.lockBoundary });
   totals.evaluated++;
-  noteEvaluation(run, service, evalResult, ctx);
+  noteEvaluation(run, evaluatedService, evalResult, ctx);
 
   // A grouped move is only as legal as its siblings (Codex #4995 r4 P2) —
   // preview the apply-time member guard now, in every mode (Codex #6055 r2:
   // a person-placed sibling must refuse a dry-run recommendation too), so
   // neither a recommendation nor a planned move carries one apply would refuse.
   const refusal = evalResult.kind === 'move'
-    ? await previewGroupMove(service, evalResult.best, { ...config, prefs, lockBoundary: run.lockBoundary })
+    ? await previewGroupMove(evaluatedService, evalResult.best, { ...config, prefs, lockBoundary: run.lockBoundary })
     : null;
   const noChange = evalResult.kind === 'no_change' ? evalResult : refusal && guardSkipReason(refusal);
   if (noChange) {
-    noteUnmoved(run, service, noChange.reason_code);
+    noteUnmoved(run, evaluatedService, noChange.reason_code);
     return audit.logDecision(run.runId, {
-      action: 'no_change', service, reason_code: noChange.reason_code, reason_description: noChange.reason_description, ...evalResult.audit,
+      action: 'no_change', service: evaluatedService, reason_code: noChange.reason_code, reason_description: noChange.reason_description, ...evalResult.audit,
     });
   }
 
@@ -1313,12 +1325,12 @@ async function evaluateServiceForRun(service, run) {
     // An overlap is recommended at the end of the pass, in apply's own order
     // (recommendOverlapFixes), so the dry run names the visit apply would move.
     if (overlapOf(evalResult)) {
-      run.dryRunOverlaps.push({ service, result: evalResult });
+      run.dryRunOverlaps.push({ service: evaluatedService, result: evalResult });
       return undefined;
     }
-    return logDryRunRecommendation(run, service, evalResult);
+    return logDryRunRecommendation(run, evaluatedService, evalResult);
   }
-  run.plannedMoves.push({ service, prefs, ctx, result: evalResult });
+  run.plannedMoves.push({ service: evaluatedService, prefs, ctx, result: evalResult });
   return undefined;
 }
 
@@ -1473,6 +1485,7 @@ async function applyPlannedMove(pm, run, attempt) {
 
   const fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
   attempt.fresh = fresh;
+  pm.service = serviceSnapshotOf(fresh, pm.service);
   noteEvaluation(run, pm.service, fresh, pm.ctx);
   if (fresh.kind !== 'move') {
     // Re-scoring against the live schedule no longer clears the bar (an

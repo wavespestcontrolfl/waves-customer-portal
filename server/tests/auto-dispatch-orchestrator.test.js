@@ -1845,15 +1845,19 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
 
   test('allow: the visit moves on the approved slot only, and the row says the move was checked', async () => {
     await applyMode(async () => {
+      const anchored = svc({ window_start: '10:00', window_end: '11:00' });
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ service: anchored, current: CURRENT, candidates: [CAND_BIG, CAND_MODERATE] });
       checkMove.mockResolvedValue(ALLOW);
       expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 1, failed: 0 });
       const [{ service, best, run }] = checkMove.mock.calls[0];
       expect(service.id).toBe('s1');
+      expect(service.window_start).toBe('10:00');
       expect(best).toMatchObject({ date: CAND_BIG.date, start_time: CAND_BIG.start_time });
       expect(run.proofreader).toMatchObject({ calls: 0 });
       // The deadline counts from the run's entry, 300 seconds by default.
       expect(run.proofreader.deadlineAt).toBe(run.nowDate.getTime() + 300000);
       const options = apply.applyAutoDispatchMove.mock.calls[0][3];
+      expect(apply.applyAutoDispatchMove.mock.calls[0][0].window_start).toBe('10:00');
       expect(options.alternateCandidates).toEqual([]);
       expect(options.rescore).toBeUndefined();
       expect(lastDecision('changed').constraints.proofreader).toEqual(ALLOW.audit);
@@ -1997,9 +2001,12 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
   });
 
   test('a dry run never asks', async () => {
+    const anchored = svc({ window_start: '10:00', window_end: '11:00' });
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ service: anchored, current: CURRENT, candidates: [CAND_BIG] });
     checkMove.mockResolvedValue(ALLOW);
     expect(await runAutoDispatch({ mode: 'dry_run', proofreaderEnabled: true })).toMatchObject({ recommended: 1 });
     expect(checkMove).not.toHaveBeenCalled();
+    expect(lastDecision('recommended').service.window_start).toBe('10:00');
   });
 });
 
