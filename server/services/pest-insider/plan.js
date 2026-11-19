@@ -85,8 +85,8 @@ const tierBefore = (a, b) => { const i = a.findIndex((v, k) => v !== b[k]); retu
 // the best tier (pest kind, seasonal, high confidence) wins, and the send
 // date picks inside that tier, so equal facts rotate instead of the same id
 // always winning.
-function pickLeadFact(dateET, recentFactIds) {
-  const candidates = factsForSend(dateET, { excludeIds: recentFactIds });
+function pickLeadFact(dateET, recentFactIds, recheckedFactIds) {
+  const candidates = factsForSend(dateET, { excludeIds: recentFactIds, recheckedIds: recheckedFactIds });
   if (!candidates.length) return null;
   const previous = recentFactIds.length ? factById(recentFactIds[recentFactIds.length - 1]) : null;
   const fresh = previous ? candidates.filter((f) => f.service !== previous.service) : candidates;
@@ -98,15 +98,17 @@ function pickLeadFact(dateET, recentFactIds) {
 }
 
 /**
- * @param {{ sendDate: string|Date, recentFactIds?: string[], recentSpeciesSlugs?: string[] }} input
+ * @param {{ sendDate: string|Date, recentFactIds?: string[], recentSpeciesSlugs?: string[], recheckedFactIds?: string[] }} input
  *   recent* lists hold the last six issues' picks (RECENT_WINDOW), oldest
  *   first; every id in them is excluded, so a fact or species used there
  *   never repeats, and the last fact id names the previous issue's service.
+ *   recheckedFactIds names the recheck_before_send facts a person re-read
+ *   for this send; any other flagged fact is never picked.
  * @returns {{ leadFact: object|null, idItem: object|null, reason?: string }}
  */
-function planIssue({ sendDate, recentFactIds = [], recentSpeciesSlugs = [] }) {
+function planIssue({ sendDate, recentFactIds = [], recentSpeciesSlugs = [], recheckedFactIds = [] }) {
   const dateET = sendDateET(sendDate);
-  const leadFact = pickLeadFact(dateET, recentFactIds);
+  const leadFact = pickLeadFact(dateET, recentFactIds, recheckedFactIds);
   if (!leadFact) return { leadFact: null, idItem: null, reason: 'no_fact_for_month' };
   const idItem = pickSpecies({ dateET, fact: leadFact, recentSpeciesSlugs });
   if (!idItem) return { leadFact, idItem: null, reason: 'no_species' };

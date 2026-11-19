@@ -584,15 +584,16 @@
     {
       "id": "O01",
       "title": "North Port's blackout starts in April",
-      "statement": "In North Port, lawn fertilizer with nitrogen or phosphorus is banned from April 1 through Sept. 30.",
+      "statement": "In North Port, lawn fertilizer with nitrogen or phosphorus is banned from April 1 through Sept. 30; in most of Sarasota County, the ban starts June 1.",
       "lead": [
         "In North Port, lawn fertilizer with nitrogen or phosphorus is banned from April 1 through Sept. 30.",
-        "The rule covers lawns and landscape plants in residential areas."
+        "In most of Sarasota County, the ban starts June 1."
       ],
       "quotes": [
         "From April 1 through Sept. 30, no fertilizer containing nitrogen or phosphorus shall be applied to turf or landscape plants in residential areas.",
         "Use of fertilizer on turf grass is prohibited between April 1 through Sept. 30.",
-        "On May 9, 2023, the North Port City Commission approved"
+        "On May 9, 2023, the North Port City Commission approved",
+        "From June 1 through Sept. 30, no fertilizer containing nitrogen or phosphorus shall be applied to turf or landscape plants in residential areas."
       ],
       "sources": [
         {
@@ -620,7 +621,8 @@
       "quote_sources": [
         0,
         1,
-        1
+        1,
+        0
       ]
     },
     {

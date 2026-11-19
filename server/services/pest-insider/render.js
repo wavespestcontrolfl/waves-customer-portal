@@ -14,13 +14,12 @@
 'use strict';
 
 const { newsletterPalette, newsletterSectionTheme, wrapNewsletter, bodyIsDarkAware } = require('../email-template');
-const { formatDisplayDate } = require('../../utils/date-only');
+const { formatDisplayDate, validDateOnly } = require('../../utils/date-only');
 const { containsAffiliateMaterial } = require('../content/content-guardrails');
 
 const SITE = 'https://www.wavespestcontrol.com';
 const IDENTIFIER_URL = `${SITE}/pest-identifier/`;
 const FORWARD_LINE = 'Know a neighbor with a pest problem? Forward this email.';
-const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
 const escapeHtml = (text) => String(text ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -36,7 +35,8 @@ function httpsUrl(url, { host } = {}) {
 
 const siteUrl = (url) => httpsUrl(url, { host: 'www.wavespestcontrol.com' });
 const speciesUrl = (slug) => (/^[a-z0-9-]+$/.test(String(slug)) ? `${IDENTIFIER_URL}${slug}/` : null);
-const dateText = (value) => (DATE_ONLY.test(String(value)) ? formatDisplayDate(value) : '');
+// An impossible day (2027-02-30) is left out, never shown as the day it rolls over to.
+const dateText = (value) => (validDateOnly(String(value)) ? formatDisplayDate(value) : '');
 
 function headingHtml(index, label) {
   const palette = newsletterPalette();

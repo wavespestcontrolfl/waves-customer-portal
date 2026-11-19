@@ -104,9 +104,18 @@ describe('factsForSend', () => {
     expect(factsForSend('2026-12-03', { excludeIds: [first.id] }).map((f) => f.id)).not.toContain(first.id);
   });
 
+  test('a fact marked for a send-time recheck leads only when the caller names it as rechecked', () => {
+    const flagged = bank.facts.filter((f) => f.recheck_before_send).map((f) => f.id);
+    expect(flagged).toContain('M01');
+    const june = factsForSend('2027-06-03').map((f) => f.id);
+    expect(june.filter((id) => flagged.includes(id))).toEqual([]);
+    expect(factsForSend('2027-06-03', { recheckedIds: ['M01'] }).map((f) => f.id)).toContain('M01');
+  });
+
   test('a fact past expires_on is dropped, and still valid on the day itself', () => {
-    expect(factsForSend('2027-03-31').map((f) => f.id)).toContain('O04');
-    expect(factsForSend('2027-04-01').map((f) => f.id)).not.toContain('O04');
+    const rechecked = { recheckedIds: ['O04'] }; // O04 is also marked for a send-time recheck
+    expect(factsForSend('2027-03-31', rechecked).map((f) => f.id)).toContain('O04');
+    expect(factsForSend('2027-04-01', rechecked).map((f) => f.id)).not.toContain('O04');
     expect(FACTS.find((f) => f.id === 'O04').months).not.toContain(4);
   });
 
@@ -123,7 +132,7 @@ describe('factsForSend', () => {
     expect(sendDateET('2026-12-01T01:00:00Z')).toBe('2026-11-30');
     expect(sendDateET('2026-12-01T01:00:00-05:00')).toBe('2026-12-01');
     expect(sendDateET(' 2026-12-03 ')).toBe('2026-12-03');
-    for (const bad of ['December 3, 2026', '12/03/2026', '2026-12-03T25', '', null, 20261203]) {
+    for (const bad of ['December 3, 2026', '12/03/2026', '2026-12-03T25', '2026-12-03T25:99', '2026-12-03T24:00', '2026-12-03T12:60', '2026-12-03T12:00+25:00', '', null, 20261203]) {
       expect(() => sendDateET(bad)).toThrow(/sendDate must be/);
     }
     expect(() => sendDateET(new Date('nope'))).toThrow(/not a valid date/);

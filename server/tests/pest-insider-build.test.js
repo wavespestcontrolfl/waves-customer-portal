@@ -15,7 +15,7 @@ describe('buildIssue', () => {
     const plan = planOf(A01);
     const r = buildIssue({ sendDate: '2026-12-03', plan, blogUrl: 'https://www.wavespestcontrol.com/blog/white-footed-ants/' });
     expect(r.ok).toBe(true);
-    expect(plan).toHaveBeenCalledWith({ sendDate: '2026-12-03', recentFactIds: [], recentSpeciesSlugs: [] });
+    expect(plan).toHaveBeenCalledWith({ sendDate: '2026-12-03', recentFactIds: [], recentSpeciesSlugs: [], recheckedFactIds: [] });
     expect(r.issue.subject).toBe(`🐜 ${A01.title}`);
     expect(r.issue.preview).toBe("What's this? White-footed Ant");
     for (const line of A01.lead) {
@@ -51,6 +51,15 @@ describe('buildIssue', () => {
     expect(r.diagnostics.problems[0]).toMatchObject({ part: 'send_validator' });
   });
 
+  test('a lead fact marked for a send-time recheck is refused unless the caller names it as rechecked', () => {
+    const M01 = factById('M01');
+    expect(M01.recheck_before_send).toBe(true);
+    const plan = planOf(M01, SPECIES.find((s) => s.slug === 'house-centipede'));
+    expect(buildIssue({ sendDate: '2027-06-03', plan })).toMatchObject({ ok: false, issue: null, reason: 'recheck_needed: M01' });
+    expect(buildIssue({ sendDate: '2027-06-03', plan, recheckedFactIds: ['M01'] }).ok).toBe(true);
+    expect(plan.mock.calls[1][0].recheckedFactIds).toEqual(['M01']);
+  });
+
   test('passes planning failures through', () => {
     const used = factsForSend('2026-12-03').map((f) => f.id);
     expect(buildIssue({ sendDate: '2026-12-03', recent: { factIds: used } })).toMatchObject({ ok: false, reason: 'no_fact_for_month', issue: null });
@@ -79,7 +88,7 @@ describe('buildIssue', () => {
 
 describe('every issue the bank can make', () => {
   test.each(FACTS.filter((f) => !f.reserve).map((f) => [f.id, f]))('%s builds an issue the send validator accepts', (_id, fact) => {
-    const r = buildIssue({ sendDate: '2026-12-03', plan: planOf(fact) });
+    const r = buildIssue({ sendDate: '2026-12-03', plan: planOf(fact), recheckedFactIds: [fact.id] });
     expect({ reason: r.reason, problems: r.diagnostics.problems }).toEqual({ reason: null, problems: [] });
   });
 
@@ -112,7 +121,9 @@ describe('every issue the bank can make', () => {
     });
     expect(built).toHaveLength(26);
     expect(built.filter((b) => b.reason)).toEqual([]);
+    // With no recheck recorded, no fact marked for one ever leads.
+    expect(recent.factIds.filter((id) => factById(id).recheck_before_send)).toEqual([]);
     // The two default sample dates (ops/agents/pest-insider-sample.js).
-    expect(recent.factIds.slice(0, 2)).toEqual(['T03', 'A02']);
+    expect(recent.factIds.slice(0, 2)).toEqual(['T03', 'A01']);
   });
 });

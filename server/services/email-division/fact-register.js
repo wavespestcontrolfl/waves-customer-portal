@@ -663,6 +663,31 @@ function swarmOutOfSeason(clause, formosan) {
   return OUT_OF_SEASON.test(formosan ? clause.replace(/\bjune\b/gi, ' ') : clause);
 }
 
+// CLAUSE_BREAK splits a month list off its verb: "swarm in June and July"
+// becomes "swarm in June" + "July", and "In October, native termites swarm"
+// puts October in a clause of its own. A clause made only of time words
+// ("July", "in the fall", "December through May", "and again in July")
+// belongs to the swarm clause next to it, so the season test reads the whole
+// list (pre-push round 4: the Formosan June exception let "June and July"
+// pass). A clause with any other word is its own statement and stays out.
+const TIME_WORDS = new Set(['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december', 'spring', 'summer', 'summertime', 'fall', 'autumn', 'winter']);
+const TIME_FILLER = new Set(['in', 'during', 'through', 'thru', 'until', 'till', 'to', 'from', 'into', 'or', 'the', 'early', 'mid', 'late', 'also', 'too', 'even', 'again', 'mostly', 'especially', 'sometimes', 'occasionally']);
+
+function timeOnlyClause(clause) {
+  const words = clause.toLowerCase().match(/[a-z]+/g) || [];
+  return words.some((w) => TIME_WORDS.has(w)) && words.every((w) => TIME_WORDS.has(w) || TIME_FILLER.has(w));
+}
+
+// The swarm clause at `index` joined with the time-only clauses on either
+// side; `start` is the first clause of that span.
+function swarmSpan(clauses, index) {
+  let start = index;
+  let end = index;
+  while (start > 0 && timeOnlyClause(clauses[start - 1])) start -= 1;
+  while (end < clauses.length - 1 && timeOnlyClause(clauses[end + 1])) end += 1;
+  return { start, text: clauses.slice(start, end + 1).join(' ') };
+}
+
 // The kind of termite the last mention in `text` names: 'drywood',
 // 'other', or null when no termite is mentioned.
 function lastTermiteKind(text) {
@@ -697,11 +722,12 @@ function termiteClaimInSentence(sentence, previousSentence) {
     }
     if (subject !== 'other') continue;
     if (!SWARM_WORD.test(clause)) continue;
-    const repeat = REPEAT_TRIGGER.test(clause);
-    const outOfSeason = !repeat && swarmOutOfSeason(clause, formosan) && !SWARM_RECEDES.test(clause);
+    const span = swarmSpan(clauses, i);
+    const repeat = REPEAT_TRIGGER.test(span.text);
+    const outOfSeason = !repeat && swarmOutOfSeason(span.text, formosan) && !SWARM_RECEDES.test(span.text);
     if (!repeat && !outOfSeason) continue;
-    if (clauseDenies(clause) || previousClauseIsMythLabel(clauses, i)) continue;
-    return clause;
+    if (clauseDenies(clause) || previousClauseIsMythLabel(clauses, span.start)) continue;
+    return span.text;
   }
   return null;
 }

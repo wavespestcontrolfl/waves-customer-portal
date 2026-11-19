@@ -42,6 +42,10 @@ describe('renderIssue', () => {
       expect(renderIssue({ ...BASE, blogUrl }).html_body).not.toContain('Read the full story');
     }
     expect(renderIssue({ ...BASE, home: { lastVisit: { date: 'not a date' } } }).html_body).not.toContain('Your home');
+    // an impossible day (2027-02-30) is left out, never shown as March 2
+    const rolled = renderIssue({ ...BASE, home: { nextVisit: { date: '2027-02-30', service: 'pest control' }, sinceDate: '2024-03-12' } });
+    expect(rolled.text_body).not.toMatch(/Next visit|March 2/);
+    expect(rolled.text_body).toContain('With us since March 12, 2024');
     expect(renderIssue({ ...BASE, tool: { name: 'No link', why: 'x', url: 'http://insecure.example.com' } }).html_body).not.toContain('No link');
   });
 

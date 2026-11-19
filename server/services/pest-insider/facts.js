@@ -21,8 +21,9 @@ const CONFIDENCES = new Set(['high', 'medium']);
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 // An ISO timestamp with no offset is Eastern wall-clock time (the portal is
 // Eastern-only); one with Z or an offset is an instant.
-const LOCAL_TIMESTAMP = /^(\d{4}-\d{2}-\d{2})[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
-const OFFSET_TIMESTAMP = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i;
+const CLOCK = '(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?';
+const LOCAL_TIMESTAMP = new RegExp(`^(\\d{4}-\\d{2}-\\d{2})[T ]${CLOCK}$`);
+const OFFSET_TIMESTAMP = new RegExp(`^\\d{4}-\\d{2}-\\d{2}[T ]${CLOCK}(?:Z|[+-](?:[01]\\d|2[0-3]):?[0-5]\\d)$`, 'i');
 
 /** How many reviewed lead sentences a main fact carries. */
 const LEAD_MIN = 2;
@@ -121,17 +122,22 @@ function byPreference(a, b) {
 /**
  * Facts that may lead an issue sent on `sendDate` (ET): reserve facts, facts
  * past their expires_on and facts outside the send month are dropped, as are
- * `excludeIds`. Order: kind 'pest' first, then confidence high, then id.
+ * `excludeIds`. A fact marked recheck_before_send (a source that changes or
+ * could not be re-read automatically) is dropped too, unless its id is in
+ * `recheckedIds`: the caller's record that a person re-read the source for
+ * this send. Order: kind 'pest' first, then confidence high, then id.
  */
-function factsForSend(sendDate, { excludeIds = [] } = {}) {
+function factsForSend(sendDate, { excludeIds = [], recheckedIds = [] } = {}) {
   const dateET = sendDateET(sendDate);
   const month = monthOf(dateET);
   const excluded = new Set(excludeIds);
+  const rechecked = new Set(recheckedIds);
   return FACTS
     .filter((f) => !f.reserve)
     .filter((f) => !f.expires_on || dateET <= f.expires_on)
     .filter((f) => f.months.includes(month))
     .filter((f) => !excluded.has(f.id))
+    .filter((f) => !f.recheck_before_send || rechecked.has(f.id))
     .sort(byPreference);
 }
 

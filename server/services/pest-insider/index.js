@@ -5,7 +5,9 @@
  * the database; the caller supplies recent picks and the optional blocks (blog
  * link, area line, tool, per-recipient home block). Every word of the lead
  * and of "What's this?" is fixed, reviewed copy: the fact bank's `lead`
- * sentences and title, and the identifier species entry's fact.
+ * sentences and title, and the identifier species entry's fact. A fact
+ * marked recheck_before_send leads only when the caller names it in
+ * `recheckedFactIds` (a person re-read its source for this send).
  * Returns { ok, reason, issue, diagnostics } where `issue` is
  * { subject, preview, html_body, text_body } when ok.
  */
@@ -39,10 +41,10 @@ function sendGateErrors(issue) {
 
 /**
  * @param {{ sendDate: string|Date, recent?: { factIds?: string[], speciesSlugs?: string[] },
- *   blogUrl?: string|null, areaLine?: string|null, tool?: object|null, home?: object|null,
- *   plan?: Function }} input   `plan` is the planner (injectable for tests).
+ *   recheckedFactIds?: string[], blogUrl?: string|null, areaLine?: string|null, tool?: object|null,
+ *   home?: object|null, plan?: Function }} input   `plan` is the planner (injectable for tests).
  */
-function buildIssue({ sendDate, recent = {}, blogUrl = null, areaLine = null, tool = null, home = null, plan = planIssue }) {
+function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], blogUrl = null, areaLine = null, tool = null, home = null, plan = planIssue }) {
   const dateET = sendDateET(sendDate);
   const diagnostics = { sendDate: dateET, factId: null, speciesSlug: null, problems: [], fallbacks: [] };
 
@@ -50,10 +52,14 @@ function buildIssue({ sendDate, recent = {}, blogUrl = null, areaLine = null, to
     sendDate: dateET,
     recentFactIds: recent.factIds || [],
     recentSpeciesSlugs: recent.speciesSlugs || [],
+    recheckedFactIds,
   });
   diagnostics.factId = leadFact ? leadFact.id : null;
   diagnostics.speciesSlug = idItem ? idItem.slug : null;
   if (!leadFact || !idItem) return { ok: false, reason, issue: null, diagnostics };
+  if (leadFact.recheck_before_send && !recheckedFactIds.includes(leadFact.id)) {
+    return { ok: false, reason: `recheck_needed: ${leadFact.id}`, issue: null, diagnostics };
+  }
 
   const copy = checkIssueCopy({ leadFact, species: idItem });
   diagnostics.problems = copy.problems;

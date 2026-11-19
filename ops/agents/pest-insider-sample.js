@@ -14,7 +14,8 @@
  *     --demo-blocks   fill the optional blocks (area line, tool, home) with synthetic text
  *
  * Dates run in order: each issue's fact and species count as "recent" for the
- * next one, the way the real schedule will.
+ * next one, the way the real schedule will. No recheck is recorded here, so a
+ * fact marked recheck_before_send never leads a sample.
  *
  * Per date it writes pest-insider-<date>.html (the body inside the newsletter
  * chrome, for opening in a browser) and pest-insider-<date>.txt, and prints
