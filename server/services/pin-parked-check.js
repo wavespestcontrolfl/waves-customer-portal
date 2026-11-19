@@ -569,11 +569,11 @@ function suggestionDay(row) {
  * day the truck stood there (stop_started_at) and the truck of the technician who made it, read again for that one
  * day (late data can show the truck at the pin after the bell). Any parked gap of BRIEF_STOP_MIN_MINUTES or more at
  * the stored pin is "the truck came to the pin". A day past the lookback cap is not read, nor one that began before
- * the technician's tracker was remapped (it may have been another vehicle: dayBeforeMapping). `stopsOfDay(imei, day)`
- * reads that vehicle-day (recheckOpenSuggestions shares one read per vehicle-day). A read that fails answers no: the
- * suggestion stays as it was.
+ * the technician's tracker was remapped (it may have been another vehicle: dayBeforeMapping). `vehicleStops(imei, day)`
+ * gives that vehicle's parked gaps over a read that covers the day (recheckOpenSuggestions: one read per vehicle); only
+ * the gaps that START on the day count. A read that fails answers no: the suggestion stays as it was.
  */
-async function suggestionExplained(conn, row, technician, { radius, now, stopsOfDay }) {
+async function suggestionExplained(conn, row, technician, { radius, now, vehicleStops }) {
   const pin = usablePin(row.pin_lat, row.pin_lng);
   const spot = usablePin(row.parked_lat, row.parked_lng);
   const imei = String((technician && technician.bouncie_imei) || '').trim();
@@ -581,7 +581,7 @@ async function suggestionExplained(conn, row, technician, { radius, now, stopsOf
   if (!pin || !spot || !imei || !day) return false;
   if (day < etDateString(addETDays(now, -MAX_LOOKBACK_DAYS)) || dayBeforeMapping(day, technician.bouncie_imei_changed_at)) return false;
   try {
-    if (!briefStopNear(await stopsOfDay(imei, day), [pin], day, radius)) return false;
+    if (!briefStopNear(await vehicleStops(imei, day), [pin], day, radius)) return false;
     return await otherCustomerPinNear(conn, row.customer_id, spot, radius);
   } catch (err) {
     logger.warn(`${LOG} could not check an open suggestion again`, { error: err.code || err.name });
@@ -593,8 +593,10 @@ async function suggestionExplained(conn, row, technician, { radius, now, stopsOf
  * Every open suggestion the two-fact rule now explains is closed (superseded, with its bell) BEFORE any visit is
  * decided: insertSuggestion keeps an open suggestion for the same pin ("already_open"), so a newer visit's suggestion
  * could not replace it. A closed one leaves `openByCustomer`. Every open suggestion whose stop is inside the lookback
- * cap is checked on every run while it stays open; the reads are one technicians read and at most one truck read per
- * vehicle-day (a technician's suggestions of one day share it). Returns the count closed.
+ * cap is checked on every run while it stays open. The reads are one technicians read, then ONE paged read per
+ * vehicle from the first day its suggestions need through today, as the visit scan reads its trucks (loadVehicles):
+ * every event received by now. So a parked gap that ends after midnight, or whose events arrive late, is seen here
+ * exactly as the visit scan sees it. Returns the count closed.
  */
 async function recheckOpenSuggestions(conn, openByCustomer, { radius, now }) {
   const cap = etDateString(addETDays(now, -MAX_LOOKBACK_DAYS));
@@ -609,20 +611,26 @@ async function recheckOpenSuggestions(conn, openByCustomer, { radius, now }) {
     logger.warn(`${LOG} could not read the technicians of open suggestions`, { error: err.code || err.name });
     return 0;
   }
-  const days = new Map();
-  const stopsOfDay = (imei, day) => {
-    const key = `${imei} ${day}`;
-    if (!days.has(key)) {
-      const { startMs, endMs } = etDayBounds(day);
-      days.set(key, truckStops.loadTruckStops(conn, imei, {
-        fromMs: startMs, toMs: endMs, maxGapMeters: radius, now: now.getTime(), minMinutes: BRIEF_STOP_MIN_MINUTES,
+  const firstDay = new Map();
+  for (const row of rows) {
+    const tech = technicians.get(String(row.technician_id));
+    const imei = String((tech && tech.bouncie_imei) || '').trim();
+    const known = firstDay.get(imei);
+    if (imei && (!known || suggestionDay(row) < known)) firstDay.set(imei, suggestionDay(row));
+  }
+  const reads = new Map();
+  const vehicleStops = (imei, day) => {
+    if (!reads.has(imei)) {
+      reads.set(imei, truckStops.loadTruckStops(conn, imei, {
+        fromMs: etDayBounds(firstDay.get(imei) || day).startMs, toMs: etDayBounds(etDateString(now)).endMs,
+        maxGapMeters: radius, now: now.getTime(), minMinutes: BRIEF_STOP_MIN_MINUTES,
       }));
     }
-    return days.get(key);
+    return reads.get(imei);
   };
   let closed = 0;
   for (const row of rows) {
-    if (!(await suggestionExplained(conn, row, technicians.get(String(row.technician_id)), { radius, now, stopsOfDay }))) continue;
+    if (!(await suggestionExplained(conn, row, technicians.get(String(row.technician_id)), { radius, now, vehicleStops }))) continue;
     try {
       const done = await store.closeSuggestion(row.id, 'superseded', {
         reason: 'other_customer_stop', resolution: "Closed: the truck also came to the pin that day; the long stop was at another customer's", conn,

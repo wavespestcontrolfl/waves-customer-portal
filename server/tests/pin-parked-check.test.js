@@ -481,14 +481,14 @@ describe("a short stop at the pin, then the long stop at another customer's", ()
       return fn;
     };
     const explained = (conn, row, stops, { tech = TECH, now = LATER } = {}) => p.suggestionExplained(conn, row, tech, {
-      radius: RADIUS, now, stopsOfDay: typeof stops === 'function' ? stops : reads(stops),
+      radius: RADIUS, now, vehicleStops: typeof stops === 'function' ? stops : reads(stops),
     });
 
     test("both facts on the suggestion's own pin, spot and day explain it; its visit is never read", async () => {
       const conn = pinsConn({ customers: FOUND });
-      const stopsOfDay = reads([parkedOn('2026-10-08')]);
-      expect(await explained(conn, openRow(), stopsOfDay)).toBe(true);
-      expect(stopsOfDay.calls).toEqual([['imei-1', '2026-10-08']]); // the truck of the technician who made it, that ET day
+      const vehicleStops = reads([parkedOn('2026-10-08')]);
+      expect(await explained(conn, openRow(), vehicleStops)).toBe(true);
+      expect(vehicleStops.calls).toEqual([['imei-1', '2026-10-08']]); // the truck of the technician who made it, that ET day
       expect(conn.tables()).toEqual(['customers as c', 'customer_properties as p']);
       const raw = conn.calls[0].steps.find(([name]) => name === 'whereRaw');
       expect(raw[2][0]).toBeCloseTo(at(310).lat, 7); // measured from the stored parked spot
@@ -514,22 +514,22 @@ describe("a short stop at the pin, then the long stop at another customer's", ()
 
     test('the day read is the ET day of the stored stop: 22:30 ET is still that day', async () => {
       const late = openRow({ stop_started_at: new Date('2026-10-09T02:30:00Z') }); // Oct 8, 22:30 ET
-      const stopsOfDay = reads([parkedOn('2026-10-08')]);
-      expect(await explained(pinsConn({ customers: FOUND }), late, stopsOfDay)).toBe(true);
-      expect(stopsOfDay.calls).toEqual([['imei-1', '2026-10-08']]);
+      const vehicleStops = reads([parkedOn('2026-10-08')]);
+      expect(await explained(pinsConn({ customers: FOUND }), late, vehicleStops)).toBe(true);
+      expect(vehicleStops.calls).toEqual([['imei-1', '2026-10-08']]);
     });
 
     test('a day past the lookback cap, a day before the tracker was remapped, or no tracker: nothing is read, it stays open', async () => {
-      const stopsOfDay = reads([parkedOn('2026-10-08')]);
+      const vehicleStops = reads([parkedOn('2026-10-08')]);
       const conn = pinsConn({ customers: FOUND });
-      expect(await explained(conn, openRow(), stopsOfDay, { now: new Date('2026-10-16T12:00:00Z') })).toBe(false); // cap Oct 9
-      expect(await explained(conn, openRow(), stopsOfDay, { tech: { ...TECH, bouncie_imei_changed_at: new Date('2026-10-08T18:00:00Z') } })).toBe(false);
-      expect(await explained(conn, openRow(), stopsOfDay, { tech: { ...TECH, bouncie_imei: ' ' } })).toBe(false);
-      expect(await explained(conn, openRow(), stopsOfDay, { tech: null })).toBe(false); // the technician is gone
-      expect(stopsOfDay.calls).toEqual([]);
-      expect(await explained(conn, openRow(), stopsOfDay, { now: new Date('2026-10-15T12:00:00Z') })).toBe(true); // cap Oct 8
+      expect(await explained(conn, openRow(), vehicleStops, { now: new Date('2026-10-16T12:00:00Z') })).toBe(false); // cap Oct 9
+      expect(await explained(conn, openRow(), vehicleStops, { tech: { ...TECH, bouncie_imei_changed_at: new Date('2026-10-08T18:00:00Z') } })).toBe(false);
+      expect(await explained(conn, openRow(), vehicleStops, { tech: { ...TECH, bouncie_imei: ' ' } })).toBe(false);
+      expect(await explained(conn, openRow(), vehicleStops, { tech: null })).toBe(false); // the technician is gone
+      expect(vehicleStops.calls).toEqual([]);
+      expect(await explained(conn, openRow(), vehicleStops, { now: new Date('2026-10-15T12:00:00Z') })).toBe(true); // cap Oct 8
       // remapped before that day began: the current tracker is the one that drove it
-      expect(await explained(conn, openRow(), stopsOfDay, { tech: { ...TECH, bouncie_imei_changed_at: new Date('2026-10-01T12:00:00Z') } })).toBe(true);
+      expect(await explained(conn, openRow(), vehicleStops, { tech: { ...TECH, bouncie_imei_changed_at: new Date('2026-10-01T12:00:00Z') } })).toBe(true);
     });
 
     test('no stored pin, spot or stop time, or a read that fails: it stays open', async () => {
@@ -560,30 +560,32 @@ describe("a short stop at the pin, then the long stop at another customer's", ()
       return conn;
     }
 
-    test('every open suggestion inside the cap is checked; an explained one closes and leaves the map; one truck read per vehicle-day', async () => {
+    test('every open suggestion inside the cap is checked; an explained one closes and leaves the map; one truck read per vehicle', async () => {
       const store = require('../services/customer-pin-suggestions');
       const close = jest.spyOn(store, 'closeSuggestion').mockImplementation(async (id) => ({ id }));
       const load = jest.spyOn(truckStops, 'loadTruckStops').mockResolvedValue([parkedOn('2026-10-08')]);
       try {
         const openByCustomer = new Map([
           ['customer-1', openRow()],
-          ['customer-2', openRow({ id: 's-2', customer_id: 'customer-2' })], // the same truck and day: the read is shared
+          ['customer-2', openRow({ id: 's-2', customer_id: 'customer-2', stop_started_at: new Date('2026-10-09T14:25:00Z') })], // the same truck, a day later: one read
+          ['customer-5', openRow({ id: 's-5', customer_id: 'customer-5', technician_id: 'tech-5' })], // another truck, nothing at the pin
           ['customer-3', openRow({ id: 's-3', customer_id: 'customer-3', stop_started_at: new Date('2026-10-01T14:25:00Z') })], // past the cap
           ['customer-4', openRow({ id: 's-4', customer_id: 'customer-4', technician_id: null })],
         ]);
-        const conn = recheckConn();
+        const conn = recheckConn({ technicians: [TECH, { id: 'tech-5', bouncie_imei: 'imei-5', bouncie_imei_changed_at: null }] });
+        load.mockImplementation(async (_conn, imei) => (imei === 'imei-1' ? [parkedOn('2026-10-08'), parkedOn('2026-10-09')] : []));
         expect(await p.recheckOpenSuggestions(conn, openByCustomer, { radius: RADIUS, now: LATER })).toBe(2);
         expect(close.mock.calls.map(([id]) => id)).toEqual(['s-1', 's-2']);
         expect(close).toHaveBeenCalledWith('s-1', 'superseded', expect.objectContaining({
           reason: 'other_customer_stop', resolution: "Closed: the truck also came to the pin that day; the long stop was at another customer's",
         }));
-        expect([...openByCustomer.keys()]).toEqual(['customer-3', 'customer-4']);
-        expect(conn.techReads).toEqual([['id', ['tech-1']]]);
-        expect(load).toHaveBeenCalledTimes(1);
-        const [, imei, opts] = load.mock.calls[0];
-        const { startMs, endMs } = p.etDayBounds('2026-10-08');
-        expect(imei).toBe('imei-1');
-        expect(opts).toEqual({ fromMs: startMs, toMs: endMs, maxGapMeters: RADIUS, now: LATER.getTime(), minMinutes: 1 });
+        expect([...openByCustomer.keys()]).toEqual(['customer-5', 'customer-3', 'customer-4']);
+        expect(conn.techReads).toEqual([['id', ['tech-1', 'tech-5']]]);
+        // One read per vehicle, from the first day its suggestions need through today (every event received by now).
+        expect(load.mock.calls.map(([, imei]) => imei)).toEqual(['imei-1', 'imei-5']);
+        expect(load.mock.calls[0][2]).toEqual({
+          fromMs: p.etDayBounds('2026-10-08').startMs, toMs: p.etDayBounds('2026-10-10').endMs, maxGapMeters: RADIUS, now: LATER.getTime(), minMinutes: 1,
+        });
       } finally { close.mockRestore(); load.mockRestore(); }
     });
 

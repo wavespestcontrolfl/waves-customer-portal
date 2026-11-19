@@ -516,6 +516,24 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
       expect((await all(customerId)).map((r) => r.status)).toEqual(['superseded']);
     });
 
+    test('a short stop that starts before ET midnight and whose last event arrives late is still read by the recheck', async () => {
+      const { customerId } = await ourVisit();
+      await customer(north(338));
+      const away = north(4000);
+      // 10:20 to 10:49 ET: the long stop 310 m north, next to the other customer.
+      await tripData(`trip-a-${randomUUID()}`, [['2026-10-08T14:00:00Z', away], ['2026-10-08T14:20:00Z', north(310)]], { receivedAt: '2026-10-08T15:00:00Z' });
+      await tripData(`trip-b-${randomUUID()}`, [['2026-10-08T14:49:00Z', north(310)], ['2026-10-08T14:59:00Z', away]], { receivedAt: '2026-10-08T15:00:00Z' });
+      // 23:59 ET Oct 8 to 00:02 ET Oct 9 at the pin. The trip that leaves at 00:02 reaches us at 12:01 ET, more than
+      // 12 hours after Oct 8 ended (still inside 12 hours of the gap's end).
+      await tripData(`trip-c-${randomUUID()}`, [['2026-10-09T03:40:00Z', away], ['2026-10-09T03:59:00Z', north(19)]], { receivedAt: '2026-10-09T04:30:00Z' });
+      await tripData(`trip-d-${randomUUID()}`, [['2026-10-09T04:02:00Z', north(19)], ['2026-10-09T04:12:00Z', away]], { receivedAt: '2026-10-09T16:01:00Z' });
+      expect(await run()).toMatchObject({ created: 1 }); // 08:00 ET Oct 9: the trip that left the pin is not in yet
+      const bell = await bellFor((await open(customerId))[0]);
+      expect(await runPinParkedCheck({ now: new Date('2026-10-10T12:00:00Z'), conn: mockPg })).toMatchObject({ created: 0, closed: 1, other_customer_stop: 1 });
+      expect((await all(customerId)).map((r) => r.status)).toEqual(['superseded']);
+      expect((await bellNow(bell.id)).done_at).not.toBeNull();
+    });
+
     test('a short stop at the pin on another day does not clear the long stop', async () => {
       // The visit was started Oct 7 (a 3 minute stop at the pin) and done Oct 8 (29 minutes at the other customer's).
       const techId = await technician();
