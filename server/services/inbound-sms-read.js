@@ -342,7 +342,10 @@ async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, exc
     .modify((q) => { if (senderKey) q.whereRaw(`${address.peerSql} = ?`, [senderKey]); })
     .modify((q) => {
       for (const phone of excludePhones) {
-        q.whereNot('c.our_endpoint_id', phone)
+        // Null-safe on every side: a thread with no stored business line (its
+        // text or legacy row names the line) still counts on the badge, so
+        // Mark all read must reach it.
+        q.where((b) => b.whereNot('c.our_endpoint_id', phone).orWhereNull('c.our_endpoint_id'))
           .where((b) => b.whereNot('c.contact_phone', phone).orWhereNull('c.contact_phone'))
           .where((b) => b.whereNot('cu.phone', phone).orWhereNull('cu.phone'));
       }

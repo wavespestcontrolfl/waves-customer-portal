@@ -1406,11 +1406,12 @@ it("Mark all read stays disabled while its write is out, so a slow write cannot 
   expect(screen.getByRole("button", { name: "Mark all read" })).not.toBeDisabled();
 });
 
-it("a technician's large row read goes out in batches of 200 ids", async () => {
+it("a technician's large row read goes out in batches of 200 ids, all started at once", async () => {
   messages = Array.from({ length: 450 }, (_, i) => ({ ...inbound(`m${i}`, `Text ${i}`), isRead: false, createdAt: new Date(Date.UTC(2024, 6, 1, 12, 0, i)).toISOString() }));
   render(<MemoryRouter><Routes><Route element={<Outlet context={{ user: { id: "tech-1", role: "technician" } }} />}><Route path="*" element={<SmsTab active />} /></Route></Routes></MemoryRouter>);
   await tick();
   fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
-  await tick(5000); await tick(0); await tick(0);
+  // Closing the tab starts every batch at once, so none waits on another.
+  await act(async () => { window.dispatchEvent(new Event("pagehide")); });
   expect(readPosts("/messages/read").map(([, init]) => JSON.parse(init.body).messageIds.length)).toEqual([200, 200, 50]);
 });

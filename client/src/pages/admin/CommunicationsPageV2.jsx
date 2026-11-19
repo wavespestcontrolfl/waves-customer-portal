@@ -1812,14 +1812,17 @@ export function SmsTab({
         });
       } else {
         // A row with no phone, or a technician's row: its loaded texts, in
-        // batches that stay well under the browser's 64 KiB keepalive limit.
+        // batches under the browser's 64 KiB keepalive limit, all started at
+        // once so a tab that closes cannot stop the later ones.
+        const batches = [];
         for (let i = 0; i < pending.messageIds.length; i += LIST_READ_ID_BATCH) {
-          await adminFetch("/admin/communications/messages/read", {
-            method: "POST",
-            keepalive: true,
-            body: JSON.stringify({ messageIds: pending.messageIds.slice(i, i + LIST_READ_ID_BATCH) }),
-          });
+          batches.push(pending.messageIds.slice(i, i + LIST_READ_ID_BATCH));
         }
+        await Promise.all(batches.map((messageIds) => adminFetch("/admin/communications/messages/read", {
+          method: "POST",
+          keepalive: true,
+          body: JSON.stringify({ messageIds }),
+        })));
       }
       const readAt = new Date().toISOString();
       readCommitSeqRef.current += 1;

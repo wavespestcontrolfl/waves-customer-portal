@@ -95,7 +95,7 @@ test('Mark all read selects unread inbound texts up to the boundary, never recru
   expect(select.sql).toContain('"m"."message_type" not like ?');
   expect(select.sql).not.toContain('"c"."customer_id" in');
   // The inbox log's internal-phone exclusion: either side of the thread, or the customer's phone.
-  expect(select.sql).toContain('not "c"."our_endpoint_id" = ?');
+  expect(select.sql).toContain('(not "c"."our_endpoint_id" = ? or "c"."our_endpoint_id" is null)');
   expect(select.sql).toContain('(not "c"."contact_phone" = ? or "c"."contact_phone" is null)');
   expect(select.sql).toContain('(not "cu"."phone" = ? or "cu"."phone" is null)');
   expect(select.bindings).toEqual(expect.arrayContaining(['sms', 'inbound', 'job\\_%', '+19415550199']));

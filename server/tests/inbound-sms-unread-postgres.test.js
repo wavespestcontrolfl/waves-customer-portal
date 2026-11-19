@@ -168,6 +168,8 @@ postgres('public SMS needs-response count (PostgreSQL)', () => {
     const later = await text('arrived after the list loaded', { phone: '+19415550102', createdAt: '2026-11-19T12:00:00.124001Z' });
     const internal = await text('internal phone', { phone: '+19415550199' });
     const recruiting = await text('applicant reply', { phone: '+19415550103', type: 'job_applicant_reply' });
+    // A thread with no stored business line still counts on the badge.
+    const noLine = await text('no stored business line', { phone: '+19415550108', ours: null });
     const blockedText = await text('blocked sender', { phone: '+19415550104' });
     await mockPg('blocked_numbers').insert({ id: randomUUID(), number: '(941) 555-0104' });
     // A customer's second phone shares the thread; the inbox names it by the linked legacy row's sender.
@@ -180,7 +182,8 @@ postgres('public SMS needs-response count (PostgreSQL)', () => {
     const resetTagged = await text('read by a backlog reset', { phone: '+19415550107', read: true, metadata: { backlog_reset: { at: '2026-11-01' } } });
     // The client shows the newest text at millisecond precision.
     const result = await markAllInboundSmsRead({ readBefore: new Date('2026-11-19T12:00:00.123Z'), role: 'admin', excludePhones: ['+19415550199'] });
-    expect(result.updated).toBe(2);
+    expect(result.updated).toBe(3);
+    expect((await readIds()).has(noLine)).toBe(true);
     // Every statement in the writer ran, bell reconciliation included.
     expect(logger.warn).not.toHaveBeenCalled();
     const read = await readIds();
