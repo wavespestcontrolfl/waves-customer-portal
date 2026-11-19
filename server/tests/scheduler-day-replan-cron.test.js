@@ -157,20 +157,12 @@ describe('hourly route check, shadow (owner 2026-11-19): measures the openings, 
     expect(logger.error).toHaveBeenCalledWith('[route-check] tick failed: db down');
   });
 
-  test("a second instance's run of an hour already recorded ('duplicate') is no failure", async () => {
-    runRouteCheck.mockResolvedValueOnce({ status: 'duplicate', totals: { next: { slots: 2 } } });
-    let lockOutcome;
-    runExclusive.mockImplementationOnce(async (_key, task) => {
-      lockOutcome = task().then(() => 'ok', (err) => err.message);
-      return lockOutcome;
-    });
-    await routeCheckJob()[1]();
-    expect(await lockOutcome).toBe('ok');
-    expect(logger.error).not.toHaveBeenCalled();
-  });
-
-  test.each(['failed', 'completed_with_errors'])('a run recorded as %s still fails the health lock, and the tick does not throw', async (status) => {
-    runRouteCheck.mockResolvedValueOnce({ status, totals: {} });
+  // A second instance's run of an hour already recorded reports that hour's status (duplicate: true): a failed hour
+  // stays a failure in job health.
+  test.each([
+    ['failed', false], ['completed_with_errors', false], ['failed', true],
+  ])('a run recorded as %s (duplicate %s) still fails the health lock, and the tick does not throw', async (status, duplicate) => {
+    runRouteCheck.mockResolvedValueOnce({ status, duplicate, totals: {} });
     let lockOutcome;
     runExclusive.mockImplementationOnce(async (_key, task) => {
       lockOutcome = task().then(() => 'ok', (err) => err.message);

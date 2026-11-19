@@ -184,13 +184,32 @@ function unmeasurable(rows) {
  * where the van sets off and returns. slots: jobs that start on the hour after their drive (hourSlots);
  * noticeSlots: the 07:05 notice's own count (close-gaps: whole SLOT_MIN slots), so the two can be compared.
  */
+/**
+ * True when the simulation splits one visit (pure). Dispatch runs a visit's services at one stop back to back from
+ * one arrival, their work summed (scheduling/arrival-route.js groupRouteStops). The app simulator runs each service
+ * on its own, so a schedule block, a later promised start or another stop can open a gap inside the visit, and the
+ * day's openings would not be dispatch's. When no gap opens, the two timelines are the same: one arrival, then each
+ * service's work in turn (a zero-distance leg is 0 minutes).
+ */
+function visitSplit(physical, seq, sim) {
+  const at = new Map(seq.map((row, i) => [String(row.id), sim.arrivals[i]]));
+  // A stop of one group is a lone row or co-visit siblings, which the simulator already runs as one stay.
+  return physical.filter((stop) => stop.length > 1).some((stop) => {
+    const legs = stop.flat().map((r) => at.get(String(r.id))).sort((a, b) => a.arrivalMin - b.arrivalMin);
+    return legs.some((leg, i) => i > 0 && leg.arrivalMin > legs[i - 1].departureMin);
+  });
+}
+
 function measureTechDay({ rows, blocks, held, origin, departureMin, openMin, closeMin }) {
   // Physical stops, not services: one visit's services at one place are one stop (physicalStops).
-  const stops = physicalStops(rows).length;
+  const physical = physicalStops(rows);
+  const stops = physical.length;
   const skip = unmeasurable(rows);
   if (skip) return { stops, skip };
-  const sim = simulate(routeOrder(rows), { origin, departureMin, blockedIntervals: serviceBlocks(blocks) });
+  const seq = routeOrder(rows);
+  const sim = simulate(seq, { origin, departureMin, blockedIntervals: serviceBlocks(blocks) });
   if (!sim) return { stops, skip: 'NO_SIMULATION' };
+  if (visitSplit(physical, seq, sim)) return { stops, skip: 'SPLIT_VISIT' };
   const open = openMin < closeMin
     ? gaps.openBlocks(sim, { departureMin, openMin, closeMin, unavailable: [...blocks, ...held], driveBlocks: serviceBlocks(blocks) })
     : [];
@@ -340,7 +359,8 @@ async function measureOne(conn, env, { day, techId, rows, occupancy }) {
  *
  * One row per ET hour. runExclusive stops two instances running at the same time only: a second instance (a deploy
  * overlap) whose tick waited for a lock slot can run after the first released the lock. The unique key on
- * (service_date, run_hour) keeps the first row of the hour; the second run writes nothing and returns 'duplicate'.
+ * (service_date, run_hour) keeps the first row of the hour. The second run writes nothing and reports that row's
+ * status (`duplicate: true`), so job health keeps a failed hour failed and never clears it.
  * run_hour is the hour the run starts, which is its tick's hour: a tick waits at most SLOT_WAIT_MAX_MS (10 minutes)
  * past :30 for a slot (utils/cron-lock.js).
  */
@@ -359,8 +379,10 @@ async function runRouteCheck({ conn = db, now = new Date() } = {}) {
     days: JSON.stringify(run.days), totals: JSON.stringify(run.totals), ad_shadow: JSON.stringify(run.ad),
   }).onConflict(['service_date', 'run_hour']).ignore().returning('id');
   if (!written.length) {
-    logger.info(`[route-check] ${today} ${hour}:00 already recorded by another instance; this run wrote nothing`);
-    return { status: 'duplicate', totals: run.totals, days: run.days.length };
+    const recorded = await conn(TABLE).where({ service_date: today, run_hour: hour }).first('status');
+    const status = recorded?.status || 'failed';
+    logger.info(`[route-check] ${today} ${hour}:00 already recorded (${status}) by another instance; this run wrote nothing`);
+    return { status, duplicate: true, totals: {}, days: 0 };
   }
   if (run.status !== 'failed') {
     logger.info(`[route-check] ${run.status}: next ${run.totals.next.dates.length} staffed days slots=${run.totals.next.slots}`);
@@ -421,7 +443,8 @@ async function measureRun(conn, now) {
 module.exports = {
   runRouteCheck,
   _internals: {
-    recoverable, physicalStops, heldSpans, hourSlots, routeOrder, measureTechDay, staffed, datesToMeasure, summarize, unmeasurable,
+    recoverable, physicalStops, heldSpans, hourSlots, routeOrder, measureTechDay, visitSplit, staffed, datesToMeasure, summarize,
+    unmeasurable,
     STAFFED_DAYS, DEMAND_DAYS,
   },
 };

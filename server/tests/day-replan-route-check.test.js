@@ -143,6 +143,27 @@ describe('one tech-day', () => {
     expect(rc.measureTechDay({ ...open, rows: [service('v1'), service('v2', { lat: null })] })).toMatchObject({ stops: 1, skip: 'STOP_WITHOUT_COORDINATES' });
   });
 
+  test("a visit's services split by a block or by another stop leave the day unmeasured (SPLIT_VISIT); back to back, it is measured", () => {
+    // Open-ended windows: each service's work is its 45-minute estimate (a window's span would count as work).
+    const service = (id, extra) => stop(id, '09:00:00', null, { visit_id: 'visit-1', customer_id: 'cust-1', ...extra });
+    const together = [service('v1'), service('v2')];
+    // One arrival at 9:00, then 45 + 45 minutes of work: dispatch's one stop, the same timeline.
+    const measured = rc.measureTechDay({ ...open, rows: together });
+    expect(measured).toMatchObject({ stops: 1, openings: expect.any(Array) });
+    expect(measured.skip).toBeUndefined();
+    // A block at 9:45-10:30 lands inside the visit: the simulator would run the second service after it.
+    expect(rc.measureTechDay({ ...open, rows: together, blocks: [{ startMin: 585, endMin: 630 }] })).toEqual({ stops: 1, skip: 'SPLIT_VISIT' });
+    // Another stop driven between the two services splits the visit too; back to back, it does not.
+    const other = stop('x1', '09:00:00', null, { customer_id: 'cust-2', lat: 27.45, lng: -82.4 });
+    const physical = rc.physicalStops([...together, other]);
+    const leg = (arrivalMin, departureMin) => ({ arrivalMin, departureMin });
+    expect(rc.visitSplit(physical, [together[0], other, together[1]], { arrivals: [leg(540, 585), leg(595, 640), leg(650, 695)] })).toBe(true);
+    expect(rc.visitSplit(physical, [together[0], together[1], other], { arrivals: [leg(540, 585), leg(585, 630), leg(640, 685)] })).toBe(false);
+    // Two stops of one visit (disconnected windows) are two stops, never a split visit.
+    const pm = stop('v3', '15:00:00', '16:00:00', { visit_id: 'visit-1', customer_id: 'cust-1' });
+    expect(rc.measureTechDay({ ...open, rows: [service('v1', { window_end: '10:00:00' }), pm] }).skip).toBeUndefined();
+  });
+
   test('after the day closes there is no opening', () => {
     expect(rc.measureTechDay({ ...open, rows: [], departureMin: 1050, openMin: 1050 })).toMatchObject({ openings: [], slots: 0 });
   });
@@ -236,13 +257,16 @@ describe('the totals', () => {
 describe('runRouteCheck', () => {
   const NOW = new Date('2026-11-19T15:30:00Z'); // Thu 10:30 AM ET
 
-  // `campaigns` an Error: the campaign read throws. `taken`: the unique key's rows, shared across runs.
-  function fakeConn({ campaigns = [{ id: 'c1', status: 'paused', budget_mode: 'stop' }], taken = new Set() } = {}) {
+  // `campaigns` an Error: the campaign read throws. `taken`: the unique key's rows (key -> row), shared across runs.
+  function fakeConn({ campaigns = [{ id: 'c1', status: 'paused', budget_mode: 'stop' }], taken = new Map() } = {}) {
     const writes = [];
     const conflicts = [];
     const conn = (table) => {
+      let filter = {};
       const q = {
-        leftJoin() { return q; }, where() { return q; }, whereIn() { return q; }, whereNotIn() { return q; }, whereRaw() { return q; },
+        leftJoin() { return q; }, whereIn() { return q; }, whereNotIn() { return q; }, whereRaw() { return q; },
+        where(arg) { if (arg && typeof arg === 'object') filter = arg; return q; },
+        first: async () => taken.get(`${filter.service_date}|${filter.run_hour}`),
         select: async () => {
           if (table === 'technicians') return [{ id: TECH }];
           if (table === 'ad_campaigns') {
@@ -259,7 +283,7 @@ describe('runRouteCheck', () => {
                 conflicts.push(cols);
                 const key = cols.map((c) => row[c]).join('|');
                 if (taken.has(key)) return [];
-                taken.add(key);
+                taken.set(key, row);
                 writes.push([table, row]);
                 return [{ id: `r${writes.length}` }];
               },
@@ -356,19 +380,30 @@ describe('runRouteCheck', () => {
     expect(days.find((d) => d.date === '2026-11-22')).toMatchObject({ skip: 'FAILED' }); // staffed when unknown
   });
 
-  test('one row per ET hour: a second run of an hour already recorded writes nothing and is no failure', async () => {
-    const taken = new Set();
+  test("one row per ET hour: a second run of an hour already recorded writes nothing and reports that hour's status", async () => {
+    const taken = new Map();
     const first = fakeConn({ taken });
     expect((await runRouteCheck({ conn: first.conn, now: NOW })).status).toBe('completed');
     // A second instance's run of the same 10:30 tick, after the first released the lock (a slot wait, at most 10 min).
     const second = fakeConn({ taken });
     const result = await runRouteCheck({ conn: second.conn, now: new Date('2026-11-19T15:39:00Z') });
-    expect(result).toMatchObject({ status: 'duplicate' });
+    expect(result).toMatchObject({ status: 'completed', duplicate: true });
     expect(second.writes).toHaveLength(0);
     // The next hour records its own row.
     const next = fakeConn({ taken });
     expect((await runRouteCheck({ conn: next.conn, now: new Date('2026-11-19T16:30:00Z') })).status).toBe('completed');
     expect(next.writes[0][1]).toMatchObject({ service_date: '2026-11-19', run_hour: 11 });
+  });
+
+  test('a failed hour stays failed: a second run of it reports the recorded failure, never a success', async () => {
+    const taken = new Map();
+    getBlackoutDates.mockRejectedValueOnce(new Error('timeout'));
+    const first = fakeConn({ taken });
+    expect((await runRouteCheck({ conn: first.conn, now: NOW })).status).toBe('failed');
+    const second = fakeConn({ taken });
+    expect(await runRouteCheck({ conn: second.conn, now: new Date('2026-11-19T15:39:00Z') }))
+      .toMatchObject({ status: 'failed', duplicate: true });
+    expect(second.writes).toHaveLength(0);
   });
 
   test('an unread campaign list is an error of the run, with its message; an empty list is a completed run', async () => {
