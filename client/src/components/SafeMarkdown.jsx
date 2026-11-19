@@ -1,19 +1,41 @@
 /**
- * Plain-markdown reader for the offer letter and the signed copy. Returns
- * React nodes only (no dangerouslySetInnerHTML): headings, bullet and
- * numbered lists, rules, paragraphs. Inline bold and links go through the
- * shared renderAnswerInline (https and /admin links only; anything else
- * stays literal text). Raw HTML in the text shows as text.
+ * Plain-markdown reader (offer letter, signed copy, applicant offer page).
+ * Returns React nodes only (no dangerouslySetInnerHTML): headings, bullet and
+ * numbered lists, rules, paragraphs, **bold** and [label](https://...) links.
+ * Any other link target stays literal text, and raw HTML shows as text.
+ * A trailing heading anchor ` {#anchor}` is dropped. No app-specific imports.
  */
 import React from "react";
-import { renderAnswerInline } from "../answerInline";
+
+const INLINE_TOKEN_RE = /(\[[^\]\n]+\]\(https:\/\/[^)\s]+\)|\*\*[^*]+\*\*)/g;
+const LINK_TOKEN_RE = /^\[([^\]\n]+)\]\((https:\/\/[^)\s]+)\)$/;
+const ANCHOR_RE = /\s+\{#[^}]*\}\s*$/;
+
+function renderInline(text) {
+  return String(text)
+    .split(INLINE_TOKEN_RE)
+    .map((part, i) => {
+      if (i % 2 === 0) return part;
+      const link = LINK_TOKEN_RE.exec(part);
+      if (link) {
+        return (
+          <a key={i} href={link[2]} target="_blank" rel="noopener noreferrer" className="underline">
+            {link[1]}
+          </a>
+        );
+      }
+      return (
+        <strong key={i} className="font-medium">
+          {part.slice(2, -2)}
+        </strong>
+      );
+    });
+}
 
 const HEADING_RE = /^(#{1,6})\s+(.*)$/;
 const BULLET_RE = /^\s*[-*]\s+(.*)$/;
 const NUMBER_RE = /^\s*\d+[.)]\s+(.*)$/;
 const RULE_RE = /^\s*([-*_])(\s*\1){2,}\s*$/;
-
-const INLINE = { strong: { className: "font-medium" } };
 
 export function parseBlocks(markdown) {
   const blocks = [];
@@ -33,7 +55,7 @@ export function parseBlocks(markdown) {
     if (!line.trim() || RULE_RE.test(line) || heading) {
       flushPara();
       flushList();
-      if (heading) blocks.push({ type: "h", level: heading[1].length, text: heading[2] });
+      if (heading) blocks.push({ type: "h", level: heading[1].length, text: heading[2].replace(ANCHOR_RE, "") });
       else if (line.trim()) blocks.push({ type: "hr" });
     } else if (item) {
       flushPara();
@@ -56,18 +78,18 @@ function Block({ block }) {
   if (block.type === "h") {
     return (
       <div className="text-14 font-medium text-zinc-900 mt-3 mb-1" role="heading" aria-level={Math.min(block.level + 2, 6)}>
-        {renderAnswerInline(block.text, INLINE)}
+        {renderInline(block.text)}
       </div>
     );
   }
   if (block.type === "p") {
-    return <p className="text-14 text-zinc-800 mb-2 whitespace-pre-line">{renderAnswerInline(block.text, INLINE)}</p>;
+    return <p className="text-14 text-zinc-800 mb-2 whitespace-pre-line">{renderInline(block.text)}</p>;
   }
   const List = block.type === "ol" ? "ol" : "ul";
   return (
     <List className={`text-14 text-zinc-800 mb-2 pl-5 ${block.type === "ol" ? "list-decimal" : "list-disc"}`}>
       {block.items.map((item, i) => (
-        <li key={i}>{renderAnswerInline(item, INLINE)}</li>
+        <li key={i}>{renderInline(item)}</li>
       ))}
     </List>
   );

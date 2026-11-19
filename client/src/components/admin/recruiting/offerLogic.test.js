@@ -3,6 +3,7 @@ import {
   commsSummary,
   expiryLabel,
   formatDay,
+  formatIssued,
   formatTimelineTime,
   isStartWeekday,
   maskEmail,
@@ -28,7 +29,9 @@ describe('offer helpers', () => {
 
   it('formats days without a time-zone shift and times in Eastern', () => {
     expect(formatDay('2027-01-04')).toBe('Mon, Jan 4, 2027');
-    expect(formatTimelineTime('2026-12-11T15:20:00Z')).toBe('Fri Dec 11, 10:20 AM');
+    expect(formatTimelineTime('2026-12-11T15:20:00Z')).toBe('Fri, Dec 11, 10:20 AM');
+    // 9 PM Eastern is already the next day in UTC: the Eastern day must show.
+    expect(formatIssued('2026-11-11T02:30:00Z')).toBe('Nov 10, 2026');
     expect(expiryLabel(new Date('2026-12-11T15:20:00Z'))).toBe('Fri, Dec 18, 2026');
   });
 
@@ -40,7 +43,7 @@ describe('offer helpers', () => {
   });
 
   it('turns each 409 code into a plain sentence', () => {
-    for (const code of ['TERMS_NOT_ISSUED', 'OFFER_NOT_DRAFT', 'NO_CONTACT', 'APPLICATION_CLOSED', 'ROLE_NOT_SUPPORTED']) {
+    for (const code of ['TERMS_NOT_ISSUED', 'DRAFT_CHANGED', 'DRAFT_HASH_REQUIRED', 'OFFER_NOT_DRAFT', 'NO_CONTACT', 'APPLICATION_CLOSED', 'ROLE_NOT_SUPPORTED']) {
       const text = offerErrorMessage({ message: 'HTTP 409', body: { code } });
       expect(text).not.toBe('HTTP 409');
       expect(text).not.toContain(code);

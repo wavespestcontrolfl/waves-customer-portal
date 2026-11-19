@@ -46,7 +46,7 @@ function offerPayload(overrides = {}) {
   return {
     enabled: true,
     termsIssued: true,
-    terms: { templateId: 't1', versionId: 'v1', title: 'Offer Letter: Technician Terms', issuedAt: '2026-11-10T15:00:00Z' },
+    terms: { templateId: 't1', versionId: 'v1', title: 'Offer Letter: Technician Terms', issuedAt: '2026-11-11T02:30:00Z' },
     termsBlockers: [],
     defaults: DEFAULTS,
     letterPreview: { markdown: '# Your job offer\n\nStart: **Monday, January 4, 2027**.\n\n<script>alert(1)</script>' },
@@ -63,6 +63,7 @@ function offerRecord(overrides = {}) {
     status: 'draft',
     ...DEFAULTS,
     reportTo: 'Owner, owner',
+    draftHash: 'hash-1',
     timeline: [{ at: '2026-12-11T14:00:00Z', kind: 'drafted', label: 'Draft saved' }],
     ...overrides,
   };
@@ -174,12 +175,19 @@ describe('RecruitingPage offer flow: form', () => {
   });
 
   it('saves the draft, then asks before sending one text and one email', async () => {
-    const saved = offerRecord({ startDate: '2027-01-11', stepEffectiveOn: '2027-04-12' });
-    const { calls } = setupFetch({
-      'POST /admin/careers/app-1/offer': () => res(200, { offer: saved }),
-      'POST /admin/careers/app-1/offer/offer-1/send': () =>
-        res(200, { offer: { ...saved, status: 'sent' }, comms: { sms: { outcome: 'sent' }, email: { outcome: 'sent' } } }),
-    });
+    const saved = offerRecord({ startDate: '2027-01-11', stepEffectiveOn: '2027-04-12', draftHash: 'hash-saved' });
+    let current = null;
+    const { calls } = setupFetch(
+      {
+        'POST /admin/careers/app-1/offer': () => {
+          current = saved;
+          return res(200, { offer: saved });
+        },
+        'POST /admin/careers/app-1/offer/offer-1/send': () =>
+          res(200, { offer: { ...saved, status: 'sent' }, comms: { sms: { outcome: 'sent' }, email: { outcome: 'sent' } } }),
+      },
+      { offer: () => res(200, offerPayload({ current })) },
+    );
     await openForm();
     fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2027-01-11' } });
     expect(screen.getByRole('button', { name: 'Send offer' })).toBeDisabled();
@@ -202,7 +210,55 @@ describe('RecruitingPage offer flow: form', () => {
     fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Send offer' }));
     expect(await screen.findByText('Offer sent to Jordan.')).toBeInTheDocument();
     expect(screen.getByText('Text sent. Email sent.')).toBeInTheDocument();
+    const sends = calls.filter((c) => c.path.endsWith('/send'));
+    expect(sends).toHaveLength(1);
+    // Send names the draft the owner read, by the hash of that draft.
+    expect(sends[0].body).toEqual({ draftHash: 'hash-saved' });
+  });
+
+  it('shows the terms issue day in Eastern, not as the UTC day', async () => {
+    setupFetch({});
+    await openForm();
+    expect(screen.getByText(/issued Nov 10, 2026/)).toBeInTheDocument();
+  });
+
+  it('on DRAFT_CHANGED it reloads the draft, shows the new preview and sends nothing more', async () => {
+    let current = offerRecord({ draftHash: 'old' });
+    const { calls } = setupFetch(
+      {
+        'POST /admin/careers/app-1/offer/offer-1/send': () => {
+          current = offerRecord({ draftHash: 'new', hourlyRate: 24 });
+          return res(409, { error: 'x', code: 'DRAFT_CHANGED' });
+        },
+      },
+      { offer: () => res(200, offerPayload({ current, letterPreview: { markdown: `Rate ${current.hourlyRate}` } })) },
+    );
+    await openForm();
+    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
+    const confirmDialog = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Send offer' }));
+    expect(await screen.findByText('This draft changed after you opened it. Review the new preview, then send.')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(24));
+    expect(screen.getByText('Rate 24')).toBeInTheDocument();
     expect(calls.filter((c) => c.path.endsWith('/send'))).toHaveLength(1);
+    // The next send carries the new hash.
+    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
+    expect(await screen.findByText(/Send this offer to Jordan/)).toBeInTheDocument();
+  });
+
+  it('a failed refresh after a save keeps the dialog open and keeps Send off', async () => {
+    let failRead = false;
+    setupFetch(
+      { 'POST /admin/careers/app-1/offer': () => { failRead = true; return res(200, { offer: offerRecord({ startDate: '2027-01-11' }) }); } },
+      { offer: () => (failRead ? res(500, { error: 'boom' }) : res(200, offerPayload())) },
+    );
+    await openForm();
+    fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2027-01-11' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    expect(await screen.findByText(/could not refresh/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Hourly rate ($)')).toBeInTheDocument();
+    expect(screen.getByText('Letter preview')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send offer' })).toBeDisabled();
   });
 
   it('shows the terms blockers and keeps Send off when the terms are not issued', async () => {
@@ -255,18 +311,19 @@ describe('RecruitingPage offer flow: timeline card', () => {
     setupFetch({}, { offer: offerPayload({ current: sent }), detail: detailFixture({ status: 'offer' }) });
     const card = await openCard();
     expect(within(card).getByText('Offer sent, text and email')).toBeInTheDocument();
-    expect(within(card).getByText('Fri Dec 11, 10:20 AM')).toBeInTheDocument();
-    expect(within(card).getByText('Fri Dec 11, 12:02 PM')).toBeInTheDocument();
+    expect(within(card).getByText('Fri, Dec 11, 10:20 AM')).toBeInTheDocument();
+    expect(within(card).getByText('Fri, Dec 11, 12:02 PM')).toBeInTheDocument();
     expect(within(card).getByRole('button', { name: 'Revise' })).toBeInTheDocument();
-    expect(within(card).getByRole('button', { name: 'Withdraw' })).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: 'Withdraw offer' })).toBeInTheDocument();
     expect(within(card).queryByRole('button', { name: 'View signed copy' })).toBeNull();
   });
 
   it('Revise posts, then opens the new draft in the form', async () => {
     const draft = offerRecord({ id: 'offer-2', startDate: '2027-01-11', supersedesId: 'offer-1' });
+    let revised = false;
     const { calls } = setupFetch(
-      { 'POST /admin/careers/app-1/offer/offer-1/revise': () => res(200, { offer: draft }) },
-      { offer: offerPayload({ current: sent }), detail: detailFixture({ status: 'offer' }) },
+      { 'POST /admin/careers/app-1/offer/offer-1/revise': () => { revised = true; return res(200, { offer: draft }); } },
+      { offer: () => res(200, offerPayload({ current: sent, draft: revised ? draft : null })), detail: detailFixture({ status: 'offer' }) },
     );
     const card = await openCard();
     fireEvent.click(within(card).getByRole('button', { name: 'Revise' }));
@@ -281,7 +338,7 @@ describe('RecruitingPage offer flow: timeline card', () => {
       { offer: offerPayload({ current: sent }), detail: detailFixture({ status: 'offer' }) },
     );
     const card = await openCard();
-    fireEvent.click(within(card).getByRole('button', { name: 'Withdraw' }));
+    fireEvent.click(within(card).getByRole('button', { name: 'Withdraw offer' }));
     expect(calls.some((c) => c.path.endsWith('/withdraw'))).toBe(false);
     const dialog = (await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Withdraw' }));
@@ -331,5 +388,72 @@ describe('RecruitingPage offer flow: timeline card', () => {
     expect(await screen.findByRole('heading', { name: 'Signed offer' })).toBeInTheDocument();
     expect(screen.getByText(/Signed by Jordan Rivera/, { selector: 'div' })).toBeInTheDocument();
     expect(screen.getByText(/abc123/)).toBeInTheDocument();
+  });
+});
+
+describe('RecruitingPage offer flow: read failures, re-offers and drafts', () => {
+  it('a failed offer read shows an error with Try again and no status-only move', async () => {
+    let fail = true;
+    setupFetch({}, { offer: () => (fail ? res(500, { error: 'Server error' }) : res(200, offerPayload())) });
+    await openDetail();
+    expect(await screen.findByText('Server error')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Offer' })).toBeDisabled();
+    expect(screen.queryByRole('heading', { name: 'Move to Offer' })).toBeNull();
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Offer' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Offer' }));
+    await screen.findByLabelText('Hourly rate ($)');
+  });
+
+  it('a 404 without enabled:false is a failure, not the gate-off answer', async () => {
+    setupFetch({}, { offer: () => res(404, { error: 'Not found' }) });
+    await openDetail();
+    expect(await screen.findByText('Not found')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Offer' })).toBeDisabled();
+  });
+
+  it.each(['withdrawn', 'expired'])('offers Make an offer next to a %s offer while the application is in Offer', async (status) => {
+    const old = offerRecord({ status, timeline: [{ at: '2026-12-11T15:20:00Z', kind: status, label: 'Closed' }] });
+    setupFetch({}, { offer: offerPayload({ current: old }), detail: detailFixture({ status: 'offer' }) });
+    await openDetail();
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Make an offer' }));
+    expect(await screen.findByLabelText('Hourly rate ($)')).toBeInTheDocument();
+    expect(screen.getByLabelText('Start date')).toHaveValue('2027-01-04');
+  });
+
+  it.each([['accepted', 'hired'], ['declined', 'withdrawn']])('no new offer after a %s offer', async (status, appStatus) => {
+    const old = offerRecord({ status, timeline: [] });
+    setupFetch({}, { offer: offerPayload({ current: old }), detail: detailFixture({ status: appStatus }) });
+    await openDetail();
+    const card = await screen.findByTestId('offer-card');
+    expect(within(card).queryByRole('button', { name: 'Make an offer' })).toBeNull();
+  });
+
+  it('labels a revision draft as the draft and keeps Withdraw for the sent offer', async () => {
+    const sent = offerRecord({ status: 'sent', timeline: [] });
+    const draft = offerRecord({ id: 'offer-2', startDate: '2027-01-11', supersedesId: 'offer-1' });
+    const { calls } = setupFetch(
+      { 'POST /admin/careers/app-1/offer/offer-2/withdraw': () => res(200, { offer: { ...draft, status: 'withdrawn' } }) },
+      { offer: offerPayload({ current: sent, draft }), detail: detailFixture({ status: 'offer' }) },
+    );
+    await openDetail();
+    const card = await screen.findByTestId('offer-card');
+    expect(within(card).getByRole('button', { name: 'Open the updated draft' })).toBeInTheDocument();
+    expect(within(card).queryByRole('button', { name: 'Revise' })).toBeNull();
+    // The sent offer's own action is Withdraw offer and its confirm says the link stops.
+    fireEvent.click(within(card).getByRole('button', { name: 'Withdraw offer' }));
+    const withdrawDialog = (await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]');
+    expect(withdrawDialog).toHaveTextContent('His link stops working');
+    fireEvent.click(within(withdrawDialog).getByRole('button', { name: 'Cancel' }));
+    // The draft's action never promises that the link stops.
+    fireEvent.click(within(card).getByRole('button', { name: 'Discard this draft — the offer you sent stays open' }));
+    const discardDialog = (await screen.findByText(/Discard this draft\? The offer you sent/)).closest('[role="dialog"]');
+    expect(discardDialog).toHaveTextContent('stays open and his link keeps working');
+    expect(discardDialog).not.toHaveTextContent('stops working');
+    fireEvent.click(within(discardDialog).getByRole('button', { name: 'Discard draft' }));
+    await waitFor(() => expect(calls.filter((c) => c.path === '/admin/careers/app-1/offer/offer-2/withdraw')).toHaveLength(1));
+    expect(calls.some((c) => c.path === '/admin/careers/app-1/offer/offer-1/withdraw')).toBe(false);
   });
 });

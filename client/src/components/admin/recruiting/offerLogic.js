@@ -4,8 +4,9 @@
  * offer API's 409 codes.
  */
 
+import { etDateString, formatETDate, formatETDateTime } from "../../../lib/timezone";
+
 const DAY_MS = 86400000;
-const ET = "America/New_York";
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -30,7 +31,7 @@ export function addDays(value, days) {
 
 // Today's calendar date in Eastern, "YYYY-MM-DD".
 export function todayET(now = new Date()) {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: ET }).format(now);
+  return etDateString(now);
 }
 
 // Monday to Thursday only (the offer's start days).
@@ -64,24 +65,16 @@ export function expiryLabel(now = new Date()) {
   return formatDay(addDays(todayET(now), 7));
 }
 
-// "Fri Dec 11, 10:20 AM" in Eastern, for the timeline.
+// "Fri, Dec 11, 10:20 AM" in Eastern, for the timeline and signed copy.
 export function formatTimelineTime(value) {
-  if (!value) return "";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return "";
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-US", {
-      timeZone: ET,
-      weekday: "short",
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    })
-      .formatToParts(d)
-      .map((p) => [p.type, p.value]),
-  );
-  return `${parts.weekday} ${parts.month} ${parts.day}, ${parts.hour}:${parts.minute} ${parts.dayPeriod}`;
+  if (!value || Number.isNaN(new Date(value).getTime())) return "";
+  return formatETDateTime(value, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+// "Nov 10, 2026" for a timestamp (the Eastern calendar day, never a UTC slice).
+export function formatIssued(value) {
+  if (!value || Number.isNaN(new Date(value).getTime())) return "";
+  return formatETDate(value, { month: "short", day: "numeric", year: "numeric" });
 }
 
 export function maskPhone(phone) {
@@ -107,6 +100,8 @@ const ERROR_TEXT = {
   NO_CONTACT: "This applicant has no phone or email on file, so nothing can be sent.",
   APPLICATION_CLOSED: "This application is closed (hired, rejected or withdrawn). Move it back before sending an offer.",
   ROLE_NOT_SUPPORTED: "Offers are for technician applications only.",
+  DRAFT_CHANGED: "This draft changed after you opened it. Review the new preview, then send.",
+  DRAFT_HASH_REQUIRED: "The draft could not be checked. Reload the offer, review the preview, then send.",
 };
 
 // err = the Error the offer API helper throws (err.body.code on a 409).

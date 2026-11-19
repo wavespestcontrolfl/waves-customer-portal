@@ -14,7 +14,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "../../ui";
-import SafeMarkdown from "./SafeMarkdown";
+import SafeMarkdown from "../../SafeMarkdown";
 import { fetchSignedCopy, reviseOffer, withdrawOffer } from "./offerApi";
 import { formatDay, formatTimelineTime, money, offerErrorMessage } from "./offerLogic";
 
@@ -88,16 +88,14 @@ export function SignedCopyView({ copy, onClose }) {
   );
 }
 
-function WithdrawDialog({ firstName, busy, error, onCancel, onConfirm }) {
+function CloseOfferDialog({ copy, busy, error, onCancel, onConfirm }) {
   return (
     <Dialog open onClose={busy ? undefined : onCancel} size="sm" layer={130}>
       <DialogHeader>
-        <DialogTitle>Withdraw offer</DialogTitle>
+        <DialogTitle>{copy.title}</DialogTitle>
       </DialogHeader>
       <DialogBody>
-        <p className="text-14 text-zinc-800">
-          Withdraw this offer for {firstName}? Their link stops working. Nothing is sent.
-        </p>
+        <p className="text-14 text-zinc-800">{copy.message}</p>
         {error && (
           <ActionFeedback error className="mt-3">
             {error}
@@ -109,11 +107,30 @@ function WithdrawDialog({ firstName, busy, error, onCancel, onConfirm }) {
           Cancel
         </Button>
         <Button size="sm" variant="danger" onClick={onConfirm} disabled={busy}>
-          {busy ? "Withdrawing…" : "Withdraw"}
+          {busy ? "Working…" : copy.confirm}
         </Button>
       </DialogFooter>
     </Dialog>
   );
+}
+
+// Words for closing one offer record. A draft is never sent, so discarding it
+// must not promise anything about the link of an offer that is already out.
+function closeCopy(target, firstName, liveOffer) {
+  if (target.status === "draft") {
+    return {
+      title: "Discard draft",
+      message: liveOffer
+        ? `Discard this draft? The offer you sent to ${firstName} stays open and his link keeps working.`
+        : "Discard this draft? Nothing was sent.",
+      confirm: "Discard draft",
+    };
+  }
+  return {
+    title: "Withdraw offer",
+    message: `Withdraw this offer for ${firstName}? His link stops working. Nothing is sent.`,
+    confirm: "Withdraw",
+  };
 }
 
 function DateRequestNote({ offer, busy, onUpdate }) {
@@ -159,10 +176,30 @@ export function History({ history, onViewSigned }) {
   );
 }
 
-export default function OfferTimeline({ applicationId, firstName, offer, history, onChanged, onOpenDraft, onEdit }) {
+function DraftBlock({ draft, busy, onOpen, onDiscard }) {
+  return (
+    <div className="border-hairline border rounded p-3 mb-3">
+      <div className="flex flex-wrap items-center gap-2 mb-1">
+        <span className="text-14 font-medium text-zinc-900">Updated draft</span>
+        <Badge>Not sent</Badge>
+      </div>
+      <Terms offer={draft} />
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+        <Button size="sm" onClick={onOpen} disabled={busy}>
+          Open the updated draft
+        </Button>
+        <Button size="sm" variant="secondary" onClick={onDiscard} disabled={busy}>
+          Discard this draft — the offer you sent stays open
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+export default function OfferTimeline({ applicationId, firstName, offer, draft, history, canMakeOffer, onMakeOffer, onChanged, onOpenDraft, onEdit }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const [withdrawing, setWithdrawing] = useState(false);
+  const [closing, setClosing] = useState(null); // the offer record being withdrawn or discarded
   const [signed, setSigned] = useState(null);
 
   const act = async (work) => {
@@ -186,12 +223,12 @@ export default function OfferTimeline({ applicationId, firstName, offer, history
       onOpenDraft(draft);
     });
 
-  const withdraw = async () => {
+  const closeTarget = async () => {
     const ok = await act(async () => {
-      await withdrawOffer(applicationId, offer.id);
+      await withdrawOffer(applicationId, closing.id);
       await onChanged();
     });
-    if (ok) setWithdrawing(false);
+    if (ok) setClosing(null);
   };
 
   const viewSigned = (target) =>
@@ -207,13 +244,21 @@ export default function OfferTimeline({ applicationId, firstName, offer, history
       </div>
       <Terms offer={offer} />
       <Timeline entries={offer.timeline} />
-      <DateRequestNote offer={offer} busy={busy} onUpdate={revise} />
-      {error && !withdrawing && (
+      <DateRequestNote offer={offer} busy={busy || Boolean(draft)} onUpdate={revise} />
+      {error && !closing && (
         <ActionFeedback error className="mb-3">
           {error}
         </ActionFeedback>
       )}
+      {draft && (
+        <DraftBlock draft={draft} busy={busy} onOpen={() => onOpenDraft(draft)} onDiscard={() => setClosing(draft)} />
+      )}
       <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+        {canMakeOffer && (
+          <Button size="sm" onClick={onMakeOffer} disabled={busy}>
+            Make an offer
+          </Button>
+        )}
         {offer.status === "draft" && (
           <Button size="sm" onClick={onEdit} disabled={busy}>
             Open the draft
@@ -224,29 +269,29 @@ export default function OfferTimeline({ applicationId, firstName, offer, history
             View signed copy
           </Button>
         )}
-        {CAN_REVISE.includes(offer.status) && (
+        {CAN_REVISE.includes(offer.status) && !draft && (
           <Button size="sm" variant="secondary" onClick={() => revise()} disabled={busy}>
             Revise
           </Button>
         )}
         {CAN_WITHDRAW.includes(offer.status) && (
-          <Button size="sm" variant="secondary" onClick={() => setWithdrawing(true)} disabled={busy}>
-            Withdraw
+          <Button size="sm" variant="secondary" onClick={() => setClosing(offer)} disabled={busy}>
+            {offer.status === "draft" ? "Discard this draft" : "Withdraw offer"}
           </Button>
         )}
       </div>
       <History history={history} onViewSigned={viewSigned} />
       <SignedCopyView copy={signed} onClose={() => setSigned(null)} />
-      {withdrawing && (
-        <WithdrawDialog
-          firstName={firstName}
+      {closing && (
+        <CloseOfferDialog
+          copy={closeCopy(closing, firstName, closing.status === "draft" && offer.status !== "draft" ? offer : null)}
           busy={busy}
           error={error}
           onCancel={() => {
-            setWithdrawing(false);
+            setClosing(null);
             setError(null);
           }}
-          onConfirm={withdraw}
+          onConfirm={closeTarget}
         />
       )}
     </div>

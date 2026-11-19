@@ -23,9 +23,13 @@ async function offerRequest(path, options = {}) {
   return body;
 }
 
+// Only a 404 whose body says enabled:false means the flow is off. Any other
+// failure, or a 200 that is not { enabled: true }, throws.
 export async function fetchOffer(applicationId) {
   try {
-    return await offerRequest(`/admin/careers/${applicationId}/offer`);
+    const body = await offerRequest(`/admin/careers/${applicationId}/offer`);
+    if (body?.enabled !== true) throw new Error("The offer screen sent an unexpected answer.");
+    return body;
   } catch (err) {
     if (err.status === 404 && err.body?.enabled === false) return { enabled: false };
     throw err;
@@ -39,8 +43,12 @@ export function saveOfferDraft(applicationId, fields) {
   });
 }
 
-export function sendOffer(applicationId, offerId) {
-  return offerRequest(`/admin/careers/${applicationId}/offer/${offerId}/send`, { method: "POST" });
+// draftHash = the hash of the draft whose letter preview the owner read.
+export function sendOffer(applicationId, offerId, draftHash) {
+  return offerRequest(`/admin/careers/${applicationId}/offer/${offerId}/send`, {
+    method: "POST",
+    body: JSON.stringify({ draftHash }),
+  });
 }
 
 export function withdrawOffer(applicationId, offerId) {

@@ -21,6 +21,16 @@ describe('SafeMarkdown', () => {
     expect(container.querySelectorAll('ol li')).toHaveLength(1);
   });
 
+  it('drops a trailing heading anchor and links only https targets', () => {
+    const { container } = render(
+      <SafeMarkdown markdown={'## 3. Pay {#pay}\n\nSee [terms](https://example.com/t) or [bad](http://example.com).'} />,
+    );
+    expect(screen.getByRole('heading', { name: '3. Pay' })).toBeInTheDocument();
+    expect(container.querySelectorAll('a')).toHaveLength(1);
+    expect(container.querySelector('a')).toHaveAttribute('href', 'https://example.com/t');
+    expect(container).toHaveTextContent('[bad](http://example.com)');
+  });
+
   it('never turns raw HTML or an unsafe link into elements', () => {
     const { container } = render(
       <MemoryRouter>

@@ -825,11 +825,15 @@ function SamePhoneBlock({ records, onOpenApplication }) {
 // own right (derives contact/screen from `detail`, owns the interview-block
 // branching) rather than a one-use helper — moving it out is what actually
 // removes those decisions from RecruitingPage.
-// The Offer button opens the Offer form only while the offer flow is on for
-// a technician application; otherwise it is today's status-only move.
+// The Offer button opens the Offer form while the offer flow is on for a
+// technician application, and is today's status-only move only when the
+// server said the flow is off (or for a non-technician).
 function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, onOpenStageDialog, onOpenApplication, onClose }) {
   const contact = detail?.contact_snapshot || {};
-  const offerForm = offerFlow.enabled && detail.role === "technician";
+  const technician = detail.role === "technician";
+  const offerForm = offerFlow.enabled && technician;
+  // Until the offer read confirms on or off, a technician has no Offer move.
+  const offerPending = technician && (offerFlow.loading || Boolean(offerFlow.error));
   const onStageButton = (key) => (key === "offer" && offerForm ? offerFlow.openForm() : onOpenStageDialog(key));
   const screen = detail?.ai_screen || null;
 
@@ -930,7 +934,7 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, on
                 size="sm"
                 variant="secondary"
                 onClick={() => onStageButton(key)}
-                disabled={key === "offer" && offerFlow.loading}
+                disabled={key === "offer" && offerPending}
               >
                 {label}
               </Button>

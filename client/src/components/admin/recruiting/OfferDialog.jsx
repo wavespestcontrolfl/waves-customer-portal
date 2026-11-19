@@ -18,12 +18,12 @@ import {
   Field,
   Input,
 } from "../../ui";
-import SafeMarkdown from "./SafeMarkdown";
+import SafeMarkdown from "../../SafeMarkdown";
 import { saveOfferDraft, sendOffer } from "./offerApi";
 import {
   commsSummary,
   expiryLabel,
-  formatDay,
+  formatIssued,
   isStartWeekday,
   maskEmail,
   maskPhone,
@@ -56,7 +56,7 @@ function TermsBlock({ data }) {
     return (
       <div className="text-14 text-zinc-800">
         {data.terms?.title || "Technician Terms"}
-        {data.terms?.issuedAt ? ` · issued ${formatDay(data.terms.issuedAt)}` : " · issued version"}
+        {data.terms?.issuedAt ? ` · issued ${formatIssued(data.terms.issuedAt)}` : " · issued version"}
       </div>
     );
   }
@@ -145,32 +145,39 @@ function ConfirmSend({ open, firstName, busy, error, onCancel, onConfirm }) {
   );
 }
 
-function formView({ fields, saved, data, contact, busy }) {
+// The draft (by id) the letter preview in `data` was built from. Its draftHash
+// is what Send carries, so Send can only name a draft the owner has read.
+function reviewedDraft(data, draftId) {
+  return [data.draft, data.current].find((o) => o && o.id === draftId && o.status === "draft") || null;
+}
+
+function formView({ fields, reviewed, data, contact, busy }) {
   const phone = maskPhone(contact?.phone);
   const email = maskEmail(contact?.email);
   const startError = fields.startDate && !isStartWeekday(fields.startDate) ? "Pick a Monday to Thursday." : null;
   const fieldsOk = Boolean(fields.startDate) && !startError && fields.hourlyRate !== "" && fields.hoursLine.trim() !== "";
-  const savedFields = fieldsFrom(saved);
-  const dirty = !saved || FIELD_KEYS.some((k) => fields[k] !== savedFields[k]);
+  const shown = fieldsFrom(reviewed);
+  const dirty = !reviewed || FIELD_KEYS.some((k) => fields[k] !== shown[k]);
   return {
     firstName: String(contact?.name || "the applicant").trim().split(/\s+/)[0],
     sendTo: [phone && `Text ${phone}`, email && `Email ${email}`].filter(Boolean).join(" · "),
     startError,
     fieldsOk,
     dirty,
-    canSend: Boolean(saved) && !dirty && fieldsOk && data.termsIssued && !busy,
+    canSend: Boolean(reviewed?.draftHash) && !dirty && fieldsOk && data.termsIssued && !busy,
   };
 }
 
 function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged, onSent }) {
   const start = draft || (data.current?.status === "draft" ? data.current : null);
   const [fields, setFields] = useState(() => fieldsFrom(start || data.defaults));
-  const [saved, setSaved] = useState(start);
+  const [draftId, setDraftId] = useState(start?.id || null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [confirming, setConfirming] = useState(false);
   const [result, setResult] = useState(null);
-  const { firstName, sendTo, startError, fieldsOk, dirty, canSend } = formView({ fields, saved, data, contact, busy });
+  const reviewed = reviewedDraft(data, draftId);
+  const { firstName, sendTo, startError, fieldsOk, dirty, canSend } = formView({ fields, reviewed, data, contact, busy });
 
   const onChange = (key, value) => {
     setFields((prev) => {
@@ -194,21 +201,41 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
     }
   };
 
+  // The draft in the refreshed read replaces the form, so the owner reviews
+  // the preview that matches the hash Send will carry.
+  const adopt = (next) => {
+    const d = next && reviewedDraft(next, draftId);
+    if (!d) return false;
+    setFields(fieldsFrom(d));
+    return true;
+  };
+
   const save = () =>
     run(async () => {
       const { offer } = await saveOfferDraft(applicationId, toPayload(fields));
-      setSaved(offer);
+      setDraftId(offer.id);
       setFields(fieldsFrom(offer));
-      await onChanged();
+      const next = await onChanged();
+      if (!next) setError("The draft was saved, but the letter preview could not refresh. Press Save draft again to retry.");
     });
 
   const send = async () => {
-    const ok = await run(async () => {
-      const out = await sendOffer(applicationId, saved.id);
+    try {
+      setBusy(true);
+      setError(null);
+      const out = await sendOffer(applicationId, reviewed.id, reviewed.draftHash);
       setResult(out.comms || {});
       await onSent();
-    });
-    if (ok) setConfirming(false);
+      setConfirming(false);
+    } catch (err) {
+      setError(offerErrorMessage(err));
+      if (err?.body?.code === "DRAFT_CHANGED") {
+        setConfirming(false);
+        adopt(await onChanged());
+      }
+    } finally {
+      setBusy(false);
+    }
   };
 
   if (result) {
