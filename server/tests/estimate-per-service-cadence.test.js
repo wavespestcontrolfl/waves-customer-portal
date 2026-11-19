@@ -1503,6 +1503,29 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
       expect(run(null)).toBe(false);
     });
 
+    // The mapped result (result.results.tmBait) still names the annual plan after the pest-only filter drops the termite
+    // row: termite plus pest must count as two units first, or one pest unit would park a termite agreement.
+    test('a mapped termite annual plan with pest and a one-time pest choice is refused, with a tier or without', () => {
+      const mapped = {
+        result: {
+          results: { tmBait: { plan: 'annual_protection', annual: 250 } },
+          recurring: { services: [termiteRow, pestRow] },
+          oneTime: { total: 250, items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 250 }] },
+        },
+      };
+      const choice = { show_one_time_option: true };
+      const run = (selectedFrequency) => acceptPrepayAvailable({
+        selectedFrequency, recurringSvcList: [pestRow], oneTimeList: [], estData: mapped, estimate: choice,
+      });
+      expect(run({ key: 'quarterly', annualPrepayEligible: true })).toBe(false);
+      expect(run(null)).toBe(false);
+      // Control: the same rows on a quarterly termite program keep the pest-only count (one pest unit).
+      const quarterly = { result: { ...mapped.result, results: { tmBait: { plan: 'quarterly_monitoring' } } } };
+      expect(acceptPrepayAvailable({
+        selectedFrequency: { key: 'quarterly', annualPrepayEligible: true }, recurringSvcList: [pestRow], oneTimeList: [], estData: quarterly, estimate: choice,
+      })).toBe(true);
+    });
+
     test('a tier flag still decides for one unit, and never re-opens two', () => {
       const one = { result: { recurring: { services: [pestRow] } } };
       expect(check([pestRow], one, { key: 'quarterly', annualPrepayEligible: false })).toBe(false);

@@ -28384,8 +28384,15 @@ function recurringDataAsAccepted(estData, estimate, { frequencyResolves = true }
 // may refuse.
 function prepayUnitCountClosed(estData, estimate, { frequencyResolves = true } = {}) {
   try {
-    return require('../services/estimate-converter')
-      .annualPrepayRecurringUnitCount(recurringDataAsAccepted(estData, estimate, { frequencyResolves })) !== 1;
+    const count = (opts) => require('../services/estimate-converter')
+      .annualPrepayRecurringUnitCount(recurringDataAsAccepted(estData, estimate, opts));
+    // A termite annual plan is counted on every recurring row it carries before the pest-only filter applies: the filter
+    // drops the termite row while the estimate still names the annual plan (the converter's own
+    // selectedTermiteAnnualPlanRows test, mapped tmBait included), so termite plus pest would read as one pest unit and
+    // park a termite agreement for it.
+    if (require('../services/estimate-termite-program-rows').selectedTermiteAnnualPlanRows(estData || {}).length > 0
+      && count({ frequencyResolves: false }) !== 1) return true;
+    return count({ frequencyResolves }) !== 1;
   } catch (err) {
     logger.warn(`[estimate-public] prepay unit count failed (${err?.name || 'Error'}); prepay closed`);
     return true;
