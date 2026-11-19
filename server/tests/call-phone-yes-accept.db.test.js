@@ -411,6 +411,25 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     expect(payloadOf(card)).toMatchObject({ yes_heard: true, yes_rechecking: false, yes_call_log_id: yesCallId, caller_words: WORDS });
   });
 
+  test('a re-read that turns the yes into a cancel closes the card in the same pass', async () => {
+    const { yesCallId, bookingCallId } = await phoneYes();
+    await sweep();
+    await trx('call_log').where({ id: yesCallId }).update({ ai_extraction_enriched: JSON.stringify(extractionWith(null, 'cancellation_request')) });
+    await expect(sweep()).resolves.toMatchObject({ closed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(card).toMatchObject({ status: 'dismissed', resolution_rule: 'call_phone_yes_moot' });
+  });
+
+  test('a call relinked after the check gets no card for the old customer, and no row that would block the new one', async () => {
+    const { customerId, bookingCallId } = await phoneYes();
+    const other = await customer();
+    const { fileCardForTest } = require('../services/call-phone-yes-accept')._private;
+    const evaluation = await evaluatePhoneYes({ callLogId: bookingCallId, customerId });
+    await trx('call_log').where({ id: bookingCallId }).update({ customer_id: other });
+    await expect(fileCardForTest({ call: { id: bookingCallId, customer_id: customerId }, extraction: {}, evaluation })).resolves.toBe(false);
+    expect(await cards(bookingCallId)).toEqual([]);
+  });
+
   test('a yes call read again without the yes: the card shows no yes', async () => {
     const { yesCallId, bookingCallId } = await phoneYes();
     await sweep();

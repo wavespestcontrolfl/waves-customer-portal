@@ -339,6 +339,9 @@ async function fileCard({ call, extraction, evaluation }) {
   return db.transaction(async (trx) => {
     await lockTriageCall(trx, call.id);
     if (await trx('triage_items').where({ call_log_id: call.id, reason_code: REASON_CODE }).first('id')) return false;
+    // The call must still be this customer's under the lock: a card filed for a call relinked since the check would be
+    // closed as moved, and its row would block the right customer's card for good. Read again next run instead.
+    if (!(await trx('call_log').where({ id: call.id, customer_id: call.customer_id }).forUpdate().first('id'))) return false;
     const item = buildTriageItem({
       callLogId: call.id,
       flag: REASON_CODE,
@@ -430,14 +433,15 @@ async function yesState(card, { customerId, ids, since }) {
   const p = parseJson(card.payload);
   const yesCall = await yesCallState(p, customerId);
   if (yesCall === 'owed') return p.yes_rechecking === true ? null : { refresh: null, rechecking: p.yes_call_log_id };
-  if (yesCall === 'gone' || yesCall === 'changed') return { refresh: null };
-  if (await Word.unreadCallSince(db, { customerId, since })) return null;
+  // Words that no longer hold are cleared at once; the latest word is then read in the same pass when no call owes a read.
+  const stale = yesCall === 'gone' || yesCall === 'changed';
+  if (await Word.unreadCallSince(db, { customerId, since })) return stale ? { refresh: null } : null;
   const until = await newerEstimateSentAt(db, { customerId, cardIds: ids, bookingCallId: card.call_log_id });
   const heard = await Word.callerWord(db, { customerId, since, until });
   if (heard.skip) return { close: MOOT_NOTES[heard.skip] };
   // The yes the card shows must be the customer's latest word, from the same call with the same words.
   const now = heardFields(heard.yes);
-  const same = ['yes_heard', 'yes_rechecking', 'yes_call_log_id', 'caller_words']
+  const same = !stale && ['yes_heard', 'yes_rechecking', 'yes_call_log_id', 'caller_words']
     .every((k) => now[k] === (typeof now[k] === 'boolean' ? p[k] === true : (p[k] ?? null)));
   return same ? null : { refresh: heard.yes };
 }
@@ -581,4 +585,6 @@ module.exports = {
   runCallPhoneYesSweep,
   closeMootCards,
   cardSummary,
+  // Tests only: filing under the lock, without the sweep's own check.
+  _private: { fileCardForTest: fileCard },
 };
