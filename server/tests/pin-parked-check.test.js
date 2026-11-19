@@ -330,6 +330,98 @@ describe('one decision per customer', () => {
   test('nothing qualifying means nothing to do', () => {
     expect(p.decideCustomer([judged({ flag: false, reason: 'stop_too_short' })]).action).toBe('none');
   });
+  test("a visit cleared as another customer's stop retracts only its own earlier suggestion, and never beats a flag", () => {
+    const cleared = judged({ flag: false, reason: 'other_customer_stop' });
+    expect(p.decideCustomer([cleared])).toEqual({ action: 'retract', visitIds: ['visit-1'] });
+    expect(p.decideCustomer([cleared, flagged(540)]).action).toBe('flag');
+    expect(p.decideCustomer([cleared, atPin()]).action).toBe('ok');
+  });
+});
+
+// 2026-11-16, the first live bell: nobody was home, the truck left the (correct) pin after 3 minutes and stood 29
+// minutes at a customer 310 m away who had no completed visit that day. The bell offered to move the pin there.
+describe("a short stop at the pin, then the long stop at another customer's", () => {
+  const NOW = new Date('2026-10-08T20:00:00Z');
+  const OTHER = at(310); // the other customer's saved pin
+  const parkedShort = (north, minutes) => ({ ...stop(north, minutes), startMs: Date.parse('2026-10-08T14:20:00Z') });
+  const vehicles = (stops) => new Map([['imei-1', { stops, home: null }]]);
+  const judgeDay = (stops) => p.judgeVisits([visit()], vehicles(stops), { radius: RADIUS, fences: [], now: NOW });
+  // A stand-in for knex: answers the customers read and the properties read, or fails both.
+  function pinsConn({ customers = [], properties = [], fail = false } = {}) {
+    const tables = [];
+    const conn = (table) => {
+      tables.push(table);
+      const rows = String(table).startsWith('customer_properties') ? properties : customers;
+      const b = {};
+      for (const name of ['join', 'where', 'whereNull', 'whereNot', 'whereBetween', 'limit']) b[name] = () => b;
+      b.select = async () => { if (fail) throw Object.assign(new Error('db down'), { code: 'XX000' }); return rows; };
+      return b;
+    };
+    conn.tables = tables;
+    return conn;
+  }
+  const row = (point) => ({ latitude: String(point.lat), longitude: String(point.lng) });
+
+  test('a parked gap under the 5 minute stop floor never settles the pin; the flag only notes it', () => {
+    const [{ verdict }] = judgeDay([parkedShort(19, 3), stop(310, 29)]);
+    expect(verdict).toMatchObject({ flag: true, distanceM: 310, stopMinutes: 29, briefAtPin: true });
+    // at the floor it is a stop at the pin, as before
+    expect(judgeDay([parkedShort(19, 5), stop(310, 29)])[0].verdict).toEqual({ flag: false, reason: 'stop_at_pin' });
+    // a short gap is never the suggested spot and never a stop that is too short or too far
+    expect(judgeDay([parkedShort(540, 3)])[0].verdict).toEqual({ flag: false, reason: 'no_stops' });
+  });
+
+  test('no short stop at the pin, or one somewhere else, leaves briefAtPin false', () => {
+    expect(judgeDay([stop(310, 29)])[0].verdict.briefAtPin).toBe(false);
+    expect(judgeDay([parkedShort(900, 3), stop(310, 29)])[0].verdict.briefAtPin).toBe(false);
+  });
+
+  test("both facts together clear the flag: the stop is the other customer's (customer row or an active property)", async () => {
+    for (const pins of [{ customers: [row(at(338))] }, { properties: [row(at(282))] }]) {
+      const judged = await p.clearStopsAtOtherCustomers(pinsConn(pins), judgeDay([parkedShort(19, 3), stop(310, 29)]), RADIUS);
+      expect(judged[0].verdict).toEqual({ flag: false, reason: 'other_customer_stop' });
+    }
+  });
+
+  test('a brief stop at the pin alone still flags: the map can lead a technician to a wrong pin first', async () => {
+    const far = pinsConn({ customers: [row(at(310 + RADIUS + 5))], properties: [{ latitude: null, longitude: null }] });
+    const judged = await p.clearStopsAtOtherCustomers(far, judgeDay([parkedShort(19, 3), stop(310, 29)]), RADIUS);
+    expect(judged[0].verdict.flag).toBe(true);
+  });
+
+  test("another customer's pin alone still flags, and other customers are not even read", async () => {
+    const conn = pinsConn({ customers: [row(OTHER)] });
+    const judged = await p.clearStopsAtOtherCustomers(conn, judgeDay([stop(310, 29)]), RADIUS);
+    expect(judged[0].verdict.flag).toBe(true);
+    expect(conn.tables).toEqual([]);
+  });
+
+  test('a read that fails leaves the visit unknown: no suggestion, nothing closed', async () => {
+    const judged = await p.clearStopsAtOtherCustomers(pinsConn({ fail: true }), judgeDay([parkedShort(19, 3), stop(310, 29)]), RADIUS);
+    expect(judged[0].verdict).toEqual({ flag: false, reason: 'other_pins_unreadable', unknown: true });
+    expect(p.decideCustomer(judged).action).toBe('skip');
+  });
+
+  test('the retraction closes the open suggestion of that visit only', async () => {
+    const store = require('../services/customer-pin-suggestions');
+    const close = jest.spyOn(store, 'closeSuggestion').mockResolvedValue({ id: 's-1' });
+    try {
+      const tally = { created: 0, closed: 0 };
+      const decision = { action: 'retract', visitIds: ['visit-1'] };
+      await p.applyDecision({}, 'customer-1', decision, new Map([['customer-1', { id: 's-1', scheduled_service_id: 'visit-9' }]]), tally);
+      expect(close).not.toHaveBeenCalled();
+      await p.applyDecision({}, 'customer-1', decision, new Map([['customer-1', { id: 's-1', scheduled_service_id: 'visit-1' }]]), tally);
+      expect(close).toHaveBeenCalledWith('s-1', 'superseded', expect.objectContaining({ reason: 'other_customer_stop' }));
+      expect(tally.closed).toBe(1);
+    } finally { close.mockRestore(); }
+  });
+
+  test('the run reads the short gaps (1 minute and up) and clears before it decides', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/pin-parked-check.js'), 'utf8');
+    expect(p.BRIEF_STOP_MIN_MINUTES).toBe(1);
+    expect(source).toMatch(/minMinutes: BRIEF_STOP_MIN_MINUTES/);
+    expect(source).toMatch(/const judged = await clearStopsAtOtherCustomers\(conn, judgeVisits\(/);
+  });
 });
 
 describe('settled suggestions', () => {

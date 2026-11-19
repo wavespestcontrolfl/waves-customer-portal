@@ -294,6 +294,83 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
     expect(await all(customerId)).toHaveLength(0);
   });
 
+  // 2026-11-16, the first live bell: nobody was home, the truck left the (correct) pin after 3 minutes and stood 29
+  // minutes at a customer 310 m away who had no completed visit that day, so the neighbour rule did not see them.
+  describe("a short stop at the pin, then the long stop at another customer's", () => {
+    const minute = (n) => new Date(Date.parse('2026-10-08T14:20:00Z') + n * 60000).toISOString();
+    // In at 10:20 ET, 3 minutes 19 m from the pin, a 2 minute drive, 29 minutes 310 m north, then away.
+    async function shortThenLong({ arrivalReceivedAt = minute(60) } = {}) {
+      const away = north(4000);
+      await tripData(`trip-a-${randomUUID()}`, [[minute(-20), away], [minute(0), north(19)]], { receivedAt: arrivalReceivedAt });
+      await tripData(`trip-b-${randomUUID()}`, [[minute(3), north(19)], [minute(5), north(310)]], { receivedAt: minute(60) });
+      await tripData(`trip-c-${randomUUID()}`, [[minute(34), north(310)], [minute(44), away]], { receivedAt: minute(60) });
+    }
+    async function ourVisit() {
+      const techId = await technician();
+      const customerId = await customer();
+      const visitId = await completedVisit(customerId, techId);
+      return { customerId, visitId };
+    }
+
+    test("raises nothing when the long stop is inside the radius of another customer's saved pin", async () => {
+      const { customerId } = await ourVisit();
+      await customer(north(338)); // 28 m from the long stop; no visit of theirs that day
+      await shortThenLong();
+      expect(await run()).toMatchObject({ visits: 1, created: 0, other_customer_stop: 1 });
+      expect(await all(customerId)).toHaveLength(0);
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+    });
+
+    test("an active property of another customer counts; an inactive one and a deleted customer's pin do not", async () => {
+      const { customerId } = await ourVisit();
+      const landlordId = await customer(north(3000));
+      const property = { customer_id: landlordId, address_line1: '9 Rental Way', city: 'Fixture City', state: 'FL', zip: '34201', is_primary: false, latitude: north(338).lat, longitude: north(338).lng };
+      await mockPg('customer_properties').insert({ ...property, active: false });
+      await customer(north(338), { deleted_at: new Date('2026-10-01T12:00:00Z') });
+      await shortThenLong();
+      expect(await run()).toMatchObject({ created: 1 });
+      await mockPg('customer_pin_suggestions').where({ customer_id: customerId }).del();
+      await mockPg('customer_properties').insert({ ...property, address_line1: '11 Rental Way', active: true });
+      expect(await run()).toMatchObject({ created: 0, other_customer_stop: 1 });
+    });
+
+    test('with no other customer there the suggestion is still made: the map can lead a technician to a wrong pin first', async () => {
+      const { customerId } = await ourVisit();
+      await customer(north(310 + 200)); // another customer, but outside the radius of the long stop
+      await shortThenLong();
+      expect(await run()).toMatchObject({ visits: 1, created: 1 });
+      const [row] = await open(customerId);
+      expect(row).toMatchObject({ distance_m: 310, stop_minutes: 29 });
+    });
+
+    test("another customer's pin alone does not clear it: without the short stop at the pin the suggestion is made", async () => {
+      const { customerId } = await ourVisit();
+      await customer(north(338));
+      await truckStopsAt(north(310), 29);
+      expect(await run()).toMatchObject({ visits: 1, created: 1 });
+      expect(await open(customerId)).toHaveLength(1);
+    });
+
+    test('a suggestion an earlier run made, before the short stop was received, is closed with its bell and does not come back', async () => {
+      const { customerId, visitId } = await ourVisit();
+      await customer(north(338));
+      await shortThenLong({ arrivalReceivedAt: '2026-10-09T13:00:00Z' }); // the trip that ended at the pin reaches us after the first run
+      expect(await run()).toMatchObject({ created: 1 });
+      const [row] = await open(customerId);
+      expect(row.scheduled_service_id).toBe(visitId);
+      const [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'customer', title: 'Customers — check the map pin for Fixture', body: 'Truck parked 310 m from the pin.',
+        metadata: JSON.stringify({ dedupeKey: `pin-suggestion:${row.id}` }),
+      }).returning('*');
+      const later = () => runPinParkedCheck({ now: new Date('2026-10-10T12:00:00Z'), conn: mockPg });
+      expect(await later()).toMatchObject({ created: 0, closed: 1, other_customer_stop: 1 });
+      expect((await all(customerId)).map((r) => r.status)).toEqual(['superseded']);
+      expect((await bellNow(bell.id)).done_at).not.toBeNull();
+      expect(await later()).toMatchObject({ created: 0, closed: 0 });
+      expect(await all(customerId)).toHaveLength(1);
+    });
+  });
+
   test('a business fence explains the stop; an inactive one does not', async () => {
     const techId = await technician();
     const customerId = await customer();
