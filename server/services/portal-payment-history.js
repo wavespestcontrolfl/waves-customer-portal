@@ -151,98 +151,93 @@ async function recoveryInvoiceAvailableNow(customerId, invoice, database) {
   }
 }
 
-// A failed history row may offer a Pay action only for the invoice that the
-// attempt itself identifies. The account's oldest open invoice is unrelated
-// when a customer has more than one balance, and using it here can put a $60
-// pay link under a failed $95 attempt. Resolve every canonical linkage the
-// payment ledger supports, then fail closed when the row's identifiers are
-// absent, conflicting, payer-owned, settled, withdrawn, or fully covered.
-async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = db) {
-  const failedPayments = visiblePayments.filter((p) => String(p.status || '').toLowerCase() === 'failed'
-    && !isParkedOrSupersededAttempt(p) && !isNeverAttemptedDeferral(p))
-    // Checkout parity requires several read-only fences per candidate. Keep
-    // that work bounded to the newest failures; every other row retains the
-    // safe "View open invoices" fallback.
-    .slice(0, RECOVERY_PAYMENT_LIMIT);
-  const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const invoiceIds = [...new Set(failedPayments.flatMap(paymentInvoiceIds).filter((id) => UUID_SHAPE.test(id)))];
-  const intentIds = [...new Set(failedPayments.map((p) => p.stripe_payment_intent_id).filter(Boolean))];
-  const chargeIds = [...new Set(failedPayments.map((p) => p.stripe_charge_id).filter(Boolean))];
-  const invoiceNumbers = [...new Set(failedPayments.map(invoiceNumberOf).filter(Boolean))];
-  if (!invoiceIds.length && !intentIds.length && !chargeIds.length && !invoiceNumbers.length) return new Map();
+const RECOVERY_UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-  let rows;
+function isRecoveryPayment(payment) {
+  return String(payment.status || '').toLowerCase() === 'failed'
+    && !isParkedOrSupersededAttempt(payment)
+    && !isNeverAttemptedDeferral(payment);
+}
+
+function recoveryLookupKeys(payments) {
+  return {
+    invoiceIds: [...new Set(payments.flatMap(paymentInvoiceIds)
+      .filter((id) => RECOVERY_UUID_SHAPE.test(id)))],
+    intentIds: [...new Set(payments.map((payment) => payment.stripe_payment_intent_id).filter(Boolean))],
+    chargeIds: [...new Set(payments.map((payment) => payment.stripe_charge_id).filter(Boolean))],
+    invoiceNumbers: [...new Set(payments.map(invoiceNumberOf).filter(Boolean))],
+  };
+}
+
+async function loadRecoveryInvoiceRows(customerId, keys, database) {
   try {
-    rows = await database('invoices')
+    return await database('invoices')
       .where({ customer_id: customerId })
       .where(function linkedToFailedAttempt() {
-        if (invoiceIds.length) this.orWhereIn('id', invoiceIds);
-        if (intentIds.length) this.orWhereIn('stripe_payment_intent_id', intentIds);
-        if (chargeIds.length) this.orWhereIn('stripe_charge_id', chargeIds);
-        if (invoiceNumbers.length) this.orWhereIn('invoice_number', invoiceNumbers);
+        if (keys.invoiceIds.length) this.orWhereIn('id', keys.invoiceIds);
+        if (keys.intentIds.length) this.orWhereIn('stripe_payment_intent_id', keys.intentIds);
+        if (keys.chargeIds.length) this.orWhereIn('stripe_charge_id', keys.chargeIds);
+        if (keys.invoiceNumbers.length) this.orWhereIn('invoice_number', keys.invoiceNumbers);
       })
       .select(...RECOVERY_INVOICE_COLUMNS);
   } catch (err) {
     if (database !== db && (['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
       || ['AbortError', 'KnexTimeoutError'].includes(err?.name))) throw err;
     logger.warn(`[billing] failed-payment invoice lookup failed for customer ${customerId}: ${err.message}`);
-    return new Map();
+    return null;
   }
+}
 
-  // An asynchronous saved-bank failure reopens the invoice and deliberately
-  // clears its PaymentIntent. The resolved charge-attempt row retains the
-  // verified invoice/PI pair, so load that terminal evidence before identity
-  // matching. Resolve by PI across every invoice owned by this customer before
-  // narrowing candidates; otherwise a different invoice's live PI stamp can
-  // hide the cleared invoice named by the resolved attempt.
-  let resolvedFailedAttempts = [];
-  let resolvedAttemptLookupFailed = false;
-  if (intentIds.length) {
-    try {
-      resolvedFailedAttempts = await database('stripe_invoice_charge_attempts as attempt')
-        .join('invoices as attempt_invoice', 'attempt_invoice.id', 'attempt.invoice_id')
-        .where({ 'attempt_invoice.customer_id': customerId, 'attempt.status': 'failed' })
-        .whereIn('attempt.stripe_payment_intent_id', intentIds)
-        .whereNotNull('attempt.resolved_at')
-        .select('attempt.invoice_id', 'attempt.stripe_payment_intent_id');
-      const loadedIds = new Set(rows.map((row) => String(row.id)));
-      const missingIds = [...new Set(resolvedFailedAttempts.map((attempt) => String(attempt.invoice_id)))]
-        .filter((id) => !loadedIds.has(id));
-      if (missingIds.length) {
-        const resolvedAttemptInvoices = await database('invoices')
-          .where({ customer_id: customerId })
-          .whereIn('id', missingIds)
-          .select(...RECOVERY_INVOICE_COLUMNS);
-        rows = [...rows, ...resolvedAttemptInvoices];
-      }
-    } catch (err) {
-      resolvedAttemptLookupFailed = true;
-      resolvedFailedAttempts = [];
-      logger.warn(`[billing] failed-payment charge-attempt lookup failed for customer ${customerId}: ${err.message}`);
-    }
+// Saved-bank failures clear the invoice's live PI binding after resolution.
+// Retain the terminal attempt as a second, verified PI→invoice edge and load
+// any invoice reachable only through that evidence before identity matching.
+async function loadResolvedAttemptEvidence(customerId, intentIds, initialRows, database) {
+  if (!intentIds.length) {
+    return { rows: initialRows, resolvedFailedAttempts: [], resolvedAttemptLookupFailed: false };
   }
-
-  // Establish identity against every matching invoice before deciding whether
-  // it is payable. Otherwise a settled invoice named by metadata could be
-  // filtered out first and an unrelated payable invoice sharing another key
-  // could win. All identifiers on an ordinary attempt must resolve uniquely
-  // to one invoice; marked combined shares are handled explicitly below.
-  const rowSetIndex = (keyOf, normalize = String) => {
-    const index = new Map();
-    for (const row of rows) {
-      const key = keyOf(row);
-      if (!key) continue;
-      const normalized = normalize(key);
-      const matches = index.get(normalized) || [];
-      matches.push(row);
-      index.set(normalized, matches);
+  try {
+    const resolvedFailedAttempts = await database('stripe_invoice_charge_attempts as attempt')
+      .join('invoices as attempt_invoice', 'attempt_invoice.id', 'attempt.invoice_id')
+      .where({ 'attempt_invoice.customer_id': customerId, 'attempt.status': 'failed' })
+      .whereIn('attempt.stripe_payment_intent_id', intentIds)
+      .whereNotNull('attempt.resolved_at')
+      .select('attempt.invoice_id', 'attempt.stripe_payment_intent_id');
+    const loadedIds = new Set(initialRows.map((row) => String(row.id)));
+    const missingIds = [...new Set(resolvedFailedAttempts.map((attempt) => String(attempt.invoice_id)))]
+      .filter((id) => !loadedIds.has(id));
+    if (!missingIds.length) {
+      return { rows: initialRows, resolvedFailedAttempts, resolvedAttemptLookupFailed: false };
     }
-    return index;
-  };
-  const byId = rowSetIndex((row) => row.id, (value) => String(value).toLowerCase());
-  const byIntent = rowSetIndex((row) => row.stripe_payment_intent_id);
-  const byCharge = rowSetIndex((row) => row.stripe_charge_id);
-  const byNumber = rowSetIndex((row) => row.invoice_number);
+    const supplementalRows = await database('invoices')
+      .where({ customer_id: customerId })
+      .whereIn('id', missingIds)
+      .select(...RECOVERY_INVOICE_COLUMNS);
+    return {
+      rows: [...initialRows, ...supplementalRows],
+      resolvedFailedAttempts,
+      resolvedAttemptLookupFailed: false,
+    };
+  } catch (err) {
+    logger.warn(`[billing] failed-payment charge-attempt lookup failed for customer ${customerId}: ${err.message}`);
+    return { rows: initialRows, resolvedFailedAttempts: [], resolvedAttemptLookupFailed: true };
+  }
+}
+
+function rowSetIndex(rows, keyOf, normalize = String) {
+  const index = new Map();
+  for (const row of rows) {
+    const key = keyOf(row);
+    if (!key) continue;
+    const normalized = normalize(key);
+    const matches = index.get(normalized) || [];
+    matches.push(row);
+    index.set(normalized, matches);
+  }
+  return index;
+}
+
+function recoveryIdentityIndexes(rows, resolvedFailedAttempts) {
+  const byId = rowSetIndex(rows, (row) => row.id, (value) => String(value).toLowerCase());
   const byResolvedAttemptIntent = new Map();
   for (const attempt of resolvedFailedAttempts) {
     const invoiceMatches = byId.get(String(attempt.invoice_id || '').toLowerCase()) || [];
@@ -252,48 +247,120 @@ async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = d
     matches.set(String(invoiceMatches[0].id), invoiceMatches[0]);
     byResolvedAttemptIntent.set(key, matches);
   }
+  return {
+    byId,
+    byIntent: rowSetIndex(rows, (row) => row.stripe_payment_intent_id),
+    byCharge: rowSetIndex(rows, (row) => row.stripe_charge_id),
+    byNumber: rowSetIndex(rows, (row) => row.invoice_number),
+    byResolvedAttemptIntent,
+  };
+}
 
-  const invoiceByPaymentId = new Map();
-  for (const payment of failedPayments) {
-    // A failed evidence lookup means a historic binding could conflict with
-    // the invoice's current PI stamp. Keep the history row, but withhold the
-    // bearer recovery link until the lookup succeeds.
-    if (payment.stripe_payment_intent_id && resolvedAttemptLookupFailed) continue;
-    const explicitGroups = paymentInvoiceIds(payment).map((id) => byId.get(id) || []);
-    const invoiceNumber = invoiceNumberOf(payment);
-    const strictGroups = [...explicitGroups];
-    if (invoiceNumber) strictGroups.push(byNumber.get(invoiceNumber) || []);
-    const stripeGroups = [];
-    if (payment.stripe_payment_intent_id) {
-      const intentId = String(payment.stripe_payment_intent_id);
-      // Union live invoice stamps with resolved-attempt evidence. A fallback
-      // can restore a cleared binding, but can never hide a conflicting live
-      // binding or a second attempt claiming the same PaymentIntent.
-      const matches = new Map();
-      for (const row of (byIntent.get(intentId) || [])) matches.set(String(row.id), row);
-      for (const row of (byResolvedAttemptIntent.get(intentId)?.values() || [])) matches.set(String(row.id), row);
-      stripeGroups.push([...matches.values()]);
+function stripeMatchGroups(payment, indexes) {
+  const groups = [];
+  if (payment.stripe_payment_intent_id) {
+    const intentId = String(payment.stripe_payment_intent_id);
+    // A resolved attempt may restore a cleared binding, but cannot hide a
+    // conflicting live binding or a second attempt claiming the same PI.
+    const matches = new Map();
+    for (const row of (indexes.byIntent.get(intentId) || [])) matches.set(String(row.id), row);
+    for (const row of (indexes.byResolvedAttemptIntent.get(intentId)?.values() || [])) {
+      matches.set(String(row.id), row);
     }
-    if (payment.stripe_charge_id) stripeGroups.push(byCharge.get(String(payment.stripe_charge_id)) || []);
-    const candidateGroup = strictGroups[0] || stripeGroups[0];
-    const candidate = candidateGroup?.length === 1 ? candidateGroup[0] : null;
-    const combined = isCombinedPayment(payment);
-    // Combined balance payments intentionally store one ledger row per
-    // invoice while every share carries the same Stripe identifiers. The
-    // explicit invoice must still be unique, and the shared Stripe match set
-    // must contain it. Ordinary attempts keep requiring every key to resolve
-    // uniquely to the same invoice.
-    if (!candidate || (combined && !explicitGroups.length)) continue;
-    if (!strictGroups.every((group) => group.length === 1 && group[0] === candidate)) continue;
-    if (!stripeGroups.every((group) => (combined
-      ? group.includes(candidate)
-      : group.length === 1 && group[0] === candidate))) continue;
-    // The existing Billing balance rescues a draft only when the attempt
-    // explicitly names it. A Stripe or description match alone cannot
-    // publish a draft invoice to the customer.
-    if (candidate.status === 'draft' && String(invoiceIdOf(payment)).toLowerCase() !== candidate.id) continue;
-    invoiceByPaymentId.set(String(payment.id), candidate);
+    groups.push([...matches.values()]);
   }
+  if (payment.stripe_charge_id) {
+    groups.push(indexes.byCharge.get(String(payment.stripe_charge_id)) || []);
+  }
+  return groups;
+}
+
+function groupsIdentifyCandidate(groups, candidate) {
+  return groups.every((group) => group.length === 1 && group[0] === candidate);
+}
+
+function stripeGroupsIdentifyCandidate(groups, candidate, combined) {
+  return groups.every((group) => (combined
+    ? group.includes(candidate)
+    : group.length === 1 && group[0] === candidate));
+}
+
+function paymentMayPublishInvoice(payment, invoice) {
+  if (String(invoice?.status || '').toLowerCase() !== 'draft') return true;
+  return String(invoiceIdOf(payment) || '').toLowerCase() === String(invoice?.id || '').toLowerCase();
+}
+
+function recoveryInvoiceForPayment(payment, indexes, resolvedAttemptLookupFailed) {
+  // A failed evidence lookup means a historic binding could conflict with
+  // the current PI stamp. Keep the history row, but withhold its bearer link.
+  if (payment.stripe_payment_intent_id && resolvedAttemptLookupFailed) return null;
+  const explicitGroups = paymentInvoiceIds(payment).map((id) => indexes.byId.get(id) || []);
+  const invoiceNumber = invoiceNumberOf(payment);
+  const strictGroups = invoiceNumber
+    ? [...explicitGroups, indexes.byNumber.get(invoiceNumber) || []]
+    : explicitGroups;
+  const stripeGroups = stripeMatchGroups(payment, indexes);
+  const candidateGroup = strictGroups.length ? strictGroups[0] : stripeGroups[0];
+  const candidate = candidateGroup?.length === 1 ? candidateGroup[0] : null;
+  const combined = isCombinedPayment(payment);
+  if (!candidate || (combined && !explicitGroups.length)) return null;
+  if (!groupsIdentifyCandidate(strictGroups, candidate)) return null;
+  if (!stripeGroupsIdentifyCandidate(stripeGroups, candidate, combined)) return null;
+  return paymentMayPublishInvoice(payment, candidate) ? candidate : null;
+}
+
+function identifyRecoveryInvoices(payments, indexes, resolvedAttemptLookupFailed) {
+  const invoiceByPaymentId = new Map();
+  for (const payment of payments) {
+    const invoice = recoveryInvoiceForPayment(payment, indexes, resolvedAttemptLookupFailed);
+    if (invoice) invoiceByPaymentId.set(String(payment.id), invoice);
+  }
+  return invoiceByPaymentId;
+}
+
+function recoveryInvoiceIsPayable(invoice, ownedIds = null) {
+  if (!invoice?.token || !(invoiceAmountDue(invoice) > 0)) return false;
+  if (ownedIds?.has(String(invoice.id))) return false;
+  if (String(invoice.status || '').toLowerCase() !== 'draft') return isCollectibleOwnInvoice(invoice);
+  return !invoice.payer_id && !invoice.payer_statement_id && !invoiceWithdrawnFromCustomer(invoice);
+}
+
+// A failed history row may offer a Pay action only for the invoice that the
+// attempt itself identifies. The account's oldest open invoice is unrelated
+// when a customer has more than one balance, and using it here can put a $60
+// pay link under a failed $95 attempt. Resolve every canonical linkage the
+// payment ledger supports, then fail closed when the row's identifiers are
+// absent, conflicting, payer-owned, settled, withdrawn, or fully covered.
+async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = db) {
+  const failedPayments = visiblePayments.filter(isRecoveryPayment)
+    // Checkout parity requires several read-only fences per candidate. Keep
+    // that work bounded to the newest failures; every other row retains the
+    // safe "View open invoices" fallback.
+    .slice(0, RECOVERY_PAYMENT_LIMIT);
+  const keys = recoveryLookupKeys(failedPayments);
+  if (!Object.values(keys).some((values) => values.length > 0)) return new Map();
+  const initialRows = await loadRecoveryInvoiceRows(customerId, keys, database);
+  if (!initialRows) return new Map();
+
+  // An asynchronous saved-bank failure reopens the invoice and deliberately
+  // clears its PaymentIntent. The resolved charge-attempt row retains the
+  // verified invoice/PI pair, so load that terminal evidence before identity
+  // matching. Resolve by PI across every invoice owned by this customer before
+  // narrowing candidates; otherwise a different invoice's live PI stamp can
+  // hide the cleared invoice named by the resolved attempt.
+  const { rows, resolvedFailedAttempts, resolvedAttemptLookupFailed } = await loadResolvedAttemptEvidence(
+    customerId, keys.intentIds, initialRows, database,
+  );
+
+  // Establish identity against every matching invoice before deciding whether
+  // it is payable. Otherwise a settled invoice named by metadata could be
+  // filtered out first and an unrelated payable invoice sharing another key
+  // could win. All identifiers on an ordinary attempt must resolve uniquely
+  // to one invoice; marked combined shares are handled explicitly below.
+  const indexes = recoveryIdentityIndexes(rows, resolvedFailedAttempts);
+  const invoiceByPaymentId = identifyRecoveryInvoices(
+    failedPayments, indexes, resolvedAttemptLookupFailed,
+  );
 
   const identifiedInvoices = [...new Map([...invoiceByPaymentId.values()]
     .map((row) => [String(row.id), row])).values()];
@@ -305,29 +372,21 @@ async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = d
 
   const availableInvoices = new Map();
   for (const invoice of identifiedInvoices) {
-    const ownDraft = String(invoice.status || '').toLowerCase() === 'draft'
-      && !invoice.payer_id && !invoice.payer_statement_id && !invoiceWithdrawnFromCustomer(invoice);
-    const basePayable = !ownership.ownedIds.has(String(invoice.id))
-      && invoice.token && (ownDraft || isCollectibleOwnInvoice(invoice)) && invoiceAmountDue(invoice) > 0;
-    if (!basePayable) continue;
+    if (!recoveryInvoiceIsPayable(invoice, ownership.ownedIds)) continue;
     const current = await recoveryInvoiceAvailableNow(customerId, invoice, database);
-    const currentDraft = String(current?.status || '').toLowerCase() === 'draft'
-      && !current?.payer_id && !current?.payer_statement_id && !invoiceWithdrawnFromCustomer(current);
-    const currentPayable = current?.token
-      && (currentDraft || isCollectibleOwnInvoice(current)) && invoiceAmountDue(current) > 0;
-    if (currentPayable) availableInvoices.set(String(invoice.id), current);
+    if (recoveryInvoiceIsPayable(current)) availableInvoices.set(String(invoice.id), current);
   }
 
+  const failedPaymentById = new Map(failedPayments.map((payment) => [String(payment.id), payment]));
   const recoveryByPaymentId = new Map();
   for (const [paymentId, invoice] of invoiceByPaymentId) {
     const current = availableInvoices.get(String(invoice.id));
     if (!current) continue;
-    const payment = failedPayments.find((row) => String(row.id) === paymentId);
+    const payment = failedPaymentById.get(paymentId);
     // If the fresh row moved back to draft after identity resolution, retain
     // Billing's stricter rule: only its canonical explicit invoice id may
     // publish that otherwise-undelivered debt.
-    if (String(current.status || '').toLowerCase() === 'draft'
-      && String(invoiceIdOf(payment)).toLowerCase() !== String(current.id).toLowerCase()) continue;
+    if (!payment || !paymentMayPublishInvoice(payment, current)) continue;
     recoveryByPaymentId.set(paymentId, {
       payUrl: `/pay/${current.token}`,
       amountDue: invoiceAmountDue(current),
