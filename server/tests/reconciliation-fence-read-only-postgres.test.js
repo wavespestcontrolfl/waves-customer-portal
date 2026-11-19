@@ -44,13 +44,14 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       t.uuid('customer_id');
       t.string('status');
       t.string('invoice_number');
+      t.string('payment_method');
+      t.timestamp('paid_at');
+      t.timestamp('ach_processing_notified_at');
+      t.timestamp('updated_at');
       t.decimal('total');
       t.decimal('credit_applied', 12, 2).defaultTo(0);
       t.date('due_date');
       t.timestamp('viewed_at');
-      t.timestamp('paid_at');
-      t.timestamp('ach_processing_notified_at');
-      t.timestamp('updated_at');
       t.string('stripe_payment_intent_id');
     });
     await app.schema.createTable('customer_merge_journal', (t) => {
@@ -72,6 +73,7 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       t.string('stripe_payment_method_id');
       t.decimal('credit_applied_delta', 12, 2).defaultTo(0);
       t.decimal('credit_applied_total', 12, 2).defaultTo(0);
+      t.decimal('amount', 12, 2);
       t.text('error_message');
       t.timestamp('submitted_at');
       t.timestamp('resolved_at');
@@ -81,14 +83,17 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     await app.schema.createTable('stripe_orphan_charges', (t) => {
       t.uuid('invoice_id');
       t.boolean('resolved');
-      t.string('stripe_payment_intent_id');
       t.timestamp('resolved_at');
       t.text('resolution_notes');
+      t.string('stripe_payment_intent_id');
     });
     await app.schema.createTable('payments', (t) => {
       t.uuid('id').primary();
       t.uuid('customer_id');
       t.string('status');
+      t.string('processor');
+      t.uuid('payment_method_id');
+      t.decimal('amount', 12, 2);
       t.string('stripe_payment_intent_id');
       t.jsonb('metadata');
       t.uuid('superseded_by_payment_id');
@@ -412,6 +417,53 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       expect(await verdict(independent.invoiceId, trx, { checkout: true }))
         .toMatchObject({ chargeAttemptId: independent.attemptId });
     });
+  });
+
+  test.each([true, false])('pre-migration bank return reopens only with the original worker ledger row (matches %s)', async (matches) => {
+    const { attemptId, invoiceId, intent, customerId } = await authenticationFixture(app);
+    const savedMethod = randomUUID();
+    await app('customers').insert({ id: customerId, account_credits: 0 });
+    await app('invoices').where({ id: invoiceId }).update({
+      payment_method: 'us_bank_account', status: 'processing', stripe_payment_intent_id: intent.id, credit_applied: 0,
+    });
+    const attempt = () => app('stripe_invoice_charge_attempts').where({ id: attemptId });
+    await attempt().update({ status: 'ambiguous', resolved_at: null, decline_code: null, amount: 25,
+      created_at: new Date('2020-01-01'), payment_method_id: savedMethod, stripe_payment_intent_id: intent.id });
+    await app('payments').insert({ id: randomUUID(), stripe_payment_intent_id: intent.id, processor: 'stripe',
+      payment_method_id: matches ? savedMethod : null, amount: 25, customer_id: customerId,
+      metadata: { invoice_id: invoiceId }, status: 'failed' });
+    expect(await StripeService.resolveFailedInvoiceSavedCardChargeAttempt({ attemptId, invoiceId, customerId,
+      stripePaymentIntentId: intent.id, bankReturnAmountCents: 2500, declineCode: 'bank_return', database: app })).toBe(matches);
+    expect(await attempt().first()).toMatchObject({ status: matches ? 'failed' : 'ambiguous', worker_payment_intent_id: null });
+    expect(await app('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: matches ? 'sent' : 'processing' });
+  });
+
+  test.each([true, false])('cancellation checks the recorded customer transfer under lock (proven %s)', async (proven) => {
+    const { attemptId, invoiceId, intent, customerId } = await authenticationFixture(app);
+    const currentOwner = randomUUID();
+    await app('customers').insert({ id: currentOwner, account_credits: 0 });
+    await recordInvoiceMerge(app, { invoiceId, loserId: customerId, winnerId: currentOwner, invoiceIds: proven ? [invoiceId] : [] });
+    await app('invoices').where({ id: invoiceId }).update({ status: 'processing', stripe_payment_intent_id: intent.id });
+    await app('stripe_invoice_charge_attempts').where({ id: attemptId }).update({
+      status: 'ambiguous', resolved_at: null, worker_payment_intent_id: intent.id, stripe_payment_intent_id: intent.id,
+    });
+    const result = await StripeService.resolveFailedInvoiceSavedCardChargeAttempt({ attemptId, invoiceId, customerId: currentOwner,
+      originalCustomerId: customerId, stripePaymentIntentId: intent.id, database: app });
+    expect(result).toBe(proven);
+    expect(await app('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: proven ? 'sent' : 'processing' });
+  });
+
+  test('retains a worker authentication decline with no returned intent after a definitive failure webhook', async () => {
+    const { attemptId, invoiceId } = await authenticationFixture(app);
+    const attempt = () => app('stripe_invoice_charge_attempts').where({ id: attemptId });
+    await attempt().update({ decline_code: 'card_declined', stripe_payment_intent_id: 'pi_webhook_only' });
+    await StripeService.resolveNoFundsSavedCardChargeAttempt({
+      attemptId, invoiceId, declineCode: 'authentication_required', failureMessage: 'authentication required', database: app,
+    });
+    expect(await attempt().first()).toMatchObject({
+      decline_code: 'authentication_required', worker_payment_intent_id: null, stripe_payment_intent_id: 'pi_webhook_only',
+    });
+    expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ chargeAttemptId: attemptId });
   });
 
   test.each(['card_declined', 'authentication_required'])('a preceding %s webhook for another PI preserves both identities and keeps checkout held', async (declineCode) => {

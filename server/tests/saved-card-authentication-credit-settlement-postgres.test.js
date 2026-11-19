@@ -179,6 +179,40 @@ jest.setTimeout(20000);
     expect(payment.payment_date.toISOString().slice(0, 10)).toBe('2026-09-30');
   });
 
+  test.each(['refunded', 'disputed'])('a delayed success closes the original challenge after a %s ledger entry', async (status) => {
+    await mockDatabase('payments').insert({ customer_id: customerId, stripe_payment_intent_id: intent.id,
+      amount: 75, payment_date: '2026-09-30', processor: 'stripe', status, metadata: { invoice_id: invoiceId } });
+    await settle(intent);
+    expect(await mockDatabase('payments').where({ stripe_payment_intent_id: intent.id }).first()).toMatchObject({ status });
+    expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'sent', credit_applied: '0.00' });
+    expect(await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).first()).toMatchObject({
+      status: 'succeeded', stripe_payment_intent_id: intent.id, decline_code: null,
+    });
+    expect(await mockDatabase('customer_credit_ledger').where({ invoice_id: invoiceId })).toHaveLength(0);
+  });
+
+  test('a shortfall after a proven merge records the captured cash for the current invoice owner', async () => {
+    const currentOwner = randomUUID();
+    await insertMergeOwner(currentOwner, 1);
+    await recordInvoiceMerge(customerId, currentOwner);
+    await mockDatabase('invoices').where({ id: invoiceId }).update({ customer_id: currentOwner });
+    await settle(intent);
+    expect(await mockDatabase('stripe_orphan_charges').where({ stripe_payment_intent_id: intent.id }).first())
+      .toMatchObject({ invoice_id: invoiceId, customer_id: currentOwner, amount: '75.00', resolved: false });
+  });
+
+  test.each([null, '2026-10-03T18:00:00.000Z'])('fills only a missing cash-basis settlement day (%s)', async (recordedAt) => {
+    await mockDatabase('payments').insert({ customer_id: customerId, stripe_payment_intent_id: intent.id, amount: 75,
+      payment_date: '2026-10-03', status: 'paid', processor: 'stripe', metadata: {
+        invoice_id: invoiceId, ...(recordedAt ? { settled_event_at: recordedAt } : {}),
+      } });
+    const stripeTime = '2026-10-01T02:30:00.000Z';
+    await settle(intent, Date.parse(stripeTime) / 1000);
+    const row = await mockDatabase('payments').where({ stripe_payment_intent_id: intent.id }).first();
+    expect(row.metadata.settled_event_at).toBe(recordedAt || stripeTime);
+    expect(row.payment_date.toISOString().slice(0, 10)).toBe(recordedAt ? '2026-10-03' : '2026-09-30');
+  });
+
   test('settlement replaces the checkout this attempt retired, including its sibling stamps', async () => {
     const retired = `pi_old_${attemptId}`;
     const sibling = randomUUID();

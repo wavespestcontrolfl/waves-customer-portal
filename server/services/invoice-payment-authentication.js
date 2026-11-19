@@ -93,6 +93,15 @@ function matchingSavedCardIntent(intent, database, { lockInvoice = false, settle
   return { query, methodId };
 }
 
+async function invoiceHasRecordedOwner(invoice, metadataCustomerId, database) {
+  if (!invoice?.customer_id || !metadataCustomerId) return false;
+  if (String(invoice.customer_id).toLowerCase() === String(metadataCustomerId).toLowerCase()) return true;
+  if (![invoice.id, metadataCustomerId, invoice.customer_id].every(isUuid)) return false;
+  const query = database('invoices').where({ id: invoice.id, customer_id: invoice.customer_id });
+  whereProvenInvoiceOwner(query, { invoiceAlias: 'invoices', invoiceId: invoice.id, metadataCustomerId });
+  return Boolean(await query.first('id'));
+}
+
 // Validate every provider-controlled identity field before opening a
 // transaction or reading the database. Unrelated cancellation payloads remain
 // a no-op without consuming a connection.
@@ -219,20 +228,31 @@ async function recordAuthenticationCancellation(intent, database) {
 
 // Run inside the transaction that pays the invoice. A signed success alone
 // cannot release a hold when the payment was quarantined or linked elsewhere.
-async function recordAuthenticationSettlement(intent, trx) {
+async function recordAuthenticationSettlement(intent, trx, { returnedPaymentId = null } = {}) {
   if (intent.status !== 'succeeded') return;
-  const match = matchingSavedCardIntent(intent, trx, { settled: true });
+  const match = matchingSavedCardIntent(intent, trx, { settled: !returnedPaymentId });
   if (!match) return;
   const { query, methodId } = match;
   if (!methodId) query.where({ stripe_payment_intent_id: intent.id });
   const currentInvoiceOwner = trx('invoices')
     .select('customer_id')
     .where({ id: intent.metadata.waves_invoice_id });
-  return whereAwaitingAuthentication(query, 'stripe_invoice_charge_attempts')
-    .whereExists(trx('payments').select('id')
-      .whereIn('customer_id', currentInvoiceOwner)
-      .where({ stripe_payment_intent_id: intent.id, status: 'paid' })
-      .whereRaw("(metadata->>'invoice_id' IS NULL OR metadata->>'invoice_id' = ?)", [intent.metadata.waves_invoice_id]))
+  const ledger = trx('payments').select('id').whereIn('customer_id', currentInvoiceOwner)
+    .where({ stripe_payment_intent_id: intent.id });
+  if (returnedPaymentId) {
+    // A prior refund/dispute owns the invoice and ledger. Prove the original
+    // capture and close only its challenge, leaving both terminal states alone.
+    const cents = Number(intent.amount_received || intent.amount);
+    if (!Number.isSafeInteger(cents) || cents <= 0) return 0;
+    query.where({ amount: cents / 100 });
+    ledger.where({ id: returnedPaymentId, amount: cents / 100 }).whereIn('status', ['disputed', 'refunded'])
+      .whereRaw("(metadata->>'invoice_id' = ? OR (metadata->>'invoice_id' IS NULL AND EXISTS (SELECT 1 FROM invoices WHERE id = ? AND stripe_payment_intent_id = ?)))",
+        [intent.metadata.waves_invoice_id, intent.metadata.waves_invoice_id, intent.id]);
+  } else {
+    ledger.where({ status: 'paid' })
+      .whereRaw("(metadata->>'invoice_id' IS NULL OR metadata->>'invoice_id' = ?)", [intent.metadata.waves_invoice_id]);
+  }
+  return whereAwaitingAuthentication(query, 'stripe_invoice_charge_attempts').whereExists(ledger)
     .update({
       status: 'succeeded', stripe_payment_intent_id: intent.id, decline_code: null, error_message: null,
       resolved_at: trx.fn.now(), updated_at: trx.fn.now(),
@@ -274,6 +294,6 @@ async function verifySavedCardCancellation({ attemptId, intentId, stripe, databa
 }
 
 module.exports = {
-  whereAwaitingAuthentication, findSettlingAuthenticationAttempt, assertNoConflictingAuthenticationSettlement, recordAuthenticationCancellation,
+  invoiceHasRecordedOwner, whereAwaitingAuthentication, findSettlingAuthenticationAttempt, assertNoConflictingAuthenticationSettlement, recordAuthenticationCancellation,
   recordAuthenticationSettlement, verifySavedCardCancellation,
 };

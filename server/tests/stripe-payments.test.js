@@ -270,6 +270,17 @@ describe('saved-card ambiguous webhook binding', () => {
   };
 
   test('allows the exact fenced invoice, customer, source, and saved method to bind', () => {
+    const canceled = { ...paymentIntent, status: 'canceled', payment_method: null };
+    const binding = { ...attempt, stripe_payment_intent_id: canceled.id, worker_payment_intent_id: canceled.id, authentication_canceled_intent_id: canceled.id };
+    const verify = (row, pi = canceled) => savedCardAttemptMatchesPaymentIntent({ attempt: row, invoice, paymentIntent: pi, allowVerifiedCancellationWithoutMethod: true });
+    expect(verify(binding)).toBe(true);
+    expect(verify({ ...binding, authentication_canceled_intent_id: null })).toBe(false);
+    expect(verify({ ...binding, worker_payment_intent_id: null })).toBe(false);
+    expect(savedCardAttemptMatchesPaymentIntent({
+      attempt: { ...binding, worker_payment_intent_id: null, stripe_payment_intent_id: null },
+      invoice, paymentIntent: canceled, allowVerifiedCancellationWithoutMethod: true, allowCancellationAwaitingWorker: true,
+    })).toBe(true);
+    expect(verify(binding, { ...canceled, payment_method: 'pm_other' })).toBe(false);
     expect(savedCardAttemptMatchesPaymentIntent({ attempt, invoice, paymentIntent })).toBe(true);
     expect(savedCardAttemptMatchesPaymentIntent({
       attempt: { ...attempt, status: 'claimed' },
@@ -284,6 +295,7 @@ describe('saved-card ambiguous webhook binding', () => {
     ['wrong source', { paymentIntent: { ...paymentIntent, metadata: { ...paymentIntent.metadata, source: 'public_pay' } } }],
     ['wrong saved method', { paymentIntent: { ...paymentIntent, payment_method: 'pm-stripe-2' } }],
     ['wrong attempt id', { paymentIntent: { ...paymentIntent, metadata: { ...paymentIntent.metadata, saved_card_attempt_id: 'attempt-old' } } }],
+    ['different worker PaymentIntent despite matching webhook attachment', { attempt: { ...attempt, stripe_payment_intent_id: paymentIntent.id, worker_payment_intent_id: 'pi-other' } }],
     ['different attached PaymentIntent', { attempt: { ...attempt, stripe_payment_intent_id: 'pi-other' } }],
     ['resolved fence', { attempt: { ...attempt, resolved_at: new Date().toISOString() } }],
   ])('rejects %s', (_label, overrides) => {

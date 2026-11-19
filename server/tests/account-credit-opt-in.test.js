@@ -99,10 +99,7 @@ describe('applyAccountCreditToInvoice — customer opt-in gate', () => {
 
     expect(calls.attempts).toEqual(expect.arrayContaining([
       ['where', { invoice_id: 'inv-1' }],
-      ['where', {
-        'stripe_invoice_charge_attempts.status': 'failed',
-        'stripe_invoice_charge_attempts.decline_code': 'authentication_required',
-      }],
+      ['where', { 'stripe_invoice_charge_attempts.status': 'failed' }],
     ]));
     expect(calls.attempts.some(([method]) => method === 'first')).toBe(true);
     expect(calls.ledger).toEqual([]);

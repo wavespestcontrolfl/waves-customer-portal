@@ -598,11 +598,17 @@ describe('saved-card failed-webhook attempt repair', () => {
   test('withholds invoice and credit writes until the original worker binds a webhook-first failure', async () => {
     const { database, state } = failedAttemptDb();
     state.attempt.worker_payment_intent_id = null;
+    state.attempt.submitted_at = new Date();
     state.attempt.status = 'ambiguous'; // a concurrent checkout promoted the claim while the worker is still waiting
     await expect(resolveFailedInvoiceSavedCardChargeAttempt({
       attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1', stripePaymentIntentId: 'pi-failed', database,
     })).rejects.toMatchObject({ code: 'SAVED_CARD_WORKER_INTENT_PENDING' });
     expect(state.ledger).toEqual([]);
+    expect(state.updates).toEqual([]);
+    state.attempt.submitted_at = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({
+      attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1', stripePaymentIntentId: 'pi-failed', database,
+    })).resolves.toBe(false);
     expect(state.updates).toEqual([]);
   });
 

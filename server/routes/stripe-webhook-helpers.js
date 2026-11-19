@@ -51,6 +51,9 @@ function savedCardAttemptMatchesPaymentIntent({
   paymentIntent,
   allowResolvedSucceeded = false,
   requireWorkerPaymentIntent = false,
+  allowVerifiedCancellationWithoutMethod = false,
+  allowCancellationAwaitingWorker = false,
+  provenInvoiceOwner = false,
 }) {
   if (!attempt || !invoice || !paymentIntent) return false;
   const metadata = paymentIntent.metadata || {};
@@ -73,18 +76,24 @@ function savedCardAttemptMatchesPaymentIntent({
   const exactAttemptBinding = metadataAttemptId
     ? metadataAttemptId === String(attempt.id)
     : Boolean(attachedPaymentIntentId && attachedPaymentIntentId === paymentIntentId);
+  const verifiedCancellation = allowVerifiedCancellationWithoutMethod && !paymentMethodId
+    && paymentIntent.status === 'canceled' && Boolean(paymentIntentId) && Boolean(metadataAttemptId)
+    && attempt.authentication_canceled_intent_id === paymentIntentId
+    && ((attempt.worker_payment_intent_id === paymentIntentId && attachedPaymentIntentId === paymentIntentId)
+      || (allowCancellationAwaitingWorker && !attempt.worker_payment_intent_id));
   const activeAttempt = ['claimed', 'ambiguous'].includes(attempt.status) && !attempt.resolved_at;
   const settledAttempt = allowResolvedSucceeded && attempt.status === 'succeeded' && attempt.resolved_at;
   return (activeAttempt || settledAttempt)
     && exactAttemptBinding
     && (!requireWorkerPaymentIntent || (Boolean(metadataAttemptId) && workerPaymentIntentId === paymentIntentId))
+    && (!attempt.worker_payment_intent_id || attempt.worker_payment_intent_id === paymentIntentId)
     && (!attachedPaymentIntentId || attachedPaymentIntentId === paymentIntentId)
     && String(attempt.invoice_id) === String(invoice.id)
     && metadata.source === 'admin_card_on_file'
     && String(metadata.waves_invoice_id || '') === String(invoice.id)
-    && String(metadata.waves_customer_id || '') === String(invoice.customer_id)
+    && (provenInvoiceOwner || String(metadata.waves_customer_id || '') === String(invoice.customer_id))
     && Boolean(attempt.stripe_payment_method_id)
-    && String(attempt.stripe_payment_method_id) === String(paymentMethodId || '');
+    && (verifiedCancellation || String(attempt.stripe_payment_method_id) === String(paymentMethodId || ''));
 }
 
 function savedCardCreditAdjustment({ attempt, invoice }) {

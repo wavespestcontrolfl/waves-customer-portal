@@ -127,6 +127,7 @@ const SAVED_CARD_RECONCILIATION_ERROR_CODES = new Set([
   'STRIPE_AMBIGUOUS_OUTCOME',
 ]);
 const SAVED_CARD_CLAIM_STALE_MS = 5 * 60 * 1000;
+const SAVED_CARD_WORKER_WEBHOOK_RETRY_MS = 24 * 60 * 60 * 1000;
 
 function savedCardClaimIsStale(attempt, now = Date.now()) {
   const claimedAt = new Date(attempt?.created_at || '').getTime();
@@ -490,7 +491,8 @@ async function resolveSettledInvoiceSavedCardChargeAttempt({
     const attempt = await trx('stripe_invoice_charge_attempts')
       .where({ id: attemptId, invoice_id: invoiceId })
       .forUpdate()
-      .first('id', 'status', 'resolved_at', 'stripe_payment_intent_id');
+      .first('id', 'status', 'resolved_at', 'stripe_payment_intent_id', 'worker_payment_intent_id');
+    if (attempt?.worker_payment_intent_id && attempt.worker_payment_intent_id !== stripePaymentIntentId) return false;
     if (!attempt || !['claimed', 'ambiguous', 'succeeded'].includes(attempt.status)) return false;
     if (attempt.stripe_payment_intent_id
       && String(attempt.stripe_payment_intent_id) !== String(stripePaymentIntentId)) return false;
@@ -589,7 +591,16 @@ async function resolveNoFundsSavedCardChargeAttempt({
     if (!attempt) {
       // A signed failure can resolve this claim while the create request is
       // still returning. Only the original worker has that response's PI.
-      if (declineCode !== 'authentication_required' || !authenticationIntentId) return false;
+      if (declineCode !== 'authentication_required') return false;
+      if (!authenticationIntentId) {
+        // A worker can report authentication without returning the intent. Its
+        // decline still fences collection, but supplies no cancellation proof.
+        const held = await trx('stripe_invoice_charge_attempts')
+          .where({ id: attemptId, invoice_id: invoiceId, status: 'failed' })
+          .whereNotNull('resolved_at')
+          .update({ decline_code: declineCode, updated_at: new Date() });
+        return held ? { resolved: true, reopened: false } : false;
+      }
       const recordedAt = new Date();
       const bound = await compatibleWorkerIntent(trx('stripe_invoice_charge_attempts'), authenticationIntentId)
         .where({ id: attemptId, invoice_id: invoiceId, status: 'failed' })
@@ -659,6 +670,8 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
   stripePaymentIntentId,
   failureMessage,
   requestIdempotencyKey = null,
+  originalCustomerId = null,
+  bankReturnAmountCents = null,
   // Codex #4971 r24 P1: the asynchronous failure's own code (a bank
   // return, an async card decline) — persisted as decline_code so the
   // termite renewal's crash recovery reads this as the CUSTOMER-side
@@ -678,7 +691,13 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
     // check right below still refuses if the locked invoice disagrees.
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
     const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
-    if (!invoice || String(invoice.customer_id) !== String(customerId)) return false;
+    if (!invoice) return false;
+    if (originalCustomerId
+      && !await require('./invoice-payment-authentication').invoiceHasRecordedOwner(invoice, originalCustomerId, trx)) return false;
+    if (String(invoice.customer_id) !== String(customerId)) {
+      if (originalCustomerId) throw new Error('Saved-card invoice owner changed while locking the cancellation; retry');
+      return false;
+    }
     const invoiceStatus = String(invoice.status || '').toLowerCase();
     if (invoiceStatus !== 'processing' && !isInvoiceCollectibleStatus(invoiceStatus)) return false;
     if (invoiceStatus === 'processing'
@@ -692,16 +711,35 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
       .whereIn('status', ['claimed', 'ambiguous'])
       .whereNull('resolved_at')
       .forUpdate()
-      .first('id', 'status', 'submitted_at', 'idempotency_key', 'stripe_payment_intent_id', 'worker_payment_intent_id', 'worker_create_timed_out_at', 'credit_applied_delta', 'credit_applied_total');
+      .first('id', 'status', 'created_at', 'submitted_at', 'idempotency_key', 'stripe_payment_intent_id', 'worker_payment_intent_id', 'worker_create_timed_out_at', 'payment_method_id', 'amount', 'credit_applied_delta', 'credit_applied_total');
     if (!attempt || (attempt.stripe_payment_intent_id && attempt.stripe_payment_intent_id !== stripePaymentIntentId)) return false;
     if (attempt.worker_payment_intent_id && attempt.worker_payment_intent_id !== stripePaymentIntentId) return false;
     const originalCreateFailed = Boolean(attempt.submitted_at && requestIdempotencyKey
       && attempt.idempotency_key === requestIdempotencyKey);
-    if (!attempt.worker_payment_intent_id && !originalCreateFailed) {
+    // Pre-migration ACH debits can return days later without a create request
+    // key. The original worker alone inserts the bank ledger row with its
+    // saved payment_method_id. A webhook-only stamp or card cancellation
+    // cannot take this path. The caller matched the signed attempt metadata.
+    let bankLedger = null;
+    if (!attempt.worker_payment_intent_id && !originalCreateFailed && Number.isInteger(bankReturnAmountCents)
+      && bankReturnAmountCents > 0 && Math.round(Number(attempt.amount) * 100) === bankReturnAmountCents
+      && attempt.payment_method_id && attempt.status === 'ambiguous' && invoiceStatus === 'processing'
+      && invoice.payment_method === 'us_bank_account' && invoice.stripe_payment_intent_id === stripePaymentIntentId
+      && attempt.stripe_payment_intent_id === stripePaymentIntentId) {
+      bankLedger = await trx('payments')
+        .where({ processor: 'stripe', customer_id: customerId, payment_method_id: attempt.payment_method_id,
+          stripe_payment_intent_id: stripePaymentIntentId, amount: attempt.amount })
+        .whereIn('status', ['processing', 'failed'])
+        .whereRaw("metadata->>'invoice_id' = ?", [String(invoiceId)])
+        .forUpdate().first('id');
+    }
+    if (!attempt.worker_payment_intent_id && !originalCreateFailed && !bankLedger) {
       // Even the invoice's pointer may have been written by a processing
       // webhook. A timed-out worker cannot supply further proof. Acknowledge
       // that observation while retaining the ambiguous claim and its credit.
-      if (attempt.worker_create_timed_out_at) return false;
+      const startedAt = new Date(attempt.submitted_at || attempt.created_at || '').getTime();
+      if (attempt.worker_create_timed_out_at || !Number.isFinite(startedAt)
+        || Date.now() - startedAt >= SAVED_CARD_WORKER_WEBHOOK_RETRY_MS) return false;
       // Stripe can deliver failure before the original create returns. Retry
       // the signed event after the worker has bound its exact response. No
       // invoice, reserved credit or attempt state has changed in this path.
