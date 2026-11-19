@@ -2866,7 +2866,11 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     const target = coords.source === 'service_zone_fallback' ? null : {
       lat: coords.lat, lng: coords.lng, planning_exempt: true, estimated_duration_minutes: candidateExpectedMinutes || serviceProfile.durationMinutes,
     };
-    result[OFFER_RANK] = observeOffers(db, shown, target, { pinned, rainTierOf, calendar: userOpts.dispatchCalendar });
+    // `estimateId` is the root-scoped, server-loaded estimate (never a caller-supplied exclusion). Its own active
+    // reservation may occupy one of these public cards; booking-fit ignores only that hold and keeps every rival hold.
+    result[OFFER_RANK] = observeOffers(db, shown, target, {
+      pinned, rainTierOf, calendar: userOpts.dispatchCalendar, ownEstimateId: estimateId,
+    });
   }
 
   // Never cache a funnel-ACTIVE result: the funnel's day set changes with

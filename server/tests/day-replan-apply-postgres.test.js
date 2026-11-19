@@ -153,7 +153,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
 
   async function scoredCrossDay() {
     const { positionFor, routeStamp } = require('../services/auto-dispatch/route-position');
-    const { loadDayStopRows } = require('../services/auto-dispatch/candidate-slots')._internals;
+    const { DAY_CLOSE, _internals: { loadDayStopRows } } = require('../services/auto-dispatch/candidate-slots');
     const date = '2097-06-11';
     const [mover, , left, right] = visits;
     for (const [v, start, end, n] of [[left, '13:00', '14:00', 1], [right, '15:00', '16:00', 2]]) {
@@ -162,7 +162,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     const rows = await loadDayStopRows(mockConn, { dates: [DAY, date], technicianIds: [techId] });
     const others = rows.filter(r => r.dateStr === DAY && r.id !== mover.id);
     const target = { ...rows.find(r => r.id === mover.id), window_start: '14:00', window_end: '15:00' };
-    const position = positionFor(rows.filter(r => r.dateStr === date), target, { sourceStamp: routeStamp(others), origin: HQ, departureMin: 450 });
+    const position = positionFor(rows.filter(r => r.dateStr === date), target, { sourceStamp: routeStamp(others), origin: HQ, departureMin: 450, dayEndMin: DAY_CLOSE });
     expect(position.order).toEqual([left.id, mover.id, right.id]);
     return { date, left, right, mover, position };
   }
@@ -179,6 +179,15 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     const { date, mover, position } = await scoredCrossDay();
     await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'admin', 'admin',
       { seriesPolicy: 'single', dispatchRoutePosition: position })).rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+  });
+
+  test('a late calendar block that pushes the last job past closing aborts the priced move', async () => {
+    const { date, mover, position } = await scoredCrossDay();
+    await mockConn('tech_schedule_blocks').insert({ date, technician_id: techId, block_type: 'blocked', start_time: '15:30', end_time: '16:30' });
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position })).rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
+    expect(await mockConn('reschedule_log').where({ scheduled_service_id: mover.id }).first('id')).toBeUndefined();
   });
 
   test('a changed destination hour after pricing aborts the whole cross-day move', async () => {
@@ -203,6 +212,26 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     expect(measured.map(m => m.start)).toEqual(cards.map(s => s.windowStart));
     expect(measured[0]).toMatchObject({ displayed: 1, proposed: 1, driveMin: expect.any(Number), finishMin: expect.any(Number) });
     for (const i of [1, 2, 4, 5]) expect(measured[i]).not.toHaveProperty('driveMin');
+  });
+
+  test('only the requesting estimate can measure the hour it already holds', async () => {
+    const { observeOffers } = require('../services/day-replan/booking-fit');
+    const date = '2097-06-11';
+    const own = randomUUID();
+    const other = randomUUID();
+    const customer = visits[0].customerId;
+    await mockConn('estimates').insert([own, other].map(id => ({ id, customer_id: customer, status: 'sent' })));
+    const cards = ['09', '11'].map(h => ({ date, techId, windowStart: h + ':00', windowEnd: String(Number(h) + 1) + ':00' }));
+    for (const [index, id] of [own, other].entries()) {
+      await mockConn('scheduled_services').insert({ customer_id: customer, technician_id: techId, scheduled_date: date,
+        service_type: 'Quarterly Pest Control Service', status: 'pending', source_estimate_id: id,
+        reservation_expires_at: date + 'T22:00Z', window_start: cards[index].windowStart, window_end: cards[index].windowEnd });
+    }
+    const target = { lat: HQ.lat, lng: HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
+    const measure = ownEstimateId => observeOffers(mockConn, cards, target, { now: NOW, ownEstimateId })();
+    expect((await measure(own)).map(m => Number.isFinite(m.driveMin))).toEqual([true, false]);
+    expect((await measure()).map(m => Number.isFinite(m.driveMin))).toEqual([false, false]);
+    expect((await measure(randomUUID())).map(m => Number.isFinite(m.driveMin))).toEqual([false, false]);
   });
 
   test('the office notice shows the verified series and two feasible starts, and a live customer pick stays quiet', async () => {

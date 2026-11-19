@@ -130,7 +130,8 @@ async function loadDayStops(conn, dateStr) {
       'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
       ...CUSTOMER_PREMISE_ALIASES,
       'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
-      'scheduled_services.reservation_expires_at', 'scheduled_services.route_order', 'scheduled_services.created_at',
+      'scheduled_services.reservation_expires_at', 'scheduled_services.source_estimate_id',
+      'scheduled_services.route_order', 'scheduled_services.created_at',
       // Apply mode's version hash reads these (the shadow plan ignores them).
       'scheduled_services.scheduled_date', 'scheduled_services.customer_confirmed', 'scheduled_services.updated_at',
       // The columns the move's CAS pins (apply mode): the stored location, not the guarded pin the planner reads.

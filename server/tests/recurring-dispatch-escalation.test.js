@@ -194,6 +194,25 @@ describe('recurring visit with no arrival time and no due date', () => {
     expect(whyOf('recurring-no-window:s8:2026-08-13')).toBe('The Aug 13 visit has no arrival time; set one in dispatch so it can be placed.');
   });
 
+  test.each([
+    ['Saturday', '2026-08-08'],
+    ['Sunday', '2026-08-09'],
+  ])('a skip-weekends series on %s keeps its missing-due-date notice without suggesting hours', async (_day, date) => {
+    const candidate = { ...windowless, scheduled_date: date };
+    const current = { ...candidate, technician_id: 'tech-1', skip_weekends: true };
+    query.select = jest.fn().mockResolvedValueOnce([candidate]).mockResolvedValue([]);
+    query.first = jest.fn()
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce({ scheduled_date: '2026-01-10', recurring_pattern: 'quarterly' })
+      .mockResolvedValueOnce(null);
+    notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
+
+    expect(await flagUnplacedVisits({ lockWindowDays: 14 }, new Date('2026-08-01T16:00:00Z'))).toBe(1);
+    const opts = notifications.notifyAdmin.mock.calls[0][3];
+    expect(opts.detail).toBe('Series started 2026-01-10 (quarterly). The dispatch due date is missing.');
+    expect(opts.metadata.suggestedStarts).toEqual([]);
+  });
+
   test('re-checks the row under its lock: a visit given a time meanwhile raises nothing', async () => {
     scanFindsOnlyWindowless();
     query.first.mockResolvedValue(null);

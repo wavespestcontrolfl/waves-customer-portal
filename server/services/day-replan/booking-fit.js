@@ -14,9 +14,20 @@ const minute = t => Number(String(t).slice(0, 2)) * 60 + Number(String(t).slice(
 const hasPin = r => r?.lat != null && r?.lng != null && Number.isFinite(Number(r.lat))
   && Number.isFinite(Number(r.lng)) && Number(r.lat) !== 0 && Number(r.lng) !== 0;
 
+// loadDayStops has already removed expired holds. A public picker may be re-reading the hour held by this same
+// estimate, so remove only that known hold; committed rows and every other estimate's live hold remain occupancy.
+function withoutOwnEstimateHold(rows, ownEstimateId) {
+  if (!ownEstimateId) return rows;
+  return rows.filter(row => !(row.reservation_expires_at
+    && row.source_estimate_id != null
+    && String(row.source_estimate_id) === String(ownEstimateId)));
+}
+
 // All inputs are stored appointments, pins and local drive estimates. One read of the route per date and
 // one of the calendar blocks per technician-date. Candidates come from the caller's own admitted hours.
-async function assessOfferedHours(conn, offered, target, { now = new Date(), pref = null, calendar = new Map() } = {}) {
+async function assessOfferedHours(conn, offered, target, {
+  now = new Date(), pref = null, calendar = new Map(), ownEstimateId = null,
+} = {}) {
   if (!hasPin(target)) return [];
   const replan = require('./index')._internals;
   const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
@@ -40,7 +51,10 @@ async function assessOfferedHours(conn, offered, target, { now = new Date(), pre
   const techBlind = !techScopedConfirmActive();
   const fits = [];
   for (const [date, techs] of byDate) {
-    const rows = (await read(date, () => replan.loadDayStops(conn, date))).filter(r => r.id !== target.id);
+    const rows = withoutOwnEstimateHold(
+      (await read(date, () => replan.loadDayStops(conn, date))).filter(r => r.id !== target.id),
+      ownEstimateId,
+    );
     for (const [techId, slots] of techs) {
       const own = rows.filter(r => r.technician_id === techId && !r.reservation_expires_at);
       if (own.some(r => !r.window_start || !hasPin(r) || !['confirmed', 'pending'].includes(r.status))) continue;
@@ -118,4 +132,4 @@ function observeOffers(conn, shown, target, options = {}) {
   };
 }
 
-module.exports = { assessOfferedHours, rankOfferedHours, observeOffers, OFFER_RANK };
+module.exports = { assessOfferedHours, rankOfferedHours, observeOffers, OFFER_RANK, _internals: { withoutOwnEstimateHold } };

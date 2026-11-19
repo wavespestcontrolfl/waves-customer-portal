@@ -26,26 +26,26 @@ function targetStamp(row) {
     row.service_type ?? null, !!row.is_recurring, !!row.is_callback, row.geo?.lat, row.geo?.lng]);
 }
 
-function routeFits(rows, order, origin, departureMin, blocks = []) {
+function routeFits(rows, order, { origin, departureMin, dayEndMin, blocks = [] }) {
   const byId = new Map(rows.map(r => [r.id, r]));
   const seq = order.map(id => byId.get(id));
-  if (seq.some(r => !r || !r.window_start || r.lat == null || r.lng == null)) return false;
+  if (!Number.isFinite(dayEndMin) || seq.some(r => !r || !r.window_start || r.lat == null || r.lng == null)) return false;
   return !!simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, seq, {
-    origin, end: origin, startMin: departureMin, blockedIntervals: blocks, legMinutes: driveMin,
+    origin, end: origin, startMin: departureMin, dayEndMin, blockedIntervals: blocks, legMinutes: driveMin,
   });
 }
 
 // Existing commitments stay in the order dispatch reads. Insert the new window between those commitments.
 // A group still travels through its own unit writer. Unassigned stops, holds and live routes retain their
 // existing scoring and ownership. An otherwise supported insertion that misses a promise is refused.
-function positionFor(stops, target, { origin, departureMin, sourceStamp }) {
+function positionFor(stops, target, { origin, departureMin, dayEndMin, sourceStamp }) {
   if (!sourceStamp || !target.technician_id || target.visit_id
       || stops.some(r => r.technician_id !== target.technician_id || r.reservation_expires_at
         || !['pending', 'confirmed'].includes(r.status) || r.geo == null)) return undefined;
   const numbered = currentOrder(stops).map((r, i) => ({ ...r, route_order: i + 1 }));
   if (staleOrderReasons(numbered).length) return null;
   const order = timeFallbackOrder(numbered, target);
-  if (!order || !routeFits([...stops, target], order, origin, departureMin)) return null;
+  if (!order || !routeFits([...stops, target], order, { origin, departureMin, dayEndMin })) return null;
   return { order, sourceStamp, destinationStamp: routeStamp(stops), targetStamp: targetStamp(target), origin, departureMin };
 }
 

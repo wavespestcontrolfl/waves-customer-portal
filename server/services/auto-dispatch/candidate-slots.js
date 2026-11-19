@@ -546,7 +546,9 @@ function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home
     lat: geo.lat, lng: geo.lng, geo };
   const otherDay = toDateStr(service.scheduled_date) !== cand.date || service.technician_id !== cand.technician_id;
   const position = otherDay && !siblings.length && service.technician_id && service.window_start
-    ? positionFor(stops, target, { origin: home, departureMin: ctx.departureMinutes ?? DAY_OPEN, sourceStamp: ctx.sourceRouteStamp })
+    ? positionFor(stops, target, {
+      origin: home, departureMin: ctx.departureMinutes ?? DAY_OPEN, dayEndMin: DAY_CLOSE, sourceStamp: ctx.sourceRouteStamp,
+    })
     : undefined;
   if (position === null) return null;
   const numbers = new Map(position?.order.map((id, i) => [id, i + 1]));
@@ -586,7 +588,9 @@ async function verifyScoredPosition(trx, service, date, technicianId, window, po
   const blocks = await require('../day-replan')._internals.loadBlocks(trx, date, technicianId);
   const target = { ...moving, technician_id: technicianId, window_start: window.start, window_end: window.end };
   if (targetStamp(target) !== position.targetStamp
-      || !routeFits([...targetDay, target], position.order, position.origin, position.departureMin, blocks)) throw changed();
+      || !routeFits([...targetDay, target], position.order, {
+        origin: position.origin, departureMin: position.departureMin, dayEndMin: DAY_CLOSE, blocks,
+      })) throw changed();
 }
 
 /**
@@ -1423,6 +1427,7 @@ module.exports = {
   territoryTechnicianForVisit,
   territoryCoverForVisit,
   inBlackout,
+  isWeekendDay,
   violatesPreferredDay,
   violatesPreferredTime,
   _internals: {

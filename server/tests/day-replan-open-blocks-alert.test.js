@@ -145,12 +145,25 @@ describe('the copy', () => {
   });
 });
 
-test('a matching estimate needs the assigned technician and the entire visit inside the opening', () => {
-  const block = { day: '2026-11-20', tech: 'Pat', techId: 't1', start: 600, min: 90 };
+test('a matching estimate needs its two-hour arrival promise, stored window and simulated finish inside the opening', () => {
+  const block = { day: '2026-11-20', tech: 'Pat', techId: 't1', start: 600, min: 120 };
   const offer = { date: block.day, techId: 't1', start: '10:00', end: '11:00', finishMin: 675, driveMin: 42, addedDriveMin: 5, proposed: 1 };
-  const fits = diff => _internals.matchingHour([{ ...offer, ...diff }], [block]);
+  const fits = (diff, blocks = [block]) => _internals.matchingHour([{ ...offer, ...diff }], blocks);
   expect(fits({})).toMatchObject({ tech: 'Pat', start: 600 });
-  for (const diff of [{ techId: 'other' }, { finishMin: 691 }, { end: '12:00' }, { driveMin: null }]) expect(fits(diff)).toBeNull();
+  expect(fits({}, [{ ...block, min: 119 }])).toBeNull(); // customer sees 10 AM to noon
+  for (const diff of [{ techId: 'other' }, { finishMin: 721 }, { end: '12:01' }, { driveMin: null }]) expect(fits(diff)).toBeNull();
+});
+
+test('booking fit removes only the trusted estimate\'s hold; absent and unknown ids remove nothing', () => {
+  const { _internals: fit } = require('../services/day-replan/booking-fit');
+  const own = { id: 'hold-own', source_estimate_id: 'estimate-own', reservation_expires_at: '2097-01-01' };
+  const rival = { id: 'hold-rival', source_estimate_id: 'estimate-rival', reservation_expires_at: '2097-01-01' };
+  const unscoped = { id: 'hold-unscoped', source_estimate_id: null, reservation_expires_at: '2097-01-01' };
+  const committed = { id: 'visit-own', source_estimate_id: 'estimate-own', reservation_expires_at: null };
+  const rows = [own, rival, unscoped, committed];
+  expect(fit.withoutOwnEstimateHold(rows, 'estimate-own')).toEqual([rival, unscoped, committed]);
+  expect(fit.withoutOwnEstimateHold(rows, 'estimate-unknown')).toEqual(rows);
+  expect(fit.withoutOwnEstimateHold(rows, null)).toBe(rows);
 });
 
 test('a route-aware alternate preserves the first card, technician, day, rain priority and five-minute driving limit', () => {
@@ -171,7 +184,7 @@ describe('runOpenBlocksAlert', () => {
     const { OFFER_RANK } = require('../services/day-replan/booking-fit');
     const day = '2026-11-19';
     const estimate = { id: 'estimate123', customer_id: 'customer', customer_name: 'Test Customer' };
-    const { conn } = fakeConn({ rows: [{ day, technician_id: TECH, close_gaps: rec([tail(600, 90)]) }], assignable: [{ id: TECH }], estimates: [estimate] });
+    const { conn } = fakeConn({ rows: [{ day, technician_id: TECH, close_gaps: rec([tail(600, 120)]) }], assignable: [{ id: TECH }], estimates: [estimate] });
     offerableEstimateSlots.mockResolvedValueOnce({ [OFFER_RANK]: async () => [
       { date: day, techId: TECH, start: '10:00', end: '11:00', finishMin: 670, driveMin: 25, addedDriveMin: 3, proposed: 1 },
     ] });

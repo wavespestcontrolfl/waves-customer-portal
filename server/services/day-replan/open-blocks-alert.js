@@ -29,6 +29,7 @@ const { _internals: replan } = require('./index');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
+const { ARRIVAL_WINDOW_MINUTES } = require('../../utils/sms-time-format');
 
 const KEY_PREFIX = 'open-blocks:';
 const DAYS = 7;
@@ -218,8 +219,9 @@ function detailText(sum) {
   return lines.join('\n');
 }
 
-// Keep the first feasible match per estimate. Both the displayed arrival window and service belong inside
-// the standing block. The picker has already checked the customer's plan, service mix and the calendar.
+// Keep the first feasible match per estimate. The customer's displayed arrival promise (always start + 2 hours),
+// the stored service window and the simulated service finish all belong inside the standing block. The picker has
+// already checked the customer's plan, service mix and the calendar.
 function matchingHour(offers, blocks) {
   const minute = t => Number(String(t).slice(0, 2)) * 60 + Number(String(t).slice(3, 5));
   const matches = [];
@@ -228,7 +230,8 @@ function matchingHour(offers, blocks) {
     const start = minute(offer.start);
     const end = minute(offer.end);
     const block = blocks.find(b => b.day === offer.date && b.techId === String(offer.techId)
-      && b.start <= start && end > start && end <= b.start + b.min && offer.finishMin <= b.start + b.min);
+      && b.start <= start && end > start && start + ARRIVAL_WINDOW_MINUTES <= b.start + b.min
+      && end <= b.start + b.min && offer.finishMin <= b.start + b.min);
     if (block) matches.push({ offer, block, start });
   }
   matches.sort((a, b) => a.offer.addedDriveMin - b.offer.addedDriveMin || a.offer.date.localeCompare(b.offer.date)

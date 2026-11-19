@@ -476,12 +476,13 @@ async function noWindowDetail(trx, row, date, now = new Date()) {
   const series = root ? `Series started ${toDateStr(root.scheduled_date)}${root.recurring_pattern ? ` (${root.recurring_pattern})` : ''}.` : null;
   const detail = [series, 'The dispatch due date is missing.'].filter(Boolean);
   const { etDateString } = require('../../utils/datetime-et');
+  const { inBlackout, violatesPreferredDay, isWeekendDay, DAY_OPEN, DAY_CLOSE } = require('./candidate-slots');
   if (date <= etDateString(now) || !row.technician_id || row.visit_id || row.customer_confirmed
-      || row.reservation_expires_at || row.auto_dispatch_locked || row.auto_dispatch_excluded) return { detail: detail.join(' '), hours: [] };
+      || row.reservation_expires_at || row.auto_dispatch_locked || row.auto_dispatch_excluded
+      || (row.skip_weekends === true && isWeekendDay(date))) return { detail: detail.join(' '), hours: [] };
   const { _internals: replan } = require('../day-replan');
   const { applyAssignable, absentTechDays } = require('../technician-eligibility');
   const { getBlackoutDates } = require('../scheduling/blackout-dates');
-  const { inBlackout, violatesPreferredDay, DAY_OPEN, DAY_CLOSE } = require('./candidate-slots');
   const mowing = require('./mowing-days');
   const techId = row.technician_id;
   const prefs = await require('./preferences').getCustomerSchedulingPreferences(row.customer_id, row.service_type, trx,
