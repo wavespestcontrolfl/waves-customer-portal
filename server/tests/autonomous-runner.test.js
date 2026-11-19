@@ -1615,6 +1615,7 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
     runner._withEngineLock = (label, fn) => fn();
     runner._claimableBackfillSlots = jest.fn(async () => reserved);
     runner._terminalFirstIds = jest.fn(async () => ({ written, held }));
+    runner._recoverStaleClaimsSoft = jest.fn(async () => {});
     runner.settleTerminalWork = jest.fn(async () => {});
     runner._sendBlogDroughtSms = jest.fn(async () => {});
     return { runner, order };
@@ -1919,10 +1920,29 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
       expect(result).toMatchObject({ count: 2, failures: 2 });
     });
 
-    test('a reviewer that could not run counts as a Mac pass failure: the outage stops the pass and shows in failures', async () => {
+    test('the Mac pass recovers stale claims before it lists its rows; a failed recovery does not stop it', async () => {
       mac({ runner: 'mac' });
-      const tw = require('../services/content/terminal-writer');
-      const outage = ['u1', 'u2', 'u3'].map((id, i) => row(id, 90 - i, { skip_reason: tw.PLAN_UNAVAILABLE }));
+      const { runner, order } = queueRunner(rows(), { written: ['written_a'] });
+      await runner.runTerminalDrafts();
+      expect(runner._recoverStaleClaimsSoft).toHaveBeenCalledWith('runTerminalDrafts');
+      expect(runner._recoverStaleClaimsSoft.mock.invocationCallOrder[0]).toBeLessThan(runner._terminalFirstIds.mock.invocationCallOrder[0]);
+      expect(order).toEqual(['written_a']);
+      // The real method: a failed recovery, or a queue without it, resolves.
+      let recover;
+      jest.isolateModules(() => {
+        recover = jest.fn().mockRejectedValue(new Error('lock timeout'));
+        jest.doMock('../services/content/opportunity-queue', () => ({ recoverStaleClaims: recover }));
+        const { AutonomousRunner } = require('../services/content/autonomous-runner');
+        runner.realRecover = AutonomousRunner.prototype._recoverStaleClaimsSoft.bind(new AutonomousRunner());
+      });
+      await expect(runner.realRecover('runTerminalDrafts')).resolves.toBeUndefined();
+      expect(recover).toHaveBeenCalledTimes(1);
+      jest.dontMock('../services/content/opportunity-queue');
+    });
+
+    test.each(['terminal_plan_review_unavailable', 'terminal_review_unavailable'])('a reviewer that could not run (%s) counts as a Mac pass failure: the outage stops the pass and shows in failures', async (skipReason) => {
+      mac({ runner: 'mac' });
+      const outage = ['u1', 'u2', 'u3'].map((id, i) => row(id, 90 - i, { skip_reason: skipReason }));
       const { runner, order } = queueRunner(outage, { written: ['u1', 'u2', 'u3'] });
       const result = await runner.runTerminalDrafts({ limit: 5 });
       expect(order).toEqual(['u1', 'u2']);
@@ -5791,6 +5811,43 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
     expect(briefBuilder.compose).not.toHaveBeenCalled();
     expect(onward.mock.calls[0][2]).toMatchObject({ brief_id: 'brief_handed', agent_id: 'terminal-writer', draft_payload: draft, terminal_draft_revision: 'sha_read' });
+  });
+
+  describe('the Mac job: an editorial review that could not run is no verdict on the terminal draft', () => {
+    const saved = { ...process.env };
+    afterEach(() => { process.env = { ...saved }; });
+    const read = { ok: true, draft, brief_id: 'brief_handed', revision: 'sha_read', duration_ms: 5, agent_id: 'terminal-writer', session_id: null };
+    const reviewFails = (code) => jest.doMock('../services/content/editorial-evidence', () => ({
+      prepareDraft: jest.fn().mockRejectedValue(Object.assign(new Error('claude -p timed out'), { code, findings: [] })),
+      reviewError: jest.fn(),
+    }));
+
+    test('on the Mac: the draft is kept (no revision for the cleanup), the row waits on the same brief, the claim is deferred', async () => {
+      process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
+      process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = 'mac';
+      const { queue, runner } = setup({ source: read, handed: city('brief_handed') });
+      reviewFails('BLOG_EDITORIAL_REVIEW_UNAVAILABLE');
+      const retry = jest.spyOn(runner, '_gateFailRetryOrSkip');
+      const result = await runner.runNext();
+      expect(result).toMatchObject({ outcome: 'deferred_terminal_draft', skip_reason: 'terminal_review_unavailable', brief_id: 'brief_handed' });
+      expect(result.terminal_draft_revision).toBeUndefined();
+      expect(retry).not.toHaveBeenCalled();
+      expect(queue.defer).toHaveBeenCalledWith('opp_tw', expect.any(Date), { claimToken: claimedAt });
+      expect(queue.release).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['a review that failed on the Mac', { runner: 'mac', code: 'BLOG_EDITORIAL_REVIEW_FAILED' }],
+      ['an outage off the Mac', { runner: null, code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' }],
+    ])('%s still takes the bounded gate retry', async (_label, { runner: onMac, code }) => {
+      process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
+      if (onMac) process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = onMac; else delete process.env.CONTENT_EDITORIAL_REVIEW_RUNNER;
+      const { runner } = setup({ source: read, handed: city('brief_handed') });
+      reviewFails(code);
+      const retry = jest.spyOn(runner, '_gateFailRetryOrSkip').mockResolvedValue({ outcome: 'gate_retry' });
+      await expect(runner.runNext()).resolves.toEqual({ outcome: 'gate_retry' });
+      expect(retry.mock.calls[0][5]).toMatchObject({ skipReason: 'editorial_review_failed' });
+    });
   });
 
   test('a draft that could not be read keeps the row waiting on the same brief', async () => {

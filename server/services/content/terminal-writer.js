@@ -125,6 +125,8 @@ const editorialReviewOnMac = () => process.env.CONTENT_EDITORIAL_REVIEW_HOST ===
 const runningOnMac = () => process.env.CONTENT_EDITORIAL_REVIEW_RUNNER === 'mac';
 const AWAITS_MAC = 'terminal_draft_awaits_mac';
 const PLAN_UNAVAILABLE = 'terminal_plan_review_unavailable';
+// The Mac job's full editorial review could not run (autonomous-runner _awaitTerminalReviewer).
+const REVIEW_UNAVAILABLE = 'terminal_review_unavailable';
 const MAX_PLAN_REASON_CHARS = 700;
 // In Mac mode a wait is rechecked soon, not after RECHECK_MS: the Mac job takes a
 // draft the terminal wrote after the server's look at the row, and its claim
@@ -134,9 +136,10 @@ const recheckMs = () => (editorialReviewOnMac() ? MAC_RECHECK_MS : RECHECK_MS);
 // A rejected plan stays on its run so the listing does not offer the same commit again.
 const REJECTED_AT_RE = /\s*\[terminal revision ([^\]\s]+)\]$/;
 
-// The model lanes of the review the Mac job runs (editorial-review.js). The owner's spend line
-// (2026-11-19, "A"): each must be answered by the Max plan.
-const MAC_MODEL_LANES = Object.freeze(['editorial_review', 'editorial_repair', 'editorial_plan_review']);
+// The model lanes of the fact check the Mac job runs: the editorial review (editorial-review.js) and
+// the publish-time fact check (fact-check-gate.js). The owner's spend line (2026-11-19, "A"): each
+// must be answered by the Max plan.
+const MAC_MODEL_LANES = Object.freeze(['editorial_review', 'editorial_repair', 'editorial_plan_review', 'fact_check_gate']);
 
 /**
  * True when the Max-plan adapter (~/max-runner/claude-code-fetch.js) is the live fetch and answers
@@ -734,7 +737,7 @@ module.exports = {
   terminalWriterLive, editorialReviewOnMac, runningOnMac, editorialPlanRequired, needsEditorialPlan, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, draftSourceFor, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue, closeTerminalItems, blogDraftRequested, macHoldsBlogDraft,
   raiseHoldQuestion, syncHoldQuestions, holdSkipReason,
   branchFor, draftPathFor, draftProblem, holdProblem,
-  AWAITS_MAC, PLAN_UNAVAILABLE, MAC_RECHECK_MS, recheckMs, MAC_MODEL_LANES, maxPlanAdapterCovers,
+  AWAITS_MAC, PLAN_UNAVAILABLE, REVIEW_UNAVAILABLE, MAC_RECHECK_MS, recheckMs, MAC_MODEL_LANES, maxPlanAdapterCovers,
   AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID, MISSING, INVALID, UNREADABLE, RECHECK_MS, MAX_BRIEF_AGE_MS, BRANCH_PREFIX, DRAFT_DIR, DRAFT_FIELDS,
   HELD, HOLD_OUTCOME, HOLD_MS, HOLD_REASONS,
 };

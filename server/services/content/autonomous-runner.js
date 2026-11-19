@@ -805,6 +805,11 @@ class AutonomousRunner {
       if (!['BLOG_EDITORIAL_REVIEW_FAILED', 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE'].includes(err.code)) {
         err = require('./editorial-evidence').reviewError(null);
       }
+      // The Mac job: a reviewer that could not run (a claude -p limit or timeout) is no verdict on the
+      // terminal draft. Keep the draft on its branch and wait on the same brief, as a plan-review outage does.
+      if (err.code === 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' && run.terminal_draft_revision && terminalWriter.runningOnMac()) {
+        return this._awaitTerminalReviewer({ queue, opp, run, t0, finalize, claimToken, reason: err.message });
+      }
       return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
         claimToken, skipReason: 'editorial_review_failed', notes: err.message, blocking: err.findings,
       });
@@ -2032,6 +2037,9 @@ class AutonomousRunner {
     const runs = [];
     const failedOppIds = [];
     let streak = 0;
+    // A Mac pass that died holding its claim leaves the row claimed, and the listing reads pending rows
+    // only: recover stale claims first, as claimNext does (fail-soft; claimNext recovers again).
+    await this._recoverStaleClaimsSoft('runTerminalDrafts');
     let terminalFirst;
     try {
       terminalFirst = await this._terminalFirstIds(null, { ignoreDraftsFirstSwitch: true, throwOnError: true });
@@ -2452,6 +2460,30 @@ class AutonomousRunner {
    * needs_owner hold's question from the stored run and deletes the branch,
    * like a taken draft's (settleTerminalWork).
    */
+  // Stale-claim recovery that never stops its caller (claimNext recovers again).
+  async _recoverStaleClaimsSoft(label) {
+    try {
+      await getQueue()?.recoverStaleClaims?.();
+    } catch (err) {
+      logger.warn(`[autonomous-runner] ${label} stale-claim recovery failed (${err.message}); listing pending rows only`);
+    }
+  }
+
+  // A terminal draft whose editorial review could not run on the Mac: not consumed (the branch stays,
+  // since cleanup deletes only a run's terminal_draft_revision), recorded as a wait on the same brief,
+  // and rechecked like any terminal wait (the attempt is refunded).
+  async _awaitTerminalReviewer({ queue, opp, run, t0, finalize, claimToken, reason }) {
+    const terminalWriter = require('./terminal-writer');
+    run.terminal_draft_revision = undefined;
+    const finalized = await finalize(run, t0, {
+      outcome: terminalWriter.AWAITING_OUTCOME,
+      skip_reason: terminalWriter.REVIEW_UNAVAILABLE,
+      reviewer_notes: `the editorial review could not run; the draft is kept and the row looks again later: ${reason}`.slice(0, 760),
+    });
+    await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.recheckMs()), { claimToken });
+    return finalized;
+  }
+
   async _parkHeldTerminalRow({ queue, opp, run, t0, claimToken, dispatchResult }) {
     const terminalWriter = require('./terminal-writer');
     const { hold } = dispatchResult;
@@ -5404,14 +5436,15 @@ function isDeterministicPublishError(err) {
   ].some((pattern) => pattern.test(message));
 }
 
-// The claim scope for the next batch slot (_terminalFirstIds lists): the
-// written drafts first, then the held rows, then none (score order).
 // The Mac pass counts a reviewer that could not run (the draft is kept and the row
 // waits) as a failure, so a model outage stops the pass and its run bell rings.
 function macPassFailure(run) {
-  return String(run.outcome).startsWith('failed') || run.skip_reason === require('./terminal-writer').PLAN_UNAVAILABLE;
+  const tw = require('./terminal-writer');
+  return String(run.outcome).startsWith('failed') || [tw.PLAN_UNAVAILABLE, tw.REVIEW_UNAVAILABLE].includes(run.skip_reason);
 }
 
+// The claim scope for the next batch slot (_terminalFirstIds lists): the
+// written drafts first, then the held rows, then none (score order).
 function terminalFirstScope(lists) {
   if (lists.written.length) return { kind: 'written', ids: lists.written };
   if (lists.held.length) return { kind: 'held', ids: lists.held };

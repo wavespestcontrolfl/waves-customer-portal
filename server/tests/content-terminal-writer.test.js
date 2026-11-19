@@ -365,13 +365,15 @@ describe('blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST / _RUNNER)',
       replaced.fetch = () => {};
       expect(tw.maxPlanAdapterCovers({ target: replaced })).toBe(false);
       expect(tw.maxPlanAdapterCovers({ target: target({ answers: ['editorial_review', 'editorial_repair'], contextModule: context }) })).toBe(false);
+      // The publish-time fact check runs in its own lane: without it a publish bills the API.
+      expect(tw.maxPlanAdapterCovers({ target: target({ answers: ['editorial_review', 'editorial_repair', 'editorial_plan_review'], contextModule: context }) })).toBe(false);
       expect(tw.maxPlanAdapterCovers({ target: target({ answers: [...tw.MAC_MODEL_LANES], contextModule: '/elsewhere/portal/server/services/agent-control/context.js' }) })).toBe(false);
       expect(tw.maxPlanAdapterCovers({ target: target({ answers: [...tw.MAC_MODEL_LANES] }) })).toBe(false);
       expect(tw.maxPlanAdapterCovers()).toBe(false); // the test process has no adapter
     });
-    test('the lanes are the ones editorial-review.js dispatches in', () => {
-      const src = require('fs').readFileSync(require.resolve('../services/content/editorial-review'), 'utf8');
-      const used = [...src.matchAll(/laneId: '([a-z_]+)'/g)].map((m) => m[1]).sort();
+    test('the lanes are the ones editorial-review.js and fact-check-gate.js dispatch in', () => {
+      const lanes = (mod) => [...require('fs').readFileSync(require.resolve(mod), 'utf8').matchAll(/laneId: '([a-z_]+)'/g)].map((m) => m[1]);
+      const used = [...lanes('../services/content/editorial-review'), ...lanes('../services/content/fact-check-gate')].sort();
       expect(used).toEqual([...tw.MAC_MODEL_LANES].sort());
     });
   });
