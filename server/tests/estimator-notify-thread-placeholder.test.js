@@ -207,6 +207,90 @@ describe('notify() with a thread key', () => {
   });
 });
 
+describe('sender identity rides on text-origin bells only', () => {
+  test('a placeholder insert carries metadata.senderIdentity', async () => {
+    await notify(placeholderCall({ senderIdentity: '9415550123' }));
+    expect(mockNotifyAdmin.mock.calls[0][3].metadata.senderIdentity).toBe('9415550123');
+  });
+
+  test('an international identity is stored as +digits', async () => {
+    await notify(placeholderCall({ senderIdentity: '+447700900123' }));
+    expect(mockNotifyAdmin.mock.calls[0][3].metadata.senderIdentity).toBe('+447700900123');
+  });
+
+  test('the identity survives the placeholder-gives-way rewrite, even when the outcome passes none', async () => {
+    mockRow = bellRow({ senderIdentity: '9415550123' });
+    await notify(outcomeCall({ senderIdentity: null }));
+    expect(JSON.parse(mockUpdates[0].metadata).senderIdentity).toBe('9415550123');
+    mockUpdates.length = 0;
+    mockRow = bellRow({ senderIdentity: '9415550123' });
+    await notify(outcomeCall({ senderIdentity: '9415550123' }));
+    expect(JSON.parse(mockUpdates[0].metadata).senderIdentity).toBe('9415550123');
+  });
+
+  test('the identity survives a draft upgrade', async () => {
+    mockRow = bellRow({ senderIdentity: '+447700900123' });
+    await notify(outcomeCall({ estimateId: 'est-5', link: undefined, senderIdentity: undefined }));
+    expect(JSON.parse(mockUpdates[0].metadata).senderIdentity).toBe('+447700900123');
+  });
+
+  test('a fresh text-origin outcome insert carries it', async () => {
+    mockRow = bellRow({ placeholder: false, estimateId: 'est-1' });
+    await notify(outcomeCall({ estimateId: 'est-2', senderIdentity: '9415550123' }));
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(mockNotifyAdmin.mock.calls[0][3].metadata.senderIdentity).toBe('9415550123');
+  });
+
+  test('call-origin bells never carry the key (no identity, null or empty)', async () => {
+    for (const senderIdentity of [undefined, null, '']) {
+      mockNotifyAdmin.mockClear();
+      await notify({
+        call: { twilio_call_sid: 'CA-id-1' }, context: null, lane: 'red', quotePromised: true,
+        title: 'Quote promised on call — send it', body: 'x', senderIdentity,
+      });
+      expect(mockNotifyAdmin.mock.calls[0][3].metadata).not.toHaveProperty('senderIdentity');
+    }
+  });
+});
+
+describe('a new ask after a CLOSED thread bell gets its own row', () => {
+  const CLOSED = new Date('2026-11-18T12:00:00Z');
+
+  test('a closed newest bell plus a placeholder inserts a fresh placeholder bell and never touches the closed row', async () => {
+    mockRow = bellRow({ placeholder: false }, { done_at: CLOSED });
+    expect(await notify(placeholderCall({ senderIdentity: '9415550123' }))).toBe(true);
+    expect(mockUpdates).toHaveLength(0);
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    const meta = mockNotifyAdmin.mock.calls[0][3].metadata;
+    expect(meta.placeholder).toBe(true);
+    expect(meta.smsThreadKey).toBe(THREAD_KEY);
+    expect(meta.senderIdentity).toBe('9415550123');
+  });
+
+  test('a closed PLACEHOLDER plus a new placeholder also gets a fresh row', async () => {
+    mockRow = bellRow({}, { done_at: CLOSED });
+    await notify(placeholderCall());
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(mockUpdates).toHaveLength(0);
+  });
+
+  test('an OPEN bell plus a placeholder still stands: no insert, no update', async () => {
+    for (const meta of [{ placeholder: false }, {}]) {
+      mockRow = bellRow(meta);
+      expect(await notify(placeholderCall())).toBe(true);
+    }
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockUpdates).toHaveLength(0);
+  });
+
+  test('an outcome against a closed placeholder still stands', async () => {
+    mockRow = bellRow({}, { done_at: CLOSED });
+    expect(await notify(outcomeCall())).toBe(true);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockUpdates).toHaveLength(0);
+  });
+});
+
 describe('the placeholder rewrite is conditional in the UPDATE itself', () => {
   const rawSql = (wheres) => wheres.filter((w) => w.m === 'whereRaw').map((w) => w.args[0]).join(' | ');
 

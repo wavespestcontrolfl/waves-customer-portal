@@ -32,6 +32,7 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
 const { last10 } = require('../external-phone');
+const { phoneIdentityKey } = require('../../utils/phone');
 
 
 // Structured-output contracts (llm/call.js jsonSchema): the provider constrains
@@ -331,6 +332,7 @@ async function runThreadDraft({
           title: origin.strings.redTitle,
           body: `A text thread asked for a quote the estimator engine could not read (${context.error}). Review the conversation and send the estimate manually.`,
           link: origin.bellLink || null,
+          senderIdentity: origin.senderIdentity || null,
         });
       }
       return result;
@@ -530,6 +532,10 @@ async function startSmsThreadDraft({
       return result;
     }
     const origin = smsOrigin(`sms:${digits}`);
+    // Canonical sender identity (NANP last 10, else +digits), stored on every
+    // text bell so a later sweep never matches an international sender to a
+    // US customer who shares the last 10 digits.
+    origin.senderIdentity = phoneIdentityKey(phone);
     if (!dryRun) {
       // Durable owed-quote task BEFORE any detached work — a restart or
       // deploy mid-compose must leave a bell, never a silent loss. The
@@ -551,6 +557,7 @@ async function startSmsThreadDraft({
         body: `${sender.label} asked for a quote by text. The estimator is drafting it; if no draft comes, send one by hand.`,
         link: sender.link,
         placeholder: true,
+        senderIdentity: origin.senderIdentity || null,
       });
       if (!belled) {
         result.skipped = 'durable_bell_failed';

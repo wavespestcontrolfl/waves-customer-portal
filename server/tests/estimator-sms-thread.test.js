@@ -203,6 +203,22 @@ describe('startSmsThreadDraft', () => {
       expect(mockLoadCustomerByPhone).toHaveBeenCalledTimes(1);
     });
 
+    test('the placeholder and the unreadable-thread red bell carry the canonical sender identity', async () => {
+      mockBuildSmsThreadContext.mockResolvedValue({ error: 'thread_unreadable' });
+      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT });
+      await result.draftPromise;
+      expect(mockNotify.mock.calls[0][0].senderIdentity).toBe('9415550123');
+      expect(mockNotify.mock.calls[1][0].senderIdentity).toBe('9415550123');
+      expect(mockRunDraftPipeline).not.toHaveBeenCalled();
+    });
+
+    test('the pipeline origin carries the identity; an international sender is +digits, not a US last 10', async () => {
+      const result = await startSmsThreadDraft({ phone: '+447700900123', triggerBody: TEXT });
+      await result.draftPromise;
+      expect(placeholderArgs().senderIdentity).toBe('+447700900123');
+      expect(mockRunDraftPipeline.mock.calls[0][0].origin.senderIdentity).toBe('+447700900123');
+    });
+
     test('a known customer with no triggering text id gets the bare thread link', async () => {
       mockLoadCustomerByPhone.mockResolvedValue(named());
       await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT });
