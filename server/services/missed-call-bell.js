@@ -291,75 +291,97 @@ async function exchangeHangupScreenHit(fromPhone, at = new Date()) {
 // the carrier fully attested (STIR/SHAKEN 'TN-Validation-Passed-A', stored as
 // metadata.stir_verstat by the voice webhook) counts (pre-push audit): a
 // spoofed earlier call that borrowed a real person's number must never silence
-// that person's own first missed call. Only calls the press-1 screen never
-// touched count, judged call and history alike (pre-push audit): a pass is a
-// person, and 'gated' may be a pass whose stamp failed; a failed screen is the
-// screen rule's own case. History with any recording never counts either: the
-// shared silent-hang-up read accepts a recording of 3 s or less, but this rule
-// takes a push away, so it counts only calls that left no recording. And a
-// number that shows a person anywhere in the window is never a repeat
-// (numberShowsPerson). Production replay of this rule, read-only, 90 days to
-// 2026-11-19: 12 bells from 7 numbers match, 10 of them pushed (2 were already
-// quiet under another rule); both 941-541 numbers match (7 bells); 0 real
-// callers (no message on a matched call, no text from the number, no later call
-// that got through, no lead, no customer).
+// that person's own first missed call. And the number's whole record in the
+// window must be silent: every other call from or to it a settled silent
+// hang-up (an unattested one counts for nothing either way), the judged call
+// carrying nothing more than a silent call does, and no text from it.
+// Production replay of this rule, read-only, 90 days to 2026-11-19: 12 bells
+// from 7 numbers match, 10 of them pushed (2 were already quiet under another
+// rule); both 941-541 numbers match (7 bells); 0 real callers (no message on a
+// matched call, no text from the number, no later call that got through, no
+// lead, no customer).
 const REPEAT_DAYS = 14;
 const REPEAT_MIN_PRIOR = 2;
 const FULL_ATTESTATION = 'TN-Validation-Passed-A';
 
-// Pre-push audit rounds 2 to 7 each found one more sign of a person that the
-// history still counted (a spoofed number, a press-1 pass, a short recording, a
-// pass whose stamp failed, a parked recording, a callback). So the rule reads
-// every sign at once, for the whole number and not only the counted calls. In
-// the window:
-//  - an inbound call from it that was linked to a customer; that reached staff
-//    or Sandy (answered_by, an AI outcome, or Sandy's session claim, which
-//    stays when a relay falls back to voicemail); that holds a recording
-//    anywhere (its own, or one parked or superseded in metadata:
-//    call-recording-processor.js RECORDING_LISTS) or a transcript of any kind;
-//    that rang the voicemail lane; or that met the press-1 screen with a key
-//    press or a challenge whose result was never saved;
-//  - an outbound call to it whose customer leg answered (the callback proof,
-//    CUSTOMER_LEG_ANSWERED_SQL, even with no bridge stamp; or the bridged
-//    recording proof in ANSWERED_LEG_PROOF_SQL): staff reached that caller;
-//  - a text from it.
-// Any one means a person uses the number. Read only when the history matched,
-// and bounded like the history.
-const LISTED_RECORDING_SQL = (list) => `(jsonb_typeof(later.metadata->'${list}') = 'array' AND jsonb_array_length(later.metadata->'${list}') > 0)`;
+// Pre-push audit rounds 2 to 8 each found one more sign of a person that the
+// rule still counted: a spoofed number, a press-1 pass, a short recording, a
+// pass whose stamp failed, a recording parked in metadata, a staff callback, a
+// customer link, a staff acceptance whose completion write failed. A list of
+// signs of a person does not end. So the rule lists what a silent hang-up
+// carries instead: the columns and metadata keys set on production's 257
+// silent unknown-caller calls of the 90 days to 2026-11-19 (call setup, plus
+// our own bookkeeping), and nothing else. A call that carries anything more
+// (a recording, a transcript, a link, a bridge, a note, a screen result, a
+// staff acceptance, Sandy, or a key no silent call has) is no silent hang-up.
+const SILENT_COLUMNS = [
+  'id', 'direction', 'from_phone', 'to_phone', 'twilio_call_sid', 'status', 'duration_seconds',
+  'answered_by', 'call_outcome', 'metadata', 'created_at', 'updated_at', 'call_recording_consent_disclaimer_played',
+];
+const SILENT_METADATA_KEYS = [
+  // Call setup, on every inbound call.
+  'addons', 'domain', 'location', 'numberType', 'screen_caller_name', 'stir_verstat', 'promise_chaser_eligible', 'ended_at',
+  // This bell, its push retry, and the text-back.
+  'missed_call_notified_at', 'missed_call_settled_at', 'missed_call_push_retries', 'missed_call_push_first_subs',
+  'missed_call_text_leased_at', 'missed_call_text_settled_at', 'missed_call_text_outcome', 'missed_call_text_body',
+  // The quiet rules' own stamps.
+  'missed_call_spam_wave', 'missed_call_spam_wave_shadow', 'missed_call_spam_burst_shadow', 'missed_call_spam_repeat_shadow',
+  'missed_call_screen_quiet_shadow', 'missed_call_text_spam_shadow',
+  // The staff repeat-caller alert, which counts calls only.
+  'repeat_caller_claim', 'repeat_caller_alerted_at', 'repeat_caller_delivery_id',
+];
+const sqlNames = (names) => names.map((name) => {
+  if (!/^[A-Za-z_]+$/.test(name)) throw new Error(`not a plain name: ${name}`);
+  return `'${name}'`;
+}).join(', ');
+// Every other column empty (null, false, 0 or ''); metadata an object, or
+// none, with no other key. Names call_log itself: only for a read of call_log
+// with no alias.
+const SILENT_SHAPE_SQL = `(NOT EXISTS (SELECT 1 FROM jsonb_each(to_jsonb(call_log) - ARRAY[${sqlNames(SILENT_COLUMNS)}]::text[]) col`
+  + ` WHERE col.value NOT IN ('null'::jsonb, 'false'::jsonb, '0'::jsonb, '""'::jsonb))`
+  + " AND COALESCE(jsonb_typeof(call_log.metadata), 'null') IN ('null', 'object')"
+  + " AND NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(call_log.metadata) = 'object' THEN call_log.metadata ELSE '{}'::jsonb END) mk"
+  + ` WHERE mk NOT IN (${sqlNames(SILENT_METADATA_KEYS)})))`;
 
-async function numberShowsPerson(key, since) {
-  const call = await db('call_log as later')
-    .modify((qb) => whereNotSandboxCall(qb, 'later.source'))
-    .where('later.created_at', '>=', since)
-    .where((sign) => sign
-      .where((inbound) => inbound
-        .where('later.direction', 'inbound')
-        .whereRaw(`${LATER_KEY} = ?`, [key])
-        .where((person) => person
-          .whereNotNull('later.customer_id')
-          .orWhereIn('later.answered_by', ['human', 'ai_agent'])
-          .orWhereIn('later.call_outcome', [...AI_OUTCOMES])
-          .orWhereRaw("later.metadata->>'relay_session_claimed_at' IS NOT NULL")
-          .orWhereNotNull('later.recording_sid').orWhereNotNull('later.recording_url')
-          .orWhere('later.recording_duration_seconds', '>', 0)
-          .orWhereRaw(LISTED_RECORDING_SQL('additional_recordings'))
-          .orWhereRaw(LISTED_RECORDING_SQL('superseded_recordings'))
-          .orWhereNotNull('later.transcription')
-          .orWhereRaw("later.metadata->'relay_transcript' IS NOT NULL")
-          .orWhereNotNull('later.voicemail_callback_alerted_at')
-          .orWhereRaw("later.metadata->>'preconnect_screen' IN ('passed', 'gated')")))
-      .orWhere((outbound) => outbound
-        .where('later.direction', 'outbound')
-        .whereRaw(`${phoneKeySql('later.to_phone')} = ?`, [key])
-        // An answered customer leg is proof even when the bridge stamp failed
-        // to save (the connect webhook dials on; pre-push audit r7). The
-        // recording-only proof keeps the bridge.
-        .where((answered) => answered
-          .whereRaw(CUSTOMER_LEG_ANSWERED_SQL)
-          .orWhere((bridged) => bridged.whereNotNull('later.bridged_at').whereRaw(ANSWERED_LEG_PROOF_SQL)))))
+// A settled silent hang-up: inbound, nobody (no person, no AI) answered, over
+// and past the voicemail grace at check time (a recording may still land
+// before then), with the silent shape. Built per call: the status lists are
+// defined further down this file.
+function settledSilentSql(checkedAt) {
+  const marks = (list) => [...list].map(() => '?').join(', ');
+  return [
+    "(call_log.direction = 'inbound'"
+      + ` AND (call_log.answered_by IN (${marks(UNANSWERED)}) OR (call_log.answered_by IS NULL AND call_log.status IN (${marks(UNANSWERED_STATUSES)})))`
+      + ` AND COALESCE(call_log.call_outcome, '') NOT IN (${marks(AI_OUTCOMES)})`
+      + ` AND call_log.status IN (${marks(TERMINAL_STATUSES)})`
+      + ' AND COALESCE(call_log.updated_at, call_log.created_at) < ?'
+      + ` AND ${SILENT_SHAPE_SQL})`,
+    [...UNANSWERED, ...UNANSWERED_STATUSES, ...AI_OUTCOMES, ...TERMINAL_STATUSES, new Date(checkedAt.getTime() - VOICEMAIL_GRACE_MS)],
+  ];
+}
+
+// The number's record beside the counted history, read only once that matched
+// and bounded like it: the judged call has the silent shape; no other call
+// from or to the number in the window is anything but a settled silent
+// hang-up (IS NOT TRUE: a NULL in the test blocks too); no text from it.
+async function recordIsSilent(row, key, at, checkedAt) {
+  const since = new Date(at.getTime() - REPEAT_DAYS * 86400 * 1000);
+  const judged = await db('call_log').where('id', row.id).whereRaw(SILENT_SHAPE_SQL)
+    .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true }).first('id');
+  if (!judged) return false;
+  const [settledSql, settledBindings] = settledSilentSql(checkedAt);
+  const other = await db('call_log')
+    .modify((qb) => whereNotSandboxCall(qb))
+    .whereNot('id', row.id)
+    .where('created_at', '>=', since)
+    .where('created_at', '<', at)
+    .where((number) => number
+      .whereRaw(`${CALLER_KEY} = ?`, [key])
+      .orWhereRaw(`${phoneKeySql('call_log.to_phone')} = ?`, [key]))
+    .whereRaw(`${settledSql} IS NOT TRUE`, settledBindings)
     .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
-    .first('later.id');
-  if (call) return true;
+    .first('id');
+  if (other) return false;
   const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
   const text = await excludeUnresolvedSendReservations(db('sms_log'))
     .where('direction', 'inbound')
@@ -367,11 +389,11 @@ async function numberShowsPerson(key, since) {
     .whereRaw(`${phoneKeySql('sms_log.from_phone')} = ?`, [key])
     .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
     .first('id');
-  return Boolean(text);
+  return !text;
 }
 
 async function isRepeatSilentCaller(row) {
-  if (!row || row.customer_id || parseMeta(row.metadata).preconnect_screen) return false;
+  if (!row || row.customer_id) return false;
   const line = require('../config/twilio-numbers').findByNumber(row.to_phone);
   if (line?.type !== 'gbp_tracking') return false;
   const raw = String(row.from_phone || '').replace(/\D/g, '');
@@ -382,22 +404,18 @@ async function isRepeatSilentCaller(row) {
   const otherLines = gbpLines().filter((d) => d !== String(row.to_phone || '').replace(/\D/g, '').slice(-10));
   const otherLineSql = otherLines.length ? `${LAST10_SQL('to_phone')} IN (${otherLines.map(() => '?').join(', ')})` : 'false';
   const checkedAt = new Date();
+  // The shared read also admits a short recording (0 s included, with no
+  // grace) and a failed screen; the settled silent test admits neither.
+  const [settledSql, settledBindings] = settledSilentSql(checkedAt);
   const found = await silentHangupsBefore(at, REPEAT_DAYS, checkedAt)
     .whereNot('id', row.id)
     .whereRaw(`${CALLER_KEY} = ?`, [key])
     .whereRaw("metadata->>'stir_verstat' = ?", [FULL_ATTESTATION])
-    .whereRaw("metadata->>'preconnect_screen' IS NULL")
-    // No recording at all (even 2 seconds can hold "call me back"), the call
-    // over and past the voicemail grace at check time. The shared read also
-    // admits a known short recording length, 0 included, with no grace; this
-    // rule never does (pre-push audit r7).
-    .whereNull('recording_sid').whereNull('recording_url')
-    .whereIn('status', TERMINAL_STATUSES)
-    .whereRaw('COALESCE(updated_at, created_at) < ?', [new Date(checkedAt.getTime() - VOICEMAIL_GRACE_MS)])
+    .whereRaw(settledSql, settledBindings)
     .select(db.raw('COUNT(*) AS n'), db.raw(`COALESCE(bool_or(${otherLineSql}), false) AS other_line`, otherLines))
     .first();
   if (!(found?.other_line || Number(found?.n || 0) >= REPEAT_MIN_PRIOR)) return false;
-  return !(await numberShowsPerson(key, new Date(at.getTime() - REPEAT_DAYS * 86400 * 1000)));
+  return recordIsSilent(row, key, at, checkedAt);
 }
 
 const spamGateOn = (name) => require('../config/feature-gates').isEnabled(name);
@@ -563,11 +581,9 @@ const CALLED_BACK_SQL = buildCalledBackSql('');
 //    minutes. Capped at 15 minutes from the bridge.
 // No literal question mark: knex reads one as a binding.
 const CUSTOMER_LEG_SECONDS_SQL = "CASE WHEN later.metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (later.metadata->'customer_leg'->>'duration_seconds')::numeric > 0 ELSE FALSE END";
-// The proof alone, on a `later` row: the repeat rule's person check reads it too.
-const CUSTOMER_LEG_ANSWERED_SQL = "(later.metadata->'customer_leg'->>'status' = 'completed' AND " + CUSTOMER_LEG_SECONDS_SQL + ')';
-const ANSWERED_LEG_PROOF_SQL = `(${CUSTOMER_LEG_ANSWERED_SQL}`
-  + " OR (later.metadata->'customer_leg' IS NULL AND later.recording_duration_seconds > 0 AND (later.recording_sid IS NOT NULL OR later.recording_url IS NOT NULL)))";
-const CALLED_BACK_ANSWERED_SQL = buildCalledBackSql(` AND ${ANSWERED_LEG_PROOF_SQL}`);
+const CALLED_BACK_ANSWERED_SQL = buildCalledBackSql(
+  " AND ((later.metadata->'customer_leg'->>'status' = 'completed' AND " + CUSTOMER_LEG_SECONDS_SQL + ')'
+  + " OR (later.metadata->'customer_leg' IS NULL AND later.recording_duration_seconds > 0 AND (later.recording_sid IS NOT NULL OR later.recording_url IS NOT NULL)))");
 // The same proof plus a bridged call still in flight. For the claim, the sweep
 // and the re-read before the push ONLY (do not ring during a live callback;
 // the sweep looks again in 2 minutes). Never for retiring a bell: a callback

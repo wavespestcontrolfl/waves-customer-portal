@@ -727,6 +727,16 @@ jest.setTimeout(30000);
       ['a call the voicemail lane rang for', { voicemail_callback_alerted_at: new Date() }],
       ['a press-1 pass', { metadata: { preconnect_screen: 'passed' } }],
       ['a challenge whose result was never saved', { metadata: { preconnect_screen: 'gated' } }],
+      // Staff pressed 1 to accept, then the completion write was late or lost (pre-push audit r8):
+      // by its columns the call looks unanswered.
+      ['a staff acceptance whose completion was never saved', { answered_by: null, status: 'no-answer', metadata: { stir_verstat: 'TN-Validation-Passed-A', forward_acceptance: { accepted: true } } }],
+      ['a conference leg staff accepted', { answered_by: null, status: 'no-answer', metadata: { stir_verstat: 'TN-Validation-Passed-A', conference_path: { accepted_leg_sid: 'CA0123456789abcdef0123456789abcdef' } } }],
+      // Anything a silent hang-up never carries, named or not.
+      ['a metadata key no silent hang-up carries', { metadata: { stir_verstat: 'TN-Validation-Passed-A', some_later_marker: true } }],
+      ['a staff note', { metadata: { stir_verstat: 'TN-Validation-Passed-A' }, notes: 'asked about a quote' }],
+      ['an inbound call that was bridged', { metadata: { stir_verstat: 'TN-Validation-Passed-A' }, bridged_at: new Date() }],
+      // The settled-silent test is NULL here; IS NOT TRUE still counts the call as no silent hang-up.
+      ['a call whose status was never saved', { answered_by: null, status: null, metadata: { stir_verstat: 'TN-Validation-Passed-A' } }],
     ])('a number with %s in the last 14 days is never a repeat (pre-push audit)', async (label, sign) => {
       await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
       const row = judged();
@@ -736,25 +746,49 @@ jest.setTimeout(30000);
       expect(await repeat(row)).toBe(false);
     });
 
-    // A staff callback before the counted hang-up, where "got through later" cannot see it (pre-push audit r6, r7).
+    // A staff call to the number before the counted hang-up, where "got through
+    // later" cannot see it (pre-push audit r6, r7): any call to it is no silent hang-up.
     test.each([
-      ['rang out', true, { bridged: true, leg: { status: 'no-answer', duration_seconds: 0 } }],
-      ['left a recording but has no bridge stamp', true, { bridged: false, recording: true }],
-      ['was bridged and recorded', false, { bridged: true, recording: true }],
-      ['had its customer leg answer', false, { bridged: true, leg: { status: 'completed', duration_seconds: 95 } }],
-      ['had its customer leg answer but lost the bridge stamp', false, { bridged: false, leg: { status: 'completed', duration_seconds: 95 } }],
-    ])('a staff callback that %s: repeat stays %s', async (label, stillRepeat, shape) => {
+      ['rang out', { status: 'no-answer', metadata: { customer_leg: { status: 'no-answer', duration_seconds: 0 } } }],
+      ['reached the caller but lost its bridge stamp', { status: 'completed', metadata: { customer_leg: { status: 'completed', duration_seconds: 95 } } }],
+    ])('a staff call to the number that %s means it is never a repeat', async (label, shape) => {
       await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
       const row = judged();
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(true);
-      const base = call(GBP_LINE, 60 * 24 * 4, { direction: 'outbound', to_phone: CALLER, answered_by: null, metadata: shape.leg ? { customer_leg: shape.leg } : {} });
-      await database('call_log').insert({
-        ...base,
-        bridged_at: shape.bridged ? base.created_at : null,
-        ...(shape.recording ? { recording_sid: 'RE9', recording_url: 'https://api.twilio.com/RE9', recording_duration_seconds: 30 } : {}),
-      });
-      expect(await repeat(row)).toBe(stillRepeat);
+      await database('call_log').insert(call(GBP_LINE, 60 * 24 * 4, { direction: 'outbound', to_phone: CALLER, answered_by: null, ...shape }));
+      expect(await repeat(row)).toBe(false);
+    });
+
+    test('a silent hang-up with every call-setup and bookkeeping key production stores still counts', async () => {
+      const at = new Date(Date.now() - 60 * 24 * 2 * 60 * 1000).toISOString();
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, {
+        to_phone: SECOND_GBP_LINE,
+        call_outcome: 'voicemail',
+        call_recording_consent_disclaimer_played: true,
+        metadata: {
+          stir_verstat: 'TN-Validation-Passed-A', addons: { status: 'successful' }, domain: 'example.test', location: 'GBP — Venice', numberType: 'mobile',
+          screen_caller_name: 'WIRELESS CALLER', promise_chaser_eligible: true, ended_at: at,
+          missed_call_notified_at: at, missed_call_settled_at: at, missed_call_text_leased_at: at, missed_call_text_settled_at: at,
+          missed_call_text_outcome: 'sent', missed_call_text_body: 'Sorry we missed your call', missed_call_spam_wave: 'repeat_quiet',
+          missed_call_spam_repeat_shadow: true, repeat_caller_alerted_at: at,
+        },
+      }));
+      const row = judged({ call_outcome: 'voicemail', call_recording_consent_disclaimer_played: true, metadata: { location: 'GBP — Parrish', stir_verstat: 'TN-Validation-Passed-B', missed_call_notified_at: at } });
+      await database('call_log').insert(row);
+      expect(await repeat(row)).toBe(true);
+    });
+
+    test.each([
+      ['a staff acceptance', { metadata: { location: 'GBP — Parrish', forward_acceptance: { accepted: true } } }],
+      ['a staff note', { notes: 'called back, it was a person' }],
+    ])('the judged call with %s, more than a silent hang-up carries, is never quieted', async (label, extra) => {
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      const row = judged(extra);
+      await database('call_log').insert(row);
+      expect(await repeat(row)).toBe(false);
+      await database('call_log').where({ id: row.id }).update({ metadata: { location: 'GBP — Parrish' }, notes: null });
+      expect(await repeat(row)).toBe(true);
     });
 
     test('a text from the number in the last 14 days is a person; our own text and an older sign are not (pre-push audit)', async () => {
