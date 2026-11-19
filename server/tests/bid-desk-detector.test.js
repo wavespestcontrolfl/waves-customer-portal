@@ -505,9 +505,11 @@ describe('MyFloridaMarketPlace advertisement notices', () => {
     expect(parsed.due_at.toISOString()).toBe('2026-12-04T04:59:00.000Z'); // 23:59 EST on Dec 3; Open Date is not read
   });
 
-  test('two copies of one advertisement in different threads share a key; another number does not', () => {
+  test('the key is the advertisement number: copies in other threads or with a corrected title share it; another number does not', () => {
     const first = parseBidEmail(mfmpNotice());
-    expect(first.group_key).toBe('sample water management district|itb 99z 001 sample site preparation and weed control|itb 17200');
+    expect(first).toMatchObject({ group_key: 'mfmp|itb 17200', group_base: 'mfmp|itb 17200' });
+    expect(parseBidEmail(mfmpNotice({}, { title: 'ITB 99Z-001 Sample Site Preparation and Weed Control (Revised)', org: 'Sample Water Mgmt District' })).group_key)
+      .toBe(first.group_key);
     expect(parseBidEmail(mfmpNotice({ gmail_thread_id: 't-2', received_at: new Date('2026-11-16T14:00:00Z') })).group_key).toBe(first.group_key);
     expect(parseBidEmail(mfmpNotice({}, { number: 'ITB-17201' })).group_key).not.toBe(first.group_key);
   });

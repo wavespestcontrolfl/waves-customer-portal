@@ -531,6 +531,16 @@ function groupKeys(fields) {
   return { org, group_base: base, group_key: pkg ? `${base}#${keyPart(pkg)}` : base };
 }
 
+// MFMP's identity is the state's advertisement number alone: a re-sent notice may carry a corrected title or agency
+// name, and the number never names new work.
+function mfmpKeys(fields) {
+  const org = normalizeTitle(fields.gc_or_agency);
+  const number = normalizeTitle(fields.solicitation_number);
+  if (!number) return { org: org || null, group_base: null, group_key: null };
+  const key = `mfmp|${keyPart(number)}`;
+  return { org: org || null, group_base: key, group_key: key };
+}
+
 function templateFields(template, lines) {
   if (!template) return { fields: {}, due: null, jobWalk: null };
   const due = { vendorlink: vendorlinkDue, bluebook: bluebookDue, mfmp: mfmpDue }[template];
@@ -568,7 +578,7 @@ function parseBidEmail(email = {}) {
     due_source_line: due?.line || null,
     job_walk_at: jobWalk?.at || null,
     questions_due_at: null,
-    ...groupKeys(fields),
+    ...(template === 'mfmp' ? mfmpKeys(fields) : groupKeys(fields)),
   };
 }
 

@@ -16,7 +16,8 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { detectBidEmail, parseBidEmail, classifyKind, passesGmailSpam } = require('./detector');
+const { detectBidEmail, parseBidEmail, classifyKind, passesGmailSpam, domainOf } = require('./detector');
+const { etDateString } = require('../../utils/datetime-et');
 const { attachPatch, reminderDue, datesDue, lapsedBid, OPEN_STATUSES, AUTO_CLOSE_NOTE, LAPSED_AFTER_MS, LAPSED_FLAGGED_AFTER_MS, notOurWork, NOT_OUR_WORK_NOTE } = require('./rules');
 const alerts = require('./alerts');
 const { closeDoneAlerts } = require('./close-alerts');
@@ -95,10 +96,36 @@ const columnsFor = () => [...BID_COLUMNS, ...BID_CHECKLIST_COLUMNS];
 // ---------- one email ----------
 
 const ADDS_TO_EXISTING = new Set(['addendum', 'reminder']);
-// MFMP re-sends one advertisement as a new notice (ITB-17200 came three times in Nov 2026). Its key carries the state's
+// MFMP re-sends one advertisement as a new notice (ITB-17200 came three times in Nov 2026). Its key is the state's
 // advertisement number, which never names new work, so a repeat joins the bid even after a decision and rings
 // nothing there (attachPatch: closed).
 const REPEAT_JOINS_DECIDED = new Set(['mfmp']);
+// Templates whose due date is a day with no hour (see autoConfirmsDate and patchInput).
+const DAY_ONLY_TEMPLATES = new Set(['mfmp']);
+const MFMP_SENDER_DOMAIN = 'dms.myflorida.com';
+const LEGACY_SCAN_LIMIT = 50;
+
+// A bid filed from an MFMP notice before the template existed has no key. The first repeat finds it by reading its
+// own linked notices with today's parser and sender check (a forged notice never verifies), and the caller gives it
+// the key (`!existing.group_key && parsed.group_key`).
+async function legacyMfmpBid(trx, groupKey) {
+  const rows = await trx('bid_opportunities as b')
+    .join('bid_opportunity_emails as l', 'l.bid_id', 'b.id').join('emails as e', 'e.id', 'l.email_id')
+    .whereNull('b.group_key').whereRaw('lower(e.from_address) like ?', [`%@${MFMP_SENDER_DOMAIN}`])
+    .orderBy('b.created_at').limit(LEGACY_SCAN_LIMIT)
+    .select('b.id as bid_id', 'e.from_address', 'e.subject', 'e.body_text', 'e.body_html', 'e.authentication_results');
+  const hit = rows.find((row) => domainOf(row.from_address) === MFMP_SENDER_DOMAIN
+    && parseBidEmail(withProviderCheck(row)).group_key === groupKey);
+  return hit ? trx('bid_opportunities').where({ id: hit.bid_id }).first() : null;
+}
+
+// What a later email tells attachPatch. MFMP's Close Date names a day, not an hour: a repeat for the same Eastern day
+// is not a new date (an operator may have confirmed the agency's 2:00 PM), so it carries no date at all.
+function patchInput(existing, parsed) {
+  if (!DAY_ONLY_TEMPLATES.has(parsed.template) || !parsed.due_at || !existing.due_at) return parsed;
+  if (etDateString(new Date(existing.due_at)) !== etDateString(new Date(parsed.due_at))) return parsed;
+  return { ...parsed, due_at: null, due_source_line: null };
+}
 
 async function findBid(trx, email, groupKey, groupBase = null, kind = null, template = null) {
   const thread = email.gmail_thread_id;
@@ -126,7 +153,11 @@ async function findBid(trx, email, groupKey, groupBase = null, kind = null, temp
   // An addendum or a reminder is never new work: with no open bid to join, one for a bid already decided joins that
   // bid (the newest with the key), so a county's addendum to a bid we declined does not file it again. It rings
   // nothing there (attachPatch: closed).
-  if (!ADDS_TO_EXISTING.has(kind) && !REPEAT_JOINS_DECIDED.has(template)) return null;
+  if (REPEAT_JOINS_DECIDED.has(template)) {
+    const keyed = await trx('bid_opportunities').where({ group_key: groupKey }).orderBy('created_at', 'desc').first();
+    return keyed || (await legacyMfmpBid(trx, groupKey)) || null;
+  }
+  if (!ADDS_TO_EXISTING.has(kind)) return null;
   return (await trx('bid_opportunities').where({ group_key: groupKey }).orderBy('created_at', 'desc').first()) || null;
 }
 
@@ -149,7 +180,6 @@ async function detectWithThread(email) {
 // through attachPatch, which flags a changed or late date for the operator.
 // MFMP's Close Date names a day and no hour: 23:59 is our default, not the agency's, so it stays for the operator to
 // confirm (reminders ring once it is confirmed). An unconfirmed date still closes a lapsed new bid (rules.lapsedBid).
-const DAY_ONLY_TEMPLATES = new Set(['mfmp']);
 function autoConfirmsDate(parsed, kind, historical) {
   return !historical && Boolean(parsed.template && parsed.due_at) && kind !== 'addendum' && !DAY_ONLY_TEMPLATES.has(parsed.template);
 }
@@ -179,7 +209,7 @@ async function ingestEmail(rawEmail, { historical = false, manual = false } = {}
       // Current mail on a bid the backfill filed as history makes it live again: alerts and reminders apply.
       const promote = !historical && existing.historical;
       const live = promote ? { ...existing, historical: false } : existing;
-      const { patch, notifyAddendum } = attachPatch(live, parsed, kind);
+      const { patch, notifyAddendum } = attachPatch(live, patchInput(live, parsed), kind);
       if (promote) patch.historical = false;
       // A bid first filed from a plain email (no cross-thread key) takes the key of the first template email in it.
       if (!existing.group_key && parsed.group_key) patch.group_key = parsed.group_key;
