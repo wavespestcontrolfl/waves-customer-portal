@@ -63,9 +63,13 @@ jest.mock('../services/scheduling/parse-when', () => ({
 // The commit's far-south truck re-check (owner rule B per truck): its own behavior is
 // estimate-slots-zone-day-funnel.test.js's; here only what the commit hands it.
 const mockTruckMayTakeDate = jest.fn(async () => true);
+// The two far-south gates the commit's same-pin re-check reads (feature-gates is mocked down to two names here).
+const mockFarSouthGates = { perTruck: false, funnel: false };
 jest.mock('../services/scheduling/zone-day-funnel', () => ({
   ...jest.requireActual('../services/scheduling/zone-day-funnel'),
   truckMayTakeDate: (...args) => mockTruckMayTakeDate(...args),
+  perTruckLive: () => mockFarSouthGates.perTruck,
+  funnelOn: () => mockFarSouthGates.funnel,
 }));
 
 const mockBookingConfig = jest.fn(async () => ({}));
@@ -252,6 +256,8 @@ afterEach(() => {
   insertCalls.length = 0;
   gateState.live = true;
   gateState.reviewLive = false;
+  mockFarSouthGates.perTruck = false;
+  mockFarSouthGates.funnel = false;
   mockLoserBlockers.mockClear();
   mockLoserBlockers.mockImplementation(async () => []);
   mockGeocode.mockClear();
@@ -1961,12 +1967,19 @@ describe('POST /:token commit', () => {
     // own, so a later stop read (zone-day-funnel.js zoneStopDays) reads it by the profile's city when it has no zone
     // stamp; the zone is checked and stamped, and a 409's fresh times built, from that same city, never the typed one (a
     // typed city no zone lists would let the check pass a visit later read as south). The slot is not built again at
-    // the same pin: the check under the date lock refuses a truck that city's zone day does not allow. A profile with
-    // no city on file keeps the typed address (its zone stamp alone decides then).
+    // the same pin only per truck (both far-south gates on; pre-push P1 on a921f81680): that city's zone can leave the
+    // hour to another truck, and the re-check books it. With one truck a one-day build funnels to itself, so a second
+    // build would only repeat the first. A profile with no city on file keeps the typed address (its zone stamp alone
+    // decides then).
+    const WEST = { zoneFunnelAddress: '123 Palm Ave, West Bradenton, FL, 34209', zoneFunnelCity: 'West Bradenton' };
+    const TYPED = { zoneFunnelAddress: '123 Palm Ave, Bradenton, FL, 34209', zoneFunnelCity: 'Bradenton' };
     test.each([
-      ['another city on file', 'West Bradenton', { zoneFunnelAddress: '123 Palm Ave, West Bradenton, FL, 34209', zoneFunnelCity: 'West Bradenton' }],
-      ['no city on file', null, { zoneFunnelAddress: '123 Palm Ave, Bradenton, FL, 34209', zoneFunnelCity: 'Bradenton' }],
-    ])('a matched profile at the same pin with %s: the booking and a 409\'s fresh times use that address', async (_label, profileCity, expected) => {
+      ['another city on file, per truck', 'West Bradenton', { perTruck: true, funnel: true }, WEST, ['Bradenton', 'West Bradenton', 'West Bradenton'], 'tech-2'],
+      ['another city on file, one truck', 'West Bradenton', { perTruck: false, funnel: true }, WEST, ['Bradenton', 'West Bradenton'], 'tech-1'],
+      ['another city on file, funnel off', 'West Bradenton', { perTruck: true, funnel: false }, WEST, ['Bradenton', 'West Bradenton'], 'tech-1'],
+      ['no city on file, per truck', null, { perTruck: true, funnel: true }, TYPED, ['Bradenton', 'Bradenton'], 'tech-1'],
+    ])('a matched profile at the same pin with %s: the booking and a 409\'s fresh times use that address', async (_label, profileCity, gates, expected, builtCities, bookedTech) => {
+      Object.assign(mockFarSouthGates, gates);
       firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
       firstResults.call_log = { from_phone: '+19415550101' };
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
@@ -1977,18 +1990,23 @@ describe('POST /:token commit', () => {
       };
       seedPhoneHousehold(existingCustomer);
       listResults.scheduled_services = [];
-      mockBuildAvailability.mockResolvedValueOnce({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] });
+      const nineAm = (tech) => ({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: tech }] }] });
+      mockBuildAvailability
+        .mockResolvedValueOnce(nineAm('tech-1')) // the anti-forgery build, at the typed address
+        .mockResolvedValueOnce(nineAm('tech-2')); // the same-pin re-check (per truck), else the 409's fresh times
       mockCreateSelfBooking.mockImplementationOnce(async () => ({ ok: false, status: 409, error: 'That time is no longer open.' }));
 
       const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL 34209' });
 
       expect(res.statusCode).toBe(409);
       expect(res.body.code).toBe('SLOT_TAKEN');
-      const typed = { zoneFunnelAddress: '123 Palm Ave, Bradenton, FL, 34209', zoneFunnelCity: 'Bradenton' };
-      expect(mockBuildAvailability).toHaveBeenCalledTimes(2);
-      expect(mockBuildAvailability.mock.calls[0][0]).toMatchObject(typed); // the anti-forgery rebuild, as the list
+      // The anti-forgery build reads the typed city, as the list did; the re-check (per truck only) and the 409's fresh
+      // times read the booking's.
+      expect(mockBuildAvailability.mock.calls.map(([args]) => args.zoneFunnelCity)).toEqual(builtCities);
+      expect(mockBuildAvailability.mock.calls[0][0]).toMatchObject(TYPED);
+      expect(mockBuildAvailability.mock.calls.at(-1)[0]).toMatchObject(expected);
+      expect(mockCreateSelfBooking.mock.calls[0][0].technician_id).toBe(bookedTech);
       expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: expected.zoneFunnelAddress, city: expected.zoneFunnelCity });
-      expect(mockBuildAvailability.mock.calls[1][0]).toMatchObject(expected); // the 409's fresh times
     });
 
     // Codex #4737 r9 pre-push P1: the matched profile is re-read under its
