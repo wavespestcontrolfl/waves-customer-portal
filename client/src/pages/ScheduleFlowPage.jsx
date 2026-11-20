@@ -2157,7 +2157,14 @@ function ScheduleFlowPage({ flow }) {
   const refreshInspectionAvailability = useCallback(async ({ signal, ignoreHeldAddress = false } = {}) => {
     if (flow === 'inspection' && resolvedAddress && !ignoreHeldAddress) {
       const { res, body } = await postInspectionAvailability(token, resolvedAddress, { signal });
-      if (signal?.aborted) return;
+      if (signal.aborted) return;
+      // The held address is outside the service area now: the stop card the
+      // address form and the commit show, with its waitlist ticket (pre-push
+      // P1 on b91bb3768f). The answer is the GET's own out_of_area state.
+      if (res.status === 422 && body.error === 'out_of_area') {
+        setOutOfArea({ county: body.county || null, ticket: body.waitlist_ticket || null });
+        return { ...body, state: 'out_of_area' };
+      }
       if (!res.ok) throw new Error(body.error || 'availability refresh failed');
       // A terminal state (already_booked / converted / gone) replaces the
       // page, as the gate and the slot search do (Codex #4737 r11 pre-push P1).
@@ -2166,10 +2173,10 @@ function ScheduleFlowPage({ flow }) {
       return body;
     }
     const res = await fetch(availabilityUrl, { signal });
-    if (signal?.aborted) return;
+    if (signal.aborted) return;
     if (!res.ok) throw new Error('availability refresh failed');
     const body = await res.json();
-    if (signal?.aborted) return;
+    if (signal.aborted) return;
     setData(body);
     return body;
   }, [flow, resolvedAddress, token, availabilityUrl, mergeData]);
@@ -2240,7 +2247,11 @@ function ScheduleFlowPage({ flow }) {
   // full-window response is applied: on failure the filtered calendar is
   // still what's on screen, so the reset link must survive for another try.
   const showAllTimes = async () => {
-    const signal = loadAbortRef.current?.signal;
+    // A refresh starts a new page view, and can change the address: a
+    // booking's refusal or a search still running belongs to the old view
+    // (pre-push P1 on b91bb3768f). A booking or a terminal state still shows.
+    supersedeSearches();
+    const { signal } = loadAbortRef.current;
     try {
       await refreshInspectionAvailability({ signal });
       if (signal?.aborted) return;

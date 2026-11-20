@@ -1120,6 +1120,79 @@ describe('InspectionPage: an address race without availability refreshes at the 
     expect(getCalls).toBe(2);
   });
 
+  // Pre-push P1 on b91bb3768f: "Show all open times" starts a new page view.
+  // A booking's refusal that lands after it belongs to the old view, whose
+  // address the refresh can change: its times never land under the new address.
+  it('a refusal that lands after "Show all open times" changed the address applies none of its times', async () => {
+    let resolveCommit = null;
+    let getCalls = 0;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) return Promise.resolve(jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }));
+      if (opts.method === 'POST') return new Promise((resolve) => { resolveCommit = resolve; });
+      getCalls += 1;
+      return Promise.resolve(jsonResponse(getCalls === 1 ? okPayload() : okPayload({
+        availability: mondayAvailability('09:00', '9:00 AM'),
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: '9 Gulf Dr, Sarasota 34231' },
+      })));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i });
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'this weekend' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    const showAll = await screen.findByRole('button', { name: 'Show all open times' });
+    fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(resolveCommit).not.toBeNull());
+    fireEvent.click(showAll);
+    expect(await screen.findByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i })).toBeInTheDocument();
+    const oldTimes = okPayload().availability;
+    oldTimes.days[0].slots = [{ start_time: '15:00', end_time: '15:30', start_label: '3:00 PM', end_label: '3:30 PM', technician_id: 'tech-1' }];
+    await act(async () => {
+      resolveCommit(jsonResponse({ error: 'That time is no longer open.', code: 'SLOT_TAKEN', availability: oldTimes }, 409));
+    });
+    await new Promise((r) => { setTimeout(r, 20); });
+    expect(screen.queryByRole('button', { name: /Choose 3:00 PM on Sunday, July 12/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i })).toBeInTheDocument();
+    expect(screen.queryByText(/That time was just taken/i)).not.toBeInTheDocument();
+  });
+
+  // Pre-push P1 on b91bb3768f: the held address's reload can answer
+  // out_of_area. The page stops on the same card the address form and the
+  // commit show, with its waitlist ticket, never the generic reload warning.
+  it('a refusal whose held-address reload answers out_of_area → the out-of-area card', async () => {
+    let availabilityPosts = 0;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/availability') && opts.method === 'POST') {
+        availabilityPosts += 1;
+        return Promise.resolve(availabilityPosts === 1
+          ? jsonResponse({ availability: okPayload().availability, needs_address: false })
+          : jsonResponse({ error: 'out_of_area', county: 'Hardee', waitlist_ticket: 'signed-ticket' }, 422));
+      }
+      if (opts.method === 'POST') return Promise.resolve(jsonResponse({ error: 'That time is no longer open.', code: 'SLOT_TAKEN', availability: null }, 409));
+      return Promise.resolve(jsonResponse(okPayload({
+        needs_address: true,
+        availability: null,
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
+      })));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '123 Palm Ave, Bradenton, FL 34209' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    expect(await screen.findByText(/we don.t service this area yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't load the latest open times/i)).not.toBeInTheDocument();
+    expect(availabilityPosts).toBe(2);
+  });
+
   // Pre-push P1 on 8f40c19990: a search still running when the refusal lands
   // must not put its times back over the reload's.
   it('a search still running when the refusal lands → its late times never show', async () => {

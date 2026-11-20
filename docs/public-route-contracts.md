@@ -7754,7 +7754,11 @@ closed while that reload runs, and opens again when the reload brings a list, so
 search never finishes over a failed reload. A time picked from the old calendar while
 it runs is not kept: the reload's list drops it, even when it offers the same start.
 "Show all open times" applies its answer as it is: with no list, the old times, pick
-and address leave, and the page shows the answer's address and no times. A terminal state, the address form, or the GET's own no-times answers
+and address leave, and the page shows the answer's address and no times. It starts a
+new page view too, as a change of address does: a booking's refusal or a search still
+running when it starts belongs to the old view. A held address's reload that answers
+`422 out_of_area` stops on the out-of-area card with its waitlist ticket, as the
+address form does. A terminal state, the address form, or the GET's own no-times answers
 (`service_area_unavailable`, `booking_unavailable`) in that answer still replace the
 page, and the page then shows no "latest open times" message. Any answer but a booking also drops a search still running, so its late times
 never land over the page, and that search ends quietly (no search error). The reload runs under the page's request controller: a
