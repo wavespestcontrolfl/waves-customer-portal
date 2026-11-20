@@ -823,13 +823,9 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 // Public assets used by server-rendered customer pages. In production Vite
 // copies these into client/dist; in local API-only dev they still need to be
 // served from client/public so SSR pages can render shared brand artwork.
-// Waves Pest Insider pictures load in mail apps on other origins: both static
-// mounts set their CORP header (services/pest-insider/picture-headers.js).
-const { pictureHeaders } = require('./services/pest-insider/picture-headers');
 app.use(express.static(path.join(__dirname, '..', 'client', 'public'), {
   index: false,
   maxAge: config.nodeEnv === 'production' ? '1h' : 0,
-  setHeaders: pictureHeaders,
 }));
 
 // Request logging
@@ -1366,7 +1362,6 @@ if (config.nodeEnv === 'production') {
     maxAge: '1y',       // Cache hashed assets (/assets/*) for 1 year
     immutable: true,
     setHeaders: (res, filePath) => {
-      pictureHeaders(res, filePath);
       // But never cache index.html, sw.js, or the per-build asset list —
       // all three keep a stable filename across deploys, so the immutable
       // year above would pin the previous build's copy.

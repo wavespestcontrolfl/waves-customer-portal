@@ -25,9 +25,10 @@
  * title, or HERO_DESIGN bumped); an old file stays until a person removes
  * it, once no sent issue uses it.
  *
- * The title, tag and kicker are drawn here, in Anton and Inter from Google
- * Fonts; a picture is refused when either font did not load, so none ships
- * in a fallback font. Every color comes from cards.js WAVES_COLORS, and a
+ * The title, tag and kicker are drawn here, in Anton and Inter from font
+ * files the portal ships (pest-insider-fonts.js), so the drawing needs no
+ * network; a picture is refused when either font did not load, so none
+ * ships in a fallback font. Every color comes from cards.js WAVES_COLORS, and a
  * test refuses any other. Change the drawing below -> bump HERO_DESIGN in
  * heroes.js, so every picture gets a new file name.
  */
@@ -46,6 +47,7 @@ process.env.WAVES_LOCAL_DEV = '1';
 const { chromium } = require('playwright');
 const sharp = require('sharp');
 const { WAVES_COLORS: C } = require('../../server/services/pest-insider/cards');
+const { fontStyle } = require('./pest-insider-fonts');
 
 // The command line, checked whole: an unknown flag, a flag with no value,
 // a flag given twice or an extra word stops the run (exit 2), so a typo
@@ -107,13 +109,13 @@ const keepTogether = (t) => t.replace(/(\d) (?=[A-Za-z])/g, '$1 ');
 // the tag, the kicker and the title, so gold on navy reads 6.3:1 whatever the
 // art shows. Without art: the title across the whole picture on navy, over
 // the Waves wave band.
-function heroHtml(hero, artUrl, { HERO_WIDTH, HERO_HEIGHT }) {
+function heroHtml(hero, artUrl, { HERO_WIDTH, HERO_HEIGHT }, fonts) {
   const box = artUrl ? { width: 250, height: 250 } : { width: 534, height: 220 };
   const backdrop = artUrl
     ? `<div class="art" style="background-image:url(${artUrl})"></div><div class="scrim"></div>`
     : `<svg class="wave" viewBox="0 0 582 70" preserveAspectRatio="none"><path d="M0 44 C 60 24, 120 24, 180 44 S 300 64, 360 44 S 480 24, 582 42 L582 70 L0 70 Z" fill="${C.wavesBlue}" opacity="0.22"/><path d="M0 56 C 70 40, 140 40, 210 56 S 350 72, 420 56 S 520 44, 582 54 L582 70 L0 70 Z" fill="${C.wavesBlue}" opacity="0.34"/></svg>`;
   return `<!doctype html><html><head><meta charset="utf-8">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@700;800&display=block">
+${fonts}
 <style>
   html, body { margin: 0; padding: 0; background: ${C.navy}; }
   .p { position: relative; width: ${HERO_WIDTH}px; height: ${HERO_HEIGHT}px; overflow: hidden; background: ${C.navy}; font-family: Inter, sans-serif; }
@@ -158,6 +160,7 @@ async function draw(H) {
     return;
   }
   fs.mkdirSync(outDir, { recursive: true });
+  const fontCss = fontStyle([700, 800]);
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: HERO_WIDTH, height: HERO_HEIGHT }, deviceScaleFactor: 2 });
   let failed = 0;
@@ -169,7 +172,7 @@ async function draw(H) {
       if (sha16(art) !== hero.art) { console.error(`${id}: ${hero.artFile} is not the art the heroes file names; import it again with pest-insider-art-import.js`); failed += 1; continue; }
       artUrl = `data:image/webp;base64,${art.toString('base64')}`;
     }
-    await page.setContent(heroHtml(hero, artUrl, H), { waitUntil: 'networkidle' });
+    await page.setContent(heroHtml(hero, artUrl, H, fontCss), { waitUntil: 'networkidle' });
     const fonts = await page.evaluate(fontsLoaded, ['40px Anton', '800 11px Inter']);
     if (!fonts) { console.error(`${id}: Anton or Inter did not load; not drawn`); failed += 1; continue; }
     const size = await fitTitle(page, hero.art ? { width: 250, height: 250 } : { width: 534, height: 220 });

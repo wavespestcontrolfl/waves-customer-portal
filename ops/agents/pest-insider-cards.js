@@ -22,8 +22,9 @@
  * or CARD_DESIGN is bumped); an old file stays until a person removes it,
  * once no sent issue uses it.
  *
- * The drawing loads Anton and Inter from Google Fonts. A card is refused
- * when either font did not load, so no card ships in a fallback font. Each
+ * The drawing uses Anton and Inter from font files the portal ships
+ * (pest-insider-fonts.js), so it needs no network. A card is refused when
+ * either font did not load, so no card ships in a fallback font. Each
  * card uses its color set from cards.js SCHEMES, and no other color.
  * Change the drawing below -> bump CARD_DESIGN in cards.js, so every card
  * gets a new file name and the test asks for new pictures.
@@ -42,6 +43,7 @@ process.env.WAVES_LOCAL_DEV = '1';
 const { chromium } = require('playwright');
 const sharp = require('sharp');
 const { CARDS, CARD_DIR, CARD_WIDTH, CARD_HEIGHT, SCHEMES } = require('../../server/services/pest-insider/cards');
+const { fontStyle } = require('./pest-insider-fonts');
 
 // The command line, checked whole: an unknown flag, a flag with no value,
 // a flag given twice or an extra word stops the run (exit 2), so a typo
@@ -126,7 +128,7 @@ function pieceHtml(p, cls = '') {
 // color. Waves Blue carries no words, so the source line on it stays readable.
 const waveBand = (color) => `<svg class="wave" viewBox="0 0 582 64" preserveAspectRatio="none"><path d="M0 40 C 60 22, 120 22, 180 40 S 300 58, 360 40 S 480 22, 582 38 L582 64 L0 64 Z" fill="${color}" opacity="0.18"/><path d="M0 52 C 70 38, 140 38, 210 52 S 350 66, 420 52 S 520 40, 582 50 L582 64 L0 64 Z" fill="${color}" opacity="0.28"/></svg>`;
 
-function cardHtml(card) {
+function cardHtml(card, fonts) {
   const c = SCHEMES[card.scheme];
   const main = card.layout === 'versus'
     ? `<div class="vs">${pieceHtml(card.pieces[0], 'side')}<div class="vsmark">VS</div>${pieceHtml(card.pieces[1], 'side')}</div>`
@@ -135,7 +137,7 @@ function cardHtml(card) {
     ? `<div class="strip">${MONTH_LETTERS.map((m, i) => `<span class="m${lit(i + 1, card.months) ? ' on' : ''}">${m}</span>`).join('')}</div>`
     : '';
   return `<!doctype html><html><head><meta charset="utf-8">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@600;700;800&display=block">
+${fonts}
 <style>
   html, body { margin: 0; padding: 0; background: transparent; }
   .card { position: relative; box-sizing: border-box; width: ${CARD_WIDTH}px; height: ${CARD_HEIGHT}px; overflow: hidden;
@@ -193,12 +195,13 @@ async function fitText(page, layout) {
     return;
   }
   fs.mkdirSync(outDir, { recursive: true });
+  const fontCss = fontStyle([600, 700, 800]);
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: CARD_WIDTH, height: CARD_HEIGHT }, deviceScaleFactor: 2 });
   let failed = 0;
   for (const [id, card] of wanted) {
     if (fs.existsSync(path.join(outDir, card.file))) { console.log(`${id}  ${card.file}  already drawn; kept`); continue; }
-    await page.setContent(cardHtml(card), { waitUntil: 'networkidle' });
+    await page.setContent(cardHtml(card, fontCss), { waitUntil: 'networkidle' });
     const fonts = await page.evaluate(fontsLoaded, ['40px Anton', '700 17px Inter']);
     if (!fonts) { console.error(`${id}: Anton or Inter did not load; not drawn`); failed += 1; continue; }
     const size = await fitText(page, card.layout);

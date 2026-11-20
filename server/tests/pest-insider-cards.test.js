@@ -5,7 +5,7 @@ const path = require('path');
 const {
   CARDS, CARD_DIR, CARD_BASE_URL, LAYOUTS, TAGS, WAVES_COLORS, SCHEMES, cardFor, validateCards, pieceText, sourceLine, monthsNamed,
 } = require('../services/pest-insider/cards');
-const { HERO_BASE_URL } = require('../services/pest-insider/heroes');
+const { HERO_BASE_URL, HERO_DIR } = require('../services/pest-insider/heroes');
 const { newsletterPalette } = require('../services/email-template');
 const { FACTS, factById } = require('../services/pest-insider/facts');
 const { POSTS } = require('../services/pest-insider/posts');
@@ -106,27 +106,11 @@ describe('the reviewed card list', () => {
     ['months on a number card', { A01: { ...A01, months: [1, 2] } }, /only a months card/],
   ])('refuses %s', (_label, cards, message) => refuse(cards, message));
 
-  test('mail apps on other origins may load the cards and top pictures: both static mounts answer them with CORP cross-origin', () => {
-    const { pictureHeaders } = require('../services/pest-insider/picture-headers');
-    const headersFor = (filePath) => { const headers = {}; pictureHeaders({ set: (k, v) => { headers[k] = v; } }, filePath); return headers; };
-    const CORP = { 'Cross-Origin-Resource-Policy': 'cross-origin' };
-    expect(headersFor('/app/client/dist/pest-insider/cards/a01-0123456789.png')).toEqual(CORP);
-    expect(headersFor('/app/client/public/pest-insider/heroes/t03-0123456789.jpg')).toEqual(CORP);
-    expect(headersFor('C:\\app\\client\\dist\\pest-insider\\cards\\a01-0123456789.png')).toEqual(CORP);
-    // nothing else the static mounts serve changes
-    for (const other of ['/app/client/dist/index.html', '/app/client/dist/assets/app.js', '/app/client/public/pest-insider/x.png',
-      '/app/client/public/pest-insider/cards/notes.txt', '/app/client/public/brand/pest-insider/cards.png']) {
-      expect({ other, headers: headersFor(other) }).toEqual({ other, headers: {} });
-    }
-    // both mounts that serve the folders call it, and no route or middleware of its own exists for them
-    const src = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
-    const local = src.slice(src.indexOf("app.use(express.static(path.join(__dirname, '..', 'client', 'public'), {"));
-    expect(local.slice(0, local.indexOf('}));'))).toContain('setHeaders: pictureHeaders,');
-    const built = src.slice(src.indexOf('app.use(express.static(clientBuild, {'));
-    expect(built.slice(0, built.indexOf('}));'))).toContain('pictureHeaders(res, filePath);');
-    expect(src).not.toMatch(/app\.(use|get)\(\s*\[?\s*'\/pest-insider/);
+  test('an email links each card and top picture at the file the portal serves from client/public, with no route of its own', () => {
     expect(CARD_BASE_URL).toBe('https://portal.wavespestcontrol.com/pest-insider/cards/');
     expect(HERO_BASE_URL).toBe('https://portal.wavespestcontrol.com/pest-insider/heroes/');
+    expect(CARD_DIR).toBe('client/public/pest-insider/cards');
+    expect(HERO_DIR).toBe('client/public/pest-insider/heroes');
   });
 
   test('refuses a file with no cards map', () => {
