@@ -122,17 +122,31 @@ describe('session setup and caller audio', () => {
     expect(msg.session.delegation).toEqual({ type: 'client' });
   });
 
-  test('caller audio is dropped until session.started, then forwarded unchanged', async () => {
+  test('caller audio before session.started is held and forwarded in order after the greeting; later audio goes straight through', async () => {
     const t = setup();
+    t.twilioMedia('EARLY'); // before even the start frame
     await t.twilioStart();
     t.openai.emit('open');
     t.twilioMedia('BEFORE');
-    expect(t.openai.types()).toEqual(['session.start']);
+    expect(t.openai.types()).toEqual(['session.start']); // nothing sent before the session is up
     t.openai.receive({ type: 'session.started', session: { id: 's1' } });
     await flush();
     t.twilioMedia('AFTER');
-    expect(t.openai.sent).toContainEqual({ type: 'session.input_audio.append', audio: 'AFTER' });
-    expect(t.openai.sent.some((m) => m.audio === 'BEFORE')).toBe(false);
+    expect(t.openai.types()).toEqual(['session.start', 'session.commentary.append', 'session.input_audio.append', 'session.input_audio.append', 'session.input_audio.append']);
+    expect(t.openai.sent.filter((m) => m.audio).map((m) => m.audio)).toEqual(['EARLY', 'BEFORE', 'AFTER']);
+  });
+
+  test('the held opening audio keeps only the latest 150 frames (3 s)', async () => {
+    const t = setup();
+    await t.twilioStart();
+    t.openai.emit('open');
+    for (let i = 0; i < 160; i++) t.twilioMedia(`F${i}`);
+    t.openai.receive({ type: 'session.started', session: { id: 's1' } });
+    await flush();
+    const held = t.openai.sent.filter((m) => m.audio).map((m) => m.audio);
+    expect(held).toHaveLength(150);
+    expect(held[0]).toBe('F10');
+    expect(held[149]).toBe('F159');
   });
 
   test('session.started sends the greeting as commentary', async () => {
@@ -305,6 +319,26 @@ describe('model audio, barge-in and latency', () => {
     await flush();
     expect(t.twilio.sent.some((m) => m.event === 'media' && m.media.payload === b64(240))).toBe(true);
     expect(summaryOf(t)).toMatchObject({ turns: [], after_barge_in_ambiguous_ms: [300] }); // +1800 minus +1500
+  });
+
+  test('a final transcript fragment that lands after an ambiguous reply began refines that sample, never turns', async () => {
+    const t = setup();
+    await t.ready();
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
+    t.twilioMedia();
+    t.advance(1000);
+    streamReply(t, 6); // a reply streams +1000..+1500
+    t.advance(100);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'wait', start_ms: 1300, end_ms: 1500 }); // barge-in at +1600
+    t.advance(600);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // ambiguous reply at +2200: 700 provisional
+    t.advance(100);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'hold on', start_ms: 1500, end_ms: 1900 }); // the final fragment
+    t.twilioStop();
+    await flush();
+    const s = summaryOf(t);
+    expect(s.after_barge_in_ambiguous_ms).toEqual([300]); // +2200 minus the real speech end +1900
+    expect(s.turns).toEqual([]);
   });
 
   test('a tail chunk delayed past the gap by a network stall is never timed into turns; a later reply outside the window is', async () => {

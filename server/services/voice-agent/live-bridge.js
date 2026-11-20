@@ -39,6 +39,10 @@ const START_DEADLINE_MS = 10000; // session.started must arrive within this, or 
 const BARGE_IN_MARGIN_MS = 200;
 const NEW_REPLY_GAP_MS = 250; // a model audio chunk this long after the one before starts a new reply
 const TAIL_DROP_MAX_MS = 1500; // after a barge-in, drop the cut-off reply's tail at most this long
+// Caller audio that arrives before session.started (admission and the OpenAI
+// start) is held in memory, never stored, and forwarded in order once the
+// session is up: the latest 3 s at most (Twilio sends 20 ms frames).
+const OPENING_AUDIO_MAX_FRAMES = 150;
 const MULAW_BYTES_PER_MS = 8; // 8000 samples a second, one byte each
 const INSTRUCTIONS_MAX_CHARS = 60000; // about 16k tokens; OpenAI's limit is 16,384
 
@@ -194,6 +198,7 @@ class LiveBridge {
     this.startTimer = null;
     this.firstReplyAmbiguousMs = null; // caller spoke before the first reply
     this.ambiguousReplies = []; // reply starts inside a barge-in's tail-drop window
+    this.openingAudio = []; // caller frames before session.started (memory only)
     this.replyAmbiguous = false;
   }
 
@@ -276,10 +281,15 @@ class LiveBridge {
   }
 
   onTwilioMedia(media) {
-    // Caller audio is dropped until the model session is confirmed, and from
-    // the moment shutdown begins (session.close sent; only the final usage is
-    // still awaited).
-    if (!this.ready || this._finalizing || typeof media.payload !== 'string' || (media.track && media.track !== 'inbound')) return;
+    // Nothing is sent from the moment shutdown begins (session.close sent;
+    // only the final usage is still awaited). Before the session is confirmed,
+    // the caller's opening audio is held (OPENING_AUDIO_MAX_FRAMES).
+    if (this._finalizing || typeof media.payload !== 'string' || (media.track && media.track !== 'inbound')) return;
+    if (!this.ready) {
+      this.openingAudio.push(media.payload);
+      if (this.openingAudio.length > OPENING_AUDIO_MAX_FRAMES) this.openingAudio.shift();
+      return;
+    }
     this.toOpenAi({ type: 'session.input_audio.append', audio: media.payload });
   }
 
@@ -347,6 +357,9 @@ class LiveBridge {
     clearTimeout(this.startTimer);
     if (this._finalizing) return; // shutting down: no greeting
     this.toOpenAi({ type: 'session.commentary.append', delegation_id: null, content: this.deps.greeting() });
+    const opening = this.openingAudio;
+    this.openingAudio = [];
+    for (const audio of opening) this.toOpenAi({ type: 'session.input_audio.append', audio });
   }
 
   onOutputAudio(msg) {
@@ -387,7 +400,10 @@ class LiveBridge {
     this.replySample = null;
     this.replyAmbiguous = ambiguous;
     if (ambiguous) {
-      if (this.awaitingReply && this.speechEndWall !== null) this.ambiguousReplies.push(Math.max(0, Math.round(t - this.speechEndWall)));
+      if (this.awaitingReply && this.speechEndWall !== null) {
+        this.ambiguousReplies.push(Math.max(0, Math.round(t - this.speechEndWall)));
+        this.replySample = { index: this.ambiguousReplies.length - 1, speechEnd: this.speechEndWall };
+      }
       this.awaitingReply = false;
       return;
     }
@@ -439,12 +455,15 @@ class LiveBridge {
       this.firstReplyAmbiguousMs = this.firstReplyAmbiguousMs === null ? delay : Math.min(this.firstReplyAmbiguousMs, delay);
       return;
     }
-    if (speechEnd <= this.prevReplyStartWall || this.replyAmbiguous) return; // an ambiguous reply is never timed into turns
+    if (speechEnd <= this.prevReplyStartWall) return;
+    // The latest speech end before the reply wins. An ambiguous reply's sample
+    // is refined the same way, in its own list: never in turns.
+    const samples = this.replyAmbiguous ? this.ambiguousReplies : this.latencies;
     if (!this.replySample) {
-      this.latencies.push(delay);
-      this.replySample = { index: this.latencies.length - 1, speechEnd };
+      samples.push(delay);
+      this.replySample = { index: samples.length - 1, speechEnd };
     } else if (speechEnd > this.replySample.speechEnd) {
-      this.latencies[this.replySample.index] = delay;
+      samples[this.replySample.index] = delay;
       this.replySample.speechEnd = speechEnd;
     }
   }
