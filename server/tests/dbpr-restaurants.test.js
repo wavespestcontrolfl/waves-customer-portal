@@ -61,6 +61,13 @@ describe('parseUsDate', () => {
 describe('parseInspectionRows', () => {
   const { parseDbprCsv } = require('../services/commercial-suite-size/dbpr-food-license');
 
+  test('an area row cut short before Violation 35 is counted, never passed over as a visit without code 35', () => {
+    const short = inspRow({ visit: '9002' }).split(',').slice(0, 40).join(','); // ends at Violation 24
+    const counts = { malformed: 0 };
+    expect(svc.parseInspectionRows(parseDbprCsv(inspCsv([inspRow(), short])), counts).map((r) => r.source_key)).toEqual(['9001']);
+    expect(counts.malformed).toBe(1);
+  });
+
   test('leaves out a row without both digit-only report ids, so a corrected copy in a later file can still enter', () => {
     const rows = parseDbprCsv(inspCsv([
       inspRow({ visit: '9101' }),
@@ -292,5 +299,7 @@ describe('syncRestaurantProspects', () => {
     // A failed file or database call must read as a failed run in job_health: the leased callback throws (a count only).
     expect(src).toMatch(/if \(result\.failures > 0\) throw new Error\(`restaurant prospect sync: \$\{result\.failures\} failure\(s\)`\);/);
     expect(src).toMatch(/registerDeployKillRetry\('restaurant-prospect-sync'/);
+    // Daily in the last week of June: the files start over on July 1.
+    expect(src).toMatch(/cron\.schedule\('36 10 24-30 6 \*', \(\) => runRestaurantProspectSyncTick\(\), \{ timezone: 'America\/New_York' \}\)/);
   });
 });

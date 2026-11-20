@@ -305,11 +305,22 @@ function assertPlausibleExtract(rows, { minRows, lastGoodCount }) {
   }
 }
 
-async function defaultFetchText(url, timeoutMs = DBPR_FETCH_TIMEOUT_MS) {
+// A state extract is a few MB (the district 7 inspection file is about 3 MB).
+// A body past this cap is refused while it downloads, so a wrong or huge
+// answer cannot fill the web process's memory.
+const DBPR_MAX_BYTES = 32 * 1024 * 1024;
+
+async function defaultFetchText(url, timeoutMs = DBPR_FETCH_TIMEOUT_MS, maxBytes = DBPR_MAX_BYTES) {
   const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
   if (!res || !res.ok) throw new Error(`HTTP ${res && res.status}`);
-  const buf = await res.arrayBuffer();
-  return new TextDecoder('latin1').decode(buf);
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of res.body || []) {
+    size += chunk.byteLength;
+    if (size > maxBytes) throw new Error('extract too large');
+    chunks.push(chunk);
+  }
+  return new TextDecoder('latin1').decode(Buffer.concat(chunks));
 }
 
 // timeoutMs (the admin lookup's remaining budget) caps only THIS caller's

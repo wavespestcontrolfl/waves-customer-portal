@@ -1,6 +1,7 @@
 const {
   parseDbprCsv,
   eachDbprCsvRow,
+  defaultFetchText,
   normalizeStreetName,
   matchDbprRow,
   seatsToSqft,
@@ -98,6 +99,20 @@ describe('eachDbprCsvRow', () => {
     await expect(eachDbprCsvRow('', (row) => rows.push(row))).resolves.toEqual([]);
     expect(rows).toEqual([]);
     await expect(eachDbprCsvRow(`${csv([])}"OPEN QUOTE,`, () => {})).rejects.toThrow(/quote/i);
+  });
+});
+
+describe('defaultFetchText', () => {
+  const realFetch = global.fetch;
+  afterEach(() => { global.fetch = realFetch; });
+
+  test('reads the body as Latin-1 text, and refuses a body past the byte cap', async () => {
+    global.fetch = jest.fn(async () => new Response(Buffer.from([0x50, 0x45, 0xd1, 0x41]))); // PEÑA in Latin-1
+    await expect(defaultFetchText('https://example.invalid/x.csv', 1000)).resolves.toBe('PEÑA');
+    global.fetch = jest.fn(async () => new Response('x'.repeat(64)));
+    await expect(defaultFetchText('https://example.invalid/x.csv', 1000, 32)).rejects.toThrow('extract too large');
+    global.fetch = jest.fn(async () => new Response('', { status: 503 }));
+    await expect(defaultFetchText('https://example.invalid/x.csv', 1000)).rejects.toThrow('HTTP 503');
   });
 });
 

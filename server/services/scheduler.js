@@ -1787,6 +1787,9 @@ function initScheduledJobs() {
     }).catch((err) => logger.error(`Restaurant prospect sync failed: ${err.message}`));
   };
   cron.schedule('36 10 * * 1', () => runRestaurantProspectSyncTick(), { timezone: 'America/New_York' });
+  // The files hold one fiscal year and start over on July 1 (no CSV of the year before), so the last week of June
+  // runs daily: at most the last day of June goes unread. A Monday in that week runs once (one lease).
+  cron.schedule('36 10 24-30 6 *', () => runRestaurantProspectSyncTick(), { timezone: 'America/New_York' });
   registerDeployKillRetry('restaurant-prospect-sync', () => runRestaurantProspectSyncTick());
 
   // =========================================================================

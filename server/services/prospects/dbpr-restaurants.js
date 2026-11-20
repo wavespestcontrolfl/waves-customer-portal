@@ -8,6 +8,10 @@
  *   chgownr_food.csv  ownership changes statewide. Kept: the same places. In this file the values under
  *                     "Primary Phone Number" and "Mailing County Code" arrive swapped, so a phone is picked by shape.
  *
+ * The state rebuilds the three files each morning, and each holds one fiscal year (July to June): on July 1 they
+ * start over, and the state posts no CSV of the year before. So the job also runs daily on June 24-30
+ * (scheduler.js): at most the last day of June goes unread.
+ *
  * Violation 35 holds two codes. 35A is pest evidence (roaches, rodents, flies); 35B is outer openings not protected
  * (a door that does not self-close). The CSV has only the count. pest_evidence: NULL = the public report page is not
  * read yet, true = a 35A finding, false = 35B only. The report-page reads that fill it are the next change; until
@@ -120,17 +124,18 @@ function hasEveryColumn(row, kind) {
 
 /**
  * Inspection rows -> one record per visit that cited violation 35, in the three counties. A row in the area that is
- * cut short, or has a bad id or date, is skipped and counted in counts.malformed.
+ * cut short (checked before violation 35, which a short row can lack), or a code-35 row with a bad id or date, is
+ * skipped and counted in counts.malformed.
  */
 function parseInspectionRows(rows, counts = { malformed: 0 }) {
   const out = [];
   for (const row of rows) {
     if (!inServiceArea(row['County Name'], row['Location City'], row['Location Zip Code'])) continue;
-    if (!(Number(row['Violation 35']) > 0)) continue;
     if (!hasEveryColumn(row, 'inspection')) {
       counts.malformed += 1;
       continue;
     }
+    if (!(Number(row['Violation 35']) > 0)) continue;
     const sourceKey = clean(row['Inspection Visit ID']);
     const licenseId = clean(row['License ID'], 40);
     const eventDate = parseUsDate(row['Inspection Date']);
