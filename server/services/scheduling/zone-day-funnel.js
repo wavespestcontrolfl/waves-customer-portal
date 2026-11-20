@@ -17,7 +17,7 @@
  *      visible to step 1.
  *
  * Deliberate boundaries:
- *   - The cluster choice is offer-time only. There is NO cluster re-check in reserveSlot: the
+ *   - Offer-time only. There is NO redemption re-check in reserveSlot: the
  *     signed slot offer (slot-offer-token) already binds surface + estimate +
  *     date, so a customer can only tap a day this funnel genuinely offered —
  *     and unlike an owner blackout, a cluster day shifting between offer and
@@ -32,8 +32,6 @@
  *     exactly the pre-funnel status quo (one extra scattered trip), bounded
  *     by the offer-token TTL, and self-heals: funneled results are never
  *     cached, so the first redeemed seed clusters every subsequent offer.
- *     Per truck the holds re-check one thing, which needs no window: owner
- *     rule B on the hold's own date (see Per truck).
  *   - Window-scoped by design. The default rolling 14-day picker hard-funnels;
  *     an explicit single-date request (calendar pin, AI "next Tuesday" search)
  *     evaluates only that day, so a day without zone stops seeds rather than
@@ -63,16 +61,14 @@
  * openings, because that commit books whichever truck its rebuild finds at
  * the picked date and start (the estimate page books the signed slot's own
  * technician). Two bookings can still pick the same new day for two trucks
- * before either is written, so each writer re-checks the truck under its date
- * lock (truckMayTakeDate) with the zone it stamps on its row: the assessment
- * link's booking transaction (createSelfBooking callbackVisit.slotGuard), and
- * the estimate page's holds at every hold write, live or lapsed (a new hold, a
- * same-slot re-tap, an extend, an accept: a hold can run out while its writer
- * waits on the date lock, and an unstamped hold is no zone stop at all). A
- * hold's zone stamp decides its zone; an unstamped hold takes the funneled zone
- * its check read. The stop read counts a hold by the real clock
- * (clock_timestamp), not the writer's transaction start, and an unstamped
- * stop by the cities of every funneled zone (one pool, as for a stamp). The
+ * before either is written, so the assessment link's booking transaction
+ * re-checks the truck under its date lock (truckMayTakeDate,
+ * createSelfBooking callbackVisit.slotGuard) with the zone it stamps on its
+ * row. The estimate page's holds do not re-check it: like the cluster choice
+ * (Deliberate boundaries), two offers held before either is written can send
+ * a second truck south that day, bounded by the offer-token TTL. The stop read
+ * counts a hold by the real clock (clock_timestamp), not the writer's
+ * transaction start. The
  * assessment link's list and its booking resolve the zone from the one booking
  * address the same way (slot-zone.js leadBookingZone: its city decides, its text
  * only without one, else the customer's own city on file when the list knows the
@@ -173,12 +169,6 @@ function fallbackCenterZoneName(city) {
 // A genuine Lakewood Ranch row still stays excluded through the city leg.
 const FALLTHROUGH_ZONE_STAMP = 'lakewood_ranch';
 
-// Does a zone stamp name the zone `zoneSlug`: exactly, or as a legacy backfill compound ('venice_north_port' names
-// 'venice')? The stop read and the hold check (slot-reservation.js stampedZone) read a stamp by this one rule.
-function stampNamesZone(stamp, zoneSlug) {
-  return !!zoneSlug && (stamp === zoneSlug || stamp.startsWith(`${zoneSlug}_`));
-}
-
 // Slug equivalence for stamped rows. Direct/prefix match first; beyond
 // that, every slug in the funnel list names the SAME consolidated south
 // pool (the migration merged the legacy Port Charlotte zone's cities into
@@ -187,7 +177,7 @@ function stampNamesZone(stamp, zoneSlug) {
 // slug is cluster evidence for an estimate resolving another.
 function slugMatchesZone(rowZone, zoneSlug) {
   if (!zoneSlug) return false;
-  if (stampNamesZone(rowZone, zoneSlug)) return true;
+  if (rowZone === zoneSlug || rowZone.startsWith(`${zoneSlug}_`)) return true;
   const slugs = funnelZoneSlugs();
   const inFunnel = (s) => slugs.has(s) || [...slugs].some((f) => s.startsWith(`${f}_`));
   return inFunnel(rowZone) && inFunnel(zoneSlug);
@@ -218,14 +208,14 @@ const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 // estimate's zone. `techs`: each of those dates -> the technician ids of its
 // stops (null = an unassigned stop). Hold rows count only while unexpired,
 // mirroring filterCollidingSlots.
-async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo, pool = null) {
+async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo) {
   const rows = await dbc('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
     .andWhere((q) => {
       // The real clock, not NOW() (the transaction's start): a writer reads this under its date lock after waiting for
-      // it, and a hold that ran out meanwhile, the writer's own included, no longer holds the day (owner rule B).
+      // it, and a hold that ran out meanwhile no longer holds the day (owner rule B).
       q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > clock_timestamp()');
     })
     .select(
@@ -237,13 +227,8 @@ async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo, pool = null) {
     );
 
   const zoneSlug = zoneSlugOf(estimateZone);
-  // The funneled zones are one far-south pool (slugMatchesZone), for an unstamped stop's city too: a zone row the
-  // 2026-08-24 consolidation emptied (Port Charlotte, kept for its stamp) would otherwise match no unstamped stop,
-  // and a hold stamped with it would miss another truck's stop that only its city places down south (owner rule B).
-  // `pool` = the funneled zone rows when the caller already read them (funnelZoneRows; the night run reads them once).
-  const poolZones = isFunnelZone(estimateZone) ? (pool || await funnelZoneRows(dbc)) : [];
   const zoneCities = new Set(
-    [estimateZone, ...poolZones].flatMap((z) => z?.cities || []).map((c) => String(c || '').toLowerCase()).filter(Boolean),
+    (estimateZone?.cities || []).map((c) => String(c || '').toLowerCase()).filter(Boolean),
   );
   const dates = new Set();
   const techs = new Map();
@@ -268,12 +253,11 @@ async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo, pool = null) {
 // every zone day is the fleet's. `failed` distinguishes a transient lookup
 // failure from genuinely-inactive so the caller can keep fail-open
 // REQUEST-scoped (e.g. not cache the unfunneled result and extend one bad
-// lookup across the whole cache TTL). `pool`: the funneled zone rows
-// (funnelZoneRows) when the caller already read them, so they are not read again.
-async function getZoneFunnelDays(dbc, { estimateZone, dateFrom, dateTo, pool = null }) {
+// lookup across the whole cache TTL).
+async function getZoneFunnelDays(dbc, { estimateZone, dateFrom, dateTo }) {
   if (!isFunnelZone(estimateZone)) return { days: null, techDays: null, failed: false };
   try {
-    const { dates, techs } = await zoneStopDays(dbc, estimateZone, dateFrom, dateTo, pool);
+    const { dates, techs } = await zoneStopDays(dbc, estimateZone, dateFrom, dateTo);
     return { days: dates, techDays: perTruckLive() ? techs : null, failed: false };
   } catch (err) {
     logger.warn(`[zone-day-funnel] zone-stop lookup failed (failing open): ${err.message}`);
@@ -329,9 +313,8 @@ function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [] } = 
 // Owner rule B when a booking is written, under the writer's date lock: may `technicianId` still take `date` for a
 // booking in `estimateZone`, the zone the writer stamps on its row? Two bookings can pick the same new day for two
 // trucks before either is written; the date lock serializes them, and this read on the locked transaction sees the
-// first one's stop. Writers: the lead assessment link (createSelfBooking callbackVisit.slotGuard) and the estimate
-// page's holds (slot-reservation.js). true when the rule does not apply (gate off, fleet view, no technician, no
-// funneled zone), with no read. A query failure throws, so the writer's transaction fails closed like its other reads.
+// first one's stop. Writer: the lead assessment link (createSelfBooking callbackVisit.slotGuard). true when the rule
+// does not apply (gate off, fleet view, no technician, no funneled zone), with no read. A query failure throws, so the writer's transaction fails closed like its other reads.
 async function truckMayTakeDate(conn, { estimateZone, date, technicianId }) {
   if (technicianId == null || !perTruckLive() || !isFunnelZone(estimateZone)) return true;
   const { dates, techs } = await zoneStopDays(conn, estimateZone, date, date);
@@ -410,7 +393,6 @@ module.exports = {
   perTruckLive,
   funnelOn,
   isFunnelZone,
-  stampNamesZone,
   funnelZoneSlugs,
   fallbackCenterZoneName,
   // Exposed for tests.

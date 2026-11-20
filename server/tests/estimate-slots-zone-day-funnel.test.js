@@ -710,8 +710,8 @@ describe('offerFunnelView + funnelOfferPool (assessment link pool, same helpers 
     expect(await offerFunnelView({ address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db })).toBeNull();
   });
 
-  // The writers' re-check under their date lock (createSelfBooking callbackVisit.slotGuard, slot-reservation.js holds),
-  // with the zone the writer stamps: the first of two racing bookings' stop decides the second.
+  // The writer's re-check under its date lock (createSelfBooking callbackVisit.slotGuard), with the zone the writer
+  // stamps: the first of two racing bookings' stop decides the second.
   describe('truckMayTakeDate (rule B when a booking is written)', () => {
     const take = (technicianId, estimateZone = VENICE_ZONE) => truckMayTakeDate(db, { estimateZone, date: '2027-05-20', technicianId });
 
@@ -739,7 +739,7 @@ describe('offerFunnelView + funnelOfferPool (assessment link pool, same helpers 
     });
 
     // Pre-push P1 on e78306a32d: a writer reads the stops under its date lock, after waiting for it. NOW() is its
-    // transaction's start, so a hold that ran out meanwhile (the writer's own included) would still count as its
+    // transaction's start, so a hold that ran out meanwhile would still count as its
     // truck's stop; the read counts a hold by the real clock.
     test('the stop read counts a hold by the real clock, not the transaction\'s NOW()', async () => {
       await withTruckGate('true', async () => {
@@ -750,26 +750,6 @@ describe('offerFunnelView + funnelOfferPool (assessment link pool, same helpers 
         chain.andWhere.mock.calls[0][0](q);
         expect(q.whereNull).toHaveBeenCalledWith('scheduled_services.reservation_expires_at');
         expect(q.orWhereRaw).toHaveBeenCalledWith('scheduled_services.reservation_expires_at > clock_timestamp()');
-      });
-    });
-
-    // Pre-push P1 on da74da7dc7: the funneled zones are one pool for an unstamped stop's city too, as they are for a
-    // stamp (slugMatchesZone). The Port Charlotte row the 2026-08-24 consolidation emptied (no cities; a hold stamped
-    // with it is checked in it) still sees another truck's unstamped stop by its city in the Venice row, in the check
-    // and in the offer's days. A zone the funnel does not cover never takes the pool's cities.
-    test('an emptied funneled zone reads unstamped stops by every funneled zone\'s cities; an unfunneled zone does not', async () => {
-      const PORT_CHARLOTTE_ZONE = { id: 'z-pc', zone_name: 'Port Charlotte', cities: [] };
-      await withTruckGate('true', async () => {
-        mockDb({
-          scheduledRows: [zoneStopRow({ technician_id: 'tech-2', zone: null, customer_city: 'Nokomis' })],
-          zones: [PORT_CHARLOTTE_ZONE, VENICE_ZONE, SARASOTA_ZONE],
-        });
-        expect(await take('tech-1', PORT_CHARLOTTE_ZONE)).toBe(false);
-        expect(await take('tech-2', PORT_CHARLOTTE_ZONE)).toBe(true);
-        const { days } = await getZoneFunnelDays(db, { estimateZone: PORT_CHARLOTTE_ZONE, dateFrom: '2027-05-20', dateTo: '2027-05-20' });
-        expect([...days]).toEqual(['2027-05-20']);
-        const { dates } = await funnelInternals.zoneStopDays(db, SARASOTA_ZONE, '2027-05-20', '2027-05-20');
-        expect(dates.size).toBe(0);
       });
     });
 

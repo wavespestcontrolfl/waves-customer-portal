@@ -1418,20 +1418,12 @@ The assessment link's commit rebuild drops the same openings, so it books that
 zone-day technician or answers `SLOT_TAKEN`. Its booking transaction checks the
 technician again under the date lock (`truckMayTakeDate`), so two commits that
 rebuilt the same new day before either booked never send two technicians south:
-the second answers `SLOT_TAKEN`. The estimate page's holds check the same rule
-under their date lock at every hold write, live or lapsed (a new hold, a
-same-slot re-tap, an extend and an accept), in the zone stamped on the hold; an
-unstamped hold is stamped with the funneled zone its check read, so the next
-booking sees it. An accept whose hold has no funneled zone of its own is also
-checked in the funneled zone its written row's city places it in (the service
-address's, else the accepting customer's), as the stop read reads such a row by
-that city. A written row with no service address takes its estimate's linked
-property's address after the accept commits, so that property's city decides,
-and the accept stamps its zone on the row under the date lock. The answer is the existing `SLOT_UNAVAILABLE`; a refused re-tap or
-extend also deletes its hold, as one that now clashes does, so the day keeps
-one truck south. The stop read counts a hold by the real clock, so a hold that ran out while its writer waited
-on the date lock no longer holds the day, and it counts an unstamped stop by the
-cities of every funneled zone, as it counts a stamp. The assessment
+the second answers `SLOT_TAKEN`. The estimate page's holds and accepts book the
+offered slot's own technician and do not check the rule again (follow-up): two
+offers held before either is written can send a second technician south that
+day, bounded by the offer-token TTL. The stop read counts a hold by the real
+clock, so a hold that ran out while its writer waited on the date lock no
+longer holds the day. The assessment
 link's list and its booking resolve the zone from the one booking address the
 same way (its city decides, its text only without one; `callbackVisit.zoneAddress`,
 read only with the far-south funnel on), so a list never offers a time that

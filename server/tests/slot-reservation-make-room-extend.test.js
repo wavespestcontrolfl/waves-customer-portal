@@ -16,11 +16,6 @@ jest.mock('../services/estimate-slot-availability', () => ({
   MAX_SLOT_HORIZON_DAYS: 90,
 }));
 jest.mock('../services/scheduling/booking-make-room', () => ({ bookingMakeRoomMode: jest.fn(() => 'on') }));
-// The held technician is still assignable (the rule B tests below hold a truck; the make-room ones hold none).
-jest.mock('../services/technician-eligibility', () => ({
-  ...jest.requireActual('../services/technician-eligibility'),
-  assertAssignableTechnician: jest.fn(async () => {}),
-}));
 
 /**
  * extendReservation and GATE_BOOKING_MAKE_ROOM on (Codex pre-push P1): an ordinary hold can lapse, its hour can become
@@ -51,21 +46,18 @@ const HOLD = {
   make_room_moves: null, lat: null, lng: null, reservation_service_mix: null, reservation_policy_version: null,
 };
 
-function harness({ hold = HOLD, destinationHit = null, probeRows = [], destinationProbe = true, superseded = false, chainProbes = [], probeRuns = true, estimate = {}, zones = [] } = {}) {
+function harness({ hold = HOLD, destinationHit = null, probeRows = [], destinationProbe = true, superseded = false, chainProbes = [], probeRuns = true } = {}) {
   const pre = chain({ first: jest.fn().mockResolvedValue({ id: hold.id, scheduled_date: DATE }) });
   const locked = chain({ first: jest.fn().mockResolvedValue(hold) });
-  // A lapsed hold's rival live-hold read: none.
-  const rival = chain({ first: jest.fn().mockResolvedValue(null) });
   const destination = chain({ first: jest.fn().mockResolvedValue(destinationHit) });
   const probe = chain({ orderBy: jest.fn(() => Promise.resolve(probeRows)) });
   const dead = chain({});
   const update = chain({ returning: jest.fn().mockResolvedValue([{ id: hold.id, reservation_expires_at: '2027-05-20T13:40:00.000Z' }]) });
-  const queue = [pre, locked, ...(hold._already_lapsed ? [rival] : []), ...(destinationProbe ? [destination] : []), ...chainProbes, ...(probeRuns ? [probe] : []), ...(superseded ? [dead] : []), update];
-  const estimates = chain({ first: jest.fn().mockResolvedValue({ id: EST, status: 'sent', _expired: false, ...estimate }) });
+  const queue = [pre, locked, ...(destinationProbe ? [destination] : []), ...chainProbes, ...(probeRuns ? [probe] : []), ...(superseded ? [dead] : []), update];
+  const estimates = chain({ first: jest.fn().mockResolvedValue({ id: EST, status: 'sent', _expired: false }) });
   const trx = jest.fn((table) => {
     if (table === 'estimates') return estimates;
     if (table === 'scheduled_services') return queue.shift();
-    if (table === 'service_zones') return { select: jest.fn().mockResolvedValue(zones) };
     throw new Error(`unexpected table ${table}`);
   });
   trx.raw = jest.fn((sql) => ({ raw: sql }));
@@ -224,81 +216,5 @@ describe('extendReservation — a make-room hold nothing can prove again is supe
     const { update } = harness({ probeRuns: false });
     await expect(extend()).resolves.toMatchObject({ scheduledServiceId: 'hold-1' });
     expect(update.update).toHaveBeenCalledWith({ reservation_expires_at: '2027-05-20T13:40:00.000Z' });
-  });
-});
-
-// Owner rule B per truck (GATE_MULTI_TECH_CONFIRM), pre-push P1s on e81d7ed7c0 and e78306a32d: every extend checks the
-// hold's truck, lapsed or live (a hold can run out while the extend waits on the date lock), and keeps the zone its
-// far-south check read. A hold has no customer city, so an UNSTAMPED hold (its zone did not resolve at reserve) without
-// the stamp is invisible to the next booking's stop read (zoneStopDays), and a second truck could take the same south
-// day. A stamped hold keeps its stamp; gate off reads nothing and writes the expiry alone.
-describe('extendReservation — a far-south hold per truck (owner rule B)', () => {
-  const funnel = require('../services/scheduling/zone-day-funnel');
-  const { gates } = require('../config/feature-gates');
-  const VENICE = { id: 'zone-ven', zone_name: 'Venice / North Port', cities: ['Venice'] };
-  const LAPSED = { ...HOLD, technician_id: 'tech-1', _already_lapsed: true };
-  const VENICE_ESTIMATE = { address: '1 Test Way, Venice, FL 34285' };
-  let spies = [];
-  let funnelGate;
-  beforeEach(() => {
-    funnelGate = gates.southZoneDayFunnel;
-    gates.southZoneDayFunnel = true;
-    jest.clearAllMocks();
-    delete process.env.GATE_SCHEDULING_CAPACITY;
-    jest.useFakeTimers();
-    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
-    makeRoom.bookingMakeRoomMode.mockReturnValue('off');
-    db.mockImplementation((table) => (table === 'booking_config' ? { first: jest.fn().mockResolvedValue(undefined) } : undefined));
-  });
-  afterEach(() => { for (const spy of spies) spy.mockRestore(); spies = []; jest.useRealTimers(); gates.southZoneDayFunnel = funnelGate; });
-
-  const extend = () => slotReservation.extendReservation({ estimateId: EST, scheduledServiceId: 'hold-1' });
-
-  test.each([
-    ['lapsed unstamped', null, true, { reservation_expires_at: '2027-05-20T13:40:00.000Z', zone: 'venice' }],
-    ['lapsed stamped', 'venice', true, { reservation_expires_at: '2027-05-20T13:40:00.000Z' }],
-    ['live unstamped', null, false, { reservation_expires_at: '2027-05-20T13:40:00.000Z', zone: 'venice' }],
-  ])('a %s hold is checked and keeps the zone its check read on the row', async (_label, zone, lapsed, written) => {
-    const mayTake = jest.fn().mockResolvedValue(true);
-    spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
-    const { update } = harness({ hold: { ...LAPSED, zone, _already_lapsed: lapsed }, destinationProbe: false, estimate: VENICE_ESTIMATE, zones: [VENICE] });
-    await expect(extend()).resolves.toMatchObject({ scheduledServiceId: 'hold-1' });
-    expect(mayTake).toHaveBeenCalledWith(expect.any(Function), { estimateZone: VENICE, date: DATE, technicianId: 'tech-1' });
-    expect(update.update).toHaveBeenCalledWith(written);
-  });
-
-  // Pre-push P1 on 2b747741a9: at the expiry cap the extend writes no new expiry, but an unstamped hold still takes the
-  // stamp its check read (and only that), or the next booking's stop read misses it; a stamped hold writes nothing.
-  test.each([
-    ['unstamped', null, [[{ zone: 'venice' }]]],
-    ['stamped', 'venice', []],
-  ])('at the expiry cap, an %s hold writes only the stamp its check read', async (_label, zone, writes) => {
-    const mayTake = jest.fn().mockResolvedValue(true);
-    spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
-    const capped = { ...LAPSED, zone, _already_lapsed: false, reservation_expires_at: '2027-05-20T13:40:00.000Z', _new_expiry: '2027-05-20T13:40:00.000Z' };
-    const { update } = harness({ hold: capped, destinationProbe: false, estimate: VENICE_ESTIMATE, zones: [VENICE] });
-    await expect(extend()).resolves.toEqual({ scheduledServiceId: 'hold-1', expiresAt: '2027-05-20T13:40:00.000Z' });
-    expect(mayTake).toHaveBeenCalledWith(expect.any(Function), { estimateZone: VENICE, date: DATE, technicianId: 'tech-1' });
-    expect(update.update.mock.calls).toEqual(writes);
-  });
-
-  test('gate off (one truck): nothing is asked and the expiry alone is written', async () => {
-    const mayTake = jest.fn().mockResolvedValue(false);
-    spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(false), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
-    const { update } = harness({ hold: { ...LAPSED, zone: null }, destinationProbe: false, estimate: VENICE_ESTIMATE, zones: [VENICE] });
-    await expect(extend()).resolves.toMatchObject({ scheduledServiceId: 'hold-1' });
-    expect(mayTake).not.toHaveBeenCalled();
-    expect(update.update).toHaveBeenCalledWith({ reservation_expires_at: '2027-05-20T13:40:00.000Z' });
-  });
-
-  // Pre-push P1 on c08db66cc0: a refused hold, live or lapsed, can only lose at accept, so it is superseded like a
-  // clashing one: its delete commits before the 409, and a live one no longer blocks its truck's hour until it expires.
-  test.each([['lapsed', true], ['live', false]])('another truck\'s far-south day: slot-taken, and the %s hold is released, not kept', async (_label, lapsed) => {
-    spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockResolvedValue(false)];
-    const { dead, update } = harness({ hold: { ...LAPSED, zone: null, _already_lapsed: lapsed }, destinationProbe: false, probeRuns: false, superseded: true, estimate: VENICE_ESTIMATE, zones: [VENICE] });
-    await expect(extend()).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: `${DATE}_09-00_tech-1` });
-    expect(dead.where).toHaveBeenCalledWith({ id: 'hold-1' });
-    expect(dead.del).toHaveBeenCalledTimes(1);
-    expect(update.update).not.toHaveBeenCalled();
   });
 });
