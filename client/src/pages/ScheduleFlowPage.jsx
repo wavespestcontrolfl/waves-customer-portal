@@ -58,6 +58,12 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Returns the raw fetch Response alongside the parsed body so each caller
 // keeps its own status/error handling (the gate shows inline recovery UI;
 // the page-level refresh just needs the availability payload).
+// An inspection list answer (GET, or POST /availability, whose success has
+// no `state`) with no list though nothing else applies: not a terminal state,
+// not the address gate. Its slot build failed, so it refreshes nothing, and the
+// caller keeps or clears its own times (pre-push P1 on 4e9d76bcb1).
+const listMissing = (body) => (body.state ?? 'ok') === 'ok' && !body.needs_address && !body.availability;
+
 async function postInspectionAvailability(token, address, { signal } = {}) {
   const res = await fetch(`${API_BASE}/public/inspection/${token}/availability`, {
     method: 'POST',
@@ -2118,6 +2124,7 @@ export default function ScheduleFlowPage({ flow }) {
         setData(body);
         return;
       }
+      if (listMissing(body)) throw new Error('availability refresh failed');
       mergeData({ availability: body.availability, needs_address: false });
       return;
     }
@@ -2126,6 +2133,7 @@ export default function ScheduleFlowPage({ flow }) {
     if (!res.ok) throw new Error('availability refresh failed');
     const body = await res.json();
     if (signal?.aborted) return;
+    if (listMissing(body)) throw new Error('availability refresh failed');
     setData(body);
   }, [flow, resolvedAddress, token, availabilityUrl, mergeData]);
 
@@ -2225,6 +2233,10 @@ export default function ScheduleFlowPage({ flow }) {
         setResult({ ...body, ...resultMarks });
         return;
       }
+      // Any answer but a booking supersedes the searches still running, as
+      // onChangeAddress does: their times were built before it and could
+      // land over what it shows (pre-push P1s on 8f40c19990 and 4e9d76bcb1).
+      supersedeSearches();
       // Inspection only: the geocoded address falls outside the service
       // area — STOP with the dedicated card instead of a generic error.
       if (inspectionLike && body.error === 'out_of_area') {
@@ -2265,10 +2277,6 @@ export default function ScheduleFlowPage({ flow }) {
         return;
       }
       if (body.code === 'SLOT_TAKEN') {
-        // A refusal supersedes any search still running: its times were
-        // built before this answer and could land over the reload below
-        // (pre-push P1 on 8f40c19990), as onChangeAddress does.
-        supersedeSearches();
         setSelectedSlot(null);
         // The taken time may be the emailed one: drop it here, not only via
         // a later availability update — the refresh is best-effort and can
@@ -2302,11 +2310,20 @@ export default function ScheduleFlowPage({ flow }) {
           // profile at another address), and the next confirm books what
           // the server resolves now (pre-push P1s on 979f0dbec9 and
           // 8f40c19990).
-          if (!(await refreshInspectionAvailability({ ignoreHeldAddress: Boolean(body.address_changed) }).then(() => true, () => false))) {
-            mergeData({ availability: null });
-            setSubmitError('That time was just taken, and we couldn\'t load the latest open times. Please reload this page, or text us and we\'ll help.');
-            return;
-          }
+          // The reload runs under the current request controller, so a
+          // change of address meanwhile supersedes it: it applies no list,
+          // clears nothing and says nothing, as the new address's own list
+          // replaces the page (pre-push P1 on 4e9d76bcb1).
+          const { signal } = loadAbortRef.current;
+          const done = await refreshInspectionAvailability({ signal, ignoreHeldAddress: Boolean(body.address_changed) })
+            .then(() => signal.aborted, () => {
+              if (!signal.aborted) {
+                mergeData({ availability: null });
+                setSubmitError('That time was just taken, and we couldn\'t load the latest open times. Please reload this page, or text us and we\'ll help.');
+              }
+              return true;
+            });
+          if (done) return;
         } else {
           await load();
         }
