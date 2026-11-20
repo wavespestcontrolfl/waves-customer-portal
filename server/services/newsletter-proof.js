@@ -525,7 +525,8 @@ async function releaseRefusedProofClaim(sendId, token, reason) {
  * the copy went out (queueAutoSendIssue).
  */
 function proofDelivery(calendarContext, recipientCount, issueContext = null) {
-  if (issueContext && pestInsiderAutoSendLive()) {
+  // A planned Waves Pest Insider issue: sendNewsletterProof proofs it only with its switch on.
+  if (issueContext) {
     return {
       autoSend: true,
       prefix: 'FYI',
@@ -648,6 +649,9 @@ async function sendNewsletterProof(sendId) {
   if (calendarContext.linkedCalendar?.status === 'skipped') return { skipped: true, reason: 'week_skipped' };
   // The same for a held Waves Pest Insider issue.
   if (issueContext?.issue.status === 'held') return { skipped: true, reason: 'issue_held' };
+  // A planned issue is only ever proofed as an FYI copy, so its replies always follow the FYI
+  // rules (handlePlannedIssueReply). With its switch off nothing proofs or queues it.
+  if (issueContext && !pestInsiderAutoSendLive()) return { skipped: true, reason: 'auto_send_off' };
   if (!calendarContext.valid) {
     const errors = ['The linked calendar must target its own future issue Tuesday at exactly 6:00 AM ET.'];
     const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors });
@@ -804,7 +808,7 @@ async function holdAutoQueuedIssue(send, token, from) {
  * the switch already queued was handled by holdAutoQueuedIssue. HOLD on a send that is not queued
  * yet holds the planned row: the queueing needs that row drafted, so one still in flight rolls
  * back, and a send queued in between goes back to draft here. APPROVED never sends it at another
- * time; the owner is told how to send it instead.
+ * time, and the owner is told that the reply changed nothing.
  */
 async function handlePlannedIssueReply(send, token, from, replyText) {
   if (send.status !== 'draft') {
@@ -826,7 +830,7 @@ async function handlePlannedIssueReply(send, token, from, replyText) {
   if (isApprovalReply(replyText)) {
     await notifyProof('newsletter_proof_blocked', { sendId: send.id,
       subject: send.subject,
-      errors: ['Approved, but this Waves Pest Insider issue sends only by itself, on its Thursday at 7:00 AM ET, so the reply did not send it. To send it now, use the Newsletter page.'],
+      errors: ['Approved, but an APPROVED reply does not send a Waves Pest Insider issue: it sends only by itself, on its Thursday at 7:00 AM ET, once it is queued. Nothing changed.'],
     });
   }
   logger.info(`[newsletter-proof] reply for planned issue send ${send.id} is not HOLD — no change`);

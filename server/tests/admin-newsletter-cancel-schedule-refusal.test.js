@@ -94,12 +94,15 @@ test('a planned Waves Pest Insider issue is held on Cancel schedule, so its plan
   expect(updates.find(([table]) => table === 'pest_insider_issues')[1]).toMatchObject({ status: 'held', reason: 'Cancel schedule in History' });
 });
 
-test('deleting a planned Waves Pest Insider draft holds its issue first, then deletes the draft', async () => {
+test('deleting a planned Waves Pest Insider draft locks the send, holds its issue, then deletes the draft', async () => {
   const order = [];
   scheduledSend = { id: SEND_UUID, status: 'draft', newsletter_type: 'pest-insider-monthly' };
   db.transaction = jest.fn(async (work) => work((table) => {
     const q = {};
     ['where', 'whereIn'].forEach((m) => { q[m] = jest.fn(() => q); });
+    // The send row is locked before the issue row, the order the proof step's queueing uses.
+    q.forUpdate = jest.fn(() => { order.push(['lock', table]); return q; });
+    q.first = jest.fn(async () => ({ id: SEND_UUID }));
     q.pluck = jest.fn(async () => []);
     q.del = jest.fn(async () => { order.push(['del', table]); return 1; });
     q.update = jest.fn(async (patch) => { order.push(['update', table, patch]); return 1; });
@@ -111,6 +114,7 @@ test('deleting a planned Waves Pest Insider draft holds its issue first, then de
     delete db.transaction;
   }
   expect(order).toEqual([
+    ['lock', 'newsletter_sends'],
     ['update', 'pest_insider_issues', expect.objectContaining({ status: 'held', reason: 'Draft deleted in History' })],
     ['del', 'newsletter_sends'],
   ]);

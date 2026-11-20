@@ -901,14 +901,14 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     }));
   });
 
-  test('switch off: a planned issue is not queued by the flagship switch either', async () => {
+  test('switch off: a planned issue gets no proof at all (only ever an FYI copy), so the weekly switch cannot queue it either', async () => {
     delete process.env.GATE_PEST_INSIDER_AUTO_SEND;
     process.env.GATE_NEWSLETTER_AUTO_SEND = 'true';
     try {
-      const { issuesChain } = wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE } });
-      const r = await sendNewsletterProof('send-1');
-      expect(r.queued).toBe(false);
-      expect(mockSendOne.mock.calls[0][0].subject).toMatch(/^ACT: /);
+      const { sendsChain, issuesChain } = wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE } });
+      expect(await sendNewsletterProof('send-1')).toEqual({ skipped: true, reason: 'auto_send_off' });
+      expect(mockSendOne).not.toHaveBeenCalled();
+      expect(sendsChain.update).not.toHaveBeenCalled();
       expect(issuesChain.update).not.toHaveBeenCalled();
     } finally {
       delete process.env.GATE_NEWSLETTER_AUTO_SEND;
@@ -955,7 +955,7 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'draft', scheduled_for: null, proof_approved_at: null }));
   });
 
-  test('APPROVED never sends a planned issue at another time, and the owner is told how to send it', async () => {
+  test('APPROVED never sends a planned issue at another time, and the owner is told the reply changed nothing', async () => {
     process.env.GATE_PEST_INSIDER_PROOF = 'true';
     try {
       const { sendsChain, issuesChain } = wireDb({ sends: { first: PI_FYI_DRAFT }, issues: { first: ISSUE } });
@@ -965,7 +965,7 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
       expect(issuesChain.update).not.toHaveBeenCalled();
       expect(mockSendCampaign).not.toHaveBeenCalled();
       expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
-        errors: ['Approved, but this Waves Pest Insider issue sends only by itself, on its Thursday at 7:00 AM ET, so the reply did not send it. To send it now, use the Newsletter page.'],
+        errors: ['Approved, but an APPROVED reply does not send a Waves Pest Insider issue: it sends only by itself, on its Thursday at 7:00 AM ET, once it is queued. Nothing changed.'],
       }));
     } finally {
       delete process.env.GATE_PEST_INSIDER_PROOF;

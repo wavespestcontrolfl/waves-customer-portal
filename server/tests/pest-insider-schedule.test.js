@@ -454,12 +454,15 @@ describe('runIssuePlanner with GATE_PEST_INSIDER_AUTO_SEND on', () => {
       });
     });
 
-    test('a draft whose FYI copy SendGrid refused raises the notice', async () => {
+    test.each([
+      ['SendGrid refused', 'proof_send_failed', 'SendGrid did not accept the FYI copy'],
+      ['the switch turned off during the run', 'auto_send_off', 'GATE_PEST_INSIDER_AUTO_SEND turned off during the run, so the FYI copy did not go out'],
+    ])('a draft whose FYI copy did not go out (%s) raises the notice', async (_label, reason, copy) => {
       const database = fakeDb({ after: { status: 'drafted', reason: null } });
-      const result = await runIssuePlanner({ now: CATCH_UP, database, finalTick: true, sendProof: jest.fn(async () => ({ skipped: true, reason: 'proof_send_failed' })) });
+      const result = await runIssuePlanner({ now: CATCH_UP, database, finalTick: true, sendProof: jest.fn(async () => ({ skipped: true, reason })) });
 
-      expect(result).toMatchObject({ status: 'drafted', proof: 'proof_send_failed', noticeRaised: true });
-      expect(triggerNotification.mock.calls[0][1].errors).toEqual(['It will not send this time: SendGrid did not accept the FYI copy (proof_send_failed)']);
+      expect(result).toMatchObject({ status: 'drafted', proof: reason, noticeRaised: true });
+      expect(triggerNotification.mock.calls[0][1].errors).toEqual([`It will not send this time: ${copy} (${reason})`]);
     });
 
     test('a draft whose FYI copy an earlier run claimed but never queued raises the notice', async () => {
@@ -501,6 +504,24 @@ describe('runIssuePlanner with GATE_PEST_INSIDER_AUTO_SEND on', () => {
       } else {
         expect(triggerNotification).not.toHaveBeenCalled();
       }
+    });
+
+    test('a claim that found the draft changed raises the notice: nothing else proofs a planned draft', async () => {
+      const database = fakeDb({ existing: { id: 'row-1', status: 'drafted', send_id: 'send-1' }, after: { status: 'drafted', reason: null } });
+      const result = await runIssuePlanner({ now: CATCH_UP, database, finalTick: true, sendProof: jest.fn(async () => ({ skipped: true, reason: 'proof_claimed_elsewhere' })) });
+
+      expect(result.noticeRaised).toBe(true);
+      expect(triggerNotification.mock.calls[0][1].errors).toEqual(['It will not send this time: its draft changed while its FYI copy was being prepared (proof_claimed_elsewhere)']);
+    });
+
+    test('a notice that reached no one fails the run for job health, and is not sent again', async () => {
+      buildIssue.mockReturnValue({ ok: false, reason: 'no_live_post: fact-9', issue: null, diagnostics: {} });
+      triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: null, prefsUnavailable: true });
+      const database = fakeDb({ after: { status: 'skipped', reason: 'no_live_post: fact-9' } });
+
+      await expect(runIssuePlanner({ now: CATCH_UP, database, finalTick: true, sendProof: jest.fn() }))
+        .rejects.toMatchObject({ code: 'NOTICE_NOT_DELIVERED' });
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
     });
 
     test('no second notice when the proof step already told the owner why', async () => {

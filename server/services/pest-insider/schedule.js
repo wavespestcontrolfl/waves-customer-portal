@@ -255,13 +255,14 @@ function proofOutcome(proof) {
 }
 
 // The proof step told the owner in this run (its FYI copy queued the issue, or an alert reached
-// the owner), or another worker is on its FYI copy right now: no second notice from the planner.
-// An FYI copy that could not queue the issue counts only when the alert about that was delivered
-// (`notified`): otherwise the owner's only message says the issue will send. A copy an EARLIER
-// run claimed (proof_already_sent) is not enough either: that run may have stopped after the
-// claim, before the copy went out or the issue was queued (a restart), and then nobody was told.
-const proofInformed = (proof) => Boolean(proof && ((proof.sent && proof.queued) || proof.notified
-  || proof.reason === 'proof_claimed_elsewhere'));
+// the owner): no second notice from the planner. An FYI copy that could not queue the issue counts
+// only when the alert about that was delivered (`notified`): otherwise the owner's only message
+// says the issue will send. A copy an EARLIER run claimed (proof_already_sent) is not enough
+// either: that run may have stopped after the claim, before the copy went out or the issue was
+// queued (a restart), and then nobody was told. Nothing else proofs a planned draft (the planner
+// runs under its lock), so a claim that found the draft changed (proof_claimed_elsewhere) is no
+// sign that anyone told the owner.
+const proofInformed = (proof) => Boolean(proof && ((proof.sent && proof.queued) || proof.notified));
 
 // Why the proof step left an issue drafted, as a reason code for reasonCopy.
 const proofReason = (proof) => (proof && (proof.reason || (proof.sent ? 'not_queued' : null))) || 'draft_missing';
@@ -275,11 +276,13 @@ const REASON_COPY = [
   [/^copy_check_failed|^send_validator_blocked/, 'the copy check refused it'],
   [/^empty_audience$/, 'no reader opened a Waves email in the last 90 days'],
   [/^gate_off$/, 'GATE_NEWSLETTER_PROOF_APPROVAL is off, so the FYI copy did not go out'],
+  [/^auto_send_off$/, 'GATE_PEST_INSIDER_AUTO_SEND turned off during the run, so the FYI copy did not go out'],
   [/^no_approvers_configured$/, 'NEWSLETTER_PROOF_APPROVERS is empty, so the FYI copy did not go out'],
   [/^sendgrid_not_configured$/, 'SendGrid is not set up, so the FYI copy did not go out'],
   [/^proof_send_failed$/, 'SendGrid did not accept the FYI copy'],
   [/^proof_already_sent$/, 'an earlier run started its FYI copy but never queued it'],
   [/^not_queued$/, 'its FYI copy went out, but the issue could not be queued'],
+  [/^proof_claimed_elsewhere$/, 'its draft changed while its FYI copy was being prepared'],
   [/^draft_missing$/, 'its draft was deleted'],
 ];
 function reasonCopy(reason) {
@@ -299,6 +302,8 @@ const issueDayLabel = (issueDate) => new Intl.DateTimeFormat('en-US', {
  * that stopped the last run part way, given as the reason.
  */
 async function noticeIfIssueWillNotSend(db, issueDate, proof, failure = null) {
+  // A run that stopped because its notice reached no one does not send that notice again.
+  if (failure && failure.code === 'NOTICE_NOT_DELIVERED') return false;
   const row = await db('pest_insider_issues').where({ issue_date: issueDate }).first('status', 'reason');
   if (row && ['scheduled', 'sent', 'held'].includes(row.status)) return false;
   if (!failure && row && row.status === 'drafted' && proofInformed(proof)) return false;
@@ -306,11 +311,19 @@ async function noticeIfIssueWillNotSend(db, issueDate, proof, failure = null) {
     ? `the planner's last run stopped with an error: ${String(failure.message || failure).slice(0, 200)}`
     : !row ? 'no issue was recorded' : reasonCopy(row.status === 'drafted' ? proofReason(proof) : row.reason);
   const { triggerNotification } = require('../notification-triggers');
-  await triggerNotification('newsletter_proof_blocked', {
+  const delivery = await triggerNotification('newsletter_proof_blocked', {
     sendId: null,
     subject: `Waves Pest Insider for ${issueDayLabel(issueDate)}`,
     errors: [`It will not send this time: ${reason}`],
   });
+  // triggerNotification resolves with the outcome instead of throwing. Delivered = a bell row was
+  // written or a push went out, as the proof step's notifyProof reads it. A notice that reached
+  // no one fails the run, so the cron's job health shows it.
+  if (!(delivery && (delivery.bellWritten === true || Number(delivery.push?.sent) > 0))) {
+    const err = new Error(`the will-not-send notice for ${issueDate} reached no one`);
+    err.code = 'NOTICE_NOT_DELIVERED';
+    throw err;
+  }
   return true;
 }
 

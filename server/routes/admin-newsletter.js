@@ -505,6 +505,9 @@ router.delete('/sends/:id', async (req, res, next) => {
       // the planner never drafts or proofs it again. Before the delete: the
       // delete clears the row's send_id (ON DELETE SET NULL).
       if (send.newsletter_type === PEST_INSIDER_TYPE) {
+        // The send row first, then the issue row: the proof step's queueing takes them in that
+        // order too, so a delete as an FYI copy finishes waits for it instead of deadlocking.
+        await trx('newsletter_sends').where({ id: req.params.id }).forUpdate().first('id');
         await moveIssueForSend(req.params.id, ['drafted', 'scheduled'], 'held', { reason: 'Draft deleted in History', database: trx });
       }
       const deleted = await trx('newsletter_sends')
