@@ -22,6 +22,7 @@ const PART_LABELS = {
 const ESTIMATE_NOTE = 'Estimate, final at season end.';
 const NO_BONUS_REASONS = {
   score_incomplete: 'No estimate yet: a score part has no data so far.',
+  no_settings: 'No estimate yet: the score settings for this season are not set.',
   no_hire_date: 'No estimate yet: your hire date is not on file.',
   hired_after_season: 'No estimate: you started after this season.',
 };
@@ -49,11 +50,13 @@ function ScoreCard({ score }) {
   return <Card className="grid gap-3 p-4" aria-label="Season score">
     <div className="flex flex-wrap items-baseline justify-between gap-2">
       <h3 className="m-0 text-ui-title font-medium">Season score</h3>
-      {score.complete
+      {score.unavailable
+        ? <span className="text-ui-caption text-ink-secondary">Not available yet: the score settings for this season are not set.</span>
+        : score.complete
         ? <span className="text-ui-title font-medium">{percent(score.value)}{score.band && <Badge tone="strong">{score.band.rateBps > 0 ? `Bonus band ${bpsPercent(score.band.rateBps)}` : 'Below the bonus bands'}</Badge>}</span>
         : <span className="text-ui-caption text-ink-secondary">Not complete: {score.missing.map(key => PART_LABELS[key]).join(', ')} {score.missing.length === 1 ? 'has' : 'have'} no data yet.</span>}
     </div>
-    <Table aria-label="Score parts">
+    {!score.unavailable && <Table aria-label="Score parts">
       <THead><TR><TH>Part</TH><TH align="right">Score</TH><TH align="right">Weight</TH></TR></THead>
       <TBody>
         {Object.entries(score.parts).map(([key, part]) => <TR key={key}>
@@ -62,7 +65,7 @@ function ScoreCard({ score }) {
           <TD nums align="right">{percent(part.weight)}</TD>
         </TR>)}
       </TBody>
-    </Table>
+    </Table>}
   </Card>;
 }
 
@@ -107,9 +110,9 @@ export function ScoreboardView({ scoreboard }) {
         note={`${reviews.count} Google ${reviews.count === 1 ? 'review' : 'reviews'} from ${reviews.asks} ${reviews.asks === 1 ? 'ask' : 'asks'} this season.`}
       />
       <Stat
-        label={`Commission, ${commission.year} to date`}
+        label={`Commission recorded, ${commission.year}`}
         value={centsToDollars(commission.yearToDateCents)}
-        note={`${centsToDollars(commission.paidCents)} paid, ${centsToDollars(commission.pendingCents)} waiting for the next pay run.`}
+        note={`${commission.recordedThrough ? `Recorded through the pay run of ${dayLabel(commission.recordedThrough.payDate)}.` : 'No pay run yet.'} ${centsToDollars(commission.paidCents)} paid, ${centsToDollars(commission.unpaidCents)} not paid yet. A payment after that pay run is not counted yet.`}
       />
     </Card>
     <BonusCard scoreboard={scoreboard} />

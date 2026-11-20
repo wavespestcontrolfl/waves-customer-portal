@@ -23,7 +23,7 @@ const BOARD = {
     },
   },
   reviews: { count: 6, asks: 30, rateBps: 2000, multiplierPartE4: 3333 },
-  commission: { year: 2026, yearToDateCents: 30000, paidCents: 20000, pendingCents: 10000 },
+  commission: { year: 2026, yearToDateCents: 30000, paidCents: 20000, unpaidCents: 10000, recordedThrough: { payDate: '2026-11-13', weekEnd: '2026-11-08' } },
   multiplier: { multiplierE4: 15833, parts: { baseE4: 10000, tenureE4: 2500, reviewRateE4: 3333, levelE4: 0 }, tenureYears: 1, level: 1, levelSource: 'entry_default' },
   seasonBonus: { grossCents: 1000000, estimate: true, estimateCents: 63332, rateBps: 400, multiplierE4: 15833 },
   stayBonus: { dueDate: '2027-01-05', years: 1, rateBps: 200, estimateCents: 40000, estimate: true },
@@ -47,7 +47,8 @@ describe('Tech scoreboard tab', () => {
     expect(screen.getByText('20.0%')).toBeInTheDocument();
     expect(screen.getByText('6 Google reviews from 30 asks this season.')).toBeInTheDocument();
     expect(screen.getByText('$300.00')).toBeInTheDocument();
-    expect(screen.getByText('$200.00 paid, $100.00 waiting for the next pay run.')).toBeInTheDocument();
+    expect(screen.getByText('Commission recorded, 2026')).toBeInTheDocument();
+    expect(screen.getByText(/Recorded through the pay run of Nov 13, 2026\. \$200\.00 paid, \$100\.00 not paid yet\. A payment after that pay run is not counted yet\./)).toBeInTheDocument();
     expect(screen.getByText('$633.32')).toBeInTheDocument();
     expect(screen.getByText(/Estimate, final at season end\. 4\.0% of \$10,000\.00 pay x 1\.58x multiplier\./)).toBeInTheDocument();
     expect(screen.getByText('Jan 5, 2027')).toBeInTheDocument();
@@ -96,6 +97,27 @@ describe('Tech scoreboard tab', () => {
     expect(screen.getByText('Apr 1, 2028')).toBeInTheDocument();
     expect(screen.getByText(/3-year bonus\. Estimate starts Apr 1, 2027/)).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/about \$0\.00/);
+  });
+
+  it('shows the score and bonus as unavailable when no score settings are in force, with the rest intact', () => {
+    const board = {
+      ...BOARD,
+      score: { complete: false, value: null, missing: [], parts: {}, band: null, settingsVersion: null, unavailable: 'no_settings' },
+      seasonBonus: { grossCents: 1000000, estimate: true, estimateCents: null, reason: 'no_settings' },
+    };
+    render(<Scoreboard board={{ status: 'ready', scoreboard: board }} />);
+    expect(screen.getByText('Not available yet: the score settings for this season are not set.')).toBeInTheDocument();
+    expect(screen.queryByRole('table', { name: 'Score parts' })).not.toBeInTheDocument();
+    expect(screen.getByText('No estimate yet: the score settings for this season are not set.')).toBeInTheDocument();
+    expect(screen.getByText('20.0%')).toBeInTheDocument();
+    expect(screen.getByText('$300.00')).toBeInTheDocument();
+    expect(screen.getByText('Jan 5, 2027')).toBeInTheDocument();
+  });
+
+  it('says so when there is no pay run yet', () => {
+    const board = { ...BOARD, commission: { year: 2026, yearToDateCents: 0, paidCents: 0, unpaidCents: 0, recordedThrough: null } };
+    render(<Scoreboard board={{ status: 'ready', scoreboard: board }} />);
+    expect(screen.getByText(/^No pay run yet\. \$0\.00 paid/)).toBeInTheDocument();
   });
 
   it('shows no customer data', () => {

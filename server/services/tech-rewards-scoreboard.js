@@ -27,9 +27,10 @@
 const db = require('../models/db');
 const calc = require('./tech-rewards-calc');
 const scores = require('./tech-rewards-scores');
-const { ASK_TOUCH_SQL } = require('./review-outreach-templates');
+const { deliveredAskEventsForTechnician } = require('./review-ask-history');
 const { PAYOUT_ELIGIBLE_SOURCES } = require('./review-incentives');
 const { SOURCE_TYPE: COMMISSION_SOURCE_TYPE } = require('./payroll-commission');
+const { SOURCE_TYPE: REVIEW_BONUS_SOURCE_TYPE } = require('./payroll-review-bonuses');
 const { etDateString } = require('../utils/datetime-et');
 const { STAFF_TIME_ZONE, addStaffWorkDays } = require('../utils/staff-time-work-date');
 
@@ -79,7 +80,11 @@ function reviewRateBps(reviews, asks) {
   return Math.min(10000, Math.round((reviews * 10000) / asks));
 }
 
+// No score settings are in force for the season date: no score, no weights, no band, and no bonus; never a guess.
+const UNAVAILABLE_SCORE = Object.freeze({ complete: false, value: null, missing: [], parts: {}, band: null, settingsVersion: null, unavailable: 'no_settings' });
+
 function scoreBlock(seasonScore, settings) {
+  if (!seasonScore) return { ...UNAVAILABLE_SCORE };
   const weights = (seasonScore.settings || settings).weights;
   const parts = Object.fromEntries(PART_KEYS.map((key) => [key, { value: seasonScore.parts[key], weight: weights[key] }]));
   if (!seasonScore.complete) {
@@ -101,6 +106,7 @@ function multiplierBlock(hireDate, season, rateBps) {
 
 function seasonBonusBlock(score, multiplier, grossCents) {
   const base = { grossCents, estimate: true };
+  if (score.unavailable) return { ...base, estimateCents: null, reason: score.unavailable };
   if (!score.complete) return { ...base, estimateCents: null, reason: 'score_incomplete' };
   if (multiplier.multiplierE4 == null) return { ...base, estimateCents: null, reason: multiplier.reason };
   const estimateCents = calc.seasonBonusCents({
@@ -125,7 +131,8 @@ function stayBonusBlock(hireDate, today, priorPayCents) {
 /**
  * The scoreboard from the already-read inputs. Pure: no database, no clock.
  * inputs: { technician: { id, name, hireDate }, today, season, seasonScore, settings, reviews, asks,
- *           grossSeasonCents, priorYearGrossCents, commission: { paidCents, pendingCents } }
+ *           grossSeasonCents, priorYearGrossCents, commission: { paidCents, unpaidCents },
+ *           commissionRecordedThrough: { payDate, weekEnd } | null }
  */
 function composeScoreboard(inputs) {
   const { technician, today, season, seasonScore, settings } = inputs;
@@ -140,9 +147,13 @@ function composeScoreboard(inputs) {
     reviews: { count: inputs.reviews, asks: inputs.asks, rateBps, multiplierPartE4: multiplier.parts ? multiplier.parts.reviewRateE4 : null },
     commission: {
       year: Number(today.slice(0, 4)),
-      yearToDateCents: inputs.commission.paidCents + inputs.commission.pendingCents,
+      yearToDateCents: inputs.commission.paidCents + inputs.commission.unpaidCents,
       paidCents: inputs.commission.paidCents,
-      pendingCents: inputs.commission.pendingCents,
+      unpaidCents: inputs.commission.unpaidCents,
+      // the commission ledger is written by the pay run sync (payroll-commission.js syncCommissionLines, at every
+      // draft, recompute and finalize), so a payment after the last sync is not here yet: the board says how far
+      // it is recorded and never projects
+      recordedThrough: inputs.commissionRecordedThrough || null,
     },
     multiplier,
     seasonBonus: seasonBonusBlock(score, multiplier, inputs.grossSeasonCents),
@@ -175,16 +186,15 @@ async function readReviewCount(conn, technicianId, season) {
   return Number(row?.n) || 0;
 }
 
-// Review asks the technician's visits sent in the window, by the ET day the ask went out (an ask sent
-// after the season for a visit inside it belongs to the next one).
+// Review asks the technician's visits delivered in the window, by the ET day each went out (review-ask-history.js:
+// the initial ask and a delivered follow-up each count on their own send day; the follow-up's stamp and its
+// audit-log record are one ask). An ask sent after the season for a visit inside it belongs to the next one.
 async function readAskCount(conn, technicianId, season) {
-  const row = await conn('review_requests')
-    .where({ technician_id: technicianId })
-    .whereRaw(ASK_TOUCH_SQL)
-    .whereRaw(ET_DATE_IN_WINDOW('COALESCE(sms_sent_at, sent_at)'), [season.start, season.asOf])
-    .count({ n: '*' })
-    .first();
-  return Number(row?.n) || 0;
+  const events = await deliveredAskEventsForTechnician(conn, technicianId);
+  return events.filter(({ at }) => {
+    const day = etDateString(at);
+    return day >= season.start && day <= season.asOf;
+  }).length;
 }
 
 const DAY_MS = 86400000;
@@ -236,55 +246,106 @@ async function readDayMinutes(conn, technicianId, weekStart) {
   return rows.map((row) => ({ workDate: row.work_date, minutes: Number(row.minutes) || 0 }));
 }
 
-// The technician's finalized checks whose pay week overlaps [from, to] (with the day minutes of a week that
-// straddles an edge), then earnedGrossCents.
+// The day a pay line was EARNED (the same dating the commission year to date uses): a commission ledger line on the day
+// of the payment it pays (covers_to), a review bonus on the day the review was credited, any other line (a hand-made
+// commission, a bonus) in its own pay week (earned_week_start). `l` is payroll_pay_lines.
+const LINE_EARNED_ON_SQL = `COALESCE(CASE l.source_type
+    WHEN ? THEN l.covers_to
+    WHEN ? THEN (SELECT (p.earned_at AT TIME ZONE ?)::date FROM review_incentive_payouts p WHERE p.id::text = l.source_id)
+  END, l.earned_week_start)`;
+const lineEarnedOnBindings = () => [COMMISSION_SOURCE_TYPE, REVIEW_BONUS_SOURCE_TYPE, STAFF_TIME_ZONE];
+
+/**
+ * Gross pay earned in [from, to], in two parts. WAGES: each finalized check's gross less the pay lines paid on it
+ * (commission, review bonus, other lines), by work week through earnedGrossCents (a catch-up line paid in a later
+ * week must not move wages). LINES: each paid line counts in full on the day it was earned (LINE_EARNED_ON_SQL),
+ * wherever it was paid. D5-5 pay lines use this function for the season bonus base and the stay bonus's prior 12
+ * months.
+ */
 async function readGross(conn, technicianId, from, to) {
   const rows = await conn('payroll_checks as c')
     .join('payroll_runs as r', 'r.id', 'c.run_id')
     .where({ 'c.technician_id': technicianId, 'c.status': 'finalized', 'r.status': 'finalized' })
     .whereRaw('c.week_start + 6 >= ?::date AND c.week_start <= ?::date', [from, to])
-    .select(conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), 'c.gross_cents');
+    .select(conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), 'c.gross_cents',
+      conn.raw("COALESCE((SELECT SUM(l.amount_cents) FROM payroll_pay_lines l WHERE l.check_id = c.id AND l.status = 'paid'), 0) AS lines_cents"));
   const weeks = [];
   for (const row of rows) {
-    const week = { weekStart: row.week_start, grossCents: toCents(row.gross_cents) };
+    const week = { weekStart: row.week_start, grossCents: Math.max(0, toCents(row.gross_cents) - toCents(row.lines_cents)) };
     if (week.weekStart < from || addStaffWorkDays(week.weekStart, 6) > to) week.dayMinutes = await readDayMinutes(conn, technicianId, week.weekStart);
     weeks.push(week);
   }
-  return earnedGrossCents(weeks, from, to);
+  const lines = await conn('payroll_pay_lines as l')
+    .join('payroll_checks as c', 'c.id', 'l.check_id')
+    .join('payroll_runs as r', 'r.id', 'c.run_id')
+    .where({ 'l.technician_id': technicianId, 'l.status': 'paid', 'c.status': 'finalized', 'r.status': 'finalized' })
+    .whereRaw(`${LINE_EARNED_ON_SQL} >= ?::date AND ${LINE_EARNED_ON_SQL} <= ?::date`,
+      [...lineEarnedOnBindings(), from, ...lineEarnedOnBindings(), to])
+    .sum({ cents: 'l.amount_cents' })
+    .first();
+  return earnedGrossCents(weeks, from, to) + toCents(lines?.cents);
 }
 
-// Commission pay lines earned from Jan 1 to today: 'paid' on a finalized check, 'open' waiting for the next run.
-// The ledger's lines (payroll-commission.js) are earned on the day of the payment they pay (covers_to); a hand-made
-// line is earned in its own pay week (earned_week_start).
-const COMMISSION_EARNED_ON = 'CASE WHEN source_type = ? THEN covers_to ELSE earned_week_start END';
+// Commission pay lines earned from Jan 1 to today: 'paid' on a finalized check, 'open' on a run not finalized yet,
+// dated by LINE_EARNED_ON_SQL.
 async function readCommission(conn, technicianId, today) {
-  const rows = await conn('payroll_pay_lines')
-    .where({ technician_id: technicianId, kind: 'commission' })
-    .whereIn('status', ['open', 'paid'])
-    .whereRaw(`(${COMMISSION_EARNED_ON}) >= ?::date AND (${COMMISSION_EARNED_ON}) <= ?::date`,
-      [COMMISSION_SOURCE_TYPE, `${today.slice(0, 4)}-01-01`, COMMISSION_SOURCE_TYPE, today])
-    .groupBy('status')
-    .select('status', conn.raw('SUM(amount_cents) AS cents'));
+  const rows = await conn('payroll_pay_lines as l')
+    .where({ 'l.technician_id': technicianId, 'l.kind': 'commission' })
+    .whereIn('l.status', ['open', 'paid'])
+    .whereRaw(`${LINE_EARNED_ON_SQL} >= ?::date AND ${LINE_EARNED_ON_SQL} <= ?::date`,
+      [...lineEarnedOnBindings(), `${today.slice(0, 4)}-01-01`, ...lineEarnedOnBindings(), today])
+    .groupBy('l.status')
+    .select('l.status', conn.raw('SUM(l.amount_cents) AS cents'));
   const by = Object.fromEntries(rows.map((row) => [row.status, toCents(row.cents)]));
-  return { paidCents: by.paid || 0, pendingCents: by.open || 0 };
+  return { paidCents: by.paid || 0, unpaidCents: by.open || 0 };
+}
+
+// Score settings that are not in force on the season date make the score and the bonus unavailable; nothing is guessed.
+const isNoSettings = (err) => err instanceof scores.TechRewardsScoresError && err.code === 'NO_SETTINGS_IN_FORCE';
+
+async function readScore(conn, technicianId, season) {
+  try {
+    const seasonScore = await scores.buildSeasonScore(technicianId, season.year, { start: season.start, end: season.asOf }, conn);
+    // an incomplete score carries no settings: read the weights the parts would be weighed with
+    const settings = seasonScore.complete ? null : await scores.getSettings(season.asOf, conn);
+    return { seasonScore, settings };
+  } catch (err) {
+    if (isNoSettings(err)) return { seasonScore: null, settings: null };
+    throw err;
+  }
+}
+
+// The day before a date (ET calendar).
+const dayBefore = (dateStr) => addStaffWorkDays(dateStr, -1);
+
+// How far the commission ledger is recorded: the newest pay run that is not voided (every draft, recompute and
+// finalize of a run syncs commission for all W-2 technicians, payroll-commission.js), as its pay date and the end of
+// its pay week (the sync records payments up to that day). null when no pay run exists.
+async function readCommissionRecordedThrough(conn) {
+  const row = await conn('payroll_runs')
+    .whereNot({ status: 'voided' })
+    .orderBy('week_start', 'desc')
+    .first(conn.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date"), conn.raw("to_char(week_start + 6, 'YYYY-MM-DD') AS week_end"));
+  return row ? { payDate: row.pay_date, weekEnd: row.week_end } : null;
 }
 
 async function readAll(conn, technicianId, today) {
   const technician = await readTechnician(conn, technicianId);
   const season = pickSeason(today);
   // the score and its settings are cut at the board's as-of date: a running season never reads a later change
-  const seasonScore = await scores.buildSeasonScore(technicianId, season.year, { start: season.start, end: season.asOf }, conn);
-  // an incomplete score carries no settings: read the weights the parts would be weighed with
-  const settings = seasonScore.complete ? null : await scores.getSettings(season.asOf, conn);
-  // the stay bonus pays on the next anniversary from the 12 months before IT: the pay recorded so far in that window
+  const { seasonScore, settings } = await readScore(conn, technicianId, season);
+  // the stay bonus pays on the next anniversary from the 12 months before IT, up to the day before it or today,
+  // whichever comes first: the pay recorded so far in that window
   const due = stayBonusBlock(technician.hireDate, today, 0);
+  const stayEnd = due ? (due.dueDate <= today ? dayBefore(due.dueDate) : today) : null;
   return {
     technician, today, season, seasonScore, settings,
     asks: await readAskCount(conn, technicianId, season),
     reviews: await readReviewCount(conn, technicianId, season),
     grossSeasonCents: await readGross(conn, technicianId, season.start, season.asOf),
-    priorYearGrossCents: due && due.estimateCents !== null ? await readGross(conn, technicianId, yearBefore(due.dueDate), today) : 0,
+    priorYearGrossCents: due && due.estimateCents !== null ? await readGross(conn, technicianId, due.earningsStart, stayEnd) : 0,
     commission: await readCommission(conn, technicianId, today),
+    commissionRecordedThrough: await readCommissionRecordedThrough(conn),
   };
 }
 

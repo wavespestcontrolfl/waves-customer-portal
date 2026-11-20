@@ -58,12 +58,13 @@ function looksLikeReviewAsk(body) {
 // (set only once the provider actually dispatches) for follow-ups delivered
 // before that column existed — correlated back via the review_request_id the
 // followup send stamps into its metadata.
-const FOLLOWUP_DELIVERED_SUBQUERY = `(
+const followupDeliveredSubquery = (scopeSql) => `(
   SELECT metadata->>'review_request_id' AS review_request_id, MAX(sent_at) AS followup_delivered_at
   FROM messaging_audit_log
-  WHERE customer_id = ? AND entry_point = 'review_request_followup' AND sent_at IS NOT NULL
+  WHERE ${scopeSql} AND entry_point = 'review_request_followup' AND sent_at IS NOT NULL
   GROUP BY metadata->>'review_request_id'
 ) followups`;
+const FOLLOWUP_DELIVERED_SUBQUERY = followupDeliveredSubquery('customer_id = ?');
 
 // review_requests columns that hold UNRESOLVED send evidence: stamped before a
 // provider handoff and cleared once the outcome is known (accepted or a
@@ -246,4 +247,28 @@ async function lastUnresolvedAskAt(customerId, { since, excludeReservationId = n
   return smsLogAt && (!requestWithinWindow || smsLogAt > requestWithinWindow) ? smsLogAt : requestWithinWindow;
 }
 
-module.exports = { ASK_SPACING_MS, looksLikeReviewAsk, deliveredAskRows, latestDeliveredAt, lastDeliveredAskAt, lastManualAskAt, lastUnresolvedAskAt };
+/**
+ * Every ask one technician's visits actually delivered, as { requestId, at } (a Date), from the same evidence
+ * deliveredAskRows reads: the initial ask (sms_sent_at, else sent_at) and a delivered follow-up (the stamped
+ * followup_delivered_at, else the audit log's send time; the two are ONE follow-up, never two asks). Used for
+ * counts by send day (the Tech Rewards scoreboard's review rate); no spacing or reservation logic.
+ */
+async function deliveredAskEventsForTechnician(conn, technicianId) {
+  const scope = 'customer_id IN (SELECT customer_id FROM review_requests WHERE technician_id = ?)';
+  const rows = await conn('review_requests')
+    .joinRaw(`LEFT JOIN ${followupDeliveredSubquery(scope)} ON followups.review_request_id = review_requests.id::text`, [technicianId])
+    .where({ 'review_requests.technician_id': technicianId })
+    .whereRaw(ASK_TOUCH_SQL)
+    .select('review_requests.id', 'review_requests.sms_sent_at', 'review_requests.sent_at',
+      'review_requests.followup_delivered_at as followup_recorded_at', 'followups.followup_delivered_at');
+  const events = [];
+  for (const row of rows) {
+    const initial = row.sms_sent_at || row.sent_at;
+    const followUp = row.followup_recorded_at || row.followup_delivered_at;
+    if (initial) events.push({ requestId: row.id, at: new Date(initial) });
+    if (followUp) events.push({ requestId: row.id, at: new Date(followUp) });
+  }
+  return events;
+}
+
+module.exports = { ASK_SPACING_MS, deliveredAskEventsForTechnician, looksLikeReviewAsk, deliveredAskRows, latestDeliveredAt, lastDeliveredAskAt, lastManualAskAt, lastUnresolvedAskAt };

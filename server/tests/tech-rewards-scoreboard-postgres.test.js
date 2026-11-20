@@ -11,10 +11,12 @@ jest.mock('../models/db', () => {
   return knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [mockSchema], pool: { min: 0, max: 4 } });
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../services/tech-rewards-scores', () => ({
-  buildSeasonScore: jest.fn(),
-  getSettings: jest.fn(),
-}));
+jest.mock('../services/tech-rewards-scores', () => {
+  class TechRewardsScoresError extends Error {
+    constructor(code, message) { super(message); this.code = code; }
+  }
+  return { TechRewardsScoresError, buildSeasonScore: jest.fn(), getSettings: jest.fn() };
+});
 
 const WEIGHTS = { onTime: 25, audit: 25, callbacks: 20, truck: 10, ownerRating: 20 };
 const CUTS = { top: 90, mid: 80, low: 70 };
@@ -42,6 +44,8 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     });
     await s.createTable('payroll_runs', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+      t.date('week_start').notNullable();
+      t.date('pay_date').notNullable();
       t.text('status').notNullable();
     });
     await s.createTable('payroll_checks', (t) => {
@@ -58,6 +62,8 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
       t.text('kind').notNullable();
       t.text('status').notNullable();
       t.text('source_type');
+      t.text('source_id');
+      t.uuid('check_id');
       t.date('earned_week_start').notNullable();
       t.date('covers_to');
       t.integer('amount_cents').notNullable();
@@ -69,6 +75,13 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
       t.decimal('total_shift_minutes', 10, 2);
       t.decimal('unpaid_meal_minutes', 10, 2);
     });
+    await s.createTable('messaging_audit_log', (t) => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+      t.uuid('customer_id');
+      t.text('entry_point');
+      t.jsonb('metadata');
+      t.timestamp('sent_at', { useTz: true });
+    });
     await s.createTable('review_incentive_payouts', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
       t.uuid('technician_id');
@@ -78,6 +91,8 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     await s.createTable('review_requests', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
       t.uuid('technician_id');
+      t.uuid('customer_id');
+      t.timestamp('followup_delivered_at', { useTz: true });
       t.date('service_date');
       t.timestamp('sms_sent_at', { useTz: true });
       t.timestamp('sent_at', { useTz: true });
@@ -86,7 +101,7 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     [{ id: alpha }, { id: beta }] = await db('technicians').insert([
       { name: 'Sample Alpha', hire_date: '2025-12-01' }, { name: 'Sample Beta', hire_date: '2024-01-15' },
     ]).returning('id');
-  });
+  }, 60000);
 
   afterAll(async () => {
     await db.raw('DROP SCHEMA IF EXISTS ?? CASCADE', [mockSchema]);
@@ -94,7 +109,7 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
   });
 
   beforeEach(async () => {
-    for (const table of ['payroll_checks', 'payroll_runs', 'payroll_pay_lines', 'review_incentive_payouts', 'review_requests', 'time_entry_daily_summary']) await db(table).del();
+    for (const table of ['payroll_checks', 'payroll_runs', 'payroll_pay_lines', 'review_incentive_payouts', 'review_requests', 'time_entry_daily_summary', 'messaging_audit_log']) await db(table).del();
     scores.buildSeasonScore.mockReset().mockResolvedValue({
       complete: true, year: 2026, parts: PARTS, score: 91.5, rateBps: 400, settings: { version: 0, weights: WEIGHTS, cutLines: CUTS },
     });
@@ -102,7 +117,7 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
   });
 
   async function seed() {
-    const [run, voided] = (await db('payroll_runs').insert([{ status: 'finalized' }, { status: 'voided' }]).returning('id')).map((r) => r.id);
+    const [run, voided] = (await db('payroll_runs').insert([{ status: 'finalized', week_start: '2026-10-26', pay_date: '2026-11-06' }, { status: 'voided', week_start: '2026-11-02', pay_date: '2026-11-13' }]).returning('id')).map((r) => r.id);
     await db('payroll_checks').insert([
       { run_id: run, technician_id: alpha, status: 'finalized', week_start: '2026-03-02', gross_cents: 100000 },
       { run_id: run, technician_id: alpha, status: 'finalized', week_start: '2026-08-31', gross_cents: 50000 },
@@ -163,7 +178,7 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     // the Mar 2 week in full; the Aug 31 week (Aug 31 - Sep 6) by paid minutes: 480 of 480 + 480 + 480 (Tuesday's 510 less a 30 minute unpaid meal) = 1440 -> 50000 x 480 / 1440; the Feb 23 week (ends Mar 1) had no hours in the season
     expect(board.seasonBonus.grossCents).toBe(100000 + Math.round((50000 * 480) / 1440));
     expect(board.reviews).toMatchObject({ count: 3, asks: 3, rateBps: 10000 });
-    expect(board.commission).toEqual({ year: 2026, yearToDateCents: 33600, paidCents: 23600, pendingCents: 10000 });
+    expect(board.commission).toEqual({ year: 2026, yearToDateCents: 33600, paidCents: 23600, unpaidCents: 10000, recordedThrough: { payDate: '2026-11-06', weekEnd: '2026-11-01' } });
     // hired 2025-12-01: the 1-year bonus is due 2026-12-01 from the pay of 2025-12-01 .. today: 100000+50000+70000+10000
     expect(board.stayBonus).toMatchObject({ dueDate: '2026-12-01', years: 1, estimateCents: Math.round(230000 * 0.02) });
   });
@@ -184,6 +199,95 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     const [gamma] = await db('technicians').insert({ name: 'Sample Gamma', hire_date: '2025-04-01' }).returning('id');
     const board = await service.getScoreboard(gamma.id, { now: NOW });
     expect(board.stayBonus).toMatchObject({ dueDate: '2028-04-01', years: 3, estimateCents: null, earningsStart: '2027-04-01' });
+  });
+
+  test('catch-up pay: lines paid in a later week count on the day they were earned, wages by work week', async () => {
+    await seed();
+    const [sept] = await db('payroll_checks').where({ technician_id: alpha, week_start: '2026-09-07' }).select('id');
+    const [payout] = await db('review_incentive_payouts').where({ technician_id: alpha, source: 'google_review' }).orderBy('earned_at').limit(1).select('id');
+    await db('payroll_pay_lines').insert([
+      // the Sept 7 check's 70000 gross holds 11500 of lines; its wages (58500) are outside the season
+      { technician_id: alpha, check_id: sept.id, kind: 'commission', source_type: 'commission_payment', status: 'paid', earned_week_start: '2026-09-07', covers_to: '2026-05-10', amount_cents: 8000 }, // earned May 10
+      { technician_id: alpha, check_id: sept.id, kind: 'review_bonus', source_type: 'review_incentive_payout', source_id: payout.id, status: 'paid', earned_week_start: '2026-09-07', amount_cents: 1500 }, // review credited Apr 10
+      { technician_id: alpha, check_id: sept.id, kind: 'commission', status: 'paid', earned_week_start: '2026-09-07', amount_cents: 2000 }, // hand-made, earned in its own September week
+    ]);
+    const board = await service.getScoreboard(alpha, { now: NOW });
+    expect(board.seasonBonus.grossCents).toBe(100000 + Math.round((50000 * 480) / 1440) + 8000 + 1500);
+    expect(board.commission).toMatchObject({ paidCents: 23600 + 8000 + 2000 });
+    // the stay window holds the same wages (218500) and all three lines (11500) once each
+    expect(board.stayBonus.estimateCents).toBe(Math.round(230000 * 0.02));
+  });
+
+  test('review asks count every delivered ask by its send day: a follow-up counts once even when stamped twice', async () => {
+    await seed();
+    const [c1, c2, c3, c4] = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+    const rows = await db('review_requests').insert([
+      { technician_id: alpha, customer_id: c1, service_date: '2026-04-11', sms_sent_at: '2026-04-11T16:00:00Z', followup_delivered_at: '2026-06-05T16:00:00Z' }, // stamp only
+      { technician_id: alpha, customer_id: c2, service_date: '2026-05-12', sms_sent_at: '2026-05-12T16:00:00Z' }, // audit log only
+      { technician_id: alpha, customer_id: c3, service_date: '2026-06-01', sms_sent_at: '2026-06-01T16:00:00Z', followup_delivered_at: '2026-06-25T16:00:00Z' }, // both
+      { technician_id: alpha, customer_id: c4, service_date: '2026-08-20', sms_sent_at: '2026-08-20T16:00:00Z' }, // follow-up after the season
+    ]).returning(['id', 'customer_id']);
+    const idOf = (customer) => rows.find((r) => r.customer_id === customer).id;
+    await db('messaging_audit_log').insert([
+      { customer_id: c2, entry_point: 'review_request_followup', metadata: { review_request_id: idOf(c2) }, sent_at: '2026-06-20T16:00:00Z' },
+      { customer_id: c3, entry_point: 'review_request_followup', metadata: { review_request_id: idOf(c3) }, sent_at: '2026-06-25T16:00:05Z' },
+      { customer_id: c4, entry_point: 'review_request_followup', metadata: { review_request_id: idOf(c4) }, sent_at: '2026-09-02T16:00:00Z' },
+      { customer_id: c1, entry_point: 'sms_other', metadata: { review_request_id: idOf(c1) }, sent_at: '2026-06-06T16:00:00Z' }, // not a follow-up
+    ]);
+    const board = await service.getScoreboard(alpha, { now: NOW });
+    // the 3 seeded asks + (initial + follow-up) for c1, c2, c3 + the initial for c4 (its follow-up is after the season)
+    expect(board.reviews.asks).toBe(3 + 6 + 1);
+  });
+
+  test('no score settings in force: the score and bonus are unavailable, the rest still shows', async () => {
+    await seed();
+    const noSettings = new scores.TechRewardsScoresError('NO_SETTINGS_IN_FORCE', 'none in force');
+    scores.buildSeasonScore.mockRejectedValue(noSettings);
+    let board = await service.getScoreboard(alpha, { now: NOW });
+    expect(board.score).toMatchObject({ unavailable: 'no_settings', complete: false, value: null, band: null, parts: {} });
+    expect(board.seasonBonus).toMatchObject({ estimateCents: null, reason: 'no_settings' });
+    expect(board.reviews.asks).toBe(3);
+    expect(board.commission.paidCents).toBe(23600);
+    expect(board.stayBonus).toMatchObject({ dueDate: '2026-12-01' });
+    // the same when the parts are incomplete and the weights lookup is what finds no settings
+    scores.buildSeasonScore.mockResolvedValue({ complete: false, year: 2026, parts: { ...PARTS, audit: null }, missing: ['audit'] });
+    scores.getSettings.mockRejectedValue(noSettings);
+    board = await service.getScoreboard(alpha, { now: NOW });
+    expect(board.score.unavailable).toBe('no_settings');
+    // any other failure is still a failure
+    scores.buildSeasonScore.mockRejectedValue(new scores.TechRewardsScoresError('MALFORMED_SETTINGS', 'bad'));
+    await expect(service.getScoreboard(alpha, { now: NOW })).rejects.toMatchObject({ code: 'MALFORMED_SETTINGS' });
+  });
+
+  test('the stay bonus window ends the day before the anniversary and prorates a check that spans that day', async () => {
+    await seed();
+    const [delta] = await db('technicians').insert({ name: 'Sample Delta', hire_date: '2025-12-01' }).returning('id');
+    const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-11-30', pay_date: '2026-12-11' }).returning('id');
+    await db('payroll_checks').insert({ run_id: run.id, technician_id: delta.id, status: 'finalized', week_start: '2026-11-30', gross_cents: 70000 });
+    await db('time_entry_daily_summary').insert([
+      { technician_id: delta.id, work_date: '2026-11-30', total_shift_minutes: 480, unpaid_meal_minutes: 0 }, // in the window
+      { technician_id: delta.id, work_date: '2026-12-01', total_shift_minutes: 480, unpaid_meal_minutes: 0 }, // on the anniversary: not in it
+    ]);
+    const board = await service.getScoreboard(delta.id, { now: new Date('2026-12-01T15:00:00Z') });
+    expect(board.stayBonus).toMatchObject({ dueDate: '2026-12-01', earningsStart: '2025-12-01', estimateCents: Math.round(35000 * 0.02) });
+  });
+
+  test('commission is recorded only through the newest non-voided pay run; a payment after it is not counted, and the cutoff says so', async () => {
+    await db('payroll_runs').insert([
+      { status: 'finalized', week_start: '2026-11-02', pay_date: '2026-11-13' },
+      { status: 'draft', week_start: '2026-11-09', pay_date: '2026-11-20' },
+      { status: 'voided', week_start: '2026-11-16', pay_date: '2026-11-27' }, // a voided run is not a sync that counts
+    ]);
+    // a payment dated Nov 17 whose ledger line the next sync has not written yet: no row, so no figure
+    await db('payroll_pay_lines').insert({ technician_id: alpha, kind: 'commission', source_type: 'commission_payment', status: 'paid', earned_week_start: '2026-11-02', covers_to: '2026-11-05', amount_cents: 4000 });
+    const board = await service.getScoreboard(alpha, { now: NOW });
+    expect(board.commission.recordedThrough).toEqual({ payDate: '2026-11-20', weekEnd: '2026-11-15' });
+    expect(board.commission.paidCents).toBe(4000);
+  });
+
+  test('no pay run at all: the cutoff is null', async () => {
+    const board = await service.getScoreboard(alpha, { now: NOW });
+    expect(board.commission).toMatchObject({ recordedThrough: null, yearToDateCents: 0 });
   });
 
   test('an edge week with no daily summaries falls back to days / 7', async () => {

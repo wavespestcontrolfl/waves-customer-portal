@@ -25,7 +25,8 @@ function inputs(over = {}) {
     asks: 30,
     grossSeasonCents: 1000000,
     priorYearGrossCents: 2000000,
-    commission: { paidCents: 20000, pendingCents: 10000 },
+    commission: { paidCents: 20000, unpaidCents: 10000 },
+    commissionRecordedThrough: { payDate: '2026-11-13', weekEnd: '2026-11-08' },
     ...over,
   };
 }
@@ -110,7 +111,7 @@ describe('composeScoreboard', () => {
     expect(board.score).toMatchObject({ complete: true, value: 91.5, band: { rateBps: 400, cutLines: CUTS } });
     expect(board.score.parts.audit).toEqual({ value: 90, weight: 25 });
     expect(board.reviews).toEqual({ count: 6, asks: 30, rateBps: 2000, multiplierPartE4: 3333 });
-    expect(board.commission).toEqual({ year: 2026, yearToDateCents: 30000, paidCents: 20000, pendingCents: 10000 });
+    expect(board.commission).toEqual({ year: 2026, yearToDateCents: 30000, paidCents: 20000, unpaidCents: 10000, recordedThrough: { payDate: '2026-11-13', weekEnd: '2026-11-08' } });
     // 1 year of tenure on Mar 1 2026 (hired 2025-04-01 -> 0 full years: Apr 1 is after Mar 1)
     expect(board.multiplier).toMatchObject({ tenureYears: 0, level: 1, levelSource: 'entry_default', multiplierE4: 13333 });
     // 400 bps x $10,000.00 x 1.3333 = $533.32
@@ -125,6 +126,19 @@ describe('composeScoreboard', () => {
     expect(board.score.parts.audit).toEqual({ value: null, weight: 25 });
     expect(board.score.parts.onTime).toEqual({ value: 95, weight: 25 });
     expect(board.seasonBonus).toEqual({ grossCents: 1000000, estimate: true, estimateCents: null, reason: 'score_incomplete' });
+  });
+
+  test('no pay run yet: the commission cutoff is null', () => {
+    expect(composeScoreboard(inputs({ commissionRecordedThrough: null })).commission.recordedThrough).toBeNull();
+  });
+
+  test('no score settings in force: no score, no band, no bonus; the rest of the board is intact', () => {
+    const board = composeScoreboard(inputs({ seasonScore: null, settings: null }));
+    expect(board.score).toEqual({ complete: false, value: null, missing: [], parts: {}, band: null, settingsVersion: null, unavailable: 'no_settings' });
+    expect(board.seasonBonus).toEqual({ grossCents: 1000000, estimate: true, estimateCents: null, reason: 'no_settings' });
+    expect(board.reviews.rateBps).toBe(2000);
+    expect(board.commission.yearToDateCents).toBe(30000);
+    expect(board.stayBonus).toMatchObject({ dueDate: '2028-04-01' });
   });
 
   test('no asks: the review rate is null and counts 0 in the multiplier', () => {
