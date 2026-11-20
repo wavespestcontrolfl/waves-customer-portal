@@ -11,6 +11,8 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
+const fs = require('fs');
+const path = require('path');
 const logger = require('../services/logger');
 const svc = require('../services/prospects/dbpr-restaurants');
 
@@ -254,7 +256,9 @@ describe('syncRestaurantProspects', () => {
   }
   beforeEach(() => {
     jest.clearAllMocks();
+    delete process.env.DBPR_PROSPECT_SYNC_DISABLED;
   });
+  afterAll(() => { delete process.env.DBPR_PROSPECT_SYNC_DISABLED; });
 
   test('upserts every kind under its own key, once per (kind, source_key)', async () => {
     store = makeStore();
@@ -579,5 +583,27 @@ describe('syncRestaurantProspects', () => {
     const result = await sync({ fetchText, store });
     expect(result.failures).toBe(0);
     expect(result.files.new_license).toEqual({ kept: 9, malformed: 1, upserted: 9 });
+  });
+
+  test.each(['1', 'true', 'ON'])('DBPR_PROSPECT_SYNC_DISABLED=%s makes the sync a no-op', async (value) => {
+    process.env.DBPR_PROSPECT_SYNC_DISABLED = value;
+    store = makeStore();
+    fetchText = makeFetch();
+    const result = await sync({ fetchText, store });
+    expect(result.skipped).toBe('disabled');
+    expect(fetchText).not.toHaveBeenCalled();
+    expect(store.upsertRecords).not.toHaveBeenCalled();
+  });
+
+  test('the Monday job runs under its own lease and a deploy-kill retry, and a failure fails the run', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+    expect(src).toMatch(/cron\.schedule\('36 10 \* \* 1', \(\) => runRestaurantProspectSyncTick\(\), \{ timezone: 'America\/New_York' \}\)/);
+    // The kill switch returns before the lease, so a run that did nothing never reads as a success in job_health.
+    expect(src).toMatch(/const runRestaurantProspectSyncTick = async \(\) => \{\s*const prospects = require\('\.\/prospects\/dbpr-restaurants'\);\s*\/\/[^\n]*\n\s*if \(prospects\.syncDisabled\(\)\) return;\s*await runExclusive\('restaurant-prospect-sync', async \(\) => \{\s*const result = await prospects\.syncRestaurantProspects\(\);/);
+    // A failed file or database call must read as a failed run in job_health: the leased callback throws (a count only).
+    expect(src).toMatch(/if \(result\.failures > 0\) throw new Error\(`restaurant prospect sync: \$\{result\.failures\} failure\(s\)`\);/);
+    expect(src).toMatch(/registerDeployKillRetry\('restaurant-prospect-sync'/);
+    // Daily in the last week of June: the files start over on July 1.
+    expect(src).toMatch(/cron\.schedule\('36 10 24-30 6 \*', \(\) => runRestaurantProspectSyncTick\(\), \{ timezone: 'America\/New_York' \}\)/);
   });
 });
