@@ -4,8 +4,8 @@
 // services of the visits and of the service reports with their catalog join, the contracts, the calendar read, the legacy plan
 // visit, the visit with no status, the ongoing series root, the billed plan rate, the plan hold, the two annual
 // prepay reads), that a JSONB estimate payload comes back in a form the estimate rules read, and that the
-// account and property values the rules name are values the schema accepts. No network, no spend. All names
-// and addresses are synthetic.
+// account and property values the rules name are values the schema accepts, and that each read has an index
+// (two of them from this proof's own migration). No network, no spend. All names and addresses are synthetic.
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
@@ -551,6 +551,28 @@ postgres('planStartBlocker (live Postgres)', () => {
       })).toBe('commercial');
     });
 
+    // A copy of the service label in the payload, on an estimate with a home plan line and no label in its
+    // own column. The reader of service lines answers with the line, so only the rule for a label reads it.
+    test.each([
+      ["the lead's interest the estimator form keeps", { inputs: { isCommercial: 'NO', propertyType: 'Single Family', leadServiceInterest: 'Commercial Lawn Care' } }],
+      ['the interest the engine was given', { engineInputs: { isCommercial: false, serviceInterest: 'Commercial Lawn Care' } }],
+      ['the service a call asked for, kept with a draft', { estimatorEngine: { version: 1, call: { requested_service: 'Lawn care for a commercial plaza', matched_service: 'Lawn Care' } } }],
+    ])('%s, in an estimate payload with a home plan line: commercial', async (_label, labels) => {
+      expect(await blockerFor(async (customer) => {
+        await seedEstimate(customer);
+        const estimate = await seedEstimate(customer, { estimate_data: { ...labels, result: { recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care' }] } } } });
+        expect([estimate.category, estimate.service_interest]).toEqual(['RESIDENTIAL', null]);
+      })).toBe('commercial');
+    });
+
+    test('home service labels in an estimate payload are not commercial', async () => {
+      expect(await blockerFor((customer) => seedEstimate(customer, { estimate_data: {
+        inputs: { isCommercial: 'NO', leadServiceInterest: 'Quarterly Pest Control', interestNote: 'Asked if we also do commercial work.' },
+        engineInputs: { serviceInterest: 'Pest Control + Lawn Care' },
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control' }] } },
+      } }))).toBeNull();
+    });
+
     test('a quote that is not auto-priced as commercial, 20 levels down in an estimate payload, is not commercial', async () => {
       const mark = { commercialEstimatedPricing: false, isCommercial: 'NO', commercialSubtype: '', commercialDetectionSource: null };
       expect(await blockerFor((customer) => seedEstimate(customer, { estimate_data: farDown(mark) }))).toBeNull();
@@ -641,6 +663,10 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['a lead whose payload has a commercial category beside a residential type', { extracted_data: JSON.stringify({ enriched: { category: 'COMMERCIAL', propertyType: 'single_family' } }) }],
       ["a lead whose payload keeps staff's answer about a business at the address", { extracted_data: JSON.stringify({ enriched: { category: 'RESIDENTIAL', isCommercial: false, occupancyAnswer: 'building' } }) }],
       ['a lead with the mark of an auto-priced commercial quote 20 levels down in its payload', { extracted_data: JSON.stringify(farDown({ commercialEstimatedPricing: true })) }],
+      // A web form keeps the service label in the payload too.
+      ['a lead with a commercial service label in its payload, behind a home label in its column', {
+        service_interest: 'Pest Control', extracted_data: JSON.stringify({ stage: 'lead_webhook_received', service_interest: 'Commercial Pest Control' }),
+      }],
     ])('%s, beside a home lead: commercial', async (_label, change) => {
       expect(await blockerFor(async (customer) => {
         await seedLead(customer);
@@ -658,6 +684,9 @@ postgres('planStartBlocker (live Postgres)', () => {
       }],
       ["a quiz lead that answered 'house'", { extracted_data: JSON.stringify({ quiz: { kind: 'pest', seeing: 'ants', property: 'house' } }) }],
       ['a lead whose payload has a residential category', { extracted_data: JSON.stringify({ enriched: { category: 'RESIDENTIAL', propertyType: 'single_family' } }) }],
+      ['a lead with a home service label and the words of a call in its payload', {
+        extracted_data: JSON.stringify({ stage: 'lead_webhook_received', service_interest: 'Pest Control', pain_points: ['The commercial spray from the store did not work'] }),
+      }],
     ])('%s is not commercial', async (_label, change) => {
       expect(await blockerFor((customer) => seedLead(customer, change))).toBeNull();
     });
@@ -739,6 +768,16 @@ postgres('planStartBlocker (live Postgres)', () => {
         ...enriched({ service_request: { primary_service_category: 'pest_general', specific_service_name: 'Commercial Pest Control' } }),
       }],
       ['an address the check reads as a business and not as a home', { ai_address_validation: { status: 'validated_accept', addressUse: { business: true, residential: false, poBox: false } } }],
+      // The first format keeps the service under two more names, and again in the record of what an adoption replaced.
+      ['a commercial catalog match in the first format, behind a home request and with no other verdict', {
+        ai_extraction: { requested_service: 'Pest control', matched_service: 'Commercial Pest Control' }, ai_extraction_enriched: null, ai_validation: null,
+      }],
+      ['a commercial catalog name in the first format, with no other verdict', {
+        ai_extraction: { requested_service: 'Pest control', matched_service: 'Pest Control', specific_service_name: 'Commercial Pest Control' }, ai_extraction_enriched: null, ai_validation: null,
+      }],
+      ['a commercial catalog match that an adoption replaced in the first format', {
+        ai_extraction: { requested_service: 'pest_general', matched_service: 'Pest Control', pre_adoption_service_fields: { matched_service: 'Commercial Pest Control', requested_service: null } },
+      }],
     ])('%s, beside a call about a home: commercial', async (_label, change) => {
       expect(await blockerFor(async (customer) => {
         await seedCall(customer);
@@ -755,6 +794,10 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['a commercial-signals block with nothing set', enriched({ commercial_signals: { business_name: null, decision_authority_confirmed: false, insurance_or_compliance_requirements: [] } })],
       ['the word in the summary of the call', { ai_extraction: { requested_service: 'Pest control at home', call_summary: 'Works at a commercial bakery. Wants service at home.' } }],
       ['the word in a price quote of the service request', enriched({ service_request: { specific_service_name: 'Pest control', price: { evidence_quote: 'The commercial rate is higher.' } } })],
+      ['the word in the pain points, and in the summary an adoption replaced', { ai_extraction: {
+        requested_service: 'Pest control', matched_service: 'Pest Control', specific_service_name: 'Quarterly Pest Control', pain_points: ['The commercial spray from the store did not work'],
+        pre_adoption_service_fields: { call_summary: 'Works at a commercial bakery. Wants service at home.', pain_points: ['Tried a commercial product'], matched_service: 'Pest Control' },
+      } }],
     ])('%s: not commercial', async (_label, change) => {
       expect(await blockerFor(async (customer) => {
         await seedCall(customer);
@@ -1298,6 +1341,61 @@ postgres('planStartBlocker (live Postgres)', () => {
     test("another customer's term does not count", async () => {
       await seedPrepayTerm(await seedCustomer());
       expect(await planStartBlocker(trx, (await seedCustomer()).id)).toBeNull();
+    });
+  });
+
+  // The proof asks each table for the rows of ONE account, once for each account a caller asks about. So the
+  // column each read filters by leads a whole index (one with no WHERE of its own), and no read scans a
+  // table. Two of the indexes are the proof's own (migration 20261120200000): the table of day-agreement
+  // decisions had none on its customer, and the table of add-ons had none on its visit.
+  describe('the index behind each read', () => {
+    const leadsAnIndex = async (table, column) => (await trx.raw(
+      `select 1 from pg_index i
+         join pg_class c on c.oid = i.indrelid
+         join pg_attribute a on a.attrelid = c.oid and a.attnum = i.indkey[0]
+        where c.relnamespace = (select oid from pg_namespace where nspname = current_schema())
+          and c.relname = ? and a.attname = ? and i.indpred is null and i.indisvalid`,
+      [table, column],
+    )).rows.length > 0;
+
+    test.each([
+      ['customer_properties', 'customer_id'], ['estimates', 'customer_id'], ['leads', 'customer_id'],
+      ['scheduled_services', 'customer_id'], ['scheduled_service_addons', 'scheduled_service_id'],
+      ['service_records', 'customer_id'], ['customer_contracts', 'customer_id'], ['call_log', 'customer_id'],
+      ['day_agreement_decisions', 'customer_id'], ['plan_holds', 'customer_id'], ['customer_plan_rates', 'customer_id'],
+      ['annual_prepay_terms', 'customer_id'],
+    ])('%s has a whole index that starts with %s', async (table, column) => {
+      expect(await leadsAnIndex(table, column)).toBe(true);
+    });
+
+    test('the check itself tells an indexed column from one with no index', async () => {
+      expect(await leadsAnIndex('day_agreement_decisions', 'customer_id')).toBe(true);
+      expect(await leadsAnIndex('day_agreement_decisions', 'verdict')).toBe(false);
+    });
+
+    // The migration itself, on tables of its own in a schema of its own. All of it is inside this test's
+    // transaction, so nothing stays. Up makes both indexes and can run twice; down removes both and can run
+    // twice; a schema with neither table is left alone.
+    test('the index migration goes up and down, and each direction can run twice', async () => {
+      const migration = require('../models/migrations/20261120200000_plan_start_proof_lookup_indexes');
+      const schema = `plan_start_idx_${hex(8)}`;
+      await trx.raw('CREATE SCHEMA ??', [schema]);
+      await trx.raw('SET LOCAL search_path TO ??', [schema]);
+      const indexes = async () => (await trx.raw(
+        "select indexname from pg_indexes where schemaname = ? and indexname not like '%_pkey' order by indexname", [schema],
+      )).rows.map((row) => row.indexname);
+      await migration.up(trx);
+      expect(await indexes()).toEqual([]);
+      await trx.schema.createTable('day_agreement_decisions', (table) => { table.uuid('id').primary(); table.uuid('customer_id'); });
+      await trx.schema.createTable('scheduled_service_addons', (table) => { table.uuid('id').primary(); table.uuid('scheduled_service_id'); });
+      await migration.up(trx);
+      await migration.up(trx);
+      expect(await indexes()).toEqual(['day_agreement_decisions_customer_id_index', 'scheduled_service_addons_scheduled_service_id_index']);
+      expect(await leadsAnIndex('day_agreement_decisions', 'customer_id')).toBe(true);
+      expect(await leadsAnIndex('scheduled_service_addons', 'scheduled_service_id')).toBe(true);
+      await migration.down(trx);
+      await migration.down(trx);
+      expect(await indexes()).toEqual([]);
     });
   });
 });

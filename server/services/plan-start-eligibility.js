@@ -288,7 +288,9 @@ const isSetSubtype = (value) => isSet(value) && !(typeof value === 'string' && N
 //   an estimate saves the profile (lookupSaysBusiness below);
 // - the estimator engine's mark on a draft it made as a commercial proposal
 //   (estimatorEngine.commercialProposal: the engine reads it back when it
-//   meets the draft again). Read as the toggle is read.
+//   meets the draft again). Read as the toggle is read;
+// - a service the payload keeps as a label or a name, away from a service
+//   line (namesCommercialService below).
 // Not read: the parameters of a commercial price the estimator form keeps
 // (commercialPricingMode, the pest and lawn cadences, the interior service)
 // and the size of a suite the engine keeps with a commercial draft
@@ -327,6 +329,31 @@ function lookupSaysBusiness(node) {
     || (Boolean(answer) && answer !== 'none')
     || isSet(node.commercialDetectionSource);
 }
+// A service the app keeps as a label or a name, away from a service line (the
+// converter's two rules read a line's own names). Three families of names.
+// Each is read on every object, as the label columns are read (the word in
+// the text: isCommercialServiceRow):
+// - the names of the label columns, in both spellings (service_interest on an
+//   estimate and a lead, lead_service_interest on an account). A payload
+//   keeps copies under them: the lead's interest the estimator form carries
+//   (inputs.leadServiceInterest), the interest the engine was given
+//   (engineInputs.serviceInterest), the interest a web form or the
+//   classification of an email named (service_interest in a lead payload).
+//   The reader of service lines reads the first two only for an estimate
+//   with no service line;
+// - the three names a call keeps a service under (requested_service,
+//   matched_service, specific_service_name: the fields the call system's
+//   service resolvers read, CALL_SERVICE_VIEW_FIELDS in
+//   call-recording-processor.js). A payload made from a call keeps them too;
+// - the name of a row's own service text (service_type), in both spellings.
+// The value is a text, or a list or an object of texts.
+const SERVICE_LABEL_NAMES = Object.freeze([
+  'serviceInterest', 'service_interest', 'leadServiceInterest', 'lead_service_interest',
+  'requested_service', 'matched_service', 'specific_service_name',
+  'serviceType', 'service_type',
+]);
+const carriesCommercialWord = (text) => text.toLowerCase().includes('commercial');
+const namesCommercialService = (node) => someText(SERVICE_LABEL_NAMES.map((name) => node[name]), carriesCommercialWord);
 function nodeSaysCommercial(node) {
   const converter = require('./estimate-converter');
   return saysYes(node.isCommercial) || saysYes(node.is_commercial) || saysYes(node.commercialEstimatedPricing)
@@ -336,6 +363,7 @@ function nodeSaysCommercial(node) {
     || String(node.category ?? '').trim().toUpperCase() === 'COMMERCIAL'
     || factsSayCommercial(node) || lookupSaysBusiness(node)
     || saysYes(node.commercialProposal)
+    || namesCommercialService(node)
     || isSet(node.commercialRiskType) || isSet(node.commercial_risk_type)
     || converter.isCommercialRecurringLine(node)
     || String(converter.recurringServiceKey(node) || '').startsWith('commercial_')
@@ -429,7 +457,9 @@ function someText(value, test) {
 //   (inferEstimateServiceLines in estimate-service-lines.js): a line whose
 //   key starts with 'commercial_'. For an estimate with no service line it
 //   sorts the label, the label's copies in the payload and the notes by the
-//   app's text patterns.
+//   app's text patterns. (The label and its copies are also read on every
+//   estimate, by the rule for a label: the reader answers with the service
+//   lines first, where the estimate has one.)
 // Not the termite agreement's classifier itself (isCommercialEstimate in
 // termite-program-agreement.js). It is broad on purpose, and three of its
 // rules read homes: it parks a duplex, a condo and a townhome; it reads a
@@ -485,7 +515,8 @@ async function hasCommercialEstimate(database, customerId) {
 //   classification of an email), by the rules for an estimate payload: the
 //   marks on every object, the text prefix, and the payload scan of the save
 //   (isCommercialEstimateData). It keeps the same fields (isCommercial,
-//   category, commercialSubtype, propertyType).
+//   category, commercialSubtype, propertyType), and a web form keeps the
+//   service label in it too (service_interest).
 function isCommercialLeadRow(lead) {
   const { isCommercialAccount, isCommercialServiceRow } = require('./self-booking-plan-sync');
   if (lead.is_commercial === true || lead.is_residential === false) return true;
@@ -535,6 +566,8 @@ async function hasCommercialServiceIn(database, table, customerId) {
 // catalog key it was booked under (service_key_snapshot), and the key and the
 // name of its catalog row, where its link to the catalog still stands. Every
 // add-on of every visit of the account counts, whatever the visit's status.
+// (The join to a visit's add-ons has its index since migration
+// 20261120200000.)
 async function hasCommercialAddon(database, customerId) {
   const { isCommercialServiceRow } = require('./self-booking-plan-sync');
   const kinds = await database('scheduled_service_addons as addon')
@@ -586,7 +619,10 @@ async function hasCommercialContract(database, customerId) {
 // (ai_extraction_enriched; ai_extraction is the first format, kept as JSON
 // text), what the triage decided (ai_validation) and what the address check
 // found (ai_address_validation). Those saved verdicts are read. The words of
-// the call (its transcript, its summary) are not.
+// the call (its transcript, its summary) are not. Nor is the call's record of
+// what it wrote to a lead (metadata.lead_prior_state and lead_written_state:
+// the restore record of a call that is linked again). The lead itself is
+// read.
 // - The app's rule for an extraction that typed the premises commercial
 //   (commercialCategoryConflict in estimator-engine/unit-scope-model.js): a
 //   commercial property type, any commercial subtype, an HOA common area, the
@@ -606,13 +642,15 @@ async function hasCommercialContract(database, customerId) {
 //   (computeDeterministicTriageFlags in call-triage-flags.js), anywhere in
 //   either verdict: the model's own flags, the routing flags, the flags that
 //   hold a booking, or a list a later gate moved the flag to.
-// - The service the caller asked for, by name, in either format: the first
-//   format's requested_service (a text or an object of texts) and the
-//   extraction's service_request.specific_service_name. The word in it
-//   counts, as in the service label of a lead. A first format built from an
-//   extraction keeps the service CATEGORY there (extraction-compat.js), and
-//   that vocabulary has no commercial word, so each format is read by its
-//   own field.
+// - The service the caller asked for, by name (namesCommercialService above),
+//   on every object of both formats. The first format keeps it at its root
+//   under three names (requested_service, matched_service,
+//   specific_service_name) and again in the record of what an adoption
+//   replaced there (pre_adoption_service_fields). The extraction keeps it in
+//   service_request.specific_service_name. The word in it counts, as in the
+//   service label of a lead. The first format's other two service fields are
+//   the words of the call (call_summary, pain_points) and are not read, and
+//   the extraction's service categories have no commercial word.
 // - The address check of the call's service address: Google reads it as a
 //   business and not as a home (addressUse). Both halves must be
 //   affirmative, as in the app's own rule for a business building
@@ -621,7 +659,6 @@ async function hasCommercialContract(database, customerId) {
 //   says nothing.
 const COMMERCIAL_CALL_FLAGS = Object.freeze(['commercial_requires_quote', 'hoa_common_area_requires_approval']);
 const isCommercialCallFlag = (text) => COMMERCIAL_CALL_FLAGS.includes(text);
-const carriesCommercialWord = (text) => text.toLowerCase().includes('commercial');
 const hasSetValue = (block) => Object.values(asObject(block)).some((value) => (Array.isArray(value) ? value.length > 0 : isSet(value)));
 function describesCommercialProperty(node) {
   const { commercialCategoryConflict } = require('./estimator-engine/unit-scope-model');
@@ -642,7 +679,7 @@ function isCommercialCallRow(call) {
     || someObject(extraction, describesCommercialProperty) || someObject(firstFormat, describesCommercialProperty)
     || hasSetValue(extraction.commercial_signals)
     || someText(extraction, isCommercialCallFlag) || someText(validation, isCommercialCallFlag)
-    || someText([firstFormat.requested_service, asObject(extraction.service_request).specific_service_name], carriesCommercialWord)
+    || someObject(firstFormat, namesCommercialService) || someObject(extraction, namesCommercialService)
     || isBusinessAddress(addressCheck);
 }
 
@@ -660,6 +697,7 @@ async function hasCommercialCall(database, customerId) {
 // a text thread of this customer as commercial work, and the app saved that
 // with the decision (day-agreement-rules.js keeps the judge's blockers as a
 // list of the vocabulary's words).
+// (The lookup has its index since migration 20261120200000.)
 const COMMERCIAL_DAY_BLOCKER = 'commercial';
 async function hasCommercialDayAgreement(database, customerId) {
   const decisions = await database('day_agreement_decisions').where({ customer_id: customerId }).select('judged');

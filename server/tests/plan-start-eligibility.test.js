@@ -377,6 +377,18 @@ describe('planStartBlocker', () => {
         ["the engine's flag", ESTIMATE({ estimate_data: { engine: { intent: { is_commercial: true } } } })],
         ["the engine's flag as text, inside a list", ESTIMATE({ estimate_data: { revisions: [{ intent: { is_commercial: 'true' } }] } })],
         ['a payload saved as JSON text', ESTIMATE({ estimate_data: JSON.stringify({ proposal: { enabled: true } }) })],
+        // A copy of the service label in the payload. The reader of service lines answers with the lines first,
+        // so on an estimate with a home plan line only the rule for a label reads the copy.
+        ["the lead's interest the form keeps, on an estimate with a home plan line", ESTIMATE({ estimate_data: {
+          inputs: { isCommercial: 'NO', propertyType: 'Single Family', leadServiceInterest: 'Commercial Lawn Care' },
+          result: { recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care' }] } },
+        } })],
+        ['the interest the engine was given, on an estimate with a home plan line', ESTIMATE({ estimate_data: {
+          engineInputs: { isCommercial: false, serviceInterest: 'Commercial Lawn Care' },
+          engineResult: { recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care' }] } },
+        } })],
+        ['a label copy far down in the payload', ESTIMATE({ estimate_data: farDown({ serviceInterest: 'Monthly COMMERCIAL pest program' }) })],
+        ['a label copy that is a list of labels', ESTIMATE({ estimate_data: { inputs: { isCommercial: 'NO', leadServiceInterest: ['Pest Control', 'Commercial Lawn Care'] } } })],
       ])('%s: commercial, and no plan record is read', async (_label, estimate) => {
         const reads = [];
         const db = withEstimates([ESTIMATE(), estimate, ESTIMATE()], { ...ONGOING_COLUMN, visits: (calls) => { reads.push(calls); return [FLAGGED]; } });
@@ -441,8 +453,30 @@ describe('planStartBlocker', () => {
         ['no service label and no notes', ESTIMATE({ service_interest: null, notes: null })],
         // The app's reader sorts the notes only when the estimate has no service line: the lines answer first.
         ['notes with the word on an estimate that has home service lines', ESTIMATE({ notes: 'Pest plan for the house. Not a commercial account.' })],
+        // Home services under the names that keep a service label, and the word under a name that keeps none.
+        ['home service labels in the payload', ESTIMATE({ estimate_data: {
+          inputs: { isCommercial: 'NO', leadServiceInterest: 'Quarterly Pest Control' }, engineInputs: { serviceInterest: 'Pest Control + Lawn Care' },
+          call: { requested_service: 'Ant treatment', matched_service: 'Pest Control', specific_service_name: null, serviceType: 'recurring' },
+        } })],
+        ['the word under a name that keeps no service label', ESTIMATE({ estimate_data: {
+          inputs: { isCommercial: 'NO', interestNote: 'Asked if we also do commercial work.' }, reviewNotes: ['Not a commercial property.'],
+        } })],
       ])('%s is not commercial', async (_label, estimate) => {
         expect(await blocker(withEstimates([estimate, ESTIMATE()]))).toBeNull();
+      });
+
+      // Every name the app keeps a service label or a service name under, on an object the reader of service
+      // lines does not look at, beside a home plan line.
+      test.each([
+        ['serviceInterest'], ['service_interest'], ['leadServiceInterest'], ['lead_service_interest'],
+        ['requested_service'], ['matched_service'], ['specific_service_name'], ['serviceType'], ['service_type'],
+      ])('a commercial service under the name %s is a mark, and a home service under it is none', async (name) => {
+        const kept = (label) => ESTIMATE({ estimate_data: {
+          inputs: { isCommercial: 'NO', propertyType: 'Single Family' }, source: { [name]: label },
+          result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control' }] } },
+        } });
+        expect(await blocker(withEstimates([ESTIMATE(), kept('Commercial Pest Control')]))).toBe('commercial');
+        expect(await blocker(withEstimates([ESTIMATE(), kept('Quarterly Pest Control')]))).toBeNull();
       });
 
       // The toggle's value, under either spelling of its name: the words the lead form and the termite
@@ -695,6 +729,9 @@ describe('planStartBlocker', () => {
         ['the source of a commercial verdict of the lookup', LEAD({ extracted_data: { isCommercial: false, commercialSubtype: null, commercialDetectionSource: 'satellite_ai_property_use' } })],
         // A quiz page's property question. The lead keeps the quiz object as the visitor answered it.
         ["the 'business' answer of a quiz page", LEAD({ extracted_data: { attribution: {}, quiz: { kind: 'pest', seeing: 'ants', property: 'business' } } })],
+        // A web form keeps the service label in the payload too, and the column can hold another label.
+        ['a commercial service label in the payload, behind a home label in the column', LEAD({ extracted_data: { stage: 'lead_webhook_received', service_interest: 'Commercial Pest Control' } })],
+        ['a commercial request a call left in the payload', LEAD({ extracted_data: { requested_service: 'Pest control for a commercial kitchen', matched_service: 'Pest Control' } })],
       ])('%s: commercial, and no plan record is read', async (_label, lead) => {
         const reads = [];
         const db = withLeads([LEAD(), lead, LEAD()], { ...ONGOING_COLUMN, visits: (calls) => { reads.push(calls); return [FLAGGED]; } });
@@ -713,6 +750,10 @@ describe('planStartBlocker', () => {
         ['a quiz with no property answer', LEAD({ extracted_data: { quiz: { kind: 'lawn', seeing: 'brown_patches' } } })],
         ['a residential category beside a residential type', LEAD({ extracted_data: { enriched: { category: 'RESIDENTIAL', propertyType: 'single_family' }, quote: { commercialEstimatedPricing: false } } })],
         ['an open question about a business at the address, and the answer "not this business"', LEAD({ extracted_data: { enriched: { serviceScopeDecision: 'scope_unresolved', occupancyAnswer: 'none', commercialDetectionSource: null } } })],
+        // A home label in the payload, and the words of a call a payload can keep.
+        ['a home service label and the words of a call in the payload', LEAD({ extracted_data: {
+          stage: 'lead_webhook_received', service_interest: 'Pest Control', requested_service: 'Ant treatment', pain_points: ['The commercial spray from the store did not work'],
+        } })],
       ])('%s is not commercial', async (_label, lead) => {
         expect(await blocker(withLeads([lead, LEAD()]))).toBeNull();
       });
@@ -1001,6 +1042,19 @@ describe('planStartBlocker', () => {
           ai_extraction: JSON.stringify({ requested_service: 'pest_general' }),
           ...extraction({ service_request: { primary_service_category: 'pest_general', specific_service_name: 'Commercial Pest Control' } }),
         })],
+        // The first format keeps the service under two more names: the catalog match and the catalog name.
+        ['a commercial catalog match in the first format, behind a home request', CALL({ ai_extraction: JSON.stringify({ requested_service: 'Pest control', matched_service: 'Commercial Pest Control' }) })],
+        ['a commercial catalog name in the first format', CALL({ ai_extraction: JSON.stringify({ requested_service: 'Pest control', matched_service: 'Pest Control', specific_service_name: 'Commercial Pest Control' }) })],
+        // What an adoption replaced in the first format is kept there in a record of its own.
+        ['a commercial catalog match that an adoption replaced in the first format', CALL({ ai_extraction: JSON.stringify({
+          requested_service: 'pest_general', matched_service: 'Pest Control',
+          pre_adoption_service_fields: { matched_service: 'Commercial Pest Control', requested_service: null, specific_service_name: null },
+        }) })],
+        ['a commercial request that an adoption replaced in the first format', CALL({ ai_extraction: JSON.stringify({
+          requested_service: 'pest_general', pre_adoption_service_fields: { requested_service: 'Pest service for a commercial kitchen' },
+        }) })],
+        // The three names are read on every object of the extraction too.
+        ['a service name on another object of the extraction', CALL(extraction({ adopted: { matched_service: 'Commercial Lawn Care' } }))],
         // The address check: Google reads the service address as a business and not as a home.
         ['an address the check reads as a business and not as a home', CALL(addressUse({ business: true, residential: false, poBox: false }))],
         ['an address check saved as JSON text', CALL({ ai_address_validation: JSON.stringify({ status: 'corrected', addressUse: { business: true, residential: false } }) })],
@@ -1043,6 +1097,18 @@ describe('planStartBlocker', () => {
           }),
           ...extraction({ property: { property_type: 'single_family', service_address_occupancy: 'seasonal', additional_properties: [{ street_line_1: '12 Example Test Way', occupancy: 'rental_investment', property_type: 'condo' }] } }),
         })],
+        // Home services under all three names, in both formats.
+        ['home services under every name of a service, in both formats', CALL({
+          ai_extraction: JSON.stringify({ requested_service: 'Lawn care', matched_service: 'Lawn Care', specific_service_name: 'Monthly Lawn Care' }),
+          ...extraction({ service_request: { primary_service_category: 'lawn_care', secondary_categories: ['pest_general'], specific_service_name: 'Monthly Lawn Care' } }),
+        })],
+        // The other two service fields of the first format are the words of the call, at its root and in the
+        // record of what an adoption replaced.
+        ['the word in the pain points, and in the summary an adoption replaced', CALL({ ai_extraction: JSON.stringify({
+          requested_service: 'Pest control', matched_service: 'Pest Control', specific_service_name: 'Quarterly Pest Control',
+          pain_points: ['The commercial spray from the store did not work'],
+          pre_adoption_service_fields: { call_summary: 'Works at a commercial bakery. Wants service at home.', pain_points: ['Tried a commercial product'], matched_service: 'Pest Control' },
+        }) })],
         // The words of a call are not read: the caller can name a workplace and want service at home.
         ['the word in the summaries of the call', CALL({
           ai_extraction: JSON.stringify({ requested_service: 'Pest control at home', call_summary: 'Works at a commercial bakery. Wants service at home.' }),
