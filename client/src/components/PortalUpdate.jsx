@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Button } from './ui';
 import { isAdminPath } from '../lib/adminBookmarkMeta';
@@ -42,6 +42,7 @@ const HOLD_TEXT = {
   'schedule-notice': 'A schedule notice is still open.',
   'recap-upload': 'A recap clip is not uploaded yet.',
   'ask-draft': 'An Ask Waves question is not sent yet.',
+  'page-edit': 'Changes on this page may not be saved.',
 };
 
 // The reload button of the Reload bar and of the staff retry screen
@@ -49,12 +50,12 @@ const HOLD_TEXT = {
 // it, a click names every held work instead of reloading, and the button
 // becomes "Reload anyway". Each click asks again, so "Reload anyway" reloads
 // only when nothing holds that the button has not named. A new resetKey
-// clears the named work.
-export function useHoldAwareReload(resetKey, beforeReload) {
+// clears the named work. The Reload bar also passes pageEdited (below).
+export function useHoldAwareReload(resetKey, beforeReload, pageEdited) {
   const [held, setHeld] = useState([]);
   useEffect(() => { setHeld((named) => (named.length ? [] : named)); }, [resetKey]);
   const tryReload = () => {
-    const blockers = reloadBlockers();
+    const blockers = [...reloadBlockers(), ...(pageEdited?.() ? ['page-edit'] : [])];
     if (blockers.some((name) => !held.includes(name))) {
       setHeld(blockers);
       return;
@@ -66,12 +67,38 @@ export function useHoldAwareReload(resetKey, beforeReload) {
   return { named: held.length > 0, heldText, tryReload };
 }
 
+// A change on the page in view: typing, a pick, a checkbox, or a toggle
+// button (aria-pressed), as on the truck check. Most staff forms keep such
+// changes only in the page until Save, and the bar's Reload reloads that page
+// in place. So the bar names the change first, as a browser does on a page
+// that asks before a reload. A search box is not a change. A page move ends
+// it: the move closes the page and its fields. The automatic reload waits for
+// a move, so it never needs this.
+function usePageEdited(pathname) {
+  const edited = useRef(false);
+  useEffect(() => { edited.current = false; }, [pathname]);
+  useEffect(() => {
+    const noteChange = (event) => {
+      const { target } = event;
+      if (!(target instanceof Element)) return;
+      if (event.type === 'click' ? target.closest('[aria-pressed]') : !target.matches('input[type="search"], [role="searchbox"]')) {
+        edited.current = true;
+      }
+    };
+    const types = ['input', 'change', 'click'];
+    types.forEach((type) => document.addEventListener(type, noteChange, true));
+    return () => types.forEach((type) => document.removeEventListener(type, noteChange, true));
+  }, []);
+  return () => edited.current;
+}
+
 // Every staff page, Waves Admin and the field pages included: says that a
 // newer version is live. A page move or a new build clears the named work.
 export function PortalUpdateBar() {
   const { pathname } = useLocation();
   const build = useSyncExternalStore(subscribePortalVersion, newerBuild, () => null);
-  const { named, heldText, tryReload } = useHoldAwareReload(`${build} ${pathname}`);
+  const pageEdited = usePageEdited(pathname);
+  const { named, heldText, tryReload } = useHoldAwareReload(`${build} ${pathname}`, undefined, pageEdited);
   if (!build || !isAdminPath(pathname)) return null;
 
   return (

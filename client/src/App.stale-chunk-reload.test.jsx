@@ -207,6 +207,25 @@ test.each(['/admin/communications', '/ADMIN/Communications'])('the held retry sc
   expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
 });
 
+test('the held retry screen still reloads when session storage is blocked', async () => {
+  window.history.pushState({}, '', '/admin/communications');
+  const reload = vi.fn();
+  vi.stubGlobal('location', { ...window.location, reload });
+  holding = true;
+  const GonePage = lazyWithRetry(() => Promise.reject(new Error('Failed to fetch dynamically imported module: /assets/Gone-abc123.js')));
+  renderInBoundary(GonePage);
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+  const blocked = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+    throw new DOMException('The operation is insecure.', 'SecurityError');
+  });
+  try {
+    fireEvent.click(screen.getByRole('button', { name: 'Reload anyway' }));
+    expect(reload).toHaveBeenCalledTimes(1);
+  } finally {
+    blocked.mockRestore();
+  }
+});
+
 test('on a customer page, held work leaves the stale-chunk reload as it was', () => {
   holding = true;
   const reload = vi.fn();

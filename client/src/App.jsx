@@ -342,8 +342,10 @@ function ChunkLoadFallback() {
   );
 }
 
+// Best effort: with session storage blocked there is no flag to clear, and
+// the reload must still run.
 function clearChunkReloadFlag() {
-  sessionStorage.removeItem(CHUNK_RELOAD_FLAG);
+  try { sessionStorage.removeItem(CHUNK_RELOAD_FLAG); } catch { /* storage blocked */ }
 }
 
 // Route-level Suspense placeholder. One element for every lazy page instead

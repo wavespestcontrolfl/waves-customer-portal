@@ -4,6 +4,7 @@
 // in an out-of-date tab loads the live code, the first page never reloads, a
 // tab inside a page is not a move, held work stops it, and the Reload bar
 // shows on staff pages only.
+import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
@@ -37,6 +38,23 @@ function Page({ name }) {
   );
 }
 
+// A field page whose changes live only in the page until Save, like the
+// truck check: a toggle button, a typed note and a search box.
+function TruckCheck() {
+  const navigate = useNavigate();
+  const [missing, setMissing] = useState(false);
+  const [note, setNote] = useState('');
+  return (
+    <div>
+      <h1>Truck check</h1>
+      <button type="button" aria-pressed={missing} onClick={() => setMissing(true)}>Missing</button>
+      <input aria-label="Note" value={note} onChange={(event) => setNote(event.target.value)} />
+      <input type="search" aria-label="Find a tool" />
+      <button type="button" onClick={() => navigate('/admin/today')}>Back</button>
+    </div>
+  );
+}
+
 function renderAt(path) {
   return render(
     <MemoryRouter initialEntries={[path]}>
@@ -46,6 +64,8 @@ function renderAt(path) {
           <Route path="/admin/dashboard" element={<Page name="Dashboard" />} />
           <Route path="/admin/pipeline" element={<Page name="Pipeline" />} />
           <Route path="/billing" element={<Page name="Billing" />} />
+          <Route path="/admin/today" element={<Page name="Today" />} />
+          <Route path="/admin/today/truck-check" element={<TruckCheck />} />
         </Routes>
       </PortalUpdateGate>
     </MemoryRouter>,
@@ -152,6 +172,33 @@ describe('PortalUpdateBar', () => {
     expect(reload).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Reload anyway' }));
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    ['a toggle button', () => fireEvent.click(screen.getByRole('button', { name: 'Missing' }))],
+    ['a typed note', () => fireEvent.input(screen.getByLabelText('Note'), { target: { value: 'Cracked hose' } })],
+  ])('a change on the page in view (%s) is named before Reload drops it', (_kind, change) => {
+    renderAt('/admin/today/truck-check');
+    goLive('bbb222bbb222');
+    change();
+    fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
+    expect(reload).not.toHaveBeenCalled();
+    expect(screen.getByText('Changes on this page may not be saved.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Reload anyway' }));
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  test('a search box is not a change on the page, and a page move ends a change', () => {
+    renderAt('/admin/today/truck-check');
+    goLive('bbb222bbb222');
+    fireEvent.input(screen.getByLabelText('Find a tool'), { target: { value: 'hose' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
+    expect(reload).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Missing' }));
+    fireEvent.click(screen.getByText('Back'));
+    expect(screen.getByText('Today')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
+    expect(reload).toHaveBeenCalledTimes(2);
   });
 
   test('a page move clears the named work', () => {
