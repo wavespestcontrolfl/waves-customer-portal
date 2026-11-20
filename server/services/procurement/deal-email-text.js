@@ -8,7 +8,8 @@
  * Quoted reply history is dropped from its first marker line on ("From:", "-- Original
  * Message --", "On ... wrote:"): a "tomorrow" in an older quoted email is not tomorrow from
  * the reply's date. A numeric date is m/d, m/d/yy or m/d/yyyy, not part of a longer number or
- * path, and not a fraction of a unit ("1/2 gal").
+ * path, and not a fraction of a unit ("1/2 gal"). The AI read's words for an end date are at
+ * most QUOTE_CHARS long: the read refuses longer ones, and the bell line shows them whole.
  */
 
 const QUOTED_HISTORY = [
@@ -31,4 +32,7 @@ function stripQuotedHistory(text) {
 // Read it with matchAll only: a shared /g regex must keep lastIndex 0.
 const NUMERIC_DATE = /(?<![\d/.])(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?(?![\d/])(?!\s*(?:oz|lbs?|gal|gallons?|inch|in\b|"|%|cups?|pt|qt|tons?|acres?|ac\b))/gi;
 
-module.exports = { stripQuotedHistory, NUMERIC_DATE };
+// The most characters of the words an AI read gives for an end date.
+const QUOTE_CHARS = 140;
+
+module.exports = { stripQuotedHistory, NUMERIC_DATE, QUOTE_CHARS };

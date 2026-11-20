@@ -147,7 +147,9 @@ describe('checkAnswer', () => {
   });
 
   test('null = the email states no end', () => {
-    expect(checkAnswer({ end_date: null, quote: null }, email, received)).toEqual({ ok: true, endDate: null, quote: null, priceIncrease: false });
+    expect(checkAnswer({ end_date: null, quote: null, price_increase: false }, email, received)).toEqual({ ok: true, endDate: null, quote: null, priceIncrease: false });
+    // Pre-push audit on 0ab3d820d4 (P1): "no end" with no flag replaced a pattern date. Like any answer, it needs the flag.
+    expect(checkAnswer({ end_date: null, quote: null }, email, received)).toEqual({ ok: false, reason: 'bad_price_flag' });
   });
 
   // Pre-push audit on be6684f834 (P1): "Prices increase effective May 1" read as the last day at the old price.
@@ -173,6 +175,8 @@ describe('checkAnswer', () => {
     ['no quote', { end_date: '2026-04-30', quote: null }, 'no_quote'],
     ['a stray number', { end_date: '2026-04-30', quote: '30, 2026' }, 'no_quote'],
     ['a whole paragraph', { end_date: '2026-04-30', quote: 'x'.repeat(301) }, 'no_quote'],
+    // Pre-push audit on 0ab3d820d4 (P1): the line cut words past 140 characters, and the date with them.
+    ['longer than the bell line shows (140)', { end_date: '2026-04-30', quote: `Offers valid ${'x'.repeat(128)}` }, 'no_quote'],
     ['words not in the email', { end_date: '2026-04-30', quote: 'Offer ends April 30, 2026' }, 'quote_not_found'],
     ['part of a date ("April 1" of "April 16")', { end_date: '2027-04-01', quote: 'Points double through April 1' }, 'quote_not_found'],
     ['a year after the words that is not the date\'s', { end_date: '2026-04-16', quote: 'Points double through April 16' }, 'quote_date_mismatch'],
@@ -287,6 +291,32 @@ describe('checkAnswer', () => {
     expect(read('2026-04-20', 'Final call 4/20 - 11:59 PM').ok).toBe(true);
   });
 
+  // Pre-push audit on 0ab3d820d4 (P1): "4/24, 2025" and "4/20-24, 2025" passed as 2026.
+  test('a year written after a numeric date or its closing day is its year', () => {
+    const sunday = new Date('2026-04-19T15:00:00Z'); // Sunday Apr 19
+    const old = 'Subject\nOrder by 4/24, 2025. Offer valid 4/20–24, 2025. Pickup by 4/24, 2026.';
+    const read = (endDate, quote) => checkAnswer({ end_date: endDate, quote, price_increase: false }, old, sunday);
+    const refused = { ok: false, reason: 'quote_date_mismatch' };
+    expect(read('2026-04-24', 'Order by 4/24, 2025')).toEqual(refused);
+    expect(read('2026-04-24', 'Order by 4/24')).toEqual(refused);
+    expect(read('2026-04-24', 'Offer valid 4/20–24, 2025')).toEqual(refused);
+    expect(read('2026-04-24', 'Pickup by 4/24, 2026').ok).toBe(true);
+  });
+
+  // Pre-push audit on 0ab3d820d4 (P1): "Monday through Fri." passed Monday, as "Fri." was no day.
+  test('a weekday cut short closes a range and labels a date, but never names the end alone', () => {
+    const sunday = new Date('2026-04-19T15:00:00Z'); // Sunday Apr 19
+    const promo = 'Subject\nOffer valid Monday through Fri. Rebate runs Tues - Thurs only. Order by April 30 (Thu). Sun & Shade mix 20% off.';
+    const read = (endDate, quote) => checkAnswer({ end_date: endDate, quote, price_increase: false }, promo, sunday);
+    const refused = { ok: false, reason: 'quote_date_mismatch' };
+    expect(read('2026-04-20', 'Offer valid Monday through Fri')).toEqual(refused);
+    expect(read('2026-04-21', 'Rebate runs Tues - Thurs only')).toEqual(refused);
+    expect(read('2026-04-30', 'Order by April 30 (Thu)').ok).toBe(true);
+    // "sun" may be the word, so a cut-short weekday never names the end alone. This leans to a miss.
+    expect(read('2026-04-26', 'Sun & Shade mix 20% off')).toEqual(refused);
+    expect(read('2026-04-24', 'Offer valid Monday through Fri')).toEqual(refused);
+  });
+
   // Pre-push audit on 32723022ad (P1): "April 20 through Friday" refused Friday, its last day.
   test('beside a date, a day word names the end only when it falls after every date there', () => {
     const sunday = new Date('2026-04-19T15:00:00Z'); // Sunday Apr 19
@@ -385,7 +415,7 @@ describe('readDealEndDates', () => {
     ]);
     mockCreate
       .mockResolvedValueOnce(reply('{"end_date": "2026-04-30", "quote": "Offers valid March 1 – April 30, 2026.", "price_increase": false}'))
-      .mockResolvedValueOnce(reply('{"end_date": null, "quote": null}'));
+      .mockResolvedValueOnce(reply('{"end_date": null, "quote": null, "price_increase": false}'));
 
     const found = await readDealEndDates(conn, [deal(1, { subject: 'Last Chance  for 10% Off' }), deal(2)]);
 
@@ -454,7 +484,7 @@ describe('readDealEndDates', () => {
       // A dropped <blockquote> may have held this email's own end.
       { id: 5, body_text: null, body_html: '<p>Deal on Demand CS.</p><blockquote>Offer ends April 30.</blockquote>' },
     ]);
-    mockCreate.mockResolvedValue(reply('{"end_date": null, "quote": null}'));
+    mockCreate.mockResolvedValue(reply('{"end_date": null, "quote": null, "price_increase": false}'));
     const found = await readDealEndDates(conn, [deal(1), deal(2), deal(3), deal(4), deal(5)]);
     expect([...found.entries()]).toEqual([[4, { endDate: null, quote: null, priceIncrease: false }]]);
     expect(mockRejected).not.toHaveBeenCalled();
@@ -511,7 +541,7 @@ describe('readDealEndDates', () => {
   test(`reads at most ${MAX_READS} deals, newest first as given`, async () => {
     const ids = Array.from({ length: MAX_READS + 3 }, (_, i) => i + 1);
     const { conn, calls } = fakeConn(ids.map((id) => ({ id, body_text: PROMO, body_html: null })));
-    mockCreate.mockResolvedValue(reply('{"end_date": null, "quote": null}'));
+    mockCreate.mockResolvedValue(reply('{"end_date": null, "quote": null, "price_increase": false}'));
     const found = await readDealEndDates(conn, ids.map((id) => deal(id)));
     expect(calls.whereIn[1]).toEqual(ids.slice(0, MAX_READS));
     expect(mockCreate).toHaveBeenCalledTimes(MAX_READS);

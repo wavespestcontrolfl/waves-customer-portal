@@ -30,7 +30,7 @@
  */
 const logger = require('../logger');
 const { hasAlignedAuth } = require('../email/inbox-hygiene');
-const { stripQuotedHistory, NUMERIC_DATE } = require('./deal-email-text');
+const { stripQuotedHistory, NUMERIC_DATE, QUOTE_CHARS } = require('./deal-email-text');
 const { etWeekStart, etParts, etDateString, parseETDateTime } = require('../../utils/datetime-et');
 
 const WINDOW_DAYS = 7;
@@ -244,7 +244,6 @@ const clip = (s, n) => {
 };
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const QUOTE_CLIP = 140;
 
 function shortDate(date) {
   const p = etParts(date);
@@ -262,7 +261,7 @@ function deadlineNote(email, received, aiRead) {
     const [year, month, day] = aiRead.endDate.split('-').map(Number);
     const sameYear = year === etParts(received).year;
     const what = aiRead.priceIncrease === true ? 'price rises' : 'ends';
-    return `${what} ${MONTH_NAMES[month - 1]} ${day}${sameYear ? '' : `, ${year}`} ("${clip(aiRead.quote, QUOTE_CLIP)}")`;
+    return `${what} ${MONTH_NAMES[month - 1]} ${day}${sameYear ? '' : `, ${year}`} ("${clip(aiRead.quote, QUOTE_CHARS)}")`;
   }
   if (aiRead) return 'deadline not stated';
   const deadline = extractDeadline(`${email.subject || ''}\n${bodyPlainText(email)}`, received);

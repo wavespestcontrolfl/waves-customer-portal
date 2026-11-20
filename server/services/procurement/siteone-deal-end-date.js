@@ -32,7 +32,7 @@ const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 const { anthropicText } = require('../llm/call');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 const { etDateString } = require('../../utils/datetime-et');
-const { stripQuotedHistory, NUMERIC_DATE } = require('./deal-email-text');
+const { stripQuotedHistory, NUMERIC_DATE, QUOTE_CHARS } = require('./deal-email-text');
 
 let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -51,14 +51,14 @@ const SUBJECT_CHARS = 300;
 const MAX_READS = 20;
 // The end date must fall on or after the day the email came, and at most this many days later.
 const MAX_DAYS_AHEAD = 366;
-// The proof must be words (a letter, 8 characters at least, not a bare "30, 2026") and not a paragraph.
+// The proof must be words (a letter, 8 characters at least, not a bare "30, 2026"), at most
+// QUOTE_CHARS of them, so the bell line shows them whole.
 const QUOTE_MIN_CHARS = 8;
-const QUOTE_MAX_CHARS = 300;
 
 const SYSTEM_PROMPT = [
   "You read one vendor email for a pest control company's weekly list of supplier deals.",
   'Find when the offer in this email ends: the last day a buyer can get its price, discount, rebate, points or free item.',
-  'Answer with JSON only, no other text: {"end_date": "YYYY-MM-DD" or null, "quote": "the exact words from the email that state that end, at most 160 characters" or null, "price_increase": true or false}.',
+  'Answer with JSON only, no other text: {"end_date": "YYYY-MM-DD" or null, "quote": "the exact words from the email that state that end, at most 140 characters" or null, "price_increase": true or false}.',
   'Not an offer end: a date the sender is away (PTO, out of office), the date an email was sent, an event or webinar date, a shipping or delivery date, the start of an offer.',
   'A price increase ends the current price: then end_date is the day the new price starts and price_increase is true. Otherwise price_increase is false.',
   'If the email states no end, end_date and quote are null. Copy the quote character for character from the email.',
@@ -240,18 +240,24 @@ const RANGE_GAP = 48;
 // A sentence ends at ". ", "! ", "? " or "; " before a letter; "a.m." and "p.m." do not end one.
 const SENTENCE_END = /[.!?;] [a-z]/;
 const oneSentence = (stretch) => !SENTENCE_END.test(stretch.replace(/\b([ap])\.m\./g, '$1m'));
-// Words that name a day without a date.
-const DAY_WORD = /\b(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday|today|tonight|tomorrow)\b/g;
+// Words for a day without a date. A weekday may be cut short ("Fri.", "Tues", "Thurs").
+const DAY_WORD = /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|today|tonight|tomorrow)\b/g;
 
 // "4/20-24" closes on the 24th, as "April 20-24" does: a closing day right after a numeric date with no year.
 const NUMERIC_CLOSE = /^ ?(?:-|to|through|thru) ?(\d{1,2})(?:st|nd|rd|th)?(?![/\d:])\b/;
+// A year written after a numeric date or its closing day is its year: "4/24, 2025", "4/20-24, 2025".
+// It is read from 7 characters, one past ", 2025", so \b sees where the year ends.
+const NUMERIC_YEAR = /^,? ?(20\d{2})\b/;
 
 /** Each calendar date the (comparable) words name, in order: { at, end, month, day, year } (year null when not given). */
 function quoteDates(text) {
   const numeric = (m) => {
     const after = m.index + m[0].length;
     const close = m[3] ? null : NUMERIC_CLOSE.exec(text.slice(after, after + 16));
-    return [m, m[1], close ? close[1] : m[2], m[3] && m[3].length === 2 ? `20${m[3]}` : m[3], close ? close[0].length : 0];
+    const tail = after + (close ? close[0].length : 0);
+    const written = m[3] ? null : NUMERIC_YEAR.exec(text.slice(tail, tail + 7));
+    const year = written ? written[1] : m[3] && (m[3].length === 2 ? `20${m[3]}` : m[3]);
+    return [m, m[1], close ? close[1] : m[2], year, tail - after + (written ? written[0].length : 0)];
   };
   const found = [
     ...[...text.matchAll(NAMED_DATE)].map((m) => [m, MONTH_KEYS.indexOf(m[1].slice(0, 3)) + 1, m[3] || m[2], m[4], 0]),
@@ -263,9 +269,16 @@ function quoteDates(text) {
     .sort((a, b) => a.at - b.at);
 }
 
-/** Each date and day word in the text, in order; a day word has `word`, a date has month, day and year. */
+/** Each date and day word in the text, in order; a day word has `word` and `short`, a date has month, day and year. */
 function dayMarks(text) {
-  const words = [...text.matchAll(DAY_WORD)].map((m) => ({ at: m.index, end: m.index + m[0].length, word: m[0] }));
+  // A weekday cut short reads as its full name, so it closes a range ("Monday through Fri.") and
+  // labels a date ("April 30 (Thu)"). It is `short`: it never names the end alone, as "sun" may be
+  // the word ("Sun & Shade mix"). "Today", "tonight" and "tomorrow" read as themselves.
+  const name = (word) => WEEKDAYS.find((w) => w.startsWith(word.slice(0, 3))) || word;
+  const words = [...text.matchAll(DAY_WORD)].map((m) => {
+    const word = name(m[0]);
+    return { at: m.index, end: m.index + m[0].length, word, short: word !== m[0] };
+  });
   return [...quoteDates(text), ...words].sort((a, b) => a.at - b.at);
 }
 
@@ -298,10 +311,10 @@ function quoteNamesDay({ text, wordsEnd }, endDate, away) {
   };
   const marks = dayMarks(text);
   const said = marks.filter((d) => d.end <= wordsEnd);
-  // A weekday names a day at most a week on. Beside dates in the words, a day word names only a
-  // day after all of them ("April 20 through Friday"); a weekday that labels a date is that date.
+  // A weekday names a day at most a week on, and never when cut short. Beside dates in the words, a day
+  // word names only a day after all of them ("April 20 through Friday"); a weekday that labels a date is that date.
   const afterDates = said.every((d) => d.word || asDay(d) < end);
-  const named = said.filter((d) => sameDay(d) && (!d.word || ((d.word !== weekday || away <= 7) && afterDates)));
+  const named = said.filter((d) => sameDay(d) && (!d.word || (!d.short && (d.word !== weekday || away <= 7) && afterDates)));
   // Another day after d in its sentence. The stretch takes that day's first letter, so ". Monday" ends the sentence.
   const anotherDayAfter = (d) => marks.some((n) => n.at >= d.end && n.at - d.end <= RANGE_GAP && !sameDay(n)
     && oneSentence(text.slice(d.end, n.at + 1)));
@@ -341,16 +354,20 @@ function wholeWordsInEmail(hay, needle) {
  */
 function checkAnswer(answer, emailText, receivedAt, cut = false) {
   if (!answer || !Object.prototype.hasOwnProperty.call(answer, 'end_date')) return { ok: false, reason: 'invalid_json' };
-  // "No end" needs both values null: a quote beside a null date, or no quote key, is a malformed reply.
-  if (answer.end_date === null) return answer.quote === null ? { ok: true, endDate: null, quote: null, priceIncrease: false } : { ok: false, reason: 'half_null' };
+  // "No end" needs both values null: a quote beside a null date, or no quote key, is a malformed
+  // reply. Like any answer, it needs a JSON true or false flag.
+  if (answer.end_date === null) {
+    if (answer.quote !== null) return { ok: false, reason: 'half_null' };
+    return typeof answer.price_increase === 'boolean' ? { ok: true, endDate: null, quote: null, priceIncrease: false } : { ok: false, reason: 'bad_price_flag' };
+  }
   const endDate = typeof answer.end_date === 'string' ? answer.end_date.trim() : '';
   if (!isCalendarDay(endDate)) return { ok: false, reason: 'bad_date' };
   const away = dayNumber(endDate) - dayNumber(etDateString(new Date(receivedAt)));
   if (!(away >= 0 && away <= MAX_DAYS_AHEAD)) return { ok: false, reason: 'date_out_of_range' };
   const quote = typeof answer.quote === 'string' ? answer.quote.replace(/\s+/g, ' ').trim() : '';
+  // Length first: the edge trim below is quadratic on a long run of marks. The bell line shows the words whole.
+  if (quote.length > QUOTE_CHARS) return { ok: false, reason: 'no_quote' };
   const flat = comparable(quote);
-  // Length first: the edge trim below is quadratic on a long run of marks.
-  if (flat.length > QUOTE_MAX_CHARS) return { ok: false, reason: 'no_quote' };
   const needle = flat.replace(EDGE_MARKS, '');
   if (needle.length < QUOTE_MIN_CHARS || !/[a-z]/.test(needle)) return { ok: false, reason: 'no_quote' };
   const place = wholeWordsInEmail(comparable(emailText), needle);
