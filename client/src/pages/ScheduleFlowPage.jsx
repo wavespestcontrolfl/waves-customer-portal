@@ -327,7 +327,7 @@ function EmptyTimesCard({ aiFiltered, serviceAreaUnavailable, locationReviewRequ
 
 const ASK_PROMPTS = ['Tomorrow morning', 'This weekend', 'Next week', 'Saturday', 'Late afternoon'];
 
-function AskCard({ onSearch, aiFiltered, onShowAll, closed }) {
+function AskCard({ onSearch, aiFiltered, onShowAll, closed, busy }) {
   const [question, setQuestion] = useState('');
   const [asking, setAsking] = useState(false);
   const [notice, setNotice] = useState(null); // { text, isError }
@@ -416,10 +416,14 @@ function AskCard({ onSearch, aiFiltered, onShowAll, closed }) {
         <div role="status" data-glass="soft" style={{ ...SOFT_NOTE, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
           <span>{notice ? notice.text : 'Showing the times that match your search.'}</span>
           {aiFiltered ? (
+            // Off while a booking runs: the reset drops that booking's
+            // answer, and a reset that then failed would leave the refused
+            // time picked with no message (pre-push P1 on 6d7d98d317).
             <button
               type="button"
               onClick={onShowAll}
-              style={{ border: 0, background: 'transparent', color: COLORS.glassNavy, font: 'inherit', fontSize: 14, fontWeight: 700, textDecoration: 'underline', cursor: 'pointer', whiteSpace: 'nowrap', padding: 0 }}
+              disabled={busy}
+              style={{ border: 0, background: 'transparent', color: COLORS.glassNavy, font: 'inherit', fontSize: 14, fontWeight: 700, textDecoration: 'underline', cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.65 : 1, whiteSpace: 'nowrap', padding: 0 }}
             >
               Show all open times
             </button>
@@ -2248,8 +2252,8 @@ function ScheduleFlowPage({ flow }) {
   // still what's on screen, so the reset link must survive for another try.
   const showAllTimes = async () => {
     // A refresh starts a new page view, and can change the address: a
-    // booking's refusal or a search still running belongs to the old view
-    // (pre-push P1 on b91bb3768f). A booking or a terminal state still shows.
+    // search still running belongs to the old view (pre-push P1 on
+    // b91bb3768f). The reset is off while a booking runs (AskCard `busy`).
     supersedeSearches();
     const { signal } = loadAbortRef.current;
     try {
@@ -2298,9 +2302,12 @@ function ScheduleFlowPage({ flow }) {
       // (Codex pre-push P1, 2026-09-24). The state is the link's, not an
       // address's, so it applies even after the page moved on to another
       // address (pre-push P1 on 0bef4d7e3c).
+      // It outranks the out-of-area card that a held address's refresh may
+      // have raised while this booking ran (pre-push P1 on 6d7d98d317).
       if (inspectionLike && res.ok && body.state && body.state !== 'ok') {
         supersedeSearches();
         setSelectedSlot(null);
+        setOutOfArea(null);
         setData(body);
         return;
       }
@@ -2530,7 +2537,7 @@ function ScheduleFlowPage({ flow }) {
       ) : (<>
         {flow === 'reservice' && data?.location_review_required
           ? null
-          : <AskCard key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} closed={searchClosed} />}
+          : <AskCard key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} closed={searchClosed} busy={submitting} />}
         <div ref={pickerRef} />
         <SchedulePicker
           availability={data?.availability}

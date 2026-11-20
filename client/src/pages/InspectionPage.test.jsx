@@ -1120,10 +1120,11 @@ describe('InspectionPage: an address race without availability refreshes at the 
     expect(getCalls).toBe(2);
   });
 
-  // Pre-push P1 on b91bb3768f: "Show all open times" starts a new page view.
-  // A booking's refusal that lands after it belongs to the old view, whose
-  // address the refresh can change: its times never land under the new address.
-  it('a refusal that lands after "Show all open times" changed the address applies none of its times', async () => {
+  // Pre-push P1s on b91bb3768f and 6d7d98d317: "Show all open times" starts
+  // a new page view, so it is off while a booking runs. A reset then would
+  // drop the booking's refusal, and a reset that failed would leave the
+  // refused time picked with no message. The refusal shows its own times.
+  it('"Show all open times" is off while a booking runs, so the booking\'s refusal still shows', async () => {
     let resolveCommit = null;
     let getCalls = 0;
     const fetchMock = vi.fn((url, opts = {}) => {
@@ -1132,10 +1133,7 @@ describe('InspectionPage: an address race without availability refreshes at the 
       if (u.includes('/find-slots')) return Promise.resolve(jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }));
       if (opts.method === 'POST') return new Promise((resolve) => { resolveCommit = resolve; });
       getCalls += 1;
-      return Promise.resolve(jsonResponse(getCalls === 1 ? okPayload() : okPayload({
-        availability: mondayAvailability('09:00', '9:00 AM'),
-        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: '9 Gulf Dr, Sarasota 34231' },
-      })));
+      return Promise.resolve(jsonResponse(getCalls === 1 ? okPayload() : okPayload({ availability: mondayAvailability('09:00', '9:00 AM') })));
     });
     vi.stubGlobal('fetch', fetchMock);
     renderPage();
@@ -1143,21 +1141,63 @@ describe('InspectionPage: an address race without availability refreshes at the 
     await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i });
     fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'this weekend' } });
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
-    const showAll = await screen.findByRole('button', { name: 'Show all open times' });
+    expect(await screen.findByRole('button', { name: 'Show all open times' })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
     fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
     await waitFor(() => expect(resolveCommit).not.toBeNull());
+    const showAll = screen.getByRole('button', { name: 'Show all open times' });
+    expect(showAll).toBeDisabled();
     fireEvent.click(showAll);
-    expect(await screen.findByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i })).toBeInTheDocument();
-    const oldTimes = okPayload().availability;
-    oldTimes.days[0].slots = [{ start_time: '15:00', end_time: '15:30', start_label: '3:00 PM', end_label: '3:30 PM', technician_id: 'tech-1' }];
+    const freshTimes = okPayload().availability;
+    freshTimes.days[0].slots = [{ start_time: '15:00', end_time: '15:30', start_label: '3:00 PM', end_label: '3:30 PM', technician_id: 'tech-1' }];
     await act(async () => {
-      resolveCommit(jsonResponse({ error: 'That time is no longer open.', code: 'SLOT_TAKEN', availability: oldTimes }, 409));
+      resolveCommit(jsonResponse({ error: 'That time is no longer open.', code: 'SLOT_TAKEN', availability: freshTimes }, 409));
+    });
+    expect(await screen.findByText(/That time was just taken/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Choose 3:00 PM on Sunday, July 12/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i })).not.toBeInTheDocument();
+    expect(getCalls).toBe(1);
+  });
+
+  // Pre-push P1 on b91bb3768f: a search still running when "Show all open
+  // times" starts belongs to the old view. Its late times never land, and it
+  // ends quietly.
+  it('a search still running when "Show all open times" starts never lands its times', async () => {
+    let searches = 0;
+    let finishSearch = null;
+    let getCalls = 0;
+    const fetchMock = vi.fn((url) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) {
+        searches += 1;
+        if (searches === 1) return Promise.resolve(jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }));
+        return new Promise((resolve) => { finishSearch = resolve; });
+      }
+      getCalls += 1;
+      return Promise.resolve(jsonResponse(getCalls === 1 ? okPayload() : okPayload({ availability: mondayAvailability('09:00', '9:00 AM') })));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i });
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'this weekend' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await screen.findByRole('button', { name: 'Show all open times' });
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'sunday at 3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(finishSearch).not.toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: 'Show all open times' }));
+    expect(await screen.findByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i })).toBeInTheDocument();
+    const lateTimes = okPayload().availability;
+    lateTimes.days[0].slots = [{ start_time: '15:00', end_time: '15:30', start_label: '3:00 PM', end_label: '3:30 PM', technician_id: 'tech-1' }];
+    await act(async () => {
+      finishSearch(jsonResponse({ availability: lateTimes, summary: 'Open Sunday at 3.' }));
     });
     await new Promise((r) => { setTimeout(r, 20); });
     expect(screen.queryByRole('button', { name: /Choose 3:00 PM on Sunday, July 12/i })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i })).toBeInTheDocument();
-    expect(screen.queryByText(/That time was just taken/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/couldn't search right now/i)).not.toBeInTheDocument();
   });
 
   // Pre-push P1 on b91bb3768f: the held address's reload can answer
@@ -1191,6 +1231,58 @@ describe('InspectionPage: an address race without availability refreshes at the 
     expect(await screen.findByText(/we don.t service this area yet/i)).toBeInTheDocument();
     expect(screen.queryByText(/couldn't load the latest open times/i)).not.toBeInTheDocument();
     expect(availabilityPosts).toBe(2);
+  });
+
+  // Pre-push P1 on 6d7d98d317: a held address's refresh can raise the
+  // out-of-area card while a booking runs. The booking's terminal answer is
+  // the link's own state, so it replaces that card.
+  it('a terminal booking answer after a held-address refresh raised the out-of-area card → the terminal card', async () => {
+    let availabilityPosts = 0;
+    let finishRefresh = null;
+    let resolveCommit = null;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) return Promise.resolve(jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }));
+      if (u.includes('/availability') && opts.method === 'POST') {
+        availabilityPosts += 1;
+        if (availabilityPosts === 1) return Promise.resolve(jsonResponse({ availability: okPayload().availability, needs_address: false }));
+        return new Promise((resolve) => { finishRefresh = resolve; });
+      }
+      if (opts.method === 'POST') return new Promise((resolve) => { resolveCommit = resolve; });
+      return Promise.resolve(jsonResponse(okPayload({
+        needs_address: true,
+        availability: null,
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
+      })));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '123 Palm Ave, Bradenton, FL 34209' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+    await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i });
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'this weekend' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Show all open times' }));
+    await waitFor(() => expect(finishRefresh).not.toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(resolveCommit).not.toBeNull());
+    await act(async () => {
+      finishRefresh(jsonResponse({ error: 'out_of_area', county: 'Hardee', waitlist_ticket: 'signed-ticket' }, 422));
+    });
+    expect(await screen.findByText(/we don.t service this area yet/i)).toBeInTheDocument();
+    await act(async () => {
+      resolveCommit(jsonResponse({
+        state: 'already_booked',
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: null },
+        visit: { date: '2026-07-15', window: { start: '09:00', end: '09:30' }, serviceType: 'Waves Assessment' },
+        rescheduleUrl: '/reschedule/feedface',
+      }));
+    });
+    expect(await screen.findByText(/already on the calendar/i)).toBeInTheDocument();
+    expect(screen.queryByText(/we don.t service this area yet/i)).not.toBeInTheDocument();
   });
 
   // Pre-push P1 on 8f40c19990: a search still running when the refusal lands
