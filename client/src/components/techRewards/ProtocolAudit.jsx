@@ -24,6 +24,9 @@ async function call(path, options = {}) {
 }
 
 const LINE_WORDS = { lawn: 'Lawn', tree_shrub: 'Tree & shrub' };
+const protocolWords = protocol => (protocol
+  ? [protocol.version && `version ${protocol.version}`, (protocol.windowTitle || protocol.windowKey) && `window ${protocol.windowTitle || protocol.windowKey}`].filter(Boolean).join(' · ')
+  : 'not recorded');
 const photoCountWords = counts => Object.entries(counts || {}).map(([type, n]) => `${n} ${type}`).join(', ');
 const productAmount = p => [
   p.rate != null ? `${p.rate} ${p.rateUnit || ''}`.trim() : null,
@@ -69,7 +72,7 @@ function MarkForm({ visit, onSaved }) {
     if (result === 'mismatch' && !note.trim()) { setError('A mismatch needs a note.'); return; }
     setBusy(true); setError('');
     try {
-      const data = await call(`/visits/${visit.scheduledServiceId}`, { method: 'PUT', body: { result, note, technicianId: visit.technicianId, month: visit.month, recordId: visit.recordId } });
+      const data = await call(`/visits/${visit.scheduledServiceId}`, { method: 'PUT', body: { result, note, technicianId: visit.technicianId, month: visit.month, recordId: visit.recordId, evidenceFingerprint: visit.evidenceFingerprint } });
       onSaved(data.mark);
     } catch (failure) {
       setError(failure.message);
@@ -101,6 +104,7 @@ function VisitCard({ visit, onSaved }) {
       <p className="m-0 text-ui-caption text-ink-secondary">
         {[LINE_WORDS[visit.serviceLine], visit.customerName, visit.protocolName, visit.areaSqft ? `${visit.areaSqft} sq ft` : null].filter(Boolean).join(' · ')}
       </p>
+      <p className="m-0 text-ui-caption text-ink-secondary">Lawn protocol: {protocolWords(visit.protocol)}</p>
       <p className="m-0 text-ui-caption text-ink-secondary">
         {visit.counts.products} products · {visit.counts.photos} photos{visit.counts.photos ? ` (${photoCountWords(visit.counts.photosByType)})` : ''}
       </p>
