@@ -56,14 +56,20 @@ describe('plainPage', () => {
     expect(plain('&l<b></b>t; &<!-- -->lt; <<!-- -->td>')).toBe('&amp;l<b></b>t; &amp;lt; &lt;td&gt;');
   });
 
-  test('a tag not on the list gives null (a template, a textarea, an svg, a select), as does a name with other characters', () => {
-    const refused = ['<template><td>35A-02-8</template>', '<textarea><td>x</textarea>', '<svg><td>x</svg>',
-      '<noscript>x</noscript>', '<select>x</select>', '<span>x</span>', '<td="x">', '<tdÁ>x', '</title>'];
-    for (const html of refused) expect(plain(html)).toBeNull();
+  test('a tag not on the list gives null, as does a name with other characters', () => {
+    for (const html of ['<span>x</span>', '<p>x</p>', '<td="x">', '<td\u00c1>x', '</title>']) expect(plain(html)).toBeNull();
+  });
+
+  test('an element that changes how a browser reads what follows it gives null, even when the list allows it', () => {
+    const names = ['textarea', 'template', 'svg', 'math', 'select', 'xmp', 'noscript', 'iframe', 'noembed', 'noframes',
+      'plaintext', 'frameset'];
+    const all = new Set([...TAGS, ...names]);
+    // A browser reads the <td> in each as text, or by other rules: never as a cell.
+    for (const name of names) expect(plainPage(`<table><tr><${name}><td>35A-02-8</${name}></table>`, all)).toBeNull();
   });
 
   test('only HTML white space ends a name: a no-break space is part of it', () => {
-    expect(plain('<td title="x">A')).toBeNull();
+    expect(plain('<td\u00a0title="x">A')).toBeNull();
     expect(plain('<td\ftitle="a>b">A')).toBe('<td>A');
   });
 
@@ -82,8 +88,10 @@ describe('htmlText', () => {
     expect(text('&l<b></b>t; &<!-- -->lt; <<!-- -->td>')).toBe('&lt; &lt; <td>');
   });
 
-  test('decodes references, takes out format characters, and makes NUL characters and white space one space', () => {
+  test('decodes references, takes out invisible characters, and makes NUL characters and white space one space', () => {
     expect(text(' Live&nbsp;ro&shy;aches &amp; flies,\n &lt;5 seen a < b ')).toBe('Live roaches & flies, <5 seen a < b');
-    expect(text('a\0b​c &amp;lt;')).toBe('a bc &lt;');
+    expect(text('a\0b\u200bc &amp;lt; d&lrm;e&#8288;f&#xFEFF;')).toBe('a bc &lt; def');
+    // A joiner shapes what a browser shows: the chef emoji stays one emoji.
+    expect(text('Chef: \u{1F469}&zwj;\u{1F373}')).toBe('Chef: \u{1F469}\u200d\u{1F373}');
   });
 });
