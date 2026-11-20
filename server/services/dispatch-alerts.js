@@ -98,10 +98,7 @@ async function createAlert({ type, severity, techId, jobId, payload, trx } = {})
   if (trx) {
     const row = await doWrite(trx);
     if (trx.executionPromise) {
-      trx.executionPromise.then(() => emitAlert(row)).catch(() => {
-        // Outer rollback. Caller sees the rejection; we suppress
-        // the emit so a phantom alert never reaches dispatch:admins.
-      });
+      require('../utils/trx-commit-promise').afterCommit(trx, () => emitAlert(row));
     } else {
       logger.warn('[dispatch-alerts] trx.executionPromise missing — emitting inline (test harness?)');
       emitAlert(row);
@@ -275,7 +272,10 @@ async function resolveAlert({ id, resolvedBy, trx, auto = false } = {}) {
     // round 25).
     if (!auto && !rows.length) {
       await t('dispatch_alerts').where({ id }).whereNotNull('resolved_at')
-        .whereRaw("payload->>'superseded_at' IS NOT NULL")
+        // A payment episode auto-superseded just before the dispatcher's
+        // acknowledgement must remain historical; clearing this marker could
+        // make it current again beside the replacement episode.
+        .whereRaw("payload->>'superseded_at' IS NOT NULL AND type <> 'commercial_prepay_setup_review'")
         .update({ resolved_by: resolvedBy || null,
           payload: t.raw("COALESCE(payload, '{}'::jsonb) - 'superseded_at'") });
     }
@@ -287,13 +287,8 @@ async function resolveAlert({ id, resolvedBy, trx, auto = false } = {}) {
   if (trx) {
     const row = await doWrite(trx);
     if (!row) return null;
-    // Outermost commit, not a savepoint release (codex #3590 r14).
-    const commitPromise = require('../utils/trx-commit-promise').commitPromiseOf(trx);
-    if (commitPromise) {
-      commitPromise.then(() => emitResolved(row)).catch(() => {
-        // Outer rollback. Suppress emit so cards don't disappear from
-        // dispatcher screens on a write that didn't actually commit.
-      });
+    if (trx.executionPromise) {
+      require('../utils/trx-commit-promise').afterCommit(trx, () => emitResolved(row));
     } else {
       logger.warn('[dispatch-alerts] trx.executionPromise missing — emitting inline (test harness?)');
       emitResolved(row);
@@ -360,7 +355,9 @@ async function resolveAllOpenAlerts({ resolvedBy, trx } = {}) {
     const rows = await t('dispatch_alerts')
       .whereNull('resolved_at')
       // decision-only cards are never swept away: closing one records nothing
-      .whereNotIn('type', DECISION_ONLY_ALERT_TYPES)
+      // A commercial payment episode is acknowledged on its own card; a
+      // generic queue clear must not erase that separate staff decision.
+      .whereNotIn('type', [...DECISION_ONLY_ALERT_TYPES, 'commercial_prepay_setup_review'])
       .update({
         resolved_at: t.fn.now(),
         resolved_by: resolvedBy || null,

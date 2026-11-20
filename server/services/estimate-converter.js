@@ -9022,6 +9022,12 @@ const EstimateConverter = {
           anchorId: rodentRoot ? rodentRoot.id : null,
           amount: frozenRodentBaitSetupAmount(estimateData),
           estimateId,
+          // An accept-on-book caller can promise the date before its visit row
+          // is visible. A zero converter count alone cannot establish a sale.
+          unbookedSaleCustomerId: estimateRodentBaitIsCommercial(estimateData)
+            && skipAutoSchedule && !reservationRowsExist && !firstScheduledServiceId && scheduledCount === 0
+            && !opts.adoptedExistingAppointmentId && !opts.bookedAppointmentIds?.length && !opts.requestedFirstVisit
+            && !annualPrepayTermStart && !annualPrepayCoverageOverride ? customerId : null,
         });
         if (!rodentRoot) {
           logger.info(`[estimate-converter] Estimate ${estimateId}: prepay billed the rodent setup before any series root exists — claim ledgered anchor-less; the restore resolves the root from the estimate`);

@@ -2229,6 +2229,18 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       logger.error(`[stripe-webhook] annual prepay activation failed: ${e.message}`);
     }
   }
+  // Unlike the best-effort term side effects above, the observational review
+  // is the durable record of a refund->repayment episode. Run it on retries
+  // even when the invoice was already paid; throwing leaves this webhook
+  // retryable instead of losing the only restoration observation.
+  const paidForReview = await db('invoices')
+    .where({ stripe_payment_intent_id: piId })
+    .whereIn('status', ['paid', 'prepaid'])
+    .first('id');
+  if (paidForReview) {
+    await require('../services/commercial-prepay-dispatch-review')
+      .reconcileInvoice(db, paidForReview.id);
+  }
   // Complete any active payment plan on the settled invoice. OUTSIDE the
   // invoiceUpdated>0 gate (codex r1 P1): on a webhook retry the invoice is
   // already paid (invoiceUpdated=0), and the retry must still be able to
@@ -4453,6 +4465,10 @@ async function handleRefundFailed(refund) {
           return;
         }
         await insertBounceNotification(trx, `Combined balance charge ${rowChargeId || rowPiId}: the full refund bounced — ${neutralizedMarker ? 'the pre-settlement refund fence was lifted and settlement re-runs from the PI' : `${rows.length} allocation rows unwound to paid and ${restored.length} invoices restored`}. Account credit that returnAppliedCreditOnRefund restored per invoice may need manual claw-back (it is deliberately not auto-reversed).${restored.length ? ' Any annual-prepay coverage the refund CANCELLED is not auto-revived (revival is dispute-marker-gated) — the paid-sync re-runs post-commit, but if coverage stays cancelled on a restored invoice, reactivate it manually.' : ''}`);
+        for (const invoiceId of restored) {
+          await require('../services/commercial-prepay-dispatch-review')
+            .reconcileInvoice(trx, invoiceId);
+        }
       });
       // Post-commit paid sync per restored invoice (codex r19 P1, single-
       // payment-branch parity): the refund already ran
@@ -4823,6 +4839,8 @@ async function handleRefundFailed(refund) {
         // Leaving 'refunded' (codex #3591 r47 local P0): retire the
         // refunded-transition setup side effects with the restore.
         await require('../services/invoice').retireRodentSetupObligationForReinstatedInvoice(trx, linkedInvoice.id);
+        await require('../services/commercial-prepay-dispatch-review')
+          .reconcileInvoice(trx, linkedInvoice.id);
       }
     }
 

@@ -1983,7 +1983,11 @@ async function handleDepositIntentCanceled(paymentIntent) {
 
 // Automatic collection needs invoice-specific backing. Partially consumed
 // historical pools without that attribution remain manual reconciliation.
-async function invoiceDepositCreditIsBacked(invoice, trx = db) {
+// `exactSourceBinding` is for observational receipt proof only. A partially
+// consumed deposit may be economically valid while still lacking a durable
+// invoice id on the current ledger; that shape must stay unconfirmed here,
+// not be inferred from the invoice's discount line or gross deposit balance.
+async function invoiceDepositCreditIsBacked(invoice, trx = db, { exactSourceBinding = false } = {}) {
   const lines = require('./invoice')._parseInvoiceLineItems(invoice.line_items)
     .filter((line) => line.category === 'deposit_credit');
   const required = new Map();
@@ -1993,13 +1997,26 @@ async function invoiceDepositCreditIsBacked(invoice, trx = db) {
     required.set(line.estimate_id, (required.get(line.estimate_id) || 0) + cents);
   }
   if (!required.size) return true;
-  const rows = await trx('estimate_deposits').where({ credited_invoice_id: invoice.id,
-    customer_id: invoice.customer_id }).whereIn('estimate_id', [...required.keys()])
-    .orderBy('id').forUpdate().noWait();
+  if (exactSourceBinding) {
+    const ownedEstimates = await trx('estimates').where({ customer_id: invoice.customer_id })
+      .whereIn('id', [...required.keys()]).select('id');
+    if (new Set(ownedEstimates.map((row) => String(row.id))).size !== required.size) return false;
+  }
+  const rowQuery = trx('estimate_deposits').where({ credited_invoice_id: invoice.id });
+  if (!exactSourceBinding) {
+    rowQuery.where({ customer_id: invoice.customer_id }).whereIn('estimate_id', [...required.keys()]);
+  }
+  // Collection locks the backing funds. Dispatch only reads committed
+  // allocations and must leave a concurrent refund or collection free to finish.
+  rowQuery.orderBy('id');
+  if (!exactSourceBinding) rowQuery.forUpdate().noWait();
+  const rows = await rowQuery;
   for (const row of rows) {
     const credited = Math.round(Number(row.credited_amount) * 100);
     const remaining = Math.round((Number(row.amount) - Number(row.refunded_amount || 0)) * 100);
-    if (!['received', 'credited'].includes(row.status) || !Number.isSafeInteger(credited)
+    if ((exactSourceBinding && (String(row.customer_id || '') !== String(invoice.customer_id)
+      || !required.has(row.estimate_id)))
+      || !['received', 'credited'].includes(row.status) || !Number.isSafeInteger(credited)
         || !Number.isSafeInteger(remaining) || credited <= 0 || credited > remaining) return false;
     required.set(row.estimate_id, required.get(row.estimate_id) - credited);
   }

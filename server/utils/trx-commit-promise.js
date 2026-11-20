@@ -17,4 +17,25 @@ function commitPromiseOf(trx) {
   return cur && cur.executionPromise ? cur.executionPromise : null;
 }
 
-module.exports = { commitPromiseOf };
+// A root-only promise is sufficient for callers that merely wait for the
+// outer transaction, but a callback originating inside a savepoint must also
+// be suppressed if that savepoint rolls back and its parent catches the error.
+function transactionChain(trx) {
+  const chain = [];
+  for (let current = trx, hops = 0;
+    current && hops < 32;
+    current = current.parentTransaction, hops += 1) {
+    chain.push(current);
+  }
+  return chain;
+}
+
+function afterCommit(trx, fn) {
+  const promises = transactionChain(trx)
+    .map((current) => current.executionPromise)
+    .filter((promise) => promise && typeof promise.then === 'function');
+  if (promises.length) Promise.all(promises).then(fn).catch(() => {});
+  else Promise.resolve().then(fn).catch(() => {});
+}
+
+module.exports = { commitPromiseOf, afterCommit };

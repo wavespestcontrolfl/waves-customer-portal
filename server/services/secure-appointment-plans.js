@@ -417,10 +417,15 @@ async function resolveDirectRodentSetupObligation(database, visit = {}) {
 // estimateId (codex #3591 r70 P1): the accepted estimate an accept-side mint
 // billed the setup for — the key a later booking from that estimate uses to
 // see the claim when it is still anchor-less (migration 20260831000030).
-async function recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount, estimateId = null }) {
+async function recordSetupFeeClaimForInvoice(trx, options) {
+  const { invoiceId, anchorId, amount, estimateId = null, unbookedSaleCustomerId } = options;
   const fee = cents(Math.max(0, Number(amount) || 0));
   if (!invoiceId || !(fee > 0)) return false;
-  await trx('setup_fee_claims')
+  const recordSale = Boolean(unbookedSaleCustomerId && !anchorId);
+  if (recordSale && !trx.isTransaction) {
+    return trx.transaction((conn) => recordSetupFeeClaimForInvoice(conn, options));
+  }
+  const insert = trx('setup_fee_claims')
     .insert({
       invoice_id: invoiceId,
       scheduled_service_id: anchorId || null,
@@ -429,6 +434,16 @@ async function recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount,
     })
     .onConflict('invoice_id')
     .ignore();
+  if (recordSale) {
+    const [claim] = await insert.returning('id');
+    // Only the original insert can attest to the appointment choice. Replaying
+    // a mint after a cancellation cannot relabel a previously booked sale.
+    if (claim) await require('./commercial-prepay-sale-record').recordUnbookedSale(trx, {
+      invoiceId, claimId: claim.id, customerId: unbookedSaleCustomerId,
+    });
+  } else {
+    await insert;
+  }
   return true;
 }
 
@@ -732,7 +747,7 @@ async function assertFrozenRodentSetupStillOwed(trx, customerId) {
 // transaction, refuse on drift (an anchor appeared, the amount moved, or the
 // account gained a waiving family), then ledger the claim anchor-less against
 // the prepay. Errors carry `switchConflict` (→ 409) like the anchored path.
-async function retireCoverageOnlySetupClaim(trx, { customerId, coverageServiceType, invoiceId, amount }) {
+async function retireCoverageOnlySetupClaim(trx, { customerId, coverageServiceType, invoiceId, amount, noFirstVisitPromised }) {
   const fee = cents(Math.max(0, Number(amount) || 0));
   if (!(fee > 0)) return { recorded: false, retired: false };
   const conflict = (message) => { const err = new Error(message); err.switchConflict = true; return err; };
@@ -752,7 +767,13 @@ async function retireCoverageOnlySetupClaim(trx, { customerId, coverageServiceTy
   if (Math.round(owed.amount * 100) !== Math.round(fee * 100)) {
     throw conflict(`The bait-station setup changed since the preview (previewed $${fee.toFixed(2)}, now $${Number(owed.amount).toFixed(2)}) — refresh and retry`);
   }
-  await recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId: null, amount: fee });
+  const unbookedCommercial = noFirstVisitPromised === true
+    && (recurringServiceKey({ name: coverageServiceType }) === 'commercial_rodent_bait'
+      || await customerHasCommercialChannel(trx, customerId));
+  await recordSetupFeeClaimForInvoice(trx, {
+    invoiceId, anchorId: null, amount: fee,
+    unbookedSaleCustomerId: unbookedCommercial ? customerId : null,
+  });
   return { recorded: true, retired: false };
 }
 
