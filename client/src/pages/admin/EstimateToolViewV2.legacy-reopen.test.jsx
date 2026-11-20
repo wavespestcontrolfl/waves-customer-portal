@@ -162,6 +162,21 @@ describe('reopening a bifenthrin pre-slab estimate saved before the Crosscheck P
       .toMatchObject({ preslabLabelConfirmed: true, bifenthrinLabelBottle: 'lesco_crosscheck_plus' });
   });
 
+  // A deselected service keeps its fields. Its earlier-bottle check is cleared, but the saved price, which does not include that
+  // service, stays current (pre-push audit 29).
+  it('clears the check of a deselected pre-slab service and keeps a pest-only estimate sendable', async () => {
+    reopen({ svcPest: true, homeSqFt: '2400', lotSqFt: '9000', stories: '2', preslabProductKey: 'talstar_p', preslabLabelConfirmed: true }, HOUSE);
+    await waitFor(() => expect(screen.getByLabelText('Home Sq Ft')).toHaveValue(2400));
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    expect(screen.queryByText(/label check was for the earlier bifenthrin bottle/)).not.toBeInTheDocument();
+    expect(reviewAndSend()).toBeEnabled();
+
+    fireEvent.click(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ }));
+    await waitFor(() => expect(callsTo('/calculate-estimate')).toHaveLength(1));
+    expect(JSON.parse(callsTo('/calculate-estimate')[0][1].body).options)
+      .toMatchObject({ preslabLabelConfirmed: false, bifenthrinLabelBottle: 'lesco_crosscheck_plus' });
+  });
+
   it('clears a label check when another product is chosen, so a check is never carried to a bottle it was not made for', async () => {
     reopen({ ...PRESLAB, preslabProductKey: 'termidor_sc', _bifenthrinLabelBottle: 'lesco_crosscheck_plus' }, HOUSE);
     await waitFor(() => expect(labelCheck()).toBeChecked());
@@ -190,5 +205,19 @@ describe('the trenching label check', () => {
     fireEvent.click(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ }));
     await waitFor(() => expect(callsTo('/calculate-estimate')).toHaveLength(1));
     expect(JSON.parse(callsTo('/calculate-estimate')[0][1].body).options).toMatchObject({ trenchingLabelConfirmed: false });
+  });
+
+  // The bifenthrin high rate halves the labeled volume. The label allows that only where the soil will not accept the labeled volume
+  // and a continuous barrier can still be achieved, so the box names both there, and only there (pre-push audit 29).
+  it('names the reduced-volume conditions at the bifenthrin high rate only', async () => {
+    reopen({ ...TRENCH, trenchingProductKey: 'talstar_p', _bifenthrinLabelBottle: 'lesco_crosscheck_plus' }, HOUSE);
+    await waitFor(() => expect(labelCheck()).toBeChecked());
+    fireEvent.change(document.getElementById('estimate-trenchingApplicationRate'), { target: { value: 'high' } });
+    const reducedVolume = /^Label rate, trench depth and reduced volume confirmed \(soil will not accept the labeled volume; a continuous barrier can still be achieved\)$/;
+    await waitFor(() => expect(screen.getByLabelText(reducedVolume)).not.toBeChecked());
+    expect(screen.queryByLabelText('Label rate and trench depth confirmed')).not.toBeInTheDocument();
+    fireEvent.change(document.getElementById('estimate-trenchingProductKey'), { target: { value: 'taurus_sc' } });
+    await waitFor(() => expect(labelCheck()).not.toBeChecked());
+    expect(screen.queryByLabelText(reducedVolume)).not.toBeInTheDocument();
   });
 });

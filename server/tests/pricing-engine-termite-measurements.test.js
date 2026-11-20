@@ -255,6 +255,15 @@ describe('termite measurement overrides and safeguards', () => {
     expect(high.includedChemicalCost).toBe(standard.includedChemicalCost); // the install price includes the labeled volume
     expect(high.price).toBe(4480); // the +12% install premium, as before
     expect(high.warnings.join(' ')).toMatch(/reduced finished volume, the same active ingredient per foot/);
+    // The label's two conditions for a reduced volume, and the line stays in review until the label check counts: a check sent
+    // without the Crosscheck Plus bottle mark does not (pre-push audit 29).
+    expect(high.warnings.join(' '))
+      .toMatch(/only where the soil will not accept the labeled volume and a continuous barrier can still be achieved/);
+    expect(high).toMatchObject({ requiresManualReview: true, labelConfirmed: false });
+    expect(high.manualReviewReasons).toContain('label_confirmation_required');
+    const confirmed = trench({ applicationRate: 'high', labelBottle: 'lesco_crosscheck_plus' });
+    expect(confirmed.labelConfirmed).toBe(true);
+    expect(confirmed.manualReviewReasons).not.toContain('label_confirmation_required');
     const products = require('../services/pricing-engine/constants').SPECIALTY.trenching.products;
     const savedHigh = products.talstar_p.productOzPerFinishedGallonAtHighRate;
     // The label charts one adjustment, its 0.12% dilution (2 fl oz a finished gallon) at half the volume, whatever the configured

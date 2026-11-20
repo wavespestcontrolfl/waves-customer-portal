@@ -140,10 +140,14 @@ const PRE_SLAB_INGREDIENT_NAMES = new Set(["bifenthrin", "fipronil"]);
 const productToken = (value) => String(value).trim().toLowerCase().replace(/[\s/-]+/g, "_").replace(/_+/g, "_");
 // Each termiticide product field and the label check made for the product it selects.
 const LABEL_CHECKS = [
-  { productField: "preslabProductKey", checkField: "preslabLabelConfirmed", name: "pre-slab", resolve: normalizePreSlabProductKey, keepAsSaved: PRE_SLAB_INGREDIENT_NAMES },
+  { productField: "preslabProductKey", checkField: "preslabLabelConfirmed", serviceField: "svcPreslab", name: "pre-slab", resolve: normalizePreSlabProductKey, keepAsSaved: PRE_SLAB_INGREDIENT_NAMES },
   // The trenching box confirms the label rate and trench depth too ("Label rate and trench depth confirmed").
-  { productField: "trenchingProductKey", checkField: "trenchingLabelConfirmed", name: "trenching", resolve: normalizeTrenchingProductKey, alsoConfirms: ["trenchingApplicationRate", "trenchingDepthFt"] },
+  { productField: "trenchingProductKey", checkField: "trenchingLabelConfirmed", serviceField: "svcTrenching", name: "trenching", resolve: normalizeTrenchingProductKey, alsoConfirms: ["trenchingApplicationRate", "trenchingDepthFt"] },
 ];
+// The bifenthrin high rate is the label's 0.12% dilution at half the labeled finished volume. The label allows a reduced volume only
+// where the soil will not accept the labeled volume, and only while a continuous barrier can still be achieved, so the box names both
+// there (pre-push audit 29). A rate or product change clears the box, so a check at that rate was ticked with this text.
+const TRENCHING_REDUCED_VOLUME_CHECK = "Label rate, trench depth and reduced volume confirmed (soil will not accept the labeled volume; a continuous barrier can still be achieved)";
 const LABEL_CHECK_FOR_FIELD = Object.fromEntries(LABEL_CHECKS.flatMap(({ productField, checkField, alsoConfirms = [] }) =>
   [productField, ...alsoConfirms].map((field) => [field, checkField])));
 
@@ -162,7 +166,9 @@ export function canonicalTermiticideProducts(form) {
 
 // savedInputs = the stored form snapshot as saved; form = the form a reopen restores from it. The form it returns always carries
 // today's bottle mark, so a check ticked from here on counts for the bottle it is ticked for: a saved null or an earlier bottle's
-// mark would otherwise ride along, and the server would not count the operator's new check (pre-push audit 22).
+// mark would otherwise ride along, and the server would not count the operator's new check (pre-push audit 22). A deselected
+// service keeps its fields, so its earlier-bottle check is cleared too, but only a selected service's check is named in
+// `cleared`, which sends the estimate back to Generate: the saved price does not include a deselected service (pre-push audit 29).
 export function clearPriorBottleLabelChecks(savedInputs, form) {
   const marked = form._bifenthrinLabelBottle === BIFENTHRIN_LABEL_BOTTLE ? form : { ...form, _bifenthrinLabelBottle: BIFENTHRIN_LABEL_BOTTLE };
   if (!savedInputs || savedInputs._bifenthrinLabelBottle === BIFENTHRIN_LABEL_BOTTLE) return { form: marked, cleared: [] };
@@ -171,7 +177,7 @@ export function clearPriorBottleLabelChecks(savedInputs, form) {
   if (stale.length === 0) return { form: marked, cleared: [] };
   const next = { ...marked };
   for (const { checkField } of stale) next[checkField] = false;
-  return { form: next, cleared: stale.map(({ name }) => name) };
+  return { form: next, cleared: stale.filter(({ serviceField }) => !!form[serviceField]).map(({ name }) => name) };
 }
 
 const PRE_SLAB_JOB_CONTEXT_OPTIONS = [
@@ -7794,7 +7800,9 @@ export default function EstimateToolViewV2({
                       )}
                       <CheckboxV2
                         k="trenchingLabelConfirmed"
-                        label="Label rate and trench depth confirmed"
+                        label={form.trenchingApplicationRate === "high" && BIFENTHRIN_OPTION_KEYS.has(normalizeTrenchingProductKey(form.trenchingProductKey))
+                          ? TRENCHING_REDUCED_VOLUME_CHECK
+                          : "Label rate and trench depth confirmed"}
                       />
                       <div className="text-14 text-zinc-600 leading-snug mb-1">
                         {(TRENCHING_PRODUCT_META[form.trenchingProductKey] || TRENCHING_PRODUCT_META.taurus_sc).warning}

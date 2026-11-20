@@ -7163,7 +7163,10 @@ function priceTrenching(property = {}, options = {}, replay) {
     ...warrantyResolution.warnings,
   ];
   if (volumeFactor < 1) {
-    warningList.push('Stronger dilution at a reduced finished volume, the same active ingredient per foot (label volume adjustment). Requires label confirmation.');
+    // The label allows a reduced volume only where the soil will not accept the labeled volume and a continuous barrier can still
+    // be achieved (pre-push audit 29). The bifenthrin label check, whose box names both at the high rate, holds the line in review
+    // until it is ticked (label_confirmation_required).
+    warningList.push('Stronger dilution at a reduced finished volume, the same active ingredient per foot (label volume adjustment). The label allows it only where the soil will not accept the labeled volume and a continuous barrier can still be achieved. Requires label confirmation.');
   } else if (rateResolution.applicationRate === 'high') {
     warningList.push('High/problem-soil rate increases chemical usage and requires label confirmation.');
   }

@@ -27,7 +27,10 @@ describe("termiticide product options", () => {
 
 // A label check saved before the swap was made for the earlier bottle under the same key, so a reopen clears it.
 describe("label checks saved for the earlier bifenthrin bottle", () => {
-  const saved = (extra) => ({ preslabProductKey: "talstar_p", preslabLabelConfirmed: true, trenchingProductKey: "bifen_it", trenchingLabelConfirmed: true, ...extra });
+  const saved = (extra) => ({
+    svcPreslab: true, preslabProductKey: "talstar_p", preslabLabelConfirmed: true,
+    svcTrenching: true, trenchingProductKey: "bifen_it", trenchingLabelConfirmed: true, ...extra,
+  });
 
   // Every form a reopen restores carries today's bottle mark, so a check ticked after the reopen counts (pre-push audit 22).
   const mark = { _bifenthrinLabelBottle: BIFENTHRIN_LABEL_BOTTLE };
@@ -37,6 +40,19 @@ describe("label checks saved for the earlier bifenthrin bottle", () => {
     const { form, cleared } = clearPriorBottleLabelChecks(inputs, { ...inputs, notes: "kept" });
     expect(cleared).toEqual(["pre-slab", "trenching"]);
     expect(form).toMatchObject({ preslabLabelConfirmed: false, trenchingLabelConfirmed: false, preslabProductKey: "talstar_p", trenchingProductKey: "bifen_it", notes: "kept", ...mark });
+  });
+
+  // A deselected service keeps its fields. Its check is cleared as well, but only a selected service's check sends the estimate
+  // back to Generate: the saved price does not include a deselected service (pre-push audit 29).
+  it("clears a deselected service's check without naming it, so it does not send the estimate back to Generate", () => {
+    const trenchOnly = saved({ svcPreslab: false });
+    expect(clearPriorBottleLabelChecks(trenchOnly, trenchOnly)).toEqual({
+      form: { ...trenchOnly, preslabLabelConfirmed: false, trenchingLabelConfirmed: false, ...mark }, cleared: ["trenching"],
+    });
+    const pestOnly = saved({ svcPest: true, svcPreslab: false, svcTrenching: false });
+    expect(clearPriorBottleLabelChecks(pestOnly, pestOnly)).toEqual({
+      form: { ...pestOnly, preslabLabelConfirmed: false, trenchingLabelConfirmed: false, ...mark }, cleared: [],
+    });
   });
 
   it("keeps the checks a form made for Crosscheck Plus, and fipronil checks, and unchecked boxes", () => {
