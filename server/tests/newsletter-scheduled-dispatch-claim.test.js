@@ -7,6 +7,7 @@
  * legacy draft-or-scheduled claim.
  */
 const mockValidateEventSelection = jest.fn(async () => ({ valid: true, errors: [], flagship: false, events: [] }));
+const mockTrigger = jest.fn(async () => ({ bellWritten: true }));
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/sendgrid-mail', () => ({
@@ -18,6 +19,7 @@ jest.mock('../services/newsletter-event-selection', () => ({
   validateFlagshipEventSelection: mockValidateEventSelection,
   parseLockedEventIds: jest.fn(() => []),
 }));
+jest.mock('../services/notification-triggers', () => ({ triggerNotification: mockTrigger }));
 jest.mock('../services/newsletter-validator', () => ({
   validateNewsletterDraft: jest.fn(() => ({ errors: [], warnings: [] })),
   lockedPricesForSend: jest.fn(async () => []),
@@ -34,7 +36,9 @@ const READ_AT = new Date('2026-10-06T14:00:00Z');
 const APPROVED_AT = new Date('2026-10-06T13:55:00Z');
 const SEND = {
   id: 'send-pi-1', status: 'scheduled', newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — October',
-  html_body: '<p>Body</p>', text_body: 'Body', event_ids: [], segment_filter: null,
+  html_body: '<p>Body</p>', text_body: 'Body', event_ids: [],
+  // A Waves Pest Insider issue goes out only with a planned audience.
+  segment_filter: { subscriber_ids: [1], holdout: 'pest-insider', address_keys: { 1: 'key-1' } },
   scheduled_for: new Date('2026-10-06T13:56:00Z'), updated_at: READ_AT, proof_approved_at: APPROVED_AT,
   // Approved by an APPROVED reply (email-sync always passes the stored email
   // row); no email id would mean the auto-send switch queued it.
@@ -92,6 +96,25 @@ test('the scheduler binds the claim to the version it validated, and an empty cl
   expect(claim.whereIn).not.toHaveBeenCalled();
   expect(claim.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sending' }));
   // The row was NOT flipped to failed: the only newsletter_sends writes are the claim attempt.
+});
+
+test('the scheduler returns a Waves Pest Insider issue with no plan to draft with one alert, and never marks it failed', async () => {
+  const revert = chain();
+  wire({
+    newsletter_sends: [chain({ rows: [{ ...SEND, segment_filter: null }] }), chain({ first: { ...SEND, segment_filter: null } }), revert],
+  });
+
+  const result = await processScheduledSends();
+
+  expect(result).toEqual({ processed: 0 });
+  expect(revert.where).toHaveBeenCalledWith({ id: 'send-pi-1', status: 'scheduled' });
+  expect(revert.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'draft', proof_approved_at: null }));
+  expect(mockTrigger).toHaveBeenCalledTimes(1);
+  expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+    sendId: 'send-pi-1',
+    errors: ['Stopped at send time: a Waves Pest Insider issue goes only to its planned readers, and this one has no plan'],
+  }));
+  expect(require('../services/sendgrid-mail').sendBroadcast).not.toHaveBeenCalled();
 });
 
 test('a direct (manual) sendCampaign keeps the legacy draft-or-scheduled claim and reports a lost race as ALREADY_CLAIMED', async () => {

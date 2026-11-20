@@ -48,6 +48,8 @@ const { sendCampaign, prepareResumeCampaign, resumeCampaign, hasOutstandingDeliv
 const { addressKey } = require('../services/pest-insider/audience');
 // The plan's key for each reader's qualifying address (services/pest-insider/audience.js).
 const PLANNED_KEYS = { 1: addressKey('a@example.com'), 2: addressKey('b@example.com') };
+// A Waves Pest Insider issue goes out only with a planned audience (audienceRefusal in the sender).
+const PLANNED_PI = { subscriber_ids: [1, 2], holdout: 'pest-insider', address_keys: PLANNED_KEYS };
 
 // Tiny knex-shaped chain helper. Mirrors the pattern used in
 // invoice-receipt-email-idempotency.test.js / portal-url.test.js so the
@@ -252,12 +254,19 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
       skipUpdated: 1,
       onSkipUpdate: (payload) => { skipUpdate = payload; },
     });
+    const info = jest.spyOn(require('../services/logger'), 'info');
 
     const result = await sendCampaign('send-1');
 
     expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['B@Example.com']);
     expect(skipUpdate).toMatchObject({ status: 'skipped', bounce_reason: 'ineligible_at_dispatch', send_attempt_token: null });
     expect(result.skipped_ineligible).toBe(1);
+    // The send log shows the planned audience as counts: no id list, no address key.
+    const logged = info.mock.calls.map(([line]) => String(line)).join('\n');
+    info.mockRestore();
+    expect(logged).toContain('"subscriber_ids":"2 ids"');
+    expect(logged).toContain('"address_keys":"2 keys"');
+    Object.values(PLANNED_KEYS).forEach((key) => expect(logged).not.toContain(key));
   });
 
   test('a planned issue skips a reader whose address on file changed after the batch was loaded', async () => {
@@ -329,6 +338,26 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     });
 
     await expect(sendCampaign('send-1')).rejects.toMatchObject({ code: 'UNKNOWN_HOLDOUT' });
+    expect(mockSendBroadcast).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['no segment filter', null],
+    ['a filter with no holdout', { subscriber_ids: [1, 2] }],
+  ])('a Waves Pest Insider issue with %s stops a first send before any claim work', async (_label, segmentFilter) => {
+    const queues = {
+      newsletter_sends: [chain({ first: {
+        id: 'send-1', status: 'draft', newsletter_type: 'pest-insider-monthly', html_body: '<p>Body</p>', text_body: 'Body',
+        subject: 'Hello', segment_filter: segmentFilter, subject_b: null,
+      } })], // the fetch, and nothing else: a claim would read the queue and throw
+    };
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+
+    await expect(sendCampaign('send-1')).rejects.toMatchObject({ code: 'UNPLANNED_AUDIENCE' });
     expect(mockSendBroadcast).not.toHaveBeenCalled();
   });
 
@@ -779,7 +808,7 @@ describe('resumeCampaign — preconditions', () => {
 
   test('a correction saved between validation and the claim makes the claim miss: VERSION_CHANGED, nothing is sent (codex round 13 P1)', async () => {
     const failedSend = {
-      id: 's', status: 'failed', newsletter_type: 'pest-insider-monthly', updated_at: new Date('2026-09-28T12:00:00Z'),
+      id: 's', status: 'failed', newsletter_type: 'pest-insider-monthly', segment_filter: PLANNED_PI, updated_at: new Date('2026-09-28T12:00:00Z'),
       subject: 'Pest Insider — September', html_body: '<p>Fine copy about mowing height.</p>', text_body: 'Fine copy about mowing height.', event_ids: [],
     };
     const wheres = [];
@@ -896,7 +925,7 @@ describe('resumeCampaign — preconditions', () => {
       if (table === 'newsletter_sends') {
         return chain({
           first: {
-            id: 's', status: 'failed', newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — September',
+            id: 's', status: 'failed', newsletter_type: 'pest-insider-monthly', segment_filter: PLANNED_PI, subject: 'Pest Insider — September',
             html_body: '<p>Termites swarm again after storms.</p>', text_body: 'Termites swarm again after storms.', event_ids: [],
           },
           onUpdate: (payload) => { sendUpdate = payload; },
@@ -941,7 +970,7 @@ describe('resumeCampaign — preconditions', () => {
       if (table === 'newsletter_sends') {
         const q = chain({
           first: {
-            id: 's', status: 'failed', newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — September',
+            id: 's', status: 'failed', newsletter_type: 'pest-insider-monthly', segment_filter: PLANNED_PI, subject: 'Pest Insider — September',
             html_body: '<p>Termites swarm again after storms.</p>', text_body: 'Termites swarm again after storms.', event_ids: [],
           },
           updated: 1,
@@ -965,7 +994,7 @@ describe('resumeCampaign — preconditions', () => {
       if (table === 'newsletter_sends') {
         return chain({
           first: {
-            id: 's', status: 'sending', updated_at: new Date(), newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — September',
+            id: 's', status: 'sending', updated_at: new Date(), newsletter_type: 'pest-insider-monthly', segment_filter: PLANNED_PI, subject: 'Pest Insider — September',
             html_body: '<p>Termites swarm again after storms.</p>', text_body: 'Termites swarm again after storms.', event_ids: [],
           },
           onUpdate: (payload) => { sendUpdate = payload; },
@@ -985,7 +1014,7 @@ describe('resumeCampaign — preconditions', () => {
         const q = chain({
           first: {
             id: 's', status: 'sending', updated_at: new Date(Date.now() - 60 * 60 * 1000), sending_claim_token: 'old-token',
-            newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — September',
+            newsletter_type: 'pest-insider-monthly', segment_filter: PLANNED_PI, subject: 'Pest Insider — September',
             html_body: '<p>Termites swarm again after storms.</p>', text_body: 'Termites swarm again after storms.', event_ids: [],
           },
           updated: 1,
@@ -1546,30 +1575,19 @@ describe('resumeCampaign — preconditions', () => {
     expect(skipUpdate).toMatchObject({ status: 'skipped', bounce_reason: 'ineligible_at_dispatch' });
   });
 
-  test('resume: a holdout name this server does not know stops the resume before anything is sent (it never reads the subscriber query)', async () => {
-    const sentSend = {
-      id: 's',
-      status: 'sent',
-      sent_at: new Date('2026-05-01T10:00:00Z'),
-      html_body: '<p>Body</p>',
-      text_body: 'Body',
-      subject: 'Hello',
-      from_email: 'newsletter@wavespestcontrol.com',
-      from_name: 'Waves',
-      reply_to: 'contact@wavespestcontrol.com',
-      segment_filter: { subscriber_ids: [1, 2], holdout: 'pest-insider-v2' },
-      subject_b: null,
-    };
+  test.each([
+    ['names a holdout this server does not know', { segment_filter: { subscriber_ids: [1, 2], holdout: 'pest-insider-v2' } }, 'UNKNOWN_HOLDOUT'],
+    ['is a Waves Pest Insider issue with no plan', { newsletter_type: 'pest-insider-monthly', segment_filter: null }, 'UNPLANNED_AUDIENCE'],
+    // A stale claim is not released to 'failed' either: the row stays as it is.
+    ['is a stale sending Waves Pest Insider issue with no plan', {
+      status: 'sending', updated_at: new Date('2026-01-01T00:00:00Z'), newsletter_type: 'pest-insider-monthly', segment_filter: null,
+    }, 'UNPLANNED_AUDIENCE'],
+  ])('resume: a campaign that %s is refused as it stands, before anything is counted, released or claimed', async (_label, fields, code) => {
     const queues = {
-      newsletter_sends: [
-        chain({ first: sentSend }),                           // resume fetch
-        chain({ returning: [{ id: 's' }] }),                  // conditional preclaim
-        chain({ first: { ...sentSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
-      ],
-      newsletter_send_deliveries: [
-        chain({ count: 2 }),                                  // rows exist
-        chain({ count: 2 }),                                  // two outstanding
-      ],
+      newsletter_sends: [chain({ first: {
+        id: 's', status: 'sent', sent_at: new Date('2026-05-01T10:00:00Z'), html_body: '<p>Body</p>', text_body: 'Body',
+        subject: 'Hello', subject_b: null, ...fields,
+      } })], // the resume fetch, and nothing else: any count, release or claim would throw
     };
     db.mockImplementation((table) => {
       const queue = queues[table];
@@ -1577,7 +1595,7 @@ describe('resumeCampaign — preconditions', () => {
       return queue.shift();
     });
 
-    await expect(resumeCampaign('s')).rejects.toMatchObject({ code: 'UNKNOWN_HOLDOUT' });
+    await expect(resumeCampaign('s')).rejects.toMatchObject({ code });
     expect(mockSendBroadcast).not.toHaveBeenCalled();
   });
 

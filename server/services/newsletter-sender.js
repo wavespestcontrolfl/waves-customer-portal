@@ -512,6 +512,40 @@ function keepsPlannedAudience(plan, segmentFilter, subscriberId, customerId, add
   return addresses.every((address) => keys[id] === plan.addressKey(address));
 }
 
+// Why this send must not go out to its audience, or null. Read before any
+// claim work, on a first send and on a resume (a resume reads its retryable
+// rows from the ledger and never runs buildSubscriberQuery):
+// - a holdout name this server does not know;
+// - a Waves Pest Insider issue with no planned audience (its planner sets
+//   one): without it the issue would go to every subscriber, the holdout and
+//   readers who never open Waves mail included.
+function audienceRefusal(send) {
+  const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
+  const filter = send.segment_filter;
+  if (filter?.holdout != null && !sendHoldout(filter)) {
+    return { code: 'UNKNOWN_HOLDOUT', message: 'the segment filter names a holdout this server does not know' };
+  }
+  if (send.newsletter_type === PEST_INSIDER_TYPE && filter?.holdout !== 'pest-insider') {
+    return { code: 'UNPLANNED_AUDIENCE', message: 'a Waves Pest Insider issue goes only to its planned readers, and this one has no plan' };
+  }
+  return null;
+}
+
+// The segment as the send log shows it. A planned audience's subscriber ids
+// (who opens Waves mail) and address keys (hashes of email addresses) appear
+// only as counts.
+function segmentForLog(filter) {
+  if (!filter) return 'all';
+  const shown = { ...filter };
+  if (shown.subscriber_ids != null) {
+    shown.subscriber_ids = Array.isArray(shown.subscriber_ids) ? `${shown.subscriber_ids.length} ids` : 'malformed';
+  }
+  if (shown.address_keys != null) {
+    shown.address_keys = typeof shown.address_keys === 'object' ? `${Object.keys(shown.address_keys).length} keys` : 'malformed';
+  }
+  return JSON.stringify(shown);
+}
+
 // The keys a planned issue's segment_filter carries (a Waves Pest Insider
 // issue's audience, fixed when the issue is planned: see
 // services/pest-insider/audience.js).
@@ -750,15 +784,10 @@ async function sendCampaign(sendId, opts = {}) {
     }
   }
   if (!send.html_body && !send.text_body) throw new Error('body required');
-  // A holdout name this server does not know stops the send on every path. A
-  // resume with a delivery ledger never runs buildSubscriberQuery (which
-  // matches nobody for an unknown name), so without this stop it would mail
-  // every retryable row with no holdout check at all.
-  if (send.segment_filter?.holdout != null && !sendHoldout(send.segment_filter)) {
-    const err = new Error('the segment filter names a holdout this server does not know');
-    err.code = 'UNKNOWN_HOLDOUT';
-    throw err;
-  }
+  // A send whose audience this server cannot honor stops here on every path,
+  // before any claim work (audienceRefusal).
+  const refusal = audienceRefusal(send);
+  if (refusal) throw Object.assign(new Error(refusal.message), { code: refusal.code });
 
   // Editorial + cadence pre-flight applies to the ORIGINAL dispatch only.
   // A TRUE PARTIAL resume — preclaimed AND constrained to the existing
@@ -961,7 +990,7 @@ async function sendCampaign(sendId, opts = {}) {
   // segment or new subscribers cannot expand an old campaign's audience.
   if (!opts.existingDeliveriesOnly) {
     subscribers = await buildSubscriberQuery(send.segment_filter, await resolveSegmentCustomerIds(send.segment_filter));
-    logger.info(`[newsletter] send ${send.id} → ${subscribers.length} subscribers (segment=${send.segment_filter ? JSON.stringify(send.segment_filter) : 'all'})`);
+    logger.info(`[newsletter] send ${send.id} → ${subscribers.length} subscribers (segment=${segmentForLog(send.segment_filter)})`);
     const deliveryRows = subscribers.map((s) => ({
       send_id: send.id,
       subscriber_id: s.id,
@@ -1459,6 +1488,11 @@ async function prepareResumeCampaign(sendId) {
     err.code = 'STILL_SENDING';
     throw err;
   }
+  // Refused as it stands, before anything below can change this row (the
+  // reset to draft, the release of a stale claim, the resume claim): a send
+  // whose audience this server cannot honor (audienceRefusal).
+  const refusal = audienceRefusal(send);
+  if (refusal) throw Object.assign(new Error(refusal.message), { code: refusal.code });
   // A resume mails the rest of the list from what is stored NOW. A campaign
   // persisted before a stricter claim scan shipped, or one edited after its
   // first attempt failed, must pass the same validation the manual and
@@ -1776,12 +1810,15 @@ async function processScheduledSends() {
         logger.info(`[newsletter-scheduler] send ${row.id} changed after this tick validated it — not dispatching this version`);
         continue;
       }
-      if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID') {
+      if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID'
+        || err.code === 'UNKNOWN_HOLDOUT' || err.code === 'UNPLANNED_AUDIENCE') {
         // sendCampaign's own pre-claim gates re-run the lineup checks and
         // can newly fail even though the tick's gate just passed (the
         // recheck fetches live pages). A generic 'failed' flip would
         // strand the week uneditable — take the same
-        // revert-to-editable-draft exit as the tick's gate.
+        // revert-to-editable-draft exit as the tick's gate. An audience
+        // refusal (audienceRefusal) takes the same exit: nothing went out,
+        // and the alert says why.
         logger.error(`[newsletter-scheduler] send ${row.id} blocked at dispatch: ${err.message}`);
         try {
           await revertBlockedScheduledSend(row, err.message);
