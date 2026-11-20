@@ -115,6 +115,14 @@ describe('readableEmail', () => {
     expect(readableEmail({ subject: 'S'.repeat(SUBJECT_CHARS + 1), body_text: 'Ends May 1.' })).toBeNull();
   });
 
+  // Pre-push audit on 75797b78e6 (P1): "Re: Flash sale ends tomorrow" put the old "tomorrow" on the reply's day.
+  test("a reply's or forward's subject is the old email's: left out, so the read is partial", () => {
+    for (const subject of ['Re: Flash sale ends tomorrow', 'FW: Flash sale ends tomorrow', 'fwd:Flash sale ends tomorrow']) {
+      expect(readableEmail({ subject, body_text: 'Thanks' })).toEqual({ subject: '', text: 'Thanks', cut: false, partial: true });
+    }
+    expect(readableEmail({ subject: 'Repeat order sale', body_text: 'Thanks' }).subject).toBe('Repeat order sale');
+  });
+
   test('stays linear on a hostile HTML body the size of the re-read', () => {
     const started = Date.now();
     endDateText({ body_html: '<'.repeat(BODY_HTML_CHARS) });
@@ -332,6 +340,18 @@ describe('checkAnswer', () => {
     expect(read('2026-04-23', 'Deals April 13 through Thursday').ok).toBe(true);
   });
 
+  // Pre-push audit on 75797b78e6 (P1): "Offer ends April 15 (Wednesday)" passed the Wednesday after.
+  test('beside dates, a day word names a day only as a range close; a weekday beside a date labels it', () => {
+    const wednesday = new Date('2026-04-15T14:00:00Z'); // Wednesday Apr 15
+    const promo = 'Subject\nOffer ends April 15 (Wednesday). Order by April 15. Ships Wednesday. Valid April 14 until Friday.';
+    const read = (endDate, quote) => checkAnswer({ end_date: endDate, quote, price_increase: false }, promo, wednesday);
+    const refused = { ok: false, reason: 'quote_date_mismatch' };
+    expect(read('2026-04-22', 'Offer ends April 15 (Wednesday)')).toEqual(refused);
+    expect(read('2026-04-15', 'Offer ends April 15 (Wednesday)').ok).toBe(true);
+    expect(read('2026-04-22', 'Order by April 15. Ships Wednesday')).toEqual(refused);
+    expect(read('2026-04-17', 'Valid April 14 until Friday').ok).toBe(true);
+  });
+
   // Pre-push audit on 8cdbc9728d (P1): a cap that cut "May 30" after the 3 left "Offer ends May 3" looking whole.
   test("words that run to a cap's cut cannot be checked whole: a miss on a cut email", () => {
     const cutAt3 = 'Subject\nSpring sale on Demand CS. Offer ends May 3';
@@ -523,6 +543,20 @@ describe('readDealEndDates', () => {
     expect(found.size).toBe(0);
     expect(mockCreate.mock.calls[0][0].messages[0].content).toBe('Received: 2026-04-15 (US Eastern)\nSubject: Deal 1\n\nThanks for the update.');
     expect(logger.info).toHaveBeenCalledWith('[siteone-deals] end dates: 0 of 1 deals read by AI; date patterns kept for 1 quote_not_found');
+  });
+
+  // Pre-push audit on 75797b78e6 (P1): a reply's old subject "ends tomorrow" counted from the reply's day.
+  test("a reply's subject is not sent and is no proof; \"no end\" on a reply is a miss", async () => {
+    const { conn } = fakeConn([{ id: 1, body_text: 'Thanks', body_html: null }, { id: 2, body_text: 'Thanks', body_html: null }]);
+    mockCreate
+      .mockResolvedValueOnce(reply('{"end_date": "2026-04-16", "quote": "Flash sale ends tomorrow", "price_increase": false}'))
+      .mockResolvedValueOnce(reply('{"end_date": null, "quote": null, "price_increase": false}'));
+
+    const found = await readDealEndDates(conn, [deal(1, { subject: 'Re: Flash sale ends tomorrow' }), deal(2, { subject: 'Fwd: Flash sale' })]);
+
+    expect(found.size).toBe(0);
+    expect(mockCreate.mock.calls[0][0].messages[0].content).toBe('Received: 2026-04-15 (US Eastern)\nSubject: \n\nThanks');
+    expect(logger.info).toHaveBeenCalledWith('[siteone-deals] end dates: 0 of 2 deals read by AI; date patterns kept for 1 quote_not_found, 1 no_end_in_cut_text');
   });
 
   // Pre-push audit on 8cdbc9728d (P1): the model cap cut "Ends May 30" to "Ends May 3".

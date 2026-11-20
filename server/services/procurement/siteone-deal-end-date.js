@@ -157,22 +157,27 @@ const flatten = (s) => s
 
 // A line that starts with ">" is quoted mail, also with no "On ... wrote:" line above it.
 const QUOTED_LINE = /^>[^\n]*(?:\n|$)/gm;
+// A subject that starts "Re:", "Fw:" or "Fwd:" is a reply's or forward's: the old email's subject.
+const INHERITED_SUBJECT = /^(?:re|fwd?) ?:/i;
 
 /**
  * The email as the model reads it: { subject, text, cut, partial }, or null when the subject
- * (links out, one line) runs past SUBJECT_CHARS. The text is body_text, else body_html with
+ * (links out, one line) runs past SUBJECT_CHARS. A reply's or forward's subject ("Re:", "Fwd:")
+ * is the old email's, and its "tomorrow" was said on another day, so it is left out (''). The
+ * text is body_text, else body_html with
  * tags removed (line breaks kept); entities decoded, links removed, spaces and blank lines
  * collapsed, and quoted mail dropped: reply history as the date patterns drop it, every line
  * that starts with ">", and in HTML every <blockquote>. It is capped at what the subject
  * leaves of MODEL_TEXT_CHARS. `cut` is true when a cap cut the end of the text: the body
  * re-read cap (unless it cut only reply history, which is dropped anyway) or the model cap.
- * `partial` is true when the model does not read all of the email: a cap cut it, or a quoted
- * line or a <blockquote> was dropped (the date patterns read those, and a <blockquote> may be
- * a styled block of this email).
+ * `partial` is true when the model does not read all of the email: a cap cut it, the subject
+ * was left out, or a quoted line or a <blockquote> was dropped (the date patterns read those,
+ * and a <blockquote> may be a styled block of this email).
  */
 function readableEmail(email) {
-  const subject = flatten(String(email?.subject || '')).replace(/\n/g, ' ');
-  if (subject.length > SUBJECT_CHARS) return null;
+  const flat = flatten(String(email?.subject || '')).replace(/\n/g, ' ');
+  if (flat.length > SUBJECT_CHARS) return null;
+  const subject = INHERITED_SUBJECT.test(flat) ? '' : flat;
   const text = typeof email?.body_text === 'string' && email.body_text.trim() ? email.body_text : null;
   const html = typeof email?.body_html === 'string' ? email.body_html : '';
   const read = flatten(decodeEntities(text ?? htmlText(html)));
@@ -181,7 +186,7 @@ function readableEmail(email) {
   const room = MODEL_TEXT_CHARS - subject.length;
   const readCut = kept.length === read.length && (text !== null ? text.length >= BODY_TEXT_CHARS : html.length >= BODY_HTML_CHARS);
   const cut = readCut || whole.length > room;
-  const dropped = whole.length < kept.trim().length || (text === null && /<blockquote/i.test(html));
+  const dropped = subject !== flat || whole.length < kept.trim().length || (text === null && /<blockquote/i.test(html));
   return { subject, text: whole.slice(0, room), cut, partial: cut || dropped };
 }
 
@@ -240,6 +245,9 @@ const RANGE_GAP = 48;
 // A sentence ends at ". ", "! ", "? " or "; " before a letter; "a.m." and "p.m." do not end one.
 const SENTENCE_END = /[.!?;] [a-z]/;
 const oneSentence = (stretch) => !SENTENCE_END.test(stretch.replace(/\b([ap])\.m\./g, '$1m'));
+// Beside dates, a day word names a day only as the close of a range that one of these words
+// opens from the date right before it: "April 20 through Friday", "4/14 until tomorrow".
+const RANGE_JOIN = /^ ?(?:-|to|through|thru|until|till) ?$/;
 // Words for a day without a date. A weekday may be cut short ("Fri.", "Tues", "Thurs").
 const DAY_WORD = /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|today|tonight|tomorrow)\b/g;
 
@@ -287,7 +295,7 @@ function dayMarks(text) {
  * from the ET day the email came. `text` is the words (text.slice(0, wordsEnd)) and then the
  * email right after them, so a range the quote stops short of still shows its first day as a
  * start. A date in the words decides; with none, a weekday at most a week on, "today"/"tonight"
- * or "tomorrow" must land on endDate.
+ * or "tomorrow" must land on endDate. Beside dates, a day word counts only as a range's close.
  */
 function quoteNamesDay({ text, wordsEnd }, endDate, away) {
   const [year, month, day] = endDate.split('-').map(Number);
@@ -312,9 +320,16 @@ function quoteNamesDay({ text, wordsEnd }, endDate, away) {
   const marks = dayMarks(text);
   const said = marks.filter((d) => d.end <= wordsEnd);
   // A weekday names a day at most a week on, and never when cut short. Beside dates in the words, a day
-  // word names only a day after all of them ("April 20 through Friday"); a weekday that labels a date is that date.
-  const afterDates = said.every((d) => d.word || asDay(d) < end);
-  const named = said.filter((d) => sameDay(d) && (!d.word || (!d.short && (d.word !== weekday || away <= 7) && afterDates)));
+  // word names a day only as a range's close: a RANGE_JOIN word joins it to the date right before it,
+  // and it falls after every date there ("April 20 through Friday"). So a weekday set beside a date
+  // labels that date ("April 15 (Wednesday)", "Friday, May 1") and names no other day.
+  const dates = said.filter((d) => !d.word);
+  const afterDates = dates.every((d) => asDay(d) < end);
+  const closesRange = (d) => {
+    const start = dates.filter((n) => n.end <= d.at).pop();
+    return start !== undefined && afterDates && RANGE_JOIN.test(text.slice(start.end, d.at));
+  };
+  const named = said.filter((d) => sameDay(d) && (!d.word || (!d.short && (d.word !== weekday || away <= 7) && (!dates.length || closesRange(d)))));
   // Another day after d in its sentence. The stretch takes that day's first letter, so ". Monday" ends the sentence.
   const anotherDayAfter = (d) => marks.some((n) => n.at >= d.end && n.at - d.end <= RANGE_GAP && !sameDay(n)
     && oneSentence(text.slice(d.end, n.at + 1)));
