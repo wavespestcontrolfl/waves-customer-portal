@@ -767,8 +767,12 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     expect(select('Runs From Phone App').value).toBe('');
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(bodies).toHaveLength(1));
-    // The timer is a fact about one home, so the save carries the form's home stamp (none on this row).
-    expect(bodies[0]).toEqual({ irrigationControllerBrand: 'rain_bird', irrigationControllerModel: null, irrigationControllerApp: null, confirmedAsOf: null });
+    // The timer is a fact about one home, so the save carries the form's home stamp (none on this row), and the timer
+    // the form opened with: the server sets the timer only over that one.
+    expect(bodies[0]).toEqual({
+      irrigationControllerBrand: 'rain_bird', irrigationControllerModel: null, irrigationControllerApp: null, confirmedAsOf: null,
+      controllerTimerSeen: 'hunter|x2|yes',
+    });
   });
 
   it('the timer saves as one record: an answer travels with its brand and model, and a new model clears the old answer', async () => {
@@ -807,10 +811,11 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     fireEvent.change(select('Runs From Phone App'), { target: { value: 'no' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(bodies).toHaveLength(1));
-    // Only the answer changed, and all three are sent, with the home stamp the form was rendered against.
+    // Only the answer changed, and all three are sent, with the home stamp the form was rendered against and the timer
+    // it opened with.
     expect(bodies[0]).toEqual({
       irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: 'no',
-      confirmedAsOf: '2026-11-10T15:00:00.000Z',
+      confirmedAsOf: '2026-11-10T15:00:00.000Z', controllerTimerSeen: 'hunter|x2|yes',
     });
   });
 });

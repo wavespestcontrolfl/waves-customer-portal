@@ -66,7 +66,7 @@ const {
   prefsRenderStamp,
   renderedAgainstCurrentHome,
 } = require('../services/property-preferences-schema');
-const { settleControllerTimer } = require('../services/controller-timer');
+const { controllerTimerSeen, settleControllerTimer } = require('../services/controller-timer');
 // The locked write found nothing left to save (the only fields were a rejected sprinkler timer).
 const NOTHING_SAVED = Symbol('nothing saved');
 
@@ -321,9 +321,10 @@ router.put('/preferences', async (req, res, next) => {
       // after a move the request must carry the matching stamp (an absent
       // token — an old bundle — fails closed, gh-r43).
       const requestFresh = renderedAgainstCurrentHome(current, renderStamp);
-      // The sprinkler timer on file is one record about one home: it saves whole, and only from a page rendered
-      // against the current home (a move clears it under this lock). A rejected timer leaves `updates` without it.
-      rejected.push(...settleControllerTimer(updates, { fresh: requestFresh }));
+      // The sprinkler timer on file is one record about one home: it saves whole, only from a page rendered against
+      // the current home (a move clears it under this lock), and only over the timer that page showed. A rejected
+      // timer leaves `updates` without it.
+      rejected.push(...settleControllerTimer(updates, { fresh: requestFresh, stored: current, seen: controllerTimerSeen(req.body) }));
       if (Object.keys(updates).length === 0) return NOTHING_SAVED;
       // The confirmation union is ONE atomic statement over the row's
       // CURRENT value — an unlocked pre-move read could write a full pre-move

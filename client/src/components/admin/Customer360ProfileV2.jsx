@@ -8126,6 +8126,12 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWat
     if ([...ACCESS_PREFS_SOD_KEYS, ...ACCESS_PREFS_TIMER_KEYS].some((k) => dirtyKeys.includes(k))) {
       body.confirmedAsOf = renderStampRef.current;
     }
+    // The timer this form opened with (or last saved), as brand|model|app: the server sets the timer only over that
+    // one, so a change the customer made while the form was open is never overwritten.
+    if (ACCESS_PREFS_TIMER_KEYS.some((k) => dirtyKeys.includes(k))) {
+      const shown = accessPrefsSavePayload(initialDraftRef.current, ACCESS_PREFS_TIMER_KEYS);
+      body.controllerTimerSeen = ACCESS_PREFS_TIMER_KEYS.map((k) => shown[k] ?? "").join("|");
+    }
     const response = await adminFetch(
       `/admin/customers/${customerId}/property-preferences`,
       { method: "PUT", body: JSON.stringify(body) },

@@ -217,7 +217,7 @@ describe('PUT /api/property/preferences — the sprinkler timer on file', () => 
   });
 
   test('a whole timer saves, comes back in the response, stamps no irrigation system and sends no email', async () => {
-    const { status, body } = await putPrefs(X2_ON_APP);
+    const { status, body } = await putPrefs({ ...X2_ON_APP, controller_timer_seen: '||' });
     expect(status).toBe(200);
     expect(body.preferences).toMatchObject(X2_ON_APP);
     expect(timerOf(db._state.row)).toEqual(['hunter', 'x2', 'yes']);
@@ -252,7 +252,19 @@ describe('PUT /api/property/preferences — the sprinkler timer on file', () => 
       expect(body.error).toBe('The home on this account changed. Reload, then set the sprinkler timer again.');
       expect(timerOf(db._state.row)).toEqual([null, null, null]);
     }
-    expect((await putPrefs({ ...X2_ON_APP, confirmed_as_of: movedAt })).status).toBe(200);
+    expect((await putPrefs({ ...X2_ON_APP, confirmed_as_of: movedAt, controller_timer_seen: '||' })).status).toBe(200);
+    expect(timerOf(db._state.row)).toEqual(['hunter', 'x2', 'yes']);
+  });
+
+  test('a page that showed another timer cannot set one: the timer changed while it was open', async () => {
+    db._state.row = { id: 'pref-1', customer_id: 'cust-1', irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null, irrigation_controller_app: null };
+    for (const seen of [{ controller_timer_seen: 'hunter|x2|' }, {}]) {
+      const { status, body } = await putPrefs({ ...X2_ON_APP, ...seen });
+      expect(status).toBe(400);
+      expect(body.error).toBe('The sprinkler timer on this account changed while this page was open. Reload, then set it again.');
+      expect(timerOf(db._state.row)).toEqual(['rain_bird', null, null]);
+    }
+    expect((await putPrefs({ ...X2_ON_APP, controller_timer_seen: 'rain_bird||' })).status).toBe(200);
     expect(timerOf(db._state.row)).toEqual(['hunter', 'x2', 'yes']);
   });
 

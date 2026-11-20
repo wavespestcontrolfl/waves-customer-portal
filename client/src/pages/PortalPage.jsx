@@ -8779,6 +8779,10 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   // The customer's own timer pick that the server refused: it stays on screen beside the reason, and no save response
   // replaces it, until a later pick is sent and taken.
   const timerRefusedRef = useRef(false);
+  // The timer this screen showed before its first queued timer change (sprinklerTimerKey). The save sends it as
+  // controller_timer_seen, and the server sets the timer only over that one: a page left open never puts back a timer
+  // someone else replaced, and an app answer never lands on another box.
+  const timerSeenRef = useRef(null);
   const saveQueueRef = useRef(Promise.resolve());
   // Identity these edits belong to. The whole portal tree remounts on any
   // property/customer change, so capturing once at mount is sufficient.
@@ -8866,6 +8870,11 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         // (screenStampRef), not the newest a save returned: a save that
         // reports a move does not show the customer the new home's settings.
         toSave.confirmed_as_of = screenStampRef.current;
+        const savingTimerSeen = timerSeenRef.current;
+        if (SPRINKLER_TIMER_FIELDS.some((field) => field in toSave)) {
+          toSave.controller_timer_seen = savingTimerSeen;
+          timerSeenRef.current = null;
+        }
         const savingIrrigationRevision = irrigationEditRevision.current;
         const savingAwayWatchRevision = awayWatchPairRevision.current;
         try {
@@ -8953,11 +8962,20 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
           // still re-queues the whole batch, unchanged.
           const rejectedFields = Array.isArray(err?.rejected) ? err.rejected : [];
           // What a failure may re-queue: never an Away Watch pair the member withdrew after this save left, and never
-          // `confirmed_as_of` (every flush synthesizes it fresh), so a batch left with no real field queues nothing.
+          // `confirmed_as_of` or `controller_timer_seen` (every flush synthesizes them), so a batch left with no real
+          // field queues nothing.
           const requeueable = (fields) => {
             const kept = awayWatchPairRevision.current === savingAwayWatchRevision ? { ...fields } : withoutAwayWatchPair(fields);
             delete kept.confirmed_as_of;
+            delete kept.controller_timer_seen;
             return kept;
+          };
+          // Re-queue UNDER newer edits (a field re-edited since this PUT left wins). A timer change goes back with the
+          // timer it was made against, which is older than that of any timer change queued since.
+          const requeue = (fields) => {
+            if (!Object.keys(fields).length) return;
+            pendingRef.current = { ...fields, ...pendingRef.current };
+            if (SPRINKLER_TIMER_FIELDS.some((field) => field in fields)) timerSeenRef.current = savingTimerSeen;
           };
           if (rejectedFields.length) {
             if (rejectedFields.some((r) => SPRINKLER_TIMER_FIELDS.includes(r.field))) timerRefusedRef.current = true;
@@ -8973,19 +8991,13 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
             // metadata-only request that the server 400s with no `rejected`
             // list — which re-queues it again, forever, and every
             // property-switch flush keeps failing on it.
-            const retryable = requeueable(Object.fromEntries(
+            requeue(requeueable(Object.fromEntries(
               Object.entries(toSave).filter(([k]) => k !== 'confirmed_as_of' && !rejectedSet.has(k)),
-            ));
-            if (Object.keys(retryable).length) {
-              pendingRef.current = { ...retryable, ...pendingRef.current };
-            }
+            )));
           } else {
-            // Re-queue UNDER newer edits (a field re-edited since this PUT
-            // left wins) so the next flush retries these without clobbering
-            // fresher input. The UI is not reverted, so queue and screen
-            // agree.
-            const retry = requeueable(toSave);
-            if (Object.keys(retry).length) pendingRef.current = { ...retry, ...pendingRef.current };
+            // The next flush retries these without clobbering fresher input.
+            // The UI is not reverted, so queue and screen agree.
+            requeue(requeueable(toSave));
           }
           throw err;
         }
@@ -9529,7 +9541,10 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         model={prefs.irrigationControllerModel}
         app={prefs.irrigationControllerApp}
         error={fieldErrors.irrigationControllerBrand || fieldErrors.irrigationControllerModel || fieldErrors.irrigationControllerApp}
-        onChange={(fields) => Object.entries(fields).forEach(([field, value]) => updateField(field, value))}
+        onChange={(fields) => {
+          if (!SPRINKLER_TIMER_FIELDS.some((field) => field in pendingRef.current)) timerSeenRef.current = sprinklerTimerKey(prefs);
+          Object.entries(fields).forEach(([field, value]) => updateField(field, value));
+        }}
       />}
 
       <ServicePrefsSection />

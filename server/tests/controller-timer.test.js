@@ -4,8 +4,8 @@
 // customer-dedupe.test.js, the undo in customer-dedupe-undo.test.js.
 const { CONTROLLER_BRANDS, CONTROLLER_MODELS, controllerAsksAboutApp } = require('@waves/irrigation-runtime');
 const {
-  CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerOf, hasControllerTimer, settleControllerTimer,
-  settleKeptControllerTimer,
+  CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerKey, controllerTimerOf, controllerTimerSeen,
+  hasControllerTimer, settleControllerTimer, settleKeptControllerTimer,
 } = require('../services/controller-timer');
 
 const X2 = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
@@ -47,7 +47,8 @@ test('only an exact false clears it; an unknown premise, or a row with no timer 
 
 // A preference write (settleControllerTimer): the timer saves whole or not at all, and only from a form rendered
 // against the home on the row now. `left` is what the write still holds after the settle.
-const settle = (updates, options) => ({ rejected: settleControllerTimer(updates, options), left: updates });
+// By default the form showed no timer and the row holds none (`seen` '||', no `stored` row).
+const settle = (updates, options) => ({ rejected: settleControllerTimer(updates, { seen: '||', ...options }), left: updates });
 const timerColumns = ([brand, model, app]) => ({
   irrigation_controller_brand: brand, irrigation_controller_model: model, irrigation_controller_app: app,
 });
@@ -92,6 +93,32 @@ test('a timer that cannot exist is rejected whole, with one reason on each field
     expect(rejected.map((r) => r.field)).toEqual(['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp']);
     for (const r of rejected) expect(r.message).toMatch(reason);
   }
+});
+
+test('a timer change lands only over the timer the form showed: a page left open never puts back a replaced timer', () => {
+  const RAIN_BIRD = timerColumns(['rain_bird', null, null]);
+  // The form showed the X2 and the row still holds it: the new answer saves.
+  expect(settle({ ...X2, irrigation_controller_app: 'no' }, { stored: X2, seen: 'hunter|x2|yes' }).rejected).toEqual([]);
+  // Someone set a Rain Bird meanwhile: a change from the X2 page is refused whole (an answer, a pick, a clear).
+  for (const change of [{ ...X2, irrigation_controller_app: 'no' }, timerColumns(['hunter', 'pro_c', null]), clearedControllerTimer()]) {
+    const { rejected, left } = settle({ ...change, irrigation_zones: 6 }, { stored: RAIN_BIRD, seen: 'hunter|x2|yes' });
+    expect(left).toEqual({ irrigation_zones: 6 });
+    expect(rejected).toHaveLength(3);
+    for (const r of rejected) expect(r.message).toBe('The sprinkler timer on this account changed while this page was open. Reload, then set it again.');
+  }
+  // A timer write that names no timer it saw is refused; a write with no timer field needs none.
+  expect(settle({ ...X2 }, { seen: null }).rejected).toHaveLength(3);
+  expect(settle({ irrigation_zones: 6 }, { seen: null })).toEqual({ rejected: [], left: { irrigation_zones: 6 } });
+  // A move outranks it: the reason names the home.
+  expect(settle({ ...X2 }, { stored: RAIN_BIRD, seen: 'hunter|x2|yes', fresh: false }).rejected[0].message).toMatch(/home on this account changed/);
+});
+
+test('the timer a form saw comes from either writer\'s field, as brand|model|app', () => {
+  expect(controllerTimerKey(X2)).toBe('hunter|x2|yes');
+  expect(controllerTimerKey(null)).toBe('||');
+  expect(controllerTimerSeen({ controller_timer_seen: 'hunter|x2|yes' })).toBe('hunter|x2|yes');
+  expect(controllerTimerSeen({ controllerTimerSeen: '||' })).toBe('||');
+  for (const body of [{}, null, { controller_timer_seen: 7 }, { controllerTimerSeen: null }]) expect(controllerTimerSeen(body)).toBeNull();
 });
 
 test('a write rendered against a home the customer has left is rejected, a clear included', () => {

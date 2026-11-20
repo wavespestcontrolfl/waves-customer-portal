@@ -78,8 +78,9 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
     expect(await screen.findByText('Hunter Pro-C')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Yes' })).toHaveAttribute('aria-pressed', 'false');
     await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1), { timeout: 8000 });
+    // The save names the timer the screen showed before the change: the server sets the timer only over that one.
     expect(api.updatePropertyPreferences).toHaveBeenCalledWith(expect.objectContaining({
-      irrigationControllerBrand: 'hunter', irrigationControllerModel: 'pro_c', irrigationControllerApp: null,
+      irrigationControllerBrand: 'hunter', irrigationControllerModel: 'pro_c', irrigationControllerApp: null, controller_timer_seen: 'hunter|x2|yes',
     }));
     expect(screen.getByText('Hunter Pro-C')).toBeInTheDocument();
     // A timer is not a watering input: recording one does not reload the week's plan.
@@ -106,10 +107,13 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
     expect(await screen.findByText(shown, {}, { timeout: 8000 })).toBeInTheDocument();
     expect(screen.getByText('Hunter X2')).toBeInTheDocument();
     expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1);
+    expect(api.updatePropertyPreferences.mock.calls[0][0].controller_timer_seen).toBe('||');
 
     fireEvent.change(screen.getByLabelText('Side Gate / Backyard Access'), { target: { value: 'Lift latch' } });
     await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(2), { timeout: 8000 });
     expect(api.updatePropertyPreferences.mock.calls[1][0].irrigationControllerModel).toBe(sentAgain ? 'x2' : undefined);
+    // A lost change goes again with the timer it was made against; a refused one leaves nothing behind.
+    expect(api.updatePropertyPreferences.mock.calls[1][0].controller_timer_seen).toBe(sentAgain ? '||' : undefined);
     expect(await screen.findByText('Property details saved.')).toBeInTheDocument();
     expect(screen.getByText('Hunter X2')).toBeInTheDocument();
   }, 20000);
@@ -133,8 +137,40 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
     fireEvent.change(screen.getByLabelText('Side Gate / Backyard Access'), { target: { value: 'Lift latch, then left' } });
     await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(2), { timeout: 8000 });
     expect(api.updatePropertyPreferences.mock.calls[1][0]).not.toHaveProperty('irrigationControllerModel');
+    expect(api.updatePropertyPreferences.mock.calls[1][0]).not.toHaveProperty('controller_timer_seen');
     expect(await screen.findByText('Property details saved.')).toBeInTheDocument();
     expect(screen.getByText('Hunter X2')).toBeInTheDocument();
+  }, 20000);
+
+  // Staff replaced the timer while this page was open: the next change here names the timer the screen showed, so the
+  // server refuses it (an app answer never puts back an old box), and the card says why.
+  it('a timer change names the timer the screen showed before it; the server\'s refusal stays on screen', async () => {
+    api.getPropertyPreferences.mockResolvedValue({
+      preferences: { ...SPRAY_PREFS, irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: null },
+      hasLawnCare: true,
+    });
+    const CHANGED = 'The sprinkler timer on this account changed while this page was open. Reload, then set it again.';
+    api.updatePropertyPreferences
+      .mockImplementationOnce(async (payload) => ({ saved: true, preferences: { ...SPRAY_PREFS, ...payload } }))
+      .mockRejectedValueOnce(Object.assign(new Error(CHANGED), {
+        rejected: ['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp'].map((field) => ({ field, message: CHANGED })),
+      }));
+    render(<PropertyTab customer={lawnCustomer} />);
+    // A pick and an answer in one save: both were made against the X2.
+    fireEvent.click(await screen.findByRole('button', { name: 'Change my timer' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Pro-C/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }));
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1), { timeout: 8000 });
+    expect(api.updatePropertyPreferences.mock.calls[0][0]).toMatchObject({
+      irrigationControllerModel: 'pro_c', irrigationControllerApp: 'yes', controller_timer_seen: 'hunter|x2|',
+    });
+    expect(await screen.findByText('Property details saved.')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'No' }));
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(2), { timeout: 8000 });
+    expect(api.updatePropertyPreferences.mock.calls[1][0]).toMatchObject({ irrigationControllerApp: 'no', controller_timer_seen: 'hunter|pro_c|yes' });
+    expect(await screen.findByText(`We could not save your timer. ${CHANGED}`, {}, { timeout: 8000 })).toBeInTheDocument();
+    expect(screen.getByText('Hunter Pro-C')).toBeInTheDocument();
   }, 20000);
 
   // X2 on file; the customer picks the Pro-C, then the X2 again while the Pro-C save is in flight. The Pro-C answer
@@ -159,9 +195,11 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
     fireEvent.click(screen.getByRole('button', { name: /^X2/ }));
     await act(async () => { answerFirstSave(); });
     expect(screen.getByText('Hunter X2')).toBeInTheDocument();
+    // The X2 was picked while the screen showed the Pro-C on its way to the server.
+    expect(api.updatePropertyPreferences.mock.calls[0][0].controller_timer_seen).toBe('hunter|x2|');
 
     expect(await screen.findByText('Could not save. Please check your connection and try again.', {}, { timeout: 8000 })).toBeInTheDocument();
-    expect(api.updatePropertyPreferences.mock.calls[1][0]).toMatchObject({ irrigationControllerModel: 'x2' });
+    expect(api.updatePropertyPreferences.mock.calls[1][0]).toMatchObject({ irrigationControllerModel: 'x2', controller_timer_seen: 'hunter|pro_c|' });
     expect(screen.getByText('Hunter X2')).toBeInTheDocument();
   }, 20000);
 
