@@ -871,11 +871,14 @@ const customerAddressFields = (cust) => ({
 // Nor for a place the area check refuses (Punta Gorda), which phase 1 never keeps, unless a staff-verified pin keeps
 // the whole profile (pre-push P1 on f6c3fdc9e9). zoneFallbackCity is that city, the one phase 1 may keep: the
 // commit's zone re-check compares with it, and phase 1 keeps only it.
+// `bookedCity`: the commit's re-check runs after phase 1, so it passes the city on file of the profile phase 1
+// booked, the city createSelfBooking falls back to, in place of that prediction: a sibling phase 1 reused keeps its
+// own city, even a place the area check refuses.
 const zoneFallbackCity = (customer, address, coords) => (
   customer && profileMatchesAddress(customer, address, coords)
     && (customer.verified_by_review || !isExcludedLocality(customer.city)) ? customer.city : null
 );
-async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, customer }) {
+async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, customer, bookedCity }) {
   const booking = require('./booking');
   const { buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
   const zoneInputs = zoneFunnelInputs(address);
@@ -917,7 +920,7 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     ...(zoneInputs ? {
       zoneFunnelAddress: zoneInputs.address,
       zoneFunnelCity: zoneInputs.city,
-      zoneFunnelCustomerCity: zoneFallbackCity(customer, address, coords),
+      zoneFunnelCustomerCity: bookedCity ?? zoneFallbackCity(customer, address, coords),
     } : {}),
   });
 }
@@ -2337,13 +2340,15 @@ async function sendSlotTaken(res, { location, address = null, customer, range, c
 // another truck, which the re-check books (pre-push P1 on 46fd83d04f). With
 // one truck, a zone the funnel does not cover, or the city the first build
 // read, a same-pin re-check would only repeat the first build and its travel
-// lookups (pre-push P1s on 2b747741a9, 5fc5e4d648 and 4eb9c11d2a).
+// lookups (pre-push P1s on 2b747741a9, 5fc5e4d648 and 4eb9c11d2a). It reads
+// the customer's city on file as phase 1 left it (`bookedCity`), the city the
+// booking falls back to, so a reused sibling's city on file decides here too.
 async function revalidateSlotAt(location, { slot, moved, zoneMoved, zone, date, time, config, catalog, leadId, address, customer }) {
   if (!moved && !(zoneMoved && perTruckLive() && isFunnelZone(zone))) return slot;
   let refreshedDay = null;
   try {
     refreshedDay = await buildAvailabilityForLead(location, {
-      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address, customer,
+      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address, bookedCity: customer.city,
     });
   } catch (err) {
     logger.warn(`[inspection-public] slot re-validation failed for lead ${leadId}: ${err.message}`);

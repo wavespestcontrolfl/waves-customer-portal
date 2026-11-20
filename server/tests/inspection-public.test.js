@@ -2441,15 +2441,20 @@ describe('POST /:token commit', () => {
     // another street, so the list and the commit's first build read no city fallback, and the first build gives the hour
     // to tech-1. Phase 1 books the account's sibling at the typed street, at its own pin, whose city on file (Nokomis,
     // the prospect's too) decides the far-south zone. The commit compares that city with the one its first build read
-    // (none), so it re-checks per truck and books the zone truck, tech-2.
-    test('a typed address in no zone on a sibling\'s street: the first build reads no city, the re-check books the zone truck', async () => {
+    // (none), so it re-checks per truck and books the zone truck, tech-2. A sibling phase 1 reuses keeps its city on
+    // file, even a place the area check refuses (Punta Gorda, no staff-verified pin): the booking falls back to it, so
+    // the re-check reads it as phase 1 left it, not the city a list predicts phase 1 keeps.
+    test.each([
+      ['its city on file', 'Nokomis'],
+      ['a refused place on file, as phase 1 left it', 'Punta Gorda'],
+    ])('a typed address in no zone on a sibling\'s street, %s: the first build reads no city, the re-check books the zone truck', async (_label, siblingCity) => {
       Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
-      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice'] }];
+      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice', 'Punta Gorda'] }];
       firstResults.leads = { ...LEAD_ROW, customer_id: null };
       firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-prospect' }) };
       listResults.lead_activities = [{ metadata: JSON.stringify({ customer_id: 'cust-prospect' }) }];
       const prospect = { id: 'cust-prospect', account_id: 'acct-p', phone: '9415550101', address_line1: '1 Typo St', address_line2: null, city: 'Nokomis', state: 'FL', zip: '34275', latitude: 27.4, longitude: -82.5 };
-      const sibling = { id: 'cust-sibling', account_id: 'acct-p', phone: '9415550101', address_line1: '5 Sibling St', address_line2: null, city: 'Nokomis', state: 'FL', zip: '34275', latitude: 27.45, longitude: -82.55 };
+      const sibling = { id: 'cust-sibling', account_id: 'acct-p', phone: '9415550101', address_line1: '5 Sibling St', address_line2: null, city: siblingCity, state: 'FL', zip: '34275', latitude: 27.45, longitude: -82.55 };
       firstResults.customers = (q) => (q.conds.id === 'cust-sibling' ? sibling : prospect);
       listResults.customers = [prospect, sibling];
       listResults.scheduled_services = (q) => (q.selectedColumns?.length === 1 ? [{ id: 'ss-old' }] : []);
@@ -2458,7 +2463,7 @@ describe('POST /:token commit', () => {
       mockBuildAvailability.mockImplementation(async (a) => ({
         days: [{ date: FUTURE_DATE, slots: [{
           start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM',
-          technician_id: a.zoneFunnelCustomerCity === 'Nokomis' ? 'tech-2' : 'tech-1',
+          technician_id: a.zoneFunnelCustomerCity === siblingCity ? 'tech-2' : 'tech-1',
         }] }],
       }));
       const smsToken = mintLeadConsultationToken(LEAD_ID, undefined, require('../utils/lead-consultation-token').smsChannelFor(LEAD_ROW.phone));
@@ -2466,7 +2471,7 @@ describe('POST /:token commit', () => {
       const booked = await callPost(smsToken, { date: FUTURE_DATE, time: '09:00', address: '5 Sibling St, Laurel, FL 34275' });
 
       expect(booked.statusCode).toBe(200);
-      expect(mockBuildAvailability.mock.calls.map(([a]) => a.zoneFunnelCustomerCity)).toEqual([null, 'Nokomis']);
+      expect(mockBuildAvailability.mock.calls.map(([a]) => a.zoneFunnelCustomerCity)).toEqual([null, siblingCity]);
       expect(mockCreateSelfBooking.mock.calls[0][0]).toMatchObject({ technician_id: 'tech-2', authedCustomer: { id: 'cust-sibling' } });
     });
 

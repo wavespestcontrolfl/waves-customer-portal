@@ -7702,7 +7702,9 @@ keeps the typed address, as the list read it. When the customer's city decides
 a far-south zone (one the funnel covers) and the commit's first build read
 another city, or none (phase one linked or changed the profile, or booked a
 sibling's street), the slot is checked
-again per truck (both far-south gates on). When the commit's first check,
+again per truck (both far-south gates on). That check reads the city on file
+of the profile phase one booked, the city the booking falls back to: a sibling
+phase one reuses keeps its own, even a place the area check refuses. When the commit's first check,
 before phase one provisions the customer, no longer has the time, its
 `SLOT_TAKEN` answer carries fresh times at the resolved location, built with
 that address and the trusted customer, as the lists and the next commit's first
