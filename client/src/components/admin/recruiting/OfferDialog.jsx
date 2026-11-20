@@ -30,6 +30,7 @@ import {
   isStaleWrite,
   LOST_ANSWER_TEXT,
   OUT_CHANGED_TEXT,
+  outChangeDetail,
   isValidDay,
   offerErrorMessage,
   sendChannels,
@@ -258,19 +259,34 @@ function formView({ edits, pinned, data, contact, busy, locked }) {
 // refused first save, the open draft another admin made). It is also read-only until
 // a read has succeeded and holds the draft this form is about.
 // reviewedOut: the offers out (the read's outStamp) as the owner last reviewed them.
-// A read with other offers out (an answer, a date request) makes a saved draft
-// "changed" too (outMoved), until the owner loads it again (Show the new version).
+// A read with other offers out (an answer, a date request) while the draft itself is
+// unchanged locks a saved draft too (outOnly): the notice says what changed, and
+// Continue with this draft takes the new stamp and keeps the draft and the edits.
 function formLock({ data, draftId, pinned, needRead, conflict, reviewedOut }) {
   const latest = reviewedDraft(data, draftId);
-  const outMoved = Boolean(pinned) && data.outStamp !== reviewedOut;
   // A form with no draft yet: an open draft in the read is another admin's (this form's own
   // save sets draftId first). It shows as changed, with the owner's edits kept, until they load it.
   const newer = latest || (!draftId ? openDraft(data) : null);
-  const changed = !needRead && (conflict || outMoved || Boolean(!draftId && newer) || (Boolean(pinned) && (!latest || latest.draftHash !== pinned.draftHash)));
-  return { newer, changed, outMoved, locked: needRead || changed || Boolean(draftId && !pinned) };
+  const draftMoved = Boolean(!draftId && newer) || (Boolean(pinned) && (!latest || latest.draftHash !== pinned.draftHash));
+  const outOnly = Boolean(pinned) && !draftMoved && data.outStamp !== reviewedOut;
+  const changed = !needRead && (conflict || draftMoved || outOnly);
+  return { newer, changed, outOnly, locked: needRead || changed || Boolean(draftId && !pinned) };
 }
 
-function ReadOnlyNotice({ changed, locked, message, hasNewer, onAdopt, onRetry, refreshFailed }) {
+function ReadOnlyNotice({ changed, locked, message, hasNewer, outChange, onAdopt, onRetry, refreshFailed }) {
+  // Only the offers out changed: say what changed, and let the owner go on with the same draft and edits.
+  if (changed && outChange) {
+    return (
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <ActionFeedback error className="flex-1">
+          {message} {outChange.detail}
+        </ActionFeedback>
+        <Button size="sm" variant="secondary" onClick={outChange.onContinue}>
+          Continue with this draft
+        </Button>
+      </div>
+    );
+  }
   if (changed) {
     return (
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -329,9 +345,9 @@ function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, on
     onBusyChange(busy);
     return () => onBusyChange(false);
   }, [busy, onBusyChange]);
-  const { newer, changed, outMoved, locked } = formLock({ data, draftId, pinned, needRead: needRead || stale, conflict, reviewedOut });
+  const { newer, changed, outOnly, locked } = formLock({ data, draftId, pinned, needRead: needRead || stale, conflict, reviewedOut });
   // A refused write's sentence shows once, in the read-only notice (after the re-read); else a change to the offers out.
-  const notice = conflict ? error : outMoved && OUT_CHANGED_TEXT;
+  const notice = conflict ? error : outOnly && OUT_CHANGED_TEXT;
   const { base, fields, firstName, sendTo, startError, rateErrors, fieldsOk, dirty, sendReady, canSend } = formView({ edits, pinned, data, contact, busy, locked });
   // A read that changes the draft, or locks the form, while the Send question is open closes
   // the question: Send carries only the hash of the draft whose letter is on screen.
@@ -469,8 +485,15 @@ function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, on
     if (!newer) return onClose();
     setPinned(newer);
     setDraftId(newer.id);
-    setReviewedOut(data.outStamp);
     setEdits({});
+    setConflict(false);
+    setError(null);
+  };
+
+  // Only the offers out changed, and the notice has said what: the form takes the new stamp and keeps the draft and the
+  // owner's edits. A change to the draft itself still needs Show the new version.
+  const continueWithDraft = () => {
+    setReviewedOut(data.outStamp);
     setConflict(false);
     setError(null);
   };
@@ -544,6 +567,7 @@ function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, on
               locked={locked}
               message={notice}
               hasNewer={Boolean(newer)}
+              outChange={outOnly ? { detail: outChangeDetail(data, pinned), onContinue: continueWithDraft } : null}
               onAdopt={adoptLatest}
               onRetry={retryRead}
               refreshFailed={stale && !needRead}

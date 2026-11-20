@@ -142,16 +142,44 @@ const ERROR_TEXT = {
   // Save, Send and Discard all answer these two codes: the words name no action.
   DRAFT_CHANGED: "This draft changed after you opened it, so nothing was done. Review the new version first.",
   OFFER_CHANGED: "This offer changed after you opened it. Review it again.",
-  // Only Send answers this one: the offer out (the one a revision replaces) changed after the read.
-  OFFERS_CHANGED: "The offer you sent before changed after you opened this (an answer or a date request), so nothing was sent. Check the offer card before you send.",
+  // Only Send answers this one: the offer out (the one a revision replaces) changed after the owner reviewed it. The
+  // form's notice then says what changed (outChangeDetail).
+  OFFERS_CHANGED: "The offer you sent before changed after you opened this, so nothing was sent.",
   OFFER_NOT_WITHDRAWABLE: "This offer expired before you withdrew it. Nothing was changed.",
   OFFER_NOT_REVISABLE: "This offer expired before you revised it. Make a new offer instead.",
   DRAFT_HASH_REQUIRED: "The draft could not be checked, so nothing was done. Reload the offer and review it first.",
 };
 
 // A read whose offers out differ from the ones the owner reviewed in the form (an
-// answer or a date request): the form locks with this until Show the new version.
-export const OUT_CHANGED_TEXT = "The offer you sent before changed after you opened this form (an answer or a date request). Check the offer card before you send.";
+// answer or a date request): the form locks with this and outChangeDetail until
+// the owner presses Continue with this draft.
+export const OUT_CHANGED_TEXT = "The offer you sent before changed after you opened this form.";
+
+// An offer's state, as the card names it.
+export const STATUS_LABEL = {
+  draft: "Draft",
+  sent: "Sent",
+  accepted: "Signed",
+  declined: "Declined",
+  date_requested: "Asked for another date",
+  expired: "Closed unsigned",
+  withdrawn: "Withdrawn",
+  superseded: "Replaced",
+};
+
+// "Asked to start Mon, Jan 18, 2027. Note: …" for an offer with a date request; else null.
+export function dateRequestText(offer) {
+  if (offer?.status !== "date_requested" || !offer.requestedStartDate) return null;
+  return `Asked to start ${formatDay(offer.requestedStartDate)}.${offer.dateRequestNote ? ` Note: ${offer.dateRequestNote}` : ""}`;
+}
+
+// What changed, when only the offers out moved while a draft was open: the offer
+// the draft replaces, as the card words it (a date request with its day and note).
+export function outChangeDetail(data, draft) {
+  const replaced = [data.current, ...(data.history || [])].find((o) => o && o.id === draft?.supersedesId);
+  if (!replaced) return "Check the offer card before you send.";
+  return dateRequestText(replaced) || `It now shows: ${STATUS_LABEL[replaced.status] || replaced.status}.`;
+}
 
 // err = the Error the offer API helper throws (err.body.code on a 409).
 export function offerErrorMessage(err) {

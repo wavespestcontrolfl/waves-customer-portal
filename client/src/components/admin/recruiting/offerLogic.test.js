@@ -13,6 +13,7 @@ import {
   isStartWeekday,
   isValidDay,
   offerErrorMessage,
+  outChangeDetail,
   sendChannels,
   stepDateFor,
 } from './offerLogic';
@@ -41,6 +42,14 @@ describe('offer helpers', () => {
     // 9 PM Eastern is already the next day in UTC: the Eastern day must show.
     expect(formatIssued('2026-11-11T02:30:00Z')).toBe('Nov 10, 2026');
     expect(expiryLabel(new Date('2026-12-11T15:20:00Z'))).toBe('Fri, Dec 18, 2026');
+  });
+
+  it('says what changed in the offer a draft replaces, as the card words it', () => {
+    const draft = { id: 'offer-2', supersedesId: 'offer-1' };
+    const asked = { id: 'offer-1', status: 'date_requested', requestedStartDate: '2027-01-18', dateRequestNote: 'Need two more weeks' };
+    expect(outChangeDetail({ current: asked, history: [] }, draft)).toBe('Asked to start Mon, Jan 18, 2027. Note: Need two more weeks');
+    expect(outChangeDetail({ current: draft, history: [{ id: 'offer-1', status: 'accepted' }] }, draft)).toBe('It now shows: Signed.');
+    expect(outChangeDetail({ current: draft, history: [] }, { id: 'offer-2' })).toBe('Check the offer card before you send.');
   });
 
   // The server names the channels Send tries; a mask it could not make ('***') is still a channel.

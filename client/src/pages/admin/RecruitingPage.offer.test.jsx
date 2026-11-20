@@ -1086,7 +1086,10 @@ describe('RecruitingPage offer flow: one source of truth', () => {
         },
       },
       {
-        offer: () => res(200, offerPayload({ current: answered ? { ...sent, status: 'date_requested' } : sent, draft: revision, sendReplacesId: 'offer-1', outStamp: answered ? 'out-stamp-2' : 'out-stamp-1' })),
+        offer: () => res(200, offerPayload({
+          current: answered ? { ...sent, status: 'date_requested', requestedStartDate: '2027-01-18', dateRequestNote: 'Need two more weeks' } : sent,
+          draft: revision, sendReplacesId: 'offer-1', outStamp: answered ? 'out-stamp-2' : 'out-stamp-1',
+        })),
         detail: detailFixture({ status: 'offer' }),
       },
     );
@@ -1096,11 +1099,11 @@ describe('RecruitingPage offer flow: one source of truth', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
     let confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
     fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
-    expect(await screen.findByText(/The offer you sent before changed after you opened this/)).toBeInTheDocument();
+    // The form says nothing was sent and what changed (the date request), before the owner goes on.
+    expect(await screen.findByText(/so nothing was sent\. Asked to start Mon, Jan 18, 2027\. Note: Need two more weeks/)).toBeInTheDocument();
     expect(screen.queryByText(/Send this offer to Jordan/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Send offer' })).toBeNull();
-    // The owner looks again, then sends on the new read.
-    fireEvent.click(screen.getByRole('button', { name: 'Show the new version' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue with this draft' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send offer' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
     confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');

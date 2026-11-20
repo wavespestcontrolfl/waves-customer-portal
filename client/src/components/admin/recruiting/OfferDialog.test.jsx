@@ -60,7 +60,7 @@ const offersOff = () => Object.assign(new Error("Not found"), { status: 404, bod
 // form), and a failed read keeps the data on screen, marks it stale (the page's refreshError) and answers null.
 // `outside.read(next)` is a read the form did not ask for (another screen's write, a stage change);
 // `outside.fail()` is one that failed.
-function Harness({ initial, reads, onSent = async () => {}, outside = {} }) {
+function Harness({ initial, reads, onSent = async () => {}, outside = {}, draft = null }) {
   const [data, setData] = useState(initial);
   const [open, setOpen] = useState(true);
   const [stale, setStale] = useState(false);
@@ -83,7 +83,7 @@ function Harness({ initial, reads, onSent = async () => {}, outside = {} }) {
       applicationId="app-1"
       contact={CONTACT}
       data={data}
-      draft={null}
+      draft={draft}
       stale={stale}
       onClose={() => setOpen(false)}
       onChanged={onChanged}
@@ -215,11 +215,30 @@ describe("OfferDialog", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Send offer" })).toBeNull());
     expect(screen.getByText(/The offer you sent before changed after you opened this form/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Send offer" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Show the new version" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue with this draft" }));
     fireEvent.click(await screen.findByRole("button", { name: "Send offer" }));
     fireEvent.click(within(await screen.findByRole("dialog", { name: "Send offer" })).getByRole("button", { name: "Send offer" }));
     await waitFor(() => expect(sendOffer).toHaveBeenCalledTimes(1));
     expect(sendOffer).toHaveBeenCalledWith("app-1", "offer-1", "hash-1", "out-2");
+  });
+
+  // A revision is open with typed edits when the applicant asks for another date on the offer it replaces. The form says
+  // what changed, by the card's words, before it takes the new stamp; Continue keeps the draft and the edits.
+  it("says what changed when only the offers out moved, and Continue keeps the draft and the typed edits", async () => {
+    const outside = {};
+    const sentOffer = { id: "offer-0", applicationId: "app-1", status: "sent", timeline: [] };
+    const revision = draftRow({ supersedesId: "offer-0" });
+    const read = { ...panel(revision), current: sentOffer, draft: revision };
+    render(<Harness initial={read} reads={[]} outside={outside} draft={revision} />);
+    fireEvent.change(rate(), { target: { value: "24" } });
+    act(() => outside.read({ ...read, outStamp: "out-2", current: { ...sentOffer, status: "date_requested", requestedStartDate: "2027-01-18", dateRequestNote: "Need two more weeks" } }));
+    expect(await screen.findByText(/changed after you opened this form\. Asked to start Mon, Jan 18, 2027\. Note: Need two more weeks/)).toBeInTheDocument();
+    expect(rate()).toBeDisabled();
+    expect(rate()).toHaveValue("24");
+    expect(screen.queryByRole("button", { name: "Show the new version" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Continue with this draft" }));
+    expect(rate()).toBeEnabled();
+    expect(rate()).toHaveValue("24");
   });
 
   // A background read that fails (after a stage change, say) leaves the data on screen out of date. The card turns its

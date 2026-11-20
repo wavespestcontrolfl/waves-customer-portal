@@ -17,25 +17,16 @@ import {
 import SafeMarkdown from "../../SafeMarkdown";
 import { fetchSignedCopy, reviseOffer, withdrawOffer } from "./offerApi";
 import {
+  dateRequestText,
   formatDay,
   formatTimelineTime,
   isLostAnswer,
   LOST_ANSWER_TEXT,
   money,
   offerErrorMessage,
+  STATUS_LABEL,
   todayET,
 } from "./offerLogic";
-
-const STATUS_LABEL = {
-  draft: "Draft",
-  sent: "Sent",
-  accepted: "Signed",
-  declined: "Declined",
-  date_requested: "Asked for another date",
-  expired: "Closed unsigned",
-  withdrawn: "Withdrawn",
-  superseded: "Replaced",
-};
 
 const CAN_REVISE = ["sent", "date_requested"];
 const CAN_WITHDRAW = ["draft", "sent", "date_requested"];
@@ -153,14 +144,12 @@ function closeCopy(target, firstName, liveOffer) {
 // time: for a day that has come, the server picks another start date, so the
 // note stays as history and the card's Revise is the action.
 function DateRequestNote({ offer, busy, canAct, onUpdate }) {
-  if (offer.status !== "date_requested" || !offer.requestedStartDate) return null;
+  const asked = dateRequestText(offer);
+  if (!asked) return null;
   const ahead = offer.requestedStartDate > todayET();
   return (
     <div className="border-hairline border border-zinc-200 rounded p-3 mb-3">
-      <div className="text-14 text-zinc-800 mb-1">
-        Asked to start {formatDay(offer.requestedStartDate)}.
-        {offer.dateRequestNote ? ` Note: ${offer.dateRequestNote}` : ""}
-      </div>
+      <div className="text-14 text-zinc-800 mb-1">{asked}</div>
       {canAct && ahead && (
         <Button size="sm" onClick={() => onUpdate(offer.requestedStartDate)} disabled={busy}>
           Make an updated offer for {formatDay(offer.requestedStartDate)}
