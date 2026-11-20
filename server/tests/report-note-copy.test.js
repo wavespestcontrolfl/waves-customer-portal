@@ -155,8 +155,8 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
   test('a day word in a sentence about drying or re-entry withholds the note; follow-up days stand', () => {
     // Days stay legal, except in a sentence that names drying or re-entry or
     // the people and pets a re-entry line is about: there "until dry" is the
-    // only time a note may give. Each line below is caught by this part of
-    // the rule alone, one marker or day word at a time.
+    // only time a note may give. Each marker and each kind of time word has a
+    // line here that no other part of the rule catches.
     for (const text of [
       'I treated the lawn edge. The spray dries in half a day.',
       'I treated the lawn edge. Keep pets off the treated grass for two days.',
@@ -179,6 +179,14 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       'I treated the yard. Keep pets inside for another two.',
       'I treated the yard. Keep pets off the lawn until November.',
       'I treated the yard. Avoid the treated soil until spring.',
+      // A figure or number word with no day word: the re-entry verbs of the
+      // complete screen (the next test) need a day word, so only this rule
+      // catches these.
+      'I treated the yard. Re-entry is fine in another two.',
+      'I treated the yard. Keep off the treated grass for another 48.',
+      'I treated the yard. Stay off the treated grass for another two.',
+      'I treated the yard. For a day the yard is off-limits.',
+      'I treated the yard. Pets can go out in 48.',
     ]) {
       const parsed = reportNoteCustomerCopy(stored({ text }));
       expect(parsed.body).toBeNull();
@@ -197,6 +205,31 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
     // A note holds one line, but a finding field or list value can hold two:
     // a line break does not end the sentence.
     expect(noteRecordCopyViolations('Keep off the treated grass\nfor two days.')).toEqual(['note_record_time']);
+  });
+
+  test('a re-entry verb the complete screen knows, with a day word, withholds the note; a follow-up by the technician stands', () => {
+    // activity-indicators.js REENTRY_VERB_SRC (return, come back, walk on,
+    // use the treated area, ready for use, ...) pairs with minutes and hours
+    // in the complete screen; on a note record it pairs with a day word too.
+    // None of these lines names a drying or re-entry marker of the rule above.
+    for (const text of [
+      'I treated the yard. You can return to the treated area in two days.',
+      'I treated the patio. Return to the treated patio in two days.',
+      'I treated the yard. In two days you can return to the treated area.',
+      'I treated the lawn. You can walk on the lawn again on Monday.',
+      'I treated the rooms. You can use the treated rooms again in a week.',
+      'I treated the rooms. The treated rooms are ready for use in 2d.',
+      'I treated the rooms. You can return 11/22.',
+    ]) {
+      const parsed = reportNoteCustomerCopy(stored({ text }));
+      expect(parsed.body).toBeNull();
+      expect(parsed.violations).toEqual(['note_record_time']);
+    }
+    for (const text of [
+      'I placed bait in the garage. I will return in two weeks to check the bait stations.',
+      'I placed bait in the garage. We\u2019ll come back in 14 days to check the stations.',
+      'I placed bait in the garage. Your technician will return in two weeks.',
+    ]) expect(reportNoteCustomerCopy(stored({ text })).body).toBe(text);
   });
 });
 

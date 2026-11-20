@@ -40,7 +40,7 @@
  */
 
 const crypto = require('crypto');
-const { findBannedCustomerCopy } = require('./activity-indicators');
+const { findBannedCustomerCopy, REENTRY_VERB_SRC } = require('./activity-indicators');
 const { COMPLETION_ACCESS_CODE_RE } = require('../completion-access-code');
 const { formatTechnicianForCustomer, isGenericTechnicianLabel } = require('../../utils/technician-name');
 
@@ -679,7 +679,10 @@ function customerCopyViolations(text) {
 // unit ("dries in half a day", "keep pets off for two days"), a weekday,
 // "today", a part of the day ("dry by this evening"), a month or a season.
 // Inside such a sentence the only time a note may give is the idiom "until
-// dry". A full
+// dry". The re-entry verbs the complete screen pairs with minutes and hours
+// (REENTRY_VERB_SRC) withhold a sentence with a day word as well ("You can
+// return to the treated area in two days"), but not after I, we, the
+// technician or the team: that is a follow-up. A full
 // stop ends a sentence only before a capital letter or the end of the text,
 // so "1.5 days" and "approx. 2 days" stay in their sentence; a line break
 // does not end one. Singular "second" stays legal: it is the ordinal ("second visit"), and no
@@ -713,18 +716,29 @@ const NOTE_DRY_REENTRY_SRC = `(?<!\\p{L})(?:${[
   '(?:avoid|avoids|avoiding|avoided)',
   '(?:pets?|dogs?|cats?|pupp(?:y|ies)|kittens?|kids?|child(?:ren)?|toddlers?|bab(?:y|ies)|people|family|anyone|everyone|guests?)',
 ].join('|')})(?!\\p{L})`;
-// What withholds a drying or re-entry sentence: any figure, any number word,
-// a unit from a day up, a weekday, today, a part of the day or a meal, a
-// month (not "may", the verb) or a season (not "fall", the verb).
-const NOTE_MARKED_TIME_SRC = `(?:\\p{N}|(?<!\\p{L})(?:${[
-  'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen',
-  'twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|dozen|half|couple',
+// A day word: a unit from a day up, a weekday, today, a part of the day or a
+// meal, a month (not "may", the verb), a season (not "fall", the verb), a
+// date written with a slash ("11/22"), or a figure with d or w ("2d").
+const NOTE_DAY_WORD_SRC = `(?:(?<!\\p{L})(?:${[
   'days?|nights?|weeks?|weekends?|fortnights?|months?|today',
   'monday|tuesday|wednesday|thursday|friday|saturday|sunday',
   'mornings?|afternoons?|evenings?|sunset|sundown|sunrise|dawn|dusk|lunch(?:time)?|dinner(?:time)?|bedtime|breakfast',
   'january|february|march|april|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec',
   'spring|summer|autumn|winter',
+].join('|')})(?!\\p{L})|(?<!\\p{N})\\p{N}{1,2}\\s*\\/\\s*\\p{N}{1,2}(?!\\p{N})|\\p{N}\\s*(?:d|w|wks?)(?!\\p{L}))`;
+// What withholds a drying or re-entry sentence: a day word, any figure, or
+// any number word.
+const NOTE_MARKED_TIME_SRC = `(?:${NOTE_DAY_WORD_SRC}|\\p{N}|(?<!\\p{L})(?:${[
+  'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen',
+  'twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|dozen|half|couple',
 ].join('|')})(?!\\p{L}))`;
+// The re-entry verbs the complete screen already pairs with minutes and hours
+// (activity-indicators.js REENTRY_VERB_SRC: return, come back, walk on, use the
+// treated area, ready for use, …) pair with a day word here. A follow-up says
+// the same verbs with the technician as the one who comes back ("I will
+// return in two weeks to check the stations"), so a verb after I, we, the
+// technician or the team, with or without a modal, is no re-entry.
+const NOTE_REENTRY_VERB_SRC = `(?<!\\b(?:i|we|technician|tech|team)(?:\\s*['\u2019]ll|\\s+will|\\s+can|\\s+would|\\s+should|\\s+may|\\s+might|\\s+plan\\s+to)?\\s+)\\b(?:${REENTRY_VERB_SRC})\\b`;
 const NOTE_RECORD_TIME_RE = new RegExp([
   '(?<!\\p{L})(?:half-?|quarter-?)?(?:hours?|minutes?|mins?|hrs?|secs?|seconds)(?!\\p{L})',
   '\\p{N}\\s*[hm](?!\\p{L})',
@@ -739,6 +753,8 @@ const NOTE_RECORD_TIME_RE = new RegExp([
   '\\b(?:overnight|tonight|tomorrow|noon|midnight)\\b',
   `${NOTE_DRY_REENTRY_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_MARKED_TIME_SRC}`,
   `${NOTE_MARKED_TIME_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_DRY_REENTRY_SRC}`,
+  `${NOTE_REENTRY_VERB_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_DAY_WORD_SRC}`,
+  `${NOTE_DAY_WORD_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_REENTRY_VERB_SRC}`,
 ].join('|'), 'iu');
 
 function noteRecordCopyViolations(text) {

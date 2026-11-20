@@ -4426,6 +4426,7 @@ module.exports = {
   projectPrimaryApplication,
   SCHEMA_VERSION,
   BANNED_CUSTOMER_COPY,
+  REENTRY_VERB_SRC,
   findBannedCustomerCopy,
   COPY_MAP_VERSION,
   SUMMARY_TEMPLATE_VERSION,

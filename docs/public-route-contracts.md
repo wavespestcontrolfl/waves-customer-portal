@@ -3117,7 +3117,12 @@ inside", "off-limits", "avoid") or the people and pets a re-entry line is
 about: there any figure or number word withholds the copy ("11/22", "2d"),
 and so does a day word (a unit from a day up, a weekday, "today", a part of
 the day or a meal, a month other than "may", a season other than "fall"), so
-"until dry" is the only time such a sentence may give. A full stop ends that sentence only before a capital letter
+"until dry" is the only time such a sentence may give. The re-entry verbs the
+complete screen already pairs with minutes and hours (`REENTRY_VERB_SRC`:
+return, come back, walk on, use the treated area, ready for use, …) withhold a
+sentence with a day word too ("You can return to the treated area in two
+days."), unless the verb follows I, we, the technician or the team: that is a
+follow-up ("I will return in two weeks to check the stations"). A full stop ends that sentence only before a capital letter
 or the end ("1.5 days", "approx. 2 days" stay in it); a line break does not.
 "Keep an eye out" is no keep-off. The ordinal "second" and "am" after
 anything but a number stay legal, and so does a part of the day with no hour
