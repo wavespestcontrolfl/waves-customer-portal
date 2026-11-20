@@ -64,7 +64,10 @@ async function invoiceOwnerReachedByAuditedMerge(conn, {
   }
 }
 
-async function findUnbookedSale(conn, invoiceId) {
+async function findUnbookedSale(conn, invoiceId, { lockInvoice = false } = {}) {
+  const invoiceQuery = conn('invoices').where({ id: invoiceId }).first();
+  const lockedInvoice = lockInvoice ? await invoiceQuery.forUpdate() : null;
+  if (lockInvoice && !lockedInvoice) return null;
   const sales = await conn('audit_log').where({
     action: UNBOOKED_SALE,
     resource_type: 'invoices',
@@ -74,7 +77,7 @@ async function findUnbookedSale(conn, invoiceId) {
   const saleRow = sales[0];
   const sale = saleRow.metadata;
   if (!Number.isSafeInteger(sale?.setupAmountCents) || sale.setupAmountCents <= 0) return null;
-  const invoice = await conn('invoices').where({ id: invoiceId }).first();
+  const invoice = lockedInvoice || await invoiceQuery;
   if (!invoice) return null;
   if (String(invoice.customer_id) !== String(sale.customerId)
     && !await invoiceOwnerReachedByAuditedMerge(conn, {
@@ -106,10 +109,38 @@ async function findUnbookedSale(conn, invoiceId) {
   };
 }
 
+async function verifiedCustomerLinks(conn, invoiceIds) {
+  const records = await conn('audit_log as sale')
+    .join('invoices as i', 'i.id', 'sale.resource_id')
+    .join('annual_prepay_terms as t', function invoiceOwner() {
+      this.on('t.prepay_invoice_id', '=', 'i.id').andOn('t.customer_id', '=', 'i.customer_id');
+    })
+    .where({ 'sale.action': UNBOOKED_SALE, 'sale.resource_type': 'invoices' })
+    .whereIn('sale.resource_id', invoiceIds)
+    .select('i.id', 'i.customer_id', 't.source_estimate_id', 'sale.metadata');
+  const seen = new Set();
+  const verified = new Map();
+  for (const row of records) {
+    if (seen.has(row.id)) {
+      verified.delete(row.id);
+      continue;
+    }
+    seen.add(row.id);
+    const sale = row.metadata;
+    if (!Number.isSafeInteger(sale?.setupAmountCents) || sale.setupAmountCents <= 0
+      || (row.source_estimate_id && row.source_estimate_id !== sale.estimateId)) continue;
+    if (await invoiceOwnerReachedByAuditedMerge(conn, {
+      invoiceId: row.id, originalCustomerId: sale.customerId, currentCustomerId: row.customer_id,
+    })) verified.set(row.id, row.customer_id);
+  }
+  return verified;
+}
+
 module.exports = {
   UNBOOKED_SALE,
   recordUnbookedSale,
   recordUnbookedCoverageSale,
   findUnbookedSale,
   invoiceOwnerReachedByAuditedMerge,
+  verifiedCustomerLinks,
 };

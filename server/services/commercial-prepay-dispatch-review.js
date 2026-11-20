@@ -20,17 +20,11 @@ function verifiedContextMatches(original, context) {
     && Math.round(Number(original.amount) * 100) === context.setupAmountCents;
 }
 
-async function updateReviewInTransaction(conn, context, state) {
-  if (!['active', 'cancelled'].includes(state)) return null;
-  if (!context?.sourceInvoiceId) return null;
-  const original = await require('./commercial-prepay-sale-record')
-    .findUnbookedSale(conn, context.sourceInvoiceId);
-  if (!verifiedContextMatches(original, context)) return null;
-
+async function writeEpisode(conn, original, state) {
   const current = await conn('dispatch_alerts')
     .where({ type: REVIEW_TYPE })
     .whereRaw("payload->>'sourceInvoiceId' = ? AND payload->>'superseded_at' IS NULL", [
-      String(context.sourceInvoiceId),
+      String(original.invoice.id),
     ])
     .orderBy('created_at', 'desc')
     .forUpdate()
@@ -70,18 +64,20 @@ async function updateReviewInTransaction(conn, context, state) {
   });
 }
 
-// This is deliberately an observation seam, not a receipt classifier. The
-// stacked payment PR may call it only after its own exact receipt proof has
-// produced `state`; this service re-verifies the immutable sale identity and
-// context, serializes the current card episode, and never infers money state.
-// A plain Knex caller is wrapped so verification, supersession and replacement
-// are one atomic write. A caller already inside a transaction retains its lock
-// order and transaction ownership.
-async function updateReview(conn, context, state) {
-  if (conn?.isTransaction || typeof conn?.transaction !== 'function') {
-    return updateReviewInTransaction(conn, context, state);
+// Collect, refund and dispute writers serialize on the invoice. Read receipt
+// evidence only after taking that same lock, and hold it through the card write.
+async function updateReview(conn, invoiceId, observe) {
+  if (!invoiceId || typeof observe !== 'function') return null;
+  async function readAndWrite(trx) {
+    const original = await require('./commercial-prepay-sale-record').findUnbookedSale(trx, invoiceId, { lockInvoice: true });
+    if (!original) return null;
+    const observation = await observe(trx, original);
+    if (!verifiedContextMatches(original, observation?.context)) return null;
+    const { state } = observation;
+    const alert = ['active', 'cancelled'].includes(state) ? await writeEpisode(trx, original, state) : null;
+    return { state, alert };
   }
-  return conn.transaction((trx) => updateReviewInTransaction(trx, context, state));
+  return conn.isTransaction ? readAndWrite(conn) : conn.transaction(readAndWrite);
 }
 
 // Persisted episode payloads remain immutable history. At read time, only the
@@ -94,14 +90,11 @@ async function hydrateCurrentCustomerLinks(conn, alerts) {
     .filter((row) => row?.type === REVIEW_TYPE && row.payload?.superseded_at == null)
     .map((row) => String(row.payload?.sourceInvoiceId || ''))
     .filter((id) => UUID_RE.test(id)))];
-  if (!invoiceIds.length) return rows;
-
-  const invoices = await conn('invoices').whereIn('id', invoiceIds).select('id', 'customer_id');
-  const ownerByInvoice = new Map(invoices.map((invoice) => [String(invoice.id), invoice.customer_id]));
+  const { verifiedCustomerLinks } = require('./commercial-prepay-sale-record');
+  const ownerByInvoice = invoiceIds.length ? await verifiedCustomerLinks(conn, invoiceIds) : new Map();
   return rows.map((row) => {
     if (row?.type !== REVIEW_TYPE || row.payload?.superseded_at != null) return row;
-    const customerId = ownerByInvoice.get(String(row.payload?.sourceInvoiceId || ''));
-    if (!customerId) return row;
+    const customerId = ownerByInvoice.get(String(row.payload?.sourceInvoiceId || '')) || null;
     return { ...row, payload: { ...row.payload, customerId } };
   });
 }
@@ -110,5 +103,4 @@ module.exports = {
   REVIEW_TYPE,
   updateReview,
   hydrateCurrentCustomerLinks,
-  _private: { verifiedContextMatches, updateReviewInTransaction },
 };

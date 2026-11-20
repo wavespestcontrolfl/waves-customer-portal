@@ -94,6 +94,13 @@ async function seedOriginal({ withEstimate = true } = {}) {
   return { ...ids, sale };
 }
 
+const review = require('../services/commercial-prepay-dispatch-review');
+
+async function observeState(conn, context, state) {
+  const result = await review.updateReview(conn, context?.sourceInvoiceId, () => ({ context, state }));
+  return result?.alert || null;
+}
+
 function reviews(invoiceId) {
   return trx('dispatch_alerts')
     .where({ type: 'commercial_prepay_setup_review' })
@@ -128,12 +135,11 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
 
   test('forged, stale and unsupported observations cannot open a card', async () => {
     const { invoiceId, sale } = await seedOriginal();
-    const review = require('../services/commercial-prepay-dispatch-review');
     const context = sale.reviewContext;
 
-    await expect(review.updateReview(trx, context, 'active')).resolves.toBeNull();
-    await expect(review.updateReview(trx, context, 'unknown')).resolves.toBeNull();
-    await expect(review.updateReview(trx, null, 'cancelled')).resolves.toBeNull();
+    await expect(observeState(trx, context, 'active')).resolves.toBeNull();
+    await expect(observeState(trx, context, 'unknown')).resolves.toBeNull();
+    await expect(observeState(trx, null, 'cancelled')).resolves.toBeNull();
     for (const [key, value] of [
       ['saleId', randomUUID()],
       ['sourceInvoiceId', randomUUID()],
@@ -141,7 +147,7 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
       ['estimateId', randomUUID()],
       ['setupAmountCents', 5501],
     ]) {
-      await expect(review.updateReview(trx, { ...context, [key]: value }, 'cancelled'))
+      await expect(observeState(trx, { ...context, [key]: value }, 'cancelled'))
         .resolves.toBeNull();
     }
 
@@ -150,11 +156,10 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
 
   test('acknowledgement survives replay and each opposite observation opens one new episode', async () => {
     const { invoiceId, customerId, estimateId, sale } = await seedOriginal();
-    const review = require('../services/commercial-prepay-dispatch-review');
     const dispatchAlerts = require('../services/dispatch-alerts');
 
-    await review.updateReview(trx, sale.reviewContext, 'cancelled');
-    await review.updateReview(trx, sale.reviewContext, 'cancelled');
+    await observeState(trx, sale.reviewContext, 'cancelled');
+    await observeState(trx, sale.reviewContext, 'cancelled');
     let alerts = await reviews(invoiceId);
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toEqual(expect.objectContaining({
@@ -169,14 +174,14 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
     expect(alerts[0].payload.paymentRestored).toBeUndefined();
 
     await dispatchAlerts.resolveAlert({ trx, id: alerts[0].id, resolvedBy: null });
-    await review.updateReview(trx, sale.reviewContext, 'cancelled');
+    await observeState(trx, sale.reviewContext, 'cancelled');
     alerts = await reviews(invoiceId);
     expect(alerts).toHaveLength(1);
     expect(alerts[0].resolved_at).not.toBeNull();
     expect(alerts[0].payload.superseded_at).toBeUndefined();
 
-    await review.updateReview(trx, sale.reviewContext, 'active');
-    await review.updateReview(trx, sale.reviewContext, 'active');
+    await observeState(trx, sale.reviewContext, 'active');
+    await observeState(trx, sale.reviewContext, 'active');
     alerts = await reviews(invoiceId);
     expect(alerts).toHaveLength(2);
     const returned = alerts.find((row) => row.payload.paymentRestored !== true);
@@ -191,7 +196,7 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
     const stale = await trx('dispatch_alerts').where({ id: returned.id }).first();
     expect(stale.payload.superseded_at).toBeTruthy();
 
-    await review.updateReview(trx, sale.reviewContext, 'cancelled');
+    await observeState(trx, sale.reviewContext, 'cancelled');
     alerts = await reviews(invoiceId);
     expect(alerts).toHaveLength(3);
     expect(alerts.filter((row) => row.payload.superseded_at == null)).toHaveLength(1);
@@ -200,11 +205,32 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
     expect(current.payload.paymentRestored).toBeUndefined();
   });
 
+  test('a delayed observer reads the restored invoice inside the transaction before updating the card', async () => {
+    const { invoiceId, sale } = await seedOriginal();
+    await observeState(trx, sale.reviewContext, 'cancelled');
+    const plainKnex = { transaction: (handler) => trx.transaction(handler) };
+    const observeCurrentReceipt = jest.fn(async (locked, currentSale) => {
+      expect(locked.isTransaction).toBe(true);
+      return {
+        context: currentSale.reviewContext,
+        state: currentSale.invoice.status === 'paid' ? 'active' : 'cancelled',
+      };
+    });
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'void' });
+    const delayedObserver = () => review.updateReview(plainKnex, invoiceId, observeCurrentReceipt);
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'paid' });
+    await expect(delayedObserver()).resolves.toMatchObject({ state: 'active' });
+    await expect(review.updateReview(plainKnex, invoiceId, 'cancelled')).resolves.toBeNull();
+    expect(observeCurrentReceipt).toHaveBeenCalledTimes(1);
+    const current = (await reviews(invoiceId)).filter((row) => row.payload.superseded_at == null);
+    expect(current).toHaveLength(1);
+    expect(current[0].payload.paymentRestored).toBe(true);
+  });
+
   test('a plain Knex caller rolls supersession back when replacement insertion fails', async () => {
     const { invoiceId, sale } = await seedOriginal();
-    const review = require('../services/commercial-prepay-dispatch-review');
     const plainKnex = { transaction: (handler) => trx.transaction(handler) };
-    await review.updateReview(trx, sale.reviewContext, 'cancelled');
+    await observeState(trx, sale.reviewContext, 'cancelled');
 
     const suffix = randomUUID().replace(/-/g, '');
     const functionName = `synthetic_fail_review_${suffix}`;
@@ -225,7 +251,7 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
       EXECUTE FUNCTION ${functionName}()
     `);
 
-    await expect(review.updateReview(plainKnex, sale.reviewContext, 'active'))
+    await expect(observeState(plainKnex, sale.reviewContext, 'active'))
       .rejects.toThrow('synthetic restored insert failure');
     let alerts = await reviews(invoiceId);
     expect(alerts).toHaveLength(1);
@@ -234,7 +260,7 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
 
     await trx.raw(`DROP TRIGGER ${triggerName} ON dispatch_alerts`);
     await trx.raw(`DROP FUNCTION ${functionName}()`);
-    await review.updateReview(plainKnex, sale.reviewContext, 'active');
+    await observeState(plainKnex, sale.reviewContext, 'active');
     alerts = await reviews(invoiceId);
     expect(alerts).toHaveLength(2);
     expect(alerts.filter((row) => row.payload.superseded_at == null)).toEqual([
@@ -247,9 +273,8 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
 
   test('current customer links follow an audited merge and undo without rewriting episode history', async () => {
     const ids = await seedOriginal();
-    const review = require('../services/commercial-prepay-dispatch-review');
     const dispatchAlerts = require('../services/dispatch-alerts');
-    await review.updateReview(trx, ids.sale.reviewContext, 'cancelled');
+    await observeState(trx, ids.sale.reviewContext, 'cancelled');
     const winnerId = randomUUID();
     await trx('customers').insert({
       id: winnerId,
@@ -264,6 +289,8 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
 
     const sales = require('../services/commercial-prepay-sale-record');
     await expect(sales.findUnbookedSale(trx, ids.invoiceId)).resolves.toBeNull();
+    expect((await review.hydrateCurrentCustomerLinks(trx, await reviews(ids.invoiceId)))[0]
+      .payload.customerId).toBeNull();
 
     const loser = await trx('customers').where({ id: ids.customerId }).first();
     const [journal] = await trx('customer_merge_journal').insert({
@@ -282,6 +309,8 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
       created_at: trx.raw('clock_timestamp()'),
     }).returning('*');
     await expect(sales.findUnbookedSale(trx, ids.invoiceId)).resolves.toBeNull();
+    expect((await review.hydrateCurrentCustomerLinks(trx, await reviews(ids.invoiceId)))[0]
+      .payload.customerId).toBeNull();
 
     await trx('customer_merge_journal').where({ id: journal.id }).update({
       repointed_ids: {
@@ -297,7 +326,7 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
       invoice: { id: ids.invoiceId, customer_id: winnerId },
       reviewContext: { sourceInvoiceId: ids.invoiceId, customerId: winnerId },
     });
-    const replayAfterMerge = await review.updateReview(trx, merged.reviewContext, 'cancelled');
+    const replayAfterMerge = await observeState(trx, merged.reviewContext, 'cancelled');
     expect(replayAfterMerge.payload.customerId).toBe(winnerId);
     let persisted = await reviews(ids.invoiceId);
     expect(persisted).toHaveLength(1);
@@ -308,7 +337,7 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
     // The opposite episode is born after the merge, then acknowledged. Its
     // stored winner link remains history even when the merge is later undone.
     await dispatchAlerts.resolveAlert({ trx, id: persisted[0].id, resolvedBy: null });
-    await review.updateReview(trx, merged.reviewContext, 'active');
+    await observeState(trx, merged.reviewContext, 'active');
     persisted = await reviews(ids.invoiceId);
     const restored = persisted.find((row) => row.payload.paymentRestored === true);
     await dispatchAlerts.resolveAlert({ trx, id: restored.id, resolvedBy: null });
@@ -331,7 +360,7 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
     const unmerged = await sales.findUnbookedSale(trx, ids.invoiceId);
     expect(unmerged.reviewContext.customerId).toBe(ids.customerId);
 
-    const replayAfterUndo = await review.updateReview(trx, unmerged.reviewContext, 'active');
+    const replayAfterUndo = await observeState(trx, unmerged.reviewContext, 'active');
     expect(replayAfterUndo.payload.customerId).toBe(ids.customerId);
     persisted = await reviews(ids.invoiceId);
     expect(persisted.find((row) => row.id === current.id).payload.customerId).toBe(winnerId);
@@ -342,9 +371,8 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
 
   test('bulk clear leaves the invoice review open while resolving ordinary cards', async () => {
     const { invoiceId, sale } = await seedOriginal({ withEstimate: false });
-    const review = require('../services/commercial-prepay-dispatch-review');
     const dispatchAlerts = require('../services/dispatch-alerts');
-    await review.updateReview(trx, sale.reviewContext, 'cancelled');
+    await observeState(trx, sale.reviewContext, 'cancelled');
     const ordinary = await dispatchAlerts.createAlert({
       trx,
       type: 'synthetic_bulk_clear',
