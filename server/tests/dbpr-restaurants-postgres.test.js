@@ -5,6 +5,8 @@
  * measure, judged and saved under a lock (settleRead). It refuses
  * any database but a private QA one or CI's, and its rows carry a per-run business marker so cleanup touches only them.
  */
+const fs = require('fs');
+const path = require('path');
 const { randomUUID } = require('crypto');
 
 const SKIP = !process.env.DATABASE_URL;
@@ -237,6 +239,17 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     expect((await rows().whereIn('source_key', [60, 61, 62, 63, 64].map(key))).map((r) => r.pest_evidence)).toEqual([null, null, null, null, null]);
   });
 
+  test('a pending row and the answer the parser gives for its page save as they are', async () => {
+    await svc.upsertRecords([rec(70, { event_date: '2026-10-21', detail: FIRST })]);
+    const [read] = await svc.pendingInspections({ cutoff: '2026-10-05', limit: 100, keys: [key(70)] });
+    const page = fs.readFileSync(path.join(__dirname, 'fixtures', 'dbpr-restaurants', 'report-35b.html'), 'utf8');
+    const report = svc.parseInspectionReport(page, read);
+    expect(report).toEqual({ inspectionType: 'Routine - Food', pestEvidence: false, findings: [] });
+    expect(await svc.saveReport(read, report)).toBe(true);
+    const [saved] = await rows().where({ source_key: key(70) });
+    expect([saved.pest_evidence, saved.detail.findings]).toEqual([false, []]);
+  });
+
   test('saveReport does not overwrite an answer already written', async () => {
     await svc.upsertRecords([rec(3, { detail: FIRST })]);
     const [row] = await rows().where({ source_key: key(3) });
@@ -278,6 +291,10 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     expect(mine.map((p) => p.id)).toEqual([id(11), id(10)]);
     // The file's count and visit number ride along with the visit's date.
     expect(mine.map((p) => [p.violation35, p.visitNumber, p.visitDate])).toEqual([[2, 1, '2026-11-15'], [1, 1, '2026-10-21']]);
+    // A pending row is the parser's input as it is: the 35B-only page of 10/21/2026 (one 35 row) answers "no pests".
+    const page = fs.readFileSync(path.join(__dirname, 'fixtures', 'dbpr-restaurants', 'report-35b.html'), 'utf8');
+    expect(svc.parseInspectionReport(page, mine[1])).toEqual({ inspectionType: 'Routine - Food', pestEvidence: false, findings: [] });
+    expect(svc.parseInspectionReport(page, { ...mine[1], violation35: 2 })).toBeNull();
     // The old row becomes eligible once a re-read of the file fills its visit number.
     await svc.upsertRecords([rec(16, { event_date: '2026-11-19', detail: first(1) })]);
     expect((await pending()).map((p) => p.id)).toEqual([id(16), id(11), id(10)]);
