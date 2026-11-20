@@ -8760,7 +8760,8 @@ the same answer. Out of date, the page locks every answer and says "This page is
 again." with a "Reload page" button, shown only while no send is in flight or lost (a reload would drop a send whose
 outcome is not known). When the read after a refusal fails, the page locks every answer, and its Check again reads with
 that refusal's status, so a 404 still counts. After a lost reply, a resend's 404 does not mark the page: that send may
-still land on a server that has the route, so its resend stays the only action. An open read missing a term the page
+still land on a server that has the route, so its resend stays the only action, and its banner adds "If this keeps
+happening, call us at (941) 297-5749 and we will check it for you." An open read missing a term the page
 shows stays a failed read (the load error, or Check again). Here the paths without `/v2` run the same handlers with the same check,
 for a tab that opened the page from before `/v2` (#8091 posts there with its version). A signature is also refused
 the same way (409 `{state:'open'}`, no write, a warning logged) when the frozen offer lacks a term the page shows (the

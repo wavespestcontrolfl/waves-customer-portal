@@ -335,6 +335,8 @@ function TextConsent({ token, initial, version, onPending, onStale, onUnknown, o
   const versionRef = useRef(version);
   const [saving, setSaving] = useState(false);
   const [unconfirmed, setUnconfirmed] = useState(false);
+  // Set once a resend of a save whose reply was lost met a 404: CallUsLine.
+  const [stuck, setStuck] = useState(false);
   const [error, setError] = useState('');
   // The choice the applicant just made, while its save has no answer yet. It
   // survives a failed read, and Try again sends it again.
@@ -371,6 +373,7 @@ function TextConsent({ token, initial, version, onPending, onStale, onUnknown, o
       lostSave.current = false;
       setChecked(stored);
       setUnconfirmed(false);
+      setStuck(false);
       setError('');
       onPending(false);
       onSnapshot(body);
@@ -411,6 +414,7 @@ function TextConsent({ token, initial, version, onPending, onStale, onUnknown, o
       // save, so the page reads at once: the read shows a choice that landed,
       // or a dead link, and otherwise keeps the choice and the lock.
       if (res.status === 404) {
+        setStuck(true);
         await confirm();
         return;
       }
@@ -421,6 +425,7 @@ function TextConsent({ token, initial, version, onPending, onStale, onUnknown, o
     // A definite answer: the server took the choice or refused it.
     wanted.current = null;
     lostSave.current = false;
+    setStuck(false);
     if (res.ok) {
       const stored = Boolean(res.body.textConsent);
       setChecked(stored);
@@ -458,6 +463,7 @@ function TextConsent({ token, initial, version, onPending, onStale, onUnknown, o
       {unconfirmed && (
         <div style={ERROR_BANNER_STYLE} role="alert">
           We could not confirm that choice. Check your connection and try again.
+          {stuck && <CallUsLine />}
           <div style={{ marginTop: 8 }}>
             <BrandButton variant="secondary" disabled={saving} onClick={() => (wanted.current === null ? confirm() : toggle(wanted.current))}>Try again</BrandButton>
           </div>
@@ -507,6 +513,20 @@ function NoteField({ id, label, value, onChange, disabled }) {
 // Each action sends the version of the offer on screen, the text box's choice
 // included: a change since then (another tab) is refused with the offer still
 // open, so the page reads it again and the applicant answers on what it shows.
+// Shown once a resend of a send whose reply was lost met a server without its
+// route (404): Try again may never work there, and a reload would drop the send
+// while it may still land, so the applicant can call and the office checks what
+// the server stored. The send stays the only action meanwhile.
+function CallUsLine() {
+  return (
+    <p style={{ margin: '8px 0 0' }}>
+      If this keeps happening, call us at{' '}
+      <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: 'inherit', fontWeight: 700 }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>
+      {' '}and we will check it for you.
+    </p>
+  );
+}
+
 function useOfferAction({ token, onApplied, onRefused, onReload, onRecheck, onUnknown }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -532,6 +552,7 @@ function useOfferAction({ token, onApplied, onRefused, onReload, onRecheck, onUn
         // the lost send was refused too or ended long ago (a date that passed
         // at midnight): an open read then frees the fields for a new value.
         if (res.status !== 404) setError(res.body?.error || '');
+        else setLost({ ...lost, notFound: true }); // the banner also offers a call (CallUsLine)
         const after = await onReload();
         if (res.status === 400 && after === 'open') setLost(null);
         return;
@@ -568,7 +589,7 @@ function useOfferAction({ token, onApplied, onRefused, onReload, onRecheck, onUn
   const retry = useCallback(() => (lost ? run(lost.suffix, lost.payload) : undefined), [lost, run]);
   // frozen: the send's own fields are fixed while it is in flight or lost, so
   // a resend sends what the applicant sees.
-  return { busy, error, setError, run, lost: Boolean(lost), retry, frozen: busy || Boolean(lost) };
+  return { busy, error, setError, run, lost: Boolean(lost), stuck: Boolean(lost?.notFound), retry, frozen: busy || Boolean(lost) };
 }
 
 function LostBanner({ action }) {
@@ -576,6 +597,7 @@ function LostBanner({ action }) {
   return (
     <div style={ERROR_BANNER_STYLE} role="alert">
       {LOST_ERROR}
+      {action.stuck && <CallUsLine />}
       <div style={{ marginTop: 8 }}>
         <BrandButton variant="secondary" disabled={action.busy} onClick={action.retry}>
           {action.busy ? 'Trying…' : 'Try again'}
@@ -751,7 +773,7 @@ function OpenOffer({ token, data, outdated, onApplied, onRefused, onReload, onRe
         />
         {accept.error && <div style={ERROR_BANNER_STYLE} role="alert">{accept.error}</div>}
         <LostBanner action={accept} />
-        {unknown && (
+        {unknown > 0 && (
           <div style={ERROR_BANNER_STYLE} role="alert">
             {REFRESH_ERROR}
             <div style={{ marginTop: 8 }}>

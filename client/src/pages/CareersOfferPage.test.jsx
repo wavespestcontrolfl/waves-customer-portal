@@ -85,6 +85,7 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.getByText('Every Friday, for the week before')).toBeInTheDocument();
     expect(screen.getByText(/Please don.t give notice at your current job until you have signed this offer\./)).toBeInTheDocument();
     expect(screen.getByText('Open until Fri, Dec 18')).toBeInTheDocument();
+    expect(screen.queryByText('0')).toBeNull(); // no stray value (a lock's status) renders beside the offer
   });
 
   it('shows only the hourly rate when there is no step', async () => {
@@ -436,11 +437,13 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.getByText(/We could not confirm that choice/)).toBeInTheDocument();
     expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Reload page' })).toBeNull(); // the save's outcome is unknown: no reload
+    expect(screen.getByRole('link', { name: '(941) 297-5749' })).toHaveAttribute('href', 'tel:+19412975749'); // CallUsLine
     expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
     expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
     expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
+    expect(screen.queryByRole('link', { name: '(941) 297-5749' })).toBeNull(); // settled: the call line goes
     expect(fetchMock.mock.calls[5][0]).toMatch(/\/v2\/text-consent$/);
     expect(bodyOf(fetchMock, 5)).toEqual({ consent: true, version: VERSION });
   });
@@ -882,6 +885,9 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.getByText('We could not confirm that. Check your connection and try again.')).toBeInTheDocument();
     expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Reload page' })).toBeNull(); // the send's outcome is unknown: no reload
+    // Try again may never work against that server: the applicant can call, and the office checks.
+    expect(screen.getByText((_, el) => el?.tagName === 'P' && el.textContent === 'If this keeps happening, call us at (941) 297-5749 and we will check it for you.')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '(941) 297-5749' })).toHaveAttribute('href', 'tel:+19412975749');
     expect(screen.getByRole('button', { name: 'Decline' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Ask for another start date' })).toBeDisabled();
     expect(screen.getByLabelText('Text me about this offer')).toBeDisabled();
