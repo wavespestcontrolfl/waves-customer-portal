@@ -157,12 +157,12 @@ describeDb('Restaurants list (PostgreSQL)', () => {
     expect(result.counts).toEqual({ new_restaurant: 1000, new_owner: 2, pest_finding: 1 });
   });
 
-  test('pestUnknown counts the inspections without a pest answer that a read answers for, never a callback', async () => {
+  test('pestUnknown counts the unanswered first visits the reads answer for: never a callback or a row with no visit number', async () => {
     const unread = (over) => prospect({ kind: 'inspection', event_date: '2026-11-15', pest_evidence: null, ...over });
     await mockPg('restaurant_prospects').insert([
       unread({ detail: JSON.stringify({ visitNumber: 1 }) }), // a first visit still to be read: counts
       unread({ detail: JSON.stringify({ visitNumber: 1 }), detail_attempts: 3 }), // could not be read: counts
-      unread({ detail: JSON.stringify({}) }), // a visit number not known yet: counts
+      unread({ detail: JSON.stringify({}) }), // no visit number stored: the reads skip it, left out
       unread({ detail: JSON.stringify({ visitNumber: 2 }) }), // a callback: never answered, left out
       unread({ license_type_code: '2014', detail: JSON.stringify({ visitNumber: 1 }) }), // a food truck: left out
       unread({ event_date: '2026-10-20', detail: JSON.stringify({ visitNumber: 1 }) }), // before the period: left out
@@ -171,7 +171,7 @@ describeDb('Restaurants list (PostgreSQL)', () => {
     ]);
     const result = await listRestaurants({ days: 30, now: NOW });
     expect(result.pestRead).toBe(true);
-    expect(result.pestUnknown).toBe(3);
+    expect(result.pestUnknown).toBe(2);
     expect(result.counts.pest_finding).toBe(1);
     expect(result.rows.map((row) => row.reason)).toEqual(['pest_finding']);
   });

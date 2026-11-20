@@ -58,15 +58,16 @@ function toRow(row, newSince) {
 }
 
 // The period's inspections whose pest answer is not known (pest_evidence NULL): a report still to be read, or one that
-// could not be read. Only an inspection's first visit is answered, so a callback (a later visit number) is left out;
-// a visit number not known yet counts. Food trucks are left out, as from the list.
+// could not be read. The rule is the reads' own: they answer a stored first visit only (visit number 1), so a
+// callback, or a row with no visit number stored, is neither read nor counted. The file import stores the visit
+// numbers and fills old rows before any read runs. Food trucks are left out, as from the list.
 function pestUnknownQuery(from, through) {
   return db('restaurant_prospects')
     .whereBetween('event_date', [from, through])
     .whereRaw("COALESCE(license_type_code, '') <> ?", [FOOD_TRUCK])
     .where({ kind: 'inspection' })
     .whereNull('pest_evidence')
-    .whereRaw("COALESCE(detail->>'visitNumber', '1') = '1'")
+    .whereRaw("detail->>'visitNumber' = '1'")
     .count({ n: '*' })
     .first();
 }
