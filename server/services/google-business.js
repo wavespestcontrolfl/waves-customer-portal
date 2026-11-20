@@ -956,10 +956,17 @@ class GoogleBusinessService {
     // Stamped rows are only reachable via the stable GBP identity lookups
     // above (a genuine reinstatement keeps its review ID); anything else
     // inserts as a distinct review.
+    // Nor a row that already belongs to a GBP review: the fallback only
+    // attaches a GBP identity to a row that has none yet (a Places-first
+    // row). A second review under the same display name within the time
+    // tolerance (two "Anonymous" reviews on one day) is a different review:
+    // matching it would re-point the first review's row to the second, and
+    // each later sync would swap the row between the two.
     const candidates = await db('google_reviews')
       .where({ location_id: normalized.location_id })
       .where('reviewer_name', '!=', '_stats')
       .whereNull('missing_since')
+      .whereNull('gbp_review_name')
       .select('id', 'reviewer_name', 'review_created_at');
     const hit = candidates.find(row => sameReviewerAndTime(row, normalized.reviewer_name, normalized.review_created_at));
     // Callers read the FULL row (reply, draft/auto-reply state, publish
