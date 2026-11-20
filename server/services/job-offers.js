@@ -963,7 +963,8 @@ async function lockByToken(trx, token) {
 // save that landed late) refuses the write with the state still open (409), so the page reads the offer again and the
 // applicant answers on what it now shows. A signature, a date request or a decline therefore never fixes a consent
 // choice the applicant did not see. The page always sends it, and a write without one is refused the same way, so no
-// answer skips the check. The routes that take it are under /v2, which no server from before the version has.
+// write skips the check (a text choice equal to the stored one and an identical replay of a signature write nothing,
+// so they answer as for any resend). The page posts under /v2, which no server from before the version has.
 const changedSince = (offer, version) => version !== iso(offer.updated_at);
 const CHANGED = Object.freeze({ refused: true, body: Object.freeze({ state: 'open' }) });
 

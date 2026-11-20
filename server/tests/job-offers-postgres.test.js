@@ -423,6 +423,16 @@ jest.setTimeout(120000);
         expect((await root('job_applications').where({ id: app.id }).first()).status).toBe('offer');
       });
 
+      // A text choice equal to the stored one writes nothing either way, so with no version it answers as any resend
+      // does: the stored choice and the version on file.
+      test('a text choice equal to the stored one, sent with no version, writes nothing and answers the stored choice', async () => {
+        await JobOffers.setTextConsent(token, true, await shownVersion(token));
+        const version = await shownVersion(token); // read before the row: a view stamps last_viewed_at
+        const before = await root('job_offers').where({ id: offer.id }).first();
+        expect(await JobOffers.setTextConsent(token, true)).toEqual({ body: { textConsent: true, version } });
+        expect(await root('job_offers').where({ id: offer.id }).first()).toEqual(before);
+      });
+
       test('past its expiry the offer reads expired before any sweep, and nothing can be signed', async () => {
         await root('job_offers').where({ id: offer.id }).update({ expires_at: new Date(Date.now() - 60000) });
         const view = await JobOffers.publicView(token);

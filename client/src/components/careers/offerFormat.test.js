@@ -34,6 +34,7 @@ describe('offerFormat', () => {
       { startDate: null }, { startDate: '2027-02-30' }, { startDate: 'soon' },
       { hourlyRate: null }, { hourlyRate: '' }, { hourlyRate: 0 }, { hourlyRate: '-1' }, { hourlyRate: true },
       { hourlyRate: 'twenty' }, { stepRate: 'x' }, { stepEffectiveOn: null }, { stepEffectiveOn: '2027-13-01' },
+      { stepRate: null }, { stepRate: '' }, { stepRate: undefined },
     ]) {
       expect(hasOfferFacts({ ...facts, ...missing })).toBe(false);
     }

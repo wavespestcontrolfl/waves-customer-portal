@@ -215,12 +215,60 @@ describe('CareersOfferPage — open state', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it('shows the not-valid page when the consent save answers 404', async () => {
-    globalThis.fetch = vi.fn()
+  it('shows the not-valid page when the consent save and the read after it answer 404', async () => {
+    const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404))
       .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404));
+    globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.click(await screen.findByLabelText('Text me about this offer'));
+    expect(await screen.findByRole('heading', { name: 'This link is not valid.' })).toBeInTheDocument();
+    expect(fetchMock.mock.calls[2][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}$`)); // the read
+  });
+
+  // A server without the /v2 routes (a mixed deploy or a rollback) answers 404 for a live offer: the page reads the
+  // offer before it calls the link dead, and an open read keeps the offer and says the answer did not go through.
+  it('keeps the offer when a consent save answers 404 and the read says open', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404))
+      .mockResolvedValueOnce(jsonResponse(openPayload()));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    const box = await screen.findByLabelText('Text me about this offer');
+    fireEvent.click(box);
+    expect(await screen.findByText('That did not go through. Please try again.')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'This link is not valid.' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Text me about this offer')).not.toBeChecked();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps the offer when a signature answers 404 and the read says open, and signs nothing on screen', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404))
+      .mockResolvedValueOnce(jsonResponse(openPayload()));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    const accept = await screen.findByRole('button', { name: 'Accept and sign' });
+    fireEvent.change(screen.getByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(accept);
+    expect(await screen.findByText('That did not go through. Please try again.')).toBeInTheDocument();
+    expect(screen.queryByText(/You signed this offer/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'This link is not valid.' })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls[2][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}$`)); // the read
+  });
+
+  it('shows the not-valid page when a signature and the read after it answer 404', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404));
+    renderPage();
+    const accept = await screen.findByRole('button', { name: 'Accept and sign' });
+    fireEvent.change(screen.getByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(accept);
     expect(await screen.findByRole('heading', { name: 'This link is not valid.' })).toBeInTheDocument();
   });
 
@@ -345,6 +393,7 @@ describe('CareersOfferPage — open state', () => {
     ['open without the hourly rate', openPayload({ hourlyRate: null })],
     ['open with a zero hourly rate', openPayload({ hourlyRate: '0.00' })],
     ['open with a step rate and no step date', openPayload({ stepEffectiveOn: null })],
+    ['open with a step date and no step rate', openPayload({ stepRate: null })],
     ['open without the job', openPayload({ jobTitle: ' ' })],
     ['open without the week', openPayload({ hoursLine: null })],
     ['open without who they report to', openPayload({ reportTo: '' })],

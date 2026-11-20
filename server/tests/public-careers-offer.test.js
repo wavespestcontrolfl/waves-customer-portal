@@ -111,13 +111,17 @@ describe('the actions', () => {
     expect(mockService.setTextConsent).toHaveBeenCalledWith(TOKEN, true, '2026-12-01T14:00:00.000Z');
   });
 
-  // A page that read a version posts only to /v2. The paths from before the version (#8012) have no handler here, so a
-  // body sent there is never answered by a handler that ignores its version; on a server from before the version, the
-  // /v2 paths are the ones with no handler. Either way the post answers 404 and nothing is written.
-  test.each(['accept', 'decline', 'date-request', 'text-consent'])('POST /:token/%s from before the version is a 404 that reaches no service', async (name) => {
-    const res = await call(`/${TOKEN}/${name}`, 'POST', { signedName: 'Jordan Rivera', consent: true, reason: 'x', version: '2026-12-01T14:00:00.000Z' });
-    expect(res.status).toBe(404);
-    for (const fn of Object.values(mockService)) expect(fn).not.toHaveBeenCalled();
+  // The page posts only to /v2 (CareersOfferPage.test.jsx), which a server from before the version (#8012) does not
+  // have. The paths without /v2 run the same handlers here, version included, for a tab that opened the page from
+  // before /v2 (#8091 posts there with its version).
+  test.each([
+    ['accept', 'acceptOffer'], ['decline', 'declineOffer'], ['date-request', 'requestDate'], ['text-consent', 'setTextConsent'],
+  ])('POST /:token/%s (the page from before /v2) runs the same handler, version included', async (name, fn) => {
+    const version = '2026-12-01T14:00:00.000Z';
+    const body = { signedName: 'Jordan Rivera', consent: true, reason: 'x', requestedStartDate: '2027-01-11', version };
+    expect(await call(`/${TOKEN}/${name}`, 'POST', body)).toMatchObject({ status: 200 });
+    expect(mockService[fn]).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(mockService[fn].mock.calls[0])).toContain(version);
   });
 
   test('a missing body reaches the service as nothing, never a crash', async () => {

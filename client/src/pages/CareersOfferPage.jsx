@@ -418,10 +418,10 @@ function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, 
       setChecked(stored);
       onSnapshot({ textConsent: stored, version: res.body.version }); // the page's copy follows, so a later read can correct the box
     } else setChecked(!next);
-    if (res.status === 404) onInvalid();
-    else if (res.status === 409) {
-      // The 409 says where the offer stands, or the page reads it.
-      const after = onRefused(res.body) ? 'changed' : await onStale();
+    if (res.status === 404 || res.status === 409) {
+      // A 409 says where the offer stands, or the page reads it. A 404 is read
+      // again before the link counts as dead (see useOfferAction).
+      const after = res.status === 409 && onRefused(res.body) ? 'changed' : await onStale();
       if (after === 'failed') {
         // The offer changed but the new state could not be read: stay locked.
         refused.current = next;
@@ -487,7 +487,7 @@ function NoteField({ id, label, value, onChange, disabled }) {
 // Each action sends the version of the offer on screen, the text box's choice
 // included: a change since then (another tab) is refused with the offer still
 // open, so the page reads it again and the applicant answers on what it shows.
-function useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUnknown }) {
+function useOfferAction({ token, onApplied, onRefused, onReload, onUnknown }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   // The last send whose reply was lost ({ suffix, payload }). It may still go
@@ -514,12 +514,14 @@ function useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUn
         if (res.status === 400 && after === 'open') setLost(null);
         return;
       }
-      setLost(null); // a definite answer
-      if (res.status === 404) return onInvalid();
-      if (res.status === 409) {
-        // The 409 says where the offer stands: the page shows it at once, so
-        // a failed read cannot leave the old offer on screen.
-        if (onRefused(res.body)) return;
+      setLost(null); // a definite answer: a 404 or a 409 wrote nothing
+      if (res.status === 404 || res.status === 409) {
+        // A 409 says where the offer stands: the page shows it at once, so a
+        // failed read cannot leave the old offer on screen. A 404 is read
+        // again before the link counts as dead: in a mixed deploy or a
+        // rollback, a server without the /v2 routes answers 404 for a live
+        // offer, and the read, which every server answers, tells which.
+        if (res.status === 409 && onRefused(res.body)) return;
         const after = await onReload();
         if (after === 'failed') onUnknown();
         else if (after === 'open') setError(NOT_SAVED_ERROR);
@@ -538,7 +540,7 @@ function useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUn
     } finally {
       setBusy(false);
     }
-  }, [busy, lost, token, onApplied, onRefused, onReload, onInvalid, onUnknown]);
+  }, [busy, lost, token, onApplied, onRefused, onReload, onUnknown]);
 
   const retry = useCallback(() => (lost ? run(lost.suffix, lost.payload) : undefined), [lost, run]);
   // frozen: the send's own fields are fixed while it is in flight or lost, so
@@ -650,7 +652,6 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onO
     },
     onRefused,
     onReload,
-    onInvalid,
     onUnknown: markUnknown,
   });
   const dateReq = useOfferAction({
@@ -661,7 +662,6 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onO
     },
     onRefused,
     onReload,
-    onInvalid,
     onUnknown: markUnknown,
   });
   const decline = useOfferAction({
@@ -672,7 +672,6 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onO
     },
     onRefused,
     onReload,
-    onInvalid,
     onUnknown: markUnknown,
   });
   const [consentPending, setConsentPending] = useState(false);

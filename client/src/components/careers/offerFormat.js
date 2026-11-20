@@ -83,15 +83,17 @@ export function tomorrowET(now = new Date()) {
 }
 
 const filled = (value) => typeof value === 'string' && value.trim() !== '';
+const blank = (value) => value == null || value === '';
 const positiveAmount = (value) =>
   (typeof value === 'number' || filled(value)) && Number.isFinite(Number(value)) && Number(value) > 0;
 
 // True when an offer read carries every term the page shows: the job, a real
 // start date, a rate above zero, the week, who they report to and pay day,
-// and a pay step only with its rate and its date. The page signs only such an
-// offer, so no one signs a blank start date or a "$0.00 an hour".
+// and a pay step only with both its rate and its date (a date alone would drop
+// a dated raise from the page). The page signs only such an offer, so no one
+// signs a blank start date, a "$0.00 an hour" or an offer missing its raise.
 export function hasOfferFacts(data) {
-  const noStep = data.stepRate == null || data.stepRate === '';
+  const noStep = blank(data.stepRate) && blank(data.stepEffectiveOn);
   return filled(data.jobTitle) && filled(data.hoursLine) && filled(data.reportTo) && filled(data.payDayLine)
     && weekdayOf(data.startDate) !== null && positiveAmount(data.hourlyRate)
     && (noStep || (positiveAmount(data.stepRate) && weekdayOf(data.stepEffectiveOn) !== null));

@@ -633,7 +633,11 @@
         "POST /api/public/careers/offer/:token/v2/text-consent",
         "POST /api/public/careers/offer/:token/v2/accept",
         "POST /api/public/careers/offer/:token/v2/date-request",
-        "POST /api/public/careers/offer/:token/v2/decline"
+        "POST /api/public/careers/offer/:token/v2/decline",
+        "POST /api/public/careers/offer/:token/text-consent",
+        "POST /api/public/careers/offer/:token/accept",
+        "POST /api/public/careers/offer/:token/date-request",
+        "POST /api/public/careers/offer/:token/decline"
       ]
     },
     {
