@@ -13,6 +13,10 @@
  * Each test removes everything it made and every bell its sweeps raised (Codex #7489 r2). Every row is synthetic.
  * It refuses any database but a private QA one or CI's.
  */
+// The new-lead re-alert pass (new-lead-reminder.js) is not this suite's subject. It has no gate, so the sweep run here in
+// office hours would judge, stamp and push every open lead bell in the connected database. Its own suite
+// (new-lead-reminder-postgres.test.js) runs it inside rolled-back transactions with the push mocked.
+jest.mock('../services/new-lead-reminder', () => ({ runNewLeadReminder: jest.fn(async () => ({ skipped: true, reason: 'not_this_suite' })) }));
 const { randomUUID } = require('crypto');
 
 const SKIP = !process.env.DATABASE_URL;

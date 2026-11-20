@@ -2609,7 +2609,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             ? JSON.stringify({ ...JSON.parse(extractedData), duplicate_of_lead_id: duplicateOfLeadId })
             : extractedData,
         }),
-      }).returning(['id']);
+      }).returning(['id', 'lead_type']); // lead_type: the new-lead bell below marks only the wizard's own row
       lead = rows[0];
     }
     // The label was computed from a read of the target; if the office closed
@@ -3745,7 +3745,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           : isOneTimeOnly
             ? `${serviceInterest} · $${Math.round(oneTimeTotal)} one-time · ${quoteFullAddress}`
             : `${serviceInterest} · $${monthly.toFixed(2)}/mo · ${quoteFullAddress}`}${duplicateOfLeadId ? ' · repeat of an open lead (filed as duplicate)' : ''}`,
-        { icon: '\u{1F4B0}', link: `/admin/leads?lead=${lead.id}`, metadata: { leadId: lead.id, ...(duplicateOfLeadId ? { duplicateOfLeadId } : {}) } }
+        // createdLead: the lead is this wizard run's own row (lead_type quote_wizard: inserted above, or minted by its
+        // property-lookup stage), not a repeat filed as a duplicate, nor a voicemail or inbound-call lead the prefill
+        // token attached this form to. The new-lead re-alert (new-lead-reminder.js intakeMarked) then counts a person's
+        // contact from the lead's creation, not only from this bell, and only within 15 minutes of that creation.
+        { icon: '\u{1F4B0}', link: `/admin/leads?lead=${lead.id}`, metadata: { leadId: lead.id, ...(duplicateOfLeadId ? { duplicateOfLeadId } : { createdLead: lead.lead_type === 'quote_wizard' }) } }
       );
     } catch (e) {
       logger.error(`[public-quote] Admin notify failed: ${e.message}`);

@@ -31,7 +31,7 @@ const { hashExtractionSource, recordExtractionAttempt, shouldSkipExtraction, TER
 const { extractSmsOperations, VERSION: EXTRACTOR_VERSION } = require('./sms-operational-extractor');
 const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, PAYMENT_WITNESS_KINDS } = require('./sms-commitment-fulfillment');
 const { ringOverdueBell, keptLate, resolveDueDeadline } = require('./sms-operational-actions');
-const { resolveEmailCustomerLink, personSentFilter } = require('./email/email-customer-link');
+const { emailCustomerLink, personSentFilter } = require('./email/email-customer-link');
 const { stripQuotedAndSignature, emailPlainText, ownSubjectsInThreads, settledSql } = require('./email/email-strip');
 const NotificationService = require('./notification-service');
 const { validStructuredFields } = require('./admin-alert-compose');
@@ -132,7 +132,7 @@ async function recordEmailOperations(conn, email, extracted, { direction = 'inbo
     if (!source || source.operational_analysis || emailPlainText(source) !== emailPlainText(email)
       || subjectOf(await withOwnSubject(trx, source)) !== subjectOf(email)) return { skipped: 'source_changed' };
     const stillOwned = direction === 'outbound'
-      ? String(await resolveEmailCustomerLink(trx, source)) === String(customer.id)
+      ? String((await emailCustomerLink(trx, source)).customerId) === String(customer.id)
       : eligibleAskEmail(source) && String(source.customer_id) === String(customer.id);
     if (!stillOwned) return { skipped: 'source_changed' };
     const since = gateEnvTimestamp('GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE');
@@ -296,7 +296,7 @@ async function runEmailOperationalActions({ now = new Date(), conn = db } = {}) 
       try {
         const skip = await shouldSkipExtraction({ ...source, trx: conn });
         if (skip.skip) { skipped += 1; continue; }
-        resolvedCustomerId = await resolveEmailCustomerLink(conn, email);
+        resolvedCustomerId = (await emailCustomerLink(conn, email)).customerId;
         if (!resolvedCustomerId) { await markSeen(conn, email.id, { skipped: 'no_customer_link' }); skipped += 1; continue; }
         const withCustomer = { ...email, customer_id: resolvedCustomerId };
         const properties = await loadActiveProperties(conn, resolvedCustomerId);

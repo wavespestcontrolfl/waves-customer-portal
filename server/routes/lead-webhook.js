@@ -878,8 +878,10 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // differently when the call side can't record a funnel row.
     let attachedCallLead = false;
     let attachedVia = null;
-    // True only when THIS request inserted the leads row (never an attach).
-    let insertedLead = false;
+    // True only once this submission inserted its own leads row: the new_lead bell below is then that lead's intake
+    // bell (new-lead-reminder.js inquiryOf). An attached form, or a failed insert, leaves it false. The quiz
+    // hand-off reads it too: a token only for a lead this request made (quizHandoffFor).
+    let createdLead = false;
     try {
       const webhookStage = {
         ...webhookStageBase,
@@ -959,7 +961,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           ...commercialLeadFields(estimateAutomationReadiness),
         }).returning('*');
         leadRecord = newLead;
-        insertedLead = true;
+        createdLead = true;
       }
     } catch (leadErr) {
       logger.error(`Lead record creation failed: ${leadErr.message}`);
@@ -969,7 +971,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // page that asked and gets none (the submission joined a call lead, the
     // row is commercial, the insert failed) gets the usual draft, made now.
     // A lead that is handed off says so in its activity list.
-    const handoff = quizHandoffFor({ priceAsk: quizPriceAsk, insertedLead, lead: leadRecord });
+    const handoff = quizHandoffFor({ priceAsk: quizPriceAsk, createdLead, lead: leadRecord });
     if (handoff) await notePriceHandoff(leadRecord.id);
     else if (quizPriceAsk) await createLeadDraftEstimate();
 
@@ -1064,6 +1066,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         // The bell's Call (alert-call-button.js) dials the lead row's number, or this customer's when the lead row
         // failed and leadId above is the customer id.
         customerId: customer.id,
+        // The lead's intake bell only when this submission created the lead row. A form attached to an open call lead
+        // made no lead: its bell is a later inquiry, judged from the form, never settled by the call that made the lead.
+        createdLead,
       });
       // suppressed counts as HANDLED (internal test customer) — the legacy
       // SMS fallback must not re-create the alert the suppression removed.
@@ -1383,8 +1388,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
 // that names a catalog key never asks: quizPriceAsk.) The token is
 // attach-only and lives 2 hours (utils/lead-prefill-token.js): it cannot be
 // exchanged for the lead's contact fields. null = no hand-off.
-function quizHandoffFor({ priceAsk, insertedLead, lead } = {}) {
-  if (priceAsk !== true || insertedLead !== true || !lead?.id || lead.is_commercial === true) return null;
+function quizHandoffFor({ priceAsk, createdLead, lead } = {}) {
+  if (priceAsk !== true || createdLead !== true || !lead?.id || lead.is_commercial === true) return null;
   const token = mintLeadAttachToken(lead.id);
   return token ? { lead_id: lead.id, token, expires_in: ATTACH_TTL_SECONDS } : null;
 }

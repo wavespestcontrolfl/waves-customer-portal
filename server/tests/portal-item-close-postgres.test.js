@@ -10,6 +10,10 @@
  *     service is rung once more whatever a person said, never twice, never for an old ask.
  * The rules themselves are covered by admin-alert-relevance.test.js and portal-late-rering.test.js.
  */
+// The new-lead re-alert pass (new-lead-reminder.js) is not this suite's subject. It has no gate, so the sweep run here in
+// office hours would judge, stamp and push every open lead bell in the connected database. Its own suite
+// (new-lead-reminder-postgres.test.js) runs it inside rolled-back transactions with the push mocked.
+jest.mock('../services/new-lead-reminder', () => ({ runNewLeadReminder: jest.fn(async () => ({ skipped: true, reason: 'not_this_suite' })) }));
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
 

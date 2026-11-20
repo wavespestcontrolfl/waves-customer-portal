@@ -4,9 +4,28 @@
  * once and sends one banner; the next sweep sends nothing. A person's text or Gmail send after the bell, a young bell,
  * an old bell, a closed bell and another kind of lead bell send nothing, and a row changed since it was read is not
  * stamped. The rules themselves are covered by lead-call-reminder.test.js.
+ *
+ * The sweeps read the whole notifications table (the relevance sweep also runs the new-lead re-alert), and the push is a
+ * stub, so every statement of a test runs in one transaction that is rolled back after it (as
+ * new-lead-reminder-postgres.test.js does): a bell anything else left open in this database is stamped, if at all, only
+ * inside that transaction, never used up without a push, and the fixtures go with it.
  */
 const crypto = require('crypto');
 
+// Every module reaches the database through this handle: the test's open transaction, else the real pool.
+let mockTrx = null;
+jest.mock('../models/db', () => {
+  const actual = jest.requireActual('../models/db');
+  const live = () => mockTrx || actual;
+  return new Proxy(() => {}, {
+    apply: (_target, _self, args) => live()(...args),
+    get: (_target, prop) => {
+      if (prop === 'real') return actual;
+      const value = live()[prop];
+      return typeof value === 'function' ? value.bind(live()) : value;
+    },
+  });
+});
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: false, push: { sent: 1 } })) }));
 
 const SKIP = !process.env.DATABASE_URL;
@@ -24,7 +43,6 @@ maybeDescribe('lead call-back reminder (live Postgres)', () => {
   let reminder;
   let relevance;
   let triggerNotification;
-  const made = { notifications: [], sms_log: [], emails: [], leads: [], customers: [] };
   const BIZ = '+15555559300';
   let n = 0;
   let phoneN = 9300;
@@ -37,19 +55,21 @@ maybeDescribe('lead call-back reminder (live Postgres)', () => {
     relevance = require('../services/admin-alert-relevance');
     ({ triggerNotification } = require('../services/notification-triggers'));
   });
-  beforeEach(() => {
+  beforeEach(async () => {
     jest.clearAllMocks();
+    require('../services/lead-reminder-sweep').__private.resumeAfter.clear();
+    mockTrx = await db.real.transaction();
+  });
+  afterEach(async () => {
+    if (mockTrx && !mockTrx.isCompleted()) await mockTrx.rollback();
+    mockTrx = null;
   });
   afterAll(async () => {
-    for (const table of ['notifications', 'sms_log', 'emails', 'leads', 'customers']) {
-      if (made[table].length) await db(table).whereIn('id', made[table]).del();
-    }
-    await db.destroy();
+    await db?.real.destroy();
   }, 120000);
 
   const insert = async (table, row) => {
     const [r] = await db(table).insert(row).returning('*');
-    made[table].push(r.id);
     return r;
   };
   const customerWith = () => insert('customers', { first_name: 'Lead', last_name: 'Sample', phone: `+1555555${phoneN += 1}`, email: `lead${phoneN}-${Date.now()}@example.invalid` });
@@ -73,7 +93,8 @@ maybeDescribe('lead call-back reminder (live Postgres)', () => {
   const metaOf = (row) => (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {});
   const bannersFor = (id) => triggerNotification.mock.calls.filter(([key, payload]) => key === 'lead_call_reminder' && payload.alertRowId === id);
   const run = async (now = NOW) => {
-    const result = await reminder.runLeadCallReminder({ now });
+    // The 8 PM cutoff's fresh clock is the pass's `now`: the real clock is not part of this suite.
+    const result = await reminder.runLeadCallReminder({ now, clock: () => now });
     await Promise.all(result.sends || []);
     return result;
   };
@@ -160,7 +181,8 @@ maybeDescribe('lead call-back reminder (live Postgres)', () => {
   test('the alert-relevance sweep runs the pass and reports it', async () => {
     const { customer, lead } = await leadAndCustomer();
     const row = await bell({ lead, customer, at: mins(-100) });
-    const result = await relevance.runAdminAlertRelevanceSweep({ now: NOW });
+    // The reminders' fresh clock is the sweep's `now`: the real clock is not part of this suite.
+    const result = await relevance.runAdminAlertRelevanceSweep({ now: NOW, clock: () => NOW });
     expect(result.leadCallReminders).toBeGreaterThanOrEqual(1);
     expect(metaOf(await get(row.id)).leadCallReminderAt).toBe(NOW.toISOString());
   });

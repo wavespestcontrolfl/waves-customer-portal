@@ -606,12 +606,81 @@ event (the follow-up SLA's clock, 8 AM to 8 PM ET) sends ONE banner (`lead_call_
 nobody has reached the lead since. "Reached" uses the shared contact witnesses after that event: a person's text, a call
 a person placed and spoke on, an inbound call a person answered, a person's Gmail send to the lead's customer's own
 address, a visit booked for that customer, or an estimate handed off. A deleted lead, or one a person closed, sends nothing. Banners go out
-only from 8:00 AM up to 8:00 PM Eastern, and only for bells of the last 24 hours. The banner carries the row's own title,
+only from 8:00 AM up to 8:00 PM Eastern (asked again with a fresh clock before each stamp and at the banner's dispatch),
+and only for bells of the last 24 hours. Each banner expires at the push provider at 8:00 PM that day
+(`payload.expiresAt`, which `pushExpiryFor` turns into the web push TTL, the APNs expiration and the FCM ttl), so a
+phone that was offline does not show it later. The banner carries the row's own title,
 body and link, led by "Reminder: nobody has reached this lead yet.", `pushOnly` to admin-role phones with a tag per row.
 The bell row is not rewritten: it is stamped `metadata.leadCallReminderAt` in one statement fenced on the row being open
-and unchanged since it was read, so a row sends at most one banner. The stamp is not a ring, so the 3-day quiet fall-off
+and unchanged since it was read, under notifyAdmin's advisory lock for the row's dedupe key (a refresh rewrites the
+metadata under that lock), so a row sends at most one banner. The banner goes only while the row is still an open bell in
+the bell feed with exactly the stamped metadata: a bell that rang again or moved to Activity since the stamp sends
+nothing. Before that row read, the lead is judged again with fresh reads (`lead-reminder-sweep.js` `waitingNow`): a lead
+a person reached, or one that closed, since the sweep read it sends nothing, and a failed read sends nothing. The row
+read is the last read before the handoff, so a Done or a new ring during the lead's reads still stops it. The same check
+runs again before each device's handoff (the push service's `beforeHandoff`, passed through `triggerNotification`), so a
+Done, a contact or the hours closing while an earlier device's request runs stops the remaining devices. Neither reminder's stamp is part of the bell's content version (`NOTIFICATION_VERSION_SQL` leaves out
+`REMINDER_STAMP_KEYS`), so a stamp that lands after an admin opened the bell never refuses that admin's Done. The stamp is not a ring, so the 3-day quiet fall-off
 still counts from the bell's own event. The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead
 still waits for a call"). It sends nothing to a lead.
+
+New-lead re-alert (owner 2026-11-19, "do phase 1 first"; no gate: the push goes to admin users only): in the 12 weeks to
+2026-11-19, 82 of 437 leads never got a call, text, email or estimate from a person and none booked. A form lead gets one bell
+and one push; 44 of 129 form bells in 30 days were never opened. The alert-relevance sweep (every 10 minutes, after its
+closes) also runs `server/services/new-lead-reminder.js`. An open `new_lead` bell that names a lead, or an open repeat-form
+bell (`lead-repeat-form:`, category `lead`: a lead sent the quote form again; the relevance sweep's `lead_repeat_form`
+class), that no person has reached gets ONE more phone push 15 minutes after its latest event (`lead_call_reminder`, `pushOnly`, admin users only, the
+row's own title, body and link). The clock counts only Monday to Saturday, 8:00 AM to 6:00 PM ET (`staffedDeadline`; holidays
+are not skipped), and nothing is sent outside those hours: they are judged again with a fresh clock before each stamp and before
+each push goes, and a sweep that runs past 6 PM stops and leaves the rest unstamped. A push more than 2 business hours past due is dropped,
+also when that time passes while the sweep reads (checked again before the stamp, and before and after the push's open-row read). Bells of
+the last 48 hours only. Each push expires at the push provider at 6:00 PM that day, or at the end of its late window if that
+comes first (`payload.expiresAt`, as for the call-back banner). The push is stamped first, fenced on the row being open and unchanged (`metadata.newLeadRealertAt`),
+under the same dedupe-key lock (the hours and the late window are asked again once the lock is held), so a row gets
+at most one for each event of the row. A lead gets at most one push in 48 hours (the plan's "at most twice per lead" is
+this push and the 60-minute call): the stamp also takes an advisory lock on the lead, after the dedupe-key lock, and holds
+back a bell when any bell, itself included, holds a push for its lead in the 48 hours before. Each stamp keeps the lead it
+was for (`metadata.newLeadRealertLeads`, left out of the bell version like the stamps), because the repeat-form row is
+keyed by customer and a form for the customer's other lead refreshes it: the first lead stays capped, and the other lead
+is judged on its own. So a lead with an open intake
+bell and a repeat form gets one push, for the latest inquiry: the lead's latest inquiry sets its clock, so an older open
+bell of the lead waits for the newer one (the sweep reads every page before it judges any row), and a form sent again
+just before the older bell falls due gets the push 15 minutes after that form. A bell of that lead written or rung in
+the next 48 hours gets none (the writer's own ring still
+reaches the phones). A row that rang again after its stamp (a repeat form refreshes its row and keeps the stamp) is read
+again, so after those 48 hours it can push for its new event. The stamp is the clock when it is written, and the hours
+and the late window are asked last, just before that write. As with the call-back reminder, it goes only while the row is
+still an open bell in the bell feed with exactly the stamped metadata, and while the lead still waits when judged again
+with fresh reads (a person who reached it, or a lead closed or quoted, since the sweep read it sends nothing). The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead still waits for a
+call"). "Reached" is judged on the lead, whatever the close gates say, and not only after the bell (a "New call lead" bell
+is written minutes after a call a person already answered): a deleted lead, a lead outside the shared open-lead predicate
+(`lead-statuses.js`: status new, contacted, estimate_sent or estimate_viewed, and not converted, so spam, cancelled, won, lost and the
+like are out), or one with an estimate sent or viewed; the call that made the lead answered by a
+person (`answered_by = 'human'`; only for the intake bell: the one the new-lead trigger writes for a lead its writer
+created, `metadata.triggerKey` `new_lead` as the relevance sweep's `new_lead` class defines it, with `payload.createdLead`
+set by that writer (the form webhook, the call processor's `notifyNewCallLead`, the /book preferred-time request); the
+call processor's bell by its title (`New call lead`, `New voicemail lead`; no other writer uses them), also one written
+before the mark existed, so its call, which ends before the bell, is still judged; or the quote wizard's bell for its own row (`public-quote.js` writes it straight to `notifyAdmin`, with `metadata.createdLead`, only
+for a `quote_wizard` lead: never on a repeat filed as a duplicate, nor on a voicemail or inbound-call lead the prefill token
+attached the form to), within 15 minutes of the lead's creation; every other bell, such as a repeat form, a form
+attached to an open call lead (`createdLead` false), an email follow-up's draft or another bell written before the mark existed, is
+a fresh inquiry); a person's text, call or Gmail send, or a visit booked, for the lead's customer or phone after
+the bell's inquiry began (a text or call tied to another customer never counts, even for a lead with no customer; one tied to
+no customer counts on the lead's own phone only while no other open lead holds that phone, by `lead-contact-sync.js`
+`openLeadIdentities`; the customer's file phone is not added), with no look-back before it (the shared contact witnesses, kind `customer`; for the intake bell, the
+earlier of the bell and the lead's `first_contact_at`, else `created_at`; for a later bell, such as a form sent again on a
+lead made days ago, the bell itself); a person's email to the lead's own address since that moment (only one the shared email linkage,
+`emailCustomerLink`, ties to the lead's customer, or shows names no customer at all: Cc and Bcc captured, no customer in its
+thread, no recipient on a customer's file, and no other open lead holding the address, by `lead-contact-sync.js`
+`openLeadIdentities`; a send the linkage cannot settle, such as a mixed thread, is no proof; a bell that names an email, `metadata.emailId`, counts from that message's `received_at`: a follow-up
+bell is written after classification and drafting; the push deadline stays on the bell); or an estimate sent (`sent_at`, as
+`newLeadMovedOn` reads it: the one the bell names, `metadata.estimateId`, the lead's own, or any to its customer) or handed off. A lead needs a customer, a 10-digit phone or an email
+address to be judged, so a lead from email intake with no phone is judged on email and estimate evidence. A missing lead
+row, or a read that fails, sends nothing. The quiet 72 h close and the 21-day staleness are unchanged. Sends nothing to a
+lead or a customer. The scan, the once-only stamp, the open-row recheck and the push are shared with the lead call-back
+reminder above (`server/services/lead-reminder-sweep.js`). A sweep reads at most 5 pages of 100 bells; one that stops at the
+cap remembers where (a module variable, as the relevance sweep's own cursor) and the next sweep resumes after it, so old
+reached bells cannot hide a due one. A restart starts again from the oldest bell.
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.

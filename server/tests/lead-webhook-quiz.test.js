@@ -168,7 +168,7 @@ describe('quizHandoffFor: the price page hand-off in the response', () => {
     else process.env.LEAD_PREFILL_SECRET = prevSecret;
   });
   const homeLead = { id: LEAD, is_commercial: false, is_residential: true };
-  const handoff = (over = {}) => quizHandoffFor({ priceAsk: true, insertedLead: true, lead: homeLead, ...over });
+  const handoff = (over = {}) => quizHandoffFor({ priceAsk: true, createdLead: true, lead: homeLead, ...over });
 
   test('the lead this request inserted gets an attach-only token for that lead', () => {
     const out = handoff();
@@ -188,10 +188,9 @@ describe('quizHandoffFor: the price page hand-off in the response', () => {
     expect(handoff({ lead: { id: LEAD, is_commercial: true, is_residential: false } })).toBeNull();
   });
 
-
   test('none for an attached lead or a missing lead row', () => {
-    expect(handoff({ insertedLead: false })).toBeNull();
-    expect(handoff({ insertedLead: 'yes' })).toBeNull();
+    expect(handoff({ createdLead: false })).toBeNull();
+    expect(handoff({ createdLead: 'yes' })).toBeNull();
     expect(handoff({ lead: null })).toBeNull();
     expect(handoff({ lead: {} })).toBeNull();
     expect(quizHandoffFor()).toBeNull();
