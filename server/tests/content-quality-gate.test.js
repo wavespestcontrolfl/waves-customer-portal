@@ -639,7 +639,9 @@ describe('evaluate (full gate)', () => {
   });
   test('perfect refresh draft passes its own threshold (prod 2026-06-12: 47/47 gate-failed under global 54)', () => {
     const r = evaluate(
-      fullDraft({ body: 'x'.repeat(1500) }),
+      // Real prose: the always-on privacy check (redaction_passed) fails an all-lowercase
+      // run like 'x'.repeat(), since the redactor cannot read it.
+      fullDraft({ body: 'Termite swarmers look like flying ants. They have straight antennae. Wings are equal length. '.repeat(17).slice(0, 1500) }),
       brief({ page_type: 'refresh' }),
       { previewBuildSuccess: true, sitemapHasUrl: true, previousVersion: { body: 'x'.repeat(1000) } }
     );
@@ -672,7 +674,8 @@ describe('evaluate (full gate)', () => {
     // signals.
     const r = evaluate(
       fullDraft({
-        body: 'Termites are insects. Read our [pest control services](/pest-control-services/) page.',
+        // Enough sentence capitals for the always-on privacy check to read the text.
+        body: 'Termites are insects. They eat wood. Read our [pest control services](/pest-control-services/) page. It lists treatment options.',
       }),
       brief({ page_type: 'supporting-blog' }),
       { previewBuildSuccess: true, sitemapHasUrl: true }

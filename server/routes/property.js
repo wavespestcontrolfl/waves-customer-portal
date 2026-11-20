@@ -24,7 +24,7 @@ function awayWatchPayload(req) {
 router.use(express.json({ limit: '64kb' }));
 router.use(authenticate);
 
-// Moving flow PR 2a (GATE_MOVING_PORTAL, needs GATE_MOVING_FLOW): the customer app's "Take WaveGuard with you".
+// Moving flow PR 2a (GATE_MOVING_PORTAL): the customer app's "Take WaveGuard with you".
 //   GET  /moving  { enabled }: whether My Plan shows the button. No database read.
 //   POST /moving  opens (or reuses) the signed-in customer's move and answers the moving page path { path }: the same
 //                 /moving/<token> page the office's moving link opens, for this customer only. Sends nothing.

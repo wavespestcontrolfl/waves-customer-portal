@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import ScheduleSaveNotice, { clearScheduleSaveNotices, showScheduleSaveNotice } from './ScheduleSaveNotice';
+import { reloadHoldName } from '../../lib/reloadHolds';
 
 afterEach(cleanup);
 
@@ -19,8 +20,11 @@ describe('ScheduleSaveNotice', () => {
     expect([...notices].map((p) => p.textContent)).toEqual([
       'Moved.\n\nOverlaps another visit at 9:00.', 'Moved.\n\nOverlaps another visit at 9:00.', 'Saved.',
     ]);
+    // An open notice holds the automatic reload of an out-of-date tab.
+    expect(reloadHoldName()).toBe('schedule-notice');
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss notices' }));
     expect(screen.queryByRole('status')).toBeNull();
+    expect(reloadHoldName()).toBeNull();
     act(() => showScheduleSaveNotice('Saved.'));
     expect(screen.getByRole('status').querySelectorAll('p')).toHaveLength(1);
   });

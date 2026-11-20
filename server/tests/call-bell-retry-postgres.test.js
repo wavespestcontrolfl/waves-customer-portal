@@ -23,7 +23,8 @@ jest.setTimeout(30000);
   let database;
   const schema = `call_retry_${randomUUID().replaceAll('-', '')}`;
   // sms_log, estimates, message_drafts and leads: the contact-close clauses retireCalledBackMissedCalls also runs read them.
-  const tables = ['call_log', 'scheduled_services', 'customers', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'sms_log', 'estimates', 'message_drafts', 'leads'];
+  // invoices: the visit-underway clause reads it.
+  const tables = ['call_log', 'scheduled_services', 'invoices', 'customers', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'sms_log', 'estimates', 'message_drafts', 'leads'];
   let now;
   const gateNames = ['missedCallUnknownCallers', 'repeatCallerBell'];
   const savedGates = Object.fromEntries(gateNames.map(key => [key, gates[key]]));
@@ -97,7 +98,7 @@ jest.setTimeout(30000);
     expect((await database('call_log').where({ id: missed.id }).first()).metadata.missed_call_notified_at).toBeUndefined();
   });
 
-  test('a callback whose customer leg was dialed keeps the missed call quiet; an undialed one does not', async () => {
+  test('a callback whose customer leg was answered keeps the missed call quiet; an undialed one does not', async () => {
     const missed = call(10, { customer_id: randomUUID() });
     const undialed = call(9, { direction: 'outbound', from_phone: '+19415559999', to_phone: '+19415550100', status: 'no-answer', answered_by: null });
     await database('call_log').insert([missed, undialed]);
@@ -105,7 +106,7 @@ jest.setTimeout(30000);
     expect(triggerNotification).toHaveBeenCalledTimes(1);
 
     const missed2 = call(8, { customer_id: randomUUID(), from_phone: '+19415550101' });
-    const bridged = call(7, { direction: 'outbound', from_phone: '+19415559999', to_phone: '9415550101', status: 'completed', answered_by: null, bridged_at: new Date(now - 7 * 60000) });
+    const bridged = call(7, { direction: 'outbound', from_phone: '+19415559999', to_phone: '9415550101', status: 'completed', answered_by: null, bridged_at: new Date(now - 7 * 60000), metadata: { customer_leg: { status: 'completed', duration_seconds: 42 } } });
     await database('call_log').insert([missed2, bridged]);
     expect(await sweepMissedCalls()).toBe(0);
     expect(await ringMissedCallIfUnanswered(missed2.twilio_call_sid)).toBe(false);

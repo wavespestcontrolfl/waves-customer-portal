@@ -1,16 +1,205 @@
 /**
  * Weekly restaurant prospect list from Florida's public restaurant files (DBPR; free, no key; owner approval
- * 2026-11-19), storage half: the four reads and writes on `restaurant_prospects`. The weekly job that downloads the
- * files and calls them is the next change; until it lands, nothing calls this file. It sends nothing and calls no AI.
+ * 2026-11-19): the store calls on `restaurant_prospects` and the pure parsers for the three files. The weekly job
+ * that downloads the files and calls them is the next change; until it lands, nothing calls this file. It sends
+ * nothing and calls no AI.
  *
- * pest_evidence is for inspections: NULL = the public report page is not read yet, true = a 35A pest finding,
- * false = 35B only (outer openings not protected). detail_attempts counts failed report reads.
+ *   7fdinspi.csv      district 7 inspections, current fiscal year. Kept: visits that cited violation 35 in
+ *                     Manatee, Sarasota or Charlotte, outside Punta Gorda (not served; excluded-localities.js).
+ *   newfood.csv       new licenses statewide. Kept: the three counties, outside Punta Gorda.
+ *   chgownr_food.csv  ownership changes statewide. Kept: the same places. In this file the values under
+ *                     "Primary Phone Number" and "Mailing County Code" arrive swapped, so a phone is picked by shape.
+ *
+ * Violation 35 holds two codes. 35A is pest evidence (roaches, rodents, flies); 35B is outer openings not protected
+ * (a door that does not self-close). The CSV has only the count. pest_evidence: NULL = the public report page is not
+ * read yet, true = a 35A finding, false = 35B only. detail_attempts counts failed report reads.
  */
 
 const db = require('../../models/db');
+const { isInServiceAreaCounty } = require('../call-triage-flags');
+const { isExcludedLocality, isExcludedZip } = require('../excluded-localities');
+const { nanpNationalDigits, isValidNanpNumber } = require('../../utils/phone');
+
+// Every column a parser reads. A row without one is skipped and counted (hasEveryColumn): no License ID would store
+// inspections whose report can never be read, no city or ZIP would let Punta Gorda rows through, and a renamed name,
+// address or phone column would store blanks that no later file repairs (a known key only refreshes last_seen_at).
+// An empty cell is still allowed. The two license files share one layout.
+const PLACE_COLUMNS = ['Location City', 'Location Zip Code'];
+const LICENSE_COLUMNS = [
+  'Application Number', 'Application Type', 'Application Approval Date', 'License Number', 'License Type Code',
+  'Business Name', 'Location Street Address', 'Location Address Line 2', 'Location Address Line 3', ...PLACE_COLUMNS,
+  'Location County',
+  'Primary Phone Number', 'Secondary Phone Number', 'Mailing County Code', 'Number of Seats',
+];
+const REQUIRED_COLUMNS = {
+  inspection: [
+    'County Name', ...PLACE_COLUMNS, 'Location Address', 'Business (DBA-Does Business As) Name', 'License Number',
+    'License Type Code', 'License ID', 'Inspection Visit ID', 'Inspection Date', 'Inspection Type',
+    'Inspection Disposition', 'Number of High Priority Violations', 'Violation 35',
+  ],
+  new_license: LICENSE_COLUMNS,
+  owner_change: LICENSE_COLUMNS,
+};
+// restaurant_prospects.source_key is varchar(40). A longer key is skipped, never cut: two cut keys could merge two
+// applications, and one value too long would make PostgreSQL refuse its whole insert batch.
+const KEY_MAX = 40;
 
 const REPORT_MAX_ATTEMPTS = 3;
 const UPSERT_CHUNK = 500;
+
+// ── Parsers (pure) ──────────────────────────────────────────────
+
+// PostgreSQL text and jsonb refuse a NUL character, and one in any field would fail its whole insert batch: it
+// becomes a space here, where every stored text value passes.
+const clean = (v, max) => {
+  const s = String(v == null ? '' : v).replaceAll('\0', ' ').replace(/\s+/g, ' ').trim();
+  return (max ? s.slice(0, max) : s) || null;
+};
+
+// "MM/DD/YYYY" -> "YYYY-MM-DD", or null for anything that is not a real calendar date.
+function parseUsDate(value) {
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(value || '').trim());
+  if (!m) return null;
+  const [month, day, year] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const probe = new Date(Date.UTC(year, month - 1, day, 12));
+  if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) return null;
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+// The three served counties (the shared county test: "Sarasota" and "Sarasota County" both count), less the places
+// inside them Waves does not serve (Punta Gorda, owner ruling 2026-10-22). services/excluded-localities.js is the one
+// list of those places; it decides by city name or by a Punta Gorda-only ZIP. Each value is cleaned first, as it is
+// stored: a check on the raw value could pass a city whose stored copy is excluded ("PUNTA\0GORDA" stores as
+// "PUNTA GORDA").
+function inServiceArea(county, city, zip) {
+  return isInServiceAreaCounty(clean(county)) && !isExcludedLocality(clean(city)) && !isExcludedZip(clean(zip));
+}
+
+// A trailing extension ("x12", "ext. 12", "extension 12", "#12") is dropped first, so its digits never join the number.
+const PHONE_EXTENSION_RE = /\s*(?:x|ext\.?|extension|#)\s*\d{1,6}\s*$/i;
+
+// A phone is picked by shape, never by column name: chgownr_food.csv swaps the Primary Phone and Mailing County Code
+// values. The location's own line (Secondary Phone Number) comes first, then the owner's. A value counts only as a
+// valid US number (ten digits, or 1 and ten digits, area code 2-9; utils/phone.js); anything else tries the next.
+function pickPhone(row) {
+  const candidates = [row['Secondary Phone Number'], row['Primary Phone Number'], row['Mailing County Code']];
+  for (const value of candidates) {
+    const ten = nanpNationalDigits(String(value || '').replace(PHONE_EXTENSION_RE, ''));
+    if (ten && isValidNanpNumber(ten)) return ten;
+  }
+  return null;
+}
+
+// At most 9 digits, so a seat count always fits the integer column (one value out of range would refuse its whole
+// insert batch).
+const wholeNumber = (v) => (/^\d{1,9}$/.test(String(v || '').trim()) ? Number(String(v).trim()) : null);
+
+// The public report page's address is built from these two ids only (the page reads are the next change), so both
+// must be digits.
+const ID_RE = /^\d{1,12}$/;
+
+// csv-parse keeps a row cut short, with only the cells it has. Such a row is skipped and counted: stored, it would
+// keep blanks that no later file repairs. An empty cell is a cell, so it passes. The parsers test this before the
+// area, as a row cut before its county cannot be placed at all. Each row in the area is then checked whole and,
+// when it passes, counted as good (counts.valid), cited or not, so a caller can tell a quiet file from a broken one.
+function hasEveryColumn(row, kind) {
+  return REQUIRED_COLUMNS[kind].every((column) => column in row);
+}
+
+/**
+ * Inspection rows -> one record per visit that cited violation 35, in the three counties. A row cut short, or a row
+ * in the area with a bad report id, date or violation-35 count, is skipped and counted in counts.malformed; a row in
+ * the area that passes counts in counts.valid, cited or not.
+ */
+function parseInspectionRows(rows, counts = {}) {
+  counts.malformed ??= 0;
+  counts.valid ??= 0;
+  const out = [];
+  for (const row of rows) {
+    if (!hasEveryColumn(row, 'inspection')) {
+      counts.malformed += 1;
+      continue;
+    }
+    if (!inServiceArea(row['County Name'], row['Location City'], row['Location Zip Code'])) continue;
+    const sourceKey = clean(row['Inspection Visit ID']);
+    const licenseId = clean(row['License ID'], 40);
+    const eventDate = parseUsDate(row['Inspection Date']);
+    const cited = wholeNumber(row['Violation 35']);
+    // A row without both report ids is left out: its report could never be read, and once stored it would block a
+    // corrected copy (a known key only refreshes last_seen_at). A later file with the ids adds it.
+    if (!ID_RE.test(sourceKey || '') || !ID_RE.test(licenseId || '') || !eventDate || cited === null) {
+      counts.malformed += 1;
+      continue;
+    }
+    counts.valid += 1;
+    if (!(cited > 0)) continue;
+    out.push({
+      kind: 'inspection',
+      source_key: sourceKey,
+      license_number: clean(row['License Number'], 40),
+      license_id: licenseId,
+      license_type_code: clean(row['License Type Code'], 20),
+      business_name: clean(row['Business (DBA-Does Business As) Name'], 200),
+      address: clean(row['Location Address'], 200),
+      city: clean(row['Location City'], 80),
+      zip: clean(row['Location Zip Code'], 10),
+      county: clean(row['County Name'], 40),
+      phone: null,
+      seats: null,
+      event_date: eventDate,
+      detail: {
+        disposition: clean(row['Inspection Disposition'], 120),
+        inspectionType: clean(row['Inspection Type'], 120),
+        highPriority: wholeNumber(row['Number of High Priority Violations']),
+      },
+    });
+  }
+  return out;
+}
+
+/**
+ * New-license or ownership-change rows (same layout) -> one record per application in the three counties. A row cut
+ * short, or a row in the area with no application number, one longer than the key column, or no real approval date,
+ * is skipped and counted in counts.malformed: once stored, a known key only refreshes last_seen_at, so a corrected
+ * copy in a later file could never fill it in. A row kept counts in counts.valid.
+ */
+function parseLicenseRows(rows, kind, counts = {}) {
+  counts.malformed ??= 0;
+  counts.valid ??= 0;
+  const out = [];
+  for (const row of rows) {
+    if (!hasEveryColumn(row, kind)) {
+      counts.malformed += 1;
+      continue;
+    }
+    if (!inServiceArea(row['Location County'], row['Location City'], row['Location Zip Code'])) continue;
+    const sourceKey = clean(row['Application Number']);
+    const eventDate = parseUsDate(row['Application Approval Date']);
+    if (!sourceKey || sourceKey.length > KEY_MAX || !eventDate) {
+      counts.malformed += 1;
+      continue;
+    }
+    counts.valid += 1;
+    out.push({
+      kind,
+      source_key: sourceKey,
+      license_number: clean(row['License Number'], 40),
+      license_id: null,
+      license_type_code: clean(row['License Type Code'], 20),
+      business_name: clean(row['Business Name'], 200),
+      address: clean(['Location Street Address', 'Location Address Line 2', 'Location Address Line 3']
+        .map((column) => row[column]).filter(Boolean).join(' '), 200),
+      city: clean(row['Location City'], 80),
+      zip: (clean(row['Location Zip Code']) || '').slice(0, 5) || null,
+      county: clean(row['Location County'], 40),
+      phone: pickPhone(row),
+      seats: wholeNumber(row['Number of Seats']),
+      event_date: eventDate,
+      detail: { applicationType: clean(row['Application Type'], 120) },
+    });
+  }
+  return out;
+}
 
 // ── Store ───────────────────────────────────────────────────────
 
@@ -59,4 +248,13 @@ async function bumpAttempts(id) {
   await db('restaurant_prospects').where({ id }).increment('detail_attempts', 1);
 }
 
-module.exports = { upsertRecords, pendingInspections, saveReport, bumpAttempts };
+module.exports = {
+  parseUsDate,
+  parseInspectionRows,
+  parseLicenseRows,
+  pickPhone,
+  upsertRecords,
+  pendingInspections,
+  saveReport,
+  bumpAttempts,
+};
