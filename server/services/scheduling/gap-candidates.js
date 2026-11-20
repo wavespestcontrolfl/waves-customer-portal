@@ -54,8 +54,9 @@ async function loadGapCandidate(serviceId, conn) {
  * visit (`prospective`, analyzeGapCandidate): at every place in the route, as the staff finder checks a new customer.
  * `dayOpen(date)` holds the visit's own day rules beyond analyzeGapCandidate's: the booking page's first-visit dates
  * (a seasonal mosquito program starts in season; a new-home estimate not before the move-in date) and the mowing-day
- * rule over every service the visit performs (a pest-first visit with lawn care too). `performs` lists those services
- * (`service_type`, `service_key_snapshot`), for the fill list's rain rule. `{ unavailable:
+ * rule over every service the visit performs (a pest-first visit with lawn care too). `rainServices()` names those
+ * services as the estimate page's rain ranking does (customer-rain-rank.js estimateServiceIdentities), for the fill
+ * list's rain rule; it reads the catalog only for a service without a key. `{ unavailable:
  * 'no_stored_location' }` when no stored location can stand in. A failed read throws.
  */
 async function estimateGapCandidate(estimate, conn, picker = {}) {
@@ -94,7 +95,7 @@ async function estimateGapCandidate(estimate, conn, picker = {}) {
   // books its own visits in the profile's label.
   return { service, preferences, holds: [], siblingDates: [], deactivated,
     label: slots.formatServiceProfileLabel(performed) || profile.serviceLabel, prospective: true, dayOpen,
-    performs: performs.length ? performs : [primary] };
+    rainServices: () => require('./customer-rain-rank').estimateServiceIdentities(performed, { profile, db: conn }) };
 }
 
 /**
@@ -103,8 +104,9 @@ async function estimateGapCandidate(estimate, conn, picker = {}) {
  * which the Leads screen's Schedule button books (admin-leads.js schedule-appointment: the catalog default, else 60
  * minutes). It stands at the lead's customer's stored location (`lead.latitude`/`lead.longitude`, the customer row the
  * booking routes by), never geocoded. A new stop, checked as an estimate's first visit is (`prospective`). The
- * customer's day and time rules and the capability rule apply as for estimateGapCandidate; `performs` is the one
- * visit. `{ unavailable: 'no_stored_location' }` when the customer has none. A failed read throws.
+ * customer's day and time rules and the capability rule apply as for estimateGapCandidate; `rainServices()` names the
+ * one visit by its catalog key. `{ unavailable: 'no_stored_location' }` when the customer has none. A failed read
+ * throws.
  */
 async function leadGapCandidate(lead, visit, conn) {
   const lat = Number(lead.latitude);
@@ -122,7 +124,13 @@ async function leadGapCandidate(lead, visit, conn) {
     { serviceId: visit.id, serviceKey: service.service_key_snapshot });
   const deactivated = await deactivatedFor(conn, [service]);
   return { service, preferences, holds: [], siblingDates: [], deactivated, label: visit.name, prospective: true, dayOpen: () => true,
-    performs: [service] };
+    rainServices: async () => [{ name: service.service_type, serviceKey: service.service_key_snapshot }] };
+}
+
+/** A catalog service's key (services.service_key) by its id, or null (no id, no row, no key). A failed read throws. */
+async function catalogKeyById(conn, serviceId) {
+  if (!serviceId) return null;
+  return (await conn('services').where('id', serviceId).first('service_key'))?.service_key || null;
 }
 
 /**
@@ -133,8 +141,7 @@ async function leadGapCandidate(lead, visit, conn) {
  */
 async function planFamilies(conn, row) {
   const { seedingFamilyKey, comboRouteFamiliesFromCatalogKey } = require('../estimate-converter');
-  const catalog = row.service_id ? await conn('services').where('id', row.service_id).first('service_key') : null;
-  const identity = catalog?.service_key || row.service_key_snapshot;
+  const identity = (await catalogKeyById(conn, row.service_id)) || row.service_key_snapshot;
   const combo = comboRouteFamiliesFromCatalogKey(identity);
   return combo.length ? combo : [seedingFamilyKey({ service: identity, name: row.service_type })];
 }
@@ -256,4 +263,5 @@ function analyzeGapCandidate(candidate, rows, {
       : 'Fits preserve the dispatch order produced by the existing save. They do not authorize a date/time change or create a booking hold.' };
 }
 
-module.exports = { loadGapCandidate, estimateGapCandidate, leadGapCandidate, planFamilies, planHoldsFor, deactivatedFor, analyzeGapCandidate };
+module.exports = { loadGapCandidate, estimateGapCandidate, leadGapCandidate, planFamilies, planHoldsFor, deactivatedFor, analyzeGapCandidate,
+  catalogKeyById };

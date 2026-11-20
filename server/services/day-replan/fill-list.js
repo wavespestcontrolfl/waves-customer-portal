@@ -39,12 +39,15 @@
  *
  * Rain (owner 2026-11-19 D3: "the rain rules decide which jobs qualify"): with the rain note's NWS hours (`outlooks`,
  * rain-note.js; the 07:05 notice passes them), a job whose services are not all rain-safe (rain-fit.js rainFitFor
- * 'avoid': spray, lawn, exclusion and other outside work) is left out of an opening it would run in during rain, and
- * counted. Rain is the booking rain rule (isWetWindow): a chance of RAIN_PCT or more in any hour from the visit's start
- * to RAIN_AFTER_HOURS after its end, at the forecast point nearest the job's stored location (rainArea). Unknown is
- * kept: no forecast for the area, no wet hour but an hour without a reading, or a day past the horizon. A rain-safe
- * job (every service on RAIN_OK_KEYS: assessments, inspections, rodent checks) stays and its line says it runs in rain
- * hours.
+ * 'avoid': spray, lawn, exclusion and other outside work) takes its least-drive fit in a block that is not in rain;
+ * with none, it is left out of that block and counted. Rain is the booking rain rule (isWetWindow): a chance of
+ * RAIN_PCT or more in any hour from the booked row's start to RAIN_AFTER_HOURS after its end (or after the modeled
+ * departure, when that is later), at the forecast point nearest the job's stored location (rainArea). Unknown is kept:
+ * no forecast for the area, no wet hour but an hour without a reading, or a day past the horizon. A rain-safe job
+ * (every service on RAIN_OK_KEYS: assessments, inspections, rodent checks) stays and its line says it runs in rain
+ * hours. A job's services are named as the screen that books or moves it names them (`rainServices`): an estimate as
+ * the estimate page does, a lead's visit by its catalog key, a plan visit as the rain pass reads a booked row. They are
+ * read only for a job in an area with rain.
  *
  * Nothing here is paid: no geocoding and no road times.
  */
@@ -58,6 +61,7 @@ const { dayStopsQuery } = require('../scheduling/day-stops');
 const { QUALITY_EXCLUDED_STATUSES, dayStopSelect } = require('../scheduling/day-quality');
 const {
   estimateGapCandidate, leadGapCandidate, loadGapCandidate, planFamilies, planHoldsFor, deactivatedFor, analyzeGapCandidate,
+  catalogKeyById,
 } = require('../scheduling/gap-candidates');
 const { bookedVisitOrLiveHold } = require('../scheduling/reservation-occupancy');
 const { LAWN_ROUNDS_9, roundsRowMoveIsOneOff } = require('../lawn-rounds');
@@ -67,7 +71,7 @@ const { dayDepartureMinutes } = require('../scheduling/departure-time');
 const { shiftDateStr } = require('../auto-dispatch/dates');
 const { isUnplacedDueDate } = require('../auto-dispatch/move-rules');
 const mowingDays = require('../auto-dispatch/mowing-days');
-const { rainFitFor, isWetWindow } = require('../scheduling/rain-fit');
+const { rainFitFor, isWetWindow, RAIN_PCT } = require('../scheduling/rain-fit');
 const { ZONE_COORDS } = require('../scheduling/forecast-zones');
 const { loadReminderOffIds } = require('../auto-dispatch/reminder-off');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
@@ -241,7 +245,10 @@ async function planVisitCandidate(conn, row, day, addOns) {
   const pattern = loaded.service.recurring_pattern;
   const oneOff = pattern === LAWN_ROUNDS_9 ? (date) => roundsRowMoveIsOneOff(loaded.service, date) : () => true;
   return { ...loaded, deactivated, holds, prospective: true, label: loaded.service.service_type || row.service_type,
-    performs: [loaded.service, ...extra],
+    // Its services as the rain pass reads a booked row (rain-fit.js outdoorStopRows): the key snapshot, else the catalog
+    // key of its service id, else the name. Read only when the rain rule needs them.
+    rainServices: () => Promise.all([loaded.service, ...extra].map(async (svc) => ({
+      name: svc.service_type, serviceKey: svc.service_key_snapshot || await catalogKeyById(conn, svc.service_id) }))),
     dayOpen: (date) => date >= earliest && date < day && oneOff(date) && clampDateToSeason(pattern, date) === date
       && !mowingDays.blocksLive(date, mowing) };
 }
@@ -303,20 +310,21 @@ async function movableVisits(conn, blocks) {
 }
 
 /**
- * The block's best fit, or null (routeFits come least added drive first): the visit runs inside the block, from the
- * van's arrival (or the window's start, when the van is early) to its end on the modeled route (the window's length
- * when the route gave no end). `length` is the visit as booked (its window: the catalog length); `onSiteMin` is the
- * route plan's minutes on site, which can be shorter (owner 2026-11-19: the visit row is 1 hour, the plan keeps its
- * own minutes).
+ * The block's best fit that `keep` keeps, or null (routeFits come least added drive first): the visit runs inside the
+ * block, from the van's arrival (or the window's start, when the van is early) to its end on the modeled route (the
+ * window's length when the route gave no end). `length` is the visit as booked (its window: the catalog length);
+ * `onSiteMin` is the route plan's minutes on site, which can be shorter (owner 2026-11-19: the visit row is 1 hour, the
+ * plan keeps its own minutes).
  */
-function fitInside(block, routeFits) {
+function fitInside(block, routeFits, keep = () => true) {
   for (const fit of routeFits) {
     const length = toMin(fit.windowEnd) - toMin(fit.windowStart);
     const startMin = Math.max(toMin(fit.windowStart), toMin(fit.estimatedArrival));
     const endMin = fit.estimatedDeparture ? toMin(fit.estimatedDeparture) : startMin + length;
     if (startMin >= block.start && endMin <= block.start + block.min) {
-      return { windowStart: String(fit.windowStart).slice(0, 5), startMin, endMin, length, onSiteMin: endMin - startMin,
+      const inside = { windowStart: String(fit.windowStart).slice(0, 5), startMin, endMin, length, onSiteMin: endMin - startMin,
         addedDriveMin: Math.max(0, Math.round(fit.addedDriveMinutes)) };
+      if (keep(inside)) return inside;
     }
   }
   return null;
@@ -346,14 +354,17 @@ function rainArea(service) {
 const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
 
 /**
- * A job's rain rule for one fit: 'out' when it is not rain-safe and would run in rain, 'in' when it is rain-safe and
- * would run in rain, null otherwise (dry, unknown, or no forecast).
+ * A job's rain verdict for one fit, by its rain rule (`rule`: its area's hours and its rainFitFor class): 'out' when it
+ * is not rain-safe and would run in rain, 'in' when it is rain-safe and would run in rain, null otherwise (dry,
+ * unknown, or no rule). The hours are the booked row's, as the booking ranking reads a slot (customer-rain-rank.js
+ * slotRainTierOf: its window), to the modeled departure when the work runs past the row's end.
  */
-function rainVerdict(rain, day, fit, today) {
-  if (!rain || !rain.hours || rain.fit === 'neutral') return null;
-  const wet = isWetWindow(rain.hours, { date: day, start_time: hhmm(fit.startMin), end_time: hhmm(fit.endMin) }, today);
+function rainVerdict(rule, day, fit, today) {
+  if (!rule || rule.fit === 'neutral') return null;
+  const end = Math.max(toMin(fit.windowStart) + fit.length, fit.endMin);
+  const wet = isWetWindow(rule.hours, { date: day, start_time: fit.windowStart, end_time: hhmm(end) }, today);
   if (wet !== true) return null;
-  return rain.fit === 'avoid' ? 'out' : 'in';
+  return rule.fit === 'avoid' ? 'out' : 'in';
 }
 
 const KINDS = ['estimate', 'lead', 'visit'];
@@ -463,12 +474,14 @@ async function fillList(conn, blocks, now, { outlooks = null } = {}) {
     techDays.set(key, [...(techDays.get(key) || []), i]);
   });
   const fitted = { estimate: new Set(), lead: new Set(), visit: new Set() };
-  // Each job's rain rule, read once: its services' rain class and its area's NWS hours.
-  const rainOf = new Map(outlooks ? candidates.map(({ candidate }) => [candidate, {
-    fit: rainFitFor((candidate.performs || [candidate.service])
-      .map((svc) => ({ name: svc.service_type, serviceKey: svc.service_key_snapshot || null }))),
-    hours: outlooks[rainArea(candidate.service)] || null,
-  }]) : []);
+  // Each job's rain rule, for a job whose area's NWS hours hold rain (RAIN_PCT or more in some hour): those hours and its
+  // services' rain class, read once. A job in a dry area, or with no forecast, has none.
+  const rainOf = new Map();
+  for (const { candidate } of candidates) {
+    const hours = outlooks && outlooks[rainArea(candidate.service)];
+    if (!Array.isArray(hours) || !hours.some((h) => Number(h?.rainChance) >= RAIN_PCT)) continue;
+    rainOf.set(candidate, { hours, fit: rainFitFor(await candidate.rainServices()) });
+  }
   const rainLeftOut = new Set();
   for (const indexes of techDays.values()) {
     const { day, techId } = blocks[indexes[0]];
@@ -481,14 +494,14 @@ async function fillList(conn, blocks, now, { outlooks = null } = {}) {
         modeledDepartureMinutes: departure, targetReturnMinutes: DISPATCH_DAY_END, blocks: own,
       });
       await yieldToLoop();
+      const rule = rainOf.get(candidate);
       for (const i of indexes) {
-        const fit = fitInside(blocks[i], routeFits);
+        // The best fit the rain rule keeps: an outdoor job whose best fit runs in rain takes the next one in the block;
+        // when every fit in the block runs in rain, the job is left out of it and counted.
+        let rain = null;
+        const fit = fitInside(blocks[i], routeFits, (inside) => (rain = rainVerdict(rule, day, inside, today)) !== 'out');
+        if (!fit && rain === 'out') rainLeftOut.add(`${kind}:${id}`);
         if (!fit) continue;
-        const rain = rainVerdict(rainOf.get(candidate), day, fit, today);
-        if (rain === 'out') {
-          rainLeftOut.add(`${kind}:${id}`);
-          continue;
-        }
         fitted[kind].add(id);
         result.byBlock[i].push({ kind, id, name, label: candidate.label, ...fit, ...(from ? { from } : {}),
           ...(rain === 'in' ? { inRain: true } : {}) });

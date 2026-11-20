@@ -184,4 +184,6 @@ function stampRainTiers(candidates, tierOf) {
 // Tier difference for a comparator's first key; 0 for unstamped rows.
 const rainTierDiff = (a, b) => (a.rain_tier ?? 0) - (b.rain_tier ?? 0);
 
-module.exports = { slotRainTierOf, demoteByRainTier, _test: { _forecastStarts, FORECAST_BUDGET }, startCustomerRainRank, customerRainTierOf, stampRainTiers, withDisplayTier, rainTierDiff, GATE };
+module.exports = { slotRainTierOf, demoteByRainTier, _test: { _forecastStarts, FORECAST_BUDGET }, startCustomerRainRank, customerRainTierOf, stampRainTiers, withDisplayTier, rainTierDiff, GATE,
+  // The fill list's rain rule names an estimate's services as this page does (day-replan/fill-list.js).
+  estimateServiceIdentities };
