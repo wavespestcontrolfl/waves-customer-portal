@@ -9537,6 +9537,8 @@ module.exports.durationMinutesForRecurringService = durationMinutesForRecurringS
 module.exports.remainingUnitCatalogKey = remainingUnitCatalogKey;
 module.exports.seedFamilyForReservedIdentity = seedFamilyForReservedIdentity;
 module.exports.supportsConverterFollowUpSeeding = supportsConverterFollowUpSeeding;
+// The phone-yes card names the plan by the cadence this rule seeds (call-phone-yes-accept.js planTermsOf).
+module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern;
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.resolveAnnualPrepayInvoiceTotal = resolveAnnualPrepayInvoiceTotal;

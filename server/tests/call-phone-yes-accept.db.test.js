@@ -1464,13 +1464,30 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBe(est.id);
     });
 
+    test("the card's plan is the cadence the converter books: a quarterly line with no visit count is offered; a twice-a-year line, which books no series, offers no tap", () => {
+      const terms = (data) => PhoneYesPrivate.planTermsOfForTest(
+        { estimate_data: JSON.stringify(data), monthly_total: 15, annual_total: 180 }, { service_type: 'General Pest Control' },
+      );
+      const withLine = (line, over) => planData({ result: { ...planData().result, recurring: { ...planData().result.recurring, services: [line] } }, ...over });
+      expect(terms(planData())).toEqual({ plan: 'Quarterly plan', cadence: 'quarterly', perVisit: 45 });
+      // No visit count and no selection: the converter books the line's own cadence and bills its cadence amount.
+      expect(terms(withLine({ name: 'Pest Control', service: 'pest_control', mo: 15, frequency: 'quarterly', perTreatment: 45 }, { customerSelection: undefined })))
+        .toEqual({ plan: 'Quarterly plan', cadence: 'quarterly', perVisit: 45 });
+      // Two visits a year: the converter seeds no pest series on it, so the card shows no plan to accept.
+      expect(terms(withLine({ name: 'Pest Control', service: 'pest_control', mo: 15, visitsPerYear: 2, perTreatment: 90 }, { customerSelection: { frequency: 'semiannual' } })))
+        .toBeNull();
+    });
+
     test('the price step refuses a short schedule, a price it cannot resolve, a series the converter did not book, and a price decision on the series', async () => {
       const { customerId, est, visitId } = await phoneYes();
       const visitRow = await trx('scheduled_services').where({ id: visitId }).first();
       const shownPlan = { perVisit: PER_VISIT, cadence: 'quarterly' };
       const run = (conversion, shown = shownPlan) => trx.transaction((t) => PhoneYesPrivate.priceSeriesStepForTest({ customerId, visit: visitRow, seen: {}, shown })(t, { estimate: est, conversion }));
-      // The card's cadence names cover every cadence the seeder books.
-      expect(Object.keys(PhoneYesPrivate.PEST_CADENCE_PLANS).sort()).toEqual(Object.keys(require('../services/estimate-converter').PEST_CADENCE_CATALOG_KEYS).sort());
+      // The card names every cadence the converter seeds a residential pest plan on, and no other.
+      const Converter = require('../services/estimate-converter');
+      const seeded = Object.keys(Converter.PEST_CADENCE_CATALOG_KEYS)
+        .filter((cadence) => Converter.supportsConverterFollowUpSeeding({ name: 'Pest Control', service: 'pest_control' }, {}, cadence));
+      expect(Object.keys(PhoneYesPrivate.PEST_CADENCE_PLANS).sort()).toEqual(seeded.sort());
       const conversion = { membershipEmail: { perApplicationAmount: PER_VISIT }, recurringScheduleCheck: { ok: true, gaps: [] } };
       // The converter's own check found the plan short of visits (or could not run): nothing is priced.
       await expect(run({ ...conversion, recurringScheduleCheck: { ok: false, gaps: [{ kind: 'missing_application' }] } }))
@@ -1529,9 +1546,10 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
         await pool('customers').where({ id: customerId }).del();
       });
 
-      test("a send claim on another of the customer's estimates: in flight, the tap's lock refuses at once; after the lock, the claim waits for the commit", async () => {
+      test("a send claim or an unarchive on another of the customer's estimates: in flight, the tap's lock refuses at once; after the lock, it waits for the commit", async () => {
         const perTest = trx;
         let draft;
+        let archived;
         try {
           trx = pool;
           mockConn = pool;
@@ -1539,27 +1557,35 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
           made = { customerId };
           await estimate(customerId);
           draft = await estimate(customerId, { status: 'draft', sent_at: null });
+          // A sent estimate the office archived: an unarchive (a direct update of the row) makes it open again.
+          archived = await estimate(customerId, { archived_at: new Date() });
         } finally {
           trx = perTest;
           mockConn = perTest;
         }
         const lock = (conn) => PhoneYesPrivate.lockCustomerEstimatesForTest(conn, made.customerId);
-        // A claim in flight on another connection (the row written to sending, not committed): the lock refuses at once.
-        const claim = await pool.transaction();
-        await claim('estimates').where({ id: draft.id }).update({ status: 'sending' });
-        let accept = await pool.transaction();
-        await expect(lock(accept)).rejects.toMatchObject({ phoneYesRefusal: 'estimate_being_sent' });
-        await accept.rollback();
-        await claim.rollback();
-        // The tap's lock first: a claim after it waits for the accept's commit.
-        accept = await pool.transaction();
-        await lock(accept);
-        await expect(pool.transaction(async (later) => {
-          await later.raw("SET LOCAL lock_timeout = '300ms'");
-          await later('estimates').where({ id: draft.id }).update({ status: 'sending' });
-        })).rejects.toMatchObject({ code: '55P03' });
-        await accept.commit();
-        await expect(pool('estimates').where({ id: draft.id }).update({ status: 'sending' })).resolves.toBe(1);
+        const writes = [
+          (conn) => conn('estimates').where({ id: draft.id }).update({ status: 'sending' }),
+          (conn) => conn('estimates').where({ id: archived.id }).update({ archived_at: null }),
+        ];
+        for (const write of writes) {
+          // The write in flight on another connection (not committed): the lock refuses at once.
+          const other = await pool.transaction();
+          await write(other);
+          let accept = await pool.transaction();
+          await expect(lock(accept)).rejects.toMatchObject({ phoneYesRefusal: 'estimate_being_sent' });
+          await accept.rollback();
+          await other.rollback();
+          // The tap's lock first: the write after it waits for the accept's commit.
+          accept = await pool.transaction();
+          await lock(accept);
+          await expect(pool.transaction(async (later) => {
+            await later.raw("SET LOCAL lock_timeout = '300ms'");
+            await write(later);
+          })).rejects.toMatchObject({ code: '55P03' });
+          await accept.commit();
+          await expect(write(pool)).resolves.toBe(1);
+        }
       });
 
       test("a re-read of a call the word is read from: in flight, it refuses at once; committed first, it refuses; after, it waits for the accept's commit", async () => {

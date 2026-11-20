@@ -62,14 +62,13 @@ const SETTLED_ESTIMATE_STATUSES = ['accepted', 'declined'];
 // hand (estimate-accept-effects membershipFeeLine; one-time work rows never carry this name).
 const MEMBERSHIP_FEE_LINE_NAME = 'WaveGuard membership fee';
 const PEST_FAMILY = new Set(['pest_control']);
-// Each pest cadence the seeder books (estimate-converter PEST_CADENCE_CATALOG_KEYS), its visits a year and the card's
-// name for it. The card names the plan by the line's visit count; the accept checks the booked parent's
-// recurring_pattern against it (priceSeriesStep).
+// The card's name for each cadence the converter seeds a residential pest plan on (estimate-converter
+// supportsConverterFollowUpSeeding: twice-a-year pest seeds no series). The accept checks the booked parent's
+// recurring_pattern against the cadence shown (priceSeriesStep).
 const PEST_CADENCE_PLANS = {
-  quarterly: { visits: 4, plan: 'Quarterly plan' },
-  bimonthly: { visits: 6, plan: 'Every-other-month plan' },
-  monthly: { visits: 12, plan: 'Monthly plan' },
-  semiannual: { visits: 2, plan: 'Twice-a-year plan' },
+  quarterly: 'Quarterly plan',
+  bimonthly: 'Every-other-month plan',
+  monthly: 'Monthly plan',
 };
 
 // `?.() === true`: a test's whole-module gate mock without this reader reads as off (the #7910 pattern).
@@ -747,12 +746,12 @@ const TAP_UNAVAILABLE = {
   changed_since_check: 'The estimate, the visit or the call changed since the card loaded. Reload and look again.',
   series_not_booked: 'The plan could not be booked from the visit. Accept it from the estimate instead.',
   series_incomplete: "The plan's next visits could not all be booked. Accept it from the estimate instead.",
-  price_unresolved: "The plan's per-visit price could not be set. Accept it from the estimate instead.",
+  price_unresolved: 'The plan or its per-visit price could not be set. Accept it from the estimate instead.',
   customer_changed: 'The call no longer belongs to this customer.',
   no_booked_visit: 'The visits the call booked are off the calendar.',
   no_pest_visit: 'No unlinked pest visit the call booked is left on the calendar.',
   no_open_estimate: 'The customer has no open estimate that was sent before the call.',
-  estimate_being_sent: "One of the customer's estimates is being sent. Reload in a minute.",
+  estimate_being_sent: "One of the customer's estimates is being sent or changed. Reload in a minute.",
   call_still_processing: 'A call since the estimate was sent is still being read. Reload in a few minutes.',
   chose_annual_prepay: 'The caller chose annual prepay on the booking call. Use the annual prepay card.',
   estimate_not_on_card: 'The estimate it would accept is not one this card names. Accept it from the estimate.',
@@ -841,7 +840,7 @@ async function tapCheck(shown, { now }) {
   if (await cardState(card)) return { ok: false, reason: 'card_out_of_date', note: note(TAP_UNAVAILABLE.card_out_of_date) };
   // The plan and its per-visit price, as the accept will bill them: the card shows them before the tap, and the accept
   // pins the price (priceSeriesStep). A price the card cannot show means no tap.
-  const terms = planTermsOf(evaluation.estimate);
+  const terms = planTermsOf(evaluation.estimate, evaluation.visit);
   if (!terms) return { ok: false, reason: 'price_unresolved', note: note(TAP_UNAVAILABLE.price_unresolved) };
   return { ok: true, evaluation, customerId, terms };
 }
@@ -849,11 +848,12 @@ async function tapCheck(shown, { now }) {
 // The plan the tap accepts and its per-visit price, by the converter's own rule for one recurring unit
 // (estimate-converter.js perApplicationChargeForAccept): the accepted cadence, else the one the estimate's data implies;
 // billing-cadence.js resolveBillingCadence and perApplicationChargeAmount on the row's monthly and annual totals; the
-// pest selection's visit count, else the line's. The plan is named by that visit count, the one both price rules
-// divide by (the billing cadence's own name can differ: a legacy top-level frequency beside the pest line's). The
-// accept pins both: priceSeriesStep refuses a converter price or a booked cadence that differs, so the card shows the
-// plan the visits are booked and priced on. Null when either cannot be read.
-function planTermsOf(estimate) {
+// pest selection's visit count, else the line's. The plan is the cadence the converter seeds from the booked visit
+// (converterFollowUpSeedingPattern, with the inputs its reserved-visit path passes): a line with no visit count still
+// books its cadence, and a cadence it seeds no series for (twice-a-year pest) offers no tap. The accept pins both:
+// priceSeriesStep refuses a converter price or a booked cadence that differs, so the card shows the plan the visits
+// are booked and priced on. Null when either cannot be read.
+function planTermsOf(estimate, visit) {
   const BillingCadence = require('./billing-cadence');
   const Converter = require('./estimate-converter');
   const data = parseJson(estimate.estimate_data);
@@ -864,12 +864,12 @@ function planTermsOf(estimate) {
   const monthlyRate = parseFloat(estimate.monthly_total || 0);
   const annualRate = parseFloat(estimate.annual_total || 0);
   const billingCadence = BillingCadence.resolveBillingCadence({ monthlyRate, annualRate, frequencyKey, estimateData: data, fallbackFrequencyKey: frequencyKey });
-  const visits = Number(Converter.acceptedPestSelectionVisits(unit, selected) ?? Converter.visitsPerYearForRecurringService(unit));
+  const visits = Converter.acceptedPestSelectionVisits(unit, selected) ?? Converter.visitsPerYearForRecurringService(unit);
   const perVisit = Number(BillingCadence.perApplicationChargeAmount({
     billingCadence, annualRate, monthlyRate, visitsPerYear: visits, serviceKey: Converter.recurringServiceKey(unit),
   }));
-  const cadence = Object.keys(PEST_CADENCE_PLANS).find((key) => PEST_CADENCE_PLANS[key].visits === visits);
-  return perVisit > 0 && cadence ? { plan: PEST_CADENCE_PLANS[cadence].plan, cadence, perVisit } : null;
+  const cadence = Converter.converterFollowUpSeedingPattern(unit, visit, frequencyKey, selected);
+  return perVisit > 0 && PEST_CADENCE_PLANS[cadence] ? { plan: PEST_CADENCE_PLANS[cadence], cadence, perVisit } : null;
 }
 
 // The WaveGuard membership fee, when the estimate carries one. The standard accept bills no setup fee, and completion
@@ -910,12 +910,13 @@ async function tapStateOf(card, { now = new Date() } = {}) {
 
 // The customer's estimates, locked FOR SHARE to the commit, and no send in flight. A send claim (an UPDATE of a row to
 // `sending`) either landed before, and the read after the lock sees it and refuses (which estimates are open is known
-// only once it settles), or waits for this accept's commit. A claim in flight right now refuses at once (NOWAIT): the
-// step never waits on an estimate row while it holds the accept's locks. The accepted estimate is this transaction's
-// own lock already.
+// only once it settles), or waits for this accept's commit. Archived rows too: an unarchive (a direct update of the
+// row) reopens a sent estimate, so it either landed before and the open-estimate read after the lock counts it, or
+// waits for the commit. A change in flight right now refuses at once (NOWAIT): the step never waits on an estimate row
+// while it holds the accept's locks. The accepted estimate is this transaction's own lock already.
 async function lockCustomerEstimates(trx, customerId) {
   try {
-    await trx('estimates').where({ customer_id: customerId }).whereNull('archived_at').orderBy('id').forShare().noWait().select('id');
+    await trx('estimates').where({ customer_id: customerId }).orderBy('id').forShare().noWait().select('id');
   } catch (err) {
     if (err.code === '55P03') throw stop('estimate_being_sent');
     throw err;
@@ -1146,6 +1147,6 @@ module.exports = {
     fileCardForTest: fileCard, applyCardStateForTest: applyCardState,
     // The tap's two steps inside the accept, driven directly.
     linkVisitStepForTest: linkVisitStep, priceSeriesStepForTest: priceSeriesStep, wordStillStepForTest: wordStillStep, tapWordOfForTest: tapWordOf,
-    lockCustomerEstimatesForTest: lockCustomerEstimates, PEST_CADENCE_PLANS,
+    lockCustomerEstimatesForTest: lockCustomerEstimates, PEST_CADENCE_PLANS, planTermsOfForTest: planTermsOf,
   },
 };
