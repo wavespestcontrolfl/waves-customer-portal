@@ -310,6 +310,15 @@ const VIOLATION_CODE_RE = /^\d\d[A-Z]?-\d\d-\d$/;
 // and the state's pages do, so a cell runs to the next table tag (a cell, a row or a table, start or end), as a
 // browser closes it, and any row or table tag ends the row. A cell that holds a table gives only its text before it.
 const CELL_OR_ROW_END_RE = /<t[dh]\b[^>]*>((?:(?!<\/?(?:t[dhr]|table|tbody|thead|tfoot)\b)[\s\S])*)|<\/?(tr|table|tbody|thead|tfoot)\b[^>]*>/gi;
+// A tag as a browser's tokenizer ends it: at the first ">" outside a quoted attribute value (quoted after "=", running
+// to its closing quote, or to the page end without one). Each step matches one way only, so no page can make it slow.
+const TAG_RE = /<[A-Za-z/!?](?:[^>"'=]|=\s*"[^"]*(?:"|$)|=\s*'[^']*(?:'|$)|=(?!\s*["'])|["'])*(?:>|$)/g;
+// One step of a tag read left to right: a quoted attribute value (group 1), or any other character.
+const TAG_STEP_RE = /=\s*("[^"]*(?:"|$)|'[^']*(?:'|$))|[\s\S]/g;
+// Whether a quoted attribute value holds "<" or ">" (title="count > 1"). The cell and tag patterns end a tag at its
+// first ">" and a cell at the next table tag, as a page without such a value reads, so such a page cannot answer.
+const angleInQuotedValue = (page) => [...page.matchAll(TAG_RE)]
+  .some(([tag]) => [...tag.matchAll(TAG_STEP_RE)].some((step) => /[<>]/.test(step[1] || '')));
 // The row that heads the violations table names two columns, "Violation" and "Observation", with blank spacer cells
 // around them. Returns the Violation column's position in the row, or -1 for any other row.
 function violationsColumn(cells) {
@@ -319,10 +328,12 @@ function violationsColumn(cells) {
 }
 
 // Tags out (as a browser reads them: "<" then a letter, "/", "!" or "?", so "Observed < 5 roaches" keeps its "<"),
-// every character reference decoded (named or numeric: "&nbsp;", "&#45;", "&#x2D;"), NUL characters and runs of
-// white space made one space.
+// every character reference decoded (named or numeric: "&nbsp;", "&#45;", "&#x2D;"), invisible format characters
+// (Unicode Cf: a soft hyphen, a zero-width space) taken out as a browser hides them, so "Callba&shy;ck" reads as
+// "Callback", and NUL characters and runs of white space made one space.
 function htmlText(html) {
   return decodeHTML(String(html || '').replace(/<[A-Za-z/!?][^>]*>/g, ' '))
+    .replace(/\p{Cf}/gu, '')
     .replaceAll('\0', ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -438,6 +449,7 @@ function readReportTables(page) {
  * Report page HTML -> { inspectionType, pestEvidence, findings: [{ code, text }] }, or null when the page cannot
  * answer. No answer is a failed read, retried later, never "no pests". inspectionType is the page's own visit row's
  * type, which saveReport checks again. The page answers only when:
+ * - no quoted attribute value holds "<" or ">" (the tags would not end where a browser ends them);
  * - it is whole: the state office footer follows its violations table, so an error page, a page cut short (inside
  *   that table or after it) or a page with the footer text only above the table gives no answer;
  * - it is one first visit's: its inspection table lists one visit, whose date reads (and is visitDate when given)
@@ -463,6 +475,7 @@ function parseInspectionReport(html, { violation35 = null, visitDate = null, vis
   // for the inspection; a sighting first cited at a callback is not read.
   if (visitNumber !== 1) return null;
   const page = String(html || '').replace(/<!--[\s\S]*?-->|<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ');
+  if (angleInQuotedValue(page)) return null;
   const whole = htmlText(page);
   if (!/Inspection Information/.test(whole) || !PAGE_FOOTER_RE.test(whole)) return null;
   const { entries, unreadable, visits, violationsEnd } = readReportTables(page);

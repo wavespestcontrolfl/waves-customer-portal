@@ -575,6 +575,28 @@ describe('parseInspectionReport', () => {
     expect(readReal(`<p>2601 Blair Stone Road, Tallahassee FL 32399</p>${realCut}`)).toBeNull();
   });
 
+  test('invisible format characters (a soft hyphen) are text a browser hides: they hide no callback and no label', () => {
+    const read = (html) => parse(html, { violation35: 1, visitDate: '2026-10-20' });
+    const typed = fixture('report-35a.html').replace('<td>Routine - Food</td>', '<td>Callba&shy;ck - Food</td>');
+    expect(typed).toContain('Callba&shy;ck');
+    expect(read(typed)).toBeNull();
+    const row = (text) => reportPage(`<tr><td>35A-02-8</td><td>&nbsp;</td><td>${text}</td></tr>`, '10/20/2026');
+    expect(read(row('High Priority - - From follow-up inspec&shy;tion 2026-11-10: Live roaches.'))).toBeNull();
+    expect(read(row('High Priority - Live ro&#8203;aches.')).findings).toEqual([{ code: '35A-02-8', text: 'High Priority - Live roaches.' }]);
+  });
+
+  test('a quoted attribute value holding "<" or ">" gives no answer: a tag would end inside it', () => {
+    const read = (html) => parse(html, { violation35: 1, visitDate: '2026-10-21' });
+    const real = fixture('report-35b.html');
+    const cell = '<td>Basic - Outer openings not protected with self-closing doors. Observed back door propped open. **Warning**</td>';
+    expect(real).toContain(cell);
+    expect(read(real)).toEqual({ pestEvidence: false, findings: [] });
+    expect(read(real.replace(cell, '<td title="count > 1"></td>'))).toBeNull();
+    expect(read(real.replace(cell, `<td><font title="<tr>">${cell.slice(4)}`))).toBeNull();
+    // Quotes without one, and an "=" inside a value, still read.
+    expect(read(real.replace(cell, `<td><a href="#x=1==" title='a "b"'>${cell.slice(4)}`))).toEqual({ pestEvidence: false, findings: [] });
+  });
+
   test('a page answers only for the visit whose date its inspection table gives', () => {
     const rows = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - Live flies at the bar.</td></tr>';
     const read = (html, visitDate) => parse(html, { violation35: 1, visitDate, visitNumber: 1 });
