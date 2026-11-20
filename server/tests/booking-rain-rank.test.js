@@ -171,6 +171,14 @@ describe('withCatalogKeys', () => {
     expect(resolver).toHaveBeenCalledTimes(1);
   });
 
+  test('a failed read keeps the name (word rules); with strict it throws, for a caller that keeps the job out of rain', async () => {
+    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+    const withKeys = load(jest.fn(async () => { throw new Error('db down'); }));
+    const item = { name: 'Waves Assessment', serviceKey: 'pest_quarterly' };
+    expect(await withKeys([item], {})).toEqual(['Waves Assessment']);
+    await expect(withKeys([item], {}, { strict: true })).rejects.toThrow('db down');
+  });
+
   test('gate on: each name gets the identity its visit would have', async () => {
     process.env.GATE_BOOKING_RAIN_RANK = 'true';
     const resolver = jest.fn(async ({ service_type: name }) => (name === 'Rodent Trapping Service'

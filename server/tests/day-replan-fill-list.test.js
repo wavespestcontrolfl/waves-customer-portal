@@ -1061,6 +1061,29 @@ describe('fillList', () => {
     expect(out.byBlock[0].map((l) => [l.kind, !!l.inRain])).toEqual([['lead', false], ['visit', false]]);
   });
 
+  test('rain: a failed catalog-profile read keeps the job out of rain hours; its name alone never makes it rain-safe', async () => {
+    dayStops({ [DAY]: [stop('first', '08:00'), stop('later', '13:00', { window_end: '14:00' })] });
+    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+    // Outdoor work by its key, under a name the word rules read as rain-safe.
+    const row = planVisit('v1', '2040-09-12', { service_type: 'Waves Assessment' });
+    loadGapCandidate.mockResolvedValue(loaded(row, { lat: HQ.lat + 0.01, service_key_snapshot: 'pest_quarterly' }));
+    const area = rainArea({ lat: HQ.lat + 0.01, lng: HQ.lng });
+    const run = (hours) => fillList(fakeConn({ plan: [row] }).conn, [morning], NOW, { outlooks: { [area]: hours } });
+    const resolve = resolveCompletionProfileForScheduledService.getMockImplementation();
+    resolveCompletionProfileForScheduledService.mockImplementation(async () => { throw new Error('profile timeout'); });
+    try {
+      // Rain all day: left out and counted, never listed as rain-safe work.
+      let out = await run(rainHours(DAY, { all: 70 }));
+      expect([out.byBlock[0], out.rain]).toEqual([[], { checked: true, leftOut: 1 }]);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('visit v1: rain class unread (profile timeout)'));
+      // Rain at 3 PM only: its 9:00 row is dry, so it is listed.
+      out = await run(rainHours(DAY, { 15: 70 }));
+      expect(out.byBlock[0].map((l) => [l.kind, !!l.inRain])).toEqual([['visit', false]]);
+    } finally {
+      resolveCompletionProfileForScheduledService.mockImplementation(resolve);
+    }
+  });
+
   test('rain: the area is the forecast point nearest the job; the hours are the booked row\'s, to the modeled departure when later', () => {
     for (const [zone, point] of Object.entries(ZONE_COORDS)) {
       expect(rainArea({ lat: point.lat + 0.01, lng: point.lng - 0.01 })).toBe(zone);

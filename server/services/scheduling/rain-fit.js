@@ -148,8 +148,10 @@ const OVERFLOW_SERVICE = Object.freeze({ name: 'More services', serviceKey: 'boo
 // picker's by default; `gate: null` always reads, for a rule with no gate of
 // its own: the 07:05 fill list, day-replan/fill-list.js); read one at a
 // time; an entry that cannot be resolved (or a failed read) keeps its name
-// and takes the word rules.
-async function withCatalogKeys(items, db, { gate = 'GATE_BOOKING_RAIN_RANK' } = {}) {
+// and takes the word rules. With `strict`, a failed read throws instead, for
+// a caller that keeps a job it cannot read out of rain (the fill list): a
+// name alone can read as rain-safe work when the key says otherwise.
+async function withCatalogKeys(items, db, { gate = 'GATE_BOOKING_RAIN_RANK', strict = false } = {}) {
   const list = (Array.isArray(items) ? items : [])
     .map((item) => ({ name: String((item && item.name) ?? item ?? '').trim(), serviceKey: (item && item.serviceKey) || null }))
     .filter((item) => item.name);
@@ -164,6 +166,7 @@ async function withCatalogKeys(items, db, { gate = 'GATE_BOOKING_RAIN_RANK' } = 
       );
       out.push({ name, serviceKey: profile?.serviceKey || null, findingsType: profile?.findingsType || null });
     } catch (err) {
+      if (strict) throw err;
       logger.warn(`[rain-fit] service identity lookup failed (word rules used): ${err.message}`);
       out.push(name);
     }

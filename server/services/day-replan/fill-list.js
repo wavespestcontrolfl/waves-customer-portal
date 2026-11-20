@@ -373,7 +373,8 @@ function rainVerdict(rule, day, fit, today) {
  * Each job's rain rule (`{ hours, fit }`), for a job whose area's NWS hours hold rain (RAIN_PCT or more in some hour):
  * those hours and its services' rain class, read once as the screens that book or move it read one (rain-fit.js
  * withCatalogKeys; the rule has no gate of its own, so it always reads). A job in a dry area, or with no forecast, has
- * none. A class that cannot be read is null: that job stays out of rain hours, and the others go on.
+ * none. A class that cannot be read (its services, or one catalog identity: never its name alone) is null: that job
+ * stays out of rain hours, and the others go on.
  */
 async function rainRules(conn, candidates, outlooks) {
   const rules = new Map();
@@ -383,7 +384,7 @@ async function rainRules(conn, candidates, outlooks) {
     if (!Array.isArray(hours) || !hours.some((h) => Number(h?.rainChance) >= RAIN_PCT)) continue;
     let fit = null;
     try {
-      fit = rainFitFor(await withCatalogKeys(await candidate.rainServices(), conn, { gate: null }));
+      fit = rainFitFor(await withCatalogKeys(await candidate.rainServices(), conn, { gate: null, strict: true }));
     } catch (err) {
       logger.warn(`[fill-list] ${kind} ${id}: rain class unread (${err.message}); kept out of rain hours`);
     }
