@@ -86,9 +86,9 @@ exports.up = async (knex) => {
   const approvedClaimIds = await commercialLegacyClaimIds(knex);
   const approvedClaimBindings = JSON.stringify(approvedClaimIds);
 
-  // A positive mutable claim anchor is not proof that the series existed at
-  // sale. The conversion must name one actual occurrence, that occurrence's
-  // root must be the claim root, and its promised date must be the term start.
+  // The conversion must name one actual occurrence on the promised date. Some
+  // old commercial sales never populated the claim anchor. If present, it must
+  // agree with the series identified by the conversion.
   // This also preserves a selected recurring child while storing its parent.
   // Compute the conversion evidence once, then apply the mutually exclusive
   // booked and zero-visit corrections from that one immutable snapshot.
@@ -100,15 +100,15 @@ exports.up = async (knex) => {
     JOIN scheduled_services occurrence ON occurrence.id::text = e.occurrence_id
       AND occurrence.customer_id = t.customer_id
     JOIN scheduled_services root ON root.id = coalesce(occurrence.recurring_parent_id, occurrence.id)
-      AND root.customer_id = t.customer_id
-    JOIN scheduled_services claim_visit ON claim_visit.id = cl.scheduled_service_id
+      AND root.customer_id = t.customer_id AND root.recurring_parent_id IS NULL
+    LEFT JOIN scheduled_services claim_visit ON claim_visit.id = cl.scheduled_service_id
       AND claim_visit.customer_id = t.customer_id
-    JOIN scheduled_services claim_root ON claim_root.id = coalesce(claim_visit.recurring_parent_id, claim_visit.id)
+    LEFT JOIN scheduled_services claim_root ON claim_root.id = coalesce(claim_visit.recurring_parent_id, claim_visit.id)
       AND claim_root.customer_id = t.customer_id
     LEFT JOIN services occurrence_service ON occurrence_service.id = occurrence.service_id
     LEFT JOIN services root_service ON root_service.id = root.service_id
     WHERE e.proves_booked AND e.occurrence_count = 1
-      AND claim_root.id = root.id
+      AND (cl.scheduled_service_id IS NULL OR claim_root.id = root.id)
       AND occurrence.scheduled_date = t.term_start
       AND occurrence.created_at <= e.invoice_created_at
       AND root.created_at <= e.invoice_created_at

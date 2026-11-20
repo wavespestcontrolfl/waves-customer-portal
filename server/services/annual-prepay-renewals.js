@@ -886,18 +886,34 @@ function rowInCommercialSetupScope(scope, term, row) {
 // A booked commercial term already identifies the sold series and channel.
 // Resolve the catalog once per selection, so a stale display label cannot
 // drop a paid bait visit or adopt a differently cataloged visit on that series.
-async function bookedBaitServiceMatcher(conn, scope) {
+async function bookedBaitServiceIdentity(conn, scope, root = null) {
   if (!scope?.rootId) return null;
   const { recurringServiceKey } = require('./estimate-converter');
   const { isRodentBaitProgramKey } = require('./secure-appointment-plans');
   const catalog = await conn('services')
     .whereILike('service_key', '%rodent%').orWhereILike('name', '%rodent%')
     .select('id', 'service_key', 'name');
-  const baitIds = new Set(catalog.filter((service) => isRodentBaitProgramKey(recurringServiceKey(service)))
-    .map((service) => service.id));
-  return (row) => row.service_id
+  const baitCatalog = catalog.filter((service) => isRodentBaitProgramKey(recurringServiceKey(service)));
+  const baitIds = new Set(baitCatalog.map((service) => service.id));
+  const matches = (row) => row.service_id
     ? baitIds.has(row.service_id)
     : isRodentBaitProgramKey(recurringServiceKey({ name: row.service_type }));
+  // A schedule switch may retain the generic display label "Pest Control"
+  // while the sold root's catalog id still proves rodent-bait ownership.
+  // Preserve that verified catalog identity on every child the paid term
+  // seeds; otherwise this matcher rejects the children on the stamp pass and
+  // a later refresh seeds the same paid slots again.
+  const rootCatalog = root?.service_id == null ? null
+    : baitCatalog.find((service) => String(service.id) === String(root.service_id));
+  return {
+    matches,
+    serviceId: rootCatalog?.id || null,
+    serviceKey: rootCatalog?.service_key || null,
+  };
+}
+
+async function bookedBaitServiceMatcher(conn, scope) {
+  return (await bookedBaitServiceIdentity(conn, scope))?.matches || null;
 }
 
 // Occupancy, completion and schedule-edit callers can project away the
@@ -1737,6 +1753,12 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   let coverageCatalogServiceId = null;
   let coverageCatalogKey = null;
   let staleOneTimePalmId = null;
+  const bookedBaitIdentity = await bookedBaitServiceIdentity(conn, commercialScope, bookedRoot);
+  const matchesBookedBait = bookedBaitIdentity?.matches || null;
+  if (bookedBaitIdentity?.serviceId) {
+    coverageCatalogServiceId = bookedBaitIdentity.serviceId;
+    coverageCatalogKey = bookedBaitIdentity.serviceKey;
+  }
   // Palm detection runs INDEPENDENTLY of the coverage cadence (codex r18
   // pre-push P1): nesting it under `=== 'semiannual'` let an admin-created
   // palm term with an explicit monthly/quarterly cadence bypass the
@@ -1868,7 +1890,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // creates nothing, so the refresh hard-stop leaves no correctly-seeded
   // visit unstamped. Failure files the durable exception and defers; the
   // next idempotent term refresh retries the whole sequence.
-  if (coverageCatalogServiceId && cols.service_id) {
+  if (coverageIsPalm && coverageCatalogServiceId && cols.service_id) {
     const existingOk = await backfillPalmIdentity(existingRows, 'matched-existing');
     if (!existingOk) {
       await fileCoverageException(term, 'palm_identity_backfill_failed',
@@ -1944,7 +1966,6 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // customer has no series slot to copy. The insert call sites
   // stay as the booking insert-site contract froze them.
   const seedSlotPatches = new Map();
-  const matchesBookedBait = await bookedBaitServiceMatcher(conn, commercialScope);
   const seedSlotFor = (scheduledDate, windowStartArg) => {
     const patch = seedSlotPatches.get(scheduledDate);
     if (!patch) return { windowStart: windowStartArg, technicianId: null, handoff: null };
@@ -2243,11 +2264,13 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
         // id would then stamp the promised time onto a different date (never
         // conflict-checked) or rewrite completed history. Re-read under the
         // lock and abort unless it is still the visit we matched.
-        const fresh = await sp('scheduled_services').where({ id: row.id }).first();
+        const fresh = await sp('scheduled_services').where({ id: row.id }).forUpdate().first();
         if (!fresh
           || dateOnly(fresh.scheduled_date) !== promisedTarget
           || PREPAID_UPDATE_EXCLUDED_STATUSES.has(String(fresh.status || '').toLowerCase())
-          || !(matchesBookedBait ? adoptableCoverageRow(fresh) : serviceMatchesCoverage(fresh, coverageServiceType))) {
+          || !(commercialScope
+            ? adoptableCoverageRow(fresh)
+            : serviceMatchesCoverage(fresh, coverageServiceType))) {
           staleAdoption = true;
           return;
         }
@@ -2290,7 +2313,29 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     // surface recomputes from window_start.
     if (cols.time_window) updates.time_window = null;
     if (cols.window_display) updates.window_display = null;
-    await trx('scheduled_services').where({ id: row.id }).update({ ...updates, ...recurringDispatchDuePatch(row, updates) });
+    let updateQuery = trx('scheduled_services')
+      .where({ id: row.id })
+      .where({ customer_id: term.customer_id, scheduled_date: promisedTarget })
+      .where((q) => q.whereNull('status').orWhereNotIn('status', [...PREPAID_UPDATE_EXCLUDED_STATUSES]));
+    // Pin the ownership decision to the UPDATE too. The locked re-read above
+    // closes the normal race; these predicates also fail closed if a legacy
+    // writer changes membership without honoring that row lock.
+    if (commercialScope?.rootId) {
+      updateQuery = updateQuery.where(function soldSeriesMembership() {
+        this.where('id', commercialScope.rootId).orWhere('recurring_parent_id', commercialScope.rootId);
+      }).where(function termMembership() {
+        this.whereNull('annual_prepay_term_id').orWhere('annual_prepay_term_id', term.id);
+      });
+    } else if (commercialScope) {
+      updateQuery = updateQuery.where({ annual_prepay_term_id: term.id });
+    }
+    const updated = await updateQuery.update({ ...updates, ...recurringDispatchDuePatch(row, updates) });
+    if (Number(updated) !== 1) {
+      logger.warn(`[annual-prepay] term ${term.id} adopted visit ${row.id} changed membership before retime — leaving it untouched`);
+      await fileCoverageException(term, 'adopted_visit_moved',
+        `The visit matching the promised first service on ${promisedTarget} was moved or completed while payment landed. Confirm the schedule with the customer.`);
+      return;
+    }
     // Route check on saves: the retimed visit moved within its day.
     await placeAutoSavedVisit(trx, { visit: row, source: 'annual_prepay_renewal' });
     // Filed only once the retime is written (same rule as the seed path):
@@ -2500,7 +2545,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // be prepaid-stamped, or completion would invoice a prepaid customer.
   // The unresolved adopted row is quarantined operationally via the
   // durable coverage exception instead.
-  if (coverageCatalogServiceId && cols.service_id && adoptedConcurrentRows.length) {
+  if (coverageIsPalm && coverageCatalogServiceId && cols.service_id && adoptedConcurrentRows.length) {
     const concurrentOk = await backfillPalmIdentity(adoptedConcurrentRows, 'concurrent-adoption');
     if (!concurrentOk) {
       await fileCoverageException(term, 'palm_identity_backfill_failed',

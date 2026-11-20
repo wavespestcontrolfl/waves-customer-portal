@@ -1668,6 +1668,7 @@ async function applyPerApplicationLaneStamp({ customerId, scheduledServiceId }) 
 }
 
 module.exports = {
+  customerHasCommercialChannel,
   recordSetupFeeClaimForInvoice,
   settledSetupClaimForInvoice,
   settledSetupClaimForEstimate,
@@ -1694,7 +1695,6 @@ module.exports = {
   computeSeriesPrepayPricing,
   resolveDirectRodentSetupObligation,
   authoritativeServiceKey,
-  customerHasCommercialChannel,
   PLAN_CLASS_BY_SERVICE_KEY,
   // Read-side (lock-free) overlap probe, shared rather than re-mirrored: a
   // third copy of the coverage-holding status list is a drift bug waiting

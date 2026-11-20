@@ -390,6 +390,7 @@ jobs:
                 run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
                   'tests/callback-bridge-postgres.test.js', 'tests/staff-onboarding-postgres.test.js',
                   'tests/commercial-prepay-original-invoice-postgres.test.js',
+                  'tests/annual-prepay-renewals-sale-visit-ownership-postgres.test.js',
                   'tests/admin-schedule-prepay-setup-retire-postgres.test.js'],
                   { cwd: 'server', env: { ...process.env, DATABASE_URL: `${base}${name}`, WAVES_LOCAL_DEV: '1', WAVES_WORKTREE_ID: name.slice('waves_qa_'.length), CALLBACK_BRIDGE_POSTGRES: '1', WAVES_STAFF_DOCUMENT_TEST_DB: '1' } });
               } finally { await client.query(`DROP DATABASE "${name}" WITH (FORCE)`); }

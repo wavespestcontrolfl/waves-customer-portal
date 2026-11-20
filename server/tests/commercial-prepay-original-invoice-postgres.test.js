@@ -396,6 +396,19 @@ postgres('commercial prepay original-invoice ownership', () => {
       saleTimeChild: true,
       conversionEvidence: { firstScheduledServiceId: 'saleChild', scheduledCount: 1 },
     });
+    const noLegacyAnchor = await seedSale({
+      marker: null,
+      saleTimeBooking: true,
+      saleTimeChild: true,
+      conversionEvidence: { firstScheduledServiceId: 'saleChild', scheduledCount: 1 },
+    });
+    const conflictingAnchor = await seedSale({
+      marker: null,
+      saleTimeBooking: true,
+      conversionEvidence: { firstScheduledServiceId: 'saleRoot', scheduledCount: 1 },
+    });
+    await trx('setup_fee_claims').where({ id: conflictingAnchor.ids.claimId })
+      .update({ scheduled_service_id: conflictingAnchor.ids.otherPropertyRootId });
     const wrongServiceChild = await seedSale({
       marker: null,
       saleTimeBooking: true,
@@ -486,6 +499,8 @@ postgres('commercial prepay original-invoice ownership', () => {
     const stored = (id) => trx('annual_prepay_terms').where({ id }).first('commercial_setup_series_root_id');
     expect((await stored(commercial.ids.termId)).commercial_setup_series_root_id).toBe(commercial.ids.saleRootId);
     expect((await stored(selectedChild.ids.termId)).commercial_setup_series_root_id).toBe(selectedChild.ids.saleRootId);
+    expect((await stored(noLegacyAnchor.ids.termId)).commercial_setup_series_root_id).toBe(noLegacyAnchor.ids.saleRootId);
+    expect((await stored(conflictingAnchor.ids.termId)).commercial_setup_series_root_id).toBeNull();
     expect((await stored(bookedBySoldService.ids.termId)).commercial_setup_series_root_id)
       .toBe(bookedBySoldService.ids.saleRootId);
     for (const seeded of [laterBooking, unbookedBySoldService, unbookedResidentialNoise,
@@ -497,6 +512,10 @@ postgres('commercial prepay original-invoice ownership', () => {
       .toMatchObject({ scheduled_service_id: commercial.ids.saleRootId, unbooked_commercial_setup: false });
     expect(await trx('setup_fee_claims').where({ id: selectedChild.ids.claimId }).first())
       .toMatchObject({ scheduled_service_id: selectedChild.ids.saleRootId, unbooked_commercial_setup: false });
+    expect(await trx('setup_fee_claims').where({ id: noLegacyAnchor.ids.claimId }).first())
+      .toMatchObject({ scheduled_service_id: noLegacyAnchor.ids.saleRootId, unbooked_commercial_setup: false });
+    expect(await trx('setup_fee_claims').where({ id: conflictingAnchor.ids.claimId }).first())
+      .toMatchObject({ scheduled_service_id: conflictingAnchor.ids.otherPropertyRootId, unbooked_commercial_setup: null });
     expect(await trx('setup_fee_claims').where({ id: bookedBySoldService.ids.claimId }).first())
       .toMatchObject({ scheduled_service_id: bookedBySoldService.ids.saleRootId, unbooked_commercial_setup: false });
     for (const seeded of [laterBooking, unbookedBySoldService]) {
