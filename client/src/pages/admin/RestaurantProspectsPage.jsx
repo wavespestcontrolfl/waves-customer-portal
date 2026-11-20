@@ -80,11 +80,11 @@ export function statusText(data) {
 // The line above the list: the job's state when it limits what the rows prove (statusText), else the counts. The
 // counts cover the whole period; the list stops at its newest 1,000 rows, and then says so.
 export function headlineText(data) {
-  const status = statusText(data);
-  if (status) return status;
+  // The cut line describes the list on screen, so it shows in every read state: the counts are the stored rows'
+  // whole-period totals, read in the same snapshot as the rows.
   const total = data.counts.new_restaurant + data.counts.new_owner + data.counts.pest_finding;
   const cut = data.rows.length < total ? `The list shows the newest ${countText(data.rows.length)}.` : "";
-  return [summaryText(data), cut].filter(Boolean).join(" ");
+  return [statusText(data) || summaryText(data), cut].filter(Boolean).join(" ");
 }
 
 // One request per period. A late answer for a period the owner already left is dropped.

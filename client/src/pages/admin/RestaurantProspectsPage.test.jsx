@@ -227,7 +227,7 @@ it("statusText lets the counts show only after a full read that reached the peri
   expect(statusText({ ...good, readAt: "2026-10-21T04:30:00.000Z" })).toBeNull();
 });
 
-it("headlineText shows the counts only when statusText allows, and says when the list stops short of them", () => {
+it("headlineText shows the counts only when statusText allows, and says in every state when the list stops short", () => {
   const counts = { new_restaurant: 2, new_owner: 0, pest_finding: 0 };
   const window = { from: "2026-10-21", through: "2026-11-19", counts, readUnfinishedSince: null, readFailedAt: null, rows: [LIST30.rows[0], LIST30.rows[0]] };
   expect(headlineText({ ...window, readAt: null }))
@@ -236,7 +236,14 @@ it("headlineText shows the counts only when statusText allows, and says when the
     .toBe("The weekly reads through Nov 16, 2026 have collected 2 new restaurants and 0 new owners dated Oct 21 to Nov 19.");
   expect(headlineText({ ...window, counts: { new_restaurant: 1500, new_owner: 2, pest_finding: 1 }, readAt: "2026-11-17T04:30:00.000Z" }))
     .toBe("The weekly reads through Nov 16, 2026 have collected 1,500 new restaurants and 2 new owners dated Oct 21 to Nov 19. The list shows the newest 2.");
-  // After a failed run: no counts, and no cut line either.
+  // After a failed run: no counts, but the cut line still says the list on screen stops short.
   expect(headlineText({ ...window, counts: { new_restaurant: 1500, new_owner: 2, pest_finding: 1 }, readAt: "2026-11-17T04:30:00.000Z", readFailedAt: "2026-11-24T04:30:00.000Z" }))
-    .toBe("The weekly read on Nov 23, 2026 failed, so this list may be missing restaurants. The state files were last read in full on Nov 16, 2026.");
+    .toBe("The weekly read on Nov 23, 2026 failed, so this list may be missing restaurants. The state files were last read in full on Nov 16, 2026. The list shows the newest 2.");
+  // The same while a run has not finished, and before any full read; a list that is not cut adds nothing.
+  expect(headlineText({ ...window, counts: { new_restaurant: 1500, new_owner: 2, pest_finding: 1 }, readAt: "2026-11-17T04:30:00.000Z", readUnfinishedSince: "2026-11-24T15:36:00.000Z" }))
+    .toBe("The weekly read that started on Nov 24, 2026 has not finished, so this list may be missing restaurants. The state files were last read in full on Nov 16, 2026. The list shows the newest 2.");
+  expect(headlineText({ ...window, counts: { new_restaurant: 1500, new_owner: 2, pest_finding: 1 }, readAt: null }))
+    .toBe("No weekly read has read every state file yet, so this list may be missing restaurants. The list shows the newest 2.");
+  expect(headlineText({ ...window, readAt: null, readFailedAt: "2026-11-24T04:30:00.000Z" }))
+    .toBe("The weekly read on Nov 23, 2026 failed, so this list may be missing restaurants. No weekly read has read every state file yet.");
 });
