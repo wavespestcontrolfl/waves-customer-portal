@@ -114,6 +114,29 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
     expect(screen.getByText('Hunter X2')).toBeInTheDocument();
   }, 20000);
 
+  // A batch that also carries another field saves that field and refuses the timer (a stale home): a 200 that names
+  // the timer. The refused pick stays beside its reason, and the next save does not replace it.
+  it('a timer refused beside a field that saved stays on screen with its reason', async () => {
+    api.getPropertyPreferences.mockResolvedValue({ preferences: { ...SPRAY_PREFS }, hasLawnCare: true });
+    const timerRefused = ['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp'].map((field) => ({ field, message: REFUSED }));
+    const withoutTimer = (payload) => Object.fromEntries(Object.entries(payload).filter(([field]) => !field.startsWith('irrigationController')));
+    api.updatePropertyPreferences
+      .mockImplementationOnce(async (payload) => ({ saved: true, rejected: timerRefused, preferences: { ...SPRAY_PREFS, ...withoutTimer(payload) } }))
+      .mockImplementation(async (payload) => ({ saved: true, preferences: { ...SPRAY_PREFS, ...STAFF_RAIN_BIRD, ...payload } }));
+    render(<PropertyTab customer={lawnCustomer} />);
+    fireEvent.change(await screen.findByLabelText('Side Gate / Backyard Access'), { target: { value: 'Lift latch' } });
+    fireEvent.click(screen.getByRole('button', { name: /^X2/ }));
+    expect(await screen.findByText(`We could not save your timer. ${REFUSED}`, {}, { timeout: 8000 })).toBeInTheDocument();
+    expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1);
+    expect(api.updatePropertyPreferences.mock.calls[0][0]).toMatchObject({ irrigationControllerModel: 'x2' });
+
+    fireEvent.change(screen.getByLabelText('Side Gate / Backyard Access'), { target: { value: 'Lift latch, then left' } });
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(2), { timeout: 8000 });
+    expect(api.updatePropertyPreferences.mock.calls[1][0]).not.toHaveProperty('irrigationControllerModel');
+    expect(await screen.findByText('Property details saved.')).toBeInTheDocument();
+    expect(screen.getByText('Hunter X2')).toBeInTheDocument();
+  }, 20000);
+
   // X2 on file; the customer picks the Pro-C, then the X2 again while the Pro-C save is in flight. The Pro-C answer
   // must not replace the X2 waiting in the queue, which is sent next.
   it('a newer pick waiting behind a save in flight stays on screen when that save returns', async () => {
@@ -156,10 +179,33 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
     expect(api.updatePropertyPreferences.mock.calls[0][0]).not.toHaveProperty('irrigationControllerBrand');
   }, 15000);
 
-  it('a customer with no lawn service does not get the card', async () => {
-    api.getPropertyPreferences.mockResolvedValue({ preferences: { ...SPRAY_PREFS }, hasLawnCare: false });
+  // X2 on file; the customer picks the Pro-C. The server takes it, but staff save a Rain Bird before the PUT reads
+  // the row back, so the PUT answers with the Rain Bird. The card shows what the server holds.
+  it('a timer staff saved just after the customer\'s pick replaces that pick when its save returns', async () => {
+    api.getPropertyPreferences.mockResolvedValue({
+      preferences: { ...SPRAY_PREFS, irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: null },
+      hasLawnCare: true,
+    });
+    api.updatePropertyPreferences.mockImplementation(async (payload) => ({ saved: true, preferences: { ...SPRAY_PREFS, ...payload, ...STAFF_RAIN_BIRD } }));
+    render(<PropertyTab customer={lawnCustomer} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change my timer' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Pro-C/ }));
+    expect(await screen.findByText('Rain Bird', {}, { timeout: 8000 })).toBeInTheDocument();
+    expect(screen.queryByText('Hunter Pro-C')).not.toBeInTheDocument();
+    expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1);
+    expect(api.updatePropertyPreferences.mock.calls[0][0]).toMatchObject({ irrigationControllerModel: 'pro_c' });
+  }, 15000);
+
+  // hasLawnCare also admits the Monday irrigation email's opt-ins (Weekly Inches, the watering plan). The card asks
+  // lawn-service customers only (hasLawnService).
+  it.each([
+    ['no lawn service', false, { hasLawnCare: false }],
+    ['only the Monday irrigation email', false, { hasLawnCare: true, hasLawnService: false }],
+    ['lawn visits on record but no tier or turf type', true, { hasLawnCare: true, hasLawnService: true }],
+  ])('a customer with %s: the card shows = %s', async (_case, shown, flags) => {
+    api.getPropertyPreferences.mockResolvedValue({ preferences: { ...SPRAY_PREFS }, ...flags });
     render(<PropertyTab customer={{ ...lawnCustomer, tier: 'Bronze' }} />);
     await screen.findByText('Controller Location');
-    expect(screen.queryByText('Your sprinkler timer')).not.toBeInTheDocument();
+    expect(screen.queryByText('Your sprinkler timer') !== null).toBe(shown);
   });
 });

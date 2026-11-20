@@ -60,6 +60,7 @@ const {
   snakeToCamel,
   transformKeys,
   customerHasLawnCare,
+  customerHasLawnService,
   customerQualifiesForLawnInches,
   normalizeUpdatesForStorage,
   prefsRenderStamp,
@@ -158,12 +159,16 @@ router.get('/pet-name-ask', async (req, res) => {
 
 router.get('/preferences', async (req, res, next) => {
   try {
-    const [prefs, hasLawnCare] = await Promise.all([
+    const lawnLookupFailed = (err) => {
+      logger.warn(`[property] lawn evidence lookup failed for ${req.customerId}: ${err.message}`);
+      return false;
+    };
+    const [prefs, hasLawnCare, hasLawnService] = await Promise.all([
       db('property_preferences').where({ customer_id: req.customerId }).first(),
-      customerQualifiesForLawnInches(req.customer).catch((err) => {
-        logger.warn(`[property] lawn evidence lookup failed for ${req.customerId}: ${err.message}`);
-        return false;
-      }),
+      customerQualifiesForLawnInches(req.customer).catch(lawnLookupFailed),
+      // The sprinkler timer card's audience: lawn service only. The Monday irrigation email's opt-ins get Weekly
+      // Inches and the watering plan (hasLawnCare), not the card.
+      customerHasLawnService(req.customer).catch(lawnLookupFailed),
     ]);
 
     if (!prefs) {
@@ -189,6 +194,7 @@ router.get('/preferences', async (req, res, next) => {
           updatedAt: null,
         },
         hasLawnCare,
+        hasLawnService,
         irrigationSuppressed: false,
         ...awayWatchPayload(req),
       });
@@ -219,7 +225,7 @@ router.get('/preferences', async (req, res, next) => {
     const irrigationSuppressed = fields.irrigation_system === false;
     camelFields.irrigationSystem = true;
 
-    res.json({ preferences: camelFields, hasLawnCare, irrigationSuppressed, ...awayWatchPayload(req) });
+    res.json({ preferences: camelFields, hasLawnCare, hasLawnService, irrigationSuppressed, ...awayWatchPayload(req) });
   } catch (err) {
     next(err);
   }

@@ -269,6 +269,13 @@ function customerHasLawnCare(customer = {}) {
   return ['Silver', 'Gold', 'Platinum'].includes(tier) || !!String(customer.lawn_type || '').trim();
 }
 
+// Lawn service itself: the tier / lawn_type shortcut, else live lawn-service evidence. THROWS on a lookup failure,
+// like the predicate below. The sprinkler timer card asks only these customers (owner ruling 2026-11-19, "each lawn
+// customer"): the Monday irrigation email's opt-ins qualify for Weekly Inches, not the card.
+async function customerHasLawnService(customer = {}) {
+  return customerHasLawnCare(customer) || hasLawnServiceEvidence(customer.id);
+}
+
 // Weekly Inches eligibility. The tier / lawn_type shortcut misses standalone
 // lawn-plan customers with no turf type on file, so fall back to live
 // lawn-service evidence (any live lawn-flavored visit in the trailing window
@@ -279,8 +286,7 @@ function customerHasLawnCare(customer = {}) {
 // (a GET/render) or fail the write (a false here would delete the
 // customer's inches with a 200 — GH codex P2 on #3557).
 async function customerQualifiesForLawnInches(customer = {}) {
-  if (customerHasLawnCare(customer)) return true;
-  if (await hasLawnServiceEvidence(customer.id)) return true;
+  if (await customerHasLawnService(customer)) return true;
   // Opted into the Monday irrigation email without lawn service (owner
   // 2026-09-28): that email asks for their schedule and links the plan here.
   return hasIrrigationEmailOptIn(customer.id);
@@ -337,6 +343,7 @@ module.exports = {
   snakeToCamel,
   transformKeys,
   customerHasLawnCare,
+  customerHasLawnService,
   customerQualifiesForLawnInches,
   normalizeUpdatesForStorage,
   prefsRenderStamp,

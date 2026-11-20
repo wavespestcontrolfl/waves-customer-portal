@@ -20,6 +20,7 @@ const { hasLawnServiceEvidence, hasIrrigationEmailOptIn } = require('../services
 const {
   propertyChangeItems, prefsSchema, customerQualifiesForLawnInches, IRRIGATION_INPUT_FIELDS,
 } = propertyRouter._private;
+const { customerHasLawnService } = require('../services/property-preferences-schema');
 
 describe('property preferences — irrigation minutes per zone', () => {
   test('a minutes change produces an account-updated change item', () => {
@@ -164,6 +165,19 @@ describe('property preferences — Weekly Inches eligibility', () => {
     expect(hasIrrigationEmailOptIn).toHaveBeenCalledWith('c5');
   });
 
+  // The sprinkler timer card asks lawn-service customers only (owner ruling 2026-11-19, "each lawn customer").
+  test('lawn service, the timer card\'s audience, never counts the Monday email opt-in', async () => {
+    hasIrrigationEmailOptIn.mockClear();
+    await expect(customerHasLawnService({ id: 'c1', lawn_type: 'St. Augustine' })).resolves.toBe(true);
+    hasLawnServiceEvidence.mockResolvedValueOnce(true);
+    await expect(customerHasLawnService({ id: 'c2', waveguard_tier: 'Bronze' })).resolves.toBe(true);
+    hasLawnServiceEvidence.mockResolvedValueOnce(false);
+    await expect(customerHasLawnService({ id: 'c5', waveguard_tier: 'Bronze' })).resolves.toBe(false);
+    expect(hasIrrigationEmailOptIn).not.toHaveBeenCalled();
+    hasLawnServiceEvidence.mockRejectedValueOnce(new Error('db down'));
+    await expect(customerHasLawnService({ id: 'c4' })).rejects.toThrow('db down');
+  });
+
   test('a failed evidence lookup THROWS — the PUT must fail the save, never silently drop inches', async () => {
     hasLawnServiceEvidence.mockRejectedValueOnce(new Error('db down'));
     await expect(customerQualifiesForLawnInches({ id: 'c4' })).rejects.toThrow('db down');
@@ -172,8 +186,10 @@ describe('property preferences — Weekly Inches eligibility', () => {
   test('PUT gates irrigation_inches_per_week on the shared predicate and answers 503 on lookup failure; GET fails soft', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/property.js'), 'utf8');
     expect(src).toMatch(/if \('irrigation_inches_per_week' in updates\) \{[\s\S]{0,400}eligible = await customerQualifiesForLawnInches\(req\.customer\);[\s\S]{0,600}res\.status\(503\)[\s\S]{0,300}if \(!eligible\) delete updates\.irrigation_inches_per_week;/);
-    expect(src).toMatch(/customerQualifiesForLawnInches\(req\.customer\)\.catch\(/); // GET
-    expect(src).toMatch(/res\.json\(\{ preferences: camelFields, hasLawnCare, irrigationSuppressed, \.\.\.awayWatchPayload\(req\) \}\)/);
+    expect(src).toMatch(/customerQualifiesForLawnInches\(req\.customer\)\.catch\(lawnLookupFailed\)/); // GET
+    expect(src).toMatch(/customerHasLawnService\(req\.customer\)\.catch\(lawnLookupFailed\)/); // GET, the timer card
+    expect(src).toMatch(/res\.json\(\{ preferences: camelFields, hasLawnCare, hasLawnService, irrigationSuppressed, \.\.\.awayWatchPayload\(req\) \}\)/);
+    expect(src).toMatch(/hasLawnCare,\n\s+hasLawnService,\n\s+irrigationSuppressed: false,/); // GET, no row yet
     expect(src).toMatch(/const irrigationSuppressed = fields\.irrigation_system === false;/);
   });
 });
