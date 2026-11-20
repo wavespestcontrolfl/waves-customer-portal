@@ -7765,15 +7765,16 @@ it runs is not kept: the reload's list drops it, even when it offers the same st
 "Show all open times" applies its answer as it is: with no list, the old times, pick
 and address leave, and the page shows the answer's address and no times. It starts a
 new page view too, as a change of address does: a search still running when it starts
-belongs to the old view. A search starts one too, so of the searches, resets and
-changes of address the latest one wins. A booking never does at its start: its success
-or terminal state always shows, and its refusal or failure drops what is still running.
-While a booking runs, no search or reset starts, so that booking's refusal always shows. A held address's reload that answers `422 out_of_area` stops on the
-out-of-area card with its waitlist ticket, as the address form does; a booking's
-terminal answer that lands after it replaces that card. A terminal state, the address form, or the GET's own no-times answers
+belongs to the old view, and it ends quietly (no search error). A search starts one too, so of the searches, resets and
+changes of address the latest one wins. A booking and a search or reset never overlap:
+while a booking runs, no search or reset starts, so that booking's refusal always shows;
+while a search or reset runs, every Book button is off, because a reset answers the
+address on file now, and a booking from the calendar it replaces would book that address.
+A list for another address keeps no picked or emailed time, even at the same start. A
+booking's success or terminal state always shows. A held address's reload that answers `422 out_of_area` stops on the
+out-of-area card with its waitlist ticket, as the address form does. A terminal state, the address form, or the GET's own no-times answers
 (`service_area_unavailable`, `booking_unavailable`) in that answer still replace the
-page, and the page then shows no "latest open times" message. Any answer but a booking also drops a search still running, so its late times
-never land over the page, and that search ends quietly (no search error). The reload runs under the page's request controller: a
+page, and the page then shows no "latest open times" message. The reload runs under the page's request controller: a
 change of address while it runs supersedes it, and it then applies no list,
 clears nothing and shows no message. A refusal that lands after a change of
 address, a reload or another link (which remounts the page) belongs to the old page,

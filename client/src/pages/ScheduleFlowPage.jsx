@@ -941,7 +941,8 @@ function AutoPlacedHero({ data }) {
 // tap to book; "you pick for me" books the best-ranked one; "See all open
 // times" reveals the Ask card and the full picker below. The page's confirm()
 // does every commit, so its errors and SLOT_TAKEN refresh apply unchanged.
-function CustomerPickTimesCard({ ranked, submitting, error, showError, onBook, onWePick, seeAllOpen, onSeeAll }) {
+// busy: a search or reset is running, so no time books until it lands.
+function CustomerPickTimesCard({ ranked, submitting, busy, error, showError, onBook, onWePick, seeAllOpen, onSeeAll }) {
   const [tapped, setTapped] = useState(null);
   const chips = ranked.slice(0, PICK_CHIP_LIMIT)
     .sort((a, b) => a.day.date.localeCompare(b.day.date) || String(a.s.start_time).localeCompare(String(b.s.start_time)));
@@ -967,9 +968,9 @@ function CustomerPickTimesCard({ ranked, submitting, error, showError, onBook, o
               className="wpk-best-chip"
               key={key}
               aria-label={`Book ${formatDateLabel(pick.day.date)}, arrival ${arrival}`}
-              disabled={submitting}
+              disabled={submitting || busy}
               onClick={() => book(key, pick, onBook)}
-              style={submitting ? BUSY : undefined}
+              style={submitting || busy ? BUSY : undefined}
             >
               <span>
                 <span className="wpk-best-when">{formatDateLabel(pick.day.date)}</span>
@@ -983,9 +984,9 @@ function CustomerPickTimesCard({ ranked, submitting, error, showError, onBook, o
       <button
         type="button"
         data-glass="chip"
-        disabled={submitting}
+        disabled={submitting || busy}
         onClick={() => book('we-pick', ranked[0], onWePick)}
-        style={submitting ? { ...WE_PICK_BUTTON, ...BUSY } : WE_PICK_BUTTON}
+        style={submitting || busy ? { ...WE_PICK_BUTTON, ...BUSY } : WE_PICK_BUTTON}
       >
         {busyLabel('we-pick', 'Any of these work — you pick for me')}
       </button>
@@ -1640,7 +1641,8 @@ function InspectionAddressGate({ data, token, onResolved, onAddressResolved }) {
 // that emailed pick is still the selection; a commit error that cleared it
 // (SLOT_TAKEN) keeps the card up with the error, so the reason is never
 // rendered only at the bottom of the page.
-function EmailPickCard({ slot, movedNotice, error: submitError, showError, submitting, onBook, onPickAnother }) {
+// busy: a search or reset is running, so the emailed time books only after it lands.
+function EmailPickCard({ slot, movedNotice, error: submitError, showError, submitting, busy, onBook, onPickAnother }) {
   const error = showError ? submitError : null;
   if (!slot && !error) return null;
   return (
@@ -1657,7 +1659,7 @@ function EmailPickCard({ slot, movedNotice, error: submitError, showError, submi
             data-glass-size="primary"
             className="wpk-action-btn"
             onClick={onBook}
-            disabled={submitting}
+            disabled={submitting || busy}
             style={{ width: '100%', marginTop: 14 }}
           >
             {submitting ? 'Booking…' : `Book ${shortDayLabel(slot.date)} ${arrivalWindowLabel(slot.start_time)}`}
@@ -1952,6 +1954,9 @@ function ScheduleFlowPage({ flow }) {
   // refresh) — always falls back to the first day with openings.
   const [selectedDate, setSelectedDate] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  // The controller of the search or reset still running, if any: no booking
+  // starts while one runs (listRequest).
+  const [listing, setListing] = useState(null);
   const [submitError, setSubmitError] = useState(null);
   // Inspection: a refusal's reload failed, so the page no longer knows which
   // address its next commit books (confirm). The search stays closed until a
@@ -2047,13 +2052,30 @@ function ScheduleFlowPage({ flow }) {
   // each reads loadAbortRef's signal when it starts and ignores a late
   // answer. Requests made after this take the fresh controller.
   // The page's rule: each search, reset or change of address supersedes
-  // when it starts, so the latest one wins. A booking never does at its
-  // start: its success or terminal state always shows, and any other answer
-  // or failure supersedes what is still running. While a booking runs, no
-  // search or reset starts (AskCard `busy`) (pre-push P1 on 833e0337bd).
+  // when it starts, so the latest one wins. A booking and a search or reset
+  // never overlap: while a booking runs, no search or reset starts (AskCard
+  // `busy`, pre-push P1 on 833e0337bd), and while a search or reset runs, no
+  // booking starts (`listing`). A reset can bring another address, and a
+  // booking from the calendar it replaces would book that address (pre-push
+  // P1 on 72a9851828). A booking's success or terminal state always shows.
   const supersedeSearches = () => {
     loadAbortRef.current?.abort();
     loadAbortRef.current = new AbortController();
+    setListing(null);
+  };
+
+  // Runs a search or reset as the newest list request, with every Book off
+  // until it ends. Only the request that set `listing` clears it, so one it
+  // superseded never turns Book on early.
+  const listRequest = (run) => async (...args) => {
+    supersedeSearches();
+    const controller = loadAbortRef.current;
+    setListing(controller);
+    try {
+      return await run(controller.signal, ...args);
+    } finally {
+      setListing((current) => (current === controller ? null : current));
+    }
   };
 
   // Keep the pick across an availability swap (AI search, "Show all open
@@ -2062,17 +2084,24 @@ function ScheduleFlowPage({ flow }) {
   // clear the pick unconditionally, so a lead who searched for the very time
   // already picked had to find and tap it again.
   // The emailed pick (EmailPickCard) follows the same rule on its own.
+  // A list for another address keeps no pick, even at the same start: the
+  // customer picked it, and the email offered it, for the address shown
+  // before (pre-push P1 on 72a9851828).
   const selectedSlotRef = useRef(null);
   selectedSlotRef.current = selectedSlot;
   const emailPickRef = useRef(null);
   emailPickRef.current = emailPick;
+  const shownAddressRef = useRef(null);
   useEffect(() => {
     const days = data?.availability?.days || [];
+    const address = data?.lead?.address_display ?? null;
+    const sameAddress = address === shownAddressRef.current;
+    shownAddressRef.current = address;
     const held = selectedSlotRef.current;
-    const kept = held ? findSlotInDays(days, held) : null;
+    const kept = held && sameAddress ? findSlotInDays(days, held) : null;
     if (held && !kept) setSelectedSlot(null);
     else if (kept) setSelectedSlot(kept);
-    if (emailPickRef.current) setEmailPick(findSlotInDays(days, emailPickRef.current));
+    if (emailPickRef.current) setEmailPick(sameAddress ? findSlotInDays(days, emailPickRef.current) : null);
     if (!days.length) {
       setSelectedDate(null);
       return;
@@ -2195,11 +2224,9 @@ function ScheduleFlowPage({ flow }) {
   // Waves AI date/time search — swaps in the matching window's availability
   // (same shape the GET returns) and hands the summary line back to the
   // card. Throwing lets the card show its own call-us fallback line.
-  const runAiSearch = async (query) => {
-    // The newest list request: a reset or an older search still running
-    // must not land over this one (see supersedeSearches).
-    supersedeSearches();
-    const { signal } = loadAbortRef.current;
+  // The newest list request: a reset or an older search still running
+  // must not land over this one (listRequest).
+  const runAiSearch = listRequest(async (signal, query) => {
     const res = await fetch(`${API_BASE}/public/${cfg.endpoint}/${token}/find-slots`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2254,25 +2281,22 @@ function ScheduleFlowPage({ flow }) {
       setAiFiltered(true);
     }
     return { summary: body.summary };
-  };
+  });
 
   // Back to the full window after a search — quiet refetch (no skeleton
   // flash) so the calendar is fresh. aiFiltered only clears once the
   // full-window response is applied: on failure the filtered calendar is
   // still what's on screen, so the reset link must survive for another try.
-  const showAllTimes = async () => {
-    // A refresh starts a new page view, and can change the address: a
-    // search still running belongs to the old view (pre-push P1 on
-    // b91bb3768f). The reset is off while a booking runs (AskCard `busy`).
-    supersedeSearches();
-    const { signal } = loadAbortRef.current;
+  // A refresh starts a new page view, and can change the address: a search
+  // still running belongs to the old view (pre-push P1 on b91bb3768f).
+  const showAllTimes = listRequest(async (signal) => {
     try {
       await refreshInspectionAvailability({ signal });
       if (signal?.aborted) return;
       setAiFiltered(false);
       setAiSession((n) => n + 1); // remount the card → clears its recap/query
     } catch { /* keep the filtered calendar + reset link */ }
-  };
+  });
 
   // The slot is explicit: the inline Book passes the selection, EmailPickCard
   // its own emailed time — still bookable after the customer browsed another
@@ -2280,7 +2304,7 @@ function ScheduleFlowPage({ flow }) {
   // resultMarks rides into the success result ({ wePicked: true } from the
   // customer-pick card's "you pick for me").
   const confirm = async (slotToBook, fromTop, resultMarks) => {
-    if (!slotToBook || submitting || !cfg.canConfirm({ lane: selectedLane, data, details })) return;
+    if (!slotToBook || submitting || listing || !cfg.canConfirm({ lane: selectedLane, data, details })) return;
     setBookedFromTop(fromTop);
     setSubmitting(true);
     setSubmitError(null);
@@ -2312,12 +2336,8 @@ function ScheduleFlowPage({ flow }) {
       // (Codex pre-push P1, 2026-09-24). The state is the link's, not an
       // address's, so it applies even after the page moved on to another
       // address (pre-push P1 on 0bef4d7e3c).
-      // It outranks the out-of-area card that a held address's refresh may
-      // have raised while this booking ran (pre-push P1 on 6d7d98d317).
       if (inspectionLike && res.ok && body.state && body.state !== 'ok') {
-        supersedeSearches();
         setSelectedSlot(null);
-        setOutOfArea(null);
         setData(body);
         return;
       }
@@ -2326,10 +2346,6 @@ function ScheduleFlowPage({ flow }) {
       // message are not for it (pre-push P1s on 6db4e39ca7 and a8a0462d10).
       // A booking above always shows.
       if (pageRequests.signal.aborted) return;
-      // Any answer but a booking supersedes the searches still running, as
-      // onChangeAddress does: their times were built before it and could
-      // land over what it shows (pre-push P1s on 8f40c19990 and 4e9d76bcb1).
-      supersedeSearches();
       // Inspection only: the geocoded address falls outside the service
       // area — STOP with the dedicated card instead of a generic error.
       if (inspectionLike && body.error === 'out_of_area') {
@@ -2441,8 +2457,6 @@ function ScheduleFlowPage({ flow }) {
       // A failure after the page moved on is the old page's, as a refusal is
       // (pre-push P1 on f49f71aa78).
       if (pageRequests.signal.aborted) return;
-      // An older search landing after this would clear the message.
-      supersedeSearches();
       setSubmitError('Something went wrong. Please try again, or text us and we\'ll help.');
     } finally {
       setSubmitting(false);
@@ -2496,6 +2510,7 @@ function ScheduleFlowPage({ flow }) {
             error={submitError}
             showError={bookedFromTop}
             submitting={submitting}
+            busy={Boolean(listing)}
             onBook={() => confirm(emailPick, true)}
             onPickAnother={() => pickerRef.current?.scrollIntoView?.({ behavior: scrollBehavior(), block: 'start' })}
           />
@@ -2536,6 +2551,7 @@ function ScheduleFlowPage({ flow }) {
         view={pickView}
         cardProps={{
           submitting,
+          busy: Boolean(listing),
           error: submitError,
           showError: bookedFromTop,
           onBook: (slot) => confirm(slot, true),
@@ -2597,7 +2613,7 @@ function ScheduleFlowPage({ flow }) {
                 data-glass-size="primary"
                 className="wpk-action-btn"
                 onClick={() => confirm(selectedSlot, false)}
-                disabled={submitting || !cfg.canConfirm({ lane: selectedLane, data, details })}
+                disabled={submitting || Boolean(listing) || !cfg.canConfirm({ lane: selectedLane, data, details })}
               >
                 {cfg.actionLabel({ submitting, lane: selectedLane, slot, data, details })}
               </button>
