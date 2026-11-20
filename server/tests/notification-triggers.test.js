@@ -475,6 +475,22 @@ describe('triggerNotification bell outcome', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
+  // A quiet missed call's bell row is titled likely robocall; its push goes only when no bell row
+  // was written (missed-call-bell.js pushGuard) and keeps the ordinary caller title (pre-push audit r23).
+  test('a missed-call push carries its push-only title while the bell row keeps its own', async () => {
+    const PushService = require('../services/push-notifications');
+    PushService.sendToAdminUsers.mockClear();
+    await triggerNotification('customer_missed_call', { customerId: null, name: 'likely robocall (GBP — Parrish)', pushName: 'unknown caller (GBP — Parrish)', phone: '+19415550100', callLogId: 'call-2' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe('Missed call — likely robocall (GBP — Parrish)');
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    expect(PushService.sendToAdminUsers.mock.calls[0][1]('admin-1').title).toBe('Missed call — unknown caller (GBP — Parrish)');
+    // With no push name the push carries the bell's title, as before.
+    PushService.sendToAdminUsers.mockClear();
+    await triggerNotification('customer_missed_call', { customerId: null, name: 'unknown caller (GBP — Parrish)', phone: '+19415550100', callLogId: 'call-3' });
+    expect(PushService.sendToAdminUsers.mock.calls[0][1]('admin-1').title).toBe('Missed call — unknown caller (GBP — Parrish)');
+  });
+
   // A banner for a bell row its writer rang under bell: true keeps that authorization, so a type the
   // policy would otherwise silence (one with no customer declaration) still gets its banner.
   test.each(['dashboard_alert'])(
