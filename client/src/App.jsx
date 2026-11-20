@@ -78,17 +78,25 @@ function CustomerFailureScreen({ title, message, onRetry }) {
 }
 
 export class PageErrorBoundary extends Component {
-  constructor(props) { super(props); this.state = { error: null }; }
-  static getDerivedStateFromError(error) { return { error }; }
+  constructor(props) { super(props); this.state = { error: null, heldChunk: false }; }
+  // Held work keeps a staff tab on its old code (lib/portalReload.js). A
+  // nested page chunk that plain React.lazy loads and the live build removed
+  // fails here, not in lazyWithRetry: it gets the same hold-aware retry screen.
+  static getDerivedStateFromError(error) {
+    return { error, heldChunk: isChunkError(error) && Boolean(staffReloadBlocker()) };
+  }
   componentDidCatch(error, info) {
     // A stale-chunk reload is already under way: the swallowed import made
     // React.lazy throw, and the page is about to reload into the new build.
     if (isStaleChunkReloadPending()) return;
+    // A held tab's missing chunk is expected: the retry screen handles it.
+    if (this.state.heldChunk) return;
     console.error('[Page crash]', error, info.componentStack);
     reportError(error, { context: 'PageErrorBoundary', componentStack: info.componentStack });
   }
   render() {
     if (this.state.error && isStaleChunkReloadPending()) return <RouteFallback />;
+    if (this.state.error && this.state.heldChunk) return <ChunkLoadFallback />;
     if (this.state.error) {
       if (this.props.customerGlass) {
         return (
@@ -349,6 +357,12 @@ function RouteFallback({ label = 'Loading...' }) {
   );
 }
 
+// The error for a page chunk the live build no longer serves. "Unable to
+// preload CSS" is Vite's error for a page stylesheet gone the same way.
+function isChunkError(err) {
+  return /Failed to fetch dynamically imported module|Importing a module script failed|ChunkLoadError|Unable to preload CSS/i.test(String(err?.message || ''));
+}
+
 export function lazyWithRetry(factory) {
   return lazy(async () => {
     try {
@@ -364,11 +378,7 @@ export function lazyWithRetry(factory) {
       // A CSS preload already started the reload, then the chunk itself
       // failed too: same reload, same placeholder.
       if (isStaleChunkReloadPending()) return { default: RouteFallback };
-      const msg = String(err?.message || '');
-      // "Unable to preload CSS" is Vite's error for a page stylesheet the
-      // live build no longer serves: the same stale chunk.
-      const isChunkError = /Failed to fetch dynamically imported module|Importing a module script failed|ChunkLoadError|Unable to preload CSS/i.test(msg);
-      if (isChunkError) {
+      if (isChunkError(err)) {
         // Held work on a staff page keeps the tab (lib/portalReload.js); the
         // retry screen's button reloads when the person is ready.
         if (staffReloadBlocker()) return { default: ChunkLoadFallback };

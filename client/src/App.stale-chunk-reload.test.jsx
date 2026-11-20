@@ -180,6 +180,16 @@ test.each([
   expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
 });
 
+test('held work on a staff page: a nested chunk that plain React.lazy loads gets the retry screen, not the crash screen', async () => {
+  window.history.pushState({}, '', '/admin/dispatch');
+  holding = true;
+  const NestedGone = lazy(() => Promise.reject(new Error('Failed to fetch dynamically imported module: /assets/DispatchPageV2-abc123.js')));
+  renderInBoundary(NestedGone);
+  expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  expect(screen.queryByText('Something went wrong')).not.toBeInTheDocument();
+  expect(reported.calls).toHaveLength(0);
+});
+
 test('the held retry screen names the held work before it reloads', async () => {
   window.history.pushState({}, '', '/admin/communications');
   const reload = vi.fn();
