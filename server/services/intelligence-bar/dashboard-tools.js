@@ -92,6 +92,27 @@ function dateRange(period) {
   return ranges;
 }
 
+// The Eastern calendar days from..to (YYYY-MM-DD, both inclusive) as the
+// half-open window [fromTs, toTs) of real instants, for a timestamptz
+// column (codex pre-push P1): a naive 'YYYY-MM-DDT00:00:00' string reads in
+// the database session's zone, 4-5 hours off the business day. The same
+// bounds as get_report_engagement.
+function etDayWindow(from, to) {
+  if (!validCalendarDate(from) || !validCalendarDate(to)) {
+    return { error: 'date_from and date_to must be real YYYY-MM-DD dates' };
+  }
+  const fromTs = parseETDateTime(`${from}T00:00`);
+  const toTs = parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${to}T12:00`), 1))}T00:00`);
+  if (!(fromTs < toTs)) return { error: 'date_from must be on or before date_to' };
+  return { fromTs, toTs };
+}
+
+// whereRaw arguments: the timestamptz SQL `instantSql` (a code constant,
+// never input) falls in an etDayWindow.
+function inWindowRaw(instantSql, { fromTs, toTs }) {
+  return [`${instantSql} >= ? AND ${instantSql} < ?`, [fromTs, toTs]];
+}
+
 const DASHBOARD_TOOLS = [
   {
     name: 'get_kpi_snapshot',
@@ -364,6 +385,11 @@ async function comparePeriods(input) {
 
   const a = resolvePeriod(period_a);
   const b = resolvePeriod(period_b);
+  for (const period of [a, b]) {
+    if (etDayWindow(period.from, period.to).error) {
+      return { error: `Unknown period "${period.label}". Use this_week, last_week, this_month, last_month, this_quarter, ytd, YYYY-MM or YYYY-MM-DD.` };
+    }
+  }
 
   // Each metric query mirrors the funnel-fix discipline applied in
   // PR #247:
@@ -375,6 +401,10 @@ async function comparePeriods(input) {
   //   - Exclude INTERNAL_TEST_CUSTOMERS (Adam Martinez et al.) so test
   //     activity can't skew period-over-period deltas.
   async function getMetrics(from, to) {
+    // Estimate events are timestamptz: Eastern calendar days, as the funnel
+    // counts them. Churn keeps these strings: churned_at is a DATE, which
+    // reads as midnight in the session's zone, the zone the strings read in.
+    const bounds = etDayWindow(from, to);
     const fromTs = `${from}T00:00:00`;
     const toTs = `${to}T23:59:59`;
     const m = {};
@@ -423,7 +453,7 @@ async function comparePeriods(input) {
           // later suppressed resend rewrites sent_at (sentAtSql; codex
           // pre-push r16 P1). NULL-aware (r20 P2): legacy rows carry source
           // NULL, which a bare NOT IN would drop from the count.
-          .whereRaw(`${sentAtSql('e')} BETWEEN ? AND ?`, [fromTs, toTs])
+          .whereRaw(...inWindowRaw(sentAtSql('e'), bounds))
           .where(whereNotUndeliveredSelfServe('e'))
       ).count('* as count').first();
       m.estimates_sent = parseInt(es?.count || 0);
@@ -433,7 +463,7 @@ async function comparePeriods(input) {
         db({ e: 'estimates' })
           .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
           .where('e.status', 'accepted')
-          .whereBetween('e.accepted_at', [fromTs, toTs])
+          .whereRaw(...inWindowRaw('e.accepted_at', bounds))
       ).count('* as count').first();
       m.estimates_accepted = parseInt(ea?.count || 0);
     }
@@ -690,8 +720,9 @@ async function getEstimateFunnel(input) {
   const r = dateRange();
   const from = input.date_from || r.month_start;
   const to = input.date_to || r.today;
-  const fromTs = `${from}T00:00:00`;
-  const toTs = `${to}T23:59:59`;
+  // Every date this funnel compares is a timestamptz: Eastern calendar days.
+  const bounds = etDayWindow(from, to);
+  if (bounds.error) return { error: bounds.error };
 
   // Each stage counts estimates whose stage *transition* timestamp
   // (sent_at / viewed_at / accepted_at / declined_at) falls in the
@@ -717,7 +748,7 @@ async function getEstimateFunnel(input) {
   function stageQuery(instantSql, status) {
     let qb = db({ e: 'estimates' })
       .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
-      .whereRaw(`${instantSql} BETWEEN ? AND ?`, [fromTs, toTs])
+      .whereRaw(...inWindowRaw(instantSql, bounds))
       .where(whereNotUndeliveredSelfServe('e'));
     if (status) qb = qb.where('e.status', status);
     return excludeInternalEstimates(qb);
@@ -730,16 +761,14 @@ async function getEstimateFunnel(input) {
     stageQuery('e.declined_at', 'declined').count('* as c').first(),
   ]);
 
-  const totalSent = parseInt(sent?.c || 0);
-  const totalViewed = parseInt(viewed?.c || 0);
-  const totalAccepted = parseInt(accepted?.c || 0);
-  const totalDeclined = parseInt(declined?.c || 0);
+  const [totalSent, totalViewed, totalAccepted, totalDeclined] = [sent, viewed, accepted, declined]
+    .map((row) => parseInt(row?.c || 0));
 
   const avgResponse = await excludeInternalEstimates(
     db({ e: 'estimates' })
       .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
       .where('e.status', 'accepted')
-      .whereBetween('e.accepted_at', [fromTs, toTs])
+      .whereRaw(...inWindowRaw('e.accepted_at', bounds))
       .whereRaw(`${sentAtSql('e')} IS NOT NULL`)
       .where(whereNotUndeliveredSelfServe('e'))
   ).select(db.raw(`AVG(EXTRACT(EPOCH FROM (e.accepted_at - ${sentAtSql('e')})) / 3600) as avg_hrs`)).first();
@@ -748,7 +777,7 @@ async function getEstimateFunnel(input) {
     db({ e: 'estimates' })
       .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
       .where('e.status', 'accepted')
-      .whereBetween('e.accepted_at', [fromTs, toTs])
+      .whereRaw(...inWindowRaw('e.accepted_at', bounds))
       .where(whereNotUndeliveredSelfServe('e'))
   ).select(db.raw('COALESCE(SUM(COALESCE(e.monthly_total,0) + COALESCE(e.onetime_total,0)), 0) as total')).first();
 
@@ -771,7 +800,7 @@ async function getEstimateFunnel(input) {
     db({ e: 'estimates' })
       .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
       .whereNull('e.archived_at')
-      .whereRaw(`${sentAtSql('e')} BETWEEN ? AND ?`, [fromTs, toTs])
+      .whereRaw(...inWindowRaw(sentAtSql('e'), bounds))
       .where(whereNotUndeliveredSelfServe('e'))
   )
     .select(
@@ -794,7 +823,7 @@ async function getEstimateFunnel(input) {
     db({ e: 'estimates' })
       .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
       .whereNull('e.archived_at')
-      .whereRaw(`${sentAtSql('e')} BETWEEN ? AND ?`, [fromTs, toTs])
+      .whereRaw(...inWindowRaw(sentAtSql('e'), bounds))
       .whereIn('e.status', ['sent', 'viewed'])
       .where(whereNotUndeliveredSelfServe('e'))
   ).count('* as c').first();

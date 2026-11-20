@@ -25028,7 +25028,12 @@ const {
   stripPrepaySwitchSupersededMarkers: stripSupersededMarkers,
 } = require('../services/invoice');
 
-async function resolveSupersededInvoices({ visitIds, estimateId, customerId, conn = db }) {
+// `delivered` (the invoice pay page's plan choice, pay-plan-choice.js): the
+// customer is reading this invoice on its own pay link, so having gone out —
+// or carrying the PaymentIntent that page opens — is the normal state, not a
+// refusal. That lane voids nothing at the choice; every money guard below
+// (collected, part-paid, credited, deposit, payer, foreign lines) still holds.
+async function resolveSupersededInvoices({ visitIds, estimateId, customerId, conn = db, delivered = false }) {
   if (!Array.isArray(visitIds) || visitIds.length === 0) {
     return { ok: true, supersedes: [] };
   }
@@ -25104,10 +25109,10 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
     // UNDELIVERED DRAFTS ONLY (Codex P0 r1). A delivered invoice has a live
     // pay link in the customer's hands; one carrying a PaymentIntent has a
     // payment in flight. Voiding either is a deliberate office decision.
-    if (inv.sent_at || inv.stripe_payment_intent_id) {
+    if (!delivered && (inv.sent_at || inv.stripe_payment_intent_id)) {
       return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit has already gone out to the customer. Void it from Invoices first, then switch` };
     }
-    if (status !== 'draft') {
+    if (status !== 'draft' && !(delivered && ['sent', 'viewed', 'overdue'].includes(status))) {
       return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit is ${status}, not an unsent draft. Resolve it first, then mint the prepay from Customer 360` };
     }
     if (Number(inv.amount_paid || 0) > 0) {
@@ -25336,7 +25341,7 @@ router.get('/cancel-call-notice', requireAdmin, async (req, res, next) => {
 //               and persists its own estimated_price, so a draft-shaped
 //               payload replayed after save could invoice a per-visit amount
 //               the committed series never carried.
-async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switchLaneOverride } = {}) {
+async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switchLaneOverride, payPageInvoiceId = null } = {}) {
     // Dark by default (GATE_PREPAY_ON_BOOK): 404 rather than a blockReason —
     // while the lane is off the endpoint is unobservable, exactly like the
     // /secure select-plan route. GATE_ONSITE_PREPAY_SWITCH opens the SAME
@@ -25348,6 +25353,14 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
     // the same committed-mode switch lane by passing switchLane: true.
     const switchLane = switchLaneOverride === true || isEnabled('onsitePrepaySwitch');
     if (!isEnabled('prepayOnBook') && !switchLane) return { httpStatus: 404, httpBody: { error: 'Not found' } };
+    // The invoice pay page's plan choice (GATE_PAY_PLAN_CHOICE, its own gate in
+    // pay-plan-choice.js; it passes switchLane: true): the customer reads the
+    // accept-minted first invoice on its pay link and may prepay the year
+    // instead. Same eligibility and price as the switch, with three
+    // differences, each marked `payPage` below: the invoice has been delivered,
+    // its visit may already be completed (owner 2026-11-19: that visit counts
+    // as visit 1 of the year), and nothing is voided at the choice.
+    const payPage = payPageInvoiceId ? String(payPageInvoiceId) : null;
     const {
       computeSeriesPrepayPricing,
       PLAN_CLASS_BY_SERVICE_KEY,
@@ -25395,6 +25408,11 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
             'booster_months', 'source_estimate_id')
         : visit;
       const anchor = parent || visit;
+      // payPage: only the accept-minted first invoice, which the converter
+      // attaches to the series' first visit, carries the choice.
+      if (payPage && (!anchor.source_estimate_id || String(visit.id) !== String(anchor.id))) {
+        return blocked('isn’t the first invoice of an accepted plan');
+      }
       // An estimate-origin series already made its billing choice at accept —
       // that lane owns its own prepay control.
       //
@@ -25646,6 +25664,12 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
     const firstVisitDate = validScheduleDate(input.firstVisitDateRaw)
       ? String(input.firstVisitDateRaw).split('T')[0]
       : null;
+    // payPage: the first visit may already be done. The year still starts on
+    // that visit's own date, so coverage counts it as visit 1; no first-visit
+    // promise is recorded for a date that has passed.
+    const pastAnchorDate = payPage && !firstVisitDate
+      ? require('../utils/datetime-et').validCalendarDate(input.firstVisitDateRaw, { allowTimeSuffix: true })
+      : null;
     const AnnualPrepayTimes = require('../services/annual-prepay-renewals');
     const normalizedWindowStart = firstVisitDate && input.windowStartRaw
       ? AnnualPrepayTimes.normalizeWindowStart(String(input.windowStartRaw))
@@ -25668,10 +25692,10 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
     // as past. Falling back to today would start the term after the booked
     // visit, so coverage could not adopt it — the visit would bill per
     // application while the seeder scheduled a replacement inside the window.
-    if (input.mode === 'committed' && !firstVisitDate) {
+    if (input.mode === 'committed' && !firstVisitDate && !pastAnchorDate) {
       return blocked('couldn’t anchor the prepaid year on the booked visit — its date is no longer in the future. Refresh, and mint from Customer 360 if this visit still needs prepay');
     }
-    const termStart = firstVisitDate || today;
+    const termStart = firstVisitDate || pastAnchorDate || today;
 
     // Surface an existing term as a block rather than letting the mint 409
     // after the appointment is already booked. Compared against the PROPOSED
@@ -25699,9 +25723,15 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
         estimateId: anchorEstimateId,
         customerId,
         conn,
+        delivered: !!payPage,
       });
       if (!resolved.ok) return blocked(resolved.blockReason);
       supersedes = resolved.supersedes;
+      // payPage: the year replaces exactly the invoice the customer is
+      // reading, or the choice is not offered.
+      if (payPage && !(supersedes.length === 1 && String(supersedes[0].id) === payPage)) {
+        return blocked('isn’t the first invoice of an accepted plan');
+      }
     } else if (switchLane && input.mode === 'committed' && scheduledServiceId) {
       // NON-ESTIMATE committed series under the switch gate: run the SAME
       // resolver the write path runs (estimateId null ⇒ live-attached-
@@ -25750,6 +25780,10 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
       .reduce((sum, li) => sum + (Number(li.amount) || 0), 0) * 100) / 100;
     const unwaivedSetupFee = directSetupFee > 0 ? directSetupFee : supersededRodentSetup;
     const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass, unwaivedSetupFee });
+    // payPage: a bait-station setup is carried onto the prepay, never waived,
+    // which the two-option block does not explain. Those plans switch through
+    // the office.
+    if (payPage && pricing.prepay.setupAmount > 0) return blocked('carries a bait-station setup — switch it from the office');
     const planLabel = `${coverageServiceType} Annual Prepay`;
 
     // The setup fee is only real — and therefore only waivable — when it is
@@ -25822,9 +25856,11 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
         termStart,
         ...(firstVisitDate ? { firstVisitDate } : {}),
         ...(firstVisitWindowStart ? { firstVisitWindowStart } : {}),
-        note: isAcceptedSwitch
-          ? 'Annual prepay sold at the visit — switched from per application.'
-          : 'Annual prepay sold when the visit was booked.',
+        note: payPage
+          ? require('../services/pay-plan-choice').prepayInvoiceNote(supersedes[0].invoiceNumber)
+          : (isAcceptedSwitch
+            ? 'Annual prepay sold at the visit — switched from per application.'
+            : 'Annual prepay sold when the visit was booked.'),
       },
       // Internal: the switch endpoint's supersede context. Stripped from
       // the HTTP payload by the route wrapper.
@@ -25897,13 +25933,17 @@ function prepaySwitchMatchesExpected(live, expected) {
 }
 
 // Every caller passes visitId, acknowledgeNoticedAmount, actor and auditSource;
-// switchLane and expected are the bar's alone.
+// switchLane and expected are the bar's alone. payPageInvoiceId is the invoice
+// pay page's (pay-plan-choice.js): the customer chose the year on that
+// invoice's own page, so it stays payable (owner 2026-11-19: "keep it
+// payable") and nothing is voided here. Paying the prepay closes it
+// (annual-prepay-renewals closeAcceptInvoiceReplacedByPaidTerm).
 async function runPrepaySwitch({
-  visitId, acknowledgeNoticedAmount, actor, switchLane, expected, auditSource,
+  visitId, acknowledgeNoticedAmount, actor, switchLane, expected, auditSource, payPageInvoiceId = null,
 }) {
   // Server-derived eligibility + pricing — the same computation the sheet
   // previewed, re-run fresh so nothing stale or client-shaped is minted.
-  const previewOpts = { switchLane: switchLane === true };
+  const previewOpts = { switchLane: switchLane === true, payPageInvoiceId };
   const p = await computeAnnualPrepayPreview({ scheduledServiceId: visitId }, db, previewOpts);
   if (p.httpStatus) return { httpStatus: p.httpStatus, httpBody: p.httpBody };
   if (!p.eligible) return { httpStatus: 409, httpBody: { error: `This visit ${p.blockReason}` } };
@@ -25943,7 +25983,9 @@ async function runPrepaySwitch({
       // deliberately never stamps completed/skipped rows, so a terminal
       // visit could collect a year that then reports visitCovered:false
       // forever. Only a visit that can still be stamped may switch.
-      const LIVE_SWITCH_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
+      // The pay page admits a completed first visit: paying its prepay
+      // stamps that visit as visit 1 of the year (the closer named above).
+      const LIVE_SWITCH_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site', ...(payPageInvoiceId ? ['completed'] : [])];
       if (!liveVisit || !LIVE_SWITCH_STATUSES.includes(String(liveVisit.status || ''))) {
         const err = new Error(liveVisit && ['completed', 'skipped'].includes(String(liveVisit.status || ''))
           ? 'This visit is already closed out — coverage can’t stamp it. Sell the prepay from Customer 360 instead'
@@ -26084,6 +26126,7 @@ async function runPrepaySwitch({
         estimateId: target.estimateId,
         customerId: target.customerId,
         conn: trx,
+        delivered: !!payPageInvoiceId,
       });
       if (!resolved.ok) {
         const err = new Error(`This visit ${resolved.blockReason}`);
@@ -26108,11 +26151,19 @@ async function runPrepaySwitch({
           .whereIn('status', ['paid', 'processing'])
           .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(inv.id)])
           .first('id');
-        if (recordedPayment) {
+        // The pay page's invoice may also carry an out-of-band part payment
+        // (Charge Now's prepaid credit lowers the total and stamps
+        // payment_recorded_at, leaving amount_paid at 0).
+        const recordedOnRow = payPageInvoiceId
+          ? await trx('invoices').where({ id: inv.id }).whereNotNull('payment_recorded_at').first('id')
+          : null;
+        if (recordedPayment || recordedOnRow) {
           const err = new Error(`${inv.invoiceNumber || 'The per-application invoice'} has a recorded payment — resolve it from Invoices, never a switch`);
           err.switchConflict = true;
           throw err;
         }
+        // The pay page keeps its invoice payable: checked like any other, never voided here.
+        if (payPageInvoiceId) continue;
         const retired = await trx('invoices')
           .where({ id: inv.id, status: 'draft' })
           .whereNull('sent_at')
@@ -26130,7 +26181,7 @@ async function runPrepaySwitch({
         // applied credit, and no deposit line — the states the canonical
         // voidInvoice exists to untangle are all refused upstream.
       }
-      voided = resolved.supersedes.map((inv) => ({ id: inv.id, invoiceNumber: inv.invoiceNumber, total: inv.total }));
+      voided = payPageInvoiceId ? [] : resolved.supersedes.map((inv) => ({ id: inv.id, invoiceNumber: inv.invoiceNumber, total: inv.total }));
 
       // A direct (non-estimate) rodent series' non-member setup rides the
       // recomputed payload as setupFeeAmount — billed as its OWN line
@@ -26156,7 +26207,7 @@ async function runPrepaySwitch({
           unit_price: switchSetupFee,
           category: 'Setup fee',
         }] : [])],
-        notes: `${mintPayload.note} (visit ${target.visit.id})`,
+        notes: payPageInvoiceId ? mintPayload.note : `${mintPayload.note} (visit ${target.visit.id})`,
         dueDate: etDateString(),
       });
       // The sheet displayed a tax-free residential total; anything else
@@ -26199,7 +26250,9 @@ async function runPrepaySwitch({
         await trx('invoices')
           .where({ id: inv.id })
           .update({
-            notes: trx.raw('concat(coalesce(notes, ?), ?)', ['', `\n${supersededByMarker(invoice.id)}`]),
+            // `||`, not concat(): concat() takes "any", so Postgres cannot type
+            // the bound marker and refuses the whole switch (42P18).
+            notes: trx.raw('coalesce(notes, ?) || ?', ['', `\n${supersededByMarker(invoice.id)}`]),
             updated_at: new Date(),
           });
       }
@@ -26292,7 +26345,7 @@ async function runPrepaySwitch({
       annual_prepay_term_id: mintedTerm?.id || null,
       scheduled_service_id: target.visit.id,
       superseded_invoice_ids: voided.map((v) => v.id),
-      charge_in_person: true,
+      charge_in_person: !payPageInvoiceId,
       source: auditSource,
     }),
     created_at: new Date(),

@@ -16,22 +16,13 @@
  */
 const SELF_SERVE_ESTIMATE_SOURCES = Object.freeze(['plan_restart', 'plan_start']);
 
-// Knex where-callback that keeps every row except an undelivered self-serve
-// one, for the estimates table under `alias` (a code constant, never input).
-// NULL-aware (codex GH #3671 r20 P2): legacy rows carry source NULL, which a
-// bare NOT IN would drop.
-function whereNotUndeliveredSelfServe(alias) {
-  return function notUndeliveredSelfServe() {
-    this.whereNull(`${alias}.source`)
-      .orWhereNotIn(`${alias}.source`, SELF_SERVE_ESTIMATE_SOURCES)
-      .orWhereRaw(`(${alias}.estimate_data #>> '{deliveryState,firstDeliveredAt}') IS NOT NULL`);
-  };
-}
-
-// The same rule on a row already read (its source and parsed estimate_data).
-function isUndeliveredSelfServe(source, estimateData) {
-  return SELF_SERVE_ESTIMATE_SOURCES.includes(String(source || ''))
-    && !estimateData?.deliveryState?.firstDeliveredAt;
+// One test for "staff delivered it", in JavaScript and in SQL alike (codex
+// pre-push P1: the list and the 9 AM push must agree): firstDeliveredAt is
+// there and is not the empty string. SQL reads the value as text (#>>), so a
+// JSON null is absent in both forms, and any other value is present in both.
+function hasDeliveryStamp(estimateData) {
+  const stamp = estimateData?.deliveryState?.firstDeliveredAt;
+  return stamp !== undefined && stamp !== null && stamp !== '';
 }
 
 // SQL helpers for a row under `alias` (a code constant, never input). A
@@ -39,6 +30,25 @@ function isUndeliveredSelfServe(source, estimateData) {
 // (NULL when absent or unreadable). Any other row keeps its own column.
 const SELF_SERVE_SOURCES_SQL = SELF_SERVE_ESTIMATE_SOURCES.map((source) => `'${source}'`).join(', ');
 const deliveryStampSql = (alias) => `${alias}.estimate_data #>> '{deliveryState,firstDeliveredAt}'`;
+// The stamp as text, NULL when absent or empty: hasDeliveryStamp in SQL.
+const presentStampSql = (alias) => `NULLIF(${deliveryStampSql(alias)}, '')`;
+
+// Knex where-callback that keeps every row except an undelivered self-serve
+// one, for the estimates table under `alias`. NULL-aware (codex GH #3671 r20
+// P2): legacy rows carry source NULL, which a bare NOT IN would drop.
+function whereNotUndeliveredSelfServe(alias) {
+  return function notUndeliveredSelfServe() {
+    this.whereNull(`${alias}.source`)
+      .orWhereNotIn(`${alias}.source`, SELF_SERVE_ESTIMATE_SOURCES)
+      .orWhereRaw(`${presentStampSql(alias)} IS NOT NULL`);
+  };
+}
+
+// The same rule on a row already read (its source and parsed estimate_data).
+function isUndeliveredSelfServe(source, estimateData) {
+  return SELF_SERVE_ESTIMATE_SOURCES.includes(String(source || '')) && !hasDeliveryStamp(estimateData);
+}
+
 function firstDeliveredAtSql(alias) {
   const stamp = deliveryStampSql(alias);
   return `(CASE WHEN pg_input_is_valid(${stamp}, 'timestamptz') THEN (${stamp})::timestamptz END)`;
@@ -51,7 +61,7 @@ function selfServeOr(alias, selfServeSql, otherSql) {
 // rather than load estimate_data (the 9 AM Call today push reads 2,000 rows).
 // A source-NULL row gives NULL, which reads as false.
 function undeliveredSelfServeSql(alias) {
-  return `(${alias}.source IN (${SELF_SERVE_SOURCES_SQL}) AND (${deliveryStampSql(alias)}) IS NULL)`;
+  return `(${alias}.source IN (${SELF_SERVE_SOURCES_SQL}) AND ${presentStampSql(alias)} IS NULL)`;
 }
 
 // The instant a row counts as sent. A self-serve row counts at its first real
@@ -61,7 +71,7 @@ function undeliveredSelfServeSql(alias) {
 // A stamp present but unreadable keeps sent_at, so the rows dated here are
 // exactly the delivered ones whereNotUndeliveredSelfServe keeps.
 function sentAtSql(alias) {
-  const unreadableStamp = `CASE WHEN ${deliveryStampSql(alias)} IS NOT NULL THEN ${alias}.sent_at END`;
+  const unreadableStamp = `CASE WHEN ${presentStampSql(alias)} IS NOT NULL THEN ${alias}.sent_at END`;
   return selfServeOr(alias, `COALESCE(${firstDeliveredAtSql(alias)}, ${unreadableStamp})`, `${alias}.sent_at`);
 }
 

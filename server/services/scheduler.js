@@ -8353,16 +8353,22 @@ function initScheduledJobs() {
     logger.info('Running: weekly CSR recommendation');
     try {
       const CSRCoach = require('./csr/csr-coach');
-      const rec = await CSRCoach.generateWeeklyTeamRecommendation();
+      // One period for the whole tip: the seven completed ET days before today (completedWeekDates), so one Friday's
+      // tip starts where the last one ended. The scored-call recommendation and the call-outcomes line both read it.
+      const { loadWeeklyCallOutcomes, formatWeeklyCallOutcomes, completedWeekDates } = require('./csr/weekly-call-outcomes');
+      const now = new Date();
+      const rec = await CSRCoach.generateWeeklyTeamRecommendation({ between: completedWeekDates(now) });
       // Was an internal text to the owner's phone, silenced since 2026-09
       // (services/owner-alerts.js). One row per week.
       if (rec.recommendation) {
         const { recordOwnerAlert, whyFromFreeText } = require('./owner-alerts');
+        // The week's new-customer call outcomes lead the tip; a failed read drops the line, never the tip.
+        const outcomesLine = await loadWeeklyCallOutcomes({ now, completedDays: true }).then(formatWeeklyCallOutcomes).catch(() => '');
         await recordOwnerAlert('csr-weekly-tip', {
           action: 'read the weekly call coaching tip',
           why: whyFromFreeText(rec.recommendation),
           subject: { type: 'check', id: 'csr-weekly-tip' },
-          text: `Weekly CSR Tip:\n\n${rec.recommendation}\n\n${rec.dataPoint || ''}\n${rec.estimatedImpact || ''}`,
+          text: `Weekly CSR Tip:\n\n${outcomesLine ? `${outcomesLine}\n\n` : ''}${rec.recommendation}\n\n${rec.dataPoint || ''}\n${rec.estimatedImpact || ''}`,
           link: '/admin/communications',
           dedupeKey: `owner-alert:csr-weekly-tip:${etDateString()}`,
         });
