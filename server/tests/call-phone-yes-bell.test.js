@@ -9,7 +9,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 const Bell = require('../services/call-phone-yes-bell');
 
-const { dueReason, keyToRing, textFor, visitStart } = Bell._private;
+const { dueReason, keyToRing, standingKey, textFor, visitStart } = Bell._private;
 
 // Mon, Nov 23, 2026, 10:00 AM Eastern (EST).
 const NOW = new Date('2026-11-23T15:00:00Z');
@@ -58,6 +58,21 @@ describe('which key a card rings', () => {
   ])('%s', (_label, due, rung, want) => {
     expect(keyToRing({ cardId: 'c-1', due, rung: new Set(rung) })).toBe(want);
   });
+
+  // Between rings: the open row a quiet rewrite keeps current.
+  test.each([
+    ['the time-short row while open', [[DUE, true], [FILED, false]], DUE],
+    ['the filed row while the time-short row is closed', [[DUE, false], [FILED, true]], FILED],
+    ['the filed row when time never ran short', [[FILED, true]], FILED],
+    ['none when every row is closed', [[DUE, false], [FILED, false]], null],
+    ['none before anything rang', [], null],
+  ])('standing row: %s', (_label, written, want) => {
+    expect(standingKey('c-1', new Map(written))).toBe(want);
+  });
+});
+
+test('the link opens the Triage tab, which the Communications page reads from the hash', () => {
+  expect(Bell.LINK).toBe('/admin/communications#tab=triage');
 });
 
 describe('the words, by card state', () => {
@@ -66,7 +81,7 @@ describe('the words, by card state', () => {
   const VISIT = { scheduled_date: '2026-11-24', window_start: '15:00:00' };
   const card = (payload) => ({ id: 'c-1', payload, summary: 'The card says this.' });
   const passesRules = (text) => composeAdminAlert({
-    area: 'Estimates', action: text.action, why: text.why, severity: 'needs-you', link: '/admin/communications?tab=triage',
+    area: 'Estimates', action: text.action, why: text.why, severity: 'needs-you', link: Bell.LINK,
     subject: { type: 'call', id: 'call-1' }, doneWhen: Bell.DONE_WHEN, who: 'person',
   });
 

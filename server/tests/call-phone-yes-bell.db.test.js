@@ -19,12 +19,14 @@ jest.mock('../models/db', () => {
   return proxy;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-// The phone banner: notifyAdmin hands each write here; nothing leaves the machine.
-jest.mock('../services/bell-banners', () => ({ bannerAfterWrite: jest.fn() }));
+// The phone banner: notifyAdmin hands every write here; nothing leaves the machine. The real skipReason says which
+// writes rang (a fresh row, or a refresh that rang), so the test counts the banners the real module would send.
+jest.mock('../services/bell-banners', () => ({ ...jest.requireActual('../services/bell-banners'), bannerAfterWrite: jest.fn() }));
 
 const knex = require('knex');
 const { randomUUID } = require('crypto');
-const { bannerAfterWrite } = require('../services/bell-banners');
+const { bannerAfterWrite, __private: { skipReason } } = require('../services/bell-banners');
+const Compose = require('../services/admin-alert-compose');
 const { etDateString, formatETDayDate, parseETDateTime } = require('../utils/datetime-et');
 const { _private: { ringOpenCardsForTest } } = require('../services/call-phone-yes-accept');
 
@@ -104,7 +106,10 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     expect(keyed(dueKey(cardId)).length).toBeLessThanOrEqual(1);
     return { filed: keyed(filedKey(cardId))[0], due: keyed(dueKey(cardId))[0], count: rows.length };
   }
-  const bannerKinds = () => bannerAfterWrite.mock.calls.map(([, { metadata }]) => metadata.triggerKey);
+  // The banners this card's writes would send: kind call_phone_yes, and only a write that rang (the hour aside).
+  const bannersFor = (cardId) => bannerAfterWrite.mock.calls
+    .filter(([result, { metadata }]) => metadata.triageItemId === String(cardId) && metadata.triggerKey === 'call_phone_yes'
+      && skipReason(result, metadata) === null).length;
 
   test("a filed card rings one bell with the card's words and one phone banner; the next pass rings nothing", async () => {
     const card = await phoneYesCard();
@@ -114,7 +119,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     expect(count).toBe(1);
     expect(due).toBeUndefined();
     expect(filed).toEqual(expect.objectContaining({
-      category: 'estimate', title: "Estimates — accept Pat Sampleton's estimate", link: '/admin/communications?tab=triage',
+      category: 'estimate', title: "Estimates — accept Pat Sampleton's estimate", link: '/admin/communications#tab=triage',
       read_at: null, done_at: null,
     }));
     expect(filed.body).toMatch(/^The caller said “Let's do the quarterly plan, just bill me/);
@@ -127,11 +132,11 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
       subject: { type: 'call', id: card.callLogId }, triageItemId: card.id, callLogId: card.callLogId, customerId: card.customerId,
       estimateId: card.estimateIds[0], due: null,
     }));
-    expect(bannerKinds()).toEqual(['call_phone_yes']);
+    expect(bannersFor(card.id)).toBe(1);
 
     await pass();
     expect((await bellsOf(card.id)).count).toBe(1);
-    expect(bannerKinds()).toEqual(['call_phone_yes']);
+    expect(bannersFor(card.id)).toBe(1);
   });
 
   test('time runs short (the visit is tomorrow): the time-short bell rings once and the filed row closes', async () => {
@@ -148,14 +153,18 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     expect(due.metadata).toEqual(expect.objectContaining({ due: 'visit_soon', triageItemId: card.id }));
     expect(filed.done_at).not.toBeNull();
     expect(filed.metadata).toEqual(expect.objectContaining({ autoCleared: true, autoClearedReason: 'phone_yes_time_short' }));
-    expect(bannerKinds()).toEqual(['call_phone_yes', 'call_phone_yes']);
+    expect(bannersFor(card.id)).toBe(2);
 
-    // Rung once: no third row, no third banner, also once the visit moves out again.
+    // Rung once: no third row and no third banner, also once the visit moves out again. The open row then says the
+    // card's own words with the new day, rewritten quietly.
     await pass();
     await trx('scheduled_services').where({ id: card.visitId }).update({ scheduled_date: etDay(6) });
     await pass();
-    expect((await bellsOf(card.id)).count).toBe(2);
-    expect(bannerKinds()).toHaveLength(2);
+    const after = await bellsOf(card.id);
+    expect(after.count).toBe(2);
+    expect(after.due.body.endsWith(`” on a call, and the visit is ${dayWords(6)}.`)).toBe(true);
+    expect(after.due.read_at).toBeNull();
+    expect(bannersFor(card.id)).toBe(2);
   });
 
   test('a card filed when its estimate expires within 24 hours rings the time-short bell alone, and nothing after', async () => {
@@ -201,6 +210,59 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     expect(closed.metadata).toEqual(expect.objectContaining({ autoCleared: true, autoClearedReason: 'phone_yes_card_closed' }));
     expect((await bellsOf(working.id)).filed.done_at).toBeNull();
     // A closed card rings nothing more.
-    expect(bannerKinds()).toEqual(['call_phone_yes', 'call_phone_yes']);
+    expect(bannersFor(resolved.id) + bannersFor(working.id)).toBe(2);
+  });
+
+  test('a yes taken back: the open row is rewritten quietly, with no banner, and keeps its read state', async () => {
+    const card = await phoneYesCard();
+    await pass();
+    const readAt = new Date(Date.now() - 60000);
+    await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [filedKey(card.id)]).update({ read_at: readAt });
+    // The sweep rewrites the card when a later call takes the yes back (cardState in call-phone-yes-accept.js).
+    await trx('triage_items').where({ id: card.id }).update({
+      summary: 'A call booked a pest visit while an estimate is open. No yes heard on the call. The estimate is not accepted yet.',
+      payload: JSON.stringify({ flag: 'call_phone_yes', estimate_ids: card.estimateIds, scheduled_service_id: card.visitId, yes_heard: false }),
+    });
+    await pass();
+
+    const { filed, count } = await bellsOf(card.id);
+    expect(count).toBe(1);
+    expect(filed).toEqual(expect.objectContaining({
+      title: "Estimates — check Pat Sampleton's estimate",
+      body: `A call booked a pest visit for ${dayWords(5)} while an estimate is open; no yes was heard.`, done_at: null,
+    }));
+    expect(new Date(filed.read_at).getTime()).toBe(readAt.getTime());
+    expect(filed.detail).not.toContain(WORDS);
+    expect(bannersFor(card.id)).toBe(1);
+  });
+
+  test('the filed row closes only once the time-short row exists, and every pass retries that close', async () => {
+    const card = await phoneYesCard();
+    await pass();
+    await trx('scheduled_services').where({ id: card.visitId }).update({ scheduled_date: etDay(1) });
+
+    // The time-short raise writes no row (notifyAdmin returns null on a failed write): the filed row stays open.
+    const original = Compose.raiseAdminAlert;
+    const spy = jest.spyOn(Compose, 'raiseAdminAlert').mockImplementation((category, spec, opts) => (
+      opts.dedupeKey === dueKey(card.id) ? Promise.resolve(null) : original(category, spec, opts)));
+    await pass();
+    spy.mockRestore();
+    let bells = await bellsOf(card.id);
+    expect(bells).toEqual(expect.objectContaining({ due: undefined, count: 1 }));
+    expect(bells.filed.done_at).toBeNull();
+
+    // The next pass rings it, and the filed row closes.
+    await pass();
+    bells = await bellsOf(card.id);
+    expect(bells.due.done_at).toBeNull();
+    expect(bells.filed.done_at).not.toBeNull();
+
+    // A close that failed after the time-short row committed is made up by the next pass.
+    await trx('notifications').where({ id: bells.filed.id }).update({ done_at: null, metadata: trx.raw("metadata - 'autoCleared'") });
+    await pass();
+    bells = await bellsOf(card.id);
+    expect(bells.filed.done_at).not.toBeNull();
+    expect(bells.filed.metadata).toEqual(expect.objectContaining({ autoCleared: true, autoClearedReason: 'phone_yes_time_short' }));
+    expect(bannersFor(card.id)).toBe(2);
   });
 });

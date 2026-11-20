@@ -1112,7 +1112,7 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: p.alertTitle || 'Estimates — check a call on an open estimate',
       body: p.alertBody || 'A call booked a visit while the estimate was open.',
-      link: p.alertLink || '/admin/communications?tab=triage',
+      link: p.alertLink || '/admin/communications#tab=triage',
     }),
   },
   bundle_quote_requested: {

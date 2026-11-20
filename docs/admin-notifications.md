@@ -690,11 +690,13 @@ moot close), rings the bell once for each `call_phone_yes` card when it is filed
 short: an open estimate on the card expires within 24 hours, or the card's visit starts within 48 hours. Category `estimate` with
 `bell: true`, headline "Estimates — accept <who>'s estimate" for a card with the caller's yes ("check <who>'s estimate" when no yes
 was heard or the yes is being read again; "check <who>'s booked visit" once an estimate on the card was accepted and the visit is not
-linked), subject the booking call, link `/admin/communications?tab=triage` (the card and its tap), done-when `phone_yes_card_closed`.
+linked), subject the booking call, link `/admin/communications#tab=triage` (the card and its tap), done-when `phone_yes_card_closed`.
 Keys `call-phone-yes:<card id>` (filed) and `call-phone-yes-due:<card id>` (time short), both without `dedupeOpenOnly`: a closed row
-still holds its key, so each key rings at most once and no `RERING` entry is owed. The time-short ring closes the filed row, so a card
-has one open row; a card filed when time is already short rings the time-short bell alone, and nothing rings for a card after its
-time-short bell. The why quotes the caller's first sentence when it passes the why rules, and uses plain words otherwise; `detail`
+still holds its key, so each key rings at most once and no `RERING` entry is owed. Once the time-short row exists, the filed row
+closes (every pass retries that close, and a raise that wrote no row closes nothing), so a card has one open row; a card filed when
+time is already short rings the time-short bell alone, and nothing rings for a card after its time-short bell. Between rings the
+open row is rewritten quietly when the card's words change (a yes taken back, an estimate accepted, the visit moved):
+`refreshOnDedupe` with `ringOnRefresh` false, so no ring, no banner, and the row keeps its read state. The why quotes the caller's first sentence when it passes the why rules, and uses plain words otherwise; `detail`
 holds the card's summary and the caller's whole words, redacted. Each ring sends a phone banner with the New lead sound
 (`bell-banners.js` kind `call_phone_yes`, 7:00 AM to 9:00 PM Eastern; the 8 AM banner counts a ring at night). The same pass closes
 the rows of every card that is no longer open: accepted by the tap, resolved or dismissed by a person, or closed as moot. With the

@@ -10,9 +10,11 @@
  * Contract: docs/admin-notifications.md. Category `estimate` with `bell: true` (as the other estimate bells), area
  * Estimates, severity needs-you, who person, subject the booking call (one card per call), link the Triage tab, where the
  * card and its tap are. Keys `call-phone-yes:<card id>` (filed) and `call-phone-yes-due:<card id>` (time short), without
- * dedupeOpenOnly: a closed row still holds its key, so each key rings at most once. When time runs short the filed row
- * closes, so a card keeps one open row. A card filed when time is already short rings the time-short bell alone, and
- * nothing rings for a card after its time-short bell.
+ * dedupeOpenOnly: a closed row still holds its key, so each key rings at most once. Once the time-short row exists the
+ * filed row closes (every pass retries that close), so a card keeps one open row. A card filed when time is already short
+ * rings the time-short bell alone, and nothing rings for a card after its time-short bell. Between rings the open row is
+ * rewritten quietly when the card's words change (a yes taken back, an estimate accepted, the visit moved): no ring, no
+ * banner, and its read state kept.
  *
  * Done-when `phone_yes_card_closed`: the sweep (call-phone-yes-accept.js, every 10 minutes while the gate is on) closes a
  * card's rows once the card is no longer open: the tap accepted it, a person resolved or dismissed it, or the sweep
@@ -30,7 +32,8 @@ const { parseETDateTime, formatETDayDate } = require('../utils/datetime-et');
 const FILED_PREFIX = 'call-phone-yes:';
 const DUE_PREFIX = 'call-phone-yes-due:';
 const DONE_WHEN = 'phone_yes_card_closed';
-const LINK = '/admin/communications?tab=triage';
+// The Communications page reads its tab from the hash.
+const LINK = '/admin/communications#tab=triage';
 const OPEN_CARD_STATES = ['open', 'in_progress'];
 const HOUR_MS = 3600000;
 const ESTIMATE_DUE_HOURS = 24;
@@ -125,13 +128,22 @@ function textFor({ name, card, expiresAt = null, several = false, visit = null, 
   };
 }
 
-// Rings what a card owes now (keyToRing), or nothing. After the time-short bell rings, the filed row closes.
+// The card's open row to keep current when it rings nothing new: its time-short row while open, else its filed row
+// while open. `written`: each key already written for the card, true while its row is open (not done).
+function standingKey(cardId, written) {
+  return [dueKey(cardId), filedKey(cardId)].find((key) => written.get(key) === true) || null;
+}
+
+// Rings what a card owes now (keyToRing). Otherwise rewrites its open row when the card's words changed (a yes taken
+// back, an estimate accepted, the visit moved), quietly: no ring, no banner, the read state kept. Nothing when the card
+// has no open row. Returns { key, raised } (the key it raised and the raise's result), or null.
 // card: { id, call_log_id, related_customer_id, related_estimate_id, payload, summary }; expiresAt: the soonest an open
 // estimate on the card expires, after now; several: the card names more than one estimate; visit: the card's visit while
-// on the calendar ({ scheduled_date, window_start }) or null.
-async function ringCard({ card, expiresAt = null, several = false, visit = null, rung, now = new Date() }) {
+// on the calendar ({ scheduled_date, window_start }) or null; written: as standingKey.
+async function ringCard({ card, expiresAt = null, several = false, visit = null, written, now = new Date() }) {
   const due = dueReason({ expiresAt, visit, now });
-  const key = keyToRing({ cardId: card.id, due, rung });
+  const ringKey = keyToRing({ cardId: card.id, due, rung: written });
+  const key = ringKey || standingKey(card.id, written);
   if (!key) return null;
   const name = (await Names.lookupCustomerName(db, card.related_customer_id)) || 'a customer';
   const text = textFor({ name, card, expiresAt, several, visit, due });
@@ -146,9 +158,10 @@ async function ringCard({ card, expiresAt = null, several = false, visit = null,
     who: 'person',
   }, {
     bell: true,
-    // The phone banner (bell-banners.js kind call_phone_yes).
+    // The phone banner (bell-banners.js kind call_phone_yes). A quiet rewrite sends none.
     bannerKind: 'call_phone_yes',
     dedupeKey: key,
+    ...(ringKey ? {} : { refreshOnDedupe: true, ringOnRefresh: () => false }),
     detail: text.detail,
     metadata: {
       triageItemId: String(card.id),
@@ -158,39 +171,43 @@ async function ringCard({ card, expiresAt = null, several = false, visit = null,
       due,
     },
   });
-  if (due) {
-    await Episodes.closeAdminAlertKeys(db, [filedKey(card.id)], 'phone_yes_time_short', {
-      now, resolution: 'Replaced by the alert that time runs short on this card',
-    });
-  }
-  return raised;
+  return { key, raised };
 }
 
-// The keys already written for these cards, open or closed (a closed row still holds its key).
-async function rungKeys(cardIds) {
+// Each key already written for these cards (a closed row still holds its key), true while its row is open.
+async function writtenKeys(cardIds) {
   const keys = cardIds.flatMap((id) => [filedKey(id), dueKey(id)]);
-  if (!keys.length) return new Set();
+  const written = new Map();
+  if (!keys.length) return written;
   const rows = await db('notifications').where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' = ANY(?::text[])", [keys])
-    .select(db.raw("metadata->>'dedupeKey' AS dedupe_key"));
-  return new Set(rows.map((row) => row.dedupe_key));
+    .select(db.raw("metadata->>'dedupeKey' AS dedupe_key"), 'done_at');
+  for (const row of rows) written.set(row.dedupe_key, written.get(row.dedupe_key) === true || row.done_at == null);
+  return written;
 }
 
 /**
  * The bell pass, run by the sweep after its filing and its moot close. `timed`: the open cards to ring, each
- * { card, expiresAt, several, visit }; `openCardIds`: every open card, also one whose times could not be read, so its row
- * stays. Rings what each card owes, then closes the rows of cards no longer open. Returns the number of rows closed.
+ * { card, expiresAt, several, visit }; `openCardIds`: every open card, also one whose times could not be read, so its
+ * rows stay. Then two closes, each retried by every pass: a card's filed row once its time-short row exists (one open
+ * row per card), and the rows of cards no longer open. Returns the number of rows the second close closed.
  */
 async function runBellPass({ timed, openCardIds, now = new Date() }) {
-  const rung = await rungKeys(timed.map(({ card }) => card.id));
+  const written = await writtenKeys(openCardIds);
   for (const entry of timed) {
     try {
-      await ringCard({ ...entry, rung, now });
+      const out = await ringCard({ ...entry, written, now });
+      // A row now stands for this key; a raise that failed or was withheld returns no id, and the next run tries again.
+      if (out?.raised?.id) written.set(out.key, true);
     } catch (e) {
       // Nothing rang for this key, so the next run tries again.
       logger.warn(`[call-phone-yes] bell skipped for card ${entry.card.id}: ${e.code || e.name || 'error'}`);
     }
   }
+  const replaced = openCardIds.filter((id) => written.has(dueKey(id)) && written.get(filedKey(id)) === true);
+  await Episodes.closeAdminAlertKeys(db, replaced.map(filedKey), 'phone_yes_time_short', {
+    now, resolution: 'Replaced by the alert that time runs short on this card',
+  });
   const open = new Set(openCardIds.map(String));
   const standing = [...await Episodes.openAdminAlertKeys(db, FILED_PREFIX), ...await Episodes.openAdminAlertKeys(db, DUE_PREFIX)];
   return Episodes.closeAdminAlertKeys(db, standing.filter((key) => !open.has(cardIdOfKey(key))), DONE_WHEN, {
@@ -199,6 +216,6 @@ async function runBellPass({ timed, openCardIds, now = new Date() }) {
 }
 
 module.exports = {
-  runBellPass, ringCard, OPEN_CARD_STATES, FILED_PREFIX, DUE_PREFIX, DONE_WHEN,
-  _private: { dueReason, keyToRing, textFor, visitStart, cardStateOf },
+  runBellPass, OPEN_CARD_STATES, FILED_PREFIX, DUE_PREFIX, DONE_WHEN, LINK,
+  _private: { dueReason, keyToRing, standingKey, textFor, visitStart, cardStateOf },
 };
