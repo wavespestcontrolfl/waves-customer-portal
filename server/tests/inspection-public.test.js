@@ -2083,6 +2083,80 @@ describe('POST /:token commit', () => {
       expect(mockCreateSelfBooking.mock.calls[1][0].callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, Nokomis, FL, 34209', city: 'Nokomis' });
     });
 
+    // Pre-push P1 on 903ecc5ff0: the retry sends the typed address again and checks it at its own location first (the
+    // anti-forgery build), then at the matched profile's other stored location (the re-check). A refused booking's fresh
+    // times keep only the starts open at both, so a refreshed time passes the retry's two checks.
+    describe('a typed address and a profile at another stored location', () => {
+      const typed = '123 Palm Ave, Bradenton, FL 34209';
+      const nextDay = etDateString(addETDays(new Date(), 4));
+      const open = (date, t) => ({ date, start_time: t, end_time: `${t.slice(0, 2)}:30`, start_label: t, end_label: t, technician_id: 'tech-1', nearby: t === '10:00' });
+      const at = (byDate) => {
+        const days = Object.entries(byDate).map(([date, starts]) => ({ date, nearby: starts.includes('10:00'), slots: starts.map((t) => open(date, t)) }));
+        return { days, slots: days.flatMap((d) => d.slots), nearby: days.some((d) => d.nearby) };
+      };
+      // The typed location (the default mockGeocode pin) has 09:00 and 11:00 open, and nothing the next day; the
+      // profile's has 09:00, a nearby 10:00 and 11:00, and 09:00 the next day.
+      const AT_PROFILE = { [FUTURE_DATE]: ['09:00', '10:00', '11:00'], [nextDay]: ['09:00'] };
+      const AT_TYPED = { [FUTURE_DATE]: ['09:00', '11:00'] };
+      const seedRefusedBooking = () => {
+        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+        firstResults.call_log = { from_phone: '+19415550101' };
+        firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+        seedPhoneHousehold({
+          id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
+          address_line1: '123 Palm Ave', city: 'West Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
+          latitude: 27.1, longitude: -82.2, // another stored location: the booking moves there
+        });
+        listResults.scheduled_services = [];
+        firstResults.scheduled_services = { id: 'ss-refresh', reschedule_token: 'tok-refresh' };
+        mockCreateSelfBooking.mockImplementationOnce(async () => ({ ok: false, status: 409, error: 'That time is no longer open.' }));
+      };
+
+      test('a 409 offers only starts open at both, and the retry books one', async () => {
+        seedRefusedBooking();
+        mockBuildAvailability.mockImplementation(async (args) => at(args.lat === 27.1 ? AT_PROFILE : AT_TYPED));
+        const token = mintLeadConsultationToken(LEAD_ID);
+
+        const first = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: typed });
+
+        expect(first.statusCode).toBe(409);
+        expect(first.body.code).toBe('SLOT_TAKEN');
+        // The day list, the best picks and the nearby flags keep only those starts; a day left with none drops out.
+        expect(first.body.availability.days).toEqual([expect.objectContaining({ date: FUTURE_DATE, nearby: false })]);
+        expect(first.body.availability.days[0].slots.map((s) => s.start_time)).toEqual(['09:00', '11:00']);
+        expect(first.body.availability.slots.map((s) => `${s.date} ${s.start_time}`)).toEqual([`${FUTURE_DATE} 09:00`, `${FUTURE_DATE} 11:00`]);
+        expect(first.body.availability.nearby).toBe(false);
+        // After the anti-forgery build and the re-check, the refresh builds at the profile's location with its address
+        // (the zone address the booking checks) and at the typed location with the typed address.
+        expect(mockBuildAvailability.mock.calls.map(([a]) => [a.lat, a.zoneFunnelCity])).toEqual([
+          [27.4, 'Bradenton'], [27.1, 'West Bradenton'], [27.1, 'West Bradenton'], [27.4, 'Bradenton'],
+        ]);
+
+        // The retry: phase 1 linked the lead to that profile, and the page sends the typed address again.
+        firstResults.leads = { ...firstResults.leads, customer_id: 'cust-9' };
+        const second = await callPost(token, { date: FUTURE_DATE, time: '11:00', address: typed });
+
+        expect(second.statusCode).toBe(200);
+        expect(mockCreateSelfBooking.mock.calls[1][0]).toMatchObject({ technician_id: 'tech-1', slot_start: '11:00' });
+      });
+
+      test('a failed build at the typed location answers the 409 with no times, never the unfiltered list', async () => {
+        seedRefusedBooking();
+        let typedBuilds = 0;
+        mockBuildAvailability.mockImplementation(async (args) => {
+          if (args.lat === 27.1) return at(AT_PROFILE);
+          typedBuilds += 1;
+          if (typedBuilds > 1) throw new Error('weather outlook unavailable');
+          return at(AT_TYPED);
+        });
+
+        const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: typed });
+
+        expect(res.statusCode).toBe(409);
+        expect(res.body).toMatchObject({ code: 'SLOT_TAKEN', availability: null });
+      });
+    });
+
     // Codex #4737 r9 pre-push P1: the matched profile is re-read under its
     // comms fence; an address edited in between is a retry, never given the
     // old address's coordinates.
@@ -3125,10 +3199,14 @@ describe('POST /:token commit', () => {
         expect(insertCalls.some((c) => c.table === 'customers')).toBe(false);
         // buildAvailabilityForLead: [0] the pre-lock day check at the lead's
         // OWN resolved location, [1] phase 1's re-validation at the MATCHED
-        // row's own (far-away) location — not the pre-lock one — and [2]
-        // the SLOT_TAKEN handler's refreshed-availability call.
-        expect(mockBuildAvailability).toHaveBeenCalledTimes(3);
+        // row's own (far-away) location — not the pre-lock one — and the
+        // SLOT_TAKEN refresh: [2] at the matched location, [3] at the typed
+        // one, whose starts the page's retry checks first (pre-push P1 on
+        // 903ecc5ff0).
+        expect(mockBuildAvailability).toHaveBeenCalledTimes(4);
         expect(mockBuildAvailability.mock.calls[1][0]).toEqual(expect.objectContaining({ lat: 27.1, lng: -82.2 }));
+        expect(mockBuildAvailability.mock.calls[2][0]).toEqual(expect.objectContaining({ lat: 27.1, lng: -82.2 }));
+        expect(mockBuildAvailability.mock.calls[3][0]).toEqual(expect.objectContaining({ lat: 27.4, lng: -82.5 }));
       });
     });
 

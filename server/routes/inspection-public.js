@@ -623,16 +623,40 @@ function storedAddressCandidates(lead, custRow) {
   return candidates;
 }
 
-// The zone address of the page's NEXT commit, which a refused booking's fresh
-// times are built from, so a refreshed time is one that commit's own list and
-// check read (pre-push P1 on e88162fc27). A typed address is sent again (the
-// page re-sends the address its gate resolved), so it keeps this commit's
-// `zoneSource`. With none typed, the next commit's resolver
-// (resolveServiceAddress) reads the profile phase 1 linked: its stored
-// address, else the lead's own (storedAddressCandidates' order).
-function nextCommitZoneAddress({ resolved, lead, custRow, zoneSource }) {
-  if (resolved.source === 'supplied') return zoneSource;
-  return storedAddressCandidates(lead, custRow)[0]?.address || zoneSource;
+// The fresh times a refused booking offers are times the page's NEXT commit
+// admits, so a refreshed time passes that commit's own checks (pre-push P1s on
+// e88162fc27 and 903ecc5ff0): built at the booking location with `address`,
+// and with `alsoAt` only the starts also open there. A typed address is sent
+// again (the page re-sends the address its gate resolved), and the next commit
+// checks it at its own location first (its anti-forgery build). When this
+// commit moved to a matched profile's other stored location, the next commit
+// books either there (re-checked with this commit's zone address,
+// revalidateSlotAt) or at the typed location, so only the starts open at both
+// are offered. With none typed, the next commit's resolver
+// (resolveServiceAddress) reads the profile phase 1 linked, at its stored
+// location: its stored address, else the lead's own.
+function nextCommitRefresh({ resolved, lead, custRow, zoneSource, locationMoved }) {
+  if (resolved.source !== 'supplied') {
+    return { address: storedAddressCandidates(lead, custRow)[0]?.address || zoneSource, alsoAt: null };
+  }
+  return { address: zoneSource, alsoAt: locationMoved ? { location: resolved.location, address: resolved.address } : null };
+}
+
+// `availability` with only the starts `other` offers too (date and start
+// time): its days (a day left with none drops out), its best picks and its
+// nearby flags.
+function keepStartsOpenAt(availability, other) {
+  const open = new Set(other.days.flatMap((d) => d.slots.map((s) => `${d.date} ${s.start_time}`)));
+  const days = availability.days
+    .map((d) => ({ ...d, slots: d.slots.filter((s) => open.has(`${d.date} ${s.start_time}`)) }))
+    .filter((d) => d.slots.length)
+    .map((d) => ({ ...d, nearby: d.slots.some((s) => s.nearby) }));
+  return {
+    ...availability,
+    slots: availability.slots.filter((s) => open.has(`${s.date} ${s.start_time}`)),
+    days,
+    nearby: days.some((d) => d.nearby),
+  };
 }
 
 // Everything the page's own booking address resolves from when no address
@@ -2221,10 +2245,15 @@ function sendLocationFailure(res, failure, county, leadId) {
 // (round-10 P2) let a LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY caller
 // hand back the customer's CURRENT address alongside the refreshed times —
 // every other caller omits them and the body is byte-identical to before.
-async function sendSlotTaken(res, { location, address = null, range, config, catalog, leadId, error, leadPayload = null, addressChanged = false }) {
+// `alsoAt` ({ location, address }, nextCommitRefresh): only the starts open
+// there too.
+async function sendSlotTaken(res, { location, address = null, alsoAt = null, range, config, catalog, leadId, error, leadPayload = null, addressChanged = false }) {
   let refreshed = null;
   try {
-    refreshed = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes, address });
+    const build = (at, zoneAddress) => buildAvailabilityForLead(at, { ...range, config, duration: catalog.durationMinutes, address: zoneAddress });
+    const here = await build(location, address);
+    // Set only once both builds succeed: a failed second build answers with no times, never the unfiltered ones.
+    refreshed = alsoAt ? keepStartsOpenAt(here, await build(alsoAt.location, alsoAt.address)) : here;
   } catch (err) {
     logger.warn(`[inspection-public] refresh availability failed for lead ${leadId}: ${err.message}`);
   }
@@ -2523,7 +2552,7 @@ async function trustedLeadProfileIds(dbConn, leadId, token, custId, { includeMer
 // A failed createSelfBooking mapped to the page's responses: ALREADY_BOOKED
 // resolves to GET's already_booked shape; a 409 is SLOT_TAKEN with fresh
 // times; anything else passes through.
-async function sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, bookingAddress, range, config, catalog, verified }) {
+async function sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, bookingAddress, alsoAt = null, range, config, catalog, verified }) {
   // A validated, in-area address the lead supplied through their own
   // link stays on the customer even when this attempt fails (owner
   // ruling 2026-09-24): undoing it raced concurrent bookings that had
@@ -2583,10 +2612,10 @@ async function sendBookingFailure(res, result, { lead, custRow, leadPayload, boo
   if (result.code === 'ADDRESS_UNVERIFIED') {
     return res.status(409).json({ error: result.error, code: 'ADDRESS_UNVERIFIED' });
   }
-  // Fresh times at the booking's own location and address (`bookingAddress`, the one its zone was checked with), so the
-  // list offers what this commit would allow (owner rule B per truck).
+  // Fresh times at the booking's own location, with the address and the second location the page's next commit checks
+  // (nextCommitRefresh), so the list offers what that commit admits (owner rule B per truck).
   if (result.status === 409) {
-    return sendSlotTaken(res, { location: bookingLocation, address: bookingAddress, range, config, catalog, leadId: lead.id, error: result.error });
+    return sendSlotTaken(res, { location: bookingLocation, address: bookingAddress, alsoAt, range, config, catalog, leadId: lead.id, error: result.error });
   }
   return res.status(result.status || 500).json({ error: result.error });
 }
@@ -2737,11 +2766,11 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       })
       : { fromCustomer: false };
     const zoneSource = fromCustomer ? customerAddressFields(custRow) : bookingAddress;
-    const refreshAddress = nextCommitZoneAddress({ resolved, lead, custRow, zoneSource });
+    const refresh = nextCommitRefresh({ resolved, lead, custRow, zoneSource, locationMoved });
     const bookingSlot = await revalidateSlotAt(bookingLocation, {
       slot, moved: locationMoved, zoneMoved: fromCustomer, date, time, config, catalog, leadId: lead.id, address: zoneSource,
     });
-    if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: refreshAddress, range, config, catalog, leadId: lead.id });
+    if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: refresh.address, alsoAt: refresh.alsoAt, range, config, catalog, leadId: lead.id });
 
     // Phase 2 — createSelfBooking's OWN atomic per-customer lane dedupe
     // (dedupeLane, left at its true default — no transaction of ours wraps
@@ -2780,7 +2809,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, slotGuard, zoneAddress, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), fenceIds: async (conn) => { fencedUniverse = await leadFenceIds(conn, lead.id, verified, custRow.id); return fencedUniverse; }, revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id, fencedUniverse) } });
 
     if (!result.ok) {
-      return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, bookingAddress: refreshAddress, range, config, catalog, verified });
+      return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, bookingAddress: refresh.address, alsoAt: refresh.alsoAt, range, config, catalog, verified });
     }
 
     return res.json(await finishCommittedBooking({ result, notes, date, bookingSlot }));
