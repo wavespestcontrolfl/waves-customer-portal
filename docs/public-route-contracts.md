@@ -2814,7 +2814,9 @@ finished volume (at a reduced volume the product oz cannot tell the job, so
 the pin keeps its surcharge but the line stays unmarked). When a replayed
 pre-slab or trench line lacks that mark (no stored row, a pin the engine
 skipped, or a match it cannot prove) and the replayed one-time total no longer
-matches the issued `onetime_total`, the pricing bundle carries `{
+matches the issued `onetime_total` to the cent (an issued $0.00 is a total like
+any other; a missing, NULL or blank total cannot show the price held), the
+pricing bundle carries `{
 quoteRequired: true, quoteRequiredReason: 'termiticide_price_changed_requote'
 }` with the friendly "Our termite treatment pricing has been updated since this
 quote was sent — call Waves and we’ll refresh your quote with current

@@ -328,11 +328,17 @@ function mistingKnobSignalForReplay(estData = {}) {
 // cost it priced with (the raw line's containerCost; the mapped item's fullContainerProductCost / containersRequired, cent-exact),
 // and they replay for that product. No stored row, or none with a finite cost basis: null (the live config prices it, like a
 // fresh quote).
+// A stored figure counts only when the row holds one: Number(null), Number('') and Number(false) are all 0, and a blank trench
+// surcharge read as a confirmed $0 would keep today's surcharge off a replayed line (pre-push audit 17).
+function storedFigure(value) {
+  if (typeof value === 'number') return value;
+  return typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
+}
 function preSlabRowContainerCost(row) {
-  const direct = Number(row.containerCost);
+  const direct = storedFigure(row.containerCost);
   if (Number.isFinite(direct) && direct > 0) return direct;
-  const full = Number(row.fullContainerProductCost);
-  const containers = Number(row.containersRequired);
+  const full = storedFigure(row.fullContainerProductCost);
+  const containers = storedFigure(row.containersRequired);
   return Number.isFinite(full) && full > 0 && Number.isInteger(containers) && containers > 0
     ? Math.round((full / containers) * 100) / 100
     : NaN;
@@ -341,7 +347,7 @@ function preSlabTermiticideKnobSignalForReplay(estData = {}) {
   const { storedPreSlabTermiticideRows } = require('./estimate-result-container');
   for (const row of storedPreSlabTermiticideRows(estData)) {
     const productKey = String(row.productKey || '').trim().toLowerCase();
-    const containerOz = Number(row.containerOz);
+    const containerOz = storedFigure(row.containerOz);
     const containerCost = preSlabRowContainerCost(row);
     if (productKey && Number.isFinite(containerOz) && containerOz > 0 && Number.isFinite(containerCost) && containerCost > 0) {
       return { productKey, containerCost, containerOz };
@@ -361,8 +367,8 @@ function trenchingKnobSignalForReplay(estData = {}) {
   for (const row of storedTrenchingRows(estData)) {
     const productKey = String(row.productKey || '').trim().toLowerCase();
     const applicationRate = String(row.applicationRate || '').trim().toLowerCase();
-    const productOz = Number(row.productOz);
-    const productSurcharge = Number(row.productSurcharge);
+    const productOz = storedFigure(row.productOz);
+    const productSurcharge = storedFigure(row.productSurcharge);
     if (productKey && applicationRate && Number.isFinite(productOz) && productOz > 0
       && Number.isInteger(productSurcharge) && productSurcharge >= 0) {
       return { productKey, applicationRate, productOz, productSurcharge };

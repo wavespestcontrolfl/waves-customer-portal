@@ -1265,6 +1265,30 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
     expect(replay.trenchingKnobSignalForReplay(other)).toBeNull();
   });
 
+  // A blank stored figure is no pin: Number(null) and Number('') are 0, so a row missing its surcharge must never replay as a
+  // confirmed $0 that keeps today's surcharge off the line (pre-push audit 17). A zero the row holds is a real pin.
+  test('a blank stored surcharge or product oz is no pin, in the reader and in the engine', () => {
+    const line = trenchLine(sentQuote());
+    const signal = (extra) => replay.trenchingKnobSignalForReplay({ engineResult: { lineItems: [{ ...line, ...extra }] } });
+    expect(signal({})).toEqual(PIN);
+    expect(signal({ productSurcharge: '15', productOz: '84' })).toEqual(PIN);
+    for (const blank of [null, '', ' ', undefined, false]) {
+      expect(signal({ productSurcharge: blank })).toBeNull();
+      expect(signal({ productOz: blank })).toBeNull();
+    }
+    expect(signal({ productSurcharge: 0 })).toEqual({ ...PIN, productSurcharge: 0 });
+    // Under the bottle that carries a $15 surcharge: a blank pin prices today's $15; a zero pin keeps the $0 it was sent with.
+    Object.assign(products.talstar_p, { label: 'Talak 7.9 F - Bifenthrin', containerCost: 41.57, containerOz: 96 });
+    try {
+      for (const blank of [null, '']) {
+        expect(priced({}, { ...PIN, productSurcharge: blank })).toMatchObject({ price: 4943, productSurcharge: 15 });
+      }
+      expect(priced({}, { ...PIN, productSurcharge: 0 })).toMatchObject({ price: 4928, productSurcharge: 0 });
+    } finally {
+      Object.assign(products.talstar_p, saved.talstar);
+    }
+  });
+
   test('the signal reads the raw engine line and the mapped one-time item', () => {
     const engineResult = sentQuote();
     expect(replay.trenchingKnobSignalForReplay({ engineInputs: input(), engineResult })).toEqual(PIN);

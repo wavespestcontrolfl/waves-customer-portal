@@ -7090,9 +7090,10 @@ function labelCheckCounts(options, productKey, product) {
 // pinned surcharge (the same job keeps its sent price) but stays unmarked, and a moved total goes to review (pre-push audit 16).
 function trenchReplayPinApplies(replay, priced) {
   if (!replay || typeof replay !== 'object') return false;
-  const pinned = Number(replay.productSurcharge);
+  // The replay reader emits numbers only; a null or blank figure is no pin, never a $0 one (pre-push audit 17).
+  const pinned = replay.productSurcharge;
   const samePricing = replay.productKey === priced.productKey && replay.applicationRate === priced.applicationRate
-    && [priced.productOz, priced.labeledProductOz].includes(Number(replay.productOz));
+    && typeof replay.productOz === 'number' && [priced.productOz, priced.labeledProductOz].includes(replay.productOz);
   return samePricing && Number.isInteger(pinned) && pinned >= 0;
 }
 

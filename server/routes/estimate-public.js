@@ -134,7 +134,7 @@ const {
   WAVES_PRODUCTS_SAFETY_URL,
 } = require('../constants/business');
 const {
-  moneyMatches,
+  moneyCents,
   pricingBundleMatchesEstimateTotals,
   resolveStoredPestPricingVersion,
 } = require('../services/estimate-pricing-bundle-utils');
@@ -20582,13 +20582,20 @@ function extractEngineInputs(estData) {
 // estimate keeps no stored row, the engine skips a pin for another product, rate or product oz (a changed dilution or footage, for
 // one), and a cost set on the service or a reduced trench volume leaves the match unproven. When the replayed one-time total also
 // no longer matches the issued one, the quote goes to review instead of selling a moved price. A never-issued draft is not sold
-// yet, so it is never held (pre-push audits 13 to 16).
+// yet, so it is never held (pre-push audits 13 to 16). The totals must agree to the cent: an issued $0.00 is a total like any
+// other, and a missing, NULL or blank total cannot show the price held, so it goes to review too (pre-push audit 17).
 const TERMITICIDE_PIN_SERVICES = new Set(['pre_slab_termiticide', 'trenching']);
+function issuedOneTimeCents(estimate) {
+  const value = estimate?.onetime_total;
+  if (typeof value === 'number') return moneyCents(value);
+  return typeof value === 'string' && value.trim() !== '' ? moneyCents(value.trim()) : null;
+}
 function termiticideRequoteNeeded(estData, estimate, engineResult, replayedOneTimeTotal) {
-  const issued = Number(estimate?.onetime_total);
-  if (estData?.[UNISSUED_ESTIMATE] === true || !(issued > 0) || moneyMatches(replayedOneTimeTotal, issued)) return false;
+  if (estData?.[UNISSUED_ESTIMATE] === true) return false;
   const lines = Array.isArray(engineResult?.lineItems) ? engineResult.lineItems : [];
-  return lines.some((line) => TERMITICIDE_PIN_SERVICES.has(line?.service) && line.replayPinApplied !== true);
+  if (!lines.some((line) => TERMITICIDE_PIN_SERVICES.has(line?.service) && line.replayPinApplied !== true)) return false;
+  const issued = issuedOneTimeCents(estimate);
+  return issued == null || moneyCents(replayedOneTimeTotal) !== issued;
 }
 
 // Input-level floor overrides for an engine replay of this stored estimate.

@@ -3024,11 +3024,18 @@ describe('public estimate one-time breakdown', () => {
     expect(moved).toMatchObject({ quoteRequired: true, quoteRequiredReason: 'termiticide_price_changed_requote' });
     expect(resolveEstimateQuoteRequirement(moved, issuedEarlier.estimate_data))
       .toMatchObject({ quoteRequired: true, reason: 'termiticide_price_changed_requote' });
-    for (const extra of [{ onetime_total: 743, status: 'sent' }, { onetime_total: 993, status: 'draft' }]) {
+    for (const extra of [{ onetime_total: 743, status: 'sent' }, { onetime_total: '743.00', status: 'sent' }, { onetime_total: 993, status: 'draft' }]) {
       const quote = slabQuote(extra);
       const live = await buildPricingBundle(quote);
       expect(live.oneTimeBreakdown.total).toBe(743);
       expect(resolveEstimateQuoteRequirement(live, quote.estimate_data).quoteRequired).toBe(false);
+    }
+    // The totals must agree to the cent. An issued $0.00 is a total like any other, and a missing, NULL or blank one cannot show the
+    // price held, so each goes to review (pre-push audit 17).
+    for (const onetimeTotal of [743.01, '742.99', 0, '0.00', null, '', undefined]) {
+      const held = await buildPricingBundle(slabQuote({ onetime_total: onetimeTotal, status: 'sent' }));
+      expect(held.oneTimeBreakdown.total).toBe(743);
+      expect(held.quoteRequiredReason).toBe('termiticide_price_changed_requote');
     }
     // A stored row pins the slab (an agent draft's engineResult): it replays its sent $993, and a total that moved elsewhere is
     // never a termiticide hold.

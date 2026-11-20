@@ -11,7 +11,7 @@ const { syncPricesToEstimator } = require('../services/price-sync');
 // Minimal thenable Knex chain stub (mirrors server/tests/payment-lifecycle-email.test.js).
 function chain({ result = [] } = {}) {
   const q = {};
-  ['where', 'whereNotNull', 'select', 'orderBy'].forEach((m) => {
+  ['where', 'whereNotNull', 'whereRaw', 'select', 'orderBy'].forEach((m) => {
     q[m] = jest.fn(() => q);
   });
   q.update = jest.fn(() => q);
@@ -190,6 +190,12 @@ describe('syncPricesToEstimator', () => {
     ]);
     expect(tankRead.update).not.toHaveBeenCalled();
     expect(tankWrite.update).toHaveBeenCalledTimes(1);
+    // The flag lands only on the recipe the sync read: an edit made in between leaves the row unmatched (audit 17).
+    expect(tankWrite.where).toHaveBeenCalledWith({ id: 'M1' });
+    expect(tankWrite.whereRaw).toHaveBeenCalledWith('products = ?::jsonb', [JSON.stringify([
+      { product_id: 'P1', oz_per_tank: 2, cost_in_tank: 0 },
+      { product_id: 'P4', oz_per_tank: 2, cost_in_tank: 0.91 },
+    ])]);
     const written = tankWrite.update.mock.calls[0][0];
     expect(written).not.toHaveProperty('cost_per_tank');
     expect(JSON.parse(written.products)).toEqual([
