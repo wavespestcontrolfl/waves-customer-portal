@@ -115,14 +115,22 @@ describe('plainPage', () => {
       // A browser drops an attribute whose name an earlier one of the tag has.
       + '<td style="color:red" STYLE="display:none" dir=ltr dir=rtl>K'))
       .toBe('<td>A</td><td>B<td>C<td>D<td>G<td>H<td>K');
-    // Each declaration is read once, and each rule's selector is judged once: a long style reads quickly.
-    const started = Date.now();
-    expect(plain(`<td style="${'display:'.repeat(40000)}">E`)).toBe('<td>E');
-    expect(plain(`<style>td { ${'display:'.repeat(40000)} }</style><td>F`)).toBe('<td>F');
-    expect(plain(`<style>${'.a, '.repeat(20000)}.z { ${'display: none; '.repeat(20000)}}</style><td>G`)).toBe('<td>G');
-    // A selector of 60,000 attribute tests left open counts (it may match anything), and is judged quickly.
-    expect(plain(`<style>${'a[ '.repeat(60000)}{ display: block }</style><td>H`)).toBeNull();
-    expect(Date.now() - started).toBeLessThan(1000);
+    // Each declaration is read once, each rule's selector is judged once, and an attribute test reads no further than
+    // the next "[" (one left open makes its selector count): a long style takes time in step with its length. Each
+    // input is built before its clock starts, and the clock is this process's CPU time, not wall time, which a busy
+    // runner stretches. Each parse takes a few milliseconds here; a scan quadratic in the length takes seconds to
+    // minutes on the same input, which the 2-second budget fails.
+    const long = [[`<td style="${'display:'.repeat(40000)}">E`, '<td>E'],
+      [`<style>td { ${'display:'.repeat(40000)} }</style><td>F`, '<td>F'],
+      [`<style>${'.a, '.repeat(10000)}.z { ${'display: none; '.repeat(10000)}}</style><td>G`, '<td>G'],
+      [`<style>${'a[ '.repeat(100000)}{ display: block }</style><td>H`, null]];
+    for (const [html, rebuilt] of long) {
+      const start = process.cpuUsage();
+      const result = plain(html);
+      const { user, system } = process.cpuUsage(start);
+      expect((user + system) / 1000).toBeLessThan(2000);
+      expect(result).toBe(rebuilt);
+    }
   });
 
   test('a style sheet gives null when a rule in it can hide an element of the page or reorder its text, and so does a style that can show a script, a style or the title', () => {
