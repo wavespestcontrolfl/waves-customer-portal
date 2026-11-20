@@ -112,11 +112,13 @@ function sanitizeBuiltNotification(built = {}, trigger = {}) {
   const cleanTitle = (value) => stripEmoji(String(value || 'Notification')) || String(value || 'Notification');
   const cleanBody = (value) => (value === null || value === undefined ? value : stripEmoji(value));
   if (trigger.allowContactDetails) {
-    return { ...built, title: cleanTitle(built.title), body: cleanBody(built.body) };
+    return { ...built, title: cleanTitle(built.title), body: cleanBody(built.body),
+      ...(built.pushTitle ? { pushTitle: cleanTitle(built.pushTitle) } : {}) };
   }
   return {
     ...built,
     title: cleanTitle(redactSensitiveText(built.title || 'Notification')),
+    ...(built.pushTitle ? { pushTitle: cleanTitle(redactSensitiveText(built.pushTitle)) } : {}),
     body: built.body === null || built.body === undefined ? built.body : cleanBody(redactSensitiveText(built.body)),
     ...(built.detail ? { detail: cleanBody(redactSensitiveText(built.detail)) } : {}),
   };
@@ -679,6 +681,10 @@ const TRIGGER_REGISTRY = {
     allowContactDetails: true,
     build: (p) => ({
       title: `Missed call — ${p.name || 'a customer'}`,
+      // A quiet call's bell row is titled likely robocall; its push goes only
+      // when no bell row was written, and keeps the ordinary caller title
+      // (missed-call-bell.js pushName; pre-push audit r23).
+      ...(p.pushName ? { pushTitle: `Missed call — ${p.pushName}` } : {}),
       // GATE_MISSED_CALL_ALERT_DETAIL: the producer adds line / duration /
       // next visit to the payload only with the gate on; without them this is
       // the original sentence, character for character.
@@ -1824,7 +1830,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             // A technician recipient gets its own copy when the trigger names techOmit keys.
             const shown = techCopy && !adminRoleIds.has(adminUserId) ? techCopy : built;
             return {
-              title: shown.title,
+              // pushTitle: a push-only title (customer_missed_call); the bell row keeps title.
+              title: shown.pushTitle || shown.title,
               body: shown.body,
               url: built.link || '/admin',
               // promise_chaser: the push tag IS the bell's own dedupeKey

@@ -551,9 +551,15 @@ function whereCallOfNumber(qb, table, key) {
 //    claim whose text went out (2); the 45 other unknown GBP callers of the 90
 //    days have rows in the same three tables and in no other.
 // A phone column is a text column whose name says phone, mobile or msisdn, or
-// is a plain number, caller, recipient or sender column. A hashed one holds
-// the SHA-256 of the E.164 number (compliance-contact-checks.js phoneHash); a
-// last-4 or *_sid column cannot name the number. Owner 2026-11-19 (*A*): what
+// is a plain number, caller, recipient or sender column. It matches by its
+// last 10 digits (FOOTPRINT_PHONE_SQL), the form the largest tables index
+// (migrations 20260927000006 and 20261120020000): the absence case reads every
+// table, and those grow with customers (pre-push audit r23). Every value whose
+// phone key is the number's ends in its 10 digits, so this finds all of them;
+// it can also find the same 10 digits under another country code, which only
+// lets a push go. A hashed one holds the SHA-256 of the E.164 number
+// (compliance-contact-checks.js phoneHash); a last-4 or *_sid column cannot
+// name the number. Owner 2026-11-19 (*A*): what
 // no catalog read can find (a phone inside a JSON field, a column named
 // otherwise, a row tied to a call by its id) is the risk the rule keeps.
 const FOOTPRINT_SHAPED_TABLES = ['call_log', 'sms_log', 'messages', 'conversations'];
@@ -577,6 +583,9 @@ const FOOTPRINT_ALLOWED_SQL = {
   blocked_call_attempts: "NOT (fp.channel = 'voice' AND fp.block_type = 'marchex_shadow')",
 };
 const quoteIdent = (name) => `"${String(name).replace(/"/g, '""')}"`;
+// The last 10 digits of a phone column, character for character as the
+// migrations' last-10 indexes build them, or the planner cannot use them.
+const FOOTPRINT_PHONE_SQL = (column) => `right(regexp_replace(${column}, '\\D', '', 'g'), 10)`;
 // The footprint tables and their phone columns, from pg_catalog (a domain
 // counts as its base type, as information_schema reports it). A partitioned
 // table is read once, through its parent.
@@ -602,13 +611,14 @@ async function footprintTables() {
 // No row with the number in any footprint table: one NOT EXISTS per table.
 function whereNoFootprint(qb, footprint, key) {
   const hash = crypto.createHash('sha256').update(`+${key}`, 'utf8').digest('hex');
+  const last10 = key.slice(-10);
   for (const { table_schema: schema, table_name: table, columns } of footprint) {
     const allowed = Object.prototype.hasOwnProperty.call(FOOTPRINT_ALLOWED_SQL, table) ? FOOTPRINT_ALLOWED_SQL[table] : 'true';
     qb.whereNotExists(function footprintRow() {
       this.select(1).from(db.raw('??.?? AS fp', [schema, table]))
         .where((number) => columns.forEach((column) => (/hash/i.test(column)
           ? number.orWhereRaw(`fp.${quoteIdent(column)} = ?`, [hash])
-          : number.orWhereRaw(`${phoneKeySql(`fp.${quoteIdent(column)}`)} = ?`, [key]))))
+          : number.orWhereRaw(`${FOOTPRINT_PHONE_SQL(`fp.${quoteIdent(column)}`)} = ?`, [last10]))))
         .whereRaw(allowed);
     });
   }
@@ -1220,6 +1230,9 @@ async function ringMissedCallIfUnanswered(callSid) {
         name: row.customer_id
           ? ([customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || 'Customer')
           : `${quiet ? 'likely robocall' : 'unknown caller'}${lineLabel ? ` (${lineLabel})` : ''}`,
+        // A quiet call pushes only when no bell row was written (pushGuard), and
+        // that lone alert keeps the ordinary caller title (pre-push audit r23).
+        ...(quiet && !row.customer_id ? { pushName: `unknown caller${lineLabel ? ` (${lineLabel})` : ''}` } : {}),
         phone: row.from_phone,
         callLogId: row.id,
         at: row.created_at,

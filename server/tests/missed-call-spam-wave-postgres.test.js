@@ -44,7 +44,7 @@ jest.setTimeout(30000);
   let database;
   const schema = `missed_call_wave_${randomUUID().replaceAll('-', '')}`;
   const tables = ['call_log', 'scheduled_services', 'invoices', 'customers', 'leads', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'sms_log', 'technicians', 'conversations', 'messages', 'inbound_sms_optout_receipts',
-    'messaging_suppression', 'missed_call_text_claims', 'phone_line_types'];
+    'messaging_suppression', 'missed_call_text_claims', 'phone_line_types', 'customer_accounts', 'property_preferences', 'estimates'];
 
   beforeAll(async () => {
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 3 } });
@@ -631,6 +631,8 @@ jest.setTimeout(30000);
       expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
       const [, payload, opts] = triggerNotification.mock.calls[0];
       expect(payload.name).toBe('likely robocall (GBP — Parrish)');
+      // A push sent with no bell row keeps the ordinary title (pre-push audit r23).
+      expect(payload.pushName).toBe('unknown caller (GBP — Parrish)');
       // The bell row carries its own decision, which the re-push reads (pre-push audit r17).
       expect(payload.pushQuieted).toBe(true);
       expect(await opts.beforePush({ dispatching: true })).toBe(false);
@@ -781,11 +783,87 @@ jest.setTimeout(30000);
       await ringMissedCallIfUnanswered(row.twilio_call_sid);
       const [, payload, opts] = triggerNotification.mock.calls[0];
       expect(payload.name).toBe('unknown caller (GBP — Parrish)');
+      expect(payload.pushName).toBeUndefined();
       expect(payload.pushQuieted).toBe(false);
       expect(await opts.beforePush({ dispatching: true })).toBe(true);
       const { metadata } = await stored(row);
       expect(metadata.missed_call_spam_wave).toBeUndefined();
       expect(metadata.missed_call_spam_repeat_shadow).toBe(true);
+    });
+
+    // No bell row (bells off for every admin, or the insert failed): pushGuard
+    // lets the quiet call's push go, and that lone alert keeps the ordinary
+    // caller title; the likely robocall title is the bell row's (pre-push audit r23).
+    test('gate on: with no bell row written the quiet call still pushes, titled as an ordinary missed call (pre-push audit r23)', async () => {
+      isEnabled.mockImplementation((name) => name === 'missedCallSpamRepeat' || name === 'missedCallUnknownCallers');
+      await database('call_log').insert([prior(CALLER, 60 * 24 * 3), prior(CALLER, 60 * 24)]);
+      const row = judged();
+      await database('call_log').insert(row);
+      reports({ bellWritten: false, push: { sent: 1, subscriptions: 1 } });
+      expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
+      const [, payload, opts] = triggerNotification.mock.calls[0];
+      expect(payload.name).toBe('likely robocall (GBP — Parrish)');
+      expect(payload.pushName).toBe('unknown caller (GBP — Parrish)');
+      expect(await opts.beforePush({ dispatching: true })).toBe(true);
+    });
+
+    // The absence case reads every footprint table, so the largest keep a
+    // last-10 index the record read reaches by a lookup (pre-push audit r23;
+    // migrations 20260927000006 and 20261120020000, as in
+    // hot-sweep-lookup-indexes-postgres). Synthetic rows never outweigh a full
+    // scan on real costs, so the plan runs with sequential scans off and asks
+    // for an index lookup (an Index Cond): a drift between FOOTPRINT_PHONE_SQL
+    // and an index expression orphans the index.
+    test('the record read reaches the last-10 index of each large footprint table by a lookup (pre-push audit r23)', async () => {
+      const indexes = require('../models/migrations/20261120020000_footprint_phone_last10_indexes');
+      const leadsIndex = require('../models/migrations/20260927000006_outbound_return_prior_contact_phone_indexes');
+      const NAMES = ['customers_phone_last10_index', 'customers_secondary_phone_last10_index', 'customers_service_contact_phone_last10_index',
+        'customers_service_contact2_phone_last10_index', 'customers_service_contact3_phone_last10_index', 'customer_accounts_phone_last10_index',
+        'property_preferences_hoa_phone_last10_index', 'estimates_customer_phone_last10_index', 'estimates_customer_phone_typed_last10_index',
+        'leads_phone_last10_index'];
+      const present = async () => (await database.raw('SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND indexname = ANY(?) ', [NAMES])).rows.map((r) => r.indexname).sort();
+      const lookupsIn = (node, name) => [
+        ...(node['Index Name'] === name && node['Index Cond'] ? [node['Index Cond']] : []),
+        ...(node.Plans || []).flatMap((child) => lookupsIn(child, name)),
+      ];
+      try {
+        // up() twice and down() twice are safe.
+        await indexes.up(database);
+        await indexes.up(database);
+        await leadsIndex.up(database);
+        expect(await present()).toEqual([...NAMES].sort());
+        await indexes.down(database);
+        await indexes.down(database);
+        expect(await present()).toEqual(['leads_phone_last10_index']);
+        await indexes.up(database);
+        await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+        const row = judged();
+        await database('call_log').insert(row);
+        await database('customers').insert({ id: randomUUID(), first_name: 'Test', phone: '(941) 555-0177', created_at: new Date(), updated_at: new Date() });
+        for (const table of ['customers', 'customer_accounts', 'property_preferences', 'estimates', 'leads']) await database.raw('ANALYZE ??', [table]);
+        const seen = [];
+        const capture = (query) => seen.push(query);
+        database.on('query', capture);
+        try {
+          expect(await repeat(row)).toBe(true);
+        } finally {
+          database.removeListener('query', capture);
+        }
+        const record = seen.find((query) => query.sql.includes(' AS fp'));
+        expect(record).toBeDefined();
+        const plan = await database.transaction(async (trx) => {
+          await trx.raw('SET LOCAL enable_seqscan = off');
+          return (await trx.raw(`EXPLAIN (FORMAT JSON) ${record.sql.replace(/\$\d+/g, '?')}`, record.bindings)).rows[0]['QUERY PLAN'][0].Plan;
+        });
+        for (const name of NAMES) {
+          const lookups = lookupsIn(plan, name);
+          expect([name, lookups.length > 0]).toEqual([name, true]);
+          expect(lookups.every((cond) => cond.includes('regexp_replace'))).toBe(true);
+        }
+      } finally {
+        await indexes.down(database);
+        await leadsIndex.down(database);
+      }
     });
 
     test('one earlier silent call on another GBP line is a repeat; one on the same line is not; the first call never is', async () => {
