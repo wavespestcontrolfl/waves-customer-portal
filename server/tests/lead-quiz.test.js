@@ -4,7 +4,7 @@
  * them. Every stored or shown value must be a fixed token.
  */
 const {
-  QUIZ_SEEING, QUIZ_PROPERTY, normalizeQuiz, quizName, quizAnswersLine, quizNoteLine, quizNamesProblem, quizIsCommercial,
+  QUIZ_SEEING, QUIZ_PROPERTY, normalizeQuiz, quizName, quizAnswersLine, quizNoteLine, quizNamesProblem, quizNamesRequest, quizIsCommercial,
 } = require('../services/lead-quiz');
 
 describe('normalizeQuiz', () => {
@@ -86,6 +86,23 @@ describe('staff wording', () => {
     expect(quizNamesProblem({ kind: 'pest', seeing: 'weeds' })).toBe(false);
     expect(quizNamesProblem({ kind: 'tree', seeing: 'ants' })).toBe(false);
     expect(quizNamesProblem(null)).toBe(false);
+  });
+
+  test('the answers name the request only when all three are known and name a problem', () => {
+    const full = { kind: 'pest', seeing: 'ants', property: 'house' };
+    for (const timeline of ['now', 'this_week', 'this_month', 'browsing']) expect(quizNamesRequest(full, timeline)).toBe(true);
+    expect(quizNamesRequest({ kind: 'lawn', seeing: 'palms', property: 'business' }, 'now')).toBe(true);
+    // A named problem with a missing property or timing is a partial quiz.
+    expect(quizNamesRequest({ kind: 'pest', seeing: 'ants' }, 'now')).toBe(false);
+    expect(quizNamesRequest(full, null)).toBe(false);
+    expect(quizNamesRequest(full, undefined)).toBe(false);
+    expect(quizNamesRequest(full, 'someday')).toBe(false);
+    expect(quizNamesRequest(full, 'constructor')).toBe(false);
+    expect(quizNamesRequest({ kind: 'pest', seeing: 'ants', property: 'castle' }, 'now')).toBe(false);
+    // "Not sure" and a non-quiz lead never do.
+    expect(quizNamesRequest({ kind: 'pest', seeing: 'unsure', property: 'house' }, 'now')).toBe(false);
+    expect(quizNamesRequest({ kind: 'pest', property: 'house' }, 'now')).toBe(false);
+    expect(quizNamesRequest(null, 'now')).toBe(false);
   });
 
   test('only "business" is commercial', () => {

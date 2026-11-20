@@ -85,12 +85,22 @@ function quizNoteLine(quiz, timeline) {
 
 /**
  * True when the "What are you seeing?" answer names a problem: one of the
- * quiz's tiles other than "Not sure". Only then do the answers say what the
- * visitor wants, so only then may they stand in for the service line in the
- * new-lead bell.
+ * quiz's tiles other than "Not sure".
  */
 function quizNamesProblem(quiz) {
   return !!quizName(quiz) && quiz.seeing !== 'unsure' && QUIZ_SEEING[quiz.kind].includes(quiz.seeing);
+}
+
+/**
+ * True when the three answers together say what the visitor wants: a named
+ * problem, a property type and a timing, all known. Only then may the answers
+ * stand in for the service line in the new-lead bell; a "Not sure" or partly
+ * answered quiz keeps the service beside them.
+ */
+function quizNamesRequest(quiz, timeline) {
+  return quizNamesProblem(quiz)
+    && QUIZ_PROPERTY.includes(quiz.property)
+    && Object.prototype.hasOwnProperty.call(TIMELINE_PHRASES, timeline);
 }
 
 /** "Business" on the property question: the lead is a commercial premises. */
@@ -106,5 +116,6 @@ module.exports = {
   quizAnswersLine,
   quizNoteLine,
   quizNamesProblem,
+  quizNamesRequest,
   quizIsCommercial,
 };

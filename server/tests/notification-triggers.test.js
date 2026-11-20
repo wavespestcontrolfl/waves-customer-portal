@@ -137,7 +137,7 @@ describe('notification trigger push tags', () => {
   test('a quiz lead\'s bell names the quiz and its answers in place of the service line', () => {
     const built = TRIGGER_REGISTRY.new_lead.build({
       name: 'Pat Sample', source: 'Pest Quiz', zip: '34202', service: 'Cockroach Control',
-      quizAnswers: 'Roaches, condo, wants it today', quizNamesProblem: true, leadId: 'lead-9',
+      quizAnswers: 'Roaches, condo, wants it today', quizNamesRequest: true, leadId: 'lead-9',
     });
     expect(built.title).toBe('New lead');
     expect(built.body).toBe('Pat Sample via Pest Quiz (34202) - Roaches, condo, wants it today');
@@ -145,10 +145,12 @@ describe('notification trigger push tags', () => {
     // A "Not sure" or partly answered quiz does not say what the visitor
     // wants, so the service line stays beside the answers.
     const partial = (quizAnswers) => TRIGGER_REGISTRY.new_lead.build({
-      name: 'Pat Sample', source: 'Pest Quiz', zip: '34202', service: 'Pest Control', quizAnswers, quizNamesProblem: false, leadId: 'lead-9',
+      name: 'Pat Sample', source: 'Pest Quiz', zip: '34202', service: 'Pest Control', quizAnswers, quizNamesRequest: false, leadId: 'lead-9',
     }).body;
     expect(partial('Not sure, condo, wants it today')).toBe('Pat Sample via Pest Quiz (34202) - Wants Pest Control - Not sure, condo, wants it today');
     expect(partial('wants it today')).toBe('Pat Sample via Pest Quiz (34202) - Wants Pest Control - wants it today');
+    // A named problem with no property or timing is partial too.
+    expect(partial('Ants')).toBe('Pat Sample via Pest Quiz (34202) - Wants Pest Control - Ants');
     // A caller that sends answers with no flag keeps the service line too.
     expect(TRIGGER_REGISTRY.new_lead.build({ name: 'Pat Sample', source: 'Pest Quiz', service: 'Pest Control', quizAnswers: 'condo' }).body)
       .toBe('Pat Sample via Pest Quiz - Wants Pest Control - condo');

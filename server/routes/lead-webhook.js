@@ -12,7 +12,7 @@ const { sendLeadAutoReplyOnce, sendCurrentCustomerQuoteText } = require('../serv
 
 const { aiTriageLead } = require('../services/lead-triage');
 const { normalizeTimeline, urgencyForTimeline } = require('../services/lead-timeline');
-const { normalizeQuiz, quizName, quizAnswersLine, quizNoteLine, quizNamesProblem, quizIsCommercial } = require('../services/lead-quiz');
+const { normalizeQuiz, quizName, quizAnswersLine, quizNoteLine, quizNamesRequest, quizIsCommercial } = require('../services/lead-quiz');
 const { sanitizeAnonUnitId } = require('../services/experimentation/growthbook');
 const { etDateString } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
@@ -1018,12 +1018,13 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         // A quiz lead's bell names the quiz and its answers ("via Pest Quiz
         // (34202) - Roaches, condo, wants it today"). The lead row keeps its
         // real source (lead_source_id) either way. The answers stand in for
-        // the service line only when they name the problem; a "Not sure" or
-        // partly answered quiz keeps the service beside them.
+        // the service line only when all three are known and name a problem
+        // (quizNamesRequest); a "Not sure" or partly answered quiz keeps the
+        // service beside them.
         source: quizName(quiz) || leadSource.detail || leadSource.source,
         zip: customer.zip,
         service: serviceInterest || null,
-        ...(quizAnswers ? { quizAnswers, quizNamesProblem: quizNamesProblem(quiz) } : {}),
+        ...(quizAnswers ? { quizAnswers, quizNamesRequest: quizNamesRequest(quiz, timeline) } : {}),
         leadId: leadRecord?.id || customer.id,
         // The bell's Call (alert-call-button.js) dials the lead row's number, or this customer's when the lead row
         // failed and leadId above is the customer id.

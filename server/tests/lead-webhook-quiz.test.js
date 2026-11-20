@@ -138,7 +138,7 @@ describe('route wiring', () => {
     const bell = src.slice(src.indexOf("await triggerNotification('new_lead', {"));
     const block = bell.slice(0, bell.indexOf('});'));
     expect(block).toMatch(/source: quizName\(quiz\) \|\| leadSource\.detail \|\| leadSource\.source,/);
-    expect(block).toMatch(/\.\.\.\(quizAnswers \? \{ quizAnswers, quizNamesProblem: quizNamesProblem\(quiz\) \} : \{\}\),/);
+    expect(block).toMatch(/\.\.\.\(quizAnswers \? \{ quizAnswers, quizNamesRequest: quizNamesRequest\(quiz, timeline\) \} : \{\}\),/);
     expect(src).toMatch(/lead_source_id: leadSourceId,/);
   });
 });

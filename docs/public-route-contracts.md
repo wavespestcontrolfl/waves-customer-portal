@@ -4430,9 +4430,10 @@ stage too) and written as a "Pest Quiz: Roaches, condo,
 wants it today" line on the new-lead / existing-customer Customer 360 note
 and on the unverified hold's lead activity note.
 The new-lead bell reads "<name> via Pest Quiz (<zip>) - Roaches, condo,
-wants it today"; a "Not sure" or partly answered quiz keeps the service
-line beside the answers ("- Wants Pest Control - Not sure, condo, wants it
-today"); the lead's source row (`lead_source_id`) is NOT changed by
+wants it today" when all three answers are known and name a problem
+(`quizNamesRequest`); a "Not sure" or partly answered quiz keeps the
+service line beside the answers ("- Wants Pest Control - Not sure, condo,
+wants it today"); the lead's source row (`lead_source_id`) is NOT changed by
 a quiz: a quiz is a form, not a traffic source.
 `property: business` is a stated commercial premises: it sets the intake's
 `isCommercial`, so the readiness gate records
