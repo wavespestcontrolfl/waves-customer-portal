@@ -9,6 +9,8 @@ const { randomUUID } = require('crypto');
 
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
+// The inspection type a first visit's report page gives: saveReport saves no answer without one.
+const ROUTINE = 'Routine - Food';
 
 afterAll(async () => { if (!SKIP) await require('../models/db').destroy(); });
 
@@ -106,7 +108,7 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
   test('a re-read refreshes last_seen_at and never touches an answer, findings or attempts', async () => {
     await svc.upsertRecords([rec(2)]);
     const [row] = await rows().where({ source_key: key(2) });
-    await svc.saveReport(readOf(row), { pestEvidence: true, findings: [{ code: '35A-02-8', text: 'Flies' }] });
+    await svc.saveReport(readOf(row), { inspectionType: ROUTINE, pestEvidence: true, findings: [{ code: '35A-02-8', text: 'Flies' }] });
     await db('restaurant_prospects').where({ id: row.id }).update({ detail_attempts: 2, last_seen_at: '2026-01-01T00:00:00Z' });
     await svc.upsertRecords([rec(2, { detail: { disposition: 'changed' } })]);
     const [after] = await rows().where({ id: row.id });
@@ -119,7 +121,7 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
   test('a re-read fills the count and the visit number; on an unanswered row each only rises', async () => {
     await svc.upsertRecords([rec(20), rec(21)]);
     const [answered] = await rows().where({ source_key: key(21) });
-    await svc.saveReport(readOf(answered), { pestEvidence: true, findings: [{ code: '35A-02-8', text: 'Flies' }] });
+    await svc.saveReport(readOf(answered), { inspectionType: ROUTINE, pestEvidence: true, findings: [{ code: '35A-02-8', text: 'Flies' }] });
     await svc.upsertRecords([
       rec(20, { detail: { disposition: 'changed', violation35: 2, visitNumber: 1 } }),
       rec(21, { detail: { disposition: 'changed', violation35: 1, visitNumber: 2 } }),
@@ -158,12 +160,12 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     const read = readOf(row);
     // A file re-read raises the count after the read began: no save, and the row waits for a later read.
     await svc.upsertRecords([rec(5, { detail: { disposition: 'Warning Issued', violation35: 2, visitNumber: 1 } })]);
-    expect(await svc.saveReport(read, { pestEvidence: false, findings: [] })).toBe(false);
+    expect(await svc.saveReport(read, { inspectionType: ROUTINE, pestEvidence: false, findings: [] })).toBe(false);
     expect((await rows().where({ id: row.id }))[0].pest_evidence).toBeNull();
     // Another visit number: no save either.
-    expect(await svc.saveReport({ ...read, violation35: 2, visitNumber: 2 }, { pestEvidence: false, findings: [] })).toBe(false);
+    expect(await svc.saveReport({ ...read, violation35: 2, visitNumber: 2 }, { inspectionType: ROUTINE, pestEvidence: false, findings: [] })).toBe(false);
     // Read again with the row's values, it saves.
-    expect(await svc.saveReport({ ...read, violation35: 2 }, { pestEvidence: false, findings: [] })).toBe(true);
+    expect(await svc.saveReport({ ...read, violation35: 2 }, { inspectionType: ROUTINE, pestEvidence: false, findings: [] })).toBe(true);
     expect((await rows().where({ id: row.id }))[0].pest_evidence).toBe(false);
   });
 
@@ -172,7 +174,7 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     await svc.upsertRecords([rec(30, { event_date: '2026-11-15', detail: first }), rec(31, { event_date: '2026-11-15', detail: first })]);
     const stored = await rows();
     const id = (n) => stored.find((r) => r.source_key === key(n)).id;
-    expect(await svc.saveReport({ id: id(31), violation35: 1, visitNumber: 1 }, { pestEvidence: false, findings: [] })).toBe(true);
+    expect(await svc.saveReport({ id: id(31), violation35: 1, visitNumber: 1 }, { inspectionType: ROUTINE, pestEvidence: false, findings: [] })).toBe(true);
     const keys = [key(30), key(31)];
     const pending = () => svc.pendingInspections({ cutoff: '2026-10-05', limit: 100, keys });
     const [read] = await pending();
@@ -180,7 +182,7 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     // The next file lists both visits only as uncited visit 2 copies: no record; the unanswered row is raised, the
     // answered one and a key never stored are not.
     expect(await svc.raiseVisits([[key(30), 2], [key(31), 2], [key(98), 2]])).toBe(1);
-    expect(await svc.saveReport(read, { pestEvidence: true, findings: [{ code: '35A-02-4', text: 'x' }] })).toBe(false);
+    expect(await svc.saveReport(read, { inspectionType: ROUTINE, pestEvidence: true, findings: [{ code: '35A-02-4', text: 'x' }] })).toBe(false);
     expect(await pending()).toEqual([]);
     const after = await rows().whereIn('source_key', keys).orderBy('source_key');
     expect(after.map((r) => [r.pest_evidence, r.detail.visitNumber, r.detail.violation35, r.detail.disposition]))
@@ -199,11 +201,25 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     expect(await svc.pendingInspections({ cutoff: '2026-10-05', limit: 100, keys: [key(40)] })).toEqual([]);
   });
 
+  test('saveReport saves no answer whose page names no first visit, whatever the files say: the page has the last word', async () => {
+    await svc.upsertRecords([rec(50, { event_date: '2026-11-15', detail: { disposition: 'Warning Issued', violation35: 1, visitNumber: 1 } })]);
+    const [row] = await rows().where({ source_key: key(50) });
+    const answer = { pestEvidence: true, findings: [{ code: '35A-02-8', text: 'Flies' }] };
+    // The files call it visit 1; its page names a later visit, or no type at all: nothing is saved.
+    for (const inspectionType of ['Callback - Food', 'Follow-up', 'Re-inspection', '  ', undefined]) {
+      expect(await svc.saveReport(readOf(row), { ...answer, inspectionType })).toBe(false);
+    }
+    expect(await svc.saveReport(readOf(row), null)).toBe(false);
+    expect((await rows().where({ source_key: key(50) }))[0].pest_evidence).toBeNull();
+    expect(await svc.saveReport(readOf(row), { ...answer, inspectionType: ROUTINE })).toBe(true);
+    expect((await rows().where({ source_key: key(50) }))[0].pest_evidence).toBe(true);
+  });
+
   test('saveReport does not overwrite an answer already written', async () => {
     await svc.upsertRecords([rec(3)]);
     const [row] = await rows().where({ source_key: key(3) });
-    expect(await svc.saveReport(readOf(row), { pestEvidence: false, findings: [] })).toBe(true);
-    expect(await svc.saveReport(readOf(row), { pestEvidence: true, findings: [{ code: '35A-01-8', text: 'x' }] })).toBe(false);
+    expect(await svc.saveReport(readOf(row), { inspectionType: ROUTINE, pestEvidence: false, findings: [] })).toBe(true);
+    expect(await svc.saveReport(readOf(row), { inspectionType: ROUTINE, pestEvidence: true, findings: [{ code: '35A-01-8', text: 'x' }] })).toBe(false);
     const [after] = await rows().where({ id: row.id });
     expect(after.pest_evidence).toBe(false);
     expect(after.detail.findings).toEqual([]);

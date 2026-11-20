@@ -257,6 +257,16 @@ describe('parseLicenseRows and the phone rule', () => {
   });
 });
 
+describe('namesFirstVisit', () => {
+  test('a page names a first visit only by a given type that names no callback, follow-up or re-inspection', () => {
+    expect(['Routine - Food', 'Complaint - Food', 'Licensing - Food'].map((type) => svc.namesFirstVisit(type))).toEqual([true, true, true]);
+    const later = ['Callback - Food', 'Call Back - Food', 'call-back', 'Follow-up', 'Follow Up - Food', 'Re-inspection', 'Reinspection'];
+    expect(later.map((type) => svc.namesFirstVisit(type))).toEqual(later.map(() => false));
+    const none = ['', '   ', null, undefined, 7];
+    expect(none.map((type) => svc.namesFirstVisit(type))).toEqual(none.map(() => false));
+  });
+});
+
 describe('syncRestaurantProspects', () => {
   let store;
   let upserts;

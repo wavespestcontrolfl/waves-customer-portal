@@ -287,6 +287,15 @@ function parseLicenseRows(rows, kind, counts = {}, today = null) {
   return out;
 }
 
+// An inspection type that names a later visit ("Callback - Food", "Follow-up", "Re-inspection"): not a first visit.
+const CALLBACK_TYPE_RE = /call\W{0,3}back|follow\W{0,3}up|re\W{0,3}inspect/i;
+
+// Whether a report page's own inspection type names a first visit: given, and naming no callback, follow-up or
+// re-inspection. The page has the last word on that, not the files: the state can relabel a visit between files.
+function namesFirstVisit(inspectionType) {
+  return typeof inspectionType === 'string' && inspectionType.trim() !== '' && !CALLBACK_TYPE_RE.test(inspectionType);
+}
+
 // ── Store ───────────────────────────────────────────────────────
 
 // One record per (kind, source_key); a repeated key keeps its last copy. PostgreSQL refuses an upsert that names the
@@ -350,9 +359,8 @@ async function pendingInspections({ cutoff, limit, keys }) {
     .where('event_date', '>=', cutoff)
     // First visits only: the report parser (the next part) answers for no other. A row stored before the visit number
     // was kept waits until a re-read of the file fills it. The stored visit number is the files' word and only saves
-    // page reads: the state can relabel a visit between files. The page has the last word: the parser answers no page
-    // whose own inspection type names a callback, follow-up or re-inspection, so a callback a file calls visit 1 gets
-    // no answer, and a saved answer came from a page that named a first visit.
+    // page reads: the state can relabel a visit between files. The page has the last word: saveReport saves no answer
+    // whose page's own inspection type is missing or names a callback, follow-up or re-inspection.
     .whereRaw("detail->>'visitNumber' = '1'")
     .orderBy('event_date', 'desc')
     .limit(limit)
@@ -368,8 +376,12 @@ async function pendingInspections({ cutoff, limit, keys }) {
 
 // Saves a page's answer for the read it came from (a pendingInspections row: id, violation35, visitNumber), only while
 // the row is unanswered and still holds that count and visit number: a file re-read in between (a higher count)
-// leaves the row for a later read. Returns whether the answer was saved.
+// leaves the row for a later read. The answer carries the page's own inspection type (report.inspectionType) and is
+// saved only when that type names a first visit (namesFirstVisit). The stored visit number is the files' word and
+// the state can relabel a visit between files, so this is the one rule that keeps a callback page from ever being
+// saved as a first visit's answer, whatever any file said. Returns whether the answer was saved.
 async function saveReport(read, report) {
+  if (!report || !namesFirstVisit(report.inspectionType)) return false;
   const asText = (value) => (value === null || value === undefined ? null : String(value));
   const saved = await db('restaurant_prospects')
     .where({ id: read.id })
@@ -631,6 +643,7 @@ module.exports = {
   parseInspectionRows,
   parseLicenseRows,
   pickPhone,
+  namesFirstVisit,
   upsertRecords,
   pendingInspections,
   saveReport,
