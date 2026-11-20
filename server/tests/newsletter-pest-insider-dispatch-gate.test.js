@@ -4,6 +4,9 @@
  * queued stays queued while GATE_NEWSLETTER_AUTO_SEND is off. Both checks sit
  * before any per-row work in processScheduledSends, so the lineup validator
  * being called is the signal that a row was allowed through.
+ * A planned Waves Pest Insider issue the switch queued follows
+ * GATE_PEST_INSIDER_AUTO_SEND instead, and goes out only from its planned
+ * issue row, at its own Thursday 7:00 AM ET, inside the 7:00-10:00 AM window.
  */
 const mockValidateEventSelection = jest.fn(async () => ({ valid: true, errors: [], flagship: false, events: [] }));
 const mockTrigger = jest.fn(async () => ({ bellWritten: true }));
@@ -55,6 +58,7 @@ afterAll(() => {
   delete process.env.GATE_NEWSLETTER_PROOF_APPROVAL;
   delete process.env.GATE_PEST_INSIDER_PROOF;
   delete process.env.GATE_NEWSLETTER_AUTO_SEND;
+  delete process.env.GATE_PEST_INSIDER_AUTO_SEND;
 });
 
 describe('processScheduledSends: Pest Insider kill switch', () => {
@@ -145,5 +149,116 @@ describe('processScheduledSends: auto-send kill switch (owner 2026-10-30, option
     await processScheduledSends();
 
     expect(mockTrigger).not.toHaveBeenCalled();
+  });
+});
+
+describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_INSIDER_AUTO_SEND)', () => {
+  // Thursday, December 3, 2026 at 7:00 AM EST.
+  const ISSUE_SEND_AT = new Date('2026-12-03T12:00:00Z');
+  const AUTO_QUEUED_INSIDER = {
+    id: 'send-pi-2', status: 'scheduled', newsletter_type: 'pest-insider-monthly', subject: 'Native termites can swarm in winter',
+    scheduled_for: ISSUE_SEND_AT, proof_approved_at: new Date('2026-12-02T12:05:00Z'), proof_approval_email_id: null,
+  };
+  const PLANNED = { id: 'issue-1', issue_date: '2026-12-03', status: 'scheduled', send_id: 'send-pi-2' };
+
+  function wireInsider(rows, { issue = PLANNED, updated = 1 } = {}) {
+    const updates = [];
+    db.mockImplementation((table) => {
+      const q = {};
+      ['where', 'whereNull', 'whereIn', 'whereRaw', 'orderBy', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.limit = jest.fn(async () => rows);
+      q.first = jest.fn(async () => (table === 'pest_insider_issues' ? issue : undefined));
+      q.update = jest.fn(async (patch) => { updates.push({ table, patch }); return updated; });
+      return q;
+    });
+    return updates;
+  }
+
+  const at = (iso) => jest.useFakeTimers().setSystemTime(new Date(iso));
+
+  beforeEach(() => {
+    process.env.GATE_PEST_INSIDER_AUTO_SEND = 'true';
+    at('2026-12-03T12:01:00Z');
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    delete process.env.GATE_PEST_INSIDER_AUTO_SEND;
+  });
+
+  test('switch on: its planned issue at 7:01 AM goes through, with the weekly switch off', async () => {
+    const updates = wireInsider([AUTO_QUEUED_INSIDER]);
+
+    await processScheduledSends();
+
+    expect(mockValidateEventSelection).toHaveBeenCalledTimes(1);
+    expect(updates.some(({ patch }) => patch.status === 'draft')).toBe(false);
+    expect(updates.some(({ table }) => table === 'pest_insider_issues')).toBe(false);
+    expect(mockTrigger).not.toHaveBeenCalled();
+  });
+
+  test('switch off: the queued issue is left scheduled, even with the weekly switch on', async () => {
+    delete process.env.GATE_PEST_INSIDER_AUTO_SEND;
+    process.env.GATE_NEWSLETTER_AUTO_SEND = 'true';
+    const updates = wireInsider([AUTO_QUEUED_INSIDER]);
+
+    await processScheduledSends();
+
+    expect(mockValidateEventSelection).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+  });
+
+  test.each([
+    ['no planned issue is linked', { issue: null }, null, 'no planned Waves Pest Insider issue is linked to this send'],
+    ['its planned issue is not scheduled', { issue: { ...PLANNED, status: 'drafted' } }, null, 'its planned issue is drafted, not scheduled'],
+    ['the send time was moved off its issue Thursday 7:00 AM', {}, new Date('2026-12-03T13:00:00Z'), 'scheduled_for is not its issue Thursday (2026-12-03) at 7:00 AM ET'],
+  ])('%s: stopped for good, the issue row fails, and one notice says why', async (_label, wiring, scheduledFor, reason) => {
+    at('2026-12-03T13:01:00Z');
+    const row = scheduledFor ? { ...AUTO_QUEUED_INSIDER, scheduled_for: scheduledFor } : AUTO_QUEUED_INSIDER;
+    const updates = wireInsider([row], wiring);
+
+    await processScheduledSends();
+
+    expect(mockValidateEventSelection).not.toHaveBeenCalled();
+    expect(updates).toEqual([
+      { table: 'newsletter_sends', patch: expect.objectContaining({ status: 'draft', scheduled_for: null, proof_approved_at: null }) },
+      { table: 'newsletter_calendar', patch: expect.objectContaining({ status: 'drafted' }) },
+      { table: 'pest_insider_issues', patch: expect.objectContaining({ status: 'failed', reason: `stopped at send time: ${reason}` }) },
+    ]);
+    expect(mockTrigger).toHaveBeenCalledTimes(1);
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', {
+      sendId: 'send-pi-2',
+      subject: 'Native termites can swarm in winter',
+      errors: [`Stopped at send time: ${reason}`],
+    });
+  });
+
+  test('10:00 AM ET or later: the issue missed its window and does not go out', async () => {
+    at('2026-12-03T15:00:00Z');
+    const updates = wireInsider([AUTO_QUEUED_INSIDER]);
+
+    await processScheduledSends();
+
+    expect(mockValidateEventSelection).not.toHaveBeenCalled();
+    expect(updates.find(({ table }) => table === 'pest_insider_issues').patch).toMatchObject({
+      status: 'failed', reason: 'stopped at send time: missed the 2026-12-03 7:00-10:00 AM ET send window',
+    });
+  });
+
+  test('9:59 AM ET is still inside the window', async () => {
+    at('2026-12-03T14:59:00Z');
+    wireInsider([AUTO_QUEUED_INSIDER]);
+
+    await processScheduledSends();
+
+    expect(mockValidateEventSelection).toHaveBeenCalledTimes(1);
+  });
+
+  test('a Pest Insider issue approved by an APPROVED reply still follows GATE_PEST_INSIDER_PROOF, not this switch', async () => {
+    const updates = wireInsider([{ ...AUTO_QUEUED_INSIDER, proof_approval_email_id: 'email-1' }]);
+
+    await processScheduledSends();
+
+    expect(mockValidateEventSelection).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
   });
 });

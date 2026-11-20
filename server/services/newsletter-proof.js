@@ -19,6 +19,11 @@
  * a proof, and queues itself for its Tuesday 6:00 AM ET target once that
  * copy went out. A HOLD reply to the copy skips the week. Unset the switch
  * and the issue waits for an APPROVED reply again.
+ *
+ * GATE_PEST_INSIDER_AUTO_SEND (default OFF): the same FYI-and-queue path for a
+ * Waves Pest Insider issue the planner built (services/pest-insider/
+ * schedule.js links it from its pest_insider_issues row). It queues for the
+ * issue's own Thursday 7:00 AM ET, and a HOLD reply holds that issue.
  */
 
 const crypto = require('crypto');
@@ -32,7 +37,8 @@ const { requiresClaimValidation, isFlagshipType, PEST_INSIDER_TYPE } = require('
 const { isFlagshipTargetForWeek } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
 const { reverifyEvents } = require('./event-reverify');
-const { pestInsiderProofLive, newsletterAutoSendLive } = require('../config/feature-gates');
+const { pestInsiderProofLive, newsletterAutoSendLive, pestInsiderAutoSendLive } = require('../config/feature-gates');
+const { issueContextForSend, moveIssueForSend } = require('./pest-insider/schedule');
 
 /**
  * Internal diagnostics panel rendered ABOVE the recipient preview in the
@@ -183,6 +189,21 @@ async function resolveFlagshipCalendarContext(send) {
     && isFlagshipTargetForWeek(scheduledFor, linkedCalendar.week_of),
   );
   return { flagship: true, linkedCalendar, scheduledFor, valid };
+}
+
+// A Waves Pest Insider issue the planner built is linked from its
+// pest_insider_issues row; null for every other send, including a Pest Insider
+// draft made by hand in the composer (it keeps the old approval path).
+async function resolvePestInsiderIssueContext(send) {
+  if (send?.newsletter_type !== PEST_INSIDER_TYPE) return null;
+  return issueContextForSend(send);
+}
+
+// "Thursday, December 3 at 7:00 AM ET": when a planned issue sends.
+function issueSendTimeCopy(issueContext) {
+  const day = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'long', day: 'numeric' })
+    .format(issueContext.scheduledFor);
+  return `${day} at 7:00 AM ET`;
 }
 
 /**
@@ -425,6 +446,37 @@ function autoSendBannerText(recipientCount) {
   return `SENDS BY ITSELF — NO REPLY NEEDED\nThis issue goes to ${recipientCount} active subscribers Tuesday at 6:00 AM ET. To skip this week, reply HOLD, or press Cancel schedule in Newsletter → History.\n\n----------------------------------------\n\n`;
 }
 
+// The owner's copy of a Waves Pest Insider issue the auto-send switch queued.
+function pestInsiderBannerHtml(recipientCount, issueContext) {
+  return `<div class="dm-box" style="border:2px solid #04395E;border-radius:8px;padding:14px 16px;margin:0 0 20px;background:#f4f8fb;font-family:Arial,Helvetica,sans-serif;">
+<p style="margin:0 0 6px;font-size:15px;font-weight:bold;color:#04395E;">Sends by itself — no reply needed</p>
+<p style="margin:0;font-size:14px;color:#1f2937;">This Waves Pest Insider issue goes to <strong>${recipientCount}</strong> readers <strong>${issueSendTimeCopy(issueContext)}</strong>. To skip this issue, reply <strong>HOLD</strong>, or press Cancel schedule in Newsletter → History.</p>
+</div>\n`;
+}
+
+function pestInsiderBannerText(recipientCount, issueContext) {
+  return `SENDS BY ITSELF — NO REPLY NEEDED\nThis Waves Pest Insider issue goes to ${recipientCount} readers ${issueSendTimeCopy(issueContext)}. To skip this issue, reply HOLD, or press Cancel schedule in Newsletter → History.\n\n----------------------------------------\n\n`;
+}
+
+// Internal panel for a planned Waves Pest Insider issue (proof email only):
+// what the planner picked and who it goes to.
+function pestInsiderDiagnosticsHtml(issueContext) {
+  const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const { issue } = issueContext;
+  let diagnostics = issue.diagnostics || {};
+  if (typeof diagnostics === 'string') { try { diagnostics = JSON.parse(diagnostics); } catch { diagnostics = {}; } }
+  const audience = diagnostics.audience;
+  const audienceLine = audience
+    ? `Readers: ${esc(audience.recipients)} (${esc(audience.warm)} opened a Waves email in the last 90 days; ${esc(audience.heldOut)} customers held out to measure the issue)`
+    : 'Readers: count not recorded';
+  return `<div class="dm-box" style="margin:0 0 20px 0;padding:14px 16px;background:#EEF3F8;border:1px solid #C9D6E2;border-radius:8px;font-family:monospace;font-size:12px;line-height:1.6;color:#26364A;">
+<div style="font-weight:700;margin-bottom:6px;">INTERNAL DIAGNOSTICS — not sent to subscribers</div>
+Issue ${esc(issueContext.issueDate)} · sends ${esc(issueSendTimeCopy(issueContext))} (not after 10:00 AM ET)<br/>
+Fact ${esc(issue.fact_id || '—')} · What's this? ${esc(issue.species_slug || '—')} · Tool ${esc(issue.tool_id || 'none')}<br/>
+${audienceLine}
+</div>`;
+}
+
 async function countRecipients(send) {
   // Shared preflight (codex #3472 r3): runs the archived-link relink sweep
   // before counting, so a proof approval can't block on stale links the
@@ -472,7 +524,15 @@ async function releaseRefusedProofClaim(sendId, token, reason) {
  * weekly issue that passed every check gets an FYI copy and is queued once
  * the copy went out (queueAutoSendIssue).
  */
-function proofDelivery(calendarContext, recipientCount) {
+function proofDelivery(calendarContext, recipientCount, issueContext = null) {
+  if (issueContext && pestInsiderAutoSendLive()) {
+    return {
+      autoSend: true,
+      prefix: 'FYI',
+      bannerHtml: pestInsiderBannerHtml(recipientCount, issueContext),
+      bannerText: pestInsiderBannerText(recipientCount, issueContext),
+    };
+  }
   if (calendarContext.flagship && newsletterAutoSendLive()) {
     return { autoSend: true, prefix: 'FYI', bannerHtml: autoSendBannerHtml(recipientCount), bannerText: autoSendBannerText(recipientCount) };
   }
@@ -493,7 +553,7 @@ function proofDelivery(calendarContext, recipientCount) {
  * No approving email id: that is how the dispatcher and the reply handler
  * tell an auto-queued issue from a reply-approved one.
  */
-async function queueAutoSendIssue(send, token, claimedAt, calendarContext) {
+async function queueAutoSendIssue(send, token, claimedAt, calendarContext, issueContext = null) {
   let queued = 0;
   try {
     queued = await db('newsletter_sends')
@@ -502,13 +562,15 @@ async function queueAutoSendIssue(send, token, claimedAt, calendarContext) {
       .whereRaw("date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)", [claimedAt])
       .update({
         status: 'scheduled',
-        scheduled_for: calendarContext.scheduledFor,
+        scheduled_for: issueContext ? issueContext.scheduledFor : calendarContext.scheduledFor,
         proof_approved_at: new Date(),
         proof_approval_email_id: null,
         proof_refused_at: null,
         updated_at: new Date(),
       });
-    if (queued) {
+    if (queued && issueContext) {
+      await moveIssueForSend(send.id, ['drafted'], 'scheduled');
+    } else if (queued) {
       await db('newsletter_calendar').where({ id: calendarContext.linkedCalendar.id }).update({ status: 'scheduled', updated_at: new Date() });
     }
   } catch (err) {
@@ -517,7 +579,7 @@ async function queueAutoSendIssue(send, token, claimedAt, calendarContext) {
   if (!queued) {
     await notifyProof('newsletter_proof_blocked', { sendId: send.id,
       subject: send.subject,
-      errors: ['The FYI copy went out, but the issue changed before it could be queued, so it will not send this week.'],
+      errors: [`The FYI copy went out, but the issue changed before it could be queued, so it will not send ${issueContext ? 'by itself' : 'this week'}.`],
     });
   }
   return Boolean(queued);
@@ -568,13 +630,21 @@ async function sendNewsletterProof(sendId) {
     }
   }
   const calendarContext = await resolveFlagshipCalendarContext(send);
+  const issueContext = await resolvePestInsiderIssueContext(send);
   // A held or skipped week stays skipped: a fresh proof would queue it again
   // under GATE_NEWSLETTER_AUTO_SEND, or let a reply approve a retired issue.
   if (calendarContext.linkedCalendar?.status === 'skipped') return { skipped: true, reason: 'week_skipped' };
+  // The same for a held Waves Pest Insider issue.
+  if (issueContext?.issue.status === 'held') return { skipped: true, reason: 'issue_held' };
   if (!calendarContext.valid) {
     const errors = ['The linked calendar must target its own future issue Tuesday at exactly 6:00 AM ET.'];
     const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors });
     return { skipped: true, reason: 'calendar_target_invalid', errors, notified };
+  }
+  if (issueContext && !issueContext.valid) {
+    const errors = ['This Waves Pest Insider issue must go out on its own issue Thursday at 7:00 AM ET, and that time has passed.'];
+    const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors });
+    return { skipped: true, reason: 'issue_target_invalid', errors, notified };
   }
   const selectionReference = calendarContext.flagship ? calendarContext.scheduledFor : new Date();
   const eventSelection = await validateFlagshipEventSelection(send, { reference: selectionReference });
@@ -605,7 +675,7 @@ async function sendNewsletterProof(sendId) {
   // gate while we email a proof rendered from the pre-edit body.
   const token = crypto.randomBytes(4).toString('hex');
   const now = new Date();
-  const delivery = proofDelivery(calendarContext, recipientCount);
+  const delivery = proofDelivery(calendarContext, recipientCount, issueContext);
   const claimQuery = db('newsletter_sends')
     .where({ id: send.id, status: 'draft' })
     .whereNull('proof_sent_at');
@@ -625,11 +695,9 @@ async function sendNewsletterProof(sendId) {
   try {
     // Internal diagnostics render between the proof banner and the
     // recipient preview — proof email ONLY, never the list send.
-    const diagnosticsHtml = await buildProofDiagnosticsHtml(
-      send,
-      eventSelection.events,
-      calendarContext.scheduledFor,
-    );
+    const diagnosticsHtml = issueContext
+      ? pestInsiderDiagnosticsHtml(issueContext)
+      : await buildProofDiagnosticsHtml(send, eventSelection.events, calendarContext.scheduledFor);
     const { html, text } = await renderSendPreview({
       ...send,
       html_body: delivery.bannerHtml + diagnosticsHtml + (send.html_body || ''),
@@ -658,7 +726,7 @@ async function sendNewsletterProof(sendId) {
 
     // The "reply APPROVED" bell is for a proof that waits on the owner; an
     // auto-send issue needs no one (its FYI copy is the record).
-    const queued = delivery.autoSend && await queueAutoSendIssue(send, token, now, calendarContext);
+    const queued = delivery.autoSend && await queueAutoSendIssue(send, token, now, calendarContext, issueContext);
     if (!delivery.autoSend) {
       await notifyProof('newsletter_proof_sent', { sendId: send.id,
         subject: send.subject,
@@ -707,6 +775,10 @@ async function holdAutoQueuedIssue(send, token, from) {
     return true;
   }
   await db('newsletter_calendar').where({ send_id: send.id }).update({ status: 'skipped', updated_at: new Date() });
+  // A held Waves Pest Insider issue stays held: the planner never proofs or queues it again.
+  if (send.newsletter_type === PEST_INSIDER_TYPE) {
+    await moveIssueForSend(send.id, ['drafted', 'scheduled'], 'held', { reason: 'HOLD reply from the owner' });
+  }
   logger.info(`[newsletter-proof] send ${send.id} held by ${maskEmail(from)} — week skipped`);
   return true;
 }

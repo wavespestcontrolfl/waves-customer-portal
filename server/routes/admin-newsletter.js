@@ -25,6 +25,8 @@ const {
 const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 const { computeSendRates, ratesFromTotals } = require('../services/newsletter-analytics');
 const { newsletterAutoSendLive } = require('../config/feature-gates');
+const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
+const { moveIssueForSend } = require('../services/pest-insider/schedule');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -499,6 +501,12 @@ router.delete('/sends/:id', async (req, res, next) => {
       const calendarIds = await trx('newsletter_calendar')
         .where({ send_id: req.params.id })
         .pluck('id');
+      // A planned Waves Pest Insider issue whose draft is deleted is held, so
+      // the planner never drafts or proofs it again. Before the delete: the
+      // delete clears the row's send_id (ON DELETE SET NULL).
+      if (send.newsletter_type === PEST_INSIDER_TYPE) {
+        await moveIssueForSend(req.params.id, ['drafted', 'scheduled'], 'held', { reason: 'Draft deleted in History', database: trx });
+      }
       const deleted = await trx('newsletter_sends')
         .where({ id: req.params.id, status: 'draft' })
         .del();
@@ -603,6 +611,11 @@ router.post('/sends/:id/cancel-schedule', async (req, res, next) => {
       status: (autoQueued || newsletterAutoSendLive()) ? 'skipped' : 'drafted',
       updated_at: new Date(),
     });
+    // A planned Waves Pest Insider issue is held, like a skipped week: the
+    // planner never proofs or queues it again (a person can still send it).
+    if (send.newsletter_type === PEST_INSIDER_TYPE) {
+      await moveIssueForSend(send.id, ['drafted', 'scheduled'], 'held', { reason: 'Cancel schedule in History' });
+    }
     const updated = await db('newsletter_sends').where({ id: send.id }).first();
     res.json({ success: true, send: updated });
   } catch (err) { next(err); }

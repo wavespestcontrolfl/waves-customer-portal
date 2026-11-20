@@ -102,18 +102,21 @@ const PROOF_STAMP = new Date('2026-07-09T18:00:00Z');
 const PROOFED_DRAFT = { ...FLAGSHIP_DRAFT, proof_sent_at: PROOF_STAMP, updated_at: PROOF_STAMP };
 const TARGET_SEND_AT = new Date('2026-07-21T10:00:00Z'); // Tuesday 6:00 AM EDT
 
-function wireDb({ sends, subscribers, calendar } = {}) {
+function wireDb({ sends, subscribers, calendar, issues } = {}) {
   const sendsChain = chain(sends || {});
   const subsChain = chain(subscribers || { first: undefined });
   const calendarChain = chain(calendar || {
     first: { id: 'cal-1', week_of: '2026-07-21', target_send_at: TARGET_SEND_AT },
   });
+  // pest_insider_issues: no planned issue unless a test links one.
+  const issuesChain = chain(issues || { first: undefined });
   db.mockImplementation((table) => {
     if (table === 'newsletter_sends') return sendsChain;
     if (table === 'newsletter_calendar') return calendarChain;
+    if (table === 'pest_insider_issues') return issuesChain;
     return subsChain;
   });
-  return { sendsChain, subsChain, calendarChain };
+  return { sendsChain, subsChain, calendarChain, issuesChain };
 }
 
 beforeEach(() => {
@@ -830,4 +833,100 @@ describe('GATE_NEWSLETTER_AUTO_SEND — the weekly issue sends itself (owner 202
   test.each(['Looks great', "can't wait", 'approved', '', undefined])(
     'isHoldReply rejects %j', (t) => expect(isHoldReply(t)).toBe(false),
   );
+});
+
+describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sends itself', () => {
+  // The clock is Mon Jul 20 2026; the next issue is Thursday Aug 6, 7:00 AM EDT.
+  const ISSUE_SEND_AT = new Date('2026-08-06T11:00:00Z');
+  const PI_DRAFT = { ...FLAGSHIP_DRAFT, newsletter_type: 'pest-insider-monthly', proof_token: null };
+  const ISSUE = {
+    id: 'issue-1', issue_date: '2026-08-06', status: 'drafted', send_id: 'send-1',
+    fact_id: 'T03', species_slug: 'brown-widow', tool_id: null,
+    diagnostics: { audience: { warm: 92, heldOut: 7, recipients: 85 } },
+  };
+  const PI_QUEUED = {
+    ...PROOFED_DRAFT, newsletter_type: 'pest-insider-monthly', status: 'scheduled',
+    scheduled_for: ISSUE_SEND_AT, proof_approved_at: PROOF_STAMP, proof_approval_email_id: null,
+  };
+  const HOLD = {
+    id: 'email-3',
+    subject: 'Re: FYI: [PROOF-ab12cd34] Native termites can swarm in winter',
+    from_address: 'contact@wavespestcontrol.com',
+    body_text: 'hold',
+  };
+
+  beforeEach(() => { process.env.GATE_PEST_INSIDER_AUTO_SEND = 'true'; });
+  afterAll(() => { delete process.env.GATE_PEST_INSIDER_AUTO_SEND; });
+
+  test('its FYI copy goes out, and it is queued for its own Thursday 7:00 AM ET with its issue row', async () => {
+    const { sendsChain, calendarChain, issuesChain } = wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE } });
+    const r = await sendNewsletterProof('send-1');
+
+    expect(r).toEqual(expect.objectContaining({ sent: true, queued: true }));
+    expect(issuesChain.where).toHaveBeenCalledWith({ send_id: 'send-1' });
+    const [, queue] = sendsChain.update.mock.calls.map(([patch]) => patch);
+    expect(queue).toEqual(expect.objectContaining({ status: 'scheduled', scheduled_for: ISSUE_SEND_AT, proof_approval_email_id: null }));
+    expect(issuesChain.whereIn).toHaveBeenCalledWith('status', ['drafted']);
+    expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
+    expect(calendarChain.update).not.toHaveBeenCalled();
+
+    const args = mockSendOne.mock.calls[0][0];
+    expect(args.subject).toBe(`FYI: [PROOF-${r.token}] Bubbles & Sea Lions`);
+    expect(args.html).toContain('This Waves Pest Insider issue goes to <strong>606</strong> readers <strong>Thursday, August 6 at 7:00 AM ET</strong>');
+    expect(args.html).toContain('reply <strong>HOLD</strong>');
+    expect(args.html).not.toContain('immediately');
+    expect(args.text).toContain('This Waves Pest Insider issue goes to 606 readers Thursday, August 6 at 7:00 AM ET.');
+    // The internal panel says what the planner picked and who it goes to.
+    expect(args.html).toContain('INTERNAL DIAGNOSTICS');
+    expect(args.html).toContain('Fact T03 · What&#39;s this? brown-widow · Tool none'.replace('&#39;', "'"));
+    expect(args.html).toContain('Readers: 85 (92 opened a Waves email in the last 90 days; 7 customers held out to measure the issue)');
+    expect(mockTrigger).not.toHaveBeenCalledWith('newsletter_proof_sent', expect.anything());
+  });
+
+  test('switch off: a planned issue is not queued by the flagship switch either', async () => {
+    delete process.env.GATE_PEST_INSIDER_AUTO_SEND;
+    process.env.GATE_NEWSLETTER_AUTO_SEND = 'true';
+    try {
+      const { issuesChain } = wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE } });
+      const r = await sendNewsletterProof('send-1');
+      expect(r.queued).toBe(false);
+      expect(mockSendOne.mock.calls[0][0].subject).toMatch(/^ACT: /);
+      expect(issuesChain.update).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GATE_NEWSLETTER_AUTO_SEND;
+    }
+  });
+
+  test('a held issue gets no proof', async () => {
+    wireDb({ sends: { first: PI_DRAFT }, issues: { first: { ...ISSUE, status: 'held' } } });
+    expect(await sendNewsletterProof('send-1')).toEqual({ skipped: true, reason: 'issue_held' });
+    expect(mockSendOne).not.toHaveBeenCalled();
+  });
+
+  test('an issue whose Thursday 7:00 AM ET has passed gets no proof, and the owner is told', async () => {
+    wireDb({ sends: { first: PI_DRAFT }, issues: { first: { ...ISSUE, issue_date: '2026-07-16' } } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r).toEqual(expect.objectContaining({ skipped: true, reason: 'issue_target_invalid' }));
+    expect(mockSendOne).not.toHaveBeenCalled();
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+      errors: ['This Waves Pest Insider issue must go out on its own issue Thursday at 7:00 AM ET, and that time has passed.'],
+    }));
+  });
+
+  test('a Pest Insider draft made by hand (no planned issue) keeps the old APPROVED path', async () => {
+    const { issuesChain } = wireDb({ sends: { first: PI_DRAFT } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r.queued).toBe(false);
+    expect(mockSendOne.mock.calls[0][0].subject).toMatch(/^ACT: /);
+    expect(issuesChain.update).not.toHaveBeenCalled();
+  });
+
+  test('HOLD holds the queued issue and its planned row', async () => {
+    const { sendsChain, issuesChain } = wireDb({ sends: { first: PI_QUEUED } });
+    expect(await maybeHandleProofApproval(HOLD)).toBe(true);
+    expect(sendsChain.update.mock.calls[0][0]).toEqual(expect.objectContaining({ status: 'draft', scheduled_for: null }));
+    expect(issuesChain.where).toHaveBeenCalledWith({ send_id: 'send-1' });
+    expect(issuesChain.whereIn).toHaveBeenCalledWith('status', ['drafted', 'scheduled']);
+    expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'held', reason: 'HOLD reply from the owner' }));
+  });
 });

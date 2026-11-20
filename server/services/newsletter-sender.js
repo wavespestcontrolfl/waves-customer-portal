@@ -40,8 +40,10 @@ const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = re
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds, isFlagshipSend } = require('./newsletter-event-selection');
 const { reverifyEvents, reverifyEnabled } = require('./event-reverify');
-const { pestInsiderProofLive, newsletterAutoSendLive } = require('../config/feature-gates');
+const { pestInsiderProofLive, newsletterAutoSendLive, pestInsiderAutoSendLive } = require('../config/feature-gates');
+const { issueContextForSend, inSendWindow, moveIssueForSend } = require('./pest-insider/schedule');
 const NewsletterSubscribers = require('./newsletter-subscribers');
+const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
 
 // CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
 // newsletter-draft.js (imported above) so the live-send substitution and every
@@ -579,7 +581,6 @@ function keepsPlannedAudience(plan, segmentFilter, subscriberId, customerIds, ad
 //   well-formed address key for every reader on it: the batches would skip
 //   everyone, and the issue would end 'sent' to nobody.
 function audienceRefusal(send) {
-  const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
   const filter = send.segment_filter;
   const refused = (code, message) => Object.assign(new Error(message), { code, audienceRefusal: true });
   if (filter?.holdout != null && !sendHoldout(filter)) {
@@ -1499,6 +1500,15 @@ async function sendCampaign(sendId, opts = {}) {
     } catch (err) {
       logger.warn(`[newsletter] calendar status update failed for send ${send.id}: ${err.message}`);
     }
+    // The same for a planned Waves Pest Insider issue, also when a person
+    // sent it by hand after a hold.
+    if (send.newsletter_type === PEST_INSIDER_TYPE) {
+      try {
+        await moveIssueForSend(send.id, ['drafted', 'scheduled', 'held', 'failed'], 'sent');
+      } catch (err) {
+        logger.warn(`[newsletter] Pest Insider issue status update failed for send ${send.id}: ${err.message}`);
+      }
+    }
 
     // First-'sent' only: advance events_raw.times_featured + recompute
     // freshness for the events this newsletter actually shipped, so the
@@ -1772,6 +1782,15 @@ async function revertBlockedScheduledSend(row, reason) {
   // Keep the calendar in lockstep: without this the row would stay
   // 'scheduled' forever (autopilot then skips the week).
   await db('newsletter_calendar').where({ send_id: row.id }).update({ status: 'drafted', updated_at: new Date() });
+  // A planned Waves Pest Insider issue stopped at send time does not go out:
+  // its date has a fixed send time, and the planner never queues it again.
+  if (row.newsletter_type === PEST_INSIDER_TYPE) {
+    try {
+      await moveIssueForSend(row.id, ['drafted', 'scheduled'], 'failed', { reason: `stopped at send time: ${reason}`.slice(0, 500) });
+    } catch (err) {
+      logger.warn(`[newsletter-scheduler] Pest Insider issue status update failed for send ${row.id}: ${err.message}`);
+    }
+  }
   try {
     const { triggerNotification } = require('./notification-triggers');
     await triggerNotification('newsletter_proof_blocked', {
@@ -1783,6 +1802,24 @@ async function revertBlockedScheduledSend(row, reason) {
     logger.warn(`[newsletter-scheduler] stop notice for ${row.id} failed: ${e.message}`);
   }
   return true;
+}
+
+/**
+ * Why an auto-queued Waves Pest Insider send must not go out now, or null
+ * when it may: it needs its planned issue (pest_insider_issues), still
+ * 'scheduled', with scheduled_for at that issue's 7:00 AM ET send time, and
+ * now inside the 7:00-10:00 AM ET window of that day.
+ */
+async function pestInsiderDispatchStop(row, now = new Date()) {
+  const context = await issueContextForSend(row, { now });
+  if (!context) return 'no planned Waves Pest Insider issue is linked to this send';
+  if (context.issue.status !== 'scheduled') return `its planned issue is ${context.issue.status}, not scheduled`;
+  const target = context.scheduledFor.getTime();
+  if (!row.scheduled_for || new Date(row.scheduled_for).getTime() !== target) {
+    return `scheduled_for is not its issue Thursday (${context.issueDate}) at 7:00 AM ET`;
+  }
+  if (!inSendWindow(context.issueDate, now)) return `missed the ${context.issueDate} 7:00-10:00 AM ET send window`;
+  return null;
 }
 
 /**
@@ -1814,20 +1851,35 @@ async function processScheduledSends() {
         logger.warn(`[newsletter-scheduler] send ${row.id} is proof-approved but the proof gate is off — leaving it scheduled`);
         continue;
       }
-      // Same rule for the type-specific switch: a proof-approved Pest
+      // An issue an auto-send switch queued: approved with no approving email.
+      const autoQueued = Boolean(row.proof_approved_at) && !row.proof_approval_email_id;
+      const pestInsider = row.newsletter_type === PEST_INSIDER_TYPE;
+      // Same rule for the type-specific switch: a reply-approved Pest
       // Insider issue stays queued while GATE_PEST_INSIDER_PROOF is off. A
       // Pest Insider issue scheduled by hand has no proof_approved_at and is
-      // unaffected.
-      if (row.proof_approved_at && row.newsletter_type === 'pest-insider-monthly' && !pestInsiderProofLive()) {
+      // unaffected; one the auto-send switch queued follows that switch.
+      if (row.proof_approved_at && pestInsider && !autoQueued && !pestInsiderProofLive()) {
         logger.warn(`[newsletter-scheduler] send ${row.id} is a proof-approved Pest Insider issue but GATE_PEST_INSIDER_PROOF is off — leaving it scheduled`);
         continue;
       }
-      // An issue the auto-send switch queued (approved with no approving
-      // email) stays queued while GATE_NEWSLETTER_AUTO_SEND is off: unsetting
-      // the switch stops it, and the next week waits for an APPROVED reply.
-      if (row.proof_approved_at && !row.proof_approval_email_id && !newsletterAutoSendLive()) {
+      // An issue an auto-send switch queued stays queued while that switch is
+      // off: GATE_PEST_INSIDER_AUTO_SEND for a Waves Pest Insider issue,
+      // GATE_NEWSLETTER_AUTO_SEND for every other. Unsetting the switch stops
+      // it, and the next issue waits for an APPROVED reply.
+      if (autoQueued && !(pestInsider ? pestInsiderAutoSendLive() : newsletterAutoSendLive())) {
         logger.warn(`[newsletter-scheduler] send ${row.id} was queued by the auto-send switch, which is off — leaving it scheduled`);
         continue;
+      }
+      // A Waves Pest Insider issue the switch queued goes out only from its
+      // planned issue, still scheduled, at its own Thursday 7:00 AM ET target,
+      // inside the 7:00-10:00 AM ET window. Anything else stops it for good.
+      if (autoQueued && pestInsider) {
+        const stop = await pestInsiderDispatchStop(row);
+        if (stop) {
+          logger.error(`[newsletter-scheduler] Pest Insider send ${row.id} blocked: ${stop}`);
+          await revertBlockedScheduledSend(row, stop);
+          continue;
+        }
       }
       const eventSelection = await validateFlagshipEventSelection(row);
       if (eventSelection.flagship) {
