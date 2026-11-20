@@ -59,6 +59,8 @@ function makeConn(queues) {
   const tableQueues = new Map(Object.entries(queues));
   const conn = jest.fn((table) => {
     const queue = tableQueues.get(table);
+    // These ordinary pest terms carry no commercial setup-fee claim.
+    if (!queue?.length && table === 'setup_fee_claims') return query();
     if (!queue || !queue.length) throw new Error(`Unexpected conn table ${table}`);
     return queue.shift();
   });
@@ -80,6 +82,7 @@ const COVERED_TERM = {
   prepay_amount: '480.00',
   coverage_visit_count: 4,
   coverage_service_type: 'Pest Control',
+  commercial_setup_series_root_id: null,
 };
 
 const COMPLETED_VISIT = {
@@ -341,6 +344,7 @@ describe('annual prepay late-payment gap fixes', () => {
         prepay_amount: '480.00',
         coverage_visit_count: 4,
         coverage_service_type: 'Pest Control',
+        commercial_setup_series_root_id: null,
       };
       // Dispute suspension cleared both stamps; the completed visit billed
       // per-visit while the dispute was open.

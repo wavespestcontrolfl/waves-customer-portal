@@ -2092,6 +2092,8 @@ bait service; legacy supplements use the converter's physical-program rules.
 Unsupported families/cadences, recurring foam and commercial programs return
 409 `COMBINED_VISIT_UNAVAILABLE` before offering or holding combined work.
 
+`PUT /api/estimates/:token/accept` uses the booked or explicitly selected appointment when a commercial rodent annual prepay includes a setup fee. The overlap check and the new term use that occurrence’s date. An invoice-only sale uses today’s Eastern date. An overlapping term returns HTTP 409 with code `ANNUAL_PREPAY_OVERLAP`. If the selected setup visit changes before acceptance, a completion is collecting its setup, or a completion already invoiced its setup, acceptance returns HTTP 409 with an `error` message. The acceptance transaction rolls back before another prepay invoice can collect the setup.
+
 `PUT /api/estimates/:token/accept` answers 409
 `{ error, reason: 'retired_lawn_cadence_selection' }` when a recurring lawn
 row still resolves to a retired lawn cadence — any tier hidden via

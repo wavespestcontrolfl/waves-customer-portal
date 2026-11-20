@@ -58,6 +58,7 @@ jest.mock('../services/estimate-accepted-email', () => ({
 }));
 jest.mock('../services/appointment-tagger', () => ({
   onServiceScheduled: jest.fn(async () => ({})),
+  classifyAppointmentType: jest.fn(() => ({ tag: 'service', label: 'Service' })),
 }));
 jest.mock('../services/lead-estimate-link', () => ({
   markLinkedLeadEstimateAccepted: jest.fn(async () => ({})),
@@ -139,6 +140,39 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
         }],
       },
       oneTime: { items: [], membershipFee: 0 },
+    },
+  };
+  const COMMERCIAL_RODENT_DATA = {
+    commercialEstimatedPricing: true,
+    engineRequest: { profile: { commercialRiskType: 'warehouse_distribution' } },
+    customerSelection: { frequency: 'quarterly' },
+    setupFeeQuote: { kind: 'rodent_bait_setup', amount: 55 },
+    result: {
+      totals: { year2mo: 55, year2: 660 },
+      lineItems: [
+        {
+          name: 'Commercial Rodent Bait Stations', service: 'commercial_rodent_bait',
+          frequency: 'quarterly', visitsPerYear: 4, monthly: 55, annual: 660,
+          monthlyAfterDiscount: 55, annualAfterDiscount: 660,
+          taxable: true, discountable: false, excludeFromPctDiscount: true, isCommercial: true,
+        },
+        { name: 'Bait Station Setup', service: 'rodent_bait_setup', price: 55, taxable: true },
+      ],
+      recurring: {
+        discount: 0,
+        monthlyTotal: 55,
+        grandTotal: 55,
+        services: [{
+          name: 'Commercial Rodent Bait Stations', service: 'commercial_rodent_bait',
+          frequency: 'quarterly', visitsPerYear: 4, mo: 55, annual: 660,
+          perTreatment: 165, taxable: true, discountable: false,
+          excludeFromPctDiscount: true, isCommercial: true,
+        }],
+      },
+      oneTime: {
+        items: [{ name: 'Bait Station Setup', service: 'rodent_bait_setup', price: 55 }],
+        membershipFee: 0,
+      },
     },
   };
 
@@ -320,6 +354,483 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
   describe('converter: seeds the series from the chosen slot, never from a linked assessment', () => {
     const EstimateConverter = () => require('../services/estimate-converter');
     const convertOpts = { skipSetupInvoice: true, autoSendInvoice: false, skipMembershipEmail: true };
+
+    test('an invoice-only commercial sale keeps its setup off an older $73 job', async () => {
+      const { customerId, estimateId } = await fixture(mockTransaction, {
+        data: COMMERCIAL_RODENT_DATA, monthly: 55, annual: 660,
+      });
+      await mockTransaction('customers').where({ id: customerId }).update({ property_type: 'commercial' });
+      await mockTransaction('estimates').where({ id: estimateId }).update({
+        category: 'COMMERCIAL', status: 'accepted', accepted_at: new Date(),
+      });
+      const olderId = await visit(mockTransaction, {
+        customerId, key: 'rodent_bait_quarterly', type: 'Commercial Rodent Bait Stations', date: CHOSEN_DATE,
+        extra: {
+          source_estimate_id: estimateId,
+          estimated_price: 73,
+          pending_setup_fee: 73,
+          is_recurring: true,
+          recurring_pattern: 'quarterly',
+          service_address_line1: '73 Older Visit Lane',
+        },
+      });
+      const olderBefore = await mockTransaction('scheduled_services').where({ id: olderId }).first();
+
+      const result = await EstimateConverter().convertEstimate(estimateId, {
+        database: mockTransaction,
+        billingTerm: 'prepay_annual',
+        prepayInvoiceAmount: 660,
+        allowFirstApplicationFallback: false,
+        skipAutoSchedule: true,
+        requestedFirstVisit: { date: CHOSEN_DATE, windowStart: '13:00', windowEnd: '15:00' },
+        autoSendInvoice: false,
+        skipMembershipEmail: true,
+      });
+
+      expect(result.firstScheduledServiceId).toBeNull();
+      expect(await mockTransaction('setup_fee_claims').where({ invoice_id: result.draftInvoiceId }).first())
+        .toMatchObject({
+          scheduled_service_id: null,
+          amount: '55.00',
+          estimate_id: estimateId,
+          unbooked_commercial_setup: true,
+        });
+      expect(await mockTransaction('scheduled_services').where({ customer_id: customerId }).select('*'))
+        .toEqual([olderBefore]);
+    });
+
+    test('the locked overlap check and converted term use the sold occurrence, including an invoice-only sale', async () => {
+      const { customerId, estimateId } = await fixture(mockTransaction, { data: COMMERCIAL_RODENT_DATA });
+      await mockTransaction('customers').where({ id: customerId }).update({ property_type: 'commercial' });
+      await mockTransaction('estimates').where({ id: estimateId }).update({ category: 'COMMERCIAL', status: 'accepted' });
+      const today = etDateString();
+      await mockTransaction('annual_prepay_terms').insert({
+        customer_id: customerId, term_start: today, term_end: ASSESSMENT_DATE, status: 'active', prepay_amount: 660,
+      });
+      const chosen = await visit(mockTransaction, {
+        customerId, key: 'rodent_bait_quarterly', type: 'Commercial Rodent Bait Stations', date: CHOSEN_DATE,
+        extra: { source_estimate_id: estimateId, pending_setup_fee: 55, is_recurring: true, recurring_pattern: 'quarterly' },
+      });
+      const { resolveCommercialPrepaySale } = require('../services/commercial-prepay-sale-visits');
+      const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+      const unbooked = await resolveCommercialPrepaySale(mockTransaction, customerId, COMMERCIAL_RODENT_DATA);
+      expect(unbooked.termStart).toBe(today);
+      await expect(lockAndAssertNoAnnualPrepayOverlap(mockTransaction, customerId, unbooked.termStart, false, 'Overlap', estimateId))
+        .rejects.toMatchObject({ annualPrepayOverlap: expect.any(Object) });
+      await visit(mockTransaction, {
+        customerId, key: 'lawn_care_monthly', type: 'Lawn Care', date: today, extra: { source_estimate_id: estimateId },
+      });
+      const opts = { adoptedExistingAppointmentId: chosen, skipAutoSchedule: true };
+      const sale = await resolveCommercialPrepaySale(mockTransaction, customerId, COMMERCIAL_RODENT_DATA, opts);
+      expect(sale.termStart).toBe(CHOSEN_DATE);
+      await lockAndAssertNoAnnualPrepayOverlap(mockTransaction, customerId, sale.termStart, false, 'Overlap', estimateId);
+      const result = await EstimateConverter().convertEstimate(estimateId, {
+        ...opts, database: mockTransaction, commercialPrepaySale: sale, billingTerm: 'prepay_annual',
+        prepayInvoiceAmount: 660, allowFirstApplicationFallback: false, autoSendInvoice: false, skipMembershipEmail: true,
+      });
+      const term = await mockTransaction('annual_prepay_terms').where({ id: result.annualPrepayTermId }).first();
+      expect(dateOnly(term.term_start)).toBe(sale.termStart);
+      expect(term.commercial_setup_series_root_id).toBe(chosen);
+    });
+
+    test.each([['completed', 3], ['cancelled', 0]])('collection after the sole booked root is %s creates %i remaining visits', async (status, remaining) => {
+      const { customerId, estimateId } = await fixture(mockTransaction, { data: COMMERCIAL_RODENT_DATA });
+      await mockTransaction('customers').where({ id: customerId }).update({ property_type: 'commercial' });
+      await mockTransaction('estimates').where({ id: estimateId }).update({ category: 'COMMERCIAL', status: 'accepted' });
+      const rootId = await visit(mockTransaction, {
+        customerId, key: 'rodent_bait_quarterly', type: 'Commercial Rodent Bait Stations', date: etDateString(),
+        extra: { pending_setup_fee: 55, is_recurring: true, recurring_pattern: 'quarterly', estimated_price: 165 },
+      });
+      const result = await EstimateConverter().convertEstimate(estimateId, {
+        database: mockTransaction, billingTerm: 'prepay_annual', prepayInvoiceAmount: 660,
+        allowFirstApplicationFallback: false, skipAutoSchedule: true, adoptedExistingAppointmentId: rootId,
+        autoSendInvoice: false, skipMembershipEmail: true,
+      });
+      const children = () => mockTransaction('scheduled_services').where({ recurring_parent_id: rootId });
+      expect(await children()).toHaveLength(0);
+      await mockTransaction('scheduled_services').where({ id: rootId }).update({ status });
+      await mockTransaction('invoices').where({ id: result.draftInvoiceId }).update({ status: 'paid', paid_at: new Date() });
+      const renewals = require('../services/annual-prepay-renewals');
+      await renewals.syncTermForInvoicePayment(result.draftInvoiceId, mockTransaction);
+      await renewals.syncTermForInvoicePayment(result.draftInvoiceId, mockTransaction);
+      const visits = await children();
+      expect(visits).toHaveLength(remaining);
+      for (const row of visits) {
+        expect(row).toMatchObject({ customer_id: customerId, annual_prepay_term_id: result.annualPrepayTermId, prepaid_method: 'annual_prepay_invoice' });
+      }
+    });
+
+    test('a freshly committed commercial root is promoted and seeds its recurring successors', async () => {
+      const { customerId, estimateId } = await fixture(mockTransaction, {
+        data: COMMERCIAL_RODENT_DATA, monthly: 55, annual: 660,
+      });
+      await mockTransaction('customers').where({ id: customerId }).update({ property_type: 'commercial' });
+      await mockTransaction('estimates').where({ id: estimateId }).update({
+        category: 'COMMERCIAL', status: 'accepted', accepted_at: new Date(),
+      });
+      const rootId = await visit(mockTransaction, {
+        customerId, key: 'rodent_bait_quarterly', type: 'Commercial Rodent Bait Stations', date: CHOSEN_DATE,
+        extra: {
+          source_estimate_id: estimateId,
+          estimated_price: 165,
+          pending_setup_fee: 55,
+          is_recurring: true,
+          recurring_pattern: 'quarterly',
+        },
+      });
+
+      const result = await EstimateConverter().convertEstimate(estimateId, {
+        database: mockTransaction,
+        billingTerm: 'prepay_annual',
+        prepayInvoiceAmount: 660,
+        allowFirstApplicationFallback: false,
+        skipAutoSchedule: true,
+        bookedAppointmentIds: [rootId],
+        autoSendInvoice: false,
+        skipMembershipEmail: true,
+      });
+
+      expect(result.firstScheduledServiceId).toBe(rootId);
+      expect(dateOnly((await mockTransaction('annual_prepay_terms')
+        .where({ id: result.annualPrepayTermId }).first()).term_start)).toBe(CHOSEN_DATE);
+      expect(await mockTransaction('setup_fee_claims').where({ invoice_id: result.draftInvoiceId }).first())
+        .toMatchObject({
+          scheduled_service_id: rootId,
+          estimate_id: estimateId,
+          amount: '55.00',
+          unbooked_commercial_setup: false,
+        });
+      expect((await mockTransaction('scheduled_services').where({ id: rootId }).first()).pending_setup_fee).toBeNull();
+      const successors = await mockTransaction('scheduled_services')
+        .where({ recurring_parent_id: rootId }).orderBy('scheduled_date', 'asc');
+      expect(successors).toHaveLength(3);
+      expect(successors.every((row) => dateOnly(row.scheduled_date) > CHOSEN_DATE)).toBe(true);
+    });
+
+    test('an explicitly adopted commercial root keeps its date and existing series unchanged', async () => {
+      const { customerId, estimateId } = await fixture(mockTransaction, {
+        data: COMMERCIAL_RODENT_DATA, monthly: 55, annual: 660,
+      });
+      await mockTransaction('customers').where({ id: customerId }).update({ property_type: 'commercial' });
+      await mockTransaction('estimates').where({ id: estimateId }).update({
+        category: 'COMMERCIAL', status: 'accepted', accepted_at: new Date(),
+      });
+      const rootId = await visit(mockTransaction, {
+        customerId, key: 'rodent_bait_quarterly', type: 'Commercial Rodent Bait Stations', date: CHOSEN_DATE,
+        extra: {
+          estimated_price: 165, pending_setup_fee: 55,
+          is_recurring: true, recurring_pattern: 'quarterly',
+          service_address_line1: '55 Selected Series Lane',
+        },
+      });
+      const existingChildId = await visit(mockTransaction, {
+        customerId, key: 'rodent_bait_quarterly', type: 'Commercial Rodent Bait Stations',
+        date: etDateString(addETDays(new Date(), 100)),
+        extra: { recurring_parent_id: rootId, estimated_price: 165, is_recurring: true, recurring_pattern: 'quarterly' },
+      });
+      const competingRootId = await visit(mockTransaction, {
+        customerId, key: 'rodent_bait_quarterly', type: 'Commercial Rodent Bait Stations', date: ASSESSMENT_DATE,
+        extra: {
+          source_estimate_id: estimateId,
+          estimated_price: 73, pending_setup_fee: 73,
+          is_recurring: true, recurring_pattern: 'quarterly',
+          service_address_line1: '73 Unrelated Property Way',
+        },
+      });
+      const before = await mockTransaction('scheduled_services')
+        .where(function selectedAndCompeting() {
+          this.whereIn('id', [rootId, competingRootId]).orWhere({ recurring_parent_id: rootId });
+        })
+        .orderBy('id');
+
+      const result = await EstimateConverter().convertEstimate(estimateId, {
+        database: mockTransaction,
+        billingTerm: 'prepay_annual',
+        prepayInvoiceAmount: 660,
+        allowFirstApplicationFallback: false,
+        skipAutoSchedule: true,
+        adoptedExistingAppointmentId: rootId,
+        bookedAppointmentIds: [competingRootId],
+        autoSendInvoice: false,
+        skipMembershipEmail: true,
+      });
+
+      expect(result.firstScheduledServiceId).toBe(rootId);
+      expect(dateOnly((await mockTransaction('annual_prepay_terms')
+        .where({ id: result.annualPrepayTermId }).first()).term_start)).toBe(CHOSEN_DATE);
+      expect(await mockTransaction('setup_fee_claims').where({ invoice_id: result.draftInvoiceId }).first())
+        .toMatchObject({
+          scheduled_service_id: rootId,
+          estimate_id: estimateId,
+          amount: '55.00',
+          unbooked_commercial_setup: false,
+        });
+      const after = await mockTransaction('scheduled_services')
+        .where(function selectedAndCompeting() {
+          this.whereIn('id', [rootId, competingRootId]).orWhere({ recurring_parent_id: rootId });
+        })
+        .orderBy('id');
+      const rootBefore = before.find((row) => row.id === rootId);
+      const rootAfter = after.find((row) => row.id === rootId);
+      expect(Number(rootBefore.pending_setup_fee)).toBe(55);
+      expect(rootAfter).toEqual({ ...rootBefore, pending_setup_fee: null, updated_at: rootAfter.updated_at });
+      expect(after.find((row) => row.id === existingChildId)).toEqual(before.find((row) => row.id === existingChildId));
+      expect(after.find((row) => row.id === competingRootId)).toEqual(before.find((row) => row.id === competingRootId));
+      expect(before.some((row) => row.id === existingChildId)).toBe(true);
+
+      const term = await mockTransaction('annual_prepay_terms').where({ id: result.annualPrepayTermId }).first();
+      expect(term.commercial_setup_series_root_id).toBe(rootId);
+      // Four other-property jobs land earlier than this series' children. Even
+      // after refund recovery consumes the setup claim, the term keeps its sale scope.
+      await mockTransaction('setup_fee_claims').where({ invoice_id: result.draftInvoiceId }).del();
+      const unrelatedIds = [competingRootId];
+      for (const days of [12, 14, 16, 18]) {
+        unrelatedIds.push(await visit(mockTransaction, {
+          customerId, key: 'rodent_bait_quarterly', type: 'Commercial Rodent Bait Stations',
+          date: etDateString(addETDays(new Date(), days)),
+          extra: { recurring_parent_id: competingRootId, estimated_price: 73, service_address_line1: '73 Unrelated Property Way' },
+        }));
+      }
+      const unrelated = () => mockTransaction('scheduled_services').whereIn('id', unrelatedIds).orderBy('id');
+      const otherBeforePayment = await unrelated();
+      await mockTransaction('invoices').where({ id: result.draftInvoiceId }).update({ status: 'paid', paid_at: new Date() });
+      const renewals = require('../services/annual-prepay-renewals');
+      await renewals.syncTermForInvoicePayment(result.draftInvoiceId, mockTransaction);
+      const coveredVisits = () => mockTransaction('scheduled_services')
+        .where({ annual_prepay_term_id: term.id }).orderBy('id');
+      const covered = await coveredVisits();
+      expect(covered).toHaveLength(4);
+      for (const row of covered) {
+        expect(row.recurring_parent_id || row.id).toBe(rootId);
+        expect(row.prepaid_method).toBe('annual_prepay_invoice');
+        if (![rootId, existingChildId].includes(row.id)) expect(row.service_address_line1).toBe('55 Selected Series Lane');
+      }
+      expect(covered.map((row) => row.id)).toEqual(expect.arrayContaining([rootId, existingChildId]));
+      expect(await unrelated()).toEqual(otherBeforePayment);
+      await renewals.syncTermForInvoicePayment(result.draftInvoiceId, mockTransaction);
+      expect((await coveredVisits()).map((row) => row.id)).toEqual(covered.map((row) => row.id));
+      expect(await unrelated()).toEqual(otherBeforePayment);
+    });
+
+    test.each([
+      ['catalog', 'rodent_bait_quarterly', 'Commercial Rodent Bait Stations'],
+      ['catalog with stale label', 'rodent_bait_quarterly', 'Pest Control'],
+      ['legacy', null, 'Rodent Bait Stations'],
+    ])('a selected %s bait child keeps its cancelled parent as setup owner and its own promised date', async (_kind, serviceKey, serviceType) => {
+      const { customerId, estimateId } = await fixture(mockTransaction, {
+        data: COMMERCIAL_RODENT_DATA, monthly: 55, annual: 660,
+      });
+      await mockTransaction('customers').where({ id: customerId }).update({ property_type: 'commercial' });
+      await mockTransaction('estimates').where({ id: estimateId }).update({
+        category: 'COMMERCIAL', status: 'accepted', accepted_at: new Date(),
+      });
+      const parentId = await visit(mockTransaction, {
+        customerId, key: serviceKey, type: serviceType, date: CHOSEN_DATE,
+        extra: {
+          status: 'cancelled', estimated_price: 165, pending_setup_fee: 55,
+          is_recurring: true, recurring_pattern: 'quarterly',
+        },
+      });
+      const childDate = etDateString(addETDays(new Date(), 42));
+      const childId = await visit(mockTransaction, {
+        customerId, key: serviceKey, type: serviceType, date: childDate,
+        extra: { recurring_parent_id: parentId, estimated_price: 165 },
+      });
+      const parentBefore = await mockTransaction('scheduled_services').where({ id: parentId }).first();
+      const childBefore = await mockTransaction('scheduled_services').where({ id: childId }).first();
+
+      const result = await EstimateConverter().convertEstimate(estimateId, {
+        database: mockTransaction,
+        billingTerm: 'prepay_annual',
+        prepayInvoiceAmount: 660,
+        allowFirstApplicationFallback: false,
+        skipAutoSchedule: true,
+        adoptedExistingAppointmentId: childId,
+        autoSendInvoice: false,
+        skipMembershipEmail: true,
+      });
+
+      expect(result.firstScheduledServiceId).toBe(childId);
+      const term = await mockTransaction('annual_prepay_terms').where({ id: result.annualPrepayTermId }).first();
+      expect(dateOnly(term.term_start)).toBe(childDate);
+      expect(term.commercial_setup_series_root_id).toBe(parentId);
+      expect(await mockTransaction('setup_fee_claims').where({ invoice_id: result.draftInvoiceId }).first())
+        .toMatchObject({
+          scheduled_service_id: parentId,
+          estimate_id: estimateId,
+          amount: '55.00',
+          unbooked_commercial_setup: false,
+        });
+      const parentAfter = await mockTransaction('scheduled_services').where({ id: parentId }).first();
+      expect(Number(parentBefore.pending_setup_fee)).toBe(55);
+      expect(parentAfter).toEqual({ ...parentBefore, pending_setup_fee: null, updated_at: parentAfter.updated_at });
+      expect(await mockTransaction('scheduled_services').where({ id: childId }).first()).toEqual(childBefore);
+      expect(await mockTransaction('scheduled_services').where({ customer_id: customerId }).count('id as count').first())
+        .toMatchObject({ count: '2' });
+      const otherServiceId = await visit(mockTransaction, {
+        customerId, key: 'lawn_care_monthly', type: 'Commercial Rodent Bait Stations', date: childDate,
+        extra: { recurring_parent_id: parentId, estimated_price: 73 },
+      });
+      await mockTransaction('invoices').where({ id: result.draftInvoiceId }).update({ status: 'paid', paid_at: new Date() });
+      const renewals = require('../services/annual-prepay-renewals');
+      await renewals.syncTermForInvoicePayment(result.draftInvoiceId, mockTransaction);
+      const paidChild = await mockTransaction('scheduled_services').where({ id: childId }).first();
+      expect(paidChild).toMatchObject({ annual_prepay_term_id: term.id, prepaid_method: 'annual_prepay_invoice' });
+      expect(await renewals.annualPrepayCoversVisit(paidChild, mockTransaction, { throwOnError: true })).toBe(true);
+      const partialStamp = {
+        id: childId, service_type: serviceType, scheduled_date: paidChild.scheduled_date,
+        annual_prepay_term_id: term.id, prepaid_method: paidChild.prepaid_method, prepaid_amount: paidChild.prepaid_amount,
+      };
+      expect(await renewals.annualPrepayCoversVisit(partialStamp, mockTransaction, { throwOnError: true })).toBe(true);
+      const otherService = await mockTransaction('scheduled_services').where({ id: otherServiceId }).first();
+      expect(otherService).toMatchObject({ annual_prepay_term_id: null, prepaid_method: null });
+      expect(Number(otherService.estimated_price)).toBe(73);
+      expect(await renewals.annualPrepayCoversVisit({
+        ...partialStamp, id: otherServiceId, service_type: otherService.service_type,
+      }, mockTransaction, { throwOnError: true })).toBe(false);
+    });
+
+    test('an in-flight completion claim on the selected root rejects the prepay and rolls its claim back', async () => {
+      const { customerId, estimateId } = await fixture(mockTransaction, {
+        data: COMMERCIAL_RODENT_DATA, monthly: 55, annual: 660,
+      });
+      await mockTransaction('customers').where({ id: customerId }).update({ property_type: 'commercial' });
+      await mockTransaction('estimates').where({ id: estimateId }).update({
+        category: 'COMMERCIAL', status: 'accepted', accepted_at: new Date(),
+      });
+      const rootId = await visit(mockTransaction, {
+        customerId, key: 'rodent_bait_quarterly', type: 'Commercial Rodent Bait Stations', date: CHOSEN_DATE,
+        extra: {
+          estimated_price: 165, pending_setup_fee: -55,
+          is_recurring: true, recurring_pattern: 'quarterly',
+        },
+      });
+
+      await expect(mockTransaction.transaction((conversionTrx) => EstimateConverter().convertEstimate(estimateId, {
+        database: conversionTrx,
+        billingTerm: 'prepay_annual',
+        prepayInvoiceAmount: 660,
+        allowFirstApplicationFallback: false,
+        skipAutoSchedule: true,
+        adoptedExistingAppointmentId: rootId,
+        autoSendInvoice: false,
+        skipMembershipEmail: true,
+      }))).rejects.toMatchObject({
+        switchConflict: true, status: 409, statusCode: 409,
+        message: expect.stringMatching(/completion in progress/),
+      });
+
+      expect(Number((await mockTransaction('scheduled_services').where({ id: rootId }).first()).pending_setup_fee)).toBe(-55);
+      expect(await mockTransaction('setup_fee_claims').where({ estimate_id: estimateId })).toHaveLength(0);
+      expect(await mockTransaction('annual_prepay_terms').where({ source_estimate_id: estimateId })).toHaveLength(0);
+    });
+
+    test('a completed selected series with a billed setup cannot become an invoice-only sale', async () => {
+      const { customerId, estimateId } = await fixture(mockTransaction, {
+        data: COMMERCIAL_RODENT_DATA, monthly: 55, annual: 660,
+      });
+      await mockTransaction('customers').where({ id: customerId }).update({ property_type: 'commercial' });
+      await mockTransaction('estimates').where({ id: estimateId }).update({
+        category: 'COMMERCIAL', status: 'accepted', accepted_at: new Date(),
+      });
+      const rootId = await visit(mockTransaction, {
+        customerId, key: 'rodent_bait_quarterly', type: 'Commercial Rodent Bait Stations', date: CHOSEN_DATE,
+        extra: { status: 'completed', is_recurring: true, pending_setup_fee: null, estimated_price: 165 },
+      });
+      const completionId = randomUUID();
+      await mockTransaction('invoices').insert({
+        id: completionId, customer_id: customerId, scheduled_service_id: rootId, token: randomUUID(),
+        invoice_number: 'SETUP-' + completionId.slice(0, 8), title: 'Bait station setup', status: 'paid',
+        paid_at: new Date(), subtotal: 55, total: 55, due_date: CHOSEN_DATE, line_items: '[]',
+      });
+      await mockTransaction('setup_fee_claims').insert({
+        invoice_id: completionId, scheduled_service_id: rootId, amount: 55,
+      });
+      await expect(EstimateConverter().convertEstimate(estimateId, {
+        billingTerm: 'prepay_annual', prepayInvoiceAmount: 660, skipAutoSchedule: true,
+        adoptedExistingAppointmentId: rootId, autoSendInvoice: false, skipMembershipEmail: true,
+      })).rejects.toMatchObject({ statusCode: 409, switchConflict: true });
+      expect(await mockTransaction('invoices').where({ customer_id: customerId }).select('id', 'status'))
+        .toEqual([{ id: completionId, status: 'paid' }]);
+      expect(await mockTransaction('setup_fee_claims').where({ scheduled_service_id: rootId }).select('invoice_id'))
+        .toEqual([{ invoice_id: completionId }]);
+      expect(await mockTransaction('annual_prepay_terms').where({ source_estimate_id: estimateId })).toHaveLength(0);
+    });
+
+    test.each(['parent service', 'moved child', 'rescheduled child', 'cancelled child', 'window'])(
+      'a selected bait occurrence with a changed %s cannot create a prepay invoice', async (change) => {
+        const { customerId, estimateId } = await fixture(mockTransaction, {
+          data: COMMERCIAL_RODENT_DATA, monthly: 55, annual: 660,
+        });
+        await mockTransaction('customers').where({ id: customerId }).update({ property_type: 'commercial' });
+        await mockTransaction('estimates').where({ id: estimateId }).update({
+          category: 'COMMERCIAL', status: 'accepted', accepted_at: new Date(),
+        });
+        const makeVisit = (extra) => visit(mockTransaction, {
+          customerId, key: 'rodent_bait_quarterly', type: 'Commercial Rodent Bait Stations',
+          date: CHOSEN_DATE, extra: { is_recurring: true, estimated_price: 165, ...extra },
+        });
+        const rootId = await makeVisit({ pending_setup_fee: 55 });
+        const childId = await makeVisit({ recurring_parent_id: rootId, window_start: '09:00' });
+        const opts = { adoptedExistingAppointmentId: childId, skipAutoSchedule: true };
+        const { resolveCommercialPrepaySale } = require('../services/commercial-prepay-sale-visits');
+        let snapshot;
+        if (change === 'parent service') {
+          await mockTransaction('scheduled_services').where({ id: rootId }).update({ service_id: null, service_type: 'Pest Control' });
+        } else {
+          snapshot = await resolveCommercialPrepaySale(mockTransaction, customerId, COMMERCIAL_RODENT_DATA, opts);
+          const changeTo = change === 'moved child' ? { recurring_parent_id: await makeVisit({}) }
+            : change === 'rescheduled child' ? { scheduled_date: etDateString(addETDays(new Date(CHOSEN_DATE + 'T12:00:00Z'), 4)) }
+              : change === 'cancelled child' ? { status: 'cancelled' } : { window_start: '14:00' };
+          await mockTransaction('scheduled_services').where({ id: childId }).update(changeTo);
+        }
+        await expect(EstimateConverter().convertEstimate(estimateId, {
+          ...opts, commercialPrepaySale: snapshot, billingTerm: 'prepay_annual', prepayInvoiceAmount: 660,
+          autoSendInvoice: false, skipMembershipEmail: true,
+        })).rejects.toMatchObject({ statusCode: 409, switchConflict: true });
+        expect(await mockTransaction('invoices').where({ customer_id: customerId })).toHaveLength(0);
+        expect(await mockTransaction('annual_prepay_terms').where({ customer_id: customerId })).toHaveLength(0);
+        expect(Number((await mockTransaction('scheduled_services').where({ id: rootId }).first()).pending_setup_fee)).toBe(55);
+      },
+    );
+
+    test('the standalone converter rejects an in-flight selected-root claim before its invoice commits', async () => {
+      const { customerId, estimateId } = await fixture(mockTransaction, {
+        data: COMMERCIAL_RODENT_DATA, monthly: 55, annual: 660,
+      });
+      await mockTransaction('customers').where({ id: customerId }).update({ property_type: 'commercial' });
+      await mockTransaction('estimates').where({ id: estimateId }).update({
+        category: 'COMMERCIAL', status: 'accepted', accepted_at: new Date(),
+      });
+      const rootId = await visit(mockTransaction, {
+        customerId, key: 'rodent_bait_quarterly', type: 'Commercial Rodent Bait Stations', date: CHOSEN_DATE,
+        extra: {
+          estimated_price: 165, pending_setup_fee: -55,
+          is_recurring: true, recurring_pattern: 'quarterly',
+        },
+      });
+
+      // No opts.database: exercise the normal standalone/global converter.
+      // The module's db mock delegates to this test's real PG transaction,
+      // while the converter's invoice transaction is a real savepoint.
+      await expect(EstimateConverter().convertEstimate(estimateId, {
+        billingTerm: 'prepay_annual',
+        prepayInvoiceAmount: 660,
+        allowFirstApplicationFallback: false,
+        skipAutoSchedule: true,
+        adoptedExistingAppointmentId: rootId,
+        autoSendInvoice: false,
+        skipMembershipEmail: true,
+      })).rejects.toMatchObject({
+        switchConflict: true, status: 409, statusCode: 409,
+        message: expect.stringMatching(/completion in progress/),
+      });
+
+      expect(Number((await mockTransaction('scheduled_services').where({ id: rootId }).first()).pending_setup_fee)).toBe(-55);
+      expect(await mockTransaction('invoices').where({ customer_id: customerId })).toHaveLength(0);
+      expect(await mockTransaction('setup_fee_claims').where({ estimate_id: estimateId })).toHaveLength(0);
+      expect(await mockTransaction('annual_prepay_terms').where({ source_estimate_id: estimateId })).toHaveLength(0);
+    });
 
     test('an assessment stamped to the estimate (older build) does not become the plan start', async () => {
       const { customerId, estimateId } = await fixture(mockTransaction);

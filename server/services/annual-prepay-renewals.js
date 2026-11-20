@@ -430,17 +430,15 @@ async function findVisitWindowConflict(conn, {
   const customerId = adoptableFor?.customerId || null;
   const serviceType = adoptableFor?.coverageServiceType || null;
   if (!customerId || !serviceType) return rows[0];
-  const blocking = rows.filter((row) => !(
-    String(row.customer_id) === String(customerId)
-    && serviceMatchesCoverage(row, serviceType)
-    // The exemption must be exactly as narrow as ADOPTION (codex r21
-    // pre-push P1): a row the coverage refused to adopt (wrong identity,
-    // other term) is real occupancy — the timed insert must not overlap
-    // it.
-    && (typeof adoptableFor?.isAdoptable !== 'function' || adoptableFor.isAdoptable(row))
-    && !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase())
-  ));
-  return blocking.length ? blocking[0] : null;
+  for (const row of rows) {
+    if (String(row.customer_id) !== String(customerId)
+      || COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase())) return row;
+    const adoptable = adoptableFor.isAdoptable
+      ? await adoptableFor.isAdoptable(row, conn)
+      : serviceMatchesCoverage(row, serviceType);
+    if (!adoptable) return row;
+  }
+  return null;
 }
 
 function daysUntil(fromYmd, toYmd) {
@@ -866,6 +864,68 @@ async function coverageCandidateRows(term, conn, termStart, termEnd) {
   return scope ? rows.filter((row) => rowInRenewalScope(row, scope)) : rows;
 }
 
+// A booked sale covers its selected recurring series. An invoice-owned sale
+// covers its explicitly linked visits and may seed a series from a saved promise.
+async function commercialSetupVisitScope(term, conn) {
+  if (!term?.prepay_invoice_id) return null;
+  if (term.commercial_setup_series_root_id) return { rootId: term.commercial_setup_series_root_id };
+  const { findOriginalCommercialPrepayInvoice, bookedCommercialSetupRootId } = require('./commercial-prepay-original-invoice');
+  const original = await findOriginalCommercialPrepayInvoice(conn, term.prepay_invoice_id);
+  if (original) return { promised: Boolean(dateOnly(term.first_visit_date ?? original.term?.first_visit_date)) };
+  const rootId = await bookedCommercialSetupRootId(conn, term, { readStored: true });
+  return rootId ? { rootId } : null;
+}
+
+function rowInCommercialSetupScope(scope, term, row) {
+  if (!scope) return true;
+  if (!row || row.customer_id !== term.customer_id) return false;
+  if (scope.rootId) return row.id === scope.rootId || row.recurring_parent_id === scope.rootId;
+  return term.id != null && row.annual_prepay_term_id === term.id;
+}
+
+// A booked commercial term already identifies the sold series and channel.
+// Resolve the catalog once per selection, so a stale display label cannot
+// drop a paid bait visit or adopt a differently cataloged visit on that series.
+async function bookedBaitServiceIdentity(conn, scope, root = null) {
+  if (!scope?.rootId) return null;
+  const { recurringServiceKey } = require('./estimate-converter');
+  const { isRodentBaitProgramKey } = require('./secure-appointment-plans');
+  const catalog = await conn('services')
+    .whereILike('service_key', '%rodent%').orWhereILike('name', '%rodent%')
+    .select('id', 'service_key', 'name');
+  const baitCatalog = catalog.filter((service) => isRodentBaitProgramKey(recurringServiceKey(service)));
+  const baitIds = new Set(baitCatalog.map((service) => service.id));
+  const matches = (row) => row.service_id
+    ? baitIds.has(row.service_id)
+    : isRodentBaitProgramKey(recurringServiceKey({ name: row.service_type }));
+  // A schedule switch may retain the generic display label "Pest Control"
+  // while the sold root's catalog id still proves rodent-bait ownership.
+  // Preserve that verified catalog identity on every child the paid term
+  // seeds; otherwise this matcher rejects the children on the stamp pass and
+  // a later refresh seeds the same paid slots again.
+  const rootCatalog = root?.service_id == null ? null
+    : baitCatalog.find((service) => String(service.id) === String(root.service_id));
+  return {
+    matches,
+    serviceId: rootCatalog?.id || null,
+    serviceKey: rootCatalog?.service_key || null,
+  };
+}
+
+async function bookedBaitServiceMatcher(conn, scope) {
+  return (await bookedBaitServiceIdentity(conn, scope))?.matches || null;
+}
+
+// Occupancy, completion and schedule-edit callers can project away the
+// catalog or parent ID. Keep proposed edits while filling omitted columns.
+async function completeBookedVisit(conn, row) {
+  if (!row?.id) return null;
+  if (['customer_id', 'service_id', 'service_type', 'recurring_parent_id', 'annual_prepay_term_id', 'property_id', 'source_estimate_id']
+    .every((field) => Object.hasOwn(row, field))) return row;
+  const stored = await conn('scheduled_services').where({ id: row.id }).first();
+  return stored ? { ...stored, ...row } : null;
+}
+
 async function coverageRowsForTerm(term, conn = db, {
   includeTerminalStatuses = false, extraCandidateRows = null, projectFirstActivationOn = null, activationWindow,
 } = {}) {
@@ -899,8 +959,11 @@ async function coverageRowsForTerm(term, conn = db, {
   if (!term?.customer_id || !coverageServiceType || !coverageVisitCount || !termStart || !termEnd) {
     return [];
   }
-
   const rows = await coverageCandidateRows(term, conn, termStart, termEnd);
+  const commercialScope = await commercialSetupVisitScope(term, conn);
+  const commerciallyScopedRows = commercialScope
+    ? rows.filter((row) => rowInCommercialSetupScope(commercialScope, term, row))
+    : rows;
 
   // extraCandidateRows: a read-only caller's OWN in-memory rows, substituted
   // for this term's ordinary DB-backed candidates by id — the re-price
@@ -913,12 +976,22 @@ async function coverageRowsForTerm(term, conn = db, {
   // resolved coverage scope — so an override can only ever stand in for a
   // row the ordinary query would have returned once its date is actually
   // written, never see more than that.
-  let candidateRows = rows;
+  let candidateRows = commerciallyScopedRows;
   if (extraCandidateRows && extraCandidateRows.length > 0) {
     let overrides = extraCandidateRows.filter((row) => {
       const d = dateOnly(row?.scheduled_date);
       return !!(d && d >= termStart && d <= termEnd);
     });
+    if (commercialScope) {
+      const storedRows = new Map(rows.map((row) => [String(row.id), row]));
+      const scoped = [];
+      for (const row of overrides) {
+        let candidate = { ...storedRows.get(String(row.id)), ...row };
+        if (commercialScope.rootId) candidate = await completeBookedVisit(conn, candidate);
+        if (rowInCommercialSetupScope(commercialScope, term, candidate)) scoped.push(candidate);
+      }
+      overrides = scoped;
+    }
     if (overrides.length > 0 && term?.renewed_from_term_id) {
       const scope = await successorCoverageScope(term, conn);
       overrides = !scope ? overrides : (!scope.resolved ? [] : overrides.filter((row) => rowInRenewalScope(row, scope)));
@@ -932,7 +1005,7 @@ async function coverageRowsForTerm(term, conn = db, {
     // window_start, id): the sold-slot slicing below keeps the EARLIEST rows,
     // so a visit moved earlier must compete for a slot at its new position.
     const overriddenIds = new Set(extraCandidateRows.map((row) => String(row?.id)));
-    const dbById = new Map(rows.map((row) => [String(row.id), row]));
+    const dbById = new Map(commerciallyScopedRows.map((row) => [String(row.id), row]));
     // window_start as Postgres orders a TIME: posted values arrive as
     // "9:00", "09:00" or "09:00:00" (and DB rows as "HH:MM:SS"), so compare
     // a zero-padded HH:MM:SS key, never the raw string (Codex pre-push P1).
@@ -949,7 +1022,7 @@ async function coverageRowsForTerm(term, conn = db, {
       return x < y ? -1 : (x > y ? 1 : 0);
     };
     candidateRows = [
-      ...rows.filter((row) => !overriddenIds.has(String(row.id))),
+      ...commerciallyScopedRows.filter((row) => !overriddenIds.has(String(row.id))),
       ...overrides.map((row) => ({ ...(dbById.get(String(row.id)) || {}), ...row })),
     ].sort((a, b) => cmp(dateOnly(a.scheduled_date), dateOnly(b.scheduled_date))
       || cmp(timeKey(a.window_start), timeKey(b.window_start))
@@ -980,8 +1053,9 @@ async function coverageRowsForTerm(term, conn = db, {
   // by service-type text — it counts as the coverage year's visit even when
   // it was booked under an installation label the coverage text does not
   // match, so anchoring never seeds a second visit beside it.
+  const matchesBookedBait = await bookedBaitServiceMatcher(conn, commercialScope);
   let matching = filtered.filter((row) => isInstallationAnchorRow(term, row)
-    || serviceMatchesCoverage(row, coverageServiceType));
+    || (matchesBookedBait ? matchesBookedBait(row) : serviceMatchesCoverage(row, coverageServiceType)));
   // A row explicitly linked to a DIFFERENT term never counts toward THIS
   // term's coverage, for EVERY coverage family (not only palm — the palm
   // branch below already re-applies this, redundantly but harmlessly, as
@@ -1437,6 +1511,17 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
       createdCount: 0, targetDates: [], effectiveTermEnd: termEnd, reason: 'awaiting_installation',
     };
   }
+  const commercialScope = await commercialSetupVisitScope(term, conn);
+  const bookedRoot = commercialScope?.rootId
+    ? await conn('scheduled_services').where({ id: commercialScope.rootId, customer_id: term.customer_id }).first()
+    : null;
+  // Completing the original visit uses one sold slot. The remaining quarterly
+  // visits still belong to that series even if none were scheduled at sale.
+  if (commercialScope && !commercialScope.promised
+    && !(bookedRoot && (String(bookedRoot.status).toLowerCase() === 'completed'
+      || await require('./secure-appointment-plans').seriesCanStillConsume(conn, bookedRoot)))) {
+    return { createdCount: 0, targetDates: [], effectiveTermEnd: termEnd, reason: 'awaiting_commercial_setup_assignment' };
+  }
   const lineageRefusal = await renewalLineageRefusal(term, conn, termEnd);
   if (lineageRefusal) return lineageRefusal;
   const cols = await scheduledServiceColumns();
@@ -1612,7 +1697,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   const adoptedConcurrentRows = [];
   // Owner directive (2026-07-03): every service call defaults to 60 minutes.
   const baseDuration = 60;
-  const recurringParentId = existingRows[0]?.recurring_parent_id || existingRows[0]?.id || null;
+  const recurringParentId = bookedRoot?.id || existingRows[0]?.recurring_parent_id || existingRows[0]?.id || null;
   let createdParentId = recurringParentId;
 
   // Give seeded visits a billable pre-tax per-visit price (from the prepay
@@ -1668,6 +1753,12 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   let coverageCatalogServiceId = null;
   let coverageCatalogKey = null;
   let staleOneTimePalmId = null;
+  const bookedBaitIdentity = await bookedBaitServiceIdentity(conn, commercialScope, bookedRoot);
+  const matchesBookedBait = bookedBaitIdentity?.matches || null;
+  if (bookedBaitIdentity?.serviceId) {
+    coverageCatalogServiceId = bookedBaitIdentity.serviceId;
+    coverageCatalogKey = bookedBaitIdentity.serviceKey;
+  }
   // Palm detection runs INDEPENDENTLY of the coverage cadence (codex r18
   // pre-push P1): nesting it under `=== 'semiannual'` let an admin-created
   // palm term with an explicit monthly/quarterly cadence bypass the
@@ -1799,7 +1890,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // creates nothing, so the refresh hard-stop leaves no correctly-seeded
   // visit unstamped. Failure files the durable exception and defers; the
   // next idempotent term refresh retries the whole sequence.
-  if (coverageCatalogServiceId && cols.service_id) {
+  if (coverageIsPalm && coverageCatalogServiceId && cols.service_id) {
     const existingOk = await backfillPalmIdentity(existingRows, 'matched-existing');
     if (!existingOk) {
       await fileCoverageException(term, 'palm_identity_backfill_failed',
@@ -1868,7 +1959,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // is unambiguous (same rule as the
   // manual admin-schedule / admin-leads / availability bookings);
   // multi-property customers stay office-placed. Resolved once per term.
-  const seedPropertyId = await coverageSeedPropertyId(term, cols, conn);
+  const seedPropertyId = bookedRoot ? bookedRoot.property_id : await coverageSeedPropertyId(term, cols, conn);
   // Series slot (owner 2026-11-01): per seeded date, the
   // technician / copied time / taken-hour hand-off fields buildInsert writes.
   // Filled by prepareSeedSlot inside the insert's lock scope; EMPTY when the
@@ -1895,7 +1986,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
       notes: `Annual prepaid ${coverageServiceType} coverage`,
       estimated_duration_minutes: baseDuration,
     };
-    if (cols.property_id && seedPropertyId) insertData.property_id = seedPropertyId;
+    if (bookedRoot) require('./booking/visit-financial-stamps').copyStampedServiceAddressFields(insertData, bookedRoot, cols);
+    else if (cols.property_id && seedPropertyId) insertData.property_id = seedPropertyId;
     if (cols.service_id && coverageCatalogServiceId) insertData.service_id = coverageCatalogServiceId;
     if (cols.service_key_snapshot && coverageCatalogKey) insertData.service_key_snapshot = coverageCatalogKey;
     if (cols.annual_prepay_term_id) insertData.annual_prepay_term_id = term.id;
@@ -1932,7 +2024,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     if (!datesToSeed.length || !cols.technician_id || !cols.window_start) return;
     const SeriesSlot = require('./annual-prepay-series-slot');
     seriesSlot = await SeriesSlot.coverageSeriesSlot(conn, {
-      customerId: term.customer_id, coverageServiceType, propertyId: seedPropertyId, today,
+      customerId: term.customer_id, coverageServiceType, propertyId: seedPropertyId,
+      seriesRootId: bookedRoot?.id, matchesBookedBait, today,
     });
     if (seriesSlot) seriesAbsentDays = await SeriesSlot.seriesSlotAbsentDays(conn, seriesSlot, datesToSeed);
   };
@@ -1995,7 +2088,12 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // simply stays excluded, exactly as before this fix (never a regression,
   // just not more lenient in this one edge path).
   const adoptableCoverageRow = (row) => !isCallbackRow(row)
-    && serviceMatchesCoverage(row, coverageServiceType)
+    && (matchesBookedBait ? matchesBookedBait(row) : serviceMatchesCoverage(row, coverageServiceType))
+    // A Customer 360 promise on an invoice-owned setup creates THIS term's
+    // series. A same-day row from another property/series is occupancy, not
+    // an adoption candidate; only a concurrent retry already linked to this
+    // exact term may suppress the insert.
+    && rowInCommercialSetupScope(commercialScope, term, row)
     && !rowLinkedToAnotherTerm(term, row)
     && (!coverageIsPalm || (() => {
       // Same ID-FIRST classification as coverage matching (codex r27
@@ -2050,7 +2148,14 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
           scheduledDate,
           windowStart,
           durationMinutes: baseDuration,
-          adoptableFor: { customerId: term.customer_id, coverageServiceType, isAdoptable: adoptableCoverageRow },
+          adoptableFor: {
+            customerId: term.customer_id,
+            coverageServiceType,
+            isAdoptable: async (row, reader) => {
+              const candidate = matchesBookedBait ? await completeBookedVisit(reader, row) : row;
+              return candidate && adoptableCoverageRow(candidate);
+            },
+          },
         });
         // ADVISORY (owner ruling 2026-08-27 — schedule overlaps never block
         // or drop a booking): the promised window is kept either way; a hit
@@ -2159,11 +2264,13 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
         // id would then stamp the promised time onto a different date (never
         // conflict-checked) or rewrite completed history. Re-read under the
         // lock and abort unless it is still the visit we matched.
-        const fresh = await sp('scheduled_services').where({ id: row.id }).first();
+        const fresh = await sp('scheduled_services').where({ id: row.id }).forUpdate().first();
         if (!fresh
           || dateOnly(fresh.scheduled_date) !== promisedTarget
           || PREPAID_UPDATE_EXCLUDED_STATUSES.has(String(fresh.status || '').toLowerCase())
-          || !serviceMatchesCoverage(fresh, coverageServiceType)) {
+          || !(commercialScope
+            ? adoptableCoverageRow(fresh)
+            : serviceMatchesCoverage(fresh, coverageServiceType))) {
           staleAdoption = true;
           return;
         }
@@ -2206,7 +2313,29 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     // surface recomputes from window_start.
     if (cols.time_window) updates.time_window = null;
     if (cols.window_display) updates.window_display = null;
-    await trx('scheduled_services').where({ id: row.id }).update({ ...updates, ...recurringDispatchDuePatch(row, updates) });
+    let updateQuery = trx('scheduled_services')
+      .where({ id: row.id })
+      .where({ customer_id: term.customer_id, scheduled_date: promisedTarget })
+      .where((q) => q.whereNull('status').orWhereNotIn('status', [...PREPAID_UPDATE_EXCLUDED_STATUSES]));
+    // Pin the ownership decision to the UPDATE too. The locked re-read above
+    // closes the normal race; these predicates also fail closed if a legacy
+    // writer changes membership without honoring that row lock.
+    if (commercialScope?.rootId) {
+      updateQuery = updateQuery.where(function soldSeriesMembership() {
+        this.where('id', commercialScope.rootId).orWhere('recurring_parent_id', commercialScope.rootId);
+      }).where(function termMembership() {
+        this.whereNull('annual_prepay_term_id').orWhere('annual_prepay_term_id', term.id);
+      });
+    } else if (commercialScope) {
+      updateQuery = updateQuery.where({ annual_prepay_term_id: term.id });
+    }
+    const updated = await updateQuery.update({ ...updates, ...recurringDispatchDuePatch(row, updates) });
+    if (Number(updated) !== 1) {
+      logger.warn(`[annual-prepay] term ${term.id} adopted visit ${row.id} changed membership before retime — leaving it untouched`);
+      await fileCoverageException(term, 'adopted_visit_moved',
+        `The visit matching the promised first service on ${promisedTarget} was moved or completed while payment landed. Confirm the schedule with the customer.`);
+      return;
+    }
     // Route check on saves: the retimed visit moved within its day.
     await placeAutoSavedVisit(trx, { visit: row, source: 'annual_prepay_renewal' });
     // Filed only once the retime is written (same rule as the seed path):
@@ -2364,9 +2493,18 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
         .whereNull('scheduled_service_id')
         .first('id');
       if (claimless) {
-        const { anchorSetupFeeClaim } = require('./secure-appointment-plans');
-        await anchorSetupFeeClaim(conn, { claimId: claimless.id, anchorId: createdParentId });
-        logger.info(`[annual-prepay] term ${term.id}: anchor-less setup claim ${claimless.id} anchored to covered series root ${createdParentId}`);
+        // An invoice-only commercial setup remains owned by the invoice. A
+        // later seeding/adoption pass is not evidence that the new root owned
+        // the original sale; legacy NULL markers use the same classifier.
+        const { findOriginalCommercialPrepayInvoice } = require('./commercial-prepay-original-invoice');
+        const originalInvoice = await findOriginalCommercialPrepayInvoice(conn, term.prepay_invoice_id);
+        if (originalInvoice) {
+          logger.info(`[annual-prepay] term ${term.id}: original commercial setup claim ${claimless.id} left invoice-owned`);
+        } else {
+          const { anchorSetupFeeClaim } = require('./secure-appointment-plans');
+          await anchorSetupFeeClaim(conn, { claimId: claimless.id, anchorId: createdParentId });
+          logger.info(`[annual-prepay] term ${term.id}: anchor-less setup claim ${claimless.id} anchored to covered series root ${createdParentId}`);
+        }
       }
     } catch (err) {
       logger.warn(`[annual-prepay] term ${term.id}: setup-claim anchoring skipped (${err.message}) — retried on the next term refresh`);
@@ -2407,7 +2545,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // be prepaid-stamped, or completion would invoice a prepaid customer.
   // The unresolved adopted row is quarantined operationally via the
   // durable coverage exception instead.
-  if (coverageCatalogServiceId && cols.service_id && adoptedConcurrentRows.length) {
+  if (coverageIsPalm && coverageCatalogServiceId && cols.service_id && adoptedConcurrentRows.length) {
     const concurrentOk = await backfillPalmIdentity(adoptedConcurrentRows, 'concurrent-adoption');
     if (!concurrentOk) {
       await fileCoverageException(term, 'palm_identity_backfill_failed',
@@ -2834,7 +2972,7 @@ async function findLastScheduledServiceForTerm(customerId, termStart, termEnd, c
 // visits are only ever its own plan's (successorCoverageScope) — it links
 // nothing here rather than going customer-wide.
 async function linkWindowVisitsWithoutCoverageConfig(term, conn) {
-  if (term.renewed_from_term_id) return;
+  if (term.renewed_from_term_id || await commercialSetupVisitScope(term, conn)) return;
   await conn('scheduled_services')
     .where({ customer_id: term.customer_id })
     .whereBetween('scheduled_date', [dateOnly(term.term_start), dateOnly(term.term_end)])
@@ -4782,13 +4920,20 @@ async function successorLineageLabel(row, customerId, conn) {
 // successorCoverageScope/rowInRenewalScope selection applied it) — an
 // unresolved lineage never suppresses.
 async function stampedTermStillCoversVisit(term, scheduledService, conn) {
-  if (term.coverage_service_type
+  let visit = scheduledService;
+  if (term.commercial_setup_series_root_id) {
+    const soldScope = { rootId: term.commercial_setup_series_root_id };
+    visit = await completeBookedVisit(conn, scheduledService);
+    if (!rowInCommercialSetupScope(soldScope, term, visit) || isCallbackRow(visit)) return false;
+    const matchesBookedBait = await bookedBaitServiceMatcher(conn, soldScope);
+    if (!matchesBookedBait(visit)) return false;
+  } else if (term.coverage_service_type
     && scheduledService.service_type
     && !serviceMatchesCoverage(scheduledService, normalizeCoverageServiceType(term.coverage_service_type))) {
     return false;
   }
   const scope = await successorCoverageScope(term, conn);
-  return !scope || (scope.resolved && rowInRenewalScope(scheduledService, scope));
+  return !scope || (scope.resolved && rowInRenewalScope(visit, scope));
 }
 
 // Pay after the first visit, annual prepay (GATE_PAF_PREPAY, PR-D). The accept
@@ -5120,9 +5265,9 @@ async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnErr
       .modify((q) => {
         if (scheduledService.customer_id != null) q.where('t.customer_id', scheduledService.customer_id);
       })
-      .first('t.id', 't.customer_id', 't.coverage_service_type', 't.source_estimate_id', 't.renewed_from_term_id');
+      .first('t.*');
     if (!term) return false;
-    return stampedTermStillCoversVisit(term, scheduledService, conn);
+    return await stampedTermStillCoversVisit(term, scheduledService, conn);
   } catch (err) {
     // Fail-closed: if the term/invoice can't be validated, DON'T suppress billing.
     // Callers on the CHARGING side have the opposite fail-closed direction —
@@ -5310,6 +5455,7 @@ async function refreshTermSnapshot(termOrId, conn = db, { seedNotBefore = null }
 // the re-stamp sweep's stamp-only pass, which must leave it as current as a
 // completed activation would have.
 async function writeLastServiceSnapshot(term, termStart, windowEnd, conn) {
+  const commercialScope = await commercialSetupVisitScope(term, conn);
   const coverageServiceType = normalizeCoverageServiceType(term.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term.coverage_visit_count);
   const coveredRows = coverageServiceType && coverageVisitCount
@@ -5317,7 +5463,12 @@ async function writeLastServiceSnapshot(term, termStart, windowEnd, conn) {
     : [];
   const lastService = coveredRows.length
     ? coveredRows[coveredRows.length - 1]
-    : await findLastScheduledServiceForTerm(term.customer_id, termStart, windowEnd, conn);
+    // An invoice-owned commercial setup with no term-linked visit remains
+    // genuinely unassigned. Never manufacture a snapshot from another
+    // property or a proposed booking in the same customer/date window.
+    : (!commercialScope
+      ? await findLastScheduledServiceForTerm(term.customer_id, termStart, windowEnd, conn)
+      : null);
 
   const updates = {
     last_scheduled_service_id: lastService?.id || null,
@@ -8235,7 +8386,7 @@ async function detachOutOfWindowEditedVisits(existing, updates, conn) {
 // opposed to a date-window change (handled by detachOutOfWindowEditedVisits
 // above). Every comment is unchanged from the original inline block.
 async function detachDroppedCoverageSelectionVisits(existing, {
-  normalizedCoverageServiceType, normalizedCoverageVisitCount, normalizedCoverageCadence,
+  normalizedCoverageServiceType, normalizedCoverageVisitCount, normalizedCoverageCadence, replacesInvoice = false,
 }, conn) {
   // When the coverage SELECTION changes on an edit (service type / visit count
   // / cadence) — not just the date window handled above — the visits that
@@ -8259,7 +8410,7 @@ async function detachDroppedCoverageSelectionVisits(existing, {
       && (normalizeCoverageCadence(existing.coverage_cadence) || null)
         !== (normalizedCoverageCadence || null))
   );
-  if (!coverageSelectionChanged) return;
+  if (!coverageSelectionChanged && !replacesInvoice) return;
   // Clearing stamps isn't enough: the dropped visits keep their
   // annual_prepay_term_id link, which the repo treats as Annual Prepay for
   // reporting/forecasting (pricing-reality-check) and copies onto recurring
@@ -8287,6 +8438,7 @@ async function detachDroppedCoverageSelectionVisits(existing, {
       }
     });
   } catch (err) {
+    if (replacesInvoice) throw err;
     logger.warn(`[annual-prepay] coverage-change stamp/link cleanup skipped: ${err.message}`);
   }
 }
@@ -8295,6 +8447,7 @@ async function createTermForAnnualPrepay({
   customerId,
   sourceEstimateId = null,
   prepayInvoiceId = null,
+  replaceDeadSwitchInvoice = false,
   planLabel = 'WaveGuard Annual Prepay',
   monthlyRate = null,
   prepayAmount = null,
@@ -8377,28 +8530,47 @@ async function createTermForAnnualPrepay({
 
   let existing = null;
   if (sourceEstimateId || prepayInvoiceId) {
-    existing = await conn('annual_prepay_terms')
+    const bySource = conn('annual_prepay_terms').where({ customer_id: customerId })
       .where(function () {
         if (sourceEstimateId) this.orWhere({ source_estimate_id: sourceEstimateId });
         if (prepayInvoiceId) this.orWhere({ prepay_invoice_id: prepayInvoiceId });
-      })
-      .first();
+      });
+    if (replaceDeadSwitchInvoice) bySource.forUpdate();
+    existing = await bySource.first();
   }
   if (!existing) {
-    existing = await conn('annual_prepay_terms')
-      .where({
-        customer_id: customerId,
-        term_start: normalizedStart,
-        term_end: normalizedEnd,
-      })
-      .whereIn('status', ACTIVE_STATUSES)
-      .first();
+    const byWindow = conn('annual_prepay_terms')
+      .where({ customer_id: customerId, term_start: normalizedStart, term_end: normalizedEnd })
+      .whereIn('status', ACTIVE_STATUSES);
+    if (replaceDeadSwitchInvoice) byWindow.forUpdate();
+    existing = await byWindow.first();
   }
 
+  // Only a schedule switch may replace a dead invoice. Change the binding
+  // and the setup owner together before refresh can use the former series.
+  const replacesInvoice = Boolean(replaceDeadSwitchInvoice && existing && prepayInvoiceId
+    && String(existing.prepay_invoice_id || '') !== String(prepayInvoiceId));
+  if (replacesInvoice) {
+    const oldInvoice = existing.prepay_invoice_id && await conn('invoices')
+      .where({ id: existing.prepay_invoice_id }).forUpdate().first('id', 'status', 'customer_id');
+    if (existing.renewal_decision || (oldInvoice && (oldInvoice.customer_id !== customerId
+      || !INVOICE_CANCELLED_STATUSES.has(String(oldInvoice.status || '').toLowerCase())))) {
+      throw require('./secure-appointment-plans').setupCollectionConflict(
+        'An existing annual prepay term is still bound to another invoice — resolve it from Customer 360',
+      );
+    }
+  }
+  const boundInvoiceId = replacesInvoice ? prepayInvoiceId : existing?.prepay_invoice_id || prepayInvoiceId || null;
+  const seriesRootId = termCols.commercial_setup_series_root_id && (replacesInvoice || !existing?.commercial_setup_series_root_id)
+    ? await require('./commercial-prepay-original-invoice').bookedCommercialSetupRootId(conn, {
+      customer_id: customerId, prepay_invoice_id: boundInvoiceId,
+      coverage_service_type: normalizedCoverageServiceType ?? existing?.coverage_service_type,
+    }) : null;
   if (existing) {
     const updates = {
-      source_estimate_id: existing.source_estimate_id || sourceEstimateId || null,
-      prepay_invoice_id: existing.prepay_invoice_id || prepayInvoiceId || null,
+      ...(termCols.commercial_setup_series_root_id && (replacesInvoice || seriesRootId) && { commercial_setup_series_root_id: seriesRootId }),
+      source_estimate_id: replacesInvoice ? sourceEstimateId || null : existing.source_estimate_id || sourceEstimateId || null,
+      prepay_invoice_id: boundInvoiceId,
       plan_label: planLabel || existing.plan_label,
       monthly_rate: monthlyRate != null ? monthlyRate : existing.monthly_rate,
       prepay_amount: prepayAmount != null ? prepayAmount : existing.prepay_amount,
@@ -8461,11 +8633,11 @@ async function createTermForAnnualPrepay({
     if (termCols.coverage_cadence && normalizedCoverageCadence !== undefined) {
       updates.coverage_cadence = normalizedCoverageCadence;
     }
-    if (termCols.first_visit_date && normalizedFirstVisitDate !== undefined) {
-      updates.first_visit_date = normalizedFirstVisitDate;
+    if (termCols.first_visit_date && (replacesInvoice || normalizedFirstVisitDate !== undefined)) {
+      updates.first_visit_date = normalizedFirstVisitDate ?? null;
     }
-    if (termCols.first_visit_window_start && normalizedFirstVisitWindowStart !== undefined) {
-      updates.first_visit_window_start = normalizedFirstVisitWindowStart;
+    if (termCols.first_visit_window_start && (replacesInvoice || normalizedFirstVisitWindowStart !== undefined)) {
+      updates.first_visit_window_start = normalizedFirstVisitWindowStart ?? null;
     }
     if (termCols.annual_plan_version && annualPlanVersion && !existing.annual_plan_version) {
       updates.annual_plan_version = annualPlanVersion;
@@ -8493,7 +8665,7 @@ async function createTermForAnnualPrepay({
     // reporting stale visits as Annual Prepay.
     await detachOutOfWindowEditedVisits(existing, updates, conn);
     await detachDroppedCoverageSelectionVisits(existing, {
-      normalizedCoverageServiceType, normalizedCoverageVisitCount, normalizedCoverageCadence,
+      normalizedCoverageServiceType, normalizedCoverageVisitCount, normalizedCoverageCadence, replacesInvoice,
     }, conn);
     await syncInvoiceTerm(prepayInvoiceId, existing.id, conn);
     const refreshed = await refreshTermSnapshot(existing.id, conn);
@@ -8520,6 +8692,7 @@ async function createTermForAnnualPrepay({
   }
 
   const insert = {
+    ...(seriesRootId && { commercial_setup_series_root_id: seriesRootId }),
     customer_id: customerId,
     source_estimate_id: sourceEstimateId || null,
     prepay_invoice_id: prepayInvoiceId || null,

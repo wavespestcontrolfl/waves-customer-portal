@@ -5680,6 +5680,33 @@ function rodentSetupRebillMarker(invoiceId) {
   return `[rodent-setup-rebill:${invoiceId}]`;
 }
 
+// A booked commercial prepay keeps its sold-series owner on the term after
+// refund restoration consumes setup_fee_claims, and after ON DELETE SET NULL
+// erases a deleted visit from that claim. The term pointer is authoritative:
+// when present, callers must use that root or leave the fee unresolved — never
+// fall back to another estimate/account series. Selecting the whole term keeps
+// pre-migration reads compatible (the new property is simply absent).
+async function commercialSetupSeriesOwnerForPrepay(conn, prepayInvoiceId, invoiceCustomerId = null) {
+  const term = await conn("annual_prepay_terms")
+    .where({ prepay_invoice_id: prepayInvoiceId })
+    .first();
+  const rootId = term?.commercial_setup_series_root_id || null;
+  if (!rootId) return null;
+  let ownerCustomerId = invoiceCustomerId;
+  if (!ownerCustomerId) {
+    ownerCustomerId = (await conn("invoices")
+      .where({ id: prepayInvoiceId })
+      .first("customer_id"))?.customer_id || null;
+  }
+  if (!ownerCustomerId || String(ownerCustomerId) !== String(term.customer_id)) {
+    return { rootId, root: null, ownerMismatch: true };
+  }
+  const root = await conn("scheduled_services")
+    .where({ id: rootId, customer_id: ownerCustomerId })
+    .first("id");
+  return { rootId, root: root || null };
+}
+
 // Extracted from voidInvoice's own requireUnsettled option (Codex round-3
 // audit P0 self-review, AGENTS.md L412-418 — keeps the surrounding
 // transaction's own complexity from growing past the ceiling for a
@@ -12902,6 +12929,21 @@ const InvoiceService = {
       .where({ id: prepayInvoiceId })
       .first("id", "customer_id", "scheduled_service_id", "line_items");
     if (!invoiceRow) return null;
+    const durableOwner = await commercialSetupSeriesOwnerForPrepay(conn, prepayInvoiceId, invoiceRow.customer_id);
+    if (durableOwner && !durableOwner.root) {
+      // Keep the existing sweep of replacements explicitly linked to the paid
+      // source even when its series has since been deleted.
+      if (!durableOwner.ownerMismatch) await InvoiceService._voidUntouchedRodentSetupRebills(conn, prepayInvoiceId);
+      // The sold root was deleted. Its claim may already be anchor-less from
+      // ON DELETE SET NULL; keep it (or the term pointer itself) as the office
+      // reconciliation evidence. Another property must never inherit it.
+      logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId} still names deleted sold series ${durableOwner.rootId} — setup ownership left unresolved for office review; no other series was changed`);
+      return null;
+    }
+    if (!invoiceRow.scheduled_service_id && !durableOwner) {
+      const { findOriginalCommercialPrepayInvoice } = require("./commercial-prepay-original-invoice");
+      if (await findOriginalCommercialPrepayInvoice(conn, prepayInvoiceId)) return null;
+    }
     // ESTIMATE-origin on-site prepay switches deliberately never write a
     // setup_fee_claims row for THIS prepay (admin-schedule.js prepay-switch,
     // codex #3591 r38 P1): the switch's own setup line was carried off the
@@ -12971,8 +13013,16 @@ const InvoiceService = {
     const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
     let amount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
     const { authoritativeServiceKey, recordSetupFeeClaimForInvoice } = require("./secure-appointment-plans");
-    let anchorId = null;
-    if (invoiceRow.scheduled_service_id) {
+    const existingClaim = durableOwner
+      ? await conn("setup_fee_claims").where({ invoice_id: prepayInvoiceId }).first("scheduled_service_id")
+      : null;
+    if (existingClaim?.scheduled_service_id
+      && String(existingClaim.scheduled_service_id) !== String(durableOwner.rootId)) {
+      logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId} claims series ${existingClaim.scheduled_service_id} but its term owns sold series ${durableOwner.rootId} — setup ownership left unresolved for office review; no series was changed`);
+      return null;
+    }
+    let anchorId = durableOwner?.root?.id || null;
+    if (!anchorId && invoiceRow.scheduled_service_id) {
       const own = await conn("scheduled_services")
         .where({ id: invoiceRow.scheduled_service_id })
         .first("id", "recurring_parent_id", "service_type", "service_id");
@@ -13064,6 +13114,10 @@ const InvoiceService = {
     // claiming/clearing the stamp between an unlocked scan and this lock
     // would hide its freshly minted sibling from the reconciliation.
     const parent = await conn("scheduled_services").where({ id: anchorId }).forUpdate().first("id", "pending_setup_fee");
+    if (!parent) {
+      logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId} lost sold series ${anchorId} during reconciliation — setup ownership left unresolved for office review`);
+      return null;
+    }
     const stamp = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : null;
     if (stamp != null && stamp < 0) {
       throw new Error(`revived prepay ${prepayInvoiceId}: series ${anchorId} has a completion mid-claim — retrying after it settles`);
@@ -13403,6 +13457,23 @@ const InvoiceService = {
       .forUpdate()
       .first("id", "scheduled_service_id", "amount");
     if (!claim) return null;
+    const durableOwner = await commercialSetupSeriesOwnerForPrepay(conn, prepayInvoiceId);
+    if (durableOwner && !durableOwner.root) {
+      // Deleting the booked root nulls the claim FK, but the term deliberately
+      // keeps its UUID. That is a terminal ownership fact, not permission to
+      // search another property: preserve the claim for office review.
+      logger.error(`[invoice] FIX: setup-fee claim for prepay ${prepayInvoiceId} belongs to deleted sold series ${durableOwner.rootId} — $${Number(claim.amount).toFixed(2)} remains unresolved for office review (record kept; no other series changed)`);
+      return null;
+    }
+    if (durableOwner && claim.scheduled_service_id
+      && String(claim.scheduled_service_id) !== String(durableOwner.rootId)) {
+      logger.error(`[invoice] FIX: setup-fee claim for prepay ${prepayInvoiceId} points to series ${claim.scheduled_service_id} but its term owns sold series ${durableOwner.rootId} — ownership left unresolved for office review (record kept; no series changed)`);
+      return null;
+    }
+    if (!claim.scheduled_service_id && !durableOwner) {
+      const { findOriginalCommercialPrepayInvoice } = require("./commercial-prepay-original-invoice");
+      if (await findOriginalCommercialPrepayInvoice(conn, prepayInvoiceId)) return null;
+    }
     const amount = Math.round(Number(claim.amount) * 100) / 100;
     if (!(amount > 0)) return null;
     // An ANCHOR-LESS record (codex #3591 r39 P1): the estimate-accept prepay
@@ -13410,7 +13481,7 @@ const InvoiceService = {
     // series later). Resolve the rodent root NOW from the term's source
     // estimate; with no root to carry the obligation the record is kept and
     // a human is paged — the fee is owed and nothing else re-stamps it.
-    let anchorId = claim.scheduled_service_id || null;
+    let anchorId = durableOwner?.root?.id || claim.scheduled_service_id || null;
     if (!anchorId) {
       const { authoritativeServiceKey } = require("./secure-appointment-plans");
       // Liveness per root through the shared consumable-series predicate

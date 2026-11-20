@@ -186,7 +186,7 @@ function seriesAnchorId(visit) {
 // unpersisted preview row (no id — the prepay-on-book preview prices a
 // booking that does not exist yet) is taken as given. A missing row throws
 // (callers fail closed).
-const SETUP_VISIT_COLUMNS = ['id', 'customer_id', 'service_type', 'service_id', 'source_estimate_id', 'recurring_parent_id', 'pending_setup_fee', 'created_at', 'status'];
+const SETUP_VISIT_COLUMNS = ['id', 'customer_id', 'service_type', 'service_id', 'source_estimate_id', 'recurring_parent_id', 'pending_setup_fee', 'created_at', 'status', 'annual_prepay_term_id'];
 
 // The visit's service identity, CATALOG first (codex #3591 r32 P1): a
 // scheduled row's service_type label goes stale after a catalog
@@ -210,34 +210,23 @@ async function customerHasCommercialChannel(database, customerId) {
 }
 
 async function authoritativeServiceKey(database, row = {}) {
+  const labelKey = recurringServiceKey({ name: row.service_type });
+  let key = labelKey;
   if (row.service_id) {
     const catalog = await database('services').where({ id: row.service_id }).first('service_key', 'name');
     if (catalog && (catalog.service_key || catalog.name)) {
-      const catalogKey = recurringServiceKey({ service_key: catalog.service_key || undefined, name: catalog.name || undefined });
-      // Commercial identity is a CHANNEL, not a catalog family (codex
-      // #3591 r81/r82 P1): the shared bait catalog row resolves
-      // 'rodent_bait', but a commercial customer's bait series must keep
-      // the commercial key — its setup is never family-waived (owner
-      // 2026-08-29) and it never takes the residential /secure rail. The
-      // catalog still decides the FAMILY (a stale non-bait label cannot
-      // re-family a linked row); the channel comes from the row's label
-      // when it carries one, else from the AUTHORITATIVE customer
-      // property_type (the Schedule editor persists generic labels, so
-      // the label alone cannot be required to say "commercial").
-      if (catalogKey === 'rodent_bait') {
-        if (recurringServiceKey({ name: row.service_type }) === 'commercial_rodent_bait') {
-          return 'commercial_rodent_bait';
-        }
-        let ownerId = row.customer_id;
-        if (!ownerId && row.id) {
-          ownerId = (await database('scheduled_services').where({ id: row.id }).first('customer_id'))?.customer_id;
-        }
-        if (await customerHasCommercialChannel(database, ownerId)) return 'commercial_rodent_bait';
-      }
-      return catalogKey;
+      key = recurringServiceKey({ service_key: catalog.service_key || undefined, name: catalog.name || undefined });
     }
   }
-  return recurringServiceKey({ name: row.service_type });
+  // The catalog decides the family. A generic bait label, including one on
+  // a legacy visit without a service ID, takes its channel from the customer.
+  if (key !== 'rodent_bait') return key;
+  if (labelKey === 'commercial_rodent_bait') return labelKey;
+  let customerId = row.customer_id;
+  if (!customerId && row.id) {
+    customerId = (await database('scheduled_services').where({ id: row.id }).first('customer_id'))?.customer_id;
+  }
+  return await customerHasCommercialChannel(database, customerId) ? 'commercial_rodent_bait' : key;
 }
 async function loadAuthoritativeSetupVisit(database, visit) {
   if (!visit || !visit.id) return visit || {};
@@ -262,7 +251,7 @@ function isRodentBaitProgramKey(key) {
 async function loadSeriesAnchor(database, row) {
   if (!row || !row.id) return null;
   if (!row.recurring_parent_id) return row;
-  return database('scheduled_services').where({ id: row.recurring_parent_id }).first('id', 'pending_setup_fee', 'created_at', 'source_estimate_id');
+  return database('scheduled_services').where({ id: row.recurring_parent_id }).first('id', 'customer_id', 'pending_setup_fee', 'created_at', 'source_estimate_id', 'annual_prepay_term_id');
 }
 function frozenAnchorSetupStamp(anchor) {
   const stamp = anchor && anchor.pending_setup_fee != null ? Number(anchor.pending_setup_fee) : NaN;
@@ -370,6 +359,17 @@ async function directRodentSetupForRow(database, row) {
       const claimInvoice = await database('invoices').where({ id: cl.invoice_id }).first('status');
       if (claimInvoice && !['void', 'cancelled', 'canceled', 'refunded'].includes(String(claimInvoice.status).toLowerCase())) return 0;
     }
+    // Customer 360 can seed a paid commercial series without an estimate.
+    // Its explicit term link identifies the original, invoice-owned setup.
+    if (anchor.annual_prepay_term_id && anchor.customer_id === row.customer_id) {
+      const term = await database('annual_prepay_terms')
+        .where({ id: anchor.annual_prepay_term_id, customer_id: row.customer_id }).first('prepay_invoice_id');
+      if (term?.prepay_invoice_id) {
+        const original = await require('./commercial-prepay-original-invoice').findOriginalCommercialPrepayInvoice(database, term.prepay_invoice_id);
+        if (original?.term.id === anchor.annual_prepay_term_id
+          && require('./annual-prepay-renewals')._private.invoiceTermStatus(original.invoice) === 'active') return 0;
+      }
+    }
     // HANDED TO THE OFFICE: a completion parked this series' setup for manual
     // billing (setup_fee_office_billing alert; the stamp was cleared and no
     // claim was written). The office owns that fee exactly once; never derive
@@ -417,7 +417,7 @@ async function resolveDirectRodentSetupObligation(database, visit = {}) {
 // estimateId (codex #3591 r70 P1): the accepted estimate an accept-side mint
 // billed the setup for — the key a later booking from that estimate uses to
 // see the claim when it is still anchor-less (migration 20260831000030).
-async function recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount, estimateId = null }) {
+async function recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount, estimateId = null, unbookedCommercial = false }) {
   const fee = cents(Math.max(0, Number(amount) || 0));
   if (!invoiceId || !(fee > 0)) return false;
   await trx('setup_fee_claims')
@@ -426,6 +426,11 @@ async function recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount,
       scheduled_service_id: anchorId || null,
       amount: fee,
       ...(estimateId ? { estimate_id: estimateId } : {}),
+      // NULL is reserved for pre-marker legacy rows whose provenance still
+      // needs classification. Every current writer reaches this shared
+      // choke point with enough information to record a durable answer; an
+      // anchored claim can never be an unbooked source claim.
+      unbooked_commercial_setup: Boolean(!anchorId && unbookedCommercial),
     })
     .onConflict('invoice_id')
     .ignore();
@@ -449,6 +454,39 @@ async function settledSetupClaimForInvoice(database, invoiceId) {
   return claim;
 }
 
+// A booked commercial prepay keeps its sold-series owner on the term after
+// ON DELETE SET NULL erases a deleted root from setup_fee_claims. That owner
+// is authoritative: an anchor-less claim may only be treated as belonging to
+// a candidate root when it is the SAME root and the term/invoice/root customer
+// still agrees. Terms without this pointer retain their historical behavior.
+async function durableCommercialSetupOwner(database, invoiceId) {
+  if (!invoiceId) return null;
+  const term = await database('annual_prepay_terms')
+    .where({ prepay_invoice_id: invoiceId })
+    .first();
+  const rootId = term?.commercial_setup_series_root_id || null;
+  if (!rootId) return null;
+  const invoice = await database('invoices').where({ id: invoiceId }).first('customer_id');
+  return {
+    rootId,
+    customerId: term.customer_id,
+    invoiceCustomerMatches: !!invoice
+      && String(invoice.customer_id) === String(term.customer_id),
+  };
+}
+
+async function claimMatchesDurableCommercialOwner(database, claim, anchorId = null) {
+  const owner = await durableCommercialSetupOwner(database, claim?.invoice_id);
+  if (!owner) return true;
+  const candidateId = anchorId || claim?.scheduled_service_id || null;
+  if (!candidateId || String(candidateId) !== String(owner.rootId)
+    || !owner.invoiceCustomerMatches) return false;
+  const root = await database('scheduled_services')
+    .where({ id: candidateId, customer_id: owner.customerId })
+    .first('id');
+  return !!root;
+}
+
 // Settlement evidence when the acceptance was WON BY ANOTHER SESSION (codex
 // #3591 r65 P1): markEstimateManuallyAccepted short-circuits with
 // alreadyAccepted and no conversion, so the booking must resolve the
@@ -457,7 +495,7 @@ async function settledSetupClaimForEstimate(database, estimateId) {
   if (!estimateId) return null;
   const term = await database('annual_prepay_terms').where({ source_estimate_id: estimateId }).first('prepay_invoice_id');
   const viaTerm = await settledSetupClaimForInvoice(database, term?.prepay_invoice_id || null);
-  if (viaTerm) return viaTerm;
+  if (viaTerm && await claimMatchesDurableCommercialOwner(database, viaTerm)) return viaTerm;
   // Claims the accept-side mints keyed to this estimate (codex #3591 r70
   // P1): a standard/invoice-mode acceptance bills the setup with no term —
   // and, for invoice-mode commercial accepts, before any series exists —
@@ -466,7 +504,7 @@ async function settledSetupClaimForEstimate(database, estimateId) {
   const byEstimate = await database('setup_fee_claims').where({ estimate_id: estimateId }).select('id', 'invoice_id', 'scheduled_service_id', 'amount');
   for (const candidate of byEstimate || []) {
     const live = await settledSetupClaimForInvoice(database, candidate.invoice_id);
-    if (live) return live;
+    if (live && await claimMatchesDurableCommercialOwner(database, live)) return live;
   }
   return null;
 }
@@ -487,12 +525,28 @@ async function seriesCanStillConsume(database, root) {
   return !!liveChild;
 }
 
-// TRUE when another series booked from this estimate already carries the
-// setup (a live positive stamp) or collected it (a claim on that root) —
-// a second series booked later from the same accepted estimate must not
-// stamp the disclosed setup again (codex #3591 r66 P1).
+async function originalInvoiceOwnsEstimateSetup(database, estimateId) {
+  if (!estimateId) return false;
+  const claims = await database('setup_fee_claims').where({ estimate_id: estimateId })
+    .whereNull('scheduled_service_id').select('invoice_id');
+  const terms = await database('annual_prepay_terms').where({ source_estimate_id: estimateId })
+    .select('prepay_invoice_id');
+  const sourceInvoices = new Set([...claims.map((c) => c.invoice_id), ...terms.map((t) => t.prepay_invoice_id)]);
+  const { findOriginalCommercialPrepayInvoice } = require('./commercial-prepay-original-invoice');
+  for (const invoiceId of sourceInvoices) {
+    if (!invoiceId) continue;
+    const original = await findOriginalCommercialPrepayInvoice(database, invoiceId);
+    if (original && (original.claim.estimate_id || original.term.source_estimate_id) === estimateId) return true;
+  }
+  return false;
+}
+
+// An accepted estimate can already have a carrier for its fee, including
+// the original unbooked invoice during a refund. A later series keeps its
+// own application prices without acquiring a second collectible setup.
 async function estimateSetupCarriedElsewhere(database, estimateId, excludeRootId = null) {
   if (!estimateId) return false;
+  if (await originalInvoiceOwnsEstimateSetup(database, estimateId)) return true;
   let query = database('scheduled_services')
     .where({ source_estimate_id: estimateId })
     .whereNull('recurring_parent_id');
@@ -539,10 +593,37 @@ async function stampedSetupForVisit(database, visit) {
 // paging. Only fills an EMPTY anchor — never re-points a settled one.
 async function anchorSetupFeeClaim(database, { claimId, anchorId }) {
   if (!claimId || !anchorId) return false;
-  const updated = await database('setup_fee_claims')
+  const claim = await database('setup_fee_claims').where({ id: claimId })
+    .first('id', 'invoice_id', 'scheduled_service_id', 'unbooked_commercial_setup');
+  if (!claim || claim.scheduled_service_id) return false;
+  // A source-only commercial fee remains owned by its invoice even if staff
+  // later books a visit from the same estimate. Protect both current positive
+  // markers and classifiable legacy NULL rows; known-false residential or
+  // booked-at-sale claims retain the existing automatic anchor behavior.
+  const { findOriginalCommercialPrepayInvoice } = require('./commercial-prepay-original-invoice');
+  if (claim.unbooked_commercial_setup === true
+    || (claim.unbooked_commercial_setup == null
+      && await findOriginalCommercialPrepayInvoice(database, claim.invoice_id))) {
+    return false;
+  }
+  if (!(await claimMatchesDurableCommercialOwner(database, claim, anchorId))) return false;
+  let update = database('setup_fee_claims')
     .where({ id: claimId })
     .whereNull('scheduled_service_id')
-    .update({ scheduled_service_id: anchorId });
+    // Close the read→write race with a term owner being persisted between
+    // the check above and this CAS. A different durable root always wins;
+    // the claim remains anchor-less for office review.
+    .whereNotExists(function noDifferentDurableOwner() {
+      this.select(database.raw('1'))
+        .from('annual_prepay_terms as owner_term')
+        .whereRaw('owner_term.prepay_invoice_id = setup_fee_claims.invoice_id')
+        .whereNotNull('owner_term.commercial_setup_series_root_id')
+        .whereNot('owner_term.commercial_setup_series_root_id', anchorId);
+    });
+  update = claim.unbooked_commercial_setup == null
+    ? update.whereNull('unbooked_commercial_setup')
+    : update.where({ unbooked_commercial_setup: false });
+  const updated = await update.update({ scheduled_service_id: anchorId });
   return Number(updated) === 1;
 }
 
@@ -576,8 +657,16 @@ async function liveAnchorlessCoverageSetupClaim(database, { customerId, rootId }
   const terms = await coveredTermsAsOf(database, etDateString())
     .where('t.customer_id', customerId)
     .whereNotNull('t.prepay_invoice_id')
-    .select('t.prepay_invoice_id as prepay_invoice_id', 't.coverage_service_type as coverage_service_type');
+    .select(
+      't.prepay_invoice_id as prepay_invoice_id',
+      't.coverage_service_type as coverage_service_type',
+      't.commercial_setup_series_root_id as commercial_setup_series_root_id',
+      'i.customer_id as invoice_customer_id',
+    );
   for (const term of terms || []) {
+    if (term.commercial_setup_series_root_id
+      && (String(term.commercial_setup_series_root_id) !== String(rootId)
+        || String(term.invoice_customer_id) !== String(customerId))) continue;
     let termKey = recurringServiceKey({ name: term.coverage_service_type });
     // Same-customer channel lift (codex #3591 r83 P1): a generic coverage
     // label on a commercial customer's term is the commercial program —
@@ -591,6 +680,12 @@ async function liveAnchorlessCoverageSetupClaim(database, { customerId, rootId }
       .whereNull('estimate_id')
       .first('id', 'invoice_id', 'amount');
     if (!claim) continue;
+    // An invoice-only commercial sale has no booked visit to own its setup
+    // claim. A later direct booking merely matching the account/coverage is
+    // not ownership evidence and must not inherit it. The classifier also
+    // recognizes eligible pre-flag legacy rows.
+    const { findOriginalCommercialPrepayInvoice } = require('./commercial-prepay-original-invoice');
+    if (await findOriginalCommercialPrepayInvoice(database, claim.invoice_id)) continue;
     // Live-invoice rule (codex #3591 r68/r69 P1): a voided/refunded prepay's
     // claim is an open obligation for recovery, never a settlement. Read
     // FOR UPDATE (codex #3591 r75 P1, same race as the estimate-claim
@@ -752,7 +847,9 @@ async function retireCoverageOnlySetupClaim(trx, { customerId, coverageServiceTy
   if (Math.round(owed.amount * 100) !== Math.round(fee * 100)) {
     throw conflict(`The bait-station setup changed since the preview (previewed $${fee.toFixed(2)}, now $${Number(owed.amount).toFixed(2)}) — refresh and retry`);
   }
-  await recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId: null, amount: fee });
+  const unbookedCommercial = recurringServiceKey({ name: coverageServiceType }) === 'commercial_rodent_bait'
+    || await customerHasCommercialChannel(trx, customerId);
+  await recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId: null, amount: fee, unbookedCommercial });
   return { recorded: true, retired: false };
 }
 
@@ -788,6 +885,12 @@ async function retirePrepayOnBookSetupClaim(trx, { customerId, scheduledServiceI
   return retireDirectSetupClaimForPrepay(trx, { anchorId, invoiceId, amount: fee });
 }
 
+function setupCollectionConflict(message) {
+  return Object.assign(new Error(message), {
+    switchConflict: true, status: 409, statusCode: 409, isOperational: true,
+  });
+}
+
 // The on-site prepay switch bills a DIRECT rodent series' unwaived setup as
 // its own prepay line (codex #3591 r33 P1). The series parent may ALSO hold
 // the durable per-application claim (pending_setup_fee) an earlier
@@ -803,15 +906,18 @@ async function retirePrepayOnBookSetupClaim(trx, { customerId, scheduledServiceI
 // r40 P1 — the /secure prepay selection used to clear ANY non-null stamp,
 // racing the technician's completion claim on the parent into a double
 // charge).
-async function retireDirectSetupClaimForPrepay(trx, { anchorId, invoiceId, amount }) {
+async function retireDirectSetupClaimForPrepay(trx, {
+  anchorId, invoiceId, amount, estimateId = null, expectedCommercialCustomerId = null, selectedVisit = null,
+}) {
   const fee = cents(Math.max(0, Number(amount) || 0));
   if (!anchorId || !invoiceId) return { recorded: false, retired: false };
-  const parent = await trx('scheduled_services').where({ id: anchorId }).forUpdate().first('id', 'pending_setup_fee');
+  const parent = await trx('scheduled_services').where({ id: anchorId }).forUpdate().first();
+  if (expectedCommercialCustomerId) {
+    await assertSelectedSetupVisit(trx, parent, expectedCommercialCustomerId, selectedVisit);
+  }
   const stamp = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : null;
   if (stamp != null && stamp < 0) {
-    const err = new Error('The bait-station setup is being billed by a completion in progress — retry in a moment');
-    err.switchConflict = true;
-    throw err;
+    throw setupCollectionConflict('The bait-station setup is being billed by a completion in progress — retry in a moment');
   }
   // A completion can WIN between the caller's derivation and this lock
   // (codex #3591 r72 P1): it clears the stamp and writes its own live
@@ -827,12 +933,10 @@ async function retireDirectSetupClaimForPrepay(trx, { anchorId, invoiceId, amoun
     for (const sibling of siblingClaims || []) {
       const siblingInvoice = await trx('invoices').where({ id: sibling.invoice_id }).first('status');
       if (siblingInvoice && !TERMINAL_INVOICE_STATUSES.includes(String(siblingInvoice.status || '').toLowerCase())) {
-        const err = new Error('The bait-station setup was just billed by a completion on this series — refresh and retry');
-        err.switchConflict = true;
-        throw err;
+        throw setupCollectionConflict('The bait-station setup was just billed by a completion on this series — refresh and retry');
       }
     }
-    await recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount: fee });
+    await recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount: fee, estimateId });
   }
   let retired = 0;
   if (stamp != null && stamp > 0) {
@@ -841,6 +945,26 @@ async function retireDirectSetupClaimForPrepay(trx, { anchorId, invoiceId, amoun
       .update({ pending_setup_fee: null, updated_at: new Date() });
   }
   return { recorded: fee > 0, retired: retired === 1 };
+}
+
+// The caller resolved the promised occurrence before the invoice transaction.
+// Re-read both rows while the financial claim is being written. A job moved
+// to another parent or another day no longer represents the same sale.
+async function assertSelectedSetupVisit(trx, parent, customerId, selected) {
+  const conflict = () => setupCollectionConflict('The selected setup visit changed before acceptance. Refresh and select the visit again.');
+  if (!parent || parent.recurring_parent_id || parent.reservation_expires_at
+    || String(parent.customer_id) !== String(customerId)
+    || await authoritativeServiceKey(trx, parent) !== 'commercial_rodent_bait') throw conflict();
+  if (!selected) return;
+  const visit = String(selected.id) === String(parent.id) ? parent
+    : await trx('scheduled_services').where({ id: selected.id }).forUpdate().first();
+  const { dateOnlyString } = require('../utils/date-only');
+  if (!visit || String(visit.customer_id) !== String(customerId)
+    || String(visit.recurring_parent_id || visit.id) !== String(parent.id)
+    || visit.status !== selected.status || visit.reservation_expires_at
+    || dateOnlyString(visit.scheduled_date) !== dateOnlyString(selected.scheduled_date)
+    || visit.window_start !== selected.window_start || visit.window_end !== selected.window_end
+    || (visit !== parent && await authoritativeServiceKey(trx, visit) !== 'commercial_rodent_bait')) throw conflict();
 }
 
 // consumeDisclosure: the SELECTION path (selectSecurePlan). There a NULL
@@ -1544,15 +1668,18 @@ async function applyPerApplicationLaneStamp({ customerId, scheduledServiceId }) 
 }
 
 module.exports = {
+  customerHasCommercialChannel,
   recordSetupFeeClaimForInvoice,
   settledSetupClaimForInvoice,
   settledSetupClaimForEstimate,
   estimateSetupCarriedElsewhere,
+  originalInvoiceOwnsEstimateSetup,
   seriesCanStillConsume,
   stampedSetupForVisit,
   anchorSetupFeeClaim,
   liveAnchorlessCoverageSetupClaim,
   assertFrozenRodentSetupStillOwed,
+  setupCollectionConflict,
   retireDirectSetupClaimForPrepay,
   retirePrepayOnBookSetupClaim,
   findDirectRodentSetupObligationForCoverage,

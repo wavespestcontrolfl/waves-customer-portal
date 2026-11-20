@@ -13720,19 +13720,24 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         // term-agnostic coverage selection silently shorted the new term's
         // visits. Same lock + assertion as estimate-manual-acceptance, inside
         // this accept transaction.
-        // termStart mirrors the converter's own anchor: convertEstimate reads
-        // the committed reservation rows in this same trx and starts the term
-        // on the earliest one (falling back to today for no-slot accepts,
-        // where createTermForAnnualPrepay defaults the start). Guarding with
-        // bare "today" 409'd a legitimate next-term renewal whose current
-        // term ends before the booked first visit.
-        const reservedStartRow = await trx('scheduled_services')
-          .where({ source_estimate_id: estimate.id })
-          .whereNotNull('customer_id')
-          .whereNull('reservation_expires_at')
-          .orderBy('scheduled_date', 'asc')
-          .first('scheduled_date');
-        const overlapTermStart = dateOnly(reservedStartRow?.scheduled_date) || etDateString();
+        const saleAppointments = {
+          bookedAppointmentIds: reservationCommitted
+            ? acceptedAppointmentsToRegister.map((row) => row.id).filter(Boolean) : [],
+          adoptedExistingAppointmentId: existingAppointmentRow && !isReservationHeldAppointment(existingAppointmentRow)
+            && !isTermiteAnnualSignBeforePay ? existingAppointmentRow.id : null,
+        };
+        const commercialPrepaySale = await require('../services/commercial-prepay-sale-visits')
+          .resolveCommercialPrepaySale(trx, customerId, parseEstimateDataSafe(acceptedEstimateForScheduling), saleAppointments);
+        let overlapTermStart = commercialPrepaySale?.termStart;
+        if (!overlapTermStart) {
+          const reservedStartRow = await trx('scheduled_services')
+            .where({ source_estimate_id: estimate.id })
+            .whereNotNull('customer_id')
+            .whereNull('reservation_expires_at')
+            .orderBy('scheduled_date', 'asc')
+            .first('scheduled_date');
+          overlapTermStart = dateOnly(reservedStartRow?.scheduled_date) || etDateString();
+        }
         const { lockAndAssertNoAnnualPrepayOverlap } = require('./admin-customers')._private;
         try {
           await lockAndAssertNoAnnualPrepayOverlap(
@@ -13831,16 +13836,8 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           autoSendInvoice: false,
           deferFollowUpReminderRegistration: true,
           deferCommercialScheduleNotification: true,
-          // Genuinely ADOPTED pre-existing appointment (not a reservation
-          // hold): the converter's add-on classification re-admits it BY ID
-          // so it stands on its own billed-plan evidence (codex #3241 r4/r5).
-          // A sign-before-pay accept adopts nothing (see the commit skip
-          // above).
-          adoptedExistingAppointmentId: (existingAppointmentRow
-            && !isReservationHeldAppointment(existingAppointmentRow)
-            && !isTermiteAnnualSignBeforePay)
-            ? existingAppointmentRow.id
-            : null,
+          ...saleAppointments,
+          ...(commercialPrepaySale && { commercialPrepaySale }),
           // The customer's pick, kept only as a scheduling preference for
           // staff once the plan is signed (nothing was booked).
           ...(isTermiteAnnualSignBeforePay && (reservationRow || existingAppointmentRow)
