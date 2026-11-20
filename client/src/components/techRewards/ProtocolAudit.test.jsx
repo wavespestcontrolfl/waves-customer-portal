@@ -87,6 +87,15 @@ describe('Protocol audit tab', () => {
   });
 });
 
+describe('Protocol audit tab, a stale mark', () => {
+  it('shows Needs re-check on a visit whose old mark no longer counts', async () => {
+    adminFetch.mockImplementation(() => reply(BOARD([VISIT({ needsRecheck: true })])));
+    render(<ProtocolAudit />);
+    expect(await screen.findByText(/Needs re-check/)).toBeInTheDocument();
+    expect(screen.getByText(/0 of 1 marked/)).toBeInTheDocument();
+  });
+});
+
 describe('Protocol audit tab, a save that returns after the month changed', () => {
   it('is dropped and does not break the board', async () => {
     let finishSave;

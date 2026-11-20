@@ -282,6 +282,9 @@ describe('deliveryEvidenceForRecords', () => {
     expect((await deliveryEvidenceForRecords([ID], fakeKnex(exemptRow(), [{ record_id: ID, kind: 'consent_blocked' }]))).get(ID).exempt).toBe(true);
     // ... but not once a delivered-only report email exists
     expect((await deliveryEvidenceForRecords([ID], fakeKnex(exemptRow(), [{ record_id: ID, kind: 'consent_blocked' }, delivered]))).get(ID).exempt).toBe(false);
+    // a delivered-only email wholly before the closeout window (completed 15:00, window from 14:00) is an earlier closeout's: no block
+    const earlier = { record_id: ID, kind: 'email_delivered_only', at: '2026-04-06T10:00:00Z', text_at: null, queued_at: '2026-04-05T10:00:00Z' };
+    expect((await deliveryEvidenceForRecords([ID], fakeKnex(exemptRow(), [{ record_id: ID, kind: 'consent_blocked' }, earlier]))).get(ID).exempt).toBe(true);
     // same for a suppressed summary pair
     expect((await deliveryEvidenceForRecords([ID], fakeKnex(exemptRow({ report_waived: false }), [{ record_id: ID, kind: 'summary_suppressed' }]))).get(ID).exempt).toBe(true);
     expect((await deliveryEvidenceForRecords([ID], fakeKnex(exemptRow({ report_waived: false }), [{ record_id: ID, kind: 'summary_suppressed' }, delivered]))).get(ID).exempt).toBe(false);

@@ -442,6 +442,10 @@ async function runPredicate(key, knex = db) {
 // records the detectors never needed a time from: the report-ready email row
 // and the combined-visit summary effect. Read only; the detectors are unchanged.
 
+// A send may land a little before the visit's completion stamp (the stamp is written after the completion
+// commits): a closeout's window starts this long before its completion. Shared with the on-time read.
+const CLOSEOUT_SLACK_MS = 60 * 60000;
+
 const TEXT_TS_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})$/;
 
 // A stored text timestamp as a Date, or null when absent or not a real instant
@@ -575,12 +579,15 @@ function foldSendRows(rows, out) {
     const entry = out.get(id);
     if (row.kind === 'consent_blocked') { sets.blocked.add(id); continue; }
     if (row.kind === 'summary_suppressed') { sets.summaryPair.add(id); continue; }
-    sets.confirmed.add(id);
     if (row.kind === 'email_delivered_only') {
-      // a confirmed send (so it also blocks the exemptions) whose time is the queued..delivered interval
-      entry.deliveredIntervals.push({ from: new Date(row.queued_at), to: new Date(row.at) });
+      const interval = { from: new Date(row.queued_at), to: new Date(row.at) };
+      entry.deliveredIntervals.push(interval);
+      // a confirmed send of THIS closeout (so it blocks the exemptions) whose time is the queued..delivered interval;
+      // one delivered wholly before this closeout's window belongs to an earlier closeout of a reused record
+      if (!entry.completedAt || interval.to.getTime() >= entry.completedAt.getTime() - CLOSEOUT_SLACK_MS) sets.confirmed.add(id);
       continue;
     }
+    sets.confirmed.add(id);
     if (row.kind === 'recap_text_skipped') {
       // its time is its audit row's; with no audit row it is a confirmed send of unknown time
       if (!pestRecapTexts.has(id)) entry.confirmedWithoutTime = true;
@@ -607,8 +614,9 @@ function foldSendRows(rows, out) {
  *   sendTimes              every readable confirmed send time (a delivered-only email has none: it is in deliveredIntervals)
  *   deliveredIntervals     report emails delivered with no stored send time, as { from: queued, to: delivered }: the
  *                          send fell somewhere in between, so the reader must use both bounds. Such an email is a
- *                          confirmed send: it keeps a suppressed summary pair or a consent-blocked text from
- *                          marking the record exempt
+ *                          confirmed send of this closeout (unless delivered wholly before the closeout window,
+ *                          completedAt - CLOSEOUT_SLACK_MS): it keeps a suppressed summary pair or a consent-blocked
+ *                          text from marking the record exempt
  *   completedAt            when the visit last became complete (COMPLETED_MARKER_AT, the detectors' own anchor)
  * A record with no evidence at all is { exempt: false, firstConfirmedSendAt: null, confirmedWithoutTime: false }.
  */
@@ -637,6 +645,7 @@ async function deliveryEvidenceForRecords(recordIds, knex = db) {
 
 module.exports = {
   deliveryEvidenceForRecords,
+  CLOSEOUT_SLACK_MS,
   PREDICATES,
   PREDICATE_KEYS,
   runPredicate,

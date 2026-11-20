@@ -74,7 +74,7 @@ async function eligibleVisits({ monthStart = null, technicianId = null, schedule
     SELECT c.scheduled_service_id, c.id AS record_id, c.technician_id, c.customer_id,
            c.service_type, c.service_line, c.protocol_name, c.area_serviced_sqft,
            to_char(c.service_date, 'YYYY-MM-DD') AS service_date,
-           to_char(date_trunc('month', c.service_date), 'YYYY-MM-DD') AS month
+           to_char(date_trunc('month', c.service_date), 'YYYY-MM-DD') AS month, c.created_at AS record_created_at
       FROM (
         SELECT DISTINCT ON (sr.scheduled_service_id) sr.*
           FROM service_records sr
@@ -91,6 +91,26 @@ async function eligibleVisits({ monthStart = null, technicianId = null, schedule
      WHERE TRUE ${outer.join(' ')}`, [...candidateParams, ...params]);
   return rows.filter((row) => AUDIT_LINES.includes(row.service_line || detectServiceLine(row.service_type)));
 }
+
+/**
+ * SQL for the audit rows that still count (the board and the score's readAudit read the SAME rule). A mark counts
+ * only while it matches its visit's CURRENT canonical record (newest completed performed non-callback sibling):
+ * the same technician and the same ET month, and no replacement record created after the mark. A moved visit
+ * therefore leaves the old technician's score, and a replaced record asks for a new mark. A row whose visit was
+ * deleted (scheduled_service_id NULL) keeps counting: nothing is left to compare it with. Alias `a` = the audit row.
+ */
+const CURRENT_AUDIT_FROM_SQL = `tech_protocol_audits a
+  LEFT JOIN LATERAL (
+    SELECT sr.technician_id, sr.created_at, to_char(date_trunc('month', sr.service_date), 'YYYY-MM-DD') AS month
+      FROM service_records sr
+     WHERE sr.scheduled_service_id = a.scheduled_service_id
+       AND sr.status = 'completed'
+       AND NOT ${VISIT_IS_CALLBACK_SQL('sr')}
+       AND ${PERFORMED_OUTCOME_SQL('sr')}
+     ORDER BY sr.created_at DESC, sr.id DESC
+     LIMIT 1) cur ON TRUE`;
+const CURRENT_AUDIT_WHERE_SQL = `(a.scheduled_service_id IS NULL
+    OR (cur.technician_id = a.technician_id AND cur.month = to_char(a.audit_month, 'YYYY-MM-DD') AND cur.created_at <= a.audited_at))`;
 
 const sampleRank = (technicianId, monthStart, visitId) => crypto.createHash('sha256')
   .update(`${technicianId}:${monthStart}:${visitId}`).digest('hex');
@@ -131,6 +151,14 @@ async function signedPhotoUrl(s3Key) {
   }
 }
 
+// The mark a visit shows: counted (audit) or stale (needsRecheck) by the same rule as CURRENT_AUDIT_WHERE_SQL.
+function auditState(a, row) {
+  if (!a) return { audit: null, needsRecheck: false };
+  const current = a.technician_id === row.technician_id && a.month_key === row.month.slice(0, 7)
+    && new Date(row.record_created_at).getTime() <= new Date(a.audited_at).getTime();
+  return current ? { audit: { result: a.result, note: a.note, auditedAt: a.audited_at }, needsRecheck: false } : { audit: null, needsRecheck: true };
+}
+
 // What the owner compares with the protocol, for the sampled records: products with rate, area and
 // targets, photos, the customer's name, and the existing mark. Reads only.
 async function visitDetails(sampled, conn = db) {
@@ -148,10 +176,10 @@ async function visitDetails(sampled, conn = db) {
     conn('customers').whereIn('id', sampled.map((row) => row.customer_id).filter(Boolean)).select('id', 'first_name', 'last_name'),
   ]);
   const customerName = new Map(customers.map((c) => [c.id, [c.first_name, c.last_name].filter(Boolean).join(' ') || null]));
-  // A mark counts here only while it is attributed to the technician and month the visit shows now (a corrected
-  // visit may have moved); a stale one reads as unmarked, and marking again re-attributes it.
-  const auditByVisit = new Map(audits.map((a) => [`${a.scheduled_service_id}|${a.technician_id}|${a.month_key}`,
-    { result: a.result, note: a.note, auditedAt: a.audited_at }]));
+  // A mark counts here by the score's own rule (see CURRENT_AUDIT_FROM_SQL): it must match the technician and
+  // month the visit shows now, and be newer than its record. Otherwise it reads as unmarked, flagged "needs
+  // re-check" (a moved visit or a replaced record); marking again re-attributes it.
+  const auditRow = new Map(audits.map((a) => [a.scheduled_service_id, a]));
   const out = new Map();
   for (const row of sampled) {
     const own = products.filter((p) => p.service_record_id === row.record_id);
@@ -180,7 +208,7 @@ async function visitDetails(sampled, conn = db) {
       photos: await Promise.all(ownPhotos.slice(0, MAX_PHOTOS_PER_VISIT).map(async (p) => ({
         id: p.id, type: p.photo_type, caption: p.caption || null, url: p.s3_key ? await signedPhotoUrl(p.s3_key) : null,
       }))),
-      audit: auditByVisit.get(`${row.scheduled_service_id}|${row.technician_id}|${row.month.slice(0, 7)}`) || null,
+      ...auditState(auditRow.get(row.scheduled_service_id), row),
     });
   }
   return out;
@@ -249,4 +277,4 @@ async function saveMark({ scheduledServiceId, recordId = null, result, note, aud
   });
 }
 
-module.exports = { SAMPLE_SIZE, ProtocolAuditError, parseMonth, eligibleVisits, pickSample, getBoard, saveMark };
+module.exports = { CURRENT_AUDIT_FROM_SQL, CURRENT_AUDIT_WHERE_SQL, SAMPLE_SIZE, ProtocolAuditError, parseMonth, eligibleVisits, pickSample, getBoard, saveMark };

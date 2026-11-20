@@ -88,6 +88,7 @@ function MarkForm({ visit, onSaved }) {
     </Field>
     <div className="flex items-center gap-3">
       <Button type="submit" loading={busy} disabled={!result}>{visit.audit ? 'Change mark' : 'Save mark'}</Button>
+      {visit.needsRecheck && <Badge tone="warn">Needs re-check: the visit changed after your last mark</Badge>}
       {visit.audit && <Badge tone={visit.audit.result === 'match' ? 'strong' : 'warn'}>{visit.audit.result === 'match' ? 'Marked match' : 'Marked mismatch'}</Badge>}
     </div>
   </form>;

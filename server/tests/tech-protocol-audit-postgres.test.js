@@ -266,12 +266,28 @@ describe('pickSample (pure)', () => {
     await db('service_records').where({ id: record.id }).update({ technician_id: other }); // the visit was corrected to another technician
     const moved = (await board())[0];
     expect(moved.name).toBe('Fixture Two');
-    expect(moved.visits[0].audit).toBeNull();
+    expect(moved.visits[0]).toMatchObject({ audit: null, needsRecheck: true });
+    expect(await scores.readAudit(tech, { from: '2026-04-01', to: '2026-04-30' })).toBeNull(); // gone from the old technician's score at once
     await audit.saveMark({ scheduledServiceId: svc.id, result: 'mismatch', note: 'wrong rate', auditedBy: tech });
     const rows = await db('tech_protocol_audits');
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ technician_id: other, result: 'mismatch' });
     expect(await scores.readAudit(tech, { from: '2026-04-01', to: '2026-04-30' })).toBeNull(); // the first technician's score no longer counts it
+  });
+
+  test('a replacement record made after the mark asks for a re-mark: needs re-check, not counted, then counted again', async () => {
+    const { svc } = await visit(tech);
+    await audit.saveMark({ scheduledServiceId: svc.id, result: 'match', auditedBy: tech });
+    expect(await scores.readAudit(tech, { from: '2026-04-01', to: '2026-04-30' })).toBe(100);
+    await db('service_records').insert({ technician_id: tech, customer_id: customerId, scheduled_service_id: svc.id, status: 'completed',
+      service_date: '2026-04-11', service_type: 'Lawn Care Treatment', service_line: 'lawn', created_at: new Date(Date.now() + 60000) });
+    expect((await board())[0].visits[0]).toMatchObject({ audit: null, needsRecheck: true });
+    expect((await board())[0].markedCount).toBe(0);
+    expect(await scores.readAudit(tech, { from: '2026-04-01', to: '2026-04-30' })).toBeNull();
+    await new Promise((resolve) => { setTimeout(resolve, 5); });
+    await db('tech_protocol_audits').update({ audited_at: new Date(Date.now() + 120000) }); // a re-mark after the replacement
+    expect((await board())[0].visits[0]).toMatchObject({ audit: { result: 'match' }, needsRecheck: false });
+    expect(await scores.readAudit(tech, { from: '2026-04-01', to: '2026-04-30' })).toBe(100);
   });
 
   test('a save that names a record the visit no longer has is refused as stale', async () => {
