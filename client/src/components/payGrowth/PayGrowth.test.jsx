@@ -55,6 +55,17 @@ describe('Pay and growth selection and write boundaries', () => {
     expect(screen.getByText(/not earned compensation/)).toBeTruthy();
   });
 
+  it('leaves an over-cap review payout out of the review total and labels it (owner 2026-11-20 D4)', async () => {
+    const earned = (id, over) => ({ id, amount_cents: 1500, status: 'earned', earned_at: `${month}-10T15:00:00Z`, over_monthly_cap: over });
+    request.mockResolvedValue({ ...view(), reviews: [earned('r1', false), earned('r2', true)] });
+    mount(false);
+    await screen.findByRole('heading', { name: 'Monthly outcome model' });
+    const card = screen.getByText('Existing review payouts').closest('section');
+    expect(card).toHaveTextContent('$15.00');
+    expect(card).not.toHaveTextContent('$30.00');
+    expect(screen.getByText(/Over monthly cap — not paid/)).toBeInTheDocument();
+  });
+
   it('requires the server’s management verdict even when the admin component is requested', async () => {
     request.mockImplementation(path => Promise.resolve(path === '/setup' ? setup : view()));
     mount(true);
