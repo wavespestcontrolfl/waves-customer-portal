@@ -2302,9 +2302,8 @@ const StripeService = {
 
     let projectedCreditApplied = Number(invoice.credit_applied) || 0;
     // Same eligibility as the charge path's apply (gate AND the customer's
-    // opt-in, owner ruling 2026-08-28) — an opted-out customer's quote must
-    // be the gross total, or the confirmed quote and the charge disagree
-    // and the charge rejects it as stale.
+    // opt-in, owner ruling 2026-08-28). For opted-out customers, quote the
+    // balance after previously applied credit and partial payments.
     const {
       accountCreditSnapshotForInvoice,
       computeApplication,

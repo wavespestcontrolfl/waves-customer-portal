@@ -400,6 +400,7 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
       invoice_id: invoiceId,
       stripe_payment_method_id: stripeMethodId,
       stripe_payment_intent_id: intentId,
+      worker_payment_intent_id: intentId,
       status: 'failed',
       decline_code: 'authentication_required',
       idempotency_key: randomUUID(),

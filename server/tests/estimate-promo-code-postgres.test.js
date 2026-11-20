@@ -119,6 +119,7 @@ jest.mock('../config/feature-gates', () => ({
       t.string('decline_code');
       t.string('stripe_payment_intent_id');
       t.string('authentication_canceled_intent_id');
+      t.string('worker_payment_intent_id');
       t.string('idempotency_key');
       t.decimal('credit_applied_delta', 12, 2).defaultTo(0);
       t.decimal('credit_applied_total', 12, 2).defaultTo(0);
@@ -399,7 +400,7 @@ jest.mock('../config/feature-gates', () => ({
       await enterOn(inv, disc.promo_code);
       await db('stripe_invoice_charge_attempts').insert({
         invoice_id: inv.id, status: 'failed', decline_code: 'authentication_required',
-        stripe_payment_intent_id: 'pi_promo_auth', submitted_at: new Date(), resolved_at: new Date(),
+        stripe_payment_intent_id: 'pi_promo_auth', worker_payment_intent_id: 'pi_promo_auth', submitted_at: new Date(), resolved_at: new Date(),
       });
       expect(await setup(inv)).toBe(0);
       expect(await usesOf(disc.id)).toBe(0);

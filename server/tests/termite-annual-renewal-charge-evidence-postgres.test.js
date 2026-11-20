@@ -68,8 +68,11 @@ const describeOrSkip = SKIP ? describe.skip : describe;
 
 async function createScratchDb() {
   const url = new URL(process.env.REPAIR_TEST_DATABASE_URL);
-  if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) || !['/invoice_repair_test', '/waves_test'].includes(url.pathname)) {
-    throw new Error('This test requires a local invoice_repair_test or waves_test database');
+  const worktreeId = (process.env.WAVES_WORKTREE_ID || '').replace(/-/g, '').toLowerCase();
+  const worktreeDatabase = /^[0-9a-f]{32}$/.test(worktreeId) && url.pathname === `/waves_qa_${worktreeId}`;
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
+    || (!worktreeDatabase && !['/invoice_repair_test', '/waves_test'].includes(url.pathname))) {
+    throw new Error('This test requires a loopback repair, test, or matching worktree QA database');
   }
   const schema = `termite_evidence_${randomUUID().replace(/-/g, '')}`;
   const db = knexLib({ client: 'pg', connection: url.toString(), searchPath: [schema], pool: { min: 0, max: 4 } });
@@ -172,6 +175,8 @@ async function createScratchDb() {
     decline_code text,
     submitted_at timestamptz,
     stripe_payment_intent_id text,
+    worker_payment_intent_id text,
+    authentication_canceled_intent_id text,
     resolved_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now()
   )`);

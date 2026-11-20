@@ -381,10 +381,9 @@ describe('active payment plans auto-complete when the invoice settles', () => {
       await expect(res.json()).resolves.toEqual({
         error: 'An earlier card payment is awaiting verification. Please contact us before trying again. — resolve it before applying credit',
       });
-      expect(trxChargeAttempts.where).toHaveBeenCalledWith({
-        'stripe_invoice_charge_attempts.status': 'failed',
-        'stripe_invoice_charge_attempts.decline_code': 'authentication_required',
-      });
+      expect(trxChargeAttempts.where).toHaveBeenCalledWith({ 'stripe_invoice_charge_attempts.status': 'failed' });
+      expect(trxChargeAttempts.whereRaw).toHaveBeenCalledWith('COALESCE(?? = ?, FALSE)',
+        ['stripe_invoice_charge_attempts.decline_code', 'authentication_required']);
       expect(require('../services/customer-credit').postCreditMovement).not.toHaveBeenCalled();
       expect(trxInvoices.update).not.toHaveBeenCalled();
       expect(trx).not.toHaveBeenCalledWith('payment_plans');
