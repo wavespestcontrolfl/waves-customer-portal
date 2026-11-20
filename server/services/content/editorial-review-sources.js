@@ -56,17 +56,30 @@ function normalizeRequestedSources(sourceUrls) {
   return { urls, errors };
 }
 
+// A fetch that may succeed later: a network failure, a timeout or a server-side status. A blocked or
+// invalid URL, a broken redirect, a 404 or a challenge page fails the same way again.
+const PERMANENT_FETCH_ERRORS = new Set(['invalid_url', 'unsupported_protocol', 'blocked_host', 'redirect_without_location', 'redirect_budget_exhausted']);
+function retryableFetchFailure(page) {
+  if (!page) return true;
+  if (page.blocked) return false;
+  if (!page.status) return !PERMANENT_FETCH_ERRORS.has(page.error);
+  return [408, 425, 429].includes(page.status) || page.status >= 500;
+}
+
+// `transient`: every error is a fetch that may succeed later, so the same document may pass a retry.
 async function fetchSources(sourceUrls) {
   const normalized = normalizeRequestedSources(sourceUrls);
   let remaining = LIMITS.totalSourceChars;
   const records = [];
   const errors = [...normalized.errors];
+  let retryable = 0;
   const seenFinalUrls = new Set();
   for (const url of normalized.urls) {
     if (!remaining) { errors.push(`Total source evidence exceeds ${LIMITS.totalSourceChars} characters.`); break; }
     const page = await fetchPage(url, { timeoutMs: 10000, maxRedirects: 3, carryCookies: true });
     if (!page || page.blocked || !page.html || page.status < 200 || page.status >= 300) {
       errors.push(`Source could not be safely retrieved: ${url}`);
+      retryable += Number(retryableFetchFailure(page));
       continue;
     }
     const mediaType = String(page.contentType || '').split(';', 1)[0].trim().toLowerCase();
@@ -104,7 +117,7 @@ async function fetchSources(sourceUrls) {
     });
     remaining -= excerpt.length;
   }
-  return { records, errors };
+  return { records, errors, transient: errors.length > 0 && retryable === errors.length };
 }
 
 module.exports = {

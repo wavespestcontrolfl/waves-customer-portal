@@ -1,6 +1,6 @@
 /**
  * restaurant_prospects against live Postgres (services/prospects/dbpr-restaurants.js): the (kind, source_key) key,
- * the upsert that refreshes last_seen_at and nothing else, the report read that never overwrites a pest_evidence
+ * the upsert that refreshes last_seen_at and nothing else and writes a repeated key once, the report read that never overwrites a pest_evidence
  * answer, and the pending query (NULL answer, under 3 attempts, inside the date window, newest first). It refuses
  * any database but a private QA one or CI's, and its rows carry a per-run business marker so cleanup touches only them.
  */
@@ -63,6 +63,13 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     const [after] = await rows().where({ id: row.id });
     expect(after.pest_evidence).toBe(false);
     expect(after.detail.findings).toEqual([]);
+  });
+
+  test('a batch that repeats a key writes one row with the last copy, and the count says so', async () => {
+    const written = await svc.upsertRecords([rec(4, { business_name: 'SAMPLE DINER ONE' }), rec(4, { business_name: 'SAMPLE DINER TWO' })]);
+    expect(written).toBe(1);
+    const found = await rows().where({ source_key: key(4) });
+    expect(found.map((r) => r.business_name)).toEqual(['SAMPLE DINER TWO']);
   });
 
   test('pending reads only unanswered inspections under 3 attempts inside the window, newest first', async () => {

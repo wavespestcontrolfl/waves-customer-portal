@@ -266,6 +266,11 @@ const SERVICE_LABEL = {
   german_roach_initial: 'German Roach Initial Service (3-Visit)',
   pest_initial_roach: 'Cockroach Treatment Service',
   stinging: 'Stinging Insect',
+  // The keys the bee/wasp pricers emit (priceStingingInsect / calculateStingingPrice).
+  // Without them the line kept its raw key as its name, and the customer estimate
+  // page titled a beehive quote "One-Time Pest Control" (EST-2026-1312, 2026-11-19).
+  stinging_insect: 'Stinging Insect',
+  stinging_insect_v2: 'Stinging Insect',
   exclusion: 'Exclusion',
   rodent_trapping: 'Rodent Trapping',
   rodent_sanitation: 'Rodent Sanitation',

@@ -38,6 +38,12 @@ const FACTCHECK_MODEL_OVERRIDE = process.env.MODEL_FACTCHECK || null;
 // 60s is the ceiling the publish-lock contract allows (fact-check-gate.test.js
 // bounds it) — raise via FACTCHECK_TIMEOUT_MS only alongside that contract.
 const FACTCHECK_TIMEOUT_MS = Number.parseInt(process.env.FACTCHECK_TIMEOUT_MS, 10) || 60000;
+// The Mac job (CONTENT_EDITORIAL_REVIEW_RUNNER=mac) answers this lane with `claude -p` on the Max plan,
+// which runs far past 60 s, so 60 s would fail open on every post. That job holds the engine lock for its
+// whole pass anyway, so the longer wait blocks nothing new. Read at call time.
+const MAC_RUNNER_FACTCHECK_TIMEOUT_MS = 10 * 60 * 1000;
+const factCheckTimeoutMs = () => (process.env.CONTENT_EDITORIAL_REVIEW_RUNNER === 'mac'
+  ? Math.max(FACTCHECK_TIMEOUT_MS, MAC_RUNNER_FACTCHECK_TIMEOUT_MS) : FACTCHECK_TIMEOUT_MS);
 
 const SYSTEM_PROMPT = `You are a meticulous fact-checker for a Southwest Florida (Manatee/Sarasota/Charlotte county) pest-control and lawn-care blog. The post will publish under a licensed pest-control operator's byline, so factual accuracy is critical.
 
@@ -124,7 +130,7 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
     response = await dispatchWithFallback(policy, {
       laneId: 'fact_check_gate',
       maxTokens: 6000,
-      timeoutMs: FACTCHECK_TIMEOUT_MS,
+      timeoutMs: factCheckTimeoutMs(),
       jsonMode: true,
       jsonSchema: RESPONSE_SCHEMA,
       system: SYSTEM_PROMPT,
