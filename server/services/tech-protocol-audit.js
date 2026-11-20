@@ -80,7 +80,6 @@ async function eligibleVisits({ monthStart = null, technicianId = null, schedule
           FROM service_records sr
           JOIN scheduled_services ss ON ss.id = sr.scheduled_service_id
          WHERE sr.status = 'completed'
-           AND sr.technician_id IS NOT NULL
            AND NOT ${VISIT_IS_CALLBACK_SQL('sr')}
            AND ${PERFORMED_OUTCOME_SQL('sr')}
            AND NOT (${internalTestVisitSql('sr')})
@@ -88,7 +87,9 @@ async function eligibleVisits({ monthStart = null, technicianId = null, schedule
                                            ${candidate.join(' ')})
          ORDER BY sr.scheduled_service_id, sr.created_at DESC, sr.id DESC
       ) c
-     WHERE TRUE ${outer.join(' ')}`, [...candidateParams, ...params]);
+     WHERE c.technician_id IS NOT NULL ${outer.join(' ')}`, [...candidateParams, ...params]);
+  // the technician check runs AFTER the newest record is picked: a newest record with no technician makes the
+  // visit unauditable instead of letting an older assigned sibling put it in that technician's sample
   return rows.filter((row) => AUDIT_LINES.includes(row.service_line || detectServiceLine(row.service_type)));
 }
 
@@ -259,11 +260,13 @@ async function getBoard(rawMonth, conn = db) {
  * visit's canonical record. The check and the write run under one lock per technician and month, so two
  * marks can never both pass the five-visit sample.
  */
-async function saveMark({ scheduledServiceId, technicianId, month, recordId = null, result, note, auditedBy }, conn = db) {
+async function saveMark({ scheduledServiceId, technicianId, month, recordId, result, note, auditedBy }, conn = db) {
   if (typeof scheduledServiceId !== 'string' || !UUID_RE.test(scheduledServiceId)) throw new ProtocolAuditError(400, 'INVALID_VISIT', 'visit id must be a uuid');
   if (typeof technicianId !== 'string' || !UUID_RE.test(technicianId) || !MONTH_RE.test(String(month))) {
     throw new ProtocolAuditError(400, 'INVALID_CONTEXT', 'technicianId and month (YYYY-MM) of the board are required');
   }
+  // the record the owner reviewed is required: without it a replacement record could inherit the judgment
+  if (typeof recordId !== 'string' || !UUID_RE.test(recordId)) throw new ProtocolAuditError(400, 'INVALID_RECORD', 'recordId of the reviewed record is required');
   if (!RESULTS.includes(result)) throw new ProtocolAuditError(400, 'INVALID_RESULT', "result must be 'match' or 'mismatch'");
   const text = note == null ? '' : String(note).trim();
   if (text.length > MAX_NOTE_CHARS) throw new ProtocolAuditError(400, 'NOTE_TOO_LONG', `note must be at most ${MAX_NOTE_CHARS} characters`);
@@ -275,7 +278,7 @@ async function saveMark({ scheduledServiceId, technicianId, month, recordId = nu
     const [visit] = await eligibleVisits({ scheduledServiceId }, trx);
     // the mark is filed under the technician and month the board showed; any other current record is refused
     if (!visit || visit.technician_id !== first.technician_id || visit.month !== first.month
-      || visit.technician_id !== technicianId.toLowerCase() || visit.month.slice(0, 7) !== month || (recordId && recordId !== visit.record_id)) {
+      || visit.technician_id !== technicianId.toLowerCase() || visit.month.slice(0, 7) !== month || recordId.toLowerCase() !== visit.record_id) {
       throw new ProtocolAuditError(409, 'STALE_VISIT', 'this visit changed since it was loaded: reload and review it again');
     }
     const { sample } = await sampleFor(await eligibleVisits({ monthStart: visit.month, technicianId: visit.technician_id }, trx), visit.technician_id, visit.month, trx);

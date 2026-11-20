@@ -75,7 +75,8 @@ describe('pickSample (pure)', () => {
   // marks a visit under the technician and month its record shows now (what the board would have sent)
   const save = async (args) => {
     const [current] = /^[0-9a-f-]{36}$/.test(args.scheduledServiceId) ? await audit.eligibleVisits({ scheduledServiceId: args.scheduledServiceId }) : [];
-    return audit.saveMark({ technicianId: current ? current.technician_id : tech, month: current ? current.month.slice(0, 7) : MONTH, ...args });
+    return audit.saveMark({ technicianId: current ? current.technician_id : tech, month: current ? current.month.slice(0, 7) : MONTH,
+      recordId: current ? current.record_id : '00000000-0000-4000-8000-000000000000', ...args });
   };
   const board = async (month = MONTH) => (await audit.getBoard(month)).technicians;
   const ids = (t) => t.visits.map((v) => v.scheduledServiceId);
@@ -293,6 +294,20 @@ describe('pickSample (pure)', () => {
     await db('tech_protocol_audits').update({ audited_at: new Date(Date.now() + 120000) }); // a re-mark after the replacement
     expect((await board())[0].visits[0]).toMatchObject({ audit: { result: 'match' }, needsRecheck: false });
     expect(await scores.readAudit(tech, { from: '2026-04-01', to: '2026-04-30' })).toBe(100);
+  });
+
+  test('a mark without the reviewed record id is refused', async () => {
+    const { svc } = await visit(tech);
+    await expect(save({ scheduledServiceId: svc.id, recordId: undefined, result: 'match', auditedBy: tech })).rejects.toMatchObject({ status: 400, code: 'INVALID_RECORD' });
+    expect(await db('tech_protocol_audits')).toHaveLength(0);
+  });
+
+  test('a newest record with no technician makes the visit unauditable; an older assigned sibling does not win', async () => {
+    const { svc } = await visit(tech);
+    await db('service_records').insert({ technician_id: null, customer_id: customerId, scheduled_service_id: svc.id, status: 'completed',
+      service_date: '2026-04-11', service_type: 'Lawn Care Treatment', service_line: 'lawn', created_at: new Date(Date.now() + 60000) });
+    expect(await audit.eligibleVisits({ scheduledServiceId: svc.id })).toHaveLength(0);
+    expect(await board()).toHaveLength(0);
   });
 
   test('a save that names a record the visit no longer has is refused as stale', async () => {
