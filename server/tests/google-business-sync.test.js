@@ -151,7 +151,8 @@ function createDbMock(initialRows = {}) {
         if (f) this._rawFilters.push(f);
         return this;
       },
-      whereNull(column) { this._whereNull = column; return this; },
+      // Every column, not only the last: a query can chain several.
+      whereNull(column) { this._whereNull = column; this._rawFilters.push(row => row[column] == null); return this; },
       whereNotNull(column) { this._rawFilters.push(row => row[column] != null); return this; },
       whereIn(column, values) { this._rawFilters.push(row => values.includes(row[column])); return this; },
       whereNot(arg, value) {
@@ -2111,6 +2112,34 @@ describe('Google Business review sync', () => {
       r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-copycat',
     );
     expect(copycat).toBeTruthy();
+  });
+
+  test('a second same-name review within a day lands as its own row; the first keeps its row (no fold)', async () => {
+    // Two "Anonymous" reviews on one day. The name+time fallback must not
+    // re-point the first review's row to the second: each sync would then
+    // swap the one row between the two reviews.
+    seedSyncedReview({
+      id: 'anon-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-anon-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-anon-1',
+      reviewer_name: 'Anonymous',
+      review_text: 'First review',
+    });
+    gbpFeed([
+      { name: 'accounts/1/locations/2/reviews/rev-anon-2', reviewer: {}, starRating: 'FOUR', comment: 'Second review', createTime: '2026-05-25T15:00:00Z' },
+      { name: 'accounts/1/locations/2/reviews/rev-anon-1', reviewer: {}, starRating: 'FIVE', comment: 'First review', createTime: '2026-05-25T12:00:00Z' },
+    ]);
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'anon-1')).toMatchObject({
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-anon-1',
+      review_text: 'First review',
+    });
+    const second = db.__state.rows.google_reviews.filter(r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-anon-2');
+    expect(second).toHaveLength(1);
+    expect(second[0]).toMatchObject({ review_text: 'Second review' });
+    expect(second[0].id).not.toBe('anon-1');
   });
 
   test('an unexpired publish claim defers the removal stamp; an expired claim does not', async () => {
