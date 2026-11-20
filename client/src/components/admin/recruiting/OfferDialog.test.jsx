@@ -164,6 +164,28 @@ describe("OfferDialog", () => {
     expect(sendOffer).toHaveBeenCalledWith("app-1", "offer-1", "hash-1");
   });
 
+  // A send refused for a reason the form does not show (the Terms lost their issued status, say): nothing was sent. The
+  // question closes, the form re-reads the offer and the application, and Send follows that read; while the read fails,
+  // Send stays off and Try again reads.
+  it("closes the Send question and re-reads after a refused send, and keeps Send off until a read lands", async () => {
+    sendOffer.mockRejectedValueOnce(
+      Object.assign(new Error("The Technician Terms are not issued."), { status: 409, body: { code: "TERMS_NOT_ISSUED" } }),
+    );
+    const unissued = { ...panel(draftRow()), termsIssued: false, termsBlockers: ["The Technician Terms are not issued."] };
+    render(<Harness initial={panel(draftRow())} reads={[null, unissued]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Send offer" }));
+    const ask = await screen.findByRole("dialog", { name: "Send offer" });
+    fireEvent.click(within(ask).getByRole("button", { name: "Send offer" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Send offer" })).toBeNull());
+    expect(await screen.findByText("The shared Technician Terms are not issued yet. Issue them in Staff Documents first.")).toBeInTheDocument();
+    expect(screen.getByText(/The offer could not be loaded after your last change/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send offer" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.queryByText(/could not be loaded/)).toBeNull());
+    expect(screen.getByRole("button", { name: "Send offer" })).toBeDisabled();
+    expect(sendOffer).toHaveBeenCalledTimes(1);
+  });
+
   // Send carries the hash of the draft whose letter is on screen, so a read that changes the draft while the Send
   // question is open closes the question; the form shows the draft as changed.
   it("closes the Send question when a read changes the draft while it is open, and sends nothing", async () => {

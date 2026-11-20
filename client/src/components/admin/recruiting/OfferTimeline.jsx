@@ -131,13 +131,15 @@ function expectedState(target) {
 }
 
 // Words for closing one offer record. A draft is never sent, so discarding it
-// must not promise anything about the link of an offer that is already out.
+// changes nothing about the offer already out. The words say only that: that
+// offer may be answered (a date request) or expired by now, so they never say it
+// is open or that its link works.
 function closeCopy(target, firstName, liveOffer) {
   if (target.status === "draft") {
     return {
       title: "Discard draft",
       message: liveOffer
-        ? `Discard this draft? The offer you sent to ${firstName} stays open and their link keeps working.`
+        ? `Discard this draft? The offer you sent to ${firstName} is unchanged.`
         : "Discard this draft? Nothing was sent.",
       confirm: "Discard draft",
     };
@@ -214,7 +216,7 @@ function DraftBlock({ draft, busy, canAct, onOpen, onDiscard }) {
         </Button>
         {canAct && (
           <Button size="sm" variant="secondary" onClick={onDiscard} disabled={busy}>
-            Discard this draft — the offer you sent stays open
+            Discard this draft — the offer you sent is unchanged
           </Button>
         )}
       </div>

@@ -69,7 +69,7 @@ describe("OfferTimeline", () => {
   it("closes the Discard question when the draft it was opened for changes, and discards nothing", async () => {
     const draft = record({ id: "offer-2", status: "draft", draftHash: "hash-2" });
     const { rerender } = render(card({ draft }));
-    fireEvent.click(screen.getByRole("button", { name: "Discard this draft — the offer you sent stays open" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard this draft — the offer you sent is unchanged" }));
     expect(await screen.findByRole("dialog", { name: "Discard draft" })).toBeInTheDocument();
     rerender(card({ draft: { ...draft, hourlyRate: 26, draftHash: "hash-3" } }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Discard draft" })).toBeNull());

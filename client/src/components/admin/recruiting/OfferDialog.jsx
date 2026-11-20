@@ -423,12 +423,24 @@ function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, on
     setNeedRead(false);
   };
 
-  // A failed write: a lost answer re-reads; a refusal shows the server's sentence.
+  // Any other refusal (the Terms are not issued, no phone or email on file, not the owner
+  // account, a field the server will not take): nothing was written, and the server sees
+  // something this form does not. Close the Send question and re-read the offer and the
+  // application, so Save and Send follow what the server sees; if that read fails, both stay
+  // off and Try again re-reads.
+  const refusedWrite = async () => {
+    setConfirming(false);
+    setNeedRead(true);
+    if (await onChanged()) setNeedRead(false);
+  };
+
+  // A failed write: a lost answer re-reads; a refusal shows the server's sentence and re-reads.
   const writeFailed = async (err, kind) => {
     if (isLostAnswer(err)) return lostWrite(kind);
     setError(offerErrorMessage(err));
     if (isStaleWrite(err)) await staleWrite();
     else if (isGateOffAnswer(err)) await gateOff();
+    else await refusedWrite();
   };
 
   const adoptLatest = () => {

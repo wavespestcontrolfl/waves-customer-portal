@@ -560,9 +560,10 @@ describe('RecruitingPage offer flow: read failures, re-offers and drafts', () =>
     expect(withdrawDialog).toHaveTextContent('Their link stops working');
     fireEvent.click(within(withdrawDialog).getByRole('button', { name: 'Cancel' }));
     // The draft's action never promises that the link stops.
-    fireEvent.click(within(card).getByRole('button', { name: 'Discard this draft — the offer you sent stays open' }));
+    fireEvent.click(within(card).getByRole('button', { name: 'Discard this draft — the offer you sent is unchanged' }));
     const discardDialog = (await screen.findByText(/Discard this draft\? The offer you sent/)).closest('[role="dialog"]');
-    expect(discardDialog).toHaveTextContent('stays open and their link keeps working');
+    expect(discardDialog).toHaveTextContent('The offer you sent to Jordan is unchanged.');
+    expect(discardDialog).not.toHaveTextContent('stays open');
     expect(discardDialog).not.toHaveTextContent('stops working');
     fireEvent.click(within(discardDialog).getByRole('button', { name: 'Discard draft' }));
     await waitFor(() => expect(calls.filter((c) => c.path === '/admin/careers/app-1/offer/offer-2/withdraw')).toHaveLength(1));
@@ -587,7 +588,7 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     await openDetail();
     const card2 = await screen.findByTestId('offer-card');
     expect(within(card2).getByRole('button', { name: 'Open the updated draft' })).toBeInTheDocument();
-    for (const name of ['Revise', 'Withdraw offer', 'Discard this draft — the offer you sent stays open', /Make an updated offer/]) {
+    for (const name of ['Revise', 'Withdraw offer', 'Discard this draft — the offer you sent is unchanged', /Make an updated offer/]) {
       expect(within(card2).queryByRole('button', { name })).toBeNull();
     }
   });
@@ -723,6 +724,53 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.queryByRole('button', { name: 'Reviewed' })).toBeNull(); // the detail still reads Reviewed
     expect(screen.queryByText(/could not be reloaded after the offer change/)).toBeNull();
+  });
+
+  it('a stage dialog opened while the re-read after an offer action is out holds Confirm when that re-read fails, until Try again reads', async () => {
+    let current = offerRecord({ status: 'sent', timeline: [] });
+    let holdRead = false;
+    let failRead;
+    const detail = detailFixture({ status: 'offer' });
+    const patches = [];
+    setupFetch(
+      {
+        'POST /admin/careers/app-1/offer/offer-1/withdraw': () => {
+          current = offerRecord({ status: 'withdrawn', timeline: [] });
+          holdRead = true;
+          return res(200, { offer: current });
+        },
+        'GET /admin/careers/app-1': () => {
+          if (!holdRead) return res(200, { application: detail });
+          holdRead = false;
+          // The re-read after the withdraw: held while the owner opens a stage move, then it fails.
+          return new Promise((resolve) => { failRead = () => resolve(res(500, { error: 'Server error' })); });
+        },
+        'PATCH /admin/careers/app-1/status': () => {
+          patches.push('PATCH');
+          return res(200, { application: detailFixture({ status: 'reviewed' }), sent: {} });
+        },
+      },
+      { offer: () => res(200, offerPayload({ current })), detail },
+    );
+    await openDetail();
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Withdraw offer' }));
+    const confirm = (await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Withdraw' }));
+    await waitFor(() => expect(failRead).toBeDefined());
+    fireEvent.click(screen.getByRole('button', { name: 'Reviewed' }));
+    const stage = (await screen.findByRole('heading', { name: 'Move to Reviewed' })).closest('[role="dialog"]');
+    const confirmButton = within(stage).getByRole('button', { name: 'Confirm' });
+    await waitFor(() => expect(confirmButton).not.toBeDisabled());
+    failRead();
+    // The stage buttons behind the dialog turn off, and so does the dialog's own Confirm.
+    expect(await within(stage).findByText(/could not be reloaded after the offer change, so its stage may be out of date\. Confirm stays off until it loads\./)).toBeInTheDocument();
+    expect(confirmButton).toBeDisabled();
+    fireEvent.click(confirmButton);
+    expect(patches).toHaveLength(0);
+    fireEvent.click(within(stage).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(within(stage).queryByText(/could not be reloaded/)).toBeNull());
+    expect(confirmButton).not.toBeDisabled();
   });
 
   it('a failed application re-read after an offer change stays on the detail with Try again, and stage moves wait for it', async () => {
@@ -1151,7 +1199,7 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
     fireEvent.click(await screen.findByText(CONTACT.name));
     const card = await screen.findByTestId('offer-card');
-    fireEvent.click(within(card).getByRole('button', { name: 'Discard this draft — the offer you sent stays open' }));
+    fireEvent.click(within(card).getByRole('button', { name: 'Discard this draft — the offer you sent is unchanged' }));
     let dialog = (await screen.findByText(/Discard this draft\?/)).closest('[role="dialog"]');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Discard draft' }));
     await waitFor(() => expect(calls.some((c) => c.path.endsWith('/offer-2/withdraw'))).toBe(true));
