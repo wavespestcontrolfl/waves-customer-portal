@@ -562,6 +562,21 @@ describe('each field of these rows sets its one constant, read by its own rule',
     }
   });
 
+  // 0 is a value the row states (the bronze discount). The answer counts the field as carried, so a warm worker
+  // must take the 0 and not keep what it held.
+  test('waveguard_tiers: a discount of zero replaces what a warm worker held', async () => {
+    const worker = freshWorker();
+    const { constants } = worker;
+    const config = fullRows(constants);
+    for (const tier of TIERS) config.waveguard_tiers[tier].discount = 0.3;
+    await expect(sync(worker, config)).resolves.toBe(true);
+    expect(TIERS.map((tier) => constants.WAVEGUARD.tiers[tier].discount)).toEqual([0.3, 0.3, 0.3, 0.3]);
+    for (const tier of TIERS) config.waveguard_tiers[tier].discount = 0;
+    await expect(sync(worker, config)).resolves.toBe(true);
+    expect(worker.bridge.standardPestPriceRowsAreComplete()).toBe(true);
+    expect(TIERS.map((tier) => constants.WAVEGUARD.tiers[tier].discount)).toEqual([0, 0, 0, 0]);
+  });
+
   test('the engine knows the six property types and the four tiers the rows carry', () => {
     const { constants } = freshWorker();
     expect(Object.keys(constants.PROPERTY_TYPE_ADJ).sort()).toEqual([...PROPERTY_TYPES].sort());
