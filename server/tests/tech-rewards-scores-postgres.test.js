@@ -80,6 +80,7 @@ describe('tech rewards scores input checks', () => {
     await db.schema.withSchema(mockSchema).createTable('service_records', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
       t.uuid('technician_id');
+      t.uuid('scheduled_service_id');
       t.uuid('customer_id');
       t.text('status');
       t.text('service_type');
@@ -99,6 +100,12 @@ describe('tech rewards scores input checks', () => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
       t.string('status');
       t.string('idempotency_key');
+      t.timestamp('sent_at', { useTz: true });
+    });
+    await db.schema.withSchema(mockSchema).createTable('service_recaps', (t) => {
+      t.bigIncrements('id');
+      t.uuid('scheduled_service_id').notNullable().unique();
+      t.string('status', 20);
       t.timestamp('sent_at', { useTz: true });
     });
     await db.schema.withSchema(mockSchema).createTable('service_visits', (t) => {
@@ -150,6 +157,7 @@ describe('tech rewards scores input checks', () => {
     await db('tech_protocol_audits').del();
     await db('tech_owner_ratings').del();
     await db('equipment_checks').del();
+    await db('service_recaps').del();
     await db('visit_completion_packet_items').del();
     await db('visit_completion_packets').del();
     await db('visit_effects').del();
@@ -267,6 +275,21 @@ describe('tech rewards scores input checks', () => {
       // on time: a, c, d, u, sp, held (21 h after creation) = 6 of 9 counted (a, b, c, d, u, sp, nothing, held, failed);
       // without the email join, or if a later status dropped the credit, this reads lower
       expect(await scores.readOnTime(tech, WINDOW)).toBe(66.67);
+    });
+
+    test('onTime: a confirmed video recap text is a send; an unconfirmed one (no sent_at) is not', async () => {
+      const onTimeVisit = await scheduled(tech);
+      const lateVisit = await scheduled(tech);
+      const unsentVisit = await scheduled(tech);
+      await visit(tech, { scheduled_service_id: onTimeVisit.id });
+      await visit(tech, { scheduled_service_id: lateVisit.id });
+      await visit(tech, { scheduled_service_id: unsentVisit.id });
+      await db('service_recaps').insert([
+        { scheduled_service_id: onTimeVisit.id, status: 'approved', sent_at: ts('2026-04-10T17:00:00Z') },
+        { scheduled_service_id: lateVisit.id, status: 'approved', sent_at: ts('2026-04-11T21:00:00Z') },
+        { scheduled_service_id: unsentVisit.id, status: 'approved', sent_at: null },
+      ]);
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(33.33); // 1 of 3: the recap is the only send of the first
     });
 
     test('onTime: a combined visit summary counts for each member; no-report records leave the share', async () => {

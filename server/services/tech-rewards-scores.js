@@ -17,7 +17,8 @@
  *                (intelligence-bar/dashboard-tools.js): the earliest of a sent
  *                service_report_deliveries row, a sent service_report_ready email (key
  *                service_report_ready:<record>:<role>[:<suffix>], matched on the record segment),
- *                the completion text (completionSmsDeferredDeliveredAt, else sentSmsAt, when
+ *                the confirmed video recap text (service_recaps.sent_at), the completion text
+ *                (completionSmsDeferredDeliveredAt, else sentSmsAt, when
  *                completionSmsStatus is 'sent'), and the combined-visit summary send
  *                (visit_effects completion_sms / completion_email, as closeout-status.js reads
  *                it; the send record counts even if the summary link is revoked later).
@@ -209,7 +210,7 @@ async function saveSettings(input, actor = null, conn = db) {
 // stored value must not fail the whole read.
 const ON_TIME_SQL = `
   WITH cohort AS (
-    SELECT id, created_at, structured_notes
+    SELECT id, scheduled_service_id, created_at, structured_notes
       FROM service_records
      WHERE technician_id = ?
        AND status = 'completed'
@@ -228,6 +229,13 @@ const ON_TIME_SQL = `
           JOIN cohort c ON split_part(m.idempotency_key, ':', 2) = c.id::text
          WHERE split_part(m.idempotency_key, ':', 1) = 'service_report_ready'
            AND m.sent_at IS NOT NULL -- the recorded send time stands whatever the status became later (unsubscribed, spam_report, ...)
+        UNION ALL
+        -- the video recap text: service_recaps.sent_at is set only on provider confirmation
+        -- (recap-delivery.js; completion-record-invariants.js reads it the same way)
+        SELECT c.id, rc.sent_at
+          FROM cohort c
+          JOIN service_recaps rc ON rc.scheduled_service_id = c.scheduled_service_id
+         WHERE rc.sent_at IS NOT NULL
         UNION ALL
         -- a combined visit: ONE summary text or email for every member (visit_effects, as closeout-status
         -- reads it). The send record is the evidence: a link revoked later does not undo a delivery.
