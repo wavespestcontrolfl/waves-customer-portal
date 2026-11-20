@@ -1183,12 +1183,6 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
   const step2On = isEnabled('referralStep2');
 
   const outcome = await db.transaction(async (trx) => {
-    // GATE_REFERRAL_STEP2: the money rules (amounts, radius, yearly limit, the friend's credit) come from the live
-    // row read INSIDE this transaction, never from getSettings(), whose defaults stand in for a failed read. A
-    // read that fails or finds no row ends the transaction here: nothing posts and no guard is consumed, so the
-    // referral stays pending for the next completion.
-    const rules = step2On ? await liveSettingsOrThrow(trx) : settings;
-    const refereeDollarsNow = step2On ? round2((Number(rules.referee_discount_cents) || 0) / 100) : refereeDollars;
     // Re-read under lock; these guards are the single-use protection.
     const referral = await trx('referrals').where({ id: candidate.id }).forUpdate().first();
     if (!referral
@@ -1197,6 +1191,15 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
       || referral.referrer_reward_status !== 'pending_service') {
       return { skipped: true };
     }
+    // GATE_REFERRAL_STEP2: the money rules (amounts, radius, yearly limit, the friend's credit) come from the live row
+    // read INSIDE this transaction, never from getSettings(), whose defaults stand in for a failed read. That holds
+    // for a referral staged under Step 2 (marked 'staged') after the gate has been switched off too: its legacy
+    // amounts then come from the live row. A read that fails or finds no row ends the transaction here: nothing
+    // posts and no guard is consumed, so the referral stays pending for the next completion. An unmarked referral
+    // with the gate off keeps getSettings(), as before.
+    const stagedUnderStep2 = referral.referrer_reward_reason === 'staged';
+    const rules = step2On || stagedUnderStep2 ? await liveSettingsOrThrow(trx) : settings;
+    const refereeDollarsNow = step2On || stagedUnderStep2 ? round2((Number(rules.referee_discount_cents) || 0) / 100) : refereeDollars;
 
     // Real account credit = the FLAT referrer reward, symmetric with the referee
     // credit below (which uses the current referee_discount setting). WaveGuard
@@ -1210,10 +1213,10 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
     // Step 2 bookkeeping (the amount posted and its reason recorded, total earned reconciled): when the gate is on, or
     // the referral was staged under Step 2 and the gate has since been switched off. A referral with no marker settled
     // with the gate off is exactly the legacy path, adjusted by nothing.
-    const step2Row = step2On || referral.referrer_reward_reason === 'staged';
+    const step2Row = step2On || stagedUnderStep2;
     const referrerDollars = memberCredit
       ? memberCredit.dollars
-      : round2((Number(settings.referrer_reward_cents) / 100) || 0);
+      : round2((Number(rules.referrer_reward_cents) / 100) || 0);
     // The pending DRAIN, by contrast, uses the exact amount staged into the
     // promoter's pending at conversion (base + any tier bonus, FROZEN on the
     // referral) so the non-cashable tracker zeroes out. Finite-check so a frozen

@@ -311,7 +311,7 @@ const DAY = 86400000;
       await db(table).del();
     }
     await db('referral_program_settings').where({ id: 1 }).update({
-      require_service_completion: true, referee_discount_cents: 2500, step2_annual_credit_cap: 10, step2_near_radius_miles: 0.5,
+      require_service_completion: true, referrer_reward_cents: 2500, referee_discount_cents: 2500, step2_annual_credit_cap: 10, step2_near_radius_miles: 0.5,
       step2_referrer_reward_cents: 2500, step2_near_referrer_reward_cents: 5000, bonus_silver_cents: 0,
     });
     await db('referrals').whereNot({ referral_code: 'WAVES-OLD' }).del();
@@ -436,6 +436,28 @@ const DAY = 86400000;
       expect(await db('referral_promoters').where({ id: ctx.ref.promoter_id }).first()).toMatchObject({ pending_earnings_cents: 0, total_earned_cents: 2500 });
       // The settlement records what was posted, for the dashboards and the finance views.
       expect(await row(ctx.ref.id)).toMatchObject({ referrer_credit_cents: 2500, referrer_reward_reason: 'standard', referee_customer_id: ctx.friend.id });
+    });
+
+    test('a staged referral settled after the gate is off uses the live legacy amounts, and never defaults', async () => {
+      const ctx = await performed();
+      gates.referralStep2 = false;
+      await db('referral_program_settings').where({ id: 1 }).update({ referrer_reward_cents: 0, referee_discount_cents: 0 });
+      expect(await firstService(ctx.friend, ctx.visit)).toMatchObject({ referrerDollars: 0, refereeDollars: 0 });
+      expect(await credits(ctx.member.id)).toHaveLength(0);
+      expect(await credits(ctx.friend.id)).toHaveLength(0);
+      expect(await row(ctx.ref.id)).toMatchObject({ status: 'credited', referrer_credit_cents: 0, referrer_reward_reason: 'standard' });
+
+      // With no settings row the settlement stops and consumes nothing.
+      gates.referralStep2 = true;
+      await db('referral_program_settings').where({ id: 1 }).update({ referrer_reward_cents: 2500, referee_discount_cents: 2500 });
+      const again = await performed();
+      gates.referralStep2 = false;
+      const saved = await db('referral_program_settings').where({ id: 1 }).first();
+      await db('referral_program_settings').del();
+      await expect(firstService(again.friend, again.visit)).rejects.toMatchObject({ code: 'SETTINGS_UNAVAILABLE' });
+      expect(await row(again.ref.id)).toMatchObject({ status: 'signed_up', first_service_completed: false });
+      expect(await credits(again.friend.id)).toHaveLength(0);
+      await db('referral_program_settings').insert(saved);
     });
 
     test('conversion under Step 2 marks the referral staged until it settles', async () => {
