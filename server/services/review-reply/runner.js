@@ -1421,6 +1421,8 @@ async function applyRequeueOnIdentity(reviewId, existing, normalized, { conn = d
   if (!Object.keys(fields).length) return 0;
   const n = await conn('google_reviews')
     .where({ id: reviewId, auto_reply_status: existing.auto_reply_status, auto_reply_reason: existing.auto_reply_reason })
+    // Never under an in-flight publish (see claimDueRows).
+    .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()])
     .update(fields);
   return Array.isArray(n) ? n.length : n;
 }
@@ -1683,6 +1685,16 @@ function pipelineDraftGuard(text, { draftToken = null, groundingToken = null } =
     if (!gReview && human && submitted === human && MANUAL_VERSIONS.has(fresh.auto_reply_version || '')) {
       const moved = await manualAttemptMoved(fresh);
       if (moved) return moved;
+    }
+    // The same rule for a manual attempt still parked (its PUT timed out and
+    // the sync has not restored it yet, so its text is in auto_reply_draft
+    // and the slot is empty) submitted verbatim from the editor. Never the
+    // automatic-draft snapshot check below: a person's own words record no
+    // account facts, so that check would refuse an unchanged review.
+    if (!gReview && !token && !human && fresh.auto_reply_draft && submitted === String(fresh.auto_reply_draft).trim()
+      && fresh.auto_reply_status === STATUS.PARKED && RECONCILE_REASONS.has(fresh.auto_reply_reason)
+      && MANUAL_VERSIONS.has(fresh.auto_reply_version || '')) {
+      return manualAttemptMoved(fresh);
     }
     if (gReview) {
       if (gReview !== reviewFingerprint(fresh)) return 'the review or its customer link changed since this draft was generated — reload and draft again';

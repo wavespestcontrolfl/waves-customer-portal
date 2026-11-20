@@ -1341,6 +1341,10 @@ describe('processDueAutoReplies — state machine', () => {
     state.rows = [{ ...parked, auto_reply_status: 'skipped', auto_reply_reason: 'admin_skip' }];
     expect(await Runner.applyRequeueOnIdentity('p', parked, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toBe(0);
     expect(state.rows[0].auto_reply_status).toBe('skipped');
+    // A person's post in flight on the row: the requeue waits for the next sync.
+    state.rows = [{ ...parked, publish_claimed_until: '2099-01-01T00:00:00Z' }];
+    expect(await Runner.applyRequeueOnIdentity('p', parked, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toBe(0);
+    expect(state.rows[0].auto_reply_status).toBe('parked');
     state.rows = [{ ...parked }];
     expect(await Runner.applyRequeueOnIdentity('p', parked, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toBe(1);
     expect(state.rows[0].auto_reply_status).toBe('queued');
@@ -1973,6 +1977,22 @@ describe('admin actions', () => {
     expect(await Runner.pipelineDraftGuard(text + ' We fixed the garage too.')(fresh)).toBeNull();
     mockAccountFacts.mockRejectedValueOnce(new Error('db down'));
     expect(await Runner.pipelineDraftGuard(text)(fresh)).toMatch(/could not be re-read/);
+  });
+
+  test('pipelineDraftGuard (editor): a still-parked manual attempt submitted verbatim meets its own grounding, never the automatic-draft snapshot check', async () => {
+    const text = 'Thanks Dana, we will be back Tuesday for the garage.';
+    const base = row({ id: 'pg', customer_id: 'c1', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', review_reply: null, auto_reply_draft: text, auto_reply_version: 'human', auto_reply_mode: null });
+    const own = { ...base, auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(base), accountFingerprint: null } };
+    mockAccountFacts.mockResolvedValue({ city: 'Venice', tenure: 'new' });
+    // A person's own words: no account facts recorded, so an unchanged review passes.
+    expect(await Runner.pipelineDraftGuard(text)(own)).toBeNull();
+    expect(await Runner.pipelineDraftGuard(text)({ ...own, review_text: 'Edited: they missed the garage' })).toMatch(/review or its customer link changed/);
+    expect(await Runner.pipelineDraftGuard(text + ' Thanks again.')({ ...own, review_text: 'Edited: they missed the garage' })).toBeNull();
+    // An Intelligence Bar attempt: its account facts too.
+    const ib = { ...own, auto_reply_version: 'agent_ops', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(base), accountFingerprint: 'fp:Venice|new' } };
+    expect(await Runner.pipelineDraftGuard(text)(ib)).toBeNull();
+    mockAccountFacts.mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
+    expect(await Runner.pipelineDraftGuard(text)(ib)).toMatch(/customer facts changed/);
   });
 
   test('a malformed grounding token is never an unguarded submission (codex r47)', async () => {
