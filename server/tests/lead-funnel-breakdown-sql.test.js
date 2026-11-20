@@ -14,7 +14,7 @@ describeDb('lead funnel breakdown keys', () => {
 
   const keysFor = async ({ extracted = null, leadCity = null, heard = null, landing = null, customerCity = null, service = null, channel = 'form', booking = null }) => {
     const { rows } = await knex.raw(
-      `SELECT ${B.page} AS page, ${B.service} AS service, ${B.city} AS city, ${B.heard} AS heard
+      `SELECT ${B.page} AS page, ${B.service} AS service, ${B.city} AS city, ${B.heard} AS heard, ${B.quiz} AS quiz
          FROM (SELECT CAST(? AS jsonb) AS extracted_data, CAST(? AS text) AS city, CAST(? AS text) AS heard_about, CAST(? AS text) AS first_contact_channel) l,
               (SELECT CAST(? AS text) AS landing_page_url, CAST(? AS text) AS city) c,
               (SELECT CAST(? AS text) AS service_line) asa,
@@ -32,6 +32,15 @@ describeDb('lead funnel breakdown keys', () => {
     // a spoke stays distinct from the hub
     expect((await keysFor({ extracted: { attribution: { pageUrl: 'https://bradentonflpestcontrol.com/' } } })).page)
       .toBe('bradentonflpestcontrol.com');
+  });
+
+  test('quiz: the quiz page a lead came from, else unknown', async () => {
+    expect((await keysFor({ extracted: { quiz: { kind: 'pest', seeing: 'roaches' } } })).quiz).toBe('pest_quiz');
+    expect((await keysFor({ extracted: { quiz: { kind: 'lawn' } } })).quiz).toBe('lawn_quiz');
+    expect((await keysFor({ extracted: { quiz: { kind: 'tree' } } })).quiz).toBe('(unknown)');
+    expect((await keysFor({ extracted: { quiz: 'pest' } })).quiz).toBe('(unknown)');
+    expect((await keysFor({ extracted: 'not an object' })).quiz).toBe('(unknown)');
+    expect((await keysFor({})).quiz).toBe('(unknown)');
   });
 
   test('landing page falls back to the customer\'s first page, then stays unknown', async () => {
