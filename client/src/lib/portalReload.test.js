@@ -10,7 +10,7 @@ vi.mock('../native/platform', () => ({ isWavesAdminApp: () => platform.wavesAdmi
 import { installPortalVersionWatch, noteServerAnswer, resetPortalVersionForTests } from './portalVersion';
 import { registerReloadHold } from './reloadHolds';
 import { countDeviceWrite } from './deviceWrites';
-import { RECENT_ANSWER_MS, WRITE_WAIT_MS, reloadDueAtMove, reloadForNewBuild, staffReloadBlocker } from './portalReload';
+import { RECENT_ANSWER_MS, WRITE_WAIT_MS, reloadBlockers, reloadDueAtMove, reloadForNewBuild, staffReloadBlocker } from './portalReload';
 
 const NOW = 1_000_000;
 let holding = false;
@@ -83,7 +83,7 @@ describe('offline', () => {
     vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
     expect(reloadDueAtMove('/admin/pipeline')).toBe(false);
     const reload = vi.fn();
-    await expect(reloadForNewBuild({ reload })).resolves.toBe('no-signal');
+    await expect(reloadForNewBuild({ reload })).resolves.toBe('offline');
     expect(reload).not.toHaveBeenCalled();
     expect(sessionStorage.getItem('portal-reloaded-for')).toBeNull();
   });
@@ -99,11 +99,13 @@ describe('staffReloadBlocker', () => {
     expect(staffReloadBlocker('/admin/communications')).toBeNull();
   });
 
-  test('a staff tab the browser reports offline keeps its page, for the stale-chunk reload', () => {
+  test('a browser that reports itself offline blocks every reload button, named after held work, and keeps a staff tab', () => {
     vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    expect(reloadBlockers()).toEqual(['offline']);
     expect(staffReloadBlocker('/admin/today')).toBe('offline');
     expect(staffReloadBlocker('/billing')).toBeNull();
     holding = true;
+    expect(reloadBlockers()).toEqual(['test-hold', 'offline']);
     expect(staffReloadBlocker('/admin/today')).toBe('test-hold');
   });
 });

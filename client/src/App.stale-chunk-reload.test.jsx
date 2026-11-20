@@ -229,7 +229,7 @@ test('the held retry screen still reloads when session storage is blocked', asyn
   }
 });
 
-test('an offline staff tab keeps its page: no reload for a missing chunk, and the retry screen shows', async () => {
+test('an offline staff tab keeps its page: no reload for a missing chunk, and Retry names the offline state before it reloads', async () => {
   window.history.pushState({}, '', '/admin/today');
   vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
   const reload = vi.fn();
@@ -237,11 +237,17 @@ test('an offline staff tab keeps its page: no reload for a missing chunk, and th
   handleVitePreloadError(event, reload);
   expect(reload).not.toHaveBeenCalled();
   expect(event.defaultPrevented).toBe(false);
+  const pageReload = vi.fn();
+  vi.stubGlobal('location', { ...window.location, reload: pageReload });
   const Panel = lazyWithRetry(() => Promise.reject(new Error('Failed to fetch dynamically imported module: /assets/Panel-abc123.js')));
   renderInBoundary(Panel);
-  expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+  expect(pageReload).not.toHaveBeenCalled();
+  expect(screen.getByText('This device is offline. A reload may show an error page.')).toBeInTheDocument();
   expect(isStaleChunkReloadPending()).toBe(false);
   expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Reload anyway' }));
+  expect(pageReload).toHaveBeenCalledTimes(1);
 });
 
 test('a staff page with nothing held reloads at once for a missing chunk, with no delay in which work could start', async () => {

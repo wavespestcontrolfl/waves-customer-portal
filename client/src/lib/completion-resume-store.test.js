@@ -29,7 +29,7 @@ import {
   getVisitCompletionDraft,
   putVisitCompletionDraft,
 } from "./completion-resume-store";
-import { deviceWritesInFlight } from "./deviceWrites";
+import { countDeviceWrite, deviceWritesInFlight } from "./deviceWrites";
 import {
   clearCompletionResumeOwed,
   completionResumeOwed,
@@ -85,6 +85,12 @@ const fastRecord = (serviceId, operatorId, body, summary, storedAt = Date.now())
   storedAt,
 });
 
+// The real count, observed: a prune must never call it.
+vi.mock("./deviceWrites", async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, countDeviceWrite: vi.fn(actual.countDeviceWrite) };
+});
+
 beforeEach(() => {
   // Fresh database AND fresh marker per test.
   globalThis.indexedDB = new IDBFactory();
@@ -99,6 +105,22 @@ describe("completion resume store (IndexedDB)", () => {
     expect(deviceWritesInFlight()).toBe(before + 2);
     await Promise.all([put, remove]);
     expect(deviceWritesInFlight()).toBe(before);
+  });
+
+  it("never counts a prune as a save, so a background prune never holds a tab reload; a user write through the same writer is counted", async () => {
+    await putCompletionDraft("svc-prune", { draftId: "d-p", notes: "Old" }, "tech-p");
+    await putFastCompletionAttempt("svc-prune", "tech-p", { body: { idempotencyKey: "p-1" }, summary: "Old" });
+    await putCompletionResumeBody("svc-orphan", { notes: "Orphan" }, Date.now() - PRUNE_GRACE_MS - 1);
+    countDeviceWrite.mockClear();
+    const pruned = await Promise.all([
+      pruneCompletionDrafts(Date.now() + 1, 0),
+      pruneFastCompletionAttempts(Date.now() + 1, 0),
+      pruneCompletionResumeBodies(() => false),
+    ]);
+    expect(pruned).toEqual([[expect.objectContaining({ serviceId: "svc-prune" })], 1, 1]);
+    expect(countDeviceWrite).not.toHaveBeenCalled();
+    await putFastCompletionAttempt("svc-prune-2", "tech-p", { body: { idempotencyKey: "p-2" }, summary: "New" });
+    expect(countDeviceWrite).toHaveBeenCalled();
   });
 
   it("keeps a Fast Complete write that outlives its 5 s bound counted until its transaction settles, so a reload never cuts it off", async () => {

@@ -18,9 +18,11 @@
 
 // Every write below counts from its call until it settles, also while it
 // waits behind another on the same key, so a reload waits for it
-// (deviceWrites.js). Prunes are not counted: a reload that cuts one off
-// loses nothing, and the next prune finishes it.
+// (deviceWrites.js). Prunes are not counted (`counted: false`): a reload
+// that cuts one off loses nothing, and the next prune finishes it.
 import { countDeviceWrite } from "./deviceWrites";
+
+const notCounted = (work) => work;
 
 const DB_NAME = "waves-completion-resume";
 const STORE = "bodies";
@@ -123,9 +125,10 @@ export function getCompletionResumeBody(serviceId) {
     .then((row) => (row && typeof row.body === "object" && row.body ? row.body : null));
 }
 
-export function deleteCompletionResumeBody(serviceId) {
+export function deleteCompletionResumeBody(serviceId, { counted = true } = {}) {
   if (!serviceId) return Promise.resolve(false);
-  return countDeviceWrite(withStore(DB_NAME, "readwrite", false, (store) => store.delete(String(serviceId))))
+  const count = counted ? countDeviceWrite : notCounted;
+  return count(withStore(DB_NAME, "readwrite", false, (store) => store.delete(String(serviceId))))
     .then((result) => result !== false);
 }
 
@@ -207,11 +210,13 @@ function withFastCompletionAttempt(serviceId, operatorId, operation, timedOut) {
 // The local queue above preserves call order in this JS context; IndexedDB's
 // transaction lock and the mutation predicate are what keep another tab's
 // newer idempotency key from being overwritten or deleted by a late result.
-function mutateFastCompletionRow(key, mutate) {
-  // Counted twice: from the call until the queue answers, and from the open
-  // until the transaction settles. The 5 s bound answers the caller, but a
-  // write that outlives it still runs, and a reload would cut it off.
-  return countDeviceWrite(withFastCompletionKey(key, () => countDeviceWrite(openDb(FAST_COMPLETION_DB_NAME).then((db) => {
+function mutateFastCompletionRow(key, mutate, { counted = true } = {}) {
+  // A counted write is counted twice: from the call until the queue answers,
+  // and from the open until the transaction settles. The 5 s bound answers
+  // the caller, but a write that outlives it still runs, and a reload would
+  // cut it off.
+  const count = counted ? countDeviceWrite : notCounted;
+  return count(withFastCompletionKey(key, () => count(openDb(FAST_COMPLETION_DB_NAME).then((db) => {
     if (!db) return false;
     return new Promise((resolve) => {
       let settled = false;
@@ -354,7 +359,7 @@ export function pruneFastCompletionAttempts(now = Date.now(), maxAgeMs = DRAFT_R
         .filter((key) => key.startsWith(FAST_COMPLETION_PREFIX))
         .map((key) => mutateFastCompletionRow(key, (record) => (
           record && now - Number(record.storedAt || 0) >= maxAgeMs ? { delete: true } : null
-        ))),
+        ), { counted: false })),
     ))
     .then((results) => results.filter(Boolean).length);
 }
@@ -378,8 +383,9 @@ function withDraft(serviceId, scope, operation) {
 // can finish after a newer draft has taken the same technician/visit key; the
 // draft id check keeps that late result from overwriting or deleting the new
 // work. The read and mutation share one IndexedDB readwrite transaction.
-function mutateDraftRow(key, mutate) {
-  return countDeviceWrite(withDraftKey(key, (key) => openDb(DRAFT_DB_NAME).then((db) => {
+function mutateDraftRow(key, mutate, { counted = true } = {}) {
+  const count = counted ? countDeviceWrite : notCounted;
+  return count(withDraftKey(key, (key) => openDb(DRAFT_DB_NAME).then((db) => {
     if (!db) return false;
     return new Promise((resolve) => {
       let settled = false;
@@ -557,7 +563,7 @@ export function pruneCompletionDrafts(now = Date.now(), maxAgeMs = DRAFT_RETENTI
           if (!row || now - Number(row.storedAt || 0) < maxAgeMs) return null;
           removed = { serviceId: row.serviceId, scope: row.scope };
           return { delete: true };
-        });
+        }, { counted: false });
         return deleted ? removed : null;
       }),
     ))
@@ -587,7 +593,7 @@ export function pruneCompletionResumeBodies(isOwed, now = Date.now()) {
         .map((key) => rowFor(key).then((row) => (
           row && now - Number(row.storedAt || 0) < PRUNE_GRACE_MS
             ? false
-            : deleteCompletionResumeBody(key)
+            : deleteCompletionResumeBody(key, { counted: false })
         ))),
     ))
     .then((results) => results.filter(Boolean).length);

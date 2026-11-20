@@ -43,6 +43,7 @@ const HOLD_TEXT = {
   'recap-upload': 'A recap clip is not uploaded yet.',
   'ask-draft': 'An Ask Waves question is not sent yet.',
   'page-use': 'Anything not saved on this page will be lost.',
+  offline: 'This device is offline. A reload may show an error page.',
 };
 
 // The reload button of the Reload bar and of the staff retry screen

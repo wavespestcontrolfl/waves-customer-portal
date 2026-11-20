@@ -48,9 +48,15 @@ export function reloadDueAtMove(pathname, now = Date.now()) {
 const savesInFlight = () => writesInFlight() + deviceWritesInFlight();
 
 // Everything that stops a reload right now: 'saving' for a save still open,
-// then each registered hold's name.
+// then each registered hold's name, then 'offline' when the browser reports
+// itself offline (a reload then opens an error page). Every reload button
+// names them before it reloads.
 export function reloadBlockers() {
-  return [...(savesInFlight() > 0 ? ['saving'] : []), ...reloadHoldNames()];
+  return [
+    ...(savesInFlight() > 0 ? ['saving'] : []),
+    ...reloadHoldNames(),
+    ...(browserOffline() ? ['offline'] : []),
+  ];
 }
 
 // The first of them, or null.
@@ -59,13 +65,11 @@ export function reloadBlocker() {
 }
 
 // The stale-chunk reload (staleChunkReload.js, App.jsx's lazyWithRetry) asks
-// too: on a staff page, held work keeps the tab, and so does a browser that
-// reports itself offline ('offline'): a reload then opens an error page. The
-// page whose code failed to load shows its retry screen instead. Customer
-// pages are unchanged.
+// too: on a staff page, anything above keeps the tab, and the page whose code
+// failed to load shows its retry screen instead. Customer pages are
+// unchanged.
 export function staffReloadBlocker(pathname = window.location.pathname) {
-  if (!isAdminPath(pathname)) return null;
-  return reloadBlocker() ?? (browserOffline() ? 'offline' : null);
+  return isAdminPath(pathname) ? reloadBlocker() : null;
 }
 
 const pause = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });

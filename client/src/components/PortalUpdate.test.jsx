@@ -161,6 +161,21 @@ describe('PortalUpdateBar', () => {
     expect(screen.queryByText('A new version of the portal is ready.')).toBeNull();
   });
 
+  test('an offline tab: Reload names it first, then Reload anyway reloads', () => {
+    renderAt('/admin/dashboard');
+    goLive('bbb222bbb222');
+    const offline = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
+      expect(reload).not.toHaveBeenCalled();
+      expect(screen.getByText('This device is offline. A reload may show an error page.')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Reload anyway' }));
+      expect(reload).toHaveBeenCalledTimes(1);
+    } finally {
+      offline.mockRestore();
+    }
+  });
+
   test('Reload reloads; held work is named first, then Reload anyway', () => {
     renderAt('/admin/dashboard');
     goLive('bbb222bbb222');
