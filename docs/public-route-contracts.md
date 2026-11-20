@@ -2113,7 +2113,8 @@ Unsupported families/cadences, recurring foam and commercial programs return
 `PUT /api/estimates/:token/accept` on an estimate with `source = 'plan_start'` (the portal
 pricing card's first-plan quote, `GATE_PORTAL_PLAN_START`) re-runs the mint's eligibility inside
 the accept transaction, at the same point and under the same locks as the plan-restart re-check
-(comms advisory lock, then the customers row `FOR UPDATE`): the customer must still be active (the
+(comms advisory lock, then the property-preferences key, tried once, then the customers row
+`FOR UPDATE`): the customer must still be active (the
 flag exactly true: customer auth reads NULL as inactive), not churned, not deleted, carry no plan
 membership on the row (a real WaveGuard tier, a plan billing lane or a monthly rate), and own no
 live recurring service of any family (rodent and commercial rows included, and a visit still en
@@ -2137,6 +2138,20 @@ keeps the held time and the payment choice for that retry, as for `ACCEPT_INVOIC
 check, a `plan_start` accept must name the visit it books: a held `slotId` or an `existingAppointmentId`,
 both verified as on every accept. An accept that names neither answers 400 `{ error, code:
 'plan_start_slot_required' }` and writes nothing, so the quote stays open. Estimates of every other source are unchanged.
+
+`PUT /api/estimates/:token/accept` on an estimate with `source = 'plan_restart'` (the portal's
+restart quote, `GATE_CANCEL_FLOW_V2`) re-runs the restart mint's eligibility at the same point and
+under the same locks (comms advisory lock, then the property-preferences key, tried once, then the
+customers row `FOR UPDATE`): the account must still carry the exact churn stamp (`active` false,
+`pipeline_stage` `churned`), own no live row of a quoted family, and still be in the cancellation
+the quote was made for (the same eligible families, case id and request id). The estimate must
+still belong to the customer the accept read before its row lock: one that a merge or its undo
+moved to another customer refuses, and the re-check reads and locks no other customer. Otherwise it
+answers 409 `{ error, code: 'RESTART_STATE_CHANGED' }` and writes nothing. A re-check that cannot
+read its state, or that finds the customer's property-preferences key held by another change,
+answers 409 `{ error, code: 'RESTART_RECHECK_RETRY' }` with a retry line and writes nothing; the
+estimate page keeps the held time and the payment choice for that retry, as for
+`PLAN_START_RECHECK_RETRY`.
 
 `GET /api/estimates/:token` and the accept build an estimate's offer through
 `buildPricingBundle`, which serves the frozen send snapshot as is only when

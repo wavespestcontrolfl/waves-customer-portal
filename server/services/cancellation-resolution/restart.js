@@ -1497,6 +1497,56 @@ async function mintPlanStartEstimate({
   });
 }
 
+// The property-preferences advisory key, tried once, for the restart and plan-start accept
+// re-checks. Each runs while its accept holds the comms key, and the converter after it takes this
+// key before its own customers row lock, so a re-check that took the row first would deadlock
+// against a turf-profile save that holds this key and waits for the row (codex pre-push P1). Staff
+// tier, rate and billing edits take the two keys the other way (admin-customers.js), so a re-check
+// never waits on this key while it holds the comms key: a key another change holds throws here,
+// and the caller answers that failed read with its retry code (codex pre-push r33 to r35).
+async function tryPropertyPreferencesKey(trx, customerId) {
+  const prefs = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired', ['property-preferences', String(customerId)]);
+  // One row, always: a SELECT of one function.
+  if (prefs.rows[0].acquired !== true) throw new Error('the property-preferences key is held by another change');
+}
+
+// The restart accept re-check's reads. Fresh in-transaction reads: the accept path locked the
+// estimate row FOR UPDATE just above, so they see the committed truth, not the handler's
+// pre-transaction snapshot. The estimate row lock fences neither the customers row nor
+// scheduled_services, so the locks come before the eligibility reads (codex pre-push P1), in the
+// order every recurring accept takes (customer-comms-lock.js contract §1):
+//   1. the per-customer comms advisory key. The accept already holds it as its first lock
+//      (re-entrant, contract §3), and every scheduled_services-inserting restoration writer takes it.
+//   2. the property-preferences key, tried once (tryPropertyPreferencesKey above).
+//   3. the customers row FOR UPDATE. A reactivation is an UPDATE on this row, so it commits
+//      strictly before or after this check, never inside it.
+async function readRestartAcceptState(trx, estimate) {
+  const row = (await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data')) || {};
+  // The owner the handler read before the row lock (the plan-start check's rule, codex pre-push
+  // P0). The handler books for estimate.customer_id, so an estimate that a merge or its undo moved
+  // to another customer since then reads, and locks, no customer here and refuses as changed.
+  const customerId = row.customer_id === estimate.customer_id ? row.customer_id : null;
+  const planRestart = parseJson(row.estimate_data, {})?.planRestart;
+  const state = {
+    quoted: Array.isArray(planRestart?.families) ? planRestart.families : null,
+    quotedAttempt: { caseId: planRestart?.cancellationCaseId ?? null, requestId: planRestart?.cancellationRequestId ?? null },
+    fresh: null,
+    ownedFamilies: [],
+    latestAttempt: { families: [], caseId: null, requestId: null },
+  };
+  await lockCustomerComms(trx, customerId);
+  if (!customerId) return state;
+  await tryPropertyPreferencesKey(trx, customerId);
+  state.fresh = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first('id', 'active', 'pipeline_stage');
+  if (!state.fresh) return state;
+  state.ownedFamilies = await ownedResidualFamilies(trx, state.fresh.id);
+  // The LATEST attempt's families, under the same locks: a reactivate-then-recancel with a
+  // different scope leaves an unexpired older token whose families still pass the churn and
+  // residual checks (codex GH r8 P1); the quote must describe the cancellation the account is in.
+  state.latestAttempt = await cancelledFamiliesFor(state.fresh.id, trx);
+  return state;
+}
+
 // Accept-time revalidation (codex GH r4 P1) — called from the public
 // estimate accept transaction AFTER it takes the estimate row lock. The
 // residual-ownership exclusion in the mint runs at MINT time only, but the
@@ -1515,51 +1565,17 @@ async function assertRestartAcceptEligible(trx, estimate) {
     return err;
   };
   const changed = () => refuse('This account changed since this restart quote was created — please reopen "Restart my plan" for a current quote.');
-  let quoted;
-  let quotedAttempt;
-  let fresh;
-  let ownedFamilies;
-  let latestAttempt;
+  let state;
   try {
-    // Fresh in-transaction read: the accept path locked this row FOR UPDATE
-    // just above, so this sees the committed truth, not the handler's
-    // pre-transaction snapshot.
-    const row = await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data');
-    const planRestart = parseJson(row?.estimate_data, {})?.planRestart;
-    quoted = Array.isArray(planRestart?.families) ? planRestart.families : null;
-    quotedAttempt = {
-      caseId: planRestart?.cancellationCaseId ?? null,
-      requestId: planRestart?.cancellationRequestId ?? null,
-    };
-    // Serialize against reactivation/restoration BEFORE the eligibility
-    // reads (codex pre-push P1): the estimate row lock fences neither the
-    // customers row nor scheduled_services, so a concurrent staff
-    // reactivation or row restoration could commit between plain reads
-    // here and this accept's commit. Locks, in the repo's established
-    // order (customer-comms-lock.js contract §1):
-    //   1. the per-customer comms advisory key — the accept txn already
-    //      holds it as its FIRST lock (reentrant, contract §3), and it is
-    //      the key every scheduled_services-inserting restoration writer
-    //      takes, so those serialize here;
-    //   2. the customers row FOR UPDATE — a reactivation is an UPDATE on
-    //      this row, so it now commits strictly before or after this
-    //      check, never inside it.
-    // The eligibility reads below run AFTER both locks.
-    await lockCustomerComms(trx, row?.customer_id);
-    fresh = row?.customer_id
-      ? await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').forUpdate().first('id', 'active', 'pipeline_stage')
-      : null;
-    ownedFamilies = fresh ? await ownedResidualFamilies(trx, fresh.id) : [];
-    // The LATEST attempt's families, under the same locks: a
-    // reactivate-then-recancel with a different scope leaves an unexpired
-    // older token whose families still pass the churn + residual checks
-    // (codex GH r8 P1) — the quote must describe the cancellation the
-    // account is actually in.
-    latestAttempt = fresh ? await cancelledFamiliesFor(fresh.id, trx) : { families: [], caseId: null, requestId: null };
+    state = await readRestartAcceptState(trx, estimate);
   } catch (err) {
     logger.warn(`[plan-restart] accept revalidation could not read state for estimate ${estimate.id} — refusing: ${err.message}`);
-    throw refuse('We could not re-verify this restart just now — please try again in a moment.');
+    // A failed read, or a property-preferences key another change holds, is not a changed account
+    // (codex pre-push r32): its own code tells the estimate page to keep the held time and the
+    // payment choice for the retry this message asks for.
+    throw Object.assign(refuse('We could not re-verify this restart just now — please try again in a moment.'), { code: 'RESTART_RECHECK_RETRY' });
   }
+  const { quoted, quotedAttempt, fresh, ownedFamilies, latestAttempt } = state;
   // A plan_restart estimate without its quoted families (or its customer)
   // is malformed — never accept it.
   if (!quoted || !quoted.length || !fresh) throw changed();
@@ -1633,26 +1649,17 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
     // The home the mint priced (codex pre-push P0): a staff address change rewrites the address
     // column above on an open quote, but never this key.
     pricedHome = planStart?.premisesKey;
-    // Comms advisory key, then the property-preferences key, then the
-    // customers row FOR UPDATE, then the reads: the order every recurring
-    // accept already takes, because the converter that runs after this check
-    // takes the property-preferences key before its own customers row lock
-    // (codex pre-push P1). Taking the row here first would deadlock against a
-    // turf-profile save that holds that key and waits for the row; the
-    // converter's second acquire is a re-entrant no-op. Staff tier, rate and
-    // billing edits take these two keys the other way (admin-customers.js),
-    // and a plan-start-only order would trade that for a deadlock against an
-    // ordinary accept (codex pre-push r33/r34). So the check never waits on
-    // the property-preferences key while it holds the comms key: it tries the
-    // key once, and a key another change holds is a failed read, answered as
-    // PLAN_START_RECHECK_RETRY below (codex pre-push r35). The whole row, as
+    // Comms advisory key, then the property-preferences key (tried once:
+    // tryPropertyPreferencesKey; a held key is a failed read, answered as
+    // PLAN_START_RECHECK_RETRY below), then the customers row FOR UPDATE, then
+    // the reads: the order every recurring accept takes, the restart check's
+    // too. A plan-start-only order would trade the staff-edit deadlock for one
+    // against an ordinary accept (codex pre-push r33/r34). The whole row, as
     // the mint reads it: the premises proof needs the address and the
     // multi-home flag.
     await lockCustomerComms(trx, customerId);
     if (customerId) {
-      const prefs = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired', ['property-preferences', String(customerId)]);
-      // One row, always: a SELECT of one function.
-      if (prefs.rows[0].acquired !== true) throw new Error('the property-preferences key is held by another change');
+      await tryPropertyPreferencesKey(trx, customerId);
       fresh = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first();
     }
     if (fresh) {

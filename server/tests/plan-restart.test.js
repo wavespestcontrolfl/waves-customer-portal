@@ -231,8 +231,10 @@ function fakeTrx(ops = null, tableFactory = builder) {
   };
   t.raw = async (sql, bindings) => {
     if (ops) ops.push(`raw:${String(sql)}:${JSON.stringify(bindings)}`);
-    return {};
+    // A try-lock answers one row, as Postgres does; a key named in t.busy is another transaction's.
+    return String(sql).includes('pg_try_advisory_xact_lock') ? { rows: [{ acquired: !t.busy.includes(bindings?.[0]) }] } : {};
   };
+  t.busy = [];
   // Savepoint stand-in: the mint nests best-effort lookups (seed) so their
   // failure can't abort the outer transaction.
   t.transaction = async (fn) => fn(t);
@@ -1189,7 +1191,8 @@ describe('mintRestartEstimate', () => {
 // transaction re-runs on a plan_restart estimate under the estimate row lock.
 describe('assertRestartAcceptEligible', () => {
   const trx = fakeTrx();
-  const RESTART_ESTIMATE = { id: 'est-r1' };
+  // The handler's pre-lock read of the row: its id and the customer it books for.
+  const RESTART_ESTIMATE = { id: 'est-r1', customer_id: 'cust-1' };
   beforeEach(() => {
     tables.estimates = [{
       id: 'est-r1', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'tok-r1',
@@ -1288,7 +1291,7 @@ describe('assertRestartAcceptEligible', () => {
       .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
   });
 
-  test('an unreadable residual read fails closed with a retryable 409', async () => {
+  test('an unreadable residual read fails closed with its own retry code (codex pre-push r32: a failed read is not a changed account, so the page keeps the held time)', async () => {
     const failingTrx = fakeTrx(null, (table) => {
       const b = builder(table);
       if (table.startsWith('scheduled_services')) {
@@ -1297,32 +1300,59 @@ describe('assertRestartAcceptEligible', () => {
       return b;
     });
     await expect(actualRestart.assertRestartAcceptEligible(failingTrx, RESTART_ESTIMATE))
-      .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_RECHECK_RETRY' });
   });
 
-  test('serializes BEFORE reading: comms advisory lock + customers FOR UPDATE precede every eligibility read (codex pre-push P1)', async () => {
+  test('serializes BEFORE reading: the comms key, then the property-preferences key, then customers FOR UPDATE precede every eligibility read (codex pre-push P1; the converter\'s order, r28)', async () => {
     const ops = [];
     await actualRestart.assertRestartAcceptEligible(fakeTrx(ops), RESTART_ESTIMATE);
     const advisoryIdx = ops.findIndex((op) => op.includes('pg_advisory_xact_lock') && op.includes('customer-comms:cust-1'));
+    const prefsIdx = ops.findIndex((op) => op.startsWith('raw:') && op.includes('"property-preferences","cust-1"'));
     const customerReadIdx = ops.findIndex((op) => op.startsWith('read:customers'));
     const residualReads = ops
       .map((op, i) => ({ op, i }))
       .filter(({ op }) => op.startsWith('read:scheduled_services'));
-    // The advisory key is taken, and BEFORE the customers read.
+    // The comms key is taken first, then the property-preferences key, both BEFORE the customers
+    // read: the converter after this check takes the property-preferences key before its own
+    // customers row lock, so taking the row first would deadlock against a turf-profile save.
     expect(advisoryIdx).toBeGreaterThanOrEqual(0);
-    expect(customerReadIdx).toBeGreaterThan(advisoryIdx);
+    expect(prefsIdx).toBeGreaterThan(advisoryIdx);
+    expect(customerReadIdx).toBeGreaterThan(prefsIdx);
     // The customers read itself holds the row lock (a concurrent
     // reactivation UPDATE blocks until this accept commits or rolls back).
     expect(ops[customerReadIdx]).toBe('read:customers:forUpdate');
-    // Every residual eligibility read runs after BOTH locks.
+    // Every residual eligibility read runs after all three locks.
     expect(residualReads.length).toBeGreaterThan(0);
     for (const { i } of residualReads) expect(i).toBeGreaterThan(customerReadIdx);
   });
 
-  test('an unacquirable advisory lock fails closed (never proceeds unfenced)', async () => {
+  test('the property-preferences key is tried, never waited on, while the comms key is held: a held key asks for the retry and reads no customer row (codex pre-push r33 to r35)', async () => {
+    // A staff tier, rate or billing edit holds the property-preferences key and waits for the comms
+    // key (admin-customers.js); a blocking acquire here would deadlock against it.
+    const ops = [];
+    await actualRestart.assertRestartAcceptEligible(fakeTrx(ops), RESTART_ESTIMATE);
+    expect(ops.find((op) => op.includes('"property-preferences","cust-1"'))).toContain('pg_try_advisory_xact_lock');
+    const busyOps = [];
+    const busyTrx = fakeTrx(busyOps);
+    busyTrx.busy = ['property-preferences'];
+    await expect(actualRestart.assertRestartAcceptEligible(busyTrx, RESTART_ESTIMATE))
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_RECHECK_RETRY' });
+    expect(busyOps.some((op) => op.startsWith('read:customers'))).toBe(false);
+  });
+
+  test('an estimate moved to another customer since the handler read it refuses as changed and locks no customer (the plan-start rule, codex pre-push P0)', async () => {
+    // A merge or its undo moved the row after the handler's pre-lock read; the handler books for
+    // the customer it read, so the re-check must not validate the row's new owner instead.
+    const ops = [];
+    await expect(actualRestart.assertRestartAcceptEligible(fakeTrx(ops), { id: 'est-r1', customer_id: 'cust-0' }))
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
+    expect(ops.some((op) => op.startsWith('read:customers') || op.startsWith('raw:'))).toBe(false);
+  });
+
+  test('an unacquirable advisory lock fails closed with the retry code (never proceeds unfenced)', async () => {
     const t = fakeTrx();
     t.raw = async () => { throw new Error('lock boom'); };
     await expect(actualRestart.assertRestartAcceptEligible(t, RESTART_ESTIMATE))
-      .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_RECHECK_RETRY' });
   });
 });
