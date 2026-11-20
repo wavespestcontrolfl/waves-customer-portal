@@ -556,38 +556,32 @@ function classifyReplyMode(grounding) {
   return 'service_quality';
 }
 
-// Owner 2026-11-19: the app is always "the Waves app". A rewrite, not a
-// verifier rejection: a rejection would park the review for a person.
-// "the/our/your [Waves [Pest Control]] [mobile] app" and an article-free
-// "Waves [Pest Control] [mobile] app" become "the Waves app" (a capital "The"
-// only at the start of a sentence or a line). A brand name that already has
-// its own article ("a new Waves app") keeps that article and only loses
-// "Pest Control"/"mobile". A bare "app" with no "the/our/your" and no "Waves"
-// ("an app") is not ours to name and is left alone.
+// Owner 2026-11-19: the app is always "the Waves app". Two parts:
+// - wavesApp rewrites each mention whose article is known: "the/our/your
+//   [Waves [Pest Control]] [mobile] app" becomes "the Waves app" ("The" at the
+//   start of a sentence or a line). That is the common slip, and a rewrite
+//   costs no extra attempt.
+// - offAppName finds any other mention that names Waves but is not exactly
+//   "the Waves app" ("a new Waves app", "finds Waves app helpful"). The
+//   verifier rejects it (app_name) and the model writes the reply again: the
+//   right article cannot be guessed from the words around the name.
+// A bare "app" with no "the/our/your" and no "Waves" ("an app") is not ours
+// to name and is left alone.
 const APP_MENTION_RE = /\b(?:(?:the|our|your)\s+)?(?:waves\s+(?:pest\s+control\s+)?)?(?:mobile\s+)?app\b(?!-|\s+store)/gi;
+const OWN_APP_RE = /^(?:the|our|your)\s/i;
 const SENTENCE_START_RE = /(?:^|[.!?]["')\]\u2019\u201d]*\s+|\n\s*)$/;
-const DETERMINER_RE = /^(?:a|an|the|our|your|this|these|those|my|their|his|her|its|any|each|every|no|some|another)$/i;
-// A word that ends the phrase before the name: an article behind it belongs to
-// an earlier phrase ("the kind words about Waves app").
-const PHRASE_BREAK_RE = /^(?:about|after|at|by|for|from|in|into|of|on|over|than|that|through|to|via|with|without|and|or|but|so|is|are|was|were|be|been|has|have|had|get|gets|got|made|built|use[sd]?|using|love[sd]?|loving|like[sd]?|enjoy(?:s|ed)?|tr(?:y|ies|ied|ying)|download(?:s|ed)?|recommend(?:s|ed)?|mention(?:s|ed)?)$/i;
-// The name has its own article when the nearest article, at most three
-// words back, comes before any punctuation or phrase break.
-function hasOwnArticle(before) {
-  for (const word of before.split(/\s+/).filter(Boolean).slice(-4).reverse()) {
-    if (/[^\w'\u2019-]$/.test(word)) return false;
-    if (DETERMINER_RE.test(word)) return true;
-    if (PHRASE_BREAK_RE.test(word)) return false;
-  }
-  return false;
-}
 function wavesApp(text) {
   return String(text || '').replace(APP_MENTION_RE, (m, at, s) => {
-    const own = /^(?:the|our|your)\s/i.test(m);
-    if (!own && !/^waves\s/i.test(m)) return m;
-    const before = s.slice(0, at);
-    if (!own && hasOwnArticle(before)) return 'Waves app';
-    return SENTENCE_START_RE.test(before) ? 'The Waves app' : 'the Waves app';
+    if (!OWN_APP_RE.test(m)) return m;
+    return SENTENCE_START_RE.test(s.slice(0, at)) ? 'The Waves app' : 'the Waves app';
   });
+}
+function offAppName(text) {
+  for (const [m] of String(text || '').matchAll(APP_MENTION_RE)) {
+    const ours = OWN_APP_RE.test(m) || /^waves\s/i.test(m);
+    if (ours && m.replace(/\s+/g, ' ').toLowerCase() !== 'the waves app') return m;
+  }
+  return null;
 }
 
 /**
@@ -926,6 +920,8 @@ function verifyReplyDetailed(text, grounding, { recentReplies = [], mode } = {})
   if (body.includes('—') || body.includes('–')) return reject('em_dash');
   if (FIRST_PERSON_SINGULAR_RE.test(body)) return reject('first_person_singular');
   if (LEGACY_BRAND_RE.test(body)) return reject('legacy_brand');
+  const appSaid = offAppName(body);
+  if (appSaid) return reject('app_name', appSaid);
   if (EMAIL_RE.test(body)) return reject('email', body.match(EMAIL_RE)[0]);
   if (URL_RE.test(body)) return reject('url', body.match(URL_RE)[0]);
   if (PHONE_RE.test(body)) return reject('phone', body.match(PHONE_RE)[0]);
@@ -1211,7 +1207,7 @@ HARD RULES (a reply breaking any of these is discarded):
 - No incentives of any kind (discount, free, credit, gift, reward). Never ask for stars or for the review to be changed.
 - No safety claims ("safe", "non-toxic", "EPA"), no re-entry or drying times, no guarantees or warranties, no "best"/"#1" claims, no competitor names.
 - No emoji in the body. No em dashes. No stock phrases: "means the world", "thrilled", "delighted to hear", "made our day", "taking the time to", "pest and lawn team", "down here", "here in the neighborhood".
-- If the reply mentions the app, call it "the Waves app" ("The Waves app" at the start of a sentence). Never "the app", "our app", "your app" or "the Waves Pest Control app".
+- If the reply mentions the app, call it "the Waves app" ("The Waves app" at the start of a sentence), word for word. Never "the app", "our app", "your app", "Waves app" without "the", or "the Waves Pest Control app".
 - Do not repeat the openings or phrasing of the recent replies you are shown.
 - Do not summarize the review back to the reviewer.
 
@@ -1271,13 +1267,13 @@ function buildUserText(grounding, recentReplies, feedback, { reviewOnly = false 
 
 // Rejection codes whose span cannot carry a person BY CONSTRUCTION — a word
 // count, a fixed-vocabulary match (stock phrase, dispute word, private-channel
-// phrase, unsourced claim), a stray digit, a listed city — and so may be
+// phrase, unsourced claim, app name), a stray digit, a listed city — and so may be
 // stored on the row and the audit log. Every other span reaches the retry
 // prompt only: a name, a phone number, an email, an address, a link, the
 // opening (which starts with the greeting name), a date phrase, and a banned
 // phrase — BANNED_RE spans intervening words ("give ... stars", "take ...
 // off"), so its match can absorb any name the reviewer wrote.
-const STORED_SPAN_CODES = new Set(['too_long', 'dispute_words', 'stock_phrase', 'private_channel', 'unlisted_digits', 'unlisted_city', 'unlisted_service_claim', 'negated_review_claim', 'unlisted_relationship_claim', 'unlisted_credential_claim', 'unlisted_experience_claim']);
+const STORED_SPAN_CODES = new Set(['too_long', 'app_name', 'dispute_words', 'stock_phrase', 'private_channel', 'unlisted_digits', 'unlisted_city', 'unlisted_service_claim', 'negated_review_claim', 'unlisted_relationship_claim', 'unlisted_credential_claim', 'unlisted_experience_claim']);
 
 const FEEDBACK_FOR = {
   too_long: 'too many words',
@@ -1287,6 +1283,7 @@ const FEEDBACK_FOR = {
   emoji: 'an emoji appeared in the body',
   em_dash: 'an em dash was used',
   first_person_singular: 'used "I"/"my" instead of "we"/"our"',
+  app_name: 'named the app wrong: write "the Waves app" word for word ("The Waves app" at the start of a sentence)',
   url: 'contained a link', email: 'contained an email address', phone: 'contained a phone number',
   money: 'mentioned money', address: 'contained a street address',
   banned_phrase: 'used a banned phrase (incentive, safety claim, guarantee, rank claim, competitor, or rating request)',
