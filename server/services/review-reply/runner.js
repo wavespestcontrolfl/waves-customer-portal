@@ -959,14 +959,15 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     // sync re-queues a parked row the moment it attaches the name).
     const backoffMin = code === CODES.NO_RESOURCE ? IDENTITY_BACKOFF_MIN : RETRY_BACKOFF_MIN;
     // No delay left (undefined → NaN) parks. So does a retry due in the last
-    // hour of the queue-age window: expireOverAgeQueued clears an over-age
-    // row with no bell (deploy-forward, codex r74), so the 5-minute cron must
-    // claim the retry inside the window. The hour covers a busy batch and
-    // missed ticks; a longer outage clears the row with every other pending
-    // row, as before.
+    // hour of the queue-age window (the last quarter of a window shorter
+    // than 4 h): expireOverAgeQueued clears an over-age row with no bell
+    // (deploy-forward, codex r74), so the 5-minute cron must claim the retry
+    // inside the window. The margin covers a busy batch and missed ticks; a
+    // longer outage clears the row with every other pending row, as before.
     const delayMin = code === CODES.GOOGLE_FAILED && googleMayAcceptLater(err.cause) ? GOOGLE_RETRY_DELAYS_MIN[attempts - 1] : (attempts < MAX_ATTEMPTS ? backoffMin * attempts : undefined);
     const dueMs = Date.now() + delayMin * 60000;
-    const lastRetryMs = new Date(merged.review_created_at).getTime() + cfg.maxQueueAgeHours * 3600000 - LAST_RETRY_MARGIN_MS;
+    const windowMs = cfg.maxQueueAgeHours * 3600000;
+    const lastRetryMs = new Date(merged.review_created_at).getTime() + windowMs - Math.min(LAST_RETRY_MARGIN_MS, windowMs / 4);
     // RECONCILE_FAILED (codex r74): Google shows an owner reply but the
     // local record of it failed — transient, retry; never "already replied".
     if (PUBLISH_RETRYABLE_CODES.has(code) && dueMs < lastRetryMs) {
@@ -1704,7 +1705,15 @@ async function retryFailedEditedBells({ limit = 20 } = {}) {
     if (!m) continue;
     const [reason, actionFlag] = String(m[1]).split(':');
     if (reason === CODES.RECONCILE_FAILED) {
-      if (await reconcileFailedBell(r)) n++;
+      // Re-ring only while the row is still parked for reconciliation. Once
+      // the sync has recorded the reply, the stamp is obsolete: clear it,
+      // compare-and-set on the row as read, so a newer stamp is never lost.
+      if (r.auto_reply_status === STATUS.PARKED && r.auto_reply_reason === CODES.RECONCILE_FAILED) {
+        if (await reconcileFailedBell(r)) n++;
+      } else {
+        await db('google_reviews').where({ id: r.id, auto_reply_status: r.auto_reply_status, auto_reply_reason: r.auto_reply_reason, auto_reply_error: r.auto_reply_error })
+          .update({ auto_reply_error: err.replace(BELL_STAMP_RE, '') || null });
+      }
       continue;
     }
     const action = actionFlag !== '0';

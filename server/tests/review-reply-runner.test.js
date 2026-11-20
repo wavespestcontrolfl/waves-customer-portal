@@ -644,6 +644,14 @@ describe('processDueAutoReplies — state machine', () => {
     expect(body).toContain('Google shows a reply to this review that was not recorded here.');
     expect(opts).toMatchObject({ link: `/admin/reviews?responded=all&review=${state.rows[0].id}`, metadata: { reason: 'reconcile_failed', needsAction: true } });
     expect(state.rows[0].auto_reply_error).not.toMatch(/bell_failed/);
+    // A stamp the sync made obsolete (it recorded the owner reply after the bell failed) rings nothing
+    // and is cleared: the review is no longer waiting for anyone.
+    const stamped = `${state.rows[0].auto_reply_error} || bell_failed:reconcile_failed:1`;
+    Object.assign(state.rows[0], { auto_reply_status: 'skipped', auto_reply_reason: 'owner_replied_on_google', review_reply: 'Thanks, Dana!', auto_reply_error: stamped });
+    mockNotify.mockClear();
+    expect(await Runner.retryFailedEditedBells()).toBe(0);
+    expect(mockNotify).not.toHaveBeenCalled();
+    expect(state.rows[0].auto_reply_error).not.toMatch(/bell_failed/);
     mockNotify.mockReset().mockResolvedValue({});
   });
 
@@ -755,6 +763,19 @@ describe('processDueAutoReplies — state machine', () => {
     await Runner.processDueAutoReplies();
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1 });
     expect(mockNotify).not.toHaveBeenCalled();
+    // The shortest window (1 h) keeps a quarter of it as the margin, not the full hour: a fresh review still retries.
+    process.env.REVIEW_AUTO_REPLY_MAX_AGE_HOURS = '1';
+    try {
+      state.rows = [row({ review_created_at: new Date(Date.now() - 60000).toISOString() })];
+      await Runner.processDueAutoReplies();
+      expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_attempts: 1 });
+      // Created 40 min ago: the 10 min retry falls due 10 min before the window closes, inside its last 15 min.
+      state.rows = [row({ review_created_at: new Date(Date.now() - 40 * 60000).toISOString() })];
+      await Runner.processDueAutoReplies();
+      expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_failed', auto_reply_attempts: 1 });
+    } finally {
+      delete process.env.REVIEW_AUTO_REPLY_MAX_AGE_HOURS;
+    }
   });
 
   test('a Google refusal that may still turn into a yes takes the long ladder; a permanent one keeps the 10/20 min retry and parks on attempt 3', async () => {
