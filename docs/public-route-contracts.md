@@ -5272,7 +5272,11 @@ by `applyOpenLeadPredicate`, not deleted, not commercial). The lead keeps
 its `form_submission` type, its source and its `quiz` answers
 (`extracted_data` is merged: a key the price page does not send, `timeline`
 included, is kept), and the later `/api/public/quote/calculate` run prices
-that same lead. A wrong, expired or refused attach token is ignored: the
+that same lead. Either attach (prefill or hand-off) writes its service label
+only while the lead has no `service_key`: the price calculation writes a
+key and its catalog name together, so a lookup that runs again on the same
+token leaves that name beside its key. A wrong, expired or refused attach
+token is ignored: the
 lookup inserts its own `quote_wizard` lead as before. The rule is decided
 once, in the attach UPDATE; the same request's later writes (the completion
 stage, the address verdict) follow that lead and merge `extracted_data`

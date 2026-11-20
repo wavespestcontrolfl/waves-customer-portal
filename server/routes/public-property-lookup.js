@@ -455,7 +455,13 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
             address: lookupAddress,
             city: normalizedAddress.city || zipToCity(normalizedAddress.zip) || null,
             zip: normalizedAddress.zip || null,
-            ...(serviceInterest ? { service_interest: serviceInterest } : {}),
+            // A keyed lead's label is its catalog name: the price calculation
+            // writes the two together. A lookup that runs again on the same
+            // token (the visitor went back and changed the address) leaves
+            // that label alone, so key and label never disagree.
+            ...(serviceInterest
+              ? { service_interest: db.raw('CASE WHEN service_key IS NULL THEN ? ELSE service_interest END', [serviceInterest]) }
+              : {}),
             ...(declaredUrgency ? { urgency: declaredUrgency } : {}),
             ...(anonId ? { anon_id: anonId } : {}),
             // Fills an EMPTY answer only; a recorded one is never replaced.

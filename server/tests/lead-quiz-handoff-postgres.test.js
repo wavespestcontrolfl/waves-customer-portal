@@ -314,6 +314,19 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
       expect(await estimatesOnPhone(lead.phone)).toEqual([['quote_wizard', 'draft']]);
     }, 120000);
 
+    test('a lookup that runs again never rewrites a keyed lead\'s label: the catalog name stays beside its key', async () => {
+      // The price calculation writes the key and the catalog name together.
+      // The visitor then goes back and sends the lookup again on the same token.
+      const keyed = await quizLead({ service_key: 'pest_quarterly', service_interest: 'Quarterly Pest Control' });
+      const again = await lookup(keyed, { prefill_lead_id: keyed.leadId, prefill_token: keyed.token, serviceInterest: 'ant-control' });
+      expect(again).toMatchObject({ status: 200, json: { lead_id: keyed.leadId } });
+      expect(await leadRow(keyed.leadId)).toMatchObject({ service_key: 'pest_quarterly', service_interest: 'Quarterly Pest Control' });
+      // A lead with no key takes the price page's label, as before.
+      const plain = await quizLead();
+      await lookup(plain, { prefill_lead_id: plain.leadId, prefill_token: plain.token, serviceInterest: 'ant-control' });
+      expect(await leadRow(plain.leadId)).toMatchObject({ service_key: null, service_interest: 'Ant Control' });
+    }, 120000);
+
     test('continues only a lead that is still open, live and not commercial', async () => {
       for (const [, change] of [...CLOSED, ['deleted', { deleted_at: new Date() }]]) {
         const lead = await quizLead();
