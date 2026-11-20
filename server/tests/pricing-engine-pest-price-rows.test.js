@@ -38,6 +38,14 @@ const FEATURE_FIELDS = [
   'near_water', 'indoor', 'attached_garage',
 ];
 const REQUIRED_FEATURE_FIELDS = FEATURE_FIELDS.filter((field) => field !== 'attached_garage');
+// The engine's adjustment (a key of PEST.additionalAdjustments) that each required field of the features row sets.
+const FEATURE_ADJUSTMENT = {
+  pool_cage: 'poolCage', pool_cage_small: 'poolCageSmall', pool_cage_medium: 'poolCageMedium', pool_cage_large: 'poolCageLarge',
+  pool_cage_oversized: 'poolCageOversized', pool_no_cage: 'poolNoCage',
+  shrubs_heavy: 'shrubs_heavy', shrubs_moderate: 'shrubs_moderate', shrubs_light: 'shrubs_light',
+  landscape_complex: 'complexity_complex', landscape_moderate: 'complexity_moderate', landscape_simple: 'complexity_simple',
+  near_water: 'nearWater', indoor: 'indoor',
+};
 const PROPERTY_TYPES = ['single_family', 'townhome_end', 'townhome_interior', 'duplex', 'condo_ground', 'condo_upper'];
 const TIERS = ['bronze', 'silver', 'gold', 'platinum'];
 const ROW_KEYS = ['pest_base', 'pest_footprint', 'pest_features', 'pest_property_type', 'waveguard_tiers'];
@@ -145,8 +153,10 @@ describe('the answer after one sync', () => {
     expect(constants.PEST.base).toBe(expected.base);
     expect(constants.PEST.floor).toBe(expected.floor);
     expect(constants.PEST.footprintBrackets).toEqual([{ sqft: 1000, adj: -7 }, { sqft: 2000, adj: 4 }, { sqft: 3000, adj: 11 }]);
-    const markers = Object.values(constants.PEST.additionalAdjustments).filter((value) => value >= 20 && value < 20 + REQUIRED_FEATURE_FIELDS.length);
-    expect(markers.sort((a, b) => a - b)).toEqual(REQUIRED_FEATURE_FIELDS.map((_field, index) => 20 + index));
+    // Each field at the adjustment the engine reads for it: two swapped fields would misprice both homes.
+    expect(Object.keys(FEATURE_ADJUSTMENT)).toEqual(REQUIRED_FEATURE_FIELDS);
+    expect(Object.fromEntries(REQUIRED_FEATURE_FIELDS.map((field) => [field, constants.PEST.additionalAdjustments[FEATURE_ADJUSTMENT[field]]])))
+      .toEqual(Object.fromEntries(REQUIRED_FEATURE_FIELDS.map((field, index) => [field, 20 + index])));
     PROPERTY_TYPES.forEach((type, index) => expect(constants.PROPERTY_TYPE_ADJ[type]).toBe(-(30 + index)));
     TIERS.forEach((tier, index) => expect(constants.WAVEGUARD.tiers[tier]).toMatchObject({ discount: discounts[index], minServices: counts[index] }));
   });
