@@ -89,13 +89,13 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
   }
 
   // A call of the customer's, read and final, `hoursAgo` hours ago: `choice` is the caller's plan choice (null for
-  // none), `intent` the call's ask.
-  async function call(customerId, { choice = null, intent = null, hoursAgo = 0 } = {}) {
+  // none), `intent` the call's ask; `over` overrides columns (a call still being read).
+  async function call(customerId, { choice = null, intent = null, hoursAgo = 0, over = {} } = {}) {
     const id = randomUUID();
     await trx('call_log').insert({
       id, customer_id: customerId, twilio_call_sid: `CA${id.replace(/-/g, '')}`, from_phone: '+19415550101', answered_by: 'human',
       processing_status: 'processed', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify(extractionWith(choice, intent)),
-      transcription: transcriptWith(choice), direction: 'inbound', created_at: new Date(Date.now() - hoursAgo * HOUR),
+      transcription: transcriptWith(choice), direction: 'inbound', created_at: new Date(Date.now() - hoursAgo * HOUR), ...over,
     });
     return id;
   }
@@ -110,12 +110,12 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
   }
 
   // One open phone-yes card as the sweep files and keeps it: a customer, the estimates it names (each { hours } until it
-  // expires, and its status), the call with the yes a day ago (`yes`; none when false), the booking call two hours ago
-  // and the pest visit it booked (`visitDays` from today). One estimate is the card's own; two or more are a card that
-  // names several. A call that booked several visits files its card with no visit of its own (`cardVisit` false);
-  // `moreVisits` are the call's other visits.
+  // expires, and its status; made `madeHoursAgo` hours ago and sent two days ago), the call with the yes a day ago
+  // (`yes`; none when false), the booking call two hours ago and the pest visit it booked (`visitDays` from today). One
+  // estimate is the card's own; two or more are a card that names several. A call that booked several visits files its
+  // card with no visit of its own (`cardVisit` false); `moreVisits` are the call's other visits.
   async function phoneYesCard({
-    estimates = [{ hours: 5 * 24 }], visitDays = 5, cardVisit = true, moreVisits = [], yes = true,
+    estimates = [{ hours: 5 * 24 }], visitDays = 5, cardVisit = true, moreVisits = [], yes = true, madeHoursAgo = 72,
   } = {}) {
     seq += 1;
     const customerId = randomUUID();
@@ -127,7 +127,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
       const [row] = await trx('estimates').insert({
         customer_id: customerId, status: estimateStatus, token: randomUUID().replace(/-/g, ''), customer_name: 'Pat Sampleton',
         address: '100 Example Lane, Sampleton, FL 34200', monthly_total: 15, annual_total: 180, onetime_total: 0, category: 'RESIDENTIAL',
-        created_at: new Date(Date.now() - 3 * DAY), sent_at: new Date(Date.now() - 2 * DAY), expires_at: new Date(Date.now() + hours * HOUR),
+        created_at: new Date(Date.now() - madeHoursAgo * HOUR), sent_at: new Date(Date.now() - 2 * DAY), expires_at: new Date(Date.now() + hours * HOUR),
       }).returning('id');
       estimateIds.push(String(row.id || row));
     }
@@ -489,6 +489,47 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     expect(bannersFor(card.id)).toBe(0);
   });
 
+  test('a later call still being read holds the ring, as it holds the tap; once read, the ring says what the read found', async () => {
+    const card = await phoneYesCard();
+    await pass();
+    // Time runs short while a newer call is not read yet: the card still shows the yes, and the bell rings nothing.
+    await trx('scheduled_services').where({ id: card.visitId }).update({ scheduled_date: etDay(1) });
+    const later = await call(card.customerId, {
+      over: { processing_status: 'processing', v2_extraction_status: null, ai_extraction_enriched: null, transcription: null },
+    });
+    await pass();
+    expect(await bellsOf(card.id)).toEqual(expect.objectContaining({ due: undefined, count: 1 }));
+    expect(bannersFor(card.id)).toBe(1);
+
+    // The read finds a cancel: the sweep writes it on the card, then the time-short bell says what the card says.
+    await trx('call_log').where({ id: later }).update({
+      processing_status: 'processed', v2_extraction_status: 'valid', transcription: transcriptWith(null),
+      ai_extraction_enriched: JSON.stringify(extractionWith(null, 'cancellation_request')),
+    });
+    await keepCurrent(card.id);
+    await pass();
+    const { due } = await bellsOf(card.id);
+    expect(due).toEqual(expect.objectContaining({
+      title: "Estimates — check Pat Sampleton's estimate",
+      body: `The visit the call booked is ${dayWords(1)}, and its card in Triage is still open.`,
+    }));
+    expect(bannersFor(card.id)).toBe(2);
+  });
+
+  test("urgency is read by the clock after the card's lock, not the sweep's start", async () => {
+    // By a clock two days old (a long scan, a long wait for the lock), a visit that began yesterday at 3:00 PM would
+    // start within 48 hours, and one tomorrow at 3:00 PM would not.
+    const started = await phoneYesCard({ visitDays: -1 });
+    const soon = await phoneYesCard({ visitDays: 1 });
+    await ringOpenCardsForTest(new Date(Date.now() - 2 * DAY));
+    const startedBells = await bellsOf(started.id);
+    expect(startedBells.due).toBeUndefined();
+    expect(startedBells.filed.body).toBe('The caller said yes to pay per application on a call.');
+    const soonBells = await bellsOf(soon.id);
+    expect(soonBells.filed).toBeUndefined();
+    expect(soonBells.due.body).toBe(`The visit the call booked is ${dayWords(1)}, and its card in Triage is still open.`);
+  });
+
   describe('the rows a ring reads, on two connections', () => {
     // These rows are committed, on a pool of their own, so a second connection sees them; each test deletes its own.
     let pool; let made = null;
@@ -511,16 +552,19 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
       await conn.raw("SET LOCAL statement_timeout = '30s'");
     };
 
+    const reRead = (card) => ['call_log', card.yesCallId, { v2_extraction_status: 'valid' }];
     test.each([
-      ['the customer accepts the estimate', (card) => ['estimates', card.estimateIds[0], { status: 'accepted', accepted_at: new Date() }]],
-      ['the visit moves to tomorrow', (card) => ['scheduled_services', card.visitId, { scheduled_date: etDay(1) }]],
-      ['a re-read of the call with the yes', (card) => ['call_log', card.yesCallId, { v2_extraction_status: 'valid' }]],
-    ])("%s: in flight, the card rings nothing this run; after the ring's read, the change waits for its commit", async (_label, changeOf) => {
+      ['the customer accepts the estimate', {}, (card) => ['estimates', card.estimateIds[0], { status: 'accepted', accepted_at: new Date() }]],
+      ['the visit moves to tomorrow', {}, (card) => ['scheduled_services', card.visitId, { scheduled_date: etDay(1) }]],
+      ['a re-read of the call with the yes', {}, reRead],
+      // The window starts at the send, as the card's check reads it: here before the estimate's row was made.
+      ['a re-read of the call with the yes, on an estimate whose send is dated before its row was made', { madeHoursAgo: 0 }, reRead],
+    ])("%s: in flight, the card rings nothing this run; after the ring's read, the change waits for its commit", async (_label, setup, changeOf) => {
       const perTest = trx;
       try {
         trx = pool;
         mockConn = pool;
-        made = await phoneYesCard();
+        made = await phoneYesCard(setup);
       } finally {
         trx = perTest;
         mockConn = perTest;
@@ -535,7 +579,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
       try {
         await write(other);
         await waitNoLonger(ring);
-        await expect(openCardNowForTest(ring, listed, new Date())).resolves.toBeNull();
+        await expect(openCardNowForTest(ring, listed)).resolves.toBeNull();
       } finally {
         await ring.rollback();
         await other.rollback();
@@ -543,7 +587,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
       // The ring's read first: the change after it waits until the ring commits.
       ring = await pool.transaction();
       try {
-        await expect(openCardNowForTest(ring, listed, new Date())).resolves.toEqual(expect.objectContaining({
+        await expect(openCardNowForTest(ring, listed)).resolves.toEqual(expect.objectContaining({
           card: expect.objectContaining({ id: made.id }),
         }));
         await expect(pool.transaction(async (later) => {

@@ -204,14 +204,14 @@ async function writtenKeys(cardIds) {
 /**
  * The bell pass, run by the sweep after its filing and its moot close. `listCards()`: every card still open or claimed,
  * each { id, status, call_log_id }. `readCard(trx, listed)`: an open card read again under its call's triage lock (the
- * lock every card writer takes first), with the times that make it urgent ({ card, expiresAt, several, visit }), or null
- * once it is no longer open, while a row it reads is busy, or while its evidence says something it does not show yet.
- * Each open card rings in a transaction of its own that holds that lock, so a card the tap accepts or a person claims
- * while the pass runs rings nothing. With the Bell switch off (bellSwitchOn) nothing rings, and open rows are still
- * rewritten. Then two closes, each retried by every pass: a card's filed row once its time-short row exists (one open
- * row per card), and the rows of cards no longer open, listed again so a card closed during the pass loses its rows in
- * this pass. A claimed card, or one that could not be read, keeps its rows. Returns the number of rows the second close
- * closed.
+ * lock every card writer takes first), with the times that make it urgent and the clock it read them by after the lock
+ * ({ card, expiresAt, several, visit, now }), or null once it is no longer open, while a row it reads is busy, while its
+ * evidence says something it does not show yet, or while a call in its window still owes a read. Each open card rings
+ * in a transaction of its own that holds that lock, so a card the tap accepts or a person claims while the pass runs
+ * rings nothing. With the Bell switch off (bellSwitchOn) nothing rings, and open rows are still rewritten. Then two
+ * closes, each retried by every pass: a card's filed row once its time-short row exists (one open row per card), and
+ * the rows of cards no longer open, listed again so a card closed during the pass loses its rows in this pass. A
+ * claimed card, or one that could not be read, keeps its rows. Returns the number of rows the second close closed.
  */
 async function runBellPass({ listCards, readCard, now = new Date() }) {
   const listed = await listCards();
@@ -220,7 +220,8 @@ async function runBellPass({ listCards, readCard, now = new Date() }) {
     try {
       const out = await db.transaction(async (trx) => {
         const fresh = await readCard(trx, entry);
-        return fresh ? ringCard({ ...fresh, written, now, trx }) : null;
+        // The card's own clock (`fresh.now`, read after its lock) wins over the pass's.
+        return fresh ? ringCard({ now, ...fresh, written, trx }) : null;
       });
       // A row now stands for this key; a raise that failed or was withheld returns no id, and the next run tries again.
       if (out?.raised?.id) written.set(out.key, true);

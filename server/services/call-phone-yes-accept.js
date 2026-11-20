@@ -581,6 +581,26 @@ function callVisitsOnCalendar(conn, callLogId, customerId) {
   return visitsCallBooked(conn, callLogId, customerId).whereIn('status', CALENDAR_VISIT_STATUSES).select('*');
 }
 
+// The card's estimates as its check reads them, under the card's customer: the ones that stay on it (still open,
+// lapsed or accepted) and where the caller's word starts (`since`: the earliest send of those, earliestSentAnchor; null
+// when none stays). cardState, the ring's row hold and its unread-call check read the same window.
+async function cardEstimatesOf(card, conn) {
+  const ids = cardEstimateIds(card);
+  const estimates = ids.length
+    ? await conn('estimates').whereIn('id', ids).where({ customer_id: card.related_customer_id })
+      .select('id', 'status', 'sent_at', 'created_at', 'archived_at', conn.raw(`${handoffSql()} AS handoff_at`))
+    : [];
+  // An archived estimate is closed to the customer, whatever its status.
+  const live = estimates.filter((e) => !e.archived_at);
+  const kept = live.filter((e) => !SETTLED_ESTIMATE_STATUSES.includes(e.status));
+  // An accepted estimate keeps the card while a pest visit this call booked is unlinked (cardState checks that first):
+  // the office's Mark accepted links no visit (skipAutoSchedule), so the visit still lacks the plan. The accept answers
+  // only half of the card's ask, so the card stays, says so and keeps that estimate's link.
+  const accepted = live.filter((e) => e.status === 'accepted');
+  const stays = [...kept, ...accepted];
+  return { ids, accepted, stays, since: stays.length ? earliestSentAnchor(stays) : null };
+}
+
 // `conn`: the global handle, or the close's own transaction when it reads the card again under the lock (a cron job
 // holds one pool connection for its lock, so a read inside the transaction must not take a third).
 async function cardState(card, conn = db) {
@@ -591,28 +611,16 @@ async function cardState(card, conn = db) {
   if (!(await anyPestVisit(conn, onCalendar.filter((v) => !v.source_estimate_id)))) {
     return { close: onCalendar.some((v) => v.source_estimate_id) ? MOOT_NOTES.visit_linked : MOOT_NOTES.no_pest_visit };
   }
-  const ids = cardEstimateIds(card);
-  const estimates = ids.length
-    ? await conn('estimates').whereIn('id', ids).where({ customer_id: customerId })
-      .select('id', 'status', 'sent_at', 'created_at', 'archived_at', conn.raw(`${handoffSql()} AS handoff_at`))
-    : [];
-  // An archived estimate is closed to the customer, whatever its status.
-  const live = estimates.filter((e) => !e.archived_at);
-  const kept = live.filter((e) => !SETTLED_ESTIMATE_STATUSES.includes(e.status));
-  // An accepted estimate keeps the card while a pest visit this call booked is unlinked (checked above): the office's
-  // Mark accepted links no visit (skipAutoSchedule), so the visit still lacks the plan. The accept answers only half of
-  // the card's ask, so the card stays, says so and keeps that estimate's link.
-  const accepted = live.filter((e) => e.status === 'accepted');
-  if (!kept.length && !accepted.length) return { close: MOOT_NOTES.estimate_closed };
+  const { ids, accepted, stays, since } = await cardEstimatesOf(card, conn);
+  if (!stays.length) return { close: MOOT_NOTES.estimate_closed };
   // A card with more than one estimate links the ones still open, lapsed or accepted, in the card's own order (a set
   // compare: a row order that differs is no change, so the card's version moves only when an estimate leaves).
-  const stays = [...kept, ...accepted];
   const staySet = new Set(stays.map((e) => String(e.id)));
   const keptIds = ids.filter((id) => staySet.has(id));
   const linksChanged = !card.related_estimate_id && keptIds.length !== ids.length;
   const acceptedChanged = (accepted.length > 0) !== (parseJson(card.payload).estimate_accepted === true);
   // The yes is read again in every state, an accepted one too: the card never shows words that no longer hold.
-  const state = await yesState(card, { customerId, ids, since: earliestSentAnchor(stays) }, conn);
+  const state = await yesState(card, { customerId, ids, since }, conn);
   if (state?.close || (!linksChanged && !acceptedChanged)) return state;
   return {
     ...(state || { keepYes: true }),
@@ -747,43 +755,49 @@ async function ringOpenCards(now) {
   return Bell.runBellPass({
     listCards: () => db('triage_items').where({ reason_code: REASON_CODE }).whereIn('status', Bell.OPEN_CARD_STATES)
       .select('id', 'status', 'call_log_id'),
-    readCard: (trx, listed) => openCardNow(trx, listed, now),
+    readCard: (trx, listed) => openCardNow(trx, listed),
     now,
   });
 }
 
 // An open card read again under its call's triage lock (the lock every card writer takes first), with the times that
-// make it urgent. Null once it is no longer open (the tap accepted it, or a person claimed, resolved or dismissed it),
-// while a row it reads is busy (holdCardRows), and while its evidence says something the card does not show yet
-// (cardState: a close or a refresh the next run writes).
-async function openCardNow(trx, listed, now) {
+// make it urgent, read by the clock after the lock (`now`: a visit may start, or an estimate expire, while the pass
+// waits for it). Null once it is no longer open (the tap accepted it, or a person claimed, resolved or dismissed it),
+// while a row it reads is busy (holdCardRows), while its evidence says something the card does not show yet
+// (cardState: a close or a refresh the next run writes), and while a call in the word's window still owes a read: the
+// card shows nothing new then (yesState) and the tap refuses, since the read may take the yes back. A read ends within
+// OWED_READ_HOURS.
+async function openCardNow(trx, listed) {
   await lockTriageCall(trx, listed.call_log_id);
   const card = await trx('triage_items').where({ id: listed.id, reason_code: REASON_CODE, status: 'open' })
     .first('id', 'call_log_id', 'related_customer_id', 'related_estimate_id', 'payload', 'summary');
-  if (!card || !(await holdCardRows(trx, card)) || await cardState(card, trx)) return null;
-  return { card, ...(await cardTimes(trx, card, now)) };
+  const held = card && await holdCardRows(trx, card);
+  if (!held || await cardState(card, trx)) return null;
+  if (held.since && await Word.unreadCallSince(trx, { customerId: card.related_customer_id, since: held.since })) return null;
+  const now = new Date();
+  return { card, now, ...(await cardTimes(trx, card, now)) };
 }
 
 // The rows a ring reads, held FOR SHARE to its commit, as the tap holds them: the customer's estimates (the tap's own
-// lock, which also refuses while one is being sent), the customer's calls since the card's estimates were made (the yes,
-// any later word and the booking call) and every visit the call booked. A change to one (an accept, a decline, an
-// extension, a re-read, a visit moved) either landed before, and the reads after the lock see it, or waits for the
-// ring's commit, so the ring says what was true when it committed. A change in flight right now: false, and the card
-// rings nothing this run (NOWAIT, in a savepoint, so the bell never waits on a row and its transaction stays usable). A
-// call or a visit inserted meanwhile has no row to hold; the next run reads it.
+// lock, which also refuses while one is being sent), the customer's calls in the word's window (cardEstimatesOf's
+// `since`, the window cardState reads: the yes, any later word, the booking call) and every visit the call booked. A
+// change to one (an accept, a decline, an extension, a re-read, a visit moved) either landed before, and the reads after
+// the lock see it, or waits for the ring's commit, so the ring says what was true when it committed. Returns { since },
+// or null for a change in flight right now: the card rings nothing this run (NOWAIT, in a savepoint, so the bell never
+// waits on a row and its transaction stays usable). A call or a visit inserted meanwhile has no row to hold; the next
+// run reads it.
 async function holdCardRows(trx, card) {
   const customerId = card.related_customer_id;
   try {
-    await trx.transaction(async (sp) => {
+    return await trx.transaction(async (sp) => {
       await lockCustomerEstimates(sp, customerId);
-      const made = await sp('estimates').whereIn('id', cardEstimateIds(card)).where({ customer_id: customerId })
-        .min('created_at as at').first();
-      if (made?.at) await Word.lockCallsSince(sp, { customerId, since: made.at });
+      const { since } = await cardEstimatesOf(card, sp);
+      if (since) await Word.lockCallsSince(sp, { customerId, since });
       await visitsCallBooked(sp, card.call_log_id, customerId).orderBy('id').forShare().noWait().select('id');
+      return { since };
     });
-    return true;
   } catch (err) {
-    if (err.code === '55P03' || err.phoneYesRefusal) return false;
+    if (err.code === '55P03' || err.phoneYesRefusal) return null;
     throw err;
   }
 }
