@@ -34,8 +34,12 @@ function customerName(customer) {
     .filter(Boolean).join(" ") || customer.name || customer.phone || "Customer";
 }
 
-export default function PrepGuideForm({ active, guide, initialSearch = "", initialChannel = "both", onSendingChange }) {
+// `guide` is a prep guide row (pestType) or a how-to guide row (steps). A
+// how-to guide goes by email only (owner 2026-11-20): it has no page a text
+// could link to, so `onInsertSteps` puts its steps in the draft instead.
+export default function PrepGuideForm({ active, guide, initialSearch = "", initialChannel = "both", onSendingChange, onInsertSteps }) {
   const formId = useId();
+  const howTo = Array.isArray(guide.steps);
   const [channel, setChannel] = useState(initialChannel);
   const [search, setSearch] = useState(initialSearch);
   const [results, setResults] = useState([]);
@@ -80,9 +84,11 @@ export default function PrepGuideForm({ active, guide, initialSearch = "", initi
     onSendingChange(true);
     setResult(null);
     try {
-      const response = await adminFetch("/admin/communications/send-prep", {
+      const response = await adminFetch(howTo ? "/admin/communications/send-howto" : "/admin/communications/send-prep", {
         method: "POST",
-        body: { customerId: selected.id, pestType: guide.pestType, channel },
+        body: howTo
+          ? { customerId: selected.id, guideKey: guide.key.replace(/^howto:/, "") }
+          : { customerId: selected.id, pestType: guide.pestType, channel },
       });
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.error || "Couldn't confirm guide delivery.");
@@ -101,7 +107,9 @@ export default function PrepGuideForm({ active, guide, initialSearch = "", initi
       <div>
         <h2 className="text-16 font-medium mb-2">{guide.name}</h2>
         <p className="text-zinc-600 leading-relaxed">
-          {guide.pestType === "sprinkler_timer"
+          {howTo
+            ? "Sends this guide as an email, with a button that opens the right app screen. It is for customers with an active plan."
+            : guide.pestType === "sprinkler_timer"
             ? "A one-time seasonal tip for recurring lawn customers. The text carries the website guide link and needs no visit. Seasonal Lawn Tips preferences apply."
             : "Email sends the full guide. Text uses the upcoming visit's guide link when available; some guides need a matching visit to be texted."}
         </p>
@@ -145,19 +153,26 @@ export default function PrepGuideForm({ active, guide, initialSearch = "", initi
           </>
         )}
       </fieldset>
-      <fieldset disabled={sending} className="flex flex-col gap-3 min-w-0 border-0 p-0 m-0">
-        <legend className="font-medium mb-2 p-0">Send by</legend>
-        {CHANNELS.map((choice) => (
-          <Radio key={choice.value} id={`${formId}-prep-${choice.value}`} name={`${formId}-prep-channel`}
-            label={choice.label} checked={channel === choice.value} disabled={sending}
-            onChange={() => { setChannel(choice.value); setResult(null); }} />
-        ))}
-      </fieldset>
+      {!howTo && (
+        <fieldset disabled={sending} className="flex flex-col gap-3 min-w-0 border-0 p-0 m-0">
+          <legend className="font-medium mb-2 p-0">Send by</legend>
+          {CHANNELS.map((choice) => (
+            <Radio key={choice.value} id={`${formId}-prep-${choice.value}`} name={`${formId}-prep-channel`}
+              label={choice.label} checked={channel === choice.value} disabled={sending}
+              onChange={() => { setChannel(choice.value); setResult(null); }} />
+          ))}
+        </fieldset>
+      )}
       <p className="text-zinc-600 leading-relaxed">This sends the guide separately. Your message draft stays as written.</p>
       {result && <p role={result.ok ? "status" : "alert"} className={result.ok ? "text-zinc-900" : "text-alert-fg"}>{result.text}</p>}
       <Button type="submit" className="w-full text-14" disabled={!selected || sending || result?.ok}>
-        {sending ? "Sending…" : CHANNELS.find((choice) => choice.value === channel).action}
+        {sending ? "Sending…" : howTo ? "Send by email" : CHANNELS.find((choice) => choice.value === channel).action}
       </Button>
+      {howTo && onInsertSteps && (
+        <Button variant="secondary" className="w-full text-14" disabled={sending} onClick={onInsertSteps}>
+          Put the steps in my message instead
+        </Button>
+      )}
     </form>
   );
 }

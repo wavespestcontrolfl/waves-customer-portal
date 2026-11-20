@@ -51,6 +51,25 @@ describe('PrepGuideForm customer picker', () => {
   });
 });
 
+describe('PrepGuideForm how-to guide', () => {
+  it('emails the guide with no channel choice, and offers the steps for the draft instead', async () => {
+    const fetcher = stubCustomers([exact]);
+    const onInsertSteps = vi.fn();
+    render(<PrepGuideForm active guide={{ key: 'howto:alerts_iphone', name: 'Make app alerts show on iPhone', steps: ['Open Settings.'] }}
+      initialSearch="Orlan Stompf" onSendingChange={() => {}} onInsertSteps={onInsertSteps} />);
+    expect(screen.queryByRole('radio')).toBeNull();
+    fireEvent.click(await screen.findByText('Orlan Stompf'));
+    fetcher.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ success: true, message: 'Guide emailed.' }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Send by email' }));
+    await screen.findByText('Guide emailed.');
+    const [url, init] = fetcher.mock.calls.at(-1);
+    expect(String(url)).toContain('/admin/communications/send-howto');
+    expect(JSON.parse(init.body)).toEqual({ customerId: 'e1', guideKey: 'alerts_iphone' });
+    fireEvent.click(screen.getByRole('button', { name: 'Put the steps in my message instead' }));
+    expect(onInsertSteps).toHaveBeenCalled();
+  });
+});
+
 describe('ProjectFindingFieldInput customer search', () => {
   it('asks for suggestions and shows them under "Did you mean"', async () => {
     const fetcher = stubCustomers([exact, sound]);

@@ -1971,6 +1971,32 @@ router.post('/send-prep', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/communications/send-howto — a Quick Links how-to guide
+// emailed to a customer picked by name (owner 2026-11-20). Email only.
+const HOW_TO_REFUSAL_COPY = {
+  customer_not_found: 'That customer could not be found.',
+  no_email: 'This customer has no email on file — put the steps in your message instead.',
+  email_blocked: "This customer's email address is blocked or unsubscribed — the guide was not sent.",
+  unsupported_guide: 'That guide is not available.',
+};
+router.post('/send-howto', async (req, res, next) => {
+  try {
+    const { customerId, guideKey } = req.body || {};
+    if (!customerId) return res.status(400).json({ error: 'customerId required' });
+    if (!(await technicianCustomerGuard(req, res, customerId))) return undefined;
+    const { sendHowToGuideToCustomer, isSupportedGuide } = require('../services/how-to-guide-sender');
+    if (!isSupportedGuide(guideKey)) return res.status(400).json({ error: HOW_TO_REFUSAL_COPY.unsupported_guide });
+    const result = await sendHowToGuideToCustomer({ customerId, guideKey, actorId: req.technicianId || null });
+    if (!result.ok) {
+      const error = result.emailUncertain
+        ? "The guide email may or may not have gone out — check the customer's email log before sending it again."
+        : HOW_TO_REFUSAL_COPY[result.reason] || "Couldn't send the guide — check the customer's email address and try again.";
+      return res.status(result.reason === 'customer_not_found' ? 404 : 400).json({ error, result });
+    }
+    return res.json({ success: true, message: `${result.label} guide emailed to ${result.emailAddress}.`, result });
+  } catch (err) { return next(err); }
+});
+
 // GET /api/admin/communications/sender?phone=&customerId= — the line a
 // staff text to this person leaves from (home-line PR 3): the line they
 // texted within 30 days, else their home line, else main. GATE_HOME_LINE off

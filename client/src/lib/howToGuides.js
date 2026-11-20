@@ -1,11 +1,14 @@
 import { APP_STORE_URL, PLAY_STORE_URL } from "../components/estimate/AppShowcaseCard";
 
 // How-to guides for the composers' Quick Links sheet ("How-to guides"
-// group). Picking one inserts short steps plus a link that opens the right
+// group). Picking one opens the send form, which emails the guide (the
+// howto.* email templates, owner 2026-11-20). The form's other button puts
+// the steps below in the draft instead, with a link that opens the right
 // portal screen after sign-in (LoginPage honors ?next=, same encoded form as
-// the cancel plan link). Nothing is sent on pick: the operator reads the
-// draft and sends it. Plain ASCII on purpose, since the same rows go into
-// texts. Every step names a real button label in PortalPage.jsx; when a
+// the cancel plan link); the operator reads that draft and sends it. Plain
+// ASCII on purpose, since the same rows go into texts. The email carries the
+// same steps: when one changes here, publish the new wording in Email
+// Templates too (howToGuides.test.js compares them to the seed). Every step names a real button label in PortalPage.jsx; when a
 // label there changes, change it here too. A guide is static, so each step
 // must hold for every account shape (paused Auto Pay, several properties,
 // dark gates). Where it cannot, the step sends the customer to us instead,
@@ -14,7 +17,7 @@ import { APP_STORE_URL, PLAY_STORE_URL } from "../components/estimate/AppShowcas
 
 // A cancelled account keeps only Plan, Visits history, Billing and Documents
 // (CANCELLED_TABS), so the caption tells staff the guides are for active plans.
-export const HOW_TO_CAPTION = "For customers with an active plan. Each guide gives steps and a link that opens the right app screen after sign-in.";
+export const HOW_TO_CAPTION = "For customers with an active plan. Each guide is sent as an email with steps and a button that opens the right app screen. You can put the steps in your message instead.";
 
 const portalLink = (path) => `portal.wavespestcontrol.com/login?next=${encodeURIComponent(path)}`;
 
@@ -211,7 +214,7 @@ export const HOW_TO_GUIDE_LINKS = GUIDES.map(({ path, ...guide }) => ({
   category: "howto",
   url: portalLink(path),
   // On the row, not only the group caption: a search hides captions.
-  description: "Active plans only. Steps plus a link to the app screen",
+  description: "Active plans only. Send by email, or put the steps in your message",
 }));
 
 // The inserted text: title, numbered steps, optional closing line, then the
