@@ -25,13 +25,18 @@ const QUIZ_SEEING_LABELS = {
 };
 const QUIZ_PROPERTIES = ["house", "townhome", "condo", "business"];
 
+// A label for the map's OWN key only: "constructor" or "__proto__" is not a
+// token, and must not read a function off the object's prototype.
+const labelFor = (labels, token) =>
+  typeof token === "string" && Object.prototype.hasOwnProperty.call(labels, token) ? labels[token] : null;
+
 // { name: "Pest Quiz", answers: "Roaches, condo" }, or null when the lead is
 // not a quiz lead.
 export function quizAnswerLine(quiz) {
-  const name = quiz && typeof quiz === "object" ? QUIZ_NAMES[quiz.kind] : null;
+  const name = quiz && typeof quiz === "object" ? labelFor(QUIZ_NAMES, quiz.kind) : null;
   if (!name) return null;
   const answers = [
-    QUIZ_SEEING_LABELS[quiz.seeing],
+    labelFor(QUIZ_SEEING_LABELS, quiz.seeing),
     QUIZ_PROPERTIES.includes(quiz.property) ? quiz.property : null,
   ].filter(Boolean);
   return { name, answers: answers.join(", ") };

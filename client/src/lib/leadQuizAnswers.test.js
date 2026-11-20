@@ -21,4 +21,13 @@ describe("quizAnswerLine", () => {
     expect(quizAnswerLine("pest")).toBeNull();
     expect(quizAnswerLine({ kind: "tree" })).toBeNull();
   });
+
+  test("a prototype name is not a token", () => {
+    expect(quizAnswerLine({ kind: "constructor" })).toBeNull();
+    expect(quizAnswerLine({ kind: "__proto__" })).toBeNull();
+    expect(quizAnswerLine({ kind: "pest", seeing: "constructor", property: "toString" }))
+      .toEqual({ name: "Pest Quiz", answers: "" });
+    expect(quizAnswerLine({ kind: "pest", seeing: ["roaches"], property: "condo" }))
+      .toEqual({ name: "Pest Quiz", answers: "condo" });
+  });
 });
