@@ -69,12 +69,18 @@ function TruckCheck() {
   );
 }
 
-// Like AdminIndexRedirect: the /admin index only redirects, to Today for a
+// Like AdminIndexRedirect and AdminTabRedirect: the /admin index and old
+// aliases only redirect, with replace. The index goes to Today for a
 // technician or with Field view on, else to the dashboard. Where shows the
 // tab's path when it reloads.
 function Home() {
   const navigate = useNavigate();
-  return <button type="button" onClick={() => navigate('/admin')}>Home</button>;
+  return (
+    <>
+      <button type="button" onClick={() => navigate('/admin')}>Home</button>
+      <button type="button" onClick={() => navigate('/admin/leads')}>Leads</button>
+    </>
+  );
 }
 
 function Where() {
@@ -92,6 +98,7 @@ function renderWithIndex(landing, start = '/admin/pipeline') {
           <Route path="/admin/dashboard" element={<Page name="Dashboard" />} />
           <Route path="/admin/today" element={<Page name="Today" />} />
           <Route path="/admin/today/visit" element={<Home />} />
+          <Route path="/admin/leads" element={<Navigate to="/admin/pipeline?tab=leads" replace />} />
         </Routes>
       </PortalUpdateGate>
     </MemoryRouter>,
@@ -201,6 +208,16 @@ describe('PortalUpdateGate', () => {
     expect(reload).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText('Open Pipeline'));
     await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+  });
+
+  test('a move from a field page through an old alias keeps the tab, as its redirect continues that move', async () => {
+    renderWithIndex('/admin/dashboard', '/admin/today/visit');
+    goLive('bbb222bbb222');
+    fireEvent.click(screen.getByText('Leads'));
+    await waitFor(() => expect(screen.getByTestId('where').textContent).toBe('/admin/pipeline'));
+    await act(async () => {});
+    expect(reload).not.toHaveBeenCalled();
+    expect(screen.getByText('Home')).toBeTruthy();
   });
 
   test('held work keeps the tab: the move opens the page and the bar stays', async () => {

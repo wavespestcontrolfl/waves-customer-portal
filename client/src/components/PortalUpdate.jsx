@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigationType } from 'react-router-dom';
 import { Button } from './ui';
-import { isAdminPath } from '../lib/adminBookmarkMeta';
+import { isAdminPath, isFieldPath } from '../lib/adminBookmarkMeta';
 import { newerBuild, subscribePortalVersion } from '../lib/portalVersion';
-import { pageAfterMove, reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/portalReload';
+import { reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/portalReload';
 
 // Wraps the route tree (App.jsx). At a page move that is due a reload
 // (lib/portalReload.js) it shows `fallback` in place of the routes, so the old
@@ -20,11 +20,17 @@ import { pageAfterMove, reloadBlockers, reloadDueAtMove, reloadForNewBuild } fro
 // without this gate, held work or not; a follow-up PR makes it obey the holds.
 export function PortalUpdateGate({ fallback, children }) {
   const { pathname } = useLocation();
-  // `page`: the page the tab shows. The bare /admin index, a redirect, never
-  // replaces it (lib/portalReload.js, pageAfterMove).
-  const [gate, setGate] = useState({ pathname, page: pathname, reloading: false });
+  const navigationType = useNavigationType();
+  // `origin`: the page the current move started from. A redirect is a
+  // replace, as every <Navigate> in the routes is, and it continues that
+  // move. So when the move started on a field page, its redirects leave that
+  // page too: Today -> /admin -> the dashboard, Today -> /admin/leads ->
+  // Pipeline.
+  const [gate, setGate] = useState({ pathname, origin: pathname, reloading: false });
   if (gate.pathname !== pathname) {
-    setGate({ pathname, page: pageAfterMove(gate.page, pathname), reloading: reloadDueAtMove(pathname, Date.now(), gate.page) });
+    const origin = navigationType === 'REPLACE' ? gate.origin : gate.pathname;
+    const from = isFieldPath(origin) ? origin : gate.pathname;
+    setGate({ pathname, origin, reloading: reloadDueAtMove(pathname, Date.now(), from) });
   }
 
   useEffect(() => {
