@@ -132,7 +132,7 @@ describe('parseInspectionRows', () => {
     expect(out[0]).toMatchObject({
       kind: 'inspection', license_id: '5001', license_number: 'SEA0000001', license_type_code: '2010', business_name: 'SAMPLE DINER',
       address: '200 SAMPLE TRL', city: 'BRADENTON', zip: '34208', county: 'Manatee', event_date: '2026-11-16',
-      detail: { disposition: 'Warning Issued', inspectionType: 'Routine - Food', highPriority: 2 },
+      detail: { disposition: 'Warning Issued', inspectionType: 'Routine - Food', highPriority: 2, violation35: 1, visitNumber: 1 },
     });
   });
 });
@@ -346,7 +346,8 @@ describe('parseInspectionReport', () => {
     expect(open).not.toContain('35A-02-8</u></a></td>');
     expect(parse(open)).toEqual(whole);
     // No </td> and no </tr> anywhere: each row still ends at the next one, so the 35B note never joins the 35A entry.
-    const bare = '<p>Inspection Information</p><table><tr><td>Violation<td>&nbsp;<td>Observation'
+    const bare = '<p>Inspection Information</p><table><tr><td>Inspection Type<td>Inspection Date<td>Result'
+      + '<tr><td>Routine - Food<td>10/20/2026<td>Warning Issued</table><table><tr><td>Violation<td>&nbsp;<td>Observation'
       + '<tr><td>35A-02-8<td>High Priority - Live flies at the bar.'
       + '<tr><td>35B-03-4<td>Basic - Back door propped open.</table><p>2601 Blair Stone Road</p>';
     expect(parse(bare)).toEqual({ pestEvidence: true, findings: [{ code: '35A-02-8', text: 'High Priority - Live flies at the bar.' }] });
@@ -442,6 +443,12 @@ describe('parseInspectionReport', () => {
     const fixtureTwice = fixture('report-35a.html').replace('<td>Warning Issued</td></tr></table>', callback);
     expect(fixtureTwice).toContain('10/21/2026');
     expect(parse(fixtureTwice, { visitDate: '2026-10-20' })).toBeNull();
+    // Without a visit date the page still needs exactly one date that reads.
+    expect(parse(fixture('report-35a.html'))).toMatchObject({ pestEvidence: true });
+    expect(parse(fixtureTwice)).toBeNull();
+    expect(parse(twice)).toBeNull();
+    expect(parse(reportPage(rows, '10/20/2026').replace(/<table><tr><td>Inspection Type[\s\S]*?<\/table>/, ''))).toBeNull();
+    expect(parse(reportPage(rows, '13/45/2026'))).toBeNull();
     // The fixtures carry the real layout.
     expect(parse(fixture('report-35a.html'), { visitDate: '2026-10-20' })).toMatchObject({ pestEvidence: true });
     expect(parse(fixture('report-35b.html'), { cited35: 1, visitDate: '2026-10-21' })).toEqual({ pestEvidence: false, findings: [] });
@@ -539,6 +546,7 @@ describe('syncRestaurantProspects', () => {
   test.each([
     ['Business (DBA-Does Business As) Name', '7fdinspi.csv', 'inspection'],
     ['Location Address', '7fdinspi.csv', 'inspection'],
+    ['Visit Number', '7fdinspi.csv', 'inspection'],
     ['Business Name', 'newfood.csv', 'new_license'],
     ['Location Street Address', 'newfood.csv', 'new_license'],
     ['Primary Phone Number', 'chgownr_food.csv', 'owner_change'],

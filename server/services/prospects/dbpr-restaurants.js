@@ -57,7 +57,7 @@ const LICENSE_COLUMNS = [
 const REQUIRED_COLUMNS = {
   inspection: [
     'County Name', ...PLACE_COLUMNS, 'Location Address', 'Business (DBA-Does Business As) Name', 'License Number',
-    'License Type Code', 'License ID', 'Inspection Visit ID', 'Inspection Date', 'Inspection Type',
+    'License Type Code', 'License ID', 'Inspection Visit ID', 'Visit Number', 'Inspection Date', 'Inspection Type',
     'Inspection Disposition', 'Number of High Priority Violations', 'Violation 35',
   ],
   new_license: LICENSE_COLUMNS,
@@ -190,6 +190,10 @@ function parseInspectionRows(rows, counts = {}, today = null) {
         disposition: clean(row['Inspection Disposition'], 120),
         inspectionType: clean(row['Inspection Type'], 120),
         highPriority: wholeNumber(row['Number of High Priority Violations']),
+        // The violation-35 citations the file counted: a report page that lists fewer cannot answer.
+        violation35: cited,
+        // Which visit of the inspection this is: only the first visit's report page answers.
+        visitNumber: wholeNumber(row['Visit Number']),
       },
     });
   }
@@ -364,7 +368,7 @@ function readReportTables(page) {
  * Report page HTML -> { pestEvidence, findings: [{ code, text }] }, or null when the page cannot answer. No answer is
  * a failed read, retried later, never "no pests". The page answers only when:
  * - it is whole (the state office footer closes it): an error page or a page cut short gives no answer;
- * - it is the read visit's: its inspection table gives one date, visitDate (checked when given);
+ * - it is one visit's: its inspection table gives one date that reads, and it is visitDate when given;
  * - the read visit is its inspection's first (visitNumber 1). A later visit's page holds free text that may clear an
  *   earlier citation ("No flies observed", "door repaired"), labelled or not, so a later visit, or one whose number
  *   is not known, gets no answer either way;
@@ -388,8 +392,9 @@ function parseInspectionReport(html, { cited35 = null, visitDate = null, visitNu
   const whole = htmlText(page);
   if (!/Inspection Information/.test(whole) || !PAGE_FOOTER_RE.test(whole)) return null;
   const { entries, unreadable, dates } = readReportTables(page);
-  // A page of another visit, or one whose date does not read, cannot answer for this one.
-  if (visitDate && (dates.length !== 1 || parseUsDate(dates[0]) !== visitDate)) return null;
+  // A page whose date does not read, one that gives two dates (two visits), or another visit's page cannot answer.
+  const pageDate = dates.length === 1 ? parseUsDate(dates[0]) : null;
+  if (!pageDate || (visitDate && pageDate !== visitDate)) return null;
   const rows35 = entries.filter((entry) => /^35[AB]-/.test(entry.code)).map((entry) => {
     const text = entry.parts.join(' ');
     return { code: entry.code, text, notes: visitNotes(text) };
@@ -417,14 +422,21 @@ function dedupeByKey(records) {
   return [...new Map(records.map((r) => [`${r.kind}|${r.source_key}`, r])).values()];
 }
 
-// A re-read of a known row refreshes last_seen_at only: a pest_evidence answer, the findings and the attempt count
-// are never overwritten by a later file. Returns the number of rows written.
+// A row stored without the file's violation-35 count or visit number (before they were kept, or blank: JSON null, so
+// ->> tests it) takes them from the file on a re-read; nothing else in detail changes.
+const FILL_DETAIL_SQL = `COALESCE(restaurant_prospects.detail, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
+  'violation35', CASE WHEN restaurant_prospects.detail->>'violation35' IS NULL THEN excluded.detail->'violation35' END,
+  'visitNumber', CASE WHEN restaurant_prospects.detail->>'visitNumber' IS NULL THEN excluded.detail->'visitNumber' END))`;
+
+// A re-read of a known row refreshes last_seen_at and fills the two keys above: a pest_evidence answer, the findings
+// and the attempt count are never overwritten by a later file. Returns the number of rows written.
 async function upsertRecords(records) {
   const unique = dedupeByKey(records);
   let n = 0;
   for (let i = 0; i < unique.length; i += UPSERT_CHUNK) {
     const chunk = unique.slice(i, i + UPSERT_CHUNK).map((r) => ({ ...r, detail: JSON.stringify(r.detail) }));
-    await db('restaurant_prospects').insert(chunk).onConflict(['kind', 'source_key']).merge({ last_seen_at: db.fn.now() });
+    await db('restaurant_prospects').insert(chunk).onConflict(['kind', 'source_key'])
+      .merge({ last_seen_at: db.fn.now(), detail: db.raw(FILL_DETAIL_SQL) });
     n += chunk.length;
   }
   return n;
@@ -438,8 +450,14 @@ async function pendingInspections({ cutoff, limit }) {
     .where('event_date', '>=', cutoff)
     .orderBy('event_date', 'desc')
     .limit(limit)
-    .select('id', 'license_id', 'source_key');
-  return rows;
+    .select(
+      'id', 'license_id', 'source_key',
+      db.raw("detail->>'violation35' AS violation35"),
+      db.raw(`detail->>'visitNumber' AS "visitNumber"`),
+      db.raw(`to_char(event_date, 'YYYY-MM-DD') AS "visitDate"`),
+    );
+  // violation35 and visitNumber are null on a row stored before they were kept, until a re-read fills them.
+  return rows.map((row) => ({ ...row, violation35: wholeNumber(row.violation35), visitNumber: wholeNumber(row.visitNumber) }));
 }
 
 async function saveReport(id, report) {
