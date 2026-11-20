@@ -1,7 +1,8 @@
 import { lazy } from 'react';
 import { isAdminPath } from '../lib/adminBookmarkMeta';
-import { isChunkError, isStaleChunkReloadPending } from '../lib/staleChunkReload';
-import { PortalReloadPrompt } from './PortalUpdate';
+import { browserOffline } from '../lib/portalReload';
+import { isChunkError, isStaleChunkReloadPending, missingCodeIsNewVersion } from '../lib/staleChunkReload';
+import { PortalReloadPrompt, useNewerBuild } from './PortalUpdate';
 
 // React.lazy for a part of a staff page: a tab, a panel, a sheet. A route's
 // page uses App.jsx's lazyWithRetry. When the live build no longer serves the
@@ -25,16 +26,22 @@ export function lazyPanel(factory) {
 }
 
 function PanelPending() {
-  return <div role="status" className="p-4 font-sans text-sm text-zinc-600">Loading the new version...</div>;
+  const label = useNewerBuild() ? 'Loading the new version...' : 'Loading...';
+  return <div role="status" className="p-4 font-sans text-sm text-zinc-600">{label}</div>;
 }
 
-// Offline, the part's code may be fine and only out of reach. A part that
-// loads its code with its own import() shows it too (CustomersPageV2.jsx).
+// It says the portal has a new version only when the server names a newer
+// build (missingCodeIsNewVersion). Offline, the part's code may be fine and
+// only out of reach; otherwise the cause is unknown. A part that loads its
+// code with its own import() shows it too (CustomersPageV2.jsx).
 export function MissingPanelCode() {
-  const reason = navigator.onLine === false ? 'this device is offline' : 'the portal has a new version';
+  const newVersion = missingCodeIsNewVersion(useNewerBuild());
+  let message = 'This part of the page did not load. Check your connection and try again.';
+  if (browserOffline()) message = 'This part of the page did not load: this device is offline.';
+  else if (newVersion) message = 'This part of the page did not load: the portal has a new version.';
   return (
     <PortalReloadPrompt
-      message={`This part of the page did not load: ${reason}.`}
+      message={message}
       className="flex flex-wrap items-center gap-3 rounded-sm border-hairline border-zinc-300 bg-white px-4 py-3 font-sans text-sm text-zinc-900"
     />
   );

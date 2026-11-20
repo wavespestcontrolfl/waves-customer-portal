@@ -48,7 +48,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 test('a Map view whose code a deploy removed shows the Reload prompt, not the import error', async () => {
   legacy.error = new TypeError('Failed to fetch dynamically imported module: /assets/CustomersPage-old.js');
   openMap();
-  expect(await screen.findByText('This part of the page did not load: the portal has a new version.')).toBeInTheDocument();
+  expect(await screen.findByText(/^This part of the page did not load/)).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Reload' })).toBeInTheDocument();
   expect(screen.queryByText(/Could not load this panel/)).not.toBeInTheDocument();
 });

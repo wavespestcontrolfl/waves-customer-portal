@@ -25,7 +25,7 @@ import {
   watchPageUse,
 } from './lib/staleChunkReload';
 import { registerReloadHold } from './lib/reloadHolds';
-import { installPortalVersionWatch, resetPortalVersionForTests } from './lib/portalVersion';
+import { installPortalVersionWatch, noteServerAnswer, resetPortalVersionForTests } from './lib/portalVersion';
 
 // Held work on a staff tab (lib/reloadHolds.js), as a manual card charge
 // waiting on the card check registers it.
@@ -44,6 +44,14 @@ function tap(element) {
 
 function preloadErrorEvent() {
   return new Event('vite:preloadError', { cancelable: true });
+}
+
+// The server names a newer build than this page loaded, as after a deploy
+// (lib/portalVersion.js). Only then does a screen for missing code say the
+// portal has a new version. #8121's gate then also reloads at a staff move,
+// so no gate test names one.
+function nameNewerBuild() {
+  act(() => { noteServerAnswer(new Headers({ 'X-Portal-Build': 'bbb222bbb222', 'X-Portal-Boot': '2000' })); });
 }
 
 // What Vite 5.4 hands back once the handler calls preventDefault(): the
@@ -99,10 +107,17 @@ beforeEach(() => {
   sessionStorage.clear();
   resetStaleChunkReloadForTests();
   resetPortalVersionForTests();
+  // The build this page loaded; no answer names a newer one until a test does.
+  document.head.insertAdjacentHTML('beforeend', '<meta name="portal-build" content="aaa111aaa111">');
   reported.calls = [];
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
+afterEach(() => {
+  cleanup();
+  document.head.querySelectorAll('meta[name="portal-build"]').forEach((el) => el.remove());
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 test('the first stale-chunk preload error reloads once and marks the reload pending', () => {
   const reload = vi.fn();
@@ -333,7 +348,8 @@ describe('on a staff page', () => {
       handleVitePreloadError(stale, reload);
       expect(stale.defaultPrevented).toBe(false);
       renderInBoundary(lazyWithRetry(missingChunk));
-      expect(await screen.findByText('Loading the new version...')).toBeInTheDocument();
+      // No answer named a newer build: the wait does not say new version.
+      expect(await screen.findByText('Loading...')).toBeInTheDocument();
       expect(reload).not.toHaveBeenCalled();
       pending[0]({ headers: new Headers() });
       await read;
@@ -351,6 +367,7 @@ describe('on a staff page', () => {
     const uninstall = installPortalVersionWatch({ target });
     const stop = watchPageUse(document);
     try {
+      nameNewerBuild();
       const read = target.fetch('/api/admin/auth/me');
       renderInBoundary(lazyWithRetry(missingChunk));
       expect(await screen.findByText('Loading the new version...')).toBeInTheDocument();
@@ -373,6 +390,7 @@ describe('on a staff page', () => {
 
   test('a page whose code is missing while held work keeps the tab says the portal has a new version; Reload names the work, then Reload anyway reloads', async () => {
     holding = true;
+    nameNewerBuild();
     renderInBoundary(lazyWithRetry(missingChunk));
     expect(await screen.findByText('The portal has a new version.')).toBeInTheDocument();
     expect(screen.getByText('Couldn’t load this page')).toBeInTheDocument();
@@ -386,8 +404,23 @@ describe('on a staff page', () => {
     expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
   });
 
-  test('after the one reload for a missing chunk already ran, the page shows the retry screen, not another reload', async () => {
+  // A chunk can also fail from an asset fault or an outage. The screen says
+  // new version only when an answer names a newer build, as the Reload bar.
+  test('with no newer build named, a page whose code is missing asks to check the connection; once an answer names one, it says new version', async () => {
+    holding = true;
+    renderInBoundary(lazyWithRetry(missingChunk));
+    expect(await screen.findByText('Check your connection and try again.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.queryByText('The portal has a new version.')).not.toBeInTheDocument();
+    nameNewerBuild();
+    expect(screen.getByText('The portal has a new version.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reload' })).toBeInTheDocument();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('after the one reload for a missing chunk already ran, the page shows the retry screen, not another reload, and asks to check the connection even with a newer build named', async () => {
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+    nameNewerBuild();
     renderInBoundary(lazyWithRetry(missingChunk));
     expect(await screen.findByText('Couldn’t load this page')).toBeInTheDocument();
     expect(screen.getByText('Check your connection and try again.')).toBeInTheDocument();
@@ -420,6 +453,7 @@ describe('on a staff page', () => {
     const uninstall = installPortalVersionWatch({ target });
     const stop = watchPageUse(document);
     try {
+      nameNewerBuild();
       fireEvent.input(document.body);
       target.fetch('/api/admin/dashboard');
       renderInBoundary(lazyWithRetry(missingChunk));
@@ -464,6 +498,7 @@ describe('on a staff page', () => {
   // move (selfReloadBarred, lib/portalReload.js).
   test('on a field page a missing chunk never reloads by itself: the page says new version, and its Reload reloads', async () => {
     vi.stubGlobal('location', { ...window.location, pathname: '/admin/today/protocols', reload });
+    nameNewerBuild();
     const stale = preloadErrorEvent();
     handleVitePreloadError(stale, reload);
     expect(stale.defaultPrevented).toBe(false);
@@ -477,6 +512,7 @@ describe('on a staff page', () => {
 
   test('on a field page a page whose code is missing does not wait for open work: it names that work at once', async () => {
     vi.stubGlobal('location', { ...window.location, pathname: '/admin/today', reload });
+    nameNewerBuild();
     const target = { fetch: () => new Promise(() => {}) };
     const uninstall = installPortalVersionWatch({ target });
     try {
@@ -566,6 +602,44 @@ describe('on a staff page', () => {
     }
   });
 
+  // While a move is not yet in view, the address already names the next
+  // page. A use then is a use of the page still in view.
+  test('a use while the next page loads counts for the page in view: Back to that page keeps the tab', () => {
+    const stop = watchPageUse(document);
+    try {
+      const move = renderGate(['/admin/dashboard'], { transitions: true });
+      move('/admin/blog');
+      vi.stubGlobal('location', { ...window.location, pathname: '/admin/blog', reload });
+      expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
+      fireEvent.input(document.body);
+      vi.stubGlobal('location', { ...window.location, pathname: '/admin/dashboard', reload });
+      move(-1);
+      expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
+      const stale = preloadErrorEvent();
+      handleVitePreloadError(stale, reload);
+      expect(stale.defaultPrevented).toBe(false);
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      stop();
+    }
+  });
+
+  test('a use while the next page loads keeps the tab at a missing chunk of that page: a reload would drop the page in view', () => {
+    const stop = watchPageUse(document);
+    try {
+      const move = renderGate(['/admin/dashboard'], { transitions: true });
+      move('/admin/blog');
+      vi.stubGlobal('location', { ...window.location, pathname: '/admin/blog', reload });
+      fireEvent.input(document.body);
+      const stale = preloadErrorEvent();
+      handleVitePreloadError(stale, reload);
+      expect(stale.defaultPrevented).toBe(false);
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      stop();
+    }
+  });
+
   test('a move that never comes into view keeps the bar on a page a move from a field page opened', () => {
     const move = renderGate(['/admin/today'], { transitions: true });
     move('/admin/dashboard');
@@ -602,8 +676,9 @@ describe('on a staff page', () => {
     }
   });
 
-  test('offline, a page whose code is missing asks to check the connection, and its Retry names the offline device', async () => {
+  test('offline, a page whose code is missing asks to check the connection, even with a newer build named, and its Retry names the offline device', async () => {
     vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    nameNewerBuild();
     renderInBoundary(lazyWithRetry(missingChunk));
     expect(await screen.findByText('Check your connection and try again.')).toBeInTheDocument();
     expect(reload).not.toHaveBeenCalled();
@@ -649,6 +724,7 @@ describe('on a staff page', () => {
 
   test('a use of the page after the retry screen named the work clears it, so its Reload asks again', async () => {
     holding = true;
+    nameNewerBuild();
     renderInBoundary(lazyWithRetry(missingChunk));
     tap(await screen.findByRole('button', { name: 'Reload' }));
     expect(screen.getByText('A card payment is still going through.')).toBeInTheDocument();
@@ -664,6 +740,7 @@ describe('on a staff page', () => {
   test('a mixed-case staff URL gets the staff retry screen, which asks before it reloads', async () => {
     vi.stubGlobal('location', { ...window.location, pathname: '/ADMIN/Dashboard', reload });
     holding = true;
+    nameNewerBuild();
     renderInBoundary(lazyWithRetry(missingChunk));
     expect(await screen.findByText('The portal has a new version.')).toBeInTheDocument();
     tap(screen.getByRole('button', { name: 'Reload' }));
@@ -692,9 +769,12 @@ describe('on a staff page', () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
-  test('without session storage there is no one-shot guard, so the tab never reloads by itself', async () => {
+  test('without session storage there is no one-shot guard, so the tab never reloads by itself; no reload ran, so its screen can say new version', async () => {
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('storage blocked'); });
     await expect(reloadForMissingCode({ reload })).resolves.toBe('storage');
+    nameNewerBuild();
+    renderInBoundary(lazyWithRetry(missingChunk));
+    expect(await screen.findByText('The portal has a new version.')).toBeInTheDocument();
     expect(reload).not.toHaveBeenCalled();
   });
 

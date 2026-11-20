@@ -31,10 +31,12 @@
 //
 // A part opens in place, so the page around it can hold unsaved work in
 // component state that no hold names. So a staff tab used on the page in
-// view since the last page move (watchPageUse) keeps the tab too: a part
-// asks before it reloads, and any other import() fails to its caller. A page
-// move ends that use once it is in view (notePageInView), so a page whose
-// code is missing still reloads at once when nothing holds the tab.
+// view since it came into view (watchPageUse) keeps the tab too: a part asks
+// before it reloads, and any other import() fails to its caller. A use
+// counts for the page in view, not for the address, which names the next
+// page while a move is not yet in view. A page move ends that use once it is
+// in view (notePageInView), so a page whose code is missing still reloads at
+// once when nothing holds the tab.
 //
 // Waves Admin and the field pages never reload by themselves, as at a page
 // move (selfReloadBarred, lib/portalReload.js): a reload with no signal opens
@@ -49,7 +51,7 @@
 
 import { isAdminPath } from './adminBookmarkMeta';
 import {
-  isPageUse, PAGE_USE_EVENTS, selfReloadBarred, staffBlockerAfterWork, staffReloadBlocker,
+  browserOffline, isPageUse, PAGE_USE_EVENTS, selfReloadBarred, staffBlockerAfterWork, staffReloadBlocker,
 } from './portalReload';
 
 export const CHUNK_RELOAD_FLAG = 'chunk-reload-attempted';
@@ -103,18 +105,25 @@ function moveFromFor(pathname) {
   return shownMove.to === pathname ? shownMove.from : null;
 }
 
-// Notes the path of each use of a page, as the Reload bar counts a use
-// (isPageUse, lib/portalReload.js). Installed once, by main.jsx.
+// The page in view: the one the last move in view opened, or before any
+// move, the address. While a move is not yet in view, the address already
+// names the next page, and Back can still undo that move.
+function pageInView() {
+  return shownMove.to ?? window.location.pathname;
+}
+
+// Notes each use of a page against the page in view, as the Reload bar
+// counts a use (isPageUse, lib/portalReload.js). Installed once, by main.jsx.
 export function watchPageUse(target = document) {
-  const noteUse = (event) => { if (isPageUse(event)) usedPath = window.location.pathname; };
+  const noteUse = (event) => { if (isPageUse(event)) usedPath = pageInView(); };
   PAGE_USE_EVENTS.forEach((type) => target.addEventListener(type, noteUse, true));
   return () => PAGE_USE_EVENTS.forEach((type) => target.removeEventListener(type, noteUse, true));
 }
 
-// Whether the tab was used on the staff page in view since the last page
-// move.
+// Whether the tab was used on the staff page in view since it came into
+// view.
 export function usedOnThisStaffPage() {
-  const { pathname } = window.location;
+  const pathname = pageInView();
   return isAdminPath(pathname) && usedPath === pathname;
 }
 
@@ -243,6 +252,21 @@ function selfReloadRuledOut() {
   }
   if (usedOnThisStaffPage()) return 'page-use';
   return staffSelfReloadBarred() ? 'manual' : null;
+}
+
+// Whether a screen for missing staff code (App.jsx, components/LazyPanel.jsx)
+// says the portal has a new version: only when the server names a newer
+// build (`newer`, lib/portalVersion.js), as for the Reload bar, the device is
+// online, and the one reload for a missing chunk has not run here. A chunk
+// can also fail from an asset fault or an outage; then the screen asks to
+// check the connection.
+export function missingCodeIsNewVersion(newer) {
+  if (!newer || browserOffline()) return false;
+  try {
+    return !chunkReloadAttempted();
+  } catch {
+    return true; // storage blocked: no reload ran
+  }
 }
 
 // A staff page whose code is missing (App.jsx): waits for open work, as a

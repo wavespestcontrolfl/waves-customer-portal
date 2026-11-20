@@ -49,7 +49,7 @@ function reloadTries(build) {
   } catch { return RELOAD_TRIES; }
 }
 
-const browserOffline = () => typeof navigator !== 'undefined' && navigator.onLine === false;
+export const browserOffline = () => typeof navigator !== 'undefined' && navigator.onLine === false;
 
 // A reload with no connection swaps a working page for an offline error, so
 // it needs a recent answer from the new server, and the browser must not

@@ -131,11 +131,19 @@ export function usePageUsed(pathname, onUse) {
   return () => used.current;
 }
 
+// The build the server names when it is newer than this tab's
+// (lib/portalVersion.js), else null. The Reload bar shows while there is one,
+// and only then do the screens for missing code say the portal has a new
+// version (App.jsx, LazyPanel.jsx).
+export function useNewerBuild() {
+  return useSyncExternalStore(subscribePortalVersion, newerBuild, () => null);
+}
+
 // Every staff page, Waves Admin and the field pages included: says that a
 // newer version is live. A page move or a new build clears the named work.
 export function PortalUpdateBar() {
   const { pathname } = useLocation();
-  const build = useSyncExternalStore(subscribePortalVersion, newerBuild, () => null);
+  const build = useNewerBuild();
   const { named, heldText, tryReload, clearNamed } = useHoldAwareReload(`${build} ${pathname}`);
   const pageUsed = usePageUsed(pathname, clearNamed);
   if (!build || !isAdminPath(pathname)) return null;

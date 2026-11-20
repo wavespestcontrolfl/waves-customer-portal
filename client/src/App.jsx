@@ -2,10 +2,10 @@ import React, { Component, useEffect, useRef, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { reportError } from './lib/reportError';
 import {
-  CHUNK_RELOAD_FLAG, isChunkError, isStaleChunkReloadPending, markStaleChunkReloadPending, noteChunkLoaded,
-  reloadForMissingCode, takeChunkReload, usedOnThisStaffPage,
+  CHUNK_RELOAD_FLAG, isChunkError, isStaleChunkReloadPending, markStaleChunkReloadPending, missingCodeIsNewVersion,
+  noteChunkLoaded, reloadForMissingCode, takeChunkReload, usedOnThisStaffPage,
 } from './lib/staleChunkReload';
-import { PortalUpdateBar, PortalUpdateGate, useHoldAwareReload, usePageUsed } from './components/PortalUpdate';
+import { PortalUpdateBar, PortalUpdateGate, useHoldAwareReload, useNewerBuild, usePageUsed } from './components/PortalUpdate';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
 import { CUSTOMER_SURFACE } from './theme-customer';
@@ -303,8 +303,9 @@ function showReloadToast() {
 // Rendered when a lazy chunk still fails after the one automatic reload —
 // a friendly retry beats the blank screen the rethrow used to produce. On a
 // staff page it also shows while open or held work keeps the tab
-// (MissingPageCode, `newVersion`): the page's code is then most likely gone
-// because the portal has a new version, so it says so. Its button names that
+// (MissingPageCode). When the server names a newer build (`newVersion`), the
+// page's code is gone because the portal has a new version, so it says so;
+// otherwise it asks to check the connection. Its button names that
 // work first, as the Reload bar does (components/PortalUpdate.jsx), and
 // becomes "Reload anyway". When the tab was used on this page since the last
 // page move, it asks once about the page too, as the bar does after a use.
@@ -380,11 +381,14 @@ function RouteFallback({ label = 'Loading...' }) {
 // stale-chunk reload did not run at once (lib/staleChunkReload.js): it waits
 // for open work, as a page move does, then reloads once. When work still
 // holds the tab, the tab was used on this page meanwhile, or the one reload
-// for a missing chunk already ran, it shows the retry screen. After that one
-// reload, or offline, the code may be out of reach rather than replaced, so
-// the screen asks to check the connection.
+// for a missing chunk already ran, it shows the retry screen. It says the
+// portal has a new version only when the server names a newer build
+// (missingCodeIsNewVersion): after the one reload, offline, or with no newer
+// build named, the code may be out of reach rather than replaced, so the
+// screen asks to check the connection.
 function MissingPageCode() {
   const [blocker, setBlocker] = useState(null);
+  const newVersion = missingCodeIsNewVersion(useNewerBuild());
   useEffect(() => {
     let current = true;
     reloadForMissingCode({ current: () => current }).then((reason) => {
@@ -392,8 +396,8 @@ function MissingPageCode() {
     });
     return () => { current = false; };
   }, []);
-  if (!blocker) return <RouteFallback label="Loading the new version..." />;
-  return <ChunkLoadFallback newVersion={blocker !== 'reloaded' && blocker !== 'offline'} />;
+  if (!blocker) return <RouteFallback label={newVersion ? 'Loading the new version...' : 'Loading...'} />;
+  return <ChunkLoadFallback newVersion={newVersion} />;
 }
 
 export function lazyWithRetry(factory) {

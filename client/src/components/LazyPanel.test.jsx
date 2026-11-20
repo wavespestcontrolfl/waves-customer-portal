@@ -5,19 +5,26 @@
 // bar: it names what holds the tab and asks once about the page first.
 import React, { Suspense } from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { lazyPanel } from './LazyPanel';
 import { registerReloadHold } from '../lib/reloadHolds';
-import { resetPortalVersionForTests } from '../lib/portalVersion';
-import { handleVitePreloadError, resetStaleChunkReloadForTests } from '../lib/staleChunkReload';
+import { noteServerAnswer, resetPortalVersionForTests } from '../lib/portalVersion';
+import { CHUNK_RELOAD_FLAG, handleVitePreloadError, resetStaleChunkReloadForTests } from '../lib/staleChunkReload';
 
 let holding = false;
 registerReloadHold('card-payment', () => holding);
 let reload;
 
 const PROMPT = 'This part of the page did not load: the portal has a new version.';
+const CONNECTION = 'This part of the page did not load. Check your connection and try again.';
+
+// The server names a newer build than this page loaded, as after a deploy
+// (lib/portalVersion.js). Only then does the prompt say new version.
+function nameNewerBuild() {
+  act(() => { noteServerAnswer(new Headers({ 'X-Portal-Build': 'bbb222bbb222', 'X-Portal-Boot': '2000' })); });
+}
 
 // A tap as a browser sends it: pointerdown, then click.
 function tap(element) {
@@ -55,12 +62,20 @@ beforeEach(() => {
   sessionStorage.clear();
   resetStaleChunkReloadForTests();
   resetPortalVersionForTests();
+  // The build this page loaded; no answer names a newer one until a test does.
+  document.head.insertAdjacentHTML('beforeend', '<meta name="portal-build" content="aaa111aaa111">');
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => {
+  cleanup();
+  document.head.querySelectorAll('meta[name="portal-build"]').forEach((el) => el.remove());
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 test('a part whose code is missing on a held staff tab shows a Reload prompt in its place, and the rest of the page stays', async () => {
   holding = true;
+  nameNewerBuild();
   renderPage(lazyPanel(missingChunk));
   expect(await screen.findByText(PROMPT)).toBeInTheDocument();
   expect(screen.getByText('Page body')).toBeInTheDocument();
@@ -70,8 +85,28 @@ test('a part whose code is missing on a held staff tab shows a Reload prompt in 
 
 test('offline, the prompt says the device is offline, not that the portal has a new version', async () => {
   vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+  nameNewerBuild();
   renderPage(lazyPanel(missingChunk));
   expect(await screen.findByText('This part of the page did not load: this device is offline.')).toBeInTheDocument();
+  expect(reload).not.toHaveBeenCalled();
+});
+
+// A chunk can also fail from an asset fault or an outage. The prompt says new
+// version only when an answer names a newer build, as the Reload bar does.
+test('with no newer build named, the prompt asks to check the connection; once an answer names one, it says new version', async () => {
+  renderPage(lazyPanel(missingChunk));
+  expect(await screen.findByText(CONNECTION)).toBeInTheDocument();
+  expect(screen.queryByText(PROMPT)).not.toBeInTheDocument();
+  nameNewerBuild();
+  expect(screen.getByText(PROMPT)).toBeInTheDocument();
+  expect(reload).not.toHaveBeenCalled();
+});
+
+test('after the one reload for a missing chunk, the prompt asks to check the connection, even with a newer build named', async () => {
+  sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+  nameNewerBuild();
+  renderPage(lazyPanel(missingChunk));
+  expect(await screen.findByText(CONNECTION)).toBeInTheDocument();
   expect(reload).not.toHaveBeenCalled();
 });
 
@@ -88,6 +123,7 @@ test('its first Reload asks about the page and names what holds the tab; Reload 
 });
 
 test('a use of the page after the prompt named its work clears the names, so the next Reload asks again', async () => {
+  nameNewerBuild();
   renderPage(lazyPanel(missingChunk));
   tap(await screen.findByRole('button', { name: 'Reload' }));
   expect(screen.getByText('Anything not saved on this page will be lost.')).toBeInTheDocument();
@@ -99,13 +135,15 @@ test('a use of the page after the prompt named its work clears the names, so the
   expect(reload).toHaveBeenCalledTimes(1);
 });
 
-test('while the stale-chunk reload is under way, a part whose import it swallowed shows the loading line, not a crash', async () => {
+test('while the stale-chunk reload is under way, a part whose import it swallowed shows the loading line, not a crash; it says new version once an answer names one', async () => {
   vi.stubGlobal('location', { ...window.location, pathname: '/admin/customers', reload });
   handleVitePreloadError(new Event('vite:preloadError', { cancelable: true }), reload);
   expect(reload).toHaveBeenCalledTimes(1);
   renderPage(lazyPanel(() => Promise.resolve(undefined)));
-  expect(await screen.findByText('Loading the new version...')).toBeInTheDocument();
+  expect(await screen.findByText('Loading...')).toBeInTheDocument();
   expect(screen.queryByText(/Route tree crashed/)).not.toBeInTheDocument();
+  nameNewerBuild();
+  expect(screen.getByText('Loading the new version...')).toBeInTheDocument();
 });
 
 test('a part that loads renders as usual', async () => {
