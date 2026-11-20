@@ -643,7 +643,7 @@ describe('pricing engine DB bridge', () => {
     // A sane price backed by an ACTIVE, APPROVED vendor row flows into the
     // engine (containerCost AND containerOz come from the catalog together).
     await expect(syncConstantsFromDB(linkDb(
-      [{ name: 'Atticus Talak 7.9 F', best_price: 45.5, unit_size_oz: 128, best_vendor_pricing_id: 'vp-approved' }],
+      [{ name: 'LESCO Crosscheck Plus', best_price: 45.5, unit_size_oz: 128, best_vendor_pricing_id: 'vp-approved' }],
       [{ id: 'vp-approved' }],
     ))).resolves.toBe(true);
     expect(constants.SPECIALTY.preSlabTermiticide.products.talstar_p.containerCost).toBe(45.5);
@@ -657,12 +657,12 @@ describe('pricing engine DB bridge', () => {
     await expect(syncConstantsFromDB(linkDb(
       [
         { name: 'Taurus SC', best_price: 99, unit_size_oz: 78, best_vendor_pricing_id: 'vp-pending' },
-        { name: 'Atticus Talak 7.9 F', best_price: 44, unit_size_oz: 128, best_vendor_pricing_id: null },
+        { name: 'LESCO Crosscheck Plus', best_price: 44, unit_size_oz: 128, best_vendor_pricing_id: null },
       ],
       [], // the approval-filtered lookup returns nothing
     ))).resolves.toBe(true);
     expect(constants.SPECIALTY.preSlabTermiticide.products.taurus_sc.containerCost).toBe(95.00);
-    // bifen_it and talstar_p both link to the Talak row (owner 2026-10-25): a Talak price with no
+    // bifen_it and talstar_p both link to the Crosscheck Plus row (owner 2026-11-18): a price with no
     // approved backing row never applies to either.
     expect(constants.SPECIALTY.preSlabTermiticide.products.bifen_it.containerCost).not.toBe(44);
     expect(constants.SPECIALTY.preSlabTermiticide.products.talstar_p.containerCost).not.toBe(44);
@@ -1179,7 +1179,7 @@ describe('rodent bait brackets runtime sync — quarterly invariant (codex #3591
 });
 
 describe('mosquito product costs follow the inventory catalog (owner 2026-11-01)', () => {
-  const DEFAULTS = { bifenthrinOz: 41.57 / 96, summitDunkTablet: 26.88 / 20 };
+  const DEFAULTS = { bifenthrinOz: 30.90 / 128, summitDunkTablet: 26.88 / 20 };
   const catalogDb = (catalogRows, approvedIds = catalogRows.map((r) => r.best_vendor_pricing_id).filter(Boolean)) => {
     const db = (table) => {
       if (table === 'products_catalog' || table === 'vendor_pricing') {
@@ -1200,7 +1200,7 @@ describe('mosquito product costs follow the inventory catalog (owner 2026-11-01)
     db.schema = { hasTable: jest.fn(async () => true) };
     return db;
   };
-  const talak = (best, oz = 96) => ({ name: 'Atticus Talak 7.9 F', best_price: best, unit_size_oz: oz, container_size: `${oz} fl oz`, best_vendor_pricing_id: 'vp-talak' });
+  const talak = (best, oz = 128) => ({ name: 'LESCO Crosscheck Plus', best_price: best, unit_size_oz: oz, container_size: `${oz} fl oz`, best_vendor_pricing_id: 'vp-talak' });
   const summit = (best, size = '20 count') => ({ name: 'Summit Mosquito Dunk Tablets', best_price: best, unit_size_oz: null, container_size: size, best_vendor_pricing_id: 'vp-summit' });
   const costs = () => constants.MOSQUITO.productCosts;
 
@@ -1208,10 +1208,10 @@ describe('mosquito product costs follow the inventory catalog (owner 2026-11-01)
     await syncConstantsFromDB(catalogDb([]));
   });
 
-  test('the code defaults are the inventory prices: Talak $41.57/96 fl oz, Summit $26.88/20', () => {
-    expect(constants.MOSQUITO.productCostCatalog.bifenthrinOz.catalogProductName).toBe('Atticus Talak 7.9 F');
+  test('the code defaults are the inventory prices: Crosscheck Plus $30.90/128 fl oz, Summit $26.88/20', () => {
+    expect(constants.MOSQUITO.productCostCatalog.bifenthrinOz.catalogProductName).toBe('LESCO Crosscheck Plus');
     expect(constants.MOSQUITO.productCostCatalog.summitDunkTablet.catalogProductName).toBe('Summit Mosquito Dunk Tablets');
-    expect(costs().bifenthrinOz).toBeCloseTo(0.433, 3);
+    expect(costs().bifenthrinOz).toBeCloseTo(0.2414, 4);
     expect(costs().summitDunkTablet).toBeCloseTo(1.344, 3);
   });
 

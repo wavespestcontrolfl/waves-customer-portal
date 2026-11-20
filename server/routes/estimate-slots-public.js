@@ -1452,8 +1452,10 @@ const SETTLED_SLOT_CODES = ['ESTIMATE_NOT_FOUND', 'ESTIMATE_EXPIRED', 'ESTIMATE_
 // /data reconciles a stale frozen membership snapshot (in memory, never persisted) before building either, so this
 // does too: a lapsed plan can reprice the default selection or make the estimate quote-required.
 // Shared by the texting AI (offerableEstimateSlots) and the daily no-time-soon check.
-async function pageSlotPicker(estimateId) {
-  const full = await db('estimates').where({ id: estimateId }).first();
+// `row`: the caller's own read of this estimate (the 07:05 fill list), so every check it makes reads one revision. The
+// picker works on a copy: the snapshot step below may rewrite the row's estimate_data in place.
+async function pageSlotPicker(estimateId, { row = null } = {}) {
+  const full = row ? structuredClone(row) : await db('estimates').where({ id: estimateId }).first();
   if (!full) return null;
   await reconcileFrozenMembershipSnapshot(full);
   const pricing = await buildPricingBundle(full, { monthlyBilled: await estimateRendersMonthlyBilling(full) });

@@ -103,7 +103,9 @@ async function eligibility(conn, now) {
   const from = etDateString(addETDays(now, 1));
   const to = etDateString(addETDays(now, DAYS));
   const { getBlackoutDates } = require('../scheduling/blackout-dates');
-  const blackout = await getBlackoutDates(from, to);
+  // Strict: a failed read is the notice's "day rules unread" case (no unplanned day, no fill list), never a silent
+  // fail-open that lists a closed day.
+  const blackout = await getBlackoutDates(from, to, conn, { strict: true });
   const techs = await applyAssignable(conn('technicians')).select('technicians.id');
   const techIds = techs.map((t) => String(t.id));
   const absent = techIds.length ? await absentTechDays(conn, { dateFrom: from, dateTo: to, technicianIds: techIds }) : new Set();
@@ -205,9 +207,13 @@ function alertSpec(sum, fill = null) {
 }
 
 /** A listed block's fill lines (fill-list.js): an open estimate's visit, its length, the drive it adds, its finish. */
+// The visit as booked, and the route plan's minutes on site when they differ (owner 2026-11-19: the visit row is 1 hour,
+// the plan keeps its own minutes).
+const visitText = (f) => (f.onSiteMin && f.onSiteMin !== f.length ? `${span(f.length)} visit, ${span(f.onSiteMin)} on site` : span(f.length));
+
 function fillLines(fill, i) {
   if (!fill || fill.error) return [];
-  return fill.byBlock[i].map((f) => `  - Open estimate, ${f.name || 'no name on file'} (${f.label}, ${span(f.length)}): +${f.addedDriveMin} min drive, finishes ${clock(f.endMin)}`);
+  return fill.byBlock[i].map((f) => `  - Open estimate, ${f.name || 'no name on file'} (${f.label}, ${visitText(f)}): +${f.addedDriveMin} min drive, finishes ${clock(f.endMin)}`);
 }
 
 /**

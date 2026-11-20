@@ -55,11 +55,11 @@ describe('pest-control pricing hardening', () => {
       marginFloorOk: true,
       requiresManualReview: false,
     }));
-    expect(line.costs.materialPerVisit).toBeCloseTo(6.67, 2);
+    expect(line.costs.materialPerVisit).toBeCloseTo(6.34, 2); // bifenthrin 0.97 (Crosscheck Plus) + taurus 4.87 + surfactant 0.50
     expect(line.costs.onSiteLaborCost).toBeCloseTo(14.58, 2);
     expect(line.costs.driveLaborCost).toBeCloseTo(11.67, 2);
-    expect(line.costs.annualCost).toBe(183);
-    expect(line.margin).toBeCloseTo(0.59, 2);
+    expect(line.costs.annualCost).toBe(181);
+    expect(line.margin).toBeCloseTo(0.595, 3);
   });
 
   test('protocol recurring pest example B auto-attaches German roach knockdown', () => {

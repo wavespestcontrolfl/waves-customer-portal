@@ -343,6 +343,9 @@ function contactOf(application) {
 }
 const firstNameOf = (application) => String(contactOf(application).name).trim().split(/\s+/)[0] || 'there';
 const ownerReportTo = (name) => `${name}, owner`;
+// The signer a draft's preview names (Signed by, Reports to) when the reader is not an owner account. Only an owner
+// account sends, and the Send names the owner who sends it, so another admin's preview names no one: never the reader.
+const UNNAMED_SIGNER = "[owner's name]";
 const ownerFirstName = (snapshot) => String((snapshot && snapshot.owner && snapshot.owner.name) || 'Adam').trim().split(/\s+/)[0] || 'Adam';
 
 // ----------------------------------------------------------------- state
@@ -518,9 +521,32 @@ async function presentDraft(conn, row, ownerName, now) {
 }
 
 /** GET /:id/offer */
+// Which of an application's offers (rows newest first) the panel shows where:
+// - out: the offer the applicant can act on (sent / date_requested, not past its expiry); draft: the open draft.
+// - current: out, else the open draft, else the newest offer the applicant received (signed, declined, withdrawn,
+//   replaced or expired), else the newest of any status (a draft closed unsent). A revision that was never sent and
+//   was then closed is newer, but never outranks the offer the applicant received: signing or declining the offer
+//   out closes the revision the owner was drafting.
+// - revision: a revision in progress, the open draft when it is not itself current.
+function panelOffers(rows, now) {
+  const draft = rows.find((r) => r.status === 'draft') || null;
+  const out = rows.find((r) => OUT_STATUSES.includes(r.status) && !expiredByClock(r, now)) || null;
+  const current = out || draft || rows.find((r) => r.sent_at) || rows[0] || null;
+  const revision = draft && draft.id !== current.id ? draft : null; // a draft makes current non-null (out || draft)
+  return { draft, out, current, revision };
+}
+
+// The panel reads the application and its offers in one snapshot. A signature or a decline moves both in one
+// transaction, so the stage the panel returns (applicationStatus) is the one its offers were read with, and the page
+// can tell when its own, separate read of the application is behind the offer card.
+const PANEL_SNAPSHOT = Object.freeze({ isolationLevel: 'repeatable read', readOnly: true });
+
 async function adminPanel(applicationId, actor, now = new Date()) {
-  const application = await loadApplication(db, applicationId);
-  const rows = await db('job_offers').where({ application_id: applicationId }).orderBy('created_at', 'desc');
+  const { application, rows } = await db.transaction(async (trx) => {
+    const app = await loadApplication(trx, applicationId);
+    const offers = await trx('job_offers').where({ application_id: applicationId }).orderBy('created_at', 'desc');
+    return { application: app, rows: offers };
+  }, PANEL_SNAPSHOT);
   const names = await sentByNames(db, rows);
   const { terms, payDayLine, blockers } = await loadIssuedTerms(db, now);
   const hashCtx = { terms, payDayLine, ownerName: actor.name, now };
@@ -530,13 +556,11 @@ async function adminPanel(applicationId, actor, now = new Date()) {
     sentByName: (row && names.get(row.sent_by)) || null,
     ...(row && row.status === 'draft' ? { draftHash: draftHashOf(row, hashCtx) } : {}),
   });
-  const draft = rows.find((r) => r.status === 'draft') || null;
-  const out = rows.find((r) => OUT_STATUSES.includes(r.status) && !expiredByClock(r, now)) || null;
-  // current = the offer that is out (sent / date_requested), else the open draft, else the newest of any status.
-  // draft = a revision in progress: the open draft when it is not itself current.
-  const current = out || draft || rows[0] || null;
-  const revision = draft && current && draft.id !== current.id ? draft : null;
-  const defaults = { ...defaultsFor(now), reportTo: ownerReportTo(actor.name), payDayLine, expiresAt: iso(expiryFor(now)) };
+  const { draft, out, current, revision } = panelOffers(rows, now);
+  // The preview names the reader as the signer only for an owner account (who would send it). The draft hash keeps the
+  // reader's own name: for another admin it is only the token their save is checked against, by that same name.
+  const signer = actor.ownerAccount ? actor.name : UNNAMED_SIGNER;
+  const defaults = { ...defaultsFor(now), reportTo: ownerReportTo(signer), payDayLine, expiresAt: iso(expiryFor(now)) };
   // The letter preview follows the draft being worked on; with no draft it is the frozen letter of the offer that is out.
   const shown = draft || out;
   // With no draft, the preview is the letter the applicant received (the frozen snapshot of the current offer, closed or
@@ -545,15 +569,24 @@ async function adminPanel(applicationId, actor, now = new Date()) {
   const view = frozen
     ? asObject(frozen.snapshot)
     : previewView({
-      offerInput: shown ? inputOfRow(shown) : defaults, application, actor, terms, payDayLine, now,
+      offerInput: shown ? inputOfRow(shown) : defaults, application, actor: { ...actor, name: signer }, terms, payDayLine, now,
       expiresAt: iso(expiryFor(now)),
     });
   return {
     enabled: true,
+    // The application's stage as this read saw it with the offers below.
+    applicationStatus: application.status,
     termsIssued: !blockers.length,
     terms: terms ? { templateId: terms.templateId, versionId: terms.versionId, title: terms.title, issuedAt: terms.issuedAt } : null,
     termsBlockers: blockers,
     defaults,
+    sendTo: sendTargetsOf(application),
+    // The offer out now that sending the open draft replaces (its link stops working at the send), or null. `out` is
+    // already null for an offer past its expiry, whose link no longer works.
+    sendReplacesId: replacedBySend(out, revision),
+    // The offers out now (sent, date requested) as this read saw them, each with its version. Send carries it back
+    // (expectedOut), so an answer or a date request after this read refuses the send (commitSend).
+    outStamp: offerStampOf(rows.filter((r) => OUT_STATUSES.includes(r.status))),
     // The preview names the offer its letter belongs to (the open draft, else the frozen letter of the current offer, else
     // none: the defaults) and that draft's hash, so a Save, Send or Discard can be tied to what was read.
     letterPreview: {
@@ -607,7 +640,7 @@ async function saveDraft(applicationId, input, actor, now = new Date()) {
     const reportTo = ownerReportTo(await actorName(trx, actor));
     const columns = columnsOf(value, reportTo);
     if (draft) {
-      const [row] = await trx('job_offers').where({ id: draft.id }).update({ ...columns, updated_at: new Date() }).returning('*');
+      const [row] = await trx('job_offers').where({ id: draft.id }).update({ ...columns, updated_at: nextVersion(draft) }).returning('*');
       return presentDraft(trx, row, await actorName(trx, actor), now);
     }
     const [row] = await trx('job_offers').insert({ application_id: applicationId, status: 'draft', created_by: actor.id, ...columns }).returning('*');
@@ -727,10 +760,56 @@ async function withdrawOffer(applicationId, offerId, actor, precondition = {}, n
  * The offers on an application that the applicant still holds: a sent offer not past expires_at, or a date request.
  * Locked. A stage move that would withdraw one is the owner account's call, like POST .../withdraw.
  */
+// An offer the applicant holds: a date request (held past the expiry, since the owner answers it), or a sent offer
+// that has not expired.
+const HELD_STATUSES = ['sent', 'date_requested'];
+const isHeldOffer = (o, now) => HELD_STATUSES.includes(o.status)
+  && (o.status === 'date_requested' || !o.expires_at || new Date(o.expires_at).getTime() >= now.getTime());
+
 async function heldOffersOf(trx, applicationId, now = new Date()) {
   const rows = await trx('job_offers').where({ application_id: applicationId })
-    .whereIn('status', ['sent', 'date_requested']).forUpdate().select('id', 'status', 'expires_at');
-  return rows.filter((o) => o.status === 'date_requested' || !o.expires_at || new Date(o.expires_at).getTime() >= now.getTime());
+    .whereIn('status', HELD_STATUSES).forUpdate().select('id', 'status', 'expires_at');
+  return rows.filter((o) => isHeldOffer(o, now));
+}
+
+/**
+ * Leaving the offer stage (back to review or interview), or closing the application (rejected, withdrawn, hired),
+ * withdraws its live offers. The stage move applies this rule (admin-careers.js applyStatusTransition) and the stage
+ * dialog's preview reads it, with GATE_JOB_OFFERS on or off.
+ */
+function stageMoveClosesOffers(fromStatus, toStatus) {
+  return (fromStatus === 'offer' && toStatus !== 'offer')
+    || (['rejected', 'withdrawn', 'hired'].includes(toStatus) && fromStatus !== toStatus);
+}
+
+// The live offers such a move withdraws (a draft, a sent offer, a date request).
+function liveOffersOf(knex, applicationId, { lock = false } = {}) {
+  const query = knex('job_offers').where({ application_id: applicationId }).whereIn('status', LIVE_STATUSES);
+  return (lock ? query.forUpdate() : query).select('id', 'status', 'expires_at', 'updated_at');
+}
+
+// One stamp for the offers a stage move withdraws, from their ids, statuses and versions (updated_at, which every offer
+// write sets). A write that changes the status changes the stamp by its status; a write that keeps it (a draft edited
+// in place, a second date request, a text-consent choice) takes nextVersion, so even two such writes in one
+// millisecond give two stamps. A move that keeps the offers withdraws none: the empty list has a stamp of its own. The
+// stage preview returns it and the move names the offers again under its lock, so a move never withdraws an offer, or
+// a version of one, that its dialog did not show. The Send's outStamp is the same stamp of the offers out.
+function offerStampOf(rows) {
+  const parts = rows.map((o) => `${o.id}:${o.status}:${iso(o.updated_at)}`).sort();
+  return crypto.createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 32);
+}
+
+// The version (updated_at) for a write that keeps an offer's status, on a row this transaction holds locked: strictly
+// later than the version it replaces, so two writes in one millisecond still get two versions (offerStampOf, and the
+// applicant page's `version` in changedSince, compare it).
+function nextVersion(row) {
+  return new Date(Math.max(Date.now(), new Date(row.updated_at).getTime() + 1));
+}
+
+/** What such a move would withdraw, for the stage dialog's preview: a plain read (the move re-checks under its lock). */
+async function liveOfferStake(knex, applicationId, now = new Date()) {
+  const rows = await liveOffersOf(knex, applicationId);
+  return { held: rows.some((o) => isHeldOffer(o, now)), draft: rows.some((o) => o.status === 'draft'), stamp: offerStampOf(rows) };
 }
 
 async function closeOffersWithApplication(trx, applicationId, actorId, now = new Date()) {
@@ -762,8 +841,8 @@ async function assertSendable(trx, application, offer, { now, ownerName, draftHa
     throw new OfferError(409, 'OFFER_NOT_DRAFT', 'This offer is not a draft.', { status: offer.status });
   }
   assertOfferable(application);
-  const contact = contactOf(application);
-  if (!contact.phone && !contact.email) throw new OfferError(409, 'NO_CONTACT', 'This applicant has no phone number or email.');
+  const to = sendTargetsOf(application);
+  if (!to.sms && !to.email) throw new OfferError(409, 'NO_CONTACT', 'This applicant has no phone number or email.');
   const issued = await loadIssuedTerms(trx, now);
   if (issued.blockers.length) {
     throw new OfferError(409, 'TERMS_NOT_ISSUED', 'The Technician Terms are not issued.', { blockers: issued.blockers });
@@ -778,14 +857,21 @@ async function assertSendable(trx, application, offer, { now, ownerName, draftHa
   return issued;
 }
 
+// The id of the offer out now that a Send of `draft` replaces (its link stops working at the send, before any text or
+// email), or null. supersedePrior applies it under the lock; the offer read names it, so the Send question can say so.
+function replacedBySend(out, draft) {
+  return out && draft && out.id === draft.supersedes_id ? out.id : null;
+}
+
 async function supersedePrior(trx, applicationId, offer, now) {
   const out = await trx('job_offers').where({ application_id: applicationId }).whereIn('status', OUT_STATUSES).forUpdate().first();
   if (!out) return;
-  if (out.id !== offer.supersedes_id && expiredByClock(out, now)) {
+  const replaced = replacedBySend(out, offer);
+  if (!replaced && expiredByClock(out, now)) {
     await trx('job_offers').where({ id: out.id }).update({ status: 'expired', updated_at: new Date() });
     return;
   }
-  if (out.id !== offer.supersedes_id) {
+  if (!replaced) {
     throw new OfferError(409, 'OFFER_ALREADY_OPEN', 'An offer is already out. Use Revise to make an updated one.', { offerId: out.id });
   }
   await trx('job_offers').where({ id: out.id }).update({ status: 'superseded', superseded_by_id: offer.id, updated_at: new Date() });
@@ -802,12 +888,19 @@ function sentHistoryEntry(application, actor) {
   };
 }
 
-async function commitSend(applicationId, offerId, actor, now, draftHash) {
+async function commitSend(applicationId, offerId, actor, now, draftHash, expectedOut) {
   return db.transaction(async (trx) => {
     const application = await loadApplication(trx, applicationId, { lock: true });
     const offer = await loadOffer(trx, applicationId, offerId, { lock: true });
     const name = await actorName(trx, actor);
     const { terms, payDayLine } = await assertSendable(trx, application, offer, { now, ownerName: name, draftHash });
+    // The owner sends on a read of the offers out now (the offer read's outStamp, which sendOffer requires). An answer, a
+    // date request or any other write to them since that read refuses the send, before anything is replaced or sent: the
+    // owner sees it first. Every offer writer locks the application row first, so this read holds until the commit.
+    const outNow = (await liveOffersOf(trx, applicationId, { lock: true })).filter((o) => OUT_STATUSES.includes(o.status));
+    if (offerStampOf(outNow) !== expectedOut) {
+      throw new OfferError(409, 'OFFERS_CHANGED', 'The offer you sent before changed after you opened this, so nothing was sent.');
+    }
     await supersedePrior(trx, applicationId, offer, now);
 
     const owner = { name, reportTo: ownerReportTo(name) };
@@ -836,9 +929,21 @@ async function commitSend(applicationId, offerId, actor, now, draftHash) {
 }
 
 // The text + email, after the commit. Comms never undo the send: a failure is reported per channel.
-async function deliverOfferComms({ offer, application, ownerName, snapshot }, actor) {
+// Who Send reaches: a text to the phone on file and an email to the email on file, whatever their form. The send tries
+// each one (a number or address it cannot use still gets the attempt, and the outcome says it did not go out). The offer
+// read returns the same list, masked ('***' when a mask cannot be made), so the Send question names every channel the
+// send tries.
+function sendTargetsOf(application) {
   const RecruitingComms = require('./recruiting-comms');
   const contact = RecruitingComms.contactOf(application);
+  return {
+    sms: contact.phone ? RecruitingComms.maskPhone(contact.phone) : null,
+    email: contact.email ? RecruitingComms.maskEmail(contact.email) : null,
+  };
+}
+async function deliverOfferComms({ offer, application, ownerName, snapshot }, actor) {
+  const RecruitingComms = require('./recruiting-comms');
+  const to = sendTargetsOf(application);
   const stillEligible = async (conn = db) => {
     const row = await conn('job_offers').where({ id: offer.id }).first('status', 'token');
     const app = await conn('job_applications').where({ id: application.id }).first('status');
@@ -846,8 +951,8 @@ async function deliverOfferComms({ offer, application, ownerName, snapshot }, ac
   };
   try {
     const comms = await RecruitingComms.sendStageComms(application, 'offer_sent', {
-      sms: Boolean(contact.phone),
-      email: Boolean(contact.email),
+      sms: Boolean(to.sms),
+      email: Boolean(to.email),
       by: actor.id,
       stillEligible,
       offerId: offer.id,
@@ -862,7 +967,11 @@ async function deliverOfferComms({ offer, application, ownerName, snapshot }, ac
     return outcomesOf(comms);
   } catch (err) {
     logger.error(`[job-offers] offer comms failed after the committed send (offer ${offer.id}): ${errTag(err)}`);
-    return { sms: { outcome: 'failed', code: 'comms_threw' }, email: { outcome: 'failed', code: 'comms_threw' } };
+    // The send threw partway, so a channel it tried may already have gone out (the text leg runs before the email
+    // leg): its outcome is not known. 'uncertain', never 'failed', so the page does not ask for a Revise that would
+    // stop a link the applicant may already have. A channel with nothing on file was not tried.
+    const unknown = (target) => (target ? { outcome: 'uncertain', code: 'comms_threw' } : { outcome: 'not_requested', code: null });
+    return { sms: unknown(to.sms), email: unknown(to.email) };
   }
 }
 
@@ -872,11 +981,17 @@ const outcomesOf = (comms) => ({
 });
 
 /** POST /:id/offer/:offerId/send */
-async function sendOffer(applicationId, offerId, actor, draftHash, now = new Date()) {
+// expectedOut: the offer read's outStamp, which the page always sends; null skips the check.
+async function sendOffer(applicationId, offerId, actor, draftHash, now = new Date(), { expectedOut } = {}) {
   if (typeof draftHash !== 'string' || !draftHash) {
     throw new OfferError(400, 'DRAFT_HASH_REQUIRED', 'Send needs the hash of the preview you reviewed.');
   }
-  const committed = await commitSend(applicationId, offerId, actor, now, draftHash);
+  // And the offers out the owner reviewed (the read's outStamp): without it, a Send could replace an answer or a date
+  // request the owner never saw.
+  if (typeof expectedOut !== 'string' || !expectedOut) {
+    throw new OfferError(400, 'OUT_STAMP_REQUIRED', 'Send needs the offers out you reviewed. Open the offer again, then send.');
+  }
+  const committed = await commitSend(applicationId, offerId, actor, now, draftHash, expectedOut);
   const comms = await deliverOfferComms(committed, actor);
   const fresh = await db('job_offers').where({ id: committed.offer.id }).first();
   return { offer: presentOffer(fresh || committed.offer, { sentByName: committed.ownerName, includeUrl: true }), comms };
@@ -989,8 +1104,7 @@ async function setTextConsent(token, consent, version) {
     const current = iso(found.offer.updated_at);
     if (Boolean(found.offer.text_consent_at) === consent) return { body: { textConsent: consent, version: current } };
     if (changedSince(found.offer, version)) return CHANGED;
-    // Strictly later than the version it replaces, so two changes in one millisecond still get two versions.
-    const updatedAt = new Date(Math.max(Date.now(), new Date(found.offer.updated_at).getTime() + 1));
+    const updatedAt = nextVersion(found.offer);
     await trx('job_offers').where({ id: found.offer.id }).update({ text_consent_at: consent ? found.now : null, updated_at: updatedAt });
     return { body: { textConsent: consent, version: iso(updatedAt) } };
   });
@@ -1094,7 +1208,7 @@ async function requestDate(token, { requestedStartDate, note, version }) {
     const cleanNote = note ? cleanText(note) : null;
     await trx('job_offers').where({ id: found.offer.id }).update({
       status: 'date_requested', date_requested_at: found.now, requested_start_date: requestedStartDate,
-      date_request_note: cleanNote || null, updated_at: new Date(),
+      date_request_note: cleanNote || null, updated_at: nextVersion(found.offer),
     });
     return { body: { state: 'date_requested' }, forBell: found.offer };
   });
@@ -1190,7 +1304,7 @@ module.exports = {
   snapshotHashOf, signatureHashOf, renderLetterMarkdown, readableTerms, payDayLineFrom,
   publicStateOf, closedMessage, presentOffer, timelineOf, buildSnapshot,
   // admin
-  loadIssuedTerms, draftHashOf, heldOffersOf, closeOffersWithApplication, adminPanel, saveDraft, sendOffer, withdrawOffer, reviseOffer, signedCopy,
+  loadIssuedTerms, draftHashOf, heldOffersOf, stageMoveClosesOffers, liveOffersOf, offerStampOf, liveOfferStake, closeOffersWithApplication, adminPanel, saveDraft, sendOffer, withdrawOffer, reviseOffer, signedCopy,
   // public
   publicView, setTextConsent, acceptOffer, requestDate, declineOffer,
 };
