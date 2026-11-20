@@ -14,7 +14,7 @@ const PERIODS = [
   { days: 30, label: "Last 30 days" },
   { days: 90, label: "Last 90 days" },
 ];
-const REASON_LABELS = { new_restaurant: "New restaurant", new_owner: "New owner", pest_finding: "Pest finding" };
+const REASON_LABELS = { new_restaurant: "New restaurant", new_owner: "New owner", pest_finding: "Pests found" };
 
 // An error answer may carry no JSON body. A success whose body cannot be read (cut off on the way) is an error
 // too, so the page shows Try again, never a broken list.
@@ -36,9 +36,10 @@ const phoneText = (phone) => (/^\d{10}$/.test(phone || "") ? `(${phone.slice(0, 
 // At 1100 px and under the table shows each restaurant as a stacked record (the shared records layout): counts read left there.
 const COUNT_CELL = "align-middle max-[1100px]:text-left";
 
+// The pest count is per inspection (one row each), whatever the number of findings in it.
 export function summaryText(data) {
   const { counts, from, through } = data;
-  const parts = `${plural(counts.new_restaurant, "new restaurant")}, ${plural(counts.new_owner, "new owner")} and ${plural(counts.pest_finding, "pest finding")}`;
+  const parts = `${plural(counts.new_restaurant, "new restaurant")}, ${plural(counts.new_owner, "new owner")} and ${plural(counts.pest_finding, "inspection")} that found pests`;
   return `${parts} from ${shortDay(from)} to ${shortDay(through)}.`;
 }
 

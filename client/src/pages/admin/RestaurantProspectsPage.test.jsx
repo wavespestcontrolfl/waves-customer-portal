@@ -14,12 +14,13 @@ const reply = (body, { ok = true, status = 200 } = {}) => Promise.resolve({ ok, 
 
 const READ_AT = "2026-11-16T15:40:00.000Z";
 const ROACHES = { code: "35A-02-4", text: "Live roaches seen in the dry storage area." };
+const DROPPINGS = { code: "35A-03-4", text: "Rodent droppings under the prep table." };
 const LIST30 = {
   days: 30, from: "2026-10-21", through: "2026-11-19", readAt: READ_AT,
   counts: { new_restaurant: 1, new_owner: 1, pest_finding: 1 },
   rows: [
     { id: "r-1", reason: "new_restaurant", name: "SAMPLE GRILL", address: "200 SAMPLE TRL", city: "BRADENTON", zip: "34208", county: "Manatee", phone: "9415550101", seats: 40, eventDate: "2026-11-18", licenseNumber: "SEA0000001", isNew: true, findings: [] },
-    { id: "r-2", reason: "pest_finding", name: "SAMPLE BISTRO", address: "300 SAMPLE AVE", city: "SARASOTA", zip: "34231", county: "Sarasota", phone: null, seats: null, eventDate: "2026-11-12", licenseNumber: "SEA0000002", isNew: false, findings: [ROACHES] },
+    { id: "r-2", reason: "pest_finding", name: "SAMPLE BISTRO", address: "300 SAMPLE AVE", city: "SARASOTA", zip: "34231", county: "Sarasota", phone: null, seats: null, eventDate: "2026-11-12", licenseNumber: "SEA0000002", isNew: false, findings: [ROACHES, DROPPINGS] },
     { id: "r-3", reason: "new_owner", name: "SAMPLE CAFE", address: "400 SAMPLE BLVD", city: "PORT CHARLOTTE", zip: "33948", county: "Charlotte", phone: "9415550102", seats: 1200, eventDate: "2026-11-10", licenseNumber: "SEA0000003", isNew: false, findings: [] },
   ],
 };
@@ -44,7 +45,8 @@ afterEach(() => cleanup());
 it("opens on the last 30 days with the summary, the read day, the area note and one row per restaurant", async () => {
   route({ "/admin/prospects/restaurants?days=30": () => reply(LIST30) });
   renderPage();
-  expect(await screen.findByText("1 new restaurant, 1 new owner and 1 pest finding from Oct 21 to Nov 19. The state files were last read on Nov 16, 2026.")).toBeInTheDocument();
+  // The pest count is per inspection: one inspection with two findings is one.
+  expect(await screen.findByText("1 new restaurant, 1 new owner and 1 inspection that found pests from Oct 21 to Nov 19. The state files were last read on Nov 16, 2026.")).toBeInTheDocument();
   expect(screen.getByText(/Food trucks are left out/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Last 30 days" })).toHaveAttribute("aria-pressed", "true");
 
@@ -59,8 +61,9 @@ it("opens on the last 30 days with the summary, the read day, the area note and 
   expect(within(grill).getByText("40")).toBeInTheDocument();
   const bistro = rowOf(table, "SAMPLE BISTRO");
   expect(within(bistro).queryByText("New")).toBeNull();
-  expect(within(bistro).getByText("Pest finding")).toBeInTheDocument();
+  expect(within(bistro).getByText("Pests found")).toBeInTheDocument();
   expect(within(bistro).getByText(ROACHES.text)).toBeInTheDocument();
+  expect(within(bistro).getByText(DROPPINGS.text)).toBeInTheDocument();
   expect(within(bistro).getAllByText("Not listed")).toHaveLength(2); // no phone, no seat count
   const cafe = rowOf(table, "SAMPLE CAFE");
   expect(within(cafe).getByText("New owner")).toBeInTheDocument();
@@ -76,7 +79,7 @@ it("switching to the last 90 days loads that list", async () => {
   await screen.findByText("SAMPLE GRILL");
   fireEvent.click(screen.getByRole("button", { name: "Last 90 days" }));
   expect(await screen.findByText("SAMPLE TAVERN")).toBeInTheDocument();
-  expect(screen.getByText(/^1 new restaurant, 0 new owners and 0 pest findings from Aug 22 to Nov 19\./)).toBeInTheDocument();
+  expect(screen.getByText(/^1 new restaurant, 0 new owners and 0 inspections that found pests from Aug 22 to Nov 19\./)).toBeInTheDocument();
   expect(screen.queryByText("SAMPLE GRILL")).toBeNull();
   expect(screen.getByRole("button", { name: "Last 90 days" })).toHaveAttribute("aria-pressed", "true");
 });
@@ -114,7 +117,7 @@ it("rows from a first run that did not read every file show with a not-complete 
   route({ "/admin/prospects/restaurants?days=30": () => reply({ ...LIST30, readAt: null, counts: { new_restaurant: 1, new_owner: 0, pest_finding: 0 }, rows: [LIST30.rows[0]] }) });
   renderPage();
   expect(await screen.findByText("Not every state file has been read yet, so this list may be missing restaurants.")).toBeInTheDocument();
-  expect(screen.queryByText(/pest findings?/)).toBeNull();
+  expect(screen.queryByText(/that found pests from/)).toBeNull();
   expect(screen.queryByText(/new restaurants?,/)).toBeNull();
   expect(rowOf(screen.getByRole("table", { name: "Restaurants" }), "SAMPLE GRILL")).toBeInTheDocument();
   expect(screen.queryByText("Not every state file has been read yet.")).toBeNull();
@@ -124,7 +127,7 @@ it("a read with nothing in the window shows the zero counts and an empty message
   route({ "/admin/prospects/restaurants?days=30": () => reply({ ...LIST30, counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, rows: [] }) });
   renderPage();
   expect(await screen.findByText("Nothing in the last 30 days.")).toBeInTheDocument();
-  expect(screen.getByText("0 new restaurants, 0 new owners and 0 pest findings from Oct 21 to Nov 19. The state files were last read on Nov 16, 2026.")).toBeInTheDocument();
+  expect(screen.getByText("0 new restaurants, 0 new owners and 0 inspections that found pests from Oct 21 to Nov 19. The state files were last read on Nov 16, 2026.")).toBeInTheDocument();
   expect(screen.queryByRole("table")).toBeNull();
 });
 
@@ -147,7 +150,7 @@ it("a late answer for the period the owner left never replaces the list shown no
 
 it("summaryText says one or many per reason; readText names the Eastern day of the read", () => {
   expect(summaryText({ from: "2026-10-21", through: "2026-11-19", counts: { new_restaurant: 2, new_owner: 0, pest_finding: 1 } }))
-    .toBe("2 new restaurants, 0 new owners and 1 pest finding from Oct 21 to Nov 19.");
+    .toBe("2 new restaurants, 0 new owners and 1 inspection that found pests from Oct 21 to Nov 19.");
   expect(readText(null)).toBe("");
   // 11:30 PM on Nov 16 Eastern is already Nov 17 in UTC: the day named is Nov 16.
   expect(readText("2026-11-17T04:30:00.000Z")).toBe("The state files were last read on Nov 16, 2026.");
@@ -156,5 +159,5 @@ it("summaryText says one or many per reason; readText names the Eastern day of t
   expect(headlineText({ from: "2026-10-21", through: "2026-11-19", counts, readAt: null }))
     .toBe("Not every state file has been read yet, so this list may be missing restaurants.");
   expect(headlineText({ from: "2026-10-21", through: "2026-11-19", counts, readAt: "2026-11-17T04:30:00.000Z" }))
-    .toBe("2 new restaurants, 0 new owners and 0 pest findings from Oct 21 to Nov 19. The state files were last read on Nov 16, 2026.");
+    .toBe("2 new restaurants, 0 new owners and 0 inspections that found pests from Oct 21 to Nov 19. The state files were last read on Nov 16, 2026.");
 });
