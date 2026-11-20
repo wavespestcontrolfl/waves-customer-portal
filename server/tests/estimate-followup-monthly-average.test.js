@@ -385,28 +385,28 @@ describe('send-time check: the average is re-read at the provider boundary', () 
     await expect(check()).rejects.toMatchObject({ reason: 'monthly_average_changed' });
   });
 
-  test('the PDF fence and the average read from ONE snapshot; the final check reads after them in a fresh one', async () => {
-    // With separate reads, a price or recipient edit between them could pass one content check on the
-    // old row and the other on the new one. The final check stays last and fresh, so an acceptance
-    // during the content checks is still seen.
-    const pdfCheck = jest.fn(async () => ({ ok: true }));
+  test('the PDF fence and the average run first on their own reads; the final check reads last, in its own snapshot', async () => {
+    // No transaction is held open across the PDF fingerprint and the average: their helpers read
+    // through the pool, so a held snapshot could wait on a second connection. The final check stays
+    // last and fresh, so an acceptance during the content checks is still seen.
+    const order = [];
+    const pdfCheck = jest.fn(async () => { order.push('pdf fence'); return { ok: true }; });
     const pdfHandoff = jest.fn(async (dispatch) => { await dispatch(undefined, pdfCheck); return { ok: true }; });
     mockPdf.copy = { attachments: [], payload: {}, withProviderHandoff: pdfHandoff };
     const check = await checkOf(await installedHandoff(await pinned()));
     freshOverride = row();
-    const snapshotOf = () => Object.assign(jest.fn((table) => db(table)), { raw: db.raw, fn: db.fn });
-    const content = snapshotOf();
-    const final = snapshotOf();
-    db.transaction.mockImplementationOnce(async (fn) => fn(content)).mockImplementationOnce(async (fn) => fn(final));
+    const final = Object.assign(jest.fn((table) => db(table)), { raw: db.raw, fn: db.fn });
+    db.transaction.mockClear();
+    db.transaction.mockImplementationOnce(async (fn) => { order.push('final snapshot'); return fn(final); });
     db.mockClear();
     await expect(check({ database: undefined })).resolves.toEqual({ ok: true });
-    expect(db.transaction.mock.calls.slice(-2).map((c) => c[1])).toEqual([
-      { isolationLevel: 'repeatable read', readOnly: true }, { isolationLevel: 'repeatable read', readOnly: true },
-    ]);
-    expect(pdfCheck).toHaveBeenCalledWith(expect.objectContaining({ snapshot: content }));
-    expect(content.mock.calls.map(([table]) => table)).toEqual(['estimates']); // the average re-read
+    expect(order).toEqual(['pdf fence', 'final snapshot']);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(db.transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
     expect(final.mock.calls.map(([table]) => table)).toEqual(expect.arrayContaining(['estimates', 'scheduled_services', 'estimate_checkout_events']));
-    expect(db.mock.calls.length).toBe(content.mock.calls.length + final.mock.calls.length); // no read outside the snapshots
+    // The average re-read went through the pool, outside the final snapshot.
+    expect(db.mock.calls.length - final.mock.calls.length).toBe(1);
+    expect(db.mock.calls[0][0]).toBe('estimates');
   });
 
   test('a snapshot that cannot open is a retryable check failure, not a pass', async () => {

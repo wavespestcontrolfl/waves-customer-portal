@@ -220,13 +220,13 @@ function rowStateBlock(row, { validThrough, now, delivery }) {
 }
 
 // The call-side half: invalidation markers and the call's verdict/linkage.
-async function callSideBlock(row, data, conn = db) {
+async function callSideBlock(row, data) {
   const { estimateOffCustomerSurface, callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
   if (estimateOffCustomerSurface({ estimate_data: data })) return 'estimate_invalidated';
-  const callBlock = await callSideBlockForEstimateData(conn, data, { estimateStatus: row.status });
+  const callBlock = await callSideBlockForEstimateData(db, data, { estimateStatus: row.status });
   if (callBlock) return `call_side_${callBlock}`;
   const { staleCallLinkageReason } = require('./admin-estimate-persistence');
-  const stale = await staleCallLinkageReason(conn, data, { estimateStatus: row.status });
+  const stale = await staleCallLinkageReason(db, data, { estimateStatus: row.status });
   return stale ? `call_linkage_${stale}` : null;
 }
 
@@ -236,9 +236,8 @@ async function callSideBlock(row, data, conn = db) {
 // plain "is it still sendable" read). `validThrough` is the date the document
 // advertises when it is newer than the stored row (an extension in flight);
 // `now` is the clock at the handoff. `delivery`: the manual delivery send.
-// `conn`: the connection the reads go through (a caller's snapshot transaction).
-async function handoffBlockReason(estimateId, expectedFingerprint, { validThrough = null, now = new Date(), recipient = null, delivery = false, conn = db } = {}) {
-  const row = await conn('estimates').where({ id: estimateId }).first();
+async function handoffBlockReason(estimateId, expectedFingerprint, { validThrough = null, now = new Date(), recipient = null, delivery = false } = {}) {
+  const row = await db('estimates').where({ id: estimateId }).first();
   if (!row) return 'estimate_missing';
   if (recipient && !sameRecipient(row.customer_email, recipient)) return 'recipient_changed';
   const stateBlock = rowStateBlock(row, { validThrough, now, delivery });
@@ -246,23 +245,20 @@ async function handoffBlockReason(estimateId, expectedFingerprint, { validThroug
   if (expectedFingerprint && (await fullFingerprint(row, { omitExpiry: delivery, validThrough: validThrough || (delivery ? null : row.expires_at) })) !== expectedFingerprint) return 'estimate_changed_since_render';
   // A one-property PDF must never go out for a multi-property group, whenever
   // the group formed (r6 exclusion; r9/r10 sibling unarchived mid-render).
-  if (expectedFingerprint && await module.exports.estimateInMultiPropertyGroup(row, conn)) return 'estimate_grouped';
+  if (expectedFingerprint && await module.exports.estimateInMultiPropertyGroup(row)) return 'estimate_grouped';
   const data = parseData(row);
   if (data === null) return 'estimate_data_unreadable';
-  return callSideBlock(row, data, conn);
+  return callSideBlock(row, data);
 }
 
 // sendOne awaits this after its own preparation, right before the request.
 // A veto is a definite non-send (providerBoundaryBlocked); a failed read is a
-// definite non-send too, tagged so the library settles it retryable. A caller
-// that composes several checks passes its one read-only `snapshot` transaction,
-// so every check judges the same estimate revision (estimate-follow-up.js
-// checkoutProviderHandoff).
+// definite non-send too, tagged so the library settles it retryable.
 function pdfBoundaryCheck(estimateId, expectedFingerprint, { validThrough = null, recipient = null, delivery = false, clock = () => new Date() } = {}) {
-  return async ({ snapshot } = {}) => {
+  return async () => {
     let reason;
     try {
-      reason = await handoffBlockReason(estimateId, expectedFingerprint, { validThrough, recipient, delivery, now: clock(), conn: snapshot || db });
+      reason = await handoffBlockReason(estimateId, expectedFingerprint, { validThrough, recipient, delivery, now: clock() });
     } catch (err) {
       const unavailable = new Error(`estimate ${estimateId} PDF fence unavailable: ${err.message}`);
       unavailable.providerBoundaryCheckFailed = true;

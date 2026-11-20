@@ -370,24 +370,21 @@ describe('provider-boundary checkout check (sendDualChannel with an outcome)', (
     expect(outcome).toEqual({ midCheckout: true });
   });
 
-  test('the content checks share one snapshot; the final check runs after them in its own fresh one', async () => {
+  test('the content checks run first on their own reads; the final check runs last, in a fresh snapshot', async () => {
     arrange({ est: OPEN });
-    const pdfCheck = jest.fn(async () => ({ ok: true }));
+    const order = [];
+    // The customer accepts while the PDF fence runs (it passes): the final check, after it, still sees the acceptance.
+    const pdfCheck = jest.fn(async () => { order.push('pdf fence'); arrange({ est: { ...OPEN, status: 'accepted' } }); return { ok: true }; });
     mockPdf.copy = { attachments: [], payload: {}, withProviderHandoff: async (dispatch) => { await dispatch(undefined, pdfCheck); return { ok: true }; } };
     const outcome = {};
     const check = await installedCheck(outcome);
-    const contentSnapshot = Object.assign((table) => db(table), { raw: db.raw, fn: db.fn });
     db.transaction.mockClear();
-    db.transaction
-      .mockImplementationOnce(async (fn) => fn(contentSnapshot))
-      // The customer accepts after the content snapshot was taken: the final check still sees it.
-      .mockImplementationOnce(async (fn) => { arrange({ est: { ...OPEN, status: 'accepted' } }); return fn(db); });
+    db.transaction.mockImplementationOnce(async (fn) => { order.push('final snapshot'); return fn(db); });
     await expect(check()).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_not_sendable' });
-    expect(pdfCheck).toHaveBeenCalledWith(expect.objectContaining({ snapshot: contentSnapshot }));
-    expect(db.transaction).toHaveBeenCalledTimes(2);
-    expect(db.transaction.mock.calls.map((c) => c[1])).toEqual([
-      { isolationLevel: 'repeatable read', readOnly: true }, { isolationLevel: 'repeatable read', readOnly: true },
-    ]);
+    // One transaction, the final check's, opened after the content checks: none is held open across them.
+    expect(order).toEqual(['pdf fence', 'final snapshot']);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(db.transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
     expect(outcome).toEqual({ finalReason: 'terminal-status:accepted' });
   });
 

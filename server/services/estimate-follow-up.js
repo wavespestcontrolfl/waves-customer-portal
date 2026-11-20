@@ -345,10 +345,9 @@ function followupFinalVerdict(est, { stage = null, quotedExpiresAt = null, nowMs
 // it shows either the hold (a wait) or the accepted row (a final no). A failed
 // read, the checkout lookup's included, throws; the caller decides what an
 // unreadable state means (both legs make it a retryable non-send).
-// `snapshot`: a caller that composes several checks passes its own snapshot
-// transaction (opened with FINAL_CHECK_SNAPSHOT), so they all judge one revision.
-async function followupMayStillSend(estimateId, { stage = null, quotedExpiresAt = null, nowMs = Date.now(), snapshot = null } = {}) {
-  const judge = async (trx) => {
+async function followupMayStillSend(estimateId, { stage = null, quotedExpiresAt = null, nowMs = Date.now() } = {}) {
+  const { FINAL_CHECK_SNAPSHOT } = require("./estimate-consultation-offer");
+  return db.transaction(async (trx) => {
     const est = await trx("estimates").where({ id: estimateId }).first();
     if (!est) return { ok: false, final: true, reason: "estimate-missing" };
     const reason = followupFinalVerdict(est, { stage, quotedExpiresAt, nowMs });
@@ -357,10 +356,7 @@ async function followupMayStillSend(estimateId, { stage = null, quotedExpiresAt 
       return { ok: false, final: false, reason: "customer-mid-checkout", retryAt: new Date(nowMs + CHECKOUT_ACTIVE_MINUTES * 60000) };
     }
     return { ok: true };
-  };
-  if (snapshot) return judge(snapshot);
-  const { FINAL_CHECK_SNAPSHOT } = require("./estimate-consultation-offer");
-  return db.transaction(judge, FINAL_CHECK_SNAPSHOT);
+  }, FINAL_CHECK_SNAPSHOT);
 }
 
 // The text leg's final check. twilio.js runs it at the provider boundary
@@ -632,10 +628,10 @@ async function withAverageEmail(email, est) {
 // (providerBoundaryCheckFailed). Either way the caller releases the stage and the next
 // sweep sends fresh copy.
 function averageBoundaryCheck(estimateId, expectedText) {
-  return async ({ snapshot } = {}) => {
+  return async () => {
     let current;
     try {
-      const row = await (snapshot || db)("estimates").where({ id: estimateId }).first();
+      const row = await db("estimates").where({ id: estimateId }).first();
       current = row ? monthlyAverageService().averageText(await monthlyAverageService().emailAverageParts(row)) : null;
     } catch (err) {
       const unavailable = new Error(`estimate ${estimateId} monthly average check unavailable: ${err.message}`);
@@ -666,7 +662,7 @@ function averageProviderHandoff(estimateId, expectedText, pdfHandoff = null) {
   return (dispatch) => pdfHandoff(async (database, pdfCheck) => {
     await dispatch(database, async (args) => {
       if (pdfCheck) await pdfCheck(args);
-      return check(args);
+      return check();
     });
   });
 }
@@ -680,10 +676,10 @@ function averageProviderHandoff(estimateId, expectedText, pdfHandoff = null) {
 // so the engine can wait (midCheckout) or drop the job (finalReason) instead of
 // counting a failed attempt. An unreadable row is a retryable non-send.
 function checkoutBoundaryCheck(est, outcome, { stage = null, quotedExpiresAt = null } = {}) {
-  return async ({ snapshot } = {}) => {
+  return async () => {
     let verdict;
     try {
-      verdict = await followupMayStillSend(est.id, { stage, quotedExpiresAt, snapshot });
+      verdict = await followupMayStillSend(est.id, { stage, quotedExpiresAt });
     } catch (err) {
       const unavailable = new Error(`estimate ${est.id} send check unavailable: ${err.message}`);
       unavailable.providerBoundaryCheckFailed = true;
@@ -706,36 +702,27 @@ function checkoutBoundaryCheck(est, outcome, { stage = null, quotedExpiresAt = n
 
 // Composes that check after whatever handoff the send already has (the PDF
 // fence, the monthly-average check, both, or none), as averageProviderHandoff does.
-// The content checks read from ONE read-only snapshot (FINAL_CHECK_SNAPSHOT), so
-// they judge the same estimate revision. The final check runs after them, last,
-// in its own fresh snapshot: an acceptance or a visit-time hold that commits
-// while the PDF fingerprint or the average is recomputed is still seen. A content
-// veto (the PDF fence's estimate_not_open, a changed average) can come from the
-// same acceptance the final check reports, so the final check also classifies
-// it, and the caller ends the job or waits instead of counting a failed send. A
-// snapshot that cannot open is a retryable non-send, like any unreadable check.
+// The content checks run first, with their own reads, exactly as without this
+// check. The final check runs after them, last, in its own short snapshot: an
+// acceptance or a visit-time hold that commits while the PDF fingerprint or the
+// average is recomputed is still seen, and no transaction is held open across
+// that slower work. A content veto (the PDF fence's estimate_not_open, a changed
+// average) can come from the same acceptance the final check reports, so the
+// final check also classifies it, and the caller ends the job or waits instead
+// of counting a failed send. The veto itself still stops the send.
 function checkoutProviderHandoff(est, outcome, inner = null, ctx = {}) {
   const check = checkoutBoundaryCheck(est, outcome, ctx);
-  const contentChecks = async (innerCheck, args) => {
-    const { FINAL_CHECK_SNAPSHOT } = require("./estimate-consultation-offer");
-    try {
-      await db.transaction((snapshot) => innerCheck({ ...args, snapshot }), FINAL_CHECK_SNAPSHOT);
-    } catch (err) {
-      if (err.providerBoundaryBlocked) {
+  const allChecks = (innerCheck) => async (args) => {
+    if (innerCheck) {
+      try {
+        await innerCheck(args);
+      } catch (err) {
         // Classify only: the final check records a final reason or a wait on `outcome`.
-        await check(args).catch(() => {});
+        if (err.providerBoundaryBlocked) await check().catch(() => {});
         throw err;
       }
-      if (err.providerBoundaryCheckFailed) throw err;
-      const unavailable = new Error(`estimate ${est.id} send check unavailable: ${err.message}`);
-      unavailable.providerBoundaryCheckFailed = true;
-      unavailable.cause = err;
-      throw unavailable;
     }
-  };
-  const allChecks = (innerCheck) => async (args = {}) => {
-    if (innerCheck) await contentChecks(innerCheck, args);
-    return check(args);
+    return check();
   };
   if (!inner) {
     return async (dispatch) => {
