@@ -102,11 +102,11 @@ postgres('geocoder quality recovery on isolated PostgreSQL', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     process.env.GATE_ROUTE_REORDER = 'true';
-    process.env.GATE_ROUTE_REORDER_REPAIR = 'true';
+    // Deliberately keep route-order repair off: this suite verifies coordinate
+    // and warning reconciliation, while repair has its own PG suite.
+    process.env.GATE_ROUTE_REORDER_REPAIR = 'false';
     process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS = 'true';
     process.env.GATE_SCHEDULE_QUALITY_ALERTS = 'true';
-    // Deliberately keep calibration off: this suite verifies coordinate and
-    // warning reconciliation, while route-order repair has its own PG suite.
     geocodeAddressWithStatus.mockResolvedValue({ location: PIN, permanent: false });
     mockConnection = await database.transaction();
     for (const table of [
