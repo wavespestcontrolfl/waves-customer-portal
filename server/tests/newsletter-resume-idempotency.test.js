@@ -20,6 +20,8 @@
  */
 
 const mockSendBroadcast = jest.fn(async () => ({ messageId: 'sg-batch-1', recipientCount: 1 }));
+// A planned Waves Pest Insider issue that reached no reader raises one alert.
+const mockTrigger = jest.fn(async () => ({ bellWritten: true }));
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/sendgrid-mail', () => ({
@@ -30,6 +32,7 @@ jest.mock('../services/sendgrid-mail', () => ({
 jest.mock('../services/conversations', () => ({
   recordTouchpoint: jest.fn(async () => ({ ok: true })),
 }));
+jest.mock('../services/notification-triggers', () => ({ triggerNotification: (...args) => mockTrigger(...args) }));
 
 const db = require('../models/db');
 // The pre-send archived-link relink sweep (relinkArchivedLinkedSubscribers)
@@ -386,7 +389,8 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     expect(mockSendBroadcast).not.toHaveBeenCalled();
   });
 
-  test('a planned issue whose every batch SendGrid refused ends failed, and so does its planned issue row', async () => {
+  test('a planned issue whose every batch SendGrid refused ends failed, and so does its planned issue row; the owner is told', async () => {
+    mockTrigger.mockClear();
     mockSendBroadcast.mockRejectedValueOnce(new Error('SendGrid 503'));
     let issueUpdate = null;
     buildDb({
@@ -411,9 +415,12 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
 
     expect(result).toMatchObject({ accepted: 0, failed: 2 });
     expect(issueUpdate).toMatchObject({ status: 'failed', reason: 'every SendGrid batch failed' });
+    expect(mockTrigger).toHaveBeenCalledTimes(1);
+    expect(mockTrigger.mock.calls[0][1].errors).toEqual(['Stopped at send time: it reached no reader (every SendGrid batch failed)']);
   });
 
-  test('a planned issue whose every reader dropped out at dispatch reached nobody, so its planned issue row fails', async () => {
+  test('a planned issue whose every reader dropped out at dispatch reached nobody, so its planned issue row fails; the owner is told', async () => {
+    mockTrigger.mockClear();
     let issueUpdate = null;
     buildDb({
       send: {
@@ -439,6 +446,8 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     expect(mockSendBroadcast).not.toHaveBeenCalled();
     expect(result).toMatchObject({ recipients: 0, skipped_ineligible: 2 });
     expect(issueUpdate).toMatchObject({ status: 'failed', reason: 'no planned reader was still eligible at send time' });
+    expect(mockTrigger).toHaveBeenCalledTimes(1);
+    expect(mockTrigger.mock.calls[0][1].errors).toEqual(['Stopped at send time: it reached no reader (no planned reader was still eligible at send time)']);
   });
 
   test('a holdout name this server does not know stops a first send before anything is sent', async () => {

@@ -49,6 +49,12 @@ const AUTO_QUEUED_WEEKLY = {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // A transaction reaches the same tables (the relink sweep's raw UPDATE is a no-op).
+  db.transaction = jest.fn(async (work) => {
+    const trx = (table) => db(table);
+    trx.raw = jest.fn(async () => ({ rowCount: 0, rows: [] }));
+    return work(trx);
+  });
   process.env.GATE_NEWSLETTER_PROOF_APPROVAL = 'true';
   delete process.env.GATE_PEST_INSIDER_PROOF;
   delete process.env.GATE_NEWSLETTER_AUTO_SEND;
@@ -178,11 +184,15 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
 
   beforeEach(() => {
     process.env.GATE_PEST_INSIDER_AUTO_SEND = 'true';
+    // The FYI copy's address (the default) can reply HOLD.
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'contact@wavespestcontrol.com';
+    delete process.env.NEWSLETTER_PROOF_EMAIL;
     at('2026-12-03T12:01:00Z');
   });
   afterEach(() => {
     jest.useRealTimers();
     delete process.env.GATE_PEST_INSIDER_AUTO_SEND;
+    delete process.env.NEWSLETTER_PROOF_APPROVERS;
   });
 
   test('switch on: its planned issue at 7:01 AM goes through, with the weekly switch off', async () => {
@@ -230,6 +240,47 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
       subject: 'Native termites can swarm in winter',
       errors: [`Stopped at send time: ${reason}`],
     });
+    // The send, its week and its planned issue moved in one transaction.
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  test('an FYI address that can no longer reply HOLD stops the issue for good, with one notice', async () => {
+    // NEWSLETTER_PROOF_APPROVERS changed after the FYI copy went out: a HOLD reply would be ignored.
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'someone-else@wavespestcontrol.com';
+    const updates = wireInsider([AUTO_QUEUED_INSIDER]);
+
+    await processScheduledSends();
+
+    const reason = 'its FYI address can no longer reply HOLD (it is not in NEWSLETTER_PROOF_APPROVERS)';
+    expect(mockValidateEventSelection).not.toHaveBeenCalled();
+    expect(updates.map(({ table, patch }) => [table, patch.status])).toEqual([
+      ['newsletter_sends', 'draft'], ['newsletter_calendar', 'drafted'], ['pest_insider_issues', 'failed'],
+    ]);
+    expect(updates[2].patch.reason).toBe(`stopped at send time: ${reason}`);
+    expect(mockTrigger).toHaveBeenCalledTimes(1);
+    expect(mockTrigger.mock.calls[0][1].errors).toEqual([`Stopped at send time: ${reason}`]);
+  });
+
+  test('a stop whose planned-issue write fails raises no notice: nothing commits, and the next tick tries again', async () => {
+    at('2026-12-03T15:30:00Z'); // 10:30 AM EST: the window closed, so this tick stops the issue
+    db.mockImplementation((table) => {
+      const q = { conds: [] };
+      ['whereNull', 'whereIn', 'whereRaw', 'orderBy', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.where = jest.fn((cond) => { q.conds.push(cond); return q; });
+      q.limit = jest.fn(async () => [AUTO_QUEUED_INSIDER]);
+      q.first = jest.fn(async () => (table === 'pest_insider_issues' ? PLANNED : undefined));
+      q.update = jest.fn(async () => {
+        if (table === 'pest_insider_issues') throw new Error('connection reset');
+        return q.conds.some((cond) => cond && cond.status === 'sending') ? 0 : 1;
+      });
+      return q;
+    });
+
+    await processScheduledSends();
+
+    // The stop's one transaction rolled back: the row stays scheduled, and it is not marked failed.
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(mockTrigger).not.toHaveBeenCalled();
   });
 
   test('10:00 AM ET or later: the issue missed its window and does not go out', async () => {

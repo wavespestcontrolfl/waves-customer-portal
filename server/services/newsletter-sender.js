@@ -1500,9 +1500,12 @@ async function sendCampaign(sendId, opts = {}) {
     return { recipients: recipientCount, accepted, failed, skipped_already_sent: skippedAlreadySent, skipped_ineligible: skippedIneligible, lostClaim: true };
   }
 
-  // Nothing went out: a planned Waves Pest Insider issue's row says so.
-  if (finalSendUpdate.status === 'failed') await markIssueSendFailed(send, 'every SendGrid batch failed');
-  else if (recipientCount <= 0) await markIssueSendFailed(send, 'no planned reader was still eligible at send time');
+  // Nothing went out: a planned Waves Pest Insider issue's row says so, and the
+  // owner, told that a Pest Insider issue would send, is told it did not.
+  const noDelivery = finalSendUpdate.status === 'failed' ? 'every SendGrid batch failed'
+    : (recipientCount <= 0 ? 'no planned reader was still eligible at send time' : null);
+  if (noDelivery) await markIssueSendFailed(send, noDelivery);
+  if (noDelivery && send.newsletter_type === PEST_INSIDER_TYPE) await notifyStoppedAtSendTime(send, `it reached no reader (${noDelivery})`);
 
   if (finalSendUpdate.status === 'sent' && recipientCount > 0) {
     // Advance the calendar lifecycle (idempotent) so a sent newsletter's
@@ -1769,13 +1772,6 @@ async function resumeCampaign(sendId) {
 }
 
 /**
- * A scheduled send that fails a check at dispatch goes back to draft with its
- * approval cleared (the state the owner signed off no longer holds), its
- * calendar week back to 'drafted', and one alert that says why: the week is
- * skipped, nothing went out (owner 2026-10-30, option A). Returns whether
- * this tick reverted it.
- */
-/**
  * A planned Waves Pest Insider issue whose send did not go out: its planned row moves to failed,
  * so the planner's history stops counting its picks. A resume that sends it later moves the row
  * to sent. The send row stays the record of what was mailed, so a failure here is logged only.
@@ -1789,28 +1785,50 @@ async function markIssueSendFailed(send, reason) {
   }
 }
 
+/**
+ * A scheduled send that fails a check at dispatch goes back to draft with its
+ * approval cleared (the state the owner signed off no longer holds), its
+ * calendar week back to 'drafted', and one alert that says why: the week is
+ * skipped, nothing went out (owner 2026-10-30, option A). A planned Waves Pest
+ * Insider issue's row moves to failed in the same transaction: all of it lands,
+ * or nothing does and the row stays scheduled for the next tick, which stops it
+ * again. The alert follows the commit. Never throws (the callers move on to the
+ * next row either way): returns whether this tick reverted it.
+ */
 async function revertBlockedScheduledSend(row, reason) {
-  // Bound to the version this tick read, as the dispatch claim is: a row
-  // edited, re-approved or rescheduled since then is left as it is now.
-  const revert = db('newsletter_sends').where({ id: row.id, status: 'scheduled' });
-  if (row.updated_at) revert.where('updated_at', '<', noLaterThan(row.updated_at));
-  if (row.proof_approved_at) revert.where('proof_approved_at', '<', noLaterThan(row.proof_approved_at));
-  const reverted = await revert.update({
-    status: 'draft',
-    scheduled_for: null,
-    proof_token: null,
-    proof_sent_at: null,
-    proof_approved_at: null,
-    proof_refused_at: null,
-    updated_at: new Date(),
-  });
+  let reverted;
+  try {
+    reverted = await db.transaction(async (trx) => {
+      // Bound to the version this tick read, as the dispatch claim is: a row
+      // edited, re-approved or rescheduled since then is left as it is now.
+      const revert = trx('newsletter_sends').where({ id: row.id, status: 'scheduled' });
+      if (row.updated_at) revert.where('updated_at', '<', noLaterThan(row.updated_at));
+      if (row.proof_approved_at) revert.where('proof_approved_at', '<', noLaterThan(row.proof_approved_at));
+      const count = await revert.update({
+        status: 'draft',
+        scheduled_for: null,
+        proof_token: null,
+        proof_sent_at: null,
+        proof_approved_at: null,
+        proof_refused_at: null,
+        updated_at: new Date(),
+      });
+      if (!count) return false;
+      // Keep the calendar in lockstep: without this the row would stay
+      // 'scheduled' forever (autopilot then skips the week).
+      await trx('newsletter_calendar').where({ send_id: row.id }).update({ status: 'drafted', updated_at: new Date() });
+      // A planned Waves Pest Insider issue stopped at send time does not go out:
+      // its date has a fixed send time, and the planner never queues it again.
+      if (row.newsletter_type === PEST_INSIDER_TYPE) {
+        await moveIssueForSend(row.id, ['drafted', 'scheduled'], 'failed', { reason: `stopped at send time: ${reason}`.slice(0, 500), database: trx });
+      }
+      return true;
+    });
+  } catch (err) {
+    logger.error(`[newsletter-scheduler] stop for send ${row.id} did not commit, left for the next tick: ${err.message}`);
+    return false;
+  }
   if (!reverted) return false;
-  // Keep the calendar in lockstep: without this the row would stay
-  // 'scheduled' forever (autopilot then skips the week).
-  await db('newsletter_calendar').where({ send_id: row.id }).update({ status: 'drafted', updated_at: new Date() });
-  // A planned Waves Pest Insider issue stopped at send time does not go out:
-  // its date has a fixed send time, and the planner never queues it again.
-  await markIssueSendFailed(row, `stopped at send time: ${reason}`);
   await notifyStoppedAtSendTime(row, reason);
   return true;
 }
@@ -1848,6 +1866,10 @@ async function pestInsiderDispatchStop(row, now = new Date()) {
     return `scheduled_for is not its issue Thursday (${context.issueDate}) at 7:00 AM ET`;
   }
   if (!inSendWindow(context.issueDate, now)) return `missed the ${context.issueDate} 7:00-10:00 AM ET send window`;
+  // Its FYI copy offered HOLD, and a reply counts only from NEWSLETTER_PROOF_APPROVERS (read
+  // live): an address that can no longer reply HOLD stops it, as it would have stopped the copy.
+  const { approvalSenders, proofRecipient } = require('./newsletter-proof');
+  if (!approvalSenders().includes(proofRecipient())) return 'its FYI address can no longer reply HOLD (it is not in NEWSLETTER_PROOF_APPROVERS)';
   return null;
 }
 
@@ -2017,15 +2039,21 @@ async function processScheduledSends() {
         // status-guarded flip as the route's fire-and-forget catch.
         // Bound to the version this tick read, as the claim is: a row
         // cancelled, edited or rescheduled since then is left as it is now.
-        const preClaim = db('newsletter_sends').where({ id: row.id, status: 'scheduled' });
-        if (row.updated_at) preClaim.where('updated_at', '<', noLaterThan(row.updated_at));
-        if (row.proof_approved_at) preClaim.where('proof_approved_at', '<', noLaterThan(row.proof_approved_at));
-        const failedBeforeClaim = !flipped && await preClaim.update({ status: 'failed', updated_at: new Date() });
-        // Nothing went out, so a planned issue's row says so, and the owner,
-        // told that a Pest Insider issue would send, is told it did not.
-        // After the claim some readers may have it: that row stays as it
-        // is, and a resume that finishes the send moves it to sent.
-        if (failedBeforeClaim) await markIssueSendFailed(row, `send failed before it started: ${err.message}`);
+        // Nothing went out, so a planned issue's row fails with it, in one
+        // transaction: all of it lands, or nothing does and the next tick
+        // tries again. After the claim some readers may have it: that row
+        // stays as it is, and a resume that finishes the send moves it to sent.
+        const failedBeforeClaim = !flipped && await db.transaction(async (trx) => {
+          const preClaim = trx('newsletter_sends').where({ id: row.id, status: 'scheduled' });
+          if (row.updated_at) preClaim.where('updated_at', '<', noLaterThan(row.updated_at));
+          if (row.proof_approved_at) preClaim.where('proof_approved_at', '<', noLaterThan(row.proof_approved_at));
+          const count = await preClaim.update({ status: 'failed', updated_at: new Date() });
+          if (count && row.newsletter_type === PEST_INSIDER_TYPE) {
+            await moveIssueForSend(row.id, ['drafted', 'scheduled'], 'failed', { reason: `send failed before it started: ${err.message}`.slice(0, 500), database: trx });
+          }
+          return count;
+        });
+        // The owner, told that a Pest Insider issue would send, is told it did not.
         if (failedBeforeClaim && row.newsletter_type === PEST_INSIDER_TYPE) await notifyStoppedAtSendTime(row, `it failed before it started: ${err.message}`);
       } catch { /* swallow */ }
     }

@@ -29,7 +29,12 @@ const db = require('../models/db');
 // The pre-send archived-link relink sweep runs a raw UPDATE in its own
 // transaction; nothing stale here, so it is a 0-row no-op.
 db.raw = jest.fn(async () => ({ rowCount: 0 }));
-db.transaction = jest.fn(async (cb) => cb({ raw: db.raw }));
+// A transaction reaches the same tables too (a stop at send time reverts in one).
+db.transaction = jest.fn(async (cb) => {
+  const trx = (table) => db(table);
+  trx.raw = db.raw;
+  return cb(trx);
+});
 const { sendCampaign, processScheduledSends } = require('../services/newsletter-sender');
 
 const READ_AT = new Date('2026-10-06T14:00:00Z');
@@ -214,6 +219,9 @@ describe('a planned Waves Pest Insider issue the switch queued (GATE_PEST_INSIDE
 
   beforeEach(() => {
     process.env.GATE_PEST_INSIDER_AUTO_SEND = 'true';
+    // The FYI copy's address (the default) can reply HOLD.
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'contact@wavespestcontrol.com';
+    delete process.env.NEWSLETTER_PROOF_EMAIL;
     // Only the clock is fake; the send path's own timers and ticks run as usual.
     jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
     jest.setSystemTime(new Date('2026-12-03T14:59:00Z')); // 9:59 AM EST: inside the window
@@ -221,6 +229,7 @@ describe('a planned Waves Pest Insider issue the switch queued (GATE_PEST_INSIDE
   afterEach(() => {
     jest.useRealTimers();
     delete process.env.GATE_PEST_INSIDER_AUTO_SEND;
+    delete process.env.NEWSLETTER_PROOF_APPROVERS;
   });
 
   test('its claim must land before 10:00 AM ET: a claim the window closed on stops the issue for good, with one alert', async () => {
