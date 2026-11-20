@@ -17,7 +17,8 @@
  * run takes each deal's end date from one Claude Haiku read of the whole email, shown with
  * the email's own words (siteone-deal-end-date.js; at most 20 reads, about $0.04 a week);
  * a read that fails keeps the date-pattern deadline, and the catch-up reruns use the date
- * patterns only. Read-only: it writes nothing but the bell.
+ * patterns only. It writes nothing but the bell and, with the gate on, the week's AI-pass
+ * claim (one ops_email_send_state row; see claimAiPass).
  *
  * The bell follows docs/admin-notifications.md: it is raised through
  * raiseAdminAlert (headline and why inside the copy rules), and the one-line-
@@ -321,6 +322,31 @@ function candidateEmailQuery(conn, since, now) {
     .limit(MAX_CANDIDATE_ROWS);
 }
 
+// ---- the week's paid AI pass -----------------------------------------------
+// With the gate on, the Monday run claims the ET week's AI pass before the first model call:
+// one ops_email_send_state row (the job markers' table; no new table), stamped only when its
+// stamp is older than this ET week's Monday 00:00. A second Monday run that week (a deploy-
+// overlap tick that waited out the first one's lock) finds the claim taken and keeps the date
+// patterns, so a week pays for one pass at most. A claim that cannot be written pays nothing.
+const AI_PASS_KEY = 'siteone-deal-end-date-pass';
+
+async function claimAiPass(conn, now) {
+  try {
+    const claimed = await conn.raw(
+      `INSERT INTO ops_email_send_state (email_key, last_sent_at, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT (email_key) DO UPDATE SET last_sent_at = EXCLUDED.last_sent_at, updated_at = EXCLUDED.updated_at
+       WHERE ops_email_send_state.last_sent_at IS NULL OR ops_email_send_state.last_sent_at < ?
+       RETURNING email_key`,
+      [AI_PASS_KEY, now, now, parseETDateTime(`${etWeekStart(now)}T00:00`)],
+    );
+    if (claimed?.rows?.length) return true;
+    logger.info('[siteone-deals] end dates: this week\'s AI pass already ran; date patterns kept');
+  } catch (err) {
+    logger.warn(`[siteone-deals] end dates not read by AI: weekly claim not written: ${err.message}`);
+  }
+  return false;
+}
+
 /**
  * Scans the last 7 days of mail, rings ONE bell when there are deals.
  * `notify` has raiseAdminAlert's shape (category, spec, opts); tests pass a fake.
@@ -356,7 +382,8 @@ async function runSiteOneDealsDigest({ now = new Date(), db, notify, aiEndDates 
 
   // Gate off, or not the Monday run: no model call, and every line keeps its date-pattern deadline.
   let endDates = new Map();
-  if (aiEndDates === true && require('../../config/feature-gates').siteOneDealAiEndDateLive?.() === true) {
+  if (aiEndDates === true && require('../../config/feature-gates').siteOneDealAiEndDateLive?.() === true
+    && await claimAiPass(conn, now)) {
     endDates = await require('./siteone-deal-end-date').readDealEndDates(conn, deals);
   }
 
@@ -443,5 +470,5 @@ async function runSiteOneDealsCatchUp({ now = new Date(), db, notify } = {}) {
 module.exports = {
   weekIsMissing, runSiteOneDealsCatchUp, scheduledTickFor,
   runSiteOneDealsDigest, isDealEmail, extractDeadline, matchProducts, isDealSenderDomain,
-  candidateEmailQuery, MAX_CANDIDATE_ROWS, BODY_CHARS, HTML_CHARS,
+  candidateEmailQuery, MAX_CANDIDATE_ROWS, BODY_CHARS, HTML_CHARS, claimAiPass, AI_PASS_KEY,
 };

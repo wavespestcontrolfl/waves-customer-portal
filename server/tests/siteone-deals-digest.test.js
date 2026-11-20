@@ -207,8 +207,9 @@ describe('matchProducts', () => {
 describe('runSiteOneDealsDigest', () => {
   const now = new Date('2026-11-02T13:00:00Z'); // Monday 8:00 AM ET
 
-  function fakeDb({ emails, products = [{ name: 'Taurus SC 1 gal' }, { name: 'Demand CS' }], productsFail = false }) {
-    const calls = { wheres: [], tables: [], selects: [] };
+  // `claim` answers the week's AI-pass claim: 'granted', 'taken' (a run this week has it) or 'fails'.
+  function fakeDb({ emails, products = [{ name: 'Taurus SC 1 gal' }, { name: 'Demand CS' }], productsFail = false, claim = 'granted' }) {
+    const calls = { wheres: [], tables: [], selects: [], claims: [] };
     const db = (table) => {
       calls.tables.push(table);
       const preds = [];
@@ -238,7 +239,12 @@ describe('runSiteOneDealsDigest', () => {
       };
       return chain;
     };
-    db.raw = (sql, bindings) => ({ sql, bindings });
+    db.raw = (sql, bindings) => {
+      if (!/ops_email_send_state/.test(sql)) return { sql, bindings };
+      calls.claims.push({ sql, bindings });
+      if (claim === 'fails') return Promise.reject(new Error('claim boom'));
+      return Promise.resolve({ rows: claim === 'granted' ? [{ email_key: bindings[0] }] : [] });
+    };
     return { db, calls };
   }
 
@@ -358,31 +364,31 @@ describe('runSiteOneDealsDigest', () => {
       email({ id: 34, subject: 'Early order program', received_at: at('2026-10-28T15:00:00Z'), body_text: 'Book now.' }),
     ];
 
+    const PATTERN_NOTES = ['deadline not stated', 'deadline 2026-11-05', 'deadline 2026-11-12', 'deadline not stated'];
+
     test.each([['unset', undefined], ['not exactly true', '1']])('gate %s: no AI read even on the Monday run, the date patterns decide', async (_label, value) => {
       if (value !== undefined) process.env[GATE] = value;
-      const { db } = fakeDb({ emails: gateEmails() });
+      const { db, calls } = fakeDb({ emails: gateEmails() });
       const notify = jest.fn().mockResolvedValue({ id: 1 });
       await runSiteOneDealsDigest({ now, db, notify, aiEndDates: true });
       expect(mockReadEndDates).not.toHaveBeenCalled();
-      expect(notify.mock.calls[0][2].detail.split('\n').map((line) => line.split(' · ')[3])).toEqual([
-        'deadline not stated', 'deadline 2026-11-05', 'deadline 2026-11-12', 'deadline not stated',
-      ]);
+      expect(calls.claims).toEqual([]);
+      expect(notify.mock.calls[0][2].detail.split('\n').map((line) => line.split(' · ')[3])).toEqual(PATTERN_NOTES);
     });
 
     test('gate on, but not the Monday run (no aiEndDates): no AI read, the date patterns decide', async () => {
       process.env[GATE] = 'true';
-      const { db } = fakeDb({ emails: gateEmails() });
+      const { db, calls } = fakeDb({ emails: gateEmails() });
       const notify = jest.fn().mockResolvedValue({ id: 1 });
       await runSiteOneDealsDigest({ now, db, notify });
       expect(mockReadEndDates).not.toHaveBeenCalled();
-      expect(notify.mock.calls[0][2].detail.split('\n').map((line) => line.split(' · ')[3])).toEqual([
-        'deadline not stated', 'deadline 2026-11-05', 'deadline 2026-11-12', 'deadline not stated',
-      ]);
+      expect(calls.claims).toEqual([]);
+      expect(notify.mock.calls[0][2].detail.split('\n').map((line) => line.split(' · ')[3])).toEqual(PATTERN_NOTES);
     });
 
     test('gate on: an AI date shows with its words, an AI "no end" wins over a pattern date, a failed read keeps the pattern', async () => {
       process.env[GATE] = 'true';
-      const { db } = fakeDb({ emails: gateEmails() });
+      const { db, calls } = fakeDb({ emails: gateEmails() });
       mockReadEndDates.mockResolvedValue(new Map([
         [31, { endDate: null, quote: null }],
         [32, { endDate: '2026-11-30', quote: 'Offers valid November 1 – November 30, 2026.' }],
@@ -391,6 +397,12 @@ describe('runSiteOneDealsDigest', () => {
       const notify = jest.fn().mockResolvedValue({ id: 1 });
       await runSiteOneDealsDigest({ now, db, notify, aiEndDates: true });
 
+      // The week's claim first: one row, stamped only when its stamp is older than this ET week's Monday 00:00.
+      expect(calls.claims).toHaveLength(1);
+      expect(calls.claims[0].sql.replace(/\s+/g, ' ')).toBe('INSERT INTO ops_email_send_state (email_key, last_sent_at, updated_at) VALUES (?, ?, ?) '
+        + 'ON CONFLICT (email_key) DO UPDATE SET last_sent_at = EXCLUDED.last_sent_at, updated_at = EXCLUDED.updated_at '
+        + 'WHERE ops_email_send_state.last_sent_at IS NULL OR ops_email_send_state.last_sent_at < ? RETURNING email_key');
+      expect(calls.claims[0].bindings).toEqual(['siteone-deal-end-date-pass', now, now, new Date('2026-11-02T05:00:00Z')]);
       // One read for the week's deals, newest first, on the same connection.
       expect(mockReadEndDates).toHaveBeenCalledTimes(1);
       const [conn, deals] = mockReadEndDates.mock.calls[0];
@@ -402,6 +414,24 @@ describe('runSiteOneDealsDigest', () => {
         'Oct 29 · Sam Rep · Fall rebate · deadline 2026-11-12 · your products: none named',
         'Oct 28 · Sam Rep · Early order program · ends Jan 15, 2027 ("Orders must be placed by January 15, 2027") · your products: none named',
       ]);
+    });
+
+    // Pre-push audit on b21fc449c9 (P1): a second Monday run in one week (a deploy-overlap tick
+    // that waited out the first run's lock) paid for the reads again.
+    test.each([
+      ['a run this week already has the claim', 'taken', 'info', "[siteone-deals] end dates: this week's AI pass already ran; date patterns kept"],
+      ['the claim cannot be written', 'fails', 'warn', '[siteone-deals] end dates not read by AI: weekly claim not written: claim boom'],
+    ])('gate on, Monday run, %s: no AI read, the date patterns decide', async (_label, claim, level, line) => {
+      process.env[GATE] = 'true';
+      logger.info.mockClear();
+      logger.warn.mockClear();
+      const { db, calls } = fakeDb({ emails: gateEmails(), claim });
+      const notify = jest.fn().mockResolvedValue({ id: 1 });
+      await runSiteOneDealsDigest({ now, db, notify, aiEndDates: true });
+      expect(calls.claims).toHaveLength(1);
+      expect(mockReadEndDates).not.toHaveBeenCalled();
+      expect(logger[level]).toHaveBeenCalledWith(line);
+      expect(notify.mock.calls[0][2].detail.split('\n').map((l) => l.split(' · ')[3])).toEqual(PATTERN_NOTES);
     });
 
     test('gate on: a long quote is clipped in the line', async () => {

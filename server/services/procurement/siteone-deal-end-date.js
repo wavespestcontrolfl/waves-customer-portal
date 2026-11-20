@@ -10,10 +10,11 @@
  * end date in fine print past the cut, an end written in words ("ending on Thursday") and a
  * rep's time off went wrong. Here each deal email is read whole, links removed, and the model
  * answers with the end date and the email's own words for it. An answer is kept only when
- * those words are in the email, they name that day, and the day falls from the day the email
- * came to a year after it. Any miss (no API key, API error, refusal, a reply that is not the
- * JSON asked for, words not found, words for another day, a date out of range) leaves that
- * line on the date patterns.
+ * those words are whole words of the email, they name that day (not the first day of a
+ * range), and the day falls from the day the email came to a year after it. Any miss (no API
+ * key, API error, refusal, a reply that is not the JSON asked for, words not found, words for
+ * another day, a date out of range, "no end" on an email a cap cut short) leaves that line
+ * on the date patterns.
  *
  * Spend: one Haiku call per deal email, at most MAX_READS a run, on the scheduled Monday run
  * only (the catch-up reruns use the date patterns). A read costs at most about $0.002 (20,000
@@ -104,19 +105,21 @@ function htmlText(html) {
 
 /**
  * The email as the model reads it: body_text, else body_html with tags removed (line breaks
- * kept); entities decoded, links removed, spaces and blank lines collapsed, capped.
+ * kept); entities decoded, links removed, spaces and blank lines collapsed, capped. `cut` is
+ * true when a cap (the body re-read or the model's text) dropped part of it.
  */
-function endDateText(email) {
+function readableEmail(email) {
   const text = typeof email?.body_text === 'string' && email.body_text.trim() ? email.body_text : null;
-  const raw = text ?? htmlText(typeof email?.body_html === 'string' ? email.body_html : '');
-  return decodeEntities(raw)
+  const html = typeof email?.body_html === 'string' ? email.body_html : '';
+  const whole = decodeEntities(text ?? htmlText(html))
     .replace(/https?:\/\/\S+/g, ' ')
     .replace(/\r\n?/g, '\n')
     .replace(/[ \t\u00a0]+/g, ' ')
     .replace(/ ?\n ?/g, '\n')
     .replace(/\n{2,}/g, '\n')
-    .trim()
-    .slice(0, MODEL_TEXT_CHARS);
+    .trim();
+  const readCut = text !== null ? text.length >= BODY_TEXT_CHARS : html.length >= BODY_HTML_CHARS;
+  return { text: whole.slice(0, MODEL_TEXT_CHARS), cut: readCut || whole.length > MODEL_TEXT_CHARS };
 }
 
 // Compare text the way a reader would: one space for any run of spaces, any case, and the
@@ -157,29 +160,76 @@ function isCalendarDay(iso) {
 // The quoted words must name the day. A calendar date in them must be that day (and that
 // year, when they give one); with no calendar date, a weekday at most a week on, "today" /
 // "tonight" or "tomorrow" must land on it. Words with no day in them prove nothing.
-const NAMED_DATE = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.? ?(\d{1,2})(?:st|nd|rd|th)?\b(?:,? ?(20\d{2})\b)?/g;
+// "March 1-30" names its closing day alone (group 3); "Mar 2 - 12/31" and "Nov 3 - 11:59 PM" do not.
+const NAMED_DATE = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.? ?(\d{1,2})(?:st|nd|rd|th)?(?: ?(?:-|to|through|thru) ?(\d{1,2})(?:st|nd|rd|th)?(?![/\d:]))?\b(?:,? ?(20\d{2})\b)?/g;
 const NUMERIC_DATE = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?\b/g;
 const ISO_DATE = /\b(20\d{2})-(\d{2})-(\d{2})\b/g;
 const MONTH_KEYS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+// The first date of "March 1 - April 30", "11/1-11/30" or "Nov 1 through Nov 30" opens a range: not an end.
+const RANGE_JOIN = /^ ?(?:-|to|through|thru|until|till) ?$/;
 
-/** Every calendar date the (comparable) words name, as { month, day, year } (year null when not given). */
-function quoteDates(flat) {
-  const named = [...flat.matchAll(NAMED_DATE)].map((m) => [MONTH_KEYS.indexOf(m[1].slice(0, 3)) + 1, m[2], m[3]]);
-  const numeric = [...flat.matchAll(NUMERIC_DATE)].map((m) => [m[1], m[2], m[3] && m[3].length === 2 ? `20${m[3]}` : m[3]]);
-  const iso = [...flat.matchAll(ISO_DATE)].map((m) => [m[2], m[3], m[1]]);
-  return [...named, ...numeric, ...iso].map(([month, day, year]) => ({ month: Number(month), day: Number(day), year: year ? Number(year) : null }));
+/** Each calendar date the (comparable) words name, in order: { at, end, month, day, year } (year null when not given). */
+function quoteDates(text) {
+  const found = [
+    ...[...text.matchAll(NAMED_DATE)].map((m) => [m, MONTH_KEYS.indexOf(m[1].slice(0, 3)) + 1, m[3] || m[2], m[4]]),
+    ...[...text.matchAll(NUMERIC_DATE)].map((m) => [m, m[1], m[2], m[3] && m[3].length === 2 ? `20${m[3]}` : m[3]]),
+    ...[...text.matchAll(ISO_DATE)].map((m) => [m, m[2], m[3], m[1]]),
+  ];
+  return found
+    .map(([m, month, day, year]) => ({ at: m.index, end: m.index + m[0].length, month: Number(month), day: Number(day), year: year ? Number(year) : null }))
+    .sort((a, b) => a.at - b.at);
 }
 
-/** True when the words name endDate; `away` is its day count from the ET day the email came. */
-function quoteNamesDay(flat, endDate, away) {
+/** True when a range join and another date follow date d in the text. */
+const opensRange = (text, d, dates) => {
+  const next = dates.find((n) => n.at >= d.end);
+  return Boolean(next) && RANGE_JOIN.test(text.slice(d.end, next.at));
+};
+
+/**
+ * True when the words name endDate; `away` is its day count from the ET day the email came.
+ * `text` is the words (text.slice(0, wordsEnd)) and then the email right after them, so a
+ * range the quote stops short of still shows its first day as a start, not an end.
+ */
+function quoteNamesDay({ text, wordsEnd }, endDate, away) {
   const [year, month, day] = endDate.split('-').map(Number);
-  const dates = quoteDates(flat);
-  if (dates.length) return dates.some((d) => d.month === month && d.day === day && (d.year === null || d.year === year));
+  const dates = quoteDates(text);
+  const named = dates.filter((d) => d.end <= wordsEnd);
+  if (named.length) {
+    return named.some((d) => d.month === month && d.day === day && (d.year === null || d.year === year)
+      && !opensRange(text, d, dates));
+  }
+  const words = text.slice(0, wordsEnd);
   const weekday = WEEKDAYS[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
-  return (away <= 7 && new RegExp(`\\b${weekday}\\b`).test(flat))
-    || (away === 0 && /\b(?:today|tonight)\b/.test(flat))
-    || (away === 1 && /\btomorrow\b/.test(flat));
+  return (away <= 7 && new RegExp(`\\b${weekday}\\b`).test(words))
+    || (away === 0 && /\b(?:today|tonight)\b/.test(words))
+    || (away === 1 && /\btomorrow\b/.test(words));
+}
+
+const WORD_CHAR = /[a-z0-9]/;
+// A year the email writes right after a quoted day: "April 30" + ", 2027", "5/15" + "/27".
+const YEAR_AFTER = /^(?:,? ?20\d{2}\b|\/(?:\d{4}|\d{2})\b)/;
+// Room after the words for a range join and the date it runs to (" through September 30th, 2026").
+const AFTER_CHARS = 40;
+
+/**
+ * Where the quoted words sit in the email, or null: { text, wordsEnd }, the words as the
+ * email has them and then up to AFTER_CHARS of what follows. The words must sit at word
+ * edges ("April 3" is not in "April 30"), and a year the email writes right after a quoted
+ * day joins them, so the date is checked whole.
+ */
+function wholeWordsInEmail(hay, needle) {
+  const edge = (outside, inside) => !outside || !WORD_CHAR.test(outside) || !WORD_CHAR.test(inside);
+  for (let at = hay.indexOf(needle); at !== -1; at = hay.indexOf(needle, at + 1)) {
+    const end = at + needle.length;
+    if (edge(hay[at - 1], needle[0]) && edge(hay[end], needle[needle.length - 1])) {
+      const year = /\d$/.test(needle) ? YEAR_AFTER.exec(hay.slice(end, end + 7)) : null;
+      const wordsEnd = needle.length + (year ? year[0].length : 0);
+      return { text: hay.slice(at, at + wordsEnd + AFTER_CHARS), wordsEnd };
+    }
+  }
+  return null;
 }
 
 /**
@@ -200,8 +250,9 @@ function checkAnswer(answer, emailText, receivedAt) {
   if (flat.length > QUOTE_MAX_CHARS) return { ok: false, reason: 'no_quote' };
   const needle = flat.replace(EDGE_MARKS, '');
   if (needle.length < QUOTE_MIN_CHARS || !/[a-z]/.test(needle)) return { ok: false, reason: 'no_quote' };
-  if (!comparable(emailText).includes(needle)) return { ok: false, reason: 'quote_not_found' };
-  if (!quoteNamesDay(flat, endDate, away)) return { ok: false, reason: 'quote_date_mismatch' };
+  const place = wholeWordsInEmail(comparable(emailText), needle);
+  if (place === null) return { ok: false, reason: 'quote_not_found' };
+  if (!quoteNamesDay(place, endDate, away)) return { ok: false, reason: 'quote_date_mismatch' };
   return { ok: true, endDate, quote };
 }
 
@@ -210,7 +261,7 @@ async function readOne(client, email) {
   try {
     const received = new Date(email.received_at);
     const subject = String(email.subject || '').replace(/\s+/g, ' ').trim();
-    const body = endDateText(email);
+    const { text: body, cut } = readableEmail(email);
     if (!body && !subject) return { ok: false, reason: 'empty' };
     let response;
     try {
@@ -230,6 +281,8 @@ async function readOne(client, email) {
     if (response?.stop_reason === 'max_tokens') return { ok: false, reason: 'max_tokens' };
     const read = checkAnswer(parseAnswer(anthropicText(response)), `${subject}\n${body}`, received);
     if (!read.ok) ledgerCallRejected(response, read.reason === 'invalid_json' ? 'invalid_json' : 'schema_invalid');
+    // "No end" on part of an email proves nothing: the end may sit in the part a cap dropped.
+    if (read.ok && read.endDate === null && cut) return { ok: false, reason: 'no_end_in_cut_text' };
     return read;
   } catch (err) {
     logger.warn(`[siteone-deals] end-date read failed: ${err?.message || 'error'}`);
@@ -283,5 +336,5 @@ async function readDealEndDates(conn, deals) {
 module.exports = {
   readDealEndDates,
   MAX_READS, BODY_TEXT_CHARS, BODY_HTML_CHARS, MODEL_TEXT_CHARS,
-  _test: { endDateText, checkAnswer, parseAnswer, SYSTEM_PROMPT },
+  _test: { readableEmail, checkAnswer, parseAnswer, SYSTEM_PROMPT },
 };
