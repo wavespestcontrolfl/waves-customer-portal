@@ -79,6 +79,7 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
       row(null, 'viewed'), // a legacy staff send: counts
       row('plan_start', 'viewed'), // undelivered self-serve: never counts
       row('plan_restart', 'viewed'), // undelivered self-serve: never counts
+      row('service_report_cta', 'viewed'), // an undelivered report-card quote: never counts
       row('plan_start', 'viewed', { deliveryState: { firstDeliveredAt: AT } }), // staff delivered it: counts
       row(null, 'accepted'), // a staff send the customer accepted: counts
       row('plan_start', 'accepted'), // an undelivered self-serve quote the customer accepted
@@ -127,11 +128,11 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     await seed();
     const rows = await trx('estimates as e').where('e.service_interest', SERVICE)
       .select('e.source', 'e.estimate_data', trx.raw(`${undeliveredSelfServeSql('e')} AS flag`));
-    expect(rows).toHaveLength(12);
+    expect(rows).toHaveLength(13);
     for (const row of rows) expect(Boolean(row.flag)).toBe(isUndeliveredSelfServe(row.source, row.estimate_data));
-    // The five undelivered self-serve rows (two carry an empty or null stamp); a
+    // The six undelivered self-serve rows (two carry an empty or null stamp); a
     // source-NULL row and an unreadable stamp are not among them.
-    expect(rows.filter((row) => row.flag)).toHaveLength(5);
+    expect(rows.filter((row) => row.flag)).toHaveLength(6);
   });
 
   test('a suppressed resend never moves a delivered self-serve quote across a reporting boundary (codex pre-push r16 P1)', async () => {
@@ -190,5 +191,23 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     const delta = (period, key) => after.compare[period].metrics[key] - before.compare[period].metrics[key];
     expect([delta('period_b', 'estimates_sent'), delta('period_b', 'estimates_accepted')]).toEqual([1, 1]);
     expect([delta('period_a', 'estimates_sent'), delta('period_a', 'estimates_accepted')]).toEqual([0, 0]);
+  });
+
+  test('a delivered self-serve quote counts as viewed at its first logged open after delivery; a later open never moves it (codex pre-push P1)', async () => {
+    // A portal look on Feb 20; staff delivered it March 1; the customer opened it March 5 and again April 10.
+    const viewedIn = async (from, to) => (await executeDashboardTool('get_estimate_funnel', { date_from: from, date_to: to })).funnel.viewed;
+    const months = async () => [await viewedIn('2006-03-01', '2006-03-31'), await viewedIn('2006-04-01', '2006-04-30')];
+    const before = await months();
+    const id = randomUUID();
+    await trx('estimates').insert({
+      id, customer_id: await insertCustomer(), source: 'plan_start', status: 'viewed',
+      sent_at: '2006-03-01T15:00:00Z', viewed_at: '2006-02-20T15:00:00Z', last_viewed_at: '2006-04-10T15:00:00Z',
+      service_interest: SERVICE, monthly_total: 50, onetime_total: 0,
+      estimate_data: { deliveryState: { firstDeliveredAt: '2006-03-01T15:00:00Z' } },
+    });
+    await trx('estimate_views').insert(['2006-02-20T15:00:00Z', '2006-03-05T15:00:00Z', '2006-04-10T15:00:00Z']
+      .map((viewedAt) => ({ estimate_id: id, viewed_at: viewedAt })));
+    const after = await months();
+    expect([after[0] - before[0], after[1] - before[1]]).toEqual([1, 0]);
   });
 });

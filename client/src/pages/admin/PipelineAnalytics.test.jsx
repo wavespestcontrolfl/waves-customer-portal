@@ -628,9 +628,10 @@ describe("PipelineAnalytics", () => {
 
   // A self-serve quote nobody delivered waits under Awaiting Response but is no
   // send: the Sent tile and its "awaiting" line leave it out (codex pre-push P1).
+  // One staff scheduled to send counts either way, as scheduled.
   it.each([
-    ["staff quotes (control)", false, { sent: "3", sub: "2 awaiting · 1 viewed · 0 scheduled" }],
-    ["self-serve quotes nobody delivered", true, { sent: "1", sub: "1 awaiting · 0 viewed · 0 scheduled" }],
+    ["staff quotes (control)", false, { sent: "4", sub: "2 awaiting · 1 viewed · 1 scheduled" }],
+    ["self-serve quotes nobody delivered", true, { sent: "2", sub: "1 awaiting · 0 viewed · 1 scheduled" }],
   ])("counts %s in the Sent tile", (_label, flagged, expected) => {
     renderAnalytics({
       estimates: [
@@ -642,6 +643,12 @@ describe("PipelineAnalytics", () => {
           viewedAt: daysAgo(1),
           source: "plan_restart",
           undeliveredSelfServe: flagged,
+        }),
+        estimate({
+          id: "portal-scheduled",
+          status: "scheduled",
+          source: "plan_start",
+          undeliveredSelfServe: true,
         }),
       ],
     });

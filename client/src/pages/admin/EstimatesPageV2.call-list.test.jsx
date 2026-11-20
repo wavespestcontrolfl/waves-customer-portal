@@ -345,6 +345,8 @@ it.each([
   const row = container.querySelector('[data-estimate-id="ss-1"]');
   if (flagged) expect(within(row).queryByText("Follow up")).not.toBeInTheDocument();
   else expect(within(row).getByText("Follow up")).toBeInTheDocument();
+  // The row's Follow Up action too (codex pre-push P1).
+  expect(Boolean(within(row).queryByRole("button", { name: "Follow Up" }))).toBe(!flagged);
   cleanup();
 
   renderPage(390);
@@ -361,17 +363,24 @@ it.each([
   expect(await screen.findByText(`Action Required (${counts.action})`)).toBeInTheDocument();
 });
 
-// The Sent tile and its rows agree (codex pre-push P1): a self-serve quote nobody delivered is no
-// send, so the tile's drilldown leaves it out. The same row unflagged is the control.
+// The Sent tile counts the rows its drilldown lists (codex pre-push P1): a self-serve quote nobody
+// delivered is no send, so both leave it out; the same row unflagged is the control. One staff
+// scheduled to send (ss-2) counts either way, as scheduled.
 it.each([
   ["a staff quote (control)", false],
   ["a self-serve quote nobody delivered", true],
-])("%s viewed 3 days ago: the Sent tile's rows", async (_label, flagged) => {
-  listRows = [...ROWS, viewed("ss-1", "Portal Quote", 3 * DAY, { source: "plan_start", undeliveredSelfServe: flagged })];
+])("%s viewed 3 days ago: the Sent tile counts the rows its drilldown lists", async (_label, flagged) => {
+  const scheduled = {
+    ...viewed("ss-2", "Portal Scheduled", 4 * DAY, { source: "plan_start", undeliveredSelfServe: true }),
+    status: "scheduled",
+  };
+  listRows = [...ROWS, viewed("ss-1", "Portal Quote", 3 * DAY, { source: "plan_start", undeliveredSelfServe: flagged }), scheduled];
   const { container } = renderPage();
   await screen.findByText("Portal Quote");
-  fireEvent.click(screen.getByRole("button", { name: /^Sent/ }));
-  const sentRows = ["v-1h", "v-5h", "v-30h", "v-called", "v-cold", ...(flagged ? [] : ["ss-1"])];
+  const sentRows = ["v-1h", "v-5h", "v-30h", "v-called", "v-cold", "ss-2", ...(flagged ? [] : ["ss-1"])];
+  const tile = screen.getByRole("button", { name: /^Sent/ });
+  expect(tile.querySelector(".u-nums").textContent).toBe(String(sentRows.length));
+  fireEvent.click(tile);
   await waitFor(() => expect([...rowIds(container)].sort()).toEqual([...sentRows].sort()));
 });
 

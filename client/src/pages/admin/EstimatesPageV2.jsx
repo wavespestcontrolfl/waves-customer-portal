@@ -52,6 +52,7 @@ import PipelineAnalytics, {
   isFollowUpOverdueEstimate,
   isGoingColdEstimate,
   isPickReasonEstimate,
+  isSentGroupEstimate,
 } from "./PipelineAnalytics";
 // The Call today rule's one home, shared with the 9 AM push.
 import { isCallTodayEstimate, lastEngagementMs } from "@estimate-call-today";
@@ -428,8 +429,6 @@ const PIPELINE_AND_RISK_FILTERS = [
   ...PIPELINE_FILTERS,
   ...PRICING_RISK_FILTERS,
 ];
-// The Sent tile's classes (PipelineAnalytics counts the tile the same way).
-const SENT_GROUP_CLASSES = new Set(["awaiting", "follow_up", "scheduled"]);
 function estimateMatchesFilter(e, filter) {
   // Archived-accepted rows ride along in the pipeline fetch for the Won
   // funnel/MRR stats; the Archived tab (its own fetch) is where archived
@@ -439,10 +438,8 @@ function estimateMatchesFilter(e, filter) {
     return e._class === "won" || (!!e.archivedAt && e.status === "accepted");
   if (filter === "drafts")
     return e._class === "needs_estimate" || e._class === "ready_to_send";
-  // The Sent tile's rows: never a self-serve quote nobody delivered, which
-  // is no send.
-  if (filter === "sent_group")
-    return !e.undeliveredSelfServe && SENT_GROUP_CLASSES.has(e._class);
+  // The Sent tile's rows (the tile counts the same predicate).
+  if (filter === "sent_group") return isSentGroupEstimate(e);
   if (filter === "follow_up_overdue") return isFollowUpOverdueEstimate(e);
   if (filter === "going_cold") return isGoingColdEstimate(e);
   if (Object.hasOwn(CALL_LIST_MATCHERS, filter)) return CALL_LIST_MATCHERS[filter](e);
@@ -3001,16 +2998,19 @@ function EstimatePipelineViewV2({
                           </Button>
                         )}
 
-                        {(e.status === "sent" || e.status === "viewed") && (
-                          <Button
-                            size="sm"
-                            variant="primary"
-                            className="w-full sm:w-auto whitespace-nowrap"
-                            onClick={() => setFollowUpTarget(e)}
-                          >
-                            Follow Up
-                          </Button>
-                        )}
+                        {/* Never on a self-serve quote nobody delivered: the
+                            zero-follow-up contract. Sending it clears the flag. */}
+                        {["sent", "viewed"].includes(e.status) &&
+                          !e.undeliveredSelfServe && (
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              className="w-full sm:w-auto whitespace-nowrap"
+                              onClick={() => setFollowUpTarget(e)}
+                            >
+                              Follow Up
+                            </Button>
+                          )}
 
                         {/* Schedule a verbal "yes" before formal acceptance: books
                             the visit and records the win on book (POST /admin/schedule

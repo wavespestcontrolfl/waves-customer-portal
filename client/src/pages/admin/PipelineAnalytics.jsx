@@ -138,6 +138,17 @@ export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
   return false;
 }
 
+// The Sent tile's rows, shared with its drilldown (the Estimates page's
+// sent_group filter) so the count and the list always agree: awaiting,
+// viewed (follow_up) and scheduled estimates, except a self-serve quote
+// nobody delivered that still waits on the customer. That is no send (codex
+// pre-push P1). One staff scheduled to send counts, as scheduled.
+const SENT_GROUP_CLASSES = new Set(["awaiting", "follow_up", "scheduled"]);
+export function isSentGroupEstimate(estimate) {
+  if (!SENT_GROUP_CLASSES.has(estimate?._class)) return false;
+  return !(estimate._class === "awaiting" && estimate.undeliveredSelfServe);
+}
+
 // Going cold = the early-warning window only: a VIEWED offer idle 48h–7d. A
 // never-opened send is follow-up-overdue (not "cold"), and past 7d a viewed
 // offer crosses into follow-up-overdue too — so this is the complement slice,
@@ -560,15 +571,14 @@ export default function PipelineAnalytics({
     const readyToSend = classified.filter(
       (e) => e._class === "ready_to_send",
     ).length;
-    // The Sent tile counts estimates staff sent: a self-serve quote nobody
-    // delivered (undeliveredSelfServe) stays under Awaiting Response but is
-    // not a send (codex pre-push P1), so the tile, its "awaiting" line and the
-    // sent_group drilldown (EstimatesPageV2) all leave it out.
-    const awaiting = classified.filter(
-      (e) => e._class === "awaiting" && !e.undeliveredSelfServe,
-    ).length;
-    const followUp = classified.filter((e) => e._class === "follow_up").length;
-    const scheduled = classified.filter((e) => e._class === "scheduled").length;
+    // The Sent tile and its lines count isSentGroupEstimate rows, the rows
+    // its drilldown lists.
+    const sentGroup = classified.filter(isSentGroupEstimate);
+    const sentOfClass = (cls) =>
+      sentGroup.filter((e) => e._class === cls).length;
+    const awaiting = sentOfClass("awaiting");
+    const followUp = sentOfClass("follow_up");
+    const scheduled = sentOfClass("scheduled");
     // Won = won forever: archiving an accepted estimate (housekeeping)
     // must not shrink the funnel, so archived-accepted rows still count.
     const won = classified.filter(
@@ -634,7 +644,7 @@ export default function PipelineAnalytics({
         drafts: needsEstimate + readyToSend,
         needsEstimate,
         readyToSend,
-        sent: awaiting + followUp + scheduled,
+        sent: sentGroup.length,
         awaiting,
         viewed: followUp,
         scheduled,

@@ -251,13 +251,13 @@ describe('Action Inbox generators', () => {
     );
     expect(exclusions).toHaveLength(2);
 
-    // Undelivered plan_restart and plan_start quotes never become a "call
+    // Undelivered self-serve quotes (plan restart, plan start, report card) never become a "call
     // before it expires" prompt (C4 zero-follow-up contract, codex #3671 r28
     // P1): source-NULL legacy rows and operator-delivered quotes stay.
     const est = capture.filter((c) => c.table === 'estimates as e');
     expect(est.some((c) => c.method === 'whereNull' && c.args[0] === 'e.source')).toBe(true);
     expect(est.some((c) => c.method === 'orWhereNotIn' && c.args[0] === 'e.source'
-      && JSON.stringify(c.args[1]) === JSON.stringify(['plan_restart', 'plan_start']))).toBe(true);
+      && JSON.stringify(c.args[1]) === JSON.stringify(['plan_restart', 'plan_start', 'service_report_cta']))).toBe(true);
     expect(est.some((c) => c.method === 'orWhereRaw'
       && String(c.args[0]).includes("e.estimate_data #>> '{deliveryState,firstDeliveredAt}'") && String(c.args[0]).includes('IS NOT NULL'))).toBe(true);
   });

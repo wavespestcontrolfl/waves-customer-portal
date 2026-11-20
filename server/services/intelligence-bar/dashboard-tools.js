@@ -443,9 +443,10 @@ async function comparePeriods(input) {
       const es = await excludeInternalEstimates(
         db({ e: 'estimates' })
           .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
-          // plan_restart and plan_start (GATE_PORTAL_PLAN_START) sent_at is a
-          // synthetic publish stamp (the customer self-served the quote;
-          // nothing was delivered) — it is not an estimate SENT (codex GH
+          // A self-serve quote's sent_at (plan_restart, plan_start, the report
+          // card's service_report_cta) is a synthetic publish stamp (the
+          // customer self-served the quote; nothing was delivered) — it is
+          // not an estimate SENT (codex GH
           // r19 P1 on #3671) UNLESS an operator later really delivered it:
           // the admin send path stamps deliveryState.firstDeliveredAt, the
           // same real-delivery witness estimate-source-performance counts
@@ -735,8 +736,9 @@ async function getEstimateFunnel(input) {
   // reflect real prospect activity only.
   //
   // The funnel is the estimates staff delivered: every query here leaves out
-  // a self-serve quote the customer opened from the portal (plan restart, plan
-  // start), whose sent_at is a mint stamp, unless staff really delivered it
+  // a self-serve quote the customer opened from the portal or a report card
+  // (plan restart, plan start, report card), whose sent_at is a mint stamp,
+  // unless staff really delivered it
   // (whereNotUndeliveredSelfServe, as compare_periods counts sends; codex
   // pre-push P1). All stages share the cohort, so the rates stay rates.
   // compare_periods' accepted count still includes them (a count with no
