@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "notes": "Pest Insider top pictures (pest-insider/heroes.js): one per lead fact. The title is the fact's own title and the tag its card's, both drawn by code; art = the first 16 hex of the sha256 of ops/agents/pest-insider-art/<fact>.webp, the wordless picture ChatGPT drew for the fact (checked by a person before use), or null for the title on navy with no art. New art: node ops/agents/pest-insider-heroes.js --import <dir>. After any change, draw the pictures again: node ops/agents/pest-insider-heroes.js",
+  "notes": "Pest Insider top pictures (pest-insider/heroes.js): one per lead fact. The title is the fact's own title and the tag its card's, both drawn by code; art = the first 16 hex of the sha256 of ops/agents/pest-insider-art/<fact>.webp, the wordless picture ChatGPT drew for the fact (checked by a person before use), or null for the title on navy with no art. New art: node ops/agents/pest-insider-art-import.js <dir> --execute. After any change, draw the new pictures: node ops/agents/pest-insider-heroes.js --execute",
   "heroes": {
     "L01": { "art": "9bf4199395eeb2b1" },
     "L02": { "art": "70bc19534301e9e3" },

@@ -9,30 +9,19 @@
  * pictures with the change.
  *
  *   node ops/agents/pest-insider-heroes.js [--execute] [--out <dir>] [--only T03,R01]
- *   node ops/agents/pest-insider-heroes.js --import <dir> [--execute] [--only T03]
  *
- *     (none)          dry run: lists what would be drawn or taken; nothing written
- *     --execute       draw the pictures whose file is not there yet (with
- *                     --import: write the art files and the heroes file)
- *     --import <dir>  take new art: each <dir>/<fact>.png (lower-case id,
- *                     wide) is cut to 1164x652, saved as
- *                     ops/agents/pest-insider-art/<fact>.webp, and its hash
- *                     goes into the heroes file. Then draw with --execute.
- *     --out <dir>     the folder to draw into (a preview) instead of the portal's
- *     --only ids      only these facts
+ *     (none)        dry run: lists each picture's file and whether it is drawn yet
+ *     --execute     draw the pictures whose file is not there yet
+ *     --out <dir>   the folder to draw into (a preview) instead of the portal's
+ *     --only ids    only these facts
+ *
+ * New art comes in through ops/agents/pest-insider-art-import.js.
  *
  * A file, once drawn, is never drawn again, changed or removed: a sent
  * email and the issue archive keep the exact picture URLs they were sent
  * with. A picture that must look different gets a new name (new art, a new
  * title, or HERO_DESIGN bumped); an old file stays until a person removes
  * it, once no sent issue uses it.
- *
- * The art: ChatGPT on the owner's plan (owner 2026-11-19: "just use
- * chatgpt"), through Codex on the Mac with Codex's built-in image tool, never
- * a paid image API. One picture per fact, wide, with no words, bugs only as
- * cartoons, no body parts, and the subject in the right half (the title
- * panel covers the left). A person checks every picture against its fact
- * before it is imported.
  *
  * The title, tag and kicker are drawn here, in Anton and Inter from Google
  * Fonts; a picture is refused when either font did not load, so none ships
@@ -59,7 +48,6 @@ const { WAVES_COLORS: C } = require('../../server/services/pest-insider/cards');
 const args = process.argv.slice(2);
 const opt = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : null; };
 const repoRoot = path.resolve(__dirname, '../..');
-const HEROES_FILE = path.join(repoRoot, 'server/data/pest-insider-heroes-v1.json');
 const only = opt('--only') ? new Set(opt('--only').split(',').map((s) => s.trim())) : null;
 const execute = args.includes('--execute');
 
@@ -79,50 +67,6 @@ const tint = (hex, alpha) => {
 };
 // Line breaks only: a number stays with the word after it ("8 months"). No word changes.
 const keepTogether = (t) => t.replace(/(\d) (?=[A-Za-z])/g, '$1 ');
-
-// Writes the heroes file with one fact per line, as it is kept.
-function writeHeroesFile(raw) {
-  const lines = Object.entries(raw.heroes).map(([id, h]) => `    ${JSON.stringify(id)}: { "art": ${JSON.stringify(h.art)} }`);
-  fs.writeFileSync(HEROES_FILE, `{\n  "version": ${raw.version},\n  "notes": ${JSON.stringify(raw.notes)},\n  "heroes": {\n${lines.join(',\n')}\n  }\n}\n`);
-}
-
-// Takes new art in two steps, so the art files and the heroes file never
-// disagree. Step 1 writes nothing: every <fact>.png in the folder is cut to
-// size, and the new heroes file must pass heroes.js (a main fact with a
-// card), or nothing is taken. Step 2 writes the art, then the heroes file;
-// if a write fails, the old art is written back.
-async function importArt(dir, { HERO_WIDTH, HERO_HEIGHT, ART_DIR, validateHeroes }) {
-  const raw = JSON.parse(fs.readFileSync(HEROES_FILE, 'utf8'));
-  const artDir = path.join(repoRoot, ART_DIR);
-  const batch = [];
-  for (const name of fs.readdirSync(dir).filter((f) => /^[a-z]\d\d\.png$/.test(f)).sort()) {
-    const id = name.slice(0, 3).toUpperCase();
-    if (only && !only.has(id)) continue;
-    const webp = await sharp(path.join(dir, name)).resize(HERO_WIDTH * 2, HERO_HEIGHT * 2, { fit: 'cover', position: 'centre' }).webp({ quality: 82, effort: 6 }).toBuffer();
-    batch.push({ id, file: path.join(artDir, `${id.toLowerCase()}.webp`), webp, art: sha16(webp) });
-  }
-  const next = { ...raw, heroes: { ...raw.heroes } };
-  for (const item of batch) next.heroes[item.id] = { art: item.art };
-  validateHeroes(next);
-  for (const item of batch) console.log(`${item.id}  art ${item.art}  ${Math.round(item.webp.length / 1024)} KB${execute ? '' : '  (dry run)'}`);
-  if (!execute) { console.log(`Dry run: ${batch.length} art file(s) would be taken; nothing written. Add --execute.`); return; }
-  fs.mkdirSync(artDir, { recursive: true });
-  const written = [];
-  try {
-    for (const item of batch) {
-      const old = fs.existsSync(item.file) ? fs.readFileSync(item.file) : null;
-      fs.writeFileSync(item.file, item.webp);
-      written.push({ ...item, old });
-    }
-    writeHeroesFile(next);
-  } catch (err) {
-    for (const item of written) if (item.old) fs.writeFileSync(item.file, item.old);
-    const added = written.filter((item) => !item.old).map((item) => path.relative(repoRoot, item.file));
-    console.error(`Import failed; the old art is back.${added.length ? ` New art files no fact names yet: ${added.join(', ')}` : ''}`);
-    throw err;
-  }
-  console.log(`${batch.length} art file(s) taken; now draw: node ops/agents/pest-insider-heroes.js --execute`);
-}
 
 // With art: a navy panel on the left (solid, then fading into the art) holds
 // the tag, the kicker and the title, so gold on navy reads 6.3:1 whatever the
@@ -185,7 +129,7 @@ async function draw(H) {
     let artUrl = null;
     if (hero.art) {
       const art = fs.readFileSync(path.join(repoRoot, ART_DIR, hero.artFile));
-      if (sha16(art) !== hero.art) { console.error(`${id}: ${hero.artFile} is not the art the heroes file names; run --import again`); failed += 1; continue; }
+      if (sha16(art) !== hero.art) { console.error(`${id}: ${hero.artFile} is not the art the heroes file names; import it again with pest-insider-art-import.js`); failed += 1; continue; }
       artUrl = `data:image/webp;base64,${art.toString('base64')}`;
     }
     await page.setContent(heroHtml(hero, artUrl, H), { waitUntil: 'networkidle' });
@@ -202,9 +146,4 @@ async function draw(H) {
   if (failed) process.exit(1);
 }
 
-(async () => {
-  // Loaded here, after --import may have rewritten the heroes file.
-  const H = require('../../server/services/pest-insider/heroes');
-  if (opt('--import')) await importArt(path.resolve(opt('--import')), H);
-  else await draw(H);
-})().catch((e) => { console.error(e); process.exit(1); });
+draw(require('../../server/services/pest-insider/heroes')).catch((e) => { console.error(e); process.exit(1); });

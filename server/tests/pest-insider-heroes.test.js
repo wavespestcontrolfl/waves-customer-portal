@@ -1,8 +1,10 @@
 // Pest Insider top pictures: one per lead fact, its words drawn by code from
 // the fact's own title and card tag, its art checked in the repo, and its
 // picture shipped with the portal.
+const { spawnSync } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const {
   HEROES, HERO_DESIGN, HERO_DIR, HERO_BASE_URL, ART_DIR, heroFor, validateHeroes,
@@ -101,4 +103,34 @@ describe('the top picture list', () => {
     expect(() => validateHeroes({})).toThrow(/no heroes map/);
     expect(() => validateHeroes({ heroes: [] })).toThrow(/no heroes map/);
   });
+});
+
+describe('taking new art', () => {
+  const IMPORT = path.join(ROOT, 'ops/agents/pest-insider-art-import.js');
+  const run = (dir, ...more) => spawnSync(process.execPath, [IMPORT, dir, ...more], { cwd: ROOT, encoding: 'utf8', env: process.env });
+  const snapshot = () => [fs.readFileSync(path.join(ROOT, 'server/data/pest-insider-heroes-v1.json'), 'utf8'), listed(path.join(ROOT, ART_DIR)).join()];
+
+  test('checks the whole batch before it writes: a fact with no card or a broken picture stops it, and nothing is written', async () => {
+    const sharp = require('sharp');
+    const noCard = FACTS.find((f) => !f.reserve && !cardFor(f.id)).id;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-insider-art-'));
+    try {
+      const png = await sharp(path.join(ROOT, ART_DIR, 't03.webp')).png().toBuffer();
+      fs.writeFileSync(path.join(dir, 't03.png'), png);
+      const before = snapshot();
+      const dry = run(dir);
+      expect([dry.status, dry.stdout]).toEqual([0, expect.stringMatching(/Dry run: 1 art file\(s\) checked; nothing written/)]);
+
+      fs.writeFileSync(path.join(dir, `${noCard.toLowerCase()}.png`), png);
+      const refused = run(dir, '--execute');
+      expect([refused.status, refused.stderr]).toEqual([1, expect.stringContaining(`${noCard}: has no card`)]);
+      fs.rmSync(path.join(dir, `${noCard.toLowerCase()}.png`));
+
+      fs.writeFileSync(path.join(dir, 't02.png'), 'not a picture');
+      expect(run(dir, '--execute').status).toBe(1);
+      expect(snapshot()).toEqual(before);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60000);
 });
