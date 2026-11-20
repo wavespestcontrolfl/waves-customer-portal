@@ -127,7 +127,7 @@ describe('Waves Chat pill with Messages offered', () => {
     fireEvent.change(box, { target: { value: 'Can you come Friday?' } });
     fireEvent.click(send);
     expect(await within(sheet).findByText('Can you come Friday?')).toBeInTheDocument();
-    expect(api.sendPortalMessage).toHaveBeenCalledWith('Can you come Friday?', expect.any(String));
+    expect(api.sendPortalMessage).toHaveBeenCalledWith('Can you come Friday?', expect.any(String), []);
     await waitFor(() => expect(box).toHaveValue(''));
   });
 
