@@ -8552,6 +8552,20 @@ const EstimateConverter = {
                 ? { depositCredit: { amount: requestedPrepayDepositCredit, estimateId } }
                 : {}),
             });
+            // Persist the original invoice-only sale before a later booking
+            // can attach or consume its setup claim. Any booked occurrence or
+            // promised start/date keeps this out of the unbooked lane.
+            if (created?.id && prepayRodentSetupAmount > 0 && estimateRodentBaitIsCommercial(estimateData)
+              && skipAutoSchedule && !reservationRowsExist && !firstScheduledServiceId && scheduledCount === 0
+              && !opts.adoptedExistingAppointmentId && !opts.bookedAppointmentIds?.length
+              && !opts.requestedFirstVisit && !annualPrepayTermStart && !annualPrepayCoverageOverride) {
+              await require('./commercial-prepay-sale-record').recordUnbookedSale(invoiceTrx, {
+                invoiceId: created.id,
+                customerId,
+                estimateId,
+                setupAmount: prepayRodentSetupAmount,
+              });
+            }
             appliedPrepayDepositCredit = Number(created?.applied_deposit_credit) || 0;
             // Frozen-price enforcement (codex round-3 P1): the minted bill
             // must be the accepted one — the same subtotal to the cent, and

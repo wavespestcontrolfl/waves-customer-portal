@@ -42,8 +42,12 @@ describe('dispatch alerts bulk resolve', () => {
 
     expect(chain.table).toHaveBeenCalledWith('dispatch_alerts');
     expect(chain.whereNull).toHaveBeenCalledWith('resolved_at');
-    // a "Visit not closed out" card needs a recorded decision: Clear leaves it open
-    expect(chain.whereNotIn).toHaveBeenCalledWith('type', ['visit_not_closed_out']);
+    // Decision cards and invoice-specific billing reviews need an explicit
+    // staff action. Clear leaves both open.
+    expect(chain.whereNotIn).toHaveBeenCalledWith('type', [
+      'visit_not_closed_out',
+      'commercial_prepay_setup_review',
+    ]);
     expect(chain.update).toHaveBeenCalledWith({
       resolved_at: 'NOW()',
       resolved_by: 'tech-1',
