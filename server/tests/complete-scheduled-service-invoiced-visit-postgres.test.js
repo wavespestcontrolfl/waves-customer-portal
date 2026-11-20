@@ -130,8 +130,8 @@ async function cleanup(f) {
 // flags); the full form posts the same names.
 const SHEET_FLAGS = { sendCompletionSms: true, includePayLink: true, requestReview: true, reviewTiming: 'auto' };
 
-async function complete(f, invoiceFields) {
-  return completeScheduledService({ serviceId: f.serviceId, idempotencyKey: randomUUID(),
+async function complete(f, invoiceFields, { idempotencyKey = randomUUID() } = {}) {
+  return completeScheduledService({ serviceId: f.serviceId, idempotencyKey,
     actor: { techRole: 'admin', technicianId: f.techId, technician: null },
     body: { customerRecap: 'Visit closed out.', visitOutcome: 'completed', products: [], areasServiced: [], ...SHEET_FLAGS, ...invoiceFields } });
 }
@@ -295,26 +295,137 @@ postgres('completing a visit that is already invoiced, from a Fast Complete shee
     } finally { await cleanup(f); }
   });
 
-  test('completion preserves an open checkout when cumulative cash does not cover its balance', async () => {
+  test('completion retires a shared checkout before posting partial cash, and a retry cannot overcollect', async () => {
     const f = await seedInvoicedVisit({ invoiceStatus: 'sent' });
     try {
       const StripeService = require('../services/stripe');
+      const idempotencyKey = randomUUID();
+      const siblingId = randomUUID();
       StripeService.retrievePaymentIntent.mockClear();
       StripeService.cancelPaymentIntent.mockClear();
+      StripeService.retrievePaymentIntent.mockResolvedValueOnce({
+        id: 'pi_short_completion',
+        status: 'requires_payment_method',
+      });
       await mockPg('scheduled_services').where({ id: f.serviceId }).update({
         prepaid_amount: 40,
         prepaid_method: 'cash',
         prepaid_at: new Date(),
       });
-      await mockPg('invoices').where({ id: f.invoiceId }).update({ stripe_payment_intent_id: 'pi_short_completion' });
+      await mockPg('invoices').where({ id: f.invoiceId }).update({
+        stripe_payment_intent_id: 'pi_short_completion',
+        processor: 'stripe',
+      });
+      await mockPg('invoices').insert({
+        id: siblingId,
+        customer_id: f.customerId,
+        invoice_number: `TST-${siblingId.slice(0, 8)}`,
+        token: randomUUID().replace(/-/g, ''),
+        status: 'sent',
+        total: 25,
+        subtotal: 25,
+        service_date: etDateString(),
+        service_type: LAWN_TYPE,
+        sent_at: new Date(),
+        stripe_payment_intent_id: 'pi_short_completion',
+        processor: 'stripe',
+        line_items: JSON.stringify([{ description: LAWN_TYPE, amount: 25, quantity: 1, unit_price: 25 }]),
+      });
+
+      const out = await complete(f, { invoiceAlreadySent: true }, { idempotencyKey });
+      expect(out.status).toBe(200);
+      expect(await mockPg('invoices').where({ id: f.invoiceId })
+        .first('status', 'total', 'stripe_payment_intent_id', 'processor'))
+        .toMatchObject({ status: 'sent', total: '40.00', stripe_payment_intent_id: null, processor: null });
+      expect(await mockPg('invoices').where({ id: siblingId }).first('status', 'stripe_payment_intent_id', 'processor'))
+        .toMatchObject({ status: 'sent', stripe_payment_intent_id: null, processor: 'stripe' });
+      expect((await mockPg('payments').where({ customer_id: f.customerId })).map((row) => Number(row.amount)))
+        .toEqual([40]);
+      expect(StripeService.retrievePaymentIntent).toHaveBeenCalledTimes(1);
+      expect(StripeService.cancelPaymentIntent).toHaveBeenCalledTimes(1);
+      expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith(
+        'pi_short_completion',
+        { cancellation_reason: 'abandoned' },
+      );
+
+      // A delivery retry of the same completion returns its recorded result.
+      const retried = await complete(f, { invoiceAlreadySent: true }, { idempotencyKey });
+      expect(retried.status).toBe(200);
+      expect(retried.body).toEqual({ ...out.body, replayed: true });
+      expect(await mockPg('invoices').where({ id: f.invoiceId })
+        .first('status', 'total', 'stripe_payment_intent_id', 'processor'))
+        .toMatchObject({ status: 'sent', total: '40.00', stripe_payment_intent_id: null, processor: null });
+      expect((await mockPg('payments').where({ customer_id: f.customerId })).map((row) => Number(row.amount)))
+        .toEqual([40]);
+      expect(StripeService.retrievePaymentIntent).toHaveBeenCalledTimes(1);
+      expect(StripeService.cancelPaymentIntent).toHaveBeenCalledTimes(1);
+    } finally { await cleanup(f); }
+  });
+
+  test('completion reports overlapping cash when checkout money is already moving', async () => {
+    const f = await seedInvoicedVisit({ invoiceStatus: 'sent' });
+    try {
+      const StripeService = require('../services/stripe');
+      const alert = jest.spyOn(require('../services/admin-alert-compose'), 'raiseAdminAlert')
+        .mockResolvedValue({ id: 'fixture-alert' });
+      const siblingId = randomUUID();
+      StripeService.retrievePaymentIntent.mockClear();
+      StripeService.cancelPaymentIntent.mockClear();
+      StripeService.retrievePaymentIntent.mockResolvedValueOnce({
+        id: 'pi_moving_completion',
+        status: 'processing',
+      });
+      await mockPg('scheduled_services').where({ id: f.serviceId }).update({
+        prepaid_amount: 40,
+        prepaid_method: 'cash',
+        prepaid_at: new Date(),
+      });
+      await mockPg('invoices').where({ id: f.invoiceId }).update({
+        stripe_payment_intent_id: 'pi_moving_completion',
+        processor: 'stripe',
+      });
+      await mockPg('invoices').insert({
+        id: siblingId,
+        customer_id: f.customerId,
+        invoice_number: `TST-${siblingId.slice(0, 8)}`,
+        token: randomUUID().replace(/-/g, ''),
+        status: 'sent',
+        total: 25,
+        subtotal: 25,
+        service_date: etDateString(),
+        service_type: LAWN_TYPE,
+        sent_at: new Date(),
+        stripe_payment_intent_id: 'pi_moving_completion',
+        processor: 'stripe',
+        line_items: JSON.stringify([{ description: LAWN_TYPE, amount: 25, quantity: 1, unit_price: 25 }]),
+      });
 
       const out = await complete(f, { invoiceAlreadySent: true });
       expect(out.status).toBe(200);
-      expect(await mockPg('invoices').where({ id: f.invoiceId }).first('status', 'total', 'stripe_payment_intent_id'))
-        .toMatchObject({ status: 'sent', total: '80.00', stripe_payment_intent_id: 'pi_short_completion' });
+      expect(await mockPg('invoices').where({ id: f.invoiceId })
+        .first('status', 'total', 'stripe_payment_intent_id', 'processor'))
+        .toMatchObject({ status: 'sent', total: '80.00', stripe_payment_intent_id: 'pi_moving_completion', processor: 'stripe' });
+      expect(await mockPg('invoices').where({ id: siblingId }).first('status', 'stripe_payment_intent_id', 'processor'))
+        .toMatchObject({ status: 'sent', stripe_payment_intent_id: 'pi_moving_completion', processor: 'stripe' });
       expect(await mockPg('payments').where({ customer_id: f.customerId })).toHaveLength(0);
-      expect(StripeService.retrievePaymentIntent).not.toHaveBeenCalled();
+      expect(StripeService.retrievePaymentIntent).toHaveBeenCalledWith('pi_moving_completion');
       expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+      expect(alert).toHaveBeenCalledWith('billing', expect.objectContaining({
+        area: 'Billing',
+        severity: 'needs-you',
+        subject: { type: 'invoice', id: f.invoiceId },
+        doneWhen: 'payment_reconciled',
+      }), expect.objectContaining({
+        bell: true,
+        dedupeKey: `completion-prepaid-reconciliation:${f.invoiceId}:pi_moving_completion`,
+        metadata: expect.objectContaining({
+          customerId: f.customerId,
+          invoiceId: f.invoiceId,
+          reason: 'payment_in_flight',
+          piStatus: 'processing',
+          prepaidCents: 4000,
+        }),
+      }));
     } finally { await cleanup(f); }
   });
 

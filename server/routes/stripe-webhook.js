@@ -2313,8 +2313,13 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
       logger.info(`[stripe-webhook] Settled payment row for PI: ${piId}`);
       return null;
     });
-    // Neither a quarantined capture nor a repaired paid receipt creates a new settlement.
-    if (fallbackOutcome === QUARANTINED || fallbackOutcome === ALREADY_PAID_AUTHENTICATION) return;
+    if (fallbackOutcome === QUARANTINED) return;
+    if (fallbackOutcome === ALREADY_PAID_AUTHENTICATION) {
+      // A shortfall may have put this capture in the office queue before the
+      // credit became available. Close that item after the repair commits.
+      await resolveOrphanSucceededPaymentIntentIfSettled(piId);
+      return;
+    }
   }
 
   // A disputed chargeback owns this PI now — a late or reclaimed

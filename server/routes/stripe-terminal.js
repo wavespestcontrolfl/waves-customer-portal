@@ -438,13 +438,27 @@ async function lockedHandoffInvoiceStateRefusal(invoice, database) {
   if (!isInvoiceCollectibleStatus(invoice.status)) {
     return { status: 409, body: { error: `Invoice is ${invoice.status}`, code: 'invoice_status_changed' } };
   }
-  if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)) {
+  if (invoice.payer_id || invoice.payer_statement_id || invoiceWithdrawnFromCustomer(invoice)) {
     return {
       status: 400,
       body: { error: 'Invoice is billed to a third-party payer — do not collect in person' },
     };
   }
   return null;
+}
+
+// Return only the credit this handoff request applied when minting ultimately
+// refuses. reverseAppliedCredit re-locks the invoice and skips a reversal once
+// another payment has entered flight or settled, so a late saved-card winner is
+// never undone by this cleanup.
+async function reverseRefusedHandoffCredit(invoiceId, amount, createdBy, context) {
+  if (!(Number(amount) > 0)) return;
+  try {
+    const { reverseAppliedCredit } = require('../services/customer-credit');
+    await reverseAppliedCredit({ invoiceId, amount, createdBy });
+  } catch (err) {
+    logger.warn(`[stripe-terminal] credit reversal after ${context} skipped for ${invoiceId}: ${err.message}`);
+  }
 }
 
 router.post('/handoff', adminAuthenticate, async (req, res) => {
@@ -484,7 +498,7 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     // Third-party Bill-To: never mint an in-person collection handoff for a
     // payer-billed invoice — the tech must not collect the AP's invoice from the
     // service recipient. AR routes to the payer AP inbox.
-    if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)) {
+    if (invoice.payer_id || invoice.payer_statement_id || invoiceWithdrawnFromCustomer(invoice)) {
       // A WITHDRAWN combined-visit invoice keeps payer_id NULL and a
       // collectible status — the Bill-To move is recorded only in its stamp
       // (Codex #4311 r31 P1) — so a payer_id-only guard let a technician mint
@@ -678,25 +692,40 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       mintedExpiresAt = expires_at;
     });
 
-    // The competing card may already be priced from the applied credit.
-    if (mintChargeRefusal) return res.status(409).json(terminalChargeFenceResponse(mintChargeRefusal));
+    // A competing card may already be priced from the applied credit. Ask the
+    // common reversal primitive to return this request's credit; its locked
+    // payment-in-flight/settled fence safely skips the reversal when that card
+    // has won the race.
+    if (mintChargeRefusal) {
+      await reverseRefusedHandoffCredit(
+        invoice_id,
+        handoffCreditResult?.applied,
+        'system:handoff_charge_refused',
+        'competing-payment handoff refusal',
+      );
+      return res.status(409).json(terminalChargeFenceResponse(mintChargeRefusal));
+    }
 
     if (ownershipLostAtMint) {
       // Same refusal as the pre-check above. Reverse the credit this seam
       // applied so the customer's credit is not consumed (and the invoice not
       // edit-locked) for a collection the technician is no longer assigned to.
-      if (handoffCreditResult?.applied > 0) {
-        try {
-          const { reverseAppliedCredit } = require('../services/customer-credit');
-          await reverseAppliedCredit({ invoiceId: invoice_id, amount: handoffCreditResult.applied, createdBy: 'system:handoff_not_assigned' });
-        } catch (e) {
-          logger.warn(`[stripe-terminal] credit reversal after unassigned handoff skipped for ${invoice_id}: ${e.message}`);
-        }
-      }
+      await reverseRefusedHandoffCredit(
+        invoice_id,
+        handoffCreditResult?.applied,
+        'system:handoff_not_assigned',
+        'unassigned handoff',
+      );
       return res.status(404).json({ error: 'Invoice not found' });
     }
 
     if (mintInvoiceRefusal) {
+      await reverseRefusedHandoffCredit(
+        invoice_id,
+        handoffCreditResult?.applied,
+        'system:handoff_invoice_refused',
+        'invoice-state handoff refusal',
+      );
       return res.status(mintInvoiceRefusal.status).json(mintInvoiceRefusal.body);
     }
 
@@ -712,14 +741,12 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       // Mint was rate-limited — no handoff/deep link issued. Reverse any credit
       // this seam applied above so we don't consume the customer's credit and
       // edit-lock an invoice the tech couldn't actually collect on.
-      if (handoffCreditResult?.applied > 0) {
-        try {
-          const { reverseAppliedCredit } = require('../services/customer-credit');
-          await reverseAppliedCredit({ invoiceId: invoice_id, amount: handoffCreditResult.applied, createdBy: 'system:handoff_rate_limited' });
-        } catch (e) {
-          logger.warn(`[stripe-terminal] credit reversal after rate-limited handoff skipped for ${invoice_id}: ${e.message}`);
-        }
-      }
+      await reverseRefusedHandoffCredit(
+        invoice_id,
+        handoffCreditResult?.applied,
+        'system:handoff_rate_limited',
+        'rate-limited handoff',
+      );
       res.setHeader('Retry-After', String(rateLimitedRetryAfter));
       return res.status(429).json({
         error: 'Too many handoff mints. Try again in an hour.',
@@ -768,13 +795,13 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
   } catch (err) {
     // No handoff token was minted but we already applied credit above — return it
     // so an aborted mint doesn't strand the customer's credit + edit-lock the invoice.
-    if (!handoffTokenMinted && handoffAppliedCredit > 0) {
-      try {
-        const { reverseAppliedCredit } = require('../services/customer-credit');
-        await reverseAppliedCredit({ invoiceId: req.body?.invoice_id, amount: handoffAppliedCredit, createdBy: 'system:handoff_mint_failed' });
-      } catch (e) {
-        logger.warn(`[stripe-terminal] credit reversal after failed handoff mint skipped: ${e.message}`);
-      }
+    if (!handoffTokenMinted) {
+      await reverseRefusedHandoffCredit(
+        req.body?.invoice_id,
+        handoffAppliedCredit,
+        'system:handoff_mint_failed',
+        'failed handoff mint',
+      );
     }
     if (savedCardChargeSuppressesAlternateCollection(err)) {
       return res.status(409).json(terminalChargeFenceResponse(err));
@@ -943,7 +970,7 @@ router.post('/validate-handoff', async (req, res) => {
     const invoice = await db('invoices').where({ id: handoffRow.invoice_id }).first();
     // A Bill-To move committed between the mint and this validation is the
     // same refusal as a status change (r31 P1): the stamp is the only record.
-    if (!invoice || invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)
+    if (!invoice || invoice.payer_id || invoice.payer_statement_id || invoiceWithdrawnFromCustomer(invoice)
       || !isInvoiceCollectibleStatus(invoice.status)) {
       auditTerminalHandoffValidate({
         tech_user_id: handoffRow.tech_user_id || null,
@@ -1642,7 +1669,7 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
     const invoice = await db('invoices').where({ id: handoff.invoice_id }).first();
     const statusRefusal = await terminalPaymentIntentStatusRefusal(invoice, db);
     if (statusRefusal) return res.status(409).json(statusRefusal);
-    if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)) {
+    if (invoice.payer_id || invoice.payer_statement_id || invoiceWithdrawnFromCustomer(invoice)) {
       return res.status(409).json({
         error: 'Invoice is billed to a third-party payer — do not collect in person',
         code: 'invoice_withdrawn_from_customer',
@@ -1732,7 +1759,7 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       if (!locked || !isInvoiceCollectibleStatus(locked.status)) return { ok: false, status: locked?.status };
       // The withdrawal re-read UNDER THE LOCK, like every other money seam:
       // a Bill-To assignment can commit while this transaction waits here.
-      if (locked.payer_id || invoiceWithdrawnFromCustomer(locked)) {
+      if (locked.payer_id || locked.payer_statement_id || invoiceWithdrawnFromCustomer(locked)) {
         return { ok: false, withdrawn: true, status: locked.status };
       }
       // Amount agreement under the lock. Partial account credit can land between

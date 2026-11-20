@@ -16,6 +16,11 @@
  *
  * Multiple candidate PIs or any conflicting local linkage fail closed. The
  * update mirrors recordAuthenticationSettlement and is idempotent.
+ *
+ * First-release history: the earlier draft at a28915ea48 never deployed.
+ * On 2026-11-19 the Railway project had PR previews disabled. None of the
+ * 78 distinct revisions deployed to staging or production since PR #7945
+ * opened contained this migration. Its first deployment runs the checks below.
  */
 exports.up = async function up(knex) {
   await knex.raw(`

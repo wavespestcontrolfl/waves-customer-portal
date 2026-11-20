@@ -152,6 +152,19 @@ async function postPaymentIntent() {
 const boundPointer = () => invoiceUpdates.find((u) => u.stripe_payment_intent_id === TERMINAL_PI.id);
 
 describe('POST /payment-intent retires the open pay-page PaymentIntent (B07)', () => {
+  test('a statement-owned invoice is refused before creating a Terminal intent', async () => {
+    setup({ invoice: baseInvoice({ payer_statement_id: 'statement-1' }), handoff: baseHandoff() });
+
+    const { status, body } = await postPaymentIntent();
+
+    expect(status).toBe(409);
+    expect(body).toEqual({
+      error: 'Invoice is billed to a third-party payer — do not collect in person',
+      code: 'invoice_withdrawn_from_customer',
+    });
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
   test('checkout-aware preflight holds an earlier authentication attempt before minting a Terminal PI', async () => {
     setup({ invoice: baseInvoice(), handoff: baseHandoff() });
     mockChargeFence.mockRejectedValueOnce(Object.assign(new Error('awaiting authentication verification'), {
@@ -330,6 +343,26 @@ describe('POST /payment-intent retires the open pay-page PaymentIntent (B07)', (
     expect(body).not.toHaveProperty('clientSecret');
     expect(mockCancelCreated).toHaveBeenCalledTimes(1);
     expect(invoiceUpdates).toEqual([]);
+  });
+
+  test('a payer-statement assignment under the invoice lock retires the newly minted Terminal intent', async () => {
+    const invoice = baseInvoice();
+    setup({ invoice, handoff: baseHandoff() });
+    mockCreate.mockImplementationOnce(async () => {
+      invoice.payer_statement_id = 'statement-1';
+      return TERMINAL_PI;
+    });
+
+    const { status, body } = await postPaymentIntent();
+
+    expect(status).toBe(409);
+    expect(body).toEqual({
+      error: 'Invoice is billed to a third-party payer — do not collect in person',
+      code: 'invoice_withdrawn_from_customer',
+    });
+    expect(body).not.toHaveProperty('clientSecret');
+    expect(boundPointer()).toBeUndefined();
+    expect(mockCancelCreated).toHaveBeenCalledWith(TERMINAL_PI.id, { cancellation_reason: 'abandoned' });
   });
 
   test('a concurrent successful bind wins the handoff lock and its published PI is never canceled by refusal cleanup', async () => {

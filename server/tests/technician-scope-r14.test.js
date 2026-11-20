@@ -187,8 +187,13 @@ describe('finding 3: handoff mint re-validates assignment under a row lock', () 
     expect(miss).toBeGreaterThan(txn);
     expect(miss).toBeLessThan(sign);
     const missBlock = handler.slice(miss, handler.indexOf('if (rateLimited) {'));
-    expect(missBlock).toMatch(/reverseAppliedCredit\(\{ invoiceId: invoice_id, amount: handoffCreditResult\.applied, createdBy: 'system:handoff_not_assigned' \}\)/);
+    expect(missBlock).toMatch(/reverseRefusedHandoffCredit\(\s*invoice_id,\s*handoffCreditResult\?\.applied,\s*'system:handoff_not_assigned'/);
     expect(missBlock).toMatch(/res\.status\(404\)\.json\(\{ error: 'Invoice not found' \}\)/);
+    const helper = src.slice(
+      src.indexOf('async function reverseRefusedHandoffCredit('),
+      src.indexOf("router.post('/handoff'"),
+    );
+    expect(helper).toMatch(/await reverseAppliedCredit\(\{ invoiceId, amount, createdBy \}\)/);
   });
 });
 

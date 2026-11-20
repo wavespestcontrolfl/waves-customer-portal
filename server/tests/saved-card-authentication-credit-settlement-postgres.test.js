@@ -239,6 +239,28 @@ jest.setTimeout(20000);
     expect(await mockDatabase('customer_credit_ledger').where({ invoice_id: invoiceId })).toHaveLength(0);
   });
 
+  test('restoring credit resolves the shortfall on an already-paid receipt', async () => {
+    const paidAt = new Date('2026-09-30T18:00:00Z');
+    await mockDatabase('invoices').where({ id: invoiceId }).update({
+      status: 'paid', paid_at: paidAt, stripe_payment_intent_id: intent.id,
+    });
+    const [receipt] = await mockDatabase('payments').insert({
+      customer_id: customerId, stripe_payment_intent_id: intent.id, amount: 75,
+      payment_date: '2026-09-30', processor: 'stripe', status: 'paid', metadata: { invoice_id: invoiceId },
+    }).returning('*');
+    await mockDatabase('customers').where({ id: customerId }).update({ account_credits: 0 });
+    const orphan = () => mockDatabase('stripe_orphan_charges').where({ stripe_payment_intent_id: intent.id }).first();
+    await settle(intent);
+    expect(await orphan()).toMatchObject({ resolved: false });
+    const { postCreditMovement } = require('../services/customer-credit');
+    await postCreditMovement({ customerId, delta: 25, source: 'adjustment' });
+    await settle(intent);
+    expect(await orphan()).toMatchObject({ resolved: true, resolved_at: expect.any(Date) });
+    expect(await mockDatabase('payments').where({ stripe_payment_intent_id: intent.id })).toEqual([receipt]);
+    expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({ paid_at: paidAt, credit_applied: '25.00' });
+    expect(await mockDatabase('customer_credit_ledger').where({ invoice_id: invoiceId }).pluck('delta')).toEqual(['-25.00']);
+  });
+
   test.each(['refunded', 'disputed'])('a delayed success closes the original challenge after a %s ledger entry', async (status) => {
     await mockDatabase('payments').insert({ customer_id: customerId, stripe_payment_intent_id: intent.id,
       amount: 75, payment_date: '2026-09-30', processor: 'stripe', status, metadata: { invoice_id: invoiceId } });

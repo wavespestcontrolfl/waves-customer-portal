@@ -869,6 +869,11 @@ While a saved card can still settle, staff payment posting, credit application,
 annual-prepay removal, and invoice voids recheck the hold under the invoice
 lock. A refused posting preserves the customer's existing checkout. Applying
 credit also rechecks the available balance under the customer lock.
+Schedule issues a paid receipt only when the unallocated visit cash covers
+the amount due. At visit completion, a partial cash posting retires a
+cancelable checkout so the next checkout quotes the remaining balance. If
+the processor is already collecting the payment, staff reconcile the cash
+against the processor outcome.
 
 Off-Stripe tender block (2026-08-29; ZELLE-ONLY since 2026-09-02 — owner
 ruling, Venmo and PayPal retired over their fees): the GET payload carries
@@ -6631,6 +6636,12 @@ adjustments do not add up to the handoff amount, every item carries
 never shows prices that disagree with the charge; a failure building them
 returns empty lists, never an error, because the jti is already burned. No
 contact field, address, note or other invoice rides this reply.
+
+A payer statement also establishes Bill-To ownership when the invoice's
+individual payer field is empty. Terminal checks statement ownership before
+handoff, at token validation, and when binding the reader payment. If the
+invoice moves to a payer after this handoff applies homeowner credit, a
+refused mint returns that credit when the invoice is still safe to reverse.
 
 For an invoice with a saved-card payment awaiting bank verification, both
 `POST /api/stripe/terminal/handoff` and `/payment-intent` return HTTP 409

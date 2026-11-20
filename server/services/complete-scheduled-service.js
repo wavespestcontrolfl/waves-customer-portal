@@ -12322,6 +12322,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       if (invoiceRow.payer_id) return invoiceRow;
 
       let flippedPaidByPrepayment = false;
+      let prepaidReconciliation = null;
       let creditedResult;
       try {
         creditedResult = await db.transaction(async (trx) => {
@@ -12407,22 +12408,22 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const prepaidCents = await remainingVisitPrepaidCents(trx, paymentVisit, lockedInvoice.id);
           if (!(prepaidCents > 0)) return lockedInvoice;
 
-          // Completion can still apply a partial recorded prepayment when there
-          // is no browser checkout. With a live checkout, leave both untouched
-          // unless the current unallocated cash covers the full balance. Canceling
-          // an $80 checkout to post $40 would strand the remaining $40 and make a
-          // retried completion consume the same session without settling it.
-          if (lockedInvoice.stripe_payment_intent_id && prepaidCents < dueCents) {
-            logger.warn(`[dispatch] Prepaid credit NOT applied to invoice ${lockedInvoice.invoice_number}: recorded cash does not cover the open checkout balance`);
-            return lockedInvoice;
-          }
-
           // Every no-write check above has passed under the canonical checkout
           // allocation locks. It is now safe to cancel a cancelable session and
-          // clear its sibling stamps before recording the visit cash.
+          // clear its sibling stamps before recording the visit cash. This also
+          // applies to a PARTIAL cash payment: leaving the old full-balance
+          // checkout confirmable beside received cash would overcollect it.
           const { guardOpenPaymentIntentForPrepaid } = require('../services/prepaid-pi-guard');
           const piGuard = await guardOpenPaymentIntentForPrepaid(lockedInvoice, { database: trx });
           if (!piGuard.ok) {
+            prepaidReconciliation = {
+              invoiceId: lockedInvoice.id,
+              invoiceNumber: lockedInvoice.invoice_number || lockedInvoice.id,
+              paymentIntentId: piGuard.piId || lockedInvoice.stripe_payment_intent_id || null,
+              reason: piGuard.reason,
+              piStatus: piGuard.piStatus || null,
+              prepaidCents,
+            };
             logger.error(`[dispatch] Prepaid credit NOT applied to invoice ${lockedInvoice.invoice_number} for service ${svc.id}: open PaymentIntent (${piGuard.reason}) — a card/ACH payment may still settle; manual reconciliation needed`);
             return lockedInvoice;
           }
@@ -12482,6 +12483,53 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (err?.code !== 'visit_busy') throw err;
         logger.info(`[dispatch] Prepaid credit deferred for service ${svc.id}: ${err.message}`);
         return invoiceRow;
+      }
+      // Stripe says money is moving (or the checkout cannot safely be
+      // verified): the transaction intentionally posted no cash and changed no
+      // checkout stamps. File one deduped Billing task after releasing the money
+      // locks so staff can reconcile the two tenders.
+      if (prepaidReconciliation) {
+        try {
+          const { raiseAdminAlert } = require('../services/admin-alert-compose');
+          const { fullName, fitAction } = require('../services/admin-alert-names');
+          const customer = fullName(svc) || 'this customer';
+          const cash = `$${centsToDollars(prepaidReconciliation.prepaidCents)}`;
+          const moneyMoving = prepaidReconciliation.reason === 'payment_in_flight';
+          const created = await raiseAdminAlert('billing', {
+            area: 'Billing',
+            action: fitAction('Billing', customer, [
+              (name) => `reconcile ${name}'s cash and checkout`,
+              (name) => `review ${name}'s overlapping payment`,
+            ]),
+            why: moneyMoving
+              ? `A card or bank payment is moving while ${cash} cash is recorded for the same bill.`
+              : `The checkout could not be verified while ${cash} cash is recorded for the same bill.`,
+            severity: 'needs-you',
+            who: 'person',
+            link: `/admin/invoices?invoice=${encodeURIComponent(prepaidReconciliation.invoiceId)}`,
+            subject: { type: 'invoice', id: String(prepaidReconciliation.invoiceId) },
+            doneWhen: 'payment_reconciled',
+          }, {
+            bell: true,
+            dedupeKey: `completion-prepaid-reconciliation:${prepaidReconciliation.invoiceId}:${prepaidReconciliation.paymentIntentId || prepaidReconciliation.reason}`,
+            dedupeOpenOnly: true,
+            detail: moneyMoving
+              ? `${cash} was recorded for the visit. The invoice checkout has money in flight. Verify the processor result before applying or returning the cash.`
+              : `${cash} was recorded for the visit. The invoice checkout could not be verified. Verify the processor result before applying or returning the cash.`,
+            metadata: {
+              customerId: String(svc.customer_id),
+              scheduledServiceId: String(svc.id),
+              invoiceId: String(prepaidReconciliation.invoiceId),
+              paymentIntentId: prepaidReconciliation.paymentIntentId,
+              reason: prepaidReconciliation.reason,
+              piStatus: prepaidReconciliation.piStatus,
+              prepaidCents: prepaidReconciliation.prepaidCents,
+            },
+          });
+          if (!created) logger.error(`[dispatch] prepaid reconciliation alert NOT recorded for invoice ${prepaidReconciliation.invoiceId}`);
+        } catch (err) {
+          logger.error(`[dispatch] prepaid reconciliation alert failed for invoice ${prepaidReconciliation.invoiceId}: ${err.message}`);
+        }
       }
       // A cash/Zelle prepayment that fully covers the invoice flips it paid
       // with NO Stripe webhook behind it, so the annual-prepay payment sync

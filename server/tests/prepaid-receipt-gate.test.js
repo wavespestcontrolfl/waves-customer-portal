@@ -162,7 +162,6 @@ describe('Schedule prepaid invoice writers share the locked saved-card fence', (
       'lockVisitForSettlement(trx, svc.id',
       'const dueCents = Math.round(invoiceAmountDue(lockedInvoice) * 100)',
       'remainingVisitPrepaidCents(trx, paymentVisit, lockedInvoice.id)',
-      'lockedInvoice.stripe_payment_intent_id && prepaidCents < dueCents',
       'guardOpenPaymentIntentForPrepaid(lockedInvoice, { database: trx })',
       'Math.min(prepaidCents, dueCents)',
       'dueCents - creditCents <= 0',

@@ -84,11 +84,13 @@ function setupHandoffDb({
   assigned = true,
   transactionState = null,
   invoiceStatus = 'sent',
+  invoicePatches = {},
   lockedInvoicePatches = [],
 } = {}) {
   const invoice = {
     id: 'inv-1', customer_id: 'cust-1', status: invoiceStatus, total: '100.00',
     credit_applied: '0.00', stripe_payment_intent_id: null,
+    ...invoicePatches,
   };
   const tableReads = [];
   const rowLocks = [];
@@ -162,6 +164,19 @@ describe('technicianMayCollectInvoice', () => {
 });
 
 describe('POST /handoff checkout reconciliation fence', () => {
+  test('a statement-owned invoice is refused at preflight before credit or token work', async () => {
+    const state = setupHandoffDb({ invoicePatches: { payer_statement_id: 'statement-1' } });
+    mockServices.mockResolvedValue(true);
+
+    const { status, body } = await postHandoff();
+
+    expect(status).toBe(400);
+    expect(body).toEqual({ error: 'Invoice is billed to a third-party payer — do not collect in person' });
+    expect(mockChargeFence).not.toHaveBeenCalled();
+    expect(mockAutoApplyCredit).not.toHaveBeenCalled();
+    expect(state.tokenInserts).toEqual([]);
+  });
+
   test('a processing invoice parked by saved-card evidence returns that hold', async () => {
     const state = setupHandoffDb({ invoiceStatus: 'processing' });
     mockServices.mockResolvedValue(true);
@@ -250,6 +265,7 @@ describe('POST /handoff checkout reconciliation fence', () => {
   test.each([
     ['paid status', { status: 'paid' }, 400, { error: 'Invoice already paid' }],
     ['payer ownership', { payer_id: 'payer-2' }, 400, { error: 'Invoice is billed to a third-party payer — do not collect in person' }],
+    ['statement ownership', { payer_statement_id: 'statement-2' }, 400, { error: 'Invoice is billed to a third-party payer — do not collect in person' }],
   ])('the credit transaction refuses locked %s before credit', async (_label, patch, expectedStatus, expectedBody) => {
     const state = setupHandoffDb({ lockedInvoicePatches: [patch] });
     mockServices.mockResolvedValue(true);
@@ -267,6 +283,7 @@ describe('POST /handoff checkout reconciliation fence', () => {
     ['owner drift', { customer_id: 'cust-2' }, 404, { error: 'Invoice not found' }],
     ['paid status', { status: 'paid' }, 400, { error: 'Invoice already paid' }],
     ['payer ownership', { payer_id: 'payer-2' }, 400, { error: 'Invoice is billed to a third-party payer — do not collect in person' }],
+    ['statement ownership', { payer_statement_id: 'statement-2' }, 400, { error: 'Invoice is billed to a third-party payer — do not collect in person' }],
   ])('the mint transaction refuses locked %s before token work', async (_label, patch, expectedStatus, expectedBody) => {
     const state = setupHandoffDb({ lockedInvoicePatches: [{}, patch] });
     mockServices.mockResolvedValue(true);
@@ -281,6 +298,24 @@ describe('POST /handoff checkout reconciliation fence', () => {
     if (patch.customer_id) {
       expect(state.operations).toContainEqual({ table: 'customers', method: 'where', args: [{ id: patch.customer_id }] });
     }
+  });
+
+  test('returns partial credit when the invoice moves to a payer statement before mint', async () => {
+    const state = setupHandoffDb({ lockedInvoicePatches: [{}, { payer_statement_id: 'statement-2' }] });
+    mockServices.mockResolvedValue(true);
+    mockAutoApplyCredit.mockResolvedValueOnce({ applied: 25, fullyCovered: false });
+
+    const { status, body } = await postHandoff();
+
+    expect(status).toBe(400);
+    expect(body).toEqual({ error: 'Invoice is billed to a third-party payer — do not collect in person' });
+    expect(require('../services/customer-credit').reverseAppliedCredit).toHaveBeenCalledWith({
+      invoiceId: 'inv-1',
+      amount: 25,
+      createdBy: 'system:handoff_invoice_refused',
+    });
+    expect(state.tokenInserts).toEqual([]);
+    expect(mockJwtSign).not.toHaveBeenCalled();
   });
 
   test('keeps an unexpected fence failure on the ordinary 500 rollback path', async () => {
@@ -348,7 +383,7 @@ describe('POST /handoff checkout reconciliation fence', () => {
     expect(Stripe).not.toHaveBeenCalled();
   });
 
-  test('preserves partial credit used to price a competing card when handoff issuance is refused', async () => {
+  test('delegates a competing-card credit race to the settlement-safe reversal primitive', async () => {
     const state = setupHandoffDb();
     mockTechRole = 'admin';
     mockAutoApplyCredit.mockImplementationOnce(async () => {
@@ -363,7 +398,11 @@ describe('POST /handoff checkout reconciliation fence', () => {
     expect(status).toBe(409);
     expect(body.code).toBe('payment_charge_in_progress');
     expect(state.invoice.credit_applied).toBe(25);
-    expect(require('../services/customer-credit').reverseAppliedCredit).not.toHaveBeenCalled();
+    expect(require('../services/customer-credit').reverseAppliedCredit).toHaveBeenCalledWith({
+      invoiceId: 'inv-1',
+      amount: 25,
+      createdBy: 'system:handoff_charge_refused',
+    });
     expect(state.tableReads).not.toContain('terminal_handoff_tokens');
   });
 
