@@ -2105,8 +2105,9 @@ premises checks: a stored property type that is not commercial (the mint's store
 `isCommercialProperty`), and one provable premises (`singlePremisesStreet`, strict: not flagged
 multi-home, a primary street with a city or zip, at most one property row and that row at the
 primary street, and no visit whose stamped address, property row or creating estimate names another
-address or cannot be resolved) whose street is the estimate's own address, so a move or a second
-property since the mint refuses. Otherwise it answers 409 `{ error, code: 'PLAN_START_STATE_CHANGED' }` (the
+address or cannot be resolved) whose street is both the estimate's own address and the home the mint
+priced (`estimate_data.planStart.premisesKey`), so a move or a second property since the mint refuses,
+even after a staff address change rewrote the open quote's address. Otherwise it answers 409 `{ error, code: 'PLAN_START_STATE_CHANGED' }` (the
 error reads "This account changed since this estimate was created — please go back to your portal
 for a current price.", or a retry line when the state cannot be read) and writes nothing. Before that
 check, a `plan_start` accept must name the visit it books: a held `slotId` or an `existingAppointmentId`,

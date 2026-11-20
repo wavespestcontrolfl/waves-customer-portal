@@ -4750,7 +4750,11 @@ describe('GATE_PORTAL_PLAN_START — plan-start accept revalidation runs inside 
     source: 'plan_start',
     customer_id: 'cust-9',
     estimate_data: JSON.stringify({
-      planStart: { families: ['pest_control'], serviceKey: 'pest_control', optionId: 'pest-quarterly', mintedAt: '2026-11-19T00:00:00Z' },
+      planStart: {
+        families: ['pest_control'], serviceKey: 'pest_control', optionId: 'pest-quarterly', mintedAt: '2026-11-19T00:00:00Z',
+        // The home the mint priced: the lead's one premises below.
+        premisesKey: require('../services/estimate-property-linkage').normalizedStampedStreet('123 Palm Ave', null, 'Bradenton', null),
+      },
       result: {
         recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] },
         oneTime: { items: [], membershipFee: 99 },

@@ -754,7 +754,9 @@ function disclosedSetupFeeQuote(estimateData) {
 //   matchesLive       (liveEstimateData) => the entry's own scope/identity
 //                     test for reusing a live quote (the core adds the
 //                     cent-exact totals + full-offer fingerprint checks)
-//   strictEvidence    optional (plan start): evidence the price depends on must
+//   strictEvidence    optional (plan start): the estimate block also stores the
+//                     proven premises key (premisesKey), which reuse and the
+//                     accept compare; evidence the price depends on must
 //                     be readable, else pricing_unavailable: the single-premises
 //                     proof fails on an unresolvable visit link
 //                     (singlePremisesStreet strict) and an unreadable estimate
@@ -931,7 +933,10 @@ async function mintPricedEstimate({
     // about an estimate they asked for and are looking at (click-mint
     // doctrine; enforced centrally in estimate-engagement-engine).
     noEngagementAutomation: true,
-    [estimateBlock.key]: estimateBlock.value,
+    // Plan start also stores the home its price was proven for (codex pre-push P0): a staff address
+    // change rewrites an open quote's address column (customer-address-fanout.js), so the accept and
+    // a reuse compare the account's home with this key as well as with that column.
+    [estimateBlock.key]: strictEvidence ? { ...estimateBlock.value, premisesKey: primaryStreet } : estimateBlock.value,
   };
   // priorQualifyingServices from the SERVER-derived residual set —
   // normally empty for a cancelled customer, so the engine prices at
@@ -1033,6 +1038,7 @@ async function mintPricedEstimate({
     // archives and a fresh quote is minted at the current address.
     if (matchesLive(liveData)
       && sameHome(linkage.normalizedEstimateStreet(live.address), primaryStreet)
+      && (!strictEvidence || sameHome(liveData?.[estimateBlock.key]?.premisesKey, primaryStreet))
       && cents(monthlyTotal) === cents(live.monthly_total)
       && cents(annualTotal) === cents(live.annual_total)
       && cents(onetimeTotal) === cents(live.onetime_total)
@@ -1501,6 +1507,7 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
   };
   let quoted;
   let quotedStreet;
+  let pricedHome;
   let fresh;
   let commercial;
   let ownsPlan;
@@ -1510,6 +1517,9 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
     const planStart = parseJson(row?.estimate_data, {})?.planStart;
     quoted = Array.isArray(planStart?.families) ? planStart.families : null;
     quotedStreet = require('../estimate-property-linkage').normalizedEstimateStreet(row?.address);
+    // The home the mint priced (codex pre-push P0): a staff address change rewrites the address
+    // column above on an open quote, but never this key.
+    pricedHome = planStart?.premisesKey;
     // Same lock order as the restart accept: comms advisory key, then the
     // customers row FOR UPDATE, then the reads. The whole row, as the mint
     // reads it: the premises proof needs the address and the multi-home flag.
@@ -1531,8 +1541,9 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
   if (!quoted || !quoted.length || !fresh) throw changed();
   // The mint's bar again (the price was standalone and residential): no plan
   // membership on the row, no commercial type, no live recurring service of
-  // any kind, and the one premises the estimate is addressed to.
-  if (!planStartAccountOpen(fresh) || commercial || ownsPlan || !premisesStreet || !sameHome(quotedStreet, premisesStreet)) throw changed();
+  // any kind, and the one premises the estimate is addressed to and was priced for.
+  if (!planStartAccountOpen(fresh) || commercial || ownsPlan || !premisesStreet) throw changed();
+  if (!sameHome(quotedStreet, premisesStreet) || !sameHome(pricedHome, premisesStreet)) throw changed();
 }
 
 module.exports = {

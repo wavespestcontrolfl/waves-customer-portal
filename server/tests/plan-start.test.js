@@ -198,6 +198,7 @@ function builder(table) {
       orWhereNotNull: (col) => { push(true, (r) => r[norm(col)] != null); return sub; },
       whereIn: (col, vals) => { push(false, (r) => vals.map(String).includes(String(r[norm(col)]))); return sub; },
       orWhereIn: (col, vals) => { push(true, (r) => vals.map(String).includes(String(r[norm(col)]))); return sub; },
+      orWhereNotIn: (col, vals) => { push(true, (r) => !vals.map(String).includes(String(r[norm(col)]))); return sub; },
       // coveredTermsAsOf's P2-4 termite grace-deadline check (a raw SQL
       // GREATEST/INTERVAL expression) — vacuously true, same rationale as
       // the top-level b.whereRaw below: no fixture here carries both
@@ -211,7 +212,8 @@ function builder(table) {
       // preceding whereNotNull gates already exclude every fixture row.
       whereExists: () => { push(false, () => true); return sub; },
     };
-    fn.call(sub);
+    // Knex hands the group builder over as `this` and as the argument (the address fanout's `(q) => q.…`).
+    fn.call(sub, sub);
     return (r) => parts.reduce((acc, p, i) => (i === 0 ? p.cond(r) : (p.or ? (acc || p.cond(r)) : (acc && p.cond(r)))), false);
   };
   b.where = (a, op, val) => {
@@ -375,6 +377,8 @@ beforeEach(() => {
 
 // The lead's own row: ACTIVE, not churned, no plan membership, no recurring rows.
 const LEAD = { ...CUSTOMER, active: true, pipeline_stage: 'new_lead', waveguard_tier: null, billing_mode: null, monthly_rate: null };
+// The home key the mint proves for LEAD and stores with the quote (planStart.premisesKey).
+const HOME_KEY = require('../services/estimate-property-linkage').normalizedStampedStreet('1 Main St', null, 'Parrish', '34219');
 // An engine line, and what the card shows for it through the REAL quoteAmountFromLine — so a
 // test's `shown` matches its recompute unless the test drifts one amount on purpose.
 function engineLine(service, monthly, extra = {}) {
@@ -425,6 +429,23 @@ describe('mintPlanStartEstimate', () => {
     recompute.mockResolvedValue(pricedAs(PEST_LINE));
   });
 
+  test('a move the address fanout carries onto the open quote is caught: the accept refuses and a repeat tap prices the new home (codex pre-push P0)', async () => {
+    const first = await mint();
+    const quote = tables.estimates.find((row) => row.id === first.estimateId);
+    // Staff move the customer; the fanout rewrites the open quote's address too.
+    const before = { ...tables.customers[0] };
+    Object.assign(tables.customers[0], { address_line1: '9 Oak Ave' });
+    // A preferences row, so the fanout's move stamp is an update (this fake has no upsert).
+    tables.property_preferences = [{ customer_id: 'cust-1' }];
+    await require('../services/customer-address-fanout').propagateCustomerAddressChange({ before, after: tables.customers[0] }, fakeTrx());
+    expect(quote.address).toMatch(/^9 Oak Ave/);
+    await expect(actualRestart.assertPlanStartAcceptEligible(fakeTrx(), { id: quote.id }))
+      .rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
+    const again = await mint({ customer: tables.customers[0], randomBytes: () => Buffer.from('0123456789abcdef') });
+    expect(again.reused).toBe(false);
+    expect(again.estimateId).not.toBe(first.estimateId);
+  });
+
   test('mints a published, server-priced estimate for exactly the option shown, nothing sent', async () => {
     const result = await mint();
     expect(result).toEqual({ estimateId: 'estimates-1', token: '61626364656630313233343536373839', url: '/estimate/61626364656630313233343536373839', reused: false });
@@ -438,7 +459,7 @@ describe('mintPlanStartEstimate', () => {
       monthly_total: 31.67, service_interest: 'Pest Control',
     });
     const stored = JSON.parse(row.estimate_data);
-    expect(stored.planStart).toEqual({ families: ['pest_control'], serviceKey: 'pest_control', optionId: 'pest-quarterly', mintedAt: '2026-11-19T12:00:00.000Z' });
+    expect(stored.planStart).toEqual({ families: ['pest_control'], serviceKey: 'pest_control', optionId: 'pest-quarterly', mintedAt: '2026-11-19T12:00:00.000Z', premisesKey: HOME_KEY });
     expect(stored.planRestart).toBeUndefined();
     expect(stored.sendSnapshot).toBeTruthy();
     // Timeline note only: no request row, no bell, no customer message.
@@ -973,7 +994,7 @@ describe('assertPlanStartAcceptEligible', () => {
     tables.customer_properties = [];
     tables.estimates = [{
       id: 'est-ps1', customer_id: 'cust-1', source: 'plan_start', status: 'sent', token: 'tok-ps1', address: '1 Main St, Parrish, FL 34219',
-      estimate_data: JSON.stringify({ planStart: { families: ['pest_control'], serviceKey: 'pest_control', optionId: 'pest-quarterly' } }),
+      estimate_data: JSON.stringify({ planStart: { families: ['pest_control'], serviceKey: 'pest_control', optionId: 'pest-quarterly', premisesKey: HOME_KEY } }),
     }];
   });
 
@@ -1004,6 +1025,13 @@ describe('assertPlanStartAcceptEligible', () => {
     }],
     ['has no street with a city or zip', () => { tables.customers = [{ ...LEAD, city: null, zip: null }]; }],
     ['has an estimate with no stored address', () => { delete tables.estimates[0].address; }],
+    ['has a quote stored without the home it was priced for', () => {
+      tables.estimates[0].estimate_data = JSON.stringify({ planStart: { families: ['pest_control'], serviceKey: 'pest_control', optionId: 'pest-quarterly' } });
+    }],
+    ['moved, with a staff address change carrying the open quote to the new home too (codex pre-push P0)', () => {
+      tables.customers = [{ ...LEAD, address_line1: '9 Oak Ave' }];
+      tables.estimates[0].address = '9 Oak Ave, Parrish, FL 34219';
+    }],
   ])('an account that %s refuses: the mint\'s bar again (codex pre-push P1s)', async (_label, arrange) => {
     arrange();
     await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
