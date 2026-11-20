@@ -862,6 +862,12 @@ jobs:
         working-directory: server
         env:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        # The default 5 s test timeout is raised to 15 s, as in `server-unit`:
+        # the first file in a lane runs while both lanes load modules cold.
+        # On 2026-11-20 (#8086) the time split put the 1,974-line
+        # admin-schedule-discount-provenance suite first in lane 1, and its
+        # first requests passed 5 s in two runs out of two (5.7 s for the whole
+        # file when it ran fourth). A test that sets its own timeout keeps it.
         # --forceExit removed 2026-07-16: the open handle was the shared app
         # pool (models/db) pulled at module scope by lawn-intelligence in
         # lawn-assessment-drift-sweep.test.js — that suite now destroys it in
@@ -870,7 +876,7 @@ jobs:
           grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
             | grep -v products-catalog-label-fields \
             | tee /dev/stderr \
-            | xargs npx jest --ci --silent --runInBand --shard=${{ matrix.first }}/4 --testSequencer=./tests/helpers/time-balanced-sequencer.js
+            | xargs npx jest --ci --silent --runInBand --shard=${{ matrix.first }}/4 --testSequencer=./tests/helpers/time-balanced-sequencer.js --testTimeout=15000
       - name: DB-gated suites, lane ${{ matrix.second }} of 4 (serial, against the migrated database)
         id: db-gated-2
         background: true
@@ -881,7 +887,7 @@ jobs:
           grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
             | grep -v products-catalog-label-fields \
             | tee /dev/stderr \
-            | xargs npx jest --ci --silent --runInBand --shard=${{ matrix.second }}/4 --testSequencer=./tests/helpers/time-balanced-sequencer.js
+            | xargs npx jest --ci --silent --runInBand --shard=${{ matrix.second }}/4 --testSequencer=./tests/helpers/time-balanced-sequencer.js --testTimeout=15000
       - name: Wait for both lanes (fails if either failed)
         wait-all:
 
