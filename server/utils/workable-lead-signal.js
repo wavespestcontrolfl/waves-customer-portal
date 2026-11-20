@@ -38,10 +38,10 @@ function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false
   // voicemail, when the processor stamped `caller_id_reachback: true` on the
   // stored extraction (stampCallerIdReachback: an adopted V2 extraction that
   // did not end with nothing to do, from a caller who did not disclaim the
-  // line). Read from the extraction, never passed in, so both callers of
-  // this gate judge the same stored fact. A call stored without the stamp
-  // (processed before it existed, or one that left before the lead step)
-  // keeps its old verdict.
+  // line, with the lead keyed on the call's own number). Read from the
+  // extraction, never passed in, so both callers of this gate judge the
+  // same stored fact. A call stored without the stamp (processed before it
+  // existed, or one that left before the lead step) keeps its old verdict.
   const callerIdReachback = extracted.caller_id_reachback === true;
   return hasServiceIntent && (hasReachback || voicemail === true || callerIdReachback);
 }

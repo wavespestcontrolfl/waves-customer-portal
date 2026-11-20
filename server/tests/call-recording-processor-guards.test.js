@@ -1424,10 +1424,14 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
       ...over,
     });
     const ani = '+19415550100';
+    // Step 4b keys the lead on the caller ID itself (the usual phone-only case).
+    const phones = { leadPhone: ani, callerId: ani };
     const stored = { matched_service: 'WDO Inspection Service' };
-    const stamp = (v2) => stampCallerIdReachback(stored, v2).caller_id_reachback;
+    const stamp = (v2, p = phones) => stampCallerIdReachback(stored, v2, p).caller_id_reachback;
     // The caller will call back: the model left the call open.
-    expect(stampCallerIdReachback(stored, adopted())).toEqual({ ...stored, caller_id_reachback: true });
+    expect(stampCallerIdReachback(stored, adopted(), phones)).toEqual({ ...stored, caller_id_reachback: true });
+    // The same number in another format is the same line.
+    expect(stamp(adopted(), { leadPhone: '(941) 555-0100', callerId: ani })).toBe(true);
     // Waves does not sell the service: the model closed it with nothing to do.
     expect(stamp(adopted({ recommended_disposition: 'no_action_needed' }))).toBe(false);
     // ...but a quote Waves promised keeps the same call open (the canonical rule).
@@ -1440,20 +1444,30 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     // keys the lead on the resolved phone, which can fall back to the
     // disclaimed line or keep a number the processor did not adopt.
     expect(stamp(adopted({ caller: { caller_id_disclaimed: true, phone_e164: '+17275550123', phone_source: 'spoken' } }))).toBe(false);
+    // The lead would be keyed on a number the caller dictated, not the call's
+    // own number (pre-push P1 r4): a dictated number is unverified, and it
+    // would be the lead's only reachback.
+    expect(stamp(adopted(), { leadPhone: '+17275550123', callerId: ani })).toBe(false);
+    // No external caller ID (a forwarding-masked call) or no lead phone: none.
+    expect(stamp(adopted(), { leadPhone: ani, callerId: null })).toBe(false);
+    expect(stamp(adopted(), { leadPhone: null, callerId: ani })).toBe(false);
+    expect(stampCallerIdReachback(stored, adopted()).caller_id_reachback).toBe(false);
     // Adoption did not run (no valid V2 result, shadow mode, or the primary
     // switch is off): the processor passes null and the old rule stands.
     expect(stamp(null)).toBe(false);
     // A later pass overwrites an earlier pass's true.
-    expect(stampCallerIdReachback({ ...stored, caller_id_reachback: true }, null).caller_id_reachback).toBe(false);
+    expect(stampCallerIdReachback({ ...stored, caller_id_reachback: true }, null, phones).caller_id_reachback).toBe(false);
   });
 
-  test('the processor stamps the reachback from the ADOPTED V2 extraction, after every exit that skips the lead step (pre-push P1 x2)', () => {
+  test('the processor stamps the reachback from the ADOPTED V2 extraction and the lead phone, after every exit that skips the lead step (pre-push P1 x3)', () => {
     // 1. A valid V2 result in shadow mode, or with CALL_EXTRACTION_V2_PRIMARY=false,
     //    may not drive the canonical writes: the stamp reads only the extraction
     //    the adoption block used.
     // 2. A call that leaves before the lead step (the hard veto, the tech
     //    follow-up, spam or a non-lead voicemail) never stores the stamp, so the
     //    ads attribution mirror cannot treat it as a linked phone-only call.
+    // 3. The stamp compares the phone Step 4b keys the lead on with the call's
+    //    own number, both resolved before it.
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     const at = (needle) => {
       expect(src.split(needle).length - 1).toBe(1);
@@ -1463,7 +1477,7 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     const decl = at('let adoptedV2Extraction = null;');
     const assign = at('adoptedV2Extraction = v2Result.extraction;');
     const blockEnd = src.indexOf('\n    }\n', adoptionIf);
-    const stamp = at('extracted = stampCallerIdReachback(extracted, adoptedV2Extraction);');
+    const stamp = at('extracted = stampCallerIdReachback(extracted, adoptedV2Extraction, { leadPhone: phone, callerId: contactPhone });');
     // Declared before the adoption block, assigned only inside it.
     expect(decl).toBeLessThan(adoptionIf);
     expect(assign).toBeGreaterThan(adoptionIf);
@@ -1476,6 +1490,9 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     expect(stamp).toBeGreaterThan(at("return { success: true, skipped: true, reason: 'v2_canonical_write_blocked' };"));
     expect(stamp).toBeLessThan(at('// Step 4: Update call log with extraction results.'));
     expect(stamp).toBeLessThan(at('hasWorkableLeadSignal({ extracted, phone, voicemail: extracted.is_voicemail === true })'));
+    // `phone` is Step 3's resolved lead phone and `contactPhone` the call's own number.
+    expect(stamp).toBeGreaterThan(at('    const phone = resolveCallContactPhone(call, extracted.phone);'));
+    expect(stamp).toBeGreaterThan(at('    const contactPhone = resolveCallContactPhone(call);'));
   });
 
   test('normalizeCallExtraction carries is_lead + call_type through', () => {
