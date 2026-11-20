@@ -73,7 +73,7 @@ const { dayDepartureMinutes } = require('../scheduling/departure-time');
 const { shiftDateStr } = require('../auto-dispatch/dates');
 const { isUnplacedDueDate } = require('../auto-dispatch/move-rules');
 const mowingDays = require('../auto-dispatch/mowing-days');
-const { rainFitFor, isWetWindow, withCatalogKeys, RAIN_PCT } = require('../scheduling/rain-fit');
+const { rainFitFor, isWetWindow, withCatalogKeys, bookingServiceList, OVERFLOW_SERVICE, RAIN_PCT } = require('../scheduling/rain-fit');
 const { ZONE_COORDS } = require('../scheduling/forecast-zones');
 const { loadReminderOffIds } = require('../auto-dispatch/reminder-off');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
@@ -248,9 +248,14 @@ async function planVisitCandidate(conn, row, day, addOns) {
   const oneOff = pattern === LAWN_ROUNDS_9 ? (date) => roundsRowMoveIsOneOff(loaded.service, date) : () => true;
   return { ...loaded, deactivated, holds, prospective: true, label: loaded.service.service_type || row.service_type,
     // Its stored services (the row and its add-ons), as the move screens name them (rain-fit.js storedVisitServices): the
-    // key snapshot, else the catalog key of its service id, else the name. Read only when the rain rule needs them.
-    rainServices: () => Promise.all([loaded.service, ...extra].map(async (svc) => ({
-      name: svc.service_type, serviceKey: svc.service_key_snapshot || await catalogKeyById(conn, svc.service_id) }))),
+    // key snapshot, else the catalog key of its service id, else the name; deduplicated and capped as they count them
+    // (bookingServiceList: a service past the cap counts as outdoor work). Read only when the rain rule needs them.
+    rainServices: async () => {
+      const pairs = await Promise.all([loaded.service, ...extra].map(async (svc) => ({
+        name: svc.service_type, key: svc.service_key_snapshot || await catalogKeyById(conn, svc.service_id) })));
+      const { services, overflow } = bookingServiceList(pairs);
+      return overflow ? [...services, OVERFLOW_SERVICE] : services;
+    },
     dayOpen: (date) => date >= earliest && date < day && oneOff(date) && clampDateToSeason(pattern, date) === date
       && !mowingDays.blocksLive(date, mowing) };
 }

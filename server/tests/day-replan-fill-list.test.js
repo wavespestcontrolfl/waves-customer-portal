@@ -1018,6 +1018,10 @@ describe('fillList', () => {
     const unkeyed = { ...row, service_id: 'svc-bait' };
     expect(await visitRain(unkeyed, { key: null, catalog: [{ id: 'svc-bait', service_key: 'rodent_bait_quarterly' }] })).toBe('in');
     expect(await visitRain(unkeyed, { key: null })).toBe('out');
+    // Counted as the move screens count them: at most 12 services; one more counts as outdoor work.
+    const baitChecks = (n) => Array.from({ length: n }, (_, i) => ({ scheduled_service_id: 'v1', service_id: null, service_name: `Bait Check ${i}`, service_key_snapshot: 'rodent_bait_quarterly' }));
+    expect(await visitRain(row, { addOns: baitChecks(11) })).toBe('in');
+    expect(await visitRain(row, { addOns: baitChecks(12) })).toBe('out');
     // Work of no known class (a general appointment) is not rain-safe work: it stays out of rain hours too.
     expect(await visitRain({ ...row, service_type: 'General Appointment' }, { key: 'general_appointment' })).toBe('out');
     // A lead's visit by its catalog key: an inspection whose name reads as outside work is still rain-safe.

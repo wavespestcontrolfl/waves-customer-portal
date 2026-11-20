@@ -182,6 +182,43 @@ describe('withCatalogKeys', () => {
     expect(resolver).toHaveBeenLastCalledWith({ service_type: 'Waves Assessment', service_key_snapshot: 'pest_quarterly' }, {}, { strict: true });
   });
 
+  test('strict: a key the resolver does not return (gone from the catalog) decides, never the name\'s row', async () => {
+    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+    // No row has the stored key, so the resolver falls back to the name: an assessment.
+    const withKeys = load(jest.fn(async () => ({ serviceKey: 'waves_assessment', findingsType: 'assessment' })));
+    const item = { name: 'Waves Assessment', serviceKey: 'pest_retired' };
+    expect(await withKeys([item], {})).toEqual([{ name: 'Waves Assessment', serviceKey: 'waves_assessment', findingsType: 'assessment' }]);
+    const strict = await withKeys([item], {}, { strict: true });
+    expect(strict).toEqual([{ name: 'Waves Assessment', serviceKey: 'pest_retired', findingsType: null }]);
+    expect(rainFitFor(strict)).toBe('avoid');
+  });
+
+  test('bookingServiceList: deduplicated by key and name, capped at 12 (overflow), the primary added unless named', () => {
+    const { bookingServiceList } = require('../services/scheduling/rain-fit');
+    const pairs = Array.from({ length: 13 }, (_, i) => ({ name: `Bait Check ${i}`, key: 'rodent_bait_quarterly' }));
+    const twelve = bookingServiceList(pairs.slice(0, 12));
+    expect([twelve.services.length, twelve.overflow]).toEqual([12, false]);
+    expect(twelve.services[11]).toEqual({ name: 'Bait Check 11', serviceKey: 'rodent_bait_quarterly' });
+    expect(bookingServiceList(pairs)).toEqual({ services: twelve.services, overflow: true });
+    expect(bookingServiceList([{ name: ' Lawn Care ', key: 'lawn_care_monthly' }, { name: 'lawn care', key: 'lawn_care_monthly' }, { name: 'X', key: 'Bad Key!' }, { name: ' ' }, null], 'LAWN CARE'))
+      .toEqual({ services: [{ name: 'Lawn Care', serviceKey: 'lawn_care_monthly' }, { name: 'X', serviceKey: null }], overflow: false });
+    expect(bookingServiceList([], ' WDO Inspection ')).toEqual({ services: [{ name: 'WDO Inspection', serviceKey: null }], overflow: false });
+    // The primary past the cap overflows too.
+    expect(bookingServiceList(pairs.slice(0, 12), 'WDO Inspection').overflow).toBe(true);
+  });
+
+  test('bookingServices: past 12 services the booking carries the overflow entry (outdoor)', async () => {
+    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+    load(jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null })));
+    const { bookingServices, rainFitFor: fit } = require('../services/scheduling/rain-fit');
+    const names = Array.from({ length: 13 }, (_, i) => `Bait Check ${i}`);
+    const keys = names.map(() => 'rodent_bait_quarterly');
+    const twelve = await bookingServices({ bestRows: true, serviceTypes: names.slice(0, 12), serviceKeys: keys.slice(0, 12) }, {});
+    expect([twelve.length, fit(twelve)]).toEqual([12, 'prefer']);
+    const thirteen = await bookingServices({ bestRows: true, serviceTypes: names, serviceKeys: keys }, {});
+    expect([thirteen.length, thirteen[12], fit(thirteen)]).toEqual([13, { name: 'More services', serviceKey: 'booking_services_over_cap', findingsType: null }, 'avoid']);
+  });
+
   test('gate on: each name gets the identity its visit would have', async () => {
     process.env.GATE_BOOKING_RAIN_RANK = 'true';
     const resolver = jest.fn(async ({ service_type: name }) => (name === 'Rodent Trapping Service'
