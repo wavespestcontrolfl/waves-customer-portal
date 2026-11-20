@@ -320,13 +320,14 @@ function LetterBox({ letter }) {
 // stale: the page's last read of the offer, or of the application, failed (a background re-read
 // after a stage change, say), so the data on screen may be out of date. The card turns its
 // actions off then; the form stays read-only until a read works (Try again re-reads both).
-function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, onChanged, onSent, onBusyChange }) {
+function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, onClose, onChanged, onSent, onBusyChange }) {
   const [edits, setEdits] = useState({});
   const [draftId, setDraftId] = useState(() => initialDraftId(draft, data));
   const [pinned, setPinned] = useState(() => reviewedDraft(data, initialDraftId(draft, data)));
-  // The offers out as the owner reviewed them: when the form opened, or at Show the new version. Send carries this
+  // The offers out as the owner reviewed them: on the card before the action that opened the form (seenOut: a Revise
+  // opens it only after a write and a read), else when it opened; then at Continue with this draft. Send carries this
   // stamp, never a later read's, so the server refuses a send over a change the owner has not seen (OFFERS_CHANGED).
-  const [reviewedOut, setReviewedOut] = useState(() => data.outStamp);
+  const [reviewedOut, setReviewedOut] = useState(() => seenOut ?? data.outStamp);
   const [needRead, setNeedRead] = useState(false);
   // Set when the server refused a write as stale. The form stays read-only, with the owner's
   // edits on screen, until they load the new version or close the form.
@@ -394,9 +395,9 @@ function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, on
   };
 
   // Try again after a failed read. After a save it pins the saved draft; if the read shows
-  // that draft is gone (another admin sent or discarded it), the form closes and the card
-  // shows the offer's state. After a refused write, or one that found offers turned off, it
-  // only re-reads: the owner still picks, and edits stay on screen.
+  // that draft is gone (another admin sent or discarded it), a form with nothing typed closes
+  // and the card shows the offer's state. After a refused write, or one that found offers
+  // turned off, it only re-reads: the owner still picks, and edits stay on screen.
   const reread = async () => {
     if (conflict || lost || off) {
       const next = await onChanged();
@@ -408,7 +409,11 @@ function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, on
     }
     const expected = pinned?.id || draftId;
     const next = await refresh(expected);
-    if (next && expected && !reviewedDraft(next, expected)) onClose();
+    if (!next || !expected || reviewedDraft(next, expected)) return;
+    // The draft is gone. With typed edits, the form stays read-only and says so, as after any read of that state: the
+    // owner closes it and loses nothing unseen.
+    if (dirty) setNeedRead(false);
+    else onClose();
   };
   const retryRead = () => run(reread);
 
@@ -618,7 +623,7 @@ function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, on
   );
 }
 
-export default function OfferDialog({ open, applicationId, contact, data, draft, stale = false, onClose, onChanged, onSent }) {
+export default function OfferDialog({ open, applicationId, contact, data, draft, seenOut = null, stale = false, onClose, onChanged, onSent }) {
   const [busy, setBusy] = useState(false);
   const name = String(contact?.name || "Applicant");
   const status = (draft || data?.current)?.status;
@@ -636,6 +641,7 @@ export default function OfferDialog({ open, applicationId, contact, data, draft,
           contact={contact}
           data={data}
           draft={draft}
+          seenOut={seenOut}
           stale={stale}
           onClose={onClose}
           onChanged={onChanged}

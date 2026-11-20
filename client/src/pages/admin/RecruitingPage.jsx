@@ -1087,6 +1087,8 @@ export default function RecruitingPage() {
   }, []);
 
   const offerFlow = useOfferFlow(detail?.id, detail?.status);
+  // The offer form open now, if any: the draft it opened on, the offers out the owner saw first, and its key.
+  const { draft: formDraft, seenOut, key: formKey } = offerFlow.form || {};
   const stageWorkflow = useStageChangeWorkflow(detail, tab, load, applyStageAnswer, Boolean(detailRefreshError), offerFlow.reload);
   const detailIdRef = useRef(null);
   detailIdRef.current = detail?.id ?? null;
@@ -1317,11 +1319,12 @@ export default function RecruitingPage() {
         applicationId={detail?.id}
         contact={detail?.contact_snapshot}
         data={offerFlow.data}
-        draft={offerFlow.form?.draft}
+        draft={formDraft}
+        seenOut={seenOut}
         stale={Boolean(offerFlow.refreshError || detailRefreshError)}
         // Bound to the form open at this render: a close from an action that started in it (a Try again whose read
         // finds the draft gone) cannot close a form opened since.
-        onClose={() => offerFlow.closeForm(offerFlow.form?.key)}
+        onClose={() => offerFlow.closeForm(formKey)}
         onChanged={refreshAfterOffer}
         onSent={refreshAfterOffer}
       />

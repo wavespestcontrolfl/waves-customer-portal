@@ -251,7 +251,7 @@ function closeStillValid(target, { offer, draft, canAct }) {
   return canAct && Boolean(now) && now.status === target.status && (target.status !== "draft" || now.draftHash === target.draftHash);
 }
 
-export default function OfferTimeline({ applicationId, firstName, offer, draft, history, canMakeOffer, ownerActions, stale = false, onMakeOffer, onChanged, onOpenDraft, onEdit }) {
+export default function OfferTimeline({ applicationId, firstName, offer, draft, history, outStamp, canMakeOffer, ownerActions, stale = false, onMakeOffer, onChanged, onOpenDraft, onEdit }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [closing, setClosing] = useState(null); // the offer record being withdrawn or discarded
@@ -292,7 +292,9 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
       // may have sent it meanwhile: the refreshed card then shows where it stands.
       const next = await onChanged();
       const held = next ? [next.draft, next.current].find((o) => o?.id === draft.id) : null;
-      if (held?.status === "draft") onOpenDraft(held);
+      // The form opens on the offers out as this card showed them before the Revise (outStamp, from the render the
+      // owner pressed it in), so an answer or a date request that landed meanwhile shows in the form before any Send.
+      if (held?.status === "draft") onOpenDraft(held, outStamp);
       else if (next && !held) setError("The new draft could not be loaded. Try again.");
     });
 

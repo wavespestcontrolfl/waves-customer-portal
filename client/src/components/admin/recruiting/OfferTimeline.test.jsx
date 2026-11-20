@@ -28,6 +28,7 @@ function card(props = {}) {
       offer={record()}
       draft={null}
       history={[]}
+      outStamp="out-1"
       canMakeOffer={false}
       ownerActions
       stale={false}
@@ -106,9 +107,10 @@ describe("OfferTimeline", () => {
     expect(onOpenDraft).not.toHaveBeenCalled();
     expect(screen.queryByText("The new draft could not be loaded. Try again.")).toBeNull();
     unmount();
-    render(card({ onOpenDraft, onChanged: async () => ({ current: record(), draft: revision }) }));
+    render(card({ onOpenDraft, onChanged: async () => ({ current: record(), draft: revision, outStamp: "out-2" }) }));
     fireEvent.click(screen.getByRole("button", { name: "Revise" }));
-    await waitFor(() => expect(onOpenDraft).toHaveBeenCalledWith(revision));
+    // The form opens on the offers out this card showed before the Revise, not the read after it.
+    await waitFor(() => expect(onOpenDraft).toHaveBeenCalledWith(revision, "out-1"));
   });
 
   // Two signed copies in the history: while one loads, every signed-copy button waits, so a slower read can never

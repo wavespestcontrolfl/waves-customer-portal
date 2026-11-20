@@ -278,6 +278,29 @@ describe("OfferDialog", () => {
     expect(rate()).toBeEnabled();
   });
 
+  // Typed edits on a saved draft, then a background read fails. Try again's read shows the draft gone (another admin
+  // sent it): the form keeps the edits, read-only, and says so, as after any read of that state. The owner closes it.
+  it("keeps the typed edits when Try again finds the draft gone, and says the draft is no longer open", async () => {
+    const outside = {};
+    render(<Harness initial={panel(draftRow())} reads={[panel(draftRow({ status: "sent" }))]} outside={outside} />);
+    fireEvent.change(rate(), { target: { value: "24" } });
+    act(() => outside.fail());
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("This draft is no longer open. Close this form to see the offer.")).toBeInTheDocument();
+    expect(rate()).toHaveValue("24");
+    expect(rate()).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Send offer" })).toBeNull();
+  });
+
+  // With nothing typed, the same Try again closes the form, and the card shows where the offer stands.
+  it("closes the form when Try again finds the draft gone and nothing was typed", async () => {
+    const outside = {};
+    render(<Harness initial={panel(draftRow())} reads={[panel(draftRow({ status: "sent" }))]} outside={outside} />);
+    act(() => outside.fail());
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.queryByLabelText("Hourly rate ($)")).toBeNull());
+  });
+
   // The send's result shows at once, but the card behind still shows the draft until the read after the send lands.
   it("keeps Close off until the read after a send lands", async () => {
     let landed;

@@ -15,7 +15,7 @@ const IDLE = { id: null, status: "idle", data: null, error: null };
  */
 export default function useOfferFlow(applicationId, applicationStatus) {
   const [state, setState] = useState(IDLE);
-  const [form, setForm] = useState(null); // null = closed, else { draft, key }
+  const [form, setForm] = useState(null); // null = closed, else { draft, key, seenOut }
   const seq = useRef(0);
   const formSeq = useRef(0); // each opened form gets its own key, so a close can name the form it is for
   // The application the page has open now. Every async result carries the id
@@ -90,8 +90,10 @@ export default function useOfferFlow(applicationId, applicationStatus) {
     refreshError: status === "ready" ? mine.refreshError || null : null,
     ownerActions: status === "ready" && mine.data?.viewer?.ownerActions === true,
     form,
-    openForm: (draft = null, forId = openId.current) => {
-      if (forId === openId.current) setForm({ draft, key: ++formSeq.current });
+    // seenOut: the offers out the owner saw before the action that opens the form, when a write and a read come
+    // between (Revise); the form starts from it instead of the read it opens on.
+    openForm: (draft = null, forId = openId.current, seenOut = null) => {
+      if (forId === openId.current) setForm({ draft, key: ++formSeq.current, seenOut });
     },
     // Closes the form only while it is the one `key` names. An action that finishes after the owner opened another
     // form (for another applicant, or again for this one) leaves that form and its edits alone.

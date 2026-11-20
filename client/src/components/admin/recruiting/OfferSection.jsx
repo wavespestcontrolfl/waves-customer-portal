@@ -57,10 +57,11 @@ export default function OfferSection({ detail, offerFlow, onChanged, detailStale
         offer={current}
         draft={data.draft || null}
         history={history}
+        outStamp={data.outStamp}
         canMakeOffer={canMakeOffer}
         onMakeOffer={() => openForm(null, detail.id)}
         onChanged={onChanged}
-        onOpenDraft={(draft) => openForm(draft, detail.id)}
+        onOpenDraft={(draft, seenOut) => openForm(draft, detail.id, seenOut)}
         onEdit={() => openForm(data.current, detail.id)}
       />
       </>

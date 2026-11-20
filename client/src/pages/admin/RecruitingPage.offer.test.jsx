@@ -462,6 +462,32 @@ describe('RecruitingPage offer flow: timeline card', () => {
     expect(calls.find((c) => c.path.endsWith('/revise')).body).toEqual({ expectedStatus: 'sent' });
   });
 
+  // The applicant asks for another date between the Revise and the read after it. The card never showed that request,
+  // so the form names it before anything else, and Send waits for Continue.
+  it('a date request that lands while a Revise runs shows in the form, and Send waits for Continue', async () => {
+    const draft = offerRecord({ id: 'offer-2', startDate: '2027-01-11', supersedesId: 'offer-1', draftHash: 'hash-2' });
+    let revised = false;
+    setupFetch(
+      { 'POST /admin/careers/app-1/offer/offer-1/revise': () => { revised = true; return res(200, { offer: draft }); } },
+      {
+        offer: () => res(200, revised
+          ? offerPayload({
+            current: { ...sent, status: 'date_requested', requestedStartDate: '2027-01-18', dateRequestNote: 'Need two more weeks' },
+            draft, sendReplacesId: 'offer-1', outStamp: 'out-stamp-2',
+          })
+          : offerPayload({ current: sent })),
+        detail: detailFixture({ status: 'offer' }),
+      },
+    );
+    const card = await openCard();
+    fireEvent.click(within(card).getByRole('button', { name: 'Revise' }));
+    expect(await screen.findByText(/changed after you opened this form\. Asked to start Mon, Jan 18, 2027\. Note: Need two more weeks/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Hourly rate ($)')).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Send offer' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue with this draft' }));
+    expect(screen.getByLabelText('Hourly rate ($)')).toBeEnabled();
+  });
+
   it('Withdraw asks first, then posts', async () => {
     const { calls } = setupFetch(
       { 'POST /admin/careers/app-1/offer/offer-1/withdraw': () => res(200, { offer: { ...sent, status: 'withdrawn' } }) },
