@@ -4465,9 +4465,10 @@ router.get('/', async (req, res, next) => {
       // phone in the batch's whereIn (AGENTS.md, PII in logs). The driver code is enough.
       logger.warn(`[estimates] call-list lastCalledAt read failed (${err?.code || 'no code'})`);
     }
-    // The newest call outcome tapped on each row (POST /:id/call-outcome), one batched read. A failed read costs only
-    // the field (lastCallOutcome stays null).
-    let lastCallOutcomeById = new Map();
+    // The newest call outcome tapped on each row (POST /:id/call-outcome), one batched read. A failed read marks every
+    // row callOutcomeUnknown, and the shared rule then keeps it off Call today: a row someone logged must not come
+    // back because the read failed (the 9 AM push sends nothing then).
+    let lastCallOutcomeById = null;
     try {
       lastCallOutcomeById = await lastCallOutcomeByEstimateId(db, estimates.map((e) => e.id));
     } catch (err) {
@@ -4540,7 +4541,8 @@ router.get('/', async (req, res, next) => {
           ...callTodayFields(e, {
             lastClickedAt: clickStats.get(e.id)?.last_clicked_at,
             lastCalledAt: lastCalledById.get(e.id),
-            lastCallOutcome: lastCallOutcomeById.get(e.id),
+            lastCallOutcome: lastCallOutcomeById?.get(e.id),
+            callOutcomeUnknown: !lastCallOutcomeById,
             undeliveredSelfServe: require('../services/self-serve-estimates').isUndeliveredSelfServe(e.source, estData),
           }),
           source: e.source || 'manual',

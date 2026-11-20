@@ -32,6 +32,13 @@ function lastEngagementMs(estimate) {
   return stamps.length ? Math.max(...stamps) : null;
 }
 
+// The row checks every Call today row passes, held rows on the page too: a VIEWED, unarchived offer someone delivered,
+// with a phone to call.
+function isCallableEstimate(estimate) {
+  if (estimate?.status !== 'viewed' || estimate.archivedAt || estimate.undeliveredSelfServe) return false;
+  return !!String(estimate.customerPhone || '').trim();
+}
+
 // Call today = the hot window the 48h "Going cold" check misses: a VIEWED
 // offer whose last customer touch was 2h–48h ago and that nobody has phoned, followed up on or logged a call outcome
 // for since. Every outcome counts (owner 2026-11-20, D1 A), No answer and Call back too: the row comes back only when
@@ -42,9 +49,10 @@ function lastEngagementMs(estimate) {
 // card). The list route and the 9 AM push both set it through callTodayFields, from one rule
 // (server/services/self-serve-estimates.js): the customer opened it from the portal, and the
 // mint promises no follow-up.
+// A row whose call outcomes could not be read (callOutcomeUnknown: the list route's batched read failed) is withheld:
+// a failed read must not put a row someone already logged back on the list. The 9 AM push sends nothing then.
 function isCallTodayEstimate(estimate, nowMs = Date.now()) {
-  if (estimate?.status !== 'viewed' || estimate.archivedAt || estimate.undeliveredSelfServe) return false;
-  if (!String(estimate.customerPhone || '').trim()) return false;
+  if (!isCallableEstimate(estimate) || estimate.callOutcomeUnknown) return false;
   const last = lastEngagementMs(estimate);
   if (last == null) return false;
   const age = nowMs - last;
@@ -57,4 +65,4 @@ function isCallTodayEstimate(estimate, nowMs = Date.now()) {
   return true;
 }
 
-module.exports = { HOUR, CALL_OUTCOMES, lastEngagementMs, isCallTodayEstimate };
+module.exports = { HOUR, CALL_OUTCOMES, lastEngagementMs, isCallableEstimate, isCallTodayEstimate };

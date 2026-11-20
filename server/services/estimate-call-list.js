@@ -168,7 +168,7 @@ function estimateListQuery(database, { status, sentOnly = false, sources = null,
  *   three values read in batches (short_codes, call_log, activity_log), and the self-serve rule's answer for the row
  *   (services/self-serve-estimates.js)
  */
-function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null, lastCallOutcome = null, undeliveredSelfServe = false } = {}) {
+function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null, lastCallOutcome = null, callOutcomeUnknown = false, undeliveredSelfServe = false } = {}) {
   const hasBeenSent = !!row.sent_at;
   return {
     status: row.status,
@@ -182,6 +182,8 @@ function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null, lastC
     lastCalledAt: lastCalledAt || null,
     // The newest outcome tapped on the row, { outcome, at, by }, or null.
     lastCallOutcome: lastCallOutcome || null,
+    // The outcome read failed, so null above proves nothing: the shared rule withholds the row from Call today.
+    callOutcomeUnknown: Boolean(callOutcomeUnknown),
     // A self-serve quote nobody delivered (plan restart, plan start, report card) never makes the
     // list: the zero-follow-up contract (services/self-serve-estimates.js). The caller passes the
     // rule's answer.

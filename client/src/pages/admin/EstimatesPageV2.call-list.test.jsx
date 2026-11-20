@@ -17,7 +17,9 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import EstimatesPageV2, {
+  CALL_OUTCOMES_UNREAD_NOTE,
   callOutcomeLine,
+  callOutcomesUnreadNote,
   useCallOutcomes,
 } from "./EstimatesPageV2";
 
@@ -109,6 +111,8 @@ let patches;
 let posts;
 let savedOutcomes;
 let listRows;
+// The list route's outcome read failed: every row comes back callOutcomeUnknown, with no outcome.
+let outcomesUnread;
 
 // The page's current URL and a navigate function, read from inside the router.
 const routerProbe = { search: null, navigate: null };
@@ -136,6 +140,7 @@ beforeEach(() => {
   posts = [];
   savedOutcomes = new Map();
   listRows = ROWS;
+  outcomesUnread = false;
   window.HTMLElement.prototype.scrollIntoView = vi.fn();
   vi.stubGlobal(
     "fetch",
@@ -161,7 +166,9 @@ beforeEach(() => {
       if (parsed.pathname === "/api/admin/estimates") {
         if (parsed.searchParams.get("archived") === "only") return response({ estimates: [] });
         if (parsed.searchParams.get("status") === "draft") return response({ estimates: [] });
-        const rows = listRows.map((r) => (savedOutcomes.has(r.id) ? { ...r, lastCallOutcome: savedOutcomes.get(r.id) } : r));
+        const rows = outcomesUnread
+          ? listRows.map((r) => ({ ...r, lastCallOutcome: null, callOutcomeUnknown: true }))
+          : listRows.map((r) => (savedOutcomes.has(r.id) ? { ...r, lastCallOutcome: savedOutcomes.get(r.id) } : r));
         return response({ estimates: rows, truncated: false });
       }
       return response({ resolved: 0, drafted: 0, sources: [] });
@@ -458,6 +465,68 @@ it.each([
   expect(posts.at(-1)).toEqual({ path: "/api/admin/estimates/v-5h/call-outcome", body: { outcome: "booked" } });
 });
 
+// The hold is for the caller to log the call they placed from Call today, so a call from any other list holds nothing,
+// and a held row still needs the rule's row checks (codex pre-push P1s).
+it.each([
+  ["desktop", 1440],
+  ["mobile", 390],
+])("(%s) a call placed from another list holds nothing: once it connects, the row is off Call today", async (_label, width) => {
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  const { container } = renderPage(width, "?tab=estimates");
+  await screen.findByText("Five Hours");
+  fireEvent.click(within(rowOf(container, "v-5h")).getByRole("button", { name: /via Waves$/ }));
+  await waitFor(() => expect(posts.map((p) => p.path)).toEqual(["/api/admin/communications/call"]));
+  listRows = ROWS.map((r) => (r.id === "v-5h" ? { ...r, lastCalledAt: new Date().toISOString() } : r));
+  act(() => routerProbe.navigate("/admin/pipeline?tab=estimates&view=call_today"));
+  await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
+  await settle();
+  expect(rowIds(container)).toEqual(["v-30h"]);
+});
+
+it.each([
+  ["desktop", 1440],
+  ["mobile", 390],
+])("(%s) a held row leaves when the customer accepts during the call", async (_label, width) => {
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  const { container } = renderPage(width, "?tab=estimates&view=call_today");
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  fireEvent.click(within(rowOf(container, "v-5h")).getByRole("button", { name: /via Waves$/ }));
+  await waitFor(() => expect(posts.map((p) => p.path)).toEqual(["/api/admin/communications/call"]));
+  listRows = ROWS.map((r) =>
+    r.id === "v-5h" ? { ...r, status: "accepted", lastCalledAt: new Date().toISOString() } : r,
+  );
+  act(() => routerProbe.navigate("/admin/pipeline?tab=estimates&view=call_today"));
+  await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
+  await settle();
+  expect(rowIds(container)).toEqual(["v-30h"]);
+  expect(screen.queryByRole("group", { name: "Call outcome for Five Hours" })).not.toBeInTheDocument();
+});
+
+// A failed outcome read must not put a logged row back on the list (codex pre-push P1): Call today withholds every
+// row and says why.
+it.each([
+  ["desktop", 1440],
+  ["mobile", 390],
+])("(%s) when the outcomes cannot be read, Call today pauses with a note and a tapped row stays off", async (_label, width) => {
+  const { container } = renderPage(width, "?tab=estimates&view=call_today");
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  expect(screen.queryByText(CALL_OUTCOMES_UNREAD_NOTE)).not.toBeInTheDocument();
+  outcomesUnread = true;
+  fireEvent.click(within(rowOf(container, "v-5h")).getByRole("button", { name: "No answer" }));
+  expect(await screen.findByText(CALL_OUTCOMES_UNREAD_NOTE)).toBeInTheDocument();
+  expect(rowIds(container)).toEqual([]);
+  expect(posts).toEqual([{ path: "/api/admin/estimates/v-5h/call-outcome", body: { outcome: "no_answer" } }]);
+});
+
+it("the unread note shows only on Call today, and only when a row's outcomes could not be read", () => {
+  const unread = [viewed("u-1", "Unread", 5 * HOUR, { callOutcomeUnknown: true })];
+  const read = [viewed("r-1", "Read", 5 * HOUR, { callOutcomeUnknown: false })];
+  expect(callOutcomesUnreadNote(unread, "call_today")).toBe(CALL_OUTCOMES_UNREAD_NOTE);
+  expect(callOutcomesUnreadNote(unread, "all")).toBe("");
+  expect(callOutcomesUnreadNote(read, "call_today")).toBe("");
+  expect(callOutcomesUnreadNote([], "call_today")).toBe("");
+});
+
 it.each([
   ["desktop", 1440],
   ["mobile", 390],
@@ -499,4 +568,21 @@ it("a held row leaves once anyone logs an outcome after the call was placed, not
   expect(result.current.onCallToday({ ...called, lastCallOutcome: earlier })).toBe(true);
   const later = { outcome: "booked", at: new Date(Date.now() + 1000).toISOString(), by: "Virginia" };
   expect(result.current.onCallToday({ ...called, lastCallOutcome: later })).toBe(false);
+});
+
+it("a held row keeps the rule's row checks; only the answered call and a touch during the call are set aside", () => {
+  const { result } = renderHook(() =>
+    useCallOutcomes({ setEstimates: vi.fn(), refresh: vi.fn(), onNotInterested: vi.fn() }),
+  );
+  const now = new Date().toISOString();
+  const called = viewed("h-2", "Held Offer", 5 * HOUR, { lastCalledAt: now });
+  act(() => result.current.hold("h-2"));
+  expect(result.current.onCallToday(called)).toBe(true);
+  // The customer opens the estimate during the call: too fresh for the rule, still held.
+  expect(result.current.onCallToday({ ...called, lastViewedAt: now })).toBe(true);
+  expect(result.current.onCallToday({ ...called, status: "accepted" })).toBe(false);
+  expect(result.current.onCallToday({ ...called, archivedAt: now })).toBe(false);
+  expect(result.current.onCallToday({ ...called, callOutcomeUnknown: true })).toBe(false);
+  // Not held: the rule alone.
+  expect(result.current.onCallToday({ ...called, id: "h-other" })).toBe(false);
 });

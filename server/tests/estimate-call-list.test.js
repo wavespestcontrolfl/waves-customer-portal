@@ -462,6 +462,10 @@ describe('call outcomes', () => {
     const older = { outcome: 'call_back', at: '2026-11-20T08:00:00Z', by: 'Virginia' };
     expect(isCallTodayEstimate(callTodayFields(stored, { lastCallOutcome: older }), now)).toBe(true);
     expect(callTodayFields(stored).lastCallOutcome).toBeNull();
+    // A failed outcome read (codex pre-push P1): the row says so, and the shared rule withholds it.
+    expect(callTodayFields(stored).callOutcomeUnknown).toBe(false);
+    expect(callTodayFields(stored, { callOutcomeUnknown: true }).callOutcomeUnknown).toBe(true);
+    expect(isCallTodayEstimate(callTodayFields(stored, { callOutcomeUnknown: true }), now)).toBe(false);
   });
 
   test('the list route and the 9 AM push both read outcomes through the one batched read', () => {

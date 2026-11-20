@@ -58,6 +58,7 @@ import PipelineAnalytics, {
 // The Call today rule's one home, shared with the 9 AM push.
 import {
   CALL_OUTCOMES,
+  isCallableEstimate,
   isCallTodayEstimate,
   lastEngagementMs,
 } from "@estimate-call-today";
@@ -346,9 +347,11 @@ function sortOldestEngagementFirst(rows) {
 }
 // Call today outcomes (owner 2026-11-20, D1 A). One tap on a row saves what the call came to (Booked, Call back,
 // Not interested, No answer) with who and when, and the saved outcome takes the row off the list by the shared rule
-// until the customer opens or taps the estimate again. A call placed from the list keeps its row on screen until
-// someone taps an outcome, even after the call connects (the answered call alone takes a row off), so whoever called
-// can log it. "Not interested" also opens the Mark lost box. Only records: the route texts, emails and calls nobody.
+// until the customer opens or taps the estimate again. A call placed from the Call today list keeps its row on screen
+// until someone taps an outcome, even after the call connects (the answered call alone takes a row off) or the
+// customer opens the estimate during the call, so whoever called can log it. A held row still passes the rule's row
+// checks (a viewed, unarchived offer with a phone): an estimate accepted during the call leaves. "Not interested" also
+// opens the Mark lost box. Only records: the route texts, emails and calls nobody.
 function withoutKey(collection, key) {
   if (!collection.has(key)) return collection;
   const next = new collection.constructor(collection);
@@ -366,8 +369,9 @@ export function useCallOutcomes({ setEstimates, refresh, onNotInterested }) {
     (e) => {
       if (isCallTodayEstimate(e)) return true;
       const placedAt = held.get(e.id);
+      if (placedAt === undefined || !isCallableEstimate(e) || e.callOutcomeUnknown) return false;
       // A held row leaves once anyone logs an outcome for it after the call was placed.
-      return placedAt !== undefined && !(Date.parse(e.lastCallOutcome?.at) >= placedAt);
+      return !(Date.parse(e.lastCallOutcome?.at) >= placedAt);
     },
     [held],
   );
@@ -403,6 +407,14 @@ function matchesListFilter(e, filter, callOutcomes) {
   return filter === "call_today"
     ? callOutcomes.onCallToday(e)
     : estimateMatchesFilter(e, filter);
+}
+// The list route could not read the saved outcomes, so the shared rule withholds every row from Call today.
+export const CALL_OUTCOMES_UNREAD_NOTE =
+  "Call today is paused: the saved call outcomes could not be read. Reload the page to try again.";
+export function callOutcomesUnreadNote(estimates, filter) {
+  return filter === "call_today" && estimates.some((e) => e.callOutcomeUnknown)
+    ? CALL_OUTCOMES_UNREAD_NOTE
+    : "";
 }
 // A row's newest outcome: "No answer · 9:42 AM · Virginia", with the date when it was not today (ET).
 export function callOutcomeLine(callOutcome, now = new Date()) {
@@ -2662,6 +2674,10 @@ function EstimatePipelineViewV2({
               </Button>
             )}{" "}
           </div>
+          <ViewErrorNote
+            message={callOutcomesUnreadNote(estimates, filter)}
+            className="mb-2"
+          />
           {/* Estimates list */}
           {filtered.length === 0 ? (
             <div className="p-10 text-center text-ui-body text-ink-secondary">
@@ -2854,7 +2870,10 @@ function EstimatePipelineViewV2({
                                     "Call failed: " +
                                       (r?.error || "unknown error"),
                                   );
-                                else if (isCallTodayEstimate(e))
+                                else if (
+                                  filter === "call_today" &&
+                                  isCallTodayEstimate(e)
+                                )
                                   callOutcomes.hold(e.id);
                               } catch (err) {
                                 alert("Call failed: " + err.message);
@@ -4701,6 +4720,10 @@ function EstimatesMobileListView({
       <div className="u-nums text-ui-body text-ink-tertiary text-right mb-3 mt-3">
         {flat.length} result{flat.length !== 1 ? "s" : ""}
       </div>
+      <ViewErrorNote
+        message={callOutcomesUnreadNote(estimates, filter)}
+        className="mb-3"
+      />
       {/* List */}
       {loading ? (
         <div className="p-10 text-center text-ui-body text-ink-secondary">
@@ -4756,7 +4779,8 @@ function EstimatesMobileListView({
               v3Flag={v3Flag}
               onPickReason={setReasonTarget}
               onCalled={(row) => {
-                if (isCallTodayEstimate(row)) callOutcomes.hold(row.id);
+                if (filter === "call_today" && isCallTodayEstimate(row))
+                  callOutcomes.hold(row.id);
               }}
               onCallOutcome={filter === "call_today" ? callOutcomes.save : undefined}
               callOutcomeSaving={callOutcomes.saving.has(e.id)}
