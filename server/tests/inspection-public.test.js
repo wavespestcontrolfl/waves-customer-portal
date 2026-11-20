@@ -2038,13 +2038,14 @@ describe('POST /:token commit', () => {
     // not SLOT_TAKEN: the page shows its address message instead of the times it holds, and builds no fresh times.
     // Pre-push P1 on 756cfc2628: the same when staff also cleared the address on file under a verified review (the row no
     // longer carries its address): the list's own rule would let the typed address through, but the next commit's phase 1
-    // refuses it (reviewRefusesBooking). Either way the retry gets that same refusal and books nothing.
+    // refuses it (reviewRefusesBooking). Either way the retry gets that same refusal and books nothing: the list's rule
+    // refuses the first case before any build, phase 1 refuses the second after the retry's first build.
     test.each([
-      ['sent the address to review', 'needs_pin', {}],
+      ['sent the address to review', 'needs_pin', {}, 1],
       ['cleared the address on file under a verified review', 'verified', {
         address_line1: null, address_line2: null, city: null, state: null, zip: null, latitude: null, longitude: null,
-      }],
-    ])('a same-pin booking refused after staff %s: the answer is address_unresolved, and the retry\'s too', async (_label, status, cleared) => {
+      }, 2],
+    ])('a same-pin booking refused after staff %s: the answer is address_unresolved, and the retry\'s too', async (_label, status, cleared, builds) => {
       Object.assign(mockFarSouthGates, { funnel: true });
       gateState.reviewLive = true;
       let blocked = false;
@@ -2063,7 +2064,7 @@ describe('POST /:token commit', () => {
       seedPhoneHousehold(profile);
       listResults.scheduled_services = [];
       const open = { days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] };
-      mockBuildAvailability.mockResolvedValueOnce(open).mockResolvedValueOnce(open);
+      mockBuildAvailability.mockResolvedValueOnce(open);
       mockCreateSelfBooking.mockImplementationOnce(async () => {
         blocked = true;
         Object.assign(profile, cleared);
@@ -2079,11 +2080,13 @@ describe('POST /:token commit', () => {
       expect(res.body).toEqual({ error: 'address_unresolved' });
       expect(mockBuildAvailability).toHaveBeenCalledTimes(1);
 
+      if (builds > 1) mockBuildAvailability.mockResolvedValueOnce(open);
       const retry = await callPost(token, typed);
 
       expect(retry.statusCode).toBe(422);
       expect(retry.body).toEqual({ error: 'address_unresolved' });
       expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
+      expect(mockBuildAvailability).toHaveBeenCalledTimes(builds);
     });
 
     // Owner rule B per truck (pre-push P1 on 46fd83d04f): the typed city is in no zone while the matched profile's city
