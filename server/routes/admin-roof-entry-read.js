@@ -2,20 +2,21 @@
  * Staff roof read (GATE_ROOF_ENTRY_READ, owner 2026-11-19): the aerial-photo read of likely rodent entry points.
  *
  *   POST  /api/admin/roof-entry-read                run, or reuse (same property within 90 days), a read
- *         body { lat, lng, county, address?, estimate_id?, customer_id? }
+ *         body { lat, lng, county, estimate_id?, customer_id? }; county is Manatee, Sarasota or Charlotte
  *         -> { status: 'ok' | 'no_image' | 'model_failed', cached, read }; read is null unless status is 'ok'
  *   PATCH /api/admin/roof-entry-read/:id/tech-count the technician's final count and flags, to compare with the AI later
  *         body { count?: int >= 0, flags?: { <entry type>: 'yes' | 'no' | 'unsure' } } -> { read }
  *
- * Admin only, like the other admin estimate routes. Gate off = 404 { enabled: false } before any body read,
- * image fetch, model call or database read. Nothing here is customer-facing.
+ * Admin only, like the other admin estimate routes. The gate is checked FIRST, before the staff login reads the
+ * technicians table: gate off = 404 { enabled: false } with no database read, image fetch or model call (a non-admin
+ * sees the same 404 while it is off). Nothing here is customer-facing.
  */
 const express = require('express');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { roofEntryReadLive } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const {
-  ENTRY_TYPES, LIKELY, runRoofEntryRead, saveTechCount,
+  ENTRY_TYPES, LIKELY, countyKey, runRoofEntryRead, saveTechCount,
 } = require('../services/roof-entry-read');
 
 const router = express.Router();
@@ -23,7 +24,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const MAX_TECH_COUNT = 500;
 
 const gateOn = (req, res, next) => (roofEntryReadLive() ? next() : res.status(404).json({ enabled: false }));
-router.use(adminAuthenticate, requireAdmin, gateOn);
+router.use(gateOn, adminAuthenticate, requireAdmin);
 
 const isCoord = (v, limit) => typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= limit;
 const optionalUuid = (v) => v == null || (typeof v === 'string' && UUID_RE.test(v));
@@ -32,11 +33,10 @@ function readInput(body) {
   const b = body && typeof body === 'object' ? body : {};
   const ok = isCoord(b.lat, 90) && isCoord(b.lng, 180)
     && typeof b.county === 'string' && b.county.trim() && b.county.length <= 40
-    && (b.address == null || (typeof b.address === 'string' && b.address.length <= 300))
     && optionalUuid(b.estimate_id) && optionalUuid(b.customer_id);
   if (!ok) return null;
   return {
-    lat: b.lat, lng: b.lng, county: b.county, address: b.address || null,
+    lat: b.lat, lng: b.lng, county: b.county,
     estimateId: b.estimate_id || null, customerId: b.customer_id || null,
   };
 }
@@ -61,13 +61,13 @@ function techCountInput(body) {
 router.post('/', async (req, res, next) => {
   try {
     const input = readInput(req.body);
-    if (!input) return res.status(400).json({ error: 'lat, lng and county are required; address, estimate_id and customer_id are optional' });
+    if (!input) return res.status(400).json({ error: 'lat, lng and county are required; estimate_id and customer_id are optional' });
     const result = await runRoofEntryRead(input);
-    logger.info(`[admin-roof-entry-read] status=${result.status} cached=${result.cached} county=${String(input.county).toLowerCase()}`);
+    logger.info(`[admin-roof-entry-read] status=${result.status} cached=${result.cached} county=${countyKey(input.county) || 'unsupported'}`);
     return res.json(result);
   } catch (err) {
-    // A made-up estimate_id or customer_id breaks the foreign key.
-    if (err.code === '23503') return res.status(400).json({ error: 'Unknown estimate_id or customer_id' });
+    // A missing estimate or customer is refused before any spend; the foreign key still catches one deleted mid-read.
+    if (err.code === 'unknown_reference' || err.code === '23503') return res.status(400).json({ error: 'Unknown estimate_id or customer_id' });
     logger.error(`[admin-roof-entry-read] run failed: ${err.message}`);
     return next(err);
   }

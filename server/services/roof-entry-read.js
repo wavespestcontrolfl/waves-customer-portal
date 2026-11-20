@@ -4,10 +4,12 @@
  * Staff roof read (GATE_ROOF_ENTRY_READ, owner 2026-11-19). From a free county aerial photo of the home, ONE vision
  * call flags which rodent entry-point types the roof likely has, so the technician knows where to look and the
  * estimate is not short. Staff only; nothing here reaches a customer. Every read is a paid model call, so:
- *   - a stored read of the same property is reused for 90 days (no new call);
+ *   - a stored read of the same crop (imagery source + centre rounded to 5 decimals) is reused for 90 days;
  *   - an unknown county or a failed image fetch is { status: 'no_image' } and makes NO model call;
- *   - the model gets one call (no validator-driven retry on a second provider): an answer that fails the strict
- *     schema is stored with tier 'unknown' and no pins, and is never reused.
+ *   - the model gets ONE provider call: the estimateVision policy is cut to its primary route, so a billed answer
+ *     that fails to parse or validate is never retried on the second provider. It is stored with tier 'unknown' and
+ *     no pins, and is never reused;
+ *   - a property is read under a database advisory lock, so two server instances cannot both pay for it.
  * The model gives yes / no / unsure per entry type and up to 6 pins as 0-1 image fractions. It is never asked to
  * count: vision models count poorly, and the technician's own count (saveTechCount) is the ground truth.
  */
@@ -26,6 +28,9 @@ const FETCH_TIMEOUT_MS = 15000;
 const MODEL_TIMEOUT_MS = 60000;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_PINS = 6;
+// The estimateVision policy without its fallback leg: dispatchWithFallback skips a missing route, so one read is
+// one provider call (a billed-but-unusable Gemini answer must not buy a second read from OpenAI).
+const ONE_CALL_POLICY = Object.freeze({ ...MODELS.TEXT_POLICIES.estimateVision, fallback: null });
 
 // Free public county imagery, no key, no paid source. Each service answers an ArcGIS export request for a bounding
 // box; the three were read with a plain GET on 2026-11-19 (a 60 m crop came back as a JPEG).
@@ -68,8 +73,8 @@ const ENTRY_TYPES = Object.freeze([
   'tile_eave_open_ends',
 ]);
 const LIKELY = Object.freeze(['yes', 'no', 'unsure']);
-const TIERS = Object.freeze(['low', 'med', 'high']);
 const TIER_UNKNOWN = 'unknown';
+const TIERS = Object.freeze(['low', 'med', 'high', TIER_UNKNOWN]);
 
 const PIN_SCHEMA = {
   type: 'object',
@@ -116,13 +121,18 @@ Types: ${ENTRY_TYPES.join(', ')}.
 - tile_eave_open_ends: barrel or S-tile roofs with open tile ends at the eave.
 
 For every type give "pins": up to ${MAX_PINS} points marking where you see it, each as {"x": 0-1, "y": 0-1} fractions of the picture width and height, measured from the top-left corner. Use an empty list when the answer is "no" or "unsure".
-Never give counts. Give "tier" for the whole roof: "low" (few places a rodent could get in), "med", or "high" (many or complex places).
-If the picture is blank, or no roof is visible at the centre, answer "unsure" for every type with no pins, and tier "low".
+Pins only go with "yes". Never give counts. Give "tier" for the whole roof: "low" (few places a rodent could get in), "med", or "high" (many or complex places).
+If the roof cannot be read (the picture is blank, cloudy or cut off, or no building is visible at the centre), give tier "unknown" and answer "unsure" for every type with no pins. Never answer "low" for a roof you cannot see.
 Return only JSON: {"flags": {"<type>": {"likely": "...", "pins": [...]}, ...for every type}, "tier": "..."}.`;
 
 // ── Image ─────────────────────────────────────────────────────────────────
 
 const normalizeCounty = (county) => String(county || '').toLowerCase().replace(/\s+county\s*$/, '').trim();
+/** The allowlisted county key ('manatee' | 'sarasota' | 'charlotte'), or null: the only county text that may be logged. */
+const countyKey = (county) => {
+  const key = normalizeCounty(county);
+  return Object.hasOwn(IMAGE_SOURCES, key) ? key : null;
+};
 
 // A square ground crop centred on the home, as a Web Mercator box: a metre on the ground spans 1/cos(lat) mercator
 // units, so the half-width is stretched by that factor to keep the crop square on the ground.
@@ -149,8 +159,9 @@ function exportRequestUrl(src, lat, lng) {
 
 /** The aerial crop as { data (base64), mimeType, source, year }, or null (unknown county, fetch or content failure). */
 async function fetchAerial(lat, lng, county) {
-  const src = IMAGE_SOURCES[normalizeCounty(county)];
-  if (!src) return null;
+  const key = countyKey(county);
+  if (!key) return null;
+  const src = IMAGE_SOURCES[key];
   try {
     const res = await fetch(exportRequestUrl(src, lat, lng), { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     // ArcGIS answers an out-of-range or failed export with a 200 and a JSON body, so the type is checked too.
@@ -159,7 +170,7 @@ async function fetchAerial(lat, lng, county) {
     if (!buffer.length || buffer.length > MAX_IMAGE_BYTES) return null;
     return { data: buffer.toString('base64'), mimeType: 'image/jpeg', source: src.source, year: src.year };
   } catch (err) {
-    logger.warn(`[roof-entry-read] aerial fetch failed county=${normalizeCounty(county)}: ${err.message}`);
+    logger.warn(`[roof-entry-read] aerial fetch failed county=${key}: ${err.message}`);
     return null;
   }
 }
@@ -171,7 +182,8 @@ const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
 function validPins(entry) {
   if (!Array.isArray(entry.pins) || entry.pins.length > MAX_PINS) return null;
-  if (entry.likely === 'no' && entry.pins.length) return null;
+  // Pins mark where a thing IS: only a 'yes' may carry them.
+  if (entry.likely !== 'yes' && entry.pins.length) return null;
   if (!entry.pins.every((p) => isPlainObject(p) && inUnit(p.x) && inUnit(p.y))) return null;
   return entry.pins.map((p) => ({ x: p.x, y: p.y }));
 }
@@ -187,13 +199,15 @@ function validateRead(json) {
     if (!pins) return null;
     flags[type] = { likely: entry.likely, pins };
   }
-  return { flags, tier: json.tier };
+  // An unreadable roof (tier 'unknown') carries no flags, like an answer that failed validation.
+  return { flags: json.tier === TIER_UNKNOWN ? {} : flags, tier: json.tier };
 }
 
-async function estimateCostCents(outcome) {
+/** Estimated spend of one billed leg, in cents: from llm_model_prices, else the ceiling. */
+async function estimateCostCents({ provider, model, usage }) {
   try {
     const { map } = await llmCost.loadPrices();
-    const usd = llmCost.costUsd(outcome.provider, outcome.usage || {}, llmCost.priceFor(map, outcome.model));
+    const usd = llmCost.costUsd(provider, usage || {}, llmCost.priceFor(map, model));
     if (usd != null && Number.isFinite(usd)) return Math.max(1, Math.ceil(usd * 100));
   } catch (err) {
     logger.warn(`[roof-entry-read] price lookup failed: ${err.message}`);
@@ -203,10 +217,9 @@ async function estimateCostCents(outcome) {
 
 // ── Reads ─────────────────────────────────────────────────────────────────
 
-/** sha256 of the normalized address; without one, of the coordinates rounded to ~1 m. */
-function lookupKey({ address, lat, lng }) {
-  const text = String(address || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  return crypto.createHash('sha256').update(text || `geo:${lat.toFixed(5)},${lng.toFixed(5)}`).digest('hex');
+/** sha256 of the imagery source and the crop centre rounded to 5 decimals (~1 m): the same roof in the same photo. */
+function lookupKey({ source, lat, lng }) {
+  return crypto.createHash('sha256').update(`${source}|${lat.toFixed(5)},${lng.toFixed(5)}`).digest('hex');
 }
 
 const parseJson = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
@@ -229,8 +242,9 @@ function publicRead(row) {
   };
 }
 
-async function findReusable(key) {
-  return db(TABLE)
+// A read with tier 'unknown' (unreadable roof, or an answer that failed validation) is never reused.
+async function findReusable(key, conn = db) {
+  return conn(TABLE)
     .where({ lookup_key: key })
     .whereNot({ ai_tier: TIER_UNKNOWN })
     .whereRaw("created_at > now() - (? * interval '1 day')", [REUSE_DAYS])
@@ -238,11 +252,20 @@ async function findReusable(key) {
     .first();
 }
 
-async function runNewRead({ key, lat, lng, county, estimateId, customerId }) {
-  const image = await fetchAerial(lat, lng, county);
-  if (!image) return { status: 'no_image', cached: false, read: null };
+/** Throws code 'unknown_reference' before any spend when a supplied estimate or customer does not exist. */
+async function assertReferencesExist({ estimateId, customerId }) {
+  const checks = [['estimates', estimateId], ['customers', customerId]];
+  for (const [table, id] of checks) {
+    if (id && !(await db(table).where({ id }).first('id'))) {
+      const err = new Error(`unknown ${table} reference`);
+      err.code = 'unknown_reference';
+      throw err;
+    }
+  }
+}
 
-  const outcome = await dispatchWithFallback(MODELS.TEXT_POLICIES.estimateVision, {
+async function callModel(image) {
+  return dispatchWithFallback(ONE_CALL_POLICY, {
     text: PROMPT,
     images: [{ data: image.data, mimeType: image.mimeType }],
     jsonMode: true,
@@ -252,41 +275,69 @@ async function runNewRead({ key, lat, lng, county, estimateId, customerId }) {
     reasoningEffort: 'low',
     timeoutMs: MODEL_TIMEOUT_MS,
     laneId: 'satellite',
-  }, { reserveFallbackBudget: true });
-  if (!outcome.ok) {
-    logger.warn(`[roof-entry-read] model call failed: ${outcome.reason || 'unknown'}`);
-    return { status: 'model_failed', cached: false, read: null };
-  }
-
-  const checked = validateRead(outcome.json);
-  const [row] = await db(TABLE).insert({
-    estimate_id: estimateId || null,
-    customer_id: customerId || null,
-    lookup_key: key,
-    county: normalizeCounty(county),
-    image_source: image.source,
-    image_year: image.year,
-    model: outcome.model,
-    ai_flags: JSON.stringify(checked ? checked.flags : {}),
-    ai_tier: checked ? checked.tier : TIER_UNKNOWN,
-    cost_estimate_cents: await estimateCostCents(outcome),
-  }).returning('*');
-  return { status: 'ok', cached: false, read: publicRead(row) };
+  });
 }
 
-// One in-flight read per property in this process, so a double tap never pays for two calls.
+// What the one provider call produced, as the row's model, validated read and billed leg. A call that failed but
+// was billed (the provider answered, then the answer could not be parsed) is still on the books as tier 'unknown'.
+function settleOutcome(outcome) {
+  if (outcome.ok) {
+    return { model: outcome.model, checked: validateRead(outcome.json), billed: { provider: outcome.provider, model: outcome.model, usage: outcome.usage } };
+  }
+  const leg = (outcome.failures || []).find((f) => f.usage);
+  return leg ? { model: leg.model, checked: null, billed: leg } : null;
+}
+
+// The paid part, run under the property's advisory lock and one transaction: reuse check again, then image, model
+// call and insert. A second server instance waits on the lock and then finds this row instead of paying again.
+async function readUnderLock({ key, lat, lng, county, estimateId, customerId }) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [key]);
+    const reusable = await findReusable(key, trx);
+    if (reusable) return { status: 'ok', cached: true, read: publicRead(reusable) };
+
+    const image = await fetchAerial(lat, lng, county);
+    if (!image) return { status: 'no_image', cached: false, read: null };
+    const outcome = await callModel(image);
+    const settled = settleOutcome(outcome);
+    if (!settled) {
+      logger.warn(`[roof-entry-read] model call failed: ${outcome.reason || 'unknown'}`);
+      return { status: 'model_failed', cached: false, read: null };
+    }
+    const [row] = await trx(TABLE).insert({
+      estimate_id: estimateId || null,
+      customer_id: customerId || null,
+      lookup_key: key,
+      county: countyKey(county),
+      image_source: image.source,
+      image_year: image.year,
+      model: settled.model,
+      ai_flags: JSON.stringify(settled.checked ? settled.checked.flags : {}),
+      ai_tier: settled.checked ? settled.checked.tier : TIER_UNKNOWN,
+      cost_estimate_cents: await estimateCostCents(settled.billed),
+    }).returning('*');
+    return { status: 'ok', cached: false, read: publicRead(row) };
+  });
+}
+
+// Fast path only: one in-flight read per property in this process. The advisory lock is what holds across instances.
 const inFlight = new Map();
 
 /**
  * Run or reuse a roof read. Returns { status: 'ok' | 'no_image' | 'model_failed', cached, read }.
- * input: { lat, lng, county, address?, estimateId?, customerId? }
+ * input: { lat, lng, county, estimateId?, customerId? }. Throws code 'unknown_reference' for a missing estimate or
+ * customer. An unsupported county answers no_image before any database read.
  */
 async function runRoofEntryRead(input) {
-  const key = lookupKey(input);
+  const county = countyKey(input.county);
+  if (!county) return { status: 'no_image', cached: false, read: null };
+  await assertReferencesExist(input);
+  const src = IMAGE_SOURCES[county];
+  const key = lookupKey({ source: src.source, lat: input.lat, lng: input.lng });
   const reusable = await findReusable(key);
   if (reusable) return { status: 'ok', cached: true, read: publicRead(reusable) };
   if (inFlight.has(key)) return inFlight.get(key);
-  const pending = runNewRead({ ...input, key }).finally(() => inFlight.delete(key));
+  const pending = readUnderLock({ ...input, key }).finally(() => inFlight.delete(key));
   inFlight.set(key, pending);
   return pending;
 }
@@ -310,6 +361,7 @@ module.exports = {
   exportRequestUrl,
   fetchAerial,
   validateRead,
+  countyKey,
   lookupKey,
   runRoofEntryRead,
   saveTechCount,

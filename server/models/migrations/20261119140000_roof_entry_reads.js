@@ -4,11 +4,12 @@
  * roof_entry_reads: one row per staff roof read (GATE_ROOF_ENTRY_READ, owner 2026-11-19). A vision model reads a free
  * county aerial photo of the home and flags the likely rodent entry-point types on the roof, so the technician knows
  * where to look. Staff only; nothing here reaches a customer.
- *   lookup_key           sha256 of the normalized address (or of the rounded coordinates when no address was given):
- *                        a read of the same property is reused for 90 days instead of paying for a new call.
+ *   lookup_key           sha256 of image_source + the crop centre (lat, lng) rounded to 5 decimals: a read of the same
+ *                        roof in the same photo is reused for 90 days instead of paying for a new call. It is also the
+ *                        key of the advisory lock (hashtext) that stops two servers paying for one property.
  *   ai_flags             { <entry type>: { likely: 'yes'|'no'|'unsure', pins: [{ x, y }] } }, pins as 0-1 image fractions.
  *                        {} when the model answer failed validation (ai_tier 'unknown').
- *   ai_tier              'low' | 'med' | 'high' | 'unknown'.
+ *   ai_tier              'low' | 'med' | 'high' | 'unknown' (unreadable roof or failed validation; never reused).
  *   tech_final_count     the entry points the technician found on site; with tech_final_flags it lets us compare
  *                        the AI read with the technician later. Null until the technician reports.
  *   cost_estimate_cents  estimated spend of the one model call (never a billed figure).
