@@ -6803,6 +6803,18 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
             amount: collectedSetupFee,
           });
         }
+        // A recorded setup with no visit anchor is the same original,
+        // unbooked commercial sale as the invoice-first route. Cash/check
+        // has no later provider webhook that could recover this immutable
+        // fact, so ledger it beside the paid invoice and setup claim.
+        if (!collectedSetupAnchor) {
+          await require('../services/commercial-prepay-sale-record').recordUnbookedCoverageSale(trx, {
+            invoiceId: updatedInvoice.id,
+            customerId: customer.id,
+            coverageServiceType,
+            setupAmount: collectedSetupFee,
+          });
+        }
       }
       // The setup line's tax-proportional share of the PAID total never
       // enters the coverage basis the term slices across visits.

@@ -1840,6 +1840,27 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
     }
   }
 
+  // Build the invoice settlement once so an existing processing row can
+  // promote the payment, invoice, and Dispatch proof in one transaction.
+  const invoiceUpdates = {
+    status: 'paid',
+    // Money received by hand earlier (a part payment) is part of the bill this payment completes: total below carries it, and the column
+    // resets because it holds money received on a still-open invoice. Both read the old row inside the one UPDATE.
+    amount_paid: 0,
+    paid_at: new Date().toISOString(),
+    stripe_charge_id: paymentIntent.latest_charge || null,
+  };
+  // chargedTotal is CASH taken (amount due + surcharge); add back the row's own
+  // applied account credit and part payments IN SQL (the matched invoice isn't in this outer scope)
+  // so the invoice keeps its real total (credit + earlier parts + cash), not just the cash.
+  if (chargedTotal !== null) {
+    invoiceUpdates.total = db.raw('ROUND((? + COALESCE(credit_applied, 0) + COALESCE(amount_paid, 0))::numeric, 2)', [chargedTotal]);
+  }
+  if (details.paymentMethod) invoiceUpdates.payment_method = details.paymentMethod;
+  if (details.cardBrand) invoiceUpdates.card_brand = details.cardBrand;
+  if (details.cardLastFour) invoiceUpdates.card_last_four = details.cardLastFour;
+  if (details.receiptUrl) invoiceUpdates.receipt_url = details.receiptUrl;
+
   // Update payments table
   const paymentUpdates = {
     status: 'paid',
@@ -1885,6 +1906,8 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   if (details.receiptUrl) paymentUpdates.receipt_url = details.receiptUrl;
   let fallbackLinkedInvoiceId = null;
   let fallbackObservedCommercialSale = false;
+  let processingSaleReconciled = false;
+  let processingInvoiceUpdated = 0;
   if (details.cardBrand) paymentUpdates.card_brand = details.cardBrand;
   if (details.cardLastFour) paymentUpdates.card_last_four = details.cardLastFour;
   // The processing → paid flip and its withdrawal check commit together: a
@@ -1906,6 +1929,10 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
     if (invoiceForTenderGuard?.id) {
       await lockAlertCustomers(trx, [invoiceForTenderGuard.customer_id, paymentIntent.metadata?.waves_customer_id]);
     }
+    // Full refunds use this same fence. Take it before the processing-row
+    // promotion so they see either the old processing receipt or the fully
+    // committed paid invoice + restoration review, never paid money alone.
+    await lockPaymentIntentPaymentRow(trx, piId);
     const flipped = await trx('payments')
       .where({ stripe_payment_intent_id: piId, status: 'processing' })
       .update(paymentUpdates);
@@ -1917,7 +1944,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       // against payer-owned debt. The lock waits for that transaction to
       // finish and then reads its outcome.
       const settledInvoice = await trx('invoices').where({ id: invoiceForTenderGuard.id })
-        .forUpdate().first('id', 'invoice_number', 'customer_id', 'scheduled_send_error');
+        .forUpdate().first('id', 'invoice_number', 'customer_id', 'scheduled_send_error', 'status', 'stripe_payment_intent_id');
       if (invoiceWithdrawnFromCustomer(settledInvoice)) {
         logger.error(`[stripe-webhook] PI ${piId} settled on invoice ${settledInvoice.id} whose Bill-To moved to a third-party payer mid-payment`);
         await insertHealthAlert({
@@ -1928,6 +1955,30 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
           description: "This invoice's Bill-To moved to a third-party payer while the payment was in flight. The funds are captured and the invoice is paid — refund the customer or re-bill AP.",
           trigger_data: JSON.stringify({ stripe_payment_intent_id: paymentIntent.id, invoice_number: settledInvoice.invoice_number }),
         }, { trx });
+      }
+      const currentPi = settledInvoice?.stripe_payment_intent_id
+        ? String(settledInvoice.stripe_payment_intent_id) : null;
+      const currentStatus = String(settledInvoice?.status || '').toLowerCase();
+      // Only this PI's still-collectible invoice may become the restored
+      // receipt. A rebound or terminal invoice leaves the now-settled payment
+      // for the existing anomaly/reconciliation rails; it cannot certify an
+      // unrelated commercial sale.
+      const ownsCollectibleInvoice = currentPi === String(piId)
+        && !INVOICE_TERMINAL_PAYMENT_STATUSES.includes(currentStatus);
+      if (ownsCollectibleInvoice && await require('../services/commercial-prepay-sale-record')
+        .hasRecordedUnbookedSale(trx, settledInvoice.id)) {
+        if (!['paid', 'prepaid'].includes(currentStatus)) {
+          processingInvoiceUpdated = await trx('invoices')
+            .where({ id: settledInvoice.id, stripe_payment_intent_id: piId })
+            .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES)
+            .update(invoiceUpdates);
+          if (!processingInvoiceUpdated) {
+            throw new Error(`Processing payment PI ${piId} no longer owns invoice ${settledInvoice.id}; retry webhook`);
+          }
+        }
+        await require('../services/commercial-prepay-dispatch-review')
+          .reconcileInvoice(trx, settledInvoice.id);
+        processingSaleReconciled = true;
       }
     }
     return flipped;
@@ -2222,26 +2273,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
     return;
   }
 
-  // Update invoices table
-  const invoiceUpdates = {
-    status: 'paid',
-    // Money received by hand earlier (a part payment) is part of the bill this payment completes: total below carries it, and the column
-    // resets because it holds money received on a still-open invoice. Both read the old row inside the one UPDATE.
-    amount_paid: 0,
-    paid_at: new Date().toISOString(),
-    stripe_charge_id: paymentIntent.latest_charge || null,
-  };
-  // chargedTotal is CASH taken (amount due + surcharge); add back the row's own
-  // applied account credit and part payments IN SQL (the matched invoice isn't in this outer scope)
-  // so the invoice keeps its real total (credit + earlier parts + cash), not just the cash.
-  if (chargedTotal !== null) {
-    invoiceUpdates.total = db.raw('ROUND((? + COALESCE(credit_applied, 0) + COALESCE(amount_paid, 0))::numeric, 2)', [chargedTotal]);
-  }
-  if (details.paymentMethod) invoiceUpdates.payment_method = details.paymentMethod;
-  if (details.cardBrand) invoiceUpdates.card_brand = details.cardBrand;
-  if (details.cardLastFour) invoiceUpdates.card_last_four = details.cardLastFour;
-  if (details.receiptUrl) invoiceUpdates.receipt_url = details.receiptUrl;
-  const recordedCommercialSale = fallbackObservedCommercialSale
+  const recordedCommercialSale = processingSaleReconciled || fallbackObservedCommercialSale
     || (!fallbackLinkedInvoiceId && invoiceForTenderGuard?.id
       && await require('../services/commercial-prepay-sale-record')
         .hasRecordedUnbookedSale(db, invoiceForTenderGuard.id));
@@ -2252,6 +2284,8 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   let invoiceUpdated;
   if (fallbackLinkedInvoiceId) {
     invoiceUpdated = 1;
+  } else if (processingSaleReconciled) {
+    invoiceUpdated = processingInvoiceUpdated;
   } else if (recordedCommercialSale) {
     invoiceUpdated = await settlePaidSingleInvoiceAndReview(piId, invoiceUpdates);
   } else {
@@ -8714,7 +8748,7 @@ async function handleDisputeClosed(dispute) {
             // The reopen and Dispatch observation are one transaction: a
             // replacement payment cannot commit between them and make the
             // lost-money episode disappear behind a newly paid invoice.
-            const lostDisputeOwnsInvoice = await db.transaction(async (trx) => {
+            await db.transaction(async (trx) => {
               await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [invId] });
               const lockedLostInvoice = await trx('invoices').where({ id: invId }).forUpdate()
                 .first('id', 'status', 'stripe_payment_intent_id');
@@ -8735,18 +8769,16 @@ async function handleDisputeClosed(dispute) {
               if (ownsInvoice) {
                 await require('../services/commercial-prepay-dispatch-review')
                   .reconcileInvoice(trx, invId);
+                // Coverage cancellation belongs to this same ownership
+                // decision and invoice lock. A replacement payment that
+                // starts after the check waits here, then re-activates the
+                // term from its paid invoice after this transaction commits.
+                // Running this on the root connection would let the old
+                // dispute cancel that newly paid coverage in the gap.
+                await require('../services/annual-prepay-renewals')
+                  .syncTermForInvoicePayment({ id: invId, status: 'refunded', paid_at: null }, trx);
               }
-              return ownsInvoice;
             });
-            // Refund-shaped term sync (codex r4 P1): lost money cancels the
-            // prepaid coverage this invoice funded — but only when the
-            // DISPUTED payment still owns the invoice under the locked check
-            // above. UNCAUGHT (codex r5 P1): critical lifecycle write,
-            // propagate for Stripe redelivery.
-            if (lostDisputeOwnsInvoice) {
-              await require('../services/annual-prepay-renewals')
-                .syncTermForInvoicePayment({ id: invId, status: 'refunded', paid_at: null });
-            }
           }
         }
       }

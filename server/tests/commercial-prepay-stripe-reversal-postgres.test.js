@@ -723,6 +723,87 @@ postgres('commercial prepay Stripe reversal writers', () => {
     expect(await reviews(sale.invoiceId)).toEqual([]);
   });
 
+  test('a replacement started after the combined-loss ownership check reactivates coverage after the old loss commits', async () => {
+    const customerId = await seedCustomer();
+    const paymentIntentId = `pi_dispute_after_check_${randomUUID().slice(0, 12)}`;
+    const chargeId = `ch_dispute_after_check_${randomUUID().slice(0, 12)}`;
+    const replacementPi = `pi_replacement_after_check_${randomUUID().slice(0, 12)}`;
+    const replacementCharge = `ch_replacement_after_check_${randomUUID().slice(0, 12)}`;
+    const sale = await seedSale({ customerId, paymentIntentId, chargeId });
+    await seedPayment(sale, {
+      paymentIntentId,
+      chargeId,
+      metadata: {
+        invoice_id: sale.invoiceId,
+        combined_payment: true,
+        combined_anchor_invoice_id: sale.invoiceId,
+        base_amount: 55,
+        card_surcharge: 0,
+      },
+    });
+    // dispute.created normally stamps this before the closure. Keep that
+    // durable window marker so a replacement paid after the loss can revive
+    // the cancelled term through the production recovery path.
+    await trx('annual_prepay_terms').where({ id: sale.termId }).update({
+      dispute_suspended_at: new Date(),
+    });
+    mockStripeChargeRetrieve.mockResolvedValue({ id: chargeId, amount: 5500 });
+
+    // The competing repayment needs its own root transaction. Commit this
+    // synthetic fixture so it can genuinely wait on the dispute's invoice
+    // lock instead of sharing the suite's rollback transaction.
+    await trx.commit();
+    trx = null;
+    mockPg = database;
+
+    const renewals = require('../services/annual-prepay-renewals');
+    const realSync = renewals.syncTermForInvoicePayment;
+    let replacementStarted = false;
+    let replacement;
+    let cancellationUsedOwnershipTransaction = false;
+    jest.spyOn(renewals, 'syncTermForInvoicePayment').mockImplementation(async (invoice, conn) => {
+      if (!replacementStarted && invoice?.id === sale.invoiceId && invoice.status === 'refunded') {
+        replacementStarted = true;
+        cancellationUsedOwnershipTransaction = conn?.isTransaction === true;
+        replacement = database.transaction(async (replacementTrx) => {
+          // The replacement's money row has already committed on its own
+          // rail; this is the invoice ownership + coverage tail that races
+          // the old dispute. It waits only on the invoice lock and holds no
+          // customer/payment lock that could manufacture a test deadlock.
+          await replacementTrx('invoices').where({ id: sale.invoiceId }).update({
+            status: 'paid',
+            paid_at: replacementTrx.fn.now(),
+            stripe_payment_intent_id: replacementPi,
+            stripe_charge_id: replacementCharge,
+          });
+          const paidReplacement = await replacementTrx('invoices').where({ id: sale.invoiceId }).first();
+          await realSync(paidReplacement, replacementTrx);
+        });
+        // On the broken shape cancellation runs after its ownership
+        // transaction released the invoice. Let the replacement land first
+        // so the stale refund-shaped sync demonstrably cancels fresh coverage.
+        if (!cancellationUsedOwnershipTransaction) await replacement;
+      }
+      return realSync(invoice, conn);
+    });
+
+    await require('../routes/stripe-webhook')._handleDisputeClosed({
+      id: `dp_after_check_${randomUUID().slice(0, 12)}`,
+      charge: chargeId,
+      payment_intent: paymentIntentId,
+      status: 'lost',
+      amount: 5500,
+    });
+    await replacement;
+
+    expect(replacementStarted).toBe(true);
+    expect(cancellationUsedOwnershipTransaction).toBe(true);
+    await expect(database('invoices').where({ id: sale.invoiceId }).first('status', 'stripe_payment_intent_id'))
+      .resolves.toMatchObject({ status: 'paid', stripe_payment_intent_id: replacementPi });
+    await expect(database('annual_prepay_terms').where({ id: sale.termId }).first('status'))
+      .resolves.toMatchObject({ status: 'active' });
+  });
+
   test('synchronous confirm uses the production sale lookup and records restoration before a later refund', async () => {
     const customerId = await seedCustomer();
     const originalPi = `pi_confirm_original_${randomUUID().slice(0, 12)}`;

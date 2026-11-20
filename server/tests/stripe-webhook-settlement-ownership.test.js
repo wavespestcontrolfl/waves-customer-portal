@@ -66,7 +66,13 @@ jest.mock('../services/receipt-delivery-queue', () => ({
 }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
 jest.mock('../services/commercial-prepay-sale-record', () => ({
-  hasRecordedUnbookedSale: jest.fn(async () => false),
+  hasRecordedUnbookedSale: jest.fn(async () => mockState.recordedCommercialSale),
+}));
+jest.mock('../services/commercial-prepay-dispatch-review', () => ({
+  reconcileInvoice: jest.fn(async (conn, invoiceId) => {
+    mockState.updates.push({ table: 'commercial-review', payload: { invoiceId }, inTrx: conn?.isTransaction === true });
+    return 'active';
+  }),
 }));
 jest.mock('../services/estimate-deposits', () => ({
   handleDepositChargeReversed: jest.fn(async () => ({ handled: false })),
@@ -108,6 +114,7 @@ function resetMockState() {
     settleReadThrows: false,
     // A payments row the fallback's FOR UPDATE read finds (null = none).
     fallbackPayment: null,
+    recordedCommercialSale: false,
     updates: [],
   });
 }
@@ -174,8 +181,12 @@ jest.mock('../models/db', () => {
   db.fn = { now: () => 'NOW()' };
   db.transaction = jest.fn(async (fn) => {
     const trx = jest.fn((table) => mockMakeBuilder(table, { inTrx: true }));
-    trx.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+    trx.raw = jest.fn((sql, bindings) => {
+      mockState.updates.push({ table: 'raw', payload: { sql, bindings }, inTrx: true });
+      return { __raw: sql, bindings };
+    });
     trx.fn = { now: () => 'NOW()' };
+    trx.isTransaction = true;
     return fn(trx);
   });
   return db;
@@ -284,6 +295,54 @@ describe('a withdrawn invoice never settles from a customer-minted intent', () =
 
     await expect(handlePaymentIntentSucceeded(succeededPI())).rejects.toThrow('connection reset');
     expect(mockState.inserts.find((i) => i.table === 'customer_health_alerts')).toBeFalsy();
+  });
+});
+
+describe('processing-to-paid commercial restoration is one fenced transaction', () => {
+  test('the PI fence, payment flip, invoice flip and review observation are ordered inside one transaction', async () => {
+    mockState.processingPaymentsUpdated = 1;
+    mockState.recordedCommercialSale = true;
+    mockState.preLockInvoice = {
+      ...mockState.preLockInvoice,
+      status: 'processing',
+      stripe_payment_intent_id: 'pi_test_1',
+    };
+    mockState.settleReadInvoice = { ...mockState.preLockInvoice };
+
+    await handlePaymentIntentSucceeded(succeededPI({ payment_method_types: ['us_bank_account'] }));
+
+    const fenceAt = mockState.updates.findIndex((row) => row.table === 'raw'
+      && row.payload.bindings?.[0] === 'stripe.pi.payment'
+      && row.payload.bindings?.[1] === 'pi_test_1');
+    const paymentAt = mockState.updates.findIndex((row) => row.table === 'payments'
+      && row.inTrx && row.payload.status === 'paid');
+    const invoiceAt = mockState.updates.findIndex((row) => row.table === 'invoices'
+      && row.inTrx && row.payload.status === 'paid');
+    const reviewAt = mockState.updates.findIndex((row) => row.table === 'commercial-review');
+    expect(fenceAt).toBeGreaterThanOrEqual(0);
+    expect(paymentAt).toBeGreaterThan(fenceAt);
+    expect(invoiceAt).toBeGreaterThan(paymentAt);
+    expect(reviewAt).toBeGreaterThan(invoiceAt);
+    expect(mockState.updates[reviewAt]).toMatchObject({
+      inTrx: true,
+      payload: { invoiceId: 'inv-1' },
+    });
+  });
+
+  test('a processing row cannot certify a commercial restoration after the invoice rebinds to another PI', async () => {
+    mockState.processingPaymentsUpdated = 1;
+    mockState.recordedCommercialSale = true;
+    mockState.settleReadInvoice = {
+      ...mockState.preLockInvoice,
+      status: 'processing',
+      stripe_payment_intent_id: 'pi_unrelated_replacement',
+    };
+
+    await handlePaymentIntentSucceeded(succeededPI({ payment_method_types: ['us_bank_account'] }));
+
+    expect(mockState.updates.find((row) => row.table === 'commercial-review')).toBeFalsy();
+    expect(mockState.updates.find((row) => row.table === 'invoices'
+      && row.inTrx && row.payload.status === 'paid')).toBeFalsy();
   });
 });
 

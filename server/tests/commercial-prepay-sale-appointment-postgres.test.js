@@ -253,6 +253,15 @@ postgres('commercial setup sale records preserve the appointment choice', () => 
     return { status: response.status, body: await response.json() };
   }
 
+  async function postRecordedCustomer(customerId, body) {
+    const response = await fetch(`${baseUrl}/admin/customers/${customerId}/annual-prepay`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return { status: response.status, body: await response.json() };
+  }
+
   const draftRouteBody = (extra = {}) => ({
     amount: 660,
     setupFeeAmount: 99,
@@ -329,5 +338,27 @@ postgres('commercial setup sale records preserve the appointment choice', () => 
     expect(promised.status).toBe(201);
     expect(await saleFor(promised.body.invoice.id)).toBeNull();
     expect(invoiceSend).toHaveBeenCalledTimes(2);
+  });
+
+  test.each(['cash', 'check'])('the real recorded-%s route makes its anchorless setup discoverable before review', async (method) => {
+    const customerId = await customer();
+    const recorded = await postRecordedCustomer(customerId, {
+      amount: 759,
+      setupFeeAmount: 99,
+      serviceType: 'Commercial Rodent Bait Stations',
+      planLabel: 'Commercial Rodent Bait Stations Annual Prepay',
+      visitCount: 4,
+      coverageCadence: 'quarterly',
+      termStart: termStart(),
+      method,
+    });
+    expect(recorded.status).toBe(201);
+    const records = require('../services/commercial-prepay-sale-record');
+    await expect(records.hasRecordedUnbookedSale(trx, recorded.body.invoice.id)).resolves.toBe(true);
+    await expect(saleFor(recorded.body.invoice.id)).resolves.toMatchObject({
+      estimateId: null,
+      amount: 99,
+      invoice: { id: recorded.body.invoice.id, customer_id: customerId, status: 'paid' },
+    });
   });
 });
