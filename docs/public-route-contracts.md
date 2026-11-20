@@ -8768,11 +8768,11 @@ for a tab that opened the page from before `/v2` (#8091 posts there with its ver
 the same way (409 `{state:'open'}`, no write, a warning logged) when the frozen offer lacks a term the page shows (the
 job, a real start date, an hourly rate of whole cents, the week, who they report to, pay day, the Terms, and a pay step
 only with both its rate and its date; no raise is both sent as null), so no client signs a gap. The page never
-applies an open read or a text-choice save without a `version` (a server from before it): such a read counts as failed,
-and such a save is checked with a read, so signing stays locked until a read carries a version. It shows the signing
+applies an open read or a text-choice save without a `version` (a server from before it): such a read marks the page out
+of date (above), and such a save is checked with a read, so signing stays locked until a read carries a version. It shows the signing
 controls only for a read whose state is explicitly `open` and that carries the text choice, non-empty Terms and every
-term it shows, each as it shows it (rates in whole cents, no raise only as both step fields null); a read with no known
-state, or an open read without those, also counts as failed, and an
+term it shows, each as it shows it (rates in whole cents, no raise only as both step fields null); an open read without those,
+or a read that names no state, counts as failed (a state the page does not know marks the page out of date, above), and an
 action's 200 that does not name its answer (`signed`, `date_requested`, `declined`) is treated as a lost reply: the
 page reads the offer. Each acts only from state `open`; any
 other state answers 409 with the current state body (an identical replay of a signature, the same name in any letter
