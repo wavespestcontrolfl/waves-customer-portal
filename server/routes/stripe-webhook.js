@@ -806,6 +806,45 @@ async function lockPaymentIntentPaymentRow(trx, piId) {
   );
 }
 
+// The processing -> paid ledger flip can commit before the invoice write, and
+// a synchronous /confirm can commit both before this webhook arrives. In both
+// cases, settle the invoice and record any commercial-prepay restoration in
+// one transaction. Refunds take this same PI fence, so they either land first
+// (this sees no paid row and does nothing) or wait until the paid invoice +
+// restored review are both durable. Within the fence, use /confirm's canonical
+// invoice -> payment row order.
+async function settlePaidSingleInvoiceAndReview(piId, invoiceUpdates) {
+  return db.transaction(async (trx) => {
+    await lockPaymentIntentPaymentRow(trx, piId);
+    const lockedInvoice = await trx('invoices')
+      .where({ stripe_payment_intent_id: piId })
+      .forUpdate()
+      .first('id', 'status');
+    if (!lockedInvoice) return 0;
+
+    const paidPayment = await trx('payments')
+      .where({ stripe_payment_intent_id: piId, status: 'paid' })
+      .orderBy('created_at', 'desc')
+      .forUpdate()
+      .first('id');
+    if (!paidPayment) return 0;
+
+    const status = String(lockedInvoice.status || '').toLowerCase();
+    let invoiceUpdated = 0;
+    if (!['paid', 'prepaid'].includes(status)) {
+      invoiceUpdated = await trx('invoices')
+        .where({ id: lockedInvoice.id, stripe_payment_intent_id: piId })
+        .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES)
+        .update(invoiceUpdates);
+      if (!invoiceUpdated) return 0;
+    }
+
+    await require('../services/commercial-prepay-dispatch-review')
+      .reconcileInvoice(trx, lockedInvoice.id);
+    return invoiceUpdated;
+  });
+}
+
 // Use express.raw() for Stripe signature verification
 router.post(
   '/',
@@ -1844,9 +1883,10 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   };
   if (chargedTotal !== null) paymentUpdates.amount = chargedTotal;
   if (details.receiptUrl) paymentUpdates.receipt_url = details.receiptUrl;
+  let fallbackLinkedInvoiceId = null;
+  let fallbackObservedCommercialSale = false;
   if (details.cardBrand) paymentUpdates.card_brand = details.cardBrand;
   if (details.cardLastFour) paymentUpdates.card_last_four = details.cardLastFour;
-  let fallbackLinkedInvoiceId = null;
   // The processing → paid flip and its withdrawal check commit together: a
   // payment already sitting in `processing` was accepted server-side while
   // the invoice was still self-pay — our own guards would have refused it
@@ -2080,7 +2120,8 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         throw new Error(`Invoice ${invoice.id} no longer matches PI ${piId}`);
       }
       fallbackLinkedInvoiceId = lockedInvoice.id;
-
+      fallbackObservedCommercialSale = await require('../services/commercial-prepay-sale-record')
+        .hasRecordedUnbookedSale(trx, lockedInvoice.id);
       const metadataBaseAmount = Number(paymentIntent.metadata?.base_amount ?? invoiceAmountDue(invoice));
       const metadataCardSurcharge = Number(paymentIntent.metadata?.card_surcharge ?? 0);
       await trx('payments').insert({
@@ -2133,6 +2174,10 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
           ...(lockedInvoice.payer_id ? { payer_id: lockedInvoice.payer_id } : {}),
         }),
       });
+      if (fallbackObservedCommercialSale) {
+        await require('../services/commercial-prepay-dispatch-review')
+          .reconcileInvoice(trx, lockedInvoice.id);
+      }
       if (matchingAmbiguousAttempt) {
         const attemptResolved = await trx('stripe_invoice_charge_attempts')
           .where({ id: matchingAmbiguousAttempt.id })
@@ -2189,12 +2234,24 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   if (details.cardBrand) invoiceUpdates.card_brand = details.cardBrand;
   if (details.cardLastFour) invoiceUpdates.card_last_four = details.cardLastFour;
   if (details.receiptUrl) invoiceUpdates.receipt_url = details.receiptUrl;
-  let invoiceUpdated = await db('invoices')
-    .where({ stripe_payment_intent_id: piId })
-    .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES)
-    .update(invoiceUpdates);
-  if (fallbackLinkedInvoiceId && invoiceUpdated === 0) {
+  const recordedCommercialSale = fallbackObservedCommercialSale
+    || (!fallbackLinkedInvoiceId && invoiceForTenderGuard?.id
+      && await require('../services/commercial-prepay-sale-record')
+        .hasRecordedUnbookedSale(db, invoiceForTenderGuard.id));
+  // A fallback write already settled the invoice (count = 1) and, for a
+  // recorded commercial sale, observed the review in that same transaction.
+  // Ordinary invoices retain the historical bare UPDATE path exactly. Only a
+  // verified sale needs the locked invoice+review helper.
+  let invoiceUpdated;
+  if (fallbackLinkedInvoiceId) {
     invoiceUpdated = 1;
+  } else if (recordedCommercialSale) {
+    invoiceUpdated = await settlePaidSingleInvoiceAndReview(piId, invoiceUpdates);
+  } else {
+    invoiceUpdated = await db('invoices')
+      .where({ stripe_payment_intent_id: piId })
+      .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES)
+      .update(invoiceUpdates);
   }
 
   if (['claimed', 'ambiguous', 'succeeded'].includes(savedCardAttemptForTenderGuard?.status)
@@ -2228,18 +2285,6 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
     } catch (e) {
       logger.error(`[stripe-webhook] annual prepay activation failed: ${e.message}`);
     }
-  }
-  // Unlike the best-effort term side effects above, the observational review
-  // is the durable record of a refund->repayment episode. Run it on retries
-  // even when the invoice was already paid; throwing leaves this webhook
-  // retryable instead of losing the only restoration observation.
-  const paidForReview = await db('invoices')
-    .where({ stripe_payment_intent_id: piId })
-    .whereIn('status', ['paid', 'prepaid'])
-    .first('id');
-  if (paidForReview) {
-    await require('../services/commercial-prepay-dispatch-review')
-      .reconcileInvoice(db, paidForReview.id);
   }
   // Complete any active payment plan on the settled invoice. OUTSIDE the
   // invoiceUpdated>0 gate (codex r1 P1): on a webhook retry the invoice is
@@ -3658,6 +3703,14 @@ async function handleChargeRefunded(charge) {
       chargeId,
       paymentIntentId: charge.payment_intent,
     });
+    // Serialize refund against single-invoice /confirm and succeeded-webhook
+    // settlement. Those writers hold this fence across invoice + payment +
+    // commercial-review writes, so refund either precedes the restored
+    // episode or waits until that episode is durable before recording the
+    // next returned state. Re-entrant for combined branches below.
+    if (charge.payment_intent) {
+      await lockPaymentIntentPaymentRow(trx, charge.payment_intent);
+    }
     // Fee-lane refunds serialize with settlement's marker adoption (Codex
     // #3153 r24 P1): an existing fee row (pre-settlement marker or settled
     // row) updated here unlocked could commit between settlement's plain
@@ -8328,7 +8381,7 @@ async function handleDisputeClosed(dispute) {
             dispute_id: dispute.id,
             dispute_final: status,
             ...(status === 'lost' && invId && !row.statement_id
-              ? { dispute_full_payment: disputeFullPayment }
+              ? { dispute_invoice_id: invId, dispute_full_payment: disputeFullPayment }
               : {}),
           });
           if (status === 'won' || status === 'warning_closed') {

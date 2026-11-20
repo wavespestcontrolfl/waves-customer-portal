@@ -65,6 +65,8 @@ async function seedOriginal({
   depositBound = true,
   withDeposit = true,
   recordSale = true,
+  status = 'paid',
+  withPayment = true,
 } = {}) {
   const ids = {
     customerId: randomUUID(),
@@ -94,10 +96,10 @@ async function seedOriginal({
     invoice_number: `DEP-${ids.invoiceId.slice(0, 8)}`,
     customer_id: ids.customerId,
     title: 'Commercial Rodent Bait Stations — Annual Prepay',
-    status: 'paid',
-    paid_at: new Date(),
-    payment_recorded_at: new Date(),
-    stripe_payment_intent_id: ids.paymentIntentId,
+    status,
+    paid_at: status === 'paid' ? new Date() : null,
+    payment_recorded_at: withPayment ? new Date() : null,
+    stripe_payment_intent_id: withPayment ? ids.paymentIntentId : null,
     subtotal,
     total: cardAmount,
     due_date: etDateString(),
@@ -125,21 +127,23 @@ async function seedOriginal({
       setupAmount: 55,
     });
   }
-  await trx('payments').insert({
-    id: ids.paymentId,
-    customer_id: ids.customerId,
-    payment_date: etDateString(),
-    amount: cardAmount,
-    base_amount_cents: cardAmount * 100,
-    surcharge_amount_cents: 0,
-    status: 'paid',
-    refund_amount: 0,
-    stripe_payment_intent_id: ids.paymentIntentId,
-    processor: 'stripe',
-    description: 'Synthetic deposit/card receipt',
-    metadata: { invoice_id: ids.invoiceId },
-    created_at: new Date(Date.now() - 60_000),
-  });
+  if (withPayment) {
+    await trx('payments').insert({
+      id: ids.paymentId,
+      customer_id: ids.customerId,
+      payment_date: etDateString(),
+      amount: cardAmount,
+      base_amount_cents: cardAmount * 100,
+      surcharge_amount_cents: 0,
+      status: 'paid',
+      refund_amount: 0,
+      stripe_payment_intent_id: ids.paymentIntentId,
+      processor: 'stripe',
+      description: 'Synthetic deposit/card receipt',
+      metadata: { invoice_id: ids.invoiceId },
+      created_at: new Date(Date.now() - 60_000),
+    });
+  }
   if (withDeposit) {
     const [deposit] = await trx('estimate_deposits').insert({
       estimate_id: ids.estimateId,
@@ -196,7 +200,7 @@ postgres('commercial prepay deposit/card refund proof', () => {
   });
 
   afterEach(async () => {
-    await trx.rollback();
+    if (trx && !(typeof trx.isCompleted === 'function' && trx.isCompleted())) await trx.rollback();
     trx = null;
   });
 
@@ -225,9 +229,11 @@ postgres('commercial prepay deposit/card refund proof', () => {
       action: 'invoice.deposit_credit.returned', resource_type: 'invoices', resource_id: ids.invoiceId,
     });
     expect(evidence.metadata).toEqual(expect.objectContaining({
-      version: 1,
+      version: 2,
       invoiceId: ids.invoiceId,
       customerId: ids.customerId,
+      terminalStatus: 'refunded',
+      terminalUpdatedAtMs: expect.any(Number),
       requestedCents: 1500,
       restoredCents: 1500,
       allocations: [{ depositId: ids.depositId, estimateId: ids.estimateId, returnedCents: 1500 }],
@@ -250,8 +256,14 @@ postgres('commercial prepay deposit/card refund proof', () => {
     const ids = await seedOriginal({ recordSale: false });
     const saleRecords = require('../services/commercial-prepay-sale-record');
     await expect(saleRecords.hasRecordedUnbookedSale(trx, ids.invoiceId)).resolves.toBe(false);
-
-    await expect(stampFullCardRefund(ids)).resolves.toEqual(expect.any(Object));
+    const lookup = jest.spyOn(saleRecords, 'hasRecordedUnbookedSale')
+      .mockImplementationOnce((conn) => conn.raw('SELECT * FROM dispatch_optional_lookup_must_not_exist'));
+    try {
+      await expect(trx.transaction((attempt) => stampFullCardRefund(ids, attempt)))
+        .resolves.toEqual(expect.any(Object));
+    } finally {
+      lookup.mockRestore();
+    }
     await expect(trx('invoices').where({ id: ids.invoiceId }).first('status'))
       .resolves.toMatchObject({ status: 'refunded' });
     const deposit = await trx('estimate_deposits').where({ id: ids.depositId }).first();
@@ -262,9 +274,96 @@ postgres('commercial prepay deposit/card refund proof', () => {
     })).resolves.toHaveLength(0);
   });
 
+  test('the normal void entry point creates one review for an exact deposit-only return', async () => {
+    const ids = await seedOriginal({
+      subtotal: 55,
+      depositCredit: 55,
+      status: 'prepaid',
+      withPayment: false,
+    });
+    await expect(trx.transaction(async (attempt) => {
+      const parent = mockPg;
+      mockPg = attempt;
+      try {
+        await expect(require('../services/invoice').voidInvoice(ids.invoiceId))
+          .resolves.toMatchObject({ id: ids.invoiceId, status: 'void' });
+        const rows = await attempt('dispatch_alerts')
+          .where({ type: 'commercial_prepay_setup_review' })
+          .whereRaw("payload->>'sourceInvoiceId' = ?", [String(ids.invoiceId)]);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].payload).toEqual(expect.objectContaining({
+          sourceInvoiceId: ids.invoiceId,
+          customerId: ids.customerId,
+          estimateId: ids.estimateId,
+          amount: 55,
+        }));
+        const review = require('../services/commercial-prepay-dispatch-review');
+        await expect(review.reconcileInvoice(attempt, ids.invoiceId)).resolves.toBe('cancelled');
+        await expect(review.reconcileInvoice(attempt, ids.invoiceId)).resolves.toBe('cancelled');
+        await expect(attempt('dispatch_alerts')
+          .where({ type: 'commercial_prepay_setup_review' })
+          .whereRaw("payload->>'sourceInvoiceId' = ?", [String(ids.invoiceId)]))
+          .resolves.toHaveLength(1);
+      } finally {
+        mockPg = parent;
+      }
+      throw new Error('roll back synthetic void');
+    })).rejects.toThrow('roll back synthetic void');
+    expect(await reviews(ids.invoiceId)).toEqual([]);
+    await expect(trx('invoices').where({ id: ids.invoiceId }).first('status'))
+      .resolves.toMatchObject({ status: 'prepaid' });
+    await expect(trx('estimate_deposits').where({ id: ids.depositId }).first())
+      .resolves.toMatchObject({ status: 'credited', credited_invoice_id: ids.invoiceId });
+  });
+
+  test('a returned deposit with other unpaid principal remains unconfirmed', async () => {
+    const ids = await seedOriginal({
+      subtotal: 75,
+      depositCredit: 55,
+      status: 'prepaid',
+      withPayment: false,
+    });
+    const [voided] = await trx('invoices').where({ id: ids.invoiceId })
+      .update({ status: 'void', updated_at: trx.fn.now() }).returning('*');
+    await require('../services/estimate-deposits')
+      .restoreDepositCreditForVoidedInvoice({ invoice: voided, trx });
+    const fresh = await trx('invoices').where({ id: ids.invoiceId }).first();
+    await expect(require('../services/commercial-prepay-dispatch-review')
+      .readReceiptState(trx, fresh)).resolves.toBe('unconfirmed');
+    await expect(require('../services/commercial-prepay-dispatch-review')
+      .reconcileInvoice(trx, ids.invoiceId)).resolves.toBe('unconfirmed');
+    expect(await reviews(ids.invoiceId)).toEqual([]);
+  });
+
+  test('an exact deposit-only return from a prior terminal episode is stale', async () => {
+    const ids = await seedOriginal({
+      subtotal: 55,
+      depositCredit: 55,
+      status: 'prepaid',
+      withPayment: false,
+    });
+    const [voided] = await trx('invoices').where({ id: ids.invoiceId })
+      .update({ status: 'void', updated_at: trx.fn.now() }).returning('*');
+    const review = require('../services/commercial-prepay-dispatch-review');
+    const reconcile = jest.spyOn(review, 'reconcileInvoice').mockResolvedValueOnce('cancelled');
+    try {
+      await require('../services/estimate-deposits')
+        .restoreDepositCreditForVoidedInvoice({ invoice: voided, trx });
+    } finally {
+      reconcile.mockRestore();
+    }
+    await trx('invoices').where({ id: ids.invoiceId })
+      .update({ updated_at: new Date(Date.now() + 60_000) });
+    const laterEpisode = await trx('invoices').where({ id: ids.invoiceId }).first();
+    await expect(review.readReceiptState(trx, laterEpisode)).resolves.toBe('unconfirmed');
+    await expect(review.reconcileInvoice(trx, ids.invoiceId)).resolves.toBe('unconfirmed');
+    expect(await reviews(ids.invoiceId)).toEqual([]);
+  });
+
   test('a deposit released before this card-refund episode remains unconfirmed', async () => {
     const ids = await seedOriginal();
-    const invoice = await trx('invoices').where({ id: ids.invoiceId }).first();
+    const [invoice] = await trx('invoices').where({ id: ids.invoiceId })
+      .update({ status: 'void', updated_at: trx.fn.now() }).returning('*');
     await require('../services/estimate-deposits').restoreDepositCreditForVoidedInvoice({ invoice, trx });
     const [evidence] = await trx('audit_log').where({
       action: 'invoice.deposit_credit.returned', resource_id: ids.invoiceId,
@@ -274,7 +373,8 @@ postgres('commercial prepay deposit/card refund proof', () => {
       status: 'refunded', refund_status: 'full', refund_amount: ids.cardAmount,
       created_at: laterEpisode, updated_at: laterEpisode,
     });
-    await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'refunded' });
+    await trx('invoices').where({ id: ids.invoiceId })
+      .update({ status: 'refunded', updated_at: laterEpisode });
 
     await expect(require('../services/commercial-prepay-dispatch-review')
       .reconcileInvoice(trx, ids.invoiceId)).resolves.toBe('unconfirmed');
@@ -308,7 +408,7 @@ postgres('commercial prepay deposit/card refund proof', () => {
       invoice_number: `OTHER-${otherInvoiceId.slice(0, 8)}`,
       customer_id: ids.customerId,
       title: 'Other invoice',
-      status: 'paid',
+      status: 'void',
       paid_at: new Date(),
       subtotal: ids.depositCredit,
       total: 0,

@@ -314,13 +314,26 @@ postgres('commercial prepay Dispatch review observes only recovered receipt proo
       paid_at: null,
       payment_recorded_at: null,
       stripe_payment_intent_id: null,
-      stripe_charge_id: null,
+      stripe_charge_id: chargeId,
     });
     await require('../services/invoice-manual-payment').recordManualPayment(ids.invoiceId, {
       method: 'cash',
       recordedBy: 'Synthetic Office Writer',
       sendReceipt: false,
     });
+
+    const repaid = await trx('invoices').where({ id: ids.invoiceId }).first();
+    expect(repaid).toMatchObject({ status: 'paid', payment_method: 'cash', stripe_charge_id: chargeId, stripe_payment_intent_id: null });
+    const review = require('../services/commercial-prepay-dispatch-review');
+    await expect(review.readReceiptState(trx, repaid)).resolves.toBe('active');
+    const damaged = await trx.transaction();
+    try {
+      const { MANUAL_PAYMENT_RECORDED_ACTION } = require('../services/invoice-manual-payment');
+      await damaged('audit_log').where({ action: MANUAL_PAYMENT_RECORDED_ACTION, resource_id: ids.invoiceId }).del();
+      await expect(review.readReceiptState(damaged, repaid)).resolves.not.toBe('active');
+    } finally {
+      await damaged.rollback();
+    }
 
     // A late replay of the old provider refund cannot reclaim the invoice or
     // replace the current repayment episode.

@@ -71,37 +71,52 @@ async function providerInvoiceLinkIsUnique(conn, invoice) {
   return rows.length === 1 && String(rows[0].id) === String(invoice.id);
 }
 
-async function manualPaymentChain(conn, invoice, { partialOnly = false } = {}) {
+async function manualPaymentChain(conn, invoice) {
   const { MANUAL_PAYMENT_RECORDED_ACTION } = require('./invoice-manual-payment');
   const recordedAt = millis(invoice.payment_recorded_at);
-  if (recordedAt == null) return [];
+  const empty = { parts: [], payments: [], final: false };
+  if (recordedAt == null) return empty;
   const markers = await conn('audit_log')
     .where({
       action: MANUAL_PAYMENT_RECORDED_ACTION,
       resource_type: 'invoices',
       resource_id: invoice.id,
     })
-    .orderBy('created_at', 'desc')
     .select('created_at', 'metadata');
-  const byTime = new Map(markers.map((marker) => [millis(marker.created_at), marker]));
-  const paymentIds = [];
-  const seenTimes = new Set();
-  let markerAt = recordedAt;
-  while (markerAt != null && !seenTimes.has(markerAt)) {
-    seenTimes.add(markerAt);
-    const marker = byTime.get(markerAt);
-    const value = metadata(marker?.metadata);
-    if (!marker || !value.paymentId) break;
-    if (!partialOnly || value.partial === true) paymentIds.push(value.paymentId);
-    markerAt = millis(value.previous?.payment_recorded_at);
+  const byTime = new Map();
+  for (const marker of markers) {
+    const at = millis(marker.created_at);
+    byTime.set(at, byTime.has(at) ? null : metadata(marker.metadata));
   }
-  if (!paymentIds.length) return [];
-  const rows = await conn('payments').whereIn('id', paymentIds);
-  const markerTimes = new Map(markers.map((marker) => [
-    String(metadata(marker.metadata).paymentId || ''), millis(marker.created_at),
-  ]));
-  return rows.filter((row) => String(row.customer_id) === String(invoice.customer_id)
-    && millis(row.created_at) === markerTimes.get(String(row.id)));
+  const current = byTime.get(recordedAt);
+  if (!current?.paymentId) return empty;
+  const chain = new Map();
+  let at = recordedAt;
+  while (at != null) {
+    const marker = byTime.get(at);
+    if (!marker?.paymentId || chain.has(marker.paymentId)) break;
+    // A previous completed settlement starts a different receipt episode.
+    if (at !== recordedAt && marker.partial !== true) break;
+    chain.set(marker.paymentId, { at, amount: marker.amount, part: marker.partial === true });
+    at = millis(marker.previous?.payment_recorded_at);
+  }
+  const rows = await conn('payments').whereIn('id', [...chain.keys()]);
+  const payments = rows.filter((row) => {
+    const marker = chain.get(row.id);
+    const linkedInvoice = metadataInvoiceId(row);
+    return marker && row.customer_id === invoice.customer_id && billToMatches(invoice, row)
+      && (!linkedInvoice || String(linkedInvoice) === String(invoice.id))
+      && !row.stripe_charge_id && !row.stripe_payment_intent_id
+      && millis(row.created_at) === marker.at
+      && cents(row.amount) > 0 && cents(row.amount) === cents(marker.amount);
+  });
+  return {
+    payments,
+    parts: payments.filter((row) => chain.get(row.id).part),
+    final: current.partial !== true && current.method === invoice.payment_method
+      && recordedAt === millis(invoice.paid_at) && !invoice.processor && !invoice.stripe_payment_intent_id
+      && payments.some((row) => row.id === current.paymentId),
+  };
 }
 
 function customer360ShapeMatches(invoice, row, value, requiredCents) {
@@ -146,6 +161,10 @@ async function customer360Receipt(conn, invoice) {
 }
 
 async function sourcePayments(conn, invoice) {
+  const manual = await manualPaymentChain(conn, invoice);
+  // Office collection clears the PI and stamps the final tender and paid time
+  // together. The charge ID can still refer to an earlier, refunded payment.
+  if (manual.final) return manual.payments;
   if (invoice.stripe_charge_id || invoice.stripe_payment_intent_id) {
     const rows = await conn('payments').where(function providerIdentity() {
       if (invoice.stripe_charge_id) this.orWhere('stripe_charge_id', invoice.stripe_charge_id);
@@ -173,13 +192,11 @@ async function sourcePayments(conn, invoice) {
       && await providerInvoiceLinkIsUnique(conn, invoice);
     const allocation = tagged.length ? tagged : singleUntagged ? untagged : [];
     const providerRows = newestRowsBy(allocation, providerKey);
-    const manualParts = await manualPaymentChain(conn, invoice, { partialOnly: true });
-    return [...providerRows, ...manualParts.filter((part) =>
+    return [...providerRows, ...manual.parts.filter((part) =>
       !providerRows.some((row) => String(row.id) === String(part.id)))];
   }
 
-  const manual = await manualPaymentChain(conn, invoice);
-  if (manual.length) return manual;
+  if (manual.payments.length) return manual.payments;
   if (String(invoice.status || '').toLowerCase() === 'prepaid'
     && (cents(invoice.credit_applied) > 0 || invoiceDepositCreditCents(invoice) > 0)) return [];
 
@@ -408,6 +425,22 @@ async function readReceiptState(conn, invoice) {
   if (collected && requiredCents > 0
     && depositBacked
     && paidCents + credit.committedCents + depositCents === requiredCents) return 'active';
+  // A deposit can cover the entire original prepay without creating any
+  // payments row. Its terminal void/refund is fully proven only when the
+  // exact invoice-bound deposit return covers the whole pre-credit principal,
+  // no card/manual receipt exists, and no account-credit episode contributes.
+  // readInvoiceDepositCreditReturn also binds the proof to this exact terminal
+  // invoice updated_at, so a stale return cannot manufacture a later episode.
+  const depositOnlyReturned = depositCents > 0
+    && requiredCents === depositCents
+    && !depositBacked
+    && depositReturn?.returnedCents === depositCents
+    && money.length === 0
+    && credit.committedCents === 0
+    && credit.refundEpisodes.length === 0
+    && !credit.prepaidReversed
+    && ['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status || '').toLowerCase());
+  if (depositOnlyReturned) return 'cancelled';
   if (depositCents === 0 && !paid.length && credit.prepaidReversed) return 'cancelled';
   const refundedBaseCents = valued.filter(({ payment }) => fullRefund(payment))
     .reduce((sum, row) => sum + row.amounts.baseCents, 0);

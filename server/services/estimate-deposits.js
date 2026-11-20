@@ -2068,9 +2068,12 @@ async function readInvoiceDepositCreditReturn(invoice, trx = db) {
   const value = typeof event.metadata === 'string'
     ? (() => { try { return JSON.parse(event.metadata); } catch { return null; } })()
     : event.metadata;
-  if (!value || value.version !== 1
+  const currentUpdatedAt = invoice.updated_at ? new Date(invoice.updated_at).getTime() : NaN;
+  if (!value || value.version !== 2
     || String(value.invoiceId || '') !== String(invoice.id)
     || String(value.customerId || '') !== String(invoice.customer_id)
+    || String(value.terminalStatus || '') !== String(invoice.status || '').toLowerCase()
+    || !Number.isFinite(currentUpdatedAt) || value.terminalUpdatedAtMs !== currentUpdatedAt
     || !Number.isSafeInteger(value.requestedCents)
     || !Number.isSafeInteger(value.restoredCents)
     || value.requestedCents <= 0 || value.restoredCents !== value.requestedCents
@@ -2195,8 +2198,13 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
   let hasUnbookedCommercialSale = false;
   if (exactInvoiceAllocations.length) {
     try {
-      hasUnbookedCommercialSale = await require('./commercial-prepay-sale-record')
-        .hasRecordedUnbookedSale(trx, invoice.id);
+      // A failed PostgreSQL statement poisons its transaction even when JS
+      // catches the rejection. Isolate this optional Dispatch lookup in a
+      // savepoint so its rollback restores the surrounding financial
+      // transaction to a committable state.
+      hasUnbookedCommercialSale = await trx.transaction((lookupTrx) =>
+        require('./commercial-prepay-sale-record')
+          .hasRecordedUnbookedSale(lookupTrx, invoice.id));
     } catch (err) {
       // Dispatch proof is observational. A read outage must not turn an
       // ordinary invoice's otherwise-complete money unwind into a refund
@@ -2205,6 +2213,17 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
     }
   }
   if (hasUnbookedCommercialSale) {
+    // The caller's object may be the pre-transition row. Re-read after the
+    // ledger unwind so proof and post-commit reconciliation bind to the true
+    // terminal episode, never to a still-live invoice or an older return.
+    const terminalInvoice = await trx('invoices').where({ id: invoice.id })
+      .first('status', 'updated_at', 'subtotal', 'discount_amount', 'tax_amount', 'total');
+    const terminalStatus = String(terminalInvoice?.status || '').toLowerCase();
+    const terminalUpdatedAtMs = terminalInvoice?.updated_at
+      ? new Date(terminalInvoice.updated_at).getTime() : NaN;
+    const terminal = ['void', 'refunded', 'canceled', 'cancelled'].includes(terminalStatus)
+      && Number.isFinite(terminalUpdatedAtMs);
+    if (!terminal) return totalRestoredCents / 100;
     await require('./audit-log').recordAuditEvent({
       trx,
       critical: true,
@@ -2213,14 +2232,30 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
       resource_type: 'invoices',
       resource_id: invoice.id,
       metadata: {
-        version: 1,
+        version: 2,
         invoiceId: invoice.id,
         customerId: invoice.customer_id,
+        terminalStatus,
+        terminalUpdatedAtMs,
         requestedCents: totalRequestedCents,
         restoredCents: totalRestoredCents,
         allocations: exactInvoiceAllocations,
       },
     });
+    const netInvoiceCents = Math.max(0, Math.round(((Number(terminalInvoice.subtotal) || 0)
+      - (Number(terminalInvoice.discount_amount) || 0)
+      + (Number(terminalInvoice.tax_amount) || 0)) * 100));
+    const depositOnlyReturn = totalRestoredCents === netInvoiceCents
+      && Math.round(Number(terminalInvoice.total || 0) * 100) === 0;
+    if (depositOnlyReturn) {
+      // This exact deposit-only terminalization has no provider refund whose
+      // webhook could reconcile it. Record the Dispatch review in the SAME
+      // transaction, after the writer's terminal invoice update + deposit
+      // restore. Receipt reconciliation takes no financial row locks; its only
+      // lock is the already-observed sale record, so it cannot invert the
+      // invoice/deposit locks held by this writer.
+      await require('./commercial-prepay-dispatch-review').reconcileInvoice(trx, invoice.id);
+    }
   }
   return totalRestoredCents / 100;
 }
