@@ -216,8 +216,8 @@ async function listBuilders({ kind, now = new Date() }) {
 }
 
 // The names (upper-cased, trimmed) that fold into one builder key.
-async function namesForKey(source, key, today) {
-  const result = await db.raw(
+async function namesForKey(conn, source, key, today) {
+  const result = await conn.raw(
     `SELECT DISTINCT UPPER(BTRIM(contractor_name)) AS name FROM ${source.table}
       WHERE issued_date IS NOT NULL AND issued_date <= ?::date ${BUILDER_ONLY} ${source.where}`,
     [today],
@@ -226,26 +226,30 @@ async function namesForKey(source, key, today) {
 }
 
 // Job sites, newest first. Like the list, a permit dated after today is left out, so it can never push a real job
-// site off the page. The limit is a whole number from 1 to 100 (PostgreSQL refuses a fraction).
+// site off the page. The limit is a whole number from 1 to 100 (PostgreSQL refuses a fraction). The spellings and
+// the job sites share one snapshot, so a sync that renames a builder between the two reads cannot drop a permit.
 async function builderPermits({ kind, key, limit = DEFAULT_PERMIT_LIMIT, now = new Date() }) {
   const source = sourceFor(kind);
   const started = Date.now();
   const today = etDateString(now);
-  const names = await namesForKey(source, key, today);
-  if (!names.length) return [];
   const take = Math.min(Math.max(Math.trunc(Number(limit)) || DEFAULT_PERMIT_LIMIT, 1), MAX_PERMIT_LIMIT);
-  const result = await db.raw(
-    `SELECT ${source.id} AS id, issued_date, ${source.status} AS status, ${source.address} AS address,
-            ${source.city} AS city, zip, ${source.typeOfWork} AS type_of_work
-       FROM ${source.table}
-      WHERE issued_date IS NOT NULL AND issued_date <= ?::date ${BUILDER_ONLY} ${source.where}
-        AND UPPER(BTRIM(contractor_name)) IN (${names.map(() => '?').join(', ')})
-      ORDER BY issued_date DESC, ${source.id}
-      LIMIT ?`,
-    [today, ...names, take],
-  );
-  logger.info(`[builder-list] ${kind} permits: ${result.rows.length} rows in ${Date.now() - started} ms`);
-  return result.rows.map((row) => ({
+  const rows = await db.transaction(async (trx) => {
+    const names = await namesForKey(trx, source, key, today);
+    if (!names.length) return [];
+    const result = await trx.raw(
+      `SELECT ${source.id} AS id, issued_date, ${source.status} AS status, ${source.address} AS address,
+              ${source.city} AS city, zip, ${source.typeOfWork} AS type_of_work
+         FROM ${source.table}
+        WHERE issued_date IS NOT NULL AND issued_date <= ?::date ${BUILDER_ONLY} ${source.where}
+          AND UPPER(BTRIM(contractor_name)) IN (${names.map(() => '?').join(', ')})
+        ORDER BY issued_date DESC, ${source.id}
+        LIMIT ?`,
+      [today, ...names, take],
+    );
+    return result.rows;
+  }, PERMIT_SNAPSHOT);
+  logger.info(`[builder-list] ${kind} permits: ${rows.length} rows in ${Date.now() - started} ms`);
+  return rows.map((row) => ({
     id: row.id,
     issuedDate: dateOnlyString(row.issued_date),
     status: row.status || null,

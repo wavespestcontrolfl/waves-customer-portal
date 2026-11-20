@@ -201,7 +201,7 @@ describe('listBuilders', () => {
 });
 
 describe('builderPermits', () => {
-  beforeEach(() => mockRaw.mockReset());
+  beforeEach(() => { mockRaw.mockReset(); mockSnapshots.length = 0; });
 
   test('finds every spelling that folds into the key, then reads the newest permits for those names', async () => {
     mockRaw
@@ -213,6 +213,9 @@ describe('builderPermits', () => {
     expect(mockRaw.mock.calls[1][1]).toEqual(['2026-11-19', 'SAMPLE POOLS LLC', 'SAMPLE POOLS, L.L.C.', 10]);
     for (const [sql] of mockRaw.mock.calls) expect(sql).toMatch(/issued_date <= \?::date/);
     expect(mockRaw.mock.calls[1][0]).toMatch(/ORDER BY issued_date DESC/);
+    // The spellings and the job sites come from one read-only REPEATABLE READ snapshot.
+    expect(mockSnapshots).toEqual([{ isolationLevel: 'repeatable read', readOnly: true }]);
+    expect(mockRaw.mock.calls.map((call) => call[2])).toEqual(['snapshot', 'snapshot']);
     expect(permits).toEqual([{ id: 'P-1', issuedDate: '2026-11-16', status: 'Permit Issued', address: '200 SAMPLE TRL', city: 'PARRISH', zip: '34219', typeOfWork: null }]);
   });
 
