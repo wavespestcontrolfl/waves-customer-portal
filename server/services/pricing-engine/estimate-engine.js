@@ -2305,6 +2305,8 @@ function generateEstimate(input) {
   let rodentExclusionV2Summary = null;
   const wholeHomeSeal = wholeHomeSealInputs(services.exclusion || {}, property, input);
   const roofStyle = roofStyleInputs(services.exclusion || {}, input);
+  // The technician's confirmed roof style beats the lookup's roof type for the rodent guarantee tier (tile = the tile tier).
+  const confirmedRoofType = roofStyle ? (['flat_tile', 'barrel_tile'].includes(roofStyle.roofStyle) ? 'tile' : roofStyle.roofStyle) : null;
   if (services.exclusion && !useCommercialManualQuote(services.exclusion, 'pest_control', {
     // Only the V2 shape is unit-scoped (per point + per LF, no home-sqft
     // floors) — this is the LIVE producer shape (property-lookup-v2 sends
@@ -2343,6 +2345,7 @@ function generateEstimate(input) {
         urgency: services.exclusion.urgency || 'ROUTINE',
         afterHours: services.exclusion.afterHours || false,
         ...wholeHomeSeal,
+        ...(wholeHomeSeal && confirmedRoofType ? { roofType: confirmedRoofType } : {}),
         ...roofStyle,
       });
       rodentExclusionV2Summary = result;
@@ -2495,7 +2498,7 @@ function generateEstimate(input) {
     const guaranteeOpts = {
       homeSqFt: opts.homeSqFt || property.footprint || 2000,
       stories: opts.stories || property.stories || 1,
-      roofType: opts.roofType || property.roofType || 'shingle',
+      roofType: confirmedRoofType || opts.roofType || property.roofType || 'shingle',
       eligibility: opts.eligibility || {},
     };
     if (exclusionResult?.pricingVersion === 'RODENT_EXCLUSION_V2_MESH_BIRD_BOX') {

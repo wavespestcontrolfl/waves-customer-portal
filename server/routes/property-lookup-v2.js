@@ -5425,6 +5425,17 @@ function roofStyleFields(options) {
   return { roofStyle: style, ...(style === 'barrel_tile' ? { barrelEaveFt: Number(options.exclBarrelEaveFt) || 0 } : {}) };
 }
 
+// A fail-closed 400 for a roof style pick that cannot ride beside legacy point counts (the engine's error shape).
+function roofStyleRouteError(message) {
+  const err = new Error(message);
+  err.status = 400;
+  err.statusCode = 400;
+  err.code = 'EXCLUSION_ROOF_STYLE_INCOMPATIBLE';
+  err.failClosed = true;
+  err.isOperational = true;
+  return err;
+}
+
 function translateV2CallToV1Input(profile, selectedServices, options) {
   const p = profile || {};
   const o = options || {};
@@ -6046,12 +6057,20 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // Whole-home seal (GATE_EXCLUSION_WHOLE_HOME, dark): an all-zero count still prices the home-size
     // minimum, so the pick alone selects the V2 shape. Gate off = the field is never read.
     const wholeHomeSeal = wholeHomeSealFields(o, { homeSqFt, stories, roofType: p.roofType });
-    // Roof style (GATE_EXCLUSION_ROOF_STYLE_PRICING, dark): any pick selects the V2 shape, so the engine prices it or
-    // refuses it (gated, incompatible); the legacy branch would drop it silently. No pick = the field is never read.
+    // Roof style (GATE_EXCLUSION_ROOF_STYLE_PRICING, dark). A pick never changes the request's shape unless it adds
+    // priced work (tile with roof/high points, barrel with eave feet): shingle, metal, other and a bare tile pick route
+    // exactly as no pick (a V2 request carries the pick so the engine stamps, validates or refuses it; a legacy one drops it).
+    // Barrel feet alone select V2 (the closure minimum is above the V2 floor, so nothing drops); legacy point counts
+    // beside them are refused, never discarded. No pick = the field is never read.
     const roofStyle = roofStyleFields(o);
-    const hasV2Fields = (o.exclStandardWireMesh || o.exclAdvancedWireMesh ||
+    const v2Counts = (o.exclStandardWireMesh || o.exclAdvancedWireMesh ||
       o.exclStandardBirdBox || o.exclTileHighBirdBox || o.exclCustomBirdBox ||
-      o.exclMeshSoftLF || o.exclMeshConcreteLF || wholeHomeSeal.sealScope || roofStyle.roofStyle);
+      o.exclMeshSoftLF || o.exclMeshConcreteLF || wholeHomeSeal.sealScope);
+    const addsClosureWork = roofStyle.roofStyle === 'barrel_tile' && roofStyle.barrelEaveFt > 0;
+    if (addsClosureWork && !v2Counts && (o.exclSimple || o.exclModerate || o.exclAdvanced)) {
+      throw roofStyleRouteError('A barrel tile eave closure needs the per-point exclusion. Clear the legacy point counts or the roof style and reprice.');
+    }
+    const hasV2Fields = v2Counts || addsClosureWork;
     if (hasV2Fields) {
       services.exclusion = {
         pricingVersion: 'v2',

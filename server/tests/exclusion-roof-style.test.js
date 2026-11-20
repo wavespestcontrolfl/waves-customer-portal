@@ -230,13 +230,56 @@ describe('the estimator route translation of the roof style pick', () => {
     expect(plain.services.exclusion.roofStyle).toBeUndefined();
   });
 
-  test('any pick routes to the V2 shape (zero points, no feet too), so the engine prices it or refuses it', () => {
-    for (const exclRoofStyle of ['shingle', 'flat_tile', 'barrel_tile', 'metal', 'other']) {
-      const spot = translate({ exclAdvancedWireMesh: 0, exclRoofStyle }).services.exclusion;
-      expect(spot).toMatchObject({ pricingVersion: 'v2', roofStyle: exclRoofStyle });
-      withGate(undefined, () => expect(() => generateEstimate(translate({ exclAdvancedWireMesh: 0, exclRoofStyle }))).toThrow(/Clear the roof style/));
-      gateOn(() => expect(() => generateEstimate(translate({ exclAdvancedWireMesh: 0, exclRoofStyle }))).not.toThrow());
-    }
+  describe('a pick changes the shape only when it adds priced work', () => {
+    const zero = (extra) => translate({ exclAdvancedWireMesh: 0, exclWaiveInspection: true, ...extra });
+    const exclTotal = (request) => generateEstimate(request).lineItems
+      .filter((li) => ['exclusion', 'rodent_exclusion'].includes(li.service)).reduce((sum, li) => sum + li.price, 0);
+
+    test('shingle, metal, other and a bare tile pick price exactly as no pick (legacy stays legacy)', () => {
+      gateOn(() => {
+        const noPick = zero({});
+        expect(noPick.services.exclusion.pricingVersion).toBeUndefined();
+        const base = exclTotal(noPick);
+        expect(base).toBe(595);
+        for (const exclRoofStyle of ['shingle', 'metal', 'other', 'flat_tile', 'barrel_tile']) {
+          const request = zero({ exclRoofStyle });
+          expect(request.services.exclusion).toEqual(noPick.services.exclusion);
+          expect(exclTotal(request)).toBe(base);
+        }
+      });
+    });
+
+    test('a pick on a V2-shaped request is carried, so the engine stamps it and refuses it when the gate is off', () => {
+      for (const exclRoofStyle of ['shingle', 'metal', 'other', 'flat_tile', 'barrel_tile']) {
+        expect(translate({ exclRoofStyle }).services.exclusion).toMatchObject({ pricingVersion: 'v2', roofStyle: exclRoofStyle });
+        withGate(undefined, () => expect(() => generateEstimate(translate({ exclRoofStyle }))).toThrow(/Clear the roof style/));
+        gateOn(() => expect(() => generateEstimate(translate({ exclRoofStyle }))).not.toThrow());
+      }
+    });
+
+    test('barrel feet alone route to V2 with the closure; legacy counts beside them are refused, never discarded', () => {
+      gateOn(() => {
+        const request = zero({ exclRoofStyle: 'barrel_tile', exclBarrelEaveFt: 40 });
+        expect(request.services.exclusion).toMatchObject({ pricingVersion: 'v2', roofStyle: 'barrel_tile', barrelEaveFt: 40 });
+        expect(rowsOf(generateEstimate(request)).some((li) => li.component === 'barrel_eave_closure' && li.price === 480)).toBe(true);
+        let error;
+        try { zero({ exclRoofStyle: 'barrel_tile', exclBarrelEaveFt: 40, exclModerate: 2 }); } catch (err) { error = err; }
+        expect(error).toMatchObject({ statusCode: 400, code: 'EXCLUSION_ROOF_STYLE_INCOMPATIBLE', failClosed: true });
+      });
+      // The refusal does not depend on the gate (the route cannot carry the pick beside legacy counts).
+      expect(() => zero({ exclRoofStyle: 'barrel_tile', exclBarrelEaveFt: 40, exclSimple: 1 })).toThrow(/legacy point counts/);
+      // Feet without Barrel tile, or with no feet, add no work and the legacy counts stay.
+      expect(zero({ exclRoofStyle: 'flat_tile', exclBarrelEaveFt: 40, exclModerate: 2 }).services.exclusion.moderate).toBe(2);
+      expect(zero({ exclRoofStyle: 'barrel_tile', exclBarrelEaveFt: 0, exclModerate: 2 }).services.exclusion.moderate).toBe(2);
+    });
+
+    test('tile with roof/high points selects V2 and prices the multiplier', () => {
+      gateOn(() => {
+        const request = translate({ exclAdvancedWireMesh: 2, exclRoofStyle: 'flat_tile', exclWaiveInspection: true });
+        expect(request.services.exclusion.pricingVersion).toBe('v2');
+        expect(exclTotal(request)).toBe(exclTotal(translate({ exclAdvancedWireMesh: 2, exclWaiveInspection: true })) + 75);
+      });
+    });
   });
 
   test('gate off with NO pick: a zero-point request keeps the legacy shape, byte-identical to one that never mentions the field', () => {
@@ -246,6 +289,54 @@ describe('the estimator route translation of the roof style pick', () => {
       expect(translate({ exclAdvancedWireMesh: 0, exclRoofStyle: '', exclBarrelEaveFt: 40 })).toEqual(plain);
       expect(translate({ exclAdvancedWireMesh: 0, exclRoofStyle: null })).toEqual(plain);
       expect(() => generateEstimate(plain)).not.toThrow();
+    });
+  });
+});
+
+describe('the confirmed roof style sets the rodent guarantee tier', () => {
+  const wholeHome = (extra = {}, input = {}) => generateEstimate(baseInput({
+    roofType: 'shingle',
+    services: { exclusion: { pricingVersion: 'v2', standardWireMeshPoints: 2, waiveInspection: true, sealScope: 'whole_home', ...extra } },
+    ...input,
+  }));
+  const renewal = (estimate) => rowsOf(estimate)[0].guaranteeRenewalPrice;
+  const both = (fn) => gateOn(() => withGateBoth(fn));
+
+  test('lookup shingle + confirmed Flat tile = the tile tier ($249); other styles keep the standard tier ($199)', () => {
+    both(() => {
+      expect(renewal(wholeHome())).toBe(199);
+      expect(renewal(wholeHome({ roofStyle: 'flat_tile' }))).toBe(249);
+      expect(renewal(wholeHome({ roofStyle: 'barrel_tile', barrelEaveFt: 40 }))).toBe(249);
+      for (const roofStyle of ['shingle', 'metal', 'other']) expect(renewal(wholeHome({ roofStyle }))).toBe(199);
+      // The confirmed answer beats the lookup the other way too: a lookup tile roof confirmed Shingle is the standard tier.
+      expect(renewal(wholeHome({ roofStyle: 'shingle' }, { roofType: 'tile' }))).toBe(199);
+      expect(renewal(wholeHome({}, { roofType: 'tile' }))).toBe(249);
+    });
+  });
+
+  test('a saved renewal stays frozen on replay, whatever the confirmed style says', () => {
+    both(() => {
+      const replay = generateEstimate({
+        ...baseInput({ roofType: 'shingle', services: { exclusion: { pricingVersion: 'v2', standardWireMeshPoints: 2, waiveInspection: true, sealScope: 'whole_home', roofStyle: 'flat_tile' } } }),
+        savedEstimateReplay: true,
+        wholeHomeSealReplay: { minimum: 595, renewal: 199 },
+      });
+      expect(renewal(replay)).toBe(199);
+    });
+  });
+
+  test('the separate paid guarantee line also reads the confirmed style', () => {
+    gateOn(() => {
+      const guarantee = (roofStyle) => generateEstimate(baseInput({
+        roofType: 'shingle',
+        services: {
+          exclusion: { pricingVersion: 'v2', standardWireMeshPoints: 2, waiveInspection: true, ...(roofStyle ? { roofStyle } : {}) },
+          rodentGuarantee: { eligibility: { trappingCompleted: true, exclusionCompleted: true, sanitationCompletedOrPhotoBaseline: true, noActivityAfterFinalTrapCheck: true } },
+        },
+      })).lineItems.find((li) => li.service === 'rodent_guarantee');
+      expect(guarantee().price).toBe(199);
+      expect(guarantee('flat_tile').price).toBe(249);
+      expect(guarantee('metal').price).toBe(199);
     });
   });
 });
