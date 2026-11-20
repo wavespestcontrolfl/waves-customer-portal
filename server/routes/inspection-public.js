@@ -2501,7 +2501,7 @@ async function trustedLeadProfileIds(dbConn, leadId, token, custId, { includeMer
 // A failed createSelfBooking mapped to the page's responses: ALREADY_BOOKED
 // resolves to GET's already_booked shape; a 409 is SLOT_TAKEN with fresh
 // times; anything else passes through.
-async function sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, verified }) {
+async function sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, bookingAddress, range, config, catalog, verified }) {
   // A validated, in-area address the lead supplied through their own
   // link stays on the customer even when this attempt fails (owner
   // ruling 2026-09-24): undoing it raced concurrent bookings that had
@@ -2561,8 +2561,10 @@ async function sendBookingFailure(res, result, { lead, custRow, leadPayload, boo
   if (result.code === 'ADDRESS_UNVERIFIED') {
     return res.status(409).json({ error: result.error, code: 'ADDRESS_UNVERIFIED' });
   }
+  // Fresh times at the booking's own location and address (`bookingAddress`, the one its zone was checked with), so the
+  // list offers what this commit would allow (owner rule B per truck).
   if (result.status === 409) {
-    return sendSlotTaken(res, { location: bookingLocation, address: customerAddressFields(custRow), range, config, catalog, leadId: lead.id, error: result.error });
+    return sendSlotTaken(res, { location: bookingLocation, address: bookingAddress, range, config, catalog, leadId: lead.id, error: result.error });
   }
   return res.status(result.status || 500).json({ error: result.error });
 }
@@ -2698,7 +2700,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const bookingSlot = locationMoved
       ? await revalidateSlotAt(bookingLocation, { date, time, config, catalog, leadId: lead.id, address: bookingAddress })
       : slot;
-    if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: customerAddressFields(custRow), range, config, catalog, leadId: lead.id });
+    if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: bookingAddress, range, config, catalog, leadId: lead.id });
 
     // Phase 2 — createSelfBooking's OWN atomic per-customer lane dedupe
     // (dedupeLane, left at its true default — no transaction of ours wraps
@@ -2737,7 +2739,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, slotGuard, zoneAddress, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), fenceIds: async (conn) => { fencedUniverse = await leadFenceIds(conn, lead.id, verified, custRow.id); return fencedUniverse; }, revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id, fencedUniverse) } });
 
     if (!result.ok) {
-      return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, verified });
+      return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, bookingAddress, range, config, catalog, verified });
     }
 
     return res.json(await finishCommittedBooking({ result, notes, date, bookingSlot }));

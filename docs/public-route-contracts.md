@@ -1421,7 +1421,8 @@ rebuilt the same new day before either booked never send two technicians south:
 the second answers `SLOT_TAKEN`. The estimate page's holds check the same rule
 under their date lock where a hold starts to hold its day (a new hold, and a
 lapsed hold that an extend revives or an accept graduates, checked in the zone
-stamped on it), with the existing `SLOT_UNAVAILABLE` answer. The assessment
+stamped on it; an unstamped one is stamped with the zone its check read, so the
+next booking sees it), with the existing `SLOT_UNAVAILABLE` answer. The assessment
 link's list and its booking resolve the zone from the one booking address the
 same way (its city decides, its text only without one; `callbackVisit.zoneAddress`), so a list
 never offers a time that check refuses. No field or status changes.
@@ -7607,7 +7608,8 @@ day first, it answers `SLOT_TAKEN`. Every list reads the zone from the address's
 own city (the zone that lists it, else the zone whose city its name contains;
 the address text only when there is no city), and the booking resolves its zone
 from the same address the same way (`callbackVisit.zoneAddress`), so its stamp
-and its check match the list. No field, status, error code, limiter or header
+and its check match the list. A refused booking's `SLOT_TAKEN` refresh uses the
+address that booking checked. No field, status, error code, limiter or header
 changes. `POST /:token/find-slots` is the same natural-language search
 reservice uses, READ-ONLY, same booking-window clamp on both ends, and
 (same P1) is likewise routed through `finalizeBookingLocation` rather than

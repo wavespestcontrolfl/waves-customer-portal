@@ -858,15 +858,19 @@ function slotTaken(slotId) {
 // it stamps), and a lapsed hold that an extend revives or an accept graduates (a lapsed hold stopped counting, so
 // another truck may have taken the day). A lapsed hold keeps the zone stamped on it (`stamp`, the row's `zone`), so
 // that stamp decides; an unstamped hold resolves its zone from `estimate`, as reserveSlot did. Slot-taken when
-// refused. Gate off or no technician: nothing is read.
+// refused. Returns the zone stamp an unstamped hold takes when it revives or graduates (`{ zone }`, the zone the
+// check read): a hold has no customer city, so without it the next booking's stop read (zoneStopDays) cannot see this
+// truck's day. `{}` for a stamped hold or no zone. Gate off or no technician: nothing is read, `{}`.
 async function refuseOtherTruckSouthDay(conn, { date, techId, slotId, zone = null, stamp = null, estimate = null }) {
   const funnel = require('./scheduling/zone-day-funnel');
-  if (techId == null || !funnel.perTruckLive()) return;
+  if (techId == null || !funnel.perTruckLive()) return {};
   // An unstamped hold whose zone cannot be resolved skips the check, as reserveSlot's own zone checks do.
   const estimateZone = zone
     || (stamp ? await stampedZone(conn, stamp) : null)
     || (estimate ? await resolveEstimateZone(conn, estimate).catch(() => null) : null);
   if (!(await funnel.truckMayTakeDate(conn, { estimateZone, date, technicianId: techId }))) throw slotTaken(slotId);
+  const slug = stamp ? null : zoneSlugOf(estimateZone);
+  return slug ? { zone: slug } : {};
 }
 
 // A hold's zone stamp (zoneSlugOf of the zone reserveSlot resolved) back to its service_zones row, whose cities the
@@ -2252,10 +2256,12 @@ async function commitReservation({
       }
     }
     // Owner rule B per truck: a lapsed hold stopped counting, so another truck may have taken its far-south day.
-    // Same slot-unavailable recovery as the technician check below (the customer re-picks a time).
+    // Same slot-unavailable recovery as the technician check below (the customer re-picks a time). An unstamped hold
+    // graduates with the zone the check read (`zoneStamp`, in `updates` below).
+    let zoneStamp = {};
     if (row._lapsed) {
       const heldDate = dateOnly(row.scheduled_date);
-      await refuseOtherTruckSouthDay(client, {
+      zoneStamp = await refuseOtherTruckSouthDay(client, {
         stamp: row.zone, estimate, date: heldDate, techId: row.technician_id,
         slotId: `${heldDate}_${String(row.window_start).slice(0, 5).replace(':', '-')}_${row.technician_id}`,
       });
@@ -2464,6 +2470,7 @@ async function commitReservation({
       updated_at: new Date(),
       ...(serviceProfile?.reservationServiceMix || row.reservation_service_mix
         ? { reservation_service_mix: serviceProfile?.reservationServiceMix || null } : {}),
+      ...zoneStamp,
     };
     if (paymentMethodPreference) {
       updates.payment_method_preference = paymentMethodPreference;
@@ -3019,6 +3026,7 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
     // reserveSlot explicitly supersedes, and /data could then surface the
     // stale one instead of the customer's newer selection. The newer hold
     // wins: this one stays dead and the caller re-picks.
+    let zoneStamp = {};
     if (alreadyLapsed) {
       const rivalLiveHold = await trx('scheduled_services')
         .where({ source_estimate_id: estimateId })
@@ -3032,8 +3040,9 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
         err.code = 'RESERVATION_NOT_FOUND';
         throw err;
       }
-      // Owner rule B per truck: while lapsed, another truck may have taken this hold's far-south day.
-      await refuseOtherTruckSouthDay(trx, {
+      // Owner rule B per truck: while lapsed, another truck may have taken this hold's far-south day. An unstamped hold
+      // revives with the zone the check read (`zoneStamp`, in the expiry write below).
+      zoneStamp = await refuseOtherTruckSouthDay(trx, {
         stamp: row.zone, estimate, date: scheduledDate, techId: row.technician_id,
         slotId: `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`,
       });
@@ -3134,7 +3143,7 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
 
     const [updated] = await trx('scheduled_services')
       .where({ id: row.id })
-      .update({ reservation_expires_at: newExpiry })
+      .update({ reservation_expires_at: newExpiry, ...zoneStamp })
       .returning(['id', 'reservation_expires_at']);
     const expiresAt = updated?.reservation_expires_at || newExpiry;
     logger.info('[slot-reservation] extended hold', {

@@ -1956,6 +1956,34 @@ describe('POST /:token commit', () => {
       expect(bookingArgs.callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, West Bradenton, FL, 34209', city: 'West Bradenton' });
     });
 
+    // Owner rule B per truck (pre-push P1 on e81d7ed7c0): at the SAME pin the booking keeps the address its list and
+    // anti-forgery check used (the one the lead typed), and a 409's fresh times use that address too, never the
+    // profile's city on file, so the retry list resolves the zone the refused commit checked.
+    test('a matched profile at the same pin with another city on file: the booking and a 409\'s fresh times both use the typed address', async () => {
+      firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      const existingCustomer = {
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
+        address_line1: '123 Palm Ave', city: 'West Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
+        latitude: 27.4, longitude: -82.5, // the default mockGeocode pin: the location does not move
+      };
+      seedPhoneHousehold(existingCustomer);
+      listResults.scheduled_services = [];
+      mockBuildAvailability.mockResolvedValueOnce({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] });
+      mockCreateSelfBooking.mockImplementationOnce(async () => ({ ok: false, status: 409, error: 'That time is no longer open.' }));
+
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL 34209' });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.body.code).toBe('SLOT_TAKEN');
+      const typed = { zoneFunnelAddress: '123 Palm Ave, Bradenton, FL, 34209', zoneFunnelCity: 'Bradenton' };
+      expect(mockBuildAvailability).toHaveBeenCalledTimes(2);
+      expect(mockBuildAvailability.mock.calls[0][0]).toMatchObject(typed); // the anti-forgery rebuild
+      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: typed.zoneFunnelAddress, city: 'Bradenton' });
+      expect(mockBuildAvailability.mock.calls[1][0]).toMatchObject(typed); // the 409's fresh times
+    });
+
     // Codex #4737 r9 pre-push P1: the matched profile is re-read under its
     // comms fence; an address edited in between is a retry, never given the
     // old address's coordinates.

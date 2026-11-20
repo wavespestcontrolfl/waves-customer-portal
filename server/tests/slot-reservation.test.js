@@ -427,7 +427,8 @@ describe('slot reservation helpers', () => {
       const trx = conn();
       const result = refuseOtherTruckSouthDay(trx, ARGS);
       if (code) await expect(result).rejects.toMatchObject({ code, slotId: ARGS.slotId });
-      else await expect(result).resolves.toBeUndefined();
+      // An unstamped hold takes the zone the check read (the accept and the extend write it on the row).
+      else await expect(result).resolves.toEqual({ zone: 'venice' });
       expect(mayTake).toHaveBeenCalledWith(trx, { estimateZone: VENICE, date: '2027-05-20', technicianId: 'tech-1' });
     });
 
@@ -436,9 +437,9 @@ describe('slot reservation helpers', () => {
       const perTruck = jest.spyOn(funnel, 'perTruckLive').mockReturnValue(false);
       spies = [perTruck, jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
       const trx = conn();
-      await expect(refuseOtherTruckSouthDay(trx, ARGS)).resolves.toBeUndefined();
+      await expect(refuseOtherTruckSouthDay(trx, ARGS)).resolves.toEqual({});
       perTruck.mockReturnValue(true);
-      await expect(refuseOtherTruckSouthDay(trx, { ...ARGS, techId: null })).resolves.toBeUndefined();
+      await expect(refuseOtherTruckSouthDay(trx, { ...ARGS, techId: null })).resolves.toEqual({});
       expect(trx).not.toHaveBeenCalled();
       expect(mayTake).not.toHaveBeenCalled();
     });
@@ -463,7 +464,7 @@ describe('slot reservation helpers', () => {
       const mayTake = jest.fn().mockResolvedValue(true);
       spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
       const failing = jest.fn(() => ({ select: jest.fn().mockRejectedValue(new Error('zones down')) }));
-      await expect(refuseOtherTruckSouthDay(failing, ARGS)).resolves.toBeUndefined();
+      await expect(refuseOtherTruckSouthDay(failing, ARGS)).resolves.toEqual({});
       expect(mayTake).toHaveBeenCalledWith(failing, { estimateZone: null, date: '2027-05-20', technicianId: 'tech-1' });
     });
 
@@ -484,6 +485,46 @@ describe('slot reservation helpers', () => {
       expect(at).toBeGreaterThan(branch);
       expect(at).toBeLessThan(techCheck);
       expect(body.slice(at, body.indexOf('});', at))).toContain('stamp: row.zone,');
+    });
+
+    // Pre-push P1 on e81d7ed7c0: a hold has no customer city, so an UNSTAMPED lapsed hold (its zone did not resolve at
+    // reserve) graduates with the zone its check read, or the next booking's stop read (zoneStopDays) cannot see this
+    // truck's far-south day. A stamped hold keeps its stamp. extendReservation: slot-reservation-make-room-extend.test.js.
+    test.each([
+      ['unstamped', null, { zone: 'venice' }],
+      ['stamped', 'venice', {}],
+    ])('accept: an %s lapsed hold graduates with the zone its check read on the row', async (_label, zone, stamped) => {
+      const mayTake = jest.fn().mockResolvedValue(true);
+      spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
+      const chainOf = (first) => {
+        const b = { first: jest.fn().mockResolvedValue(first) };
+        for (const name of ['where', 'whereNot', 'whereNull', 'whereNotNull', 'whereNotIn', 'andWhereRaw', 'orWhereRaw', 'select', 'forUpdate']) b[name] = jest.fn().mockReturnValue(b);
+        b.modify = jest.fn((callback) => { callback(b); return b; });
+        b.andWhere = jest.fn((callback) => { callback(b); return b; });
+        return b;
+      };
+      const reservationBuilder = chainOf({
+        id: 'scheduled-123', source_estimate_id: 'estimate-456', scheduled_date: '2027-05-20', window_start: '09:00:00',
+        window_end: '10:00:00', technician_id: 'tech-1', reservation_expires_at: '2027-05-20T13:15:00.000Z', zone, _lapsed: true,
+      });
+      const updateBuilder = { where: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis(), returning: jest.fn().mockResolvedValue([{ id: 'scheduled-123' }]) };
+      // The date probe, the held row, the rival live-hold read, the technician's window probe, the global probe, the write.
+      const scheduledBuilders = [chainOf({ scheduled_date: '2027-05-20' }), reservationBuilder, chainOf(null), chainOf(null), makeGlobalProbeBuilder([]), updateBuilder];
+      const trx = jest.fn((table) => {
+        if (table === 'scheduled_services') return scheduledBuilders.shift();
+        if (table === 'service_zones') return { select: jest.fn().mockResolvedValue([SARASOTA, VENICE]) };
+        if (table === 'technicians') return makeAssignableTechnicianBuilder();
+        if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
+        throw new Error(`unexpected table ${table}`);
+      });
+      trx.raw = jest.fn((sql) => ({ raw: sql }));
+      await expect(slotReservation.commitReservation({
+        scheduledServiceId: 'scheduled-123', customerId: 'customer-1', estimate: { ...ESTIMATE, service_interest: 'Pest Control' }, trx,
+      })).resolves.toMatchObject({ id: 'scheduled-123' });
+      expect(mayTake).toHaveBeenCalledWith(trx, { estimateZone: VENICE, date: '2027-05-20', technicianId: 'tech-1' });
+      const [written] = updateBuilder.update.mock.calls[0];
+      expect(written).toMatchObject({ customer_id: 'customer-1', reservation_expires_at: null, ...stamped });
+      if (zone) expect(written).not.toHaveProperty('zone');
     });
   });
 
