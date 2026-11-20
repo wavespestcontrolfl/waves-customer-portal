@@ -428,6 +428,25 @@ async function technicianMayCollectInvoiceLocked(trx, req, invoice) {
   return !!assigned;
 }
 
+async function lockedHandoffInvoiceStateRefusal(invoice, database) {
+  if (invoice.status === 'paid') return { status: 400, body: { error: 'Invoice already paid' } };
+  if (invoice.status === 'prepaid') return { status: 400, body: { error: 'Invoice is already prepaid' } };
+  const processingRefusal = await terminalProcessingRefusal(
+    invoice, database, { error: 'Bank payment is already processing' },
+  );
+  if (processingRefusal) return { status: 409, body: processingRefusal };
+  if (!isInvoiceCollectibleStatus(invoice.status)) {
+    return { status: 409, body: { error: `Invoice is ${invoice.status}`, code: 'invoice_status_changed' } };
+  }
+  if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)) {
+    return {
+      status: 400,
+      body: { error: 'Invoice is billed to a third-party payer — do not collect in person' },
+    };
+  }
+  return null;
+}
+
 router.post('/handoff', adminAuthenticate, async (req, res) => {
   // Hoisted so the generic catch below can reverse seam-applied credit when no
   // handoff token ends up minted (any abort after the credit-apply).
@@ -445,6 +464,7 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
 
     let invoice = await db('invoices').where({ id: invoice_id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    const handoffCustomerId = invoice.customer_id;
     // Technician scope (codex #5568 r1 P1): a technician mints a Tap to Pay
     // handoff only for a customer on their current/recent route; an admin is
     // unscoped. 404 so an invoice id observed elsewhere does not confirm
@@ -496,10 +516,16 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       // cannot deadlock against this ownership check (pre-push P1). The
       // credit apply below re-locks the same rows within this transaction.
       const lockedInvoice = await trx('invoices').where({ id: invoice_id }).forUpdate().first();
-      if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
-      if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) {
+      if (!lockedInvoice) return { status: 404, body: { error: 'Invoice not found' } };
+      if (lockedInvoice.customer_id) {
+        await trx('customers').where({ id: lockedInvoice.customer_id }).forUpdate().first('id');
+      }
+      if (String(lockedInvoice.customer_id || '') !== String(handoffCustomerId || '')
+        || !(await technicianMayCollectInvoiceLocked(trx, req, lockedInvoice))) {
         return { status: 404, body: { error: 'Invoice not found' } };
       }
+      const lockedStateRefusal = await lockedHandoffInvoiceStateRefusal(lockedInvoice, trx);
+      if (lockedStateRefusal) return lockedStateRefusal;
       // This is intentionally the writing checkout fence under the invoice
       // lock. A saved-card owner must cross the same lock before it can mark a
       // claim submitted, so an expired pre-submit claim is safe to release.
@@ -530,11 +556,9 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       return res.status(400).json({ error: 'Invoice is now covered by account credit — no in-person collection needed' });
     }
 
-    // Collect the amount DUE (total − applied account credit), not raw total.
-    const amount_cents = Math.round(invoiceAmountDue(invoice) * 100);
-    if (!amount_cents || amount_cents < 50) {
-      return res.status(400).json({ error: 'Invalid invoice amount' });
-    }
+    // Priced again from the locked row in the mint transaction below. The
+    // unlocked re-read is useful only for the full-credit exit above.
+    let amount_cents = null;
 
     let rateLimited = false;
     let rateLimitedCount = 0;
@@ -542,6 +566,7 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     let mintedJti = null;
     let mintedExpiresAt = null;
     let ownershipLostAtMint = false;
+    let mintInvoiceRefusal = null;
     let mintChargeRefusal = null;
 
     await db.transaction(async (trx) => {
@@ -551,13 +576,20 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       // For technicians, continue through the billing lock order invoice →
       // customer → visit before any rate-limit or token work.
       const lockedInvoice = await trx('invoices').where({ id: invoice_id }).forUpdate().first();
-      if (req.techRole === 'technician') {
-        if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
-      }
-      if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) {
+      if (!lockedInvoice) {
         ownershipLostAtMint = true;
         return;
       }
+      if (lockedInvoice.customer_id) {
+        await trx('customers').where({ id: lockedInvoice.customer_id }).forUpdate().first('id');
+      }
+      if (String(lockedInvoice.customer_id || '') !== String(handoffCustomerId || '')
+        || !(await technicianMayCollectInvoiceLocked(trx, req, lockedInvoice))) {
+        ownershipLostAtMint = true;
+        return;
+      }
+      mintInvoiceRefusal = await lockedHandoffInvoiceStateRefusal(lockedInvoice, trx);
+      if (mintInvoiceRefusal) return;
       try {
         await assertNoInvoiceChargeReconciliationPending(invoice_id, trx, { checkout: true });
       } catch (err) {
@@ -566,6 +598,14 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
         // Return from the callback so the promotion commits before the 409.
         await parkTerminalSavedCardReconciliationLocked(trx, lockedInvoice, err);
         mintChargeRefusal = err;
+        return;
+      }
+
+      // Collect the amount DUE (total − applied account credit), not raw
+      // total, and bind the token to the row we just authorized under lock.
+      amount_cents = Math.round(invoiceAmountDue(lockedInvoice) * 100);
+      if (!amount_cents || amount_cents < 50) {
+        mintInvoiceRefusal = { status: 400, body: { error: 'Invalid invoice amount' } };
         return;
       }
 
@@ -626,7 +666,7 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       await trx('terminal_handoff_tokens').insert({
         jti,
         tech_user_id: req.technicianId,
-        invoice_id: invoice.id,
+        invoice_id: lockedInvoice.id,
         amount_cents,
         expires_at,
         // Two-step proof of the minting session (GATE_ADMIN_MFA); this row is
@@ -654,6 +694,10 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
         }
       }
       return res.status(404).json({ error: 'Invoice not found' });
+    }
+
+    if (mintInvoiceRefusal) {
+      return res.status(mintInvoiceRefusal.status).json(mintInvoiceRefusal.body);
     }
 
     if (rateLimited) {

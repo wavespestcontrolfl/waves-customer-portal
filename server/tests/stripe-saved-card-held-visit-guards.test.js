@@ -20,6 +20,7 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
     let chargeAttempt = null;
     const db = jest.fn((table) => {
       const chain = {};
+      let summedPayments = false;
       ['where', 'whereNot', 'whereIn', 'orWhereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNull', 'orWhereColumn', 'forUpdate', 'orderBy', 'orderByRaw'].forEach((method) => {
         chain[method] = jest.fn((arg) => {
           if (['where', 'orWhere'].includes(method) && typeof arg === 'function') arg.call(chain, chain);
@@ -39,7 +40,10 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
         if (table === 'payment_plans') return activePlan;
         if (table === 'autopay_log') return autopayToggle;
         // Only the applied-prepayment marker lookup (it binds 'scheduled_service_prepaid') sees the marker.
-        if (table === 'payments') return markerLookup ? appliedMarker : null;
+        if (table === 'payments') {
+          if (!markerLookup) return null;
+          return summedPayments ? { amount: appliedMarker?.amount || null } : appliedMarker;
+        }
         return null;
       });
       let markerLookup = false;
@@ -53,6 +57,7 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
         return chain;
       });
       chain.returning = jest.fn(async () => (chargeAttempt ? [chargeAttempt] : []));
+      chain.sum = jest.fn(() => { summedPayments = true; return chain; });
       chain.update = jest.fn(async (payload) => {
         if (table === 'stripe_invoice_charge_attempts' && chargeAttempt) Object.assign(chargeAttempt, payload);
         return 1;
@@ -180,7 +185,7 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
 
     test.each([
       ['the option is off (every other caller)', prepaidVisit, null, false],
-      ['the prepayment was applied to this invoice (marker payment)', prepaidVisit, { id: 'pay-1' }, true],
+      ['the prepayment was fully applied to this invoice', prepaidVisit, { id: 'pay-1', amount: '40.00' }, true],
       ['the stamp is the annual-prepay invoice marker', { ...heldVisit, prepaid_method: 'annual_prepay_invoice', prepaid_amount: '40.00' }, null, true],
       ['no prepayment amount', { ...heldVisit, prepaid_method: 'cash', prepaid_amount: null }, null, true],
     ])('%s: the charge proceeds to Stripe', async (_label, visit, appliedMarker, option) => {
@@ -188,6 +193,17 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
       await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireNoUnappliedVisitPrepayment: option }))
         .rejects.not.toMatchObject({ code: 'UNAPPLIED_VISIT_PREPAYMENT' });
       expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+    });
+
+    test('a prior allocation below the raised cumulative marker still refuses before Stripe', async () => {
+      const { StripeService, stripeClient } = load({
+        visit: prepaidVisit,
+        contract: null,
+        appliedMarker: { id: 'pay-1', amount: '25.00' },
+      });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...guards, requireNoUnappliedVisitPrepayment: true }))
+        .rejects.toMatchObject({ code: 'UNAPPLIED_VISIT_PREPAYMENT' });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
     });
   });
 
@@ -275,7 +291,7 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
     // requireNoUnappliedVisitPrepayment) refuses; once the prepayment marker is booked, it proceeds.
     test.each([
       ['not yet applied to this invoice', null, true],
-      ['applied to this invoice', { id: 'pay-1' }, false],
+      ['fully applied to this invoice', { id: 'pay-1', amount: '40.00' }, false],
     ])('a cash prepayment on the completed visit, %s', async (_label, appliedMarker, refuses) => {
       const { StripeService, stripeClient } = load({
         visit: visitToday({ prepaid_method: 'cash', prepaid_amount: '40.00' }), contract: null, appliedMarker,

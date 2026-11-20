@@ -1,5 +1,6 @@
 const express = require('express');
 const Sentry = require('@sentry/node');
+const { validate: isUuid } = require('uuid');
 const { safeErrorToken } = require('../utils/sentry-scrub');
 const { REPLAY_HOLD_CODES, billingDeliveryCategory: resolveBillingDeliveryCategory } = require('../services/messaging/billing-channel-routing');
 const router = express.Router();
@@ -36,7 +37,13 @@ const {
 } = require('../services/stripe-invoice-state');
 const { computeChargeAmount } = require('../services/stripe-pricing');
 const { isEnabled } = require('../config/feature-gates');
-const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, invoiceWithdrawnFromCustomer, invoicePrincipalCents } = require('../services/invoice-helpers');
+const {
+  INVOICE_UNCOLLECTIBLE_STATUSES,
+  invoiceAmountDue,
+  invoiceWithdrawnFromCustomer,
+  invoicePrincipalCents,
+  isInvoiceCollectibleStatus,
+} = require('../services/invoice-helpers');
 const { publicPortalUrl } = require('../utils/portal-url');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
@@ -428,7 +435,14 @@ async function findMatchingSavedCardAttempt(
   database,
   invoice,
   paymentIntent,
-  { lock = false, allowResolvedSucceeded = false, allowVerifiedCancellationWithoutMethod = false, reportWorkerConflict = false, requireWorkerPaymentIntent = false } = {},
+  {
+    lock = false,
+    allowResolvedSucceeded = false,
+    requireWorkerPaymentIntent = false,
+    allowVerifiedCancellationWithoutMethod = false,
+    allowRecordedOwner = false,
+    reportWorkerConflict = false,
+  } = {},
 ) {
   if (!invoice || paymentIntent.metadata?.source !== 'admin_card_on_file') return null;
   let query = database('stripe_invoice_charge_attempts')
@@ -466,7 +480,7 @@ async function findMatchingSavedCardAttempt(
     return reportWorkerConflict ? CONFLICTING_WORKER_INTENT : null;
   }
   const originalCustomerId = paymentIntent.metadata?.waves_customer_id;
-  const provenInvoiceOwner = Boolean(allowVerifiedCancellationWithoutMethod && candidate && originalCustomerId
+  const provenInvoiceOwner = Boolean((allowVerifiedCancellationWithoutMethod || allowRecordedOwner) && candidate && originalCustomerId
     && originalCustomerId !== invoice.customer_id
     && await require('../services/invoice-payment-authentication').invoiceHasRecordedOwner(invoice, originalCustomerId, database));
   return savedCardAttemptMatchesPaymentIntent({
@@ -1912,19 +1926,36 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
     if (invoiceForTenderGuard?.id) {
       await lockAlertCustomers(trx, [invoiceForTenderGuard.customer_id, paymentIntent.metadata?.waves_customer_id]);
     }
+    // A worker can return a different PI after the preflight read. Recheck the
+    // named attempt only after the invoice and attempt rows are locked, and do
+    // it BEFORE an existing processing payment is flipped to paid. Otherwise
+    // PI A can settle the ledger after the worker proves this attempt belongs
+    // to PI B.
+    const settledInvoice = invoiceForTenderGuard?.id
+      ? await trx('invoices').where({ id: invoiceForTenderGuard.id })
+        .forUpdate().first('id', 'invoice_number', 'customer_id', 'scheduled_send_error', 'status', 'stripe_payment_intent_id')
+      : null;
+    const lockedAttempt = settledInvoice
+      ? await findMatchingSavedCardAttempt(trx, settledInvoice, paymentIntent, {
+        lock: true, reportWorkerConflict: true,
+      })
+      : null;
+    if (lockedAttempt === CONFLICTING_WORKER_INTENT) {
+      await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal ?? centsToDollars(paymentIntent.amount),
+        'Succeeded PaymentIntent differs from the locked saved-card worker response', { database: trx });
+      return QUARANTINED;
+    }
+    if (settledInvoice) await assertNoConflictingAuthenticationSettlement(paymentIntent, settledInvoice, null, trx);
     const flipped = await trx('payments')
       .where({ stripe_payment_intent_id: piId, status: 'processing' })
       .update(paymentUpdates);
-    if (flipped > 0 && invoiceForTenderGuard?.id) {
+    if (flipped > 0 && settledInvoice) {
       // FOR UPDATE, not a plain read (fallback audit P1): an unlocked SELECT
       // under READ COMMITTED sees a racing withdrawal only once it has
       // committed, so a withdrawal still in flight here would read as absent
       // and the anomaly alert would be skipped on a payment that settles
       // against payer-owned debt. The lock waits for that transaction to
       // finish and then reads its outcome.
-      const settledInvoice = await trx('invoices').where({ id: invoiceForTenderGuard.id })
-        .forUpdate().first('id', 'invoice_number', 'customer_id', 'scheduled_send_error', 'status', 'stripe_payment_intent_id');
-      await assertNoConflictingAuthenticationSettlement(paymentIntent, settledInvoice, null, trx);
       if (invoiceWithdrawnFromCustomer(settledInvoice)) {
         logger.error(`[stripe-webhook] PI ${piId} settled on invoice ${settledInvoice.id} whose Bill-To moved to a third-party payer mid-payment`);
         await insertHealthAlert({
@@ -1940,6 +1971,7 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
     return flipped;
   });
 
+  if (updated === QUARANTINED) return;
   if (updated > 0) {
     logger.info(`[stripe-webhook] Updated ${updated} payment(s) to paid for PI: ${piId}`);
   } else {
@@ -1955,9 +1987,25 @@ async function settleSucceededPaymentIntent(paymentIntent, eventCreated) {
         .forUpdate()
         .first();
       if (existingPayment && !authenticatingAttempt) {
-        if (invoiceForTenderGuard) {
-          const locked = await trx('invoices').where({ id: invoiceForTenderGuard.id }).forUpdate().first();
-          await assertNoConflictingAuthenticationSettlement(paymentIntent, locked, null, trx);
+        // The direct processing flip above and this fallback existing-row path
+        // must enforce the same worker identity fence. Lock the invoice and
+        // named attempt before changing this row to paid (or adding the
+        // settlement stamp), because the worker may have bound a different PI
+        // since the preflight read.
+        if (invoiceForTenderGuard?.id) {
+          const lockedInvoice = await trx('invoices').where({ id: invoiceForTenderGuard.id })
+            .forUpdate().first();
+          const matchingAttempt = lockedInvoice
+            ? await findMatchingSavedCardAttempt(trx, lockedInvoice, paymentIntent, {
+              lock: true, reportWorkerConflict: true,
+            })
+            : null;
+          if (matchingAttempt === CONFLICTING_WORKER_INTENT) {
+            await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal ?? centsToDollars(paymentIntent.amount),
+              'Succeeded PaymentIntent differs from the locked saved-card worker response', { database: trx });
+            return QUARANTINED;
+          }
+          if (lockedInvoice) await assertNoConflictingAuthenticationSettlement(paymentIntent, lockedInvoice, null, trx);
         }
         // 'disputed' is terminal here: a delayed/reclaimed succeeded
         // event arriving after charge.dispute.created must not flip a
@@ -3248,7 +3296,7 @@ async function handlePaymentIntentFailed(paymentIntent, eventId, eventCreated = 
   // release the attempt, reopen the invoice, and return reserved credit.
   const failedAttemptInvoice = failedInvoice || await findInvoiceForPaymentIntent(paymentIntent);
   const failedSavedCardAttempt = failedAttemptInvoice
-    ? await findMatchingSavedCardAttempt(db, failedAttemptInvoice, paymentIntent)
+    ? await findMatchingSavedCardAttempt(db, failedAttemptInvoice, paymentIntent, { allowRecordedOwner: true })
     : null;
   if (failedSavedCardAttempt) {
     const { resolveFailedInvoiceSavedCardChargeAttempt } = require('../services/stripe');
@@ -3259,6 +3307,7 @@ async function handlePaymentIntentFailed(paymentIntent, eventId, eventCreated = 
         ? { bankReturnAmountCents: paymentIntent.amount } : {}),
       invoiceId: failedAttemptInvoice.id,
       customerId: failedAttemptInvoice.customer_id,
+      ...(paymentIntent.metadata?.waves_customer_id ? { originalCustomerId: paymentIntent.metadata.waves_customer_id } : {}),
       stripePaymentIntentId: piId,
       failureMessage: `${failureMessage}${failureCode ? ` (${failureCode})` : ''}`,
       // Codex #4971 r24 P1: payment_intent.payment_failed is a CUSTOMER-side
@@ -7213,17 +7262,19 @@ async function alertCanceledMonthlyAutopay(paymentIntent, row) {
 async function resolveMetadataCanceledSavedCardAttempt(paymentIntent, database = db) {
   const metadataInvoiceId = paymentIntent.metadata?.waves_invoice_id || null;
   const metadataAttemptId = paymentIntent.metadata?.saved_card_attempt_id || null;
-  if (paymentIntent.metadata?.source !== 'admin_card_on_file' || !metadataInvoiceId || !metadataAttemptId) {
+  const metadataCustomerId = paymentIntent.metadata?.waves_customer_id || null;
+  if (paymentIntent.metadata?.source !== 'admin_card_on_file'
+    || ![metadataInvoiceId, metadataAttemptId, metadataCustomerId].every(isUuid)) {
     return false;
   }
   const metadataInvoice = await database('invoices').where({ id: metadataInvoiceId }).first();
+  const invoiceStatus = String(metadataInvoice?.status || '').toLowerCase();
   if (!metadataInvoice
-    || String(metadataInvoice.status || '').toLowerCase() !== 'processing'
-    || metadataInvoice.stripe_payment_intent_id) {
+    || (invoiceStatus !== 'processing' && !isInvoiceCollectibleStatus(invoiceStatus))) {
     return false;
   }
   const metadataAttempt = await findMatchingSavedCardAttempt(database, metadataInvoice, paymentIntent, {
-    requireWorkerPaymentIntent: true,
+    allowVerifiedCancellationWithoutMethod: true,
   });
   if (!metadataAttempt) return false;
   const { resolveFailedInvoiceSavedCardChargeAttempt } = require('../services/stripe');
@@ -7231,6 +7282,7 @@ async function resolveMetadataCanceledSavedCardAttempt(paymentIntent, database =
     attemptId: metadataAttempt.id,
     invoiceId: metadataInvoice.id,
     customerId: metadataInvoice.customer_id,
+    originalCustomerId: metadataCustomerId,
     stripePaymentIntentId: paymentIntent.id,
     failureMessage: 'PaymentIntent canceled before settling',
     database,

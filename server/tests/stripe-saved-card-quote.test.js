@@ -254,6 +254,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
       // getChargeableAutopayMethod walks candidates via orderBy().select()
       // since the multi-default fix — resolve the same row first() serves.
       chain.select = chain.select || jest.fn(async () => { const row = await chain.first(); return row ? [row] : []; });
+      if (table === 'invoices') chain.then = (resolve, reject) => chain.select().then(resolve, reject);
       return chain;
     });
     db.transaction = jest.fn(async (callback) => callback(db));
@@ -317,6 +318,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
       // getChargeableAutopayMethod walks candidates via orderBy().select()
       // since the multi-default fix — resolve the same row first() serves.
       chain.select = chain.select || jest.fn(async () => { const row = await chain.first(); return row ? [row] : []; });
+      if (table === 'invoices') chain.then = (resolve, reject) => chain.select().then(resolve, reject);
       return chain;
     });
     db.transaction = jest.fn(async (callback) => callback(db));

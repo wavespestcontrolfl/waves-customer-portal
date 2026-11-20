@@ -175,7 +175,7 @@ describe('finding 3: handoff mint re-validates assignment under a row lock', () 
     const src = read('routes/stripe-terminal.js');
     const handler = src.slice(src.indexOf("router.post('/handoff'"), src.indexOf("router.post('/validate-handoff'"));
     const txn = handler.indexOf('await db.transaction(async (trx) => {');
-    const lock = handler.indexOf('await technicianMayCollectInvoiceLocked(trx, req, invoice)');
+    const lock = handler.indexOf('await technicianMayCollectInvoiceLocked(trx, req, lockedInvoice)');
     const advisory = handler.indexOf('pg_advisory_xact_lock');
     const tokenRow = handler.indexOf("trx('terminal_handoff_tokens').insert(");
     const sign = handler.indexOf('jwt.sign(');
@@ -215,7 +215,7 @@ describe('codex #5568 r15', () => {
 
   test('the handoff locks ownership and applies credit in one transaction, before the prepaid exit (superseded by r16)', () => {
     const s = src('routes/stripe-terminal.js');
-    const lock = s.indexOf('if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice)))');
+    const lock = s.indexOf('technicianMayCollectInvoiceLocked(trx, req, lockedInvoice)');
     const apply = s.indexOf('autoApplyAccountCreditIfEnabled(invoice_id, { trx, deferFullCoverageSideEffects: true })', lock);
     const prepaidExit = s.indexOf("if (invoice.status === 'prepaid') {", apply);
     expect(lock).toBeGreaterThan(-1);
@@ -242,7 +242,7 @@ describe('codex #5568 r16', () => {
     test('the locked ownership check runs first inside the transaction, and credit only after it passes', () => {
       const h = handler();
       const txn = h.indexOf('const handoffRefusal = await db.transaction(async (trx) => {');
-      const lock = h.indexOf('if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice)))');
+      const lock = h.indexOf('technicianMayCollectInvoiceLocked(trx, req, lockedInvoice)');
       const denied = h.indexOf("return { status: 404, body: { error: 'Invoice not found' } };", lock);
       const apply = h.indexOf('autoApplyAccountCreditIfEnabled(invoice_id, { trx, deferFullCoverageSideEffects: true })');
       const miss = h.indexOf('if (handoffRefusal) return res.status(handoffRefusal.status).json(handoffRefusal.body);');
@@ -277,7 +277,7 @@ describe('codex #5568 r16', () => {
       const s = src('routes/stripe-terminal.js');
       expect(s).toMatch(/system:handoff_mint_failed/);
       expect(s).toMatch(/system:handoff_not_assigned/);
-      expect(handler()).toMatch(/technicianMayCollectInvoiceLocked\(trx, req, invoice\)\)\) \{\s*ownershipLostAtMint = true;/);
+      expect(handler()).toMatch(/technicianMayCollectInvoiceLocked\(trx, req, lockedInvoice\)\)\) \{\s*ownershipLostAtMint = true;/);
     });
   });
 
@@ -390,8 +390,8 @@ describe('handoff lock order (pre-push P1)', () => {
     const s = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes/stripe-terminal.js'), 'utf8');
     const trxAt = s.indexOf('const handoffRefusal = await db.transaction(async (trx) => {');
     const inv = s.indexOf("await trx('invoices').where({ id: invoice_id }).forUpdate().first();", trxAt);
-    const cust = s.indexOf("await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');", trxAt);
-    const visit = s.indexOf('technicianMayCollectInvoiceLocked(trx, req, invoice)', trxAt);
+    const cust = s.indexOf("await trx('customers').where({ id: lockedInvoice.customer_id }).forUpdate().first('id');", trxAt);
+    const visit = s.indexOf('technicianMayCollectInvoiceLocked(trx, req, lockedInvoice)', trxAt);
     expect(trxAt).toBeGreaterThan(-1);
     expect(inv).toBeGreaterThan(trxAt);
     expect(cust).toBeGreaterThan(inv);
@@ -404,8 +404,8 @@ describe('mint transaction lock order (pre-push P1)', () => {
     const s = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes/stripe-terminal.js'), 'utf8');
     const at = s.indexOf('let ownershipLostAtMint = false;');
     const inv = s.indexOf("await trx('invoices').where({ id: invoice_id }).forUpdate().first();", at);
-    const cust = s.indexOf("await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');", at);
-    const visit = s.indexOf('technicianMayCollectInvoiceLocked(trx, req, invoice)', at);
+    const cust = s.indexOf("await trx('customers').where({ id: lockedInvoice.customer_id }).forUpdate().first('id');", at);
+    const visit = s.indexOf('technicianMayCollectInvoiceLocked(trx, req, lockedInvoice)', at);
     expect(at).toBeGreaterThan(-1);
     expect(inv).toBeGreaterThan(at);
     expect(cust).toBeGreaterThan(inv);

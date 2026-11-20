@@ -373,6 +373,40 @@ describe('saved-card attempt state updates', () => {
     });
   });
 
+  test('preserves worker provenance when a different PI already settled the attempt', async () => {
+    const queries = [];
+    const updateResults = [0, 0, 1];
+    const database = jest.fn(() => {
+      const query = {};
+      ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNot'].forEach((method) => {
+        query[method] = jest.fn(() => query);
+      });
+      query.update = jest.fn(async (payload) => {
+        query.payload = payload;
+        return updateResults.shift();
+      });
+      queries.push(query);
+      return query;
+    });
+
+    await expect(markInvoiceSavedCardChargeAttempt(
+      'attempt-succeeded-first',
+      { status: 'ambiguous', stripe_payment_intent_id: 'pi_worker_returned', resolved_at: null },
+      database,
+    )).rejects.toMatchObject({ code: 'STRIPE_CHARGE_ATTEMPT_FENCE_LOST' });
+
+    expect(queries).toHaveLength(3);
+    expect(queries[2].where).toHaveBeenCalledWith({ id: 'attempt-succeeded-first' });
+    expect(queries[2].where).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }));
+    expect(queries[2].whereNotNull).toHaveBeenCalledWith('stripe_payment_intent_id');
+    expect(queries[2].whereNot).toHaveBeenCalledWith('stripe_payment_intent_id', 'pi_worker_returned');
+    expect(queries[2].payload).toEqual(expect.objectContaining({
+      worker_payment_intent_id: 'pi_worker_returned',
+      stripe_payment_intent_bound_at: expect.any(Date),
+      error_message: 'Conflicting saved-card PaymentIntents require reconciliation',
+    }));
+  });
+
   test('guards bookkeeping writes so a final webhook cannot be reopened', async () => {
     const query = {};
     query.where = jest.fn(() => query);

@@ -73,7 +73,7 @@ const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttribute
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { refuseBillingLaneDriftInTrx, membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
+const { refuseBillingLaneDriftInTrx, membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice, remainingVisitPrepaidCents } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolvePerApplicationCharge, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
 const { lawnCloseoutProhibitedBlocks, lawnProhibitedProductsBlockPayload } = require('./lawn-prohibited-products');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
@@ -12300,9 +12300,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // we never credit a discounted slice, book a non-cash payment as revenue, or
       // credit a stale/refunded stamp. The completion suppression gate already
       // stops the double-bill for covered visits (no new invoice is cut).
-      const prepaidCents = (svc.prepaid_method !== AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD
-        && svc.prepaid_amount != null) ? toCents(svc.prepaid_amount) : 0;
-      if (!(prepaidCents > 0) || !invoiceRow?.id) return invoiceRow;
+      const carriesOutOfBandPrepayment = svc.prepaid_method !== AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD
+        && svc.prepaid_amount != null && toCents(svc.prepaid_amount) > 0;
+      if (!carriesOutOfBandPrepayment || !invoiceRow?.id) return invoiceRow;
       // Backfill closeouts leave the completion invoice EXACTLY as minted for
       // office review (Codex P1, fix round): applying the out-of-band
       // prepayment here reduces the total, inserts a payments row, and can
@@ -12360,13 +12360,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           logger.warn(`[dispatch] Prepaid credit NOT applied to invoice ${lockedInvoice.invoice_number}: a part payment is on it — the office records the rest`);
           return lockedInvoice;
         }
-        const existingCredit = await trx('payments')
-          .where({ customer_id: svc.customer_id, status: 'paid' })
-          .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
-          .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [lockedInvoice.id])
-          .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [svc.id])
-          .first('id');
-        if (existingCredit) return lockedInvoice;
+        // The visit marker is cumulative. Charge Now may already have
+        // allocated an earlier $60, then staff can raise the marker to $100
+        // without requesting a receipt. Apply only the newly available $40;
+        // the existence of the first ledger row does not mean the current
+        // marker is fully allocated.
+        const prepaidCents = await remainingVisitPrepaidCents(trx, svc, lockedInvoice.id);
+        if (!(prepaidCents > 0)) return lockedInvoice;
 
         const creditCents = Math.min(prepaidCents, invoiceTotalCents);
         const remainingCents = Math.max(0, invoiceTotalCents - creditCents);

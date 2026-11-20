@@ -98,9 +98,7 @@ describe('Schedule prepaid invoice writers share the locked saved-card fence', (
       "String(svc.customer_id || '')",
       '(locked.stripe_payment_intent_id || null) !== reservedPiId',
       'schedulePrepaidCollectionFence(locked.id, trx)',
-      "const priorAllocation = await trx('payments')",
-      "metadata::jsonb ->> 'invoice_id'",
-      "metadata::jsonb ->> 'scheduled_service_id'",
+      "const availablePrepaidCents = await remainingVisitPrepaidCents(trx, paymentVisit, locked.id)",
       'prepaidCents: availablePrepaidCents',
       'guardOpenPaymentIntentForPrepaid(locked, { database: trx })',
       "trx('invoices')",
@@ -122,6 +120,8 @@ describe('Schedule prepaid invoice writers share the locked saved-card fence', (
       'String(lockedInvoice.customer_id',
       "String(svc.customer_id || '')",
       '(lockedInvoice.stripe_payment_intent_id || null) !== reservedPiId',
+      'lockedInvoice.payer_id || lockedInvoice.payer_statement_id',
+      'invoiceWithdrawnFromCustomer(lockedInvoice)',
       'schedulePrepaidCollectionFence(lockedInvoice.id, trx)',
       'guardOpenPaymentIntentForPrepaid(lockedInvoice, { database: trx })',
       ".update({",
@@ -130,6 +130,17 @@ describe('Schedule prepaid invoice writers share the locked saved-card fence', (
       'throw httpError(409',
     ]);
     expect(apply).toContain('return { invoice: lockedInvoice, prepaidCredit: 0, collectionHold };');
+    expect(apply).toContain('return { invoice: lockedInvoice, prepaidCredit: 0, payerRefusal: true };');
+  });
+
+  test('one remaining-prepaid authority serves Schedule, completion, and the Auto Pay fence', () => {
+    const billing = fs.readFileSync(path.join(__dirname, '../services/billing-lane.js'), 'utf8');
+    const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(billing).toMatch(/async function remainingVisitPrepaidCents\(dbConn, svc, invoiceId\)/);
+    expect(billing).toMatch(/return \(await remainingVisitPrepaidCents\(dbConn, svc, invoice\.id\)\) > 0;/);
+    expect(source).not.toMatch(/async function remainingVisitPrepaidCents\(/);
+    expect(source).toContain('remainingVisitPrepaidCents(trx, paymentVisit, lockedInvoice.id)');
+    expect(completion).toContain('remainingVisitPrepaidCents(trx, svc, lockedInvoice.id)');
   });
 
   test('the shared allocation helper locks every collectible PI member in canonical order', () => {

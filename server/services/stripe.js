@@ -207,11 +207,11 @@ function blockingInvoiceChargeAttempt(invoiceId, database, checkout, excludeChar
   const activeClaim = (q) => q.whereIn('status', ['claimed', 'ambiguous']).whereNull('resolved_at');
   if (checkout) {
     // One snapshot includes both sides of the claimed -> authentication decline
-    // transition. Prefer a failed authentication attempt over a stale claimed
+    // transition. Prefer a resolved attempt with outstanding proof over a claimed
     // row that this call could otherwise release and mistake for clearance.
     attempts.where((q) => q.where(activeClaim)
       .orWhere((auth) => whereAwaitingAuthentication(auth, 'stripe_invoice_charge_attempts')))
-      .orderByRaw("CASE WHEN status = 'failed' THEN 0 ELSE 1 END");
+      .orderByRaw("CASE WHEN status IN ('failed', 'succeeded') THEN 0 ELSE 1 END");
   } else {
     activeClaim(attempts);
   }
@@ -249,7 +249,7 @@ async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = 
           logger.error(`[stripe] could not release stale pre-submit saved-card claim ${chargeAttempt.id}: ${releaseErr.message}`);
           return 0;
         });
-        if (released > 0) chargeAttempt = null;
+        if (released > 0) chargeAttempt = checkout ? await blockingInvoiceChargeAttempt(invoiceId, database, checkout) : null;
       } else {
         const promoted = await promoteStaleSavedCardClaim(chargeAttempt, database).catch((promoteErr) => {
           logger.error(`[stripe] could not promote stale saved-card claim ${chargeAttempt.id}: ${promoteErr.message}`);
@@ -436,8 +436,13 @@ async function markInvoiceSavedCardChargeAttempt(attemptId, updates, database = 
     if (provenanceStamped) return;
     // Preserve both identities if an older writer completed a different PI.
     // The submitted charge can still settle. Refuse every new collection.
+    // Do this for EVERY observed outcome (including succeeded): a succeeded
+    // webhook can close PI A before the worker returns PI B. The worker ID is
+    // additive evidence only; never rewrite the observed PI, status or
+    // resolved_at that the webhook already recorded.
     await compatibleWorkerIntent(database('stripe_invoice_charge_attempts'), workerPaymentIntentId)
-      .where({ id: attemptId, status: 'failed' })
+      .where({ id: attemptId })
+      .whereNotNull('stripe_payment_intent_id')
       .whereNot('stripe_payment_intent_id', workerPaymentIntentId)
       .update({ worker_payment_intent_id: workerPaymentIntentId, stripe_payment_intent_bound_at: updatedAt,
         error_message: 'Conflicting saved-card PaymentIntents require reconciliation', updated_at: updatedAt });
@@ -614,7 +619,15 @@ async function resolveNoFundsSavedCardChargeAttempt({
           decline_code: 'authentication_required',
           updated_at: recordedAt,
         });
-      return bound ? { resolved: true, reopened: false } : false;
+      if (bound) return { resolved: true, reopened: false };
+      // Keep a successful webhook's settlement. A different original worker
+      // intent can still charge, so retain both identities for reconciliation.
+      const conflict = await compatibleWorkerIntent(trx('stripe_invoice_charge_attempts'), authenticationIntentId)
+        .where({ id: attemptId, invoice_id: invoiceId, status: 'succeeded' })
+        .whereNotNull('resolved_at')
+        .whereNot('stripe_payment_intent_id', authenticationIntentId)
+        .update({ worker_payment_intent_id: authenticationIntentId, stripe_payment_intent_bound_at: recordedAt, updated_at: recordedAt });
+      return conflict ? { resolved: true, reopened: false } : false;
     }
     if (authenticationIntentId && attempt.worker_payment_intent_id && attempt.worker_payment_intent_id !== authenticationIntentId) return false;
     if (authenticationIntentId && attempt.stripe_payment_intent_id && attempt.stripe_payment_intent_id !== authenticationIntentId) {
@@ -723,9 +736,8 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
     let bankLedger = null;
     if (!attempt.worker_payment_intent_id && !originalCreateFailed && Number.isInteger(bankReturnAmountCents)
       && bankReturnAmountCents > 0 && Math.round(Number(attempt.amount) * 100) === bankReturnAmountCents
-      && attempt.payment_method_id && attempt.status === 'ambiguous' && invoiceStatus === 'processing'
-      && invoice.payment_method === 'us_bank_account' && invoice.stripe_payment_intent_id === stripePaymentIntentId
-      && attempt.stripe_payment_intent_id === stripePaymentIntentId) {
+      && attempt.payment_method_id && (attempt.status === 'ambiguous' || attempt.submitted_at) && invoiceStatus === 'processing'
+      && invoice.payment_method === 'us_bank_account' && invoice.stripe_payment_intent_id === stripePaymentIntentId) {
       bankLedger = await trx('payments')
         .where({ processor: 'stripe', customer_id: customerId, payment_method_id: attempt.payment_method_id,
           stripe_payment_intent_id: stripePaymentIntentId, amount: attempt.amount })
@@ -2491,11 +2503,15 @@ const StripeService = {
     let canceledCheckoutPaymentIntentId = null;
     try {
       await db.transaction(async (trx) => {
-        const lockedInvoice = await trx('invoices')
-          .where({ id: invoiceId })
-          .forUpdate()
-          .first();
+        const checkoutPiId = invoice.stripe_payment_intent_id || null;
+        const { lockInvoicePaymentIntentAllocation } = require('./invoice-payment-intent-allocation');
+        const lockedInvoice = await lockInvoicePaymentIntentAllocation(trx, {
+          id: invoiceId, customerId: invoice.customer_id, piId: checkoutPiId, targetForUpdate: true,
+        });
         if (!lockedInvoice) throw new Error('Invoice not found');
+        if ((lockedInvoice.stripe_payment_intent_id || null) !== checkoutPiId) {
+          throw Object.assign(new Error('Payment session changed. Refresh the invoice before charging.'), { statusCode: 409 });
+        }
         // The invoice's OWN Bill-To, under its row lock (Codex #4971 r10 P1).
         // A payer stamped on the invoice (at mint — InvoiceService.create
         // persists it — or by a writer racing the unlocked read above) makes

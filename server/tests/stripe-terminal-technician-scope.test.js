@@ -80,7 +80,12 @@ async function withServer(fn) {
   }
 }
 
-function setupHandoffDb({ assigned = true, transactionState = null, invoiceStatus = 'sent' } = {}) {
+function setupHandoffDb({
+  assigned = true,
+  transactionState = null,
+  invoiceStatus = 'sent',
+  lockedInvoicePatches = [],
+} = {}) {
   const invoice = {
     id: 'inv-1', customer_id: 'cust-1', status: invoiceStatus, total: '100.00',
     credit_applied: '0.00', stripe_payment_intent_id: null,
@@ -88,14 +93,22 @@ function setupHandoffDb({ assigned = true, transactionState = null, invoiceStatu
   const tableReads = [];
   const rowLocks = [];
   const tokenInserts = [];
+  const operations = [];
+  let lockedInvoiceRead = 0;
   const queryFor = (table, row) => {
     tableReads.push(table);
-    const query = {};
+    const query = { locked: false };
     for (const method of ['where', 'whereNotIn', 'whereIn', 'whereNull']) {
-      query[method] = () => query;
+      query[method] = (...args) => { operations.push({ table, method, args }); return query; };
     }
-    query.forUpdate = () => { rowLocks.push(table); return query; };
-    query.first = async () => row;
+    query.forUpdate = () => { query.locked = true; rowLocks.push(table); return query; };
+    query.first = async () => {
+      if (table === 'invoices' && query.locked) {
+        const patch = lockedInvoicePatches[lockedInvoiceRead++] || null;
+        return patch ? { ...invoice, ...patch } : invoice;
+      }
+      return row;
+    };
     query.update = async (patch) => { Object.assign(row, patch); return 1; };
     query.insert = async (value) => { tokenInserts.push(value); return 1; };
     return query;
@@ -117,7 +130,7 @@ function setupHandoffDb({ assigned = true, transactionState = null, invoiceStatu
       throw err;
     }
   });
-  return { invoice, tableReads, rowLocks, tokenInserts };
+  return { invoice, tableReads, rowLocks, tokenInserts, operations };
 }
 
 async function postHandoff() {
@@ -218,6 +231,56 @@ describe('POST /handoff checkout reconciliation fence', () => {
     expect(mockChargeFence).not.toHaveBeenCalled();
     expect(mockAutoApplyCredit).not.toHaveBeenCalled();
     expect(state.tableReads).not.toContain('terminal_handoff_tokens');
+  });
+
+  test('the credit transaction locks the current owner and refuses ownership drift before visit, fence, or credit', async () => {
+    const state = setupHandoffDb({ lockedInvoicePatches: [{ customer_id: 'cust-2' }] });
+    mockServices.mockResolvedValue(true);
+
+    const { status, body } = await postHandoff();
+
+    expect(status).toBe(404);
+    expect(body).toEqual({ error: 'Invoice not found' });
+    expect(state.operations).toContainEqual({ table: 'customers', method: 'where', args: [{ id: 'cust-2' }] });
+    expect(mockChargeFence).not.toHaveBeenCalled();
+    expect(mockAutoApplyCredit).not.toHaveBeenCalled();
+    expect(state.tokenInserts).toEqual([]);
+  });
+
+  test.each([
+    ['paid status', { status: 'paid' }, 400, { error: 'Invoice already paid' }],
+    ['payer ownership', { payer_id: 'payer-2' }, 400, { error: 'Invoice is billed to a third-party payer — do not collect in person' }],
+  ])('the credit transaction refuses locked %s before credit', async (_label, patch, expectedStatus, expectedBody) => {
+    const state = setupHandoffDb({ lockedInvoicePatches: [patch] });
+    mockServices.mockResolvedValue(true);
+
+    const { status, body } = await postHandoff();
+
+    expect(status).toBe(expectedStatus);
+    expect(body).toEqual(expectedBody);
+    expect(mockChargeFence).not.toHaveBeenCalled();
+    expect(mockAutoApplyCredit).not.toHaveBeenCalled();
+    expect(state.tokenInserts).toEqual([]);
+  });
+
+  test.each([
+    ['owner drift', { customer_id: 'cust-2' }, 404, { error: 'Invoice not found' }],
+    ['paid status', { status: 'paid' }, 400, { error: 'Invoice already paid' }],
+    ['payer ownership', { payer_id: 'payer-2' }, 400, { error: 'Invoice is billed to a third-party payer — do not collect in person' }],
+  ])('the mint transaction refuses locked %s before token work', async (_label, patch, expectedStatus, expectedBody) => {
+    const state = setupHandoffDb({ lockedInvoicePatches: [{}, patch] });
+    mockServices.mockResolvedValue(true);
+
+    const { status, body } = await postHandoff();
+
+    expect(status).toBe(expectedStatus);
+    expect(body).toEqual(expectedBody);
+    expect(mockAutoApplyCredit).toHaveBeenCalledTimes(1);
+    expect(state.tokenInserts).toEqual([]);
+    expect(mockJwtSign).not.toHaveBeenCalled();
+    if (patch.customer_id) {
+      expect(state.operations).toContainEqual({ table: 'customers', method: 'where', args: [{ id: patch.customer_id }] });
+    }
   });
 
   test('keeps an unexpected fence failure on the ordinary 500 rollback path', async () => {

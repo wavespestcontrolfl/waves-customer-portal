@@ -23,7 +23,9 @@
  *    instead of reading as "invoice-less" and arming a ladder that could
  *    double-collect alongside the invoice/dunning lane.
  */
+const { randomUUID } = require('node:crypto');
 const mockConstructEvent = jest.fn();
+const mockSavedCardAttemptMatchesPaymentIntent = jest.fn(() => false);
 jest.mock('stripe', () => jest.fn(() => ({ webhooks: { constructEvent: mockConstructEvent } })));
 jest.mock('@sentry/node', () => ({ captureException: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -32,7 +34,7 @@ jest.mock('../routes/stripe-webhook-helpers', () => ({
   classifyExistingWebhookEvent: jest.fn(),
   invoicePaymentIntentBlocksFallback: jest.fn(() => false),
   lateSavedCardPaymentNeedsOrphan: jest.fn(() => false),
-  savedCardAttemptMatchesPaymentIntent: jest.fn(() => false),
+  savedCardAttemptMatchesPaymentIntent: (...args) => mockSavedCardAttemptMatchesPaymentIntent(...args),
   savedCardCreditAdjustment: jest.fn(() => null),
   STALE_CLAIM_WINDOW_MS: 60000,
 }));
@@ -77,6 +79,7 @@ function resetMockState() {
     processingRow: null,   // payments row matched by { pi, status: 'processing' }
     paymentRow: null,      // payments row matched by { pi } alone
     invoiceRow: null,      // invoices row matched by the PI
+    attemptRow: null,      // named saved-card attempt matched by signed metadata
     webhookEvent: null,
     failInvoiceLookup: false, // invoices .first() throws (fail-closed path)
     priorFailedCount: 0,   // payments count() result (prior attempts)
@@ -97,7 +100,7 @@ function mockMakeBuilder(table, sink) {
       return b;
     };
   };
-  ['where', 'andWhere', 'orWhere', 'whereNot', 'whereIn', 'whereNotIn',
+  ['where', 'andWhere', 'orWhere', 'orWhereRaw', 'whereNot', 'whereIn', 'whereNotIn',
     'whereNull', 'whereNotNull', 'whereRaw', 'orderBy', 'select'].forEach(chain);
   b.modify = (fn) => { fn(b); return b; };
   b.count = () => { b._counted = true; return b; };
@@ -114,6 +117,7 @@ function mockMakeBuilder(table, sink) {
       if (mockState.failInvoiceLookup) throw new Error('invoice lookup failed');
       return mockState.invoiceRow;
     }
+    if (table === 'stripe_invoice_charge_attempts') return mockState.attemptRow;
     if (table === 'customers') return mockState.customer;
     if (table === 'ach_failure_log') {
       if (b._counted) return { cnt: mockState.recentFailures };
@@ -156,6 +160,7 @@ const {
   _armMonthlyAutopayRetryForAsyncFailure: armMonthlyAutopayRetryForAsyncFailure,
 } = require('../routes/stripe-webhook');
 const { logAutopay } = require('../services/autopay-log');
+const { resolveFailedInvoiceSavedCardChargeAttempt } = require('../services/stripe');
 
 const processingRow = (over = {}) => ({
   id: 'pay-proc-1',
@@ -188,6 +193,7 @@ const armUpdates = () => mockState.updates.filter(
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockSavedCardAttemptMatchesPaymentIntent.mockReturnValue(false);
   resetMockState();
 });
 
@@ -233,6 +239,57 @@ describe('async monthly-autopay bounce arming', () => {
     // The invoice reopen path still runs.
     const reopen = mockState.updates.find((u) => u.table === 'invoices' && u.patch.paid_at === null);
     expect(reopen).toBeTruthy();
+  });
+
+  test('a signed saved-bank return carries its row-proven pre-merge owner into the locked resolver', async () => {
+    const originalOwner = randomUUID();
+    const currentOwner = randomUUID();
+    const invoiceId = randomUUID();
+    const attemptId = randomUUID();
+    const pi = achBouncePI({
+      id: 'pi_merged_bank_return',
+      amount: 3300,
+      payment_method: 'pm_saved_bank',
+      payment_method_types: ['us_bank_account'],
+      metadata: {
+        source: 'admin_card_on_file', saved_card_attempt_id: attemptId,
+        waves_invoice_id: invoiceId, waves_customer_id: originalOwner,
+      },
+      // Keep the ACH notification rail out of this ownership-focused test;
+      // the immutable saved method above still authenticates the attempt.
+      last_payment_error: { message: 'Bank returned the debit', code: 'bank_return' },
+    });
+    const row = processingRow({ customer_id: currentOwner, amount: '33.00' });
+    mockState.processingRow = row;
+    mockState.paymentRow = row;
+    mockState.invoiceRow = {
+      id: invoiceId, customer_id: currentOwner, status: 'processing',
+      stripe_payment_intent_id: pi.id, payment_method: 'us_bank_account',
+    };
+    mockState.attemptRow = {
+      id: attemptId, invoice_id: invoiceId, status: 'ambiguous', resolved_at: null,
+      stripe_payment_method_id: 'pm_saved_bank', stripe_payment_intent_id: pi.id,
+      worker_payment_intent_id: null,
+    };
+    mockSavedCardAttemptMatchesPaymentIntent.mockImplementation(({ provenInvoiceOwner }) => provenInvoiceOwner);
+    resolveFailedInvoiceSavedCardChargeAttempt.mockResolvedValueOnce(true);
+
+    await handlePaymentIntentFailed(pi, 'evt_merged_bank_return');
+
+    expect(mockSavedCardAttemptMatchesPaymentIntent).toHaveBeenCalledWith(expect.objectContaining({
+      attempt: mockState.attemptRow,
+      invoice: mockState.invoiceRow,
+      paymentIntent: pi,
+      provenInvoiceOwner: true,
+    }));
+    expect(resolveFailedInvoiceSavedCardChargeAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      attemptId,
+      invoiceId,
+      customerId: currentOwner,
+      originalCustomerId: originalOwner,
+      stripePaymentIntentId: pi.id,
+      bankReturnAmountCents: 3300,
+    }));
   });
 
   test('non-monthly (pay-page style) PI metadata does not arm', async () => {

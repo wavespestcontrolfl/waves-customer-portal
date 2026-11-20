@@ -637,30 +637,39 @@ function predictCompletionBilling({
 }
 
 /**
- * Does the visit carry an out-of-band (cash/Zelle) prepayment that THIS invoice does not show? True when
- * scheduled_services.prepaid_method (other than the annual-prepay invoice marker) is set with prepaid_amount > 0 and
- * no paid `payments` row marks it applied to this invoice (metadata.source 'scheduled_service_prepaid' with this
- * invoice_id and this scheduled_service_id, written by the completion route's prepaid application). A backfill
- * closeout skips that application, so its visit can keep the stamp with the invoice untouched. Unreadable state
- * counts as unapplied (fail closed). Pure read, shared by verifyExtendedCompletionAnchor (under its locks), the Auto
- * Pay hold sweep's verdict and chargeInvoiceWithSavedCard's requireNoUnappliedVisitPrepayment.
+ * A visit's out-of-band prepayment marker is cumulative. Return only the
+ * cents not yet allocated to THIS invoice by paid scheduled_service_prepaid
+ * ledger rows. The invoice + visit identifiers are both required: another
+ * invoice for this visit, or another visit on this invoice, cannot consume
+ * the marker. Callers that need serialization take their invoice/visit locks
+ * before this pure read.
+ */
+async function remainingVisitPrepaidCents(dbConn, svc, invoiceId) {
+  const recorded = await dbConn('payments')
+    .where({ customer_id: svc.customer_id, status: 'paid' })
+    .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
+    .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(invoiceId)])
+    .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [String(svc.id)])
+    .sum({ amount: 'amount' })
+    .first();
+  const markerCents = Math.round(Number(svc.prepaid_amount || 0) * 100);
+  const allocatedCents = Math.round(Number(recorded?.amount || 0) * 100);
+  return Math.max(0, markerCents - allocatedCents);
+}
+
+/**
+ * Does the visit carry an out-of-band (cash/Zelle) prepayment that THIS
+ * invoice does not fully show? A prior allocation is not enough by itself:
+ * raising the cumulative marker can leave a later top-up unapplied. A
+ * backfill closeout can also leave the entire marker untouched. Unreadable
+ * state counts as unapplied (fail closed). Shared by
+ * verifyExtendedCompletionAnchor, the Auto Pay hold sweep and
+ * chargeInvoiceWithSavedCard's requireNoUnappliedVisitPrepayment.
  */
 async function visitCarriesUnappliedPrepayment({ dbConn, svc, invoice }) {
   if (String(svc.prepaid_method || '') === ANNUAL_PREPAY_PREPAID_METHOD || !(Number(svc.prepaid_amount) > 0)) return false;
-  // An ALREADY-APPLIED prepayment (completion netted invoice.total and
-  // booked the scheduled_service_prepaid payment marker) leaves the
-  // stamp populated — the residual is legitimately chargeable
-  // (manual-audit P1: an unconditional refusal would permanently
-  // disable Auto Pay on every partial-prepay visit). Only an
-  // unapplied/racing prepayment refuses; unreadable state refuses.
   try {
-    const appliedMarker = await dbConn('payments')
-      .where({ customer_id: svc.customer_id, status: 'paid' })
-      .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
-      .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(invoice.id)])
-      .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [String(svc.id)])
-      .first('id');
-    return !appliedMarker;
+    return (await remainingVisitPrepaidCents(dbConn, svc, invoice.id)) > 0;
   } catch {
     return true;
   }
@@ -1900,6 +1909,7 @@ async function refuseBillingLaneDriftInTrx(trx, svc) {
 
 module.exports = {
   refuseBillingLaneDriftInTrx,
+  remainingVisitPrepaidCents,
   visitCarriesUnappliedPrepayment,
   stampedZeroFreeLive,
   BILLING_MODES,
