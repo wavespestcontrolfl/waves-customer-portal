@@ -20,6 +20,8 @@ jest.mock('../services/newsletter-event-selection', () => ({
   parseLockedEventIds: jest.fn(() => []),
 }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: mockTrigger }));
+// The inbox sync the send-time HOLD check runs to read the inbox through now (inboxReadThrough).
+jest.mock('../services/email/email-sync', () => ({ syncEmails: jest.fn(async () => ({ newEmails: 0 })) }));
 jest.mock('../services/newsletter-validator', () => ({
   validateNewsletterDraft: jest.fn(() => ({ errors: [], warnings: [] })),
   lockedPricesForSend: jest.fn(async () => []),
@@ -247,8 +249,8 @@ describe('a planned Waves Pest Insider issue the switch queued (GATE_PEST_INSIDE
       newsletter_sends: [chain({ rows: [QUEUED] }), chain({ first: QUEUED }), claim, chain({ first: { status: 'scheduled' } }), revert],
       newsletter_subscribers: [chain({ rows: PLANNED_ROWS }), chain({ rows: PLANNED_ROWS })],
       pest_insider_issues: [chain({ first: PLANNED }), issueRow],
-      // The inbox sync ran clean a minute ago (the send-time HOLD check reads it).
-      email_sync_state: [chain({ first: { last_sync_at: new Date('2026-12-03T14:58:00Z'), errors: null } })],
+      // The sync run the send-time HOLD check starts at 9:59 finishes clean.
+      email_sync_state: [chain({ first: { last_sync_at: new Date('2026-12-03T14:59:00Z'), errors: null } })],
     });
 
     const result = await processScheduledSends();

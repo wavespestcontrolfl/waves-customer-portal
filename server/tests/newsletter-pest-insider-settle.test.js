@@ -29,8 +29,9 @@ const AUTO_QUEUED = {
   updated_at: new Date('2026-12-02T12:05:00Z'),
 };
 
-// An in-memory stand-in for the three tables. `counts`: the delivery ledger's { total, sent }.
-function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { total: 85, sent: 0 } } = {}) {
+// An in-memory stand-in for the tables. `counts`: the delivery ledger's readers who got it (sent)
+// and readers a Resume would still send it to (left: the retryable rows).
+function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { sent: 85, left: 0 } } = {}) {
   const writes = [];
   const reads = [];
   const matches = (row, conds) => conds.every((cond) => Object.entries(cond).every(([k, v]) => row[k] === v));
@@ -40,9 +41,12 @@ function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { total: 85,
     q.whereRaw = jest.fn((sql, bindings) => { q.raws.push([sql, bindings]); return q; });
     q.forUpdate = jest.fn(() => { q.locked = true; return q; });
     q.select = jest.fn(() => q);
+    q.whereNull = jest.fn(() => q);
+    q.whereIn = jest.fn(() => { q.retryable = true; return q; });
+    q.count = jest.fn((what) => { q.counted = what; return q; });
     q.first = jest.fn(async () => {
       reads.push({ table, locked: Boolean(q.locked) });
-      if (table === 'newsletter_send_deliveries') return counts;
+      if (table === 'newsletter_send_deliveries') return { c: q.retryable ? counts.left : counts.sent };
       const rows = table === 'newsletter_sends' ? sends : issues;
       return rows.find((row) => matches(row, q.conds));
     });
@@ -82,18 +86,20 @@ test('it locks the send row first, then the issue row, as every writer of both d
 });
 
 test.each([
-  ['its send failed and no reader got it', { status: 'failed' }, { total: 85, sent: 0 }, 'Did not go out: its send failed, and no reader got it', undefined],
-  ['its send failed part way', { status: 'failed' }, { total: 85, sent: 40 }, 'Did not go out: its send failed after 40 of 85 readers got it; Resume in Newsletter → History sends it to the rest', 40],
+  ['its send failed and no reader got it', { status: 'failed' }, { sent: 0, left: 85 }, 'Did not go out: its send failed, and no reader got it', undefined],
+  ['its send failed part way', { status: 'failed' }, { sent: 40, left: 45 }, 'Did not go out: its send failed after 40 of 85 readers got it; Resume in Newsletter → History sends it to the rest', 40],
   ['it was sent to nobody (every reader dropped out)', { status: 'sent', recipient_count: 0 }, undefined, 'Did not go out: no planned reader was still eligible when it sent', undefined],
-  ['its claim went stale part way', { status: 'sending', updated_at: new Date('2026-12-03T13:00:00Z') }, { total: 85, sent: 10 }, 'Did not go out: its send stopped part way after 10 of 85 readers got it; Resume in Newsletter → History sends it to the rest', 10],
+  ['its send ended with readers left to resume (a batch SendGrid refused)', { status: 'sent', recipient_count: 85 }, { sent: 80, left: 5 }, 'Did not go out: its send ended after 80 of 85 readers got it; Resume in Newsletter → History sends it to the rest', 80],
+  ['its claim went stale part way', { status: 'sending', updated_at: new Date('2026-12-03T13:00:00Z') }, { sent: 10, left: 75 }, 'Did not go out: its send stopped part way after 10 of 85 readers got it; Resume in Newsletter → History sends it to the rest', 10],
 ])('%s: the row fails at once, and one alert says so', async (_label, sendPatch, counts, text, sentCount) => {
   const { writes } = fakeDb({ sends: [{ ...AUTO_QUEUED, ...sendPatch }], counts });
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
   expect(mockTrigger).toHaveBeenCalledTimes(1);
+  // Keyed per issue: a retry of an alert that already landed writes no second row and sends no second push.
   expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', {
     sendId: 'send-1', subject: 'Native termites can swarm in winter', errors: [text], ...(sentCount ? { sentCount } : {}),
-  });
+  }, { dedupeKey: 'pest-insider-outcome:issue-1' });
   expect(writes).toEqual([{
     table: 'pest_insider_issues',
     conds: [{ id: 'issue-1' }],
@@ -167,7 +173,7 @@ test("a failed row a send-time stop wrote gets its one alert, in the stop's word
 
 test('an alert that reached no one: the row still records the outcome, but untold, with the readers who got it', async () => {
   mockTrigger.mockImplementation(async () => ({ bellWritten: false, push: null }));
-  const { writes } = fakeDb({ sends: [{ ...AUTO_QUEUED, status: 'failed' }], counts: { total: 85, sent: 40 } });
+  const { writes } = fakeDb({ sends: [{ ...AUTO_QUEUED, status: 'failed' }], counts: { sent: 40, left: 45 } });
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
   expect(mockTrigger).toHaveBeenCalledTimes(1);
@@ -197,8 +203,19 @@ test('the next minute tries an untold row again: nothing changes until its alert
   expect(mockTrigger).toHaveBeenLastCalledWith('newsletter_proof_blocked', expect.objectContaining({
     errors: ['Did not go out: its send failed after 40 of 85 readers got it; Resume in Newsletter → History sends it to the rest'],
     sentCount: 40,
-  }));
+  }), { dedupeKey: 'pest-insider-outcome:issue-1' });
   expect(writes[0].patch.diagnostics.bindings).toEqual([JSON.stringify({ sentCount: 40, outcomeToldAt: IN_WINDOW.toISOString() })]);
+});
+
+test('a retry whose alert was already written (a crash before the row was marked told) finds it by its key and marks the row told', async () => {
+  // triggerNotification on a dedupe hit: the existing bell row counts as written, and no push goes again.
+  mockTrigger.mockImplementation(async () => ({ bellWritten: true, push: null, deduped: true }));
+  const untold = { ...ISSUE, status: 'failed', reason: 'stopped at send time: x' };
+  const { writes } = fakeDb({ issues: [untold], sends: [{ ...AUTO_QUEUED, status: 'draft' }] });
+
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
+  expect(mockTrigger.mock.calls[0][2]).toEqual({ dedupeKey: 'pest-insider-outcome:issue-1' });
+  expect(writes[0].patch.diagnostics.bindings).toEqual([JSON.stringify({ outcomeToldAt: IN_WINDOW.toISOString() })]);
 });
 
 test('a failed row past the lookback is no longer listed', async () => {

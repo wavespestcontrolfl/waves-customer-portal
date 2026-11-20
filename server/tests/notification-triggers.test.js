@@ -621,6 +621,15 @@ describe('triggerNotification bell outcome', () => {
     expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
   });
 
+  // A planned Waves Pest Insider issue's outcome alert is keyed per issue: a hit is the settle
+  // step's retry of an alert that landed before its row was marked told.
+  test('a keyed send-stop alert retry reuses its bell and does not push again', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'outcome-bell', deduped: true });
+    expect(await triggerNotification('newsletter_proof_blocked', { sendId: 'send-7', subject: 'x', errors: ['e'] },
+      { dedupeKey: 'pest-insider-outcome:issue-1' })).toMatchObject({ bellWritten: true, deduped: true, push: null });
+    expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
+  });
+
   // Sweep #7303 B1: Sandy's hot-lead page is keyed per call, so a dedupe hit is a
   // reconnect's or the hourly sweep's retry of a page that already landed.
   test('a keyed hot-lead page retry reuses its bell and does not push again', async () => {

@@ -1645,6 +1645,9 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     // idempotent replay of a booking whose bell already landed.
     // relay_hot_lead: keyed per call, so a hit is a reconnect's or the
     // hourly sweep's retry of a page that already landed.
+    // newsletter_proof_blocked, only with a dedupeKey (a planned Waves Pest
+    // Insider issue's outcome, keyed per issue): a hit is the settle step's
+    // retry of an alert that landed before its row was marked told.
     // new_lead, on a thread row only (refreshOnDedupe: an unknown sender's
     // texts to a website line, one row rewritten by each new text): a plain
     // hit there is the same text delivered again, which already pushed.
@@ -1752,7 +1755,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           if (created && !created.suppressed) bellRowId = created.notification?.id || created.id || null;
           // A refresh carries a NEW message onto the standing row: that is not
           // an event that already delivered, so its push still goes.
-          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked' || triggerKey === 'relay_hot_lead' || (triggerKey === 'new_lead' && refreshOnDedupe))) dedupedNoPush = true;
+          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked' || triggerKey === 'relay_hot_lead' || triggerKey === 'newsletter_proof_blocked' || (triggerKey === 'new_lead' && refreshOnDedupe))) dedupedNoPush = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);

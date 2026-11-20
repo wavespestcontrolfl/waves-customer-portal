@@ -1529,8 +1529,10 @@ async function sendCampaign(sendId, opts = {}) {
       logger.warn(`[newsletter] calendar status update failed for send ${send.id}: ${err.message}`);
     }
     // The same for a planned Waves Pest Insider issue, also when a person
-    // sent it by hand after a hold.
-    if (send.newsletter_type === PEST_INSIDER_TYPE) {
+    // sent it by hand after a hold, once no reader is left to resume: a send
+    // some readers did not get leaves its row (settlePlannedIssues tells the
+    // owner about an auto-sent one), and the resume that finishes marks it.
+    if (send.newsletter_type === PEST_INSIDER_TYPE && Number(retryableRemaining?.c || 0) === 0) {
       try {
         await moveIssueForSend(send.id, ['drafted', 'scheduled', 'held', 'failed'], 'sent');
       } catch (err) {
@@ -1835,14 +1837,15 @@ async function revertBlockedScheduledSend(row, reason) {
 
 // One newsletter_proof_blocked alert about a send. Never throws. Returns whether it reached
 // anyone (a bell row or a push), as the proof step's notifyProof reads it. sentCount > 0: some
-// readers got it before it stopped.
-function raiseSendAlert(sendId, subject, text, sentCount = 0) {
+// readers got it before it stopped. dedupeKey: the alert's identity, so a retry of one already
+// written neither writes a second row nor sends a second push.
+function raiseSendAlert(sendId, subject, text, { sentCount = 0, dedupeKey = null } = {}) {
   return require('./newsletter-proof').notifyProof('newsletter_proof_blocked', {
     sendId,
     subject,
     errors: [text],
     ...(sentCount > 0 ? { sentCount } : {}),
-  });
+  }, dedupeKey ? { dedupeKey } : null);
 }
 
 // One "Stopped at send time" alert: the owner's last word on this send said it would go out.
@@ -1871,11 +1874,12 @@ async function pestInsiderDispatchStop(row, now = new Date()) {
   }
   if (!inSendWindow(context.issueDate, now)) return `missed the ${context.issueDate} 7:00-10:00 AM ET send window`;
   // The send-time HOLD check (holdReplyOnRecord) finds a HOLD reply the reply handler could not
-  // apply when it read it. It needs a current inbox: a stale one waits for the next tick, and the
-  // window still bounds the wait (settlePlannedIssues tells the owner if it closes).
-  const { inboxReadRecently, holdReplyOnRecord } = require('./newsletter-proof');
-  if (!(await inboxReadRecently(now))) {
-    throw new Error('the inbox sync has not finished a clean run in the last 10 minutes, so a HOLD reply could be unread');
+  // apply when it read it. It first reads the inbox through now (inboxReadThrough): a read that did
+  // not finish clean waits for the next tick, and the window still bounds the wait
+  // (settlePlannedIssues tells the owner if it closes).
+  const { inboxReadThrough, holdReplyOnRecord } = require('./newsletter-proof');
+  if (!(await inboxReadThrough())) {
+    throw new Error('the inbox sync could not read the mailbox through now, so a HOLD reply could be unread');
   }
   if (await holdReplyOnRecord(row)) return 'a HOLD reply to its FYI copy is in the inbox';
   return null;
@@ -2077,16 +2081,18 @@ function issueDiagnostics(issue) {
 async function plannedSendOutcome(issue, send, now, trx) {
   const notOut = (why, more = {}) => ({ reason: `did not go out: ${why}`, ...more });
   if (!send) return notOut('its draft no longer exists');
-  if (send.status === 'sent') {
-    return Number(send.recipient_count) > 0 ? { sent: true } : notOut('no planned reader was still eligible when it sent');
-  }
-  if (send.status === 'failed' || (send.status === 'sending' && sendingClaimIsStale(send, now))) {
-    const counts = await trx('newsletter_send_deliveries').where({ send_id: send.id })
-      .select(trx.raw('count(*)::int as total'), trx.raw('count(sent_at)::int as sent')).first();
-    const sentCount = Number(counts?.sent) || 0;
-    const how = send.status === 'failed' ? 'its send failed' : 'its send stopped part way';
+  if (send.status === 'sent' && !(Number(send.recipient_count) > 0)) return notOut('no planned reader was still eligible when it sent');
+  // sendingClaimIsStale is false for any status but 'sending'.
+  if (['sent', 'failed'].includes(send.status) || sendingClaimIsStale(send, now)) {
+    // The ledger says who got it (sent_at) and who a Resume would still send it to.
+    const got = await trx('newsletter_send_deliveries').where({ send_id: send.id }).count('sent_at as c').first();
+    const left = await applyRetryableDeliveryFilter(trx('newsletter_send_deliveries').where({ send_id: send.id })).count('* as c').first();
+    const sentCount = Number(got?.c) || 0;
+    const leftCount = Number(left?.c) || 0;
+    if (send.status === 'sent' && leftCount === 0) return { sent: true };
+    const how = { sent: 'its send ended', failed: 'its send failed', sending: 'its send stopped part way' }[send.status];
     return sentCount > 0
-      ? notOut(`${how} after ${sentCount} of ${Number(counts?.total) || sentCount} readers got it; Resume in Newsletter → History sends it to the rest`, { sentCount })
+      ? notOut(`${how} after ${sentCount} of ${sentCount + leftCount} readers got it; Resume in Newsletter → History sends it to the rest`, { sentCount })
       : notOut(`${how}, and no reader got it`);
   }
   const windowEnd = issueSendAt(dateOnlyString(issue.issue_date)).getTime() + SEND_WINDOW_MS;
@@ -2133,7 +2139,9 @@ async function settlePlannedIssue({ id, send_id: sendId }, now) {
       await trx('newsletter_calendar').where({ send_id: send.id }).update({ status: 'drafted', updated_at: new Date() });
     }
     const alertText = outcome.reason.charAt(0).toUpperCase() + outcome.reason.slice(1);
-    const told = await raiseSendAlert(sendId, send?.subject || issue.subject, alertText, outcome.sentCount);
+    const told = await raiseSendAlert(sendId, send?.subject || issue.subject, alertText, {
+      sentCount: outcome.sentCount, dedupeKey: `pest-insider-outcome:${id}`,
+    });
     if (!told) logger.error(`[newsletter-scheduler] Pest Insider issue ${id}: its alert reached no one; the next minute tries again`);
     // A row already 'failed' changes only when its alert went out.
     if (!told && issue.status === 'failed') return false;

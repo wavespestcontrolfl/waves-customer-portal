@@ -17,6 +17,9 @@ jest.mock('../services/newsletter-event-selection', () => ({
   parseLockedEventIds: jest.fn(() => []),
 }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: mockTrigger }));
+// The inbox sync the send-time HOLD check runs to read the inbox through now (inboxReadThrough).
+const mockSyncEmails = jest.fn(async () => ({ newEmails: 0 }));
+jest.mock('../services/email/email-sync', () => ({ syncEmails: (...args) => mockSyncEmails(...args) }));
 
 const db = require('../models/db');
 const { processScheduledSends } = require('../services/newsletter-sender');
@@ -167,9 +170,15 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
   };
   const PLANNED = { id: 'issue-1', issue_date: '2026-12-03', status: 'scheduled', send_id: 'send-pi-2' };
 
-  // The send-time HOLD check: by default the inbox sync ran clean a minute ago, and no reply is stored.
+  // The send-time HOLD check: by default the sync run it starts finishes clean (it writes
+  // last_sync_at as it ends, so at the read's time), and no reply is stored.
   function withInbox(table, q, { synced = true, replies = [] } = {}) {
-    if (table === 'email_sync_state') q.first = jest.fn(async () => (synced ? { last_sync_at: new Date(Date.now() - 60 * 1000), errors: null } : undefined));
+    if (table === 'email_sync_state') {
+      q.first = jest.fn(async () => ({
+        last_sync_at: new Date(),
+        errors: synced ? null : 'incremental sync incomplete: 1 message(s) failed — cursor withheld, retrying next run',
+      }));
+    }
     if (table === 'emails') q.select = jest.fn(async () => replies);
     return q;
   }
@@ -258,13 +267,16 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
       ['newsletter_sends', 'draft'], ['newsletter_calendar', 'drafted'], ['pest_insider_issues', 'failed'],
     ]);
     expect(updates[2].patch.reason).toBe('stopped at send time: a HOLD reply to its FYI copy is in the inbox');
+    // It read the inbox through now first: a run in flight, then one of its own.
+    expect(mockSyncEmails).toHaveBeenCalledTimes(2);
   });
 
-  test('an inbox the sync has not read cleanly in 10 minutes leaves it scheduled for the next tick', async () => {
+  test('an inbox the sync could not read through now (its run did not finish clean) leaves it scheduled for the next tick', async () => {
     const updates = wireInsider([{ ...AUTO_QUEUED_INSIDER, proof_token: 'ab12cd34' }], { inbox: { synced: false } });
 
     await processScheduledSends();
 
+    expect(mockSyncEmails).toHaveBeenCalledTimes(2);
     expect(mockValidateEventSelection).not.toHaveBeenCalled();
     expect(updates).toEqual([]);
     expect(mockTrigger).not.toHaveBeenCalled();

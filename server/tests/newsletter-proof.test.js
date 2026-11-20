@@ -44,6 +44,9 @@ jest.mock('../services/newsletter-event-selection', () => ({
 jest.mock('../services/notification-triggers', () => ({
   triggerNotification: mockTrigger,
 }));
+// The inbox sync (the send-time HOLD check reads the inbox through now with it).
+const mockSyncEmails = jest.fn(async () => ({ newEmails: 0 }));
+jest.mock('../services/email/email-sync', () => ({ syncEmails: (...args) => mockSyncEmails(...args) }));
 jest.mock('../services/email-template', () => ({
   wrapNewsletter: ({ body }) => `<wrapped>${body}</wrapped>`,
   bodyIsDarkAware: () => true,
@@ -66,7 +69,7 @@ const {
   sendNewsletterProof,
   maybeHandleProofApproval,
   approvalSenders,
-  inboxReadRecently,
+  inboxReadThrough,
   holdReplyOnRecord,
 } = require('../services/newsletter-proof');
 
@@ -1015,7 +1018,6 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
 });
 
 describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
-  const NOW = new Date('2026-08-06T11:00:00Z');
   const SEND = {
     id: 'send-1', proof_token: 'ab12cd34', proof_sent_at: new Date('2026-08-05T11:05:00Z'),
     from_email: 'newsletter@news.wavespestcontrol.com',
@@ -1024,20 +1026,43 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
   const reply = (fields) => ({ from_address: 'contact@wavespestcontrol.com', subject: `Re: ${FYI_SUBJECT}`, body_text: 'hold', body_html: null, ...fields });
 
   function wireInbox({ state, replies = [] } = {}) {
-    const emails = { where: jest.fn(() => emails), select: jest.fn(async () => replies) };
-    const syncState = { first: jest.fn(async () => state) };
+    const emails = { where: jest.fn(() => emails), whereRaw: jest.fn(() => emails), select: jest.fn(async () => replies) };
+    const order = [];
+    mockSyncEmails.mockImplementation(async () => { order.push('sync'); return { newEmails: 0 }; });
+    // The state as the last sync run left it, read after the runs: a function of the read time.
+    const syncState = { first: jest.fn(async () => { order.push('state'); return typeof state === 'function' ? state() : state; }) };
     db.mockImplementation((table) => (table === 'emails' ? emails : syncState));
-    return { emails, syncState };
+    return { emails, syncState, order };
   }
 
+  test('it reads the inbox through now: it waits for a sync run in flight, runs one more, then needs that run to have finished clean', async () => {
+    // The run finished after the read began: it wrote last_sync_at then, with no errors.
+    const { order } = wireInbox({ state: () => ({ last_sync_at: new Date(), errors: null }) });
+    expect(await inboxReadThrough()).toBe(true);
+    // A run already in flight may have listed the mailbox before the HOLD deadline, so a second run follows it.
+    expect(order).toEqual(['sync', 'sync', 'state']);
+  });
+
   test.each([
-    ['a clean run 3 minutes ago', { last_sync_at: new Date('2026-08-06T10:57:00Z'), errors: null }, true],
-    ['a clean run 11 minutes ago', { last_sync_at: new Date('2026-08-06T10:49:00Z'), errors: null }, false],
-    ['a run with errors', { last_sync_at: new Date('2026-08-06T10:59:00Z'), errors: 'full sync incomplete' }, false],
-    ['no sync state at all', undefined, false],
-  ])('the inbox counts as read only after %s → %s', async (_label, state, expected) => {
+    ['no run finished after the read began (Gmail not connected: the state is older)', () => ({ last_sync_at: new Date(Date.now() - 60 * 1000), errors: null })],
+    ['the run did not finish clean (a message failed, so the sync holds its cursor)', () => ({ last_sync_at: new Date(), errors: 'incremental sync incomplete: 1 message(s) failed' })],
+    ['there is no sync state at all', () => undefined],
+  ])('the inbox does not count as read when %s', async (_label, state) => {
     wireInbox({ state });
-    expect(await inboxReadRecently(NOW)).toBe(expected);
+    expect(await inboxReadThrough()).toBe(false);
+  });
+
+  test('a sync run that throws makes the read throw, so the send waits for the next tick', async () => {
+    wireInbox({ state: () => ({ last_sync_at: new Date(), errors: null }) });
+    mockSyncEmails.mockImplementationOnce(async () => { throw new Error('gmail 500'); });
+    await expect(inboxReadThrough()).rejects.toThrow('gmail 500');
+  });
+
+  test('a Gmail draft or a copy only in Sent never counts: the read leaves out mail the sync stored as outbound_skipped', async () => {
+    // A reply this mailbox sent to itself reached the inbox (SENT and INBOX), so the sync stores it as inbound and it counts.
+    const { emails } = wireInbox({ replies: [reply({ body_text: 'HOLD' })] });
+    expect(await holdReplyOnRecord(SEND)).toBe(true);
+    expect(emails.whereRaw).toHaveBeenCalledWith("coalesce(auto_action, '') <> 'outbound_skipped'");
   });
 
   test('a HOLD reply from any sender stops the issue, also one outside NEWSLETTER_PROOF_APPROVERS', async () => {

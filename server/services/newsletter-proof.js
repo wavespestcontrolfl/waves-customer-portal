@@ -334,17 +334,21 @@ function isAutoQueued(send) {
 }
 
 /** The inbox sync must have finished a clean run this recently before a planned issue sends. */
-const INBOX_FRESH_MS = 10 * 60 * 1000;
-
 /**
- * Whether the inbox sync (email/email-sync.js, every 2 minutes) finished a run without errors in
- * the last 10 minutes. A HOLD reply sent by the FYI copy's 6:30 AM ET deadline is then stored
- * before the 7:00 AM send reads the inbox (holdReplyOnRecord).
+ * Reads the inbox through now, for the send-time HOLD check (holdReplyOnRecord). It waits for any
+ * inbox sync run already in flight (email/email-sync.js; that run may have listed the mailbox
+ * before the HOLD deadline), then runs one more, and returns whether the sync state shows a clean
+ * run that finished after this call began. Every reply that reached the mailbox before the call is
+ * then stored, except one the sync gave up on after 15 failed runs, which raises its own needs-you
+ * alert. False when Gmail is not connected or that run did not finish clean.
  */
-async function inboxReadRecently(now = new Date()) {
+async function inboxReadThrough() {
+  const startedAt = new Date();
+  const { syncEmails } = require('./email/email-sync');
+  await syncEmails();
+  await syncEmails();
   const state = await db('email_sync_state').first('last_sync_at', 'errors');
-  if (!state || state.errors || !state.last_sync_at) return false;
-  return now.getTime() - new Date(state.last_sync_at).getTime() <= INBOX_FRESH_MS;
+  return Boolean(state && !state.errors && state.last_sync_at && new Date(state.last_sync_at) >= startedAt);
 }
 
 /**
@@ -353,12 +357,15 @@ async function inboxReadRecently(now = new Date()) {
  * it could not apply then (the proof gate off, a sender outside NEWSLETTER_PROOF_APPROVERS, a write
  * that failed). Any sender counts, since stopping is the safe side, except the issue's own sending
  * address: its FYI copy can sync back in, and that copy quotes the HOLD line. The reply is read as
- * the handler reads it (its own text, not the quoted copy).
+ * the handler reads it (its own text, not the quoted copy), and only from mail the handler reads:
+ * a Gmail draft, or a copy only in Sent, is stored as 'outbound_skipped' and never counts. A reply
+ * this mailbox sent to itself reached the inbox, so it counts.
  */
 async function holdReplyOnRecord(send) {
   const token = String(send?.proof_token || '').toLowerCase();
   if (!token) return false;
-  const query = db('emails').where('subject', 'ilike', `%[PROOF-${token}]%`);
+  const query = db('emails').where('subject', 'ilike', `%[PROOF-${token}]%`)
+    .whereRaw("coalesce(auto_action, '') <> 'outbound_skipped'");
   // The token is new with each FYI copy; an hour of margin covers clock differences.
   if (send.proof_sent_at) query.where('received_at', '>=', new Date(new Date(send.proof_sent_at).getTime() - 60 * 60 * 1000));
   const replies = await query.select('from_address', 'subject', 'body_text', 'body_html');
@@ -482,8 +489,8 @@ function autoSendBannerText(recipientCount) {
 }
 
 // The owner's copy of a Waves Pest Insider issue the auto-send switch queued. The HOLD deadline is
-// half an hour before the 7:00 AM send, so the reply is in the stored inbox when the send-time
-// check reads it (holdReplyOnRecord, with inboxReadRecently).
+// half an hour before the 7:00 AM send, so the reply has reached the mailbox when the send-time
+// check reads it through (inboxReadThrough, then holdReplyOnRecord).
 function pestInsiderBannerHtml(recipientCount, issueContext) {
   return `<div class="dm-box" style="border:2px solid #04395E;border-radius:8px;padding:14px 16px;margin:0 0 20px;background:#f4f8fb;font-family:Arial,Helvetica,sans-serif;">
 <p style="margin:0 0 6px;font-size:15px;font-weight:bold;color:#04395E;">Sends by itself — no reply needed</p>
@@ -523,11 +530,12 @@ async function countRecipients(send) {
 
 // Returns whether the notification was actually delivered — a caller that
 // records "the owner was told" must not take a swallowed failure for a
-// delivery (Pest Insider catch-up, codex round 6 P1).
-async function notifyProof(type, payload) {
+// delivery (Pest Insider catch-up, codex round 6 P1). `options`, when given,
+// go to triggerNotification (a dedupeKey: a retry finds the row already written).
+async function notifyProof(type, payload, options = null) {
   try {
     const { triggerNotification } = require('./notification-triggers');
-    const result = await triggerNotification(type, payload);
+    const result = await (options ? triggerNotification(type, payload, options) : triggerNotification(type, payload));
     // triggerNotification resolves with the delivery outcome rather than
     // throwing — { bellWritten: false, push: null, prefsUnavailable: true }
     // is a failure. Delivered = a bell row was written or a push went out.
@@ -1151,7 +1159,7 @@ module.exports = {
   htmlReplyToText,
   isApprovalReply,
   isHoldReply,
-  inboxReadRecently,
+  inboxReadThrough,
   holdReplyOnRecord,
   renderSendPreview,
   sendNewsletterProof,

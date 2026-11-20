@@ -393,6 +393,35 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     expect(mockSendBroadcast).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['reached every reader: its planned issue row becomes sent', 0, expect.objectContaining({ status: 'sent' })],
+    ['ended with a reader still to resume (a batch SendGrid refused): its row is left to settlePlannedIssues, which tells the owner', 1, null],
+  ])('a planned issue whose send %s', async (_label, retryableLeft, expected) => {
+    let issueUpdate = null;
+    buildDb({
+      send: {
+        id: 'send-1', status: 'draft', newsletter_type: 'pest-insider-monthly', html_body: '<p>Body</p>', text_body: 'Body',
+        subject: 'Hello', from_email: 'newsletter@wavespestcontrol.com', from_name: 'Waves', reply_to: 'contact@wavespestcontrol.com',
+        segment_filter: PLANNED_PI, subject_b: null,
+      },
+      subscribers: [
+        { id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null },
+        { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: null },
+      ],
+      deliveries: [
+        { id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null },
+        { id: 'd-2', subscriber_id: 2, status: 'queued', ab_variant: null },
+      ],
+      retryableLeft,
+      onIssueUpdate: (payload) => { issueUpdate = payload; },
+    });
+
+    await sendCampaign('send-1');
+
+    expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
+    expect(issueUpdate).toEqual(expected);
+  });
+
   test('a planned issue whose every batch SendGrid refused ends failed; its planned issue row is left to settlePlannedIssues', async () => {
     mockTrigger.mockClear();
     mockSendBroadcast.mockRejectedValueOnce(new Error('SendGrid 503'));
