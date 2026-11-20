@@ -400,6 +400,24 @@ describe("Reviews workspace foundation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
     fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
     expect(await screen.findByText("No monthly cap")).toBeInTheDocument();
+
+    // A failed policy load shows Unavailable, never "No monthly cap".
+    cleanup();
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      const path = String(url);
+      if (path.includes("/admin/reviews/incentives/attribution-queue?")) return response({ items: [] });
+      if (path.includes("/admin/reviews/incentives?")) return response({ error: "Synthetic policy failure" }, 503);
+      if (path.includes("/admin/reviews")) {
+        return response({ reviews: [], locations: [], stats: { totalReviews: 0, avgRating: 0, unresponded: 0, responded: 0 } });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+    render(<ReviewsPage />);
+    await screen.findByText("No reviews match your filters");
+    fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    expect(await screen.findByText("Unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("No monthly cap")).toBeNull();
   }, 30000);
 
   it("Mark Pending Paid sends only the pending ids the button was enabled from, never over-cap rows", async () => {

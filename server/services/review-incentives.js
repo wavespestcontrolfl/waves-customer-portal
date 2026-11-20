@@ -1,7 +1,9 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { scrubSentryText } = require('../utils/sentry-scrub');
-const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
+const {
+  etParts, etDateString, addETDays, parseETDateTime, validCalendarDate,
+} = require('../utils/datetime-et');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const featureGates = require('../config/feature-gates');
 const { STAFF_TIME_ZONE } = require('../utils/staff-time-work-date');
@@ -188,6 +190,26 @@ async function getPolicy(conn = db) {
 // type first, then range; no coercion (a numeric string, an object, NaN or "12abc" is refused). Unknown keys
 // pass through as the lenient parser lets them. Used on a save (the patch and the merged result), on the
 // stored row, and so on every payment read.
+// The program cutoff, strictly (owner 2026-11-20 D4): a date-only value is the start of that Eastern day
+// (the repo's parseETDateTime); a timestamp must carry an explicit offset (Z or +hh:mm), because Railway's
+// UTC would otherwise decide it. An impossible calendar date, hour, minute or offset is refused. Returns the
+// normalized UTC ISO string, or null when the value is not acceptable. The ISO 'Z' form savePolicy has always
+// written stays valid.
+const CUTOFF_STAMP = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|([+-])(\d{2}):?(\d{2}))$/;
+function parseProgramCutoff(value) {
+  if (typeof value !== 'string') return null;
+  if (validCalendarDate(value)) {
+    const startOfDay = parseETDateTime(`${value}T00:00`);
+    return Number.isNaN(startOfDay.getTime()) ? null : startOfDay.toISOString();
+  }
+  const m = CUTOFF_STAMP.exec(value);
+  if (!m || !validCalendarDate(m[1])) return null;
+  const [, , hh, mm, ss, , oh, om] = m;
+  if (Number(hh) > 23 || Number(mm) > 59 || Number(ss || 0) > 59 || Number(oh || 0) > 23 || Number(om || 0) > 59) return null;
+  const stamp = new Date(value);
+  return Number.isNaN(stamp.getTime()) ? null : stamp.toISOString();
+}
+
 const POLICY_FIELD_CHECKS = {
   enabled: (v) => typeof v === 'boolean',
   // Upper bound = the payout amount_cents column (PG integer).
@@ -196,7 +218,7 @@ const POLICY_FIELD_CHECKS = {
   eligibleSources: (v) => Array.isArray(v) && v.every((source) => typeof source === 'string'),
   minRating: (v) => typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 5,
   requireCustomerMatchForGoogle: (v) => typeof v === 'boolean',
-  programStartsAt: (v) => v === null || (typeof v === 'string' && normalizedIsoDate(v) !== null),
+  programStartsAt: (v) => v === null || parseProgramCutoff(v) !== null,
   monthlyCapCount: (v) => v === null || (typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 1000),
 };
 
@@ -212,7 +234,7 @@ function checkPolicyFields(fields) {
     if (check && !check(value)) {
       throw operationalError(`The review bonus setting "${name}" is not valid`, 422, 'review_policy_invalid');
     }
-    checked[name] = name === 'programStartsAt' && value !== null ? normalizedIsoDate(value) : value;
+    checked[name] = name === 'programStartsAt' && value !== null ? parseProgramCutoff(value) : value;
   }
   return checked;
 }

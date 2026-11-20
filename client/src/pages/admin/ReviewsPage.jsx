@@ -825,7 +825,10 @@ function fmtDateTime(value) {
   }
 }
 // Owner 2026-11-20 D4: the monthly cap on paid reviews per technician (null = none).
-function monthlyCapLabel(policy) {
+// "No monthly cap" only for a policy that loaded; a failed load shows "Unavailable", never a guess.
+function monthlyCapLabel(data) {
+  const policy = data?.policy;
+  if (!policy) return "Unavailable";
   return policy.monthlyCapCount
     ? `${policy.monthlyCapCount} reviews a month`
     : "No monthly cap";
@@ -1369,7 +1372,7 @@ function ReviewIncentivesPanel() {
             <PolicyInfoCard
               Icon={CalendarDays}
               label="Monthly cap"
-              value={monthlyCapLabel(policy)}
+              value={monthlyCapLabel(data)}
               sub="Per technician, by Eastern calendar month. Reviews past the cap are not paid."
             />
             <PolicyInfoCard
