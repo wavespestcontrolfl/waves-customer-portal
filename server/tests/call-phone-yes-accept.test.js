@@ -64,7 +64,7 @@ describe('wiring', () => {
     }
   });
 
-  test('the tap\'s link step takes its locks in order: property-preferences, the customers row, the triage lock, the booking call, the estimates (then the send check), the catalog, then the visit', () => {
+  test('the tap\'s link step takes its locks in order: property-preferences, the customers row, the triage lock, the booking call, the estimates (then the send check), the catalog, the call\'s visits, then the visit', () => {
     const service = read('../services/call-phone-yes-accept.js');
     const inOrder = (text, needles) => {
       const order = needles.map((needle) => text.indexOf(needle));
@@ -78,7 +78,10 @@ describe('wiring', () => {
       "trx('call_log').where({ id: bookingCallId, customer_id: customerId }).forUpdate().noWait()",
       'await lockCustomerEstimates(trx, customerId);',
       "require('./scheduling/catalog-lock').lockCatalogIdentity(trx)",
+      "trx('scheduled_services').where({ source_call_log_id: bookingCallId }).orderBy('id').forUpdate().noWait()",
       "trx('scheduled_services').where({ id: visit.id }).forUpdate()",
+      "require('./call-prepay-choice').liveVisitsOfCall(trx, bookingCallId, customerId)",
+      'await callVisitsOnCalendar(trx, bookingCallId, customerId)',
     ]);
     // The send check reads after the estimates' lock, so a claim cannot land between the read and the commit.
     inOrder(service.slice(service.indexOf('async function lockCustomerEstimates('), service.indexOf('function linkVisitStep(')), [
