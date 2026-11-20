@@ -1,0 +1,46 @@
+name: Install packages (node_modules cache)
+description: >-
+  Restores the node_modules folders saved for this exact lockfile, set of
+  package.json files, Node version and runner image. On a miss it runs
+  `npm ci` and saves the fresh folders at once, before any test or build can
+  write into them. Any package.json change gives a new key, so `npm ci` still
+  checks every manifest against the lockfile when one changes.
+# 2026-11-20 (owner *a*): `npm ci` took ~20 s in every job, after a ~216 MB
+# npm-cache restore in setup-node. Kept only if 20 first-try PR runs show the
+# median run 30 s or more faster; otherwise revert this action and its uses.
+runs:
+  using: composite
+  steps:
+    - name: node_modules cache key parts
+      id: parts
+      shell: bash
+      run: |
+        echo "image=${ImageOS:-unknown}-$(uname -m)" >> "$GITHUB_OUTPUT"
+        echo "node=$(node -v)" >> "$GITHUB_OUTPUT"
+    - name: Restore node_modules
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        # npm puts packages in the root folder and, on a version clash, in a
+        # workspace's own folder (today client/ and video/).
+        path: |
+          node_modules
+          */node_modules
+          packages/*/node_modules
+        key: node-modules-v1-${{ steps.parts.outputs.image }}-node${{ steps.parts.outputs.node }}-${{ hashFiles('package-lock.json', 'package.json', '*/package.json', 'packages/*/package.json') }}
+    - name: npm ci (no saved node_modules for this key)
+      if: steps.restore.outputs.cache-hit != 'true'
+      shell: bash
+      run: npm ci
+    - name: Save node_modules
+      if: steps.restore.outputs.cache-hit != 'true'
+      # Sibling jobs that miss together race to save the same key; the losers
+      # only print a warning.
+      continue-on-error: true
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          node_modules
+          */node_modules
+          packages/*/node_modules
+        key: ${{ steps.restore.outputs.cache-primary-key }}
