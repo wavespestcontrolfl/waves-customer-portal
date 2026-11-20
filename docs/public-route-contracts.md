@@ -7915,7 +7915,7 @@ reserves one call's worst-case OpenAI cost in its own ledger table (`voice_gpt_l
 under an advisory lock before it issues the token (first releasing at $0 any reservation whose stream never opened
 within the token's life), and refuses the call
 when that reservation does not fit under `VOICE_GPT_LIVE_TEST_MAX_USD` (default 5), and on any database error there.
-Reply delay, cost and the scrubbed transcript land on `call_log.metadata.gpt_live`.)
+Reply delay and cost land on `call_log.metadata.gpt_live`; the call's words are never stored.)
 `/api/webhooks/twilio/tech-voice` (POST; machine-to-machine TwiML webhook —
 the voice URL of the staff-only "Waves Tech" voice line, `TECH_VOICE_NUMBER`,
 which a technician calls from their own cell; dark behind

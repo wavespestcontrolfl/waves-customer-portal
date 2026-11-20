@@ -9,7 +9,7 @@
  * door as /ws/voice-agent: per-call token, sandbox-sourced call_log row with
  * the gpt_live stamp the cell route wrote, gate on, token burned.
  *
- * The server records reply delay and transcript for each call on
+ * The server records reply delay (no call words) for each call on
  * call_log.metadata.gpt_live. GPT-Live sends no speech-started event, so
  * barge-in is this bridge's job: a caller transcript delta while model audio
  * is still queued in Twilio flushes Twilio's buffer.
@@ -19,7 +19,9 @@
  * OpenAI's paid Responses backend is never used. Nothing here books, captures
  * a lead, texts or transfers.
  *
- * Logging: callSid, codes and counts only. Never transcript text or numbers.
+ * Logging and storage: callSid, codes, counts and timings only. The caller's
+ * words are never stored or logged: the owner hears the trial calls himself,
+ * and a transcript could hold card numbers or access codes.
  */
 
 const logger = require('../logger');
@@ -36,8 +38,8 @@ const CLOSE_WAIT_MS = 5000;
 const START_DEADLINE_MS = 10000; // session.started must arrive within this, or the call ends
 const BARGE_IN_MARGIN_MS = 200;
 const NEW_REPLY_GAP_MS = 250; // model silence before a delta that marks the start of a new reply
+const TAIL_DROP_MAX_MS = 1500; // after a barge-in, drop the cut-off reply's tail at most this long
 const MULAW_BYTES_PER_MS = 8; // 8000 samples a second, one byte each
-const TRANSCRIPT_MAX_CHARS = 20000;
 const INSTRUCTIONS_MAX_CHARS = 60000; // about 16k tokens; OpenAI's limit is 16,384
 
 // ── Spend accounting for the owner's $5 cap (OpenAI pricing page and GPT-Live
@@ -47,15 +49,17 @@ const INSTRUCTIONS_MAX_CHARS = 60000; // about 16k tokens; OpenAI's limit is 16,
 // bill separately, and this session has none: client delegation runs no
 // OpenAI backend model (the bridge answers), so voice time is the whole cost.
 const LIVE_USD_PER_MINUTE = 0.05;
-const round4 = (n) => Math.round(n * 10000) / 10000;
 // The most one call can cost: the session cap plus 30 s of close wait and
 // clock skew. The cell route reserves this much of the cap before it issues a
 // stream token, and a call keeps it unless session.closed confirms the usage.
-const PER_CALL_RESERVE_USD = round4(((SESSION_CAP_MS + 30000) / 60000) * LIVE_USD_PER_MINUTE);
-
+// Rounded UP to the ledger's $0.0001 (decimal(10,4)): a settled row never
+// understates spend, however many short calls add up under the cap.
 function callCostUsd(usageSeconds) {
-  return round4((usageSeconds / 60) * LIVE_USD_PER_MINUTE);
+  const tenThousandths = (usageSeconds * LIVE_USD_PER_MINUTE * 10000) / 60;
+  return Math.max(0, Math.ceil(tenThousandths - 1e-9)) / 10000; // max(): never -0
 }
+
+const PER_CALL_RESERVE_USD = callCostUsd((SESSION_CAP_MS + 30000) / 1000);
 
 const TRIAL_LIMITS = [
   'TRIAL LIMITS (this overrides everything above):',
@@ -100,7 +104,7 @@ function buildSessionStart({ instructions, voice }) {
 }
 
 // A bounded error code for logs: a database error message can echo the
-// statement's bindings (the transcript), so err.message is never logged here.
+// statement's bindings, so err.message is never logged here.
 function errCode(err) {
   return String((err && (err.code || err.name)) || 'error').replace(/[^\w.-]/g, '').slice(0, 32);
 }
@@ -131,7 +135,6 @@ function defaultDeps() {
     admit: admitReservation,
     buildInstructions: buildLiveInstructions,
     greeting: () => require('./relay-protocol').defaultWelcomeGreeting(),
-    scrubTurns: (turns) => require('./relay-transcript').scrubTurnsForStorage(turns),
     db: () => require('../../models/db'),
     apiKey: () => process.env.OPENAI_API_KEY,
     sessionCapMs: SESSION_CAP_MS,
@@ -161,12 +164,14 @@ class LiveBridge {
     this.awaitingReply = false;
     this.playbackEndsAt = 0;
     this.replyStartWall = null; // wall time the model's current reply began
+    this.prevReplyStartWall = null; // ...and the reply before it
+    this.replySample = null; // { index, speechEnd } of the delay sample the current reply has
+    this.lastAudioAt = null; // arrival time of the last model audio chunk
+    this.tailDropSince = null; // a barge-in cleared Twilio at this time: drop the old reply's tail
 
     this.latencies = [];
     this.interruptions = 0;
     this.errors = [];
-    this.transcript = [];
-    this.transcriptChars = 0;
     this.delegations = new Set();
     this.usageConfirmed = false; // session.closed carried the final usage
 
@@ -310,7 +315,6 @@ class LiveBridge {
       'session.started': () => this.onSessionStarted(),
       'session.output_audio.delta': () => this.onOutputAudio(msg),
       'session.input_transcript.delta': () => this.onInputTranscript(msg),
-      'session.output_transcript.delta': () => this.addTranscript('sandy', msg.delta),
       'session.delegation.created': () => this.onDelegation(msg.delegation),
       'session.usage.updated': () => this.noteUsage(msg.usage),
       'session.closed': () => this.onSessionClosed(msg),
@@ -330,21 +334,42 @@ class LiveBridge {
   onOutputAudio(msg) {
     if (typeof msg.delta !== 'string' || !msg.delta || !this.streamSid) return;
     const t = this.deps.now();
+    if (this.isOldTail(t)) return;
     // A reply delay counts only where a reply starts (model audio after a
     // silence). A caller transcript that lands while the model is already
     // talking (transcription lag) must not log a false near-zero delay.
-    // The pending measure is consumed only by a reply start: a tail chunk of a
-    // reply the caller just cut off (inside the gap) leaves it for the next one.
-    if (t >= this.playbackEndsAt + NEW_REPLY_GAP_MS) {
-      this.replyStartWall = t;
-      if (this.awaitingReply && this.speechEndWall !== null) {
-        this.latencies.push(Math.max(0, Math.round(t - this.speechEndWall)));
-      }
-      this.awaitingReply = false;
-    }
+    if (t >= this.playbackEndsAt + NEW_REPLY_GAP_MS) this.onReplyStart(t);
     const decodedBytes = Buffer.from(msg.delta, 'base64').length;
     this.playbackEndsAt = Math.max(t, this.playbackEndsAt) + decodedBytes / MULAW_BYTES_PER_MS;
     this.toTwilio({ event: 'media', streamSid: this.streamSid, media: { payload: msg.delta } });
+  }
+
+  // After a barge-in cleared Twilio, chunks of the cut-off reply that keep
+  // streaming in are dropped, so the caller never hears it restart mid-
+  // sentence. The tail ends at a gap in the stream (a new reply), or after
+  // TAIL_DROP_MAX_MS at the most.
+  isOldTail(t) {
+    const prev = this.lastAudioAt;
+    this.lastAudioAt = t;
+    if (this.tailDropSince === null) return false;
+    // The gap counts from the later of the last chunk and the clear: the first
+    // chunk after a clear is a new reply only after a real silence.
+    const gap = t - Math.max(prev === null ? -Infinity : prev, this.tailDropSince);
+    if (gap < NEW_REPLY_GAP_MS && t - this.tailDropSince < TAIL_DROP_MAX_MS) return true;
+    this.tailDropSince = null;
+    return false;
+  }
+
+  // The pending measure is consumed only here, by a reply start.
+  onReplyStart(t) {
+    this.prevReplyStartWall = this.replyStartWall;
+    this.replyStartWall = t;
+    this.replySample = null;
+    if (this.awaitingReply && this.speechEndWall !== null) {
+      this.latencies.push(Math.max(0, Math.round(t - this.speechEndWall)));
+      this.replySample = { index: this.latencies.length - 1, speechEnd: this.speechEndWall };
+    }
+    this.awaitingReply = false;
   }
 
   onInputTranscript(msg) {
@@ -353,19 +378,35 @@ class LiveBridge {
     // start_ms / end_ms count from the start of the Live session, so they map
     // to wall time from session.started, not from the first caller packet.
     const speechEnd = Number.isFinite(msg.end_ms) && this.sessionStartWall !== null ? this.sessionStartWall + msg.end_ms : null;
-    // Arm a delay measure only for speech that ended after the latest reply
-    // began. A late transcript of words that reply already answered must not
-    // time the NEXT reply from them.
-    if (speechEnd !== null && (this.replyStartWall === null || speechEnd > this.replyStartWall)) {
-      this.speechEndWall = speechEnd;
-      this.awaitingReply = true;
-    }
+    if (speechEnd !== null) this.noteSpeechEnd(speechEnd);
     if (text.trim() && this.isBargeIn(t, speechEnd)) {
       this.toTwilio({ event: 'clear', streamSid: this.streamSid });
       this.playbackEndsAt = t;
+      this.tailDropSince = t;
       this.interruptions += 1;
     }
-    this.addTranscript('caller', text);
+  }
+
+  // Speech that ended after the current reply began arms the measure for the
+  // next reply. Speech that ended before it, whose transcript came late, timed
+  // the CURRENT reply, when it ended after the reply before that one began:
+  // it adds that reply's sample, or moves it to a later fragment's end. The
+  // greeting (no reply before it) is never timed.
+  noteSpeechEnd(speechEnd) {
+    if (this.replyStartWall === null || speechEnd > this.replyStartWall) {
+      this.speechEndWall = speechEnd;
+      this.awaitingReply = true;
+      return;
+    }
+    if (this.prevReplyStartWall === null || speechEnd <= this.prevReplyStartWall) return;
+    const delay = Math.max(0, Math.round(this.replyStartWall - speechEnd));
+    if (!this.replySample) {
+      this.latencies.push(delay);
+      this.replySample = { index: this.latencies.length - 1, speechEnd };
+    } else if (speechEnd > this.replySample.speechEnd) {
+      this.latencies[this.replySample.index] = delay;
+      this.replySample.speechEnd = speechEnd;
+    }
   }
 
   // A barge-in is caller speech that runs past the start of the reply still
@@ -376,15 +417,6 @@ class LiveBridge {
     if (t >= this.playbackEndsAt - BARGE_IN_MARGIN_MS) return false; // nothing (much) left to cut
     if (speechEnd === null || this.replyStartWall === null) return false;
     return speechEnd > this.replyStartWall + BARGE_IN_MARGIN_MS;
-  }
-
-  addTranscript(role, text) {
-    if (typeof text !== 'string' || !text || this.transcriptChars >= TRANSCRIPT_MAX_CHARS) return;
-    const piece = text.slice(0, TRANSCRIPT_MAX_CHARS - this.transcriptChars);
-    this.transcriptChars += piece.length;
-    const last = this.transcript[this.transcript.length - 1];
-    if (last && last.role === role) last.text += piece;
-    else this.transcript.push({ role, text: piece });
   }
 
   noteUsage(usage) {
@@ -448,8 +480,8 @@ class LiveBridge {
     try {
       await this.writeSummary(reason);
     } catch (err) {
-      // The UPDATE binds the transcript, and a database error message can echo
-      // its bindings: log a bounded code only, never err.message.
+      // A database error message can echo its bindings: log a bounded code
+      // only, never err.message.
       logger.warn(`[voice-live] summary write failed callSid=${this.callSid} code=${errCode(err)}`);
     }
   }
@@ -499,15 +531,6 @@ class LiveBridge {
     const sorted = [...this.latencies].sort((a, b) => a - b);
     const errors = [...this.errors];
     const { usage, settled } = this.settledUsage(errors);
-    // Card numbers and access codes are scrubbed before storage, across turns
-    // (a number read in pieces), with the relay transcript's own scrubber.
-    // It returns null when it cannot run: then no text is stored at all.
-    let transcript = null;
-    try { transcript = this.deps.scrubTurns(this.transcript); } catch { transcript = null; }
-    if (!Array.isArray(transcript)) {
-      transcript = [];
-      errors.push('transcript_scrub_unavailable');
-    }
     return {
       usage_seconds: usage,
       openai_contacted: this.startSent,
@@ -523,7 +546,6 @@ class LiveBridge {
       interruptions: this.interruptions,
       delegations: this.delegations.size,
       errors,
-      transcript: transcript.filter((turn) => turn && turn.text),
     };
   }
 

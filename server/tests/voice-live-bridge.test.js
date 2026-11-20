@@ -44,7 +44,6 @@ const waitFor = async (cond, ms = 10000) => {
   while (!cond() && Date.now() < end) await new Promise((r) => setTimeout(r, 5));
   await flush();
 };
-const realScrub = (turns) => require('../services/voice-agent/relay-transcript').scrubTurnsForStorage(turns);
 const b64 = (bytes) => Buffer.alloc(bytes, 0x7f).toString('base64');
 
 function setup({ closeReply = true, deps = {} } = {}) {
@@ -71,7 +70,6 @@ function setup({ closeReply = true, deps = {} } = {}) {
     admit,
     buildInstructions: () => 'INSTRUCTIONS',
     greeting: () => 'Waves, this is Sandy.',
-    scrubTurns: (turns) => turns.map((turn) => ({ ...turn })), // the real scrubber has its own test
     db: () => db,
     apiKey: () => 'sk-test',
     ...deps,
@@ -254,7 +252,7 @@ describe('model audio, barge-in and latency', () => {
     expect(summaryOf(t).interruptions).toBe(1);
   });
 
-  test('a tail chunk of the cut-off reply right after a barge-in keeps the delay measure for the real next reply', async () => {
+  test('after a barge-in, the cut-off reply\'s tail never reaches Twilio, and the delay measure waits for the real next reply', async () => {
     const t = setup();
     await t.ready();
     t.twilioMedia();
@@ -263,12 +261,32 @@ describe('model audio, barge-in and latency', () => {
     t.advance(600);
     t.openai.receive({ type: 'session.input_transcript.delta', delta: 'wait', start_ms: 1300, end_ms: 1500 }); // barge-in at +1600
     t.advance(100);
-    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // the old reply's tail, inside the gap
-    t.advance(900);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(320) }); // the old reply's tail, inside the gap
+    t.advance(100);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(320) }); // more tail
+    t.advance(800);
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // the real next reply at +2600
     t.twilioStop();
     await flush();
+    const payloads = t.twilio.sent.filter((m) => m.event === 'media').map((m) => m.media.payload);
+    expect(payloads).toEqual([b64(8000), b64(160)]); // no restart mid-sentence
     expect(summaryOf(t).turns).toEqual([1100]); // +2600 minus the speech end at +1500
+  });
+
+  test('a cut-off reply that keeps streaming is dropped for TAIL_DROP_MAX_MS at the most', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    t.advance(1000);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(8000) });
+    t.advance(600);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'wait', start_ms: 1300, end_ms: 1500 }); // clear at +1600
+    for (let i = 0; i < 20; i++) {
+      t.advance(100);
+      t.openai.receive({ type: 'session.output_audio.delta', delta: b64(80) }); // a stream with no gap
+    }
+    const sent = t.twilio.sent.filter((m) => m.event === 'media' && m.media.payload === b64(80));
+    expect(sent.length).toBe(6); // dropped through +3000 (1500 ms), sent from +3100 on
   });
 
   test('a caller transcript with no playback queued sends no clear', async () => {
@@ -336,17 +354,46 @@ describe('model audio, barge-in and latency', () => {
     expect(s.latency_max_ms).toBe(1200);
   });
 
-  test('a late transcript of words the last reply already answered does not time the next reply', async () => {
+  test('a transcript that arrives after the reply began times that reply, and never the next one', async () => {
     const t = setup();
     await t.ready();
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
     t.twilioMedia();
     t.advance(2000);
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // a short reply starts at t0 + 2000
     t.advance(500);
-    // the transcript of speech that ended at t0 + 1900 arrives after the reply's last chunk
+    // speech that ended at t0 + 1900: its transcript arrives after the reply began
     t.openai.receive({ type: 'session.input_transcript.delta', delta: 'thanks', start_ms: 1500, end_ms: 1900 });
     t.advance(3000);
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // the model speaks again, unprompted
+    t.twilioStop();
+    await flush();
+    expect(summaryOf(t).turns).toEqual([100]);
+  });
+
+  test('a later fragment of the same speech moves the sample to the true end of speech', async () => {
+    const t = setup();
+    await t.ready();
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
+    t.twilioMedia();
+    t.advance(1600);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'I need', start_ms: 1000, end_ms: 1500 }); // before the reply
+    t.advance(400);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // reply at t0 + 2000: 500 so far
+    t.advance(100);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: ' pest control', start_ms: 1500, end_ms: 1900 }); // late
+    t.twilioStop();
+    await flush();
+    expect(summaryOf(t).turns).toEqual([100]);
+  });
+
+  test('speech before the greeting never times the greeting', async () => {
+    const t = setup();
+    await t.ready();
+    t.advance(800);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0 + 800
+    t.advance(200);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'hello?', start_ms: 100, end_ms: 500 });
     t.twilioStop();
     await flush();
     expect(summaryOf(t).turns).toEqual([]);
@@ -366,9 +413,10 @@ describe('model audio, barge-in and latency', () => {
     expect(summaryOf(t).turns).toEqual([600]);
   });
 
-  test('a caller transcript that lands while the model is already talking records no reply delay', async () => {
+  test('a caller transcript that lands while the model is already talking times the reply from the speech end, never near zero', async () => {
     const t = setup();
     await t.ready();
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
     t.twilioMedia();
     t.advance(2000);
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(8000) }); // reply starts: 1000 ms queued
@@ -379,7 +427,7 @@ describe('model audio, barge-in and latency', () => {
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // mid-reply delta: no turn
     t.twilioStop();
     await flush();
-    expect(summaryOf(t).turns).toEqual([]);
+    expect(summaryOf(t).turns).toEqual([100]); // t0 + 2000 minus t0 + 1900, not the 20 ms to the mid-reply delta
   });
 });
 
@@ -457,8 +505,7 @@ describe('finish', () => {
       interruptions: 0,
       delegations: 0,
       errors: [],
-      transcript: [{ role: 'caller', text: 'Hi, there' }, { role: 'sandy', text: 'Hello!' }],
-    });
+    }); // no call words: the owner hears the calls himself
     expect(t.twilio.close).toHaveBeenCalled();
   });
 
@@ -552,25 +599,19 @@ describe('finish', () => {
     expect(t.openai.sent.some((m) => m.type === 'session.close')).toBe(true);
   });
 
-  test('error events log the code and type only, and the transcript is capped', async () => {
+  test('error events log the code and type only', async () => {
     const t = setup();
     await t.ready();
     t.openai.receive({ type: 'error', error: { code: 'rate_limit', type: 'server_error', message: 'echoed caller words', param: 'x' } });
-    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'x'.repeat(30000), start_ms: 0, end_ms: 10 });
     t.twilioStop();
     await flush();
     const logged = JSON.stringify(logger.warn.mock.calls) + JSON.stringify(logger.info.mock.calls) + JSON.stringify(logger.error.mock.calls);
     expect(logged).toContain('rate_limit');
     expect(logged).not.toContain('echoed caller words');
-    expect(logged).not.toContain('xxxxx');
-    const s = summaryOf(t);
-    expect(s.errors).toContain('rate_limit:server_error');
-    const stored = s.transcript.reduce((n, turn) => n + turn.text.length, 0);
-    expect(stored).toBeGreaterThan(0);
-    expect(stored).toBeLessThanOrEqual(20000);
+    expect(summaryOf(t).errors).toContain('rate_limit:server_error');
   });
 
-  test('a failed summary write logs a bounded code only, never the error message (it can echo the transcript), and never throws', async () => {
+  test('a failed summary write logs a bounded code only, never the error message (it can echo bindings), and never throws', async () => {
     const t = setup();
     const err = Object.assign(new Error('update "call_log" set metadata = my card is 4111 1111 1111 1111'), { code: '22P02' });
     t.update.mockRejectedValue(err);
@@ -581,33 +622,21 @@ describe('finish', () => {
     expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('4111');
   });
 
-  test('card numbers are scrubbed from the stored transcript, also across turns (the relay scrubber)', async () => {
-    const t = setup({ deps: { scrubTurns: realScrub } });
+  test('the caller\'s words (a card number, a gate code across turns) are never stored or logged', async () => {
+    const t = setup();
     await t.ready();
     t.twilioMedia();
-    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'my card is 4111 1111', start_ms: 0, end_ms: 900 });
-    t.openai.receive({ type: 'session.output_transcript.delta', delta: 'Sorry, I cannot take a card here.', start_ms: 1000, end_ms: 1500 });
-    t.openai.receive({ type: 'session.input_transcript.delta', delta: '1111 1111', start_ms: 1600, end_ms: 2000 });
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'the gate code is', start_ms: 0, end_ms: 900 });
+    t.openai.receive({ type: 'session.output_transcript.delta', delta: 'Okay.', start_ms: 1000, end_ms: 1200 });
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: '4 7 1 9, card 4111 1111 1111 1111', start_ms: 1300, end_ms: 2000 });
     t.twilioStop();
     await flush();
-    const stored = JSON.stringify(summaryOf(t).transcript);
-    expect(stored).not.toMatch(/4111\s*1111/);
-    expect(stored).toContain('my card is');
-    // and the production default is that same scrubber
-    const prodScrub = new bridgeMod.LiveBridge(new FakeSocket(), { callSid: CALL_SID }).deps.scrubTurns;
-    expect(JSON.stringify(prodScrub([{ role: 'caller', text: 'card 4111 1111 1111 1111' }]))).not.toMatch(/4111\s*1111/);
-  }, 60000); // the first load of the real scrubber's modules is slow on a busy machine
-
-  test('a scrubber that cannot run stores no transcript text at all', async () => {
-    const t = setup({ deps: { scrubTurns: () => null } });
-    await t.ready();
-    t.twilioMedia();
-    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'hello', start_ms: 0, end_ms: 400 });
-    t.twilioStop();
-    await flush();
-    const s = summaryOf(t);
-    expect(s.transcript).toEqual([]);
-    expect(s.errors).toContain('transcript_scrub_unavailable');
+    const stored = t.db.raw.mock.calls.map((c) => JSON.stringify(c[1])).join('');
+    const logged = JSON.stringify([logger.warn.mock.calls, logger.info.mock.calls, logger.error.mock.calls]);
+    for (const text of [stored, logged]) {
+      expect(text).not.toMatch(/gate code|4 7 1 9|4111/);
+    }
+    expect(summaryOf(t)).not.toHaveProperty('transcript');
   });
 });
 
@@ -650,7 +679,17 @@ describe('reservation admission', () => {
 describe('spend cap', () => {
   test('the per-call reservation covers the session cap plus close wait, at the voice price', () => {
     expect(bridgeMod.PER_CALL_RESERVE_USD).toBe(bridgeMod.callCostUsd(630));
-    expect(bridgeMod.PER_CALL_RESERVE_USD).toBeCloseTo(0.525, 4); // 10.5 min at $0.05
+    expect(bridgeMod.PER_CALL_RESERVE_USD).toBe(0.525); // 10.5 min at $0.05
+  });
+
+  test('a settled cost rounds UP to the ledger\'s $0.0001, so short calls never understate spend', () => {
+    expect(bridgeMod.callCostUsd(4)).toBe(0.0034); // $0.00333...
+    expect(bridgeMod.callCostUsd(45)).toBe(0.0375); // exact stays exact
+    expect(bridgeMod.callCostUsd(0)).toBe(0);
+    expect(bridgeMod.callCostUsd(4.2)).toBe(0.0035);
+    let ledger = 0;
+    for (let i = 0; i < 1000; i++) ledger += bridgeMod.callCostUsd(4);
+    expect(ledger).toBeGreaterThanOrEqual((1000 * 4 * 0.05) / 60);
   });
 
   test('the settled cost is voice time only, however many delegations ran (the bridge answers them)', async () => {
