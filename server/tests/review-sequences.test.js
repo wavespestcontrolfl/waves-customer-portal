@@ -16,6 +16,8 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: (g) => !!mockGates[g],
   // GATE_REVIEW_ASK_AFTER_REPORT: the call-time reader, driven by the same flags object.
   reviewAskAfterReportLive: () => mockGates.reviewAskAfterReport === true,
+  // GATE_REVIEW_ASK_RESULTS_VISIT: the call-time reader, driven by the same flags object.
+  reviewAskResultsVisitLive: () => mockGates.reviewAskResultsVisit === true,
   gates: mockGates,
 }));
 // Personalized-ask drafter (own suite: review-ask-drafter.test.js). Default
@@ -137,6 +139,7 @@ function makeMock(initial = {}, opts = {}) {
       orWhereNull() { return this; },
       whereRaw(sql, bindings) {
         this.raws.push(sql);
+        if (sql.includes('is_callback IS DISTINCT FROM true')) this.notEquals.push(['is_callback', true]);
         if (sql.includes("followup_next_attempt_at")) this.followupRetryAt = bindings[0];
         const greatest = sql.match(/GREATEST\(([^)]+)\) > \?/);
         if (greatest && bindings?.length) {
@@ -191,6 +194,7 @@ beforeEach(() => {
   mockGates.reviewSequences = false;
   mockGates.reviewDirectLink = false;
   mockGates.reviewAskAfterReport = false;
+  mockGates.reviewAskResultsVisit = false;
   mockDraftAskBody.mockReset().mockResolvedValue(null);
   mockDraftEmailIntro.mockReset().mockResolvedValue(null);
   mockDraftTechVoice.mockReset().mockResolvedValue(null);
@@ -8479,5 +8483,113 @@ describe('Tap pause: no automatic review ask for 180 days after a tap', () => {
     mockSendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-tp' });
     expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(0);
+  });
+});
+
+// GATE_REVIEW_ASK_RESULTS_VISIT (owner 2026-11-20, Tech Rewards Plan D6 R2): a recurring lawn
+// customer is first asked on the 3rd completed lawn visit, tree & shrub on the 2nd.
+describe('resultsVisitSkip (pure rule)', () => {
+  const { resultsVisitSkip } = ReviewService;
+  test('lawn: visits 1 and 2 skip, 3 and later ask', () => {
+    expect(resultsVisitSkip({ serviceLine: 'lawn_care', completedCount: 1, gateOn: true })).toBe('results_not_yet');
+    expect(resultsVisitSkip({ serviceLine: 'lawn_care', completedCount: 2, gateOn: true })).toBe('results_not_yet');
+    expect(resultsVisitSkip({ serviceLine: 'lawn_care', completedCount: 3, gateOn: true })).toBeNull();
+    expect(resultsVisitSkip({ serviceLine: 'lawn_care', completedCount: 9, gateOn: true })).toBeNull();
+  });
+  test('tree & shrub: visit 1 skips, 2 asks', () => {
+    expect(resultsVisitSkip({ serviceLine: 'tree_shrub', completedCount: 1, gateOn: true })).toBe('results_not_yet');
+    expect(resultsVisitSkip({ serviceLine: 'tree_shrub', completedCount: 2, gateOn: true })).toBeNull();
+  });
+  test('pest and other lines always ask', () => {
+    expect(resultsVisitSkip({ serviceLine: 'pest_control', completedCount: 1, gateOn: true })).toBeNull();
+    expect(resultsVisitSkip({ serviceLine: null, completedCount: 1, gateOn: true })).toBeNull();
+  });
+  test('gate off never skips, and an unknown count asks', () => {
+    expect(resultsVisitSkip({ serviceLine: 'lawn_care', completedCount: 1, gateOn: false })).toBeNull();
+    expect(resultsVisitSkip({ serviceLine: 'lawn_care', completedCount: NaN, gateOn: true })).toBeNull();
+    expect(resultsVisitSkip({ serviceLine: 'lawn_care', completedCount: undefined, gateOn: true })).toBeNull();
+  });
+  test('with no gateOn given it reads the gate at call time', () => {
+    mockGates.reviewAskResultsVisit = false;
+    expect(resultsVisitSkip({ serviceLine: 'lawn_care', completedCount: 1 })).toBeNull();
+    mockGates.reviewAskResultsVisit = true;
+    expect(resultsVisitSkip({ serviceLine: 'lawn_care', completedCount: 1 })).toBe('results_not_yet');
+  });
+});
+
+describe('resolveSequencePlanForEnrollment results-visit rule (GATE_REVIEW_ASK_RESULTS_VISIT)', () => {
+  const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+  const visit = (id, customer, type, ago, extra = {}) => ({
+    id, customer_id: customer, service_id: `svc-${id}`, service_type: type, status: 'completed',
+    scheduled_date: daysAgo(ago), is_recurring: true, service_key: 'recurring_visit', ...extra,
+  });
+  const resolve = (customerId, scheduledServiceId) => ReviewService.resolveSequencePlanForEnrollment({ customerId, scheduledServiceId });
+
+  test('gate on: lawn visits 1 and 2 skip with results_not_yet, visit 3 asks the recurring plan', async () => {
+    mockGates.reviewAskResultsVisit = true;
+    const rows = [
+      visit('lw-1', 'lw', 'Lawn Care Program', 60),
+      visit('lw-2', 'lw', 'Lawn Care Program', 30),
+      visit('lw-3', 'lw', 'Lawn Care Program', 0),
+    ];
+    db.mockImplementation(makeMock({ scheduled_services: rows }));
+    expect((await resolve('lw', 'lw-1')).skip).toBe('results_not_yet');
+    // Visit 2 counts only visits up to its own day, even with visit 3 already completed.
+    expect((await resolve('lw', 'lw-2')).skip).toBe('results_not_yet');
+    const third = await resolve('lw', 'lw-3');
+    expect(third.skip).toBeUndefined();
+    expect(third.plan).toHaveLength(1);
+  });
+
+  test('gate on: tree & shrub visit 1 skips, visit 2 asks; pest asks at visit 1', async () => {
+    mockGates.reviewAskResultsVisit = true;
+    db.mockImplementation(makeMock({ scheduled_services: [visit('ts-1', 'ts', 'Tree & Shrub Program', 0)] }));
+    expect((await resolve('ts', 'ts-1')).skip).toBe('results_not_yet');
+    db.mockImplementation(makeMock({ scheduled_services: [visit('ts-1', 'ts', 'Tree & Shrub Program', 60), visit('ts-2', 'ts', 'Tree & Shrub Program', 0)] }));
+    expect((await resolve('ts', 'ts-2')).plan).toHaveLength(1);
+    db.mockImplementation(makeMock({ scheduled_services: [visit('pc-1', 'pc', 'Quarterly Pest Control', 0)] }));
+    const pest = await resolve('pc', 'pc-1');
+    expect(pest.skip).toBeUndefined();
+    expect(pest.plan).toHaveLength(1);
+  });
+
+  test('gate on: one-time lawn, other lines\' visits and callbacks do not count toward the lawn total', async () => {
+    mockGates.reviewAskResultsVisit = true;
+    db.mockImplementation(makeMock({ scheduled_services: [
+      visit('mx-1', 'mx', 'Lawn Care Program', 90, { is_callback: true }),
+      visit('mx-2', 'mx', 'Quarterly Pest Control', 60),
+      visit('mx-3', 'mx', 'Lawn Care Program', 30),
+      visit('mx-4', 'mx', 'Lawn Care Program', 0),
+    ] }));
+    expect((await resolve('mx', 'mx-4')).skip).toBe('results_not_yet');
+    // A one-time lawn visit is not a recurring visit: unchanged (default plan, no skip).
+    db.mockImplementation(makeMock({ scheduled_services: [visit('ot-1', 'ot', 'One-Time Lawn Treatment', 0, { is_recurring: false })] }));
+    const oneTime = await resolve('ot', 'ot-1');
+    expect(oneTime.skip).toBeUndefined();
+    expect(oneTime.plan).toHaveLength(3);
+  });
+
+  test('gate off: byte-identical, recurring lawn visit 1 keeps the recurring plan', async () => {
+    mockGates.reviewAskResultsVisit = false;
+    db.mockImplementation(makeMock({ scheduled_services: [visit('go-1', 'go', 'Lawn Care Program', 0)] }));
+    const plan = await resolve('go', 'go-1');
+    expect(plan.skip).toBeUndefined();
+    expect(plan.plan).toHaveLength(1);
+  });
+
+  test('a failed count read asks as today and logs', async () => {
+    mockGates.reviewAskResultsVisit = true;
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
+    const mock = makeMock(
+      { scheduled_services: [visit('fl-1', 'fl', 'Lawn Care Program', 0)] },
+      { throwSelectWhen: (q) => q.table === 'scheduled_services' && q.raws.some((r) => r.includes('is_callback')) && q.selected?.[0] === 'service_type' },
+    );
+    db.mockImplementation(mock);
+    const plan = await resolve('fl', 'fl-1');
+    expect(plan.error).toBeUndefined();
+    expect(plan.skip).toBeUndefined();
+    expect(plan.plan).toHaveLength(1);
+    expect(logger.warn.mock.calls.some((c) => String(c[0]).includes('results-visit count failed'))).toBe(true);
   });
 });

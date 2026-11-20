@@ -104,6 +104,50 @@ function reviewAskAfterReportOn() {
   return require("../config/feature-gates").reviewAskAfterReportLive();
 }
 
+// GATE_REVIEW_ASK_RESULTS_VISIT (owner 2026-11-20, Tech Rewards Plan D6 R2): lawn and
+// tree & shrub results are not visible after the first visit, so an early ask wastes the
+// customer's one ask. A recurring lawn customer is first asked on the 3rd completed lawn
+// visit, a recurring tree & shrub customer on the 2nd. Keys are toQualifyingKeys lines.
+const RESULTS_VISIT_MIN = { lawn_care: 3, tree_shrub: 2 };
+function reviewAskResultsVisitOn() {
+  const gates = require("../config/feature-gates");
+  return typeof gates.reviewAskResultsVisitLive === "function" && gates.reviewAskResultsVisitLive();
+}
+/**
+ * Pure rule: the skip reason for a recurring visit, or null to ask. A null or unknown
+ * count asks (a skip is the new behavior, so an unread count fails toward today's).
+ */
+function resultsVisitSkip({ serviceLine, completedCount, gateOn = reviewAskResultsVisitOn() } = {}) {
+  if (!gateOn) return null;
+  const min = RESULTS_VISIT_MIN[serviceLine];
+  if (!min || !Number.isFinite(completedCount)) return null;
+  return completedCount < min ? "results_not_yet" : null;
+}
+// The skip reason for one recurring visit, or null. Counts the customer's completed visits
+// of the same line (callbacks excluded) plus this visit. Never throws; a failed read asks.
+async function resultsVisitSkipForVisit(customerId, visitId) {
+  if (!reviewAskResultsVisitOn()) return null;
+  try {
+    const { toQualifyingKeys } = require("./waveguard-existing-services");
+    const lineOf = (name) => toQualifyingKeys(name).find((k) => RESULTS_VISIT_MIN[k]) || null;
+    const cur = await db("scheduled_services").where({ id: visitId }).first("service_type", "scheduled_date");
+    const serviceLine = lineOf(cur?.service_type);
+    if (!serviceLine || !cur.scheduled_date) return null;
+    // Visits up to this one's day: a late enrollment of an early visit still counts as that early visit.
+    const rows = await db("scheduled_services")
+      .where({ customer_id: customerId, status: "completed" })
+      .where("id", "!=", visitId)
+      .where("scheduled_date", "<=", etDayWindow(cur.scheduled_date, 0).anchorStr)
+      .whereRaw("is_callback IS DISTINCT FROM true")
+      .select("service_type");
+    const completedCount = rows.filter((r) => lineOf(r.service_type) === serviceLine).length + 1;
+    return resultsVisitSkip({ serviceLine, completedCount, gateOn: true });
+  } catch (err) {
+    logger.warn(`[review] results-visit count failed (customerId=${customerId}): ${err.message}`);
+    return null;
+  }
+}
+
 // First name from the technician row when an ask carries technician_id but no
 // tech_name (override callers, legacy rows). Null when unknown.
 async function technicianFirstName(technicianId) {
@@ -1760,6 +1804,8 @@ const ReviewService = {
             : { plan: OUTREACH.MULTI_TREATMENT_FIRST_PLAN };
         }
         if (svc.is_recurring === true) {
+          const resultsSkip = await resultsVisitSkipForVisit(customerId, svc.id);
+          if (resultsSkip) return { skip: resultsSkip };
           return { plan: OUTREACH.RECURRING_SEQUENCE_PLAN };
         }
       }
@@ -8498,6 +8544,7 @@ ReviewService.ALREADY_LEFT_REVIEW_REASON = ALREADY_LEFT_REVIEW_REASON;
 ReviewService.firstAskOptOutReasons = firstAskOptOutReasons;
 ReviewService.alreadyReviewedForVisit = alreadyReviewedForVisit;
 ReviewService.reserveSendableReviewSms = reserveSendableReviewSms;
+ReviewService.resultsVisitSkip = resultsVisitSkip;
 
 // The review page reads the same delivered-ask evidence the sender trusts.
 ReviewService.reviewAskDeliveryEvidenceFor = reviewAskDeliveryEvidenceFor;
