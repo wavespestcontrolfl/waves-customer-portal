@@ -690,7 +690,8 @@ async function closeMootCards() {
 }
 
 /**
- * Files the cards and closes the ones that stopped being true. Dark behind GATE_CALL_PHONE_YES_ACCEPT.
+ * Files the cards, closes the ones that stopped being true, and rings the office's bell for the open ones
+ * (call-phone-yes-bell.js). Dark behind GATE_CALL_PHONE_YES_ACCEPT.
  * Reads every candidate in the lookback, newest first, in pages of `pageSize`: a call that gets no card (a lawn visit,
  * a taken-back yes) is read again next run, so it must never fill the scan and keep an older booking from its card.
  * @returns {{skipped?:true, scanned:number, filed:number, closed:number}}
@@ -716,7 +717,52 @@ async function runCallPhoneYesSweep({ now = new Date(), pageSize = SCAN_LIMIT } 
   } catch (e) {
     logger.warn(`[call-phone-yes] moot close pass failed: ${e.code || e.name || 'error'}`);
   }
+  try {
+    await ringOpenCards(now);
+  } catch (e) {
+    logger.warn(`[call-phone-yes] bell pass failed: ${e.code || e.name || 'error'}`);
+  }
   return { scanned, filed, closed };
+}
+
+// The bell pass (call-phone-yes-bell.js), after the filing and the moot close: each open card rings what it owes (once
+// when filed, once more when time runs short), then the rows of cards no longer open close. A card whose times cannot be
+// read is not rung this run, and still counts as open.
+async function ringOpenCards(now) {
+  const Bell = require('./call-phone-yes-bell');
+  const cards = await db('triage_items as t')
+    .leftJoin('scheduled_services as s', function cardVisitOnCalendar() {
+      this.on('s.id', 't.related_scheduled_service_id').andOn('s.customer_id', 't.related_customer_id')
+        .andOnIn('s.status', CALENDAR_VISIT_STATUSES);
+    })
+    .where('t.reason_code', REASON_CODE).whereIn('t.status', Bell.OPEN_CARD_STATES)
+    .select('t.id', 't.call_log_id', 't.related_customer_id', 't.related_estimate_id', 't.payload', 't.summary',
+      's.scheduled_date', 's.window_start');
+  const timed = [];
+  for (const card of cards) {
+    try {
+      timed.push({ card, ...(await cardTimes(card, now)) });
+    } catch (e) {
+      logger.warn(`[call-phone-yes] bell times skipped for card ${card.id}: ${e.code || e.name || 'error'}`);
+    }
+  }
+  return Bell.runBellPass({ timed, openCardIds: cards.map((card) => card.id), now });
+}
+
+// The times that make a card urgent: the soonest an estimate it names expires while still open (after now), and its
+// visit while on the calendar. Both are read under the card's customer, as its moot check reads them.
+async function cardTimes(card, now) {
+  const ids = cardEstimateIds(card);
+  const soonest = ids.length
+    ? await db('estimates').whereIn('id', ids).where({ customer_id: card.related_customer_id })
+      .whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at').where('expires_at', '>', now)
+      .orderBy('expires_at').first('expires_at')
+    : null;
+  return {
+    expiresAt: soonest?.expires_at || null,
+    several: ids.length > 1,
+    visit: card.scheduled_date ? { scheduled_date: card.scheduled_date, window_start: card.window_start } : null,
+  };
 }
 
 // One call's card, filed when the call earns one. True when a card was filed.
@@ -1237,5 +1283,7 @@ module.exports = {
     // The tap's two steps inside the accept, driven directly.
     linkVisitStepForTest: linkVisitStep, priceSeriesStepForTest: priceSeriesStep, notesKeyOfForTest: notesKeyOf, wordStillStepForTest: wordStillStep, tapWordOfForTest: tapWordOf,
     lockCustomerEstimatesForTest: lockCustomerEstimates, PEST_CADENCE_PLANS, planTermsOfForTest: planTermsOf,
+    // The sweep's bell pass alone (call-phone-yes-bell.db.test.js).
+    ringOpenCardsForTest: ringOpenCards,
   },
 };

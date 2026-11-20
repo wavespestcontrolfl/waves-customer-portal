@@ -10470,8 +10470,9 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // EVERY 10 MIN — a call that BOOKED a pest visit while the customer had an open estimate (GATE_CALL_PHONE_YES_ACCEPT,
-  // checked each tick): files ONE admin card so the office accepts the estimate, and closes the cards that stopped being
-  // true. It accepts nothing and sends nothing. See server/services/call-phone-yes-accept.js.
+  // checked each tick): files ONE admin card so the office accepts the estimate, closes the cards that stopped being
+  // true, and rings the office's bell and phones for the open ones (call-phone-yes-bell.js). It accepts nothing and sends
+  // a customer nothing. See server/services/call-phone-yes-accept.js.
   cron.schedule('9,19,29,39,49,59 * * * *', async () => {
     if (!require('../config/feature-gates').callPhoneYesAcceptLive()) return;
     try {

@@ -684,6 +684,23 @@ relevance sweep (class `tech_estimate_office_first`) closes the row once the est
 or gone. A send that is only queued, in flight or failed keeps the row open, because the close is final. A failure to raise is
 logged with ids only and never fails the technician's create. It sends nothing to a customer.
 
+Phone-yes card bell (owner 2026-11-18 "ok go", phone-yes step 1, page v4; under `GATE_CALL_PHONE_YES_ACCEPT`, no gate of its own):
+`server/services/call-phone-yes-bell.js`, run by the phone-yes sweep (every 10 minutes while the gate is on, after its filing and its
+moot close), rings the bell once for each `call_phone_yes` card when it is filed, and once more while the card is open and time runs
+short: an open estimate on the card expires within 24 hours, or the card's visit starts within 48 hours. Category `estimate` with
+`bell: true`, headline "Estimates — accept <who>'s estimate" for a card with the caller's yes ("check <who>'s estimate" when no yes
+was heard or the yes is being read again; "check <who>'s booked visit" once an estimate on the card was accepted and the visit is not
+linked), subject the booking call, link `/admin/communications?tab=triage` (the card and its tap), done-when `phone_yes_card_closed`.
+Keys `call-phone-yes:<card id>` (filed) and `call-phone-yes-due:<card id>` (time short), both without `dedupeOpenOnly`: a closed row
+still holds its key, so each key rings at most once and no `RERING` entry is owed. The time-short ring closes the filed row, so a card
+has one open row; a card filed when time is already short rings the time-short bell alone, and nothing rings for a card after its
+time-short bell. The why quotes the caller's first sentence when it passes the why rules, and uses plain words otherwise; `detail`
+holds the card's summary and the caller's whole words, redacted. Each ring sends a phone banner with the New lead sound
+(`bell-banners.js` kind `call_phone_yes`, 7:00 AM to 9:00 PM Eastern; the 8 AM banner counts a ring at night). The same pass closes
+the rows of every card that is no longer open: accepted by the tap, resolved or dismissed by a person, or closed as moot. With the
+gate off the sweep does not run, so open rows stay as they are until it runs again. A failed ring is logged with ids only and is
+tried again on the next run. It sends nothing to a customer.
+
 Paid-at-the-visit receipt check (owner 2026-11-18, "the daily check"; no gate, read-only): `server/services/paid-visit-receipt-check.js`
 runs hourly at :50 from 9 AM to 7 PM Eastern (scheduler job `paid-visit-receipt-check`, under `runExclusive`). A customer paid by
 check at checkout; the dispatch check and cash tender sheets recorded it with `sendReceipt: false`, no receipt went out and nobody saw
