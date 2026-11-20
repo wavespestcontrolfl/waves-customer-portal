@@ -13,10 +13,11 @@
  * full story on our blog" link must be one of POST_URLS). It takes no other
  * caller text and no other caller link: every round of the pre-push audit
  * (5 to 10) found another way such input could carry a code, a name, an
- * email or a merge tag into a shared email. The other blocks come back in
- * later PRs as structured data: "Active near you" from area counts and
- * "Your home", rendered per recipient (PR 4), and "A tool we'd use" from a
- * reviewed product list (PR 3).
+ * email or a merge tag into a shared email. The other blocks are added per
+ * recipient, never to the shared body: "A tool we'd use" (withToolBlock,
+ * opted-in readers only: its Amazon link may reach neither the archive nor
+ * a reader who never opted in), and in PR 4 "Active near you" from area
+ * counts and "Your home".
  *
  * No line asks the reader to forward the email: a forwarded copy carries
  * the subscriber's own unsubscribe link, and its page shows their address
@@ -29,6 +30,7 @@
 
 const { newsletterPalette, newsletterSectionTheme, wrapNewsletter, bodyIsDarkAware } = require('../email-template');
 const { SITE, POST_URLS } = require('./posts');
+const { toolById, toolLinkText, AMAZON_DISCLOSURE } = require('./tools');
 
 const IDENTIFIER_URL = `${SITE}/pest-identifier/`;
 const POST_LINK_TEXT = 'Read the full story on our blog';
@@ -79,6 +81,23 @@ function identifierBlock({ idItem }) {
   return { html, text };
 }
 
+// "A tool we'd use": the reviewed tool's lines and link, and Amazon's exact
+// sentence right after the link, in both parts. Every word comes from the
+// tool list.
+function toolBlock(tool) {
+  const about = tool.lines.join(' ');
+  const html = [
+    headingHtml(2, "A tool we'd use"),
+    paragraph(escapeHtml(about)),
+    paragraph(link(tool.url, toolLinkText(tool))),
+    paragraph(escapeHtml(AMAZON_DISCLOSURE)),
+  ].join('\n');
+  const text = ["A TOOL WE'D USE", about, '', `${toolLinkText(tool)}: ${tool.url}`, AMAZON_DISCLOSURE].join('\n');
+  return { html, text };
+}
+
+const wrapBlock = (b) => `<div class="dm-text">\n${b.html}\n</div>`;
+
 /**
  * @param {{ subject: string, preview: string,
  *   lead: { headline: string, sentences: {text:string}[], postUrl: string },
@@ -88,7 +107,7 @@ function identifierBlock({ idItem }) {
  */
 function renderIssue(issue) {
   const blocks = [leadBlock(issue), identifierBlock(issue)];
-  const html = blocks.map((b) => `<div class="dm-text">\n${b.html}\n</div>`).join('\n');
+  const html = blocks.map(wrapBlock).join('\n');
   const text = blocks.map((b) => b.text).join('\n\n');
   return { subject: issue.subject, preview: issue.preview, html_body: html, text_body: `${text}\n` };
 }
@@ -109,4 +128,26 @@ function wrapIssueHtml(issue, { unsubscribeUrl }) {
   });
 }
 
-module.exports = { renderIssue, wrapIssueHtml, escapeHtml, IDENTIFIER_URL, POST_LINK_TEXT };
+/**
+ * The issue as an opted-in reader gets it: the shared issue with "A tool
+ * we'd use" after "What's this?". Owner 2026-11-19: Amazon links go only to
+ * readers who opted in, so the shared issue (renderIssue), which the archive
+ * serves to anyone, never has the tool. The send path (PR 4) adds it per
+ * recipient, only for a reader with opt-in evidence, and checks that body
+ * before it sends. The tool is looked up in the registry as it is now, and
+ * renders only while its link is still the one that passed the live check
+ * (pre-push PR 3 r4). A tool that is not usable now (paused since the build,
+ * unknown, or the registry cannot be read), or whose link changed since the
+ * check, is left out: the same `issue` object comes back, so the reader
+ * gets the shared copy.
+ * @param {{ subject: string, preview: string, html_body: string, text_body: string }} issue  renderIssue's result
+ * @param {{ productId: string, url: string }|null} picked  buildIssue's `tool`: its product id and checked link
+ */
+function withToolBlock(issue, picked) {
+  const tool = picked ? toolById(picked.productId) : null;
+  if (!tool || tool.url !== picked.url) return issue;
+  const block = toolBlock(tool);
+  return { ...issue, html_body: `${issue.html_body}\n${wrapBlock(block)}`, text_body: `${issue.text_body}\n${block.text}\n` };
+}
+
+module.exports = { renderIssue, withToolBlock, wrapIssueHtml, escapeHtml, IDENTIFIER_URL, POST_LINK_TEXT };

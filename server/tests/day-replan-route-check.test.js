@@ -413,6 +413,23 @@ describe('runRouteCheck', () => {
     expect(JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-22')).toMatchObject({ stops: 1, staffed: true });
   });
 
+  test("a placeholder dispatch drops (no window start, no time window) is no stop and staffs no Sunday (round 39)", async () => {
+    const placeholder = (date) => stop('p1', null, null, { status: 'pending', scheduled_date: date });
+    replan.loadDayStops.mockImplementation(async (_c, date) => {
+      if (date === '2026-11-20') return [stop('f1', '09:00:00', '10:00:00'), placeholder(date)];
+      if (date === '2026-11-22') return [placeholder(date)];
+      return [];
+    });
+    const { conn, writes } = fakeConn();
+    await runRouteCheck({ conn, now: NOW });
+    const days = JSON.parse(writes[0][1].days);
+    expect(days.find((d) => d.date === '2026-11-20')).toMatchObject({ stops: 1, slots: expect.any(Number) });
+    expect(days.find((d) => d.date === '2026-11-20').skip).toBeUndefined();
+    expect(days.some((d) => d.date === '2026-11-22')).toBe(false);
+    expect(JSON.parse(writes[0][1].totals).next).toMatchObject({ dates: ['2026-11-20', '2026-11-21', '2026-11-23'], unmeasured: [] });
+    replan.loadDayStops.mockResolvedValue([]);
+  });
+
   test("an unclaimed hold alone does not staff a Sunday; a staff-booked visit that keeps its hold timestamp does (round 38)", async () => {
     const expires = '2026-11-20T12:00:00Z';
     for (const [extra, staffedSunday] of [
