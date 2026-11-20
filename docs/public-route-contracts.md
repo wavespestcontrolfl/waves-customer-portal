@@ -7740,7 +7740,8 @@ next commit would load another profile, staff changed that profile's pin or
 address since phase one, or that read fails, the typed address stays. A failed build answers with no times too.
 When a `SLOT_TAKEN` answer carries no times and the page's own reload then fails,
 or answers 200 with no list (its build failed), the page clears its times, the
-emailed time included, closes its search, and asks the customer to reload the page:
+emailed time included (a 200 still applies, so the address it carries shows),
+closes its search, and asks the customer to reload the page:
 nothing vouches for the old ones, and the address behind them can have changed
 (`address_changed`, this answer's or the account-change one's, or phase one linked a
 profile at another address), so a search would bring times for the address the
@@ -7751,7 +7752,9 @@ page (another token) starts a fresh page, so nothing from the old link carries o
 no typed address, closed search, result or out-of-area stop. The search is
 closed while that reload runs, and opens again when the reload brings a list, so a
 search never finishes over a failed reload. A time picked from the old calendar while
-it runs is not kept: the reload's list drops it, even when it offers the same start. A terminal state, the address form, or the GET's own no-times answers
+it runs is not kept: the reload's list drops it, even when it offers the same start.
+"Show all open times" applies its answer as it is: with no list, the old times, pick
+and address leave, and the page shows the answer's address and no times. A terminal state, the address form, or the GET's own no-times answers
 (`service_area_unavailable`, `booking_unavailable`) in that answer still replace the
 page. Any answer but a booking also drops a search still running, so its late times
 never land over the page, and that search ends quietly (no search error). The reload runs under the page's request controller: a

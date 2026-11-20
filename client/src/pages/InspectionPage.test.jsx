@@ -1203,6 +1203,40 @@ describe('InspectionPage: an address race without availability refreshes at the 
     expect(getCalls).toBe(2);
   });
 
+  // Pre-push P1 on 64c12c96f4: "Show all open times" shows the server's answer
+  // even with no list (its build failed). The stored address changed since the
+  // search, so the old address's times and pick leave with the old address.
+  it('"Show all open times" answering a changed address with no list → that answer replaces the searched times and the pick', async () => {
+    let getCalls = 0;
+    const fetchMock = vi.fn((url) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) return Promise.resolve(jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }));
+      getCalls += 1;
+      return Promise.resolve(jsonResponse(getCalls === 1 ? okPayload() : okPayload({
+        availability: null,
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: '9 Gulf Dr, Sarasota 34231' },
+      })));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i });
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'this weekend' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    const showAll = await screen.findByRole('button', { name: 'Show all open times' });
+    fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    expect(screen.getByRole('button', { name: /^Book /i })).toBeInTheDocument();
+    fireEvent.click(showAll);
+
+    expect(await screen.findByText('9 Gulf Dr, Sarasota 34231')).toBeInTheDocument();
+    expect(screen.getByText(/don't have open times to offer online right now/i)).toBeInTheDocument();
+    expect(screen.queryByText('123 Palm Ave, Bradenton 34209')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Book /i })).toBeNull();
+    expect(getCalls).toBe(2);
+  });
+
   it('a reload that answers 200 with no list (the held address\'s POST) → the old times are cleared, with the reload message', async () => {
     let availabilityPosts = 0;
     const fetchMock = vi.fn((url, opts = {}) => {

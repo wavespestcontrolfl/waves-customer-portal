@@ -2149,6 +2149,10 @@ function ScheduleFlowPage({ flow }) {
   // ignoreHeldAddress: the held address was just invalidated (an address
   // race — Codex #4737 r10 pre-push P1); this call's closure still holds
   // it, so the plain GET (the customer's current address) is used instead.
+  // Every answer is applied, and the call resolves to whether it brought a
+  // list (listMissing): only a refusal's reload (confirm) takes none as a
+  // failure. "Show all open times" shows the answer as it is, a changed
+  // address with no times included (pre-push P1 on 64c12c96f4).
   const refreshInspectionAvailability = useCallback(async ({ signal, ignoreHeldAddress = false } = {}) => {
     if (flow === 'inspection' && resolvedAddress && !ignoreHeldAddress) {
       const { res, body } = await postInspectionAvailability(token, resolvedAddress, { signal });
@@ -2156,21 +2160,17 @@ function ScheduleFlowPage({ flow }) {
       if (!res.ok) throw new Error(body.error || 'availability refresh failed');
       // A terminal state (already_booked / converted / gone) replaces the
       // page, as the gate and the slot search do (Codex #4737 r11 pre-push P1).
-      if (body.state && body.state !== 'ok') {
-        setData(body);
-        return;
-      }
-      if (listMissing(body)) throw new Error('availability refresh failed');
-      mergeData({ availability: body.availability, needs_address: false });
-      return;
+      if (body.state && body.state !== 'ok') setData(body);
+      else mergeData({ availability: body.availability, needs_address: false });
+      return !listMissing(body);
     }
     const res = await fetch(availabilityUrl, { signal });
     if (signal?.aborted) return;
     if (!res.ok) throw new Error('availability refresh failed');
     const body = await res.json();
     if (signal?.aborted) return;
-    if (listMissing(body)) throw new Error('availability refresh failed');
     setData(body);
+    return !listMissing(body);
   }, [flow, resolvedAddress, token, availabilityUrl, mergeData]);
 
   // Waves AI date/time search — swaps in the matching window's availability
@@ -2364,20 +2364,19 @@ function ScheduleFlowPage({ flow }) {
           const { signal } = loadAbortRef.current;
           setSearchClosed(true);
           const done = await refreshInspectionAvailability({ signal, ignoreHeldAddress: Boolean(body.address_changed) })
-            .then(() => {
-              if (!signal.aborted) {
-                // A time picked from the old calendar while the reload ran is
-                // not one of these times (pre-push P1 on f49f71aa78).
-                setSelectedSlot(null);
-                setSearchClosed(false);
-              }
-              return signal.aborted;
-            }, () => {
-              if (!signal.aborted) {
+            .catch(() => false)
+            .then((listed) => {
+              if (signal.aborted) return true;
+              if (!listed) {
                 mergeData({ availability: null });
                 setSubmitError('That time was just taken, and we couldn\'t load the latest open times. Please reload this page, or text us and we\'ll help.');
+                return true;
               }
-              return true;
+              // A time picked from the old calendar while the reload ran is
+              // not one of these times (pre-push P1 on f49f71aa78).
+              setSelectedSlot(null);
+              setSearchClosed(false);
+              return false;
             });
           if (done) return;
         } else {
