@@ -285,20 +285,6 @@ import { isNativeApp } from './native/platform';
 import WavesShell from './components/brand/WavesShell';
 import { lazy, Suspense } from 'react';
 
-function showReloadToast() {
-  if (document.getElementById('chunk-reload-toast')) return;
-  const el = document.createElement('div');
-  el.id = 'chunk-reload-toast';
-  el.textContent = 'New version available — reloading…';
-  Object.assign(el.style, {
-    position: 'fixed', top: '20px', left: '50%', transform: 'translateX(-50%)',
-    background: '#009CDE', color: '#fff', padding: '10px 20px', borderRadius: '8px',
-    fontSize: '14px', fontWeight: '600', fontFamily: "'DM Sans', sans-serif",
-    boxShadow: '0 4px 12px rgba(0,0,0,0.25)', zIndex: '99999',
-  });
-  document.body.appendChild(el);
-}
-
 // Rendered when a lazy chunk still fails after the one automatic reload —
 // a friendly retry beats the blank screen the rethrow used to produce. On a
 // staff page it also shows while open or held work keeps the tab
@@ -427,11 +413,15 @@ export function lazyWithRetry(factory) {
         // page is in view or at the address, or when one asked for this
         // page (lib/staleChunkReload.js).
         if (staff || staffTab()) return { default: MissingPageCode };
+        // A customer page: the stale-chunk handler left its import to fail
+        // while code a staff tab asked for is on its way. It reloads at once,
+        // as the handler reloads a customer page, in the same task as the
+        // failed import: a reload later could open a staff page that Back
+        // opened meanwhile, past that page's holds.
         if (takeChunkReload()) {
           markStaleChunkReloadPending();
-          showReloadToast();
-          setTimeout(() => window.location.reload(), 1200);
-          return { default: () => null };
+          window.location.reload();
+          return { default: RouteFallback };
         }
         // Already auto-reloaded once, or no session storage to stop a loop —
         // show a retry screen instead of rethrowing into a blank page.

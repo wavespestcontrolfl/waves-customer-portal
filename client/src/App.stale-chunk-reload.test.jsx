@@ -261,7 +261,6 @@ test('on a customer page too, after the one reload a page still missing under a 
   resetStaleChunkReloadForTests(); // the page load the one reload opened
   renderInBoundary(shellAround(lazyWithRetry(missingChunk), 'Portal shell'));
   expect(await screen.findByText('Couldn’t load this page')).toBeInTheDocument();
-  expect(document.getElementById('chunk-reload-toast')).toBeNull();
   expect(isStaleChunkReloadPending()).toBe(false);
 });
 
@@ -298,7 +297,6 @@ test('on a customer page with session storage blocked, a missing chunk gets the 
   try {
     renderInBoundary(lazyWithRetry(missingChunk));
     expect(await screen.findByText('Couldn’t load this page')).toBeInTheDocument();
-    expect(document.getElementById('chunk-reload-toast')).toBeNull();
     expect(reload).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
     expect(reload).toHaveBeenCalledTimes(1);
@@ -419,7 +417,6 @@ describe('on a staff page', () => {
     expect(stale.defaultPrevented).toBe(false);
     expect(reload).not.toHaveBeenCalled();
     expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
-    expect(document.getElementById('chunk-reload-toast')).toBeNull();
     expect(screen.getByText('/')).toBeInTheDocument();
     // That import settled: the customer page's own missing chunk reloads at
     // once again, as on main.
@@ -429,23 +426,30 @@ describe('on a staff page', () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
-  // The handler then leaves the customer page's own import to fail too: the
-  // page that asked for it, a customer page, still reloads, as on main.
-  test('while a staff page\'s code is on its way, a customer page whose own code fails still reloads once, through that page: the toast, then the reload', async () => {
+  // The handler then leaves the customer page's own import to fail too. That
+  // page reloads at once through its loader, as the handler would have: a
+  // reload a moment later could open a staff page that Back opened
+  // meanwhile, past its holds.
+  test('while a staff page\'s code is on its way, a customer page whose own code fails reloads at once, through that page; Back to a field page with held work right after reloads nothing more', async () => {
     renderInBoundary(lazyWithRetry(() => new Promise(() => {}))); // asked for on this staff page
     vi.stubGlobal('location', { ...window.location, pathname: '/', reload });
     notePageInView('/admin/dashboard', '/');
     const stale = preloadErrorEvent();
     handleVitePreloadError(stale, reload);
     expect(stale.defaultPrevented).toBe(false);
-    try {
-      renderInBoundary(lazyWithRetry(missingChunk));
-      await waitFor(() => expect(document.getElementById('chunk-reload-toast')).not.toBeNull());
-      expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBe('1');
-      await waitFor(() => expect(reload).toHaveBeenCalledTimes(1), { timeout: 2500 });
-    } finally {
-      document.getElementById('chunk-reload-toast')?.remove();
-    }
+    let failHome;
+    renderInBoundary(lazyWithRetry(() => new Promise((_, reject) => { failHome = reject; })));
+    await act(async () => { failHome(new TypeError('Failed to fetch dynamically imported module: /assets/Home-old.js')); });
+    await new Promise((resolve) => { setTimeout(resolve, 0); });
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(isStaleChunkReloadPending()).toBe(true);
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBe('1');
+    expect(screen.getByRole('status')).toHaveTextContent('Loading...');
+    holding = true;
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/today', reload });
+    notePageInView('/', '/admin/today');
+    await new Promise((resolve) => { setTimeout(resolve, 1300); });
+    expect(reload).toHaveBeenCalledTimes(1);
   });
 
   test('held work keeps the tab: a page whose code is missing does not reload, and leaves the one-shot flag', async () => {
@@ -770,7 +774,6 @@ describe('on a staff page', () => {
     tap(retries[0]);
     expect(screen.getByText('A card payment is still going through.')).toBeInTheDocument();
     expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
-    expect(document.getElementById('chunk-reload-toast')).toBeNull();
     expect(reported.calls).toEqual([]);
     expect(reload).not.toHaveBeenCalled();
   });

@@ -35,7 +35,8 @@
 // while code a staff tab asked for is on its way. So while any is
 // (trackStaffImport), the handler leaves every import to fail, and each
 // consumer decides by the tab it was asked on: a staff page or part that
-// is no longer mounted then reloads nothing.
+// is no longer mounted then reloads nothing, and a customer page whose own
+// code fails reloads at once through its loader, as the handler would.
 //
 // A reload closes the page in view and opens the address. While a move is
 // not yet in view the two differ: the address changes first, and Back
