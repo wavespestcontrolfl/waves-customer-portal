@@ -416,6 +416,18 @@ describe('winLossSlices — audit slices', () => {
     expect(db.raw).toHaveBeenCalledWith(`${countableViewAtSql('estimates')} AS countable_view_at`);
   });
 
+  test('a self-serve quote counts as viewed only by the SQL first view since delivery, never by a raw view stamp in the delivery\'s millisecond (codex pre-push P1)', async () => {
+    const delivered = daysAgo(3);
+    mockDbHandler = estimatesTable([], [row({
+      id: 'start-same-ms', status: 'viewed', accepted_at: null, sent_at: delivered, source: 'plan_start',
+      // A portal open microseconds before the send: SQL finds no open since the delivery.
+      viewed_at: delivered, last_viewed_at: delivered, view_count: 1, countable_view_at: null,
+      estimate_data: { deliveryState: { firstDeliveredAt: delivered } },
+    })]);
+    const { sentCohorts } = await winLossSlices({ days: 7 });
+    expect(sentCohorts).toMatchObject({ sentTotal: 1, viewedTotal: 0 });
+  });
+
   test('a self-serve quote anchors where the Intelligence Bar dates its send: an unreadable stamp on sent_at, none while undelivered (codex pre-push P1)', async () => {
     const quote = (id, estimateData) => row({
       id, status: 'sent', accepted_at: null, sent_at: daysAgo(3), source: 'plan_start',

@@ -183,6 +183,21 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     expect(result.caveats.join(' ')).not.toMatch(/Close rate and open estimates could not be loaded/);
   });
 
+  test('the dashboard service-line card keeps a staff quote whose only in-window stamp is a delivery stamp with no time or zone, as on main (codex pre-push P1)', async () => {
+    const { computeServiceLines } = require('../services/dashboard-service-lines');
+    const customerId = await insertCustomer();
+    const lawnSent = async () => (await computeServiceLines({ from: '2003-03-01', to: '2003-03-31' }, { now: new Date('2003-05-15T12:00:00Z') }))
+      .lines.find((line) => line.key === 'lawn')?.sent ?? 0;
+    const before = await lawnSent();
+    await trx('estimates').insert({
+      id: randomUUID(), customer_id: customerId, source: null, status: 'accepted', service_interest: 'Lawn care',
+      // First delivered in March (a date-only stamp), then resent and accepted in April.
+      sent_at: '2003-04-10T15:00:00Z', accepted_at: '2003-04-12T15:00:00Z', monthly_total: 50, onetime_total: 0,
+      estimate_data: { deliveryState: { firstDeliveredAt: '2003-03-10' } },
+    });
+    expect(await lawnSent()).toBe(before + 1);
+  });
+
   test('the Pipeline board lists a self-serve quote once staff deliver it, and never a plan restart quote (codex pre-push P1)', async () => {
     const { fetchEstimates } = require('../routes/admin-pipeline').__private;
     await seed();

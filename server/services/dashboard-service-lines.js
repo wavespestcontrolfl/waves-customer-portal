@@ -31,7 +31,6 @@ const { inferEstimateServiceLines, serviceKeysFromText, SERVICE_LINE_LABELS } = 
 // Canonical win/loss helpers (estimate-winloss.js owns the fallback chains and
 // the excluded-disposition rule; this card must never carry its own copy).
 const { sentAnchorMs, resolutionDateMs, effectiveDisposition, excludedFromRates } = require('./estimate-winloss');
-const { deliveryInstantSql } = require('./self-serve-estimates');
 const { parseETDateTime } = require('../utils/datetime-et');
 
 const DAY_MS = 86400000;
@@ -253,10 +252,13 @@ function excludeInternalEstimateRows(qb) {
 }
 
 const ET_TS = "?::timestamp AT TIME ZONE 'America/New_York'";
-// The durable first-delivery stamp, read through the guarded reader: a stamp
-// PostgreSQL cannot read is NULL here, so one bad row never aborts the card
-// query (codex pre-push P1). The prefilter is a superset; sentAnchorMs anchors.
-const FIRST_DELIVERED_SQL = deliveryInstantSql('e', 'firstDeliveredAt');
+// The durable first-delivery stamp, cast wherever PostgreSQL can read it, as
+// main's direct cast did, but NULL where the cast would throw, so one bad
+// row never aborts the card query (codex pre-push P1). A superset prefilter:
+// a staff quote's stamp with no zone or no time stays a candidate, because
+// sentAnchorMs still reads it (codex pre-push P1); sentAnchorMs anchors.
+const FIRST_DELIVERED_STAMP = "(e.estimate_data #>> '{deliveryState,firstDeliveredAt}')";
+const FIRST_DELIVERED_SQL = `(CASE WHEN pg_input_is_valid(${FIRST_DELIVERED_STAMP}, 'timestamptz') THEN ${FIRST_DELIVERED_STAMP}::timestamptz END)`;
 const RESOLVED_AT_SQL = `CASE e.status
   WHEN 'accepted' THEN COALESCE(e.accepted_at, e.created_at)
   WHEN 'declined' THEN COALESCE(e.declined_at, e.updated_at, e.created_at)
