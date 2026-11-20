@@ -1,8 +1,9 @@
 'use strict';
 
 /**
- * A web page's markup read the way a browser's HTML tokenizer reads it (the HTML standard, "Tokenization"), for a
- * reader that splits a page from one known source on its tags.
+ * A web page's markup read the way a browser's HTML tokenizer reads it (the HTML standard, "Tokenization"), after
+ * the input preprocessing that reads each CR LF pair and each lone CR as a line feed, for a reader that splits a page
+ * from one known source on its tags.
  *
  * plainPage(html, tags) rebuilds the page from its tokens: each tag as "<name>" or "</name>" (the name in lower case,
  * the attributes dropped); each run of text with its character references decoded, as a browser decodes them, and
@@ -132,24 +133,27 @@ function readAttributes(html, i) {
   }
 }
 
-// A style's text read left to right, as CSS reads it, or null where this cannot tell how CSS reads it. A comment
-// becomes a space, and a string or an unquoted url() is emptied, so none of them can hide a declaration from a test
-// or add one to it; the "<!--" and "-->" a style sheet may wrap itself in are out. Each "url(" outside a comment or a
-// string is read as a url() that runs to the first ")", unless its first character after CSS white space (a space,
-// a tab or a line break, not a no-break space) is a quote. CSS reads one so only where a token starts: after a name
-// character, a "#" or an "@" ("-url(", "#url(") the "url" ends a longer name, and CSS reads what follows as tokens.
-// Read either way, nothing up to that ")" is a declaration, and what follows it reads alike, unless the content
-// holds a "/*" or a quote, which can open a comment or a string that runs past the ")" (an opening bracket in it can
-// only make a browser read less of what follows as declarations). So such a url() gives null, whichever way a
-// browser reads it, and so does a backslash (a CSS escape: "\6e one" spells "none"). A "-->" is the wrapper only
-// where a token starts: after a name character (a NUL reads as one), a "#" or an "@" it is part of a name, a hash or
-// an at-keyword (".nav-->" is the class "nav--" and a ">"). A "<!--" is out wherever it is, as no name holds a "<".
+// A style's text read left to right, as CSS reads it, or null where this cannot tell how CSS reads it. A string or an
+// unquoted url() is emptied, so neither can hide a declaration from a test or add one to it, and the "<!--" and "-->"
+// a style sheet may wrap itself in are out. A comment becomes a vertical tab: it parts the tokens on its two sides,
+// as in CSS, where it is no white space ("./**/x" is the class ".x", "a/**/b" no descendant). HIDING_RE and
+// SHOWING_RE read a vertical tab as white space; a selector that holds one is one this cannot place (canMatch,
+// TYPE_LED_RE). Each "url(" outside a comment or a string is read as a url() that runs to the first ")", unless its
+// first character after CSS white space (a space, a tab or a line break, not a no-break space) is a quote. CSS reads
+// one so only where a token starts: after a name character, a "#" or an "@" ("-url(", "#url(") the "url" ends a
+// longer name, and CSS reads what follows as tokens. Read either way, nothing up to that ")" is a declaration, and
+// what follows it reads alike, unless the content holds a "/*" or a quote, which can open a comment or a string that
+// runs past the ")" (an opening bracket in it can only make a browser read less of what follows as declarations).
+// So such a url() gives null, whichever way a browser reads it, and so does a backslash (a CSS escape: "\6e one"
+// spells "none"). A "-->" is the wrapper only where a token starts: after a name character (a NUL reads as one), a
+// "#" or an "@" it is part of a name, a hash or an at-keyword (".nav-->" is the class "nav--" and a ">"). A "<!--"
+// is out wherever it is, as no name holds a "<".
 const CSS_SKIP_RE = /\/\*[\s\S]*?(?:\*\/|$)|"[^"\n\r\f]*"?|'[^'\n\r\f]*'?|url\([ \t\n\r\f]*(?=[^ \t\n\r\f"'])[^)]*(?:\)|$)/gi;
 function flatCss(css) {
   if (css.includes('\\')) return null;
   let unsure = false;
   const flat = css.replace(CSS_SKIP_RE, (skipped) => {
-    if (skipped[0] === '/') return ' ';
+    if (skipped[0] === '/') return '\v';
     if (/^url[\s\S]*(?:\/\*|["'])/i.test(skipped)) unsure = true;
     return '""';
   });
@@ -196,7 +200,7 @@ const namesOf = (attributes) => attributes.flatMap(({ name, value }) => {
 });
 // Whether a selector can match an element of a page whose elements have the class and id names `names`. A selector
 // (each part between commas) of only type names, classes, ids and combinators matches nothing when it names a class
-// or an id no element has. Any other selector (a pseudo-class, an attribute, "*") may match any element.
+// or an id no element has. Any other selector (a pseudo-class, an attribute, "*", a comment) may match any element.
 const canMatch = (selector, names) => selector.split(',').some((part) => !/^[-\w \t\n\r\f.#>+~]*$/.test(part)
   || (part.match(/[.#][-\w]+/g) || []).every((name) => names.has(name.toLowerCase())));
 // Whether a selector can match a script, a style or the title of a page whose elements have the class and id names
@@ -206,8 +210,9 @@ const canMatch = (selector, names) => selector.split(',').some((part) => !/^[-\w
 // ("a.top:link", "input[type=text]"). An attribute test runs to its "]" and holds no "[" (the flat text holds no
 // string), so one left open makes the part count, and no test reads past the next "[": the time to judge a part
 // grows with its length, not its square. Only CSS white space or a combinator ends a compound: a no-break space is
-// part of a name. "from" and "to" (KEYFRAME_STEPS) name no element here: in a @keyframes they are the first and
-// last steps of an animation, which can run on any element, a script too.
+// part of a name, and a last compound that holds a comment (flatCss makes it a vertical tab) makes the part count.
+// "from" and "to" (KEYFRAME_STEPS) name no element here: in a @keyframes they are the first and last steps of an
+// animation, which can run on any element, a script too.
 const TYPE_LED_RE = /(?:^|[ \t\n\r\f>+~])([A-Za-z][-\w]*)(?:[.#][-\w]+|::?[-\w]+|\[[^\][]*\])*[ \t\n\r\f]*$/;
 const KEYFRAME_STEPS = new Set(['from', 'to']);
 const canMatchTextElement = (selector, names) => selector.split(',').some((part) => {
@@ -323,7 +328,8 @@ function plainText(text) {
 }
 
 function plainPage(html, tags) {
-  const source = String(html ?? '');
+  // A browser reads each CR LF pair and each lone CR as a line feed before it tokenizes the page.
+  const source = String(html ?? '').replace(/\r\n?/g, '\n');
   const page = { tags, sheets: [], names: new Set() };
   let out = '';
   let i = 0;

@@ -54,6 +54,8 @@ describe('plainPage', () => {
     expect(plain('a &lt;td&gt; &amp;lt; &#60;b> x&lt')).toBe('a &lt;td&gt; &amp;lt; &lt;b&gt; x&lt;');
     // A reference never runs past a tag or a comment: a browser shows these as "&lt; &lt; <td>".
     expect(plain('&l<b></b>t; &<!-- -->lt; <<!-- -->td>')).toBe('&amp;l<b></b>t; &amp;lt; &lt;td&gt;');
+    // A browser reads each CR LF pair and each lone CR as a line feed before it reads the page; "&#13;" stays a CR.
+    expect(plain('<td>A\r\nB\rC&#13;D')).toBe('<td>A\nB\nC\rD');
   });
 
   test('a tag not on the list gives null, as does a name with other characters', () => {
@@ -137,6 +139,8 @@ describe('plainPage', () => {
       // After a no-break space, "url(" opens a url(); a browser does not draw a column group.
       '<style>td { background: url(\u00a0\'a); display: none; \') }</style><td>x', '<style>td { display: TABLE-COLUMN-GROUP }</style><td>x',
       '<style>td { --x: <!--url(/*); display: none }</style><td>x',
+      // A comment parts two tokens but is no white space: "./**/marker" is the class ".marker", not a "marker" element.
+      '<style>./**/marker { display: block }</style><script class=marker type=text/plain>y</script><td>x',
       // A "-->" right after a name is part of it: ".nav-->" is the class "nav--" and a ">".
       '<style>.nav--> b { display: none }</style><td class="nav--"><b>x</b>',
       // A CSS escape can spell any style, and an import loads a sheet this cannot read.
@@ -170,7 +174,7 @@ describe('plainPage', () => {
     // A hiding rule whose selector names a class or an id no element has hides nothing (the state's pages hold two);
     // a sheet's "<!--" and "-->" are no part of a selector, and a string, a url() or a comment is not a declaration.
     expect(plain('<style type="text/css"><!-- .leftNav {display:none;} @media print { .banner {display:none;} -->\r\n'
-      + 'td { font-size: 13px; content: "display: none"; --display: none; unicode-bidi: normal;'
+      + 'td { font-size: 13px; /*display: inline-block;*/ content: "display: none"; --display: none; unicode-bidi: normal;'
       + ' background: url("../i/bg2.png"), url(/i/dot.png) } /* td { display: none } */'
       + '</style><td class="list" id=x>A')).toBe('<td>A');
     // A style element of another type is inert, and of two class attributes a browser keeps the first.
