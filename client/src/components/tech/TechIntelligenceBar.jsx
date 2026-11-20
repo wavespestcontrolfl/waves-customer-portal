@@ -60,8 +60,8 @@ export default function TechIntelligenceBar() {
   const [quickActions, setQuickActions] = useState([]);
   const [expanded, setExpanded] = useState(false);
   const [attachments, setAttachments] = useState([]);
-  useAskDraftHold(prompt, attachments.length);
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  useAskDraftHold(prompt, attachments.length, attachmentsLoading);
   const fileInputRef = useRef(null);
   const attachmentConversionRef = useRef(0);
   const attachmentsLoadingRef = useRef(false);

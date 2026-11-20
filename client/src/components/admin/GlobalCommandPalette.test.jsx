@@ -1303,3 +1303,16 @@ test('an unsent question holds the Reload bar of an out-of-date tab until it is 
   cleanup();
   expect(reloadHoldNames()).not.toContain('ask-draft');
 });
+
+test('a picked photo holds the Reload bar while it is still converting, with no question typed', async () => {
+  let finish;
+  encodeJpegDataUrl.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  await mount();
+  expect(reloadHoldNames()).not.toContain('ask-draft');
+  fireEvent.change(document.querySelector('input[type=file]'), { target: { files: [new File(['x'], 'fixture-slow.png', { type: 'image/png' })] } });
+  expect(await screen.findByText('Attaching…')).toBeInTheDocument();
+  expect(reloadHoldNames()).toContain('ask-draft');
+  await act(async () => finish('data:image/jpeg;base64,QUJD'));
+  expect(screen.queryByText('Attaching…')).not.toBeInTheDocument();
+  expect(reloadHoldNames()).toContain('ask-draft');
+});
