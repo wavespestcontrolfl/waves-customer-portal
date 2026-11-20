@@ -202,6 +202,22 @@ describe('model audio, barge-in and latency', () => {
     expect(s.latency_p50_ms).toBe(1200);
     expect(s.latency_max_ms).toBe(1200);
   });
+
+  test('a caller transcript that lands while the model is already talking records no reply delay', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    t.advance(2000);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(8000) }); // reply starts: 1000 ms queued
+    t.advance(100);
+    // a late transcript of the caller's last words, 100 ms into the reply (playback still queued, so also a clear)
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'okay', start_ms: 1500, end_ms: 1900 });
+    t.advance(20);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // mid-reply delta: no turn
+    t.twilioStop();
+    await flush();
+    expect(summaryOf(t).turns).toEqual([]);
+  });
 });
 
 describe('tools', () => {

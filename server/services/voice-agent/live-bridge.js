@@ -33,6 +33,7 @@ const TOOL_TIMEOUT_MS = 8000;
 const SESSION_CAP_MS = 10 * 60 * 1000;
 const CLOSE_WAIT_MS = 3000;
 const BARGE_IN_MARGIN_MS = 200;
+const NEW_REPLY_GAP_MS = 250; // model silence before a delta that marks the start of a new reply
 const MULAW_BYTES_PER_MS = 8; // 8000 samples a second, one byte each
 const TRANSCRIPT_MAX_CHARS = 20000;
 const INSTRUCTIONS_MAX_CHARS = 60000; // about 16k tokens; OpenAI's limit is 16,384
@@ -305,7 +306,11 @@ class LiveBridge {
   onOutputAudio(msg) {
     if (typeof msg.delta !== 'string' || !msg.delta || !this.streamSid) return;
     const t = this.deps.now();
-    if (this.awaitingReply && this.speechEndWall !== null) {
+    // A reply delay counts only where a reply starts (model audio after a
+    // silence). A caller transcript that lands while the model is already
+    // talking (transcription lag) must not log a false near-zero delay.
+    const replyStart = t >= this.playbackEndsAt + NEW_REPLY_GAP_MS;
+    if (replyStart && this.awaitingReply && this.speechEndWall !== null) {
       this.latencies.push(Math.max(0, Math.round(t - this.speechEndWall)));
     }
     this.awaitingReply = false;
