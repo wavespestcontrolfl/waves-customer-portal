@@ -598,6 +598,45 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     expect(await mockPg('audit_log').where({ resource_id: f.serviceId, action: 'visit.completion_on_invoice_issued_refused' }).first()).toMatchObject({ metadata: expect.objectContaining({ code: 'error', trigger: 'paid' }) });
   });
 
+  // GATE_REPORT_AFTER_PAY (pre-push audit round 4): the resolver let a
+  // same-day payment close the visit because a second bill stood on it, and
+  // that bill was voided before the record transaction. The locked recheck
+  // re-reads the bills from the LOCKED invoice's payment stamp, so the visit
+  // stays held, as the payment's own verdict would. A live second bill made
+  // before the payment still closes it on the paid invoice.
+  test('report after pay: the locked recheck re-reads the bills: a second bill voided before the lock leaves a same-day paid arrived visit open; a live one closes it', async () => {
+    const saved = process.env.GATE_REPORT_AFTER_PAY;
+    process.env.GATE_REPORT_AFTER_PAY = 'true';
+    try {
+      await fixture({ serviceType: 'Fixture Quarterly Pest Control Service', day: etDateString() });
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      const paidAt = new Date();
+      await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'on_site' });
+      await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: paidAt });
+      const otherId = randomUUID();
+      await mockPg('invoices').insert({ id: otherId, customer_id: f.customerId, scheduled_service_id: f.serviceId, invoice_number: `TST-${otherId.slice(0, 8)}`,
+        token: randomUUID().replace(/-/g, ''), status: 'void', total: 50, subtotal: 50, service_date: f.day, service_type: 'Fixture Add-on',
+        line_items: JSON.stringify([{ description: 'Fixture Add-on', amount: 50, quantity: 1, unit_price: 50 }]), created_at: new Date(paidAt.getTime() - 3600000) });
+      const request = () => completeScheduledService({
+        serviceId: f.serviceId, idempotencyKey: randomUUID(),
+        body: { visitOutcome: 'completed', backfill: true, sendCompletionSms: false, requestReview: false, invoiceAlreadySent: true },
+        actor: { techRole: 'admin', technicianId: null, technician: null },
+        issuedInvoiceCloseout: { invoiceId: f.invoiceId, trigger: 'paid' },
+      });
+      expect(await request()).toMatchObject({ status: 409, body: { code: 'issued_visit_rescheduled' } });
+      expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('on_site');
+      expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(0);
+      await mockPg('invoices').where({ id: otherId }).update({ status: 'draft' });
+      expect(await request()).toMatchObject({ status: 200, body: { success: true } });
+      expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('completed');
+      const [record] = await mockPg('service_records').where({ scheduled_service_id: f.serviceId });
+      expect((await mockPg('invoices').where({ id: f.invoiceId }).first()).service_record_id).toBe(record.id);
+      expect((await mockPg('invoices').where({ id: otherId }).first())).toMatchObject({ status: 'draft', service_record_id: null });
+    } finally {
+      if (saved === undefined) delete process.env.GATE_REPORT_AFTER_PAY; else process.env.GATE_REPORT_AFTER_PAY = saved;
+    }
+  });
+
   // The prepayment rule under the completion's own locks: the invoice row
   // LOCKED in the record transaction carries the proof, re-decided against
   // the LOCKED visit — so a closeout that reaches the completion directly

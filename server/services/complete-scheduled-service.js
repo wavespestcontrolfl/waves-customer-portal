@@ -6985,7 +6985,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // invoice re-resolves it on its new day.
           if (issuedInvoiceCloseout) {
             const lockedDay = serviceDateOnly(lockedSvcRow?.scheduled_date);
-            const { issuedCloseoutVisitRefusal, issuedDayForInvoice, visitJobTimerRunning, approvedVisitChanged } = require('../services/invoice-issued-closeout');
+            const { issuedCloseoutVisitRefusal, issuedDayForInvoice, visitJobTimerRunning, approvedVisitChanged, paidInvoiceIsVisitsOnlyBill } = require('../services/invoice-issued-closeout');
             // A closeout approved on a card (record_payment) carries the visit's facts as the card showed them: the LOCKED row must still
             // match (service type, scheduled date, status, edit time), or the visit is left open for a person (the payment stays recorded).
             if (issuedInvoiceCloseout.expectedVisit && approvedVisitChanged(lockedSvcRow, issuedInvoiceCloseout.expectedVisit)) {
@@ -7000,11 +7000,24 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // (on_site) visit closes on a past day or on money received
             // today; a visit nobody has reached never closes today (owner
             // ruling 2026-10-04).
+            // GATE_REPORT_AFTER_PAY (pre-push audit round 4): the only-bill
+            // verdict is re-read in this transaction, under the visit's mint
+            // lock, from the LOCKED invoice's stamp: a second bill voided
+            // since the resolver's read leaves the visit held, as the
+            // payment's own verdict would.
+            const lockedToday = etDateString();
+            const lockedOnlyInvoice = await paidInvoiceIsVisitsOnlyBill(trx, {
+              visit: { id: svc.id, status: lockedSvcRow?.status, scheduled_date: lockedDay },
+              invoice: lockedIssuedInvoice,
+              today: lockedToday,
+              trigger: issuedInvoiceCloseout.trigger,
+            });
             const lockedRefusal = lockedDay !== serviceDateOnly(svc.scheduled_date)
               ? 'visit_moved'
               : issuedCloseoutVisitRefusal(lockedSvcRow?.status, lockedDay, {
-                today: etDateString(),
+                today: lockedToday,
                 trigger: issuedInvoiceCloseout.trigger,
+                onlyInvoice: lockedOnlyInvoice,
                 // The prepayment proof (lockedIssuedDay): a
                 // visit nobody arrived at closes only on an invoice settled /
                 // delivered after its day — re-decided here against the

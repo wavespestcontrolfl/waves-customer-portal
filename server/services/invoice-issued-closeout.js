@@ -93,15 +93,14 @@ function newestStamp(...values) {
 //    nothing about today — the office picker sends pre-completion invoices
 //    before the tech arrives, Codex P1 r7 #4131). With GATE_REPORT_AFTER_PAY
 //    on (owner 2026-11-19, *report after pay*), today does not close a visit
-//    this invoice alone bills (`onlyInvoice`, read by the resolver): the visit
-//    stays with its technician, whose completion reuses the paid invoice, and
-//    the daily retry sweep closes it once its day has passed. A visit with
-//    another invoice on it closes on the payment, as with the gate off, and
-//    the closeout pins the paid invoice by id (pre-push audit round 3: held
-//    open, its two invoices were picked differently by Dispatch, Charge Now,
-//    the completion and the sweep). Left out, as by the completion's locked
-//    recheck, `onlyInvoice` is false: a closeout that got past the resolver
-//    closes as with the gate off.
+//    this invoice alone billed when it was paid (`onlyInvoice`, from
+//    paidInvoiceIsVisitsOnlyBill): the visit stays with its technician, whose
+//    completion reuses the paid invoice, and the daily retry sweep closes it
+//    once its day has passed. A visit with another invoice on it closes on the
+//    payment, as with the gate off, and the closeout pins the paid invoice by
+//    id (pre-push audit round 3: held open, its two invoices were picked
+//    differently by Dispatch, Charge Now, the completion and the sweep). Left
+//    out, `onlyInvoice` is false: the visit closes as with the gate off.
 //  - UNSTARTED (pending / confirmed / NULL): nobody is known to have gone, so
 //    the INVOICE must carry the proof: it was settled / delivered on a LATER
 //    ET day than the visit (`issuedDay`, from the invoice's own stamps).
@@ -195,14 +194,23 @@ async function probeVisitRefusal(conn, svc) {
   return (profile?.requiresProject || profile?.projectBacked) ? 'project_backed' : null;
 }
 
-// GATE_REPORT_AFTER_PAY's `onlyInvoice` (issuedCloseoutVisitRefusal): no
-// other row on the visit stands before a completion mint (every live row,
-// plus a refunded one: completionInvoicesOnVisits). Void and canceled rows
-// collected nothing and do not count.
-async function invoiceIsVisitsOnlyBill(conn, visitId, invoiceId) {
+// GATE_REPORT_AFTER_PAY's `onlyInvoice` (issuedCloseoutVisitRefusal), asked
+// by the resolver and again by the completion's locked recheck: true only for
+// an arrived visit paid on its own day with the gate on, when no other row on
+// the visit stood before a completion mint at the payment (every live row,
+// plus a refunded one: completionInvoicesOnVisits; void and canceled rows
+// collected nothing). A row made after the payment (`paid_at`) does not count.
+// Like the prepayment proof, the verdict comes from durable stamps, so the
+// payment, a redelivered webhook, the visit-day sweep and the lock all reach
+// the same one, and a held visit stays held for its day (pre-push audit round
+// 4). An invoice with no `paid_at` (a card probe before the payment) counts
+// every other row.
+async function paidInvoiceIsVisitsOnlyBill(conn, { visit, invoice, today, trigger }) {
+  if (trigger !== 'paid' || !isArrivedVisitStatus(visit.status) || dateOnly(visit.scheduled_date) !== today || !reportAfterPayLive()) return false;
+  const paidAt = invoice.paid_at ? new Date(invoice.paid_at).getTime() : NaN;
   const { completionInvoicesOnVisits } = require('./completion-invoice-candidate');
-  const rows = await completionInvoicesOnVisits(conn, [visitId]);
-  return rows.every((row) => String(row.id) === String(invoiceId));
+  const rows = await completionInvoicesOnVisits(conn, [visit.id]);
+  return rows.every((row) => String(row.id) === String(invoice.id) || new Date(row.created_at).getTime() > paidAt);
 }
 
 // The visit this invoice bills, or null with the reason it was left alone.
@@ -231,16 +239,13 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
   // #4131), an arrived visit closes on a past day or on money received
   // today, and a visit nobody arrived at closes only on an invoice settled
   // or delivered after its day.
-  // GATE_REPORT_AFTER_PAY holds an arrived visit paid on its own day only
-  // while this invoice is its only bill (`onlyInvoice`), read only when that
-  // can decide.
-  const heldIfOnlyBill = trigger === 'paid' && reportAfterPayLive()
-    && isArrivedVisitStatus(svc.status) && dateOnly(svc.scheduled_date) === today;
+  // GATE_REPORT_AFTER_PAY holds an arrived visit paid on its own day that this
+  // invoice alone billed when it was paid (`onlyInvoice`).
   let issuedDay;
-  let onlyInvoice = false;
+  let onlyInvoice;
   try {
     issuedDay = await issuedDayForInvoice(conn, invoice, trigger);
-    if (heldIfOnlyBill) onlyInvoice = await invoiceIsVisitsOnlyBill(conn, svc.id, invoice.id);
+    onlyInvoice = await paidInvoiceIsVisitsOnlyBill(conn, { visit: svc, invoice, today, trigger });
   } catch (err) {
     throw Object.assign(err instanceof Error ? err : new Error(String(err)), { linkedVisit: svc });
   }
@@ -366,9 +371,9 @@ const OWN_PARKED_ATTEMPT_SQL = "EXISTS (SELECT 1 FROM service_completion_attempt
 // invoice `i`, visit `s`): an unstarted visit on a past day; an arrived one on
 // a past day, or today when the invoice / statement is SETTLED (`settledSql`,
 // a boolean SQL expression — a send never closes a same-day visit) and, with
-// GATE_REPORT_AFTER_PAY on, another invoice stands on the visit (the rule's
-// `onlyInvoice`, counted as invoiceIsVisitsOnlyBill counts it) — or a visit
-// already completed with THIS closeout's own attempt still parked.
+// GATE_REPORT_AFTER_PAY on, another invoice stood on the visit at the payment
+// (the rule's `onlyInvoice`, counted as paidInvoiceIsVisitsOnlyBill counts it)
+// — or a visit already completed with THIS closeout's own attempt still parked.
 function retryableVisitFilter(q, today, settledSql) {
   const reportAfterPay = reportAfterPayLive();
   return q
@@ -381,6 +386,7 @@ function retryableVisitFilter(q, today, settledSql) {
             if (reportAfterPay) {
               sameDay.whereExists((other) => other.select(1).from('invoices as oi')
                 .whereRaw('oi.scheduled_service_id = s.id').whereRaw('oi.id <> i.id')
+                .whereRaw('(i.paid_at IS NULL OR oi.created_at IS NULL OR oi.created_at <= i.paid_at)')
                 .whereNotIn('oi.status', require('./completion-invoice-candidate').replacedByMintStatuses()));
             }
           }))))
@@ -652,7 +658,10 @@ async function loadRetryCandidates(conn, today, sinceDays) {
     .whereIn('i.status', [...SETTLED_INVOICE_STATUSES, ...DELIVERED_INVOICE_STATUSES])
     .whereRaw(`${ISSUED_AT_SQL} >= ?`, [new Date(Date.now() - sinceDays * 86400000)])
     .where((q) => retryableVisitFilter(q, today, "i.status IN ('paid', 'prepaid')"))
-    .orderBy('i.id')
+    // Settled candidates first: a visit with a paid and a delivered invoice
+    // closes on the paid one, as a close on the payment would have (a visit
+    // GATE_REPORT_AFTER_PAY held can gain a bill after its payment).
+    .orderByRaw("i.status IN ('paid', 'prepaid') DESC, i.id")
     .select('i.id as invoice_id', 'i.status as invoice_status', 's.id as visit_id', 's.status as visit_status',
       conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${ISSUED_AFTER_SERVICE_DAY_SQL} as issued_after_service_day`));
 }
@@ -1014,6 +1023,7 @@ module.exports = {
   isLiveVisitStatus,
   isArrivedVisitStatus,
   issuedCloseoutVisitRefusal,
+  paidInvoiceIsVisitsOnlyBill,
   approvedVisitChanged,
   invoiceIssuedDay,
   issuedDayForInvoice,
