@@ -483,6 +483,10 @@ describe('parseInspectionReport', () => {
     expect(parse(twice)).toBeNull();
     expect(parse(reportPage(rows, '10/20/2026').replace(/<table><tr><td>Inspection Type[\s\S]*?<\/table>/, ''))).toBeNull();
     expect(parse(reportPage(rows, '13/45/2026'))).toBeNull();
+    // A callback's page (by the inspection type in its row), even on the first visit's date: no answer.
+    for (const type of ['Callback - Food', 'Call Back - Food', 'Follow-up - Food', 'Re-Inspection - Food']) {
+      expect(read(reportPage(rows, '10/20/2026').replace('Routine - Food', type), '2026-10-20')).toBeNull();
+    }
     // The fixtures carry the real layout.
     expect(parse(fixture('report-35a.html'), { visitDate: '2026-10-20' })).toMatchObject({ pestEvidence: true });
     expect(parse(fixture('report-35b.html'), { violation35: 1, visitDate: '2026-10-21' })).toEqual({ pestEvidence: false, findings: [] });

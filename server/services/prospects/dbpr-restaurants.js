@@ -284,6 +284,8 @@ const VISIT_NOTE_RE = /(?:-\s*)?From (?:initial inspection|follow-up inspection 
 // Any mention of a visit label, read by VISIT_NOTE_RE or not: any case, and any separator inside "follow-up",
 // "call back" or "re-inspection" (a dash of another kind, a space). A row where the two counts differ cannot be read.
 const VISIT_LABEL_RE = /\bfrom\s+(?:initial|follow\W{0,3}up|call\W{0,3}back|re\W{0,3})\s*inspection/gi;
+// An inspection type that names a later visit ("Callback - Food", "Follow-up", "Re-inspection"): not a first visit.
+const CALLBACK_TYPE_RE = /call\W{0,3}back|follow\W{0,3}up|re\W{0,3}inspect/i;
 
 // How a row's text names its visits: { routine: true } without labels (all of it the read visit's own), { label,
 // notes } with labels (a note's date is null for the initial visit), or { unreadable: true } when a label does not
@@ -319,17 +321,18 @@ function initialNoteFirst(row) {
 const capText = (text) => Array.from(text).slice(0, FINDING_TEXT_MAX).join('');
 
 // The report page's tables, row by row: the violations entries (each code with its observation cells), whether a row
-// could not be read, and each date the inspection table gives. A row ends at a row or table tag, or at the page end.
+// could not be read, and each visit the inspection table lists. A row ends at a row or table tag, or at the page end.
 // In the violations table (from its "Violation" / "Observation" head row to the next table tag) a row with anything
 // in it must hold a code alone in the Violation column and nothing before it; anywhere else no cell may be a code.
-// The inspection table is a head row naming "Inspection Date", then the rows under it: each row up to the table's
-// end gives a date in that column, so a second visit's row there is a second date.
+// The inspection table is a head row naming "Inspection Date" (and "Inspection Type"), then the rows under it: each
+// row up to the table's end is a visit, its date and type in those columns, so a second visit's row is a second visit.
 function readReportTables(page) {
   const entries = [];
-  const dates = [];
+  const visits = [];
   let unreadable = false;
   let codeColumn = -1; // the Violation column's position while in the violations table, else -1
   let dateColumn = -1; // the Inspection Date column's position from its head row to the table's end, else -1
+  let typeColumn = -1; // the Inspection Type column's position in that head row, -1 when it has none
   let row = []; // the cell texts of the row being read, blank cells kept so each keeps its position
   const endRow = () => {
     if (codeColumn >= 0 && row.some(Boolean)) {
@@ -344,8 +347,9 @@ function readReportTables(page) {
     }
     if (row.includes('Inspection Date')) {
       dateColumn = row.indexOf('Inspection Date');
+      typeColumn = row.indexOf('Inspection Type');
     } else if (dateColumn >= 0 && row.some(Boolean)) {
-      dates.push(row[dateColumn] || '');
+      visits.push({ date: row[dateColumn] || '', type: row[typeColumn] || '' });
     }
   };
   for (const match of page.matchAll(CELL_OR_ROW_END_RE)) {
@@ -363,14 +367,15 @@ function readReportTables(page) {
     row = [];
   }
   endRow();
-  return { entries, unreadable, dates };
+  return { entries, unreadable, visits };
 }
 
 /**
  * Report page HTML -> { pestEvidence, findings: [{ code, text }] }, or null when the page cannot answer. No answer is
  * a failed read, retried later, never "no pests". The page answers only when:
  * - it is whole (the state office footer closes it): an error page or a page cut short gives no answer;
- * - it is one visit's: its inspection table gives one date that reads, and it is visitDate when given;
+ * - it is one first visit's: its inspection table lists one visit, whose date reads (and is visitDate when given)
+ *   and whose inspection type is not a callback, follow-up or re-inspection;
  * - the read visit is its inspection's first (visitNumber 1). A later visit's page holds free text that may clear an
  *   earlier citation ("No flies observed", "door repaired"), labelled or not, so a later visit, or one whose number
  *   is not known, gets no answer either way;
@@ -393,10 +398,10 @@ function parseInspectionReport(html, { violation35 = null, visitDate = null, vis
   const page = String(html || '').replace(/<!--[\s\S]*?-->|<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ');
   const whole = htmlText(page);
   if (!/Inspection Information/.test(whole) || !PAGE_FOOTER_RE.test(whole)) return null;
-  const { entries, unreadable, dates } = readReportTables(page);
-  // A page whose date does not read, one that gives two dates (two visits), or another visit's page cannot answer.
-  const pageDate = dates.length === 1 ? parseUsDate(dates[0]) : null;
-  if (!pageDate || (visitDate && pageDate !== visitDate)) return null;
+  const { entries, unreadable, visits } = readReportTables(page);
+  // A page that lists two visits, whose date does not read, of another visit, or of a callback cannot answer.
+  const pageDate = visits.length === 1 ? parseUsDate(visits[0].date) : null;
+  if (!pageDate || (visitDate && pageDate !== visitDate) || CALLBACK_TYPE_RE.test(visits[0].type)) return null;
   const rows35 = entries.filter((entry) => /^35[AB]-/.test(entry.code)).map((entry) => {
     const text = entry.parts.join(' ');
     return { code: entry.code, text, notes: visitNotes(text) };
@@ -424,14 +429,18 @@ function dedupeByKey(records) {
   return [...new Map(records.map((r) => [`${r.kind}|${r.source_key}`, r])).values()];
 }
 
-// A row stored without the file's violation-35 count or visit number (before they were kept, or blank: JSON null, so
-// ->> tests it) takes them from the file on a re-read; nothing else in detail changes.
+// What a re-read takes from the file into detail. While the row is unanswered (pest_evidence NULL): the higher
+// violation-35 count (the missing citation could be 35A; jsonb compares numbers as numbers) and the file's visit number.
+// An answered row only fills a missing one (stored before they were kept, or blank: JSON null, so ->> tests it). A blank
+// in the file erases nothing (jsonb_strip_nulls), and nothing else in detail changes.
 const FILL_DETAIL_SQL = `COALESCE(restaurant_prospects.detail, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
-  'violation35', CASE WHEN restaurant_prospects.detail->>'violation35' IS NULL THEN excluded.detail->'violation35' END,
-  'visitNumber', CASE WHEN restaurant_prospects.detail->>'visitNumber' IS NULL THEN excluded.detail->'visitNumber' END))`;
+  'violation35', CASE WHEN restaurant_prospects.detail->>'violation35' IS NULL OR (restaurant_prospects.pest_evidence IS NULL
+    AND excluded.detail->'violation35' > restaurant_prospects.detail->'violation35') THEN excluded.detail->'violation35' END,
+  'visitNumber', CASE WHEN restaurant_prospects.detail->>'visitNumber' IS NULL OR restaurant_prospects.pest_evidence IS NULL
+    THEN excluded.detail->'visitNumber' END))`;
 
-// A re-read of a known row refreshes last_seen_at and fills the two keys above: a pest_evidence answer, the findings
-// and the attempt count are never overwritten by a later file. Returns the number of rows written.
+// A re-read of a known row refreshes last_seen_at and the two keys above: a pest_evidence answer, the findings and the
+// attempt count are never overwritten by a later file. Returns the number of rows written.
 async function upsertRecords(records) {
   const unique = dedupeByKey(records);
   let n = 0;
