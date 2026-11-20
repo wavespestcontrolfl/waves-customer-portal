@@ -10,11 +10,12 @@
  * A staff-facing reader that reads sent_at or a sent status as "we sent this"
  * (a send count or funnel, a staff follow-up prompt) leaves such a row out,
  * unless staff really delivered it later: the admin send path stamps
- * estimate_data.deliveryState.firstDeliveredAt. A reader that dates a send or a
- * view reads sentAtSql / countableViewAtSql, and one that times follow-up by
- * the customer's last touch counts touches from selfServeDeliveredAt (or its
- * SQL form). Customer comms use the separate
- * noEngagementAutomation rule (estimate-comms-eligibility.js).
+ * estimate_data.deliveryState.firstDeliveredAt. A report that dates a send or a
+ * view (a funnel, a period count, win/loss) reads sentAtSql /
+ * countableViewAtSql. The staff follow-up surfaces (the Estimates list and its
+ * 9 AM push, the Pipeline board) read a delivered one as stored, as they read
+ * any estimate. Customer comms use the separate noEngagementAutomation rule
+ * (estimate-comms-eligibility.js).
  *
  * A leaf module (no requires), so any reader can load it with no cycle.
  */
@@ -97,25 +98,8 @@ function countableViewAtSql(alias) {
     `${alias}.viewed_at`);
 }
 
-// A delivered self-serve quote's first delivery: the instant its customer
-// engagement counts from, for a reader that times follow-up by the last touch
-// (the Call today rule, shared/estimate-call-today.cjs). The customer opened
-// the quote in the portal before staff sent it, and that look is no response
-// to the send (codex pre-push P1). Null for any other row, and for a stamp
-// that is absent or unreadable (then every touch counts, as sent_at stays
-// the send for sentAtSql). selfServeDeliveredAtSql is the same value in SQL,
-// for a reader that does not load estimate_data.
-function selfServeDeliveredAt(source, estimateData) {
-  if (!SELF_SERVE_ESTIMATE_SOURCES.includes(String(source || ''))) return null;
-  const stamp = estimateData?.deliveryState?.firstDeliveredAt;
-  const ms = typeof stamp === 'string' ? Date.parse(stamp) : NaN;
-  return Number.isNaN(ms) ? null : new Date(ms).toISOString();
-}
-function selfServeDeliveredAtSql(alias) {
-  return selfServeOr(alias, firstDeliveredAtSql(alias), 'NULL');
-}
 
 module.exports = {
   SELF_SERVE_ESTIMATE_SOURCES, whereNotUndeliveredSelfServe, isUndeliveredSelfServe, undeliveredSelfServeSql,
-  sentAtSql, countableViewAtSql, selfServeDeliveredAt, selfServeDeliveredAtSql,
+  sentAtSql, countableViewAtSql,
 };

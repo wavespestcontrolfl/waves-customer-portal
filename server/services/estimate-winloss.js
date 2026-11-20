@@ -22,6 +22,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { DISPOSITIONS, dispositionGroup, dispositionFromDeclineReason, expiredDispositionFor } = require('./estimate-disposition');
 const { inferEstimateServiceLines, SERVICE_LINE_LABELS } = require('./estimate-service-lines');
+const { countableViewAtSql } = require('./self-serve-estimates');
 
 const RESOLVED_STATUSES = ['accepted', 'declined', 'expired'];
 
@@ -202,9 +203,12 @@ function sentCohorts(rows, { days, nowMs }) {
     // after the delivery anchor counts as an opened send (GH codex P2).
     // plan_restart shares the publish-without-delivery shape (C4): its
     // self-serve redirect stamps view signals at mint too. So does plan_start
-    // (portal pricing card, GATE_PORTAL_PLAN_START).
+    // (portal pricing card, GATE_PORTAL_PLAN_START). countable_view_at
+    // (countableViewAtSql) is the earliest open since delivery in the open log
+    // or the row, so a later reopen never stands in for their first view
+    // (codex pre-push P1); for any other row it is viewed_at.
     const isCtaMint = ['service_report_cta', 'plan_restart', 'plan_start'].includes(String(row.source || ''));
-    const viewCandidates = [ms(row.viewed_at), ms(row.last_viewed_at)]
+    const viewCandidates = [ms(row.countable_view_at), ms(row.viewed_at), ms(row.last_viewed_at)]
       .filter((ts) => ts != null && (!isCtaMint || ts >= sentAt));
     const firstView = viewCandidates.length ? Math.min(...viewCandidates) : null;
     if (inBaseWindow) {
@@ -341,7 +345,7 @@ async function winLossSlices({ days = 90 } = {}) {
       .orWhere('accepted_at', '>=', cohortWindowStart)
       .orWhere('updated_at', '>=', cohortWindowStart)
       .orWhere('created_at', '>=', cohortWindowStart))
-    .select(...SLICE_COLUMNS);
+    .select(...SLICE_COLUMNS, db.raw(`${countableViewAtSql('estimates')} AS countable_view_at`));
 
   const totals = emptyCell();
   const byFlagPresence = {

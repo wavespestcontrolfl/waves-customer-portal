@@ -125,20 +125,12 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
   });
 
   test('the SQL form of the rule agrees with the row form on every seeded row (the 9 AM Call today push reads the SQL form)', async () => {
-    const {
-      undeliveredSelfServeSql, isUndeliveredSelfServe, selfServeDeliveredAtSql, selfServeDeliveredAt,
-    } = require('../services/self-serve-estimates');
+    const { undeliveredSelfServeSql, isUndeliveredSelfServe } = require('../services/self-serve-estimates');
     await seed();
     const rows = await trx('estimates as e').where('e.service_interest', SERVICE)
-      .select('e.source', 'e.estimate_data', trx.raw(`${undeliveredSelfServeSql('e')} AS flag`),
-        trx.raw(`${selfServeDeliveredAtSql('e')} AS delivered_at`));
+      .select('e.source', 'e.estimate_data', trx.raw(`${undeliveredSelfServeSql('e')} AS flag`));
     expect(rows).toHaveLength(13);
-    for (const row of rows) {
-      expect(Boolean(row.flag)).toBe(isUndeliveredSelfServe(row.source, row.estimate_data));
-      // The first delivery the Call today rule times touches from: the push's SQL and the list's JavaScript agree.
-      expect(row.delivered_at ? row.delivered_at.toISOString() : null).toBe(selfServeDeliveredAt(row.source, row.estimate_data));
-    }
-    expect(rows.filter((row) => row.delivered_at)).toHaveLength(4);
+    for (const row of rows) expect(Boolean(row.flag)).toBe(isUndeliveredSelfServe(row.source, row.estimate_data));
     // The six undelivered self-serve rows (two carry an empty or null stamp); a
     // source-NULL row and an unreadable stamp are not among them.
     expect(rows.filter((row) => row.flag)).toHaveLength(6);

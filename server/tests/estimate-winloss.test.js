@@ -398,6 +398,24 @@ describe('winLossSlices — audit slices', () => {
     expect(bucket).toMatchObject({ sent: 4, won: 1, lost: 0, open: 3 });
   });
 
+  test('a delivered self-serve quote times its first view from the first open since delivery, not a later reopen (codex pre-push P1)', async () => {
+    const db = require('../models/db');
+    const { countableViewAtSql } = require('../services/self-serve-estimates');
+    const delivered = Date.parse(daysAgo(3));
+    const sent = [row({
+      id: 'start-delivered', status: 'viewed', accepted_at: null, sent_at: daysAgo(3), source: 'plan_start',
+      // A portal look before the send, an open 1 h after it, and a reopen 2.5 days later.
+      viewed_at: daysAgo(4), last_viewed_at: daysAgo(0.5), view_count: 3,
+      countable_view_at: new Date(delivered + 3600000).toISOString(),
+      estimate_data: { deliveryState: { firstDeliveredAt: daysAgo(3) } },
+    })];
+    mockDbHandler = estimatesTable([], sent);
+    const { sentCohorts } = await winLossSlices({ days: 7 });
+    expect(sentCohorts).toMatchObject({ sentTotal: 1, viewedTotal: 1, medianHoursToFirstView: 1 });
+    // The cohort read selects that first open in SQL, as the Intelligence Bar funnel reads it.
+    expect(db.raw).toHaveBeenCalledWith(`${countableViewAtSql('estimates')} AS countable_view_at`);
+  });
+
   test('no sent rows → empty cohorts with null rates', async () => {
     mockDbHandler = estimatesTable([], []);
     const { sentCohorts } = await winLossSlices({ days: 7 });
