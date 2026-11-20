@@ -184,13 +184,14 @@ describe('listBuilders', () => {
     });
   });
 
-  test('home builders read the construction table and only new builds on a residential permit', async () => {
+  test('home builders read the construction table: new builds on a residential permit the newest sync still lists', async () => {
     answer();
     await listBuilders({ kind: 'home', now: new Date('2026-11-19T15:00:00Z') });
     const aggregate = mockRaw.mock.calls.find(([sql]) => /GROUP BY/.test(sql));
     expect(aggregate[0]).toMatch(/FROM construction_permit_records/);
     expect(aggregate[0]).toMatch(/type_of_work ILIKE 'New%'/);
     expect(aggregate[0]).toMatch(/LOWER\(COALESCE\(permit_type, ''\)\) = 'residential'/);
+    expect(aggregate[0]).toMatch(/\(co_date IS NOT NULL OR last_seen_at >= \(SELECT MAX\(last_seen_at\) FROM construction_permit_records\)\)/);
   });
 
   test('the newest date and the counts are read in one read-only REPEATABLE READ snapshot', async () => {
