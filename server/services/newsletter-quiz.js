@@ -481,18 +481,36 @@ function chooseNewsletterPoll({ recent = [], used = [] } = {}) {
   return NEWSLETTER_POLL_IDS.find((id) => !taken.has(id)) || null;
 }
 
+// A delivery row with any success signal: the signals newsletter-sender.js
+// hasDeliverySuccessSignal reads.
+const DELIVERY_REACHED_STATUSES = ['sent', 'delivered', 'opened', 'clicked'];
+
 /**
- * Reads what chooseNewsletterPoll needs from the sent issues of one newsletter
- * type: the polls of the newest POLL_ISSUE_GAP sent issues, and every poll a
- * sent issue carried. Sent bodies keep their quiz tokens (the per-reader
+ * Reads what chooseNewsletterPoll needs from the issues of one newsletter type
+ * that readers got: the polls of the newest POLL_ISSUE_GAP such issues, and
+ * every poll such an issue carried. An issue counts when it is 'sent', or when
+ * any of its delivery rows has a success signal: a send its deadline stopped,
+ * or one the stale-claim recovery ended, is 'failed' although its first
+ * batches reached readers. Sent bodies keep their quiz tokens (the per-reader
  * buttons are SendGrid substitutions), so the token in html_body is the record.
  */
 async function newsletterIssuePolls({ newsletterType, knex = db } = {}) {
-  const sent = () => knex('newsletter_sends')
-    .where({ newsletter_type: newsletterType, status: 'sent' })
-    .whereNotNull('sent_at');
-  const newest = await sent().orderBy('sent_at', 'desc').limit(POLL_ISSUE_GAP).select('html_body');
-  const withPoll = await sent().where('html_body', 'like', `%{{quiz:${NEWSLETTER_POLL_PREFIX}%`).select('html_body');
+  const reached = () => knex('newsletter_sends as s')
+    .where('s.newsletter_type', newsletterType)
+    .where((issue) => issue.where('s.status', 'sent').orWhereExists(function deliveredRow() {
+      this.select(knex.raw('1')).from('newsletter_send_deliveries as d')
+        .whereRaw('d.send_id = s.id')
+        .where((d) => d.whereIn('d.status', DELIVERY_REACHED_STATUSES)
+          .orWhereNotNull('d.sent_at').orWhereNotNull('d.delivered_at')
+          .orWhereNotNull('d.opened_at').orWhereNotNull('d.clicked_at'));
+    }));
+  const newest = await reached()
+    .orderByRaw('COALESCE(s.sent_at, s.scheduled_for, s.created_at) DESC')
+    .limit(POLL_ISSUE_GAP)
+    .select('s.html_body');
+  const withPoll = await reached()
+    .where('s.html_body', 'like', `%{{quiz:${NEWSLETTER_POLL_PREFIX}%`)
+    .select('s.html_body');
   return {
     recent: newest.map((row) => pollInBody(row.html_body)),
     used: withPoll.map((row) => pollInBody(row.html_body)).filter(Boolean),
