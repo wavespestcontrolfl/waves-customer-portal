@@ -10,13 +10,17 @@ import { isGateOffAnswer } from "./offerLogic";
 async function offerRequest(path, options = {}) {
   const r = await adminFetch(path, options);
   let body = null;
+  let read = true;
   try {
     body = await r.json();
   } catch {
-    /* noop */
+    read = false;
   }
-  if (!r.ok) {
-    const err = new Error(body?.error || body?.message || `HTTP ${r.status}`);
+  // Every offer answer is JSON. A success whose body cannot be read says nothing about what the server did, so it
+  // throws with its status like a failure: a write takes its lost-answer path (isLostAnswer: re-read before it is
+  // offered again) and a read shows that it failed. It never passes as a success with no body.
+  if (!r.ok || !read) {
+    const err = new Error(body?.error || body?.message || (r.ok ? "The answer could not be read. Try again." : `HTTP ${r.status}`));
     err.status = r.status;
     err.body = body;
     throw err;

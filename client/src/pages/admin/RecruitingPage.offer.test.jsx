@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -11,6 +11,11 @@ import RecruitingPage from './RecruitingPage';
 
 function res(status, body) {
   return { ok: status >= 200 && status < 300, status, json: vi.fn(async () => body), clone() { return this; } };
+}
+
+// A success whose body is not JSON (a proxy's page, a cut-off answer).
+function unreadable() {
+  return { ok: true, status: 200, json: vi.fn(async () => { throw new SyntaxError('Unexpected token <'); }), clone() { return this; } };
 }
 
 const CONTACT = { name: 'Jordan Rivera', phone: '9415550123', email: 'jordan.rivera@example.com' };
@@ -1368,6 +1373,73 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     expect(await screen.findByRole('heading', { name: /Casey Morgan — / })).toBeInTheDocument();
   });
 
+  // A Try again on one applicant can finish after the owner opened another applicant's form. When its read finds the
+  // first draft gone, it closes only its own form: the other form and its typed edits stay.
+  it("a Try again that finds the draft gone after the owner opened another applicant's form leaves that form open", async () => {
+    let phase = 'start';
+    let releaseA;
+    let aDetailAsked = false;
+    const aGate = new Promise((resolve) => { releaseA = resolve; });
+    const fetchMock = vi.fn((url, options = {}) => {
+      const method = options.method || 'GET';
+      const path = apiPath(url);
+      if (path.startsWith('/admin/careers?status=')) {
+        return Promise.resolve(res(200, { applications: [{ id: 'app-1', role: 'technician', status: 'interview', contact_snapshot: { name: 'Jordan Rivera' }, created_at: '2026-09-10T12:00:00Z' }], counts: {} }));
+      }
+      if (method === 'POST' && path === '/admin/careers/app-1/offer') {
+        phase = 'saved';
+        return Promise.resolve(res(200, { offer: offerRecord({ draftHash: 'hash-after' }) }));
+      }
+      if (path === '/admin/careers/app-1/offer') {
+        if (phase === 'saved') return Promise.resolve(res(500, { error: 'boom' }));
+        // 'gone': another admin sent or discarded the draft meanwhile.
+        return Promise.resolve(res(200, offerPayload({ current: phase === 'gone' ? null : offerRecord() })));
+      }
+      if (path === '/admin/careers/app-1') {
+        const answer = () => res(200, { application: detailFixture({ status: 'interview' }) });
+        if (phase !== 'gone') return Promise.resolve(answer());
+        aDetailAsked = true;
+        return aGate.then(answer);
+      }
+      if (path === '/admin/careers/app-2/offer') return Promise.resolve(res(200, offerPayload()));
+      if (path === '/admin/careers/app-2') {
+        return Promise.resolve(res(200, { application: detailFixture({ id: 'app-2', status: 'interview', contact_snapshot: { name: 'Casey Morgan', phone: '9415550199' } }) }));
+      }
+      return Promise.resolve(res(200, {}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    function Nav() {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => navigate('/?application=app-2')}>go-b</button>;
+    }
+    render(<MemoryRouter><Nav /><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText('Jordan Rivera'));
+    await screen.findByRole('heading', { name: /Jordan Rivera — / });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Offer' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Offer' }));
+    // A save whose re-read fails leaves the form read-only with Try again.
+    fireEvent.change(await screen.findByLabelText('Hourly rate ($)'), { target: { value: '24' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    expect(await screen.findByText(/could not be loaded after your last change/)).toBeInTheDocument();
+    // Try again reads the offer (the draft is gone now); the application read after it is slow.
+    phase = 'gone';
+    fireEvent.click(within(screen.getByLabelText('Hourly rate ($)').closest('[role="dialog"]')).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(aDetailAsked).toBe(true));
+    // While that read is out, the owner opens another applicant and starts that applicant's offer.
+    fireEvent.click(screen.getByText('go-b'));
+    await screen.findByRole('heading', { name: /Casey Morgan — / });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Offer' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Offer' }));
+    fireEvent.change(await screen.findByLabelText('Hourly rate ($)'), { target: { value: '26' } });
+    // The first applicant's read finishes: its Try again finds that draft gone. The open form stays, edit included.
+    await act(async () => {
+      releaseA();
+      await new Promise((resolve) => { setTimeout(resolve, 30); });
+    });
+    expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue('26');
+    expect(screen.getByRole('heading', { name: /Casey Morgan — / })).toBeInTheDocument();
+  });
+
   // An action on one applicant can finish after the owner opened another. Its re-read is for an applicant no longer
   // on screen, so it must not cancel the open applicant's own re-read, which would leave that applicant's stage stale.
   it("a late offer action on one applicant does not cancel the open applicant's re-read", async () => {
@@ -1508,6 +1580,40 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     await waitFor(() => expect(within(screen.getByTestId('offer-card')).getByText('Withdrawn')).toBeInTheDocument());
     expect(within(screen.getByTestId('offer-card')).queryByRole('button', { name: 'Withdraw offer' })).toBeNull();
     expect(screen.queryByText('Bad gateway')).toBeNull();
+  });
+
+  // A success whose body cannot be read says nothing about what the server did (here it did nothing): the card takes
+  // the lost-answer path, never a silent success.
+  it('a withdraw answered 200 with a body that cannot be read is a lost answer: the card re-reads and says so', async () => {
+    const current = offerRecord({ status: 'sent', timeline: [] });
+    setupFetch(
+      { 'POST /admin/careers/app-1/offer/offer-1/withdraw': () => unreadable() },
+      { offer: () => res(200, offerPayload({ current })), detail: detailFixture({ status: 'offer' }) },
+    );
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Withdraw offer' }));
+    const dialog = (await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Withdraw' }));
+    await waitFor(() => expect(screen.queryByText(/Withdraw this offer for Jordan/)).toBeNull());
+    const after = screen.getByTestId('offer-card');
+    expect(within(after).getByText('No answer came back. The card shows the offer as it reads now, but the action may still finish. If it did, a repeat is refused.')).toBeInTheDocument();
+    expect(within(after).getByText('Sent')).toBeInTheDocument();
+  });
+
+  it('a signed copy answered 200 with a body that cannot be read says so and shows no copy', async () => {
+    const signed = offerRecord({ status: 'accepted', signedAt: '2026-12-12T13:15:00Z', signedName: 'Jordan Rivera', timeline: [] });
+    setupFetch(
+      { 'GET /admin/careers/app-1/offer/offer-1/signed-copy': () => unreadable() },
+      { offer: offerPayload({ current: signed }), detail: detailFixture({ status: 'hired' }) },
+    );
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'View signed copy' }));
+    expect(await within(card).findByText('The answer could not be read. Try again.')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Signed offer' })).toBeNull();
   });
 
   it('a withdraw answered gate-off turns the offer card off and brings back the plain stage moves', async () => {

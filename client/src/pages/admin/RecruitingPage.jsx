@@ -1319,7 +1319,9 @@ export default function RecruitingPage() {
         data={offerFlow.data}
         draft={offerFlow.form?.draft}
         stale={Boolean(offerFlow.refreshError || detailRefreshError)}
-        onClose={offerFlow.closeForm}
+        // Bound to the form open at this render: a close from an action that started in it (a Try again whose read
+        // finds the draft gone) cannot close a form opened since.
+        onClose={() => offerFlow.closeForm(offerFlow.form?.key)}
         onChanged={refreshAfterOffer}
         onSent={refreshAfterOffer}
       />

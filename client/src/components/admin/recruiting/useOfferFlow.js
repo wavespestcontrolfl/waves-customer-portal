@@ -15,8 +15,9 @@ const IDLE = { id: null, status: "idle", data: null, error: null };
  */
 export default function useOfferFlow(applicationId, applicationStatus) {
   const [state, setState] = useState(IDLE);
-  const [form, setForm] = useState(null); // null = closed, else { draft }
+  const [form, setForm] = useState(null); // null = closed, else { draft, key }
   const seq = useRef(0);
+  const formSeq = useRef(0); // each opened form gets its own key, so a close can name the form it is for
   // The application the page has open now. Every async result carries the id
   // it was started for and is dropped when that is no longer this one.
   const openId = useRef(null);
@@ -90,9 +91,11 @@ export default function useOfferFlow(applicationId, applicationStatus) {
     ownerActions: status === "ready" && mine.data?.viewer?.ownerActions === true,
     form,
     openForm: (draft = null, forId = openId.current) => {
-      if (forId === openId.current) setForm({ draft });
+      if (forId === openId.current) setForm({ draft, key: ++formSeq.current });
     },
-    closeForm: () => setForm(null),
+    // Closes the form only while it is the one `key` names. An action that finishes after the owner opened another
+    // form (for another applicant, or again for this one) leaves that form and its edits alone.
+    closeForm: (key) => setForm((open) => (open && open.key === key ? null : open)),
     reload: () => (applicationId ? reload(applicationId) : null),
     retry,
   };

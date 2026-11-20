@@ -24,6 +24,25 @@ afterEach(() => {
 });
 
 describe("useOfferFlow", () => {
+  // A form's own action can finish after the owner opened another form. Its close names its own form, so it never
+  // closes the newer one or drops that form's edits.
+  it("closes a form only by its own key", async () => {
+    fetchOffer.mockResolvedValue(panel("hash-1"));
+    const { result } = renderHook(() => useOfferFlow("app-1", "offer"));
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    act(() => result.current.openForm());
+    const first = result.current.form.key;
+    act(() => result.current.closeForm(first));
+    expect(result.current.form).toBeNull();
+    act(() => result.current.openForm());
+    const second = result.current.form.key;
+    expect(second).not.toBe(first);
+    act(() => result.current.closeForm(first));
+    expect(result.current.form).toMatchObject({ key: second });
+    act(() => result.current.closeForm(second));
+    expect(result.current.form).toBeNull();
+  });
+
   // Two reads can overlap (a stage change re-reads while a form's own read is out). The page shows only the newer
   // one, so the older read must not hand its caller data the page dropped: a form would act on it as current.
   it("answers null to a read that a newer read replaced, even when the newer read fails", async () => {
