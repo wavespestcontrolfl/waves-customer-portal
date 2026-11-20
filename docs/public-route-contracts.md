@@ -2107,7 +2107,9 @@ multi-home, a primary street with a city or zip, at most one property row and th
 primary street, and no visit whose stamped address, property row or creating estimate names another
 address or cannot be resolved) whose street is both the estimate's own address and the home the mint
 priced (`estimate_data.planStart.premisesKey`), so a move or a second property since the mint refuses,
-even after a staff address change rewrote the open quote's address. Otherwise it answers 409 `{ error, code: 'PLAN_START_STATE_CHANGED' }` (the
+even after a staff address change rewrote the open quote's address. The estimate must still belong to
+the customer the accept read before its row lock: one that a merge or its undo moved to another
+customer refuses, and the re-check reads and locks no other customer. Otherwise it answers 409 `{ error, code: 'PLAN_START_STATE_CHANGED' }` (the
 error reads "This account changed since this estimate was created — please go back to your portal
 for a current price.") and writes nothing. A re-check that cannot read its state, or that finds the
 customer's property-preferences key held by another change (the re-check tries that key and never

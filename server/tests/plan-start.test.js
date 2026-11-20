@@ -441,7 +441,7 @@ describe('mintPlanStartEstimate', () => {
     tables.property_preferences = [{ customer_id: 'cust-1' }];
     await require('../services/customer-address-fanout').propagateCustomerAddressChange({ before, after: tables.customers[0] }, fakeTrx());
     expect(quote.address).toMatch(/^9 Oak Ave/);
-    await expect(actualRestart.assertPlanStartAcceptEligible(fakeTrx(), { id: quote.id }))
+    await expect(actualRestart.assertPlanStartAcceptEligible(fakeTrx(), { id: quote.id, customer_id: 'cust-1' }))
       .rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
     // The repeat tap stores the moved profile's own address, as production's addressForCustomer does.
     const movedAddress = { pricingAi: { ...deps().pricingAi, addressForCustomer: require('../services/customer-pricing-ai').addressForCustomer } };
@@ -1034,7 +1034,8 @@ describe('assertPlanStartAcceptEligible', () => {
     return b;
   };
   const trx = fakeTrx(null, namedColumns);
-  const ESTIMATE = { id: 'est-ps1' };
+  // As the accept handler passes it: the row it read before the lock, owner included.
+  const ESTIMATE = { id: 'est-ps1', customer_id: 'cust-1' };
   beforeEach(() => {
     tables.customers = [{ ...LEAD }];
     tables.customer_properties = [];
@@ -1046,6 +1047,16 @@ describe('assertPlanStartAcceptEligible', () => {
 
   test('a still-plain account owning no recurring service accepts', async () => {
     await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).resolves.toBeUndefined();
+  });
+
+  test('an estimate a merge moved to another customer since the handler read it refuses, and locks nothing for that customer (codex pre-push P0)', async () => {
+    // The other customer is a plain lead at the same home, so only the owner check can refuse.
+    tables.customers.push({ ...LEAD, id: 'cust-2' });
+    tables.estimates[0].customer_id = 'cust-2';
+    const ops = [];
+    await expect(actualRestart.assertPlanStartAcceptEligible(fakeTrx(ops, namedColumns), ESTIMATE))
+      .rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
+    expect(ops.filter((o) => o.includes('cust-2'))).toEqual([]);
   });
 
   test('a quote stored without the ZIP the account has since gained names the same home and accepts (codex pre-push P1)', async () => {

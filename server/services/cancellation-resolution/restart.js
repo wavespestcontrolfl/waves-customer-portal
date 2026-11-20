@@ -1075,7 +1075,7 @@ async function reuseLiveQuote(mint, {
   priorRows, offer, estimateData, primaryStreet, premisesStamp,
 }) {
   const {
-    trx, matchesLive, estimateBlock, sells, now,
+    trx, fresh, matchesLive, estimateBlock, sells, now, mintDeps,
   } = mint;
   const lockedPriorRows = await trx('estimates')
     .whereIn('id', priorRows.map((row) => row.id))
@@ -1091,14 +1091,20 @@ async function reuseLiveQuote(mint, {
   // property facts, not the street, so a quote minted before the account's
   // address changed would hand back a link addressed to the old house. Its
   // stored address must key to today's primary premises; else the lineage
-  // archives and a fresh quote is minted at the current address.
+  // archives and a fresh quote is minted at the current address. A stored
+  // address that is today's own string is unchanged (codex pre-push r38 P1):
+  // a ZIP-only address with a unit line such as "Building 2" does not parse
+  // back to its home, so the parse alone re-minted, and freed the slot hold,
+  // on every identical restart tap.
+  const sameAddress = live.address === mintDeps.pricingAi.addressForCustomer(fresh)
+    || sameHome(require('../estimate-property-linkage').normalizedEstimateStreet(live.address), primaryStreet);
   const sameStamp = Object.entries(premisesStamp)
     .every(([key, home]) => sameHome(liveData[estimateBlock.key]?.[key], home));
   const { monthlyTotal, annualTotal, onetimeTotal } = offer.totals;
   const sameTotals = [['monthly_total', monthlyTotal], ['annual_total', annualTotal], ['onetime_total', onetimeTotal]]
     .every(([column, total]) => toCents(total) === toCents(live[column]));
   if (matchesLive(liveData)
-    && sameHome(require('../estimate-property-linkage').normalizedEstimateStreet(live.address), primaryStreet)
+    && sameAddress
     && sameStamp
     && sameTotals
     && offerFingerprint(liveData) === offerFingerprint(estimateData)
@@ -1611,11 +1617,15 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
   let ownsPlan;
   let premisesStreet;
   try {
-    const row = await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data', 'address');
-    const customerId = row?.customer_id;
-    const planStart = parseJson(row?.estimate_data, {})?.planStart;
+    const row = (await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data', 'address')) || {};
+    // The owner the handler read before the row lock (codex pre-push P0). The handler books and
+    // updates contacts for estimate.customer_id, so an estimate a merge or its undo moved to
+    // another customer since then reads, and locks, no customer here: the account checks below
+    // refuse it as a changed account.
+    const customerId = row.customer_id === estimate.customer_id ? row.customer_id : null;
+    const planStart = parseJson(row.estimate_data, {})?.planStart;
     quoted = Array.isArray(planStart?.families) ? planStart.families : [];
-    quotedStreet = require('../estimate-property-linkage').normalizedEstimateStreet(row?.address);
+    quotedStreet = require('../estimate-property-linkage').normalizedEstimateStreet(row.address);
     // The home the mint priced (codex pre-push P0): a staff address change rewrites the address
     // column above on an open quote, but never this key.
     pricedHome = planStart?.premisesKey;

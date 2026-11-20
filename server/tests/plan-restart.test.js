@@ -355,6 +355,18 @@ describe('mintRestartEstimate', () => {
     expect(releaseHolds).not.toHaveBeenCalled();
   });
 
+  test('an identical tap at an address that does not parse back to its home reuses the live quote: its stored address is today\'s own string (codex pre-push r38 P1)', async () => {
+    // With no city, the unit line "Building 2" reads back as the stored address's city.
+    const unitOnly = { ...CUSTOMER, address_line2: 'Building 2', city: null };
+    tables.customers = [{ ...unitOnly }];
+    const realAddress = deps({ pricingAi: { ...deps().pricingAi, addressForCustomer: require('../services/customer-pricing-ai').addressForCustomer } });
+    const first = await actualRestart.mintRestartEstimate({ customer: unitOnly, deps: realAddress, randomBytes: () => Buffer.from('abcdef0123456789') });
+    const again = await actualRestart.mintRestartEstimate({ customer: unitOnly, deps: realAddress });
+    expect(again).toEqual({ estimateId: first.estimateId, token: first.token, url: first.url, reused: true });
+    expect(tables.estimates[0].archived_at == null).toBe(true);
+    expect(releaseHolds).not.toHaveBeenCalled();
+  });
+
   test('a quote that expires while the tap waits on its locks is not handed back: liveness reads the clock after the locks (codex pre-push P1)', async () => {
     const first = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
     tables.estimates[0].expires_at = '2026-09-01T12:00:00.000Z';
