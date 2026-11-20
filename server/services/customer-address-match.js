@@ -19,9 +19,7 @@
 // the customers table. It is stricter on units on purpose — a unit on one
 // side only is NOT the same premise there (requireExactUnit), because a
 // merge candidate must name one household, where the finder above leans
-// toward over-suggesting. Pairwise form, for two customer rows already in
-// hand: `sameHouseholdAddress` (the same rule; the customer merge reads its
-// sprinkler-timer premise with it).
+// toward over-suggesting.
 //
 // Bounded (50 per leg, deterministic order — codex #3338 r17) so a common
 // house number cannot blow up the scan. Read-only. The property leg is
@@ -103,16 +101,6 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
   return matches;
 }
 
-// The pairwise household rule on two premises ({ text, unit, multiUnit }) that
-// each have a house number: a stacked building (multiUnit on either side) needs
-// a named unit on both, and the canonical comparator must match with an exact
-// unit. pairCustomersAtSameAddress confirms each bucketed pair with it;
-// sameHouseholdAddress applies it to two customer rows.
-function samePremise(x, y) {
-  if ((x.multiUnit || y.multiUnit) && !(x.unit && y.unit)) return false;
-  return sameStreetAddress(x.text, y.text, { requireExactUnit: true });
-}
-
 /**
  * Pure. `candidates` = [{ customerId, matchedVia, address_line1, address_line2,
  * city, zip, multiUnit? }] — one row per address a customer is known at.
@@ -161,8 +149,9 @@ function pairCustomersAtSameAddress(candidates) {
         const [lo, hi] = x.customerId < y.customerId ? [x, y] : [y, x];
         const pairId = `${lo.customerId}:${hi.customerId}`;
         if (pairs.has(pairId)) continue;
-        // Same bucket = same unit key; samePremise asks a multi-unit pair for a NAMED one.
-        if (!samePremise(x, y)) continue;
+        // Same bucket = same unit key; a multi-unit pair needs a NAMED one.
+        if ((x.multiUnit || y.multiUnit) && !(x.unit && y.unit)) continue;
+        if (!sameStreetAddress(x.text, y.text, { requireExactUnit: true })) continue;
         pairs.set(pairId, {
           a: lo.customerId,
           b: hi.customerId,
@@ -173,24 +162,6 @@ function pairCustomersAtSameAddress(candidates) {
     }
   }
   return [...pairs.values()];
-}
-
-/**
- * Pure. Two address rows ({ address_line1, address_line2, city, zip,
- * multiUnit? }) name one household by the duplicates queue's rule: both have a
- * street line with a leading house number ("123/2" and "123-125" count; a PO
- * box or a bare street name has none and is never a household), and
- * samePremise holds (a named, equal unit for a stacked building; the canonical
- * comparator with an exact unit).
- */
-function sameHouseholdAddress(rowA, rowB) {
-  if (!rowA?.address_line1 || !rowB?.address_line1) return false;
-  const premise = (row) => {
-    const text = candidateAddressString(row);
-    return { text, unit: addressUnitKey(text), multiUnit: row.multiUnit === true };
-  };
-  const [x, y] = [premise(rowA), premise(rowB)];
-  return !!(houseNumberOf(x.text) && houseNumberOf(y.text)) && samePremise(x, y);
 }
 
 const phoneKey = (v) => String(v || '').replace(/\D/g, '').slice(-10);
@@ -215,4 +186,4 @@ function rankByContact(rows, { phone = null, email = null } = {}) {
   return [...tagged.filter((r) => r.contactMatch), ...tagged.filter((r) => !r.contactMatch)];
 }
 
-module.exports = { findCustomersAtAddress, rankByContact, pairCustomersAtSameAddress, sameHouseholdAddress, _private: { houseNumberOf, candidateAddressString } };
+module.exports = { findCustomersAtAddress, rankByContact, pairCustomersAtSameAddress, _private: { houseNumberOf, candidateAddressString } };

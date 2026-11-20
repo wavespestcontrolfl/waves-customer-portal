@@ -623,10 +623,10 @@ describe('mergeSingletonPrefRow', () => {
     const rainBird = { irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null, irrigation_controller_app: null };
     const prefs = (customer_id, timer, extra = {}) => ({ id: `p-${customer_id}`, customer_id, ...timer, pet_details: null, created_at: 'x', updated_at: 'x', ...extra });
     const timerKeys = (updated) => Object.keys(updated || {}).filter((k) => TIMER_COLUMNS.includes(k));
-    const SAME_HOME = { loserFollows: true, winnerStays: true };
+    const HOME_KEPT = { winnerStays: true };
 
     it('never fills it column by column: a Rain Bird winner does not take the loser\'s Hunter model or answer', async () => {
-      for (const options of [undefined, { copyNewSod: true }, { timerPremise: SAME_HOME }]) {
+      for (const options of [undefined, { copyNewSod: true }, { timerPremise: HOME_KEPT }]) {
         const { trx, state } = stubTrx({ winnerRow: prefs('W', rainBird), loserRow: prefs('L', x2, { pet_details: 'one dog' }) });
         await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L', options);
         expect(state.updated.pet_details).toBe('one dog'); // ordinary fields still fill
@@ -634,15 +634,13 @@ describe('mergeSingletonPrefRow', () => {
       }
     });
 
-    it('SAME home for the timer (timerPremise.loserFollows): a winner with no timer takes the loser\'s whole timer; otherwise it takes none of it', async () => {
-      const same = stubTrx({ winnerRow: prefs('W', none), loserRow: prefs('L', x2) });
-      await mergeSingletonPrefRow(same.trx, 'property_preferences', 'customer_id', 'W', 'L', { timerPremise: SAME_HOME });
-      expect(same.state.updated).toMatchObject(x2);
-      // The new-sod premise alone does not carry it: the timer has its own (timerPremiseOf).
-      for (const options of [undefined, { copyNewSod: true }, { copyNewSod: true, timerPremise: { loserFollows: false, winnerStays: true } }]) {
-        const different = stubTrx({ winnerRow: prefs('W', none), loserRow: prefs('L', x2, { pet_details: 'one dog' }) });
-        await mergeSingletonPrefRow(different.trx, 'property_preferences', 'customer_id', 'W', 'L', options);
-        expect(timerKeys(different.state.updated)).toEqual([]);
+    it('the loser\'s timer never comes over: a winner with none keeps none, whatever the premise', async () => {
+      for (const options of [undefined, { copyNewSod: true }, { timerPremise: HOME_KEPT }, { timerPremise: { winnerStays: false } }]) {
+        const { trx, state } = stubTrx({ winnerRow: prefs('W', none), loserRow: prefs('L', x2, { pet_details: 'one dog' }) });
+        await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L', options);
+        expect(state.updated.pet_details).toBe('one dog'); // ordinary fields still fill
+        expect(timerKeys(state.updated)).toEqual([]);
+        expect(state.deleted).toBe(true);
       }
     });
   });
@@ -653,16 +651,9 @@ describe('mergeSingletonPrefRow', () => {
     const rainBird = { irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null, irrigation_controller_app: null };
     const prefs = (customer_id, timer) => ({ id: `p-${customer_id}`, customer_id, ...timer, created_at: 'x', updated_at: 'x' });
 
-    it('their own timer is replaced by the loser\'s whole timer when that one describes the home the merge leaves', async () => {
+    it('their own timer is cleared, as an address edit clears it, and the loser\'s does not replace it', async () => {
       const { trx, state } = stubTrx({ winnerRow: prefs('W', rainBird), loserRow: prefs('L', x2) });
-      await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L', { timerPremise: { loserFollows: true, winnerStays: false } });
-      expect(state.updated).toMatchObject(x2);
-      expect(state.deleted).toBe(true);
-    });
-
-    it('otherwise their own timer is cleared, as an address edit clears it', async () => {
-      const { trx, state } = stubTrx({ winnerRow: prefs('W', rainBird), loserRow: prefs('L', x2) });
-      await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L', { timerPremise: { loserFollows: false, winnerStays: false } });
+      await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L', { timerPremise: { winnerStays: false } });
       expect(state.updated).toMatchObject(none);
       expect(state.deleted).toBe(true);
     });
@@ -681,7 +672,6 @@ describe('mergeSingletonPrefRow', () => {
     const CLEARED = 'property_preferences.sprinkler_timer_cleared';
     const KEPT_CLEARED = 'property_preferences.kept_customer_sprinkler_timer_cleared';
     const DROPPED = 'property_preferences.merged_away_sprinkler_timer_dropped';
-    const ADOPTED = 'property_preferences.merged_away_sprinkler_timer_kept';
     const rewrites = async (prefRows, { winnerAddr = HOME, loserAddr = OTHER, fail = false } = {}) => {
       const out = await dedupe.nonFkMergeRewrites(
         jest.fn((table) => makeChain(table, (q) => {
@@ -699,16 +689,16 @@ describe('mergeSingletonPrefRow', () => {
     const X2_TEXT = 'hunter/x2/yes';
     const RAIN_BIRD_TEXT = 'rain_bird/-/-';
 
-    it('the loser\'s row moves whole to a kept customer with none: a timer that does not follow is cleared, one that follows is adopted; both pinned', async () => {
-      expect(await rewrites([{ customer_id: 'L', ...X2 }])).toEqual({ [CLEARED]: X2_TEXT });
-      expect(await rewrites([{ customer_id: 'L', ...X2 }], { loserAddr: SAME })).toEqual({ [ADOPTED]: X2_TEXT });
-      expect(await rewrites([{ customer_id: 'L', ...X2 }], { loserAddr: UNIT })).toEqual({ [ADOPTED]: X2_TEXT });
+    it('the loser\'s row moves whole to a kept customer with none: its timer is cleared at any address, and pinned', async () => {
+      for (const loserAddr of [OTHER, SAME, UNIT]) expect(await rewrites([{ customer_id: 'L', ...X2 }], { loserAddr })).toEqual({ [CLEARED]: X2_TEXT });
       expect(await rewrites([{ customer_id: 'L', ...NONE }])).toEqual({});
     });
 
-    it('two rows fold at different homes: the loser\'s timer is dropped, and a timer entered after the card changes the pin', async () => {
+    it('two rows fold: the loser\'s timer is dropped at any address, and a timer entered after the card changes the pin', async () => {
       expect(await rewrites([{ customer_id: 'L', ...NONE }, { customer_id: 'W', ...NONE }])).toEqual({});
-      expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...NONE }])).toEqual({ [DROPPED]: X2_TEXT });
+      for (const loserAddr of [OTHER, SAME]) {
+        expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...NONE }], { loserAddr })).toEqual({ [DROPPED]: X2_TEXT });
+      }
     });
 
     it('editing a timer the card names (brand, model or phone-app answer) changes the pin', async () => {
@@ -718,33 +708,10 @@ describe('mergeSingletonPrefRow', () => {
       }
     });
 
-    it('the house number stays apart from the street, and street words compare canonically', async () => {
-      const at = (address_line1) => ({ address_line1, city: 'Bradenton', zip: '34205' });
-      expect(await rewrites([{ customer_id: 'L', ...X2 }], { winnerAddr: at('12 34th St W'), loserAddr: at('123 4th St W') })).toEqual({ [CLEARED]: X2_TEXT });
-      expect(await rewrites([{ customer_id: 'L', ...X2 }], { winnerAddr: at('100 1st St NE'), loserAddr: at('100 1st Street Northeast') })).toEqual({ [ADOPTED]: X2_TEXT });
-    });
-
-    it('a slash house number follows; a condo street with no unit on either side does not', async () => {
-      const at = (address_line1, extra = {}) => ({ address_line1, city: 'Bradenton', zip: '34205', ...extra });
-      expect(await rewrites([{ customer_id: 'L', ...X2 }], { winnerAddr: at('123/2 Main St'), loserAddr: at('123/2 Main St') })).toEqual({ [ADOPTED]: X2_TEXT });
-      expect(await rewrites([{ customer_id: 'L', ...X2 }], { winnerAddr: at('500 Bay Dr'), loserAddr: at('500 Bay Dr', { property_type: 'condo' }) })).toEqual({ [CLEARED]: X2_TEXT });
-      expect(await rewrites([{ customer_id: 'L', ...X2 }], { winnerAddr: at('500 Bay Dr', { address_line2: 'Unit 12' }), loserAddr: at('500 Bay Dr', { address_line2: 'Unit 12', property_type: 'condo' }) })).toEqual({ [ADOPTED]: X2_TEXT });
-    });
-
-    it('two rows fold at the same PO box: a mailing address, not a home, so the loser\'s timer is dropped', async () => {
-      const PO_BOX = { address_line1: 'PO Box 42', city: 'Bradenton', zip: '34205' };
-      expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...NONE }], { winnerAddr: PO_BOX, loserAddr: PO_BOX })).toEqual({ [DROPPED]: X2_TEXT });
-    });
-
-    it('two rows fold at the same home: a timer entered on the loser\'s row after the card is adopted, and that changes the pin', async () => {
-      expect(await rewrites([{ customer_id: 'L', ...NONE }, { customer_id: 'W', ...NONE }], { loserAddr: SAME })).toEqual({});
-      expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...NONE }], { loserAddr: SAME })).toEqual({ [ADOPTED]: X2_TEXT });
-      expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...RAIN_BIRD }], { loserAddr: SAME })).toEqual({ [DROPPED]: X2_TEXT });
-    });
-
-    it('a street-only kept customer that takes the loser\'s unit: their own timer goes (their home changes), replaced by the loser\'s or cleared', async () => {
-      expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...RAIN_BIRD }], { loserAddr: UNIT })).toEqual({ [KEPT_CLEARED]: RAIN_BIRD_TEXT, [ADOPTED]: X2_TEXT });
+    it('the kept customer\'s own timer goes when the merge changes their home (a backfilled unit), and stays otherwise', async () => {
+      expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...RAIN_BIRD }], { loserAddr: UNIT })).toEqual({ [KEPT_CLEARED]: RAIN_BIRD_TEXT, [DROPPED]: X2_TEXT });
       expect(await rewrites([{ customer_id: 'L', ...NONE }, { customer_id: 'W', ...RAIN_BIRD }], { loserAddr: UNIT })).toEqual({ [KEPT_CLEARED]: RAIN_BIRD_TEXT });
+      expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...RAIN_BIRD }], { loserAddr: SAME })).toEqual({ [DROPPED]: X2_TEXT });
       // Only the kept customer has a row (settleKeptPrefTimer): the same clear, and none when their home stays.
       expect(await rewrites([{ customer_id: 'W', ...RAIN_BIRD }], { loserAddr: UNIT })).toEqual({ [KEPT_CLEARED]: RAIN_BIRD_TEXT });
       expect(await rewrites([{ customer_id: 'W', ...RAIN_BIRD }], { loserAddr: SAME })).toEqual({});
@@ -2000,8 +1967,8 @@ describe('executeMerge', () => {
       expect(result.repointed['property_preferences.new_sod_cleared']).toBeUndefined();
     });
 
-    // The sprinkler timer on file is the box on the LOSER's wall: it follows the same premise as the new-sod
-    // record (kept for the same home, cleared otherwise), and is journaled either way.
+    // The sprinkler timer on file is the box on the LOSER's wall: it never changes hands, so it is cleared on the
+    // moved row at any address, and journaled for the undo.
     describe('the sprinkler timer on that moved row', () => {
       const X2 = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
       const NO_TIMER = { irrigation_controller_brand: null, irrigation_controller_model: null, irrigation_controller_app: null };
@@ -2010,59 +1977,32 @@ describe('executeMerge', () => {
       it('different homes: the whole timer is cleared on the winner and journaled for the undo; the sod entry keeps its shape', async () => {
         const { prefUpdates, result, recorded } = await merge({ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, { timer: X2 });
         expect(prefUpdates).toContainEqual([{ id: 'pp-1' }, NO_TIMER]);
-        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: X2, kept: false, home_changed_at: null });
+        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: X2 });
         expect(result.repointed['property_preferences.sprinkler_timer_cleared']).toBe(1);
         expect(Object.keys(recorded.moved_pref_new_sod.before)).toEqual(['sod_laid_on', 'sod_covers', 'sod_area', 'sod_rooted_on']);
         // The move stamp itself never clears it (it has no before-image of its own).
         expect(prefUpdates.find(([, payload]) => payload.irrigation_home_changed_at)[1]).not.toHaveProperty('irrigation_controller_brand');
       });
 
-      it('same home, or an addressless winner that inherits the loser\'s home: the timer stays on the row and is journaled as kept', async () => {
+      it('the same home, an addressless winner, a street-only winner that takes the loser\'s unit, a shared PO box: cleared all the same', async () => {
+        const PO_BOX = { address_line1: 'PO Box 42', city: 'Bradenton', zip: '34205' };
         for (const [loserAddr, options] of [
           [{ address_line1: '100 MAIN ST', city: 'bradenton', zip: '34205' }, {}],
           [{ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, { winnerAddr: { address_line1: null, city: null, zip: null } }],
+          [{ address_line1: '100 Main St', address_line2: 'Apt 4', city: 'Bradenton', zip: '34205' }, {}],
+          [PO_BOX, { winnerAddr: PO_BOX }],
         ]) {
           const { prefUpdates, result, recorded } = await merge(loserAddr, { ...options, timer: X2 });
-          expect(touchesTimer(prefUpdates)).toBe(false);
-          expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: X2, kept: true, home_changed_at: null });
-          expect(result.repointed['property_preferences.sprinkler_timer_cleared']).toBeUndefined();
+          expect(prefUpdates).toContainEqual([{ id: 'pp-1' }, NO_TIMER]);
+          expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: X2 });
+          expect(result.repointed['property_preferences.sprinkler_timer_cleared']).toBe(1);
         }
-      });
-
-      // The timer reads the kept customer's address as the merge leaves it: a street-only kept customer takes the
-      // loser's unit in the backfill, so the box on the loser's wall is on theirs. The new-sod record keeps its own
-      // premise (the pre-merge units differ), unchanged here.
-      it('a street-only kept customer that takes the loser\'s unit: the timer stays and is journaled as kept; the sod record keeps its premise', async () => {
-        const { prefUpdates, result, recorded } = await merge(
-          { address_line1: '100 Main St', address_line2: 'Apt 4', city: 'Bradenton', zip: '34205' },
-          { timer: X2 },
-        );
-        expect(touchesTimer(prefUpdates)).toBe(false);
-        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: X2, kept: true, home_changed_at: null });
-        expect(result.repointed['property_preferences.sprinkler_timer_cleared']).toBeUndefined();
-        expect(result.repointed['property_preferences.new_sod_cleared']).toBe(1);
-      });
-
-      it('the same PO box is a mailing address, not a home: the timer is cleared', async () => {
-        const PO_BOX = { address_line1: 'PO Box 42', city: 'Bradenton', zip: '34205' };
-        const { prefUpdates, recorded } = await merge(PO_BOX, { timer: X2, winnerAddr: PO_BOX });
-        expect(prefUpdates).toContainEqual([{ id: 'pp-1' }, NO_TIMER]);
-        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: X2, kept: false, home_changed_at: null });
-      });
-
-      it('the kept customer has another unit of the same street: different homes, the timer is cleared', async () => {
-        const { prefUpdates, recorded } = await merge(
-          { address_line1: '100 Main St', address_line2: 'Apt 4', city: 'Bradenton', zip: '34205' },
-          { timer: X2, winnerAddr: { address_line1: '100 Main St', address_line2: 'Apt 9', city: 'Bradenton', zip: '34205' } },
-        );
-        expect(prefUpdates).toContainEqual([{ id: 'pp-1' }, NO_TIMER]);
-        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: X2, kept: false, home_changed_at: null });
       });
 
       it('different homes, no timer on the row: nothing to clear, the empty timer is still journaled for the undo guard', async () => {
         const { prefUpdates, recorded, result } = await merge({ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' });
         expect(touchesTimer(prefUpdates)).toBe(false);
-        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: NO_TIMER, kept: false, home_changed_at: null });
+        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: NO_TIMER });
         expect(result.repointed['property_preferences.sprinkler_timer_cleared']).toBeUndefined();
       });
 
@@ -2070,41 +2010,24 @@ describe('executeMerge', () => {
         const lone = { ...NO_TIMER, irrigation_controller_app: 'yes' };
         const { prefUpdates, recorded } = await merge({ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, { timer: lone });
         expect(prefUpdates).toContainEqual([{ id: 'pp-1' }, NO_TIMER]);
-        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: lone, kept: false, home_changed_at: null });
+        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: lone });
       });
 
-      it('the row\'s home stamp after the merge\'s own stamp is journaled with the timer, for the undo', async () => {
-        const STAMP = new Date('2026-11-01T14:00:00.000Z');
-        const { recorded } = await merge({ address_line1: '100 MAIN ST', city: 'bradenton', zip: '34205' }, { timer: { ...X2, irrigation_home_changed_at: STAMP } });
-        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: X2, kept: true, home_changed_at: STAMP.getTime() });
-      });
-
-      // Two rows fold (mergeSingletonPrefRow): the executor hands the fold the timer premise it reads from the
-      // addresses as the merge leaves them, the kept customer's own home included.
-      it('two rows fold: the fold gets the timer premise, read from the addresses as the merge leaves them', async () => {
+      // Two rows fold (mergeSingletonPrefRow): the executor hands the fold the premise for the kept customer's own
+      // timer, read from their address before and after the backfill.
+      it('two rows fold: the fold gets the kept customer\'s timer premise, read from their address as the merge leaves it', async () => {
         const handlers = dedupe._test.UNIQUE_COLLISION_HANDLERS;
         const original = handlers.property_preferences;
         const fold = jest.fn(async () => 'merged 0 fields into winner row, dropped loser row');
         handlers.property_preferences = fold;
         try {
           for (const [loserAddr, options, premise] of [
-            // A street-only kept customer takes the loser's unit: the loser's timer follows; their own home changed.
-            [{ address_line1: '100 Main St', address_line2: 'Apt 4', city: 'Bradenton', zip: '34205' }, {}, { loserFollows: true, winnerStays: false }],
-            [{ address_line1: '100 MAIN ST', city: 'bradenton', zip: '34205' }, {}, { loserFollows: true, winnerStays: true }],
-            [{ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, {}, { loserFollows: false, winnerStays: true }],
+            // A street-only kept customer takes the loser's unit: their own home changed.
+            [{ address_line1: '100 Main St', address_line2: 'Apt 4', city: 'Bradenton', zip: '34205' }, {}, { winnerStays: false }],
+            [{ address_line1: '100 MAIN ST', city: 'bradenton', zip: '34205' }, {}, { winnerStays: true }],
+            [{ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, {}, { winnerStays: true }],
             // An addressless kept customer takes the loser's whole address: a first address, a move for an address edit.
-            [{ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, { winnerAddr: { address_line1: null, city: null, zip: null } }, { loserFollows: true, winnerStays: false }],
-            // The same PO box: a shared mailing address, not a home.
-            [{ address_line1: 'P.O. Box 42', city: 'Bradenton', zip: '34205' }, { winnerAddr: { address_line1: 'P.O. Box 42', city: 'Bradenton', zip: '34205' } }, { loserFollows: false, winnerStays: true }],
-            // The house number stays apart from the street: 123 4th St is not 12 34th St, in the same ZIP.
-            [{ address_line1: '123 4th St W', city: 'Bradenton', zip: '34205' }, { winnerAddr: { address_line1: '12 34th St W', city: 'Bradenton', zip: '34205' } }, { loserFollows: false, winnerStays: true }],
-            // Street words compare canonically: 100 1st Street Northeast is 100 1st St NE.
-            [{ address_line1: '100 1st Street Northeast', city: 'Bradenton', zip: '34205' }, { winnerAddr: { address_line1: '100 1st St NE', city: 'Bradenton', zip: '34205' } }, { loserFollows: true, winnerStays: true }],
-            // A slash house number is a house number.
-            [{ address_line1: '123/2 Main St', city: 'Bradenton', zip: '34205' }, { winnerAddr: { address_line1: '123/2 Main St', city: 'Bradenton', zip: '34205' } }, { loserFollows: true, winnerStays: true }],
-            // A condo on either record needs a named, equal unit: with none, the street is a building, not a home.
-            [{ address_line1: '500 Bay Dr', city: 'Bradenton', zip: '34205', property_type: 'condo' }, { winnerAddr: { address_line1: '500 Bay Dr', city: 'Bradenton', zip: '34205' } }, { loserFollows: false, winnerStays: true }],
-            [{ address_line1: '500 Bay Dr', address_line2: 'Unit 12', city: 'Bradenton', zip: '34205' }, { winnerAddr: { address_line1: '500 Bay Dr', address_line2: 'Unit 12', city: 'Bradenton', zip: '34205', property_type: 'condo' } }, { loserFollows: true, winnerStays: true }],
+            [{ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, { winnerAddr: { address_line1: null, city: null, zip: null } }, { winnerStays: false }],
           ]) {
             fold.mockClear();
             const { recorded } = await merge(loserAddr, { ...options, collide: true, timer: X2 });
