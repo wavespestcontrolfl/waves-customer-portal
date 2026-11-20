@@ -1829,14 +1829,18 @@ describe('admin actions', () => {
     expect(mockPublish.mock.calls[0][0]).toMatchObject({ text, fromDraft: true, auditMeta: { version: 'agent_ops' }, autoFields: { auto_reply_version: 'agent_ops' } });
   });
 
-  test('owner 2026-11-19: a restored agent draft that times out again under Post now keeps version agent_ops for its next restore', async () => {
+  test('owner 2026-11-19: a restored agent draft that times out again under Post now keeps version agent_ops and its grounding for its next restore', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const { ReviewReplyError } = require('../services/review-reply/publisher');
     const text = 'Thanks Dana. Glad the Waves app helps.';
-    state.rows = [row({ id: 'rb', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain_cleared', review_reply: '[DRAFT] ' + text, auto_reply_draft: null, auto_reply_version: 'agent_ops', auto_reply_mode: null })];
+    const base = row({ id: 'rb', customer_id: 'c1', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain_cleared', review_reply: '[DRAFT] ' + text, auto_reply_draft: null, auto_reply_version: 'agent_ops', auto_reply_mode: null });
+    const grounding = { fingerprint: Runner.reviewFingerprint(base), accountFingerprint: 'fp:Venice|new' };
+    state.rows = [{ ...base, auto_reply_grounding: grounding }];
+    mockAccountFacts.mockResolvedValue({ city: 'Venice', tenure: 'new' });
     mockPublish.mockRejectedValueOnce(new ReviewReplyError('google_uncertain', 'GBP replyToReview timed out', { status: 502 }));
     await expect(Runner.postNow('rb', { type: 'admin' }, { expectedDraft: text })).rejects.toMatchObject({ code: 'google_uncertain' });
-    expect(state.rows[0]).toMatchObject({ auto_reply_draft: text, auto_reply_version: 'agent_ops', auto_reply_mode: null });
+    // A second restore still checks the same review and account facts.
+    expect(state.rows[0]).toMatchObject({ auto_reply_draft: text, auto_reply_version: 'agent_ops', auto_reply_mode: null, auto_reply_grounding: JSON.stringify(grounding) });
   });
 
   test('postNow publishes a restored Intelligence Bar attempt as written only while the review and account facts its grounding records still hold', async () => {
@@ -1858,7 +1862,9 @@ describe('admin actions', () => {
     state.rows = [{ ...base, auto_reply_grounding: grounding }];
     mockAccountFacts.mockResolvedValue({ city: 'Venice', tenure: 'new' });
     expect((await Runner.postNow('rg', { type: 'admin' }, { expectedDraft: text })).outcome).toBe('posted');
-    expect(mockPublish.mock.calls[0][0]).toMatchObject({ text, autoFields: { auto_reply_version: 'agent_ops' } });
+    // The publisher re-checks the same account facts after the PUT, and the
+    // posted row keeps the grounding of the text it published.
+    expect(mockPublish.mock.calls[0][0]).toMatchObject({ text, expectedAccountFingerprint: 'fp:Venice|new', autoFields: { auto_reply_version: 'agent_ops', auto_reply_grounding: JSON.stringify(grounding) } });
   });
 
   test('pipelineDraftGuard (Use Draft): a restored agent draft posted verbatim meets the grounding its attempt recorded; edited text and a person\'s restored draft take the human path', async () => {

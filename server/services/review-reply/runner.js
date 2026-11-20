@@ -1117,6 +1117,10 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
   // through the post and another timeout (owner 2026-11-19, app name).
   const restoredAgentDraft = !!humanDraft && row.auto_reply_version === 'agent_ops';
   const manualVersion = restoredAgentDraft ? 'agent_ops' : 'human';
+  // The grounding that describes the text Post now would publish: a stored
+  // draft's snapshot, or the one a restored attempt recorded. A person's own
+  // [DRAFT] has none.
+  const textGrounding = !humanDraft || restoredAgentDraft ? storedGrounding : null;
   if (humanDraft && row.auto_reply_reason === HUMAN_DRAFT_STALE) {
     await releaseClaim(row);
     throw new ReviewReplyError(CODES.STALE, 'This draft was written before the review changed — read the current review and edit the draft first.', { status: 409 });
@@ -1178,9 +1182,10 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
           // human draft too), so reconciliation and Retract see it.
           auto_reply_draft: existing,
           // A human draft carries HUMAN provenance — never the earlier model
-          // version / mode / grounding snapshot (codex r40).
+          // version / mode / grounding snapshot (codex r40). A restored
+          // attempt keeps the grounding its attempt recorded.
           ...(humanDraft
-            ? { auto_reply_version: manualVersion, auto_reply_mode: null, auto_reply_grounding: null, auto_reply_drafted_at: publishedAt }
+            ? { auto_reply_version: manualVersion, auto_reply_mode: null, auto_reply_grounding: restoredAgentDraft ? JSON.stringify(textGrounding || null) : null, auto_reply_drafted_at: publishedAt }
             : { auto_reply_drafted_at: row.auto_reply_drafted_at || publishedAt, auto_reply_grounding: JSON.stringify(storedGrounding || null) }),
           auto_reply_published_at: publishedAt,
           auto_reply_error: null,
@@ -1193,11 +1198,11 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
         fromDraft: !humanDraft || restoredAgentDraft,
         // Post-now publishes the draft the admin is looking at — a human
         // draft on the row is the payload, not an intervention.
-        guard: claimGuard(row, { publishingText: existing, accountFingerprint: humanDraft ? null : storedGrounding?.accountFingerprint || null }),
+        guard: claimGuard(row, { publishingText: existing, accountFingerprint: textGrounding?.accountFingerprint || null }),
         // …and the same fingerprint for the publisher's transactional
         // post-PUT check (codex r42): facts that change while the PUT is in
         // flight park the reply instead of recording it cleanly posted.
-        expectedAccountFingerprint: humanDraft ? undefined : (storedGrounding?.accountFingerprint || undefined),
+        expectedAccountFingerprint: textGrounding?.accountFingerprint || undefined,
         requireGoogle: true,
       });
       if (publishedExisting?.editedDuringPut) return { outcome: 'parked', reason: 'review_edited_after_post', mode: row.auto_reply_mode, live: true };
@@ -1221,7 +1226,7 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
         await db('google_reviews').where({ id: reviewId }).update({
           auto_reply_draft: existing,
           ...(humanDraft
-            ? { auto_reply_version: manualVersion, auto_reply_mode: null, auto_reply_grounding: null, auto_reply_drafted_at: new Date().toISOString() }
+            ? { auto_reply_version: manualVersion, auto_reply_mode: null, auto_reply_grounding: restoredAgentDraft ? JSON.stringify(textGrounding || null) : null, auto_reply_drafted_at: new Date().toISOString() }
             : { auto_reply_version: row.auto_reply_version || null, auto_reply_mode: row.auto_reply_mode || null, auto_reply_drafted_at: row.auto_reply_drafted_at || new Date().toISOString(), auto_reply_grounding: JSON.stringify(storedGrounding || null) }),
         }).catch(() => {});
         throw err;

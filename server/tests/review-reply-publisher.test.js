@@ -654,21 +654,33 @@ describe('publishReviewReply', () => {
     // codex r75: the manual attempt's exact text + a manual version ride the
     // park, so the clearing sync hands it back to a person, not the auto lane.
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana.', auto_reply_version: 'human', auto_reply_mode: null });
+    // Its own grounding: the review it was written for; a person's own words
+    // carry no account facts.
+    const { reviewFingerprint } = require('../services/review-reply/fingerprint');
+    expect(JSON.parse(state.rows[0].auto_reply_grounding)).toEqual({ fingerprint: reviewFingerprint(state.rows[0]), accountFingerprint: null });
   });
 
   test('owner 2026-11-19: a timed-out post that started from an AI draft keeps that origin (version agent_ops) for its restored [DRAFT]', async () => {
     process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
-    state.rows[0].auto_reply_status = null;
+    // The editor posts over the pipeline's [DRAFT], from a fresh AI draft
+    // whose grounding token carried other account facts than the row's
+    // older snapshot.
+    Object.assign(state.rows[0], { auto_reply_status: 'drafted', auto_reply_reason: null, auto_reply_draft: 'Hi Dana, pipeline words.', review_reply: '[DRAFT] Hi Dana, pipeline words.', reply_updated_at: null, auto_reply_grounding: JSON.stringify({ fingerprint: 'old-review', accountFingerprint: 'acct-old' }) });
     const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
     mockLock.mockImplementationOnce(async (id, fn) => { out.result = await fn(); return out; });
     mockGbp.replyToReview.mockImplementationOnce(() => new Promise(() => {}));
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
-    const p = publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad the Waves app helps.', actor: { type: 'admin' }, allowOverwrite: true, fromDraft: true });
+    const p = publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad the Waves app helps.', actor: { type: 'admin' }, allowOverwrite: true, fromDraft: true, expectedAccountFingerprint: 'acct-ai-draft' });
     const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_UNCERTAIN });
     await jest.advanceTimersByTimeAsync(31000);
     await assertion;
     jest.useRealTimers();
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops', auto_reply_mode: null });
+    // The grounding of the text that timed out, never the older snapshot; the
+    // pipeline's [DRAFT] it replaced leaves the slot.
+    const { reviewFingerprint } = require('../services/review-reply/fingerprint');
+    expect(JSON.parse(state.rows[0].auto_reply_grounding)).toEqual({ fingerprint: reviewFingerprint(state.rows[0]), accountFingerprint: 'acct-ai-draft' });
+    expect(state.rows[0]).toMatchObject({ review_reply: null, reply_updated_at: null });
   });
 
   // An Intelligence Bar post whose PUT times out (non-overwrite path).

@@ -106,3 +106,45 @@ describe('POST /admin/reviews/send-request — review hold response', () => {
     expect(res.json).toHaveBeenCalledWith({ error: reason });
   });
 });
+
+describe('POST /admin/reviews/:id/reply — the account facts for the post-PUT check', () => {
+  const router = require('../routes/admin-reviews');
+  const db = require('../models/db');
+  const Publisher = require('../services/review-reply/publisher');
+  const AutoReply = require('../services/review-reply/runner');
+  const handler = router.stack.find(layer => layer.route?.path === '/:id/reply' && layer.route.methods.post).route.stack.at(-1).handle;
+  const text = 'Thanks Dana. Glad the Waves app helps.';
+  const restored = { review_reply: `[DRAFT] ${text}`, auto_reply_draft: null, auto_reply_version: 'agent_ops', auto_reply_grounding: { fingerprint: 'f'.repeat(40), accountFingerprint: 'acct-recorded' } };
+  let row;
+
+  beforeEach(() => {
+    row = restored;
+    db.mockImplementation(() => ({ where: () => ({ first: async () => row }) }));
+    Publisher.publishReviewReply = jest.fn(async () => ({ googlePosted: true }));
+    AutoReply.manualReplyCloseFields = jest.fn(() => ({}));
+    AutoReply.pipelineDraftGuard = jest.fn(() => async () => null);
+    AutoReply.parseGroundingToken = jest.fn(() => null);
+  });
+  afterEach(() => db.mockReset());
+
+  async function expectedAccountFor(body) {
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+    await handler({ params: { id: 'rev-1' }, body, technicianId: 'admin-1' }, res, jest.fn());
+    expect(res.json).toHaveBeenCalledWith({ success: true, googlePosted: true });
+    return Publisher.publishReviewReply.mock.calls[0][0].expectedAccountFingerprint;
+  }
+
+  test('Use Draft on a restored agent draft, posted unchanged, carries the account facts its attempt recorded', async () => {
+    expect(await expectedAccountFor({ replyText: text, fromAgentDraft: true })).toBe('acct-recorded');
+  });
+
+  test('edited text, or a restored draft a person wrote, carries none; Use Draft of a stored draft keeps its snapshot (codex r50)', async () => {
+    expect(await expectedAccountFor({ replyText: `${text} We fixed the garage too.`, fromAgentDraft: true })).toBeUndefined();
+    Publisher.publishReviewReply.mockClear();
+    row = { ...restored, auto_reply_version: 'human' };
+    expect(await expectedAccountFor({ replyText: text, fromAgentDraft: true })).toBeUndefined();
+    Publisher.publishReviewReply.mockClear();
+    row = { review_reply: '[DRAFT] Hi Dana, pipeline words.', auto_reply_draft: 'Hi Dana, pipeline words.', auto_reply_version: 'reply-v3', auto_reply_grounding: { accountFingerprint: 'acct-stored' } };
+    expect(await expectedAccountFor({ replyText: 'Hi Dana, pipeline words.', draftToken: 'f'.repeat(40) })).toBe('acct-stored');
+  });
+});

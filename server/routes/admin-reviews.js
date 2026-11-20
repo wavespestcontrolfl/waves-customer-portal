@@ -553,9 +553,17 @@ router.post('/:id/reply', async (req, res, next) => {
         if (fromToken) return fromToken;
         // "Use Draft" (draftToken only): the stored pipeline draft's snapshot
         // carries the account fingerprint it was grounded on (codex r50).
-        if (typeof draftToken !== 'string' || !draftToken) return undefined;
-        const r = await db('google_reviews').where({ id: req.params.id }).first('auto_reply_draft', 'auto_reply_grounding', 'review_reply');
-        if (!r?.auto_reply_draft || !isDraftReply(r.review_reply) || stripDraftPrefix(r.review_reply).trim() !== String(r.auto_reply_draft).trim()) return undefined;
+        // "Use Draft" on a restored agent draft (fromAgentDraft), posted
+        // unchanged: the account facts its attempt recorded, as Post now.
+        const useDraft = typeof draftToken === 'string' && !!draftToken;
+        if (!useDraft && fromAgentDraft !== true) return undefined;
+        const r = await db('google_reviews').where({ id: req.params.id }).first('auto_reply_draft', 'auto_reply_grounding', 'review_reply', 'auto_reply_version');
+        if (!r || !isDraftReply(r.review_reply)) return undefined;
+        const slotText = stripDraftPrefix(r.review_reply).trim();
+        const snapshotFits = useDraft
+          ? !!r.auto_reply_draft && slotText === String(r.auto_reply_draft).trim()
+          : r.auto_reply_version === 'agent_ops' && slotText === String(replyText || '').trim();
+        if (!snapshotFits) return undefined;
         const g = r.auto_reply_grounding;
         const snap = !g ? null : (typeof g === 'string' ? (() => { try { return JSON.parse(g); } catch { return null; } })() : g);
         return snap?.accountFingerprint || undefined;

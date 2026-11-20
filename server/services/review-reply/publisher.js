@@ -573,21 +573,21 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       // Agent Ops draft: the restored [DRAFT] keeps that origin, so Use Draft
       // and Post now send it with the strict app-name rule.
       Object.assign(uncertain, { auto_reply_draft: replyText, auto_reply_version: auditMeta?.version || (agentText ? 'agent_ops' : 'human'), auto_reply_mode: null });
-    }
-    if (ibAttempt) {
-      // The grounding the sync checks before it marks a landed reply posted
-      // (syncReplyFields, validatePromotionAccountFacts), and Post now and
-      // Use Draft check before they publish the text again (in this park, or
-      // as the [DRAFT] the sync restores): the review as the claim read it
-      // before the PUT, and the account facts the Intelligence Bar draft was
-      // written from. Never an earlier draft's snapshot.
+      // The grounding of THIS text: the review as the claim read it before
+      // the PUT, and the account facts its draft was written from (an AI
+      // draft's grounding token, a stored or restored draft's snapshot; none
+      // for a person's own words). The sync checks it before it marks a
+      // landed reply posted (syncReplyFields, validatePromotionAccountFacts),
+      // and Post now and Use Draft before they publish the text again (in
+      // this park, or as the [DRAFT] the sync restores). Never an earlier
+      // draft's snapshot.
       uncertain.auto_reply_grounding = JSON.stringify({ fingerprint: prePutFingerprint, accountFingerprint: expectedAccountFingerprint || null });
-      // The attempted text replaces a [DRAFT] in the slot (the pipeline's,
-      // an Agent Ops draft, a restored one), as a reply that landed would and
-      // as the sync's restore will. Until that sync the card shows this
-      // attempt, and the older draft never reads as a person's own words
-      // that Post now publishes as written.
-      if (isDraftReply(prePutState.slot)) Object.assign(uncertain, { review_reply: null, reply_updated_at: null });
+      // The attempted text replaces a [DRAFT] in the slot this write compares
+      // against (the pipeline's, an Agent Ops draft, a restored one), as a
+      // landed reply and the sync's restore both do. Until that sync the card
+      // shows this attempt, and the older draft never reads as a person's own
+      // words that Post now publishes as written.
+      if (isDraftReply(allowOverwrite ? review.review_reply : prePutState.slot)) Object.assign(uncertain, { review_reply: null, reply_updated_at: null });
     }
     const q = db('google_reviews').where({ id: reviewId });
     if (allowOverwrite) {
