@@ -112,8 +112,9 @@ function OfferFields({ fields, onChange, startError, sendTo, disabled }) {
         <Field label="Step rate ($)">
           <Input type="number" inputMode="decimal" step="0.01" min="0" value={fields.stepRate} onChange={set("stepRate")} disabled={disabled} />
         </Field>
+        {/* A save sends a step date only with a step rate, so the date is set only once a rate is. */}
         <Field label="Step date" help="First Monday after day 90.">
-          <Input type="date" value={fields.stepEffectiveOn} onChange={set("stepEffectiveOn")} disabled={disabled} />
+          <Input type="date" value={fields.stepEffectiveOn} onChange={set("stepEffectiveOn")} disabled={disabled || fields.stepRate === ""} />
         </Field>
       </div>
       <Field label="Hours">
@@ -193,6 +194,7 @@ function fieldChecks(fields) {
 
 // The step date follows the start date whenever a step rate is set, and is
 // recomputed when a cleared rate is restored. It stays editable after that.
+// With no step rate it is empty and cannot be edited (a save would drop it).
 function applyEdit(cur, key, value) {
   const next = { ...cur, [key]: value };
   if (key === "startDate" && next.stepRate !== "") next.stepEffectiveOn = stepDateFor(value);
@@ -284,6 +286,9 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
   const [conflict, setConflict] = useState(false);
   // "save" or "send" while the form re-reads after a write whose answer was lost.
   const [lost, setLost] = useState(null);
+  // Set when a write answered that offers are turned off: nothing was written. The form
+  // stays read-only until a read works, and that read turns the flow off, which closes it.
+  const [off, setOff] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [confirming, setConfirming] = useState(false);
@@ -315,30 +320,36 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
     }
   };
 
-  // Re-read after a write. The form pins the draft in the read only once the read
-  // holds the draft it expects; until then it stays read-only (Try again re-reads).
-  // With no expected id (another admin created the first draft meanwhile) the open
-  // draft in the read is adopted.
-  const refresh = async (expectId) => {
+  // Re-read after a write. The form stays read-only until the read holds the draft it
+  // expects (Try again re-reads). A draft the form already pins (`kept`; after a save, the
+  // version that save wrote) is never swapped for another version of itself: formLock shows
+  // a newer one as changed, for the owner to review before Send. A form with no draft of
+  // that id pins the one in the read; with no expected id (another admin created the first
+  // draft meanwhile) the open draft in the read is adopted.
+  const refresh = async (expectId, kept = pinned) => {
     const next = await onChanged();
     const found = next && (expectId ? reviewedDraft(next, expectId) : openDraft(next));
-    if (found) setPinned(found);
+    if (found && found.id !== kept?.id) {
+      setPinned(found);
+      setEdits({});
+    }
     if (found || (next && !expectId)) {
       if (found) setDraftId(found.id);
       setNeedRead(false);
-      setEdits({});
     }
     return next;
   };
 
   // Try again after a failed read. After a save it pins the saved draft; if the read shows
   // that draft is gone (another admin sent or discarded it), the form closes and the card
-  // shows the offer's state. After a refused write it only re-reads: the owner still picks.
+  // shows the offer's state. After a refused write, or one that found offers turned off, it
+  // only re-reads: the owner still picks, and edits stay on screen.
   const reread = async () => {
-    if (conflict || lost) {
+    if (conflict || lost || off) {
       const next = await onChanged();
       if (!next) return;
       setNeedRead(false);
+      setOff(false);
       if (lost) settleLost(next, lost);
       return;
     }
@@ -385,13 +396,24 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
     settleLost(next, kind);
   };
 
+  // Offers were turned off (404 enabled:false): nothing was written. Save and Send stay off,
+  // and the Send question closes, until a read works. That read turns the flow off, which
+  // closes this form; if the read fails, the form stays read-only and Try again re-reads.
+  const gateOff = async () => {
+    setConfirming(false);
+    setOff(true);
+    setNeedRead(true);
+    if (!(await onChanged())) return;
+    setOff(false);
+    setNeedRead(false);
+  };
+
   // A failed write: a lost answer re-reads; a refusal shows the server's sentence.
   const writeFailed = async (err, kind) => {
     if (isLostAnswer(err)) return lostWrite(kind);
     setError(offerErrorMessage(err));
     if (isStaleWrite(err)) await staleWrite();
-    // Offers were turned off: the re-read turns the flow off, and that closes this form.
-    else if (isGateOffAnswer(err)) await onChanged();
+    else if (isGateOffAnswer(err)) await gateOff();
   };
 
   const adoptLatest = () => {
@@ -410,9 +432,13 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
       // An existing draft is named by the id and hash pinned when it was loaded.
       const guard = pinned ? { draftId: pinned.id, draftHash: pinned.draftHash } : {};
       const { offer } = await saveOfferDraft(applicationId, { ...toPayload(fields), ...guard });
+      // The form pins the version this save wrote (the answer carries its hash), so the read
+      // after it can only confirm it: another admin's save in between shows as changed.
       setDraftId(offer.id);
+      setPinned(offer);
+      setEdits({});
       setNeedRead(true);
-      await refresh(offer.id);
+      await refresh(offer.id, offer);
     } catch (err) {
       await writeFailed(err, "save");
     } finally {
