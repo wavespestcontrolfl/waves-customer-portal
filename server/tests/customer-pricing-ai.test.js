@@ -2463,6 +2463,81 @@ describe('strictPriceSettings: the refresh of the price settings before the engi
       const result = await price({ prompt: 'I am interested in adding pest control and mosquito service' });
       expect(result.code).not.toBe('PRICING_CONFIG_UNAVAILABLE');
     });
+
+    // The engine prices the services the customer has NOW too: the current plan, and each option's plan total
+    // and tier beside it. The bridge has no proof for the settings of those, so strict refuses the customer.
+    describe('a customer who has another service now', () => {
+      const OTHER_SERVICE = { code: 'STRICT_PRICE_OTHER_SERVICE' };
+      // The customer's live recurring visits, on a handle the bridge could refresh from.
+      const withPlan = (serviceTypes) => Object.assign(activePlanDb(customer.id, serviceTypes), { schema: { hasTable: async () => false } });
+
+      test.each([
+        ['lawn care', ['Lawn Care']],
+        ['termite bait monitoring', ['Termite Bait Monitoring']],
+        ['pest control and lawn care', ['Quarterly Pest Control', 'Lawn Care']],
+      ])('strict: a customer with %s who asks for pest control alone is refused before any property lookup or refresh', async (_label, serviceTypes) => {
+        sync.mockResolvedValue(true);
+        const propertyLookup = jest.fn(async () => ({ enriched: { homeSqFt: 2200 } }));
+        await expect(price({ strictPriceSettings: true, db: withPlan(serviceTypes), propertyLookup })).rejects.toMatchObject(OTHER_SERVICE);
+        expect(propertyLookup).not.toHaveBeenCalled();
+        expect(sync).not.toHaveBeenCalled();
+      });
+
+      test('the default prices pest control for the lawn customer as before, beside the lawn plan', async () => {
+        sync.mockResolvedValue(true);
+        const result = await price({ db: withPlan(['Lawn Care']) });
+        expect(result.currentServices).toEqual(['Lawn Care']);
+        expect(result.options.length).toBeGreaterThan(0);
+        expect(result.options.every((option) => option.serviceKey === 'pest_control')).toBe(true);
+      });
+
+      test('strict: a customer whose one service is pest control gets the "already included" answer, not this refusal', async () => {
+        sync.mockResolvedValue(true);
+        const result = await price({ strictPriceSettings: true, db: withPlan(['Quarterly Pest Control']) });
+        expect(result.alreadyIncluded).toEqual(['Pest Control']);
+        expect(result.options).toEqual([]);
+      });
+
+      test('strict: a customer with no service now is priced', async () => {
+        sync.mockResolvedValue(true);
+        const result = await price({ strictPriceSettings: true, db: withPlan([]) });
+        expect(result.currentServices).toEqual([]);
+        expect(result.options.length).toBeGreaterThan(0);
+      });
+
+      // The services reader's default reads a failed customer read as "not a member": no current services.
+      // Under strict that answer would price the lawn customer as if pest control were the first service.
+      test('a failed read of the current services: the default prices as before, strict withholds pricing', async () => {
+        sync.mockResolvedValue(true);
+        // The first read of the customers table fails (the membership check of the qualifying read).
+        const failingOnce = () => {
+          const base = withPlan(['Lawn Care']);
+          let failed = false;
+          return Object.assign((table) => {
+            if (table === 'customers' && !failed) { failed = true; throw new Error('customers read down'); }
+            return base(table);
+          }, { schema: base.schema });
+        };
+        const byDefault = await price({ db: failingOnce() });
+        expect(byDefault.currentServices).toEqual([]);
+        expect(byDefault.options.length).toBeGreaterThan(0);
+
+        const strict = await price({ strictPriceSettings: true, db: failingOnce() });
+        expect(strict).toMatchObject({ ok: false, code: 'PRICING_UNAVAILABLE', options: [] });
+        expect(sync).toHaveBeenCalledTimes(1);
+      });
+    });
+  });
+
+  // Strict reads the customer's current services, so it needs a handle and a customer id. The default prices
+  // from the profile alone, as before.
+  test.each([
+    ['no database handle', { db: null }],
+    ['a customer with no id', { customer: { ...customer, id: undefined } }],
+  ])('%s: strict is a caller\'s mistake and never a price; the default still prices', async (_label, extra) => {
+    needsSync.mockReturnValue(false);
+    await expect(price({ strictPriceSettings: true, ...extra })).rejects.toThrow('strictPriceSettings needs a database handle and a customer id');
+    expect((await price(extra)).options.length).toBeGreaterThan(0);
   });
 
   // The default skips the refresh for a handle with no schema access. Strict cannot skip a refresh that is due.

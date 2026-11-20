@@ -804,7 +804,11 @@ const SYNC_INTERVAL = 60_000; // 1 minute cache
 // started and a warm one answer the same for the same rows.
 // attached_garage is the one optional field (no row has carried it). The
 // sync rebases it to its in-code value before it reads the row, so a process
-// that once took a value from a row does not keep it either.
+// that once took a value from a row does not keep it either. A row that does
+// carry it must carry a number, like a required field: the sync applies what
+// its arithmetic can read (true becomes 1, "5" becomes 5), and such a value
+// is not a price input the row states. Null is "left out", as the sync reads
+// it.
 // The answer moves together with _lastSync: a failed sync restores the
 // constants and leaves this answer as it was.
 const PEST_REQUIRED_FEATURE_ROW_FIELDS = Object.freeze([
@@ -812,6 +816,7 @@ const PEST_REQUIRED_FEATURE_ROW_FIELDS = Object.freeze([
   'shrubs_heavy', 'shrubs_moderate', 'shrubs_light', 'landscape_complex', 'landscape_moderate', 'landscape_simple',
   'near_water', 'indoor',
 ]);
+const PEST_OPTIONAL_FEATURE_ROW_FIELDS = Object.freeze(['attached_garage']);
 const RECURRING_PEST_PRICE_ROW_FIELDS = Object.freeze([
   'pest_base.base', 'pest_base.floor', 'pest_footprint.breakpoints',
   ...PEST_REQUIRED_FEATURE_ROW_FIELDS.map((field) => `pest_features.${field}`),
@@ -839,9 +844,18 @@ function recurringPestPriceFieldsInRows(config) {
   }
   return fields;
 }
-let _pestPriceFieldsInRows = new Set(); // of the last successful sync
+// Do the rows of one sync (its parsed `config`) state every price input the
+// sync applies? Every required field is carried, and an optional field is
+// left out or a number.
+function rowsStateRecurringPestPrice(config) {
+  const carried = recurringPestPriceFieldsInRows(config);
+  const features = config.pest_features && typeof config.pest_features === 'object' ? config.pest_features : {};
+  return RECURRING_PEST_PRICE_ROW_FIELDS.every((name) => carried.has(name))
+    && PEST_OPTIONAL_FEATURE_ROW_FIELDS.every((field) => features[field] == null || isRowNumber(features[field]));
+}
+let _pestPriceIsFromRows = false; // the answer of the last successful sync
 function recurringPestPriceIsFromRows() {
-  return RECURRING_PEST_PRICE_ROW_FIELDS.every((name) => _pestPriceFieldsInRows.has(name));
+  return _pestPriceIsFromRows;
 }
 
 // ── Pre-slab inventory-price link (owner decision 2026-07-10) ─────────────
@@ -2379,7 +2393,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
 
     assertValidPestPricingConfig(constants);
 
-    _pestPriceFieldsInRows = recurringPestPriceFieldsInRows(config);
+    _pestPriceIsFromRows = rowsStateRecurringPestPrice(config);
     _lastSync = Date.now();
     console.log(`[pricing-engine] Synced ${Object.keys(config).length} pricing configs from DB`);
     return true;

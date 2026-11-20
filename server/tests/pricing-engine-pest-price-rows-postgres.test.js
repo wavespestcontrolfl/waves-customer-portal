@@ -17,6 +17,7 @@ jest.mock('../models/db', () => new Proxy((...args) => mockConnection(...args), 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const crypto = require('crypto');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const PRICE_ROWS = ['pest_base', 'pest_footprint', 'pest_features', 'pest_property_type', 'waveguard_tiers'];
 const SAVED_LOOKUP = { enriched: { homeSqFt: 2400, lotSqFt: 8000, stories: 1 }, propertyRecord: {} };
@@ -119,6 +120,24 @@ postgres('recurring pest price rows (live Postgres)', () => {
     expect(cold.bridge.recurringPestPriceIsFromRows()).toBe(false);
   });
 
+  // The optional field of the features row: left out by the schema. A row that carries it must carry a number.
+  test('pest_features.attached_garage: a number counts, a boolean that the refresh takes does not (a warm worker and one that just started)', async () => {
+    const setGarage = (json) => trx.raw("UPDATE pricing_config SET data = jsonb_set(data, '{attached_garage}', ?::jsonb) WHERE config_key = 'pest_features'", [json]);
+    const warm = freshWorker();
+    await refresh(warm);
+    expect((await setGarage('7')).rowCount).toBe(1);
+    await expect(refresh(warm)).resolves.toBe(true);
+    expect(warm.bridge.recurringPestPriceIsFromRows()).toBe(true);
+
+    await setGarage('true');
+    await expect(refresh(warm)).resolves.toBe(true);
+    expect(warm.constants.PEST.additionalAdjustments.attachedGarage).toBe(Math.round(warm.constants.PROCESSING_ADJUSTMENT));
+    expect(warm.bridge.recurringPestPriceIsFromRows()).toBe(false);
+    const cold = freshWorker();
+    await expect(refresh(cold)).resolves.toBe(true);
+    expect(cold.bridge.recurringPestPriceIsFromRows()).toBe(false);
+  });
+
   // The pricer's strict option on the real rows. The default pricer is the one a person reads from: it still
   // prices from what the engine holds.
   describe('strictPriceSettings on the real rows', () => {
@@ -156,6 +175,36 @@ postgres('recurring pest price rows (live Postgres)', () => {
       await trx('pricing_config').insert({ ...row, data: JSON.stringify(row.data) });
       worker.bridge.invalidatePricingConfigCache();
       expect((await ask(worker, { strictPriceSettings: true })).options.length).toBeGreaterThan(0);
+    });
+
+    // The engine prices the services the customer has now too (the plan total and the tier beside each
+    // option), from settings the bridge has no proof for. The real ownership read finds the lawn visit.
+    test('a customer with a live recurring lawn visit who asks for pest control alone: the default prices it beside the lawn plan, strict refuses the customer', async () => {
+      const worker = freshWorker();
+      const tag = hex(4);
+      const [lawnCustomer] = await trx('customers').insert({
+        first_name: 'Jordan', last_name: 'Example', email: `jordan.${tag}@example.test`,
+        phone: `+1941${String(parseInt(tag, 16) % 10000000).padStart(7, '0')}`,
+        address_line1: `${(parseInt(tag, 16) % 9000) + 100} Example Test Ln`, city: 'Parrish', state: 'FL', zip: '34219',
+        // A plan member: the services reader counts current services for a member only.
+        active: true, pipeline_stage: 'won', waveguard_tier: 'Bronze',
+      }).returning('*');
+      await trx('scheduled_services').insert({
+        customer_id: lawnCustomer.id, scheduled_date: etDateString(addETDays(new Date(), 10)), service_type: 'Bi-Monthly Lawn Care Service',
+        status: 'confirmed', is_recurring: true,
+      });
+      const askFor = (extra = {}) => worker.pricer.buildCustomerPricingResponse({
+        customer: lawnCustomer, prompt: 'I am interested in adding pest control', db: trx, propertyLookup: async () => SAVED_LOOKUP, ...extra,
+      });
+
+      const result = await askFor();
+      expect(result.currentServices).toEqual(['Lawn Care']);
+      expect(result.options.length).toBeGreaterThan(0);
+      await expect(askFor({ strictPriceSettings: true })).rejects.toMatchObject({ code: 'STRICT_PRICE_OTHER_SERVICE' });
+
+      // Without the lawn visit the same customer is priced under strict.
+      await trx('scheduled_services').where({ customer_id: lawnCustomer.id }).del();
+      expect((await askFor({ strictPriceSettings: true })).options.length).toBeGreaterThan(0);
     });
 
     test('a worker that starts after a property type lost its value throws too', async () => {

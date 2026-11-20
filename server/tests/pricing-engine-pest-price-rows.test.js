@@ -251,12 +251,52 @@ describe('rows that lack a required input are refused by a cold worker and by a 
 // attached_garage is the one field of these rows that the rows may lack: no row has carried it. The sync gives
 // it its in-code value when the row has none, so a worker that took one from an earlier row does not keep it.
 describe('the optional field (pest_features.attached_garage) has an explicit default', () => {
-  test('a row with the field: the engine takes it, and the answer is yes', async () => {
+  test('a row with the field as a number: the engine takes it, and the answer is yes', async () => {
     const worker = freshWorker();
     const config = fullRows(worker.constants);
     config.pest_features.attached_garage = 9;
     await sync(worker, config);
     expect(worker.constants.PEST.additionalAdjustments.attachedGarage).toBe(9);
+    expect(worker.bridge.recurringPestPriceIsFromRows()).toBe(true);
+  });
+
+  // The sync applies what its arithmetic can read, so each of these reaches the engine as a finite number and
+  // passes the bridge's validation. None is a price input the row states, so the answer is no in every worker.
+  test.each([
+    ['true', true],
+    ['false', false],
+    ['a number saved as text', '7'],
+    ['a list of one number', [7]],
+  ])('a row with the field as %s: the sync applies it, and a cold worker and a warm worker refuse', async (_label, value) => {
+    const result = await answers((config) => { config.pest_features.attached_garage = value; });
+    expect(result).toMatchObject(REFUSED_BY_BOTH);
+    for (const { constants } of [result.cold, result.warm]) {
+      const applied = constants.PEST.additionalAdjustments.attachedGarage;
+      expect(applied).toBe(Math.round(value * constants.PROCESSING_ADJUSTMENT));
+      expect(Number.isFinite(applied)).toBe(true);
+    }
+  });
+
+  // Null is "left out": the sync does not apply it.
+  test('a row with the field as null: both workers hold the in-code value, and both answer yes', async () => {
+    const result = await answers((config) => { config.pest_features.attached_garage = null; });
+    expect(result).toMatchObject({ coldSynced: true, coldAnswer: true, warmSynced: true, warmAnswer: true });
+    const inCode = freshWorker().constants.PEST.additionalAdjustments.attachedGarage;
+    expect(result.cold.constants.PEST.additionalAdjustments.attachedGarage).toBe(inCode);
+    expect(result.warm.constants.PEST.additionalAdjustments.attachedGarage).toBe(inCode);
+  });
+
+  test('a warm worker that held a number refuses when the row then carries true, and answers yes again when the number is back', async () => {
+    const worker = freshWorker();
+    const config = fullRows(worker.constants);
+    config.pest_features.attached_garage = 9;
+    await sync(worker, config);
+    expect(worker.bridge.recurringPestPriceIsFromRows()).toBe(true);
+    config.pest_features.attached_garage = true;
+    await sync(worker, config);
+    expect(worker.bridge.recurringPestPriceIsFromRows()).toBe(false);
+    config.pest_features.attached_garage = 9;
+    await sync(worker, config);
     expect(worker.bridge.recurringPestPriceIsFromRows()).toBe(true);
   });
 

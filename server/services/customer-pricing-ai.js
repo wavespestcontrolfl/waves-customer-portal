@@ -272,7 +272,11 @@ async function safeSelect(db, table, buildQuery) {
   }
 }
 
-async function loadCurrentServiceKeys(db, customer) {
+// strict (strictPriceSettings, a price nobody watches): a failed read of the
+// qualifying services is not "no current services". The reader's own strict
+// form throws where its default reads a failure as "not a member", and
+// pricing is then withheld, as for a failed ownership read.
+async function loadCurrentServiceKeys(db, customer, { strict = false } = {}) {
   if (!db || !customer?.id) return { currentServiceKeys: [], ownedServiceKeys: [] };
   try {
     // Scope BOTH sets to the property being priced (codex #3253 r2): this
@@ -296,13 +300,15 @@ async function loadCurrentServiceKeys(db, customer) {
     // undercount earned tiers). ownedSet is unioned with the qualifying keys
     // downstream, so a failed ownership lookup degrades to qualifying-only.
     let currentServiceKeys = [];
+    let qualifyingLookupFailed = false;
     try {
       // WaveGuard is count-based across the customer's actual active
       // recurring qualifying services. A tier label alone never identifies
       // which services the customer bought, so it must not seed a
       // Pest/Lawn/Mosquito basket.
-      currentServiceKeys = (await loadExistingQualifyingServiceKeys(db, customer.id, { streetScope })).map(mapKey);
+      currentServiceKeys = (await loadExistingQualifyingServiceKeys(db, customer.id, strict ? { streetScope, strict: true } : { streetScope })).map(mapKey);
     } catch (err) {
+      qualifyingLookupFailed = strict;
       logger.warn(`[customer-pricing-ai] qualifying service lookup skipped: ${err.message}`);
     }
     let ownedServiceKeys = [];
@@ -319,7 +325,7 @@ async function loadCurrentServiceKeys(db, customer) {
       ownershipLookupFailed = true;
       logger.warn(`[customer-pricing-ai] ownership lookup failed — pricing withheld: ${err.message}`);
     }
-    return { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed };
+    return { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed: ownershipLookupFailed || qualifyingLookupFailed };
   } catch (err) {
     logger.warn(`[customer-pricing-ai] active service lookup failed — pricing withheld: ${err.message}`);
     return { currentServiceKeys: [], ownedServiceKeys: [], ownershipLookupFailed: true };
@@ -1215,11 +1221,19 @@ async function maybeSyncPricingEngine(db, { strict = false } = {}) {
 //    whether the rows of the last good refresh carried every input of the
 //    recurring pest price (recurringPestPriceIsFromRows), on both paths: a
 //    refresh that just ran, and settings that read fresh. The bridge has
-//    that proof for the recurring pest price only, which is why strict
-//    prices pest control only (buildCustomerPricingResponse refuses another
-//    service).
+//    that proof for the recurring pest price only, which is why under strict
+//    the engine models pest control only: buildCustomerPricingResponse
+//    refuses another service to price (a caller's mistake), and a customer
+//    who has another service now (STRICT_PRICE_OTHER_SERVICE: the engine
+//    would price that service too, for the plan total and the tier).
 function priceSettingsUnavailable(message) {
   return Object.assign(new Error(message), { code: 'PRICING_CONFIG_UNAVAILABLE' });
+}
+function strictOtherService() {
+  return Object.assign(
+    new Error('strictPriceSettings: the customer has a current service other than pest control'),
+    { code: 'STRICT_PRICE_OTHER_SERVICE' },
+  );
 }
 async function strictPriceSettingsRefresh(db) {
   const bridge = require('./pricing-engine/db-bridge');
@@ -1255,11 +1269,18 @@ async function buildCustomerPricingResponse({
   // running refresh of the price settings that fails throws, and so does a
   // pest price whose inputs did not come from their rows, instead of a price
   // from the values the engine had (strictPriceSettingsRefresh). Pest control
-  // only. No caller passes it yet.
+  // only, for a customer who has no other service now. No caller passes it
+  // yet.
   strictPriceSettings = false,
 }) {
   const text = String(prompt || '').trim();
-  const { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed } = await loadCurrentServiceKeys(db, customer);
+  // strict reads the customer's current services (below) and the price
+  // settings. Without a handle or a customer id the first would read as
+  // "none": a caller's mistake, never a price.
+  if (strictPriceSettings && (!db || !customer?.id)) {
+    throw new Error('strictPriceSettings needs a database handle and a customer id');
+  }
+  const { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed } = await loadCurrentServiceKeys(db, customer, { strict: strictPriceSettings });
   // Two sets on purpose (codex #3253 r2): currentServiceKeys (WaveGuard
   // qualifying) keeps modeling the baseline plan/tier exactly as before;
   // ownedSet is the superset every never-re-price decision reads, so a
@@ -1327,10 +1348,23 @@ async function buildCustomerPricingResponse({
   const alreadyIncluded = requestedServices.filter(key => ownedAndNotRepeatable(key, ownedSet));
   const servicesToPrice = requestedServices.filter(key => !alreadyIncluded.includes(key));
   // strictPriceSettings: the bridge can prove "from the rows" for the
-  // recurring pest price only (strictPriceSettingsRefresh), so strict refuses
-  // to price anything else. A caller's mistake: refused before any lookup.
-  if (strictPriceSettings && servicesToPrice.some((key) => key !== 'pest_control')) {
-    throw new Error('strictPriceSettings prices pest control only');
+  // recurring pest price only (strictPriceSettingsRefresh), so under strict
+  // the engine may model pest control and nothing else. Both refused before
+  // any lookup.
+  if (strictPriceSettings) {
+    // A service to price: a caller's mistake.
+    if (servicesToPrice.some((key) => key !== 'pest_control')) {
+      throw new Error('strictPriceSettings prices pest control only');
+    }
+    // A service the customer has now. The engine prices those too (the
+    // current plan, and each option's plan total and tier beside it), from
+    // settings that have no proof. This is the customer's own state, so the
+    // error carries a code a caller can tell from its own mistake. (A failed
+    // read of the current services never reaches here under strict: pricing
+    // was withheld above, loadCurrentServiceKeys.)
+    if (currentServiceKeys.some((key) => key !== 'pest_control')) {
+      throw strictOtherService();
+    }
   }
 
   let lookupFn = propertyLookup;
