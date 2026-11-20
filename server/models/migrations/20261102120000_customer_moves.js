@@ -1,5 +1,5 @@
 // Customer moving flow, PR 1 (owner 2026-11-02, "a moving email where they can
-// do it").
+// do it"), dark behind GATE_MOVING_FLOW.
 //
 //   customer_moves  one row per move a customer tells us about. The office
 //                   sends a link (email or text) that carries `token`; the

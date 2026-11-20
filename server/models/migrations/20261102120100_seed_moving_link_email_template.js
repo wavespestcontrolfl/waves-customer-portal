@@ -2,7 +2,7 @@
 
 /**
  * Seed the moving email (template_key 'moving_link'), owner 2026-11-02, "a
- * moving email where they can do it".
+ * moving email where they can do it", dark behind GATE_MOVING_FLOW.
  *
  * The office sends it by hand from the Customer 360 Moving card
  * (services/account-membership-email.js sendMovingLink). It points at the
