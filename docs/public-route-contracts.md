@@ -6568,6 +6568,15 @@ and rodent-trapping rows may carry the sold allowance used to render that
 copy: `includedFollowUps` / `includedCallbacks` (number, `'unlimited'`, or
 null), `unlimitedCallbacks` (boolean or null), and `includedScope` (string or
 null). These are terms from the saved pricing snapshot, not live job counts.
+Whole-home rodent exclusion rows (`GATE_EXCLUSION_WHOLE_HOME`, dark) may also carry
+`includesReentryGuarantee` (true only), `reentryGuaranteeMonths` (number or null) and
+`guaranteeRenewalPrice` (positive number or null), the sold 1-year re-entry guarantee and its yearly
+renewal price. The keys are absent on every other row. New pricing needs `GATE_EXCLUSION_WHOLE_HOME`; a saved
+row's terms survive a rollback, because the public rows read the saved flag, so a customer keeps the guarantee
+they were quoted after the gate goes off. Only
+`includesReentryGuarantee === true` makes the row's copy state the guarantee: its bullet stays in
+the `'satisfaction'` and `'none'` guarantee scopes (as a purchased trenching warranty does) and its terms
+line names the renewal price; a row without the flag never states it.
 Dead Rodent Removal & Odor Treatment rows (`rodent_dead_animal_removal`, dark behind
 `GATE_DEAD_ANIMAL_REMOVAL`) never carry `deadAnimalTier` or `onSiteMinutes`: the sold access
 tier and its on-site minutes stay in the unsanitized breakdown the booking path reads
