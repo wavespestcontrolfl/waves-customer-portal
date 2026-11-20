@@ -324,7 +324,7 @@ describe('buildStartOffer', () => {
   });
 
   // The fake database holds no price settings, so the bridge's refresh would fail and the start offer would
-  // refuse to price (assertLivePriceSettings). Fresh settings are the default here; one describe below tests the rule.
+  // refuse to price (strict price settings). Fresh settings are the default here; one describe below tests the rule.
   let needsSync;
   beforeEach(() => { needsSync = jest.spyOn(pricingEngine, 'needsSync').mockReturnValue(false); });
   afterEach(() => { needsSync.mockRestore(); });
@@ -385,6 +385,30 @@ describe('buildStartOffer', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  // The calendar read answers the rows that carry the recurring flag. Its row rule (isLiveObligationRow) decides
+  // which of them is a live plan visit, here and in the pricer's own ownership read. The table below answers
+  // ONLY the reads that ask for the flag, so these cases cannot pass on the legacy read.
+  describe('a visit that carries the recurring flag', () => {
+    const asksForRecurringFlag = (calls) => calls.some(([name, filter]) => name === 'where' && filter && filter.is_recurring === true);
+    const FLAGGED = { id: 'svc-1', service_type: 'Quarterly Pest Control', is_recurring: true, status: 'scheduled', scheduled_date: FUTURE_SCHEDULED_DATE };
+    const calendarDb = (row) => noPlanDb({ visits: (calls) => (asksForRecurringFlag(calls) ? [row] : []) });
+
+    test('means the customer has a plan', async () => {
+      expect(await start(calendarDb(FLAGGED))).toEqual({ option: null, reason: 'has_plan' });
+    });
+
+    // An included follow-up is the $0 second visit of a one-time job. It rides the job, never a plan, whatever
+    // its recurring flag says: the same answer as for the legacy shape below.
+    test.each([
+      ['an included follow-up', { followup_included: true }],
+      ['an included follow-up in progress now', { followup_included: true, status: 'on_site' }],
+      ['a free re-service callback', { is_callback: true }],
+      ['a visit booked from a one-time source', { source: 'estimate-accept' }],
+    ])('%s is not a plan visit: the home is priced', async (_label, change) => {
+      expect(await start(calendarDb({ ...FLAGGED, ...change }))).toMatchObject({ reason: null, option: { id: 'pest-quarterly' } });
+    });
   });
 
   // A legacy plan visit carries no recurring flag (NULL) and a recurring parent. The calendar read asks for
@@ -582,7 +606,10 @@ describe('buildStartOffer', () => {
 
   // The bridge answers a failed refresh of the price settings with the values it had (the code defaults on a
   // cold start). The start offer prices with nobody watching, so a refresh that is due and fails is no price.
+  // The rule is enforced at the pricer's own refresh step, right before the engine prices: the start offer asks
+  // the pricer for strict price settings.
   describe('the live price settings', () => {
+    const pricer = require('../services/customer-pricing-ai');
     let sync;
     beforeEach(() => { sync = jest.spyOn(pricingEngine, 'syncConstantsFromDB'); });
     afterEach(() => { sync.mockRestore(); });
@@ -593,17 +620,26 @@ describe('buildStartOffer', () => {
     });
 
     test('a refresh that is due and succeeds prices, from the database the caller passed', async () => {
-      needsSync.mockReturnValueOnce(true);
-      sync.mockResolvedValueOnce(true);
+      needsSync.mockReturnValue(true);
+      sync.mockResolvedValue(true);
       const db = noPlanDb();
       expect(await start(db)).toMatchObject({ reason: null, option: { id: 'pest-quarterly' } });
       expect(sync).toHaveBeenCalledWith(db);
     });
 
     test.each([[false], [undefined]])('a refresh that is due and answers %p throws: never a price from the old values or the code defaults', async (answer) => {
-      needsSync.mockReturnValueOnce(true);
-      sync.mockResolvedValueOnce(answer);
+      needsSync.mockReturnValue(true);
+      sync.mockResolvedValue(answer);
       await expect(start(noPlanDb())).rejects.toMatchObject({ code: 'PRICING_CONFIG_UNAVAILABLE' });
+    });
+
+    // The settings can be fresh when the offer starts and come due while it reads (the interval ends, or an
+    // admin edit invalidates them). A check made before the reads would pass; the pricer's own step must decide.
+    test('settings that come due during the reads, with a refresh that fails, throw at the pricer', async () => {
+      sync.mockResolvedValue(false);
+      const lookupThenDue = async (address) => { needsSync.mockReturnValue(true); return savedLookup(address); };
+      await expect(start(noPlanDb(), { propertyLookup: lookupThenDue })).rejects.toMatchObject({ code: 'PRICING_CONFIG_UNAVAILABLE' });
+      expect(sync).toHaveBeenCalledTimes(1);
     });
 
     test('a customer who is refused before the price costs no refresh', async () => {
@@ -611,6 +647,27 @@ describe('buildStartOffer', () => {
       sync.mockResolvedValue(false);
       expect(await start(noPlanDb({ serviceTypes: ['Lawn Care Program'] }))).toEqual({ option: null, reason: 'has_plan' });
       expect(sync).not.toHaveBeenCalled();
+    });
+
+    // Only the start offer asks. The cards a person reads keep the best-effort refresh: a failed refresh still
+    // prices from the values the engine had, as before.
+    test('the start offer asks the pricer for strict price settings; the portal card does not, and still prices', async () => {
+      const spy = jest.spyOn(pricer, 'buildCustomerPricingResponse');
+      try {
+        await start(noPlanDb());
+        expect(spy.mock.calls[0][0]).toMatchObject({ strictPriceSettings: true });
+        spy.mockClear();
+        needsSync.mockReturnValue(true);
+        sync.mockResolvedValue(false);
+        const card = await buildPortalOffer('cust-1', dbFor({ serviceTypes: ['Quarterly Pest Control'] }), { propertyLookup: savedLookup });
+        expect(spy).toHaveBeenCalled();
+        for (const [args] of spy.mock.calls) expect(args).not.toHaveProperty('strictPriceSettings');
+        // The refresh was tried, failed, and the card was still built.
+        expect(sync).toHaveBeenCalled();
+        expect(['priced', 'quote_cta']).toContain(card.mode);
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 

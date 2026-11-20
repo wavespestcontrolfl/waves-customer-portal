@@ -1180,10 +1180,21 @@ function buildQuoteOption({
   };
 }
 
-async function maybeSyncPricingEngine(db) {
-  if (!db || !db.schema || typeof db.schema.hasTable !== 'function') return;
-  if (pricingEngine.needsSync && pricingEngine.needsSync()) {
-    await pricingEngine.syncConstantsFromDB(db);
+// The refresh of the engine's price settings, right before the engine prices.
+// Default: best-effort. The bridge answers a failed refresh with the values it
+// had (the code defaults on a cold start), and a card a person reads may show
+// a price from those.
+// strict (a caller that prices with nobody watching): a refresh that is due
+// and does not succeed THROWS PRICING_CONFIG_UNAVAILABLE. This is the place to
+// enforce it: a check made before the pricer's own reads can pass, and the
+// interval can still come due (or an admin edit can invalidate it) by here.
+async function maybeSyncPricingEngine(db, { strict = false } = {}) {
+  const canSync = Boolean(db && db.schema && typeof db.schema.hasTable === 'function');
+  if (!canSync && !strict) return;
+  if (!(pricingEngine.needsSync && pricingEngine.needsSync())) return;
+  const synced = canSync ? await pricingEngine.syncConstantsFromDB(db) : false;
+  if (strict && synced !== true) {
+    throw Object.assign(new Error('live price settings could not be loaded'), { code: 'PRICING_CONFIG_UNAVAILABLE' });
   }
 }
 
@@ -1204,6 +1215,10 @@ async function buildCustomerPricingResponse({
   // context carries raw engine inputs, so no default caller — and no public
   // payload — may ever receive it.
   includeEngineContext = false,
+  // Opt-in ONLY (the plan start offer, priced by a job with nobody watching):
+  // a due refresh of the price settings that fails throws, instead of a price
+  // from the values the engine had (maybeSyncPricingEngine).
+  strictPriceSettings = false,
 }) {
   const text = String(prompt || '').trim();
   const { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed } = await loadCurrentServiceKeys(db, customer);
@@ -1322,7 +1337,7 @@ async function buildCustomerPricingResponse({
     };
   }
 
-  await maybeSyncPricingEngine(db);
+  await maybeSyncPricingEngine(db, { strict: strictPriceSettings });
 
   const context = {
     grassType: propertyContext.grassType,

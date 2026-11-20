@@ -1209,7 +1209,7 @@ async function resolvePortalOfferTarget(database, customerId, customer, primaryS
 // route leaves the draft pending with a 503.
 // Returns { result, propertySeed, correctionsUnapplied } to hand to the
 // outcome stage, or null for every fail-closed/refused exit this stage owns.
-async function resolvePortalOfferPricingResult({ database, customerId, customer, targetKey, primaryStreet, propertyLookup, throwOnError }) {
+async function resolvePortalOfferPricingResult({ database, customerId, customer, targetKey, primaryStreet, propertyLookup, throwOnError, strictPriceSettings = false }) {
   // Best-effort seed — a failed estimate read must not kill the card, it
   // just prices without the seed (and likely degrades to the CTA).
   let propertySeed = null;
@@ -1246,6 +1246,9 @@ async function resolvePortalOfferPricingResult({ database, customerId, customer,
     db: database,
     propertyLookup: trackedPropertyLookup,
     propertySeed,
+    // Only the plan start offer asks for it; every other caller's call is
+    // unchanged (the pricer's default refresh is best-effort).
+    ...(strictPriceSettings ? { strictPriceSettings: true } : {}),
   });
 
   let correctionsUnapplied = false;
@@ -1462,7 +1465,10 @@ async function hasLiveLegacyPlanVisit(database, customerId) {
 // - the calendar: any live recurring obligation. The test is the live rows,
 //   never the owned keys: a recurring palm injection or a termite bond maps to
 //   no offer family and is still the customer's plan. A legacy plan visit
-//   (no recurring flag, a recurring parent) counts too (hasLiveLegacyPlanVisit);
+//   (no recurring flag, a recurring parent) counts too (hasLiveLegacyPlanVisit).
+//   One row rule judges both shapes (isLiveObligationRow), so a visit that
+//   rides a job without being a plan visit (a callback, an included
+//   follow-up, a one-time booking) is not a plan, whatever its flag says;
 // - the plan-rate ledger: any billed component, also one the ledger could not
 //   name (the portal card reads only the named ones: it must place a rate on
 //   a family, and here a billed rate with no name is still a plan). The read
@@ -1493,29 +1499,15 @@ async function customerHoldsPlan(database, customer) {
 // profile needs that read made strict before it joins this list.
 const START_OFFER_FAMILIES = Object.freeze(['pest_control']);
 
-// The price must come from the LIVE price settings. The pricer refreshes them
-// when the bridge's interval is due, and the bridge answers a failed refresh
-// with the values it had (the code defaults on a cold start). A card that a
-// person reads may show that; an offer priced with nobody watching must not
-// carry it. Same rule as the misting refill (pricingIsFresh in
-// misting-refill.js): a refresh that is due and fails means no price.
-async function assertLivePriceSettings(database) {
-  const engine = require('../pricing-engine');
-  if (!engine.needsSync()) return;
-  if ((await engine.syncConstantsFromDB(database)) !== true) {
-    throw Object.assign(new Error('live price settings could not be loaded'), { code: 'PRICING_CONFIG_UNAVAILABLE' });
-  }
-}
-
 // buildStartOffer(customerId, database, targetKey, { visitId }) → { option, reason }.
 // The one-time plan offer's entry point (owner 2026-11-19): the price of ONE
 // family (START_OFFER_FAMILIES) for a customer who has NO recurring service.
 // composePortalOffer answers null for that customer on purpose (its card ADDS
-// a service to a plan), so this runs the same stages with the ownership answer reversed: any
-// record of a plan (customerHoldsPlan) means the customer has a plan. Same
-// premises proof, cache-only lookup, estimate seed and demotions as every
-// other offer surface, so the price is the one the report card and the portal
-// would show.
+// a service to a plan), so this runs the same stages with the ownership answer
+// reversed: any record of a plan (customerHoldsPlan) means the customer has a
+// plan. Same premises proof, cache-only lookup, estimate seed and demotions as
+// every other offer surface, so the price is the one the report card and the
+// portal would show.
 // `option` is the full quoted option for a priced answer, else null with the
 // `reason` the app could not offer or price it: 'premises' (not a live,
 // residential, single-premises account, or `visitId` is not provably at
@@ -1533,7 +1525,13 @@ async function assertLivePriceSettings(database) {
 // lookup's own reads: the default lookup is the strict cache-only form
 // (strictCacheOnlyPropertyLookup), so a failed cache read is not a miss and a
 // failed correction read is not "no corrections". It covers the price
-// settings too (assertLivePriceSettings).
+// settings too: the pricer is asked for strict price settings, so a refresh
+// that is due and fails at the pricer's own refresh step, right before the
+// engine prices, throws PRICING_CONFIG_UNAVAILABLE. The bridge answers a
+// failed refresh with the values it had (the code defaults on a cold start);
+// a card that a person reads may show a price from those, and an offer priced
+// with nobody watching must not (same rule as pricingIsFresh in
+// misting-refill.js).
 async function buildStartOffer(customerId, database, targetKey, { propertyLookup = strictCacheOnlyPropertyLookup, visitId = null } = {}) {
   if (!customerId || !database || !visitId || !START_OFFER_FAMILIES.includes(targetKey)) {
     throw new Error('buildStartOffer: a customer, a database, a start offer family and the visit the offer follows are required');
@@ -1543,9 +1541,8 @@ async function buildStartOffer(customerId, database, targetKey, { propertyLookup
   const { customer, primaryStreet } = premises;
   if (!(await visitIsAtPrimaryPremises(database, customer, visitId, primaryStreet))) return { option: null, reason: 'premises' };
   if (await customerHoldsPlan(database, customer)) return { option: null, reason: 'has_plan' };
-  await assertLivePriceSettings(database);
   const pricing = await resolvePortalOfferPricingResult({
-    database, customerId, customer, targetKey, primaryStreet, propertyLookup, throwOnError: true,
+    database, customerId, customer, targetKey, primaryStreet, propertyLookup, throwOnError: true, strictPriceSettings: true,
   });
   if (!pricing || pricing.refusal) return { option: null, reason: pricing?.refusal === 'owned' ? 'has_plan' : 'not_priced' };
   // A customer who reaches the price holds no plan, so nothing is owned.

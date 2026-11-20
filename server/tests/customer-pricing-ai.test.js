@@ -1110,6 +1110,97 @@ describe('ownership lifecycle evidence', () => {
     }), 'cust-past');
     expect(owned).toEqual([]);
   });
+
+  // An included follow-up is the $0 second visit of a one-time job. No writer saves one with the recurring flag;
+  // if a row ever carries both, it is still not a recurring service the customer owns, so its family is quoted.
+  test('an included follow-up that carries the recurring flag is not ownership evidence, and its family is still quoted', async () => {
+    const loadOwned = loadOwnedGated();
+    const followUp = {
+      id: 'svc-fu', service_type: 'Quarterly Pest Control', scheduled_date: futureDate,
+      status: 'confirmed', is_recurring: true, followup_included: true,
+    };
+    const mk = (rows) => dbForTables({
+      customers: [{ id: 'cust-fu', active: true, waveguard_tier: null, monthly_rate: null }],
+      scheduled_services: rows,
+    });
+    expect(await loadOwned(mk([followUp]), 'cust-fu')).toEqual([]);
+    expect(await loadOwned(mk([{ ...followUp, followup_included: false }]), 'cust-fu')).toEqual(['pest_control']);
+
+    const quote = (rows) => buildCustomerPricingResponse({
+      db: mk(rows),
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-fu', waveguard_tier: null, monthly_rate: null }),
+    });
+    const quoted = await quote([followUp]);
+    expect(quoted.alreadyIncluded).toEqual([]);
+    expect(quoted.options.some((option) => option.serviceKey === 'pest_control')).toBe(true);
+    const owned = await quote([{ ...followUp, followup_included: false }]);
+    expect(owned.alreadyIncluded).toContain('Pest Control');
+    expect(owned.options).toEqual([]);
+  });
+});
+
+// strictPriceSettings (the plan start offer, priced by a job with nobody watching): a refresh of the engine's
+// price settings that is due and fails throws at the pricer's own refresh step, right before the engine prices.
+// The default stays best-effort: the bridge answers a failed refresh with the values it had.
+describe('strictPriceSettings: the refresh of the price settings before the engine prices', () => {
+  const pricingEngine = require('../services/pricing-engine');
+  let needsSync;
+  let sync;
+  beforeEach(() => {
+    needsSync = jest.spyOn(pricingEngine, 'needsSync').mockReturnValue(true);
+    sync = jest.spyOn(pricingEngine, 'syncConstantsFromDB').mockResolvedValue(false);
+  });
+  afterEach(() => { needsSync.mockRestore(); sync.mockRestore(); });
+
+  const customer = propertyCustomer({ id: 'cust-strict', waveguard_tier: null, monthly_rate: null });
+  // A handle the bridge could refresh from (the refresh itself is the spy above).
+  const refreshable = () => Object.assign(dbForTables({ customers: [customer], scheduled_services: [] }), { schema: { hasTable: async () => false } });
+  const price = (extra = {}) => buildCustomerPricingResponse({
+    db: refreshable(),
+    propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
+    prompt: 'I am interested in adding pest control',
+    customer,
+    ...extra,
+  });
+  const UNAVAILABLE = { code: 'PRICING_CONFIG_UNAVAILABLE' };
+
+  test('default: a refresh that is due and fails still prices, from the values the engine had', async () => {
+    const result = await price();
+    expect(sync).toHaveBeenCalledTimes(1);
+    expect(result.options.length).toBeGreaterThan(0);
+  });
+
+  test.each([[false], [undefined], [null]])('strict: a refresh that is due and answers %p throws, never a price', async (answer) => {
+    sync.mockResolvedValue(answer);
+    await expect(price({ strictPriceSettings: true })).rejects.toMatchObject(UNAVAILABLE);
+  });
+
+  test('strict: a refresh that is due and succeeds prices, from the handle the caller passed', async () => {
+    sync.mockResolvedValue(true);
+    const db = refreshable();
+    const result = await price({ strictPriceSettings: true, db });
+    expect(sync).toHaveBeenCalledWith(db);
+    expect(result.options.length).toBeGreaterThan(0);
+  });
+
+  test('strict: fresh settings are not loaded again', async () => {
+    needsSync.mockReturnValue(false);
+    const result = await price({ strictPriceSettings: true });
+    expect(sync).not.toHaveBeenCalled();
+    expect(result.options.length).toBeGreaterThan(0);
+  });
+
+  // The default skips the refresh for a handle with no schema access. Strict cannot skip a refresh that is due.
+  test('a handle that cannot refresh: the default prices, strict throws while a refresh is due and prices while the settings are fresh', async () => {
+    const noSchema = () => dbForTables({ customers: [customer], scheduled_services: [] });
+    expect((await price({ db: noSchema() })).options.length).toBeGreaterThan(0);
+    await expect(price({ db: noSchema(), strictPriceSettings: true })).rejects.toMatchObject(UNAVAILABLE);
+    needsSync.mockReturnValue(false);
+    expect((await price({ db: noSchema(), strictPriceSettings: true })).options.length).toBeGreaterThan(0);
+    expect(sync).not.toHaveBeenCalled();
+  });
 });
 
 // Codex #3253 r4: rodent ownership = bait-monitoring products only; owned-only

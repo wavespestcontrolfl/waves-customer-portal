@@ -197,6 +197,10 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   // other consumer of these rows.
   if (cols.is_callback) selectCols.push('is_callback');
   if (cols.source) selectCols.push('source');
+  // Carried for the ownership lifecycle filter (isLiveObligationRow): an
+  // included follow-up is not a live recurring obligation. Additive for every
+  // other consumer of these rows.
+  if (cols.followup_included) selectCols.push('followup_included');
   // For per-property tier scoping: an unstamped row resolves its property via
   // the estimate that created it (codex #3244 r6) — or directly via its
   // customer_properties link (codex #3367 PR r8).
@@ -694,7 +698,8 @@ async function loadLiveRecurringObligationRows(database, customerId) {
   // Same lifecycle evidence as the qualifying loader, applied
   // UNCONDITIONALLY (pre-push P1 ×2): a past phantom row, a callback, or a
   // one-time booking source is not a live recurring obligation and must not
-  // suppress a legitimate quote. Ownership is a NEW rule with no legacy
+  // suppress a legitimate quote. Neither is an included follow-up
+  // (isLiveObligationRow). Ownership is a NEW rule with no legacy
   // behavior to preserve, so the autoWaveguardTierEnroll gate — which exists
   // to keep the QUALIFYING path byte-identical when off — does not apply.
   // Only the lifecycle predicate is shared; the qualifying loader's
@@ -710,11 +715,20 @@ async function loadLiveRecurringObligationRows(database, customerId) {
 // billed-plan logic per #3241 r5): a visit still en_route/on_site across
 // ET midnight is the customer's plan all the same — those bypass the date
 // cutoff but never the callback/one-time exclusions.
+// An included follow-up (the $0 visit a one-time job's price already paid
+// for) is never one, whatever its recurring flag says: it rides a job, not a
+// plan. Same exclusion as the plan's own row rule (isPlanSeriesRow in
+// recurring-series-cancel-reseed.js) and the rate review's PLAN_ROW_SQL. No
+// writer saves an included follow-up with the recurring flag set, so this
+// guards a row shape, not a live case. It is here, and not in
+// rowPassesGatedPricingEvidence, because that predicate is also the gated
+// TIER evidence, which this must not change.
 // Exported so a reader of another row SHAPE judges "live" by this one rule
 // (the legacy plan visit in service-report/cross-sell.js). `today` is the ET
 // calendar day (etDateString()).
 const LIVE_IN_PROGRESS_STATUSES = new Set(['en_route', 'on_site', 'in_progress']);
 function isLiveObligationRow(row, today) {
+  if (row.followup_included === true) return false;
   if (!LIVE_IN_PROGRESS_STATUSES.has(String(row.status || '').toLowerCase())) return rowPassesGatedPricingEvidence(row, today);
   const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
   return !isCallbackRow(row) && !isOneTimeBookingSource(row.source);
