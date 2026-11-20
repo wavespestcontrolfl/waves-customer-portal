@@ -868,23 +868,32 @@ const customerAddressFields = (cust) => ({
 // pin): phase 1 books another street on a corrected or another profile, with the typed city, so the city on file
 // there named the old street, and its zone would drop another truck's opening the booking admits (pre-push P1 on
 // 1ef6ba1b16). Phase 1 makes the profile it books this lead's trusted one, so a retry's list reads that profile.
-// Nor for a place the area check refuses (Punta Gorda), which phase 1 never keeps, unless a staff-verified pin keeps
-// the whole profile (pre-push P1 on f6c3fdc9e9). Nor when the typed address names a served South Hillsborough town,
-// by city or ZIP: the area check may admit it by that name alone, so phase 1 keeps the typed city (pre-push P1 on
-// c49372bb7d: a kept Venice at a Hillsborough pin failed the next area check). zoneFallbackCity is that city, the one
-// phase 1 may keep: the commit's zone re-check compares with it, and phase 1 keeps only it. Phase 1 reads it from
-// the same trusted view of the profile as the list (its pin can be the primary property's), and with `rewritten`,
-// since it then writes over the profile: no staff-verified pin keeps the city there.
-// `bookedCity`: the commit's re-check runs after phase 1, so it passes the city on file of the profile phase 1
-// booked, the city createSelfBooking falls back to, in place of that prediction: a sibling phase 1 reused keeps its
-// own city, even a place the area check refuses.
-const zoneFallbackCity = (customer, address, coords, { rewritten = false } = {}) => (
+// Nor for a place the area check refuses (Punta Gorda), which phase 1 never keeps, nor when the typed address names a
+// served South Hillsborough town, by city or ZIP: the area check may admit it by that name alone, so phase 1 keeps the
+// typed city (pre-push P1s on f6c3fdc9e9 and c49372bb7d: a kept Venice at a Hillsborough pin failed the next area
+// check). Both hold unless phase 1 keeps the whole profile (`retained`: provisionLinkedCustomer retainReviewedLocation,
+// a staff-verified pin and a typed address that matches the customers row by its own ZIP or pin), as it then writes
+// nothing. zoneFallbackCity is that city, the one phase 1 may keep: phase 1 keeps only it, read from the same trusted
+// view of the profile as the list (its pin can be the primary property's). A list reads it through listFallbackCity,
+// which asks the customers row itself whether phase 1 keeps the whole profile, as phase 1 does (pre-push P1 on
+// cebd106404: a list took a staff-verified pin on the primary property alone for that, and so dropped the only free
+// truck for a refused city that phase 1 then wrote over).
+// `fallbackCity`: a caller that already knows the city passes it. The commit's first build passes the one its zone
+// re-check compares with. The re-check runs after phase 1, so it passes the city on file of the profile phase 1
+// booked, the city createSelfBooking falls back to: a sibling phase 1 reused keeps its own city, even a refused place.
+const zoneFallbackCity = (customer, address, coords, { retained = false } = {}) => (
   customer && profileMatchesAddress(customer, address, coords)
-    && ((customer.verified_by_review && !rewritten) || !(isExcludedLocality(customer.city)
+    && (retained || !(isExcludedLocality(customer.city)
       || isServedSouthHillsboroughTown({ cities: [address.city], zips: address.zip ? [address.zip] : [] })))
     ? customer.city : null
 );
-async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, customer, bookedCity }) {
+async function listFallbackCity(conn, customer, address, coords) {
+  const row = customer?.verified_by_review
+    ? await conn('customers').where({ id: customer.id }).first('address_line1', 'address_line2', 'zip', 'latitude', 'longitude')
+    : null;
+  return zoneFallbackCity(customer, address, coords, { retained: Boolean(row) && profileMatchesAddress(row, address, coords) });
+}
+async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, customer, fallbackCity }) {
   const booking = require('./booking');
   const { buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
   const zoneInputs = zoneFunnelInputs(address);
@@ -926,7 +935,7 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     ...(zoneInputs ? {
       zoneFunnelAddress: zoneInputs.address,
       zoneFunnelCity: zoneInputs.city,
-      zoneFunnelCustomerCity: bookedCity ?? zoneFallbackCity(customer, address, coords),
+      zoneFunnelCustomerCity: fallbackCity === undefined ? await listFallbackCity(db, customer, address, coords) : fallbackCity,
     } : {}),
   });
 }
@@ -2178,8 +2187,9 @@ async function provisionLinkedCustomer(trx, {
     // truck rule, such as Sarasota, needs no kept city); with the funnel off
     // no zone is read from it. The match reads the trusted view of the row
     // (freshCustRow), as the list does: its pin can be the primary
-    // property's (pre-push P1 on c49372bb7d).
-    const listCity = zoneFallbackCity(freshCustRow, resolved.address, resolved.location, { rewritten: true });
+    // property's (pre-push P1 on c49372bb7d). This branch does not keep the
+    // whole profile, so no `retained`.
+    const listCity = zoneFallbackCity(freshCustRow, resolved.address, resolved.location);
     const { zone: cityZone, fromCustomer } = funnelOn()
       ? await leadBookingZone(trx, zoneFunnelInputs(resolved.address), listCity) : {};
     const city = fromCustomer && isFunnelZone(cityZone) ? listCity : resolved.address.city;
@@ -2351,14 +2361,14 @@ async function sendSlotTaken(res, { location, address = null, customer, range, c
 // one truck, a zone the funnel does not cover, or the city the first build
 // read, a same-pin re-check would only repeat the first build and its travel
 // lookups (pre-push P1s on 2b747741a9, 5fc5e4d648 and 4eb9c11d2a). It reads
-// the customer's city on file as phase 1 left it (`bookedCity`), the city the
+// the customer's city on file as phase 1 left it (`fallbackCity`), the city the
 // booking falls back to, so a reused sibling's city on file decides here too.
 async function revalidateSlotAt(location, { slot, moved, zoneMoved, zone, date, time, config, catalog, leadId, address, customer }) {
   if (!moved && !(zoneMoved && perTruckLive() && isFunnelZone(zone))) return slot;
   let refreshedDay = null;
   try {
     refreshedDay = await buildAvailabilityForLead(location, {
-      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address, bookedCity: customer.city,
+      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address, fallbackCity: customer.city ?? null,
     });
   } catch (err) {
     logger.warn(`[inspection-public] slot re-validation failed for lead ${leadId}: ${err.message}`);
@@ -2765,10 +2775,12 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // to the truck the list offered, or SLOT_TAKEN when that truck lost the
     // hour (pre-push P1 on 4eb9c11d2a: phase 1 can write the typed city onto
     // the profile, and no later check then reads the city the list read).
+    // It reads that city once, before phase 1 can write the row
+    // (listFallbackCity), and the zone re-check below compares with it.
+    const firstCity = await listFallbackCity(db, custRow, resolved.address, resolved.location);
     const dayAvailability = await buildAvailabilityForLead(resolved.location, {
-      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address: resolved.address, customer: custRow,
+      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address: resolved.address, fallbackCity: firstCity,
     });
-    const checkedCustomer = custRow;
     const slot = findSlotIn(dayAvailability, date, time);
     if (!slot) return sendSlotTaken(res, { location: resolved.location, address: resolved.address, customer: custRow, range, config, catalog, leadId: lead.id });
 
@@ -2837,7 +2849,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // no zone.
     // Every build here passes that address and this customer, so it reads the
     // same zone. When the city decides and is not the city the first build
-    // read (zoneFallbackCity: none for another street), the slot is re-checked; a 409 answers fresh times only as
+    // read (`firstCity`: none for another street), the slot is re-checked; a 409 answers fresh times only as
     // nextCommitRefresh says. With the funnel off the booking reads no zone
     // address, so nothing is looked up here. A failed lookup re-checks nothing
     // (logged); the booking still checks its own zone under its date lock
@@ -2851,7 +2863,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       : { fromCustomer: false };
     const nextCommit = { lead, verified, resolved, custRow, bookingAddress, bookingLocation, locationMoved };
     const bookingSlot = await revalidateSlotAt(bookingLocation, {
-      slot, moved: locationMoved, zoneMoved: fromCustomer && custRow.city !== zoneFallbackCity(checkedCustomer, resolved.address, resolved.location), zone: bookingZone,
+      slot, moved: locationMoved, zoneMoved: fromCustomer && custRow.city !== firstCity, zone: bookingZone,
       date, time, config, catalog, leadId: lead.id, address: bookingAddress, customer: custRow,
     });
     if (!bookingSlot) return sendSlotTaken(res, { ...(await nextCommitRefresh(nextCommit)), range, config, catalog, leadId: lead.id });
@@ -3034,6 +3046,7 @@ router._internals = {
 
 router._test = {
   zoneFallbackCity,
+  listFallbackCity,
   tokenMayUseProfile,
   outrightProspect,
   loadTrustedCustomer,

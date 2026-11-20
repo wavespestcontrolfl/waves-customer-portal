@@ -2278,11 +2278,17 @@ describe('POST /:token commit', () => {
       expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toMatchObject({ id: 'cust-9', city: 'Venice' });
     });
 
-    // Pre-push P1 on c49372bb7d, its other half: phase 1 reads the trusted view of the profile, as the list does, but it
-    // writes over that profile, so a staff-verified pin keeps no city there. Here the review verified the primary
-    // property's pin; the customers row has none and no ZIP is typed, so phase 1 does not keep the whole profile (that
-    // match reads the row's own pin) and writes the typed address. A refused place on file (Punta Gorda) is not kept.
-    test('a staff-verified pin on the primary property only, no ZIP typed: phase 1 writes over the profile and keeps no refused place', async () => {
+    // Pre-push P1s on c49372bb7d (its other half) and cebd106404: phase 1 reads the trusted view of the profile, as the
+    // list does, but it keeps the whole profile only when the typed address matches the customers row by its own ZIP or
+    // pin (retainReviewedLocation), and a list asks that row too (listFallbackCity). The review verified the primary
+    // property's pin, and no ZIP is typed. With no pin on the customers row, phase 1 writes the typed address over the
+    // profile and keeps no refused place (Punta Gorda), so the list reads no fallback and offers the only free truck,
+    // tech-1, which books. With that pin on the row too, phase 1 keeps the whole profile, so the list reads Punta
+    // Gorda's zone, where tech-1 is not the truck going south: no time, and the commit refuses the hour before phase 1.
+    test.each([
+      ['only on the primary property: phase 1 writes over the profile, so the list offers the free truck', null, null, ['09:00'], 200, ['Laurel'], [['tech-1', 'Laurel']]],
+      ['on the customers row too: phase 1 keeps the whole profile, so the list reads its zone', 27.4, 'Punta Gorda', [], 409, [], []],
+    ])('a staff-verified pin %s', async (_label, rowLat, listCity, slots, status, cityWrites, bookings) => {
       Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
       listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice', 'Punta Gorda'] }];
       firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
@@ -2290,7 +2296,8 @@ describe('POST /:token commit', () => {
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
       const address = { address_line1: '123 Palm Ave', address_line2: null, city: 'Punta Gorda', state: 'FL', zip: '33950' };
       seedPhoneHousehold({
-        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, ...address, phone: '9415550101', latitude: null, longitude: null,
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, ...address, phone: '9415550101',
+        latitude: rowLat, longitude: rowLat === null ? null : -82.5,
       });
       gateState.reviewLive = true;
       firstResults.customer_properties = { id: 'property-9', customer_id: 'cust-9', active: true, is_primary: true, ...address, latitude: 27.4, longitude: -82.5 };
@@ -2299,13 +2306,21 @@ describe('POST /:token commit', () => {
         address_snapshot: ['123 Palm Ave', null, 'Punta Gorda', 'FL', '33950'], latitude: 27.4, longitude: -82.5,
       };
       listResults.scheduled_services = [];
-      mockBuildAvailability.mockResolvedValue({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] });
+      // Only tech-1 is free at 09:00; in the Venice / North Port zone tech-2 drives south that day, so the funnel drops it.
+      mockBuildAvailability.mockImplementation(async (a) => ({
+        days: [{ date: FUTURE_DATE, slots: a.zoneFunnelCustomerCity === 'Punta Gorda' ? [] : [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      }));
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const typed = '123 Palm Ave, Laurel, FL';
 
-      const booked = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Laurel, FL' });
+      const list = await callAvailability(token, { address: typed });
+      const booked = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: typed });
 
-      expect(booked.statusCode).toBe(200);
-      expect(updateCalls.filter((c) => c.table === 'customers' && 'city' in c.payload).map((c) => c.payload.city)).toEqual(['Laurel']);
-      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toMatchObject({ id: 'cust-9', city: 'Laurel' });
+      expect(mockBuildAvailability.mock.calls[0][0].zoneFunnelCustomerCity).toBe(listCity);
+      expect(list.body.availability.days.flatMap((d) => d.slots).map((sl) => sl.start_time)).toEqual(slots);
+      expect(booked.statusCode).toBe(status);
+      expect(updateCalls.filter((c) => c.table === 'customers' && 'city' in c.payload).map((c) => c.payload.city)).toEqual(cityWrites);
+      expect(mockCreateSelfBooking.mock.calls.map(([b]) => [b.technician_id, b.authedCustomer.city])).toEqual(bookings);
     });
 
     // Pre-push P1 on 63e29d5511: phase 1 kept the profile's city for any typed address that matched the profile, with
@@ -3948,11 +3963,12 @@ describe('profileAffirmativelyDiffers unit coverage (Codex P2, PR #5064, :1168 "
   });
 });
 
-// The city a list reads as the zone fallback, the one phase 1 may keep (pre-push P1s on 1ef6ba1b16, f6c3fdc9e9 and
-// c49372bb7d): the trusted profile's city only for its own property, never a place the area check refuses, and never
-// over a typed South Hillsborough town (by city or ZIP), which the area check may admit by that name, unless a
-// staff-verified pin keeps the whole profile (phase 1 then writes nothing). Phase 1 reads it with `rewritten` (it
-// writes over the profile), so no staff-verified pin keeps the city there.
+// The city a list reads as the zone fallback, the one phase 1 may keep (pre-push P1s on 1ef6ba1b16, f6c3fdc9e9,
+// c49372bb7d and cebd106404): the trusted profile's city only for its own property, never a place the area check
+// refuses, and never over a typed South Hillsborough town (by city or ZIP), which the area check may admit by that
+// name, unless phase 1 keeps the whole profile (`retained`; it then writes nothing). A staff-verified flag alone is
+// not that: phase 1 also needs the typed address to match the customers row by its own ZIP or pin, and a list asks
+// that row itself (listFallbackCity).
 describe('zoneFallbackCity (the city a list reads, as phase 1 keeps it)', () => {
   const property = { address_line1: '123 Palm Ave', address_line2: null, state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
   const typed = { line1: '123 Palm Ave', line2: null, city: 'Charlotte Harbor', state: 'FL', zip: '34209' };
@@ -3964,15 +3980,46 @@ describe('zoneFallbackCity (the city a list reads, as phase 1 keeps it)', () => 
     ['another street', null, { ...property, address_line1: '9 Other St', city: 'Nokomis' }, typed, {}],
     ['no trusted customer', null, null, typed, {}],
     ['a place the area check refuses', null, { ...property, city: 'Punta Gorda' }, typed, {}],
-    ['a place the area check refuses, under a staff-verified pin', 'Punta Gorda', { ...property, city: 'Punta Gorda', verified_by_review: true }, typed, {}],
-    ['a refused place under a staff-verified pin, written over by phase 1', null, { ...property, city: 'Punta Gorda', verified_by_review: true }, typed, { rewritten: true }],
+    ['a place the area check refuses, on a profile phase 1 keeps whole', 'Punta Gorda', { ...property, city: 'Punta Gorda', verified_by_review: true }, typed, { retained: true }],
+    ['a refused place under a staff-verified flag alone', null, { ...property, city: 'Punta Gorda', verified_by_review: true }, typed, {}],
     ['a typed South Hillsborough town', null, { ...property, city: 'Venice' }, wimauma, {}],
     ['a typed South Hillsborough ZIP', null, { ...property, city: 'Venice', zip: '33598' }, southZip, {}],
-    ['a typed South Hillsborough town, under a staff-verified pin', 'Venice', verifiedVenice, wimauma, {}],
-    ['a typed South Hillsborough town under a staff-verified pin, written over by phase 1', null, verifiedVenice, wimauma, { rewritten: true }],
-    ['a staff-verified pin, written over by phase 1', 'Nokomis', { ...property, city: 'Nokomis', verified_by_review: true }, typed, { rewritten: true }],
+    ['a typed South Hillsborough town, on a profile phase 1 keeps whole', 'Venice', verifiedVenice, wimauma, { retained: true }],
+    ['a typed South Hillsborough town under a staff-verified flag alone', null, verifiedVenice, wimauma, {}],
+    ['a profile phase 1 keeps whole, on another street', null, { ...verifiedVenice, address_line1: '9 Other St' }, typed, { retained: true }],
   ])('%s: %s', (_label, expected, customer, address, opts) => {
     expect(inspectionPublicRouter._test.zoneFallbackCity(customer, address, { lat: 27.4, lng: -82.5 }, opts)).toBe(expected);
+  });
+});
+
+// A list asks the customers row itself whether phase 1 keeps the whole profile (pre-push P1 on cebd106404): a
+// staff-verified pin, and the typed address matches that row by its own ZIP or pin, as phase 1's
+// retainReviewedLocation reads storedCustRow. The trusted view can carry the primary property's pin instead.
+describe('listFallbackCity (a list\'s fallback city, with phase 1\'s own whole-profile check)', () => {
+  const trusted = {
+    id: 'cust-pg', address_line1: '123 Palm Ave', address_line2: null, city: 'Punta Gorda', state: 'FL', zip: '33950',
+    latitude: 27.4, longitude: -82.5, verified_by_review: true,
+  };
+  const typedNoZip = { line1: '123 Palm Ave', line2: null, city: 'Laurel', state: 'FL', zip: null };
+  const connFor = (row) => {
+    const reads = [];
+    const conn = (table) => ({ where: (w) => ({ first: async (...cols) => { reads.push([table, w, cols]); return row; } }) });
+    return { conn, reads };
+  };
+  test.each([
+    ['the customers row has the matching pin: phase 1 keeps the whole profile', 'Punta Gorda', { ...trusted }],
+    ['only the primary property has the pin: phase 1 writes over the profile', null, { ...trusted, latitude: null, longitude: null }],
+    ['the customers row is gone', null, null],
+  ])('%s', async (_label, expected, row) => {
+    const { conn, reads } = connFor(row);
+    await expect(inspectionPublicRouter._test.listFallbackCity(conn, trusted, typedNoZip, { lat: 27.4, lng: -82.5 })).resolves.toBe(expected);
+    expect(reads).toEqual([['customers', { id: 'cust-pg' }, ['address_line1', 'address_line2', 'zip', 'latitude', 'longitude']]]);
+  });
+
+  test('a profile with no staff-verified pin reads no row', async () => {
+    const { conn, reads } = connFor({ ...trusted });
+    await expect(inspectionPublicRouter._test.listFallbackCity(conn, { ...trusted, verified_by_review: undefined, city: 'Nokomis' }, typedNoZip, { lat: 27.4, lng: -82.5 })).resolves.toBe('Nokomis');
+    expect(reads).toEqual([]);
   });
 });
 

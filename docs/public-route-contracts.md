@@ -7694,8 +7694,9 @@ page gets the answer an account change under the booking fence already gets:
 times and a refused booking's list) reads the same fallback when the address
 is that customer's own property (the same street and unit, and ZIP or pin) and
 the city is one phase one keeps (never a place the area check refuses, nor over
-a typed South Hillsborough town, unless a staff-verified pin keeps the whole
-profile), so a list never offers an hour that
+a typed South Hillsborough town, unless phase one keeps the whole profile: a
+staff-verified pin, and the typed address matches the customer's row by its own
+ZIP or pin, which the list reads from that row too), so a list never offers an hour that
 zone refuses, nor hides one the booking admits. For another street the city on
 file named the old address: phase one books it on a corrected or another profile
 with its own city, and makes that profile the trusted one, so a retry's list
