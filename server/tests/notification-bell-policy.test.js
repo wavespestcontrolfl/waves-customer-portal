@@ -14,7 +14,6 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
-  ownerNudgeBannerLive: jest.fn(() => false),
 }));
 jest.mock('../services/internal-test-customers', () => ({
   isInternalTestCustomerId: jest.fn(() => false),
@@ -48,7 +47,7 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 
 const db = require('../models/db');
-const { isEnabled, ownerNudgeBannerLive } = require('../config/feature-gates');
+const { isEnabled } = require('../config/feature-gates');
 const { computeDashboardAlerts } = require('../services/dashboard-alerts');
 const NotificationService = require('../services/notification-service');
 const bellPolicy = require('../services/notification-bell-policy');
@@ -81,7 +80,6 @@ const gateOff = () => isEnabled.mockReturnValue(false);
 beforeEach(() => {
   jest.clearAllMocks();
   gateOff();
-  ownerNudgeBannerLive.mockReturnValue(false);
   bellPolicy.clearOverrideCache();
 });
 
@@ -596,15 +594,13 @@ describe('bellAllowed decision order', () => {
     expect([...bellPolicy._private.GATED_TRIGGER_BELL_ALLOWLIST]).toEqual(['bill_payment_error']);
   });
 
-  test('GATE_OWNER_NUDGE_BANNER: the open_visits_nudge banner passes the policy only while its own gate is on, even with the alert category silenced', async () => {
+  test('the open_visits_nudge banner passes the policy even with the alert category silenced', async () => {
     mockTables({ notification_preferences: chainMock([{ trigger_key: 'category:alert', bell_enabled: false }]) });
     const nudge = { category: 'alert', triggerKey: 'open_visits_nudge' };
-    await expect(bellPolicy.bellAllowed(nudge)).resolves.toBe(false);
-    ownerNudgeBannerLive.mockReturnValue(true);
     await expect(bellPolicy.bellAllowed(nudge)).resolves.toBe(true);
-    // And its gate does not open any other alert-category event.
+    // And its allowlist row does not open any other alert-category event.
     await expect(bellPolicy.bellAllowed({ category: 'alert', triggerKey: 'dashboard_alert' })).resolves.toBe(false);
-    expect([...bellPolicy._private.OWNER_NUDGE_BANNER_TRIGGER_BELL_ALLOWLIST]).toEqual(['open_visits_nudge']);
+    expect(bellPolicy._private.TRIGGER_BELL_ALLOWLIST.has('open_visits_nudge')).toBe(true);
     expect([...bellPolicy._private.GATED_TRIGGER_BELL_ALLOWLIST]).toEqual(['bill_payment_error']);
   });
 
@@ -808,10 +804,14 @@ describe('missed-call bell eligibility (customer communication, owner ruling 202
     expect(missedCallEligible({ ...base, answered_by: 'voicemail', recording_sid: null })).toBe(true); // hung up at the prompt
     expect(missedCallEligible({ ...base, answered_by: 'unknown' })).toBe(true);
   });
-  test('no recorded outcome (Studio status_callback fallback rows): only an unanswered Twilio status counts as missed (codex r4)', () => {
+  test('no recorded outcome (Studio status_callback fallback rows): an unanswered Twilio status counts as missed (codex r4)', () => {
     expect(missedCallEligible({ ...base, answered_by: null, status: 'no-answer' })).toBe(true);
     expect(missedCallEligible({ ...base, answered_by: null, status: 'busy' })).toBe(true);
-    expect(missedCallEligible({ ...base, answered_by: null, status: 'completed' })).toBe(false); // may have been handled by the flow
+    // A customer's completed call with no outcome and no recording rings (owner 2026-10-20); a recording or an AI outcome keeps it out.
+    expect(missedCallEligible({ ...base, answered_by: null, status: 'completed' })).toBe(true);
+    expect(missedCallEligible({ ...base, answered_by: null, status: 'completed', recording_sid: 'RE1' })).toBe(false);
+    expect(missedCallEligible({ ...base, answered_by: null, status: 'completed', call_outcome: 'ai_handled' })).toBe(false);
+    expect(missedCallEligible({ ...base, customer_id: null, answered_by: null, status: 'completed' })).toBe(false);
     expect(missedCallEligible({ ...base, answered_by: null, status: 'failed' })).toBe(false);
     expect(missedCallEligible({ ...base, answered_by: undefined, status: undefined })).toBe(false);
   });

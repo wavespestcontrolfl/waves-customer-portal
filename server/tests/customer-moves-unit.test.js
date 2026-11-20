@@ -1,5 +1,5 @@
 /**
- * Customer moving flow (GATE_MOVING_FLOW): the pure rules in
+ * Customer moving flow: the pure rules in
  * services/customer-moves.js and services/move-address-verdict.js, with no
  * database. The live-Postgres behavior is in moving-flow-postgres.test.js.
  */

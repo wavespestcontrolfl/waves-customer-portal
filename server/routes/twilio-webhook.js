@@ -1357,9 +1357,9 @@ router.post('/sms', async (req, res) => {
     // knownInboundNotified records whether this modern bell/push actually
     // landed — when it did, the legacy owner-SMS forward below is suppressed
     // so a single inbound message can't raise two admin notifications.
-    // GATE_RING_NEW_CONTACTS (owner 2026-11-04, "ring new"): a text from a number with no customer record to a location
+    // Owner 2026-11-04, "ring new": a text from a number with no customer record to a location
     // or Google profile line rings the same one-row-per-sender bell as a tracking line, and it too counts as
-    // delivered here, so the quiet Activity row below is skipped. Ring failed, gate off or not eligible: false, as before.
+    // delivered here, so the quiet Activity row below is skipped. Ring failed or not eligible: false, the quiet row stays.
     let knownInboundNotified = await require('../services/sms-reply-alert-delivery').ringUnknownOfficeText({
       customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, From, MessageSid, message: Body, mediaCount: inboundMedia.length,
     });
@@ -1580,7 +1580,7 @@ router.post('/status', async (req, res) => {
       } catch (bookkeepingErr) {
         logger.error(`[twilio-status] status bookkeeping failed (continuing to handlers): ${bookkeepingErr.message}`);
       }
-      // GATE_DEAD_NUMBER_ALERT (off = returns at once): a 2nd failed text (30003 / 30005) to a customer's number
+      // Dead-number alert: a 2nd failed text (30003 / 30005) to a customer's number
       // raises one bell naming the customer; a delivered text closes it. Isolated: neither a sync throw nor a
       // rejection can reach the handlers below or the response.
       await Promise.resolve()

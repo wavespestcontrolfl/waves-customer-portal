@@ -84,7 +84,7 @@ function candidateQuery(since, cursor, pageSize) {
 // What a row is to this pass: a relevance class of LATE_CLASSES, a portal message's bell, or null. A row
 // the relevance table names is only ever that class.
 function lateClass(row, meta) {
-  const cls = relevance().classify(row, { anyMode: true });
+  const cls = relevance().classify(row);
   if (cls) return LATE_CLASSES.has(cls.key) ? cls : null;
   const isMessageBell = meta.doneWhen === 'customer_answered' && UUID_RE.test(String(meta.portalConversationId || ''));
   return isMessageBell && require('../config/feature-gates').portalMessagesLive?.() ? MESSAGE_ITEM : null;
@@ -289,7 +289,7 @@ function estimateDueItems(rows, now) {
   const floor = now.getTime() - ESTIMATE_WINDOW_MS;
   const items = [];
   for (const row of rows) {
-    if (classify(row, { anyMode: true })?.key !== ESTIMATE_CLASS) continue;
+    if (classify(row)?.key !== ESTIMATE_CLASS) continue;
     const meta = parseMeta(row.metadata);
     const askedAt = bellEventAt(row);
     const customerId = typeof meta.customerId === 'string' ? meta.customerId.trim().toLowerCase() : null;

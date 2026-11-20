@@ -1,0 +1,67 @@
+/**
+ * The Pest Insider shadow planner's two Wednesday crons (server/services/scheduler.js):
+ * 7:00 AM and a 1:00 PM catch-up, both ET, both under runExclusive. A failed run is logged,
+ * never thrown out of the tick.
+ *
+ * Mock baseline copied from scheduler-monday-review-bell-cron.test.js.
+ */
+jest.mock('../utils/scheduled-cron', () => ({
+  schedule: jest.fn(), scheduleTimeout: jest.fn(), scheduleInterval: jest.fn(),
+}));
+jest.mock('../models/db', () => {
+  const db = jest.fn(() => ({ where() { return this; }, del: jest.fn().mockResolvedValue(0) }));
+  db.raw = jest.fn().mockResolvedValue({ rows: [] });
+  db.fn = { now: jest.fn() };
+  return db;
+});
+jest.mock('../services/twilio', () => ({}));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
+  recurringSeriesTopUpLive: jest.fn(() => false),
+}));
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
+jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
+jest.mock('../services/auto-dispatch/audit', () => ({ flagUnplacedVisits: jest.fn() }));
+jest.mock('../services/time-tracking-crons', () => ({ initTimeTrackingCrons: jest.fn() }));
+jest.mock('../services/equipment-crons', () => ({ initEquipmentCrons: jest.fn() }));
+jest.mock('../services/bouncie-mileage-crons', () => ({ initBouncieMileageCrons: jest.fn() }));
+jest.mock('../services/analytics/ga4-crons', () => ({ initGA4Crons: jest.fn() }));
+jest.mock('../services/intelligence-bar/threads', () => ({ purgeExpiredThreads: jest.fn().mockResolvedValue({ deleted: 0 }) }));
+jest.mock('../services/intelligence-bar/tasks', () => ({ purgeExpiredTasks: jest.fn().mockResolvedValue(1) }));
+jest.mock('../services/recurring-series-topup', () => ({ runRecurringSeriesTopUpSweep: jest.fn() }));
+
+jest.mock('../services/pest-insider/schedule', () => ({ runShadowIssue: jest.fn(async () => ({ skipped: true, reason: 'not_build_day' })) }));
+
+const cron = require('../utils/scheduled-cron');
+const { runExclusive } = require('../utils/cron-lock');
+const { isEnabled } = require('../config/feature-gates');
+const { runShadowIssue } = require('../services/pest-insider/schedule');
+const logger = require('../services/logger');
+const { initScheduledJobs } = require('../services/scheduler');
+
+function ticks(expression) {
+  isEnabled.mockImplementation((name) => name === 'cronJobs');
+  initScheduledJobs();
+  const registrations = cron.schedule.mock.calls.filter(([e, task]) => e === expression && String(task).includes('runShadowIssue'));
+  expect(registrations).toHaveLength(1);
+  expect(registrations[0][2]).toEqual({ timezone: 'America/New_York' });
+  return registrations[0][1];
+}
+
+beforeEach(() => {
+  jest.clearAllMocks();
+});
+
+test.each(['0 7 * * 3', '0 13 * * 3'])('%s runs the planner once inside runExclusive', async (expression) => {
+  await ticks(expression)();
+  expect(runExclusive).toHaveBeenCalledWith('pest-insider-shadow-issue', expect.any(Function));
+  expect(runShadowIssue).toHaveBeenCalledTimes(1);
+  expect(logger.error).not.toHaveBeenCalled();
+});
+
+test('a failed run is logged, not thrown', async () => {
+  runShadowIssue.mockRejectedValueOnce(new Error('boom'));
+  await expect(ticks('0 7 * * 3')()).resolves.toBeUndefined();
+  expect(logger.error).toHaveBeenCalledWith('Pest Insider shadow planner failed: boom');
+});

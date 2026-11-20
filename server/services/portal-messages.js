@@ -27,6 +27,13 @@
  * 'agent', message_type AI_MESSAGE_TYPE, labelled Waves AI. It is not an answer by the office: the thread stays
  * an open Portal-tab item until a staff answer or Mark handled.
  *
+ * A customer message may carry up to PHOTO_MAX photos (owner 2026-11-20, "photos can go in chat"), sent as
+ * multipart files. Each is checked and re-encoded by the prep-photo sanitizer (visit-prep.js
+ * prepareUploadFile), stored in the private photo bucket under the customer's own folder, and named on the
+ * row's `media` as { type: 'photo', key, contentType, size }. The key never leaves the server: a thread page
+ * carries a signed view link per photo. A message with a photo may have no words. The Waves AI never answers
+ * a message with a photo: it stays the office's open item.
+ *
  * Nothing here messages a customer on its own: the one send is the notice for an answer a staff member
  * pressed Send on (the AI's answer gets the in-app bell and an app push only, never the email). Every entry point refuses while the gate is off, and an answer to an inactive customer
  * row (who can neither sign in nor take a push) is refused: the office texts them instead.
@@ -36,11 +43,18 @@ const db = require('../models/db');
 const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
 const Conversations = require('./conversations');
+const PhotoService = require('./photos');
+const { parseStoredMedia } = require('./sms-media');
 
 const CHANNEL = 'portal';
 const ENDPOINT = 'portal';
 const BODY_MAX = 2000;
 const PAGE_SIZE = 50;
+const PHOTO_MAX = 3;
+// The sanitizer's own ceiling (visit-prep.js VISIT_PREP_LIMITS.maxPhotoBytes); the route stops reading a file here.
+const PHOTO_MAX_BYTES = 5 * 1024 * 1024;
+// The office reads a thread page and moves on; the customer's page stays open (photos.js on the dwell time).
+const STAFF_PHOTO_TTL_SECONDS = 60 * 60;
 const PREVIEW_MAX = 140;
 // One attempt at a time runs an answer's notice (claimNotice). A claim older than this belongs to a process
 // that stopped, so a retry or the sweep may take it over. The sweep looks back one day.
@@ -82,9 +96,9 @@ function cleanBody(value) {
     .trim();
 }
 
-function checkedBody(value) {
+function checkedBody(value, { withPhotos = false } = {}) {
   const body = cleanBody(value);
-  if (!body) throw new PortalMessageError('empty', 400, 'Write a message first.');
+  if (!body && !withPhotos) throw new PortalMessageError('empty', 400, 'Write a message first.');
   if (body.length > BODY_MAX) throw new PortalMessageError('too_long', 400, `Keep it under ${BODY_MAX} characters.`);
   return body;
 }
@@ -126,6 +140,48 @@ function priorSend(trx, threadId, direction, clientRequestId) {
 }
 
 const isAiReply = (row) => row.message_type === AI_MESSAGE_TYPE;
+
+const photosOn = (row) => parseStoredMedia(row?.media).filter((item) => item && item.type === 'photo' && item.key);
+
+// Checks and stores a message's photos before its row is saved: all of them, or none (what was stored is
+// removed again). The sanitizer's own refusals are customer-safe words and keep their status.
+async function storePhotos(customerId, files) {
+  if (files.length > PHOTO_MAX) throw new PortalMessageError('too_many_photos', 400, `Attach no more than ${PHOTO_MAX} photos.`);
+  if (!files.length) return [];
+  // Loaded on first use: the sanitizer brings the image libraries and the request routes with it.
+  const { prepareUploadFile } = require('./visit-prep');
+  const { uploadFunnelPhotoToS3 } = require('../utils/funnel-photos');
+  const stored = [];
+  try {
+    for (const file of files) {
+      const photo = await prepareUploadFile(file);
+      const key = await uploadFunnelPhotoToS3({
+        rowId: `portal-messages/${customerId}`,
+        keyPrefix: 'photo',
+        index: stored.length,
+        mimeType: photo.mimeType,
+        base64: photo.buffer.toString('base64'),
+      });
+      if (!key) throw new PortalMessageError('photo_storage', 503, 'Your photos could not be saved. Please try again shortly.');
+      stored.push({ type: 'photo', key, contentType: photo.mimeType, size: photo.buffer.length });
+    }
+  } catch (err) {
+    await dropPhotos(stored);
+    if (err.visitPrep) throw new PortalMessageError('invalid_photo', err.statusCode, err.message);
+    throw err;
+  }
+  return stored;
+}
+
+const dropPhotos = (media) => Promise.all(media.map((item) => require('./visit-prep').deleteUploadedObject(item.key)));
+
+// A message as a page shows it: the view, plus a signed link per photo. A link that cannot be signed is left
+// out, and the words still show.
+async function shown(row, view, ttlSeconds) {
+  const links = await Promise.all(photosOn(row).map((item) => PhotoService.getViewUrl(item.key, ttlSeconds).catch(() => null)));
+  const photos = links.filter(Boolean).map((url) => ({ url }));
+  return photos.length ? { ...view(row), photos } : view(row);
+}
 
 // `ai: true` marks the Waves AI's answer (the bubble is labelled Waves AI); a staff answer carries no flag.
 function customerView(row) {
@@ -411,7 +467,11 @@ async function ringOffice(customer, threadId, message) {
     const name = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || 'A customer';
     // The customer's words, redacted and cut like every bell body; a quote the headline rules refuse (a second
     // sentence, a date) falls back to a plain why. The whole message is in the bell's full text either way.
-    const quoted = whyWithQuote({ lead: 'They wrote in the portal: ', quote: redactedWords(message.body) });
+    const photoCount = photosOn(message).length;
+    const photoNote = photoCount ? `Sent ${photoCount} photo${photoCount === 1 ? '' : 's'}.` : '';
+    const quoted = message.body
+      ? whyWithQuote({ lead: 'They wrote in the portal: ', quote: redactedWords(message.body) })
+      : 'They sent a photo in the portal and are waiting for an answer';
     const rang = await require('./portal-inbox').onLockedThread(threadId, async (trx, open) => {
       // Only the newest customer message writes the bell: an older one whose ring ran late would put back stale
       // words (the newer message's ring wrote, or will write, the bell).
@@ -438,7 +498,7 @@ async function ringOffice(customer, threadId, message) {
         dedupeOpenOnly: true,
         refreshOnDedupe: true,
         bumpOnRefresh: true,
-        detail: message.body,
+        detail: [message.body, photoNote].filter(Boolean).join('\n\n'),
         metadata: { customerId: customer.id, portalConversationId: threadId, portalMessageId: message.id },
       });
       return Boolean(result?.id) && !result.suppressed && (!result.deduped || (result.refreshed === true && result.rung !== false));
@@ -472,16 +532,18 @@ function startNightAi(customer, threadId, message) {
 
 /**
  * A signed-in customer writes in their portal thread.
- * @param {{ customer: { id: string, first_name?: string, last_name?: string }, body: string, clientRequestId?: string }} input
+ * @param {{ customer: { id: string, first_name?: string, last_name?: string }, body: string, clientRequestId?: string, files?: Array<{ buffer: Buffer, mimetype: string }> }} input
  */
-async function customerPost({ customer, body, clientRequestId = null }) {
+async function customerPost({ customer, body, clientRequestId = null, files = [] }) {
   requireLive();
-  const text = checkedBody(body);
+  const text = checkedBody(body, { withPhotos: files.length > 0 });
+  const media = await storePhotos(customer.id, files);
   const saved = await db.transaction(async (trx) => {
     const thread = await threadWith(trx, customer.id);
     const prior = await priorSend(trx, thread.id, 'inbound', clientRequestId);
     if (prior) return { replay: true, message: prior };
     const message = await Conversations.appendMessage({
+      ...(media.length ? { media } : {}),
       conn: trx,
       conversationId: thread.id,
       channel: CHANNEL,
@@ -493,12 +555,19 @@ async function customerPost({ customer, body, clientRequestId = null }) {
       metadata: clientRequestId ? { clientRequestId } : {},
     });
     return { message, threadId: thread.id };
+  }).catch(async (err) => {
+    await dropPhotos(media);
+    throw err;
   });
-  if (!saved.replay) {
+  if (saved.replay) {
+    // The first try saved the message and its photos: this try's copies are not on any row.
+    await dropPhotos(media);
+  } else {
     await ringOffice(customer, saved.threadId, saved.message);
-    startNightAi(customer, saved.threadId, saved.message);
+    // A photo is for a person to look at: the assistant does not take the turn.
+    if (!media.length) startNightAi(customer, saved.threadId, saved.message);
   }
-  return customerView(saved.message);
+  return shown(saved.message, customerView, PhotoService.CUSTOMER_DWELL_TTL_SECONDS);
 }
 
 async function unreadFor(thread) {
@@ -512,20 +581,21 @@ async function unreadFor(thread) {
 
 // The customer's thread, newest PAGE_SIZE first in time order; `before` (an ISO time) pages back.
 // One page of a thread: the newest PAGE_SIZE messages before `before` (or the newest), oldest first.
-async function threadPage(threadId, before, view) {
+async function threadPage(threadId, before, view, photoTtlSeconds) {
   const query = db('messages').where({ conversation_id: threadId, channel: CHANNEL }).whereIn('direction', ['inbound', 'outbound']);
   if (before) query.where('created_at', '<', before);
   const rows = await query.orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
-    .limit(PAGE_SIZE + 1).select('id', 'direction', 'body', 'created_at', 'admin_user_id', 'message_type',
+    .limit(PAGE_SIZE + 1).select('id', 'direction', 'body', 'media', 'created_at', 'admin_user_id', 'message_type',
       db.raw("metadata->>'handOff' AS hand_off"));
-  return { messages: rows.slice(0, PAGE_SIZE).reverse().map(view), hasMore: rows.length > PAGE_SIZE };
+  const messages = await Promise.all(rows.slice(0, PAGE_SIZE).reverse().map((row) => shown(row, view, photoTtlSeconds)));
+  return { messages, hasMore: rows.length > PAGE_SIZE };
 }
 
 async function customerThread(customerId, { before = null } = {}) {
   requireLive();
   const thread = await findThread(customerId);
   if (!thread) return { messages: [], hasMore: false, unread: 0 };
-  return { ...(await threadPage(thread.id, before, customerView)), unread: await unreadFor(thread) };
+  return { ...(await threadPage(thread.id, before, customerView, PhotoService.CUSTOMER_DWELL_TTL_SECONDS)), unread: await unreadFor(thread) };
 }
 
 // The office's view of a portal thread, every body whole (a Portal-tab message item shows a cut preview).
@@ -534,7 +604,7 @@ async function staffThread(threadId, { before = null } = {}) {
   requireLive();
   const thread = await db('conversations').where({ id: threadId, channel: CHANNEL, our_endpoint_id: ENDPOINT }).first('id');
   if (!thread) throw new PortalMessageError('not_found', 404, 'This thread is gone.');
-  return threadPage(thread.id, before, staffView);
+  return threadPage(thread.id, before, staffView, STAFF_PHOTO_TTL_SECONDS);
 }
 
 async function customerUnread(customerId) {
@@ -565,6 +635,8 @@ module.exports = {
   CHANNEL,
   ENDPOINT,
   BODY_MAX,
+  PHOTO_MAX,
+  PHOTO_MAX_BYTES,
   AI_MESSAGE_TYPE,
   AI_AGENT_NAME,
   MESSAGES_LINK,

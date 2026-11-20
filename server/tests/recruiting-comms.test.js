@@ -634,18 +634,22 @@ describe('sendStageComms — send-window hold', () => {
 });
 
 describe('sendStageComms — a held job-offer text', () => {
-  test('is queued with the link token hidden and pins its offer, so the replay can rebuild the real link', async () => {
-    const link = `https://portal.wavespestcontrol.com/careers/offer/${'d'.repeat(64)}`;
+  const link = `https://portal.wavespestcontrol.com/careers/offer/${'d'.repeat(64)}`;
+  function holdOfferText(text) {
     mockIsEnabled.mockImplementation((gate) => gate === 'jobOffers');
-    mockRenderSmsTemplate.mockResolvedValue(`Hi Jane, your job offer: ${link} It stays open until Fri, Dec 18. Reply STOP to opt out.`);
+    mockRenderSmsTemplate.mockResolvedValue(text);
     mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true, nextAllowedAt: '2027-03-17T12:00:00.000Z', code: 'SEND_WINDOW_CLOSED' });
     const app = baseApp();
     mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
     mockDb.__tables.sms_log = [];
-    const result = await RecruitingComms.sendStageComms(app, 'offer_sent', {
+    return RecruitingComms.sendStageComms(app, 'offer_sent', {
       sms: true, email: false, by: 'staff-1', offerId: 'offer-1', offerToken: 'd'.repeat(64),
       vars: { offer_link: link, expires_on: 'Fri, Dec 18', job_title: 'Pest Control Technician', sender_name: 'Test Owner' },
     });
+  }
+
+  test('is queued with the link token hidden and pins its offer, so the replay can rebuild the real link', async () => {
+    const result = await holdOfferText(`Hi Jane, your job offer: ${link} It stays open until Fri, Dec 18. Reply STOP to opt out.`);
     expect(result.sms).toBe('deferred');
     // the provider was handed the real link; the stored queue row was not
     expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('d'.repeat(64));
@@ -654,6 +658,111 @@ describe('sendStageComms — a held job-offer text', () => {
     expect(JSON.stringify(queued)).not.toContain('d'.repeat(64).slice(0, 40)); // no token anywhere on the row, metadata included
     expect(queued.message_type).toBe('job_offer_sent');
     expect(JSON.parse(queued.metadata)).toMatchObject({ stage: 'offer_sent', purpose: 'offer_sent', job_offer_id: 'offer-1', audience: 'applicant', offer_token_hash: expect.stringMatching(/^[0-9a-f]{64}$/) });
+  });
+
+  // The replay puts this offer's own link in every hidden link, so an edited text that also carries another offer's
+  // link would go out with this offer's link twice: it is not queued.
+  test('an edited text that also carries another offer\'s link is not queued', async () => {
+    const other = `https://portal.wavespestcontrol.com/careers/offer/${'e'.repeat(64)}`;
+    const result = await holdOfferText(`Hi Jane, your job offer: ${link} The old one: ${other} Reply STOP to opt out.`);
+    expect(result.sms).toBe('blocked');
+    expect(mockDb.__tables.sms_log.filter((r) => r.status === 'scheduled')).toHaveLength(0);
+  });
+});
+
+describe('the email ledger snapshot', () => {
+  // A browser decodes the references in an href (named ones too) and drops tabs and line breaks before it opens it.
+  test('hides a token in an href that a line break or a named line-break reference splits', async () => {
+    const { portalUrl } = require('../utils/portal-url');
+    const token = 'e'.repeat(64);
+    const html = `<p>Read it:</p><a href="https://portal.wavespestcontrol.com/careers/offer/\n${token}">Read your offer</a>`
+      + `<a href="https://portal.wavespestcontrol.com/careers/o&NewLine;ffer/${token}">Or here</a>`;
+    await RecruitingComms._internals.sendRawEmail({ app: baseApp(), stage: 'offer_sent', to: 'jane@example.com', subject: 'Your job offer from Waves', html, text: 'Read it.' });
+    const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
+    const hidden = portalUrl('/careers/offer/[link hidden]');
+    expect(row.html_snapshot).toBe(`<p>Read it:</p><a href="${hidden}">Read your offer</a><a href="${hidden}">Or here</a>`);
+    expect(mockSendOne.mock.calls[0][0].html).toContain(token); // the provider still gets the real link
+  });
+
+  // Codex P0 (round 27): the editor takes a custom subject, and the ledger stored it as typed.
+  test('hides an offer link pasted into a custom subject; the provider still gets the subject as typed', async () => {
+    const token = require('crypto').createHash('sha256').update('ledger subject').digest('hex');
+    const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockDb.__tables.email_messages = [];
+    mockSendOne.mockClear();
+    await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: false, email: true, by: 'tech-1', emailSubject: `Your offer: ${link}`, emailBody: 'Pick a time for your interview.' });
+    const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
+    expect(row.subject_snapshot).toBe('Your offer: https://portal.wavespestcontrol.com/careers/offer/[link hidden]');
+    expect(mockSendOne.mock.calls[0][0].subject).toBe(`Your offer: ${link}`);
+    const history = mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history;
+    expect(history.find((e) => e.channel === 'email').body).not.toContain(token);
+  });
+
+  // Codex P0 (round 28): the ledger redacted each part alone, so a bare copy of the token in a custom subject stayed
+  // when the link was only in the body. Codex P0 (round 29): a "%" right before the copy hid two of its digits from
+  // the decoded reading, while the subject stored all 64.
+  test.each([
+    ['a bare copy', ''],
+    ['a copy after a percent sign', '%'],
+  ])('hides %s of the token in a custom subject when the link is in the body', async (label, before) => {
+    const token = require('crypto').createHash('sha256').update('ledger cross-part').digest('hex');
+    const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockSendOne.mockClear();
+    await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: false, email: true, by: 'tech-1', emailSubject: `Your offer code ${before}${token}`, emailBody: `Read it: ${link}` });
+    const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
+    expect(row.subject_snapshot).toBe('Your offer code [link hidden]');
+    for (const field of ['subject_snapshot', 'html_snapshot', 'text_snapshot']) {
+      expect(row[field]).not.toContain(token.slice(0, 20));
+      expect(row[field]).not.toContain(token.slice(-20));
+    }
+    expect(mockSendOne.mock.calls[0][0].subject).toBe(`Your offer code ${before}${token}`);
+    const history = mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history;
+    expect(history.find((e) => e.channel === 'email').body).not.toContain(token.slice(0, 20));
+  });
+
+  // An owner who pastes a quoted reply: the link wraps over two quoted lines. The edited path wraps the text into html,
+  // which writes each line's "> " as "&gt; "; a reader skips it there as in the text.
+  test('hides a token a pasted quoted reply wraps over two lines, in the html and the text', async () => {
+    const token = require('crypto').createHash('sha256').update('ledger quoted wrap').digest('hex');
+    const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockSendOne.mockClear();
+    const emailBody = `Thanks!\n\n> Your offer: ${link.slice(0, 80)}\n> ${link.slice(80)}`;
+    await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: false, email: true, by: 'tech-1', emailSubject: 'Re: your offer', emailBody });
+    const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
+    expect(row.html_snapshot).toContain('&gt; Your offer: [link hidden]'); // the edited text, wrapped into html
+    expect(row.text_snapshot).toContain('> Your offer: [link hidden]');
+    for (const field of ['subject_snapshot', 'html_snapshot', 'text_snapshot']) {
+      expect(row[field]).not.toContain(token.slice(0, 20));
+      expect(row[field]).not.toContain(token.slice(-20));
+    }
+    expect(mockSendOne.mock.calls[0][0].text).toContain(`${link.slice(0, 80)}\n> ${link.slice(80)}`); // the provider gets it as typed
+    const history = mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history;
+    const body = history.find((e) => e.channel === 'email').body;
+    expect(body).not.toContain(token.slice(0, 20));
+    expect(body).not.toContain(token.slice(-20));
+  });
+
+  // An email may also show the link as text with an &nbsp; or a <wbr> inside the token; a reader still reads it whole.
+  test('hides a token the email shows split by an &nbsp; or a tag, beside the hidden href', async () => {
+    const token = require('crypto').createHash('sha256').update('ledger split').digest('hex');
+    const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
+    const html = `<a href="${link}">Read your offer</a><p>${link.slice(0, 80)}&nbsp;${link.slice(80)}</p>`
+      + `<p>${link.slice(0, 70)}<wbr>${link.slice(70)}</p>`;
+    await RecruitingComms._internals.sendRawEmail({ app: baseApp(), stage: 'offer_sent', to: 'jane@example.com', subject: 'Your job offer from Waves', html, text: `Read it: ${link}` });
+    const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
+    expect(row.html_snapshot).toBe('<a href="https://portal.wavespestcontrol.com/careers/offer/[link hidden]">Read your offer</a>'
+      + '<p>[link hidden]</p><p>[link hidden]<wbr></p>');
+    for (const piece of [token.slice(0, 20), token.slice(20, 30), token.slice(30)]) {
+      expect(row.html_snapshot).not.toContain(piece);
+      expect(row.text_snapshot).not.toContain(piece);
+    }
+    expect(mockSendOne.mock.calls[0][0].html).toContain(token); // the provider still gets the real link
   });
 });
 
@@ -664,13 +773,13 @@ describe('sendStageComms — a held owner reply that pastes an offer link', () =
   const HOLD = { sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true, nextAllowedAt: '2027-03-17T12:00:00.000Z', code: 'SEND_WINDOW_CLOSED' };
   const sha256 = (text) => require('crypto').createHash('sha256').update(text).digest('hex');
 
-  function holdReply(offers) {
+  function holdReply(offers, smsBody = `Here is your offer again: ${LINK}`) {
     mockSendCustomerMessage.mockResolvedValue(HOLD);
     const app = baseApp();
     mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
     mockDb.__tables.sms_log = [];
     mockDb.__tables.job_offers = offers;
-    return RecruitingComms.sendStageComms(app, 'owner_reply', { sms: true, email: false, by: 'staff-1', smsBody: `Here is your offer again: ${LINK}` });
+    return RecruitingComms.sendStageComms(app, 'owner_reply', { sms: true, email: false, by: 'staff-1', smsBody });
   }
 
   test('is queued with the link hidden and pins it to its offer, so the replay can put the real link back', async () => {
@@ -684,6 +793,31 @@ describe('sendStageComms — a held owner reply that pastes an offer link', () =
 
   test('a pasted link that matches no offer is not queued, so it never waits with a link it cannot send', async () => {
     const result = await holdReply([]);
+    expect(result.sms).toBe('blocked');
+    expect(mockDb.__tables.sms_log.filter((r) => r.status === 'scheduled')).toHaveLength(0);
+  });
+
+  test('two links in two runs of text are queued and pinned in order, and the replay gives back the text as written', async () => {
+    const { replayBodyFor } = require('../services/messaging/deferred-replay-registry');
+    const smsBody = `Your offer: ${LINK} (or ${LINK}).`;
+    expect((await holdReply([{ id: 'offer-7', token: TOKEN }], smsBody)).sms).toBe('deferred');
+    const queued = mockDb.__tables.sms_log.find((r) => r.status === 'scheduled');
+    const pins = JSON.parse(queued.metadata).offer_links;
+    expect(pins).toEqual([{ job_offer_id: 'offer-7', token_hash: sha256(TOKEN) }, { job_offer_id: 'offer-7', token_hash: sha256(TOKEN) }]);
+    expect(replayBodyFor('recruiting_comms_deferred', { eligible: true, offerTokens: [TOKEN, TOKEN] }, queued.message_body)).toBe(smsBody);
+  });
+
+  // The replay rebuilds only the hidden link in its sent spelling, one token per hidden link. A text it cannot give back
+  // as written is not queued, so the applicant never gets words the owner did not write: the bare marker "[link hidden]"
+  // left by a copy of the token or a split link, a link the replay would respell, or a second link merged into the first.
+  test.each([
+    ['a copy of the token beside the link', `Here is your offer again: ${LINK} (code ${TOKEN})`],
+    ['a link split by a no-break space', `Here is your offer again: ${LINK.slice(0, 70)}\u00a0${LINK.slice(70)}`],
+    ['a link in another spelling', `Here is your offer again: https://portal.wavespestcontrol.com/careers/%6Fffer/./${TOKEN}`],
+    ['two links to the offer in one run of text', `Here it is: ${LINK},${LINK.replace('/offer/', '/%6Fffer/')}`],
+    ['a hidden link pasted from the message history', 'Here is your offer again: https://portal.wavespestcontrol.com/careers/offer/[link hidden]'],
+  ])('a held reply with %s is not queued, so the replay never sends words the owner did not write', async (_, smsBody) => {
+    const result = await holdReply([{ id: 'offer-7', token: TOKEN }], smsBody);
     expect(result.sms).toBe('blocked');
     expect(mockDb.__tables.sms_log.filter((r) => r.status === 'scheduled')).toHaveLength(0);
   });

@@ -1,6 +1,8 @@
 jest.mock('../models/db', () => {
   const db = jest.fn();
   db.fn = { now: jest.fn(() => 'NOW()') };
+  // The merge-journal reads (the only awaited raw queries): no merges.
+  db.raw = jest.fn(async () => ({ rows: [] }));
   return db;
 });
 
@@ -24,6 +26,7 @@ jest.mock('../services/ads/ad-audience-consent', () => ({
 }));
 
 const crypto = require('crypto');
+const dbMock = require('../models/db');
 const DataManager = require('../services/ads/data-manager');
 
 const {
@@ -33,6 +36,8 @@ const {
   configurationFor,
   dedupeCandidatesByTransaction,
   destinationFor,
+  JUNK_LEAD_STATUSES,
+  collectCandidates,
   hashedUserData,
   mapCompletedJobCandidate,
   mapLeadCandidate,
@@ -423,6 +428,27 @@ describe('conversion-lane marketing-consent suppression', () => {
     expect(cleaned.consentSuppressed).toBeUndefined();
   });
 
+  test("a completed job's estimate-lead customer contact (suppressionIdentifiers) counts for the opt-out only", async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['old-address@example.com'] }));
+    const [optedOut] = await applyMarketingConsent('completed_job_revenue', [{
+      transactionId: 'waves_completed_job:j1', email: 'pat@example.com', phone: '+19415550100',
+      consentIdentifiers: [{ email: 'pat@example.com', phone: '+19415550100' }],
+      suppressionIdentifiers: [{ email: 'old-address@example.com', phone: null }],
+    }]);
+    expect(optedOut).toMatchObject({ email: null, phone: null, consentSuppressed: true });
+    expect(optedOut).not.toHaveProperty('suppressionIdentifiers');
+
+    // A wrong number is never swapped for that customer's phone.
+    mockLoadSuppression.mockResolvedValue(snapshot({ invalid: ['9415550111'] }));
+    const [wrongNumber] = await applyMarketingConsent('completed_job_revenue', [{
+      transactionId: 'waves_completed_job:j2', email: 'sam@example.com', phone: '+19415550111',
+      consentIdentifiers: [{ email: 'sam@example.com', phone: '+19415550111' }, { email: null, phone: null }],
+      suppressionIdentifiers: [{ email: null, phone: '+19415550122' }],
+    }]);
+    expect(wrongNumber).toMatchObject({ email: 'sam@example.com', phone: null });
+    expect(wrongNumber).not.toHaveProperty('suppressionIdentifiers');
+  });
+
   test('duplicate completed-job rows: consent strips BEFORE dedupe so a click-ID sibling wins', async () => {
     mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['optout@example.com'] }));
     // Pre-consent, the opted-out row outscores the click-ID row (email+phone+
@@ -686,6 +712,18 @@ describe('extra match keys on conversions (name / ZIP / external id)', () => {
     expect(cleaned).toMatchObject({ phone: '9415550199', firstName: 'Sam', lastName: 'Rivera', zip: '34211' });
     expect(cleaned).not.toHaveProperty('identitySources');
   });
+  test("consent: a wrong number shared by the lead and its customer never lends the customer's name and ZIP", async () => {
+    mockLoadSuppression.mockResolvedValue({ invalidPhones: new Set(['9415550101']), isSuppressed: () => false });
+    const lead = mapLeadCandidate({
+      id: 'lead-4', created_at: '2026-07-01T00:00:00Z', email: 'new@example.com', phone: '9415550101',
+      customer_id: 'cust-2', customer_email: 'old@example.com', customer_phone: '(941) 555-0101',
+      customer_first_name: 'Sam', customer_last_name: 'Rivera', customer_zip: '34211',
+    });
+    // Before consent, the shared number joins the two records.
+    expect(lead).toMatchObject({ firstName: 'Sam', zip: '34211' });
+    const [cleaned] = await applyMarketingConsent('qualified_lead', [lead]);
+    expect(cleaned).toMatchObject({ email: 'new@example.com', phone: null, firstName: null, lastName: null, zip: null });
+  });
   test('a clean contact keeps its extras through consent cleaning', async () => {
     mockLoadSuppression.mockResolvedValue({ invalidPhones: new Set(), isSuppressed: () => false });
     const [c] = await applyMarketingConsent('qualified_lead', [{ transactionId: 't-1', email: 'a@x.com', firstName: 'Jo', zip: '34221', externalId: 'cust-1' }]);
@@ -697,5 +735,112 @@ describe('extra match keys on conversions (name / ZIP / external id)', () => {
     const summary = redactedEventSummary(c, ev);
     expect(summary.matchKeys).toMatchObject({ email: true, address: true, userIdentifiers: 2 });
     expect(JSON.stringify(summary)).not.toContain('34221');
+  });
+});
+
+describe('test records and junk leads (owner 2026-11-19)', () => {
+  // A fictional owner cell: the rule reads ADAM_PHONE, never a number in code.
+  const OWNER_CELL = '+19415550177';
+  const savedOwnerPhone = process.env.ADAM_PHONE;
+  beforeEach(() => { process.env.ADAM_PHONE = OWNER_CELL; });
+  afterAll(() => {
+    if (savedOwnerPhone === undefined) delete process.env.ADAM_PHONE; else process.env.ADAM_PHONE = savedOwnerPhone;
+  });
+  const baseLead = {
+    id: 'l1', created_at: '2026-11-18T12:00:00Z', email: 'pat@example.com', phone: '9415550100',
+    first_name: 'Pat', last_name: 'Sample', status: 'qualified',
+  };
+
+  test('qualified leads: a lead later marked junk or non-engaged is dropped in SQL, before the limit', async () => {
+    mockLoadSuppression.mockResolvedValue({ invalidPhones: new Set(), isSuppressed: () => false });
+    const chain = {};
+    const raws = [];
+    for (const m of ['leftJoin', 'whereNull', 'where', 'orWhereRaw', 'orderByRaw', 'limit']) {
+      chain[m] = jest.fn((...args) => {
+        if (typeof args[0] === 'function') args[0].call(chain, chain);
+        return chain;
+      });
+    }
+    chain.whereRaw = jest.fn((sql, bindings) => { raws.push({ sql, bindings }); return chain; });
+    chain.select = jest.fn(() => chain);
+    chain.then = (resolve) => resolve([]);
+    dbMock.mockImplementation(() => chain);
+    await collectCandidates('qualified_lead', { since: '2026-11-01', endDate: '2026-11-18' });
+    // The shared non-engaged set (cancelled, spam, duplicate, handled) plus disqualified.
+    expect(JUNK_LEAD_STATUSES).toEqual(['cancelled', 'spam', 'duplicate', 'handled', 'disqualified']);
+    const junk = raws.find((r) => r.sql.includes('NOT IN'));
+    expect(junk.sql).toBe("LOWER(TRIM(COALESCE(l.status, ''))) NOT IN (?, ?, ?, ?, ?)");
+    expect(junk.bindings).toEqual(JUNK_LEAD_STATUSES);
+    // ...before the limit: the filter is part of the same query the limit caps.
+    expect(chain.whereRaw.mock.invocationCallOrder[raws.indexOf(junk)]).toBeLessThan(chain.limit.mock.invocationCallOrder[0]);
+  });
+
+  test('an internal test record is skipped as internal_test (owner cell, test name, linked test customer)', () => {
+    // The listed test name, read from the list so no real name is written here.
+    const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
+    const [listedFirst, ...listedRest] = INTERNAL_TEST_CUSTOMERS[0].split(' ');
+    expect(skipReason(mapLeadCandidate({ ...baseLead, phone: OWNER_CELL }))).toBe('internal_test');
+    expect(skipReason(mapLeadCandidate({ ...baseLead, first_name: listedFirst, last_name: listedRest.join(' ') }))).toBe('internal_test');
+    expect(skipReason(mapLeadCandidate({
+      ...baseLead, customer_id: 'c1', customer_first_name: 'Shakedown', customer_last_name: 'Test (internal)',
+    }))).toBe('internal_test');
+  });
+
+  test('completed-job revenue skips test records but not a merged lead (real paid work stays)', () => {
+    const job = { id: 'ea1', service_date: '2026-11-17', invoice_total: 100, lead_email: 'pat@example.com', lead_phone: '9415550100' };
+    expect(skipReason(mapCompletedJobCandidate({ ...job, customer_phone: '(941) 555-0177' }))).toBe('internal_test');
+    expect(skipReason(mapCompletedJobCandidate(job))).toBeNull();
+    // The lead joins by estimate and can belong to another customer: a listed
+    // test customer's lead makes the job a test record; any other one does not.
+    const { INTERNAL_TEST_CUSTOMER_IDS } = require('../services/internal-test-customers');
+    expect(skipReason(mapCompletedJobCandidate({ ...job, customer_id: 'c1', lead_customer_id: INTERNAL_TEST_CUSTOMER_IDS[0] }))).toBe('internal_test');
+    expect(skipReason(mapCompletedJobCandidate({ ...job, customer_id: 'c1', lead_customer_id: 'c2' }))).toBeNull();
+    // ...and so does a lead customer that is a test record by its own contact.
+    expect(skipReason(mapCompletedJobCandidate({
+      ...job, customer_id: 'c1', lead_customer_id: 'c2', lead_customer_first_name: 'Shakedown', lead_customer_last_name: 'Test',
+    }))).toBe('internal_test');
+    expect(skipReason(mapCompletedJobCandidate({ ...job, customer_id: 'c1', lead_customer_id: 'c2', lead_customer_phone: '(941) 555-0177' }))).toBe('internal_test');
+  });
+
+  test("the completed-job query selects the joined lead's own customer id, which the test-record check reads", async () => {
+    mockLoadSuppression.mockResolvedValue({ invalidPhones: new Set(), isSuppressed: () => false });
+    const selected = [];
+    const chain = new Proxy({}, {
+      get: (_t, prop) => {
+        if (prop === 'then') return (resolve) => resolve([]);
+        if (prop === 'select') return (...cols) => { selected.push(...cols); return chain; };
+        return () => chain;
+      },
+    });
+    dbMock.mockImplementation(() => chain);
+    const savedRaw = dbMock.raw;
+    dbMock.raw = (sql) => sql;
+    try {
+      await collectCandidates('completed_job_revenue', { since: '2026-11-01', endDate: '2026-11-18' });
+    } finally {
+      dbMock.raw = savedRaw;
+    }
+    expect(selected).toEqual(expect.arrayContaining([
+      'l.customer_id as lead_customer_id',
+      'lc.email as lead_customer_email', 'lc.phone as lead_customer_phone',
+      'lc.first_name as lead_customer_first_name', 'lc.last_name as lead_customer_last_name',
+    ]));
+  });
+
+  test('summarizeCandidates counts internal_test and skips it', () => {
+    const { counts, rows } = summarizeCandidates([
+      mapLeadCandidate({ ...baseLead, id: 'l2', phone: '9415550177' }),
+      mapLeadCandidate({ ...baseLead, id: 'l3' }),
+    ]);
+    expect(counts).toMatchObject({ internalTest: 1, eligible: 1, skipped: 1 });
+    expect(rows.map((r) => r.skipReason)).toEqual(['internal_test', null]);
+  });
+
+  test('dedupe: an exclusion on any sibling of a transaction excludes it', () => {
+    const [kept] = dedupeCandidatesByTransaction([
+      { transactionId: 't', email: 'a@x.com', phone: '9415550100', eventTimestamp: 'x' },
+      { transactionId: 't', internalTest: true },
+    ]);
+    expect(kept.internalTest).toBe(true);
   });
 });

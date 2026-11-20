@@ -1,4 +1,4 @@
-// GATE_MISSED_CALL_VISIT_UNDERWAY (owner 2026-10-21) on PostgreSQL: a customer on file
+// Visit underway (owner 2026-10-21) on PostgreSQL: a customer on file
 // called, nobody answered, then the customer's visit moved (en route, arrived or
 // completed) or an invoice was paid, after the call on the same ET day. The
 // missed-call bell is retired, never rings, and is never re-pushed.
@@ -38,7 +38,7 @@ const { gates } = require('../config/feature-gates');
 const missedCallBell = require('../services/missed-call-bell');
 const { sweepMissedCallRepush } = require('../services/missed-call-repush');
 
-const { ringMissedCallIfUnanswered, retireCalledBackMissedCalls, visitUnderwaySql } = missedCallBell;
+const { ringMissedCallIfUnanswered, retireCalledBackMissedCalls } = missedCallBell;
 
 jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('missed-call bell, visit underway, on PostgreSQL', () => {
@@ -48,7 +48,7 @@ jest.setTimeout(30000);
     'call_log', 'scheduled_services', 'invoices', 'customers', 'notifications', 'blocked_numbers',
     'blocked_call_attempts', 'notification_preferences', 'technicians', 'schedule_blackout_dates', 'system_settings',
   ];
-  const gateNames = ['missedCallVisitUnderway', 'missedCallRepush', 'callbackNeedsAnswer', 'missedCallUnknownCallers'];
+  const gateNames = ['missedCallUnknownCallers'];
   const savedGates = Object.fromEntries(gateNames.map((key) => [key, gates[key]]));
   const setGates = (on) => gateNames.forEach((key) => { gates[key] = on.includes(key); });
 
@@ -70,7 +70,7 @@ jest.setTimeout(30000);
   });
   beforeEach(async () => {
     jest.clearAllMocks();
-    setGates(['missedCallVisitUnderway']);
+    setGates([]);
     triggerNotification.mockResolvedValue({ bellWritten: true });
     customerId = randomUUID();
     adminId = randomUUID();
@@ -112,7 +112,7 @@ jest.setTimeout(30000);
   const visit = (cols, cid = customerId) => database('scheduled_services').insert({ id: randomUUID(), customer_id: cid, ...cols });
   const invoice = (cols, cid = customerId) => database('invoices').insert({ id: randomUUID(), customer_id: cid, ...cols });
 
-  describe('retire sweep, gate on', () => {
+  describe('retire sweep', () => {
     test.each([
       ['en route', { en_route_at: at('13:46') }],
       ['arrived', { arrived_at: at('13:59') }],
@@ -206,7 +206,7 @@ jest.setTimeout(30000);
     });
   });
 
-  describe('a bell that has not rung yet, gate on', () => {
+  describe('a bell that has not rung yet', () => {
     test.each([
       ['en route', { en_route_at: at('13:46') }],
       ['arrived', { arrived_at: at('13:59') }],
@@ -270,15 +270,6 @@ jest.setTimeout(30000);
       expect(JSON.stringify(after)).not.toContain(RETIRE_REASON);
     });
 
-    test('gate off: a visit that moves after the bell is written leaves it open', async () => {
-      setGates([]);
-      const call = await missedCall();
-      bellThenVisitMoves(call, { en_route_at: at('13:46') });
-      expect(await ringMissedCallIfUnanswered(call.twilio_call_sid)).toBe(true);
-      const after = await database('notifications').where({ category: 'missed_call' }).first();
-      expect(after.done_at).toBeNull();
-    });
-
     test('an unknown caller rings as before', async () => {
       gates.missedCallUnknownCallers = true;
       const call = await missedCall({ customer_id: null, duration_seconds: 30 });
@@ -287,13 +278,12 @@ jest.setTimeout(30000);
     });
   });
 
-  describe('re-push, gate on', () => {
+  describe('re-push', () => {
     const run = (opts = {}) => sweepMissedCallRepush({ hours: HOURS, clock: () => REPUSH_NOW, now: REPUSH_NOW, ...opts });
     // A bell that rang 45 minutes before the clock, for a call at 1:05 PM ET.
     const repushBell = (call) => bell(call, { createdAt: new Date(REPUSH_NOW.getTime() - 45 * 60 * 1000) });
 
     beforeEach(() => {
-      gates.missedCallRepush = true;
       // The retire pass has its own tests above; here the re-push check stands alone.
       jest.spyOn(missedCallBell, 'retireCalledBackMissedCalls').mockResolvedValue(0);
     });
@@ -321,39 +311,6 @@ jest.setTimeout(30000);
       await visit({ en_route_at: at('12:10') });
       expect(await run()).toBe(1);
       expect((await stored(row)).metadata.repushed_at).toBeDefined();
-    });
-  });
-
-  describe('gate off', () => {
-    beforeEach(() => setGates([]));
-
-    test('visitUnderwaySql is null, so no clause is added anywhere', () => {
-      expect(visitUnderwaySql()).toBeNull();
-    });
-
-    test('the retire sweep leaves a bell whose visit moved alone', async () => {
-      const call = await missedCall();
-      const row = await bell(call);
-      await visit({ en_route_at: at('13:46'), arrived_at: at('13:59'), completed_at: at('14:20') });
-      await invoice({ status: 'paid', paid_at: at('14:32') });
-      expect(await retireCalledBackMissedCalls()).toBe(0);
-      expect((await stored(row)).done_at).toBeNull();
-    });
-
-    test('the bell rings as before', async () => {
-      const call = await missedCall();
-      await visit({ en_route_at: at('13:46') });
-      expect(await ringMissedCallIfUnanswered(call.twilio_call_sid)).toBe(true);
-      expect(triggerNotification).toHaveBeenCalledTimes(1);
-    });
-
-    test('the re-push still goes', async () => {
-      gates.missedCallRepush = true;
-      jest.spyOn(missedCallBell, 'retireCalledBackMissedCalls').mockResolvedValue(0);
-      const call = await missedCall();
-      await bell(call, { createdAt: new Date(REPUSH_NOW.getTime() - 45 * 60 * 1000) });
-      await visit({ en_route_at: at('13:46') });
-      expect(await sweepMissedCallRepush({ hours: HOURS, clock: () => REPUSH_NOW, now: REPUSH_NOW })).toBe(1);
     });
   });
 });

@@ -1104,13 +1104,13 @@ async function handleLeadInquiry(email, classification) {
   };
 }
 
-// GATE_RING_NEW_CONTACTS (owner 2026-11-04, "ring new"): a new-lead email also puts ONE banner on the owner's phone,
+// Owner 2026-11-04, "ring new": a new-lead email also puts ONE banner on the owner's phone,
 // at any hour, and never twice for the same email. The bell row is keyed on the email id, so a retry or a re-sync of the
 // same email finds the standing row and writes nothing, and a row that already exists sends no second banner
-// (bell-banners.js, kind new_lead_email). `part` keeps the two alerts one email can raise on separate rows. Gate off:
-// no options, the plain unkeyed write exactly as before.
+// (bell-banners.js, kind new_lead_email). `part` keeps the two alerts one email can raise on separate rows. No email
+// id: no options, the plain unkeyed write.
 function ringNewLeadEmailOpts(emailId, part) {
-  if (!emailId || !require('../../config/feature-gates').ringNewContactsLive?.()) return {};
+  if (!emailId) return {};
   return { dedupeKey: `email-lead:${part}:${emailId}`, bannerKind: 'new_lead_email' };
 }
 
@@ -1526,7 +1526,7 @@ module.exports = {
   emailQuoteDraftsEnabled,
   parseExtractedAddress,
   maybeDraftEstimateFromEmailLead,
-  // Exported for unit testing the new-lead email banner options (GATE_RING_NEW_CONTACTS)
+  // Exported for unit testing the new-lead email banner options
   ringNewLeadEmailOpts,
   // Exported for unit testing the hands-off upgrade
   handleSpam,

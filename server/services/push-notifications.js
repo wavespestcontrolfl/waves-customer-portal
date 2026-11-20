@@ -225,7 +225,7 @@ async function contactDevicesAllowed(subs, purpose, customerId, database = db) {
 class PushNotificationService {
   // opts.contactKey: a contact session's own status — only that contact's
   // devices count; a holder's status never counts a contact device.
-  // opts.withReachable: routing only (GATE_APP_FIRST_ANY_DEVICE) also reads
+  // opts.withReachable: routing only also reads
   // `reachable`; the customer-facing status routes keep their exact shape.
   // `reachable` also needs a check-in within APP_FIRST_STALE_DAYS while
   // GATE_APP_FIRST_STALE_TEXT is on (appFirstStaleFloor), so every reader follows it.
@@ -246,7 +246,7 @@ class PushNotificationService {
       registered: rows.length > 0,
       fresh: rows.some((row) => providers[row.platform] && new Date(row.updated_at).getTime() >= cutoff),
       // Any active holder device whose provider is configured, however long
-      // ago the app last checked in (GATE_APP_FIRST_ANY_DEVICE).
+      // ago the app last checked in.
       // appStale: the 30-day floor alone kept a holder phone app from counting (routing then
       // sends the text AND the app alert, GATE_APP_FIRST_STALE_TEXT).
       ...(withReachable ? { reachable, appStale: Boolean(reachableSince) && !reachable && deliverable.length > 0 } : {}),
