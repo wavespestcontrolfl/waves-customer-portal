@@ -5792,6 +5792,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEDNESDAYS 7:00AM + 1:00PM — Pest Insider shadow planner. Issues go out on the 1st and 3rd
+  // Thursday of the month; the day before, this plans and builds the issue with the real builder
+  // and records the result in pest_insider_issues (status shadow, or skipped with the reason).
+  // Any other Wednesday it does nothing. The 1:00 PM run is the catch-up for a missed, failed or
+  // refused 7:00 AM tick: a built row is left alone, a skipped one is built again. It SENDS NOTHING:
+  // no email, no newsletter_sends row, no bell. The send path comes in the next PR and reads these rows.
+  // =========================================================================
+  for (const expression of ['0 7 * * 3', '0 13 * * 3']) {
+    cron.schedule(expression, async () => {
+      try {
+        await runExclusive('pest-insider-shadow-issue', () => require('./pest-insider/schedule').runShadowIssue());
+      } catch (err) {
+        logger.error(`Pest Insider shadow planner failed: ${err.message}`);
+      }
+    }, { timezone: 'America/New_York' });
+  }
+
+  // =========================================================================
   // DAILY 8AM — Morning banner. Owner
   // 2026-11-03 ("ok add", choice C): ONE phone banner says how many items wait for the owner and
   // opens his alert list. Push only, admin phones only, nothing when zero wait. runExclusive stops
