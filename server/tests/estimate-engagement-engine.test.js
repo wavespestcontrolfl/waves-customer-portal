@@ -1027,6 +1027,26 @@ describe('processDueJobs', () => {
     expect(JSON.stringify(defer.payload)).not.toMatch(/attempts/);
   });
 
+  test('a final no from the boundary predicate (accepted, expired, deadline moved) skips the job and releases the claim', async () => {
+    followupShared.sendDualChannel.mockImplementationOnce(async (_est, _spec, outcome) => {
+      outcome.finalReason = 'terminal-status:accepted';
+      return false;
+    });
+    enqueueProcessorHappyPath({
+      job: pendingJob({ rule_key: 'return_visit_hot' }),
+      est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 1 * MIN) }),
+      rules: RULE_ROWS,
+    });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    expect(followupShared.releaseFollowupSend).toHaveBeenCalledWith('est-1', 'return_visit_hot');
+    expect(followupShared.bumpFollowupCounters).not.toHaveBeenCalled();
+    const upd = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(upd.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'boundary:terminal-status:accepted' }));
+  });
+
   test('once the customer is no longer booking, the same job sends', async () => {
     followupShared.estimateMidCheckout.mockResolvedValue(false);
     enqueueProcessorHappyPath({

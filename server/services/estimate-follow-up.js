@@ -31,7 +31,7 @@ const { isInternalEmailRecipient } = require("../utils/internal-email-recipients
 const { billingEmailDetailsLive, customerPropertyAddress, isStreetShapedAddress } = require("./billing-email-details");
 const { estimateDeliverableUnderGate } = require("./pricing-authority-gate");
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../constants/business");
-const { ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY } = require("../constants/email-replay-exclusions");
+const { ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, ESTIMATE_FOLLOWUP_CATEGORY } = require("../constants/email-replay-exclusions");
 const { customerConvertedSince } = require("./estimate-conversion-guard");
 const { openEstimateEmailPdf } = require("./estimate-email-pdf");
 
@@ -299,6 +299,56 @@ async function safetyGate(est, now = new Date(), { replay = false } = {}) {
   return { skip: false };
 }
 
+// ── The one "may this nudge still go out" predicate ─────────────────────────
+// Every last step before a follow-up reaches a customer asks THIS, so the rule
+// cannot drift per path: the email provider handoff (every stage, the engine
+// included) calls followupMayStillSend; the deferred-text replay calls
+// followupFinalVerdict (below) and the same checkout lookup through safetyGate.
+// Stored-copy email retries are not a path: follow-up emails are excluded from
+// them (constants/email-replay-exclusions.js).
+const OPEN_STATUSES = new Set(["sent", "viewed"]);
+// The "sent, never opened" reminders: moot for good once the estimate is opened.
+const UNOPENED_STAGES = new Set(["unviewed", "engage_delivery_unopened_24h"]);
+// The stages whose copy quotes the estimate's deadline.
+function quotesDeadline(stage) {
+  return stage === "expiring" || String(stage || "").startsWith("engage_expiring");
+}
+
+// FINAL verdicts only, from one estimate row (no waits): the reason string, or
+// null when none applies. archived, no longer sent/viewed, deadline passed,
+// the deadline the copy quotes has moved, an unopened reminder after an open.
+function followupFinalVerdict(est, { stage = null, quotedExpiresAt = null, nowMs = Date.now() } = {}) {
+  if (est.archived_at) return "estimate-archived";
+  if (TERMINAL_STATUSES.has(est.status)) return `terminal-status:${est.status}`;
+  if (!OPEN_STATUSES.has(est.status)) return `not-open:${est.status}`;
+  const live = est.expires_at ? new Date(est.expires_at).getTime() : null;
+  if (live !== null && !Number.isNaN(live) && live <= nowMs) return "estimate-expired";
+  // The copy quotes the deadline it was built with. If an extension moved it
+  // while the message waited, the copy is wrong for good. A row queued before
+  // the stamp existed has none and skips this check.
+  if (quotedExpiresAt) {
+    const quoted = new Date(quotedExpiresAt).getTime();
+    if (live === null || Number.isNaN(quoted) || live !== quoted) return "deadline-changed";
+  }
+  if (UNOPENED_STAGES.has(stage) && est.viewed_at) return "estimate-viewed";
+  return null;
+}
+
+// Re-reads the estimate at the moment of dispatch: { ok: true }, or { ok: false,
+// reason, final } where final=false is a wait (checkout active, retryAt set) and
+// final=true is a final no. A failed row read throws; the caller decides what
+// an unreadable state means (the email handoff makes it a retryable non-send).
+async function followupMayStillSend(estimateId, { stage = null, quotedExpiresAt = null, conn = db, nowMs = Date.now() } = {}) {
+  const est = await conn("estimates").where({ id: estimateId }).first();
+  if (!est) return { ok: false, final: true, reason: "estimate-missing" };
+  const reason = followupFinalVerdict(est, { stage, quotedExpiresAt, nowMs });
+  if (reason) return { ok: false, final: true, reason };
+  if (await estimateMidCheckout(est.id, { conn, groupId: est.estimate_group_id })) {
+    return { ok: false, final: false, reason: "customer-mid-checkout", retryAt: new Date(nowMs + CHECKOUT_ACTIVE_MINUTES * 60000) };
+  }
+  return { ok: true };
+}
+
 // The two TEMPORARY holds in safetyGate are waits, not verdicts: the customer
 // may abandon the card step, and a page view ages out. The queued text must
 // come back, not be settled as stale. Mid-checkout retries after
@@ -328,26 +378,16 @@ function replayHoldVerdict(reason, est, nowMs) {
 // already declined or paid — the executor reschedules the row and re-checks
 // on the next pass instead.
 // `stage` and `quotedExpiresAt` are the queued row's followup_stage and
-// quoted_expires_at. The unviewed stage means "sent
-// and never opened": once the customer has opened the estimate that reminder
-// is moot for good, so it is a final verdict, not a timed wait. Every other
-// stage still applies after a view and keeps the timed retry.
+// quoted_expires_at (see followupFinalVerdict). Every other stage keeps the
+// timed retry after a view or while the customer is mid-checkout.
 async function deferredFollowupStillEligible(estimateId, { stage = null, quotedExpiresAt = null } = {}) {
   try {
     const est = await db("estimates").where({ id: estimateId }).first();
     if (!est) return { eligible: false, reason: "estimate-missing" };
-    // An expiring text quotes the deadline it was queued with. If an extension
-    // moved it during the wait (including a view-hold retry), the copy is wrong
-    // for good: final, as the extension-confirmation replay does. A row queued
-    // before the stamp existed has none and skips this check.
-    if (quotedExpiresAt) {
-      const live = est.expires_at ? new Date(est.expires_at).getTime() : null;
-      const quoted = new Date(quotedExpiresAt).getTime();
-      if (live === null || Number.isNaN(quoted) || live !== quoted) {
-        return { eligible: false, reason: "deadline-changed" };
-      }
-    }
-    if (stage === "unviewed" && est.viewed_at) return { eligible: false, reason: "estimate-viewed" };
+    // The shared final verdict first: archived, no longer open, deadline passed
+    // or moved since the text was queued, unopened reminder now opened.
+    const final = followupFinalVerdict(est, { stage, quotedExpiresAt });
+    if (final) return { eligible: false, reason: final };
     // replay:true — the reply-pause lookup THROWS on a transient failure
     // here (codex r27) instead of the cron path's fail-open false, so an
     // unverifiable reply state lands in the catch below and holds the row.
@@ -597,31 +637,43 @@ function averageProviderHandoff(estimateId, expectedText, pdfHandoff = null) {
   });
 }
 
-// Provider-boundary check for the customer being mid-checkout. The customer
-// can reserve a visit time or reach the card step while sendDualChannel waits
-// on the PDF render and its retries, and neither write touches the estimate
-// row, so the check runs inside the handoff, after every other await and
-// right before the provider request. A veto is a definite non-send (the
-// stage claim is released by the caller); `outcome.midCheckout` tells the
-// caller the cause, so it can look again later instead of counting a failed
-// attempt.
-function checkoutBoundaryCheck(est, outcome) {
+// Provider-boundary check: the one predicate (followupMayStillSend), run inside
+// the handoff, after every other await and right before the provider request.
+// The customer can accept, reserve a visit time or reach the card step while
+// sendDualChannel waits on link minting, the PDF render and its retries, and
+// none of those writes need touch what the caller read earlier. A veto is a
+// definite non-send (the caller releases its stage claim); `outcome` says why,
+// so the engine can wait (midCheckout) or drop the job (finalReason) instead of
+// counting a failed attempt. An unreadable row is a retryable non-send.
+function checkoutBoundaryCheck(est, outcome, { stage = null, quotedExpiresAt = null } = {}) {
   return async () => {
-    if (await estimateMidCheckout(est.id, { groupId: est.estimate_group_id })) {
-      if (outcome) outcome.midCheckout = true;
-      const veto = new Error(`estimate ${est.id} not sent: customer_mid_checkout`);
+    let verdict;
+    try {
+      verdict = await followupMayStillSend(est.id, { stage, quotedExpiresAt });
+    } catch (err) {
+      const unavailable = new Error(`estimate ${est.id} send check unavailable: ${err.message}`);
+      unavailable.providerBoundaryCheckFailed = true;
+      unavailable.cause = err;
+      throw unavailable;
+    }
+    if (!verdict.ok) {
+      if (outcome) {
+        if (verdict.final) outcome.finalReason = verdict.reason;
+        else outcome.midCheckout = true;
+      }
+      const veto = new Error(`estimate ${est.id} not sent: ${verdict.reason}`);
       veto.providerBoundaryBlocked = true;
-      veto.reason = "customer_mid_checkout";
+      veto.reason = verdict.final ? "estimate_not_sendable" : "customer_mid_checkout";
       throw veto;
     }
     return { ok: true };
   };
 }
 
-// Composes the checkout check after whatever handoff the send already has (the
-// PDF fence, the monthly-average check, both, or none), as averageProviderHandoff does.
-function checkoutProviderHandoff(est, outcome, inner = null) {
-  const check = checkoutBoundaryCheck(est, outcome);
+// Composes that check after whatever handoff the send already has (the PDF
+// fence, the monthly-average check, both, or none), as averageProviderHandoff does.
+function checkoutProviderHandoff(est, outcome, inner = null, ctx = {}) {
+  const check = checkoutBoundaryCheck(est, outcome, ctx);
   if (!inner) {
     return async (dispatch) => {
       await dispatch(undefined, check);
@@ -724,7 +776,13 @@ async function withFollowupPropertyRow(est, payload) {
 // `outcome` (optional): set to { midCheckout: true } when the email was held at the
 // provider boundary because the customer is mid-checkout. The hold applies with or
 // without it; the engine passes one to tell a hold from a failed send.
-async function sendDualChannel(est, { sms, email }, outcome = null) {
+async function sendDualChannel(est, { sms, email, stage = null }, outcome = null) {
+  // The stage travels on its own: an SMS-only stage (email template off) still
+  // stamps the replay's checks. Defaults to the email's stage.
+  const followupStage = stage || email?.stage || null;
+  const quotedExpiresAt = quotesDeadline(followupStage) && est.expires_at
+    ? new Date(est.expires_at).toISOString()
+    : null;
   let attempted = false;
   let smsHold = null;
   // A phone the customer typed on the accept card gets no follow-up text
@@ -810,12 +868,10 @@ async function sendDualChannel(est, { sms, email }, outcome = null) {
         metadata: JSON.stringify({
           entry_point: "estimate_follow_up_deferred",
           estimate_id: est.id,
-          followup_stage: email?.stage || null,
-          // The expiring text quotes this deadline in its body; the replay
-          // suppresses it if an extension moved the deadline while it waited.
-          ...(email?.stage === "expiring" && est.expires_at
-            ? { quoted_expires_at: new Date(est.expires_at).toISOString() }
-            : {}),
+          followup_stage: followupStage,
+          // The deadline the text quotes; the replay suppresses it if an
+          // extension moved the deadline while it waited.
+          ...(quotedExpiresAt ? { quoted_expires_at: quotedExpiresAt } : {}),
           original_block_code: smsHold.code,
           // Customer rows resolve their LOCATION from-number at send time
           // (from_phone above is a NOT-NULL placeholder) and re-read the
@@ -877,19 +933,19 @@ async function sendDualChannel(est, { sms, email }, outcome = null) {
         ...(pdfCopy.attachments.length ? { attachments: pdfCopy.attachments } : {}),
         // The fence rides every prepared send, with the file or without it. With the
         // monthly average the send-time average check rides too (composed with it).
-        // The mid-checkout check rides every follow-up email (the stage cron's
+        // The final-send predicate rides every follow-up email (the stage cron's
         // legacy and payment-step sends too), composed last, after the PDF fence
         // and the average check. A veto is a definite non-send: sendDualChannel
         // returns false, and each stage caller releases its claim without
         // counting an attempt, so the next tick looks again.
-        withProviderHandoff: checkoutProviderHandoff(est, outcome, innerHandoff),
+        withProviderHandoff: checkoutProviderHandoff(est, outcome, innerHandoff, { stage: followupStage, quotedExpiresAt }),
         recipientType: est.customer_id ? "customer" : "lead",
         recipientId: est.customer_id || null,
         triggerEventId: idempotencyKey,
         idempotencyKey,
         estimateId: est.id,
         categories: [
-          "estimate_followup",
+          ESTIMATE_FOLLOWUP_CATEGORY, // keeps every follow-up off the stored-copy retry and bounce-replay rails
           `estimate_followup_${email.stage}`,
           // Keeps the stored copy off the provider-retry and bounce-replay rails.
           ...(email.averageText ? [ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY] : []),
@@ -1444,6 +1500,7 @@ const EstimateFollowUp = {
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
+            stage: "unviewed",
             email: delivery.unviewed.emailEnabled ? await withAverageEmail({
               templateKey: "estimate.unviewed_followup",
               stage: "unviewed",
@@ -1529,6 +1586,7 @@ const EstimateFollowUp = {
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
+            stage: "viewed",
             email: delivery.viewed.emailEnabled ? await withAverageEmail({
               templateKey: "estimate.viewed_followup",
               stage: "viewed",
@@ -1615,6 +1673,7 @@ const EstimateFollowUp = {
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
+            stage: "final",
             email: delivery.final.emailEnabled ? await withAverageEmail({
               templateKey: "estimate.followup_final",
               stage: "final",
@@ -1732,6 +1791,7 @@ const EstimateFollowUp = {
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
+            stage: "expiring",
             email: delivery.expiring.emailEnabled ? await withAverageEmail({
               templateKey: "estimate.expiring_notice",
               stage: "expiring",
@@ -1812,5 +1872,7 @@ module.exports._private = {
   hasRepliedRecently,
   wasRecentlyOpened,
   estimateMidCheckout,
+  followupMayStillSend,
+  followupFinalVerdict,
   CHECKOUT_ACTIVE_MINUTES,
 };

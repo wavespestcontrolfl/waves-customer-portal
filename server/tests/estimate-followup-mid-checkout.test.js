@@ -67,8 +67,8 @@ function tableStub(result) {
   return b;
 }
 
-function arrange({ hold = undefined, card = undefined } = {}) {
-  const stubs = { scheduled_services: tableStub(hold), estimate_checkout_events: tableStub(card) };
+function arrange({ hold = undefined, card = undefined, est = undefined } = {}) {
+  const stubs = { scheduled_services: tableStub(hold), estimate_checkout_events: tableStub(card), estimates: tableStub(est) };
   db.mockImplementation((table) => stubs[table] || tableStub(undefined));
   return stubs;
 }
@@ -253,6 +253,14 @@ describe('deferredFollowupStillEligible (quiet-hours text replay)', () => {
       .resolves.toEqual({ eligible: false, reason: 'deadline-changed' });
   });
 
+  test('a retry cannot outlive the deadline: an elapsed expires_at is final even when the quoted stamp still matches', async () => {
+    const expired = new Date(NOW.getTime() - 60000);
+    const viewedAt = new Date(NOW.getTime() - 10 * 60000);
+    arrangeReplay({ est: { expires_at: expired, last_viewed_at: viewedAt, viewed_at: viewedAt } });
+    await expect(deferredFollowupStillEligible('est-1', { stage: 'expiring', quotedExpiresAt: expired.toISOString() }))
+      .resolves.toEqual({ eligible: false, reason: 'estimate-expired' });
+  });
+
   test('an unchanged quoted deadline keeps the timed retry; a row without the stamp skips the check', async () => {
     const expires = new Date('2026-11-25T15:00:00Z');
     const viewedAt = new Date(NOW.getTime() - 10 * 60000);
@@ -289,6 +297,9 @@ describe('provider-boundary checkout check (sendDualChannel with an outcome)', (
   const est = { id: 'est-1', status: 'sent', customer_id: null, customer_phone: null, customer_email: 'pat@example.com', estimate_group_id: null };
   const email = { templateKey: 'estimate.engage_x', stage: 'engage_x', payload: {} };
 
+  // The estimate as the boundary re-reads it: open, deadline ahead.
+  const OPEN = { id: 'est-1', status: 'sent', archived_at: null, viewed_at: null, estimate_group_id: null, expires_at: new Date(Date.now() + 5 * 86400000) };
+
   beforeEach(() => {
     mockPdf.copy = { attachments: [], payload: {} };
     EmailTemplateLibrary.sendTemplate.mockClear();
@@ -297,25 +308,26 @@ describe('provider-boundary checkout check (sendDualChannel with an outcome)', (
   // Hands the library's dispatch to the installed handoff; returns the check it was given.
   async function installedCheck(outcome) {
     await _private.sendDualChannel(est, { email }, outcome);
-    const handoff = EmailTemplateLibrary.sendTemplate.mock.calls[0][0].withProviderHandoff;
+    // The send this call just made: a test that loops makes several.
+    const handoff = EmailTemplateLibrary.sendTemplate.mock.calls.at(-1)[0].withProviderHandoff;
     let check;
     await handoff(async (_database, providerCheck) => { check = providerCheck; });
     return check;
   }
 
   test('a customer who starts checkout after preparation vetoes the send at the provider boundary and says why', async () => {
-    arrange();
+    arrange({ est: OPEN });
     const outcome = {};
     const check = await installedCheck(outcome);
     // Idle when the email was prepared; booking by the time the request is due.
-    arrange({ hold: { id: 'hold-1' } });
+    arrange({ hold: { id: 'hold-1' }, est: OPEN });
 
     await expect(check()).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'customer_mid_checkout' });
     expect(outcome.midCheckout).toBe(true);
   });
 
   test('an idle customer passes the boundary check', async () => {
-    arrange();
+    arrange({ est: OPEN });
     const outcome = {};
     const check = await installedCheck(outcome);
     await expect(check()).resolves.toEqual({ ok: true });
@@ -323,7 +335,7 @@ describe('provider-boundary checkout check (sendDualChannel with an outcome)', (
   });
 
   test('runs after the PDF fence; a PDF veto stops it first and is not read as a checkout hold', async () => {
-    arrange({ hold: { id: 'hold-1' } });
+    arrange({ hold: { id: 'hold-1' }, est: OPEN });
     const pdfCheck = jest.fn(async () => { throw Object.assign(new Error('pdf veto'), { providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' }); });
     mockPdf.copy = { attachments: [], payload: {}, withProviderHandoff: async (dispatch) => { await dispatch(undefined, pdfCheck); return { ok: true }; } };
     const outcome = {};
@@ -334,13 +346,68 @@ describe('provider-boundary checkout check (sendDualChannel with an outcome)', (
   });
 
   test('without an outcome (the stage cron: legacy and payment-step sends) the same veto applies', async () => {
-    arrange();
+    arrange({ est: OPEN });
     await _private.sendDualChannel(est, { email });
     const handoff = EmailTemplateLibrary.sendTemplate.mock.calls[0][0].withProviderHandoff;
     let check;
     await handoff(async (_database, providerCheck) => { check = providerCheck; });
-    arrange({ hold: { id: 'hold-1' } });
+    arrange({ hold: { id: 'hold-1' }, est: OPEN });
     await expect(check()).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'customer_mid_checkout' });
+  });
+
+  test('the SAME check is the final no when the estimate was accepted, archived, expired or its deadline moved during preparation', async () => {
+    const cases = [
+      [{ status: 'accepted' }, 'terminal-status:accepted'],
+      [{ archived_at: new Date() }, 'estimate-archived'],
+      [{ expires_at: new Date(Date.now() - 60000) }, 'estimate-expired'],
+      [{ status: 'draft' }, 'not-open:draft'],
+    ];
+    for (const [change, reason] of cases) {
+      arrange({ est: OPEN });
+      const outcome = {};
+      const check = await installedCheck(outcome);
+      arrange({ est: { ...OPEN, ...change } });
+      await expect(check()).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_not_sendable' });
+      expect(outcome.finalReason).toBe(reason);
+      expect(outcome.midCheckout).toBeUndefined();
+    }
+  });
+
+  test('an expiring email is vetoed when the deadline it quotes moved; an unopened reminder when the estimate was opened', async () => {
+    const quoted = new Date(Date.now() + 5 * 86400000);
+    arrange({ est: { ...OPEN, expires_at: quoted } });
+    let outcome = {};
+    await _private.sendDualChannel({ ...est, expires_at: quoted }, { email: { ...email, stage: 'expiring' } }, outcome);
+    let handoff = EmailTemplateLibrary.sendTemplate.mock.calls.at(-1)[0].withProviderHandoff;
+    let check;
+    await handoff(async (_d, c) => { check = c; });
+    arrange({ est: { ...OPEN, expires_at: new Date(quoted.getTime() + 7 * 86400000) } });
+    await expect(check()).rejects.toMatchObject({ providerBoundaryBlocked: true });
+    expect(outcome.finalReason).toBe('deadline-changed');
+
+    arrange({ est: OPEN });
+    outcome = {};
+    await _private.sendDualChannel(est, { email: { ...email, stage: 'unviewed' } }, outcome);
+    handoff = EmailTemplateLibrary.sendTemplate.mock.calls.at(-1)[0].withProviderHandoff;
+    await handoff(async (_d, c) => { check = c; });
+    arrange({ est: { ...OPEN, viewed_at: new Date() } });
+    await expect(check()).rejects.toMatchObject({ providerBoundaryBlocked: true });
+    expect(outcome.finalReason).toBe('estimate-viewed');
+  });
+
+  test('an unreadable estimate row is a retryable non-send, never a pass', async () => {
+    arrange({ est: OPEN });
+    const check = await installedCheck({});
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(check()).rejects.toMatchObject({ providerBoundaryCheckFailed: true });
+  });
+
+  test('every follow-up email is kept off the stored-copy retry and bounce-replay rails', async () => {
+    const { staleStoredCopyReason, ESTIMATE_FOLLOWUP_CATEGORY } = require('../constants/email-replay-exclusions');
+    await _private.sendDualChannel(est, { email });
+    const { categories } = EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
+    expect(categories).toContain(ESTIMATE_FOLLOWUP_CATEGORY);
+    expect(staleStoredCopyReason(categories)).toEqual(expect.any(String));
   });
 
   test('a vetoed send returns false, so every stage caller releases its claim and counts nothing', async () => {

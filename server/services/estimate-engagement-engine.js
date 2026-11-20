@@ -899,6 +899,13 @@ async function processDueBatch(now = new Date()) {
         await followupShared.bumpFollowupCounters(est.id, rule.rule_key);
         await markJob(job.id, 'done', null);
         sent++;
+      } else if (sendOutcome.finalReason) {
+        // The final-send predicate said no at the provider boundary: the estimate
+        // was accepted, archived, expired or its deadline moved while the email
+        // was prepared. Nothing was sent; give the claim back and end the job.
+        await followupShared.releaseFollowupSend(est.id, rule.rule_key);
+        claimed = false;
+        await markJob(job.id, 'skipped', `boundary:${sendOutcome.finalReason}`);
       } else if (sendOutcome.midCheckout) {
         // The customer started checkout while the email was being prepared;
         // the provider-boundary check refused before any request. Not a failed

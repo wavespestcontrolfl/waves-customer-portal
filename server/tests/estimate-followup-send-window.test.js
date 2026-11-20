@@ -118,6 +118,24 @@ describe('estimate follow-up sendDualChannel send-window hold', () => {
     expect(JSON.parse(db._inserts[0].row.metadata)).not.toHaveProperty('quoted_expires_at');
   });
 
+  test('an SMS-only stage (email template off) still stamps the stage and the quoted deadline', async () => {
+    sendCustomerMessage.mockResolvedValue({
+      sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', retryable: true, deferred: true,
+      nextAllowedAt: '2026-08-07T12:00:00.000Z',
+    });
+    const expires = '2026-08-10T15:00:00.000Z';
+    await sendDualChannel({ ...EST, expires_at: expires }, { sms: 'Follow-up body', email: null, stage: 'expiring' });
+    let meta = JSON.parse(db._inserts[0].row.metadata);
+    expect(meta.followup_stage).toBe('expiring');
+    expect(meta.quoted_expires_at).toBe(expires);
+
+    db._inserts.length = 0;
+    await sendDualChannel(EST, { sms: 'Follow-up body', email: null, stage: 'unviewed' });
+    meta = JSON.parse(db._inserts[0].row.metadata);
+    expect(meta.followup_stage).toBe('unviewed');
+    expect(meta).not.toHaveProperty('quoted_expires_at');
+  });
+
   test('replay refresh rides ONLY a snapshot that IS the account phone (r20): a differing captured recipient stays frozen', async () => {
     sendCustomerMessage.mockResolvedValue({
       sent: false,
