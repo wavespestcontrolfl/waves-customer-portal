@@ -1425,26 +1425,26 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     });
     const ani = '+19415550100';
     const stored = { matched_service: 'WDO Inspection Service' };
-    const stamp = (v2) => stampCallerIdReachback(stored, v2, { ani }).caller_id_reachback;
+    const stamp = (v2) => stampCallerIdReachback(stored, v2).caller_id_reachback;
     // The caller will call back: the model left the call open.
-    expect(stampCallerIdReachback(stored, adopted(), { ani })).toEqual({ ...stored, caller_id_reachback: true });
+    expect(stampCallerIdReachback(stored, adopted())).toEqual({ ...stored, caller_id_reachback: true });
     // Waves does not sell the service: the model closed it with nothing to do.
     expect(stamp(adopted({ recommended_disposition: 'no_action_needed' }))).toBe(false);
     // ...but a quote Waves promised keeps the same call open (the canonical rule).
     expect(stamp(adopted({ recommended_disposition: 'no_action_needed', service_request: { quote_promised: true } }))).toBe(true);
-    // The caller said the line is not theirs and gave no other number: the
-    // caller ID reaches somebody else, so it is no reachback.
+    // The caller said the line is not theirs: the caller ID reaches somebody
+    // else, so it is no reachback...
     expect(stamp(adopted({ caller: { caller_id_disclaimed: true, phone_e164: null } }))).toBe(false);
-    // ...nor when the number they gave is the same line, or one digit off it.
     expect(stamp(adopted({ caller: { caller_id_disclaimed: true, phone_e164: ani, phone_source: 'spoken' } }))).toBe(false);
-    expect(stamp(adopted({ caller: { caller_id_disclaimed: true, phone_e164: '+19415550109', phone_source: 'spoken' } }))).toBe(false);
-    // A different number given on the call clears the disclaimer (callerIdDisclaimedNeedsCallback).
-    expect(stamp(adopted({ caller: { caller_id_disclaimed: true, phone_e164: '+17275550123', phone_source: 'spoken' } }))).toBe(true);
+    // ...even with another number given on the call (pre-push P1 r3): Step 4b
+    // keys the lead on the resolved phone, which can fall back to the
+    // disclaimed line or keep a number the processor did not adopt.
+    expect(stamp(adopted({ caller: { caller_id_disclaimed: true, phone_e164: '+17275550123', phone_source: 'spoken' } }))).toBe(false);
     // Adoption did not run (no valid V2 result, shadow mode, or the primary
     // switch is off): the processor passes null and the old rule stands.
     expect(stamp(null)).toBe(false);
     // A later pass overwrites an earlier pass's true.
-    expect(stampCallerIdReachback({ ...stored, caller_id_reachback: true }, null, { ani }).caller_id_reachback).toBe(false);
+    expect(stampCallerIdReachback({ ...stored, caller_id_reachback: true }, null).caller_id_reachback).toBe(false);
   });
 
   test('the processor stamps the reachback from the ADOPTED V2 extraction, after every exit that skips the lead step (pre-push P1 x2)', () => {
@@ -1463,7 +1463,7 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     const decl = at('let adoptedV2Extraction = null;');
     const assign = at('adoptedV2Extraction = v2Result.extraction;');
     const blockEnd = src.indexOf('\n    }\n', adoptionIf);
-    const stamp = at('extracted = stampCallerIdReachback(extracted, adoptedV2Extraction, { ani: contactPhone });');
+    const stamp = at('extracted = stampCallerIdReachback(extracted, adoptedV2Extraction);');
     // Declared before the adoption block, assigned only inside it.
     expect(decl).toBeLessThan(adoptionIf);
     expect(assign).toBeGreaterThan(adoptionIf);
