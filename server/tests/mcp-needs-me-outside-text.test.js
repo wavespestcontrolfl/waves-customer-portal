@@ -1,8 +1,8 @@
 'use strict';
 
-// GATE_CLAUDE_INPUT_GUARD: the admin MCP `needs_me` never returns the body of an alert that can carry an outside sender's
+// The admin MCP `needs_me` never returns the body of an alert that can carry an outside sender's
 // words (a customer text, an unknown texter on a tracking line, an email subject, a Messenger message). Only categories whose
-// body our code writes keep `why`. Off = as before. No database, Twilio or model is reached.
+// body our code writes keep `why`. No database, Twilio or model is reached.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({ adminAuthenticate: jest.fn(), requireTechOrAdmin: jest.fn() }));
@@ -72,17 +72,7 @@ const answerFor = async (rows) => {
 };
 const allItems = (answer) => [...(answer.data.items || []), ...(answer.data.unsorted || [])];
 
-beforeEach(() => { delete process.env.GATE_CLAUDE_INPUT_GUARD; });
-afterAll(() => { delete process.env.GATE_CLAUDE_INPUT_GUARD; });
-
-test('guard off: the texter\'s words still return as today', async () => {
-  const answer = await answerFor([smsRow(), leadRow()]);
-  const whys = allItems(answer).map((item) => item.why);
-  expect(whys.some((why) => why.includes(INJECTION))).toBe(true);
-});
-
-test('guard on: no outside sender\'s words leave in a known customer\'s text or an unknown texter\'s lead row', async () => {
-  process.env.GATE_CLAUDE_INPUT_GUARD = 'true';
+test('no outside sender\'s words leave in a known customer\'s text or an unknown texter\'s lead row', async () => {
   const answer = await answerFor([smsRow(), leadRow()]);
   const items = allItems(answer);
   expect(items).toHaveLength(2);
@@ -96,8 +86,7 @@ test('guard on: no outside sender\'s words leave in a known customer\'s text or 
   expect(SERVER_INSTRUCTIONS).toMatch(/free text/);
 });
 
-test('guard on: a row whose body our code writes keeps its why; a standing count has none', async () => {
-  process.env.GATE_CLAUDE_INPUT_GUARD = 'true';
+test('a row whose body our code writes keeps its why; a standing count has none', async () => {
   computeDashboardAlerts.mockResolvedValue({ alerts: [{ id: 'overdue', label: '3 overdue invoices', count: 3, href: '/admin/invoices' }], failures: [] });
   mockRows = [systemRow(), smsRow()];
   const answer = shapeAnswer('needs_me', await executeNeedsMeTool('needs_me', {}));
@@ -108,8 +97,7 @@ test('guard on: a row whose body our code writes keeps its why; a standing count
   expect(standing.why ?? null).toBeNull();
 });
 
-test('guard on: a system-category row built by a registry trigger from a customer name or an error message is withheld', async () => {
-  process.env.GATE_CLAUDE_INPUT_GUARD = 'true';
+test('a system-category row built by a registry trigger from a customer name or an error message is withheld', async () => {
   const b = built('service_report_delivery_failed', {
     customerName: `Pat Example ${INJECTION}`, errorMessage: INJECTION, serviceReportId: 'r-1', customerId: '0b1f6c1e-3c64-4f8e-9d7a-5a2f3e9b1c10',
   });
@@ -122,8 +110,7 @@ test('guard on: a system-category row built by a registry trigger from a custome
   expect(JSON.stringify(answer)).not.toContain(INJECTION);
 });
 
-test('guard on: a token_alert row (its body is a provider\'s error text) is withheld', async () => {
-  process.env.GATE_CLAUDE_INPUT_GUARD = 'true';
+test('a token_alert row (its body is a provider\'s error text) is withheld', async () => {
   const answer = await answerFor([{
     id: '00000000-0000-4000-8000-000000000005', category: 'token_alert', title: 'Token needs reconnecting', body: INJECTION, detail: null,
     link: '/admin/settings', metadata: {}, created_at: '2026-11-04T12:04:00Z', read_at: null,

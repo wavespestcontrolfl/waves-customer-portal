@@ -164,7 +164,7 @@ import { DAY_ALIASES, DAY_KEYS, HEAD_LABELS } from "@waves/irrigation-runtime";
 
 // Reuse the Communications composer without loading the whole Messages page
 // until a profile opens Comms. Its send, attachment, and AI guards stay shared.
-const CustomerMessageMedia = lazy(() => import("../../pages/admin/CommunicationsPageV2").then((module) => ({ default: module.MessageMediaV2 })));
+const CustomerMessageMedia = lazy(() => import("./MessageMediaV2").then((module) => ({ default: module.MessageMediaV2 })));
 const CustomerSmsComposer = lazy(() => import("../../pages/admin/CommunicationsPageV2").then((module) => ({ default: module.SmsTab })));
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -6200,7 +6200,7 @@ function CustomerProfileOverview({
       {/* GET/PATCH /admin/requests are owner-only: a technician would only
           see a 403 here. */}
       {isAdmin && <CustomerRequestsPanel customerId={customerId} />}
-      {/* GET /admin/customers/:id/moves is requireAdmin and answers enabled:false while GATE_MOVING_FLOW is dark: the card then renders nothing. */}
+      {/* GET /admin/customers/:id/moves is requireAdmin: the card renders nothing until that read succeeds. */}
       {isAdmin && <CustomerMovingCardV2 customerId={customerId} />}
       {/* both customer-scoped zone endpoints are requireAdmin — a
                   technician session would only 403 on expand */}

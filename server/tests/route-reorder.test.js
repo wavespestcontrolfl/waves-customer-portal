@@ -195,12 +195,10 @@ describe('near-term null-position repair', () => {
   ];
   beforeEach(() => {
     process.env.GATE_ROUTE_REORDER_REPAIR = 'true';
-    process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
     stopsByDate[BAND[0]] = repairDay();
   });
   afterEach(() => {
     delete process.env.GATE_ROUTE_REORDER_REPAIR;
-    delete process.env.GATE_DRIVE_TIME_CALIBRATION;
     delete process.env.GATE_ROUTE_REORDER;
   });
 
@@ -228,7 +226,7 @@ describe('near-term null-position repair', () => {
     expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
   });
 
-  test.each(['GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION'])('%s off retains the near-term freeze', async gate => {
+  test.each(['GATE_ROUTE_REORDER_REPAIR'])('%s off retains the near-term freeze', async gate => {
     delete process.env[gate];
     expect((await runRouteReorder({ now: NOW })).applied).toBe(0);
     expect(trxUpdates).toEqual([]);
@@ -317,7 +315,7 @@ describe('near-term null-position repair', () => {
     expect(dbCalls.some(call => call.table === 'auto_dispatch_runs')).toBe(false);
   });
 
-  test.each(['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION'])('event mode requires %s at entry and commit', async gate => {
+  test.each(['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR'])('event mode requires %s at entry and commit', async gate => {
     process.env.GATE_ROUTE_REORDER = 'true';
     delete process.env[gate];
     expect(await runRouteRepairAfterChange({ dates: [BAND[0]], now: NOW })).toEqual({ status: 'gate_off' });
@@ -389,7 +387,6 @@ test('FAIL CLOSED + FAIL LOUD: unreadable reminder status freezes the day AND de
 test.each([false, true])('>25 stops without a safe repair are never sent to Google (repair gate: %s)', async repairGate => {
   if (repairGate) {
     process.env.GATE_ROUTE_REORDER_REPAIR = 'true';
-    process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
   }
   stopsByDate['2026-08-18'] = Array.from({ length: 26 }, (_, i) => stop(`s${i}`, { lng: i + 1 }));
   try {
@@ -401,7 +398,6 @@ test.each([false, true])('>25 stops without a safe repair are never sent to Goog
     expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'OVER_WAYPOINT_CAP', geocoded: 26 }));
   } finally {
     delete process.env.GATE_ROUTE_REORDER_REPAIR;
-    delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   }
 });
 

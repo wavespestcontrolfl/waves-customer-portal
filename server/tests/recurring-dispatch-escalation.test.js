@@ -451,7 +451,7 @@ describe('recurring visit with no arrival time and no due date', () => {
     // (metadata.rungAt), with created_at as the fallback.
     // No category filter: the watchdog rings under 'alert' (r8 P1).
     expect(budgetWhere).toEqual([{ recipient_type: 'admin' }]);
-    expect(bindings()).toEqual(expect.arrayContaining(['unpriced-series:%', 'lawn-email-gap:%', 'prepay-coverage:%', 'accepted-schedule:%', 'churned-live-work:%', 'combined-booking-check:%', 'recurring-dispatch:%']));
+    expect(bindings()).toEqual(expect.arrayContaining(['unpriced-series:%', 'lawn-email-gap:%', 'prepay-coverage:%', 'accepted-schedule:%', 'churned-live-work:%', 'same-start-visits:%', 'combined-booking-check:%', 'recurring-dispatch:%']));
     expect(budgetSql.join(' ')).toContain("COALESCE((metadata->>'rungAt')::timestamptz, created_at) >= now() - interval '24 hours'");
     // An Activity-only row never rings and takes no slot (r10 P2).
     expect(budgetSql.join(' ')).toContain("COALESCE(metadata->>'feed', '') <> 'activity'");

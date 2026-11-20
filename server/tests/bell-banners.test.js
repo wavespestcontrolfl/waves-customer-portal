@@ -71,8 +71,8 @@ test('the banner kinds: two reminders and the stuck-booking alert keep the night
     sms_operational_followup: { nightQuiet: true },
     call_commitment_overdue: { nightQuiet: true },
     messenger_reply: { nightQuiet: false },
-    // Its own gate GATE_RING_NEW_CONTACTS (owner 2026-11-04).
-    new_lead_email: { nightQuiet: false, gate: 'ringNewContactsLive' },
+    // Owner 2026-11-04.
+    new_lead_email: { nightQuiet: false },
     // A customer stuck booking from an estimate (estimate-stuck-alert.js, owner 2026-11-05).
     estimate_stuck: { nightQuiet: true },
     // An upset caller on a live call, at any hour, its own gate GATE_LIVE_CALL_UPSET_ALERT (owner 2026-11-16).

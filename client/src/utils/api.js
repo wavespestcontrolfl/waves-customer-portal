@@ -504,8 +504,13 @@ export class ApiClient {
   // shape (an Error with .status/.code/.message) so VisitPrepPhotoForm's
   // onSubmit contract (status 404 -> "gone", 409 -> "full", etc.) works
   // unchanged for this caller too.
-  async sendVisitPrepPhotos(scheduledServiceId, formData) {
-    const response = await this.fetchRaw(`${API_BASE}/schedule/${scheduledServiceId}/prep-photos`, {
+  sendVisitPrepPhotos(scheduledServiceId, formData) {
+    return this.postForm(`/schedule/${scheduledServiceId}/prep-photos`, formData);
+  }
+
+  // A multipart POST with request()'s error shape (.status / .code / .message).
+  async postForm(path, formData) {
+    const response = await this.fetchRaw(`${API_BASE}${path}`, {
       method: 'POST',
       body: formData,
     });
@@ -690,7 +695,15 @@ export class ApiClient {
   }
 
   // requestId is made once per draft; a retry with it returns the same saved message.
-  sendPortalMessage(body, requestId) {
+  // With photos (image Files) the message goes as a multipart form.
+  sendPortalMessage(body, requestId, photos = []) {
+    if (photos.length) {
+      const form = new FormData();
+      form.append('body', body);
+      form.append('requestId', requestId);
+      for (const photo of photos) form.append('photos', photo);
+      return this.postForm('/portal-messages', form);
+    }
     return this.request('/portal-messages', {
       method: 'POST',
       body: JSON.stringify({ body, requestId }),

@@ -71,7 +71,7 @@ import useIsMobile from '../hooks/useIsMobile';
 import DocumentActionBar from '../components/DocumentActionBar';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
 import { useWavesShell } from '../components/brand/WavesShellContext';
-import { hasPurchasedTrenchingWarranty, preSlabSelectedWarrantyPart, PURCHASED_TRENCHING_WARRANTY_BULLET } from '@estimate-purchased-warranty';
+import { hasPurchasedTrenchingWarranty, hasIncludedReentryGuarantee, includedReentryTerms, preSlabSelectedWarrantyPart, INCLUDED_REENTRY_GUARANTEE_BULLET, PURCHASED_TRENCHING_WARRANTY_BULLET } from '@estimate-purchased-warranty';
 
 // Payment Element renders inside Stripe's iframe, so the glass theme can't
 // restyle it via CSS — when the theme is mounted the modals pass brand-tuned
@@ -2099,16 +2099,20 @@ function oneTimeOutcomeWithoutGuarantee(text, scope = 'none') {
 function oneTimeCopyWithoutGuarantee(copy, item = {}, scope = 'none') {
   if (!copy) return null;
   const retainPurchasedWarranty = hasPurchasedTrenchingWarranty(item);
+  // A whole-home exclusion includes its 1-year re-entry guarantee in the price: the row's own flag keeps it.
+  const retainReentry = hasIncludedReentryGuarantee(item);
+  const reentryTerms = includedReentryTerms(item);
   return {
     ...copy,
     outcome: copyAllowedInScope(copy.outcome, scope) ? copy.outcome : oneTimeOutcomeWithoutGuarantee(copy.outcome, scope),
     includes: Array.isArray(copy.includes)
       ? copy.includes.filter((line) => (
         retainPurchasedWarranty && line === PURCHASED_TRENCHING_WARRANTY_BULLET
-      ) || copyAllowedInScope(line, scope))
+      ) || (retainReentry && line === INCLUDED_REENTRY_GUARANTEE_BULLET) || copyAllowedInScope(line, scope))
       : [],
     assurance: scope !== 'none' && copyAllowedInScope(copy.assurance, scope) ? copy.assurance : null,
-    terms: copyAllowedInScope(copy.terms, scope) ? copy.terms : withoutClaimsOutsideScope(copy.terms, scope),
+    terms: copyAllowedInScope(copy.terms, scope) || (reentryTerms && copy.terms === reentryTerms)
+      ? copy.terms : withoutClaimsOutsideScope(copy.terms, scope),
   };
 }
 

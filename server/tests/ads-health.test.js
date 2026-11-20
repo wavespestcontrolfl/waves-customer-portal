@@ -1,4 +1,4 @@
-// Ad health card data (services/ads/ads-health.js, GATE_ADS_HEALTH_CARD): one read-only payload from Google Ads and
+// Ad health card data (services/ads/ads-health.js): one read-only payload from Google Ads and
 // portal tables. Pins the timeline (Google changes made outside the API, the API's campaign changes = the portal's
 // Pause / Enable, the budget log, lifted holds, negative keyword decisions; newest first; at most 60), the ET window
 // sent to Google and to Postgres, the Google section shapes, and that one failed source never hides the others.

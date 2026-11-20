@@ -389,6 +389,93 @@ describe('estimate assistant no-guarantee context', () => {
     expect(context.guarantees).toMatchObject({ recurringTermsEligible: false, recurring: null });
   });
 
+  describe('the included whole-home re-entry guarantee (stated only from CURRENT saved result rows)', () => {
+    const BULLET = 'Includes a 1-year re-entry guarantee: if a rodent gets back in through the work we sealed, Waves reseals and traps at no extra charge.';
+    const wholeHome = (label, renewal = 249) => ({ service: 'rodent_exclusion', label, amount: 150, price: 150,
+      includesReentryGuarantee: true, reentryGuaranteeMonths: 12, guaranteeRenewalPrice: renewal });
+    const spot = (label) => ({ service: 'rodent_exclusion', label, amount: 150, price: 150 });
+    const ASK = 'Is re-entry covered by a guarantee?';
+    const build = ({ result, engineResult, estData, bundleItems = [] } = {}) => buildEstimateAssistantContext({
+      estimate: { onetime_total: 150 },
+      estData: estData || { result, engineResult },
+      pricingBundle: { anchorOneTimePrice: 150, oneTimeBreakdown: { items: bundleItems } },
+      noGuaranteeClaims: true,
+    });
+    const entries = (context) => (context.guarantees.serviceTerms || []).filter((entry) => entry.terms.includes(BULLET));
+    const rowTerms = (context) => context.oneTime.items.flatMap((row) => row.purchasedTerms || []);
+
+    test('a whole-home row and a spot row in one estimate: one entry, the whole-home renewal, nothing on the spot row', () => {
+      const context = build({ result: { oneTime: { items: [wholeHome('Rodent Exclusion — Whole-home seal minimum', 249), spot('Rodent Exclusion — Bird Boxes')] } } });
+      expect(entries(context)).toEqual([{
+        service: 'Rodent Exclusion — Whole-home seal minimum',
+        terms: [BULLET, 'Renew the guarantee yearly for $249.'],
+      }]);
+      expect(rowTerms(context)).toEqual([]);
+      const answer = answerEstimateQuestionFallback(ASK, context);
+      expect(answer).toContain('Whole-home seal minimum: Includes a 1-year re-entry guarantee');
+      expect(answer).toContain('$249');
+      expect(answer).not.toContain('Bird Boxes:');
+    });
+
+    test('a mirrored copy of the same saved row is one entry (mapped and nested shapes)', () => {
+      const row = wholeHome('Rodent Exclusion — Wire Mesh Points');
+      const context = build({ result: { oneTime: { items: [row], specItems: [{ ...row }] }, results: { oneTime: { items: [{ ...row }] } } } });
+      expect(entries(context)).toHaveLength(1);
+    });
+
+    test('bundle and snapshot rows never carry guarantee terms, even when flagged', () => {
+      const snapshot = wholeHome('Rodent Exclusion — Wire Mesh Points', 199);
+      const context = build({ result: { oneTime: { items: [spot(snapshot.label)] } }, bundleItems: [snapshot] });
+      expect(entries(context)).toEqual([]);
+      expect(rowTerms(context)).toEqual([]);
+      const answer = answerEstimateQuestionFallback(ASK, context);
+      expect(answer).not.toContain('1-year re-entry guarantee');
+      expect(answer).not.toContain('$199');
+    });
+
+    test('a current whole-home row states its own renewal, not the snapshot\'s', () => {
+      const label = 'Rodent Exclusion — Wire Mesh Points';
+      const context = build({ result: { oneTime: { items: [wholeHome(label, 249)] } }, bundleItems: [wholeHome(label, 199)] });
+      expect(entries(context).map((entry) => entry.terms[1])).toEqual(['Renew the guarantee yearly for $249.']);
+    });
+
+    test('a recurring-only saved result, or an exclusion removed, states none (older roots and bundle included)', () => {
+      const older = { oneTime: { items: [wholeHome('Rodent Exclusion')] } };
+      const bundleItems = [wholeHome('Rodent Exclusion')];
+      for (const result of [
+        { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 55 }] } },
+        { oneTime: { items: [{ service: 'rodent_trapping', label: 'Rodent Trapping', amount: 350, price: 350 }] } },
+      ]) {
+        const context = build({ result, engineResult: older, bundleItems });
+        expect(entries(context)).toEqual([]);
+        expect(answerEstimateQuestionFallback(ASK, context)).not.toContain('1-year re-entry guarantee');
+      }
+      // A server-repriced result that removed every service is authoritative even when it prices nothing.
+      const emptied = build({ estData: { pricingAuthorityAtLock: 'SERVER', result: { oneTime: { items: [] } }, engineResult: older }, bundleItems });
+      expect(entries(emptied)).toEqual([]);
+    });
+
+    test('no saved result at all (inputs-only replay) states none, even with a flagged priced row', () => {
+      const context = build({ estData: {}, bundleItems: [wholeHome('Rodent Exclusion')] });
+      expect(entries(context)).toEqual([]);
+      expect(answerEstimateQuestionFallback(ASK, context)).not.toContain('1-year re-entry guarantee');
+      const bare = build({ estData: { oneTime: { items: [wholeHome('Rodent Exclusion')] } } });
+      expect(entries(bare)).toEqual([]);
+    });
+
+    test('an older engineResult never states it while the current result has the exclusion without the flag', () => {
+      const label = 'Rodent Exclusion — Wire Mesh Points';
+      const context = build({ result: { oneTime: { items: [spot(label)] } }, engineResult: { oneTime: { items: [wholeHome(label)] } } });
+      expect(entries(context)).toEqual([]);
+    });
+
+    test('the flag on a non-exclusion row, or no flag, states none', () => {
+      const bedBug = { service: 'bed_bug', label: 'Bed Bug Heat Treatment', amount: 650, price: 650, includesReentryGuarantee: true, guaranteeRenewalPrice: 249 };
+      expect(entries(build({ result: { oneTime: { items: [bedBug] } } }))).toEqual([]);
+      expect(entries(build({ result: { oneTime: { items: [{ ...wholeHome('Rodent Exclusion'), includesReentryGuarantee: false }] } } }))).toEqual([]);
+    });
+  });
+
   test.each(['pricing', 'saved'])('%s purchased warranty scope survives without allowing arbitrary warranty prose', (source) => {
     const row = { service: 'termite_trenching', label: 'Front foundation', amount: 1200, price: 1200,
       warrantyTier: 'one_year_retreat', warrantyAdder: 100, detail: 'Guaranteed termite-free forever' };

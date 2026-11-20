@@ -743,7 +743,10 @@ async function getEstimateFunnel(input) {
   // (plan restart, plan start, report card), whose sent_at is a mint stamp,
   // unless staff really delivered it
   // (whereNotUndeliveredSelfServe, as compare_periods counts sends; codex
-  // pre-push P1). All stages share the cohort, so the rates stay rates.
+  // pre-push P1). Every stage leaves out the same rows. Each stage still
+  // counts by its own timestamp in the window (stage-transition volume, as
+  // on main), so view_rate and close_rate are window ratios, not send-cohort
+  // rates; the by-service block below is the cohort view.
   // compare_periods' accepted count still includes them (a count with no
   // rate). A delivered one counts as sent at its first delivery
   // (sentAtSql, in every query dated by the send; codex pre-push r16: a

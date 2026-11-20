@@ -43,7 +43,6 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
   const OLD_ENV = {};
 
   const gatesOn = () => {
-    process.env.GATE_MOVING_FLOW = 'true';
     process.env.GATE_MOVING_ESTIMATE = 'true';
   };
 
@@ -52,7 +51,7 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
     const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
     const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
     if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
-    for (const key of ['GATE_MOVING_FLOW', 'GATE_MOVING_ESTIMATE', 'GATE_CUSTOMER_PROPERTIES']) OLD_ENV[key] = process.env[key];
+    for (const key of ['GATE_MOVING_ESTIMATE', 'GATE_CUSTOMER_PROPERTIES']) OLD_ENV[key] = process.env[key];
     database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
     Moves = require('../services/customer-moves');
     Persistence = require('../services/admin-estimate-persistence');
@@ -139,9 +138,6 @@ postgres('moving PR B1: new-home estimate (live Postgres)', () => {
     test('nothing shows with the gate off or before the customer submits', async () => {
       const move = await insertMove();
       delete process.env.GATE_MOVING_ESTIMATE;
-      expect(await Moves.newHomeAction(move)).toBeNull();
-      gatesOn();
-      delete process.env.GATE_MOVING_FLOW;
       expect(await Moves.newHomeAction(move)).toBeNull();
       gatesOn();
       expect(await Moves.newHomeAction({ ...move, status: 'open' })).toBeNull();
