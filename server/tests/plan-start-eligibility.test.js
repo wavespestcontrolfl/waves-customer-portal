@@ -365,6 +365,10 @@ describe('planStartBlocker', () => {
         // Two marks of the scan of the save that no other rule holds, below the 12 levels that scan reads.
         ['the mark of an auto-priced commercial quote, far down', ESTIMATE({ estimate_data: farDown({ commercialEstimatedPricing: true }) })],
         ["the word none as a subtype in the form's spelling, beside a toggle set to no, far down", ESTIMATE({ estimate_data: farDown({ category: 'RESIDENTIAL', isCommercial: 'NO', commercialSubtype: 'none' }) })],
+        // The estimator engine's mark on a draft it made as a commercial proposal, where the engine keeps it.
+        ["the engine's mark on a draft it made as a commercial proposal", ESTIMATE({ estimate_data: { estimatorEngine: { version: 1, lane: 'red', laneReasons: [], commercialProposal: true } } })],
+        // A manual commercial quote line, under the name the reader of service lines takes such lines from.
+        ['a manual commercial quote line', ESTIMATE({ estimate_data: { commercialManualQuoteLines: [{ service: 'commercial_pest', quoteRequired: true }] } })],
         // The quiz of the lead an estimate was drafted from, where the payload keeps it.
         ["the 'business' answer of a quiz page, kept in the payload", ESTIMATE({ estimate_data: { lead: { quiz: { kind: 'lawn', property: 'business' } } } })],
         // The payload scan reads the toggle only as a boolean, and never the engine's spelling.
@@ -420,6 +424,14 @@ describe('planStartBlocker', () => {
         ['parameters of a commercial price beside a toggle set to no', ESTIMATE({ estimate_data: {
           inputs: { isCommercial: 'NO', commercialPricingMode: 'estimated', commercialPestCadence: 'monthly', commercialLawnCadence: 'six', commercialInteriorService: 'included' },
           engineRequest: { options: { commercialPricingMode: 'estimated', commercialInteriorService: 'excluded' } },
+        } })],
+        // The price card keeps the lawn area of ANY lawn quote under both lawn names. A name is not a mark.
+        ['the lawn area of a home lawn quote, kept under both lawn names', ESTIMATE({ estimate_data: {
+          inputs: { isCommercial: 'NO', propertyType: 'Single Family' },
+          measuredBasisAnchor: {
+            lawn_care: { label: 'Treatable lawn', value: '4,000 sq ft', source: 'Estimated from the lot' },
+            commercial_lawn: { label: 'Treatable lawn', value: '4,000 sq ft', source: 'Estimated from the lot' },
+          },
         } })],
         ['a category of another vocabulary', ESTIMATE({ estimate_data: { products: [{ category: 'pest_control' }, { category: 'lawn_care' }] } })],
         ...HOME_SCOPES.map((serviceScope) => [`a residential occupancy class and the service scope ${serviceScope}`, ESTIMATE({ estimate_data: FACTS({ occupancyClass: 'residential', serviceScope }) })]),
@@ -509,6 +521,18 @@ describe('planStartBlocker', () => {
 
       test.each([[false], ['false'], ['no'], [0], [null], [''], [undefined]])('a quote mark of %j is not a yes', async (flag) => {
         const data = { commercialEstimatedPricing: flag, quote: { commercialEstimatedPricing: flag }, deep: farDown({ commercialEstimatedPricing: flag }) };
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: data })]))).toBeNull();
+      });
+
+      // The estimator engine's mark on a draft it made as a commercial proposal (estimatorEngine.commercialProposal).
+      // The engine writes and reads the boolean. Here it is read as the toggle is read, at any depth.
+      test.each([[true], ['true'], [' YES '], [1]])("the engine's proposal mark of %j is a yes", async (flag) => {
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: { estimatorEngine: { version: 1, lane: 'red', commercialProposal: flag } } })]))).toBe('commercial');
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: farDown({ commercialProposal: flag }) })]))).toBe('commercial');
+      });
+
+      test.each([[false], ['false'], ['no'], [0], [null], [''], [undefined]])("the engine's proposal mark of %j is not a yes", async (flag) => {
+        const data = { estimatorEngine: { version: 1, lane: 'yellow', commercialProposal: flag }, deep: farDown({ commercialProposal: flag }) };
         expect(await blocker(withEstimates([ESTIMATE({ estimate_data: data })]))).toBeNull();
       });
 

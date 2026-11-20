@@ -285,12 +285,23 @@ const isSetSubtype = (value) => isSet(value) && !(typeof value === 'string' && N
 //   common area of an association: isCommercialServiceScope in
 //   property-lookup/property-facts-v2.js);
 // - what the lookup keeps on a profile about a business at the address, and
-//   an estimate saves the profile (lookupSaysBusiness below).
+//   an estimate saves the profile (lookupSaysBusiness below);
+// - the estimator engine's mark on a draft it made as a commercial proposal
+//   (estimatorEngine.commercialProposal: the engine reads it back when it
+//   meets the draft again). Read as the toggle is read.
 // Not read: the parameters of a commercial price the estimator form keeps
-// (commercialPricingMode, the pest and lawn cadences, the interior service).
-// They are not verdicts. Every home estimate carries the form's default
-// pricing mode, the form writes the cadences only beside the toggle, and a
-// tool can set the interior service on any estimate.
+// (commercialPricingMode, the pest and lawn cadences, the interior service)
+// and the size of a suite the engine keeps with a commercial draft
+// (commercialSuiteSize). They are not verdicts. Every home estimate carries
+// the form's default pricing mode, the form writes the cadences only beside
+// the toggle, a tool can set the interior service on any estimate, and the
+// engine sizes a suite only for inputs it saves with the toggle set.
+// Not read either, each one written beside a mark that is read: the notice
+// text of an auto-priced commercial quote (commercialDisclaimer: its two
+// writers set the quote mark from it), the research brief of a commercial
+// proposal draft (commercialProspect: written with the engine's mark) and
+// the terms block of a proposal (commercialTerms: a proposal counts when it
+// is turned on or scaffolded, and the save of a proposal turns it on).
 const COMMERCIAL_SERVICE_SCOPES = Object.freeze([
   'commercial_suite', 'entire_commercial_building', 'multi_building_commercial_parcel', 'association_common_area',
 ]);
@@ -324,6 +335,7 @@ function nodeSaysCommercial(node) {
     || isSetSubtype(node.commercial_subtype) || isSet(node.commercialSubtype)
     || String(node.category ?? '').trim().toUpperCase() === 'COMMERCIAL'
     || factsSayCommercial(node) || lookupSaysBusiness(node)
+    || saysYes(node.commercialProposal)
     || isSet(node.commercialRiskType) || isSet(node.commercial_risk_type)
     || converter.isCommercialRecurringLine(node)
     || String(converter.recurringServiceKey(node) || '').startsWith('commercial_')
@@ -341,7 +353,9 @@ function nodeSaysCommercial(node) {
 // the value half of the broadest rule the app has for a saved estimate (the
 // termite agreement's classifier searches the payload text for
 // '"commercial_'). The other half is not read: a NAME that starts with
-// 'commercial_' is also the name of a service pick that was not taken.
+// 'commercial_' is also the name of a service pick that was not taken, and
+// of the lawn area the price card keeps for any lawn quote
+// (measuredBasisAnchor.commercial_lawn).
 const COMMERCIAL_KEY_PREFIX = 'commercial_';
 function payloadSaysCommercial(value) {
   if (typeof value === 'string') return value.trim().toLowerCase().startsWith(COMMERCIAL_KEY_PREFIX);

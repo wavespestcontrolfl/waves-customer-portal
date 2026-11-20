@@ -542,6 +542,15 @@ postgres('planStartBlocker (live Postgres)', () => {
       })).toBe('commercial');
     });
 
+    // The estimator engine's mark on a draft it made as a commercial proposal, where the engine keeps it.
+    test("the engine's mark of a commercial proposal draft, in an estimate payload: commercial", async () => {
+      expect(await blockerFor(async (customer) => {
+        await seedEstimate(customer);
+        const estimate = await seedEstimate(customer, { estimate_data: { estimatorEngine: { version: 1, lane: 'red', commercialProposal: true } } });
+        expect(estimate.category).toBe('RESIDENTIAL');
+      })).toBe('commercial');
+    });
+
     test('a quote that is not auto-priced as commercial, 20 levels down in an estimate payload, is not commercial', async () => {
       const mark = { commercialEstimatedPricing: false, isCommercial: 'NO', commercialSubtype: '', commercialDetectionSource: null };
       expect(await blockerFor((customer) => seedEstimate(customer, { estimate_data: farDown(mark) }))).toBeNull();
