@@ -103,7 +103,9 @@ async function eligibility(conn, now) {
   const from = etDateString(addETDays(now, 1));
   const to = etDateString(addETDays(now, DAYS));
   const { getBlackoutDates } = require('../scheduling/blackout-dates');
-  const blackout = await getBlackoutDates(from, to);
+  // Strict: a failed read is the notice's "day rules unread" case (no unplanned day, no fill list), never a silent
+  // fail-open that lists a closed day.
+  const blackout = await getBlackoutDates(from, to, conn, { strict: true });
   const techs = await applyAssignable(conn('technicians')).select('technicians.id');
   const techIds = techs.map((t) => String(t.id));
   const absent = techIds.length ? await absentTechDays(conn, { dateFrom: from, dateTo: to, technicianIds: techIds }) : new Set();

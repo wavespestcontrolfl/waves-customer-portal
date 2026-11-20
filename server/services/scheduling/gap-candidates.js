@@ -52,7 +52,9 @@ async function loadGapCandidate(serviceId, conn) {
  * An open estimate's first visit as a gap candidate (the 07:05 notice's fill list, day-replan/fill-list.js). It is a
  * new stop, under the office's new-stop id ('__candidate__', arrival-route.js), at the customer's stored location:
  * never geocoded (resolveEstimateCoords paidCalls false). Its service and length are the ones the estimate's booking
- * page offers (resolveCatalogSlotProfile). The customer's day and time rules apply as for loadGapCandidate, and a
+ * page offers: resolveCatalogSlotProfile with the page picker's service mode and default selection (`picker`,
+ * estimate-slots-public.js pageSlotPicker), as the page's first fetch sizes the visit. The customer's day and time
+ * rules apply as for loadGapCandidate, and a
  * technician needs the capability for every service the visit performs (a combined visit's too). It is checked as a new
  * visit (`prospective`, analyzeGapCandidate): at every place in the route, as the staff finder checks a new customer.
  * `dayOpen(date)` holds the visit's own day rules beyond analyzeGapCandidate's: the booking page's first-visit dates
@@ -60,7 +62,7 @@ async function loadGapCandidate(serviceId, conn) {
  * rule over every service the visit performs (a pest-first visit with lawn care too). `{ unavailable:
  * 'no_stored_location' }` when no stored location can stand in. A failed read throws.
  */
-async function estimateGapCandidate(estimate, conn) {
+async function estimateGapCandidate(estimate, conn, picker = {}) {
   const slots = require('../estimate-slot-availability');
   let coords;
   try {
@@ -69,7 +71,8 @@ async function estimateGapCandidate(estimate, conn) {
     if (err.code === 'COORDS_NEED_GEOCODE') return { unavailable: 'no_stored_location' };
     throw err;
   }
-  const profile = await slots.resolveCatalogSlotProfile(estimate, {}, conn);
+  const profile = await slots.resolveCatalogSlotProfile(estimate,
+    { ...(picker.serviceMode ? { serviceMode: picker.serviceMode } : {}), ...(picker.selection || {}) }, conn);
   const performs = slots.appointmentServicesFor(profile).map((row) => ({
     service_type: row.label || profile.serviceLabel, service_key_snapshot: row.resolvedServiceKey || row.service || null,
   }));
@@ -175,6 +178,9 @@ function analyzeGapCandidate(candidate, rows, {
     dayEndMin: Math.min(ADMIN_DAY_END_MINUTES, returnBy ?? ADMIN_DAY_END_MINUTES), departureMin: departure, returnByMin: returnBy });
   const routeFits = result.placements.filter(item => !violatesPreferredTime(item.windowStart, preferences)).map(({ windowStart, windowEnd, fit }) => ({
     windowStart, windowEnd, estimatedArrival: fit.estimatedArrival,
+    // When the visit ends on the modeled route: its arrival plus its planned minutes on site, which can be shorter
+    // than the window (owner planning minutes, arrival-route.js buildPlacementTarget).
+    estimatedDeparture: (fit.arrivals || []).find(row => String(row.id) === String(target.id))?.departure || null,
     addedDriveMinutes: fit.detourMinutes, modeledDriveMinutes: fit.driveMinutes, modeledWaitingMinutes: fit.waitingMinutes,
     modeledReturnMinuteBeforeBreaks: fit.returnMinuteBeforeBreaks,
     modeledReturnMinuteWithAllowance: configured ? fit.returnMinuteBeforeBreaks + breakMinutes : null,

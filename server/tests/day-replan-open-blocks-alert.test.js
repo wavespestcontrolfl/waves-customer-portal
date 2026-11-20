@@ -338,6 +338,8 @@ describe('days the re-plan does not plan (no stop, or one): open hours by the bo
     const out = await _internals.unplannedDays(conn, new Set(), await _internals.eligibility(conn, NOW));
     expect(out.some((d) => d.day === '2026-11-19')).toBe(false);
     expect(out.some((d) => d.day === '2026-11-20')).toBe(true);
+    // A strict read on the job's connection: a failure is the "day rules unread" case, never a silent fail-open.
+    expect(getBlackoutDates).toHaveBeenLastCalledWith('2026-11-19', expect.any(String), conn, { strict: true });
   });
 
   test('a day with an untimed stop is not empty: it is left out', async () => {

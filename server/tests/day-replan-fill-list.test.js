@@ -25,12 +25,10 @@ jest.mock('../services/scheduling/tech-start-point', () => ({
 }));
 jest.mock('../services/scheduling/departure-time', () => ({ dayDepartureMinutes: jest.fn(async () => 480) }));
 jest.mock('../services/day-replan/route-check', () => ({ DISPATCH_DAY_END: 18 * 60 }));
-// The estimate page's own reads: a guarantee-only renewal, and an upcoming visit its page would adopt.
-jest.mock('../routes/estimate-public', () => ({
-  parseEstimateDataSafe: jest.fn((row) => (typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : row.estimate_data || {})),
-  isRodentGuaranteeOnlyEstimate: jest.fn(() => false),
-  findLinkedUpcomingAppointment: jest.fn(async () => null),
-  adoptionServiceModesForContract: jest.fn(() => ['recurring']),
+// The estimate page's own answer (estimate-slots-public.js): whether it offers times, and its slot picker.
+const PICKER = { serviceMode: 'recurring', selection: {} };
+jest.mock('../routes/estimate-slots-public', () => ({
+  _internals: { slotBrowseRefusal: jest.fn(async () => null), pageSlotPicker: jest.fn(async () => ({ serviceMode: 'recurring', selection: {} })) },
 }));
 // The real check, watched: the list must yield to the event loop between checks.
 jest.mock('../services/scheduling/gap-candidates', () => {
@@ -39,7 +37,7 @@ jest.mock('../services/scheduling/gap-candidates', () => {
 });
 
 const logger = require('../services/logger');
-const page = require('../routes/estimate-public');
+const page = require('../routes/estimate-slots-public')._internals;
 const slots = require('../services/estimate-slot-availability');
 const { getCustomerSchedulingPreferences, normalizePreferences } = require('../services/auto-dispatch/preferences');
 const { dayStopsQuery } = require('../services/scheduling/day-stops');
@@ -111,7 +109,7 @@ describe('open estimates', () => {
         estimate('e4', { customer_id: '3274944a-f509-413c-9dee-a8b0cdb16493' })],
       taken: ['e3'],
     });
-    expect((await _internals.openEstimates(conn, NOW)).estimates.map((e) => e.id)).toEqual(['e1']);
+    expect((await _internals.openEstimates(conn, NOW)).estimates.map((e) => e.estimate.id)).toEqual(['e1']);
     expect(calls).toEqual(expect.arrayContaining([
       ['estimates', 'whereIn', ['status', ['sent', 'viewed']]], ['estimates', 'whereNull', ['archived_at']],
       ['estimates', 'whereNotNull', ['customer_id']], ['estimates', 'whereNull', ['expires_at']], ['estimates', 'orWhere', ['expires_at', '>', NOW]],
@@ -127,46 +125,48 @@ describe('open estimates', () => {
     const { conn, calls } = fakeConn({ estimates: [...tests, ...older], taken: ['o0'] });
     const { estimates: open } = await _internals.openEstimates(conn, NOW);
     expect(open).toHaveLength(_internals.MAX_ESTIMATES);
-    expect(open[0].id).toBe('o1');
+    expect(open[0].estimate.id).toBe('o1');
     expect(calls.some(([table, m]) => table === 'estimates' && m === 'limit')).toBe(false);
     // The page's lookup runs for the estimates it keeps, and stops at the cap.
-    expect(page.findLinkedUpcomingAppointment).toHaveBeenCalledTimes(_internals.MAX_ESTIMATES);
+    expect(page.pageSlotPicker).toHaveBeenCalledTimes(_internals.MAX_ESTIMATES);
   });
 
-  test('an estimate with no visit to book, or whose page already shows an appointment, is left out', async () => {
-    page.isRodentGuaranteeOnlyEstimate.mockImplementation((row) => row.id === 'renewal');
-    page.findLinkedUpcomingAppointment.mockImplementation(async (row) => (row.id === 'booked' ? { id: 'visit-1' } : null));
+  test('an estimate whose page offers no times, or shows no slot picker, is left out; the rest carry the page\'s picker', async () => {
+    // A guarantee-only renewal: the page answers with no times. An appointment already scheduled: no picker.
+    page.slotBrowseRefusal.mockImplementation(async (row) => (row.id === 'renewal' ? { status: 200, body: { invoiceOnlyAcceptance: true } } : null));
+    page.pageSlotPicker.mockImplementation(async (id) => (id === 'booked' ? null : { serviceMode: 'one_time', selection: {} }));
     try {
-      // estimate_data as a JSON string: the page's helpers get it parsed, as the page's view passes it.
-      const stored = { estimate_data: JSON.stringify({ result: { recurring: { services: [{ service: 'pest_control' }] } } }) };
-      const parsed = JSON.parse(stored.estimate_data);
-      const { conn } = fakeConn({ estimates: [estimate('renewal', stored), estimate('booked', stored), estimate('open', stored)] });
-      expect(await _internals.openEstimates(conn, NOW)).toEqual({ estimates: [expect.objectContaining({ id: 'open' })], unread: 0 });
-      expect(page.isRodentGuaranteeOnlyEstimate).toHaveBeenCalledWith(expect.objectContaining({ id: 'open' }), parsed);
-      // As the page's view asks it: the estimate's own service modes, on this connection.
-      expect(page.adoptionServiceModesForContract).toHaveBeenCalledWith(expect.objectContaining({ id: 'open' }), parsed);
-      expect(page.findLinkedUpcomingAppointment).toHaveBeenCalledWith(expect.objectContaining({ id: 'open' }), parsed,
-        { database: conn, serviceModes: ['recurring'] });
-      expect(page.findLinkedUpcomingAppointment).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'renewal' }), expect.anything(), expect.anything());
+      const { conn } = fakeConn({ estimates: [estimate('renewal'), estimate('booked'), estimate('open')] });
+      expect(await _internals.openEstimates(conn, NOW)).toEqual({
+        estimates: [{ estimate: expect.objectContaining({ id: 'open' }), picker: { serviceMode: 'one_time', selection: {} } }], unread: 0 });
+      // The page's two checks, in its order: a refused estimate never reaches the picker.
+      expect(page.slotBrowseRefusal).toHaveBeenCalledWith(expect.objectContaining({ id: 'open' }));
+      expect(page.pageSlotPicker.mock.calls.map(([id]) => id)).toEqual(['booked', 'open']);
     } finally {
-      page.isRodentGuaranteeOnlyEstimate.mockImplementation(() => false);
-      page.findLinkedUpcomingAppointment.mockImplementation(async () => null);
+      page.slotBrowseRefusal.mockImplementation(async () => null);
+      page.pageSlotPicker.mockImplementation(async () => PICKER);
     }
   });
 
   test('an estimate whose page lookup fails is left off, counted as unread and logged; the rest are still checked', async () => {
-    page.findLinkedUpcomingAppointment.mockImplementation(async (row) => {
-      if (row.id === 'down') throw new Error('lookup timeout');
+    page.slotBrowseRefusal.mockImplementation(async (row) => {
+      if (row.id === 'refusal-down') throw new Error('park lookup failed');
       return null;
     });
+    page.pageSlotPicker.mockImplementation(async (id) => {
+      if (id === 'down') throw new Error('lookup timeout');
+      return PICKER;
+    });
     try {
-      const { conn } = fakeConn({ estimates: [estimate('down'), estimate('ok')] });
-      expect(await _internals.openEstimates(conn, NOW)).toEqual({ estimates: [expect.objectContaining({ id: 'ok' })], unread: 1 });
+      const { conn } = fakeConn({ estimates: [estimate('down'), estimate('refusal-down'), estimate('ok')] });
+      expect(await _internals.openEstimates(conn, NOW)).toEqual({ estimates: [{ estimate: expect.objectContaining({ id: 'ok' }), picker: PICKER }], unread: 2 });
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('estimate down unread (lookup timeout)'));
-      // The notice's count: the estimate was checked, and could not be read.
-      expect(await fillList(conn, [], NOW)).toEqual({ checked: 2, fitted: 0, noLocation: 0, unread: 1, byBlock: [] });
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('estimate refusal-down unread (park lookup failed)'));
+      // The notice's count: the estimates were checked, and could not be read.
+      expect(await fillList(conn, [], NOW)).toEqual({ checked: 3, fitted: 0, noLocation: 0, unread: 2, byBlock: [] });
     } finally {
-      page.findLinkedUpcomingAppointment.mockImplementation(async () => null);
+      page.slotBrowseRefusal.mockImplementation(async () => null);
+      page.pageSlotPicker.mockImplementation(async () => PICKER);
     }
   });
 
@@ -190,6 +190,10 @@ describe('a fit inside the block', () => {
     expect(_internals.fitInside(block, [late, early])).toEqual({ windowStart: '09:00', startMin: 540, endMin: 600, length: 60, addedDriveMin: 6 });
     // The offered window stays 9:00 when the van comes at 9:40.
     expect(_internals.fitInside({ start: 9 * 60, min: 100 }, [late])).toEqual({ windowStart: '09:00', startMin: 580, endMin: 640, length: 60, addedDriveMin: 3 });
+    // The modeled end: 45 minutes on site in a 60-minute window (owner planning minutes) fits a 50-minute block.
+    const planned = { ...early, estimatedArrival: '09:00', estimatedDeparture: '09:45', addedDriveMinutes: 2 };
+    expect(_internals.fitInside({ start: 9 * 60, min: 50 }, [planned])).toEqual({ windowStart: '09:00', startMin: 540, endMin: 585, length: 45, addedDriveMin: 2 });
+    expect(_internals.fitInside({ start: 9 * 60, min: 44 }, [planned])).toBeNull();
     expect(_internals.fitInside({ start: 9 * 60 + 1, min: 120 }, [early])).toBeNull();
     expect(_internals.fitInside(block, [{ ...early, addedDriveMinutes: -0.4 }]).addedDriveMin).toBe(0);
   });
@@ -218,11 +222,25 @@ describe('fillList', () => {
     // Never geocoded: each location is the stored one or none.
     expect(slots.resolveEstimateCoords).toHaveBeenCalledTimes(4);
     for (const [, opts] of slots.resolveEstimateCoords.mock.calls) expect(opts).toEqual({ paidCalls: false, strictReads: true });
-    expect(slots.resolveCatalogSlotProfile).toHaveBeenCalledWith(expect.objectContaining({ id: 'near' }), {}, conn);
+    // Sized as the page sizes it: the page picker's service mode and default selection.
+    expect(slots.resolveCatalogSlotProfile).toHaveBeenCalledWith(expect.objectContaining({ id: 'near' }), { serviceMode: 'recurring' }, conn);
     expect(getCustomerSchedulingPreferences).toHaveBeenCalledWith('c-near', 'Pest Control', conn, { serviceKey: 'pest_control' });
     // The gap tool's read of the day, with its statuses and columns.
     expect(dayStopsQuery).toHaveBeenCalledWith(conn, { dateStr: DAY, excludeStatuses: ['cancelled', 'completed'], select: ['stop columns'] });
     expect(loadTechStartPoints).toHaveBeenCalledWith(conn, [TECH]);
+  });
+
+  test('the visit is sized as the page sizes it: the picker\'s service mode and default selection', async () => {
+    dayStops({ [DAY]: [stop('first', '08:00')] });
+    locations({ near: { lat: HQ.lat + 0.01, lng: HQ.lng } });
+    const { conn } = fakeConn({ estimates: [estimate('near')] });
+    const selection = { selectedFrequency: 'monthly', serviceCadences: { mosquito: 'seasonal9' } };
+    page.pageSlotPicker.mockResolvedValueOnce({ serviceMode: 'recurring', selection });
+    await fillList(conn, [morning], NOW);
+    expect(slots.resolveCatalogSlotProfile).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'near' }), { serviceMode: 'recurring', ...selection }, conn);
+    page.pageSlotPicker.mockResolvedValueOnce({ serviceMode: 'one_time', selection: {} });
+    await fillList(conn, [morning], NOW);
+    expect(slots.resolveCatalogSlotProfile).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'near' }), { serviceMode: 'one_time' }, conn);
   });
 
   test('least added drive comes first, even when it starts later (a customer who asked for late morning)', async () => {
