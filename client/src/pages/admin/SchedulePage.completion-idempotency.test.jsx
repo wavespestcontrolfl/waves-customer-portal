@@ -315,6 +315,14 @@ describe("review state under a backdated quiet closeout (Codex P2, PR #2897 fix 
     expect(src).toMatch(/reviewAskGoes: reviewLateCloseAskKept && willReview && !oneTimeRecapOnly,/);
   });
 
+  it("the submit-time preview refresh applies the late-close verdict and pauses through the same guard (source contract)", () => {
+    const src = readFileSync(new URL("./SchedulePage.jsx", import.meta.url), "utf8");
+    expect(src).toMatch(/const lateCloseShown = backfillQuietCloseout && reviewLateCloseAskKept === true;/);
+    expect(src).toMatch(/\(reviewTiming === "auto" \|\| !schedulerStateKnown \|\| lateCloseShown\)/);
+    expect(src).toMatch(/if \(fresh\) setReviewLateCloseAskKept\(lateCloseAskKeptFrom\(fresh\)\);/);
+    expect(src).toMatch(/reviewPreviewSubmitVerdict\(\{ reviewTiming, fresh, shown, lateCloseShown: lateCloseShown \? true : null,/);
+  });
+
   it("both backdate checkbox layouts word the line from the review answer, not a fixed promise of silence", () => {
     const src = readFileSync(new URL("./SchedulePage.jsx", import.meta.url), "utf8");
     expect((src.match(/backfillCheckboxHint\(\{/g) || []).length).toBe(2);

@@ -144,7 +144,7 @@ const identityOf = (row) => (row ? IDENTITY_COLUMNS.map((c) => row[c]) : null);
  * The caller then adds the ask choice itself (requestReview, reviewAskAllowed, a blocking reviewSuppression), which the
  * panel's own toggle covers.
  */
-async function lateCloseAskVerdict({
+async function lateCloseAskVerdictOrNull({
   isBackfill, systemQuietCloseout, issuedInvoiceCloseout, visitOutcome, recapReviewOnly, isInternalOnlyCompletion,
   deliverySuppressed = true, visit, preLockVisit, knex = db, closedAt,
 } = {}) {
@@ -172,13 +172,20 @@ async function lateCloseAskVerdict({
       profileCategory: profile.category,
     }).suppressCustomerComms;
   } catch {
-    return false;
+    // The profile read failed: unknown, not a confirmed "no" (the preview tells the panel to ask again).
+    return null;
   }
+}
+
+// The commit's verdict: true only when confirmed; a failed read is no ask.
+async function lateCloseAskVerdict(input) {
+  return (await lateCloseAskVerdictOrNull(input)) === true;
 }
 
 /**
  * The panel's send-time preview and the first-ask pre-read: the verdict for a backdated closeout of this visit made NOW,
- * as a completed visit (the commit's own verdict on the locked row is what counts). Any read failure, or no such visit, is false.
+ * as a completed visit (the commit's own verdict on the locked row is what counts). true / false only when confirmed;
+ * null when a visit or profile read FAILED (unknown: the panel keeps the ask suppressed and asks again). No such visit is false.
  */
 async function lateCloseAskKeptForVisit(serviceId, database = db, now = new Date()) {
   try {
@@ -186,13 +193,13 @@ async function lateCloseAskKeptForVisit(serviceId, database = db, now = new Date
     const visit = serviceId
       ? await require('../utils/savepoint-read').savepointRead(database, (k) => k('scheduled_services').where({ id: serviceId }).first(...IDENTITY_COLUMNS, 'arrived_at', 'scheduled_date'))
       : null;
-    return await lateCloseAskVerdict({
+    return await lateCloseAskVerdictOrNull({
       isBackfill: true, visitOutcome: 'completed', systemQuietCloseout: false, recapReviewOnly: false, isInternalOnlyCompletion: false,
       deliverySuppressed: false, visit, preLockVisit: visit, knex: database, closedAt: now,
     });
   } catch {
-    return false;
+    return null;
   }
 }
 
-module.exports = { draftServiceDate, draftVisitDate, visitWorkedOn, closedWithinDaysOfWorkedDay, lateCloseAskVerdict, lateCloseAskKeptForVisit };
+module.exports = { draftServiceDate, draftVisitDate, visitWorkedOn, closedWithinDaysOfWorkedDay, lateCloseAskVerdict, lateCloseAskVerdictOrNull, lateCloseAskKeptForVisit };

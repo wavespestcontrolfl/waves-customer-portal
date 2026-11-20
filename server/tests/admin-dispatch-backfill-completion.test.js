@@ -1037,6 +1037,11 @@ describe('late-close review ask at the commit (owner 2026-11-20, D6 R3, GATE_REV
     const rows = (row) => jest.fn(() => ({ where: () => ({ first: async () => row }) }));
     const visit = { arrived_at: null, scheduled_date: etDateString() };
 
+    test('an unknown preview read (a failed visit read) is not eligible', async () => {
+      const failing = Object.assign(jest.fn(() => ({ where: () => ({ first: async () => { throw new Error('pg blip'); } }) })), {});
+      expect(await lateCloseFirstAskEligible({ backfill: true, completionInput: input, database: failing })).toBe(false);
+    });
+
     test('only an admin backfill with the gate on and an in-window visit', async () => {
       expect(await lateCloseFirstAskEligible({ backfill: true, completionInput: input, database: rows(null) })).toBe(false);
       expect(await lateCloseFirstAskEligible({ backfill: false, completionInput: input, database: rows(visit) })).toBe(false);

@@ -145,5 +145,9 @@ describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_LATE_CLOSE_ASK',
     expect(lateCloseAskKeptForVisit).toHaveBeenCalledWith('svc-1');
     lateCloseAskKeptForVisit.mockResolvedValue(false);
     expect((await preview({ serviceType: 'Pest', serviceId: 'svc-1' })).lateCloseAskKept).toBe(false);
+    // A failed visit or profile read is unknown, never a confirmed no: the key is there and null.
+    lateCloseAskKeptForVisit.mockResolvedValue(null);
+    const unknown = await preview({ serviceType: 'Pest', serviceId: 'svc-1' });
+    expect(unknown).toHaveProperty('lateCloseAskKept', null);
   });
 });

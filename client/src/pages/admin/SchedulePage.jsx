@@ -18721,7 +18721,8 @@ export function CompletionPanel({
     // nothing in that state, and a submit must not silently accept an ask
     // that GATE_CRON_JOBS may never send (codex #4140 r18 P1).
     const schedulerStateKnown = typeof reviewSendPreviewRef.current?.schedulerEnabled === "boolean";
-    if (!sideEffectsCommittedRef.current && !oneTimeRecapOnly && willReview && (reviewTiming === "auto" || !schedulerStateKnown)) {
+    const lateCloseShown = backfillQuietCloseout && reviewLateCloseAskKept === true;
+    if (!sideEffectsCommittedRef.current && !oneTimeRecapOnly && willReview && (reviewTiming === "auto" || !schedulerStateKnown || lateCloseShown)) {
       if (previewRecheckRef.current) return;
       previewRecheckRef.current = true;
       let fresh;
@@ -18742,7 +18743,9 @@ export function CompletionPanel({
       // still carry a later tick range after a tick boundary (codex #4140
       // r15 P2); only a bucket change needs the operator's confirmation.
       if (fresh) setReviewSendPreview(fresh);
-      const verdict = reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed: previewFailureNoticedRef.current, reportTextExpected: completionReportTextExpected({ effectiveSendSms, customerPhone: service?.customerPhone }) });
+      // The fresh answer also refreshes the late-close verdict the box shows (a visit can cross its 3rd day before submit).
+      if (fresh) setReviewLateCloseAskKept(lateCloseAskKeptFrom(fresh));
+      const verdict = reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, lateCloseShown: lateCloseShown ? true : null, failureNoticed: previewFailureNoticedRef.current, reportTextExpected: completionReportTextExpected({ effectiveSendSms, customerPhone: service?.customerPhone }) });
       if (verdict) {
         if (verdict.noticed) previewFailureNoticedRef.current = true;
         if (verdict.dropShown) setReviewSendPreview(null);

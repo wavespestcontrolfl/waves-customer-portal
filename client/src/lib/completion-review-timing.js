@@ -362,7 +362,7 @@ export function runPreviewReadWithRetry({ read, apply, retry = false, intervalMs
   const attempt = () => read().then((data) => {
     if (gone) return;
     apply(data);
-    if (data) stopTimer();
+    if (previewAnswerSettled(data)) stopTimer();
   });
   attempt();
   if (retry) timer = setInterval(attempt, intervalMs);
@@ -380,8 +380,11 @@ export const alreadyReviewedFrom = (preview) => {
 };
 
 // GATE_REVIEW_LATE_CLOSE_ASK: the preview's read that a backdated closeout made now keeps the review ask.
-// Only a boolean true counts; no key (gate off) or a failed read is false: the box stays suppressed.
+// Only a boolean true counts; no key (gate off), null (unknown) or a failed read is false: the box stays suppressed.
 export const lateCloseAskKeptFrom = (preview) => preview?.lateCloseAskKept === true;
+// A preview answer is settled unless the read failed (null) or the server could not read the visit (`lateCloseAskKept: null`:
+// unknown, not a confirmed no). No key (gate off) is settled.
+export const previewAnswerSettled = (preview) => !!preview && preview.lateCloseAskKept !== null;
 
 // The off reasons the server honors for a first ask now: the known ones it lists, else only
 // "Complaint on site" (gate off: no key).
@@ -460,7 +463,14 @@ export function customReviewTimeProblem(reviewCustomAt) {
 // which the submit proceeds and the server computes the window itself (codex #4140 r3, r13, r18).
 // `reportTextExpected` false (texting off, no phone): no report text anchors the ask, so the
 // server uses the smart window even when the preview offered the after-report time.
-export function reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed, reportTextExpected = true }) {
+export function reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed, reportTextExpected = true, lateCloseShown = null }) {
+  // A backdated closeout whose late-close verdict changed since the box was shown changes the displayed review choice:
+  // the operator sees it and submits again (GATE_REVIEW_LATE_CLOSE_ASK). `lateCloseShown` is the shown verdict, or null when not a backdated closeout.
+  if (fresh && typeof lateCloseShown === "boolean" && lateCloseAskKeptFrom(fresh) !== lateCloseShown) {
+    return { message: lateCloseShown
+      ? "This closeout is now past the 3 days after the visit, so no review request will be sent. Submit again to confirm."
+      : "This closeout now keeps its review request (closed within 3 days). Check the review box, then submit again." };
+  }
   if (reviewTiming === "auto" && fresh && shown && reviewPreviewBucket(fresh) !== reviewPreviewBucket(shown)) {
     return { message: `The automatic review time changed to ${formatETDateTime(fresh.at, { weekday: "short", hour: "numeric", minute: "2-digit" })}. Submit again to confirm.` };
   }

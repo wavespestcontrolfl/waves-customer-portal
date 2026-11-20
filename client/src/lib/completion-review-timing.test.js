@@ -14,6 +14,7 @@ import {
   alreadyReviewedFrom,
   lateCloseAskKeptFrom,
   runPreviewReadWithRetry,
+  previewAnswerSettled,
   backfillCheckboxHint,
   LATE_CLOSE_ASK_LABEL,
   completionReviewSuppressionReason,
@@ -339,6 +340,29 @@ describe('runPreviewReadWithRetry: a backdated closeout re-reads a failed previe
     expect(read).toHaveBeenCalledTimes(3);
   });
 
+  test('an unknown answer (lateCloseAskKept null: the server could not read the visit) keeps retrying and keeps the ask suppressed; a confirmed false stops it', async () => {
+    vi.useFakeTimers();
+    const answers = [{ lateCloseAskKept: null }, { lateCloseAskKept: null }, { lateCloseAskKept: false }];
+    const read = vi.fn(async () => (answers.length ? answers.shift() : { lateCloseAskKept: false }));
+    const apply = vi.fn();
+    runPreviewReadWithRetry({ read, apply, retry: true, intervalMs: 60000 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lateCloseAskKeptFrom(apply.mock.calls[0][0])).toBe(false);
+    await vi.advanceTimersByTimeAsync(60000);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(read).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(300000);
+    expect(read).toHaveBeenCalledTimes(3);
+  });
+
+  test('previewAnswerSettled: failed read and null are unknown; true, false and no key are settled', () => {
+    expect(previewAnswerSettled(null)).toBe(false);
+    expect(previewAnswerSettled({ lateCloseAskKept: null })).toBe(false);
+    expect(previewAnswerSettled({ lateCloseAskKept: true })).toBe(true);
+    expect(previewAnswerSettled({ lateCloseAskKept: false })).toBe(true);
+    expect(previewAnswerSettled({})).toBe(true);
+  });
+
   test('stopping it (box unchecked, panel closed) ends the retries and drops a late answer', async () => {
     vi.useFakeTimers();
     let resolveRead;
@@ -360,5 +384,24 @@ describe('runPreviewReadWithRetry: a backdated closeout re-reads a failed previe
     await vi.advanceTimersByTimeAsync(600000);
     expect(read).toHaveBeenCalledTimes(1);
     expect(apply).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('reviewPreviewSubmitVerdict with the late-close verdict (GATE_REVIEW_LATE_CLOSE_ASK)', () => {
+  const same = { at: '2026-11-20T15:00:00Z', bucket: 'legacy:+120m' };
+  test('a verdict that flipped to false since the box was shown pauses the submit, naming the change', () => {
+    const verdict = reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: { ...same, lateCloseAskKept: false }, shown: same, failureNoticed: false, lateCloseShown: true });
+    expect(verdict.message).toMatch(/no review request will be sent/);
+  });
+  test('a verdict that flipped to true, or went unknown (null), also pauses it', () => {
+    expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: { ...same, lateCloseAskKept: true }, shown: same, failureNoticed: false, lateCloseShown: false }).message).toMatch(/now keeps its review request/);
+    expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: { ...same, lateCloseAskKept: null }, shown: same, failureNoticed: false, lateCloseShown: true }).message).toMatch(/no review request will be sent/);
+  });
+  test('an unchanged verdict, or not a backdated closeout (lateCloseShown null), goes on as before', () => {
+    expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: { ...same, lateCloseAskKept: true }, shown: same, failureNoticed: false, lateCloseShown: true })).toBeNull();
+    expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: same, shown: same, failureNoticed: false })).toBeNull();
+  });
+  test('a failed re-check keeps its own once-only notice', () => {
+    expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: null, shown: same, failureNoticed: false, lateCloseShown: true }).noticed).toBe(true);
   });
 });

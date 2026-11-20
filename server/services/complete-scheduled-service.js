@@ -748,7 +748,7 @@ async function lateCloseFirstAskEligible({ backfill, completionInput, database =
   if (backfill !== true || completionInput?.actor?.techRole !== 'admin') return false;
   if (completionInput.systemQuietCloseout === true || completionInput.issuedInvoiceCloseout) return false;
   if (!require('../config/feature-gates').reviewLateCloseAskLive()) return false;
-  return require('./review-visit-day').lateCloseAskKeptForVisit(completionInput.serviceId, database);
+  return (await require('./review-visit-day').lateCloseAskKeptForVisit(completionInput.serviceId, database)) === true;
 }
 
 // Backfill duration policy (Codex P1, fix round): a stale row's lifecycle

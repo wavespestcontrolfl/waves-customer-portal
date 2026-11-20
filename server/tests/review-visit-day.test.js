@@ -10,7 +10,7 @@ jest.mock('../services/service-completion-profiles', () => ({
   ...jest.requireActual('../services/service-completion-profiles'),
   resolveCompletionProfileForScheduledService: (...args) => mockResolve(...args),
 }));
-const { draftServiceDate, draftVisitDate, visitWorkedOn, closedWithinDaysOfWorkedDay, lateCloseAskKeptForVisit, lateCloseAskVerdict } = require('../services/review-visit-day');
+const { draftServiceDate, draftVisitDate, visitWorkedOn, closedWithinDaysOfWorkedDay, lateCloseAskKeptForVisit, lateCloseAskVerdict, lateCloseAskVerdictOrNull } = require('../services/review-visit-day');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 
 const DAY = 86400000;
@@ -186,18 +186,18 @@ describe('lateCloseAskKeptForVisit: the preview read', () => {
       expect(await lateCloseAskKeptForVisit('v1', visitDb(inWindow), now)).toBe(true);
     });
 
-    test('an unreadable profile is false', async () => {
+    test('no profile is a confirmed no; a profile READ that fails is unknown (null), so the panel asks again', async () => {
       mockProfile.value = null;
       expect(await lateCloseAskKeptForVisit('v1', visitDb(inWindow), now)).toBe(false);
       mockProfile.value = new Error('pg blip');
-      expect(await lateCloseAskKeptForVisit('v1', visitDb(inWindow), now)).toBe(false);
+      expect(await lateCloseAskKeptForVisit('v1', visitDb(inWindow), now)).toBeNull();
     });
   });
 
   test('inside a transaction a failed visit pre-read rolls back only its savepoint, and the transaction stays usable', async () => {
     const raw = jest.fn(async () => ({}));
     const failing = Object.assign(jest.fn(() => ({ where: () => ({ first: async () => { throw new Error('relation does not exist'); } }) })), { isTransaction: true, raw });
-    expect(await lateCloseAskKeptForVisit('v1', failing, now)).toBe(false);
+    expect(await lateCloseAskKeptForVisit('v1', failing, now)).toBeNull();
     const sql = raw.mock.calls.map((c) => String(c[0]));
     expect(sql[0]).toMatch(/^SAVEPOINT fail_soft_/);
     expect(sql[1]).toMatch(/^ROLLBACK TO SAVEPOINT fail_soft_/);
@@ -209,10 +209,10 @@ describe('lateCloseAskKeptForVisit: the preview read', () => {
     expect(raw.mock.calls.map((c) => String(c[0])).slice(0, 1)).toEqual([expect.stringMatching(/^SAVEPOINT fail_soft_/)]);
   });
 
-  test('no visit, no id, or a failed read is false', async () => {
+  test('no visit or no id is a confirmed false; a failed visit read is unknown (null)', async () => {
     expect(await lateCloseAskKeptForVisit('v1', visitDb(null), now)).toBe(false);
     expect(await lateCloseAskKeptForVisit('', visitDb({ ...IDENT, scheduled_date: '2026-11-18' }), now)).toBe(false);
-    expect(await lateCloseAskKeptForVisit('v1', visitDb(null, true), now)).toBe(false);
+    expect(await lateCloseAskKeptForVisit('v1', visitDb(null, true), now)).toBeNull();
   });
 });
 
@@ -308,9 +308,10 @@ describe('lateCloseAskVerdict', () => {
     expect(await lateCloseAskVerdict(unsaid)).toBe(false);
   });
 
-  test('a strict profile lookup error, or no profile, is not kept', async () => {
+  test('a strict profile lookup error, or no profile, is not kept (the error is unknown to the preview, a plain no to the commit)', async () => {
     mockProfile.value = new Error('profile table probe failed');
     expect(await lateCloseAskVerdict(base)).toBe(false);
+    expect(await lateCloseAskVerdictOrNull(base)).toBeNull();
     mockProfile.value = null;
     expect(await lateCloseAskVerdict(base)).toBe(false);
   });
