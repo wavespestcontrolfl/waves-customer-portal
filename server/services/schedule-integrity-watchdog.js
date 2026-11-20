@@ -47,6 +47,8 @@
  *     within what the other classes and the combined-booking check left of
  *     the budget; a new pair for today (start still ahead) or tomorrow always
  *     rings, and still counts (owner 2026-11-19, decision page option A).
+ *     It runs only under alert episodes: with ALERT_EPISODES off it stands
+ *     down, since its bells close and re-ring only through them.
  *     The finder and the copy are in same-start-visits-check.js.
  *
  * Accepted-plan gaps also start from the accepted estimate, covering missing
@@ -819,7 +821,7 @@ async function runInner({ now = new Date() } = {}) {
   // Two visits at one start: a schedule fix with days to spare. Found here so
   // the close pass judges its bells with the rest, but rung only after the
   // combined-booking check below, with what is left of the shared budget.
-  const sameStart = await sameStartVisitAlerts(todayET, etClock(now));
+  const sameStart = await sameStartFindings(episodes, todayET, now);
 
   const { rings: classRings, ...delivered } = await deliverAlerts({
     alerts, lateAlerts: sameStart.alerts, episodes, now, horizonDay: etDateString(horizon), lawnGapCheckFailed,
@@ -848,7 +850,7 @@ async function runInner({ now = new Date() } = {}) {
   // Last: two visits at one start, within what is left of the shared budget;
   // a new pair for tomorrow rings past it (owner 2026-11-19, "A").
   const late = await ringWithinBudget(sameStart.alerts, {
-    episodes, now, budget: lateBudget(classRings, combinedBooking), prefix: SAME_START_PREFIX,
+    now, budget: lateBudget(classRings, combinedBooking), prefix: SAME_START_PREFIX,
     alwaysRingBy: etDateString(addETDays(now, 1)),
   });
 
@@ -923,7 +925,8 @@ async function ringAlert(episodes, dedupeKey, title, body, metadata, { link = '/
 // standing row. Killed, the classes rung by deliverAlerts keep the
 // pre-episode rule for their own cap (a deduped result never counts: a pure
 // kill switch). `countRefreshRings` counts a refresh that rang as well: the
-// late class's own rings, and the earlier rings its budget subtracts.
+// classes' rings that the later budgets subtract (the combined-booking check's
+// and the late class's).
 function realRing(created, episodes, { countRefreshRings = false } = {}) {
   if (created.suppressed) return false;
   if (episodes) return Boolean(created.rang);
@@ -942,13 +945,19 @@ function lateBudget(classRings, combinedBooking) {
 
 const capHit = () => logger.warn(`[schedule-integrity] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
 
+// The same-start class's findings. With ALERT_EPISODES off it stands down (no
+// scan, no bell), as followup-due-alerts.js and caller-callback-bell.js do: its
+// bells close and re-ring only through admin-alert-episodes, so it never raises
+// one it could not close.
+async function sameStartFindings(episodes, todayET, now) {
+  if (!episodes) return { alerts: [], failed: false };
+  return sameStartVisitAlerts(todayET, etClock(now));
+}
+
 // The days each standing bell under `prefix` carries: the newest row per key,
-// the one a delivery lands on (notifyAdmin's own lookup). Under episodes a key
-// whose newest row is auto-cleared maps to null: the reopen wrapper reopens it
-// and it rings. Killed, notifyAdmin refreshes that same row and judges a new
-// day against the days it stores (a refresh keeps the autoCleared stamp), so
-// those days count as carried.
-async function standingBellDays(prefix, episodes) {
+// the one a delivery lands on (notifyAdmin's own lookup). A key whose newest
+// row is auto-cleared maps to null: the reopen wrapper reopens it and it rings.
+async function standingBellDays(prefix) {
   const rows = await db('notifications').where({ recipient_type: 'admin' })
     .whereRaw("starts_with(metadata->>'dedupeKey', ?)", [prefix])
     .orderBy('created_at', 'desc')
@@ -957,14 +966,15 @@ async function standingBellDays(prefix, episodes) {
   for (const row of rows) {
     const key = String(row.dedupe_key || '');
     if (!key.startsWith(prefix) || days.has(key)) continue;
-    days.set(key, episodes && row.auto_cleared === 'true' ? null : (Array.isArray(row.item_keys) ? row.item_keys.map(String) : []));
+    days.set(key, row.auto_cleared === 'true' ? null : (Array.isArray(row.item_keys) ? row.item_keys.map(String) : []));
   }
   return days;
 }
 
-// The late class's alerts, with real rings up to `budget`. The standing bells
-// are read first (in both modes), and the alerts that would ring go in order of
-// their earliest day the bell does not carry yet: a day the office already
+// The late class's alerts, with real rings up to `budget`, through the reopen
+// wrapper: the class runs only under episodes (runInner never scans it with
+// ALERT_EPISODES off). The standing bells are read first, and the alerts that
+// would ring go in order of their earliest day the bell does not carry yet: a day the office already
 // knows never takes a ring from a nearer new pair. An alert whose earliest new
 // day is `alwaysRingBy` (tomorrow) or sooner (today, start still ahead) always
 // rings, past the budget too, and counts toward it (owner 2026-11-19, "A";
@@ -977,20 +987,17 @@ async function standingBellDays(prefix, episodes) {
 // new one later). A finding with no standing bell, or an auto-cleared one (a
 // delivery would reopen it), waits. Only a real wait (a new bell, a reopen, or
 // a day not shown yet) logs the cap hit: a standing bell that carries all its
-// days gets its whole update. Killed: the same order and the same exception,
-// judged by the earliest new day, so a known day never carries a new later one
-// past the budget; the rest wait, with no quiet update and no close (no episode
-// steps). Returns the real rings
+// days gets its whole update. Returns the real rings
 // and the bells closed, and the bells not delivered: a lost write never holds
 // back the rest (every alert is tried and the closes run), and the job wrapper
 // then fails the run.
 const NO_NEW_DAY = '9999-12-31';
-async function ringWithinBudget(alerts, { episodes, now, budget, prefix, alwaysRingBy }) {
+async function ringWithinBudget(alerts, { now, budget, prefix, alwaysRingBy }) {
   let rang = 0;
   let held = 0;
   const over = [];
   let undelivered = 0;
-  const standing = alerts.length ? await standingBellDays(prefix, episodes) : new Map();
+  const standing = alerts.length ? await standingBellDays(prefix) : new Map();
   const firstNewDay = (alert) => {
     const carried = standing.get(alert[0]) || [];
     // itemKeys run in date order, so the first one missing is the earliest.
@@ -1004,9 +1011,8 @@ async function ringWithinBudget(alerts, { episodes, now, budget, prefix, alwaysR
     const tomorrowOrSooner = day <= alwaysRingBy;
     if (rang >= budget && !tomorrowOrSooner) {
       const carried = standing.get(alert[0]);
-      // Killed: it waits, with no quiet update and no close (no episode steps).
-      if (!carried || !episodes) { held += 1; continue; }
-      if (day !== NO_NEW_DAY) held += 1;
+      if (!carried || day !== NO_NEW_DAY) held += 1;
+      if (!carried) continue;
       const kept = typeof alert[4]?.forDays === 'function' ? alert[4].forDays(carried) : null;
       if (!kept) { over.push(alert[0]); continue; }
       delivery = [...kept.slice(0, 4), { ...kept[4], ringOnRefresh: () => false }];
@@ -1016,7 +1022,7 @@ async function ringWithinBudget(alerts, { episodes, now, budget, prefix, alwaysR
     // message carries its SQL with the bound title, which names the customer
     // (AGENTS.md: no PII in logs).
     try {
-      if (realRing(await ringAlert(episodes, ...delivery), episodes, { countRefreshRings: true })) rang += 1;
+      if (realRing(await ringAlert(true, ...delivery), true)) rang += 1;
     } catch (err) {
       undelivered += 1;
       logger.error(`[schedule-integrity] ${delivery[0]} not delivered (${err.code || err.name || 'error'})`);
