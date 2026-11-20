@@ -962,9 +962,9 @@ async function lockByToken(trx, token) {
 // save the page last applied, the text-consent choice included. A change since then (another tab's consent save, a
 // save that landed late) refuses the write with the state still open (409), so the page reads the offer again and the
 // applicant answers on what it now shows. A signature, a date request or a decline therefore never fixes a consent
-// choice the applicant did not see. The page always sends it. A body without one is the contract these routes served
-// before the version, and it is answered as before.
-const changedSince = (offer, version) => version !== undefined && version !== iso(offer.updated_at);
+// choice the applicant did not see. The page always sends it, and a write without one is refused the same way, so no
+// answer skips the check. The routes that take it are under /v2, which no server from before the version has.
+const changedSince = (offer, version) => version !== iso(offer.updated_at);
 const CHANGED = Object.freeze({ refused: true, body: Object.freeze({ state: 'open' }) });
 
 const refusal = (state, offer) => ({
@@ -975,7 +975,7 @@ const refusal = (state, offer) => ({
 });
 
 /**
- * POST /:token/text-consent. `version` is the offer's version from the read the choice was made on. A save can land
+ * POST /:token/v2/text-consent. `version` is the offer's version from the read the choice was made on. A save can land
  * late (its reply was lost and the page saved the same choice again), so a change made from an older version is
  * refused: it cannot undo a later choice. A choice that is already stored writes nothing.
  */
@@ -1005,7 +1005,7 @@ function parseSignedName(value) {
 
 const sameName = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
 
-/** POST /:token/accept. `version`: see changedSince. */
+/** POST /:token/v2/accept. `version`: see changedSince. */
 async function acceptOffer(token, { signedName, version, ip, userAgent }) {
   const name = parseSignedName(signedName);
   const result = await db.transaction(async (trx) => {
@@ -1053,7 +1053,7 @@ async function moveApplication(trx, applicationId, { to, note, extra }) {
   });
 }
 
-/** POST /:token/date-request. `version`: see changedSince. */
+/** POST /:token/v2/date-request. `version`: see changedSince. */
 async function requestDate(token, { requestedStartDate, note, version }) {
   const result = await db.transaction(async (trx) => {
     const found = await lockByToken(trx, token);
@@ -1077,7 +1077,7 @@ async function requestDate(token, { requestedStartDate, note, version }) {
   return result;
 }
 
-/** POST /:token/decline. `version`: see changedSince. */
+/** POST /:token/v2/decline. `version`: see changedSince. */
 async function declineOffer(token, { reason, version }) {
   const result = await db.transaction(async (trx) => {
     const found = await lockByToken(trx, token);

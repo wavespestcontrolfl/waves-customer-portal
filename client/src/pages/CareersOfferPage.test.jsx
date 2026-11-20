@@ -122,7 +122,7 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     expect(await screen.findByText('That did not go through. Please try again.')).toBeInTheDocument();
     expect(bodyOf(fetchMock, 1)).toEqual({ signedName: 'Jordan Rivera', version: VERSION });
-    expect(fetchMock.mock.calls[2][0]).not.toMatch(/\/accept$/); // the re-read
+    expect(fetchMock.mock.calls[2][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}$`)); // the re-read
     await waitFor(() => expect(screen.getByLabelText('Text me about this offer')).toBeChecked());
     expect(screen.queryByText(/You signed this offer|This offer was (already )?signed/)).toBeNull(); // still open
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
@@ -145,7 +145,7 @@ describe('CareersOfferPage — open state', () => {
     expect(accept).toBeEnabled();
     fireEvent.click(accept);
     expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026\. Welcome to Waves\. Sam will contact you about your first day\./)).toBeInTheDocument();
-    expect(fetchMock.mock.calls[1][0]).toMatch(/\/accept$/);
+    expect(fetchMock.mock.calls[1][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}/v2/accept$`));
     expect(bodyOf(fetchMock, 1)).toEqual({ signedName: 'Jordan Rivera', version: VERSION });
   });
 
@@ -159,7 +159,7 @@ describe('CareersOfferPage — open state', () => {
     const box = await screen.findByLabelText('Text me about this offer');
     fireEvent.click(box);
     await waitFor(() => expect(box).toBeChecked());
-    expect(fetchMock.mock.calls[1][0]).toMatch(/\/text-consent$/);
+    expect(fetchMock.mock.calls[1][0]).toMatch(/\/v2\/text-consent$/);
     expect(bodyOf(fetchMock, 1)).toEqual({ consent: true, version: VERSION });
     fireEvent.click(box);
     expect(await screen.findByText('Try later')).toBeInTheDocument();
@@ -239,7 +239,7 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
     expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
-    expect(fetchMock.mock.calls[3][0]).toMatch(/\/text-consent$/);
+    expect(fetchMock.mock.calls[3][0]).toMatch(/\/v2\/text-consent$/);
     expect(bodyOf(fetchMock, 3)).toEqual({ consent: true, version: VERSION });
   });
 
@@ -340,6 +340,15 @@ describe('CareersOfferPage — open state', () => {
     ['open without the text choice', openPayload({ textConsent: undefined })],
     ['open without the Terms', openPayload({ terms: null })],
     ['open with empty Terms', openPayload({ terms: { title: 'Technician Terms', markdown: '  ' } })],
+    ['open without the start date', openPayload({ startDate: null })],
+    ['open with a start date that is not a day', openPayload({ startDate: '2027-02-30' })],
+    ['open without the hourly rate', openPayload({ hourlyRate: null })],
+    ['open with a zero hourly rate', openPayload({ hourlyRate: '0.00' })],
+    ['open with a step rate and no step date', openPayload({ stepEffectiveOn: null })],
+    ['open without the job', openPayload({ jobTitle: ' ' })],
+    ['open without the week', openPayload({ hoursLine: null })],
+    ['open without who they report to', openPayload({ reportTo: '' })],
+    ['open without pay day', openPayload({ payDayLine: null })],
   ])('shows the load error, not the offer, when the offer read is %s', async (label, body) => {
     globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(body));
     renderPage();
@@ -566,7 +575,7 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.click(send);
     expect(await screen.findByText(/Thanks\. Sam will look at your new date\. If it works, he will send you an updated offer\./)).toBeInTheDocument();
     expect(screen.getByText('You asked to start on Mon, Jan 11, 2027.')).toBeInTheDocument();
-    expect(fetchMock.mock.calls[1][0]).toMatch(/\/date-request$/);
+    expect(fetchMock.mock.calls[1][0]).toMatch(/\/v2\/date-request$/);
     expect(bodyOf(fetchMock, 1)).toEqual({ requestedStartDate: '2027-01-11', note: 'Need a week', version: VERSION });
   });
 
@@ -581,7 +590,7 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.change(screen.getByLabelText('Reason (optional)'), { target: { value: 'Took another job' } });
     fireEvent.click(screen.getByRole('button', { name: 'Yes, decline' }));
     expect(await screen.findByText('You declined this offer. Thank you for your time.')).toBeInTheDocument();
-    expect(fetchMock.mock.calls[1][0]).toMatch(/\/decline$/);
+    expect(fetchMock.mock.calls[1][0]).toMatch(/\/v2\/decline$/);
     expect(bodyOf(fetchMock, 1)).toEqual({ reason: 'Took another job', version: VERSION });
   });
 
@@ -635,7 +644,7 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.queryByText(/Could not save that/)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026\. Welcome to Waves\./)).toBeInTheDocument();
-    expect(fetchMock.mock.calls[3][0]).toMatch(/\/accept$/);
+    expect(fetchMock.mock.calls[3][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}/v2/accept$`));
     expect(bodyOf(fetchMock, 3)).toEqual({ signedName: 'Jordan Rivera', version: VERSION });
   });
 
@@ -655,7 +664,7 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.getByLabelText('Reason (optional)')).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText('You declined this offer. Thank you for your time.')).toBeInTheDocument();
-    expect(fetchMock.mock.calls[3][0]).toMatch(/\/decline$/);
+    expect(fetchMock.mock.calls[3][0]).toMatch(/\/v2\/decline$/);
     expect(bodyOf(fetchMock, 3)).toEqual(bodyOf(fetchMock, 1));
   });
 

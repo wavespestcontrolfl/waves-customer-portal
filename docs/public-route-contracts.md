@@ -8665,8 +8665,8 @@ that gate is dark the confirmation is skipped entirely (byte-identical to
 before the lane); it is never a blocking part of the request either way.
 Treat the gate, the limiters, the no-customer/no-lead rule, and the
 fire-and-forget-only comms contract as security-critical.)
-`/api/public/careers/offer/:token` (GET; `/offer/:token/text-consent`, `/offer/:token/accept`,
-`/offer/:token/date-request` and `/offer/:token/decline`, all POST — the applicant's private job offer
+`/api/public/careers/offer/:token` (GET; `/offer/:token/v2/text-consent`, `/offer/:token/v2/accept`,
+`/offer/:token/v2/date-request` and `/offer/:token/v2/decline`, all POST — the applicant's private job offer
 (`services/job-offers.js`), gated `GATE_JOB_OFFERS` ALONE: 404 `{error:'Not found'}` for the WHOLE `/offer/*`
 family before even the limiter runs, and `index.js` carves `/offer` out of the `jobApplications` intake gate so a
 sent offer keeps working if intake closes). The token is `job_offers.token`, 64 lowercase hex (32 random bytes set
@@ -8746,8 +8746,11 @@ version}` (trimmed,
 'YYYY-MM-DD' (future Monday to Thursday), note? (<= 500), version}` -> `{state:'date_requested'}`; `decline {reason?
 (<= 500), version}` -> `{state:'declined'}`. Each answer carries the `version` the page shows, the text choice included,
 and a change since then (another tab's text choice) answers the same 409 `{state:'open'}` with no write, so a signature,
-a date request or a decline never fixes a text choice the applicant did not see. A body without `version` is the
-contract before it and is answered as before, with no version check; the page always sends one. The page never
+a date request or a decline never fixes a text choice the applicant did not see. A body without `version` is refused
+the same way (409 `{state:'open'}`, no write), so no answer skips the check; the page always sends one. The answers
+live under `/v2`: a server from before the version (#8012) has only the same paths without `/v2`, whose handlers
+ignore it, and this server has no handler for those paths (404, no write), so in a mixed deploy or a rollback a page
+that read a version can never post an answer to a handler that ignores it. The page never
 applies an open read or a text-choice save without a `version` (a server from before it): such a read counts as failed,
 and such a save is checked with a read, so signing stays locked until a read carries a version. It shows the signing
 controls only for a read whose state is explicitly `open` and that carries the text choice and non-empty Terms; a read

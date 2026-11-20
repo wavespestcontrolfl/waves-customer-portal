@@ -65,22 +65,25 @@ router.get('/:token', offerLimiter, handle('view', async (req) => {
   return body ? { body } : { notFound: true };
 }));
 
-router.post('/:token/text-consent', offerLimiter, handle('text consent', (req) => JobOffers.setTextConsent(req.params.token, req.body && req.body.consent, req.body && req.body.version)));
+// The applicant's answers live under /v2. Each carries the version of the offer the page shows, and a server from
+// before the version (#8012) has no /v2 route: a page that read a version can never post an answer to a handler that
+// ignores it. In a mixed deploy or a rollback, such a post answers 404 and writes nothing.
+router.post('/:token/v2/text-consent', offerLimiter, handle('text consent', (req) => JobOffers.setTextConsent(req.params.token, req.body && req.body.consent, req.body && req.body.version)));
 
-router.post('/:token/accept', offerLimiter, handle('accept', (req) => JobOffers.acceptOffer(req.params.token, {
+router.post('/:token/v2/accept', offerLimiter, handle('accept', (req) => JobOffers.acceptOffer(req.params.token, {
   signedName: req.body && req.body.signedName,
   version: req.body && req.body.version,
   ip: req.ip,
   userAgent: req.get('user-agent'),
 })));
 
-router.post('/:token/date-request', offerLimiter, handle('date request', (req) => JobOffers.requestDate(req.params.token, {
+router.post('/:token/v2/date-request', offerLimiter, handle('date request', (req) => JobOffers.requestDate(req.params.token, {
   requestedStartDate: req.body && req.body.requestedStartDate,
   note: req.body && req.body.note,
   version: req.body && req.body.version,
 })));
 
-router.post('/:token/decline', offerLimiter, handle('decline', (req) => JobOffers.declineOffer(req.params.token, {
+router.post('/:token/v2/decline', offerLimiter, handle('decline', (req) => JobOffers.declineOffer(req.params.token, {
   reason: req.body && req.body.reason,
   version: req.body && req.body.version,
 })));

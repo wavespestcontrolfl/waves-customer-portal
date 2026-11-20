@@ -408,16 +408,19 @@ jest.setTimeout(120000);
         expect((await root('job_offers').where({ id: offer.id }).first()).text_consent_at).toBeTruthy();
       });
 
-      // A body with no version is the contract these routes served before the version, so it is answered as before,
-      // even after a change its sender did not see. The page always sends one (CareersOfferPage.test.jsx).
+      // A write with no version is refused like one made on an older version (409, state open) and writes nothing, so
+      // no answer skips the check. The page always sends one (CareersOfferPage.test.jsx).
       test.each([
-        ['text choice', (t) => JobOffers.setTextConsent(t, false), { textConsent: false, version: expect.any(String) }],
-        ['sign', (t) => JobOffers.acceptOffer(t, { signedName: 'Jordan Rivera' }), expect.objectContaining({ state: 'signed' })],
-        ['date request', (t) => JobOffers.requestDate(t, { requestedStartDate: addStaffWorkDays(JobOffers.suggestStartDate(), 7) }), { state: 'date_requested' }],
-        ['decline', (t) => JobOffers.declineOffer(t, { reason: 'Took another job' }), { state: 'declined' }],
-      ])('a %s sent with no version is answered as before', async (_, answer, body) => {
+        ['text choice', (t) => JobOffers.setTextConsent(t, false)],
+        ['sign', (t) => JobOffers.acceptOffer(t, { signedName: 'Jordan Rivera' })],
+        ['date request', (t) => JobOffers.requestDate(t, { requestedStartDate: addStaffWorkDays(JobOffers.suggestStartDate(), 7) })],
+        ['decline', (t) => JobOffers.declineOffer(t, { reason: 'Took another job' })],
+      ])('a %s sent with no version is refused, and nothing is written', async (_, answer) => {
         await JobOffers.setTextConsent(token, true, await shownVersion(token));
-        expect((await answer(token)).body).toEqual(body);
+        const before = await root('job_offers').where({ id: offer.id }).first();
+        expect(await answer(token)).toEqual({ refused: true, body: { state: 'open' } });
+        expect(await root('job_offers').where({ id: offer.id }).first()).toEqual(before);
+        expect((await root('job_applications').where({ id: app.id }).first()).status).toBe('offer');
       });
 
       test('past its expiry the offer reads expired before any sweep, and nothing can be signed', async () => {

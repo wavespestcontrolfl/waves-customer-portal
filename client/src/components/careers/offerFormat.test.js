@@ -5,6 +5,7 @@ import {
   formatLongDate,
   formatLongInstant,
   formatSentOn,
+  hasOfferFacts,
   payLine,
   signedNameValid,
   tomorrowET,
@@ -13,6 +14,31 @@ import {
 afterEach(() => vi.useRealTimers());
 
 describe('offerFormat', () => {
+  const facts = {
+    jobTitle: 'Pest Control Technician',
+    startDate: '2027-01-04',
+    hourlyRate: 23,
+    stepRate: '25.00',
+    stepEffectiveOn: '2027-04-05',
+    hoursLine: '40 paid hours each full week',
+    reportTo: 'Sam Carter, owner',
+    payDayLine: 'Every Friday',
+  };
+
+  it('signs only an offer that carries every term it shows', () => {
+    expect(hasOfferFacts(facts)).toBe(true);
+    expect(hasOfferFacts({ ...facts, stepRate: null, stepEffectiveOn: null })).toBe(true);
+    expect(hasOfferFacts({ ...facts, stepRate: '', stepEffectiveOn: '' })).toBe(true);
+    for (const missing of [
+      { jobTitle: '' }, { hoursLine: null }, { reportTo: '  ' }, { payDayLine: undefined },
+      { startDate: null }, { startDate: '2027-02-30' }, { startDate: 'soon' },
+      { hourlyRate: null }, { hourlyRate: '' }, { hourlyRate: 0 }, { hourlyRate: '-1' }, { hourlyRate: true },
+      { hourlyRate: 'twenty' }, { stepRate: 'x' }, { stepEffectiveOn: null }, { stepEffectiveOn: '2027-13-01' },
+    ]) {
+      expect(hasOfferFacts({ ...facts, ...missing })).toBe(false);
+    }
+  });
+
   it('formats pay with and without a step', () => {
     expect(payLine({ hourlyRate: '23.00', stepRate: '25.00', stepEffectiveOn: '2027-04-05' })).toBe('$23.00 an hour, $25.00 from Apr 5');
     expect(payLine({ hourlyRate: 23, stepRate: null, stepEffectiveOn: null })).toBe('$23.00 an hour');
