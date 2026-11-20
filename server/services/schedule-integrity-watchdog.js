@@ -45,9 +45,10 @@
  *     a visit is one hour unless its booking says otherwise). One bell per
  *     customer; it clears once no upcoming day has such a pair. It rings last,
  *     within what the other classes and the combined-booking check left of
- *     the budget; a new pair for tomorrow always rings, and still counts
- *     (owner 2026-11-19, decision page option A). The finder and the copy are
- *     in same-start-visits-check.js.
+ *     the budget; a new pair for today (start still ahead) or tomorrow always
+ *     rings, and still counts (owner 2026-11-19, decision page option A). An
+ *     hourly urgent pass (runSameStartUrgentPass) rings such a pair made after
+ *     this run. The finder and the copy are in same-start-visits-check.js.
  *
  * Accepted-plan gaps also start from the accepted estimate, covering missing
  * recurrence, applications, and matching cadence/property evidence.
@@ -96,7 +97,7 @@ const { createHash } = require('node:crypto');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const alertEpisodes = require('./admin-alert-episodes');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 
 // Upcoming look-ahead for the unpriced-series class. Two weeks: far enough
 // out that Adam can price the series before the visit day, small enough that
@@ -279,6 +280,43 @@ function isUnpricedSeriesVisit(row) {
 function seriesRootId(row) {
   if (row?.recurring_parent_id && row?.is_recurring !== false) return row.recurring_parent_id;
   return row?.id;
+}
+
+// The Eastern wall clock as HH:MM: the same-start finder counts today's pairs
+// whose start is still ahead of it.
+function etClock(date) {
+  const { hour, minute } = etParts(date);
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+// The same-start class's hourly urgent pass (scheduler.js, :25 from 7 AM to
+// 8 PM ET; owner 2026-11-19, "A"): a pair on a day up to tomorrow that its
+// customer's bell does not show yet rings now, not at the next 6:40 run, by
+// when tomorrow is today and the pair may be under way. Today counts while its
+// start is still ahead (the finder's rule). It writes only those customers'
+// bells, each whole, as the daily run would; it never updates or closes another
+// bell and runs no close pass. Like the daily run's exception, these rings
+// spend no budget and count in the 24-hour read. Same gate and lock as the run.
+async function runSameStartUrgentPass({ now = new Date() } = {}) {
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('scheduleIntegrityWatchdog')) return { skipped: true, reason: 'gated_off' };
+  const { runExclusive } = require('../utils/cron-lock');
+  return runExclusive('schedule-integrity-watchdog', () => sameStartUrgentInner({ now }));
+}
+
+async function sameStartUrgentInner({ now }) {
+  const tomorrowET = etDateString(addETDays(now, 1));
+  const sameStart = await sameStartVisitAlerts(etDateString(now), etClock(now));
+  if (sameStart.failed) return { rang: 0, failed: true };
+  const episodes = require('../config/feature-gates').alertEpisodesLive();
+  const standing = sameStart.alerts.length ? await standingBellDays(SAME_START_PREFIX) : new Map();
+  let rang = 0;
+  for (const alert of sameStart.alerts) {
+    const shown = standing.get(alert[0]) || [];
+    const newSoon = (alert[3].itemKeys || []).some((day) => day <= tomorrowET && !shown.includes(day));
+    if (newSoon && realRing(await ringAlert(episodes, ...alert), episodes, { countRefreshRings: true })) rang += 1;
+  }
+  return { rang, failed: false };
 }
 
 async function runScheduleIntegrityWatchdog({ now = new Date() } = {}) {
@@ -802,7 +840,7 @@ async function runInner({ now = new Date() } = {}) {
   // Two visits at one start: a schedule fix with days to spare. Found here so
   // the close pass judges its bells with the rest, but rung only after the
   // combined-booking check below, with what is left of the shared budget.
-  const sameStart = await sameStartVisitAlerts(todayET);
+  const sameStart = await sameStartVisitAlerts(todayET, etClock(now));
 
   const { rings: classRings, ...delivered } = await deliverAlerts({
     alerts, lateAlerts: sameStart.alerts, episodes, now, horizonDay: etDateString(horizon), lawnGapCheckFailed,
@@ -942,10 +980,10 @@ async function standingBellDays(prefix) {
 // standing bells are read first, and the alerts that would ring go in order of
 // their earliest day the bell does not carry yet: a day the office already
 // knows never takes a ring from a nearer new pair. An alert whose earliest new
-// day is `alwaysRingBy` (tomorrow) or sooner always rings, past the budget too,
-// and counts toward it (owner 2026-11-19, "A"; docs/admin-notifications.md
-// rule 3): the finder leaves today out, so the next run cannot flag it. Past the budget a
-// standing bell still gets its quiet update, so it never points at a visit
+// day is `alwaysRingBy` (tomorrow) or sooner (today, start still ahead) always
+// rings, past the budget too, and counts toward it (owner 2026-11-19, "A";
+// docs/admin-notifications.md rule 3): by the next run it may be under way.
+// Past the budget a standing bell still gets its quiet update, so it never points at a visit
 // already fixed: the bell rebuilt from only the days it already carried
 // (`forDays`: why, detail, link, visits and itemKeys), never ringing, so a new
 // day is not shown yet and rings on a later run. A standing bell none of whose
@@ -1267,6 +1305,8 @@ async function closeResolvedAlerts({ now, liveKeys, deliveredKeys, horizonDay, s
 module.exports = {
   manualSeriesStampIssue,
   runScheduleIntegrityWatchdog,
+  runSameStartUrgentPass,
+  _sameStartUrgentInner: sameStartUrgentInner,
   runInner,
   rowHasPrice,
   isUnpricedSeriesVisit,

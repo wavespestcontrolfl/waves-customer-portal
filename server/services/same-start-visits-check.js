@@ -15,9 +15,11 @@
  * technician). This check tells the office about each one.
  *
  * WHAT COUNTS: two or more live (pending or confirmed) visits of one customer
- * on one day after today, with the same arrival-window start, for the same
- * technician or with one of them unassigned. Today is left out: by the 6:40 AM
- * run its route is set and its day-before text has gone. Two technicians at one
+ * on one upcoming day, with the same arrival-window start, for the same
+ * technician or with one of them unassigned. Today counts only while the
+ * start is still ahead of the run (owner 2026-11-19, "A"): a pair made after
+ * the last run still rings before it starts, and a pair already under way is
+ * the technician's to finish. Two technicians at one
  * start are two people working at once, so they never count. A visit the
  * tracker already reads complete or cancelled is not live, whatever its
  * status says. A time held for an estimate has no customer yet (the hold
@@ -45,8 +47,9 @@
  * raised by the schedule-integrity watchdog's daily 6:40 ET run, under its gate,
  * its shared ring budget (this class rings after every other one, the
  * combined-booking check included, earliest new day first; a new pair for
- * tomorrow rings past the budget too, owner 2026-11-19 "A") and its alert
- * episodes. The bell names the
+ * today or tomorrow rings past the budget too, owner 2026-11-19 "A") and its
+ * alert episodes. The watchdog's hourly urgent pass rings such a pair made
+ * after the daily run. The bell names the
  * first day and the number of days, links to the first day's schedule, and
  * lists the days and their groups in its detail. Its itemKeys are every day,
  * listed in the detail or not, so a day that joins a standing bell rings it
@@ -68,11 +71,13 @@ const LIVE_STATUSES = ['pending', 'confirmed'];
 // Days named in the bell's detail; any more are counted, not listed.
 const DETAIL_DAYS = 10;
 
-// Every live visit after `todayET` (YYYY-MM-DD, Eastern) that shares its
-// customer, day and arrival start with another live visit for the same
-// technician, or with one of the two unassigned. One row per visit, with its
-// technician, so the groups keep two technicians' pairs apart.
-function findSameStartVisits(todayET) {
+// Every upcoming live visit that shares its customer, day and arrival start
+// with another live visit for the same technician, or with one of the two
+// unassigned: a day after `todayET` (YYYY-MM-DD, Eastern), or `todayET` itself
+// with a start after `afterTime` (HH:MM, the run's Eastern wall clock; without
+// it, today is left out). One row per visit, with its technician, so the
+// groups keep two technicians' pairs apart.
+function findSameStartVisits(todayET, afterTime) {
   const { TERMINAL_TRACK_STATES } = require('./customer-lifecycle-guard');
   const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
   return db('scheduled_services as a')
@@ -85,7 +90,10 @@ function findSameStartVisits(todayET) {
     .join('customers as c', 'c.id', 'a.customer_id')
     .whereIn('a.status', LIVE_STATUSES)
     .whereIn('b.status', LIVE_STATUSES)
-    .where('a.scheduled_date', '>', todayET)
+    .where(function upcoming() {
+      this.where('a.scheduled_date', '>', todayET);
+      if (afterTime) this.orWhere(function laterToday() { this.where('a.scheduled_date', todayET).where('a.window_start', '>', afterTime); });
+    })
     .whereNull('c.deleted_at')
     .where(function activeCustomer() { this.where('c.active', true).orWhereNull('c.active'); })
     // A former customer's leftover work is the churned-live-work alert's
@@ -142,8 +150,8 @@ function daysOf(slots) {
 
 // The finder's rows as one finding per customer, with its days (daysOf). The
 // findings come earliest first day first (then its first start), so a capped
-// run spends its rings on the nearest days. A new pair for tomorrow rings past
-// the cap: it is today's on the next run, and the finder leaves today out.
+// run spends its rings on the nearest days. A new pair for today or tomorrow
+// rings past the cap (owner 2026-11-19, "A"): by the next run it may be under way.
 function groupByCustomer(rows) {
   const { fullName } = require('./admin-alert-names');
   const customers = new Map();
@@ -289,11 +297,12 @@ function sameStartAlert(finding, todayET) {
   ];
 }
 
-// The class's alerts, or a failed flag when the check threw (an unknown live
-// set: the watchdog's close pass then leaves this class's standing bells alone).
-async function sameStartVisitAlerts(todayET) {
+// The class's alerts (`todayET` and `afterTime` as for the finder), or a failed
+// flag when the check threw (an unknown live set: the watchdog's close pass
+// then leaves this class's standing bells alone).
+async function sameStartVisitAlerts(todayET, afterTime) {
   try {
-    const findings = groupByCustomer(await findSameStartVisits(todayET));
+    const findings = groupByCustomer(await findSameStartVisits(todayET, afterTime));
     return { alerts: findings.map((finding) => sameStartAlert(finding, todayET)), failed: false };
   } catch (err) {
     logger.error(`[schedule-integrity] same-start visit check failed: ${err.message}`);

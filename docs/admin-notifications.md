@@ -350,8 +350,9 @@ customer's message by this rule.
    Exception (owner ruling 2026-11-19, decision page "Same-time visit check", option A): a new
    same-start pair for tomorrow (`server/services/same-start-visits-check.js`, the schedule
    watchdog's last class) always rings, even when the run's allowance is spent, and it counts
-   toward it. The check leaves today out, so tomorrow's run is the last one that can flag the
-   pair. At most one bell per customer.
+   toward it; so does a new pair later today whose start is still ahead. By the next run the
+   pair may be under way. An hourly pass (7 AM to 8 PM) rings such a pair made after the
+   6:40 AM run. At most one bell per customer.
    Far double bookings (owner audit 2026-10-22, decision D1):
    a visit auto-dispatch leaves in conflict more than 14 days out is a line on one standing
    Activity row (ops digest `auto-dispatch-far-conflicts`, audience fyi), outside the allowance

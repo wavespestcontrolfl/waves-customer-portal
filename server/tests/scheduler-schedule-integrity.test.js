@@ -18,7 +18,7 @@ jest.mock('../services/equipment-crons', () => ({ initEquipmentCrons: jest.fn() 
 jest.mock('../services/bouncie-mileage-crons', () => ({ initBouncieMileageCrons: jest.fn() }));
 jest.mock('../services/analytics/ga4-crons', () => ({ initGA4Crons: jest.fn() }));
 
-jest.mock('../services/schedule-integrity-watchdog', () => ({ runScheduleIntegrityWatchdog: jest.fn() }));
+jest.mock('../services/schedule-integrity-watchdog', () => ({ runScheduleIntegrityWatchdog: jest.fn(), runSameStartUrgentPass: jest.fn() }));
 jest.mock('../services/sms-auto-send', () => ({
   processGratitudeAutoSendCandidates: jest.fn().mockResolvedValue({ sent: 0 }),
   reconcileAutoSendClaims: jest.fn().mockResolvedValue({ failed: 0 }),
@@ -29,7 +29,7 @@ jest.mock('../services/sms-suggest-mode', () => ({
 
 const cron = require('../utils/scheduled-cron');
 const { isEnabled } = require('../config/feature-gates');
-const { runScheduleIntegrityWatchdog } = require('../services/schedule-integrity-watchdog');
+const { runScheduleIntegrityWatchdog, runSameStartUrgentPass } = require('../services/schedule-integrity-watchdog');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
 
@@ -53,6 +53,17 @@ test.each([
   await registration[1]();
   expect(runScheduleIntegrityWatchdog).toHaveBeenCalledTimes(1);
   expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(message));
+});
+
+test('the hourly same-start urgent pass runs on its own :25 tick, 7 AM to 8 PM ET, and reports a failed check', async () => {
+  runSameStartUrgentPass.mockResolvedValue({ rang: 0, failed: true });
+  initScheduledJobs();
+  // Two jobs share the slot: the combined-booking urgent pass, then this one.
+  const registration = cron.schedule.mock.calls.filter(([expression]) => expression === '25 7-20 * * *').at(-1);
+  expect(registration[2]).toEqual({ timezone: 'America/New_York' });
+  await registration[1]();
+  expect(runSameStartUrgentPass).toHaveBeenCalledTimes(1);
+  expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('same-start urgent pass: the check failed'));
 });
 
 test('gratitude runs on its own locked cron, not inside the scheduled-SMS sweep', async () => {

@@ -1,7 +1,8 @@
 // Same-start visits check on real Postgres (owner 2026-11-19, "build check"): the finder's SQL
 // against the migrated schema, one bell's whole life through the schedule-integrity
 // watchdog (raise, a new day rings, a fixed day is quiet, the split closes it, a comeback
-// rings again), and a new pair for tomorrow ringing past a spent budget (owner 2026-11-19, "A"). Real migrated PostgreSQL and the REAL notification service, synthetic records,
+// rings again), a new pair for tomorrow ringing past a spent budget, and the hourly pass ringing a
+// pair for today or tomorrow made after the daily run (owner 2026-11-19, "A"). Real migrated PostgreSQL and the REAL notification service, synthetic records,
 // rolled back after every test (same harness as prepay-coverage-bell-refresh-postgres.test.js).
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
@@ -70,7 +71,7 @@ postgres('same-start visits check on Postgres', () => {
   ];
   const ids = (rows) => rows.map((r) => String(r.id)).sort();
 
-  test('the finder: one customer, one day after today, one start, live, one technician or one unassigned', async () => {
+  test('the finder: one customer, one upcoming day (today while the start is ahead), one start, live, one technician or one unassigned', async () => {
     const { _findSameStartVisits, sameStartVisitAlerts, SAME_START_PREFIX } = require('../services/same-start-visits-check');
     const techA = await technician();
     const techB = await technician();
@@ -103,7 +104,10 @@ postgres('same-start visits check on Postgres', () => {
     await pair(live, { scheduled_date: '2040-01-18' }, { status: 'cancelled' });
     await pair(live, { scheduled_date: '2040-01-19' }, { status: 'completed' });
     await pair(live, { scheduled_date: '2040-01-20' }, { window_start: '11:00', window_end: '12:00' }); // already back to back
-    await pair(live, { scheduled_date: TODAY }); // today: its route is set and its day-before text has gone
+    // Today counts only while its start is still ahead of the run's clock (09:30 here).
+    const todayAhead = await pair(live, { scheduled_date: TODAY, window_start: '13:00', window_end: '14:00', technician_id: techA });
+    await pair(live, { scheduled_date: TODAY, window_start: '09:00', window_end: '10:00' }); // already started
+    await pair(live, { scheduled_date: TODAY, window_start: '09:30', window_end: '10:30' }); // starts at the clock: not ahead
     await pair(live, { scheduled_date: '2040-01-09' });
     await pair(live, { scheduled_date: '2040-01-21', window_start: null, window_end: null }); // no arrival time
     // The tracker leads `status`: a visit it reads cancelled or complete is not live, whatever its status says.
@@ -114,19 +118,23 @@ postgres('same-start visits check on Postgres', () => {
     await pair(churned, { scheduled_date: '2040-01-15' });
 
     const mine = new Set([live, inactive, deleted, churned]);
-    const rows = (await _findSameStartVisits(TODAY)).filter((r) => mine.has(String(r.customer_id)));
-    expect(ids(rows)).toEqual(ids([...counted, ...foundNoGroup]));
+    const rows = (await _findSameStartVisits(TODAY, '09:30')).filter((r) => mine.has(String(r.customer_id)));
+    expect(ids(rows)).toEqual(ids([...counted, ...todayAhead, ...foundNoGroup]));
+    // Without a clock, today is left out.
+    const noClock = (await _findSameStartVisits(TODAY)).filter((r) => mine.has(String(r.customer_id)));
+    expect(ids(noClock)).toEqual(ids([...counted, ...foundNoGroup]));
 
     // The pg DATE and TIME values read back as the calendar day and the wall-clock start.
-    const { alerts, failed } = await sameStartVisitAlerts(TODAY);
+    const { alerts, failed } = await sameStartVisitAlerts(TODAY, '09:30');
     expect(failed).toBe(false);
     const ours = alerts.filter((a) => mine.has(String(a[3].customer_id)));
     expect(ours.map((a) => a[0])).toEqual([`${SAME_START_PREFIX}${live}`]);
     expect(ours[0][3]).toMatchObject({
-      first_date: '2040-01-15', day_count: 4, itemKeys: ['2040-01-15', '2040-01-16', '2040-01-23', '2040-01-24'],
+      first_date: TODAY, day_count: 5, itemKeys: [TODAY, '2040-01-15', '2040-01-16', '2040-01-23', '2040-01-24'],
     });
-    expect(ours[0][2]).toBe('4 days have visits at the same time, first Jan 15 at 10 AM; split each so they run back to back.');
-    expect(ours[0][4].detail).toBe('Jan 15 at 10 AM: Lawn Care Service and Pest Control Service.'
+    expect(ours[0][2]).toBe('5 days have visits at the same time, first Jan 10 at 1 PM; split each so they run back to back.');
+    expect(ours[0][4].detail).toBe('Jan 10 at 1 PM: Lawn Care Service and Pest Control Service.'
+      + ' Jan 15 at 10 AM: Lawn Care Service and Pest Control Service.'
       + ' Jan 16 at 9 AM: Lawn Care Service and Pest Control Service.'
       + ' Jan 23 at 10 AM: Lawn Care Service, Mosquito Service and Pest Control Service.'
       + ' Jan 24 at 10 AM: Lawn Care Service and Pest Control Service; at 10 AM, another technician: Lawn Care Service and Pest Control Service.');
@@ -260,6 +268,51 @@ postgres('same-start visits check on Postgres', () => {
     // The next run has rings left: the later pair rings then.
     await runInner({ now });
     expect((await bell(laterCustomer)).metadata.itemKeys).toEqual(['2040-01-12']);
+  });
+
+  test('the hourly pass rings a pair for tomorrow, or later today while its start is ahead, made after the daily run; nothing else (owner 2026-11-19, "A")', async () => {
+    const { runInner, _sameStartUrgentInner } = require('../services/schedule-integrity-watchdog');
+    const tech = await technician();
+    const known = await customer();
+    const laterDay = await customer({ first_name: 'Sample', last_name: 'Later' });
+    const laterToday = await customer({ first_name: 'Sample', last_name: 'Today' });
+    const started = await customer({ first_name: 'Sample', last_name: 'Started' });
+    const keyOf = (customerId) => `same-start-visits:${customerId}`;
+    const bell = async (customerId) => (await trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [keyOf(customerId)]))[0];
+    const markRead = (customerId, at) => trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [keyOf(customerId)]).update({ read_at: at });
+    const at = (clockET) => new Date(`${TODAY}T${clockET}:00-05:00`); // January: Eastern is UTC-5
+
+    // The 6:40 run rings the known customer's Jan 15 pair; the office reads the bell.
+    await pair(known, { scheduled_date: '2040-01-15', technician_id: tech });
+    await runInner({ now: at('06:40') });
+    const raised = await bell(known);
+    expect(raised.metadata.itemKeys).toEqual(['2040-01-15']);
+    await markRead(known, at('07:00'));
+
+    // After the run: a pair for tomorrow for the known customer, and a pair on a later day for another.
+    await pair(known, { scheduled_date: '2040-01-11', window_start: '14:00', window_end: '15:00', technician_id: tech });
+    await pair(laterDay, { scheduled_date: '2040-01-12', technician_id: tech });
+    expect(await _sameStartUrgentInner({ now: at('12:25') })).toEqual({ rang: 1, failed: false });
+    const rang = await bell(known);
+    expect(rang.id).toBe(raised.id);
+    expect(rang.read_at).toBeNull();
+    expect(rang.metadata.itemKeys).toEqual(['2040-01-11', '2040-01-15']);
+    expect(await bell(laterDay)).toBeUndefined(); // a later day is the daily run's
+
+    // The next pass: the bell already shows tomorrow, so it stays read.
+    await markRead(known, at('12:30'));
+    expect(await _sameStartUrgentInner({ now: at('13:25') })).toEqual({ rang: 0, failed: false });
+    expect((await bell(known)).read_at).not.toBeNull();
+
+    // A pair later today rings while its start is ahead; a pair that already started never does.
+    await pair(laterToday, { scheduled_date: TODAY, window_start: '16:00', window_end: '17:00', technician_id: tech });
+    await pair(started, { scheduled_date: TODAY, window_start: '13:00', window_end: '14:00', technician_id: tech });
+    expect(await _sameStartUrgentInner({ now: at('13:25') })).toEqual({ rang: 1, failed: false });
+    expect((await bell(laterToday)).metadata.itemKeys).toEqual([TODAY]);
+    expect(await bell(started)).toBeUndefined();
+    expect(await bell(laterDay)).toBeUndefined();
   });
 
   test('a day past the ten listed still counts: moving it rings the bell again; a second start on a listed day is quiet', async () => {

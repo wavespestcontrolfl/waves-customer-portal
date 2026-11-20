@@ -77,6 +77,7 @@ const { siblingInvoiceCoverageVerdict } = require('../services/billing-lane');
 const { findLawnEmailAudienceGaps, findUnstampedRecurringLawnMembers } = require('../services/irrigation-weekly-email');
 const {
   runScheduleIntegrityWatchdog,
+  runSameStartUrgentPass,
   runInner,
   rowHasPrice,
   isUnpricedSeriesVisit,
@@ -1183,7 +1184,8 @@ describe('same-start visits (class 5)', () => {
       return { checked: 0, ok: 0, problems: 0, deferred: 0, skipped: 0, failed: 0, rings: 0 };
     });
     const result = await runInner({ now: NOW });
-    expect(sameStartVisitAlerts).toHaveBeenCalledWith('2026-08-04');
+    // Today counts while its start is still ahead of the run's Eastern clock (noon here).
+    expect(sameStartVisitAlerts).toHaveBeenCalledWith('2026-08-04', '12:00');
     // The combined-booking check ran with the budget the two classes left, before any same-start bell.
     expect(runCombinedBookingCheck.mock.calls[0][0].ringBudget).toBe(8);
     expect(keysWhenCombinedRan).toEqual(['unpriced-series:ss-parent-1', 'churned-live-work:cust-churned-1']);
@@ -1589,6 +1591,63 @@ describe('unpriced series held by a visit that completed unpriced since its bell
     const completedScan = db.mock.results.map((r) => r.value).find((c) => c.where.mock.calls.some(([a, b]) => a === 'ss.status' && b === 'completed'));
     expect(completedScan).toBeUndefined();
     expect(anyInvoiceLinkedToVisit).not.toHaveBeenCalled();
+  });
+});
+
+describe('same-start urgent pass (hourly; owner 2026-11-19, "A")', () => {
+  // Today is Aug 4 (noon ET), so tomorrow is Aug 5.
+  const pairOn = (customerId, itemKeys) => [
+    `same-start-visits:${customerId}`, `Schedule — split ${customerId}'s visits at the same time`, '2 visits start at 1 PM.',
+    { customer_id: customerId, itemKeys },
+    { link: `/admin/dispatch?tab=schedule&date=${itemKeys[0]}`, detail: 'Lawn and Pest.', refreshOnDedupe: true, ringOnRefresh: () => true },
+  ];
+  const watchdogOn = () => isEnabled.mockImplementation((name) => name === 'scheduleIntegrityWatchdog');
+  afterEach(() => isEnabled.mockImplementation(() => false));
+
+  test('gated off, it reads nothing', async () => {
+    isEnabled.mockReturnValue(false);
+    expect(await runSameStartUrgentPass({ now: NOW })).toEqual({ skipped: true, reason: 'gated_off' });
+    expect(sameStartVisitAlerts).not.toHaveBeenCalled();
+  });
+
+  test('it rings, whole, each customer with a day up to tomorrow that the bell does not show; it writes and closes nothing else', async () => {
+    watchdogOn();
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [
+      pairOn('cust-today', ['2026-08-04', '2026-08-20']), // later today, no bell yet
+      pairOn('cust-tomorrow', ['2026-08-05']), // its bell shows another day only
+      pairOn('cust-known', ['2026-08-05', '2026-08-09']), // its bell shows tomorrow; Aug 9 is the daily run's
+      pairOn('cust-later', ['2026-08-06']), // new, but after tomorrow: the daily run's
+    ], failed: false });
+    makeDbMock({ bellRows: [
+      { dedupe_key: 'same-start-visits:cust-tomorrow', auto_cleared: null, item_keys: ['2026-08-12'] },
+      { dedupe_key: 'same-start-visits:cust-known', auto_cleared: null, item_keys: ['2026-08-05'] },
+    ] });
+    expect(await runSameStartUrgentPass({ now: NOW })).toEqual({ rang: 2, failed: false });
+    expect(sameStartVisitAlerts).toHaveBeenCalledWith('2026-08-04', '12:00');
+    const calls = episodeHelpers.raiseAdminAlertWithReopen.mock.calls;
+    expect(calls.map((c) => c[3].dedupeKey)).toEqual(['same-start-visits:cust-today', 'same-start-visits:cust-tomorrow']);
+    expect(calls[0][3].metadata.itemKeys).toEqual(['2026-08-04', '2026-08-20']);
+    expect(episodeHelpers.closeAdminAlertKeys).not.toHaveBeenCalled();
+    expect(runCombinedBookingCheck).not.toHaveBeenCalled();
+  });
+
+  test('a failed check writes nothing', async () => {
+    watchdogOn();
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [], failed: true });
+    makeDbMock();
+    expect(await runSameStartUrgentPass({ now: NOW })).toEqual({ rang: 0, failed: true });
+    expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('kill switch off: the same customers ring through notifyAdmin', async () => {
+    watchdogOn();
+    alertEpisodesLive.mockReturnValue(false);
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [pairOn('cust-tomorrow', ['2026-08-05']), pairOn('cust-later', ['2026-08-06'])], failed: false });
+    makeDbMock();
+    expect(await runSameStartUrgentPass({ now: NOW })).toEqual({ rang: 1, failed: false });
+    expect(NotificationService.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey)).toEqual(['same-start-visits:cust-tomorrow']);
+    expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   });
 });
 
