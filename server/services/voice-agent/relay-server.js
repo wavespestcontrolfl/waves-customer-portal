@@ -159,7 +159,7 @@ async function burnCallToken(token, callSid) {
 // as path segments. Same door as /ws/voice-agent, in the same order: verify
 // the token for THIS CallSid, read the call_log row, require the sandbox
 // source AND the gpt_live stamp the cell route wrote AND the gate, then burn
-// the token. The socket goes to its own WebSocketServer, created at the first
+// the token and admit the call's reservation. The socket goes to its own WebSocketServer, created at the first
 // live upgrade, and to live-bridge.js. Any failure destroys the socket.
 const LIVE_WS_PREFIX = '/ws/voice-live/';
 let liveWss = null;
@@ -192,6 +192,19 @@ async function readLiveStamp(callSid) {
   return { voice: String(live.voice || ''), cell: String(live.cell || ''), tokenDigest: String(live.stream_token_sha256 || '') };
 }
 
+// The call's ledger row (voice_gpt_live_spend) turns admitted here, once. A
+// row the cell route already released (never admitted within the token's life)
+// or settled cannot be admitted, so no stream opens on a freed reservation.
+async function admitLiveReservation(callSid) {
+  const db = require('../../models/db');
+  const n = await db('voice_gpt_live_spend')
+    .where({ call_sid: callSid })
+    .whereNull('admitted_at')
+    .whereNull('cost_usd')
+    .update({ admitted_at: db.fn.now() });
+  return n === 1;
+}
+
 // Only the token the cell route issued (and stamped by digest) opens the paid
 // bridge: another valid token for this CallSid, such as the greeting's relay
 // token, must not open a second session on the same reservation.
@@ -220,6 +233,10 @@ async function handleLiveUpgrade(req, socket, head, pathname) {
     }
     if (!(await burnCallToken(token, callSid))) {
       logger.warn(`[voice-live] rejected ws upgrade: token already used callSid=${callSid}`);
+      return destroySocket(socket);
+    }
+    if (!(await admitLiveReservation(callSid))) {
+      logger.warn(`[voice-live] rejected ws upgrade: no open reservation callSid=${callSid}`);
       return destroySocket(socket);
     }
     if (!liveWss) {

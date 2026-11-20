@@ -7,9 +7,11 @@
  * deletes from this table.
  *
  * call_sid is the primary key, so a call claims one reservation, once (the cell route's insert, under an advisory
- * lock with the budget read). reserved_usd is the call's worst case. cost_usd is written only when OpenAI's
- * session.closed confirms the final usage, or 0 when the call never reached OpenAI. The budget is
- * SUM(COALESCE(cost_usd, reserved_usd)) over every row.
+ * lock with the budget read). reserved_usd is the call's worst case. admitted_at is set once, when the call's stream
+ * opens (relay-server.js); a row never admitted within the stream token's life is released at $0 by the next
+ * reservation (a caller who hung up during the disclosure used nothing), and a released row can no longer be
+ * admitted. cost_usd is written only when OpenAI's session.closed confirms the final usage, or 0 when the call never
+ * reached OpenAI. The budget is SUM(COALESCE(cost_usd, reserved_usd)) over every row.
  *
  * Additive; down drops the table.
  */
@@ -20,6 +22,7 @@ exports.up = async function up(knex) {
     t.decimal('reserved_usd', 10, 4).notNullable();
     t.decimal('cost_usd', 10, 4);
     t.timestamp('created_at', { useTz: true }).notNullable().defaultTo(knex.fn.now());
+    t.timestamp('admitted_at', { useTz: true });
     t.timestamp('settled_at', { useTz: true });
   });
 };

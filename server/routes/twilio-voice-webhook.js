@@ -2610,6 +2610,11 @@ const GPT_LIVE_BUDGET_LOCK = 'voice_gpt_live_budget';
 // else its reservation: a call whose summary never landed keeps it for good.
 const GPT_LIVE_LEDGER = 'voice_gpt_live_spend';
 const GPT_LIVE_SPENT_SQL = 'COALESCE(SUM(COALESCE(cost_usd, reserved_usd)), 0) AS usd';
+// A reservation whose stream never opened within the stream token's life (the
+// caller hung up during the disclosure) used nothing: the next reservation
+// releases it at $0. The upgrade admits only an unreleased row, so a late
+// stream cannot reopen it.
+const GPT_LIVE_ADMIT_WINDOW_S = 6 * 60; // CALL_TOKEN_TTL_MS (5 min) + 1 min
 const GPT_LIVE_UNCLAIMED_SQL = "(metadata->'gpt_live') IS NULL";
 
 function gptLiveCellFor(digits) {
@@ -2638,6 +2643,11 @@ async function reserveGptLiveCall(callSid, { cell, voice, token }) {
   const { PER_CALL_RESERVE_USD } = require('../services/voice-agent/live-bridge');
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [GPT_LIVE_BUDGET_LOCK]);
+    await trx(GPT_LIVE_LEDGER)
+      .whereNull('admitted_at')
+      .whereNull('cost_usd')
+      .whereRaw("created_at < now() - (? * interval '1 second')", [GPT_LIVE_ADMIT_WINDOW_S])
+      .update({ cost_usd: 0, settled_at: trx.fn.now() });
     const row = await trx(GPT_LIVE_LEDGER).first(trx.raw(GPT_LIVE_SPENT_SQL));
     if (Number(row && row.usd) + PER_CALL_RESERVE_USD > gptLiveMaxUsd()) return false;
     const claimed = await trx(GPT_LIVE_LEDGER)

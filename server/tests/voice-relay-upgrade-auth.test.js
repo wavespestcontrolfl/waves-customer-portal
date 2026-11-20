@@ -42,7 +42,28 @@ let mockBurnFails = false;
 // default: no row (generic). Tests set these to exercise the routing.
 let mockCallLogRow;
 let mockCallLogFails = false;
-jest.mock('../models/db', () => jest.fn((table) => {
+// The GPT-Live ledger: rows admitted so far, and whether the row is open
+// (unreleased, unsettled, never admitted) for admission.
+const mockAdmitted = [];
+let mockLedgerOpen = true;
+let mockAdmitFails = false;
+// One db fake for the whole suite (a function declaration, so the hoisted
+// jest.mock factory and the stall test's restore share it).
+function mockDbImpl(table) {
+  if (table === 'voice_gpt_live_spend') {
+    const chain = {
+      where: () => chain,
+      whereNull: () => chain,
+      update: (row) => {
+        if (mockAdmitFails) return Promise.reject(new Error('db down'));
+        if (!mockLedgerOpen) return Promise.resolve(0);
+        mockLedgerOpen = false; // admitted once
+        mockAdmitted.push(row);
+        return Promise.resolve(1);
+      },
+    };
+    return chain;
+  }
   if (table === 'call_log') {
     return {
       where: () => ({
@@ -67,7 +88,8 @@ jest.mock('../models/db', () => jest.fn((table) => {
     }),
     where: () => ({ del: () => Promise.resolve(0) }),
   };
-}));
+}
+jest.mock('../models/db', () => Object.assign(jest.fn(mockDbImpl), { fn: { now: () => 'NOW()' } }));
 jest.mock('../services/collections/outbound-voice/collections-conversation', () => ({
   CollectionsConversation: jest.fn(() => ({ end: jest.fn(async () => {}) })),
 }));
@@ -205,33 +227,7 @@ describe('ws upgrade — per-call token, never a reusable secret', () => {
       // tests). MUST keep the call_log dispatch (gh prb-r11) — restoring a
       // shape without .first makes the source resolution reject every
       // subsequent upgrade.
-      const db = require('../models/db');
-      db.mockImplementation((table) => {
-        if (table === 'call_log') {
-          return {
-            where: () => ({
-              first: () => (mockCallLogFails
-                ? Promise.reject(new Error('db down'))
-                : Promise.resolve(mockCallLogRow)),
-            }),
-          };
-        }
-        return {
-          insert: (row) => ({
-            onConflict: () => ({
-              ignore: () => ({
-                returning: () => {
-                  if (mockBurnFails) return Promise.reject(new Error('db down'));
-                  if (mockBurned.has(row.token_hash)) return Promise.resolve([]);
-                  mockBurned.add(row.token_hash);
-                  return Promise.resolve([{ token_hash: row.token_hash }]);
-                },
-              }),
-            }),
-          }),
-          where: () => ({ del: () => Promise.resolve(0) }),
-        };
-      });
+      require('../models/db').mockImplementation(mockDbImpl);
     }
   });
 
@@ -603,6 +599,9 @@ describe('ws upgrade — GPT-Live path', () => {
     mockBurned.clear();
     mockBurnFails = false;
     mockCallLogFails = false;
+    mockAdmitted.length = 0;
+    mockLedgerOpen = true;
+    mockAdmitFails = false;
     process.env.VOICE_RELAY_ENABLED = 'true';
     process.env.ANTHROPIC_API_KEY = 'sk-test';
     process.env.VOICE_RELAY_WS_SECRET = SECRET;
@@ -628,6 +627,21 @@ describe('ws upgrade — GPT-Live path', () => {
     const socket = await upgrade(httpServer, liveUrl());
     expect(socket.destroy).not.toHaveBeenCalled();
     expect(runLiveBridge).toHaveBeenCalledWith(ws, { callSid: LIVE_SID, voice: 'marin', cell: '71' });
+    expect(mockAdmitted).toEqual([{ admitted_at: 'NOW()' }]); // the reservation is admitted
+  });
+
+  test('a reservation already released or settled (or an admit error) opens nothing', async () => {
+    mockLedgerOpen = false; // the cell route released it: the caller hung up during the disclosure
+    let socket = await upgrade(httpServer, liveUrl());
+    expect(socket.destroy).toHaveBeenCalled();
+    mockLedgerOpen = true;
+    mockAdmitFails = true;
+    LIVE_TOKEN = mintCallToken(LIVE_SID);
+    mockCallLogRow = { source: 'voice_relay_sandbox', metadata: { gpt_live: { ...STAMP.gpt_live, stream_token_sha256: callTokenDigest(LIVE_TOKEN) } } };
+    socket = await upgrade(httpServer, liveUrl());
+    expect(socket.destroy).toHaveBeenCalled();
+    expect(mockHandleUpgrade).not.toHaveBeenCalled();
+    expect(runLiveBridge).not.toHaveBeenCalled();
   });
 
   test('a bad, missing, wrong-call or malformed token destroys the socket', async () => {

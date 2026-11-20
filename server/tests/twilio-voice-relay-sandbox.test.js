@@ -474,13 +474,18 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     });
     const insert = jest.fn(() => ledger);
     const returning = jest.fn(async () => (claimed ? [{ call_sid: 'CA-sb-live' }] : []));
-    const ledger = { first: spent, insert, onConflict: jest.fn(() => ledger), ignore: jest.fn(() => ledger), returning };
+    const release = jest.fn(async () => 0); // stale, never-admitted rows released at $0
+    const ledger = {
+      first: spent, insert, onConflict: jest.fn(() => ledger), ignore: jest.fn(() => ledger), returning,
+      whereNull: jest.fn(() => ledger), whereRaw: jest.fn(() => ledger), update: release,
+    };
     const update = jest.fn(() => (stampFails ? Promise.reject(new Error('pool down')) : Promise.resolve(stampRows)));
     const tb = { where: jest.fn(() => tb), whereRaw: jest.fn(() => tb), update };
     const trx = jest.fn((table) => (table === 'voice_gpt_live_spend' ? ledger : tb));
     trx.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    trx.fn = { now: () => 'NOW()' };
     db.transaction = jest.fn(async (fn) => fn(trx));
-    return { update, prodUpdate, spent, insert, ledger, tb, trx };
+    return { update, prodUpdate, spent, insert, release, ledger, tb, trx };
   }
   const cell = (digits, CallSid = 'CA-sb-live') => ({ body: { CallSid, To: SANDBOX, Digits: digits }, headers: {} });
 
@@ -506,7 +511,7 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
     process.env.TWILIO_ACCOUNT_SID = 'AC-test';
     process.env.TWILIO_AUTH_TOKEN = 'test-token';
-    const { update, trx, tb, insert, ledger } = primeLive();
+    const { update, trx, tb, insert, release, ledger, spent } = primeLive();
     const res = mockRes();
     await handlerFor('/relay-sandbox/cell')(cell('71'), res);
     // Twilio's own stop at 600 s, on the fake client
@@ -521,6 +526,12 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     // The ledger read, the ledger claim and the stamp run under one lock, in one transaction.
     expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['voice_gpt_live_budget']);
     expect(trx).toHaveBeenCalledWith('voice_gpt_live_spend');
+    // First, reservations whose stream never opened within the token's life go back at $0.
+    expect(ledger.whereNull).toHaveBeenCalledWith('admitted_at');
+    expect(ledger.whereNull).toHaveBeenCalledWith('cost_usd');
+    expect(ledger.whereRaw).toHaveBeenCalledWith("created_at < now() - (? * interval '1 second')", [360]);
+    expect(release).toHaveBeenCalledWith({ cost_usd: 0, settled_at: 'NOW()' });
+    expect(release.mock.invocationCallOrder[0]).toBeLessThan(spent.mock.invocationCallOrder[0]);
     expect(insert).toHaveBeenCalledWith({ call_sid: 'CA-sb-live', reserved_usd: PER_CALL_RESERVE_USD });
     expect(ledger.onConflict).toHaveBeenCalledWith('call_sid');
     // single-use: the stamp lands only on a row with no gpt_live yet
@@ -573,11 +584,11 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
   test('VOICE_GPT_LIVE_TEST_MAX_USD moves the cap; the whole reservation must fit', async () => {
     process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
     process.env.VOICE_GPT_LIVE_TEST_MAX_USD = '2';
-    primeLive({ usd: 0.9 }); // 0.9 + 1.005 fits under 2
+    primeLive({ usd: 2 - PER_CALL_RESERVE_USD }); // exactly fits under 2
     let res = mockRes();
     await handlerFor('/relay-sandbox/cell')(cell('71'), res);
     expect(res.body).toContain('<Stream');
-    primeLive({ usd: 1.0 }); // 1.0 + 1.005 does not
+    primeLive({ usd: 2 - PER_CALL_RESERVE_USD + 0.01 }); // does not
     res = mockRes();
     await handlerFor('/relay-sandbox/cell')(cell('71'), res);
     expect(res.body).toContain('budget is used up');

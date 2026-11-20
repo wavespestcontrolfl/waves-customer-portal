@@ -7906,10 +7906,12 @@ number gate or the dry-run invariant is security-critical).
 door in the same order: the token must verify for that CallSid, the call_log row must be sandbox-sourced and carry the
 `metadata.gpt_live` stamp the cell route wrote, the token must be the one that stamp names by digest
 (`stream_token_sha256`; any other valid token for the call is refused), the gate must be on, and the token is then
-burned (one session per token, one token per reservation); any failure destroys the socket. The socket goes to `services/voice-agent/live-bridge.js`. Its tools are a
-read-only allowlist of one: the services list (a database read). No open times, booking, lead, text or transfer. The cell route
+burned and the call's ledger row admitted once (a reservation already released or settled opens nothing); any failure
+destroys the socket. The socket goes to `services/voice-agent/live-bridge.js`. It has no tools and no lookups (client
+delegation: the bridge answers every delegation with one fixed sentence). No booking, lead, text or transfer. The cell route
 reserves one call's worst-case OpenAI cost in its own ledger table (`voice_gpt_live_spend`, one row per CallSid)
-under an advisory lock before it issues the token, and refuses the call
+under an advisory lock before it issues the token (first releasing at $0 any reservation whose stream never opened
+within the token's life), and refuses the call
 when that reservation does not fit under `VOICE_GPT_LIVE_TEST_MAX_USD` (default 5), and on any database error there.
 Reply delay, cost and the scrubbed transcript land on `call_log.metadata.gpt_live`.)
 `/api/webhooks/twilio/tech-voice` (POST; machine-to-machine TwiML webhook —

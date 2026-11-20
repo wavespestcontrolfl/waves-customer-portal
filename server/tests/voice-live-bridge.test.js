@@ -1,7 +1,7 @@
 /**
  * GPT-Live trial bridge (GATE_VOICE_GPT_LIVE_TEST): Twilio Media Streams on
  * one side, an OpenAI GPT-Live socket on the other. Both sockets, the clock,
- * the database and executeTool are fakes: no network, no paid call.
+ * and the database are fakes: no network, no paid call.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
@@ -9,9 +9,9 @@ jest.mock('../models/db', () => jest.fn());
 const { EventEmitter } = require('events');
 const logger = require('../services/logger');
 const bridgeMod = require('../services/voice-agent/live-bridge');
-const { OPENAI_VOICE_LIVE, DEFAULTS } = require('../config/models');
+const { OPENAI_VOICE_LIVE } = require('../config/models');
 
-const { runLiveBridge, TOOL_REFUSAL, BACKEND_TOOL_NAMES } = bridgeMod;
+const { runLiveBridge, DELEGATION_REPLY } = bridgeMod;
 const CALL_SID = 'CA-live-1';
 const STREAM_SID = 'MZ-live-1';
 
@@ -47,7 +47,7 @@ const waitFor = async (cond, ms = 10000) => {
 const realScrub = (turns) => require('../services/voice-agent/relay-transcript').scrubTurnsForStorage(turns);
 const b64 = (bytes) => Buffer.alloc(bytes, 0x7f).toString('base64');
 
-function setup({ executeTool, closeReply = true, deps = {} } = {}) {
+function setup({ closeReply = true, deps = {} } = {}) {
   let clock = 1_000_000;
   const twilio = new FakeSocket();
   const openai = new FakeSocket({
@@ -64,13 +64,10 @@ function setup({ executeTool, closeReply = true, deps = {} } = {}) {
   const db = jest.fn((table) => (table === 'voice_gpt_live_spend' ? { where: ledgerWhere } : { where }));
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   const openaiFactory = jest.fn(() => openai);
-  const exec = executeTool || jest.fn(async () => 'Waves offers: Pest Control, Lawn Care.');
   const bridge = runLiveBridge(twilio, { callSid: CALL_SID, voice: 'marin', cell: '71' }, {
     openaiFactory,
     now: () => clock,
-    executeTool: exec,
     buildInstructions: () => 'INSTRUCTIONS',
-    buildTools: () => [{ type: 'function', name: 'get_services_catalog', description: 'd', parameters: { type: 'object' } }],
     greeting: () => 'Waves, this is Sandy.',
     scrubTurns: (turns) => turns.map((turn) => ({ ...turn })), // the real scrubber has its own test
     db: () => db,
@@ -78,7 +75,7 @@ function setup({ executeTool, closeReply = true, deps = {} } = {}) {
     ...deps,
   });
   return {
-    twilio, openai, bridge, update, where, ledgerUpdate, ledgerWhere, db, openaiFactory, exec,
+    twilio, openai, bridge, update, where, ledgerUpdate, ledgerWhere, db, openaiFactory,
     advance: (ms) => { clock += ms; },
     tick: () => clock,
     twilioStart: (callSid = CALL_SID) => twilio.emit('message', JSON.stringify({ event: 'start', start: { callSid, streamSid: STREAM_SID } })),
@@ -98,7 +95,7 @@ const summaryOf = (t) => JSON.parse(t.db.raw.mock.calls[0][1][0]);
 beforeEach(() => jest.clearAllMocks());
 
 describe('session setup and caller audio', () => {
-  test('opens the OpenAI socket on start and sends session.start with the models, voice, tools and no storage', async () => {
+  test('opens the OpenAI socket on start and sends session.start with the model, voice, client delegation and no storage', async () => {
     const t = setup();
     t.twilioStart();
     expect(t.openaiFactory).toHaveBeenCalledWith({ url: 'wss://api.openai.com/v1/live/sessions', headers: { Authorization: 'Bearer sk-test' } });
@@ -110,9 +107,9 @@ describe('session setup and caller audio', () => {
       instructions: 'INSTRUCTIONS',
       audio: { format: { type: 'audio/pcmu', rate: 8000 }, output: { voice: 'marin' } },
       store: false,
-      delegation: { type: 'responses', responses: expect.objectContaining({ model: DEFAULTS.OPENAI_FAST_INTERACTIVE, tool_choice: 'auto', parallel_tool_calls: false, max_output_tokens: 1024 }) },
     });
-    expect(msg.session.delegation.responses.tools).toHaveLength(1);
+    // client: delegations come to the bridge, never to OpenAI's paid Responses backend
+    expect(msg.session.delegation).toEqual({ type: 'client' });
   });
 
   test('caller audio is dropped until session.started, then forwarded unchanged', async () => {
@@ -182,15 +179,6 @@ describe('session setup and caller audio', () => {
     expect(t.update).not.toHaveBeenCalled();
   });
 
-  test('responses_validation_failed after session.started ends the call: the lookups can never work', async () => {
-    const t = setup();
-    await t.ready();
-    t.openai.receive({ type: 'error', error: { code: 'responses_validation_failed', type: 'invalid_request_error' } });
-    await flush();
-    expect(t.twilio.close).toHaveBeenCalled();
-    expect(summaryOf(t)).toMatchObject({ close_reason: 'backend_rejected', provider_close_reason: 'close_requested' });
-  });
-
   test('no session.started within the deadline ends the call instead of leaving a silent line', async () => {
     const t = setup({ deps: { startDeadlineMs: 20 } });
     t.twilioStart();
@@ -247,6 +235,23 @@ describe('model audio, barge-in and latency', () => {
     t.twilioStop();
     await flush();
     expect(summaryOf(t).interruptions).toBe(1);
+  });
+
+  test('a tail chunk of the cut-off reply right after a barge-in keeps the delay measure for the real next reply', async () => {
+    const t = setup();
+    await t.ready();
+    t.twilioMedia();
+    t.advance(1000);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(8000) }); // reply starts at +1000, 1000 ms queued
+    t.advance(600);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'wait', start_ms: 1300, end_ms: 1500 }); // barge-in at +1600
+    t.advance(100);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // the old reply's tail, inside the gap
+    t.advance(900);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // the real next reply at +2600
+    t.twilioStop();
+    await flush();
+    expect(summaryOf(t).turns).toEqual([1100]); // +2600 minus the speech end at +1500
   });
 
   test('a caller transcript with no playback queued sends no clear', async () => {
@@ -361,90 +366,44 @@ describe('model audio, barge-in and latency', () => {
   });
 });
 
-describe('tools', () => {
-  const call = (id, name, args, extra = {}) => ({
-    type: 'response.event',
-    delegation_id: 'd1',
-    event: { type: 'response.output_item.done', item: { type: 'function_call', call_id: id, name, arguments: args, status: 'completed', ...extra } },
-  });
+describe('delegation', () => {
+  const created = (id, target = 'client') => ({ type: 'session.delegation.created', delegation: { id, target }, offset_ms: 100 });
 
-  test('an allowlisted call runs executeTool with a sandbox ctx, then answers with the output and one response.create', async () => {
+  test('a client delegation gets the fixed no-lookups answer as unspoken context, once per delegation', async () => {
     const t = setup();
     await t.ready();
-    t.openai.receive(call('c1', 'get_services_catalog', JSON.stringify({ anything: 'the model sent' })));
-    await flush();
-    expect(t.exec).toHaveBeenCalledTimes(1);
-    const [name, input, ctx] = t.exec.mock.calls[0];
-    expect(name).toBe('get_services_catalog');
-    expect(input).toEqual({}); // nothing the model sent is passed on
-    expect(ctx).toMatchObject({ sandbox: true, callSid: CALL_SID, customerId: null, callerVerified: false });
-    const tail = t.openai.sent.slice(-2);
-    expect(tail[0]).toEqual({ type: 'response.item.create', item: { type: 'function_call_output', call_id: 'c1', output: 'Waves offers: Pest Control, Lawn Care.' } });
-    expect(tail[1]).toEqual({ type: 'response.create' });
-    // a replayed done event for the same call_id answers nothing twice
-    t.openai.receive(call('c1', 'get_services_catalog', '{}'));
-    await flush();
-    expect(t.exec).toHaveBeenCalledTimes(1);
-    expect(t.openai.sent.filter((m) => m.type === 'response.create')).toHaveLength(1);
-  });
-
-  test('only a completed function_call item is acted on', async () => {
-    const t = setup();
-    await t.ready();
-    t.openai.receive(call('c2', 'get_services_catalog', '{}', { status: 'in_progress' }));
-    t.openai.receive({ type: 'response.event', event: { type: 'response.output_item.done', item: { type: 'message', call_id: 'c3', status: 'completed' } } });
-    t.openai.receive({ type: 'response.event', event: { type: 'response.output_item.added', item: { type: 'function_call', call_id: 'c4', name: 'get_services_catalog', arguments: '{}', status: 'completed' } } });
-    await flush();
-    expect(t.exec).not.toHaveBeenCalled();
-    expect(t.openai.types()).not.toContain('response.create');
-  });
-
-  test.each([
-    ['a name outside the allowlist', 'capture_lead', '{"call_summary":"x"}'],
-    ['a write tool', 'request_booking', '{}'],
-    ['find_slots (booking engine + a paid date model)', 'find_slots', '{"when":"tomorrow"}'],
-    ['get_availability (the booking engine can buy Google lookups)', 'get_availability', '{"city":"Venice"}'],
-    ['bad JSON arguments', 'get_services_catalog', '{not json'],
-    ['arguments that are not an object', 'get_services_catalog', '[1,2]'],
-  ])('%s gets the refusal text and executeTool is never called', async (_label, name, args) => {
-    const t = setup();
-    await t.ready();
-    t.openai.receive(call('cx', name, args));
-    await flush();
-    expect(t.exec).not.toHaveBeenCalled();
-    expect(t.openai.sent.slice(-2)).toEqual([
-      { type: 'response.item.create', item: { type: 'function_call_output', call_id: 'cx', output: TOOL_REFUSAL } },
-      { type: 'response.create' },
-    ]);
-  });
-
-  test('a throwing tool answers with the refusal and never throws out of the bridge', async () => {
-    const t = setup({ executeTool: jest.fn(async () => { throw new Error('boom'); }) });
-    await t.ready();
-    t.openai.receive(call('c5', 'get_services_catalog', '{}'));
-    await flush();
-    expect(t.openai.sent.slice(-2)[0].item.output).toBe(TOOL_REFUSAL);
-  });
-
-  test('a tool that outlives its bound answers with the refusal', async () => {
-    const t = setup({ executeTool: jest.fn(() => new Promise(() => {})), deps: { toolTimeoutMs: 20 } });
-    await t.ready();
-    t.openai.receive(call('c6', 'get_services_catalog', '{}'));
-    await waitFor(() => t.openai.sent.some((m) => m.type === 'response.item.create'));
-    expect(t.openai.sent.slice(-2)[0].item.output).toBe(TOOL_REFUSAL);
+    t.openai.receive(created('d1'));
+    t.openai.receive(created('d1')); // the same delegation again: no second answer
+    const answers = t.openai.sent.filter((m) => m.type === 'session.thinking.append');
+    expect(answers).toEqual([{ type: 'session.thinking.append', delegation_id: 'd1', content: DELEGATION_REPLY }]);
+    expect(DELEGATION_REPLY).toMatch(/no lookups/);
+    expect(DELEGATION_REPLY).toMatch(/call or text the Waves office/);
     t.twilioStop();
     await flush();
-    expect(summaryOf(t).errors).toContain('tool_timeout');
+    expect(summaryOf(t).delegations).toBe(1);
   });
 
-  test('the allowlist is the services list alone, in the OpenAI function shape', () => {
-    expect(BACKEND_TOOL_NAMES).toEqual(['get_services_catalog']);
-    const tools = bridgeMod.buildBackendTools();
-    expect(tools.map((x) => x.name)).toEqual(BACKEND_TOOL_NAMES);
-    for (const tool of tools) {
-      expect(tool).toEqual({ type: 'function', name: tool.name, description: expect.any(String), parameters: expect.objectContaining({ type: 'object' }) });
-      expect(tool.input_schema).toBeUndefined();
-    }
+  test('a delegation to any other target (paid backend work) ends the call', async () => {
+    const t = setup();
+    await t.ready();
+    t.openai.receive(created('d2', 'responses'));
+    await flush();
+    expect(t.openai.sent.some((m) => m.type === 'session.thinking.append')).toBe(false);
+    expect(t.openai.sent.some((m) => m.type === 'session.close')).toBe(true);
+    expect(t.twilio.close).toHaveBeenCalled();
+    expect(summaryOf(t)).toMatchObject({ close_reason: 'unexpected_delegation', errors: ['unexpected_delegation'] });
+  });
+
+  test('a delegation with no id, or one that arrives while the call is closing, gets no answer', async () => {
+    const t = setup({ closeReply: false, deps: { closeWaitMs: 5000 } });
+    await t.ready();
+    t.openai.receive({ type: 'session.delegation.created', delegation: { target: 'client' } });
+    t.twilioStop();
+    await waitFor(() => t.openai.sent.some((m) => m.type === 'session.close'));
+    t.openai.receive(created('d-late'));
+    t.openai.receive({ type: 'session.closed', reason: 'close_requested', session: {}, usage: { seconds: 45 } });
+    await waitFor(() => t.update.mock.calls.length > 0);
+    expect(t.openai.sent.some((m) => m.type === 'session.thinking.append')).toBe(false);
   });
 });
 
@@ -470,9 +429,6 @@ describe('finish', () => {
     expect(JSON.parse(raw[1][0])).toEqual({
       usage_seconds: 45, // session.closed wins over the running 12
       usage_confirmed: true,
-      backend_units: 0,
-      backend_input_tokens: 0,
-      backend_output_tokens: 0,
       cost_usd: 0.0375, // 45 s at $0.05 a minute
       openai_contacted: true,
       close_reason: 'twilio_stop', // why the bridge ended it
@@ -481,7 +437,7 @@ describe('finish', () => {
       latency_p50_ms: null,
       latency_max_ms: null,
       interruptions: 0,
-      tool_calls: [],
+      delegations: 0,
       errors: [],
       transcript: [{ role: 'caller', text: 'Hi, there' }, { role: 'sandy', text: 'Hello!' }],
     });
@@ -638,93 +594,21 @@ describe('finish', () => {
 });
 
 describe('spend cap', () => {
-  const delegation = (id) => ({ type: 'response.event', delegation_id: id, event: { type: 'response.created' } });
-
-  test('the per-call reservation covers the session cap plus close wait and the backend cap plus one unit', () => {
-    expect(bridgeMod.PER_CALL_RESERVE_USD).toBe(bridgeMod.callCostUsd(630, bridgeMod.MAX_BACKEND_UNITS + 1));
-    expect(bridgeMod.PER_CALL_RESERVE_USD).toBeCloseTo(1.005, 4); // 10.5 min at $0.05 + 16 units at $0.03
+  test('the per-call reservation covers the session cap plus close wait, at the voice price', () => {
+    expect(bridgeMod.PER_CALL_RESERVE_USD).toBe(bridgeMod.callCostUsd(630));
+    expect(bridgeMod.PER_CALL_RESERVE_USD).toBeCloseTo(0.525, 4); // 10.5 min at $0.05
   });
 
-  test('each delegation counts once; past the backend cap the call ends and the cost is settled', async () => {
+  test('the settled cost is voice time only, however many delegations ran (the bridge answers them)', async () => {
     const t = setup();
     await t.ready();
-    for (let i = 1; i <= bridgeMod.MAX_BACKEND_UNITS; i++) {
-      t.openai.receive(delegation(`d${i}`));
-      t.openai.receive(delegation(`d${i}`)); // a second event of the same delegation is not a new unit
-    }
-    await flush();
-    expect(t.openai.sent.some((m) => m.type === 'session.close')).toBe(false);
-    t.openai.receive(delegation('d-over'));
-    await flush();
-    expect(t.openai.sent.some((m) => m.type === 'session.close')).toBe(true);
-    expect(t.twilio.close).toHaveBeenCalled();
-    const s = summaryOf(t);
-    expect(s.backend_units).toBe(bridgeMod.MAX_BACKEND_UNITS + 1);
-    expect(s.errors).toContain('backend_cap');
-    expect(s.cost_usd).toBe(bridgeMod.callCostUsd(45, bridgeMod.MAX_BACKEND_UNITS + 1));
-  });
-
-  test('a delegation OpenAI starts while the call is closing is still counted in the settled cost', async () => {
-    const t = setup({ closeReply: false, deps: { closeWaitMs: 5000 } });
-    await t.ready();
+    for (let i = 1; i <= 30; i++) t.openai.receive({ type: 'session.delegation.created', delegation: { id: `d${i}`, target: 'client' } });
     t.twilioStop();
-    await waitFor(() => t.openai.sent.some((m) => m.type === 'session.close'));
-    t.openai.receive(delegation('d-late')); // already under way at OpenAI
-    t.openai.receive({ type: 'session.closed', reason: 'close_requested', session: {}, usage: { seconds: 45 } });
     await waitFor(() => t.update.mock.calls.length > 0);
     const s = summaryOf(t);
-    expect(s.backend_units).toBe(1);
-    expect(s.cost_usd).toBe(bridgeMod.callCostUsd(45, 1));
+    expect(s.delegations).toBe(30);
+    expect(s.cost_usd).toBe(bridgeMod.callCostUsd(45));
     expect(t.openai.sent.some((m) => m.type === 'response.create')).toBe(false);
-  });
-
-  test('session.delegation.created and response.event for the same delegation count once', async () => {
-    const t = setup();
-    await t.ready();
-    t.openai.receive({ type: 'session.delegation.created', delegation: { id: 'dx', target: 'responses', type: 'responses' }, offset_ms: 100 });
-    t.openai.receive(delegation('dx'));
-    t.twilioStop();
-    await flush();
-    expect(summaryOf(t).backend_units).toBe(1);
-  });
-
-  test('reported token usage can only raise the settled cost', async () => {
-    const t = setup();
-    await t.ready();
-    const completed = (input, output) => ({ type: 'response.event', delegation_id: 'du', event: { type: 'response.completed', response: { output: [], usage: { input_tokens: input, output_tokens: output } } } });
-    t.openai.receive(completed(2000, 100)); // far under one $0.03 unit
-    t.twilioStop();
-    await flush();
-    const s = summaryOf(t);
-    expect(s.backend_input_tokens).toBe(2000);
-    expect(s.backend_output_tokens).toBe(100);
-    expect(s.cost_usd).toBe(bridgeMod.callCostUsd(45, 1));
-    expect(bridgeMod.callCostUsd(0, 1, 0.5)).toBe(0.5);
-  });
-
-  test('reported token usage past the backend reserve ends the call', async () => {
-    const t = setup();
-    await t.ready();
-    t.openai.receive({ type: 'response.event', delegation_id: 'dbig', event: { type: 'response.completed', response: { usage: { input_tokens: 5_000_000, output_tokens: 0 } } } });
-    await flush();
-    expect(t.openai.sent.some((m) => m.type === 'session.close')).toBe(true);
-    expect(summaryOf(t).errors).toContain('backend_cap');
-  });
-
-  test('at the cap the response.create that would cross it is never sent, and the call ends', async () => {
-    const t = setup();
-    await t.ready();
-    for (let i = 1; i < bridgeMod.MAX_BACKEND_UNITS; i++) t.openai.receive(delegation(`d${i}`));
-    // the last unit under the cap: this delegation; the follow-up response.create would cross it
-    t.openai.receive({
-      type: 'response.event',
-      delegation_id: 'd-last',
-      event: { type: 'response.output_item.done', item: { type: 'function_call', call_id: 'c9', name: 'get_services_catalog', arguments: '{}', status: 'completed' } },
-    });
-    await waitFor(() => t.update.mock.calls.length > 0);
-    expect(t.exec).toHaveBeenCalledTimes(1); // a local read, free
-    expect(t.openai.sent.some((m) => m.type === 'response.create')).toBe(false);
-    expect(summaryOf(t).errors).toContain('backend_cap');
   });
 });
 
@@ -737,7 +621,7 @@ describe('instructions', () => {
     // Sandy's own prompt builder output is the unchanged prefix.
     expect(text.startsWith(buildBasePrompt(isContextEnabled(), null, { officeOpen: null }))).toBe(true);
     expect(text.endsWith(bridgeMod.TRIAL_LIMITS)).toBe(true);
-    expect(bridgeMod.TRIAL_LIMITS.replace(/\s+/g, ' ')).toMatch(/You cannot look up open appointment times, book, take a lead, send a text, transfer the call/);
+    expect(bridgeMod.TRIAL_LIMITS.replace(/\s+/g, ' ')).toMatch(/cannot look anything up: no open appointment times, prices, accounts or records\. You cannot book, take a lead, send a text or transfer the call/);
     expect(bridgeMod.TRIAL_LIMITS).toMatch(/call or text the Waves office/);
     expect(bridgeMod.TRIAL_LIMITS).not.toMatch(/will call (them|you) back/);
   });
