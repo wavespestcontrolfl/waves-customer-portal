@@ -1446,6 +1446,13 @@ describe('assertRestartAcceptEligible', () => {
     expect(ops.some((op) => op.startsWith('read:customers') || op.startsWith('raw:'))).toBe(false);
   });
 
+  test.each(['bill_by_invoice', 'show_one_time_option'])('a quote staff changed (%s on, as the handler read it) refuses as changed before any lock or read (codex pre-push P0)', async (column) => {
+    const ops = [];
+    await expect(actualRestart.assertRestartAcceptEligible(fakeTrx(ops), { ...RESTART_ESTIMATE, [column]: true }))
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED', message: expect.stringMatching(/restart quote changed since it was created/) });
+    expect(ops).toEqual([]);
+  });
+
   test('an unacquirable advisory lock fails closed with the retry code (never proceeds unfenced)', async () => {
     const t = fakeTrx();
     t.raw = async () => { throw new Error('lock boom'); };

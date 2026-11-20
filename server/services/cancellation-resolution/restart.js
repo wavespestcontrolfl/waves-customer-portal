@@ -1089,6 +1089,15 @@ async function recomputeOffer(mint, estimateData, propertySeed) {
 // another tab while today's price is computed can drop the frozen
 // snapshot they check. Locked, the rows hold still until this transaction
 // commits, so the checks read the row the link opens.
+// A staff delivery option on a customer's own mint (codex pre-push r29 on #8132). The mint never
+// turns on the one-time option or invoice billing, and staff can no longer turn either on
+// (selfServeMintEditRefusal), so a quote with one on was changed by staff before that rule. The
+// next tap re-mints it (reuseLiveQuote), and both accept re-checks refuse it, so an old link
+// never accepts it (codex pre-push P0): the accept acts on these values as the handler read them.
+function staffChangedDeliveryOptions(estimate) {
+  return !!(estimate?.show_one_time_option || estimate?.bill_by_invoice);
+}
+
 // Returns the live quote's { estimateId, token, url, reused: true }, or null.
 async function reuseLiveQuote(mint, {
   priorRows, offer, estimateData, primaryStreet, premisesStamp,
@@ -1126,11 +1135,8 @@ async function reuseLiveQuote(mint, {
     && sameAddress
     && sameStamp
     && sameTotals
-    // The mint's own delivery options (codex pre-push r29 on #8132): the mint never turns on the
-    // one-time option or invoice billing, so a live row with either on was changed by staff. It
-    // is re-minted, never handed back as staff changed it.
-    && !live.show_one_time_option
-    && !live.bill_by_invoice
+    // Never handed back as staff changed it: re-minted instead.
+    && !staffChangedDeliveryOptions(live)
     && offerFingerprint(liveData) === offerFingerprint(estimateData)
     // The page still sells its frozen snapshot (codex pre-push P0): the
     // fingerprint omits sendSnapshot, and the page's tier selection can
@@ -1587,6 +1593,9 @@ async function assertRestartAcceptEligible(trx, estimate) {
     return err;
   };
   const changed = () => refuse('This account changed since this restart quote was created — please reopen "Restart my plan" for a current quote.');
+  if (staffChangedDeliveryOptions(estimate)) {
+    throw refuse('This restart quote changed since it was created — please reopen "Restart my plan" for a current quote.');
+  }
   let state;
   try {
     state = await readRestartAcceptState(trx, estimate);
@@ -1651,6 +1660,9 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
     err.code = 'PLAN_START_STATE_CHANGED';
     return err;
   };
+  if (staffChangedDeliveryOptions(estimate)) {
+    throw refuse('This estimate changed since it was created — please go back to your portal for a current price.');
+  }
   let quoted;
   let quotedStreet;
   let pricedHome;

@@ -1084,6 +1084,13 @@ describe('assertPlanStartAcceptEligible', () => {
     expect(ops.filter((o) => o.includes('cust-2'))).toEqual([]);
   });
 
+  test.each(['bill_by_invoice', 'show_one_time_option'])('a quote staff changed (%s on, as the handler read it) refuses as changed before any lock or read (codex pre-push P0)', async (column) => {
+    const ops = [];
+    await expect(actualRestart.assertPlanStartAcceptEligible(fakeTrx(ops, namedColumns), { ...ESTIMATE, [column]: true }))
+      .rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED', message: expect.stringMatching(/This estimate changed since it was created/) });
+    expect(ops).toEqual([]);
+  });
+
   test('a quote stored without the ZIP the account has since gained names the same home and accepts (codex pre-push P1)', async () => {
     tables.estimates[0].address = '1 Main St, Parrish, FL';
     await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).resolves.toBeUndefined();

@@ -2347,6 +2347,22 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
     expect(storedEstimate().status).toBe('sent');
   });
 
+  test.each(['bill_by_invoice', 'show_one_time_option'])('an old link to a quote staff changed (%s on) refuses the accept (409) and rolls back: no invoice without a card (codex pre-push P0)', async (column) => {
+    // Everything else passes: a still-churned account in the quoted attempt.
+    resetStore(restartEstimate({ id: 'est-restart-7', token: 'tok-restart-7-x0123456789', [column]: true }));
+    db.__state.tables.customers = [churnedCustomer()];
+    db.__state.tables.cancellation_cases = [{
+      id: 'case-9', customer_id: 'cust-9', status: 'committed', scope: JSON.stringify(['pest_control']), created_at: '2026-08-29T00:00:00Z',
+    }];
+    const res = await putAccept('tok-restart-7-x0123456789');
+    expect(res.status).toBe(409);
+    expect(res.data.error).toMatch(/restart quote changed since it was created/);
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().price_locked_at == null).toBe(true);
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
   test('a still-churned customer passes the revalidation and the accept commits', async () => {
     resetStore(restartEstimate({ id: 'est-restart-3', token: 'tok-restart-3-x0123456789' }));
     db.__state.tables.customers = [churnedCustomer()];
@@ -4792,6 +4808,19 @@ describe('GATE_PORTAL_PLAN_START — plan-start accept revalidation runs inside 
     expect(res.data.error).toMatch(/changed since this estimate was created/);
     expect(storedEstimate().status).toBe('sent');
     expect(storedEstimate().price_locked_at == null).toBe(true);
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
+  test.each(['bill_by_invoice', 'show_one_time_option'])('an old link to a quote staff changed (%s on) refuses the accept (409) and rolls back (codex pre-push P0)', async (column) => {
+    // Everything else passes: a still-plain account and the slot the page holds.
+    resetStore(planStartEstimate({ id: 'est-plan-start-7', token: 'tok-plan-start-7-x012345', [column]: true }));
+    db.__state.tables.customers = [leadCustomer()];
+    const res = await putAccept('tok-plan-start-7-x012345', heldSlot('est-plan-start-7'));
+    expect(res.status).toBe(409);
+    expect(res.data.error).toMatch(/This estimate changed since it was created/);
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().price_locked_at == null).toBe(true);
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
     expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
   });
 
