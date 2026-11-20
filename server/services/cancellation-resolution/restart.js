@@ -1611,15 +1611,19 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
     // (codex pre-push P1). Taking the row here first would deadlock against a
     // turf-profile save that holds that key and waits for the row; the
     // converter's second acquire is a re-entrant no-op. Staff tier, rate and
-    // billing edits take these two keys the other way (admin-customers.js);
-    // every recurring accept on main shares that gap, so a plan-start-only
-    // order would trade it for a deadlock against an ordinary accept (codex
-    // pre-push r33/r34). All accepts move together, in their own change. The
-    // whole row, as the mint reads it: the premises proof needs the address
-    // and the multi-home flag.
+    // billing edits take these two keys the other way (admin-customers.js),
+    // and a plan-start-only order would trade that for a deadlock against an
+    // ordinary accept (codex pre-push r33/r34). So the check never waits on
+    // the property-preferences key while it holds the comms key: it tries the
+    // key once, and a key another change holds is a failed read, answered as
+    // PLAN_START_RECHECK_RETRY below (codex pre-push r35). The whole row, as
+    // the mint reads it: the premises proof needs the address and the
+    // multi-home flag.
     await lockCustomerComms(trx, customerId);
     if (customerId) {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+      const prefs = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired', ['property-preferences', String(customerId)]);
+      // One row, always: a SELECT of one function.
+      if (prefs.rows[0].acquired !== true) throw new Error('the property-preferences key is held by another change');
       fresh = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first();
     }
     if (fresh) {

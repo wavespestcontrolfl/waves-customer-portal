@@ -2109,7 +2109,9 @@ address or cannot be resolved) whose street is both the estimate's own address a
 priced (`estimate_data.planStart.premisesKey`), so a move or a second property since the mint refuses,
 even after a staff address change rewrote the open quote's address. Otherwise it answers 409 `{ error, code: 'PLAN_START_STATE_CHANGED' }` (the
 error reads "This account changed since this estimate was created — please go back to your portal
-for a current price.") and writes nothing. A re-check that cannot read its state answers 409
+for a current price.") and writes nothing. A re-check that cannot read its state, or that finds the
+customer's property-preferences key held by another change (the re-check tries that key and never
+waits on it while it holds the comms key), answers 409
 `{ error, code: 'PLAN_START_RECHECK_RETRY' }` with a retry line and writes nothing; the estimate page
 keeps the held time and the payment choice for that retry, as for `ACCEPT_INVOICE_BUSY_RETRY`. Before that
 check, a `plan_start` accept must name the visit it books: a held `slotId` or an `existingAppointmentId`,

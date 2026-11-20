@@ -273,8 +273,10 @@ function fakeTrx(ops = null, tableFactory = builder) {
   };
   t.raw = async (sql, bindings) => {
     if (ops) ops.push(`raw:${String(sql)}:${JSON.stringify(bindings)}`);
-    return {};
+    // A try-lock answers one row, as Postgres does; a key named in t.busy is another transaction's.
+    return String(sql).includes('pg_try_advisory_xact_lock') ? { rows: [{ acquired: !t.busy.includes(bindings?.[0]) }] } : {};
   };
+  t.busy = [];
   // Savepoint stand-in: the mint nests best-effort lookups (seed) so their
   // failure can't abort the outer transaction.
   t.transaction = async (fn) => fn(t);
@@ -1125,6 +1127,15 @@ describe('assertPlanStartAcceptEligible', () => {
     const failingTrx = fakeTrx(null, () => { throw new Error('pg down'); });
     // A failed read is not a changed account: never the code the page answers by releasing the hold.
     await expect(actualRestart.assertPlanStartAcceptEligible(failingTrx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_RECHECK_RETRY' });
+    // The property-preferences key is tried, never waited on, while the comms key is held: a staff
+    // tier, rate or billing edit holds it and waits for the comms key (codex pre-push r35). A held
+    // key asks for the same retry and reads no customer row.
+    expect(ops[prefsAt]).toContain('pg_try_advisory_xact_lock');
+    const busyOps = [];
+    const busyTrx = fakeTrx(busyOps);
+    busyTrx.busy = ['property-preferences'];
+    await expect(actualRestart.assertPlanStartAcceptEligible(busyTrx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_RECHECK_RETRY' });
+    expect(busyOps).not.toContain('read:customers:forUpdate');
   });
 });
 
