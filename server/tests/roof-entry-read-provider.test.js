@@ -69,7 +69,7 @@ function fakeNetwork(geminiText) {
       return { ok: true, status: 200, json: async () => ({ output_text: '{}' }) };
     }
     providerCalls.image += 1;
-    return { ok: true, headers: { get: () => 'image/jpeg' }, arrayBuffer: async () => Uint8Array.from([0xff, 0xd8, 1, 2]).buffer };
+    return { ok: true, headers: { get: (n) => (n === 'content-type' ? 'image/jpeg' : null) }, body: (async function* () { yield Uint8Array.from([0xff, 0xd8, 1, 2]); }()) };
   });
 }
 
@@ -92,4 +92,6 @@ it('a billed answer that parses but breaks the schema also makes one provider ca
   expect(providerCalls).toEqual({ gemini: 1, openai: 0, image: 1 });
   expect(out.read.tier).toBe('unknown');
   expect(mockRows[0].status).toBe('failed');
+  // The dispatcher's validate hook rejected it (a quality failure with its billed usage), yet no second provider call.
+  expect(mockRows[0].cost_estimate_cents).toBe(1);
 });

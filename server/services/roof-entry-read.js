@@ -165,6 +165,26 @@ function exportRequestUrl(src, lat, lng) {
   return `${src.exportUrl}?${params}`;
 }
 
+/**
+ * The response body as a Buffer, or null when it is empty or passes MAX_IMAGE_BYTES. It is read in chunks and the read
+ * stops (leaving the loop cancels the stream) as soon as the cap is passed, so an oversized answer is never buffered whole.
+ */
+async function readCapped(res) {
+  const declared = Number(res.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_IMAGE_BYTES) {
+    await res.body?.cancel?.();
+    return null;
+  }
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of res.body) {
+    total += chunk.length;
+    if (total > MAX_IMAGE_BYTES) return null;
+    chunks.push(chunk);
+  }
+  return total ? Buffer.concat(chunks, total) : null;
+}
+
 /** The aerial crop as { data (base64), mimeType, source, year }, or null (unknown county, fetch or content failure). */
 async function fetchAerial(lat, lng, county) {
   const key = countyKey(county);
@@ -174,8 +194,8 @@ async function fetchAerial(lat, lng, county) {
     const res = await fetch(exportRequestUrl(src, lat, lng), { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     // ArcGIS answers an out-of-range or failed export with a 200 and a JSON body, so the type is checked too.
     if (!res.ok || !String(res.headers.get('content-type') || '').startsWith('image/')) return null;
-    const buffer = Buffer.from(await res.arrayBuffer());
-    if (!buffer.length || buffer.length > MAX_IMAGE_BYTES) return null;
+    const buffer = await readCapped(res);
+    if (!buffer) return null;
     return { data: buffer.toString('base64'), mimeType: 'image/jpeg', source: src.source, year: src.year };
   } catch (err) {
     logger.warn(`[roof-entry-read] aerial fetch failed county=${key}: ${err.message}`);
@@ -263,9 +283,9 @@ const timeOf = (row) => new Date(row.created_at).getTime();
 /**
  * The reusable reads of one crop, or null. The window is counted from the original PAID read: the anchor is the
  * newest row with cost_estimate_cents > 0 (a paid call books at least 1 cent; a copy for another estimate books 0)
- * that is a finished ('done') read, not tier 'unknown', and under 90 days old. Rows created at or after the anchor
- * are its copies for other contexts, so a copy never carries a read past 90 days from the paid call and never starts
- * a new window. Pending and failed rows are never reused.
+ * that is a finished ('done') read, not tier 'unknown', and under 90 days old. The candidates are the anchor and the
+ * copies that name it in source_id, so a copy never carries a read past 90 days from the paid call and never starts a
+ * new window. Pending and failed rows are never reused.
  */
 async function reuseCandidates(key) {
   const rows = await db(TABLE)
@@ -275,17 +295,20 @@ async function reuseCandidates(key) {
     .select('*');
   const anchor = rows.filter((r) => r.cost_estimate_cents > 0).sort((a, b) => timeOf(b) - timeOf(a))[0];
   if (!anchor) return null;
-  return { anchor, candidates: rows.filter((r) => timeOf(r) >= timeOf(anchor)) };
+  return { anchor, candidates: rows.filter((r) => r.id === anchor.id || r.source_id === anchor.id) };
 }
 
 /**
  * The row to hand this request: the source itself when it belongs to the same (estimate, customer) context, else a
  * NEW row for this context that copies the paid AI result with cost 0 and empty technician fields. One row per
- * context keeps the technician's count for estimate B from overwriting estimate A's.
+ * context keeps the technician's count for estimate B from overwriting estimate A's. The copy names its paid source
+ * in source_id, and a unique index on (source_id, estimate, customer) lets two requests race for it: the loser's
+ * insert does nothing and both return the winning row. Only copies carry a source_id, so no paid row is in that index.
  */
 async function answerFor(source, ctx) {
   if (sameContext(source, ctx)) return publicRead(source);
-  const [row] = await db(TABLE).insert({
+  const [inserted] = await db(TABLE).insert({
+    source_id: source.id,
     estimate_id: ctx.estimateId,
     customer_id: ctx.customerId,
     lookup_key: source.lookup_key,
@@ -297,7 +320,8 @@ async function answerFor(source, ctx) {
     ai_tier: source.ai_tier,
     status: STATUS_DONE,
     cost_estimate_cents: 0,
-  }).returning('*');
+  }).onConflict().ignore().returning('*');
+  const row = inserted || await db(TABLE).where({ source_id: source.id, estimate_id: ctx.estimateId, customer_id: ctx.customerId }).first();
   return publicRead(row);
 }
 
@@ -324,6 +348,10 @@ async function callModel(image) {
     reasoningEffort: 'low',
     timeoutMs: MODEL_TIMEOUT_MS,
     laneId: 'satellite',
+  }, {
+    // A parseable answer that breaks the strict schema is a quality failure the call ledger must record, with the usage
+    // it billed. The policy has no fallback leg, so this stays ONE provider call.
+    validate: (candidate) => (validateRead(candidate.json) ? null : 'invalid_schema'),
   });
 }
 
@@ -431,6 +459,13 @@ async function readCrop({ input, county, key, ctx, hit }) {
     const again = await reuseCandidates(key);
     if (again) return reuseAnswer(again, ctx);
     return { status: 'in_progress', cached: false, read: null };
+  }
+  // The unique index covers pending rows only: another worker may have finished this crop between our reuse check and
+  // our claim. Look again; a finished read makes the claim redundant, so drop it and answer from that read.
+  const finished = await reuseCandidates(key);
+  if (finished) {
+    await releaseClaim(claim);
+    return reuseAnswer(finished, ctx);
   }
   return payForRead({ claim, lat: input.lat, lng: input.lng, county, prices });
 }

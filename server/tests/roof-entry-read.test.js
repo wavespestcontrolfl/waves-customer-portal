@@ -20,6 +20,7 @@ let mockRefs;
 let mockDbCalls;
 let mockEvents;
 let mockOnConflict;
+let mockOnClaimed;
 jest.mock('../models/db', () => {
   const table = (name) => {
     let where = {};
@@ -28,7 +29,7 @@ jest.mock('../models/db', () => {
     let claimedBefore = null;
     const source = () => (name === 'roof_entry_reads' ? mockRows : mockRefs[name] || []);
     const match = () => source()
-      .filter((r) => Object.entries(where).every(([k, v]) => r[k] === v))
+      .filter((r) => Object.entries(where).every(([k, v]) => (r[k] === undefined ? null : r[k]) === v))
       .filter((r) => Object.entries(notWhere).every(([k, v]) => r[k] !== v))
       .filter((r) => createdAfter == null || new Date(r.created_at).getTime() > createdAfter)
       .filter((r) => claimedBefore == null || new Date(r.claimed_at).getTime() < claimedBefore)
@@ -50,8 +51,12 @@ jest.mock('../models/db', () => {
       async select() { return match(); },
       insert(record) {
         const run = (ignoreConflict) => async () => {
-          if (ignoreConflict && record.status === 'pending' && mockRows.some((r) => r.lookup_key === record.lookup_key && r.status === 'pending')) {
-            if (mockOnConflict) mockOnConflict();
+          // The two unique partial indexes: one pending row per crop, one copy per (source, estimate, customer).
+          const pendingTaken = record.status === 'pending' && mockRows.some((r) => r.lookup_key === record.lookup_key && r.status === 'pending');
+          const copyTaken = !!record.source_id && mockRows.some((r) => r.source_id === record.source_id
+            && (r.estimate_id || null) === (record.estimate_id || null) && (r.customer_id || null) === (record.customer_id || null));
+          if (ignoreConflict && (pendingTaken || copyTaken)) {
+            if (pendingTaken && mockOnConflict) mockOnConflict();
             return [];
           }
           mockEvents.push(record.status === 'pending' ? 'claim' : 'insert');
@@ -65,6 +70,7 @@ jest.mock('../models/db', () => {
             claimed_at: record.claimed_at === 'NOW' ? new Date().toISOString() : record.claimed_at,
           };
           mockRows.push(row);
+          if (record.status === 'pending' && mockOnClaimed) mockOnClaimed();
           return [row];
         };
         return {
@@ -131,10 +137,12 @@ const goodWithPins = () => {
   j.flags.chimney_or_flue = entry('no');
   return j;
 };
+const BYTES = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+async function* oneChunk() { yield BYTES; }
 const jpeg = (type = 'image/jpeg', ok = true) => ({
   ok,
-  headers: { get: () => type },
-  arrayBuffer: async () => Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]).buffer,
+  headers: { get: (name) => (String(name).toLowerCase() === 'content-type' ? type : null) },
+  body: oneChunk(),
 });
 
 let server;
@@ -159,6 +167,7 @@ beforeEach(() => {
   mockDbCalls = [];
   mockEvents = [];
   mockOnConflict = null;
+  mockOnClaimed = null;
   mockAuth.mockClear();
   logger.info.mockClear();
   logger.warn.mockClear();
@@ -330,7 +339,12 @@ describe('POST /', () => {
     const policy = mockDispatch.mock.calls[0][0];
     expect(policy.primary).toEqual(expect.objectContaining({ provider: 'gemini' }));
     expect(policy.fallback).toBeNull();
-    expect(mockDispatch.mock.calls[0][2]).toBeUndefined();
+    // A parseable answer that breaks the strict schema is rejected by the dispatcher's own validate hook (the ledger
+    // records the quality failure with its billed usage); with no fallback leg that is still one provider call.
+    const { validate } = mockDispatch.mock.calls[0][2];
+    expect(validate({ json: goodJson() })).toBeNull();
+    expect(validate({ json: { flags: {}, tier: 'low' } })).toBe('invalid_schema');
+    expect(validate({ json: goodJson({ tier: 'extreme' }) })).toBe('invalid_schema');
   });
 
   it('books a billed failed answer (unparseable JSON) as tier unknown with its cost, from that one call', async () => {
@@ -547,6 +561,98 @@ describe('claim row', () => {
     // The service is called directly the same way.
     const direct = await svc.runRoofEntryRead({ lat: 27.46, lng: -82.57, county: 'Manatee', estimateId: EST.toUpperCase() });
     expect(direct.read.id).toBe(first.json.read.id);
+  });
+});
+
+describe('a finished read that lands just before the claim', () => {
+  it('rechecks after winning the claim: drops the claim and answers from the finished read, with no fetch and no call', async () => {
+    mockOnClaimed = () => {
+      mockOnClaimed = null;
+      mockRows.push(crop({ id: 'done-paid', status: 'done', ai_tier: 'high', ai_flags: JSON.stringify(goodJson().flags), cost_estimate_cents: 3, claimed_at: null }));
+    };
+    const res = await post(home({ estimate_id: EST }));
+    expect(res.json).toEqual(expect.objectContaining({ status: 'ok', cached: true }));
+    // A different context than the finished read's: it gets a copy, never a second paid call.
+    expect(res.json.read).toEqual(expect.objectContaining({ estimate_id: EST, tier: 'high' }));
+    expect(res.json.read.id).not.toBe('done-paid');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockRows.filter((r) => r.status === 'pending')).toHaveLength(0);
+    expect(mockEvents).toContain('delete');
+  });
+
+  it('answers with the finished row itself when the context matches', async () => {
+    mockOnClaimed = () => {
+      mockOnClaimed = null;
+      mockRows.push(crop({ id: 'done-paid', status: 'done', ai_tier: 'med', ai_flags: JSON.stringify(goodJson().flags), cost_estimate_cents: 3, claimed_at: null }));
+    };
+    const res = await post(home());
+    expect(res.json.read.id).toBe('done-paid');
+    expect(mockRows).toHaveLength(1);
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe('copies', () => {
+  it('two cache hits for the same new context write one copy and return the same row', async () => {
+    const paid = await post(home());
+    const [a, b] = await Promise.all([post(home({ estimate_id: EST })), post(home({ estimate_id: EST }))]);
+    expect(a.json.read.id).toBe(b.json.read.id);
+    expect(a.json.read.id).not.toBe(paid.json.read.id);
+    expect(mockRows).toHaveLength(2);
+    expect(mockRows.filter((r) => r.source_id === paid.json.read.id)).toHaveLength(1);
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('only copies carry a source_id, and copies never book cost: a paid row can never match the copy index', async () => {
+    await post(home());
+    await post(home({ estimate_id: EST }));
+    await post(home({ customer_id: CUST }));
+    for (const r of mockRows) {
+      if (r.source_id) expect(r.cost_estimate_cents).toBe(0);
+      else expect(r.cost_estimate_cents).toBeGreaterThan(0);
+    }
+    expect(mockRows.filter((r) => r.source_id)).toHaveLength(2);
+  });
+});
+
+describe('aerial download cap', () => {
+  const response = (body, headers = {}) => ({ ok: true, headers: { get: (n) => (n === 'content-type' ? 'image/jpeg' : headers[n] ?? null) }, body });
+
+  it('stops reading and answers no_image once the body passes 4 MiB, without buffering the rest', async () => {
+    let yielded = 0;
+    let closed = false;
+    const body = (async function* endless() {
+      try { for (;;) { yielded += 1; yield new Uint8Array(1024 * 1024); } } finally { closed = true; }
+    }());
+    fetchSpy.mockResolvedValue(response(body));
+    const res = await post(home());
+    expect(res.json.status).toBe('no_image');
+    expect(yielded).toBe(5);
+    expect(closed).toBe(true);
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockRows).toHaveLength(0);
+  });
+
+  it('refuses a declared oversize body without reading it, and cancels it', async () => {
+    const cancel = jest.fn(async () => {});
+    const body = Object.assign((async function* never() { throw new Error('must not be read'); }()), { cancel });
+    fetchSpy.mockResolvedValue(response(body, { 'content-length': String(9 * 1024 * 1024) }));
+    expect((await post(home())).json.status).toBe('no_image');
+    expect(cancel).toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it('answers no_image for an empty body', async () => {
+    fetchSpy.mockResolvedValue(response((async function* empty() {}())));
+    expect((await post(home())).json.status).toBe('no_image');
+  });
+
+  it('accepts a body just under the cap, read in several chunks', async () => {
+    const body = (async function* big() { for (let i = 0; i < 4; i += 1) yield new Uint8Array(1024 * 1024 - 1); }());
+    fetchSpy.mockResolvedValue(response(body));
+    expect((await post(home())).json.status).toBe('ok');
+    expect(mockDispatch.mock.calls[0][1].images[0].data.length).toBeGreaterThan(5 * 1024 * 1024);
   });
 });
 
