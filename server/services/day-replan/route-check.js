@@ -829,6 +829,8 @@ async function measureRun(conn, now) {
 
 module.exports = {
   runRouteCheck,
+  // The van home by then: the fill list's day end too (day-replan/fill-list.js).
+  DISPATCH_DAY_END,
   _internals: {
     recoverable, physicalStops, heldSpans, unheldWork, hourSlots, simulateBookedDay, latestHomeDeparture, measureTechDay, staffed,
     datesToMeasure, summarize, unmeasurable, DISPATCH_DAY_END, decideSlotRule,

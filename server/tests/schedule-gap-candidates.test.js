@@ -64,6 +64,16 @@ test('analysis preserves the route order that the save would produce instead of 
   expect(analyzeGapCandidate(candidate, positioned.map(row => ({ ...row, route_order: null })), extended).routeFits.some(fit => fit.windowStart === '14:00')).toBe(true);
 });
 
+test('a new visit (prospective: an estimate\'s first visit) is tried at every place in the route, as the staff finder tries a new customer', () => {
+  const positioned = [stop('one', '13:00', { route_order: 1 }), stop('later', '15:00', { route_order: 2, window_end: '17:00' })];
+  const extended = { ...options, targetReturnMinutes: 1200, breakMinutes: 0 };
+  const fresh = { ...candidate, service: { ...service, id: '__candidate__' }, prospective: true };
+  const result = analyzeGapCandidate(fresh, positioned, extended);
+  // Before the first stop and between stops, where the saved order (above) offers only the end of the route.
+  expect(result.routeFits.map(fit => fit.windowStart)).toEqual(expect.arrayContaining(['08:00', '14:00', '17:00']));
+  expect(result.note).toBe('Fits place the new visit where the staff finder would. They do not book it or create a booking hold.');
+});
+
 test('active holds and unassigned timed visits remain occupancy; the candidate excludes only itself', () => {
   const fixed = stop('hold', '08:00', { technician_id: null, window_end: '17:00', reservation_expires_at: '2040-09-10T20:00:00Z' });
   expect(analyzeGapCandidate(candidate, [fixed], options).routeFits).toEqual([]);
