@@ -284,9 +284,22 @@ describe('syncRestaurantProspects', () => {
   test('a file with a header and no rows fails; a file whose rows all fall outside the area does not', async () => {
     store = makeStore();
     fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([]), 'newfood.csv': () => licCsv([licRow({ county: 'Polk' })]) });
-    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    const result = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2026-11-19T15:36:00Z') });
     expect(result.failures).toBe(1);
     expect(result.files).toMatchObject({ inspection: { failed: true }, new_license: { kept: 0, malformed: 0 }, owner_change: { kept: 1 } });
+  });
+
+  test('in the first week of July a header alone is a new fiscal year, not a failed file', async () => {
+    store = makeStore();
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([]) });
+    // Monday 1 July 2030, 10:36 AM ET; then Sunday 7 July late in the evening ET (already 8 July in UTC); then 8 July.
+    for (const at of ['2030-07-01T14:36:00Z', '2030-07-08T03:30:00Z']) {
+      const result = await svc.syncRestaurantProspects({ fetchText, store, now: new Date(at) });
+      expect(result.failures).toBe(0);
+      expect(result.files.inspection).toEqual({ kept: 0, malformed: 0, upserted: 0 });
+    }
+    const later = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2030-07-08T14:36:00Z') });
+    expect(later.files.inspection).toEqual({ failed: true });
   });
 
   test('a file whose rows in the area all fail to parse fails; a good row beside a bad one does not', async () => {

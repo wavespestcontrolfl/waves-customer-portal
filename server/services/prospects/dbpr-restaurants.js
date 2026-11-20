@@ -31,6 +31,7 @@ const { isInServiceAreaCounty } = require('../call-triage-flags');
 const { isExcludedLocality, isExcludedZip } = require('../excluded-localities');
 const { eachDbprCsvRow, defaultFetchText } = require('../commercial-suite-size/dbpr-food-license');
 const { nanpNationalDigits, isValidNanpNumber } = require('../../utils/phone');
+const { etDateString } = require('../../utils/datetime-et');
 
 const EXTRACT_BASE = 'https://www2.myfloridalicense.com/sto/file_download/extracts/';
 const FILES = {
@@ -268,7 +269,7 @@ async function bumpAttempts(id) {
 
 const defaultStore = { upsertRecords };
 
-async function loadFile(kind, fetchText) {
+async function loadFile(kind, fetchText, now) {
   const text = await fetchText(`${EXTRACT_BASE}${FILES[kind]}`, FILE_TIMEOUT_MS);
   const counts = { malformed: 0, valid: 0 };
   const records = [];
@@ -280,9 +281,10 @@ async function loadFile(kind, fetchText) {
   });
   // A required column missing from the header is renamed or gone: the whole file is refused.
   if (REQUIRED_COLUMNS[kind].some((column) => !header.includes(column))) throw new Error('unexpected file layout');
-  // A header with no rows is a download cut short, not a quiet week, so the file fails. (A file whose rows all fall
-  // outside the area is fine. The first file of a fiscal year can also be empty: a run on July 1 reads as failed.)
-  if (!rowsRead) throw new Error('empty file');
+  // A header with no rows is a download cut short, not a quiet week, so the file fails. The files start over on
+  // July 1, so in the first week of July (Eastern date; it spans the July 4 holiday) a header alone is a new year
+  // with nothing in it yet. A file whose rows all fall outside the area is fine.
+  if (!rowsRead && !/-07-0[1-7]$/.test(etDateString(now))) throw new Error('empty file');
   // Malformed rows and not one good row in the area mean a changed format (a new date format, say), not a quiet
   // week: the file fails. A file whose rows all fall outside the area, or whose good rows cite nothing, succeeds.
   if (!counts.valid && counts.malformed) throw new Error('no good row in the area');
@@ -292,7 +294,7 @@ async function loadFile(kind, fetchText) {
 async function syncFiles(deps, result) {
   for (const kind of Object.keys(FILES)) {
     try {
-      const { records, malformed } = await loadFile(kind, deps.fetchText);
+      const { records, malformed } = await loadFile(kind, deps.fetchText, deps.now);
       const unique = dedupeByKey(records);
       result.files[kind] = { kept: unique.length, malformed, upserted: await deps.store.upsertRecords(unique) };
     } catch (err) {
@@ -304,14 +306,15 @@ async function syncFiles(deps, result) {
 }
 
 /**
- * The weekly job. Never throws: each file's failure is counted in the result. `deps` is for tests: { fetchText, store }.
+ * The weekly job. Never throws: each file's failure is counted in the result. `deps` is for tests:
+ * { fetchText, store, now }.
  * @returns {Promise<{ skipped?: string, failures: number, files: object, elapsedMs: number }>}
  */
 async function syncRestaurantProspects(deps = {}) {
   const started = Date.now();
   const result = { failures: 0, files: {}, elapsedMs: 0 };
   if (syncDisabled()) return { ...result, skipped: 'disabled' };
-  await syncFiles({ fetchText: defaultFetchText, store: defaultStore, ...deps }, result);
+  await syncFiles({ fetchText: defaultFetchText, store: defaultStore, now: new Date(), ...deps }, result);
   result.elapsedMs = Date.now() - started;
   const counts = Object.entries(result.files)
     .map(([k, f]) => `${k}=${f.failed ? 'failed' : f.upserted}${f.malformed ? `(${f.malformed} malformed)` : ''}`).join(' ');
