@@ -154,16 +154,6 @@ beforeEach(() => {
   isZelleNoticeCandidate.mockReturnValue(false);
 });
 
-describe('the newsletter proof-reply handler', () => {
-  test('gets the In-Reply-To the parser read; the stored row has no such column', async () => {
-    const { maybeHandleProofApproval } = require('../services/newsletter-proof');
-    gmail.getMessage.mockImplementation(async () => parsed({ in_reply_to: '<copy-1@news.example.invalid>' }));
-    expect(await syncEmails()).toEqual({ newEmails: 1 });
-    expect(maybeHandleProofApproval).toHaveBeenCalledWith(expect.objectContaining({ gmail_id: gmailId, in_reply_to: '<copy-1@news.example.invalid>' }));
-    expect(tables.emails[0]).not.toHaveProperty('in_reply_to');
-  });
-});
-
 describe('C01: a failed message holds the incremental cursor', () => {
   test.each(['fetch', 'store'])('an ordinary %s failure is retried on the next run and stored', async (failure) => {
     if (failure === 'fetch') gmail.getMessage.mockRejectedValueOnce(new Error('synthetic fetch failure'));

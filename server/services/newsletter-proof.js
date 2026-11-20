@@ -156,9 +156,6 @@ async function alternateSuggestionLine(send) {
 const { assertInternalEmailRecipient, normalizeEmail } = require('../utils/internal-email-recipients');
 
 const PROOF_SUBJECT_RE = /\[PROOF-([0-9a-f]{8})\]/i;
-// A planned issue's FYI banner heading: it opens the copy's text part (pestInsiderBannerText,
-// isProofCopyItself).
-const FYI_BANNER_HEADING = 'Sends by itself — no reply needed';
 const DEFAULT_PROOF_RECIPIENT = 'contact@wavespestcontrol.com';
 
 function isProofApprovalEnabled() {
@@ -367,12 +364,15 @@ function issueFyiAddresses(issue) {
   return Object.keys(recorded).map(normalizeEmail).filter(Boolean);
 }
 
-// Records the address a planned issue's FYI copy is about to go to, before it goes out.
-function recordFyiRecipient(sendId, to) {
+// Records the address a planned issue's FYI copy is about to go to, and the copy's text by digest
+// (fyiCopyDigest), before it goes out.
+function recordFyiRecipient(sendId, to, copyText) {
   return db('pest_insider_issues').where({ send_id: sendId }).update({
     diagnostics: db.raw(
-      "coalesce(diagnostics, '{}'::jsonb) || jsonb_build_object('fyiTo', coalesce(diagnostics->'fyiTo', '{}'::jsonb) || jsonb_build_object(?::text, true))",
-      [normalizeEmail(to)],
+      "coalesce(diagnostics, '{}'::jsonb) || jsonb_build_object("
+        + "'fyiTo', coalesce(diagnostics->'fyiTo', '{}'::jsonb) || jsonb_build_object(?::text, true), "
+        + "'fyiCopies', coalesce(diagnostics->'fyiCopies', '{}'::jsonb) || jsonb_build_object(?::text, true))",
+      [normalizeEmail(to), fyiCopyDigest(copyText)],
     ),
   });
 }
@@ -406,27 +406,32 @@ function verifiedHoldSender(email, fyiTos) {
   return hasAlignedAuth(email.authentication_results, domainFromAddress(from), { strict: true });
 }
 
-// A planned issue's FYI copy's own subject (sendNewsletterProof): its FYI: prefix right before its
-// token, with no reply or forward prefix ahead of it.
-const PROOF_COPY_SUBJECT_RE = /^\s*FYI\s*:\s*\[PROOF-[0-9a-f]{8}\]/i;
+/**
+ * A planned issue's FYI copy as its text part reads, whitespace and case aside: the issue's row
+ * records it with the address the copy goes to, before it goes out (recordFyiRecipient). SendGrid
+ * leaves that part as sent (no text click tracking, no subscription footer).
+ */
+function fyiCopyDigest(text) {
+  return crypto.createHash('sha256').update(String(text || '').replace(/\s+/g, ' ').trim().toLowerCase()).digest('hex');
+}
 
-const foldText = (text) => String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+/** The FYI copies a planned issue's row recorded, by digest (recordFyiRecipient). */
+function issueFyiCopies(issue) {
+  const recorded = issue?.diagnostics?.fyiCopies;
+  return recorded && typeof recorded === 'object' && !Array.isArray(recorded) ? recorded : {};
+}
 
 /**
  * The FYI copy itself, wherever it lands (in this mailbox when the proof address is this mailbox, a
- * group that relays it, or a rule that forwards it on). It carries the token and the HOLD line, so
- * whoever it comes from, it is never an answer to itself. It is an original message: the parser
- * read no In-Reply-To (in_reply_to null), where every reply names the message it answers. It also
- * has the copy's own subject, and its text part opens with the banner heading (sendNewsletterProof
- * puts pestInsiderBannerText first). So a reply holds, whatever its subject or layout, also one from
- * the address the copy came from. A message whose In-Reply-To was never read (in_reply_to undefined)
- * or that has no text part is never taken for the copy; that guess can only hold an issue, never
- * send one.
+ * group that relays it, or a rule that forwards it on): its text part is, word for word, a copy the
+ * issue's row recorded as it went out. It carries the token and the HOLD line, so whoever it comes
+ * from, it is never an answer to itself. Anything else reads differently and is read for a HOLD: a
+ * reply, whatever its subject, headers or layout, also one typed inside the copy. A copy changed on
+ * its way (a relay's footer) or never recorded is read for a HOLD too: that can only hold an issue,
+ * never send one.
  */
-function isProofCopyItself(email) {
-  return email?.in_reply_to === null
-    && PROOF_COPY_SUBJECT_RE.test(String(email?.subject || ''))
-    && foldText(email?.body_text).startsWith(foldText(FYI_BANNER_HEADING));
+function isProofCopyItself(email, copies) {
+  return Boolean(email?.body_text) && copies[fyiCopyDigest(email.body_text)] === true;
 }
 
 /**
@@ -435,15 +440,15 @@ function isProofCopyItself(email) {
  * (email-strip.isForwardSubject: a forward passes the copy on, and its note, such as "please hold
  * this for review", is not an answer to it), whose own text asks to stop.
  */
-function isPlannedHoldReply(email) {
+function isPlannedHoldReply(email, copies) {
   const { isForwardSubject } = require('./email/email-strip');
-  return !isProofCopyItself(email) && !isForwardSubject(email?.subject)
+  return !isProofCopyItself(email, copies) && !isForwardSubject(email?.subject)
     && isHoldReply(extractTopReplyText(email?.body_text || htmlReplyToText(email?.body_html)));
 }
 
 /** A HOLD reply to the FYI copy with this token (isPlannedHoldReply), from a verified sender. */
-function isVerifiedHold(email, token, fyiTos) {
-  return parseProofToken(email?.subject) === token && isPlannedHoldReply(email) && verifiedHoldSender(email, fyiTos);
+function isVerifiedHold(email, token, fyiTos, copies) {
+  return parseProofToken(email?.subject) === token && isPlannedHoldReply(email, copies) && verifiedHoldSender(email, fyiTos);
 }
 
 /** More messages than this carrying one FYI copy's token: the search did not read them all. */
@@ -466,20 +471,21 @@ async function holdReplyOnRecord(send, issue = null) {
   if (!isProofToken(send?.proof_token)) throw new Error('its FYI copy has no valid token');
   const token = send.proof_token.toLowerCase();
   const fyiTos = issueFyiAddresses(issue);
+  const copies = issueFyiCopies(issue);
   // Every FYI copy of this draft carries its token (a retry keeps it), so the search starts at the
   // draft, not at the latest copy; an hour of margin covers clock differences.
   const since = send.created_at ? new Date(new Date(send.created_at).getTime() - 60 * 60 * 1000) : null;
   const stored = db('emails').where('subject', 'ilike', `%[PROOF-${token}]%`);
   if (since) stored.where('received_at', '>=', since);
   const rows = await stored.select('from_address', 'to_address', 'cc_address', 'bcc_address', 'subject', 'body_text', 'body_html', 'label_ids', 'authentication_results');
-  if (rows.some((email) => isVerifiedHold(email, token, fyiTos))) return true;
+  if (rows.some((email) => isVerifiedHold(email, token, fyiTos, copies))) return true;
   const gmail = require('./email/gmail-client');
   const query = `subject:"PROOF-${token}"${since ? ` after:${Math.floor(since.getTime() / 1000)}` : ''}`;
   // Spam and Trash too: a HOLD the spam filter moved, or one deleted after it was sent, still holds.
   const { messages, truncated } = await gmail.listAllMessages(query, HOLD_SEARCH_CAP, { includeSpamTrash: true });
   if (truncated) throw new Error(`more than ${HOLD_SEARCH_CAP} messages carry its FYI copy's token`);
   const found = await Promise.all((messages || []).map(({ id }) => gmail.getMessage(id)));
-  return found.some((email) => isVerifiedHold(email, token, fyiTos));
+  return found.some((email) => isVerifiedHold(email, token, fyiTos, copies));
 }
 
 /**
@@ -597,16 +603,16 @@ function autoSendBannerText(recipientCount) {
 
 // The owner's copy of a Waves Pest Insider issue the auto-send switch queued. The HOLD deadline is
 // half an hour before the 7:00 AM send, so the reply has reached the mailbox when the send-time
-// check reads it (holdReplyOnRecord). Its heading opens the copy's text part (isProofCopyItself).
+// check reads it (holdReplyOnRecord).
 function pestInsiderBannerHtml(recipientCount, issueContext) {
   return `<div class="dm-box" style="border:2px solid #04395E;border-radius:8px;padding:14px 16px;margin:0 0 20px;background:#f4f8fb;font-family:Arial,Helvetica,sans-serif;">
-<p style="margin:0 0 6px;font-size:15px;font-weight:bold;color:#04395E;">${FYI_BANNER_HEADING}</p>
+<p style="margin:0 0 6px;font-size:15px;font-weight:bold;color:#04395E;">Sends by itself — no reply needed</p>
 <p style="margin:0;font-size:14px;color:#1f2937;">This Waves Pest Insider issue goes to <strong>${recipientCount}</strong> readers <strong>${issueSendTimeCopy(issueContext)}</strong>. To skip this issue, reply <strong>HOLD</strong> by 6:30 AM ET that day, or press Cancel schedule in Newsletter → History.</p>
 </div>\n`;
 }
 
 function pestInsiderBannerText(recipientCount, issueContext) {
-  return `${FYI_BANNER_HEADING.toUpperCase()}\nThis Waves Pest Insider issue goes to ${recipientCount} readers ${issueSendTimeCopy(issueContext)}. To skip this issue, reply HOLD by 6:30 AM ET that day, or press Cancel schedule in Newsletter → History.\n\n----------------------------------------\n\n`;
+  return `SENDS BY ITSELF — NO REPLY NEEDED\nThis Waves Pest Insider issue goes to ${recipientCount} readers ${issueSendTimeCopy(issueContext)}. To skip this issue, reply HOLD by 6:30 AM ET that day, or press Cancel schedule in Newsletter → History.\n\n----------------------------------------\n\n`;
 }
 
 // Internal panel for a planned Waves Pest Insider issue (proof email only):
@@ -866,9 +872,6 @@ async function sendNewsletterProof(sendId) {
   if (!claimed) return { skipped: true, reason: 'proof_claimed_elsewhere' };
 
   try {
-    // Every address a copy of a planned issue's FYI goes to may HOLD it (verifiedHoldSender), so it
-    // is recorded with its row before the copy goes out; a write that fails sends nothing.
-    if (issueContext) await recordFyiRecipient(send.id, to);
     // Internal diagnostics render between the proof banner and the
     // recipient preview — proof email ONLY, never the list send.
     const diagnosticsHtml = issueContext
@@ -879,6 +882,10 @@ async function sendNewsletterProof(sendId) {
       html_body: delivery.bannerHtml + diagnosticsHtml + (send.html_body || ''),
       text_body: send.text_body ? delivery.bannerText + send.text_body : send.text_body,
     }, to);
+    // Every address a copy of a planned issue's FYI goes to may HOLD it (verifiedHoldSender), and the
+    // copy itself never does (isProofCopyItself): both are recorded with its row before the copy goes
+    // out; a write that fails sends nothing.
+    if (issueContext) await recordFyiRecipient(send.id, to, text);
 
     const result = await sendgrid.sendOne({
       to,
@@ -1080,7 +1087,8 @@ async function maybeHandleProofApproval(email) {
   const planned = send ? await resolvePestInsiderIssueContext(send) : null;
   if (planned && isHoldReply(replyText)) {
     // The FYI copy itself, back in this mailbox (it quotes the HOLD line): not an answer, and no warning.
-    if (isProofCopyItself(email)) {
+    const copies = issueFyiCopies(planned.issue);
+    if (isProofCopyItself(email, copies)) {
       logger.info(`[newsletter-proof] ignoring the FYI copy of planned issue send ${send.id} itself`);
       return false;
     }
@@ -1090,7 +1098,7 @@ async function maybeHandleProofApproval(email) {
       logger.info(`[newsletter-proof] ignoring a HOLD for planned issue send ${send.id} from ${maskEmail(from)}, who may not hold it`);
       return false;
     }
-    if (!isPlannedHoldReply(email)) return ignorePlannedHold(send, from, 'forwarded');
+    if (!isPlannedHoldReply(email, copies)) return ignorePlannedHold(send, from, 'forwarded');
     if (!verified) return ignorePlannedHold(send, from, 'unverified');
   } else if (!approvalSenders().includes(from)) {
     // Ignore our own outbound proof (SendGrid copies can sync back in):
@@ -1322,6 +1330,7 @@ module.exports = {
   isApprovalReply,
   isHoldReply,
   holdReplyOnRecord,
+  fyiCopyDigest,
   renderSendPreview,
   sendNewsletterProof,
   maybeHandleProofApproval,
