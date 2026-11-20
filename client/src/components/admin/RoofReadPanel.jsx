@@ -28,9 +28,17 @@ const MAX_TECH_COUNT = 500;
 // A missing, blank or null coordinate is NaN, never 0.
 const coordinate = (v) => (typeof v === "number" || (typeof v === "string" && v.trim()) ? Number(v) : NaN);
 
-// Where the lookup put the home: coordinates and county, or null when either is missing.
+// The lookup's own marker that the geocoder snapped the typed house number to another premise (set on
+// addressAudit, and on the record's _addressAudit): the map point is then a neighbour's house.
+export function roofSpotSnapped(data) {
+  const record = data?.propertyRecord || data?.rentcast || null;
+  return !!(data?.addressAudit?.snappedRecord || record?._addressAudit?.snappedRecord);
+}
+
+// Where the lookup put the home: coordinates and county, or null when either is missing or the point is a snapped neighbour.
 export function roofSpotFrom(data) {
   const record = data?.propertyRecord || data?.rentcast || null;
+  if (roofSpotSnapped(data)) return null;
   const lat = coordinate(data?.satellite?.lat ?? record?.latitude);
   const lng = coordinate(data?.satellite?.lng ?? record?.longitude);
   const county = record?._parcel?.county || record?.county || "";
@@ -87,12 +95,14 @@ function RoofImage({ url, read }) {
   );
 }
 
-export default function RoofReadPanel({ spot, estimateId = null, customerId = null }) {
+export default function RoofReadPanel({ spot, snapped = false, estimateId = null, customerId = null }) {
   const [phase, setPhase] = useState("idle");
   const [problem, setProblem] = useState("");
   const [result, setResult] = useState(null);
   const [count, setCount] = useState("");
   const [techFlags, setTechFlags] = useState(() => techFlagsFrom(null));
+  // Entry types the tech ticked or cleared since the read was loaded or last saved. Only these are sent.
+  const [touched, setTouched] = useState({});
   const [saveState, setSaveState] = useState({ busy: false, msg: "", err: "" });
   const mounted = useRef(true);
   useEffect(() => {
@@ -101,7 +111,7 @@ export default function RoofReadPanel({ spot, estimateId = null, customerId = nu
   }, []);
 
   async function readRoof() {
-    if (phase === "loading" || !spot) return;
+    if (phase === "loading" || !spot || snapped) return;
     setPhase("loading");
     setProblem("");
     try {
@@ -133,6 +143,7 @@ export default function RoofReadPanel({ spot, estimateId = null, customerId = nu
         setResult(body);
         setCount(body.read.tech_final_count == null ? "" : String(body.read.tech_final_count));
         setTechFlags(techFlagsFrom(body.read));
+        setTouched({});
         setSaveState({ busy: false, msg: "", err: "" });
         setPhase("ok");
         return;
@@ -154,13 +165,23 @@ export default function RoofReadPanel({ spot, estimateId = null, customerId = nu
       setSaveState({ busy: false, msg: "", err: `Count must be a whole number from 0 to ${MAX_TECH_COUNT}.` });
       return;
     }
+    const touchedKeys = ROOF_TYPES.map((t) => t.key).filter((key) => touched[key]);
+    if (trimmed === "" && !touchedKeys.length) {
+      setSaveState({ busy: false, msg: "", err: "Enter a count or change an entry point first." });
+      return;
+    }
+    // The server replaces the saved flags with what it is sent, so the ticked ones go over what is already saved:
+    // an untouched saved value (including unsure) is sent back as it was. A count-only save sends no flags at all.
+    const flags = touchedKeys.length
+      ? { ...(read.tech_final_flags || {}), ...Object.fromEntries(touchedKeys.map((key) => [key, techFlags[key] ? "yes" : "no"])) }
+      : null;
     setSaveState({ busy: true, msg: "", err: "" });
     try {
       const r = await roofFetch(`/admin/roof-entry-read/${encodeURIComponent(read.id)}/tech-count`, {
         method: "PATCH",
         body: JSON.stringify({
           ...(trimmed === "" ? {} : { count: Number(trimmed) }),
-          flags: Object.fromEntries(ROOF_TYPES.map(({ key }) => [key, techFlags[key] ? "yes" : "no"])),
+          ...(flags ? { flags } : {}),
         }),
       });
       const body = await r.json().catch(() => ({}));
@@ -170,6 +191,8 @@ export default function RoofReadPanel({ spot, estimateId = null, customerId = nu
         return;
       }
       setResult((prev) => ({ ...prev, read: body.read }));
+      setTechFlags(techFlagsFrom(body.read));
+      setTouched({});
       setSaveState({ busy: false, msg: "Saved.", err: "" });
     } catch {
       if (mounted.current) setSaveState({ busy: false, msg: "", err: "Could not reach the server. Try again." });
@@ -184,12 +207,17 @@ export default function RoofReadPanel({ spot, estimateId = null, customerId = nu
         Staff only. Reads the county aerial photo for likely rodent entry points. Each new read is a paid model call, and a read of this roof
         from the last 90 days is reused at no cost. Nothing here reaches the customer.
       </p>
-      {!spot && (
+      {snapped && (
+        <p className="text-14 text-zinc-600" data-testid="roof-read-snapped">
+          The map point may be a neighbour's house. Fix the address first.
+        </p>
+      )}
+      {!spot && !snapped && (
         <p className="text-14 text-zinc-600" data-testid="roof-read-no-spot">
           Look up the address first. The read needs the home's map point and county.
         </p>
       )}
-      {spot && phase !== "ok" && (
+      {spot && !snapped && phase !== "ok" && (
         <div>
           <Button variant="secondary" size="sm" onClick={readRoof} loading={phase === "loading"} disabled={phase === "loading"} data-testid="roof-read-button">
             {phase === "idle" ? "Read the roof" : phase === "loading" ? "Reading" : "Try again"}
@@ -210,20 +238,24 @@ export default function RoofReadPanel({ spot, estimateId = null, customerId = nu
             Entry-point tier: <span className="font-medium">{TIER_LABELS[read.tier] || read.tier}</span>
           </p>
           <div className="space-y-2" data-testid="roof-read-flags">
-            <div className="grid grid-cols-[1fr_5rem_6rem] gap-2 text-14 text-zinc-400 font-medium">
-              <span>Entry point</span><span>AI read</span><span>Tech saw it</span>
+            <div className="grid grid-cols-[1fr_4.5rem_5rem_5rem] gap-2 text-14 text-zinc-400 font-medium">
+              <span>Entry point</span><span>AI read</span><span>Tech saved</span><span>Tech saw it</span>
             </div>
             {ROOF_TYPES.map(({ key, label }) => {
               const likely = read.flags?.[key]?.likely;
               return (
-                <div key={key} className="grid grid-cols-[1fr_5rem_6rem] gap-2 items-center text-14 text-zinc-900" data-testid={`roof-read-row-${key}`}>
+                <div key={key} className="grid grid-cols-[1fr_4.5rem_5rem_5rem] gap-2 items-center text-14 text-zinc-900" data-testid={`roof-read-row-${key}`}>
                   <span>{label}</span>
                   <span data-testid={`roof-read-ai-${key}`}>{LIKELY_LABELS[likely] || "Not read"}</span>
+                  <span data-testid={`roof-read-saved-${key}`}>{LIKELY_LABELS[read.tech_final_flags?.[key]] || "None"}</span>
                   <Checkbox
                     id={`roof-read-tech-${key}`}
                     aria-label={`Tech saw: ${label}`}
                     checked={!!techFlags[key]}
-                    onChange={() => setTechFlags((f) => ({ ...f, [key]: !f[key] }))}
+                    onChange={() => {
+                      setTechFlags((f) => ({ ...f, [key]: !f[key] }));
+                      setTouched((t) => ({ ...t, [key]: true }));
+                    }}
                   />
                 </div>
               );

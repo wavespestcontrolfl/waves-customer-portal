@@ -5,7 +5,7 @@ import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import RoofReadPanel, { ROOF_TYPES, roofSpotFrom } from "./RoofReadPanel";
+import RoofReadPanel, { ROOF_TYPES, roofSpotFrom, roofSpotSnapped } from "./RoofReadPanel";
 
 const SPOT = { lat: 27.46, lng: -82.57, county: "Manatee" };
 const EST = "11111111-1111-4111-8111-111111111111";
@@ -137,11 +137,54 @@ describe("an ok read", () => {
     expect(String(patch[0])).toMatch(/\/admin\/roof-entry-read\/33333333-3333-4333-8333-333333333333\/tech-count$/);
     const body = JSON.parse(patch[1].body);
     expect(body.count).toBe(4);
-    expect(Object.keys(body.flags).sort()).toEqual(ROOF_TYPES.map((t) => t.key).sort());
-    expect(body.flags.plumbing_vent_stacks).toBe("yes");
-    expect(body.flags.chimney_or_flue).toBe("yes");
-    expect(body.flags.gable_vents).toBe("no");
+    // Only the two types the tech touched are sent.
+    expect(body.flags).toEqual({ plumbing_vent_stacks: "yes", chimney_or_flue: "yes" });
     expect(screen.getByTestId("roof-read-saved")).toHaveTextContent("Saved tech count: 4.");
+  });
+
+  it("sends no flags on a count-only save, and shows untouched saved values as they are", async () => {
+    fetchMock.mockImplementationOnce(() => reply({
+      status: "ok", cached: true, image_url: IMAGE,
+      read: READ({ tech_final_count: 1, tech_final_flags: { gable_vents: "unsure", chimney_or_flue: "no", plumbing_vent_stacks: "yes" } }),
+    }));
+    render(<RoofReadPanel spot={SPOT} />);
+    tap();
+    await screen.findByTestId("roof-read-result");
+    expect(screen.getByTestId("roof-read-saved-gable_vents")).toHaveTextContent("Unsure");
+    expect(screen.getByTestId("roof-read-saved-chimney_or_flue")).toHaveTextContent("No");
+    expect(screen.getByTestId("roof-read-saved-soffit_or_fascia_gaps")).toHaveTextContent("None");
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_final_count: 6, tech_final_flags: { gable_vents: "unsure" } }) }));
+    fireEvent.change(screen.getByLabelText("Entry points the tech counted"), { target: { value: "6" } });
+    fireEvent.click(screen.getByTestId("roof-read-save"));
+    await screen.findByText("Saved.");
+    const patch = fetchMock.mock.calls.find(([, init]) => init?.method === "PATCH");
+    expect(JSON.parse(patch[1].body)).toEqual({ count: 6 });
+  });
+
+  it("sends a touched flag over the saved ones, so an untouched unsure is sent back as it was", async () => {
+    fetchMock.mockImplementationOnce(() => reply({
+      status: "ok", cached: true, image_url: IMAGE,
+      read: READ({ tech_final_flags: { gable_vents: "unsure" } }),
+    }));
+    render(<RoofReadPanel spot={SPOT} />);
+    tap();
+    await screen.findByTestId("roof-read-result");
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_final_flags: { gable_vents: "unsure", chimney_or_flue: "yes" } }) }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Tech saw: Chimney or flue" }));
+    fireEvent.click(screen.getByTestId("roof-read-save"));
+    await screen.findByText("Saved.");
+    const patch = fetchMock.mock.calls.find(([, init]) => init?.method === "PATCH");
+    expect(JSON.parse(patch[1].body)).toEqual({ flags: { gable_vents: "unsure", chimney_or_flue: "yes" } });
+    expect(screen.getByTestId("roof-read-saved-chimney_or_flue")).toHaveTextContent("Yes");
+  });
+
+  it("sends nothing when there is no count and no touched entry point", async () => {
+    render(<RoofReadPanel spot={SPOT} />);
+    tap();
+    await screen.findByTestId("roof-read-result");
+    fireEvent.click(screen.getByTestId("roof-read-save"));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Enter a count or change an entry point/);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
   });
 
   it("refuses a count that is not a whole number from 0 to 500 without sending it", async () => {
@@ -168,6 +211,29 @@ describe("an ok read", () => {
     expect(screen.getByRole("checkbox", { name: "Tech saw: Gable vents" })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "Tech saw: Plumbing vent stacks" })).not.toBeChecked();
     expect(screen.getByText(/Reused from an earlier read/)).toBeInTheDocument();
+  });
+});
+
+describe("a snapped neighbour", () => {
+  it("offers no read and says to fix the address", async () => {
+    render(<RoofReadPanel spot={null} snapped />);
+    expect(screen.getByTestId("roof-read-snapped")).toHaveTextContent("The map point may be a neighbour's house. Fix the address first.");
+    expect(screen.queryByTestId("roof-read-button")).toBeNull();
+    expect(screen.queryByTestId("roof-read-no-spot")).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("is read from the lookup's snappedRecord marker, on the audit or on the record", () => {
+    const good = { propertyRecord: { latitude: 27.5, longitude: -82.5, county: "Manatee" } };
+    expect(roofSpotSnapped(good)).toBe(false);
+    for (const data of [
+      { ...good, addressAudit: { snappedRecord: { typed: "10", record: "12" } } },
+      { propertyRecord: { ...good.propertyRecord, _addressAudit: { snappedRecord: { typed: "10", record: "12" } } } },
+    ]) {
+      expect(roofSpotSnapped(data)).toBe(true);
+      expect(roofSpotFrom(data)).toBeNull();
+    }
+    expect(roofSpotFrom({ ...good, addressAudit: { hasExactMatch: true } })).not.toBeNull();
   });
 });
 

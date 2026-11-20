@@ -29,11 +29,13 @@ const reply = (body, status = 200) => ({
 
 let fetchMock;
 let waveguardRow;
+let snapped;
 beforeEach(() => {
   localStorage.setItem("waves_admin_token", "qa-token");
   vi.spyOn(window, "confirm").mockReturnValue(true);
   vi.spyOn(window, "alert").mockImplementation(() => {});
   waveguardRow = { data: {}, roofEntryRead: true };
+  snapped = false;
   fetchMock = vi.fn((url, init) => {
     const path = String(url);
     if (path.includes("/admin/pricing-config/rodent_waveguard")) return Promise.resolve(reply(waveguardRow));
@@ -41,6 +43,7 @@ beforeEach(() => {
       return Promise.resolve(reply({
         enriched: { homeSqFt: 2000, lotSqFt: 9000, stories: 1 },
         propertyRecord: { latitude: 27.3, longitude: -82.4, _parcel: { county: "Sarasota" } },
+        ...(snapped ? { addressAudit: { snappedRecord: { typed: "400", record: "402 Example Court" } } } : {}),
         errors: [],
       }));
     }
@@ -110,20 +113,35 @@ describe("availability", () => {
 });
 
 describe("resets", () => {
-  it("starts blank after Next estimate", async () => {
+  it("starts blank when the draft gets its estimate id, then again after Next estimate", async () => {
     renderNew();
     tickExclusion();
     await lookUp();
     fireEvent.click(await screen.findByTestId("roof-read-button"));
     await screen.findByTestId("roof-read-result");
+    expect(JSON.parse(roofPosts()[0][1].body).estimate_id).toBeUndefined();
     fireEvent.click(screen.getByRole("button", { name: "Generate Estimate", exact: true }));
     fireEvent.click(await screen.findByRole("button", { name: "Save draft", exact: true }));
     const next = await screen.findByRole("button", { name: /Next estimate \(keep services\)/ });
-    // Saving the estimate keeps the read on screen; Next estimate clears it.
-    expect(screen.getByTestId("roof-read-result")).toBeInTheDocument();
-    fireEvent.click(next);
+    // The pre-draft read is gone, so a tech count cannot land on a row another draft can reuse.
     await waitFor(() => expect(screen.queryByTestId("roof-read-result")).toBeNull());
     expect(roofPosts()).toHaveLength(1);
+    fireEvent.click(await screen.findByTestId("roof-read-button"));
+    await screen.findByTestId("roof-read-result");
+    expect(JSON.parse(roofPosts()[1][1].body).estimate_id).toEqual(expect.any(String));
+    fireEvent.click(next);
+    await waitFor(() => expect(screen.queryByTestId("roof-read-result")).toBeNull());
+    expect(roofPosts()).toHaveLength(2);
+  });
+
+  it("offers no read for a snapped neighbour's address", async () => {
+    snapped = true;
+    renderNew();
+    tickExclusion();
+    await lookUp();
+    expect(await screen.findByTestId("roof-read-snapped")).toBeInTheDocument();
+    expect(screen.queryByTestId("roof-read-button")).toBeNull();
+    expect(roofPosts()).toHaveLength(0);
   });
 
   it("starts blank when the customer changes", async () => {
