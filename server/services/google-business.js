@@ -115,7 +115,7 @@ const MISSING_REVIEW_GRACE_MS = 48 * 60 * 60 * 1000;
 // chain — they sometimes return 2xx with an HTML body. Parsing that as JSON
 // produces an opaque SyntaxError that bubbles up to the user as "Unexpected
 // token '<'". Read as text first, only JSON.parse when the body looks like
-// JSON, and surface the raw status + a truncated body on anything else.
+// JSON, and surface the status (never the response text) on anything else.
 // A mutation whose request was sent but whose response never arrived
 // (ECONNRESET, socket hang-up, abort) may have been applied by Google.
 // Flag it so the reply publisher parks for reconciliation instead of
@@ -502,8 +502,10 @@ class GoogleBusinessService {
     const url = `https://mybusiness.googleapis.com/v4/${reviewResourceName}/reply`;
     const res = await mutationFetch(url, { method: 'DELETE', headers, ...(signal ? { signal } : {}) });
     if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`GBP deleteReply ${res.status}: ${text.slice(0, 500)}`);
+      // As in readJsonOrThrow: the status and Google's status word, never the response text (the admin
+      // Retract route returns this message, and a response can quote the reply or the reviewer).
+      const word = googleErrorWord(await res.text().catch(() => ''));
+      throw Object.assign(new Error(`GBP deleteReply ${res.status}${word ? ` ${word}` : ''}`), { googleStatus: res.status });
     }
     return true;
   }

@@ -333,6 +333,14 @@ describe('Google Business review sync', () => {
     expect(err.transport).toBeUndefined();
   });
 
+  test('a refused reply delete (Retract) names the status and Google\'s status word, never the response text', async () => {
+    global.fetch = jest.fn(async () => ({ ok: false, status: 404, headers: { get: () => 'application/json' }, text: async () => '{"error":{"code":404,"message":"No reply \'Thanks Dana W.\' on this review","status":"NOT_FOUND"}}' }));
+    const err = await service.deleteReply('accounts/1/locations/2/reviews/rev-1', 'sarasota').catch((e) => e);
+    expect(err).toMatchObject({ message: 'GBP deleteReply 404 NOT_FOUND', googleStatus: 404 });
+    global.fetch = jest.fn(async () => ({ ok: false, status: 500, headers: { get: () => 'text/html' }, text: async () => { throw new Error('socket hang up'); } }));
+    await expect(service.deleteReply('accounts/1/locations/2/reviews/rev-1', 'sarasota')).rejects.toMatchObject({ message: 'GBP deleteReply 500', googleStatus: 500 });
+  });
+
   describe('getReviews transient retry', () => {
     const failRes = (status) => ({ ok: false, status, headers: { get: () => 'application/json' }, text: async () => `{"error":{"status":"E${status}"}}` });
     const loc = 'accounts/1/locations/2';
