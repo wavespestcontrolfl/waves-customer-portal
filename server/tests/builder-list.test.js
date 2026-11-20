@@ -27,6 +27,8 @@ describe('builderKey', () => {
   test.each([
     ['SAMPLE POOLS LLC', 'SAMPLE POOLS'],
     ['Sample Pools, L.L.C.', 'SAMPLE POOLS'],
+    // A comma is a word break, with or without the space after it.
+    ['Sample Pools,LLC', 'SAMPLE POOLS'],
     ['  sample   pools  inc. ', 'SAMPLE POOLS'],
     ['SAMPLE POOLS CO INC', 'SAMPLE POOLS'],
     ["Sample's Pools & Spas Corporation", 'SAMPLES POOLS SPAS'],

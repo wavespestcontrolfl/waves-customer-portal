@@ -12,7 +12,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { dateOnlyString, dateOnlyAtNoonUtc } = require('../../utils/date-only');
 
 const KINDS = ['pool', 'home'];
@@ -55,7 +55,8 @@ function sourceFor(kind) {
 
 /**
  * Upper case, accents dropped (PEÑA -> PENA, so it matches a customer typed without the accent), apostrophes and
- * periods gone (straight or curly), other punctuation a space, trailing company words (LLC, INC, ...) dropped.
+ * periods gone (straight or curly), commas and other punctuation a space (POOLS,LLC is POOLS LLC), trailing company
+ * words (LLC, INC, ...) dropped.
  * Letters of any script and digits stay, so two names in another alphabet never share a key.
  */
 function builderKey(name) {
@@ -63,7 +64,7 @@ function builderKey(name) {
     .normalize('NFKD')
     .replace(/\p{M}+/gu, '')
     .toUpperCase()
-    .replace(/['‘’.,]/g, '')
+    .replace(/['‘’.]/g, '')
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim()
     .split(' ')
@@ -73,11 +74,8 @@ function builderKey(name) {
   return kept.join(' ');
 }
 
-function shiftDay(day, days) {
-  const at = dateOnlyAtNoonUtc(day);
-  at.setUTCDate(at.getUTCDate() + days);
-  return dateOnlyString(at);
-}
+// A calendar day moved by whole days, with the shared helper: noon UTC is the same day in Eastern time.
+const shiftDay = (day, days) => dateOnlyString(addETDays(dateOnlyAtNoonUtc(day), days));
 
 // The county file arrives once a week (Mondays), so "the last 7 days from today" would fall to zero as the week goes on.
 // The week summary is the 7 days that end on the newest permit date on file (weekEnd), never a day after today.
