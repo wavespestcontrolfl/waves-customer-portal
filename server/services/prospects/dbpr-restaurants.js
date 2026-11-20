@@ -22,7 +22,9 @@
  * Fail soft: a download, parse or database failure logs a count-only warning and goes into the result object; the
  * sync itself never throws. The scheduler marks a run with failures as failed in job_health. Logs carry counts and
  * elapsed time only, never a business name, address or phone. Kill switch: env DBPR_PROSPECT_SYNC_DISABLED (1, true
- * or on); the scheduler checks it before the run starts, so job_health keeps the last real outcome.
+ * or on); the scheduler checks it before the run starts, so job_health keeps the last real outcome. A read that
+ * shows again under 90% of the rows the last read kept is short (a download that stopped early): its rows are
+ * written and the run fails (shownShort).
  */
 
 const db = require('../../models/db');
@@ -273,32 +275,42 @@ async function bumpAttempts(id) {
   await db('restaurant_prospects').where({ id }).increment('detail_attempts', 1);
 }
 
-// The keys of one kind on file from a day on (the fiscal year's first day): a full file shows them all again.
-async function keysSince(kind, since) {
-  const rows = await db('restaurant_prospects').where({ kind }).where('event_date', '>=', since).select('source_key');
+// The keys of one kind that the newest read kept, from the fiscal year's first day on: the rows whose last_seen_at it
+// refreshed. A read takes minutes and reads are a day or more apart, so that is within an hour of the newest one.
+async function lastReadKeys(kind, since) {
+  const rows = await db('restaurant_prospects')
+    .where({ kind })
+    .where('event_date', '>=', since)
+    .whereRaw("last_seen_at >= (SELECT MAX(last_seen_at) - interval '1 hour' FROM restaurant_prospects WHERE kind = ?)", [kind])
+    .select('source_key');
   return rows.map((row) => row.source_key);
 }
 
 // ── Weekly job ──────────────────────────────────────────────────
 
-const defaultStore = { upsertRecords, keysSince };
+const defaultStore = { upsertRecords, lastReadKeys };
 
 // The column that holds each file's key (the parsers' source_key).
 const KEY_COLUMN = { inspection: 'Inspection Visit ID', new_license: 'Application Number', owner_change: 'Application Number' };
+
+// The row widths each file has, as cells minus header names. The inspection file fills every header column. The
+// license files never fill their last two (Base Risk Level, Secondary Risk Level): every row of the 2026-11-20 files
+// has 36 cells under 38 names, and a row that fills them is taken too. Any other width means a cell went missing or
+// crept in and every cell after it moved: a shifted phone, license number or report id would pass every other check.
+// Such a row is malformed.
+const ROW_WIDTHS = { inspection: [0], new_license: [-2, 0], owner_change: [-2, 0] };
 
 async function loadFile(kind, fetchText, now) {
   const text = await fetchText(`${EXTRACT_BASE}${FILES[kind]}`, FILE_TIMEOUT_MS);
   const counts = { malformed: 0, valid: 0 };
   const records = [];
-  // Every key in the file, kept or not: checkWholeYear compares them with the keys on file.
+  // Every key in the file, kept or not: shownShort compares them with the keys the last read kept.
   const keys = new Set();
   let rowsRead = 0;
   // A row at a time, so the server keeps answering requests and only the kept records stay in memory.
-  const header = await eachDbprCsvRow(text, (row, dropped) => {
+  const header = await eachDbprCsvRow(text, (row, { cells, columns }) => {
     rowsRead += 1;
-    // A row wider than its header lost the cells past it, and the cells it kept may have moved: an extra cell before
-    // the two report ids would shift them, and both would still pass as digits. It is malformed.
-    if (dropped) {
+    if (!ROW_WIDTHS[kind].includes(cells - columns)) {
       counts.malformed += 1;
       return;
     }
@@ -324,28 +336,33 @@ function fiscalYearStart(now) {
   return `${month >= 7 ? year : year - 1}-07-01`;
 }
 
-// A full file holds again nearly every row of its fiscal year that is already on file: the same key, whatever the
-// row's area or violation count now (a corrected count keeps its visit id). A download that stopped early but ends on
-// a whole row passes every check in loadFile, so it would report success with rows missing; a file that holds under
-// 90% of those keys fails, and none of its rows are written. A row can leave the file (a record the state withdrew),
-// hence 90%. Under 20 rows on file (early July) the check waits.
-const WHOLE_YEAR_SHARE = 0.9;
-const WHOLE_YEAR_MIN_ROWS = 20;
+// Each file holds the whole fiscal year, so a full read shows again nearly every row the last read kept: the same
+// key, whatever the row's area or violation count now (a corrected count keeps its visit id). A download that stopped
+// early but ends on a whole row passes every check in loadFile. A read that shows under 90% of those keys is short:
+// its rows are still written (each one is whole and valid) and the run fails in job_health. The next read compares
+// with this one, so rows the state withdrew fail one run at most, never the rest of the year. Under 20 rows (early
+// in the fiscal year) the check waits.
+const SHOWN_SHARE = 0.9;
+const SHOWN_MIN_ROWS = 20;
 
-async function checkWholeYear(kind, keys, deps) {
-  const onFile = await deps.store.keysSince(kind, fiscalYearStart(deps.now));
-  if (onFile.length < WHOLE_YEAR_MIN_ROWS) return;
-  const shown = onFile.filter((key) => keys.has(key)).length;
-  if (shown < onFile.length * WHOLE_YEAR_SHARE) throw new Error('file shorter than the rows on file');
+function shownShort(lastRead, keys) {
+  if (lastRead.length < SHOWN_MIN_ROWS) return false;
+  return lastRead.filter((key) => keys.has(key)).length < lastRead.length * SHOWN_SHARE;
 }
 
 async function syncFiles(deps, result) {
   for (const kind of Object.keys(FILES)) {
     try {
       const { records, malformed, keys } = await loadFile(kind, deps.fetchText, deps.now);
-      await checkWholeYear(kind, keys, deps);
       const unique = dedupeByKey(records);
+      // Read before the upsert, which refreshes last_seen_at on every row it writes.
+      const lastRead = await deps.store.lastReadKeys(kind, fiscalYearStart(deps.now));
       result.files[kind] = { kept: unique.length, malformed, upserted: await deps.store.upsertRecords(unique) };
+      if (shownShort(lastRead, keys)) {
+        result.failures += 1;
+        result.files[kind].short = true;
+        logger.warn(`[dbpr-prospects] ${kind} file is short: it shows under 90% of the ${lastRead.length} rows the last read kept`);
+      }
     } catch (err) {
       result.failures += 1;
       result.files[kind] = { failed: true };
@@ -366,7 +383,8 @@ async function syncRestaurantProspects(deps = {}) {
   await syncFiles({ fetchText: defaultFetchText, store: defaultStore, now: new Date(), ...deps }, result);
   result.elapsedMs = Date.now() - started;
   const counts = Object.entries(result.files)
-    .map(([k, f]) => `${k}=${f.failed ? 'failed' : f.upserted}${f.malformed ? `(${f.malformed} malformed)` : ''}`).join(' ');
+    .map(([k, f]) => `${k}=${f.failed ? 'failed' : f.upserted}${f.short ? '(short)' : ''}${f.malformed ? `(${f.malformed} malformed)` : ''}`)
+    .join(' ');
   logger.info(`[dbpr-prospects] ${counts} failures=${result.failures} ${result.elapsedMs}ms`);
   return result;
 }
@@ -382,5 +400,5 @@ module.exports = {
   pendingInspections,
   saveReport,
   bumpAttempts,
-  keysSince,
+  lastReadKeys,
 };

@@ -34,6 +34,19 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
   });
   afterAll(async () => { if (db) await rows().del(); });
 
+  test('lastReadKeys: the keys the newest read refreshed, from the fiscal year\'s first day on', async () => {
+    // Its own kind (kind has no fixed list), so the newest read is this test's rows alone.
+    const kind = `t${RUN}`;
+    await db('restaurant_prospects').insert([
+      { kind, source_key: key(20), event_date: '2026-11-10', last_seen_at: '2026-11-16T15:40:00Z' }, // the newest read
+      { kind, source_key: key(21), event_date: '2026-07-01', last_seen_at: '2026-11-16T14:41:00Z' }, // the same read, earlier
+      { kind, source_key: key(22), event_date: '2026-11-02', last_seen_at: '2026-11-09T15:40:00Z' }, // a read before
+      { kind, source_key: key(23), event_date: '2026-06-30', last_seen_at: '2026-11-16T15:40:00Z' }, // the year before
+    ]);
+    expect((await svc.lastReadKeys(kind, '2026-07-01')).sort()).toEqual([key(20), key(21)]);
+    expect(await svc.lastReadKeys(`u${RUN}`, '2026-07-01')).toEqual([]);
+  });
+
   test('the same (kind, source_key) is one row; a different kind with the same key is another', async () => {
     await svc.upsertRecords([rec(1), rec(1, { kind: 'new_license', detail: { applicationType: 'Initial' } })]);
     await svc.upsertRecords([rec(1)]);

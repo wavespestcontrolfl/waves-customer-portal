@@ -219,7 +219,7 @@ describe('syncRestaurantProspects', () => {
     upserts = [];
     return {
       upsertRecords: jest.fn(async (records) => { upserts.push(...records); return records.length; }),
-      keysSince: jest.fn(async () => []),
+      lastReadKeys: jest.fn(async () => []),
     };
   }
   const files = {
@@ -355,44 +355,63 @@ describe('syncRestaurantProspects', () => {
     expect(result.files).toMatchObject({ inspection: { failed: true }, new_license: { kept: 1 }, owner_change: { kept: 1 } });
   });
 
-  // Twenty inspections already on file for this fiscal year: visits 9001 to 9020.
-  const ON_FILE = Array.from({ length: 20 }, (_, i) => String(9001 + i));
-  const inspectionsOnFile = (keys) => jest.fn(async (kind) => (kind === 'inspection' ? keys : []));
+  // The last read kept twenty inspections: visits 9001 to 9020.
+  const LAST_READ = Array.from({ length: 20 }, (_, i) => String(9001 + i));
+  const inspectionsLastRead = (keys) => jest.fn(async (kind) => (kind === 'inspection' ? keys : []));
   const visitsCsv = (keys) => inspCsv(keys.map((visit) => inspRow({ visit })));
 
-  test('a file that shows under 90% of this year\'s rows on file is cut short: it fails and writes nothing', async () => {
+  test('a read that shows under 90% of the rows the last read kept is short: its rows go in and the run fails', async () => {
     store = makeStore();
-    store.keysSince = inspectionsOnFile(ON_FILE);
-    // 17 of the 20 visits on file, and every row whole: a download that stopped early on a row end.
-    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(ON_FILE.slice(0, 17)) });
+    store.lastReadKeys = inspectionsLastRead(LAST_READ);
+    // 17 of the 20 visits, every row whole: a download that stopped early on a row end.
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(LAST_READ.slice(0, 17)) });
     const result = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2026-11-19T15:36:00Z') });
-    expect(store.keysSince).toHaveBeenCalledWith('inspection', '2026-07-01');
-    expect(result.files.inspection).toEqual({ failed: true });
+    expect(store.lastReadKeys).toHaveBeenCalledWith('inspection', '2026-07-01');
+    expect(result.files.inspection).toEqual({ kept: 17, malformed: 0, upserted: 17, short: true });
     expect(result.failures).toBe(1);
-    expect(upserts.some((r) => r.kind === 'inspection')).toBe(false);
+    expect(logger.warn).toHaveBeenCalledWith('[dbpr-prospects] inspection file is short: it shows under 90% of the 20 rows the last read kept');
   });
 
-  test('90% of the rows on file passes, new rows count for nothing, and under 20 on file the check waits', async () => {
+  test('90% of the last read passes, new rows make up for nothing, and under 20 rows the check waits', async () => {
     store = makeStore();
-    store.keysSince = inspectionsOnFile(ON_FILE);
-    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv([...ON_FILE.slice(0, 18), '9101']) });
+    store.lastReadKeys = inspectionsLastRead(LAST_READ);
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv([...LAST_READ.slice(0, 18), '9101']) });
     let result = await svc.syncRestaurantProspects({ fetchText, store });
     expect(result.files.inspection).toEqual({ kept: 19, malformed: 0, upserted: 19 });
-    // New visits never make up for missing ones: 17 known and 5 new still fails.
-    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv([...ON_FILE.slice(0, 17), '9101', '9102', '9103', '9104', '9105']) });
+    // 17 known and 5 new is still short.
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv([...LAST_READ.slice(0, 17), '9101', '9102', '9103', '9104', '9105']) });
     result = await svc.syncRestaurantProspects({ fetchText, store });
-    expect(result.files.inspection).toEqual({ failed: true });
-    store.keysSince = inspectionsOnFile(ON_FILE.slice(0, 19));
+    expect(result.files.inspection).toEqual({ kept: 22, malformed: 0, upserted: 22, short: true });
+    store.lastReadKeys = inspectionsLastRead(LAST_READ.slice(0, 19));
     fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(['9101']) });
     result = await svc.syncRestaurantProspects({ fetchText, store });
     expect(result.files.inspection).toEqual({ kept: 1, malformed: 0, upserted: 1 });
   });
 
+  test('rows the state withdrew fail one run only: the next read compares with the read before it', async () => {
+    // A store that remembers what each read kept, as last_seen_at does.
+    const kept = { inspection: LAST_READ };
+    store = {
+      upsertRecords: jest.fn(async (records) => {
+        if (records.length) kept[records[0].kind] = records.map((r) => r.source_key);
+        return records.length;
+      }),
+      lastReadKeys: jest.fn(async (kind) => kept[kind] || []),
+    };
+    // Visits 9018 to 9020 are withdrawn for good; 9101 is new.
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv([...LAST_READ.slice(0, 17), '9101']) });
+    const first = await svc.syncRestaurantProspects({ fetchText, store });
+    expect(first.files.inspection).toEqual({ kept: 18, malformed: 0, upserted: 18, short: true });
+    const second = await svc.syncRestaurantProspects({ fetchText, store });
+    expect(second.files.inspection).toEqual({ kept: 18, malformed: 0, upserted: 18 });
+    expect(second.failures).toBe(0);
+  });
+
   test('a stored visit whose count was corrected to zero, or that left the area, is still in the file: it passes', async () => {
     store = makeStore();
-    store.keysSince = inspectionsOnFile(ON_FILE);
+    store.lastReadKeys = inspectionsLastRead(LAST_READ);
     // All 20 visits are in the file: 3 now cite nothing and 1 moved out of the area, so 16 still qualify.
-    const rows = ON_FILE.map((visit, i) => {
+    const rows = LAST_READ.map((visit, i) => {
       if (i < 3) return inspRow({ visit, v35: 0 });
       return i === 3 ? inspRow({ visit, county: 'Hillsborough' }) : inspRow({ visit });
     });
@@ -406,11 +425,23 @@ describe('syncRestaurantProspects', () => {
     ['2026-07-01T03:59:00Z', '2025-07-01'], // 11:59 PM on June 30, Eastern
     ['2026-07-01T04:00:00Z', '2026-07-01'],
     ['2027-03-01T15:00:00Z', '2026-07-01'],
-  ])('at %s the rows on file are counted from %s, the fiscal year the files hold', async (now, since) => {
+  ])('at %s the last read is counted from %s, the fiscal year the files hold', async (now, since) => {
     store = makeStore();
     fetchText = makeFetch();
     await svc.syncRestaurantProspects({ fetchText, store, now: new Date(now) });
-    expect(store.keysSince.mock.calls.map(([, day]) => day)).toEqual([since, since, since]);
+    expect(store.lastReadKeys.mock.calls.map(([, day]) => day)).toEqual([since, since, since]);
+  });
+
+  test('a license row with a cell added or lost is malformed; the usual 36 cells and a full 38 load', async () => {
+    store = makeStore();
+    // 37 cells: an extra cell before Secondary Phone Number would move the phone and the license number.
+    const added = licRow({ app: '7002' }).replace('"Sarasota","941-555-0101"', '"Sarasota","X","941-555-0101"');
+    const lost = licRow({ app: '7003' }).replace('"UNIT 3",', ''); // 35 cells
+    const full = `${licRow({ app: '7004' })},"1","1"`; // 38 cells: the two risk levels filled
+    fetchText = makeFetch({ 'newfood.csv': () => licCsv([licRow({ app: '7001' }), added, lost, full]) });
+    const result = await svc.syncRestaurantProspects({ fetchText, store });
+    expect(result.files.new_license).toEqual({ kept: 2, malformed: 2, upserted: 2 });
+    expect(upserts.filter((r) => r.kind === 'new_license').map((r) => r.source_key)).toEqual(['7001', '7004']);
   });
 
   test('a short first row never hides a column: the file loads and the short row is counted', async () => {

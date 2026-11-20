@@ -138,12 +138,16 @@ describe('eachDbprCsvRow', () => {
     expect(mostAhead).toBeLessThan(1000);
   }, 60000);
 
-  test('onRow also gets the count of cells past the header, which csv-parse leaves out of the row', async () => {
+  test('onRow also gets the row\'s cell count and the header\'s: csv-parse leaves the cells past the header out', async () => {
     const seen = [];
-    await eachDbprCsvRow('"A","B","C"\r\n"1","2","3"\r\n"4","5"\r\n"6","7","8","9","10"\r\n', (row, dropped) => {
-      seen.push([row, dropped]);
+    await eachDbprCsvRow('"A","B","C"\r\n"1","2","3"\r\n"4","5"\r\n"6","7","8","9","10"\r\n', (row, width) => {
+      seen.push([row, width]);
     });
-    expect(seen).toEqual([[{ A: '1', B: '2', C: '3' }, 0], [{ A: '4', B: '5' }, 0], [{ A: '6', B: '7', C: '8' }, 2]]);
+    expect(seen).toEqual([
+      [{ A: '1', B: '2', C: '3' }, { cells: 3, columns: 3 }],
+      [{ A: '4', B: '5' }, { cells: 2, columns: 3 }],
+      [{ A: '6', B: '7', C: '8' }, { cells: 5, columns: 3 }],
+    ]);
   });
 
   test('an empty file has no header and no rows; an unclosed quote rejects', async () => {
