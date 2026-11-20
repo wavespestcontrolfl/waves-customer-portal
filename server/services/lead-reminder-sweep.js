@@ -9,7 +9,11 @@
  * they aged out, possibly past its send deadline. So a sweep that hits the page cap remembers where it stopped and the
  * next sweep starts there, the way the parent relevance sweep does (admin-alert-relevance.js resumeAfter, a module
  * variable: a restart starts from the oldest row again). A sweep that reaches the end of the rows starts over.
- * Nothing here row-locks a bell or a lead.
+ *
+ * The stamp waits on notifyAdmin's advisory lock for the bell's dedupe key, the lock a refresh of that bell reads and
+ * rewrites its metadata under; nothing here row-locks a bell or a lead. Just before a push goes, the row must still be
+ * an open bell in the bell feed with exactly the metadata that was stamped: a bell that rang again, moved to Activity
+ * or lost its stamp since then sends nothing.
  */
 
 const db = require('../models/db');
@@ -31,8 +35,7 @@ const safeError = (err) => require('./notification-service').safeErrorSummary(er
 // the reminder reads, each { categories, keyPrefixes? }: a row matches an entry when its category is one of
 // `categories` and, with `keyPrefixes`, its dedupeKey starts with one of them (plain text: no LIKE wildcard in any).
 function candidateQuery({ stamp, match }, since, cursor, pageSize) {
-  const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
-  return excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin' }))
+  return openBell(db('notifications'))
     .where((any) => {
       for (const { categories, keyPrefixes = null } of match) {
         any.orWhere((one) => {
@@ -41,8 +44,6 @@ function candidateQuery({ stamp, match }, since, cursor, pageSize) {
         });
       }
     })
-    .whereNull('done_at')
-    .whereRaw("metadata->'retired' IS NULL")
     .whereRaw(`metadata->>'${stamp}' IS NULL`)
     .where((q) => q.where('created_at', '>', since).orWhereRaw("metadata->>'rungAt' > ?", [since.toISOString()]))
     .modify((q) => { if (cursor) q.whereRaw('(created_at, id) > (?::timestamptz, ?::uuid)', [cursor.createdAt, cursor.id]); })
@@ -51,20 +52,44 @@ function candidateQuery({ stamp, match }, since, cursor, pageSize) {
     .select('id', 'title', 'body', 'link', 'metadata', 'created_at', db.raw('created_at::text AS created_at_token'));
 }
 
-// The one stamp: this row, still open and unchanged since it was read. Returns true when it landed.
-async function stampOnce(stamp, { row, meta }, now) {
-  const landed = await db('notifications')
-    .where({ id: row.id, recipient_type: 'admin' })
+// An admin bell row that is open and in the bell feed: not done, not retired by the relevance sweep, not Activity-only.
+// The scan reads these, and a push is checked against them again just before it goes.
+function openBell(query) {
+  const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
+  return excludeActivityOnlyFromBell(query.where({ recipient_type: 'admin' }))
     .whereNull('done_at')
-    .whereRaw('metadata IS NOT DISTINCT FROM ?::jsonb', [JSON.stringify(meta)])
-    .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [stamp]: now.toISOString() })]) });
-  return Number(landed) === 1;
+    .whereRaw("metadata->'retired' IS NULL");
 }
 
-// Still open just before the push goes. A lookup that fails reads as closed: no push (the bell row stays).
-async function rowStillOpen(id, label) {
+// The row's metadata once `stamp` lands at `now`: what stampOnce writes, and what the dispatch check expects to find.
+const stampedMeta = (stamp, meta, now) => ({ ...meta, [stamp]: now.toISOString() });
+
+// The one stamp: this row, still open and unchanged since it was read. Returns true when it landed. A bell with a
+// dedupe key is stamped under notifyAdmin's advisory lock for that key (notification-service.js dedupeAndInsert): a
+// refresh reads the row and writes its whole metadata back under that lock, so a stamp landing between its read and
+// its write would be overwritten, and the bell could push a second time. With the lock the stamp waits for the
+// refresh, whose new metadata then fails the fence; a refresh after the stamp merges onto it and keeps it.
+async function stampOnce(stamp, { row, meta }, now) {
+  return db.transaction(async (trx) => {
+    if (meta.dedupeKey) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${meta.dedupeKey}`]);
+    const landed = await trx('notifications')
+      .where({ id: row.id, recipient_type: 'admin' })
+      .whereNull('done_at')
+      .whereRaw('metadata IS NOT DISTINCT FROM ?::jsonb', [JSON.stringify(meta)])
+      .update({ metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(stampedMeta(stamp, {}, now))]) });
+    return Number(landed) === 1;
+  });
+}
+
+// Still an open bell in the bell feed just before the push goes and, with `stamped`, still the event that was stamped:
+// its metadata exactly as the stamp left it. A bell that rang again (a fresh form: notifyAdmin advanced rungAt), moved
+// to Activity, or lost its stamp since then sends nothing; its own ring, if any, already reached the phones. A lookup
+// that fails reads as closed: no push (the bell row stays).
+async function rowStillOpen(id, label, stamped = null) {
   try {
-    const stored = await db('notifications').where({ id, recipient_type: 'admin' }).first('done_at');
+    const stored = await openBell(db('notifications').where({ id }))
+      .modify((q) => { if (stamped) q.whereRaw('metadata IS NOT DISTINCT FROM ?::jsonb', [JSON.stringify(stamped)]); })
+      .first('done_at');
     return !!stored && !stored.done_at;
   } catch (err) {
     logger.warn(`[${label}] open check failed for notification ${id}: ${safeError(err)}`);
@@ -72,10 +97,11 @@ async function rowStillOpen(id, label) {
   }
 }
 
-// The push, with the row's own words. alertRowId gives it its own push tag per bell row. `ready` (optional) is asked
-// with a fresh clock just before dispatch, before the open-row read and again after it: false means the reminder's
-// hours, or this item's late window, closed since the sweep began. Never throws.
-async function sendPush({ row, customerId }, label, ready = () => true) {
+// The push, with the row's own words. alertRowId gives it its own push tag per bell row. `stamped` is the row's
+// metadata as the stamp left it (rowStillOpen). `ready` (optional) is asked with a fresh clock just before dispatch,
+// before the open-row read and again after it: false means the reminder's hours, or this item's late window, closed
+// since the sweep began. Never throws.
+async function sendPush({ row, customerId, stamped = null }, label, ready = () => true) {
   try {
     const { triggerNotification } = require('./notification-triggers');
     return await triggerNotification(TRIGGER_KEY, {
@@ -85,7 +111,7 @@ async function sendPush({ row, customerId }, label, ready = () => true) {
       // bellAuthorized: the bell row's writer rang it (bell: true), so the push keeps that answer. pushOnly: the row is
       // not rewritten. adminOnly: nothing goes to a lead, a customer or a technician.
       pushOnly: true, adminOnly: true, bellAuthorized: true,
-      beforePush: async () => ready() && (await rowStillOpen(row.id, label)) && ready(),
+      beforePush: async () => ready() && (await rowStillOpen(row.id, label, stamped)) && ready(),
     });
   } catch (err) {
     logger.warn(`[${label}] push failed for notification ${row.id}: ${safeError(err)}`);
@@ -136,7 +162,7 @@ async function runSweep(kind, { now, pageSize = PAGE_SIZE, clock = () => new Dat
       try {
         if (!(await stampOnce(stamp, item, now))) continue;
         total.sent += 1;
-        sends.push(sendPush(item, label, () => ready() && !expired(item)));
+        sends.push(sendPush({ ...item, stamped: stampedMeta(stamp, item.meta, now) }, label, () => ready() && !expired(item)));
       } catch (err) {
         logger.warn(`[${label}] notification ${item.row.id} not stamped: ${safeError(err)}`);
       }

@@ -53,6 +53,8 @@ jest.mock('../models/db', () => {
     return chain;
   });
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  // The stamp's transaction runs on the same stub.
+  db.transaction = jest.fn(async (work) => work(db));
   return db;
 });
 jest.mock('../services/notification-service', () => ({
@@ -320,6 +322,31 @@ describe('the 15-minute push (no gate)', () => {
     expect(await beforePush()).toBe(false);
   });
 
+  test('the banner goes only while the row is an open bell with exactly the metadata the stamp left', async () => {
+    await run(PUSH_NOW);
+    const { beforePush } = pushes()[0][2];
+    mockState.calls.length = 0;
+    expect(await beforePush()).toBe(true);
+    const [read] = mockState.calls.filter((c) => c.table === 'notifications' && c.verb === 'first');
+    // A bell that rang again (notifyAdmin advanced rungAt), moved to Activity, or lost its stamp no longer matches.
+    const stamped = { ...row('n-1').metadata, [PUSH_STAMP]: PUSH_NOW.toISOString() };
+    expect(read.raws).toContainEqual(['metadata IS NOT DISTINCT FROM ?::jsonb', [JSON.stringify(stamped)]]);
+    expect(read.raws).toContainEqual(["metadata->'retired' IS NULL"]);
+  });
+
+  test('a bell with a dedupe key is stamped under notifyAdmin\'s lock for that key; one without takes no lock', async () => {
+    const db = require('../models/db');
+    mockState.rows = [repeatFormRow('rf-1')];
+    expect(await run(PUSH_NOW)).toMatchObject({ pushed: 1 });
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(db.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:lead-repeat-form:${CUST}`]);
+
+    jest.clearAllMocks();
+    mockState.rows = [row('n-2')];
+    expect(await run(PUSH_NOW)).toMatchObject({ pushed: 1 });
+    expect(db.raw.mock.calls.filter(([sql]) => sql.includes('pg_advisory_xact_lock'))).toEqual([]);
+  });
+
   test('a push provider failure never throws into the sweep', async () => {
     triggerNotification.mockRejectedValueOnce(new Error('provider down'));
     await expect(run(PUSH_NOW)).resolves.toMatchObject({ pushed: 1 });
@@ -511,6 +538,29 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     expect(items[0].bellAt).toEqual(est('09', '09:15'));
     // One batched read of the messages, whatever the batch size; the push clock stays on the bell.
     expect(mockState.calls.filter((c) => c.table === 'emails')).toHaveLength(1);
+  });
+
+  test('only the new-lead trigger\'s bell is the intake bell: an email follow-up\'s draft bell is a later inquiry, however soon it came', async () => {
+    const EMAIL = '55555555-5555-4555-8555-555555555555';
+    // A person answered the call that made the lead at 9:52; the caller's email came in at 9:58, email-actions.js linked
+    // it to that lead and rang its draft bell straight to the bell (notifyAdmin('new_lead'): no triggerKey).
+    mockState.leads = [lead({ created_at: est('09', '09:52'), twilio_call_sid: CALL_SID })];
+    mockState.answered = [{ twilio_call_sid: CALL_SID }];
+    mockState.rows = [{
+      id: 'd-1', category: 'new_lead', title: 'Email follow-up completed a quote request — draft estimate ready', body: 'Pat asked for a quote.',
+      link: '/admin/estimates', created_at: est('09', '10:00'), created_at_token: est('09', '10:00').toISOString(),
+      metadata: { emailId: EMAIL, leadId: LEAD, estimateId: '77777777-7777-4777-8777-777777777777', dedupeKey: `email-lead:draft:${EMAIL}` },
+    }];
+    mockState.emailRows = [{ id: EMAIL, received_at: est('09', '09:58') }];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
+    // Judged from the message, never from the lead's first contact, and the call is not read.
+    expect(loadContactBundles.mock.calls[0][0][0].bellAt).toEqual(est('09', '09:53'));
+    expect(mockState.calls.filter((c) => c.table === 'call_log')).toEqual([]);
+
+    // The trigger's own bell for that lead is its intake bell: the answered call settles it.
+    jest.clearAllMocks();
+    mockState.rows = [row('n-2')];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
   });
 
   test('a bell naming no usable email id reads no message and anchors to the bell', async () => {

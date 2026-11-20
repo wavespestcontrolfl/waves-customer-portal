@@ -11,8 +11,10 @@
  * With the gate on, an OPEN bell of those two kinds that is one business hour old and whose lead nobody has reached
  * since sends ONE phone banner: trigger lead_call_reminder, pushOnly, admin users only, with the row's own title and
  * body led by "Reminder: nobody has reached this lead yet." The row itself is not rewritten. It is stamped
- * metadata.leadCallReminderAt in one statement fenced on the row being open and unchanged since it was read, so a row
- * sends at most one banner, and a close or an emitter's refresh that lands first wins.
+ * metadata.leadCallReminderAt in one statement fenced on the row being open and unchanged since it was read, under
+ * notifyAdmin's lock for the row's dedupe key, so a row sends at most one banner, and a close or an emitter's refresh
+ * that lands first wins. The banner goes only while the row is still an open bell in the bell feed with exactly the
+ * stamped metadata: a bell that rang again or moved to Activity since the stamp sends nothing.
  *
  * - The clock is the follow-up SLA's (followup-sla-watcher.js followUpDueAt): 60 minutes counted only between 8 AM
  *   and 8 PM ET, from the bell's latest event (admin-alert-relevance.js bellEventAt). A 7:30 PM bell is due at

@@ -38,6 +38,8 @@ jest.mock('../models/db', () => {
   });
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.fn = { now: () => 'now()' };
+  // The stamp's transaction runs on the same stub.
+  db.transaction = jest.fn(async (work) => work(db));
   return db;
 });
 jest.mock('../services/notification-service', () => ({

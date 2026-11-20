@@ -605,7 +605,10 @@ address, a visit booked for that customer, or an estimate handed off. A deleted 
 only from 8:00 AM up to 8:00 PM Eastern, and only for bells of the last 24 hours. The banner carries the row's own title,
 body and link, led by "Reminder: nobody has reached this lead yet.", `pushOnly` to admin-role phones with a tag per row.
 The bell row is not rewritten: it is stamped `metadata.leadCallReminderAt` in one statement fenced on the row being open
-and unchanged since it was read, so a row sends at most one banner. The stamp is not a ring, so the 3-day quiet fall-off
+and unchanged since it was read, under notifyAdmin's advisory lock for the row's dedupe key (a refresh rewrites the
+metadata under that lock), so a row sends at most one banner. The banner goes only while the row is still an open bell in
+the bell feed with exactly the stamped metadata: a bell that rang again or moved to Activity since the stamp sends
+nothing. The stamp is not a ring, so the 3-day quiet fall-off
 still counts from the bell's own event. The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead
 still waits for a call") or by unsetting the gate. It sends nothing to a lead.
 
@@ -620,14 +623,16 @@ are not skipped), and nothing is sent outside those hours: they are judged again
 each push goes, and a sweep that runs past 6 PM stops and leaves the rest unstamped. A push more than 2 business hours past due is dropped,
 also when that time passes while the sweep reads (checked again before the stamp, and before and after the push's open-row read). Bells of
 the last 48 hours only. The push is stamped first, fenced on the row being open and unchanged (`metadata.newLeadRealertAt`),
-so a row gets at most one. The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead still waits for a
+under the same dedupe-key lock, so a row gets at most one; as with the call-back reminder, it goes only while the row is
+still an open bell in the bell feed with exactly the stamped metadata. The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead still waits for a
 call"). "Reached" is judged on the lead, whatever the close gates say, and not only after the bell (a "New call lead" bell
 is written minutes after a call a person already answered): a deleted lead, a lead outside the shared open-lead predicate
 (`lead-statuses.js`: status new, contacted, estimate_sent or estimate_viewed, and not converted, so spam, cancelled, won, lost and the
 like are out), or one with an estimate sent or viewed; the call that made the lead answered by a
-person (`answered_by = 'human'`; only for the bell written within 15 minutes of the lead's creation, never for a later bell
-on the same lead, and never for a repeat-form bell); a person's text, call or Gmail send, or a visit booked, for the lead's customer or phone since 5 minutes
-before the bell's inquiry began (the shared contact witnesses, kind `customer`; for the bell written with the lead, the
+person (`answered_by = 'human'`; only for the intake bell: the one the new-lead trigger writes, `metadata.triggerKey`
+`new_lead` as the relevance sweep's `new_lead` class defines it, within 15 minutes of the lead's creation; every other
+bell, such as a repeat form or an email follow-up's draft, is a fresh inquiry); a person's text, call or Gmail send, or a visit booked, for the lead's customer or phone since 5 minutes
+before the bell's inquiry began (the shared contact witnesses, kind `customer`; for the intake bell, the
 earlier of the bell and the lead's `first_contact_at`, else `created_at`; for a later bell, such as a form sent again on a
 lead made days ago, the bell itself); a person's email to the lead's own address since that moment (only one the shared email linkage,
 `resolveEmailCustomerLink`, ties to the lead's customer, or to nobody while no other customer holds the address; a bell that names an email, `metadata.emailId`, counts from that message's `received_at`: a follow-up

@@ -2,7 +2,9 @@
  * The new-lead re-alert against live Postgres, the SQL as the sweep runs it: the shared scan reads every new-lead bell
  * and the repeat-form bell that the real writer rings (lead-webhook.js ringRepeatFormAlert, through the real alert
  * composer and notifyAdmin), and no other kind of lead bell. Each bell nobody reached is stamped once and pushes once;
- * the next sweep sends nothing. The rules themselves are covered by new-lead-reminder.test.js. Synthetic names only.
+ * the next sweep sends nothing. Each push asks its dispatch check against the row as stored, so a bell that rang again or
+ * moved to Activity between its stamp and its push sends nothing. The rules themselves are covered by
+ * new-lead-reminder.test.js. Synthetic names only.
  *
  * The sweep reads the whole notifications table, so every statement of a test runs in one transaction that is rolled
  * back after it (as admin-billing-recovery-postgres.test.js does): a bell anything else left open in this database is
@@ -24,7 +26,18 @@ jest.mock('../models/db', () => {
     },
   });
 });
-jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: false, push: { sent: 1 } })) }));
+// The push provider is a stub, but each push asks its dispatch check (beforePush) as the real dispatcher does, and the
+// answer is recorded. mockBeforeDispatch (optional) changes the bell after its stamp, before that check.
+const mockDispatched = [];
+let mockBeforeDispatch = null;
+jest.mock('../services/notification-triggers', () => ({
+  triggerNotification: jest.fn(async (_key, payload, opts = {}) => {
+    if (mockBeforeDispatch) await mockBeforeDispatch(payload.alertRowId);
+    const go = opts.beforePush ? await opts.beforePush() : true;
+    mockDispatched.push({ id: payload.alertRowId, go });
+    return { bellWritten: false, push: { sent: go ? 1 : 0 } };
+  }),
+}));
 // notifyAdmin sends the bell's own banner after the writer's row lands; this suite needs only the row.
 jest.mock('../services/bell-banners', () => ({ ...jest.requireActual('../services/bell-banners'), bannerAfterWrite: jest.fn() }));
 
@@ -57,6 +70,8 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     require('../services/lead-reminder-sweep').__private.resumeAfter.clear();
+    mockDispatched.length = 0;
+    mockBeforeDispatch = null;
     mockTrx = await db.real.transaction();
   });
   afterEach(async () => {
@@ -103,6 +118,8 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
     return db('notifications').where({ id: written.id }).first();
   };
   const pushesFor = (id) => triggerNotification.mock.calls.filter(([key, payload]) => key === 'lead_call_reminder' && payload.alertRowId === id);
+  // What each push's dispatch check answered for this bell.
+  const dispatchedFor = (id) => mockDispatched.filter((d) => d.id === id).map((d) => d.go);
   const run = async () => {
     const result = await reminder.runNewLeadReminder({ now: NOW, clock: () => NOW });
     await Promise.all(result.sends || []);
@@ -123,6 +140,9 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
     expect(pushesFor(formBell.id)).toHaveLength(1);
     expect(pushesFor(webBell.id)).toHaveLength(1);
     expect(pushesFor(callBell.id)).toHaveLength(0);
+    // The dispatch check finds each row exactly as the stamp left it.
+    expect(dispatchedFor(formBell.id)).toEqual([true]);
+    expect(dispatchedFor(webBell.id)).toEqual([true]);
     for (const bell of [formBell, webBell]) {
       expect(metaOf(await db('notifications').where({ id: bell.id }).first())[reminder.PUSH_STAMP]).toBe(NOW.toISOString());
     }
@@ -133,5 +153,25 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
     await run();
     expect(pushesFor(formBell.id)).toHaveLength(0);
     expect(pushesFor(webBell.id)).toHaveLength(0);
+  }, 180000);
+
+  test('a bell that rang again or moved to Activity between its stamp and its push sends nothing', async () => {
+    const rerung = await leadOnFile();
+    const moved = await leadOnFile();
+    const rerungBell = await repeatFormBell(rerung.customer, rerung.lead, mins(-20));
+    const movedBell = await newLeadBell(moved.lead, mins(-20));
+    // What a fresh form does to the standing bell (notifyAdmin's ringing refresh advances rungAt), and what routing to
+    // Claude's queue does (feed activity), landing after the stamp and before the push.
+    const changes = { [rerungBell.id]: { rungAt: mins(-1).toISOString() }, [movedBell.id]: { feed: 'activity' } };
+    mockBeforeDispatch = async (id) => {
+      if (changes[id]) await db('notifications').where({ id }).update({ metadata: db.raw('metadata || ?::jsonb', [JSON.stringify(changes[id])]) });
+    };
+    await run();
+    expect(dispatchedFor(rerungBell.id)).toEqual([false]);
+    expect(dispatchedFor(movedBell.id)).toEqual([false]);
+    // Both keep their stamp: at most one push per bell (a ring reaches the phones itself).
+    for (const bell of [rerungBell, movedBell]) {
+      expect(metaOf(await db('notifications').where({ id: bell.id }).first())[reminder.PUSH_STAMP]).toBe(NOW.toISOString());
+    }
   }, 180000);
 });
