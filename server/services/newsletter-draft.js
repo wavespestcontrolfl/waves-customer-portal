@@ -2039,6 +2039,12 @@ function lockedEventOccurrences(events) {
 }
 
 async function persistNewsletterDraft({ draft, prompt, newsletterType, knex = db }) {
+  // This writer saves no audience plan, and a Waves Pest Insider send goes
+  // out only with one (audienceRefusal in newsletter-sender.js): it refuses
+  // the type rather than save an issue that could never be sent.
+  if (newsletterType === 'pest-insider-monthly') {
+    throw new Error('a Waves Pest Insider issue needs its planned audience, which this draft writer does not save');
+  }
   // Generate slug only at persistence time. This lets callers do paid/network
   // generation before opening a short advisory-locked DB transaction.
   const slug = generateSlug(draft.subject);

@@ -15,7 +15,7 @@ jest.mock('../services/email-division/fact-register', () => ({
 }));
 
 const db = require('../models/db');
-const { createNewsletterDraft } = require('../services/newsletter-draft');
+const { createNewsletterDraft, persistNewsletterDraft } = require('../services/newsletter-draft');
 
 const STOP = new Error('stop after the prompt is built');
 
@@ -77,5 +77,18 @@ describe('Pest Insider draft grounding', () => {
     })).rejects.toThrow(/fact register is empty/);
 
     expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('the draft writer refuses a Waves Pest Insider issue: it saves no planned audience, and the sender sends none without one', async () => {
+    const knex = jest.fn();
+
+    await expect(persistNewsletterDraft({
+      draft: { subject: 'Waves Pest Insider', htmlBody: '<p>Body</p>', textBody: 'Body' },
+      prompt: 'Pest Insider.',
+      newsletterType: 'pest-insider-monthly',
+      knex,
+    })).rejects.toThrow(/planned audience/);
+
+    expect(knex).not.toHaveBeenCalled();
   });
 });
