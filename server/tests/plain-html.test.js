@@ -60,15 +60,15 @@ describe('plainPage', () => {
     for (const html of ['<span>x</span>', '<p>x</p>', '<td="x">', '<td\u00c1>x', '</title>']) expect(plain(html)).toBeNull();
   });
 
-  test('an element that changes how a browser reads what follows it, or whose content it does not show, gives null', () => {
+  test('an element that changes how a browser reads what follows it, whose content it does not show, or that sets the direction of its text gives null', () => {
     const names = ['textarea', 'template', 'svg', 'math', 'select', 'xmp', 'noscript', 'iframe', 'noembed', 'noframes',
-      'plaintext', 'frameset', 'details', 'dialog', 'datalist', 'rp', 'audio', 'canvas', 'object', 'video'];
+      'plaintext', 'frameset', 'details', 'dialog', 'datalist', 'rp', 'audio', 'canvas', 'object', 'video', 'bdi', 'bdo'];
     // Even when the list allows it: a browser reads the <td> in each as text, by other rules, or not at all.
     const all = new Set([...TAGS, ...names]);
     for (const name of names) expect(plainPage(`<table><tr><${name}><td>35A-02-8</${name}></table>`, all)).toBeNull();
   });
 
-  test('a start tag that can hide its element gives null: the hidden or popover attribute, or a style attribute that can hide', () => {
+  test('a start tag that can hide its element or reorder its text gives null: hidden, popover, a dir other than ltr, or such a style', () => {
     const hiding = ['<td hidden>Callback</td>', '<td HIDDEN="">x', '<td popover>x', '<td style="display:none">x',
       '<td style="color:red; DISPLAY : none">x', '<td style="display:/**/none">x', '<td style="display&#58;none">x',
       "<td style='visibility: hidden'>x", '<td style=visibility:collapse>x', '<td style="content-visibility: hidden">x',
@@ -77,7 +77,10 @@ describe('plainPage', () => {
       // An unquoted url() keeps a "/*" as part of its address, and a quoted one is a string: neither opens a comment.
       '<td style="background:url(/icons/*/dot.png); display:none">x', "<td style='background: url(\"a)b\"); display: none'>x",
       // In an attribute, a reference without its ";" before a letter, a digit or "=" stays as written: no quote opens.
-      '<td style="font-family: &quotA; display: none">x', '<td style="font-family: &quot=x; display: none">x'];
+      '<td style="font-family: &quotA; display: none">x', '<td style="font-family: &quot=x; display: none">x',
+      // A browser can show a cell's text in another order than it is written.
+      '<td dir=rtl>x', '<td DIR="Auto">x', '<td style="direction: rtl">x', '<td style="unicode-bidi: bidi-override">x',
+      '<td style="direction: var(--d)">x'];
     for (const cell of hiding) expect(plain(`<table><tr><td>Routine</td>${cell}</table>`)).toBeNull();
     // Other styles read as before; a string or a comment is not a declaration, and a comment parts two words; an end
     // tag's attributes do nothing.
@@ -86,7 +89,10 @@ describe('plainPage', () => {
       // "-url(" is a function, not a url(): its "/*" opens a comment. A line break does not end a declaration.
       + '<td style="x: -url(/*); display: none; y: */; display: block">C<td style="color: red\n display: none">D'
       // A whole legacy reference before a space is decoded in an attribute too: these quotes hold the declaration.
-      + '<td style="font-family: &quot x; display: none &quot;">G')).toBe('<td>A</td><td>B<td>C<td>D<td>G');
+      + '<td style="font-family: &quot x; display: none &quot;">G'
+      // Left to right is the order a browser shows by default, and a custom property sets nothing by itself.
+      + '<td dir=LTR style="direction: ltr; unicode-bidi: normal; --display: none; --visibility: hidden">H'))
+      .toBe('<td>A</td><td>B<td>C<td>D<td>G<td>H');
     // Each declaration is read once: a long style with no ";" reads quickly.
     const started = Date.now();
     expect(plain(`<td style="${'display:'.repeat(40000)}">E`)).toBe('<td>E');
@@ -94,7 +100,7 @@ describe('plainPage', () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
-  test('a style sheet gives null when a rule in it can hide an element of the page', () => {
+  test('a style sheet gives null when a rule in it can hide an element of the page or reorder its text, and so does a link to one', () => {
     const hiding = ['<style>td.c { display: none }</style><td class="a c">x', '<style>.Banner{visibility:hidden}</style><td class=BANNER>x',
       '<style>#Main { display: none }</style><td id=main>x', '<style>.banner { display: none }</style><td class="b&#97;nner">x',
       // A selector of a type name only, a list part, a pseudo-class or "*" may match any element.
@@ -110,13 +116,28 @@ describe('plainPage', () => {
       '<style>td::after { content: "/*" } td.c { display: none } /* " */</style><td class=c>x',
       '<style>/* " */ td.c { display: none } /* " */</style><td class=c>x',
       // A script's, a style's and the title's class and id names count too.
-      '<style>.marker + table { display: none }</style><script class=marker></script><table><tr><td>x</table>'];
+      '<style>.marker + table { display: none }</style><script class=marker></script><table><tr><td>x</table>',
+      '<style>td { direction: rtl }</style><td>x'];
     for (const cell of hiding) expect(plain(`<table><tr><td>Routine</td>${cell}</table>`)).toBeNull();
     // A hiding rule whose selector names a class or an id no element has hides nothing (the state's pages hold two);
     // a sheet's "<!--" and "-->" are no part of a selector, and a string or a comment is not a declaration.
     expect(plain('<style type="text/css"><!-- .leftNav {display:none;} @media print { .banner {display:none;} -->\r\n'
-      + 'td { font-size: 13px; content: "display: none" } /* td { display: none } */</style><td class="list" id=x>A'))
-      .toBe('<td>A');
+      + 'td { font-size: 13px; content: "display: none"; --display: none; unicode-bidi: normal } /* td { display: none } */'
+      + '</style><td class="list" id=x>A')).toBe('<td>A');
+    // A link can load a style sheet this cannot read; a link to an icon loads none.
+    const withLink = new Set([...TAGS, 'link']);
+    expect(plainPage('<link rel="Alternate StyleSheet" href="a.css"><table><tr><td>x</table>', withLink)).toBeNull();
+    expect(plainPage('<link rel=icon href=i.png><td>A', withLink)).toBe('<link><td>A');
+  });
+
+  test('a run of text that holds a right-to-left letter or a direction control gives null: a browser can show it in another order', () => {
+    // "\u202e8-20-A53" shows as "35A-02-8".
+    const texts = ['\u202e8-20-A53', '&#x202E;8-20-A53', '35A-02-8&rlm;', '\u2067x\u2069', '\u202ax\u202c', '\u061cx',
+      '\u05d0 35A-02-8', '&#1488;', '\u0627', '\u0663', '\ufb1d', '\ufefc', '\u{10900}', '\u{1e900}'];
+    for (const text of texts) expect(plain(`<table><tr><td>A</td><td>${text}</table>`)).toBeNull();
+    expect(plain('<td>A</td>\u05d0')).toBeNull();
+    // The left-to-right mark changes no order on a page without right-to-left text.
+    expect(plain('<td>35A-02-8&lrm;')).toBe('<td>35A-02-8\u200e');
   });
 
   test('a name of a letter, then letters or digits, is kept when the list allows it (h1 to h6)', () => {

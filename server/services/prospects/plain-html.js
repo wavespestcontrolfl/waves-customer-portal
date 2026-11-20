@@ -11,16 +11,23 @@
  * reference. A reader that splits it on its tags reads the tokens a browser reads: a ">" inside a quoted attribute
  * value, a "<td>" inside a comment or a script, or a script closed by "</script >" cannot add, end or hide a cell. How
  * a browser then builds its tree from the tokens (an end tag it implies, text it moves out of a table) is the
- * reader's to check. plainPage returns null when it cannot rebuild the page that way, or when the page hides content:
+ * reader's to check. plainPage returns null when it cannot rebuild the page that way, or when the page can hide
+ * content or show text in another order than it is written:
  * - a tag whose name (a letter, then letters or digits: h1 too) is not in `tags`;
- * - an element that changes how a browser reads what follows it, or whose content a browser does not show
- *   (REFUSED_ELEMENTS: a template, a textarea, an svg, a select, a closed details), even when `tags` allows it;
- * - a start tag with the hidden or popover attribute, or a style attribute that can hide it (a display, visibility or
- *   content-visibility declaration whose value is none, hidden, collapse or a function such as var()), or a style
- *   sheet with such a declaration in a rule whose selector can match an element of the page (canMatch). A CSS escape
- *   or an import, which can spell or load any style, counts as one. Other ways a style can hide text (a size, a
- *   colour, a position, an opacity) are not read, and neither is what a script does when it runs: the source's own
- *   styles and scripts must not hide or add what its reader needs;
+ * - an element that changes how a browser reads what follows it, whose content a browser does not show, or that sets
+ *   the direction of its text (REFUSED_ELEMENTS: a template, a textarea, an svg, a select, a closed details, a bdo),
+ *   even when `tags` allows it;
+ * - a start tag with the hidden or popover attribute, a dir other than ltr, or a style attribute that can hide it or
+ *   reorder its text (a display, visibility or content-visibility declaration whose value is none, hidden, collapse
+ *   or a function such as var(); a direction other than ltr; a unicode-bidi other than normal); a style sheet with
+ *   such a declaration in a rule whose selector can match an element of the page (canMatch); or a link to a style
+ *   sheet. A CSS escape or an import, which can spell or load any style, counts as such a declaration. Other ways a
+ *   style can hide or change text (a size, a colour, a position, an opacity, a transform, a font, generated content)
+ *   are not read, and neither is what a script does when it runs: the source's own styles and scripts must not hide
+ *   or add what its reader needs;
+ * - a run of text that holds a right-to-left letter (Hebrew, Arabic and the like) or a direction control other than
+ *   the left-to-right mark (RIGHT_TO_LEFT_RE). Without them, and without the dir, direction, unicode-bidi and bdo
+ *   above, a browser shows text in the order it is written;
  * - a script that holds "<script": after "<!--" in a script, that makes the script run past its first end tag;
  * - a page that ends inside a tag, a comment, a doctype, a script, a style or the title.
  *
@@ -50,12 +57,13 @@ function skip(html, i, keep) {
 const TEXT_ELEMENTS = new Set(['script', 'style', 'title']);
 // Elements of which a tag gives null, whatever `tags` allows. Some change how a browser reads what follows them: their
 // content is text (textarea, xmp, iframe, noembed, noframes, noscript, plaintext), a template's, or another
-// language's (svg, math), or read by other rules (select, frameset). The others hold content a browser does not show:
-// a closed details (all but its summary), a closed dialog, a datalist, a ruby fallback (rp), and the fallback content
-// of audio, canvas, object and video.
+// language's (svg, math), or read by other rules (select, frameset). Some hold content a browser does not show: a
+// closed details (all but its summary), a closed dialog, a datalist, a ruby fallback (rp), and the fallback content
+// of audio, canvas, object and video. A bdi or a bdo sets the direction of its text.
 const REFUSED_ELEMENTS = new Set(['frameset', 'iframe', 'math', 'noembed', 'noframes', 'noscript', 'plaintext',
   'select', 'svg', 'template', 'textarea', 'xmp',
-  'audio', 'canvas', 'datalist', 'details', 'dialog', 'object', 'rp', 'video']);
+  'audio', 'canvas', 'datalist', 'details', 'dialog', 'object', 'rp', 'video',
+  'bdi', 'bdo']);
 
 // The attributes of a tag whose attributes start at `i`, and the index just past the ">" that ends it, or null when
 // the page ends first. Each attribute is a name (its first character may be "=", and a quote or a "<" in it is part
@@ -94,10 +102,11 @@ function readAttributes(html, i) {
 // can spell any style, so a style that holds a backslash is not read this way: it counts as one that can hide.
 const CSS_SKIP_RE = /\/\*[\s\S]*?(?:\*\/|$)|"[^"\n\r\f]*"?|'[^'\n\r\f]*'?|(?<![-\w\u0080-\uffff])url\(\s*(?=[^\s"'])[^)]*(?:\)|$)/gi;
 const flatCss = (css) => css.replace(CSS_SKIP_RE, (skipped) => (skipped[0] === '/' ? ' ' : '""')).replace(/<!--|-->/g, ' ');
-// Whether one declaration (a run of a style's flat text between ";", "{" and "}") can hide its element: a property
-// whose name ends in display or visibility (content-visibility too) with a value of none, hidden or collapse, or with
-// a function (var(), attr()), which can stand for any value. Each run is read once, so no style can make it slow.
-const HIDING_RE = /^\s*[-\w]*(?:display|visibility)\s*:[\s\S]*(?:none|hidden|collapse|\()/i;
+// Whether one declaration (a run of a style's flat text between ";", "{" and "}") can hide its element or reorder its
+// text: display, visibility or content-visibility with a value of none, hidden or collapse, or with a function (var(),
+// attr()), which can stand for any value; direction with any value but ltr; unicode-bidi with any value but normal.
+// A custom property (--display) sets nothing by itself. Each run is read once, so no style can make it slow.
+const HIDING_RE = /^\s*(?:(?:display|visibility|content-visibility)\s*:[\s\S]*(?:none|hidden|collapse|\()|direction\s*:(?!\s*ltr\b)|unicode-bidi\s*:(?!\s*normal\b))/i;
 const hidingStyle = (css) => css.includes('\\') || flatCss(css).split(/[;{}]/).some((run) => HIDING_RE.test(run));
 // An attribute value with its character references decoded as a browser decodes them in an attribute: as in text
 // (decodeHTML), except that a named reference without its ";" is kept as written unless it is a whole legacy name
@@ -106,10 +115,13 @@ const hidingStyle = (css) => css.includes('\\') || flatCss(css).split(/[;{}]/).s
 const decodeAttribute = (value) => decodeHTML(value.replace(/&([A-Za-z0-9]+)(?=([;=]?))/g, (reference, name, next) => (
   (next === ';' && Object.hasOwn(REFERENCE_NAMES, name)) || (next === '' && Object.hasOwn(LEGACY_REFERENCE_NAMES, name))
     ? reference : `&amp;${name}`)));
-// Whether a start tag's attributes hide its element: hidden or popover (shown only once a script opens it), or a
-// style attribute that can (hidingStyle), read with its character references decoded (decodeAttribute).
-const hides = (attributes) => attributes.some(({ name, value }) => name === 'hidden' || name === 'popover'
-  || (name === 'style' && hidingStyle(decodeAttribute(value))));
+// Whether a start tag of `element` can hide its element or reorder its text: hidden or popover (shown only once a
+// script opens it), a dir other than ltr, a style attribute that can (hidingStyle), or, on a link, a rel that loads a
+// style sheet (one this cannot read). Each value is read with its character references decoded (decodeAttribute).
+const hides = (element, attributes) => attributes.some(({ name, value }) => name === 'hidden' || name === 'popover'
+  || (name === 'dir' && decodeAttribute(value).toLowerCase() !== 'ltr')
+  || (name === 'style' && hidingStyle(decodeAttribute(value)))
+  || (element === 'link' && name === 'rel' && decodeAttribute(value).toLowerCase().split(/[\t\n\f\r ]+/).includes('stylesheet')));
 // The class and id names of a start tag: ".name" for each class and "#name" for its id, in lower case (a page in
 // quirks mode matches them in any case).
 const namesOf = (attributes) => attributes.flatMap(({ name, value }) => {
@@ -183,7 +195,7 @@ function readTag(html, i, page) {
     return close && { text: '', end: close.end };
   }
   // A browser ignores an end tag's attributes.
-  if (REFUSED_ELEMENTS.has(known) || !page.tags.has(known) || (!endTag && hides(read.attributes))) return null;
+  if (REFUSED_ELEMENTS.has(known) || !page.tags.has(known) || (!endTag && hides(known, read.attributes))) return null;
   return { text: endTag ? `</${known}>` : `<${known}>`, end: read.end };
 }
 
@@ -203,9 +215,17 @@ function readToken(html, i, page) {
   return { text: '&lt;', end: i + 1 };
 }
 
+// A right-to-left letter (Hebrew, Arabic and every other such script, with their digits: Unicode's right-to-left
+// blocks) or a direction control other than the left-to-right mark. Text that holds one can be shown in another order
+// than it is written; text that holds none, on a page with no dir, direction, unicode-bidi or bdo, cannot.
+const RIGHT_TO_LEFT_RE = /[\u0590-\u08ff\u200f\u202a-\u202e\u2066-\u2069\ufb1d-\ufdff\ufe70-\ufefe\u{10800}-\u{10fff}\u{1e800}-\u{1efff}]/u;
+
 // A run of text between tokens, its character references decoded as a browser decodes them (a reference never runs
-// past a "<"), then "&", "<" and ">" written back as references.
-const plainText = (text) => decodeHTML(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// past a "<"), then "&", "<" and ">" written back as references; or null when it holds a RIGHT_TO_LEFT_RE character.
+function plainText(text) {
+  const decoded = decodeHTML(text);
+  return RIGHT_TO_LEFT_RE.test(decoded) ? null : decoded.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
 
 function plainPage(html, tags) {
   const source = String(html ?? '');
@@ -214,24 +234,27 @@ function plainPage(html, tags) {
   let i = 0;
   for (let at = source.indexOf('<'); at >= 0; at = source.indexOf('<', i)) {
     const token = readToken(source, at, page);
-    if (!token) return null;
-    out += plainText(source.slice(i, at)) + token.text;
+    const text = plainText(source.slice(i, at));
+    if (!token || text === null) return null;
+    out += text + token.text;
     i = token.end;
   }
   // A style sheet applies to the whole page, so it is judged once every element's names are known.
   if (page.sheets.some((css) => sheetCanHide(css, page.names))) return null;
-  return out + plainText(source.slice(i));
+  const rest = plainText(source.slice(i));
+  return rest === null ? null : out + rest;
 }
 
 // Inline formatting tags: a browser shows the text on both sides of one as one run, so "35A-<b>02</b>-8" reads
 // "35A-02-8". Any other tag (a cell, a row, a paragraph, a line break, an image) parts the text around it.
-const INLINE_TAGS = new Set(['a', 'abbr', 'b', 'bdi', 'bdo', 'big', 'cite', 'code', 'data', 'dfn', 'em', 'font', 'i',
-  'kbd', 'mark', 's', 'samp', 'small', 'span', 'strike', 'strong', 'sub', 'sup', 'time', 'tt', 'u', 'var', 'wbr']);
+const INLINE_TAGS = new Set(['a', 'abbr', 'b', 'big', 'cite', 'code', 'data', 'dfn', 'em', 'font', 'i', 'kbd', 'mark',
+  's', 'samp', 'small', 'span', 'strike', 'strong', 'sub', 'sup', 'time', 'tt', 'u', 'var', 'wbr']);
 
 // Characters a browser draws as nothing that join or shape no glyph: the soft hyphen, the zero-width space, the
-// direction marks, embeddings and isolates, the word joiner and the invisible operators, and the byte-order mark.
-// The joiners (U+200C, U+200D) are not among them: they shape what a browser shows, such as an emoji sequence.
-const INVISIBLE_RE = /[\u00ad\u200b\u200e\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+// left-to-right mark (plainPage refuses the other direction controls), the word joiner and the invisible operators,
+// and the byte-order mark. The joiners (U+200C, U+200D) are not among them: they shape what a browser shows, such as
+// an emoji sequence.
+const INVISIBLE_RE = /[\u00ad\u200b\u200e\u2060-\u2064\ufeff]/g;
 
 // The text a browser shows for a part of a page plainPage rebuilt: an inline tag out with nothing in its place, any
 // other tag a space, the references decoded, the INVISIBLE_RE characters taken out (so "Callba&shy;ck" reads
