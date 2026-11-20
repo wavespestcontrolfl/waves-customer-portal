@@ -36,39 +36,38 @@ const phoneText = (phone) => (/^\d{10}$/.test(phone || "") ? `(${phone.slice(0, 
 // At 1100 px and under the table shows each restaurant as a stacked record (the shared records layout): counts read left there.
 const COUNT_CELL = "align-middle max-[1100px]:text-left";
 
-// The line counts the two reasons a full read of the license files proves: new restaurants and new owners. It gives no
-// pest count: an inspection shows only once its report has been read, so a count of them would say nothing about the
-// period. Pest rows show in the list as their reports are read.
-export function summaryText(data) {
-  const { counts, from, through } = data;
-  return `${plural(counts.new_restaurant, "new restaurant")} and ${plural(counts.new_owner, "new owner")} from ${shortDay(from)} to ${shortDay(through)}.`;
-}
-
 const readDay = (value) => formatETDate(value, { month: "short", day: "numeric", year: "numeric" });
 
-// readAt is the weekly job's last run that read all three state files without a failure.
-export function readText(readAt) {
-  return readAt ? `The state files were last read on ${readDay(readAt)}.` : "";
+// The line counts the two reasons a full read of the license files proves: new restaurants and new owners. The period
+// runs to today, but the list knows only what the last full read found (readAt: the weekly job's last run that read all
+// three state files without a failure), so the counts name that read. It gives no pest count: an inspection shows only
+// once its report has been read, so a count of them would say nothing about the period. Pest rows show in the list as
+// their reports are read.
+export function summaryText(data) {
+  const { counts, from, through, readAt } = data;
+  return `${plural(counts.new_restaurant, "new restaurant")} and ${plural(counts.new_owner, "new owner")} from ${shortDay(from)} to ${shortDay(through)}, as of the state files read on ${readDay(readAt)}.`;
 }
 
-// While a weekly run is under way (readingSince), or after one that did not finish (readFailedAt), the job has
+// While a weekly run has not finished (readUnfinishedSince), or after one failed (readFailedAt), the job may have
 // committed some files and not others: the rows may mix two reads.
 export function stateText(data) {
   const full = `The state files were last read in full on ${readDay(data.readAt)}.`;
-  if (data.readingSince) return `The state files are being read now, so this list may be missing restaurants. ${full}`;
-  return `The weekly read on ${readDay(data.readFailedAt)} did not finish, so this list may be missing restaurants. ${full}`;
+  if (data.readUnfinishedSince) {
+    return `The weekly read that started on ${readDay(data.readUnfinishedSince)} has not finished, so this list may be missing restaurants. ${full}`;
+  }
+  return `The weekly read on ${readDay(data.readFailedAt)} failed, so this list may be missing restaurants. ${full}`;
 }
 
-// The line above the list. Before the first run that read all three files (readAt null), while a run is under way
-// (readingSince) or after one that did not finish (readFailedAt), the rows may come from one file or mix two reads:
-// counts would claim what the state has not answered, so the line says the list may be missing restaurants. The counts cover the whole period; the list stops
-// at its newest 1,000 rows, and then says so.
+// The line above the list. Before the first run that read all three files (readAt null), while a run has not finished
+// (readUnfinishedSince) or after one failed (readFailedAt), the rows may come from one file or mix two reads: counts
+// would claim what the state has not answered, so the line says the list may be missing restaurants. The counts cover
+// the whole period; the list stops at its newest 1,000 rows, and then says so.
 export function headlineText(data) {
   if (!data.readAt) return "Not every state file has been read yet, so this list may be missing restaurants.";
-  if (data.readingSince || data.readFailedAt) return stateText(data);
+  if (data.readUnfinishedSince || data.readFailedAt) return stateText(data);
   const total = data.counts.new_restaurant + data.counts.new_owner + data.counts.pest_finding;
   const cut = data.rows.length < total ? `The list shows the newest ${countText(data.rows.length)}.` : "";
-  return [summaryText(data), readText(data.readAt), cut].filter(Boolean).join(" ");
+  return [summaryText(data), cut].filter(Boolean).join(" ");
 }
 
 // One request per period. A late answer for a period the owner already left is dropped.

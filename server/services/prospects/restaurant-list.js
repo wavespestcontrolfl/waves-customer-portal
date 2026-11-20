@@ -26,8 +26,6 @@ const ROW_LIMIT = 1000;
 // The weekly job's job_health row (services/scheduler.js runs it under this name). Its last success is the last run that
 // read all three files without a failure, whether or not it kept a row; a failed run leaves the last good read.
 const SYNC_JOB = 'restaurant-prospect-sync';
-// A run longer than this that never finished died (a deploy, a crash): a weekly run reads three files in minutes.
-const READ_RUN_MAX_MS = 2 * 60 * 60 * 1000;
 
 // A calendar day moved by whole days, with the shared helpers: noon UTC is the same day in Eastern time.
 const shiftDay = (day, days) => dateOnlyString(addETDays(dateOnlyAtNoonUtc(day), days));
@@ -58,31 +56,34 @@ function toRow(row, newSince) {
   };
 }
 
-// The weekly job's state from its job_health row. readAt: its last good run's end. A run started after the last finish
-// is under way (readingSince) while it is younger than READ_RUN_MAX_MS; older, it died, and counts as failed. A
-// finished run failed when it finished after the last success: a success writes last_finished_at and last_success_at
-// with one value (utils/cron-lock.js). While a run is under way, readFailedAt still names an earlier failure.
-function readState(health, now) {
+// The weekly job's state from its job_health row (utils/cron-lock.js writes it). readAt: the end of its last good run.
+// readUnfinishedSince: the start of a run that has not finished (it started after the last finish). cron-lock settles
+// a run a deploy or a crash killed as failed within about 15 minutes (settleDeadRunningJobs, at boot and every 15
+// minutes), so an unfinished run is nearly always under way; the line claims only that it has not finished.
+// readFailedAt: the end of the latest finished run, if it failed: a success writes last_finished_at and
+// last_success_at with one value, so a later finish is a failure (a settled dead run too). While a run has not
+// finished, readFailedAt still names an earlier failure.
+function readState(health) {
   const at = (value) => (value ? new Date(value) : null);
+  const iso = (date) => (date ? date.toISOString() : null);
   const success = at(health && health.last_success_at);
   const finish = at(health && health.last_finished_at);
   const start = at(health && health.last_started_at);
-  const started = start && (!finish || start > finish) ? start : null;
-  const reading = started && now.getTime() - started.getTime() < READ_RUN_MAX_MS ? started : null;
-  let failed = null;
-  if (started && !reading) failed = started;
-  else if (finish && (!success || finish > success)) failed = finish;
-  const iso = (date) => (date ? date.toISOString() : null);
-  return { readAt: iso(success), readingSince: iso(reading), readFailedAt: iso(failed) };
+  return {
+    readAt: iso(success),
+    readUnfinishedSince: iso(start && (!finish || start > finish) ? start : null),
+    readFailedAt: iso(finish && (!success || finish > success) ? finish : null),
+  };
 }
 
 /**
  * The list for the last `days` days by the row's own date (a license's approval day, an inspection's day), Eastern,
  * today included; newest first, at most ROW_LIMIT rows. counts cover the whole period, past the cap too. readAt,
- * readingSince and readFailedAt are the weekly job's state (readState): while a run is under way, or after one failed,
- * the rows may mix two reads, since the job commits each file on its own. The rows and the state come from one
- * snapshot (a read-only REPEATABLE READ transaction), so a file committed between the two reads cannot split them.
- * @returns {Promise<{ days: number, from: string, through: string, readAt: string|null, readingSince: string|null,
+ * readUnfinishedSince and readFailedAt are the weekly job's state (readState): while a run has not finished, or after
+ * one failed, the rows may mix two reads, since the job commits each file on its own. The rows and the state come from
+ * one snapshot (a read-only REPEATABLE READ transaction), so a file committed between the two reads cannot split them.
+ * @returns {Promise<{ days: number, from: string, through: string, readAt: string|null,
+ *   readUnfinishedSince: string|null,
  *   readFailedAt: string|null, counts: { new_restaurant: number, new_owner: number, pest_finding: number },
  *   rows: object[] }>}
  */
@@ -115,7 +116,7 @@ async function listRestaurants({ days = PERIODS[0], now = new Date() } = {}) {
     new_owner: Number(totals.total_new_owner || 0),
     pest_finding: Number(totals.total_pest_finding || 0),
   };
-  return { days, from, through, ...readState(health, now), counts, rows: list };
+  return { days, from, through, ...readState(health), counts, rows: list };
 }
 
 module.exports = { PERIODS, listRestaurants };

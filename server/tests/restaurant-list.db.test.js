@@ -178,7 +178,7 @@ describeDb('Restaurants list (PostgreSQL)', () => {
   test('before the first file read the answer is empty, with no read time', async () => {
     const result = await listRestaurants({ days: 30, now: NOW });
     expect(result).toEqual({
-      days: 30, from: '2026-10-21', through: '2026-11-19', readAt: null, readingSince: null, readFailedAt: null,
+      days: 30, from: '2026-10-21', through: '2026-11-19', readAt: null, readUnfinishedSince: null, readFailedAt: null,
       counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, rows: [],
     });
   });
@@ -191,25 +191,30 @@ describeDb('Restaurants list (PostgreSQL)', () => {
       .update({ last_started_at: NOW, last_finished_at: NOW, last_status: 'failed', consecutive_failures: 1 });
     const failed = await listRestaurants({ days: 30, now: NOW });
     expect([failed.readAt, failed.readFailedAt]).toEqual([daysAgo(1).toISOString(), NOW.toISOString()]);
-    // A run under way after the failure is named, and the last finished run's outcome stays.
+    // A run that started after the failure and has not finished is named, and the last finished run's outcome stays.
     const start = new Date(NOW.getTime() + 60000);
     await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_started_at: start, last_status: 'running' });
     const reading = await listRestaurants({ days: 30, now: start });
-    expect([reading.readingSince, reading.readFailedAt]).toEqual([start.toISOString(), NOW.toISOString()]);
+    expect([reading.readUnfinishedSince, reading.readFailedAt]).toEqual([start.toISOString(), NOW.toISOString()]);
     // A good run after it clears the failure: it writes the finish and the success with one value.
     const later = new Date(NOW.getTime() + 120000);
     await mockPg('job_health').where({ job_name: SYNC_JOB })
       .update({ last_finished_at: later, last_success_at: later, last_status: 'success', consecutive_failures: 0 });
     const good = await listRestaurants({ days: 30, now: later });
-    expect([good.readAt, good.readingSince, good.readFailedAt]).toEqual([later.toISOString(), null, null]);
-    // The next run starts: under way for two hours; after that it died, and counts as failed from its start.
+    expect([good.readAt, good.readUnfinishedSince, good.readFailedAt]).toEqual([later.toISOString(), null, null]);
+    // The next run starts. It has not finished, however long ago it started: cron-lock settles a dead run as failed
+    // (settleDeadRunningJobs), and then its finish names the failure.
     const next = new Date(later.getTime() + 60000);
     await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_started_at: next, last_status: 'running' });
-    const soon = await listRestaurants({ days: 30, now: new Date(next.getTime() + 119 * 60000) });
-    expect([soon.readingSince, soon.readFailedAt]).toEqual([next.toISOString(), null]);
-    const dead = await listRestaurants({ days: 30, now: new Date(next.getTime() + 121 * 60000) });
-    expect([dead.readingSince, dead.readFailedAt]).toEqual([null, next.toISOString()]);
-    await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_started_at: later });
+    const soon = await listRestaurants({ days: 30, now: next });
+    expect([soon.readAt, soon.readUnfinishedSince, soon.readFailedAt]).toEqual([later.toISOString(), next.toISOString(), null]);
+    const days = await listRestaurants({ days: 30, now: new Date(next.getTime() + 3 * DAY_MS) });
+    expect([days.readUnfinishedSince, days.readFailedAt]).toEqual([next.toISOString(), null]);
+    const settled = new Date(next.getTime() + 15 * 60000);
+    await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_finished_at: settled, last_status: 'failed' });
+    const dead = await listRestaurants({ days: 30, now: settled });
+    expect([dead.readUnfinishedSince, dead.readFailedAt]).toEqual([null, settled.toISOString()]);
+    await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_started_at: later, last_finished_at: later });
     // A failed first run, with no good read before it.
     await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_success_at: null, last_status: 'failed' });
     expect((await listRestaurants({ days: 30, now: NOW })).readFailedAt).toBe(later.toISOString());
