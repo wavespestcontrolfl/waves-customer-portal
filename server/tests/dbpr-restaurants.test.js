@@ -16,6 +16,8 @@ const path = require('path');
 const logger = require('../services/logger');
 const svc = require('../services/prospects/dbpr-restaurants');
 
+const fixture = (name) => fs.readFileSync(path.join(__dirname, 'fixtures', 'dbpr-restaurants', name), 'utf8');
+
 const csvLine = (cells) => cells.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',');
 
 // Inspection extract: leading-space headers like the real file, 58 violation columns.
@@ -212,13 +214,71 @@ describe('parseLicenseRows and the phone rule', () => {
   });
 });
 
+describe('parseInspectionReport', () => {
+  test('a 35A finding is pest evidence; an entry takes the cells after its code in the same row', () => {
+    // The fixture's script holds "35A-99-9" and its footer "12-34-5": neither starts an entry.
+    expect(svc.parseInspectionReport(fixture('report-35a.html'))).toEqual({
+      pestEvidence: true,
+      findings: [
+        { code: '35A-02-8', text: 'High Priority - Live, small flying insects found. Observed 10 small flying insects at the bar & landing on tap spouts.' },
+        { code: '35A-01-8', text: 'High Priority - Rodent droppings in dry storage. **Repeat Violation**' },
+      ],
+    });
+  });
+
+  test('35B only is not pest evidence, and the page footer never lands in a finding', () => {
+    expect(svc.parseInspectionReport(fixture('report-35b.html'))).toEqual({ pestEvidence: false, findings: [] });
+    const lastIs35A = svc.parseInspectionReport(fixture('report-35a.html').replace('08A-05-6', '35A-07-1'));
+    expect(JSON.stringify(lastIs35A)).not.toMatch(/Blair Stone|850-555/);
+  });
+
+  test('a 35A code quoted in a 35B note, or in an HTML comment, is not pest evidence', () => {
+    const quoted = fixture('report-35b.html').replace('back door propped open.', 'back door propped open; see 35A-02-8 at the last visit.');
+    expect(svc.parseInspectionReport(quoted)).toEqual({ pestEvidence: false, findings: [] });
+    const commented = fixture('report-35b.html').replace('<table>', '<table><!-- <tr><td>35A-02-8</td><td>old row</td></tr> -->');
+    expect(svc.parseInspectionReport(commented)).toEqual({ pestEvidence: false, findings: [] });
+  });
+
+  test('a page with no inspection section is a failed read, not "no pests"', () => {
+    expect(svc.parseInspectionReport('<html><body>Service temporarily unavailable</body></html>')).toBeNull();
+    expect(svc.parseInspectionReport('')).toBeNull();
+  });
+
+  test('a page cut short, or one that lists no violation 35, is a failed read, not "no pests"', () => {
+    const whole = fixture('report-35b.html');
+    // Only the heading arrived.
+    expect(svc.parseInspectionReport('<html><body><p>Inspection Information</p></body></html>')).toBeNull();
+    // The page stops before the footer that closes every report.
+    expect(svc.parseInspectionReport(whole.slice(0, whole.indexOf('2601 Blair Stone Road')))).toBeNull();
+    // A whole page, but the violation 35 the file counted is not on it.
+    expect(svc.parseInspectionReport(whole.replace('35B-03-4', '08A-05-6'))).toBeNull();
+  });
+
+  test('finding text is capped, and a NUL character never reaches it', () => {
+    const page = (note) => `<p>Inspection Information</p><table><tr><td>35A-02-8</td><td>${note}</td></tr></table><p>2601 Blair Stone Road</p>`;
+    expect(svc.parseInspectionReport(page('x'.repeat(2000))).findings[0].text).toHaveLength(400);
+    expect(svc.parseInspectionReport(page('ROACH\0ES')).findings[0].text).toBe('ROACH ES');
+  });
+});
+
+describe('reportUrl', () => {
+  test('builds the report address only from digit-only ids', () => {
+    expect(svc.reportUrl('9000001', '5001')).toBe('https://www.myfloridalicense.com/inspectionDetail.asp?InspVisitID=9000001&id=5001');
+    expect(svc.reportUrl('1&x=2', '5001')).toBeNull();
+    expect(svc.reportUrl('1', '../5001')).toBeNull();
+    expect(svc.reportUrl('1', null)).toBeNull();
+  });
+});
+
 describe('syncRestaurantProspects', () => {
   let store;
   let upserts;
   let reads;
   let fetchText;
 
-  function makeStore() {
+  const sleep = jest.fn(async () => {});
+  // pending: what pendingInspections answers (nothing by default, so a file test reads no report page).
+  function makeStore(pending = []) {
     upserts = [];
     reads = {};
     return {
@@ -230,6 +290,9 @@ describe('syncRestaurantProspects', () => {
         if (save) reads[kind] = save;
         return problem;
       }),
+      pendingInspections: jest.fn(async () => pending),
+      saveReport: jest.fn(async () => {}),
+      bumpAttempts: jest.fn(async () => {}),
     };
   }
   const files = {
@@ -259,6 +322,59 @@ describe('syncRestaurantProspects', () => {
     delete process.env.DBPR_PROSPECT_SYNC_DISABLED;
   });
   afterAll(() => { delete process.env.DBPR_PROSPECT_SYNC_DISABLED; });
+
+  test('after the files, reads the reports of the last 45 days, newest first, at most 100, one request a second', async () => {
+    store = makeStore(Array.from({ length: 3 }, (_, i) => ({ id: `id${i}`, source_key: `${9000 + i}`, license_id: '5001' })));
+    fetchText = jest.fn(async (url) => {
+      if (url.includes('inspectionDetail.asp')) return url.includes('9001') ? fixture('report-35b.html') : fixture('report-35a.html');
+      return files[url.split('/').pop()]();
+    });
+    const result = await svc.syncRestaurantProspects({ fetchText, sleep, store, now: NOW });
+    expect(store.pendingInspections).toHaveBeenCalledWith({ cutoff: '2026-10-05', limit: 100 });
+    expect(sleep.mock.calls).toEqual([[1000], [1000]]);
+    expect(store.saveReport.mock.calls.map(([id, r]) => [id, r.pestEvidence])).toEqual([['id0', true], ['id1', false], ['id2', true]]);
+    expect(result).toMatchObject({ failures: 0, reportsRead: 3, reportsFailed: 0, pestFound: 2 });
+    const reportCalls = fetchText.mock.calls.filter(([u]) => u.includes('inspectionDetail.asp'));
+    expect(reportCalls[0]).toEqual(['https://www.myfloridalicense.com/inspectionDetail.asp?InspVisitID=9000&id=5001', 15000]);
+  });
+
+  test('a failed or unreadable report adds one attempt and leaves pest_evidence alone; a bad id makes no request', async () => {
+    store = makeStore([
+      { id: 'a', source_key: '9000', license_id: '5001' },
+      { id: 'b', source_key: '9001', license_id: '5001' },
+      { id: 'c', source_key: '9002; DROP', license_id: '5001' },
+      { id: 'd', source_key: '9003', license_id: '5001' },
+    ]);
+    fetchText = jest.fn(async (url) => {
+      if (url.includes('InspVisitID=9000')) throw new Error('HTTP 503');
+      if (url.includes('InspVisitID=9001')) return '<html>error page</html>';
+      if (url.includes('inspectionDetail.asp')) return fixture('report-35b.html');
+      return files[url.split('/').pop()]();
+    });
+    const result = await svc.syncRestaurantProspects({ fetchText, sleep, store, now: NOW });
+    expect(store.bumpAttempts.mock.calls.map(([id]) => id)).toEqual(['a', 'b', 'c']);
+    expect(store.saveReport.mock.calls.map(([id]) => id)).toEqual(['d']);
+    expect(fetchText.mock.calls.filter(([u]) => u.includes('inspectionDetail.asp'))).toHaveLength(3);
+    expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 3 });
+  });
+
+  test('a failed save is a database failure: it stops the reads, counts once, and costs the row no read attempt', async () => {
+    store = makeStore([{ id: 'a', source_key: '9000', license_id: '5001' }, { id: 'b', source_key: '9001', license_id: '5001' }]);
+    store.saveReport.mockRejectedValueOnce(new Error('connection lost'));
+    fetchText = jest.fn(async (url) => (url.includes('inspectionDetail.asp') ? fixture('report-35b.html') : files[url.split('/').pop()]()));
+    const result = await svc.syncRestaurantProspects({ fetchText, sleep, store, now: NOW });
+    expect(result).toMatchObject({ failures: 1, reportsRead: 0, reportsFailed: 0 });
+    expect(store.saveReport.mock.calls.map(([id]) => id)).toEqual(['a']);
+    expect(store.bumpAttempts).not.toHaveBeenCalled();
+  });
+
+  test('a run where every report read fails is a failed run, and the log carries counts only', async () => {
+    store = makeStore([{ id: 'a', source_key: '9000', license_id: '5001' }, { id: 'b', source_key: '9001', license_id: '5001' }]);
+    fetchText = jest.fn(async (url) => (url.includes('inspectionDetail.asp') ? '<html>a changed page</html>' : files[url.split('/').pop()]()));
+    const result = await svc.syncRestaurantProspects({ fetchText, sleep, store, now: NOW });
+    expect(result).toMatchObject({ failures: 1, reportsRead: 0, reportsFailed: 2 });
+    expect(logger.info.mock.calls.map((c) => c[0]).join('\n')).toMatch(/reportsRead=0 reportsFailed=2 pestFound=0 failures=1 /);
+  });
 
   test('upserts every kind under its own key, once per (kind, source_key)', async () => {
     store = makeStore();

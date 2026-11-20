@@ -16,8 +16,10 @@
  *
  * Violation 35 holds two codes. 35A is pest evidence (roaches, rodents, flies); 35B is outer openings not protected
  * (a door that does not self-close). The CSV has only the count. pest_evidence: NULL = the public report page is not
- * read yet, true = a 35A finding, false = 35B only. The report-page reads that fill it are the next change; until
- * then every inspection stays NULL.
+ * read yet, true = a 35A finding, false = 35B only. After the files, each run reads up to 100 of those pages: the
+ * inspections of the last 45 days still NULL, newest first, one request a second. A page is read by its violation
+ * code cells (a table cell that holds a code alone starts an entry), so a code quoted in a note never counts. A page
+ * that cannot answer adds an attempt; after 3 the row stays NULL.
  *
  * Fail soft: a download, parse or database failure logs a count-only warning and goes into the result object; the
  * sync itself never throws. The scheduler marks a run with failures as failed in job_health. Logs carry counts and
@@ -34,7 +36,7 @@ const { isInServiceAreaCounty } = require('../call-triage-flags');
 const { isExcludedLocality, isExcludedZip } = require('../excluded-localities');
 const { eachDbprCsvRow, defaultFetchText } = require('../commercial-suite-size/dbpr-food-license');
 const { nanpNationalDigits, isValidNanpNumber } = require('../../utils/phone');
-const { etDateString, etCalendarDaysUntil } = require('../../utils/datetime-et');
+const { etDateString, etCalendarDaysUntil, addETDays } = require('../../utils/datetime-et');
 
 const EXTRACT_BASE = 'https://www2.myfloridalicense.com/sto/file_download/extracts/';
 const FILES = {
@@ -68,6 +70,12 @@ const REQUIRED_COLUMNS = {
 const KEY_MAX = 40;
 
 const FILE_TIMEOUT_MS = 60 * 1000;
+const REPORT_BASE = 'https://www.myfloridalicense.com/inspectionDetail.asp';
+const REPORT_TIMEOUT_MS = 15 * 1000;
+const REPORT_GAP_MS = 1000;
+const REPORT_WINDOW_DAYS = 45;
+const REPORT_MAX_PER_RUN = 100;
+const FINDING_TEXT_MAX = 400;
 const REPORT_MAX_ATTEMPTS = 3;
 const UPSERT_CHUNK = 500;
 
@@ -128,8 +136,7 @@ function pickPhone(row) {
 // insert batch).
 const wholeNumber = (v) => (/^\d{1,9}$/.test(String(v || '').trim()) ? Number(String(v).trim()) : null);
 
-// The public report page's address is built from these two ids only (the page reads are the next change), so both
-// must be digits.
+// The public report page's address is built from these two ids only, so both must be digits.
 const ID_RE = /^\d{1,12}$/;
 
 // csv-parse keeps a row cut short, with only the cells it has. Such a row is skipped and counted: stored, it would
@@ -244,6 +251,59 @@ function parseLicenseRows(rows, kind, counts = {}, today = null) {
   return out;
 }
 
+// ── Report page (pure) ──────────────────────────────────────────
+
+const ENTITIES = { '&nbsp;': ' ', '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
+// The state office's street address closes every whole page.
+const PAGE_FOOTER_RE = /2601 Blair Stone Road/;
+const VIOLATION_CODE_RE = /^\d\d[A-Z]?-\d\d-\d$/;
+// A leaf cell (no cell or table inside it), or a row end.
+const CELL_OR_ROW_END_RE = /<td\b[^>]*>((?:(?!<td\b|<\/td>|<table\b)[\s\S])*)<\/td>|<\/tr>/gi;
+
+// Tags out, the six entities the pages use decoded, NUL characters and runs of white space made one space.
+function htmlText(html) {
+  return String(html || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&(?:nbsp|amp|lt|gt|quot|#39);/g, (entity) => ENTITIES[entity])
+    .replaceAll('\0', ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Report page HTML -> { pestEvidence, findings: [{ code, text }] }, or null when the page cannot answer. A page
+ * answers only when it is whole (the state office footer closes it) and lists the violation 35 the file counted (a
+ * 35A or 35B code). An error page, a changed layout or a page cut short is a failed read, retried later, never
+ * "no pests". An entry starts at a table cell that holds a violation code alone and takes the cells after it in
+ * its row, so a code quoted in a note, a comment, a script or the footer never starts one. findings holds the
+ * 35A entries only.
+ */
+function parseInspectionReport(html) {
+  const page = String(html || '').replace(/<!--[\s\S]*?-->|<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ');
+  const whole = htmlText(page);
+  if (!/Inspection Information/.test(whole) || !PAGE_FOOTER_RE.test(whole)) return null;
+  const entries = [];
+  let open = null;
+  for (const match of page.matchAll(CELL_OR_ROW_END_RE)) {
+    if (match[1] === undefined) {
+      open = null; // a row end closes the entry
+      continue;
+    }
+    const cell = htmlText(match[1]);
+    if (VIOLATION_CODE_RE.test(cell)) {
+      open = { code: cell, parts: [] };
+      entries.push(open);
+    } else if (open && cell) {
+      open.parts.push(cell);
+    }
+  }
+  if (!entries.some((entry) => /^35[AB]-/.test(entry.code))) return null;
+  const findings = entries
+    .filter((entry) => /^35A-/.test(entry.code))
+    .map((entry) => ({ code: entry.code, text: entry.parts.join(' ').slice(0, FINDING_TEXT_MAX) }));
+  return { pestEvidence: findings.length > 0, findings };
+}
+
 // ── Store ───────────────────────────────────────────────────────
 
 // One record per (kind, source_key); a repeated key keeps its last copy. PostgreSQL refuses an upsert that names the
@@ -327,7 +387,8 @@ async function settleRead(kind, read, now) {
 
 // ── Weekly job ──────────────────────────────────────────────────
 
-const defaultStore = { upsertRecords, settleRead };
+const defaultStore = { upsertRecords, settleRead, pendingInspections, saveReport, bumpAttempts };
+const defaultSleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 // The row width each file has, as cells minus header names. The inspection file fills every header column. The
 // license files never fill their last two (Base Risk Level, Secondary Risk Level): every row of the 2026-11-20 files
@@ -480,22 +541,73 @@ async function syncFiles(deps, result) {
   }
 }
 
+function reportUrl(visitId, licenseId) {
+  if (!ID_RE.test(String(visitId)) || !ID_RE.test(String(licenseId))) return null;
+  return `${REPORT_BASE}?InspVisitID=${visitId}&id=${licenseId}`;
+}
+
+// The download and the page split only: a failed download or a page that cannot answer returns null (a failed read).
+async function readOneReport(row, deps) {
+  const url = reportUrl(row.source_key, row.license_id);
+  if (!url) return null;
+  try {
+    return parseInspectionReport(await deps.fetchText(url, REPORT_TIMEOUT_MS));
+  } catch {
+    return null;
+  }
+}
+
+// Newest first, at most REPORT_MAX_PER_RUN a run, one request a second. Each result is written as it is read, so a
+// killed run keeps its progress. A failed read adds 1 to detail_attempts and leaves pest_evidence NULL. A database
+// failure is not a failed read: it stops the reads (the caller counts it) and costs the row no attempt.
+async function readReports(deps, result) {
+  const cutoff = etDateString(addETDays(deps.now, -REPORT_WINDOW_DAYS));
+  const pending = await deps.store.pendingInspections({ cutoff, limit: REPORT_MAX_PER_RUN });
+  for (let i = 0; i < pending.length; i += 1) {
+    if (i > 0) await deps.sleep(REPORT_GAP_MS);
+    const report = await readOneReport(pending[i], deps);
+    if (report) {
+      await deps.store.saveReport(pending[i].id, report);
+      result.reportsRead += 1;
+      if (report.pestEvidence) result.pestFound += 1;
+    } else {
+      result.reportsFailed += 1;
+      await deps.store.bumpAttempts(pending[i].id);
+    }
+  }
+  // Every read failing (the site down, or a changed page) is a failed run, not a quiet week. Some failed reads beside
+  // a good one are not.
+  if (result.reportsFailed > 0 && result.reportsRead === 0) {
+    result.failures += 1;
+    logger.warn(`[dbpr-prospects] every report read failed (${result.reportsFailed})`);
+  }
+}
+
 /**
- * The weekly job. Never throws: each file's failure is counted in the result. `deps` is for tests:
- * { fetchText, store, now }.
- * @returns {Promise<{ skipped?: string, failures: number, files: object, elapsedMs: number }>}
+ * The weekly job: the three files, then the report pages. Never throws: each failure is counted in the result.
+ * `deps` is for tests: { fetchText, sleep, store, now }.
+ * @returns {Promise<{ skipped?: string, failures: number, files: object, reportsRead: number,
+ *   reportsFailed: number, pestFound: number, elapsedMs: number }>}
  */
 async function syncRestaurantProspects(deps = {}) {
   const started = Date.now();
-  const result = { failures: 0, files: {}, elapsedMs: 0 };
+  const result = { failures: 0, files: {}, reportsRead: 0, reportsFailed: 0, pestFound: 0, elapsedMs: 0 };
   if (syncDisabled()) return { ...result, skipped: 'disabled' };
-  await syncFiles({ fetchText: defaultFetchText, store: defaultStore, now: new Date(), ...deps }, result);
+  const ctx = { fetchText: defaultFetchText, sleep: defaultSleep, store: defaultStore, now: new Date(), ...deps };
+  await syncFiles(ctx, result);
+  try {
+    await readReports(ctx, result);
+  } catch (err) {
+    result.failures += 1;
+    logger.warn(`[dbpr-prospects] report reads stopped early (${err.code || err.name})`);
+  }
   result.elapsedMs = Date.now() - started;
   const counts = Object.entries(result.files)
     .map(([k, f]) => `${k}=${f.failed ? 'failed' : f.upserted}${READ_FLAGS.filter((flag) => f[flag]).map((flag) => `(${flag})`).join('')}`
       + `${f.malformed ? `(${f.malformed} malformed)` : ''}`)
     .join(' ');
-  logger.info(`[dbpr-prospects] ${counts} failures=${result.failures} ${result.elapsedMs}ms`);
+  logger.info(`[dbpr-prospects] ${counts} reportsRead=${result.reportsRead} reportsFailed=${result.reportsFailed} `
+    + `pestFound=${result.pestFound} failures=${result.failures} ${result.elapsedMs}ms`);
   return result;
 }
 
@@ -505,7 +617,9 @@ module.exports = {
   parseUsDate,
   parseInspectionRows,
   parseLicenseRows,
+  parseInspectionReport,
   pickPhone,
+  reportUrl,
   upsertRecords,
   pendingInspections,
   saveReport,
