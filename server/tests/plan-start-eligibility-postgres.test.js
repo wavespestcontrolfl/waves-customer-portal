@@ -272,6 +272,9 @@ postgres('planStartBlocker (live Postgres)', () => {
       // The key only the accept of a commercial pest estimate writes, with either of its two values (JSONB).
       ['a sold commercial scope with the interior excluded', { service_preferences: JSON.stringify({ exterior_sweep: true, interior_spray: false, commercial_interior_scope: 'excluded' }) }],
       ['a sold commercial scope with the interior included', { service_preferences: JSON.stringify({ exterior_sweep: true, interior_spray: true, commercial_interior_scope: 'included' }) }],
+      // The service label the intake saved on the account itself (lead_service_interest), with no lead and no
+      // estimate that carries it.
+      ['a commercial service label on the account', { lead_service_interest: 'Commercial Pest Control' }],
     ])('%s: commercial', async (_label, change) => {
       expect(await planStartBlocker(trx, (await seedCustomer(change)).id)).toBe('commercial');
     });
@@ -286,8 +289,14 @@ postgres('planStartBlocker (live Postgres)', () => {
       ['empty preferences', {}],
       ['a JSON null', null],
       ['a list', ['commercial_interior_scope']],
+      // A JSON text is a valid jsonb value. The driver returns it as the text itself, not as JSON to parse.
+      ['a JSON text', 'none'],
     ])('service preferences with no sold commercial scope (%s) are not commercial', async (_label, preferences) => {
       expect(await planStartBlocker(trx, (await seedCustomer({ service_preferences: JSON.stringify(preferences) })).id)).toBeNull();
+    });
+
+    test('a home service label on the account is not commercial', async () => {
+      expect(await planStartBlocker(trx, (await seedCustomer({ lead_service_interest: 'Pest Control' })).id)).toBeNull();
     });
 
     test.each([
@@ -470,6 +479,57 @@ postgres('planStartBlocker (live Postgres)', () => {
       })).toBeNull();
     });
 
+    // The estimator keeps its own verdict on the premises with a draft (estimatorEngine.propertyFactsV2). The
+    // category column keeps its default, and nothing else in the payload says commercial.
+    const FACTS = (facts) => ({ estimatorEngine: { propertyFactsV2: { version: 2, shadow: true, facts: { propertySubtype: 'single_family', ...facts } } } });
+    test.each([
+      ['the commercial occupancy class', { occupancyClass: 'commercial', serviceScope: 'unknown' }],
+      ['the scope of a whole commercial building', { occupancyClass: 'unknown', serviceScope: 'entire_commercial_building' }],
+      ['the scope of a commercial parcel with several buildings', { occupancyClass: 'unknown', serviceScope: 'multi_building_commercial_parcel' }],
+      ['the scope of the common area of an association', { occupancyClass: 'unknown', serviceScope: 'association_common_area' }],
+    ])("%s in the estimator's saved property facts, under the default category: commercial", async (_label, facts) => {
+      expect(await blockerFor(async (customer) => {
+        await seedEstimate(customer);
+        const estimate = await seedEstimate(customer, { estimate_data: FACTS(facts) });
+        expect(estimate.category).toBe('RESIDENTIAL');
+      })).toBe('commercial');
+    });
+
+    test.each([
+      ['a whole home', { occupancyClass: 'residential', serviceScope: 'entire_residential_structure' }],
+      ['one unit of a residential building', { occupancyClass: 'residential', serviceScope: 'residential_unit' }],
+      ['a scope the estimator could not resolve', { occupancyClass: 'residential', serviceScope: 'unknown' }],
+    ])("the estimator's saved property facts of %s are not commercial", async (_label, facts) => {
+      expect(await blockerFor((customer) => seedEstimate(customer, { estimate_data: FACTS(facts) }))).toBeNull();
+    });
+
+    // A JSON text is a valid jsonb value, and the driver returns it as the text itself: not as JSON to parse.
+    // It carries no structured mark, and it is never a failed read.
+    test('the fixture: a payload that is a JSON text comes back as that text', async () => {
+      const estimate = await seedEstimate(await seedCustomer(), { estimate_data: 'asked about pest control' });
+      expect(estimate.estimate_data).toBe('asked about pest control');
+    });
+
+    test.each([
+      ['a JSON text', 'asked about pest control'],
+      ['an empty JSON text', ''],
+      ['a JSON number', 7],
+      ['a JSON false', false],
+    ])('an estimate whose payload is %s carries no mark: not commercial', async (_label, estimate_data) => {
+      expect(await blockerFor(async (customer) => {
+        await seedEstimate(customer);
+        await seedEstimate(customer, { estimate_data });
+      })).toBeNull();
+    });
+
+    test.each([
+      ['its category column', { category: 'COMMERCIAL' }],
+      ['its service label', { service_interest: 'Commercial Pest Control' }],
+      ['the text itself, where it is a commercial service key', { estimate_data: 'commercial_pest' }],
+    ])('an estimate whose payload is a JSON text is commercial by %s', async (_label, change) => {
+      expect(await blockerFor((customer) => seedEstimate(customer, { estimate_data: 'asked about pest control', ...change }))).toBe('commercial');
+    });
+
     test('the estimate of a condo is not commercial', async () => {
       expect(await blockerFor((customer) => seedEstimate(customer, {
         waveguard_tier: 'Bronze',
@@ -550,6 +610,22 @@ postgres('planStartBlocker (live Postgres)', () => {
     test('the fixture: a lead payload comes back as an object', async () => {
       const lead = await seedLead(await seedCustomer(), { extracted_data: JSON.stringify({ isCommercial: false }) });
       expect(lead.extracted_data).toEqual({ isCommercial: false });
+    });
+
+    // A JSON text is a valid jsonb value. The driver returns it as the text itself: a second parse would fail.
+    test('a lead whose payload is a JSON text: the text comes back as it is, and it is not a failed read', async () => {
+      const customer = await seedCustomer();
+      await seedLead(customer);
+      const lead = await seedLead(customer, { extracted_data: JSON.stringify('asked about pest control') });
+      expect(lead.extracted_data).toBe('asked about pest control');
+      expect(await planStartBlocker(trx, customer.id)).toBeNull();
+    });
+
+    test.each([
+      ['the text itself, where it is a commercial service key', { extracted_data: JSON.stringify('commercial_pest') }],
+      ['its commercial flag', { extracted_data: JSON.stringify('asked about pest control'), is_commercial: true }],
+    ])('a lead whose payload is a JSON text is commercial by %s', async (_label, change) => {
+      expect(await blockerFor((customer) => seedLead(customer, change))).toBe('commercial');
     });
 
     test("another customer's commercial lead, and one with no customer on it, say nothing about this customer", async () => {
@@ -648,6 +724,25 @@ postgres('planStartBlocker (live Postgres)', () => {
       await seedCall(customer, enriched({ property: { property_type: 'commercial' } }));
       expect(await planStartBlocker(trx, customer.id)).toBe('commercial');
     });
+
+    // The extraction, the validation and the address check are jsonb columns. A JSON text in one of them is a
+    // valid value, and the driver returns it as the text itself: no mark, and never a failed read.
+    test('a call whose verdicts and address check are JSON texts: not commercial, and not a failed read', async () => {
+      const customer = await seedCustomer();
+      await seedCall(customer);
+      const call = await seedCall(customer, { ai_extraction_enriched: 'asked about pest control', ai_validation: 'not validated', ai_address_validation: 'not checked' });
+      expect([call.ai_extraction_enriched, call.ai_validation, call.ai_address_validation]).toEqual(['asked about pest control', 'not validated', 'not checked']);
+      expect(await planStartBlocker(trx, customer.id)).toBeNull();
+    });
+
+    // The first format is serialized JSON in a TEXT column. A text there that is not JSON is a saved verdict
+    // the proof cannot read: a failed read, never "a home".
+    test("a call whose first format is text and not JSON: a failed read", async () => {
+      const customer = await seedCustomer();
+      const [call] = await trx('call_log').insert({ customer_id: customer.id, ai_extraction: 'extraction failed' }).returning('*');
+      expect(call.ai_extraction).toBe('extraction failed');
+      await expect(planStartBlocker(trx, customer.id)).rejects.toThrow("could not read a call's first extraction");
+    });
   });
 
   // The judge of a day agreement reads a call or a text thread. The app saves its blockers with the decision.
@@ -676,6 +771,13 @@ postgres('planStartBlocker (live Postgres)', () => {
         await seedDecision(customer);
         await seedDecision(customer, change);
       })).toBeNull();
+    });
+
+    test('a decision whose saved verdict is a JSON text: not commercial, and not a failed read', async () => {
+      const customer = await seedCustomer();
+      const decision = await seedDecision(customer, { judged: 'not judged', ...SKIPPED });
+      expect(decision.judged).toBe('not judged');
+      expect(await planStartBlocker(trx, customer.id)).toBeNull();
     });
 
     test("another customer's commercial decision, and one with no customer on it, say nothing about this customer", async () => {
@@ -779,6 +881,77 @@ postgres('planStartBlocker (live Postgres)', () => {
       await seedAddon(await seedVisit(other), { service_key_snapshot: 'commercial_mosquito' });
       expect(await planStartBlocker(trx, customer.id)).toBeNull();
       expect(await planStartBlocker(trx, other.id)).toBe('commercial');
+    });
+  });
+
+  // An edit of "this visit and the ones after it" leaves the first visit as it was done and saves the new
+  // service on the series root, apart from the root's own columns (recurring_template_overrides, jsonb). The
+  // series below is over: the root is done, the plan does not go on, and no later visit carries the new service.
+  describe('the service a series of the account goes on with', () => {
+    const seedEndedRoot = (customer, template, change = {}) => seedSeriesRoot(customer, {
+      recurring_ongoing: false, recurring_template_overrides: JSON.stringify(template), ...change,
+    });
+    const NEW_PRICE = { estimated_price: 55, primary_line_price: 55 };
+
+    test('the fixture: an ended series with a new price only is no plan record, and its template comes back as an object', async () => {
+      const customer = await seedCustomer();
+      const root = await seedEndedRoot(customer, NEW_PRICE);
+      expect(root.recurring_template_overrides).toEqual(NEW_PRICE);
+      expect(root.service_type).toBe(PLAN_SERVICE);
+      expect(await planStartBlocker(trx, customer.id)).toBeNull();
+    });
+
+    test.each([
+      ['a commercial service text', { service_type: 'Commercial Pest Control' }],
+      ['a commercial catalog key that was saved with the edit, behind a generic text', { service_type: 'Pest Control', service_key_snapshot: 'commercial_pest_monthly' }],
+    ])('%s in the template of a root that keeps its home service: commercial', async (_label, service) => {
+      expect(await blockerFor((customer) => seedEndedRoot(customer, { ...NEW_PRICE, ...service }))).toBe('commercial');
+    });
+
+    test.each([
+      ['key', { service_key: `commercial_synthetic_${hex(6)}` }],
+      ['name', { name: 'Synthetic Commercial Service' }],
+    ])('a template that links a catalog service with a commercial %s: commercial', async (_label, catalog) => {
+      const service = await seedCatalogService(catalog);
+      const home = await seedCatalogService();
+      expect(await blockerFor(async (customer) => {
+        await seedEndedRoot(customer, { service_id: home.id });
+        await seedEndedRoot(customer, { service_type: 'Pest Control', service_id: service.id });
+      })).toBe('commercial');
+    });
+
+    test('a commercial template counts on a cancelled root too', async () => {
+      expect(await blockerFor((customer) => seedEndedRoot(customer, { service_type: 'Commercial Pest Control' }, { status: 'cancelled' }))).toBe('commercial');
+    });
+
+    test.each([
+      ['a home service with its catalog row', async () => ({ service_type: 'Quarterly Pest Control', service_key_snapshot: 'pest_quarterly', service_id: (await seedCatalogService()).id })],
+      ['a link to a catalog row that is not there', async () => ({ service_id: crypto.randomUUID() })],
+      // The catalog id is a uuid. A link of another kind names no catalog row, and the read does not fail on it.
+      ['a link that is not a catalog id', async () => ({ service_id: 'not-an-id' })],
+      ['a cleared link', async () => ({ service_type: 'Pest Control', service_id: null, service_key_snapshot: null })],
+      ['the keys the seeder keeps, with a street name that holds the word', async () => ({ anchored_split_per_visit: 45, appointment_address: { address_line1: '100 Commercial Way' } })],
+      // A JSON text is a valid jsonb value: no template, and never a failed read.
+      ['a JSON text', async () => 'none'],
+    ])('a template of %s is not commercial', async (_label, template) => {
+      expect(await blockerFor(async (customer) => seedEndedRoot(customer, await template()))).toBeNull();
+    });
+
+    test("another customer's commercial template says nothing about this customer", async () => {
+      const customer = await seedCustomer();
+      const other = await seedCustomer();
+      await seedEndedRoot(customer, NEW_PRICE);
+      await seedEndedRoot(other, { service_type: 'Commercial Pest Control' });
+      expect(await planStartBlocker(trx, customer.id)).toBeNull();
+      expect(await planStartBlocker(trx, other.id)).toBe('commercial');
+    });
+
+    test('a commercial template is the answer also for a series that goes on', async () => {
+      const customer = await seedCustomer();
+      const root = await seedSeriesRoot(customer);
+      expect(await planStartBlocker(trx, customer.id)).toBe('has_plan');
+      await trx('scheduled_services').where({ id: root.id }).update({ recurring_template_overrides: JSON.stringify({ service_type: 'Commercial Pest Control' }) });
+      expect(await planStartBlocker(trx, customer.id)).toBe('commercial');
     });
   });
 

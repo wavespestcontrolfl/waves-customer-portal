@@ -5,9 +5,10 @@
 // it reads stands against it, or the first reason that does:
 //   'not_live'    no such customer, an inactive account, or a deleted one
 //   'commercial'  a record of the account says commercial: the account row,
-//                 a saved property, an estimate, a lead, a visit or one of
-//                 its add-ons, a service report, a contract, a call or a
-//                 day-agreement decision (never a residential plan)
+//                 a saved property, an estimate, a lead, a visit, one of
+//                 its add-ons or the service its series goes on with, a
+//                 service report, a contract, a call or a day-agreement
+//                 decision (never a residential plan)
 //   'has_plan'    the customer already holds a plan (customerHoldsPlan below)
 // A failed read THROWS. An outage is never "nothing stands against it": the
 // caller is a job that tries again, or a pricer that must return no price.
@@ -200,11 +201,9 @@ function isCommercialPropertyType(propertyType) {
 // 'included' after a re-price), and no customer request can set it
 // (routes/service-preferences.js keeps it across writes). So the key alone
 // says a commercial plan was sold on this account. A value that is not an
-// object carries no key (the route reads it the same way), and a text that
-// is not JSON throws, as a failed read does.
+// object carries no key (the route reads it the same way).
 function hasCommercialSoldScope(customer) {
-  const raw = customer.service_preferences;
-  const preferences = typeof raw === 'string' ? JSON.parse(raw || '{}') : raw;
+  const preferences = jsonbValue(customer.service_preferences);
   return Boolean(preferences) && typeof preferences === 'object' && isSet(preferences.commercial_interior_scope);
 }
 
@@ -270,7 +269,17 @@ const isSetSubtype = (value) => isSet(value) && !(typeof value === 'string' && N
 //   to no in the same object wins there over a category or a subtype. Here
 //   one mark is enough, as it is for the intake's rule for a form
 //   (structuredCommercialSignal in lead-estimate-automation.js) and for the
-//   payload scan of the save.
+//   payload scan of the save;
+// - the estimator's own verdict on the premises, where the object is the
+//   property facts a draft keeps (estimatorEngine.propertyFactsV2): the
+//   occupancy class 'commercial', or a commercial service scope (a suite, a
+//   whole commercial building, a commercial parcel of several buildings, the
+//   common area of an association: isCommercialServiceScope in
+//   property-lookup/property-facts-v2.js).
+const COMMERCIAL_SERVICE_SCOPES = Object.freeze([
+  'commercial_suite', 'entire_commercial_building', 'multi_building_commercial_parcel', 'association_common_area',
+]);
+const factsSayCommercial = (node) => node.occupancyClass === 'commercial' || COMMERCIAL_SERVICE_SCOPES.includes(node.serviceScope);
 function nodeSaysCommercial(node) {
   const converter = require('./estimate-converter');
   return saysYes(node.isCommercial) || saysYes(node.is_commercial)
@@ -278,6 +287,7 @@ function nodeSaysCommercial(node) {
     || isCommercialPropertyType(node.property_type)
     || isSetSubtype(node.commercial_subtype) || isSetSubtype(node.commercialSubtype)
     || String(node.category ?? '').trim().toUpperCase() === 'COMMERCIAL'
+    || factsSayCommercial(node)
     || isSet(node.commercialRiskType) || isSet(node.commercial_risk_type)
     || converter.isCommercialRecurringLine(node)
     || String(converter.recurringServiceKey(node) || '').startsWith('commercial_')
@@ -304,10 +314,24 @@ function payloadSaysCommercial(value) {
   return nodeSaysCommercial(value) || Object.values(value).some((item) => payloadSaysCommercial(item));
 }
 
-// A JSON column as the driver returns it: the parsed value, or a text that
-// still has to be parsed. A text that is not JSON is a failed read, as a
+// A value of a JSONB column, as the driver returns it. PostgreSQL checks a
+// jsonb value when it is written, so what comes back is never "not JSON": a
+// text from such a column is a JSON string, a valid value. A text that parses
+// is read as what it holds (a writer that serialized a payload twice). Any
+// other text stays a text: a record with no structured mark, never a failed
+// read. A throw here would stop this account on every run.
+function jsonbValue(raw) {
+  if (typeof raw !== 'string') return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+// A TEXT column that holds serialized JSON (call_log.ai_extraction is the one
+// this proof reads). There a text that is not JSON is a failed read, as a
 // failed query is: never "nothing in it".
-function jsonValue(raw, what) {
+function jsonText(raw, what) {
   if (typeof raw !== 'string') return raw;
   if (raw.trim() === '') return null;
   try {
@@ -328,15 +352,6 @@ function someText(value, test) {
   if (typeof value === 'string') return test(value);
   if (!value || typeof value !== 'object') return false;
   return Object.values(value).some((item) => someText(item, test));
-}
-
-// The payload of an estimate, null when the row has none. A payload that is
-// not an object or a list is a failed read, as a failed query is.
-function estimatePayload(raw) {
-  if (raw === null || raw === undefined) return null;
-  const data = require('./estimate-service-lines').parseEstimateData(raw);
-  if (!data || typeof data !== 'object') throw new Error('planStartBlocker could not read an estimate payload');
-  return data;
 }
 
 // Is this estimate commercial? The app has several rules for that, each made
@@ -378,12 +393,15 @@ function isCommercialEstimateRow(estimate) {
   const { isCommercialAccount, isCommercialServiceRow } = require('./self-booking-plan-sync');
   if (isCommercialAccount({ waveguard_tier: estimate.waveguard_tier })) return true;
   if (isCommercialServiceRow({ service_type: estimate.service_interest })) return true;
-  const data = estimatePayload(estimate.estimate_data);
-  return require('./estimate-proposal').isCommercialProposalData(data)
-    || require('./estimate-delivery-options').isCommercialEstimateData(data)
-    || require('./estimate-commercial-identity').isCommercialAutoAcceptEstimate({ estimate_data: data })
-    || payloadSaysCommercial(data)
-    || require('./estimate-service-lines').inferEstimateServiceLines({ ...estimate, estimate_data: data })
+  // The payload (a jsonb column). One that is not an object or a list (a
+  // text, a number) carries no structured mark: only the rule for a text can
+  // read it, and the columns above still answer.
+  const payload = jsonbValue(estimate.estimate_data);
+  return require('./estimate-proposal').isCommercialProposalData(payload)
+    || require('./estimate-delivery-options').isCommercialEstimateData(payload)
+    || require('./estimate-commercial-identity').isCommercialAutoAcceptEstimate({ estimate_data: payload })
+    || payloadSaysCommercial(payload)
+    || require('./estimate-service-lines').inferEstimateServiceLines({ ...estimate, estimate_data: payload })
       .some((line) => String(line.key || '').startsWith(COMMERCIAL_KEY_PREFIX));
 }
 
@@ -423,7 +441,7 @@ function isCommercialLeadRow(lead) {
   if (lead.is_commercial === true || lead.is_residential === false) return true;
   if (isCommercialServiceRow({ service_type: lead.service_interest, service_key: lead.service_key })) return true;
   if (isCommercialAccount({ waveguard_tier: lead.waveguard_tier })) return true;
-  const payload = jsonValue(lead.extracted_data, 'a lead payload');
+  const payload = jsonbValue(lead.extracted_data);
   return payloadSaysCommercial(payload) || require('./estimate-delivery-options').isCommercialEstimateData(payload);
 }
 
@@ -475,6 +493,31 @@ async function hasCommercialAddon(database, customerId) {
     .where({ 'visit.customer_id': customerId })
     .distinct('addon.service_name', 'addon.service_key_snapshot as serviceKey', 'svc.service_key', 'svc.name as name');
   return kinds.some((kind) => isCommercialServiceRow(kind));
+}
+
+// The service a recurring series goes on with. An edit of "this visit and the
+// ones after it" leaves the first visit as it was done and saves the new
+// service on the series root, apart from the root's own columns
+// (recurring_template_overrides). The app's reader of that value is
+// parseTemplateOverrides in recurring-template-overrides.js: it keeps the
+// service text, the saved catalog key and the catalog link. The visit read
+// above sees a row's own columns only. A gate decides whether the scheduler
+// uses a saved override. This proof reads it either way: someone saved a
+// commercial service on a series of this account.
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+async function hasCommercialSeriesTemplate(database, customerId) {
+  const { parseTemplateOverrides } = require('./recurring-template-overrides');
+  const { isCommercialServiceRow } = require('./self-booking-plan-sync');
+  const rows = await database('scheduled_services as series').where({ 'series.customer_id': customerId })
+    .whereNotNull('series.recurring_template_overrides').select('series.recurring_template_overrides');
+  const templates = rows.map((row) => parseTemplateOverrides(row.recurring_template_overrides)).filter(Boolean);
+  if (templates.some((template) => isCommercialServiceRow({ service_type: template.service_type, serviceKey: template.service_key_snapshot }))) return true;
+  // The catalog rows the templates link to. A link that is not an id of the
+  // catalog's kind (a uuid) names no catalog row.
+  const serviceIds = [...new Set(templates.map((template) => template.service_id).filter((id) => UUID_SHAPE.test(String(id))))];
+  if (!serviceIds.length) return false;
+  const services = await database('services').whereIn('id', serviceIds).select('service_key', 'name');
+  return services.some((service) => isCommercialServiceRow(service));
 }
 
 // A contract of the account made from a commercial agreement template, at any
@@ -540,10 +583,10 @@ function isBusinessAddress(addressCheck) {
   return use.business === true && use.residential === false;
 }
 function isCommercialCallRow(call) {
-  const extraction = asObject(jsonValue(call.ai_extraction_enriched, "a call's extraction"));
-  const validation = jsonValue(call.ai_validation, "a call's validation");
-  const firstFormat = asObject(jsonValue(call.ai_extraction, "a call's first extraction"));
-  const addressCheck = jsonValue(call.ai_address_validation, "a call's address check");
+  const extraction = asObject(jsonbValue(call.ai_extraction_enriched));
+  const validation = jsonbValue(call.ai_validation);
+  const firstFormat = asObject(jsonText(call.ai_extraction, "a call's first extraction"));
+  const addressCheck = jsonbValue(call.ai_address_validation);
   const { commercialCategoryConflict } = require('./estimator-engine/unit-scope-model');
   return Boolean(commercialCategoryConflict({ extraction, intent: null }))
     || someObject(extraction, describesCommercialProperty) || someObject(firstFormat, describesCommercialProperty)
@@ -572,7 +615,7 @@ async function hasCommercialDayAgreement(database, customerId) {
   const decisions = await database('day_agreement_decisions').where({ customer_id: customerId }).select('judged');
   // A list of the vocabulary's words (or one bare word, if a writer ever saves it so).
   return decisions.some((decision) => someText(
-    asObject(jsonValue(decision.judged, 'a day-agreement decision')).blockers,
+    asObject(jsonbValue(decision.judged)).blockers,
     (blocker) => blocker === COMMERCIAL_DAY_BLOCKER,
   ));
 }
@@ -585,6 +628,7 @@ async function hasCommercialRecord(database, customerId) {
     || (await hasCommercialLead(database, customerId))
     || (await hasCommercialServiceIn(database, 'scheduled_services', customerId))
     || (await hasCommercialAddon(database, customerId))
+    || (await hasCommercialSeriesTemplate(database, customerId))
     || (await hasCommercialServiceIn(database, 'service_records', customerId))
     || (await hasCommercialContract(database, customerId))
     || (await hasCommercialCall(database, customerId))
@@ -611,9 +655,13 @@ async function planStartBlocker(database, customerId) {
   // commercial-proposal customer all the same.
   // And a sold commercial scope in the service preferences, which only a
   // commercial accept writes (hasCommercialSoldScope).
-  const { isCommercialAccount } = require('./self-booking-plan-sync');
+  // And the service the intake saved on the account itself
+  // (lead_service_interest: a form, a text thread or a quote writes it), by
+  // the rule for the service label of a lead or an estimate. It can be the
+  // only place that label was kept.
+  const { isCommercialAccount, isCommercialServiceRow } = require('./self-booking-plan-sync');
   if (isCommercialAccount(customer) || isCommercialPropertyType(customer.property_type) || customer.building_use) return 'commercial';
-  if (hasCommercialSoldScope(customer)) return 'commercial';
+  if (hasCommercialSoldScope(customer) || isCommercialServiceRow({ service_type: customer.lead_service_interest })) return 'commercial';
   if (await hasCommercialRecord(database, customer.id)) return 'commercial';
   return (await customerHoldsPlan(database, customer)) ? 'has_plan' : null;
 }

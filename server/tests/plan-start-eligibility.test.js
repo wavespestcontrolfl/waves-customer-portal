@@ -26,6 +26,7 @@ function fakeDb(tables = {}, { scheduledColumns = {}, tableProbe = null } = {}) 
     const filter = (name) => (...args) => { calls.push([name, ...args]); return q; };
     const q = {
       where: filter('where'),
+      whereIn: filter('whereIn'),
       whereNotIn: filter('whereNotIn'),
       whereNull: filter('whereNull'),
       whereNotNull: filter('whereNotNull'),
@@ -156,6 +157,9 @@ describe('planStartBlocker', () => {
       ['a sold commercial scope with the interior excluded', { service_preferences: { exterior_sweep: true, interior_spray: false, commercial_interior_scope: 'excluded' } }],
       ['a sold commercial scope with the interior included', { service_preferences: { exterior_sweep: true, interior_spray: true, commercial_interior_scope: 'included' } }],
       ['a sold commercial scope in preferences that came back as JSON text', { service_preferences: JSON.stringify({ commercial_interior_scope: 'excluded' }) }],
+      // The service label the intake saved on the account itself, by the rule for the label of a lead.
+      ['a commercial service label on the account', { lead_service_interest: 'Commercial Pest Control' }],
+      ['a commercial service label on the account in another spelling', { lead_service_interest: 'pest (COMMERCIAL)' }],
     ])('%s: commercial, and no plan record is read', async (_label, customer) => {
       const reads = [];
       const db = world({ ...ONGOING_COLUMN, customer, visits: (calls) => { reads.push(calls); return [FLAGGED]; } });
@@ -165,6 +169,10 @@ describe('planStartBlocker', () => {
 
     test.each([['single_family'], ['condo_ground'], ['unknown'], [null], ['']])('a property type of %j with no tier is not commercial', async (property_type) => {
       expect(await blocker(world({ customer: { property_type } }))).toBeNull();
+    });
+
+    test.each([['Pest Control'], ['Quarterly Pest + Lawn'], [null], [undefined], ['']])('a service label of %j on the account is not commercial', async (lead_service_interest) => {
+      expect(await blocker(world({ customer: { lead_service_interest } }))).toBeNull();
     });
 
     test.each([[null], [undefined], ['']])('a building use of %j (no commercial proposal was won) is not commercial', async (building_use) => {
@@ -190,9 +198,10 @@ describe('planStartBlocker', () => {
       expect(await blocker(world({ customer: { service_preferences } }))).toBeNull();
     });
 
-    // Never "a home": a value the proof cannot read is a failed read.
-    test('service preferences that are text and not JSON throw', async () => {
-      await expect(blocker(world({ customer: { service_preferences: '{"commercial_interior_scope":' } }))).rejects.toThrow();
+    // A jsonb column cannot hold a text that is "not JSON": a text from it is a JSON string, a valid value with
+    // no key. It is never a failed read: a throw would stop this account on every run.
+    test.each([['{"commercial_interior_scope":'], ['none']])('service preferences that are the text %j carry no key: not commercial', async (service_preferences) => {
+      expect(await blocker(world({ customer: { service_preferences } }))).toBeNull();
     });
 
     // The account row carries only a mirror of the primary property's TYPE, and nothing on it mirrors a
@@ -282,6 +291,18 @@ describe('planStartBlocker', () => {
         ...change,
       });
       const withEstimates = (estimates, given = {}) => world({ ...given, tables: { estimates } });
+      // The property facts the estimator keeps with a draft, and its vocabulary of service scopes as this proof
+      // sorts it.
+      const FACTS = (facts) => ({ estimatorEngine: { propertyFactsV2: { version: 2, shadow: true, facts: { propertySubtype: 'single_family', ...facts } } } });
+      const COMMERCIAL_SCOPES = ['commercial_suite', 'entire_commercial_building', 'multi_building_commercial_parcel', 'association_common_area'];
+      const HOME_SCOPES = ['residential_unit', 'entire_residential_structure', 'entire_parcel', 'unknown'];
+
+      // The estimator's rule for a commercial scope is not exported, so the proof keeps its own list. A scope
+      // the estimator adds later fails here until someone sorts it.
+      test("every service scope of the estimator's vocabulary is sorted: commercial or not", () => {
+        const { SERVICE_SCOPES } = require('../services/property-lookup/property-facts-v2');
+        expect([...COMMERCIAL_SCOPES, ...HOME_SCOPES].sort()).toEqual([...SERVICE_SCOPES].sort());
+      });
       // A mark 20 levels down: below the 12 levels the payload scan of the save reads.
       const farDown = (mark) => Array.from({ length: 20 }).reduce((inner) => ({ next: [inner] }), mark);
 
@@ -328,6 +349,9 @@ describe('planStartBlocker', () => {
         ['a commercial category beside a residential type, far down', ESTIMATE({ estimate_data: farDown({ category: 'COMMERCIAL', propertyType: 'single_family' }) })],
         ['a commercial category in another spelling, far down', ESTIMATE({ estimate_data: farDown({ category: ' commercial ', isCommercial: false }) })],
         ['a commercial subtype beside a toggle set to no, far down', ESTIMATE({ estimate_data: farDown({ isCommercial: 'NO', commercialSubtype: 'office' }) })],
+        // The estimator's own verdict on the premises, kept with a draft (estimatorEngine.propertyFactsV2).
+        ['a commercial occupancy class in the saved property facts', ESTIMATE({ estimate_data: FACTS({ occupancyClass: 'commercial', serviceScope: 'unknown' }) })],
+        ...COMMERCIAL_SCOPES.map((serviceScope) => [`the service scope ${serviceScope} in the saved property facts`, ESTIMATE({ estimate_data: FACTS({ occupancyClass: 'unknown', serviceScope }) })]),
         // The quiz of the lead an estimate was drafted from, where the payload keeps it.
         ["the 'business' answer of a quiz page, kept in the payload", ESTIMATE({ estimate_data: { lead: { quiz: { kind: 'lawn', property: 'business' } } } })],
         // The payload scan reads the toggle only as a boolean, and never the engine's spelling.
@@ -369,6 +393,7 @@ describe('planStartBlocker', () => {
         ['a field whose NAME starts with the prefix', ESTIMATE({ estimate_data: { commercial_lawn: { selected: false }, commercial_notes: 'none' } })],
         ['a residential category and an empty subtype, far down', ESTIMATE({ estimate_data: farDown({ category: 'RESIDENTIAL', commercialSubtype: 'none', isCommercial: 'NO' }) })],
         ['a category of another vocabulary', ESTIMATE({ estimate_data: { products: [{ category: 'pest_control' }, { category: 'lawn_care' }] } })],
+        ...HOME_SCOPES.map((serviceScope) => [`a residential occupancy class and the service scope ${serviceScope}`, ESTIMATE({ estimate_data: FACTS({ occupancyClass: 'residential', serviceScope }) })]),
         ['a home tier on the estimate', ESTIMATE({ waveguard_tier: 'Bronze' })],
         ['no tier on the estimate', ESTIMATE({ waveguard_tier: null })],
         ['a home service label and home notes', ESTIMATE({ service_interest: 'Quarterly Pest Control', notes: 'Ants in the kitchen. Side gate is open.', estimate_data: {} })],
@@ -447,19 +472,37 @@ describe('planStartBlocker', () => {
         expect(await blocker(withEstimates(estimates))).toBeNull();
       });
 
-      // An estimate the proof cannot read is a failed read, as a failed query is: never "a home".
+      // The payload is a jsonb column, so what comes back is always a valid value. A payload that is not an
+      // object or a list carries no structured mark. It is never a failed read: a throw would stop this account
+      // on every run.
       test.each([
-        ['text that is not JSON', 'not json'],
+        ['a text', 'asked about pest control'],
         ['a number', 7],
         ['JSON text of a number', '7'],
         ['an empty text', ''],
         ['a bare false', false],
-      ])('a payload of %s is a failed read', async (_label, estimate_data) => {
-        await expect(blocker(withEstimates([ESTIMATE(), ESTIMATE({ estimate_data })]))).rejects.toThrow('could not read an estimate payload');
+      ])('a payload of %s carries no mark: not commercial', async (_label, estimate_data) => {
+        expect(await blocker(withEstimates([ESTIMATE(), ESTIMATE({ estimate_data })]))).toBeNull();
       });
 
-      test('the category column answers for an estimate whose payload cannot be read', async () => {
-        expect(await blocker(withEstimates([ESTIMATE({ category: 'COMMERCIAL', estimate_data: 'not json' })]))).toBe('commercial');
+      test.each([
+        ['the category column', { category: 'COMMERCIAL' }],
+        ['the service label', { service_interest: 'Commercial Pest Control' }],
+        ['the notes, through the reader of service lines', { notes: 'Commercial pest control for the bakery' }],
+      ])('%s answers for an estimate whose payload is a text', async (_label, change) => {
+        expect(await blocker(withEstimates([ESTIMATE({ ...change, estimate_data: 'asked about pest control' })]))).toBe('commercial');
+      });
+
+      test('a payload that is one text is read by the rule for a text', async () => {
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: ' Commercial_Pest ' })]))).toBe('commercial');
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: 'pest for a commercial_kitchen' })]))).toBeNull();
+      });
+
+      // The mark here is one only this proof's own rule for an object reads: no reader of the app parses the
+      // text for it.
+      test('a payload that was serialized twice is read as what it holds', async () => {
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: JSON.stringify(FACTS({ occupancyClass: 'commercial' })) })]))).toBe('commercial');
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: JSON.stringify(FACTS({ occupancyClass: 'residential' })) })]))).toBeNull();
       });
 
       test('home estimates only, and a plan record: the plan is the answer', async () => {
@@ -539,12 +582,18 @@ describe('planStartBlocker', () => {
         expect(await blocker(withLeads(leads))).toBeNull();
       });
 
-      test('a lead payload that is text and not JSON is a failed read', async () => {
-        await expect(blocker(withLeads([LEAD(), LEAD({ extracted_data: 'not json' })]))).rejects.toThrow('could not read a lead payload');
+      // The payload is a jsonb column. A text in it is a valid value with no structured mark, never a failed
+      // read: PostgreSQL returns a JSON string as the text itself.
+      test.each([['asked about pest control'], [''], ['7']])('a lead payload that is the text %j carries no mark: not commercial', async (extracted_data) => {
+        expect(await blocker(withLeads([LEAD(), LEAD({ extracted_data })]))).toBeNull();
       });
 
-      test('a commercial flag answers for a lead whose payload cannot be read', async () => {
-        expect(await blocker(withLeads([LEAD({ is_commercial: true, extracted_data: 'not json' })]))).toBe('commercial');
+      test('a lead payload that is one text is read by the rule for a text', async () => {
+        expect(await blocker(withLeads([LEAD({ extracted_data: 'commercial_pest' })]))).toBe('commercial');
+      });
+
+      test('a commercial flag answers for a lead whose payload is a text', async () => {
+        expect(await blocker(withLeads([LEAD({ is_commercial: true, extracted_data: 'asked about pest control' })]))).toBe('commercial');
       });
 
       // The fake applies no filter, so this pins the filter itself: every lead of this customer, with no flag
@@ -627,6 +676,93 @@ describe('planStartBlocker', () => {
       });
     });
 
+    // An edit of "this visit and the ones after it" leaves the first visit as it was done and saves the new
+    // service on the series root, apart from the root's own columns. The read of the visits cannot see it.
+    describe('the service a series of the account goes on with', () => {
+      const CATALOG_ID = '0b9f5c1e-6f0a-4c3e-9d2b-5a7e8c4d1f20';
+      const OTHER_CATALOG_ID = '7d3a2b1c-4e5f-4a6b-8c9d-0e1f2a3b4c5d';
+      const PRICE_ONLY = { estimated_price: 55, primary_line_price: 55, discount_type: null };
+      const HOME_SERVICE = { service_key: 'pest_quarterly', name: 'Quarterly Pest Control' };
+      const withTemplates = (templates, { services = [], ...given } = {}) => world({
+        ...given,
+        tables: { 'scheduled_services as series': templates.map((value) => ({ recurring_template_overrides: value })), services },
+      });
+
+      test.each([
+        ['a commercial service text', [{ service_type: 'Commercial Pest Control' }], []],
+        ['a commercial catalog key that was saved with the edit, behind a generic text', [{ service_type: 'Pest Control', service_key_snapshot: 'commercial_pest_monthly' }], []],
+        ['a commercial service beside a new price, on the second series', [PRICE_ONLY, { ...PRICE_ONLY, service_type: 'Commercial Lawn Care' }], []],
+        ['a template that came back as JSON text', [JSON.stringify({ service_type: 'Commercial Pest Control' })], []],
+        ['a catalog link to a service with a commercial key', [{ service_type: 'Pest Control', service_id: CATALOG_ID }], [HOME_SERVICE, { service_key: 'commercial_pest_monthly', name: 'Monthly Pest Service' }]],
+        ['a catalog link to a service with a commercial name', [{ service_id: CATALOG_ID }], [{ service_key: 'pest_monthly_b', name: 'Commercial Monthly Pest' }]],
+      ])('%s: commercial, and no plan record is read', async (_label, templates, services) => {
+        const reads = [];
+        const db = withTemplates(templates, { services, ...ONGOING_COLUMN, visits: (calls) => { reads.push(calls); return [FLAGGED]; } });
+        expect(await blocker(db)).toBe('commercial');
+        expect(reads).toEqual([]);
+      });
+
+      test.each([
+        ['a new price only', [PRICE_ONLY]],
+        ['a home service with its catalog row', [{ service_type: 'Quarterly Pest Control', service_key_snapshot: 'pest_quarterly', service_id: CATALOG_ID }]],
+        // What the seeder keeps beside an edit: a price split and the address of the visits. Not a service.
+        ['the keys the seeder keeps, with a street name that holds the word', [{ anchored_split_per_visit: 45, appointment_address: { address_line1: '100 Commercial Way' } }]],
+        ['a cleared catalog link', [{ service_type: 'Pest Control', service_id: null, service_key_snapshot: null }]],
+        ['a value that is a text', ['none']],
+        ['a value that is a number', [7]],
+        ['an empty object', [{}]],
+      ])('%s is not commercial', async (_label, templates) => {
+        expect(await blocker(withTemplates(templates, { services: [HOME_SERVICE] }))).toBeNull();
+      });
+
+      // A gate decides whether the scheduler uses a saved template (the app reads it once, at load, into the
+      // gates object). The proof reads the template either way.
+      test.each([['off', false], ['on', true]])('a saved commercial template counts with the edit gate %s', async (_label, value) => {
+        const { gates, isEnabled } = require('../config/feature-gates');
+        const saved = gates.editApptPriceServiceScope;
+        gates.editApptPriceServiceScope = value;
+        try {
+          expect(isEnabled('editApptPriceServiceScope')).toBe(value);
+          expect(await blocker(withTemplates([{ service_type: 'Commercial Pest Control' }]))).toBe('commercial');
+        } finally {
+          gates.editApptPriceServiceScope = saved;
+        }
+      });
+
+      // The fake applies no filter, so this pins the filter: every visit row of this customer that keeps a
+      // template, whatever its status. PostgreSQL proves a completed root and another customer's root.
+      test('the read asks for every saved template of this customer', async () => {
+        const reads = [];
+        await blocker(world({ tables: { 'scheduled_services as series': (calls) => { reads.push(calls.map((call) => [...call])); return []; } } }));
+        expect(reads).toEqual([[['where', { 'series.customer_id': 'cust-1' }], ['whereNotNull', 'series.recurring_template_overrides']]]);
+      });
+
+      test('the catalog is asked once for each linked service, and only for a link that is a catalog id', async () => {
+        const reads = [];
+        const templates = [{ service_id: CATALOG_ID }, { service_id: OTHER_CATALOG_ID }, { service_id: CATALOG_ID }, { service_id: 'not-an-id' }, { service_id: 12 }, PRICE_ONLY];
+        const db = world({ tables: {
+          'scheduled_services as series': templates.map((value) => ({ recurring_template_overrides: value })),
+          services: (calls) => { reads.push(calls.map((call) => [...call])); return [HOME_SERVICE]; },
+        } });
+        expect(await blocker(db)).toBeNull();
+        expect(reads).toEqual([[['whereIn', 'id', [CATALOG_ID, OTHER_CATALOG_ID]]]]);
+      });
+
+      test.each([
+        ['no template links a catalog service', [PRICE_ONLY, { service_type: 'Pest Control' }]],
+        ['no link is a catalog id', [{ service_id: 'not-an-id' }, { service_id: '' }, { service_id: null }]],
+        ['no visit keeps a template', []],
+      ])('the catalog is not read when %s', async (_label, templates) => {
+        const reads = [];
+        const db = world({ tables: {
+          'scheduled_services as series': templates.map((value) => ({ recurring_template_overrides: value })),
+          services: (calls) => { reads.push(calls); return [{ service_key: 'commercial_pest_monthly', name: 'Commercial Monthly Pest' }]; },
+        } });
+        expect(await blocker(db)).toBeNull();
+        expect(reads).toEqual([]);
+      });
+    });
+
     // The app knows the commercial agreement by its template key. A contract from it counts at any status.
     describe('a contract of the account', () => {
       const withContracts = (templates, given = {}) => world({ ...given, tables: { customer_contracts: templates.map((key) => ({ document_template_key: key })) } });
@@ -706,6 +842,7 @@ describe('planStartBlocker', () => {
         ['the commercial flag among the flags that hold a booking', CALL({ ai_validation: { routing: { flags: [], appointment_blocking_flags: ['commercial_requires_quote'] } } })],
         ['the HOA flag in a list of another name', CALL({ ai_validation: { routing: { flags: [] }, gates: { demoted: ['hoa_common_area_requires_approval'] } } })],
         ['a validation saved as JSON text', CALL({ ai_validation: JSON.stringify({ routing: { flags: ['commercial_requires_quote'] } }) })],
+        ['an extraction saved as JSON text', CALL({ ai_extraction_enriched: JSON.stringify({ property: { property_type: 'commercial' } }) })],
         // The first format of the extraction: the service the caller asked for.
         ['a commercial service in the first format', CALL({ ai_extraction: JSON.stringify({ requested_service: 'Commercial pest control' }) })],
         ["a commercial service inside the first format's object", CALL({ ai_extraction: JSON.stringify({ requested_service: { primary: 'Pest control', also: ['Monthly COMMERCIAL kitchen service'] } }) })],
@@ -735,6 +872,8 @@ describe('planStartBlocker', () => {
         ['a call with no extraction and no validation', CALL({ ai_extraction: null, ai_extraction_enriched: null, ai_validation: null })],
         ['a blank first format', CALL({ ai_extraction: '  ' })],
         ['a first format with no requested service', CALL({ ai_extraction: JSON.stringify({ call_summary: 'Voicemail, no request.' }) })],
+        // The first format is a TEXT column: an empty text is "no extraction", not a failed read.
+        ['a first format that is an empty text', CALL({ ai_extraction: '  ' })],
         ['an extraction with no service name', CALL(extraction({ service_request: { primary_service_category: 'other', specific_service_name: null } }))],
         // Only the service name counts in the service request: a price quote is the words of the call.
         ['the word in another field of the service request', CALL(extraction({
@@ -764,14 +903,20 @@ describe('planStartBlocker', () => {
         expect(await blocker(withCalls([call, CALL()]))).toBeNull();
       });
 
-      // A saved verdict the proof cannot read is a failed read, as a failed query is: never "a home".
+      // The extraction, the validation and the address check are jsonb columns: a text there is a valid value
+      // with no mark, never a failed read.
       test.each([
-        ["a call's extraction", { ai_extraction_enriched: 'not json' }],
+        ["a call's extraction", { ai_extraction_enriched: 'asked about pest control' }],
         ["a call's validation", { ai_validation: '{"routing":' }],
-        ["a call's first extraction", { ai_extraction: 'extraction failed' }],
-        ["a call's address check", { ai_address_validation: 'not json' }],
-      ])('%s that is text and not JSON is a failed read', async (what, change) => {
-        await expect(blocker(withCalls([CALL(), CALL(change)]))).rejects.toThrow(`could not read ${what}`);
+        ["a call's address check", { ai_address_validation: 'not checked' }],
+      ])('%s that is one text carries no mark: not commercial', async (_what, change) => {
+        expect(await blocker(withCalls([CALL(), CALL(change)]))).toBeNull();
+      });
+
+      // The first format is serialized JSON in a TEXT column. A text there that is not JSON is a failed read,
+      // as a failed query is: never "a home".
+      test("a call's first extraction that is text and not JSON is a failed read", async () => {
+        await expect(blocker(withCalls([CALL(), CALL({ ai_extraction: 'extraction failed' })]))).rejects.toThrow("could not read a call's first extraction");
       });
 
       // The rule belongs to the estimator engine. A mark only that rule reads must count: the proof asks it.
@@ -840,8 +985,9 @@ describe('planStartBlocker', () => {
         expect(require('../services/prompts/day-agreement-v1').BLOCKERS).toContain('commercial');
       });
 
-      test('a decision that is text and not JSON is a failed read', async () => {
-        await expect(blocker(withDecisions(['not json']))).rejects.toThrow('could not read a day-agreement decision');
+      // A jsonb column: a text in it is a valid value with no blocker, never a failed read.
+      test('a decision that is one text carries no blocker: not commercial', async () => {
+        expect(await blocker(withDecisions(['not judged', '']))).toBeNull();
       });
 
       test('the read asks for every decision of this customer', async () => {
@@ -859,6 +1005,7 @@ describe('planStartBlocker', () => {
         tables: {
           estimates: record('estimates'), leads: record('leads'), 'scheduled_services as record': record('visits'),
           'scheduled_service_addons as addon': record('add-ons'),
+          'scheduled_services as series': record('series templates'), services: record('catalog'),
           'service_records as record': record('reports'), customer_contracts: record('contracts'),
           call_log: record('calls'), day_agreement_decisions: record('day agreements'),
         },
@@ -1077,6 +1224,8 @@ describe('planStartBlocker', () => {
       ['the lead read', { tables: { leads: failing('lead read down') } }, 'lead read down'],
       ['the read of the visit services', { tables: { 'scheduled_services as record': failing('visit service read down') } }, 'visit service read down'],
       ['the read of the visit add-ons', { tables: { 'scheduled_service_addons as addon': failing('add-on read down') } }, 'add-on read down'],
+      ['the read of the series templates', { tables: { 'scheduled_services as series': failing('series template read down') } }, 'series template read down'],
+      ['the catalog read of a series template', { tables: { 'scheduled_services as series': [{ recurring_template_overrides: { service_id: '0b9f5c1e-6f0a-4c3e-9d2b-5a7e8c4d1f20' } }], services: failing('catalog read down') } }, 'catalog read down'],
       ['the read of the service report services', { tables: { 'service_records as record': failing('report service read down') } }, 'report service read down'],
       ['the read of the contracts', { tables: { customer_contracts: failing('contract read down') } }, 'contract read down'],
       ['the read of the calls', { tables: { call_log: failing('call read down') } }, 'call read down'],
