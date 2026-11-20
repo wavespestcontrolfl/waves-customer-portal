@@ -417,8 +417,16 @@ class LiveBridge {
       this.awaitingReply = true;
       return;
     }
-    if (this.prevReplyStartWall === null || speechEnd <= this.prevReplyStartWall) return;
     const delay = Math.max(0, Math.round(this.replyStartWall - speechEnd));
+    if (this.prevReplyStartWall === null) {
+      // A late transcript of speech that ended before the FIRST reply: that
+      // reply may be the greeting or an answer, so the delay refines the
+      // separate first_reply_ambiguous_ms (the latest speech end wins) and
+      // never enters turns.
+      this.firstReplyAmbiguousMs = this.firstReplyAmbiguousMs === null ? delay : Math.min(this.firstReplyAmbiguousMs, delay);
+      return;
+    }
+    if (speechEnd <= this.prevReplyStartWall) return;
     if (!this.replySample) {
       this.latencies.push(delay);
       this.replySample = { index: this.latencies.length - 1, speechEnd };

@@ -452,6 +452,20 @@ describe('model audio, barge-in and latency', () => {
     expect(s.first_reply_ambiguous_ms).toBe(900);
   });
 
+  test('caller speaks first but the transcript lands after the first reply began: first_reply_ambiguous_ms still records it', async () => {
+    const t = setup();
+    await t.ready();
+    t.advance(2400);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // first reply at t0 + 2400
+    t.advance(300);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'hi, do you do termites', start_ms: 300, end_ms: 1500 });
+    t.twilioStop();
+    await flush();
+    const s = summaryOf(t);
+    expect(s.turns).toEqual([]);
+    expect(s.first_reply_ambiguous_ms).toBe(900);
+  });
+
   test('a transcript that arrives before the greeting\'s first audio never times the greeting', async () => {
     const t = setup();
     await t.ready();

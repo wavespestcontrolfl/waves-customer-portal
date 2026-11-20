@@ -614,7 +614,7 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
 
   test('a set VOICE_GPT_LIVE_TEST_MAX_USD that is not a plain number refuses the call; it never falls back to $5', async () => {
     process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
-    for (const bad of ['', '   ', '$1', '-1', 'five', '1e3', '9'.repeat(400)]) {
+    for (const bad of ['', '   ', '$1', '-1', 'five', '1e3', '9'.repeat(400), '0.52499']) {
       process.env.VOICE_GPT_LIVE_TEST_MAX_USD = bad;
       const { insert } = primeLive();
       const res = mockRes();

@@ -2621,15 +2621,16 @@ function gptLiveCellFor(digits) {
 }
 
 // The default applies only when the variable is absent. A set value that is
-// not a plain, finite non-negative number ("", "$1", "-1", "five", 400 digits
-// that overflow to Infinity) is a mistake: null, and the reservation refuses
+// not a plain, finite non-negative number with at most 4 decimals (the
+// ledger's $0.0001 scale): "", "$1", "-1", "five", "0.52499", or 400 digits
+// that overflow to Infinity, is a mistake: null, and the reservation refuses
 // the call rather than guess a cap.
 function gptLiveMaxUsd() {
   const raw = process.env.VOICE_GPT_LIVE_TEST_MAX_USD;
   if (raw === undefined) return GPT_LIVE_DEFAULT_MAX_USD;
   const text = String(raw).trim();
   const value = Number(text);
-  return /^\d+(\.\d+)?$/.test(text) && Number.isFinite(value) ? value : null;
+  return /^\d+(\.\d{1,4})?$/.test(text) && Number.isFinite(value) ? value : null;
 }
 
 // Reserve one call's worst-case OpenAI cost (live-bridge PER_CALL_RESERVE_USD:
