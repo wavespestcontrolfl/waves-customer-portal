@@ -8753,8 +8753,13 @@ nothing either way (a text choice equal to the stored one, an identical replay o
 any resend, so no write skips the check; the page always sends one. The page posts its answers under `/v2`: a server
 from before the version (#8012) has only the paths without `/v2`, whose handlers ignore it, so in a mixed deploy or a
 rollback a page that read a version never posts an answer to a handler that ignores it. That post answers 404 and
-writes nothing, and the page reads the offer before it calls the link dead: an open read keeps the offer and says
-"That did not go through. Please try again." Here the paths without `/v2` run the same handlers with the same check,
+writes nothing, and the page reads the offer before it calls the link dead: a 404 read shows the dead link, and an
+open read keeps the offer and marks the page out of date. So does a re-read the page cannot use (an open offer without
+its version or a term it shows, or a state it does not know): reading again gets the same answer. Out of date, the
+page locks every answer and says "This page is out of date. Please reload it and try again." with a "Reload page"
+button, shown only while no send is in flight or lost (a reload would drop a send whose outcome is not known). After a
+lost reply, a resend's 404 does not mark it: that send may still land on a server that has the route, so its resend
+stays the only action. Here the paths without `/v2` run the same handlers with the same check,
 for a tab that opened the page from before `/v2` (#8091 posts there with its version). A signature is also refused
 the same way (409 `{state:'open'}`, no write, a warning logged) when the frozen offer lacks a term the page shows (the
 job, a real start date, an hourly rate of whole cents, the week, who they report to, pay day, the Terms, and a pay step
