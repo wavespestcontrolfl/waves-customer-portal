@@ -4,23 +4,24 @@
 // planStartBlocker(database, customerId) answers null when none of the records
 // it reads stands against it, or the first reason that does:
 //   'not_live'    no such customer, an inactive account, or a deleted one
-//   'commercial'  a commercial account, a customer of a won commercial
-//                 proposal, or a commercial property among the saved ones
-//                 (never a residential plan)
+//   'commercial'  a record of the account says commercial: the account row,
+//                 a saved property, an estimate, a lead or a visit (never a
+//                 residential plan)
 //   'has_plan'    the customer already holds a plan (customerHoldsPlan below)
 // A failed read THROWS. An outage is never "nothing stands against it": the
 // caller is a job that tries again, or a pricer that must return no price.
 //
-// What it reads: the customers row, the active saved properties of the account
-// (customer_properties, for the commercial rule) and the plan records of that
-// ONE account (customerHoldsPlan below lists them). What it does not read:
+// What it reads: the customers row, and the records that carry the id of that
+// ONE account. For the commercial rule: its active saved properties, its
+// estimates, its leads and its visits (hasCommercialRecord below). For the
+// plan rule: its plan records (customerHoldsPlan below lists them). What it
+// does not read:
 // - another account of the same person or home (a duplicate profile, a payer,
-//   a family link);
-// - an estimate that is still open (an accept writes the tier, the lane and
-//   the series, and those are read);
-// - what a lead, an estimate or a visit says about "commercial" (a lead's
-//   flag, an estimate's category, a service name). Those describe one sale or
-//   one job. The flow that acts on the job judges its kind;
+//   a family link), and a lead or an estimate with no customer id on it (one
+//   that matches the person by phone, email or address only);
+// - an open estimate as a PLAN record (an accept writes the tier, the lane
+//   and the series, and those are read). The commercial rule reads every
+//   estimate of the account;
 // - termite_bonds, customer_contracts, payment_plans. A bond rides the
 //   quarterly station check, whose recurring visits are read; a bond alone is
 //   a warranty with a renewal date (no tier count, no bundle discount). A
@@ -130,6 +131,22 @@ async function customerHoldsPlan(database, customer) {
   return Boolean(await require('./admin-cancellation').findPendingPrepayInvoice(customer.id, null, database));
 }
 
+// ---- The commercial rule ----
+//
+// The app keeps no single "this customer is a business" mark. The account row
+// carries three (the tier, a mirror of the primary property's type, the
+// building use of a won proposal), and each has a gap: the mirror can be
+// behind, nothing on the row mirrors a property's occupancy, and a won
+// proposal writes a building use only when it carries one (and the column
+// came with no backfill for the wins before it). So the rule also reads every
+// record that carries the account's id and that the app itself can read as
+// commercial, each by the rule the app applies to that kind of record
+// (hasCommercialRecord). ONE mark is enough, whatever its age or status. That
+// is the fail-closed side, on purpose: this proof clears an account for an
+// offer nobody reads before it goes out. A business that gets a home price is
+// the costly mistake. A home with one old commercial mark only gets no
+// automatic offer.
+
 // One rule for a property type, wherever it is saved: the account-level list
 // (commercial, business: isCommercialAccount in self-booking-plan-sync.js) or
 // the pricing engine's own rule (isCommercialProperty).
@@ -155,6 +172,96 @@ async function hasCommercialProperty(database, customerId) {
   return properties.some((property) => property.occupancy_type === 'commercial' || isCommercialPropertyType(property.property_type));
 }
 
+// The estimator forms save their commercial toggle as text ('YES'), and the
+// payload scan (isCommercialEstimateData) reads only the boolean. A save
+// stamps the category column from the toggle, and a row from before that
+// stamp can carry the toggle alone. So this reads the toggle at any level of
+// the payload, in the words the lead form and the termite agreement take as a
+// yes, and also in the engine's spelling (is_commercial), which that scan does
+// not read.
+const COMMERCIAL_FLAG_WORDS = Object.freeze(['yes', 'y', 'true', '1', 'on', 'commercial']);
+function carriesCommercialFlag(value) {
+  if (!value || typeof value !== 'object') return false;
+  if (Array.isArray(value)) return value.some((item) => carriesCommercialFlag(item));
+  const saysYes = (flag) => COMMERCIAL_FLAG_WORDS.includes(String(flag ?? '').trim().toLowerCase());
+  if (saysYes(value.isCommercial) || saysYes(value.is_commercial)) return true;
+  return Object.values(value).some((item) => carriesCommercialFlag(item));
+}
+
+// The payload of an estimate, null when the row has none. A payload that is
+// not an object or a list is a failed read, as a failed query is.
+function estimatePayload(raw) {
+  if (raw === null || raw === undefined) return null;
+  const data = require('./estimate-service-lines').parseEstimateData(raw);
+  if (!data || typeof data !== 'object') throw new Error('planStartBlocker could not read an estimate payload');
+  return data;
+}
+
+// Is this estimate commercial? The app has several rules for that, each made
+// for its own flow, and none of them holds all the others:
+// - the category column. A save stamps it, but not every writer does: an
+//   auto-priced commercial estimate can keep the default 'RESIDENTIAL';
+// - a commercial proposal, authored or scaffolded (isCommercialProposalData).
+//   It is also the record of a WON proposal. A win marks the account
+//   commercial only when the proposal has taxable lines, and it writes a
+//   building use only when the proposal carries one (proposal-win.js), so a
+//   won proposal can leave no mark on the account at all;
+// - the payload scan the save stamps the category from
+//   (isCommercialEstimateData);
+// - the classifier of the accept and slot routes
+//   (isCommercialAutoAcceptEstimate): commercial service rows;
+// - the form's toggle as text (carriesCommercialFlag above).
+// Not the termite agreement's classifier (isCommercialEstimate in
+// termite-program-agreement.js): it also parks a duplex, a condo and a
+// townhome, and those are homes.
+function isCommercialEstimateRow(estimate) {
+  if (String(estimate.category || '').trim().toUpperCase() === 'COMMERCIAL') return true;
+  const data = estimatePayload(estimate.estimate_data);
+  return require('./estimate-proposal').isCommercialProposalData(data)
+    || require('./estimate-delivery-options').isCommercialEstimateData(data)
+    || require('./estimate-commercial-identity').isCommercialAutoAcceptEstimate({ estimate_data: data })
+    || carriesCommercialFlag(data);
+}
+
+// EVERY estimate of the account counts, whatever its status: a won one (the
+// customer bought commercial work), an open one (the office quotes commercial
+// work now) and an old one (the account was quoted as a business). An
+// archived one too.
+async function hasCommercialEstimate(database, customerId) {
+  const estimates = await database('estimates').where({ customer_id: customerId }).select('category', 'estimate_data');
+  return estimates.some((estimate) => isCommercialEstimateRow(estimate));
+}
+
+// A lead of the account that the intake marked commercial (leads.is_commercial:
+// the flag the booking-link rule refuses on, call-booking-link-text.js). A
+// deleted lead counts too: the removal of a lead does not make the caller a
+// home.
+async function hasCommercialLead(database, customerId) {
+  return Boolean(await database('leads').where({ customer_id: customerId, is_commercial: true }).first('id'));
+}
+
+// A visit of the account with a commercial service, by the rule the calendar
+// and tier readers apply to a visit joined to its catalog row
+// (isCommercialServiceRow: the visit's own service text, the catalog key, the
+// catalog name). Every visit counts: done, cancelled or still to come.
+async function hasCommercialVisit(database, customerId) {
+  const { isCommercialServiceRow } = require('./self-booking-plan-sync');
+  const kinds = await database('scheduled_services as visit')
+    .leftJoin('services as svc', 'visit.service_id', 'svc.id')
+    .where({ 'visit.customer_id': customerId })
+    .distinct('visit.service_type', 'svc.service_key', 'svc.name as service_name');
+  return kinds.some((kind) => isCommercialServiceRow(kind));
+}
+
+// Does a record of the account say commercial? Each kind of record is one
+// read on the caller's handle.
+async function hasCommercialRecord(database, customerId) {
+  return (await hasCommercialProperty(database, customerId))
+    || (await hasCommercialEstimate(database, customerId))
+    || (await hasCommercialLead(database, customerId))
+    || (await hasCommercialVisit(database, customerId));
+}
+
 async function planStartBlocker(database, customerId) {
   if (!database || !customerId) throw new Error('planStartBlocker needs a database handle and a customer id');
   const customer = await database('customers').where({ id: customerId }).first();
@@ -175,7 +282,7 @@ async function planStartBlocker(database, customerId) {
   // commercial-proposal customer all the same.
   const { isCommercialAccount } = require('./self-booking-plan-sync');
   if (isCommercialAccount(customer) || isCommercialPropertyType(customer.property_type) || customer.building_use) return 'commercial';
-  if (await hasCommercialProperty(database, customer.id)) return 'commercial';
+  if (await hasCommercialRecord(database, customer.id)) return 'commercial';
   return (await customerHoldsPlan(database, customer)) ? 'has_plan' : null;
 }
 

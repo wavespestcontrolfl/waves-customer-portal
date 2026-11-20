@@ -119,6 +119,7 @@ describe('planStartBlocker', () => {
       ['a deleted account with a plan visit on the calendar', { customer: { deleted_at: '2026-10-01T12:00:00Z' }, visits: [FLAGGED] }],
       ['an inactive commercial account', { customer: { active: false, waveguard_tier: 'Commercial' } }],
       ['an inactive account with a commercial saved property', { customer: { active: false }, tables: { customer_properties: [PROPERTY({ occupancy_type: 'commercial' })] } }],
+      ['a deleted account with a commercial estimate', { customer: { deleted_at: '2026-10-01T12:00:00Z' }, tables: { estimates: [{ category: 'COMMERCIAL', estimate_data: null }] } }],
     ])('%s: not_live', async (_label, given) => {
       expect(await blocker(world(given))).toBe('not_live');
     });
@@ -132,7 +133,9 @@ describe('planStartBlocker', () => {
   // The account-level rule (the 'commercial' tier, or a commercial or business property type) and the pricing
   // engine's own rule for a property type. The membership predicate reads the Commercial tier as "no plan":
   // without this rule a commercial account between visits would read as a home with no plan.
-  describe('a commercial account or property', () => {
+  // Then every record that carries the account's id and that the app can read as commercial: a saved property,
+  // an estimate, a lead, a visit. One mark is enough.
+  describe('a commercial account or record', () => {
     test.each([
       ['the Commercial tier and no property type', { waveguard_tier: 'Commercial', property_type: null }],
       ['the commercial tier in another spelling, with a residential property type', { waveguard_tier: ' commercial ', property_type: 'single_family' }],
@@ -233,6 +236,151 @@ describe('planStartBlocker', () => {
         expect(await blocker(db)).toBe('commercial');
         expect(reads).toEqual([]);
       });
+    });
+
+    // The app has several rules for "this estimate is commercial", each made for its own flow. Any one of them is
+    // enough, on an estimate of any status: the account row of a won commercial proposal can carry no mark at
+    // all (a proposal with no taxable lines, won before the building use existed).
+    describe('an estimate of the account', () => {
+      // A home estimate, as the estimator form saves it.
+      const ESTIMATE = (change = {}) => ({
+        category: 'RESIDENTIAL',
+        estimate_data: { inputs: { isCommercial: 'NO', propertyType: 'Single Family' }, result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control' }] } } },
+        ...change,
+      });
+      const withEstimates = (estimates, given = {}) => world({ ...given, tables: { estimates } });
+
+      // Each case carries ONE mark, so each rule is proved alone. The commercial estimate stands between two home
+      // estimates: one mark on one estimate is enough.
+      test.each([
+        ['the category column, with no payload', ESTIMATE({ category: 'COMMERCIAL', estimate_data: null })],
+        ['the category in another spelling', ESTIMATE({ category: ' commercial ' })],
+        ['an authored commercial proposal under the default category', ESTIMATE({ estimate_data: { proposal: { enabled: true } } })],
+        ['a scaffolded commercial proposal', ESTIMATE({ estimate_data: { proposal: { enabled: false, scaffold: true } } })],
+        ['a commercial property type in the form inputs', ESTIMATE({ estimate_data: { inputs: { propertyType: 'Commercial' } } })],
+        ['a commercial subtype in the engine request', ESTIMATE({ estimate_data: { engineRequest: { profile: { commercialSubtype: 'office' } } } })],
+        ['a commercial service line', ESTIMATE({ estimate_data: { engineResult: { lineItems: [{ service: 'commercial_pest' }] } } })],
+        // Only the classifier of the accept and slot routes reads a service row by its key.
+        ['a commercial service row the accept routes know by its key', ESTIMATE({ estimate_data: { result: { recurring: { services: [{ serviceKey: 'commercial_lawn_monthly' }] } } } })],
+        // The payload scan reads the toggle only as a boolean, and never the engine's spelling.
+        ["the form's toggle as text", ESTIMATE({ estimate_data: { inputs: { isCommercial: 'YES' } } })],
+        ["the form's toggle in another spelling, in another generation of the payload", ESTIMATE({ estimate_data: { engineInputs: { isCommercial: ' yes ' } } })],
+        ["the engine's flag", ESTIMATE({ estimate_data: { engine: { intent: { is_commercial: true } } } })],
+        ["the engine's flag as text, inside a list", ESTIMATE({ estimate_data: { revisions: [{ intent: { is_commercial: 'true' } }] } })],
+        ['a payload saved as JSON text', ESTIMATE({ estimate_data: JSON.stringify({ proposal: { enabled: true } }) })],
+      ])('%s: commercial, and no plan record is read', async (_label, estimate) => {
+        const reads = [];
+        const db = withEstimates([ESTIMATE(), estimate, ESTIMATE()], { ...ONGOING_COLUMN, visits: (calls) => { reads.push(calls); return [FLAGGED]; } });
+        expect(await blocker(db)).toBe('commercial');
+        expect(reads).toEqual([]);
+      });
+
+      test.each([
+        ['a home estimate', ESTIMATE()],
+        ['an estimate with no payload', ESTIMATE({ estimate_data: null })],
+        ['an estimate with an empty payload', ESTIMATE({ estimate_data: {} })],
+        ['an estimate with no category', ESTIMATE({ category: null })],
+        ['a proposal that is neither authored nor scaffolded', ESTIMATE({ estimate_data: { proposal: { enabled: false } } })],
+        ["the form's toggle and the engine's flag set to no", ESTIMATE({ estimate_data: { inputs: { isCommercial: 'NO' }, engineInputs: { isCommercial: false, is_commercial: 'no' }, engine: { intent: { is_commercial: false, category: 'RESIDENTIAL' } } } })],
+        ['a home estimate saved as JSON text', ESTIMATE({ estimate_data: JSON.stringify({ inputs: { isCommercial: 'NO' } }) })],
+      ])('%s is not commercial', async (_label, estimate) => {
+        expect(await blocker(withEstimates([estimate, ESTIMATE()]))).toBeNull();
+      });
+
+      // The toggle's value, under either spelling of its name: the words the lead form and the termite
+      // agreement take as a yes, a true and a 1.
+      test.each([['YES'], [' Yes '], ['y'], ['true'], [true], ['1'], [1], ['on'], ['Commercial']])('a commercial toggle of %j is a yes', async (flag) => {
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: { inputs: { isCommercial: flag } } })]))).toBe('commercial');
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: { engine: { intent: { is_commercial: flag } } } })]))).toBe('commercial');
+      });
+
+      test.each([['NO'], ['n'], ['false'], [false], ['0'], [0], ['off'], [''], [null], ['residential'], ['yes please']])('a commercial toggle of %j is not a yes', async (flag) => {
+        expect(await blocker(withEstimates([ESTIMATE({ estimate_data: { inputs: { isCommercial: flag }, engine: { intent: { is_commercial: flag } } } })]))).toBeNull();
+      });
+
+      // An estimate the proof cannot read is a failed read, as a failed query is: never "a home".
+      test.each([
+        ['text that is not JSON', 'not json'],
+        ['a number', 7],
+        ['JSON text of a number', '7'],
+        ['an empty text', ''],
+        ['a bare false', false],
+      ])('a payload of %s is a failed read', async (_label, estimate_data) => {
+        await expect(blocker(withEstimates([ESTIMATE(), ESTIMATE({ estimate_data })]))).rejects.toThrow('could not read an estimate payload');
+      });
+
+      test('the category column answers for an estimate whose payload cannot be read', async () => {
+        expect(await blocker(withEstimates([ESTIMATE({ category: 'COMMERCIAL', estimate_data: 'not json' })]))).toBe('commercial');
+      });
+
+      test('home estimates only, and a plan record: the plan is the answer', async () => {
+        const db = withEstimates([ESTIMATE(), ESTIMATE()], { visits: onlyFor(isCalendarRead, [FLAGGED]) });
+        expect(await blocker(db)).toBe('has_plan');
+      });
+
+      // The fake applies no filter, so this pins the filter itself: every estimate of this customer, with no
+      // status in it (a won, an open and an old estimate all count). PostgreSQL proves each status.
+      test('the read asks for every estimate of this customer, whatever its status', async () => {
+        const reads = [];
+        await blocker(withEstimates((calls) => { reads.push(calls.map((call) => [...call])); return []; }));
+        expect(reads).toEqual([[['where', { customer_id: 'cust-1' }]]]);
+      });
+    });
+
+    // The intake marks a commercial lead (leads.is_commercial), and the booking-link rule refuses on that flag.
+    describe('a lead of the account', () => {
+      // The fake applies no filter: this table answers a row only to a read that asks for the commercial flag.
+      const commercialLeadOnly = (calls) => (whereHas(calls, (f) => f.is_commercial === true) ? [{ id: 'lead-1' }] : []);
+
+      test('a lead the intake marked commercial: commercial, and no plan record is read', async () => {
+        const reads = [];
+        const db = world({ ...ONGOING_COLUMN, visits: (calls) => { reads.push(calls); return [FLAGGED]; }, tables: { leads: commercialLeadOnly } });
+        expect(await blocker(db)).toBe('commercial');
+        expect(reads).toEqual([]);
+      });
+
+      // PostgreSQL proves that a home lead, and another customer's commercial lead, say nothing.
+      test("the read asks for this customer's commercial leads", async () => {
+        const reads = [];
+        await blocker(world({ tables: { leads: (calls) => { reads.push(calls.map((call) => [...call])); return []; } } }));
+        expect(reads).toEqual([[['where', { customer_id: 'cust-1', is_commercial: true }]]]);
+      });
+    });
+
+    // The rule the calendar and tier readers apply to a visit joined to its catalog row (isCommercialServiceRow):
+    // the visit's own service text, the catalog key, the catalog name.
+    describe('a visit of the account', () => {
+      const HOME_KIND = { service_type: 'Quarterly Pest Control', service_key: 'pest_quarterly', service_name: 'Quarterly Pest Control' };
+      const withVisitKinds = (kinds, given = {}) => world({ ...given, tables: { 'scheduled_services as visit': kinds } });
+
+      test.each([
+        ["a commercial service in the visit's own text", { service_type: 'Commercial Pest Control', service_key: null, service_name: null }],
+        ['a commercial catalog key behind a generic text', { service_type: 'Pest Control', service_key: 'commercial_pest_monthly', service_name: 'Monthly Pest Service' }],
+        ['a commercial catalog name behind a generic text', { service_type: 'Pest Control', service_key: 'pest_monthly_b', service_name: 'Commercial Monthly Pest' }],
+      ])('%s: commercial, and no plan record is read', async (_label, kind) => {
+        const reads = [];
+        const db = withVisitKinds([HOME_KIND, kind, HOME_KIND], { ...ONGOING_COLUMN, visits: (calls) => { reads.push(calls); return [FLAGGED]; } });
+        expect(await blocker(db)).toBe('commercial');
+        expect(reads).toEqual([]);
+      });
+
+      test('home services only are not commercial', async () => {
+        expect(await blocker(withVisitKinds([HOME_KIND, { service_type: 'One-Time Roach Treatment', service_key: null, service_name: null }]))).toBeNull();
+      });
+
+      test('the read asks for every visit of this customer, whatever its status', async () => {
+        const reads = [];
+        await blocker(withVisitKinds((calls) => { reads.push(calls.map((call) => [...call])); return []; }));
+        expect(reads).toEqual([[['where', { 'visit.customer_id': 'cust-1' }]]]);
+      });
+    });
+
+    test('an account that is commercial by its own row is answered with no read of its estimates, leads or visits', async () => {
+      const reads = [];
+      const record = (name) => (calls) => { reads.push([name, calls]); return []; };
+      const db = world({ customer: { building_use: 'residential' }, tables: { estimates: record('estimates'), leads: record('leads'), 'scheduled_services as visit': record('visits') } });
+      expect(await blocker(db)).toBe('commercial');
+      expect(reads).toEqual([]);
     });
   });
 
@@ -407,6 +555,9 @@ describe('planStartBlocker', () => {
     test.each([
       ['the account read', { tables: { customers: customersFailingAt(1, 'account read down') } }, 'account read down'],
       ['the saved property read', { tables: { customer_properties: failing('property read down') } }, 'property read down'],
+      ['the estimate read', { tables: { estimates: failing('estimate read down') } }, 'estimate read down'],
+      ['the lead read', { tables: { leads: failing('lead read down') } }, 'lead read down'],
+      ['the read of the visit services', { tables: { 'scheduled_services as visit': failing('visit service read down') } }, 'visit service read down'],
       ['the account read of the calendar reader', { tables: { customers: customersFailingAt(2, 'calendar account read down') } }, 'calendar account read down'],
       ['the calendar read', { visits: failFor(isCalendarRead, 'calendar read down') }, 'calendar read down'],
       ['the catalog join of the calendar read', { tables: { 'scheduled_services as s': failing('catalog join down') } }, 'ownership catalog join failed'],
