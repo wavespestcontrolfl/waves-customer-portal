@@ -31,6 +31,7 @@ jest.mock('../services/invoice-followups', () => ({ stopOnPayment: jest.fn(async
 jest.mock('../services/billing-pause', () => ({ maybeResumeBillingPauseOnPayment: jest.fn(async () => undefined) }));
 jest.mock('../services/review-request', () => ({ enrollForPaidInvoice: jest.fn(async () => undefined) }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(async () => undefined) }));
+jest.mock('../services/commercial-prepay-dispatch-review', () => ({ reconcileInvoice: jest.fn(async () => null) }));
 jest.mock('../services/payment-plans', () => ({ completeActivePlansForInvoice: jest.fn(async () => undefined) }));
 jest.mock('../services/open-balance', () => ({ rowIsSelfPayDue: jest.fn(async () => true) }));
 jest.mock('../services/invoice-prepay', () => ({ resolveInvoiceTermId: jest.fn(async () => null) }));

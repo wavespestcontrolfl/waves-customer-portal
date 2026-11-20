@@ -385,7 +385,8 @@ jobs:
                 // Dispatch sale facts, review episodes and socket broadcasts use a migrated isolated database.
                 run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
                   'tests/commercial-prepay-dispatch-review-postgres.test.js',
-                  'tests/commercial-prepay-sale-appointment-postgres.test.js',
+                  'tests/commercial-prepay-receipt-lifecycle-postgres.test.js', 'tests/commercial-prepay-stripe-reversal-postgres.test.js',
+                  'tests/commercial-prepay-deposit-refund-proof-postgres.test.js', 'tests/commercial-prepay-sale-appointment-postgres.test.js',
                   'tests/dispatch-alerts-transaction-broadcast-postgres.test.js'],
                   { cwd: 'server', env: { ...process.env, DATABASE_URL: `${base}${name}`, WAVES_LOCAL_DEV: '1', WAVES_WORKTREE_ID: name.slice('waves_qa_'.length) } });
                 // Suites that accept only a private waves_qa_ database (sweep #7246 B1).

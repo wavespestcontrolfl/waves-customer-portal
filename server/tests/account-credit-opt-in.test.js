@@ -1,3 +1,7 @@
+jest.mock('../services/commercial-prepay-dispatch-review', () => ({
+  reconcileInvoice: jest.fn(async () => null),
+}));
+
 // Owner ruling 2026-08-28: automatic account-credit application is the
 // CUSTOMER's choice (customers.auto_apply_account_credit, portal slider,
 // default OFF). Every automatic seam funnels through

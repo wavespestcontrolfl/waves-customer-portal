@@ -806,6 +806,45 @@ async function lockPaymentIntentPaymentRow(trx, piId) {
   );
 }
 
+// The processing -> paid ledger flip can commit before the invoice write, and
+// a synchronous /confirm can commit both before this webhook arrives. In both
+// cases, settle the invoice and record any commercial-prepay restoration in
+// one transaction. Refunds take this same PI fence, so they either land first
+// (this sees no paid row and does nothing) or wait until the paid invoice +
+// restored review are both durable. Within the fence, use /confirm's canonical
+// invoice -> payment row order.
+async function settlePaidSingleInvoiceAndReview(piId, invoiceUpdates) {
+  return db.transaction(async (trx) => {
+    await lockPaymentIntentPaymentRow(trx, piId);
+    const lockedInvoice = await trx('invoices')
+      .where({ stripe_payment_intent_id: piId })
+      .forUpdate()
+      .first('id', 'status');
+    if (!lockedInvoice) return 0;
+
+    const paidPayment = await trx('payments')
+      .where({ stripe_payment_intent_id: piId, status: 'paid' })
+      .orderBy('created_at', 'desc')
+      .forUpdate()
+      .first('id');
+    if (!paidPayment) return 0;
+
+    const status = String(lockedInvoice.status || '').toLowerCase();
+    let invoiceUpdated = 0;
+    if (!['paid', 'prepaid'].includes(status)) {
+      invoiceUpdated = await trx('invoices')
+        .where({ id: lockedInvoice.id, stripe_payment_intent_id: piId })
+        .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES)
+        .update(invoiceUpdates);
+      if (!invoiceUpdated) return 0;
+    }
+
+    await require('../services/commercial-prepay-dispatch-review')
+      .reconcileInvoice(trx, lockedInvoice.id);
+    return invoiceUpdated;
+  });
+}
+
 // Use express.raw() for Stripe signature verification
 router.post(
   '/',
@@ -1844,9 +1883,10 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   };
   if (chargedTotal !== null) paymentUpdates.amount = chargedTotal;
   if (details.receiptUrl) paymentUpdates.receipt_url = details.receiptUrl;
+  let fallbackLinkedInvoiceId = null;
+  let fallbackObservedCommercialSale = false;
   if (details.cardBrand) paymentUpdates.card_brand = details.cardBrand;
   if (details.cardLastFour) paymentUpdates.card_last_four = details.cardLastFour;
-  let fallbackLinkedInvoiceId = null;
   // The processing → paid flip and its withdrawal check commit together: a
   // payment already sitting in `processing` was accepted server-side while
   // the invoice was still self-pay — our own guards would have refused it
@@ -2080,7 +2120,8 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         throw new Error(`Invoice ${invoice.id} no longer matches PI ${piId}`);
       }
       fallbackLinkedInvoiceId = lockedInvoice.id;
-
+      fallbackObservedCommercialSale = await require('../services/commercial-prepay-sale-record')
+        .hasRecordedUnbookedSale(trx, lockedInvoice.id);
       const metadataBaseAmount = Number(paymentIntent.metadata?.base_amount ?? invoiceAmountDue(invoice));
       const metadataCardSurcharge = Number(paymentIntent.metadata?.card_surcharge ?? 0);
       await trx('payments').insert({
@@ -2131,6 +2172,10 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
           // payer-billed invoice settling during a homeowner's failed retry
           // must not read as the homeowner's own tender.
           ...(lockedInvoice.payer_id ? { payer_id: lockedInvoice.payer_id } : {}),
+          // Only a matching durable attempt can certify this as the office
+          // saved-card rail. The receipt reader deliberately refuses an
+          // unverified source string copied from arbitrary PI metadata.
+          ...(matchingAmbiguousAttempt ? { source: 'admin_card_on_file' } : {}),
         }),
       });
       if (matchingAmbiguousAttempt) {
@@ -2150,6 +2195,13 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
           throw new Error(`Ambiguous saved-card attempt ${matchingAmbiguousAttempt.id} no longer owns invoice ${invoice.id}`);
         }
         logger.info(`[stripe-webhook] Bound ambiguous saved-card attempt ${matchingAmbiguousAttempt.id} to succeeded PI ${piId}`);
+      }
+      // Credit proof requires the exact saved-card attempt to be durable as
+      // succeeded. Reconcile only after that state and the source-stamped
+      // payment row exist together in this transaction.
+      if (fallbackObservedCommercialSale) {
+        await require('../services/commercial-prepay-dispatch-review')
+          .reconcileInvoice(trx, lockedInvoice.id);
       }
       logger.info(`[stripe-webhook] Inserted missing paid payment row for PI: ${piId}`);
       return null;
@@ -2189,12 +2241,24 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   if (details.cardBrand) invoiceUpdates.card_brand = details.cardBrand;
   if (details.cardLastFour) invoiceUpdates.card_last_four = details.cardLastFour;
   if (details.receiptUrl) invoiceUpdates.receipt_url = details.receiptUrl;
-  let invoiceUpdated = await db('invoices')
-    .where({ stripe_payment_intent_id: piId })
-    .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES)
-    .update(invoiceUpdates);
-  if (fallbackLinkedInvoiceId && invoiceUpdated === 0) {
+  const recordedCommercialSale = fallbackObservedCommercialSale
+    || (!fallbackLinkedInvoiceId && invoiceForTenderGuard?.id
+      && await require('../services/commercial-prepay-sale-record')
+        .hasRecordedUnbookedSale(db, invoiceForTenderGuard.id));
+  // A fallback write already settled the invoice (count = 1) and, for a
+  // recorded commercial sale, observed the review in that same transaction.
+  // Ordinary invoices retain the historical bare UPDATE path exactly. Only a
+  // verified sale needs the locked invoice+review helper.
+  let invoiceUpdated;
+  if (fallbackLinkedInvoiceId) {
     invoiceUpdated = 1;
+  } else if (recordedCommercialSale) {
+    invoiceUpdated = await settlePaidSingleInvoiceAndReview(piId, invoiceUpdates);
+  } else {
+    invoiceUpdated = await db('invoices')
+      .where({ stripe_payment_intent_id: piId })
+      .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES)
+      .update(invoiceUpdates);
   }
 
   if (['claimed', 'ambiguous', 'succeeded'].includes(savedCardAttemptForTenderGuard?.status)
@@ -3646,6 +3710,14 @@ async function handleChargeRefunded(charge) {
       chargeId,
       paymentIntentId: charge.payment_intent,
     });
+    // Serialize refund against single-invoice /confirm and succeeded-webhook
+    // settlement. Those writers hold this fence across invoice + payment +
+    // commercial-review writes, so refund either precedes the restored
+    // episode or waits until that episode is durable before recording the
+    // next returned state. Re-entrant for combined branches below.
+    if (charge.payment_intent) {
+      await lockPaymentIntentPaymentRow(trx, charge.payment_intent);
+    }
     // Fee-lane refunds serialize with settlement's marker adoption (Codex
     // #3153 r24 P1): an existing fee row (pre-settlement marker or settled
     // row) updated here unlocked could commit between settlement's plain
@@ -3793,10 +3865,20 @@ async function handleChargeRefunded(charge) {
           // same-charge consumers; the real per-invoice rows carry the
           // refund.
           if (row.status === 'canceled' && meta.superseded_reason) continue;
+          const allocationGrossCents = Math.max(0, Math.round((Number(row.amount) || 0) * 100));
+          const allocationSurchargeCents = Math.max(0, Math.min(
+            allocationGrossCents,
+            Math.round(Number(row.surcharge_amount_cents) || 0),
+          ));
           await trx('payments').where({ id: row.id }).update({
             status: 'refunded',
             refund_amount: row.amount,
             refund_status: 'full',
+            // Each row is one exact allocation of the combined charge. The
+            // anchor owns the charge's surcharge; siblings own zero. Record
+            // that split rather than treating the gross refund as principal.
+            refunded_base_cents: allocationGrossCents - allocationSurchargeCents,
+            refunded_surcharge_cents: allocationSurchargeCents,
             stripe_refund_id: refundId,
             metadata: JSON.stringify(metadataWithStampedRefund(row.metadata, refundId)),
             updated_at: trx.fn.now(), // the ledger's refund time (Codex #4971 r6 P1)
@@ -3825,6 +3907,15 @@ async function handleChargeRefunded(charge) {
                 .where({ id: invId })
                 .whereIn('status', ['paid', 'processing'])
                 .update({ status: 'refunded', paid_at: null, updated_at: trx.fn.now() });
+              // Observe the returned-money state in THIS transaction. A
+              // refund.failed event can arrive immediately after Stripe emits
+              // charge.refunded; keeping the review beside the payment +
+              // invoice writes means the bounce waits on this transaction and
+              // can only record the later restored episode after this one is
+              // durable. Run once per owned allocation, not just for the
+              // arbitrary row returned from this combined branch.
+              await require('../services/commercial-prepay-dispatch-review')
+                .reconcileInvoice(trx, invId);
               const combinedHandCents = await handPartsPaidCents(trx, invId);
               if (combinedHandCents > 0) mixedRefunds.push({ invoiceId: invId, handCents: combinedHandCents });
             } else {
@@ -4096,6 +4187,12 @@ async function handleChargeRefunded(charge) {
           }).returning('*');
           result = marker;
         }
+        // Same money boundary as the refund stamp, invoice terminalization,
+        // returned credit, and (for a reordered webhook) durable marker. A
+        // refund.failed event must not restore the invoice before the returned
+        // episode has ever been observed.
+        await require('../services/commercial-prepay-dispatch-review')
+          .reconcileInvoice(trx, invId);
       }
     }
     return result;
@@ -4354,6 +4451,10 @@ async function handleRefundFailed(refund) {
           await trx('payments').where({ id: row.id }).update({
             refund_amount: 0,
             refund_status: null,
+            // The full-refund writer stamps the allocation's exact split;
+            // a bank failure unwinds both halves with the gross amount.
+            refunded_base_cents: 0,
+            refunded_surcharge_cents: 0,
             stripe_refund_id: null,
             ...(row.status === 'refunded'
               ? {
@@ -4453,6 +4554,10 @@ async function handleRefundFailed(refund) {
           return;
         }
         await insertBounceNotification(trx, `Combined balance charge ${rowChargeId || rowPiId}: the full refund bounced — ${neutralizedMarker ? 'the pre-settlement refund fence was lifted and settlement re-runs from the PI' : `${rows.length} allocation rows unwound to paid and ${restored.length} invoices restored`}. Account credit that returnAppliedCreditOnRefund restored per invoice may need manual claw-back (it is deliberately not auto-reversed).${restored.length ? ' Any annual-prepay coverage the refund CANCELLED is not auto-revived (revival is dispute-marker-gated) — the paid-sync re-runs post-commit, but if coverage stays cancelled on a restored invoice, reactivate it manually.' : ''}`);
+        for (const invoiceId of restored) {
+          await require('../services/commercial-prepay-dispatch-review')
+            .reconcileInvoice(trx, invoiceId);
+        }
       });
       // Post-commit paid sync per restored invoice (codex r19 P1, single-
       // payment-branch parity): the refund already ran
@@ -4823,6 +4928,8 @@ async function handleRefundFailed(refund) {
         // Leaving 'refunded' (codex #3591 r47 local P0): retire the
         // refunded-transition setup side effects with the restore.
         await require('../services/invoice').retireRodentSetupObligationForReinstatedInvoice(trx, linkedInvoice.id);
+        await require('../services/commercial-prepay-dispatch-review')
+          .reconcileInvoice(trx, linkedInvoice.id);
       }
     }
 
@@ -8283,8 +8390,21 @@ async function handleDisputeClosed(dispute) {
             }
             continue;
           }
-          const finalRowMeta = JSON.stringify({ ...meta, dispute_id: dispute.id, dispute_final: status });
           const invId = meta.invoice_id || meta.dispute_invoice_id || null;
+          // This branch is reached only after the Stripe charge proved the
+          // dispute covers the entire combined charge. Each real per-invoice
+          // row therefore lost its complete allocation. Persist that exact
+          // allocation proof for the receipt reader; payer-statement rows are
+          // intentionally outside commercial invoice review.
+          const disputeFullPayment = status === 'lost' && !!invId && !row.statement_id;
+          const finalRowMeta = JSON.stringify({
+            ...meta,
+            dispute_id: dispute.id,
+            dispute_final: status,
+            ...(status === 'lost' && invId && !row.statement_id
+              ? { dispute_invoice_id: invId, dispute_full_payment: disputeFullPayment }
+              : {}),
+          });
           if (status === 'won' || status === 'warning_closed') {
             // PRE-SETTLEMENT marker won (codex r6 P0): the marker fenced the
             // settle (which recorded an orphan), so flipping it to 'paid'
@@ -8579,32 +8699,40 @@ async function handleDisputeClosed(dispute) {
             // it), the lost closure must not clear that valid payment and
             // reopen collection a third time — and must not claw back the
             // coverage the replacement money funds.
-            const lostInvoice = await db('invoices').where({ id: invId }).first('id', 'status', 'stripe_payment_intent_id');
-            const lostInvoicePi = lostInvoice?.stripe_payment_intent_id ? String(lostInvoice.stripe_payment_intent_id) : null;
             const lostDisputedPi = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
-            const lostStatus = String(lostInvoice?.status || '').toLowerCase();
-            if (lostInvoice && ['paid', 'processing'].includes(lostStatus)
-              && lostInvoicePi && lostDisputedPi && lostInvoicePi === lostDisputedPi) {
-              // Gate first (Codex #4971 r4 P1): the reopen revokes a termite
-              // parent's paid evidence when this is its prepay invoice.
-              await db.transaction(async (trx) => {
-                await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [invId] });
+            // Gate and lock first, then decide ownership from the locked row.
+            // The reopen and Dispatch observation are one transaction: a
+            // replacement payment cannot commit between them and make the
+            // lost-money episode disappear behind a newly paid invoice.
+            const lostDisputeOwnsInvoice = await db.transaction(async (trx) => {
+              await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [invId] });
+              const lockedLostInvoice = await trx('invoices').where({ id: invId }).forUpdate()
+                .first('id', 'status', 'stripe_payment_intent_id');
+              const lockedPi = lockedLostInvoice?.stripe_payment_intent_id
+                ? String(lockedLostInvoice.stripe_payment_intent_id) : null;
+              const lockedStatus = String(lockedLostInvoice?.status || '').toLowerCase();
+              const stillBacksDisputedPi = !!lockedLostInvoice
+                && ['paid', 'processing'].includes(lockedStatus)
+                && !!lockedPi && !!lostDisputedPi && lockedPi === lostDisputedPi;
+              const alreadyReopenedForDispute = !!lockedLostInvoice
+                && !lockedPi && lockedStatus === 'overdue';
+              if (stillBacksDisputedPi) {
                 await trx('invoices')
                   .where({ id: invId })
                   .update({ status: 'overdue', paid_at: null, amount_paid: handPartsPaidSql(trx, invId), stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: trx.fn.now() });
-              });
-            }
+              }
+              const ownsInvoice = stillBacksDisputedPi || alreadyReopenedForDispute;
+              if (ownsInvoice) {
+                await require('../services/commercial-prepay-dispatch-review')
+                  .reconcileInvoice(trx, invId);
+              }
+              return ownsInvoice;
+            });
             // Refund-shaped term sync (codex r4 P1): lost money cancels the
             // prepaid coverage this invoice funded — but only when the
-            // DISPUTED payment still owns the invoice: PI match above, or
-            // the created-reopen shape (PI cleared, invoice sitting
-            // 'overdue' under this dispute's recorded binding). UNCAUGHT
-            // (codex r5 P1): critical lifecycle write, propagate for
-            // Stripe redelivery.
-            const lostDisputeOwnsInvoice = !!lostInvoice && (
-              (lostInvoicePi && lostDisputedPi && lostInvoicePi === lostDisputedPi)
-              || (!lostInvoicePi && lostStatus === 'overdue')
-            );
+            // DISPUTED payment still owns the invoice under the locked check
+            // above. UNCAUGHT (codex r5 P1): critical lifecycle write,
+            // propagate for Stripe redelivery.
             if (lostDisputeOwnsInvoice) {
               await require('../services/annual-prepay-renewals')
                 .syncTermForInvoicePayment({ id: invId, status: 'refunded', paid_at: null });
@@ -8991,11 +9119,26 @@ async function handleDisputeClosed(dispute) {
         const fresh = await trx('payments').where({ id: payment.id }).forUpdate().first();
         const freshMeta = parsePaymentMeta(fresh);
         const priorStatus = String(fresh?.status || '').toLowerCase();
+        const disputeInvoiceId = extraMeta?.dispute_invoice_id || freshMeta.dispute_invoice_id || null;
+        // For a normal invoice charge the payments row is the invoice-owned
+        // Stripe allocation. Equality (not >=) is the durable proof that this
+        // LOST dispute returned that whole allocation. Partial disputes stay
+        // explicit false. Payer statement money never enters this receipt
+        // proof, even if a legacy row happens to carry invoice-shaped metadata.
+        const allocationCents = Math.round((Number(fresh?.amount) || 0) * 100);
+        const disputeFullPayment = !fresh?.statement_id && !!disputeInvoiceId
+          && allocationCents > 0 && Number(dispute.amount) === allocationCents;
         await trx('payments').where({ id: payment.id }).update({
           status: 'disputed',
           ...(priorStatus === 'disputed' ? {} : { updated_at: new Date() }),
           failure_reason: `Dispute lost — $${amount} returned to customer`,
-          metadata: JSON.stringify({ ...freshMeta, dispute_id: dispute.id, dispute_final: status, ...(extraMeta || {}) }),
+          metadata: JSON.stringify({
+            ...freshMeta,
+            dispute_id: dispute.id,
+            dispute_final: status,
+            ...(extraMeta || {}),
+            ...(!fresh?.statement_id && disputeInvoiceId ? { dispute_full_payment: disputeFullPayment } : {}),
+          }),
         });
         return freshMeta;
       };
@@ -9043,6 +9186,10 @@ async function handleDisputeClosed(dispute) {
             && !lockedLostInvoice.stripe_payment_intent_id
             && String(lockedLostInvoice.status || '').toLowerCase() === 'overdue'
             && freshMeta.dispute_invoice_id === lostInvoice.id);
+          if (lostDisputeOwnedInvoice) {
+            await require('../services/commercial-prepay-dispatch-review')
+              .reconcileInvoice(trx, lostInvoice.id);
+          }
         });
       } else {
         await db.transaction((trx) => writeLostFinal(trx));
