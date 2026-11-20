@@ -216,6 +216,23 @@ describe.each([
     expect(text).not.toContain('ROSE');
   });
 
+  test("the irrigation line passes the screen of the list it joins, and the note's screen on a note record", async () => {
+    // It was added after the screen (pre-push audit round 30). No code writes
+    // the column today (production 2026-11-20: 0 of 656 records).
+    serviceRow = { ...visit(JSON.stringify(LISTS)), irrigation_recommendation: { recommendation: 'Gate code 4545 opens the timer box.' } };
+    let text = await printed(path);
+    expect(text).toContain('Trim the hedge back from the wall');
+    expect(text).not.toContain('4545');
+    // A clock time stands on a record with no note (the shared screen) and
+    // drops beside the technician's own note (the note's screen).
+    serviceRow = { ...visit(JSON.stringify(LISTS)), irrigation_recommendation: JSON.stringify({ recommendation: 'Water at 4 PM.' }) };
+    expect(await printed(path)).toContain('Water at 4 PM.');
+    serviceRow = { ...visit(JSON.stringify({ reportNote: { v: 1, text: NOTE_TEXT, source: 'cleaned' }, ...LISTS })), irrigation_recommendation: { recommendation: 'Water at 4 PM.' } };
+    text = await printed(path);
+    expect(text).toContain('Trim the hedge back from the wall');
+    expect(text).not.toContain('Water at 4 PM');
+  });
+
   test('a recommendation the complete screen refuses never prints, on a record with no note too', async () => {
     // A value stored before completion screened the list: the web payload
     // drops it (customerCopyViolations), and so does the PDF.

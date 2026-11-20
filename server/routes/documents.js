@@ -25,7 +25,7 @@ const {
 } = require('../services/project-types');
 const { authenticate } = require('../middleware/auth');
 const { customerSafeVisitNotes } = require('../services/context-aggregator');
-const { customerCopyViolations, heldAccessCode } = require('../services/service-report/technician-report-copy');
+const { carriesReportNote, customerCopyViolations, heldAccessCode, noteRecordCopyViolations } = require('../services/service-report/technician-report-copy');
 const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
 const { applyReportIdentitySnapshotToLegacyPdf, readReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
@@ -429,13 +429,21 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // ══════════════════════════════════════════════════════
   // WHAT WE RECOMMEND — property-specific tips
   // ══════════════════════════════════════════════════════
-  const recommendations = printable(formLists.structuredRecommendations);
+  // The irrigation line joins the form's recommendations before the screen,
+  // so it passes every screen they pass: printable, and on a note record the
+  // note's screen, as buildProtocolPayload screens the form's values (pre-push
+  // audit round 30). No code writes the column today (production 2026-11-20,
+  // read-only: 0 of 656 records).
+  const recommendationLines = [...formLists.structuredRecommendations];
   if (service.irrigation_recommendation) {
     try {
       const irr = typeof service.irrigation_recommendation === 'string' ? JSON.parse(service.irrigation_recommendation) : service.irrigation_recommendation;
-      if (irr.recommendation) recommendations.push(irr.recommendation);
+      if (irr.recommendation && !(carriesReportNote(service.structured_notes) && noteRecordCopyViolations(String(irr.recommendation)).length)) {
+        recommendationLines.push(irr.recommendation);
+      }
     } catch { /* ignore */ }
   }
+  const recommendations = printable(recommendationLines);
 
   if (recommendations.length) {
     if (y > 620) y = addContinuationPage();

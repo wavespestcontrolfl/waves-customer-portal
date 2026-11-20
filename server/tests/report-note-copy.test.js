@@ -98,7 +98,7 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
     expect(noteRecordCopyViolations('I treated the yard and the garage door frame.')).toEqual([]);
   });
 
-  test('a code-shaped number withholds the note, whatever words surround it; small counts stand', () => {
+  test('a code-shaped number or word withholds the note, whatever words surround it; small counts and measures stand', () => {
     // Rounds 24 and 26: a code with no code noun.
     for (const text of [
       'I treated the yard. The pedestrian entrance unlocks with 1234.',
@@ -117,10 +117,14 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       'I treated the yard. The number is 12\n34.',
       'I treated the yard. The number is one two three four.',
       'I treated the yard. The number is twelve thirty-four.',
+      // Round 30: letters and digits mixed, in either case.
+      'Use B7X2 at the front door.',
+      'I treated the yard. The tag reads b7x2.',
     ]) {
       expect([text, noteRecordCopyViolations(text)]).toEqual([text, ['note_record_access_code']]);
     }
     for (const text of [
+      'I checked the 2nd station along the 10ft strip by the 3rd window.',
       'I treated 3 stations and 12 feet of fence.',
       'I applied 1.25 oz per gallon.',
       'I checked stations 1, 2 and 3.',

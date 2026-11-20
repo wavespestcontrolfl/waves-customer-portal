@@ -795,11 +795,15 @@ const NOTE_MARKED_SENTENCE_RE = new RegExp([
 // screen judges the code's own shape. A figure with a unit ("150 feet") is
 // refused too. Production (2026-11-20, read-only, counts only): it adds 10 of
 // 401 raw pest technician notes (the screen already refused 97), and no
-// recap, finding field or form value.
+// recap, finding field or form value. A word of 3 or more letters and digits
+// mixed is a code's shape too ("Use B7X2 at the front door.", pre-push audit
+// round 30), except a number with an ordinal or unit ending ("2nd", "10ft",
+// "4pm"). Production: it adds no raw note, recap or finding field.
 const NOTE_NUMBER_WORD_SRC = '(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)';
 const CODE_SHAPED_NUMBER_RE = new RegExp([
   '(?<!\\p{N})\\p{N}(?:[\\s\\-\\u2010-\\u2015]{0,3}\\p{N}){2,}',
   `(?<!\\p{L})${NOTE_NUMBER_WORD_SRC}(?:[\\s,\\-\\u2010-\\u2015]+${NOTE_NUMBER_WORD_SRC}){2,}(?!\\p{L})`,
+  '(?<![\\p{L}\\p{N}])(?=[\\p{L}\\p{N}]*\\p{L})(?=[\\p{L}\\p{N}]*\\p{N})(?!\\p{N}+(?:st|nd|rd|th|ft|in|yds?|sq|oz|gal|lbs?|ml|hrs?|mins?|am|pm|x)(?![\\p{L}\\p{N}]))[\\p{L}\\p{N}]{3,}(?![\\p{L}\\p{N}])',
 ].join('|'), 'iu');
 
 // What speaks of getting in, whatever the code is. A code can be a word
