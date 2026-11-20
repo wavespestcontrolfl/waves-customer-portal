@@ -2046,6 +2046,52 @@ describe('POST /:token commit', () => {
       expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, Laurel, FL, 34209', city: 'Laurel' });
     });
 
+    // Pre-push P1 on aa30bd86f1: the page's list for a typed address read its zone from that address alone, while
+    // the booking falls back to the trusted customer's city on file when the address is in no zone (slot-zone.js
+    // leadBookingZone). So the list could offer an hour only another truck had on the zone day, and the commit
+    // refused it with nothing changed. The list passes that city now, so an hour it offers books.
+    test('a typed address in no zone, the trusted profile\'s city in one: the list offers the zone truck\'s hour, and that hour books', async () => {
+      Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
+      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis'] }];
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
+        address_line1: '123 Palm Ave', city: 'Nokomis', state: 'FL', zip: '34209', phone: '9415550101',
+        latitude: 27.4, longitude: -82.5, // the default mockGeocode pin: the location does not move
+      });
+      listResults.scheduled_services = [];
+      const open = (t, tech) => ({ start_time: t, end_time: `${t.slice(0, 2)}:30`, start_label: t, end_label: t, technician_id: tech });
+      // The far-south funnel as the builder runs it per truck: in the Nokomis zone tech-2 drives south that day, so
+      // tech-1's 09:00 goes; in no zone both hours stay.
+      const southZone = (a) => a.zoneFunnelCity === 'Nokomis' || a.zoneFunnelCustomerCity === 'Nokomis';
+      mockBuildAvailability.mockImplementation(async (a) => ({
+        days: [{ date: FUTURE_DATE, slots: southZone(a) ? [open('10:00', 'tech-2')] : [open('09:00', 'tech-1'), open('10:00', 'tech-2')] }],
+      }));
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const typed = '123 Palm Ave, Laurel, FL 34209';
+
+      const list = await callAvailability(token, { address: typed });
+
+      expect(list.body.availability.days[0].slots.map((s) => s.start_time)).toEqual(['10:00']);
+      expect(mockBuildAvailability.mock.calls[0][0]).toMatchObject({ zoneFunnelCity: 'Laurel', zoneFunnelCustomerCity: 'Nokomis' });
+
+      // A time the list never offered: the refusal's own list passes the same city.
+      mockBuildAvailability.mockClear();
+      const refused = await callPost(token, { date: FUTURE_DATE, time: '11:00', address: typed });
+
+      expect(refused.statusCode).toBe(409);
+      expect(refused.body.availability.days[0].slots.map((s) => s.start_time)).toEqual(['10:00']);
+      expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+
+      // The offered hour books, with the zone truck.
+      const booked = await callPost(token, { date: FUTURE_DATE, time: '10:00', address: typed });
+
+      expect(booked.statusCode).toBe(200);
+      expect(mockCreateSelfBooking.mock.calls[0][0]).toMatchObject({ slot_start: '10:00', technician_id: 'tech-2' });
+    });
+
     // Pre-push P1 on e88162fc27: with no address typed, the page's retry sends none again, and the next commit's
     // resolver (resolveServiceAddress) reads the trusted profile phase 1 linked. The refusal builds no times of its
     // own: the page reloads its list (GET), which reads that profile and its address, so the times it offers are built
@@ -2082,10 +2128,11 @@ describe('POST /:token commit', () => {
       expect(builds()).toEqual([[27.4, 'Sarasota']]);
       expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, Sarasota, FL, 34209', city: 'Sarasota' });
 
-      // The page's reload: phase 1 linked the lead to that profile.
+      // The page's reload: phase 1 linked the lead to that profile, whose city on file it passes too.
       mockBuildAvailability.mockClear();
       expect((await callGet(token)).statusCode).toBe(200);
       expect(builds()).toEqual([[27.4, 'Nokomis']]);
+      expect(mockBuildAvailability.mock.calls[0][0].zoneFunnelCustomerCity).toBe('Nokomis');
 
       // The retry types nothing again, and its own build reads what the reload read.
       mockBuildAvailability.mockClear();

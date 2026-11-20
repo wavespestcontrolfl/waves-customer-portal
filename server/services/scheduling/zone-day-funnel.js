@@ -74,8 +74,9 @@
  * (clock_timestamp), not the writer's transaction start, and an unstamped
  * stop by the cities of every funneled zone (one pool, as for a stamp). The
  * assessment link's list and its booking resolve the zone from the one booking
- * address the same way (resolveEstimateZone: its city decides, its text only
- * without one; createSelfBooking callbackVisit.zoneAddress, read only with the
+ * address the same way (slot-zone.js leadBookingZone: its city decides, its text
+ * only without one, else the customer's own city on file when the list knows the
+ * customer; createSelfBooking callbackVisit.zoneAddress, read only with the
  * funnel on), so the offer never shows a time the check refuses, and the
  * visit's stamp makes it a zone stop for the next booking.
  * Off, every zone day is the fleet's, as with one truck.
@@ -85,7 +86,7 @@
  */
 
 const logger = require('../logger');
-const { zoneSlugOf, resolveEstimateZone } = require('../slot-zone');
+const { zoneSlugOf, leadBookingZone } = require('../slot-zone');
 const { isEnabled } = require('../../config/feature-gates');
 
 // The per-truck switch: the scheduler's one technician-scope reader (occupancy.js techScopedConfirmActive,
@@ -341,18 +342,20 @@ async function truckMayTakeDate(conn, { estimateZone, date, technicianId }) {
 // routes/booking.js buildBookingAvailability, fed the lead's address text), read in two steps because that
 // builder keeps one technician per date and start: offerFunnelView before its claims (per truck,
 // dropOtherTruckDays runs on find-time's slots), funnelOfferPool after them. Same helpers, same rules: the zone
-// resolves through resolveEstimateZone, from the address's own `city` first (the zone its booking will stamp,
-// createSelfBooking), else the address text, and the cluster days come from getZoneFunnelDays over THIS request's
-// window. Returns { days, techDays }, or null when the funnel does not apply (gate off, no address,
+// resolves as the booking resolves it (slot-zone.js leadBookingZone), from the address's own `city` first (the zone
+// its booking will stamp, createSelfBooking), else the address text, else `customerCity`, the trusted customer's
+// city on file that the booking falls back to (pre-push P1 on aa30bd86f1: a list read the address alone, so it could
+// offer an hour the booking's fallback zone refuses). The cluster days come from getZoneFunnelDays over THIS
+// request's window. Returns { days, techDays }, or null when the funnel does not apply (gate off, no address,
 // no funneled zone) or cannot be resolved (zone or lookup failure: logged, fail open, as the estimate page does).
 // In the fleet view a one-day window funnels to itself (clustered or seeded, that day stays whole), so it reads
 // nothing: the commit's single-day rebuild with the gate off runs exactly as before.
-async function offerFunnelView({ address, city = null, dateFrom, dateTo, conn }) {
+async function offerFunnelView({ address, city = null, customerCity = null, dateFrom, dateTo, conn }) {
   if (!address || !isEnabled('southZoneDayFunnel')) return null;
   if (dateFrom === dateTo && !perTruckLive()) return null;
   let estimateZone = null;
   try {
-    estimateZone = await resolveEstimateZone(conn, { address, city });
+    ({ zone: estimateZone } = await leadBookingZone(conn, { address, city }, customerCity));
   } catch (err) {
     logger.warn(`[zone-day-funnel] offer zone resolution failed (failing open): ${err.message}`);
     return null;

@@ -7674,7 +7674,10 @@ the booking resolves its zone from the same address the same way
 (`callbackVisit.zoneAddress`; off, from the customer's city as before), so its
 stamp and its check match the list. An address that resolves to no zone takes
 the customer's city on file, as a visit with no zone stamp is read later by its
-customer's city. A matched profile at another stored location books with its
+customer's city. Every list that knows the trusted customer (GET,
+`POST /:token/availability`, `POST /:token/find-slots`, the new_lead email
+times and a refused booking's list) reads the same fallback, so a list never
+offers an hour that zone refuses. A matched profile at another stored location books with its
 own address (the slot is checked again with it); at the same pin the booking
 keeps the typed address, as the list read it. When the customer's city decides
 the zone, the slot is checked again per truck (both far-south gates on). A

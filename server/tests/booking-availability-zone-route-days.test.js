@@ -175,6 +175,18 @@ describe('buildAvailabilityForLead — south-zone day funnel', () => {
     expect(datesOf(await buildLead({ ...VENICE, line1: '9 Sarasota St' }))).toEqual([D1]);
   });
 
+  // An address in a town no zone lists takes the trusted customer's city on file, the zone its booking falls back to
+  // (slot-zone.js leadBookingZone), so the list never offers a time that booking's zone check refuses (pre-push P1 on
+  // aa30bd86f1). With no customer city it stays in no zone and gets the full list, as before.
+  test.each([['Venice', [D1]], [null, [D, D1, D2]]])('an address in no zone, the customer\'s city on file %s', async (customerCity, dates) => {
+    stopRows = [{ scheduled_date: D1, zone: 'venice', service_city: 'Venice', customer_city: null }];
+    const built = await require('../routes/inspection-public')._test.buildAvailabilityForLead(
+      { lat: 27.12, lng: -82.44 },
+      { rangeFrom: D, rangeTo: D2, config: CONFIG, duration: 60, offer: true, address: { ...VENICE, city: 'Laurel' }, customer: { city: customerCity } },
+    );
+    expect(datesOf(built)).toEqual(dates);
+  });
+
   test('a lead outside the funneled zones, and a build with no address, get the full list with no zone-stop read', async () => {
     stopRows = [{ scheduled_date: D1, zone: 'venice', service_city: 'Venice', customer_city: null }];
     const sarasota = await buildLead(SARASOTA);
@@ -261,5 +273,10 @@ describe('buildAvailabilityForLead — south-zone day funnel', () => {
     expect(calls).toHaveLength(7);
     expect(calls.filter((c) => !/\baddress\b/.test(c))).toEqual([]);
     expect(calls.filter((c) => /rangeFrom: date, rangeTo: date/.test(c))).toHaveLength(2);
+    // Every list that knows the trusted customer passes it, so an address in no zone takes the zone of its city on
+    // file, as the booking does (pre-push P1 on aa30bd86f1): GET, /availability, /find-slots, the email block's slots
+    // and the SLOT_TAKEN refresh. The two one-day commit builds read the address alone.
+    expect(calls.filter((c) => /\bcustomer\b/.test(c))).toHaveLength(5);
+    expect(calls.filter((c) => /rangeFrom: date, rangeTo: date/.test(c) && /\bcustomer\b/.test(c))).toEqual([]);
   });
 });

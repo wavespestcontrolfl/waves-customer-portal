@@ -1737,12 +1737,13 @@ function crewSlots(slots, crew) {
 // (its own technicianId filter). Only reschedule-public.js passes it: a visit
 // that already has a technician keeps that technician.
 // `zoneFunnelAddress`: opt-in address text, and `zoneFunnelCity` its city (a city decides the zone alone, the text
-// only without one, as createSelfBooking stamps it from callbackVisit.zoneAddress). With GATE_SOUTH_ZONE_DAY_FUNNEL
+// only without one, as createSelfBooking stamps it from callbackVisit.zoneAddress), else `zoneFunnelCustomerCity`,
+// the customer's city on file that the booking falls back to (slot-zone.js leadBookingZone). With GATE_SOUTH_ZONE_DAY_FUNNEL
 // live and an address in a
 // funneled far-south zone, the offered pool is funneled exactly as the estimate page's (funnelOfferPool).
 // Per truck (GATE_MULTI_TECH_CONFIRM, owner rule B) find-time's slots of a truck on another truck's zone
 // day go before any start is claimed (dropOtherTruckDays), so a start goes to the zone day's own truck.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, zoneFunnelCity = null, paidLookups, crew, verifiedOnly }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, zoneFunnelCity = null, zoneFunnelCustomerCity, paidLookups, crew, verifiedOnly }) {
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
@@ -2095,7 +2096,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // The far-south funnel's zone days (zoneFunnelAddress), read before the claims: per truck, a truck on another
   // truck's zone day never claims a start, so the zone truck keeps each start it has. Null = no funnel.
   const offerFunnel = result.slots?.length
-    ? await offerFunnelView({ address: zoneFunnelAddress, city: zoneFunnelCity, dateFrom: rangeFrom, dateTo: rangeTo, conn: db })
+    ? await offerFunnelView({ address: zoneFunnelAddress, city: zoneFunnelCity, customerCity: zoneFunnelCustomerCity, dateFrom: rangeFrom, dateTo: rangeTo, conn: db })
     : null;
   const findTimeSlots = dropOtherTruckDays(result.slots || [], offerFunnel || {}, (slot) => slot?.technician?.id);
   // A graced build never offers a slot whose simulated arrival delay is past

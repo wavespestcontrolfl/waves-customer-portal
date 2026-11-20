@@ -825,7 +825,10 @@ const customerAddressFields = (cust) => ({
 // `address`: the booking address ({line1, line2, city, state, zip}) on every list a customer is OFFERED; the
 // south-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL) reads it. The commit and re-validation rebuilds pass it too:
 // per truck (owner rule B) they drop the same openings as the list (zone-day-funnel.js dropOtherTruckDays).
-async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null }) {
+// `customer`: the trusted customer, which a list (and a refusal's list) passes so that an address in no zone takes
+// the zone of its city on file, the zone the booking falls back to (slot-zone.js leadBookingZone; pre-push P1 on
+// aa30bd86f1).
+async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, customer }) {
   const booking = require('./booking');
   const { buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
   const zoneInputs = zoneFunnelInputs(address);
@@ -864,7 +867,7 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     // same gate and grace value.
     bookArrivalGrace: true,
     ...(timeOfDay ? { timeOfDay } : {}),
-    ...(zoneInputs ? { zoneFunnelAddress: zoneInputs.address, zoneFunnelCity: zoneInputs.city } : {}),
+    ...(zoneInputs ? { zoneFunnelAddress: zoneInputs.address, zoneFunnelCity: zoneInputs.city, zoneFunnelCustomerCity: customer?.city } : {}),
   });
 }
 
@@ -921,7 +924,7 @@ async function computeConsultationSlotsForLead(leadId, { count = 3 } = {}) {
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
-    const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, address: resolved.address });
+    const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, address: resolved.address, customer: custRow });
     return {
       ok: true, slots: flattenNextSlots(built, count), needsAddress: false, address: resolved.address,
       addressInputs: bookingAddressInputs(lead, custRow),
@@ -1860,7 +1863,7 @@ router.get('/:token', async (req, res, next) => {
     let availability = null;
     if (resolved.location) {
       try {
-        const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address });
+        const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address, customer: custRow });
         availability = built ? shapeAvailability(built, range) : null;
       } catch (err) {
         logger.error(`[inspection-public] availability failed for lead ${lead.id}: ${err.message}`);
@@ -1917,7 +1920,7 @@ router.post('/:token/availability', findSlotsLimiter, async (req, res, next) => 
     if (!catalog.serviceId) return res.status(503).json({ error: 'booking_unavailable' });
     let availability = null;
     try {
-      const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address });
+      const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address, customer: custRow });
       availability = built ? shapeAvailability(built, range) : null;
     } catch (err) {
       logger.error(`[inspection-public] address availability failed for lead ${lead.id}: ${err.message}`);
@@ -1988,7 +1991,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     try {
       availability = await buildAvailabilityForLead(resolved.location, {
         rangeFrom: when.dateFrom, rangeTo: when.dateTo, config,
-        duration: catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true, address: resolved.address,
+        duration: catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true, address: resolved.address, customer: custRow,
       });
     } catch (err) {
       logger.error(`[inspection-public] find-slots availability failed for lead ${lead.id}: ${err.message}`);
@@ -2239,11 +2242,12 @@ function sendLocationFailure(res, failure, county, leadId) {
 // every other caller omits them and the body is byte-identical to before.
 // `location` null (nextCommitRefresh): no times, so the page reloads its own
 // list; a refused booking moved to a matched profile's other stored location
-// may pass `addressChanged` with it.
-async function sendSlotTaken(res, { location, address = null, range, config, catalog, leadId, error, leadPayload = null, addressChanged = false }) {
+// may pass `addressChanged` with it. `customer`: as the page's own list
+// passes it (buildAvailabilityForLead).
+async function sendSlotTaken(res, { location, address = null, customer, range, config, catalog, leadId, error, leadPayload = null, addressChanged = false }) {
   let refreshed = null;
   try {
-    if (location) refreshed = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes, address });
+    if (location) refreshed = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes, address, customer });
   } catch (err) {
     logger.warn(`[inspection-public] refresh availability failed for lead ${leadId}: ${err.message}`);
   }
@@ -2683,7 +2687,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address: resolved.address,
     });
     const slot = findSlotIn(dayAvailability, date, time);
-    if (!slot) return sendSlotTaken(res, { location: resolved.location, address: resolved.address, range, config, catalog, leadId: lead.id });
+    if (!slot) return sendSlotTaken(res, { location: resolved.location, address: resolved.address, customer: custRow, range, config, catalog, leadId: lead.id });
 
     // Phase 1 — lock, re-read the lead's customer_id FRESH (a concurrent
     // commit's phase 1 may have just linked one), re-run eligibility, then
