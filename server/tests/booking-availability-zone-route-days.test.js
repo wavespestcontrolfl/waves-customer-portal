@@ -273,10 +273,9 @@ describe('buildAvailabilityForLead — south-zone day funnel', () => {
     expect(calls).toHaveLength(7);
     expect(calls.filter((c) => !/\baddress\b/.test(c))).toEqual([]);
     expect(calls.filter((c) => /rangeFrom: date, rangeTo: date/.test(c))).toHaveLength(2);
-    // Every list that knows the trusted customer passes it, so an address in no zone takes the zone of its city on
-    // file, as the booking does (pre-push P1 on aa30bd86f1): GET, /availability, /find-slots, the email block's slots
-    // and the SLOT_TAKEN refresh. The two one-day commit builds read the address alone.
-    expect(calls.filter((c) => /\bcustomer\b/.test(c))).toHaveLength(5);
-    expect(calls.filter((c) => /rangeFrom: date, rangeTo: date/.test(c) && /\bcustomer\b/.test(c))).toEqual([]);
+    // Every build passes the trusted customer too, so an address in no zone takes the zone of its city on file, as
+    // the booking does: the lists (pre-push P1 on aa30bd86f1) and the commit's two one-day builds, so the commit
+    // gives the hour to the truck its list offered (pre-push P1 on 4eb9c11d2a).
+    expect(calls.filter((c) => !/\bcustomer\b/.test(c))).toEqual([]);
   });
 });

@@ -7683,14 +7683,17 @@ page gets the answer an account change under the booking fence already gets:
 `422 address_unresolved` when the token no longer reaches that customer. Every list that knows the trusted customer (GET,
 `POST /:token/availability`, `POST /:token/find-slots`, the new_lead email
 times and a refused booking's list) reads the same fallback, so a list never
-offers an hour that zone refuses. A matched profile at another stored location books with its
+offers an hour that zone refuses. The commit's own builds read it too, so the
+commit gives the hour to the truck its list offered. A matched profile at another stored location books with its
 own address (the slot is checked again with it); at the same pin the booking
 keeps the typed address, as the list read it. When the customer's city decides
-a far-south zone (one the funnel covers), the slot is checked again per truck
-(both far-south gates on). A
+a far-south zone (one the funnel covers) and the commit's first build read
+another city (phase one linked or changed the profile), the slot is checked
+again per truck (both far-south gates on). A
 refused booking's `SLOT_TAKEN` answer, with the funnel on, carries fresh times
 only when the page's next commit reads this one's inputs: an address typed (the
-page sends it again) at the same pin. They are built there with the booking's zone address. Any other
+page sends it again) at the same pin. They are built there with that address and the trusted customer, as
+the next commit's first build reads them. Any other
 refusal answers `availability: null`, and the page reloads its own list (GET, or
 `POST /:token/availability` with the address it holds), which reads the same
 resolver and trusted customer as its next commit. A booking moved to a matched

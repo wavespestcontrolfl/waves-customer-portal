@@ -2027,14 +2027,18 @@ describe('POST /:token commit', () => {
     // With the funnel off nothing is looked up and the fresh times keep the typed address, as before; a failed lookup
     // keeps it too (logged), and the booking still runs (pre-push P1 on 84c9b2d840). A profile city whose zone the
     // funnel does not cover has no truck rule to apply, so there is no re-check either: it would only repeat the first
-    // build and its travel lookups (pre-push P1 on 5fc5e4d648).
+    // build and its travel lookups (pre-push P1 on 5fc5e4d648). Every build passes the typed address and the trusted
+    // customer, and the builder applies the same fallback (pre-push P1 on 4eb9c11d2a): the lead is unlinked before
+    // phase 1, so the first build has no customer city, and phase 1's profile brings one.
+    const FIRST = ['Laurel', null];
+    const LINKED = ['Laurel', 'Nokomis'];
     test.each([
-      ['per truck', { perTruck: true, funnel: true }, 'read', ['Laurel', 'Nokomis', 'Nokomis'], 'tech-2'],
-      ['per truck, a zone the funnel does not cover', { perTruck: true, funnel: true }, 'unfunneled', ['Laurel', 'Nokomis'], 'tech-1'],
-      ['one truck', { perTruck: false, funnel: true }, 'read', ['Laurel', 'Nokomis'], 'tech-1'],
-      ['the funnel off: no lookup', { perTruck: true, funnel: false }, 'none', ['Laurel', 'Laurel'], 'tech-1'],
-      ['a failed lookup', { perTruck: true, funnel: true }, 'fails', ['Laurel', 'Laurel'], 'tech-1'],
-    ])('the typed city in no zone, the profile\'s city in one (%s): the re-check and the fresh times', async (_label, gates, zoneLookup, builtCities, bookedTech) => {
+      ['per truck', { perTruck: true, funnel: true }, 'read', [FIRST, LINKED, LINKED], 'tech-2'],
+      ['per truck, a zone the funnel does not cover', { perTruck: true, funnel: true }, 'unfunneled', [FIRST, LINKED], 'tech-1'],
+      ['one truck', { perTruck: false, funnel: true }, 'read', [FIRST, LINKED], 'tech-1'],
+      ['the funnel off: no lookup', { perTruck: true, funnel: false }, 'none', [FIRST, LINKED], 'tech-1'],
+      ['a failed lookup', { perTruck: true, funnel: true }, 'fails', [FIRST, LINKED], 'tech-1'],
+    ])('the typed city in no zone, the profile\'s city in one (%s): the re-check and the fresh times', async (_label, gates, zoneLookup, builds, bookedTech) => {
       Object.assign(mockFarSouthGates, gates);
       const zoneReads = jest.fn(() => {
         if (zoneLookup === 'fails') throw new Error('zones unreadable');
@@ -2060,9 +2064,8 @@ describe('POST /:token commit', () => {
 
       expect(res.statusCode).toBe(409);
       expect(res.body.code).toBe('SLOT_TAKEN');
-      expect(mockBuildAvailability.mock.calls.map(([args]) => args.zoneFunnelCity)).toEqual(builtCities);
-      const refreshCity = builtCities.at(-1);
-      expect(mockBuildAvailability.mock.calls.at(-1)[0]).toMatchObject({ zoneFunnelAddress: `123 Palm Ave, ${refreshCity}, FL, 34209`, zoneFunnelCity: refreshCity });
+      expect(mockBuildAvailability.mock.calls.map(([args]) => [args.zoneFunnelCity, args.zoneFunnelCustomerCity ?? null])).toEqual(builds);
+      expect(mockBuildAvailability.mock.calls.at(-1)[0]).toMatchObject({ zoneFunnelAddress: '123 Palm Ave, Laurel, FL, 34209' });
       expect(zoneReads.mock.calls.length > 0).toBe(zoneLookup !== 'none');
       expect(mockCreateSelfBooking.mock.calls[0][0].technician_id).toBe(bookedTech);
       expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress({ city: 'Nokomis' })).toEqual({ address: '123 Palm Ave, Laurel, FL, 34209', city: 'Laurel' });
@@ -2112,6 +2115,54 @@ describe('POST /:token commit', () => {
 
       expect(booked.statusCode).toBe(200);
       expect(mockCreateSelfBooking.mock.calls[0][0]).toMatchObject({ slot_start: '10:00', technician_id: 'tech-2' });
+    });
+
+    // Pre-push P1 on 4eb9c11d2a: the commit's first build read the typed address alone, while the list read the trusted
+    // profile's city too. With both trucks open at the hour, that build could give it to the truck the list dropped.
+    // Phase 1 then wrote the typed city onto the profile (same street and ZIP), so no later check read the city the list
+    // read, and that truck booked. The first build reads the same customer as the list now. In the zone (Nokomis,
+    // Venice) tech-2 drives south that day, so tech-1's 09:00 goes and the hour is tech-2's; in no zone the builder gives
+    // it to tech-1. Phase 1 writes the typed city onto the profile unless a staff-verified pin keeps the profile as it
+    // is. Either way the one build read the zone the booking checks, so nothing is re-checked: a second build would only
+    // repeat it and its travel lookups.
+    test.each([
+      ['in no zone, phase 1 writes its city onto the profile', 'Laurel', false, ['Laurel']],
+      ['in no zone, a staff-verified pin keeps the profile\'s city', 'Laurel', true, []],
+      ['in the zone, phase 1 writes its city onto the profile', 'Venice', false, ['Venice']],
+    ])('a typed address %s: one build, and the hour books with the truck its list offered', async (_label, typedCity, reviewed, cityWrites) => {
+      Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
+      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice'] }];
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      const address = { address_line1: '123 Palm Ave', address_line2: null, city: 'Nokomis', state: 'FL', zip: '34209' };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, ...address, phone: '9415550101',
+        latitude: 27.4, longitude: -82.5, // the default mockGeocode pin: the location does not move
+      });
+      if (reviewed) {
+        gateState.reviewLive = true;
+        firstResults.customer_properties = { id: 'property-9', customer_id: 'cust-9', active: true, is_primary: true, ...address, latitude: 27.4, longitude: -82.5 };
+        firstResults.customer_geocode_reviews = {
+          customer_id: 'cust-9', status: 'verified', reason: 'staff_verified',
+          address_snapshot: ['123 Palm Ave', null, 'Nokomis', 'FL', '34209'], latitude: 27.4, longitude: -82.5,
+        };
+      }
+      listResults.scheduled_services = [];
+      const inZone = (city) => ['Nokomis', 'Venice'].includes(city);
+      mockBuildAvailability.mockImplementation(async (a) => ({
+        days: [{ date: FUTURE_DATE, slots: [{
+          start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM',
+          technician_id: inZone(a.zoneFunnelCity) || inZone(a.zoneFunnelCustomerCity) ? 'tech-2' : 'tech-1',
+        }] }],
+      }));
+
+      const booked = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: `123 Palm Ave, ${typedCity}, FL 34209` });
+
+      expect(booked.statusCode).toBe(200);
+      expect(updateCalls.filter((c) => c.table === 'customers' && 'city' in c.payload).map((c) => c.payload.city)).toEqual(cityWrites);
+      expect(mockBuildAvailability.mock.calls.map(([a]) => [a.zoneFunnelCity, a.zoneFunnelCustomerCity])).toEqual([[typedCity, 'Nokomis']]);
+      expect(mockCreateSelfBooking.mock.calls[0][0]).toMatchObject({ slot_start: '09:00', technician_id: 'tech-2' });
     });
 
     // Pre-push P1 on e88162fc27: with no address typed, the page's retry sends none again, and the next commit's
@@ -2237,7 +2288,7 @@ describe('POST /:token commit', () => {
 
       const refresh = await nextCommitRefresh({
         lead: { id: LEAD_ID }, verified, resolved: { source: 'supplied' }, custRow: { id: 'cust-9' },
-        zoneSource: { line1: '123 Palm Ave', city: 'Bradenton' }, bookingLocation: { lat: 27.1, lng: -82.2 }, locationMoved: true,
+        bookingAddress: { line1: '123 Palm Ave', city: 'Bradenton' }, bookingLocation: { lat: 27.1, lng: -82.2 }, locationMoved: true,
       });
 
       expect(refresh).toEqual({ location: null, addressChanged: false });
