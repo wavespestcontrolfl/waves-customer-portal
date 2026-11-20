@@ -193,6 +193,8 @@ class LiveBridge {
     this.capTimer = null;
     this.startTimer = null;
     this.firstReplyAmbiguousMs = null; // caller spoke before the first reply
+    this.ambiguousReplies = []; // reply starts inside a barge-in's tail-drop window
+    this.replyAmbiguous = false;
   }
 
   // ── plumbing ─────────────────────────────────────────────────────────────
@@ -356,11 +358,16 @@ class LiveBridge {
     // reply right after a barge-in are both timed. A chunk with no gap after a
     // barge-in is the cut-off reply's tail: it is dropped, so the caller never
     // hears it restart mid-sentence (for TAIL_DROP_MAX_MS at the most).
+    // GPT-Live audio carries no reply id or timing (OpenAI's guide), so a gap
+    // inside the tail-drop window is ambiguous: a fast reply to the barge-in,
+    // or the cut-off reply's tail after a network stall. It plays (cutting a
+    // real answer is worse) and its delay is kept apart from turns.
     const newReply = this.lastAudioAt === null || t - this.lastAudioAt >= NEW_REPLY_GAP_MS;
     this.lastAudioAt = t;
     if (newReply) {
+      const ambiguous = this.tailDropSince !== null && t - this.tailDropSince < TAIL_DROP_MAX_MS;
       this.tailDropSince = null;
-      this.onReplyStart(t);
+      this.onReplyStart(t, ambiguous);
     } else if (this.tailDropSince !== null) {
       if (t - this.tailDropSince < TAIL_DROP_MAX_MS) return;
       this.tailDropSince = null;
@@ -373,11 +380,17 @@ class LiveBridge {
   // The pending measure is consumed only here, by a reply start. The first
   // reply start is the greeting (sent at session.started): it is never timed,
   // even when the caller spoke before it.
-  onReplyStart(t) {
+  onReplyStart(t, ambiguous = false) {
     const greeting = this.replyStartWall === null;
     this.prevReplyStartWall = this.replyStartWall;
     this.replyStartWall = t;
     this.replySample = null;
+    this.replyAmbiguous = ambiguous;
+    if (ambiguous) {
+      if (this.awaitingReply && this.speechEndWall !== null) this.ambiguousReplies.push(Math.max(0, Math.round(t - this.speechEndWall)));
+      this.awaitingReply = false;
+      return;
+    }
     // The first reply is normally the greeting. When the caller spoke first,
     // it may instead be the answer: that delay is kept apart, never mixed into
     // the per-turn delays and never lost.
@@ -426,7 +439,7 @@ class LiveBridge {
       this.firstReplyAmbiguousMs = this.firstReplyAmbiguousMs === null ? delay : Math.min(this.firstReplyAmbiguousMs, delay);
       return;
     }
-    if (speechEnd <= this.prevReplyStartWall) return;
+    if (speechEnd <= this.prevReplyStartWall || this.replyAmbiguous) return; // an ambiguous reply is never timed into turns
     if (!this.replySample) {
       this.latencies.push(delay);
       this.replySample = { index: this.latencies.length - 1, speechEnd };
@@ -446,13 +459,23 @@ class LiveBridge {
     return speechEnd > this.replyStartWall + BARGE_IN_MARGIN_MS;
   }
 
+  // usage.seconds is a running total ("use the latest usage.seconds"): keep
+  // the highest valid value; a negative or non-finite one is ignored.
   noteUsage(usage) {
-    if (usage && Number.isFinite(usage.seconds)) this.usageSeconds = usage.seconds;
+    const seconds = usage && usage.seconds;
+    if (!Number.isFinite(seconds) || seconds < 0) return;
+    this.usageSeconds = this.usageSeconds === null ? seconds : Math.max(this.usageSeconds, seconds);
   }
 
   onSessionClosed(msg) {
+    // The final usage settles the call only if it is a valid total no lower
+    // than a running total OpenAI already reported. A contradiction keeps the
+    // whole reservation (unsettled).
+    const final = msg.usage && msg.usage.seconds;
+    const valid = Number.isFinite(final) && final >= 0 && (this.usageSeconds === null || final >= this.usageSeconds);
+    if (msg.usage && !valid) this.noteError('usage_contradicts');
     this.noteUsage(msg.usage);
-    if (msg.usage && Number.isFinite(msg.usage.seconds)) this.usageConfirmed = true;
+    if (valid) this.usageConfirmed = true;
     this.closeReason = typeof msg.reason === 'string' ? msg.reason : this.closeReason;
     this.openaiGone = true;
     if (this.wakeClose) this.wakeClose();
@@ -579,6 +602,7 @@ class LiveBridge {
       latency_p50_ms: median(sorted),
       latency_max_ms: sorted.length ? sorted[sorted.length - 1] : null,
       first_reply_ambiguous_ms: this.firstReplyAmbiguousMs,
+      after_barge_in_ambiguous_ms: this.ambiguousReplies,
       interruptions: this.interruptions,
       delegations: this.delegations.size,
       errors,

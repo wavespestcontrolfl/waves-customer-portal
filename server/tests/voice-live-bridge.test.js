@@ -265,7 +265,7 @@ describe('model audio, barge-in and latency', () => {
     }
   };
 
-  test('after a barge-in, the cut-off reply\'s tail never reaches Twilio, and the delay measure waits for the real next reply', async () => {
+  test('after a barge-in, the cut-off reply\'s tail never reaches Twilio; the next reply inside the tail window plays and is timed apart', async () => {
     const t = setup();
     await t.ready();
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
@@ -285,10 +285,12 @@ describe('model audio, barge-in and latency', () => {
     const payloads = t.twilio.sent.filter((m) => m.event === 'media').map((m) => m.media.payload);
     expect(payloads).not.toContain(b64(320)); // no restart mid-sentence
     expect(payloads.filter((p) => p === b64(160))).toHaveLength(2); // the greeting and the next reply
-    expect(summaryOf(t).turns).toEqual([1100]); // +2600 minus the speech end at +1500
+    // +2600 is 1000 ms after the barge-in, inside the 1.5 s tail window: a gap
+    // there may be a stalled tail, so the delay is kept apart from turns
+    expect(summaryOf(t)).toMatchObject({ turns: [], after_barge_in_ambiguous_ms: [1100] });
   });
 
-  test('a reply right after a barge-in (the old one already streamed) is played and timed, not dropped as tail', async () => {
+  test('a reply right after a barge-in (the old one already streamed) is played, not dropped as tail, and timed apart', async () => {
     const t = setup();
     await t.ready();
     t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
@@ -302,7 +304,29 @@ describe('model audio, barge-in and latency', () => {
     t.twilioStop();
     await flush();
     expect(t.twilio.sent.some((m) => m.event === 'media' && m.media.payload === b64(240))).toBe(true);
-    expect(summaryOf(t).turns).toEqual([300]); // +1800 minus +1500
+    expect(summaryOf(t)).toMatchObject({ turns: [], after_barge_in_ambiguous_ms: [300] }); // +1800 minus +1500
+  });
+
+  test('a tail chunk delayed past the gap by a network stall is never timed into turns; a later reply outside the window is', async () => {
+    const t = setup();
+    await t.ready();
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
+    t.twilioMedia();
+    t.advance(1000);
+    streamReply(t, 6); // a reply streams +1000..+1500
+    t.advance(100);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'wait', start_ms: 1300, end_ms: 1500 }); // barge-in at +1600
+    t.advance(400);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(320) }); // stalled tail at +2000: ambiguous
+    t.advance(1000);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'what about ants', start_ms: 2600, end_ms: 2800 });
+    t.advance(500);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // a real reply at +3500
+    t.twilioStop();
+    await flush();
+    const s = summaryOf(t);
+    expect(s.after_barge_in_ambiguous_ms).toEqual([500]); // +2000 minus +1500, labelled ambiguous
+    expect(s.turns).toEqual([700]); // +3500 minus +2800
   });
 
   test('a fast reply that starts right as the last one finishes playing is timed', async () => {
@@ -595,6 +619,7 @@ describe('finish', () => {
       latency_p50_ms: null,
       latency_max_ms: null,
       first_reply_ambiguous_ms: null,
+      after_barge_in_ambiguous_ms: [],
       interruptions: 0,
       delegations: 0,
       errors: [],
@@ -641,6 +666,22 @@ describe('finish', () => {
     // no acknowledgment by the deadline: terminated at once, never a 30 s graceful close
     expect(t.openai.terminate).toHaveBeenCalled();
     expect(t.openai.close).not.toHaveBeenCalled();
+  });
+
+  test('a final usage below a running total, or negative, keeps the whole reservation (unsettled)', async () => {
+    for (const final of [10, -5]) {
+      const t = setup({ closeReply: false, deps: { closeWaitMs: 50 } });
+      await t.ready();
+      t.openai.receive({ type: 'session.usage.updated', usage: { seconds: 30 } });
+      t.openai.receive({ type: 'session.closed', reason: 'expired', session: {}, usage: { seconds: final } });
+      await finalized(t);
+      const s = summaryOf(t);
+      expect(s.usage_confirmed).toBe(false);
+      expect(s.usage_seconds).toBe(30); // the highest valid running total
+      expect(s).not.toHaveProperty('cost_usd');
+      expect(s.errors).toEqual(expect.arrayContaining(['usage_contradicts', 'usage_unconfirmed']));
+      expect(t.ledgerUpdate).not.toHaveBeenCalled();
+    }
   });
 
   test('a session OpenAI ends itself (expired) ends the call even while its socket stays open', async () => {
