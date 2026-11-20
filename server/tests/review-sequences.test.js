@@ -8459,6 +8459,23 @@ describe('Yearly review ask at dispatch', () => {
     expect(mock.__state.rows.review_sequences[0].status).toBe('stopped');
   });
 
+  test('a failed recipient read at yearly dispatch retries the step: no text to the holder, no email', async () => {
+    mockGates.reviewYearlyAsk = true;
+    const optin = require('../services/recipient-optin');
+    const spy = jest.spyOn(optin, 'resolveServiceContactSmsRecipient').mockRejectedValue(new Error('optin read failed'));
+    try {
+      const mock = makeMock({ customers: [cust('y-7r')], review_sequences: [yearly('y-7r')] });
+      db.mockImplementation(mock);
+      await ReviewService.processReviewSequences();
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'y-7r' }), { failClosed: true });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+      expect(mock.__state.rows.review_sequences[0].status).toBe('active');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('texts off: no email fallback, the row is retired', async () => {
     mockGates.reviewYearlyAsk = true;
     const mock = makeMock({ customers: [cust('y-5')], review_sequences: [yearly('y-5')],
