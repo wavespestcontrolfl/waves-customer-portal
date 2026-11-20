@@ -206,6 +206,18 @@ jest.setTimeout(120000);
       await expect(JobOffers.sendOffer(app.id, draft.id, actor(), draft.draftHash)).rejects.toMatchObject({ status: 409, code: 'NO_CONTACT' });
     });
 
+    test('the offer read names every channel Send tries, by the rule the send uses, masked', async () => {
+      // A number too short to mask is still on file, so the send tries it: the read names it as '***'.
+      const app = await newApplication({ contact_snapshot: JSON.stringify({ name: 'Casey Morgan', phone: '555-01', email: 'Casey.Morgan@Example.test' }) });
+      expect((await JobOffers.adminPanel(app.id, actor())).sendTo).toEqual({ sms: '***', email: 'C***@example.test' });
+      const draft = await JobOffers.saveDraft(app.id, {}, actor());
+      mockSendStageComms.mockClear();
+      await JobOffers.sendOffer(app.id, draft.id, actor(), draft.draftHash);
+      expect(mockSendStageComms.mock.calls[0][2]).toMatchObject({ sms: true, email: true });
+      const emailOnly = await newApplication({ contact_snapshot: JSON.stringify({ name: 'Sam Lee', email: 'sam@example.test' }) });
+      expect((await JobOffers.adminPanel(emailOnly.id, actor())).sendTo).toEqual({ sms: null, email: 's***@example.test' });
+    });
+
     test('a comms failure after the commit leaves the offer sent and reports the channels as failed', async () => {
       const app = await newApplication();
       const draft = await JobOffers.saveDraft(app.id, {}, actor());

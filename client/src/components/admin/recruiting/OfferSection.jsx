@@ -32,8 +32,10 @@ export default function OfferSection({ detail, offerFlow, onChanged, detailStale
   // declined, or signed before the application was moved back to Offer.
   const current = shownOffer(data.current);
   const stillInOffer = detail.status === "offer";
-  // detailStale: the application could not be re-read, so its stage may be out of date.
-  const canMakeOffer = stillInOffer && !refreshError && !detailStale && !data.draft && !(current && LIVE_STATES.includes(current.status));
+  // The page's last read of the offer, or of the application (detailStale: its stage
+  // may be out of date), failed: every owner action waits for a read that works.
+  const readFailed = Boolean(refreshError) || detailStale;
+  const canMakeOffer = stillInOffer && !readFailed && !data.draft && !(current && LIVE_STATES.includes(current.status));
   // A failed re-read after an action is retried with the same combined re-read (the
   // offer, then the application), so the stage and its actions follow the offer: an
   // offer signed meanwhile moves the application too.
@@ -50,7 +52,7 @@ export default function OfferSection({ detail, offerFlow, onChanged, detailStale
         key={detail.id}
         applicationId={detail.id}
         ownerActions={ownerActions}
-        refreshError={refreshError}
+        stale={readFailed}
         firstName={firstName}
         offer={current}
         draft={data.draft || null}

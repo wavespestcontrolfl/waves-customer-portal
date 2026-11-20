@@ -30,8 +30,6 @@ import {
   isStaleWrite,
   LOST_ANSWER_TEXT,
   isValidDay,
-  maskEmail,
-  maskPhone,
   offerErrorMessage,
   sendChannels,
   stepDateFor,
@@ -221,15 +219,15 @@ function sendNote(ownerActions, sends, firstName) {
 // draft from a successful read) plus what the owner typed since (`edits`). A
 // newer read never replaces it silently.
 function formView({ edits, pinned, data, contact, busy, locked }) {
-  const phone = maskPhone(contact?.phone);
-  const email = maskEmail(contact?.email);
+  // Who Send reaches, as the server's offer read names them (the send's own rule).
+  const { sms: phone, email } = data.sendTo || {};
   const base = fieldsFrom(pinned || data.defaults);
   const fields = { ...base, ...edits };
   const { startError, rateErrors, fieldsOk } = fieldChecks(fields);
   const dirty = !pinned || FIELD_KEYS.some((k) => fields[k] !== base[k]);
   // Send needs a phone or an email to send to, and the letter preview of this exact draft on
   // screen: what the owner reads is what goes out.
-  const sendReady = data.viewer?.ownerActions === true && Boolean(sendChannels(contact)) && Boolean(pinned?.draftHash) && Boolean(letterFor(data, pinned)) && !dirty && fieldsOk && data.termsIssued && !locked;
+  const sendReady = data.viewer?.ownerActions === true && Boolean(sendChannels(data.sendTo)) && Boolean(pinned?.draftHash) && Boolean(letterFor(data, pinned)) && !dirty && fieldsOk && data.termsIssued && !locked;
   return {
     base,
     fields,
@@ -326,7 +324,7 @@ function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, on
     if (confirming && !busy && !sendReady) setConfirming(false);
   }, [confirming, busy, sendReady]);
   const ownerActions = data.viewer?.ownerActions === true;
-  const sends = sendChannels(contact);
+  const sends = sendChannels(data.sendTo);
   const letter = letterFor(data, pinned);
 
   const onChange = (key, value) => setEdits((prev) => applyEdit({ ...base, ...prev }, key, value));

@@ -73,23 +73,12 @@ export function formatIssued(value) {
   return formatETDate(value, { month: "short", day: "numeric", year: "numeric" });
 }
 
-export function maskPhone(phone) {
-  const digits = String(phone || "").replace(/\D/g, "").slice(-10);
-  if (digits.length < 10) return "";
-  return `(${digits.slice(0, 3)}) ***-${digits.slice(6)}`;
-}
-
-export function maskEmail(email) {
-  const [local, domain] = String(email || "").split("@");
-  if (!local || !domain) return "";
-  return `${local[0]}***@${domain}`;
-}
-
-// What Send will do, from the contact methods on file: "one text and one
-// email", "one text", "one email", or null when the applicant has neither.
-export function sendChannels(contact) {
-  const text = Boolean(maskPhone(contact?.phone));
-  const email = Boolean(maskEmail(contact?.email));
+// What Send will do, from the server's list of the channels it tries (the offer
+// read's sendTo: a masked phone and email, each null when none is on file): "one
+// text and one email", "one text", "one email", or null when there is neither.
+export function sendChannels(sendTo) {
+  const text = Boolean(sendTo?.sms);
+  const email = Boolean(sendTo?.email);
   if (text && email) return "one text and one email";
   if (text) return "one text";
   return email ? "one email" : null;

@@ -30,7 +30,7 @@ function card(props = {}) {
       history={[]}
       canMakeOffer={false}
       ownerActions
-      refreshError={null}
+      stale={false}
       onMakeOffer={() => {}}
       onChanged={async () => null}
       onOpenDraft={() => {}}
@@ -54,7 +54,7 @@ describe("OfferTimeline", () => {
   // The Withdraw question writes what the owner saw. A read that fails, changes the offer, or takes away the owner's
   // access while it is open closes it, and nothing is written.
   it.each([
-    ["the next read fails", { refreshError: "The offer could not be loaded." }],
+    ["the next read of the offer or the application fails", { stale: true }],
     ["the offer moves on (the applicant signed)", { offer: record({ status: "accepted", signedAt: "2026-12-12T15:00:00Z" }) }],
     ["the owner's access ends", { ownerActions: false }],
   ])("closes the Withdraw question when %s, and withdraws nothing", async (_label, change) => {

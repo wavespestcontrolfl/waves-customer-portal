@@ -50,6 +50,8 @@ function offerPayload(overrides = {}) {
     termsBlockers: [],
     viewer: { ownerActions: true },
     defaults: DEFAULTS,
+    // Who Send reaches, as the server names them (masked).
+    sendTo: { sms: '(941) ***-0123', email: 'j***@example.com' },
     current: null,
     draft: null,
     history: [],
@@ -355,18 +357,20 @@ describe('RecruitingPage offer flow: form', () => {
   });
 
   it.each([
-    [{ name: 'Jordan Rivera', phone: '9415550123', email: 'j@example.com' }, 'It sends one text and one email.'],
-    [{ name: 'Jordan Rivera', phone: '9415550123' }, 'It sends one text.'],
-    [{ name: 'Jordan Rivera', email: 'j@example.com' }, 'It sends one email.'],
-  ])('the send confirm names only the contact methods on file (%#)', async (contact, sentence) => {
-    setupFetch({}, { offer: offerPayload({ current: offerRecord() }), detail: detailFixture({ contact_snapshot: contact }) });
+    [{ phone: '9415550123', email: 'j@example.com' }, { sms: '(941) ***-0123', email: 'j***@example.com' }, 'It sends one text and one email.'],
+    [{ phone: '9415550123' }, { sms: '(941) ***-0123', email: null }, 'It sends one text.'],
+    [{ email: 'j@example.com' }, { sms: null, email: 'j***@example.com' }, 'It sends one email.'],
+    // A number too short to mask is still tried by the send, so the question names the text too.
+    [{ phone: '555-01', email: 'j@example.com' }, { sms: '***', email: 'j***@example.com' }, 'It sends one text and one email.'],
+  ])('the send confirm names every channel the server tries (%#)', async (contact, sendTo, sentence) => {
+    setupFetch({}, { offer: offerPayload({ current: offerRecord(), sendTo }), detail: detailFixture({ contact_snapshot: { name: 'Jordan Rivera', ...contact } }) });
     await openForm();
     fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
     expect(await screen.findByText(`Send this offer to Jordan? ${sentence}`)).toBeInTheDocument();
   });
 
   it('with no phone or email Send stays off, the form says nothing can be sent, and nothing is posted', async () => {
-    const { calls } = setupFetch({}, { offer: offerPayload({ current: offerRecord() }), detail: detailFixture({ contact_snapshot: { name: 'Jordan Rivera' } }) });
+    const { calls } = setupFetch({}, { offer: offerPayload({ current: offerRecord(), sendTo: { sms: null, email: null } }), detail: detailFixture({ contact_snapshot: { name: 'Jordan Rivera' } }) });
     await openForm();
     expect(screen.getByText('This applicant has no phone or email on file, so nothing can be sent.')).toBeInTheDocument();
     const send = screen.getByRole('button', { name: 'Send offer' });
@@ -931,6 +935,34 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     fireEvent.click(within(stage).getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(within(stage).queryByText(/could not be reloaded/)).toBeNull());
     expect(confirmButton).not.toBeDisabled();
+  });
+
+  it('a failed application re-read turns off the card actions too, until Try again loads it', async () => {
+    let failDetail = false;
+    const detail = detailFixture({ status: 'offer' });
+    setupFetch(
+      {
+        // The withdraw's answer is lost (502); the offer read after it still shows the offer out.
+        'POST /admin/careers/app-1/offer/offer-1/withdraw': () => {
+          failDetail = true;
+          return res(502, { error: 'Bad gateway' });
+        },
+        'GET /admin/careers/app-1': () => (failDetail ? res(500, { error: 'Server error' }) : res(200, { application: detail })),
+      },
+      { offer: offerPayload({ current: sent }), detail },
+    );
+    await openDetail();
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Withdraw offer' }));
+    const confirm = (await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Withdraw' }));
+    const detailDialog = screen.getByRole('heading', { name: /Jordan Rivera — / }).closest('[role="dialog"]');
+    expect(await within(detailDialog).findByText(/could not be reloaded after the offer change/)).toBeInTheDocument();
+    // The offer read worked and the application read did not: the card's owner actions wait for it too.
+    expect(within(screen.getByTestId('offer-card')).queryByRole('button', { name: 'Withdraw offer' })).toBeNull();
+    failDetail = false;
+    fireEvent.click(within(detailDialog).getByRole('button', { name: 'Try again' }));
+    expect(await within(screen.getByTestId('offer-card')).findByRole('button', { name: 'Withdraw offer' })).toBeInTheDocument();
   });
 
   it('a failed application re-read after an offer change stays on the detail with Try again, and stage moves wait for it', async () => {

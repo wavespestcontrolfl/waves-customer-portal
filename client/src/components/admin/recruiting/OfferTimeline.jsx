@@ -262,14 +262,14 @@ function closeStillValid(target, { offer, draft, canAct }) {
   return canAct && Boolean(now) && now.status === target.status && (target.status !== "draft" || now.draftHash === target.draftHash);
 }
 
-export default function OfferTimeline({ applicationId, firstName, offer, draft, history, canMakeOffer, ownerActions, refreshError, onMakeOffer, onChanged, onOpenDraft, onEdit }) {
+export default function OfferTimeline({ applicationId, firstName, offer, draft, history, canMakeOffer, ownerActions, stale = false, onMakeOffer, onChanged, onOpenDraft, onEdit }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [closing, setClosing] = useState(null); // the offer record being withdrawn or discarded
   const [signed, setSigned] = useState(null);
   // Owner-only actions (send, revise, withdraw, discard) need the server's
-  // viewer.ownerActions; none run on data that a failed re-read left stale.
-  const stale = Boolean(refreshError);
+  // viewer.ownerActions; none run while the page's last read of the offer or of the
+  // application failed (stale), and an open question closes.
   const canAct = ownerActions === true && !stale;
 
   // Every write that did not succeed re-reads the offer and the application, whatever
@@ -277,7 +277,7 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
   // the server sees something the card does not (a newer record, the owner's access
   // taken away, offers turned off), and a lost answer (no reply, a 5xx) may have gone
   // through. If that read fails, the section's Try again stays and the write actions
-  // stay off (refreshError). Reads (the signed copy) pass write: false and only show
+  // stay off (stale). Reads (the signed copy) pass write: false and only show
   // their error.
   const act = async (work, { write = true } = {}) => {
     setBusy(true);

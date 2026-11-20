@@ -554,6 +554,7 @@ async function adminPanel(applicationId, actor, now = new Date()) {
     terms: terms ? { templateId: terms.templateId, versionId: terms.versionId, title: terms.title, issuedAt: terms.issuedAt } : null,
     termsBlockers: blockers,
     defaults,
+    sendTo: sendTargetsOf(application),
     // The preview names the offer its letter belongs to (the open draft, else the frozen letter of the current offer, else
     // none: the defaults) and that draft's hash, so a Save, Send or Discard can be tied to what was read.
     letterPreview: {
@@ -799,8 +800,8 @@ async function assertSendable(trx, application, offer, { now, ownerName, draftHa
     throw new OfferError(409, 'OFFER_NOT_DRAFT', 'This offer is not a draft.', { status: offer.status });
   }
   assertOfferable(application);
-  const contact = contactOf(application);
-  if (!contact.phone && !contact.email) throw new OfferError(409, 'NO_CONTACT', 'This applicant has no phone number or email.');
+  const to = sendTargetsOf(application);
+  if (!to.sms && !to.email) throw new OfferError(409, 'NO_CONTACT', 'This applicant has no phone number or email.');
   const issued = await loadIssuedTerms(trx, now);
   if (issued.blockers.length) {
     throw new OfferError(409, 'TERMS_NOT_ISSUED', 'The Technician Terms are not issued.', { blockers: issued.blockers });
@@ -873,9 +874,21 @@ async function commitSend(applicationId, offerId, actor, now, draftHash) {
 }
 
 // The text + email, after the commit. Comms never undo the send: a failure is reported per channel.
-async function deliverOfferComms({ offer, application, ownerName, snapshot }, actor) {
+// Who Send reaches: a text to the phone on file and an email to the email on file, whatever their form. The send tries
+// each one (a number or address it cannot use still gets the attempt, and the outcome says it did not go out). The offer
+// read returns the same list, masked ('***' when a mask cannot be made), so the Send question names every channel the
+// send tries.
+function sendTargetsOf(application) {
   const RecruitingComms = require('./recruiting-comms');
   const contact = RecruitingComms.contactOf(application);
+  return {
+    sms: contact.phone ? RecruitingComms.maskPhone(contact.phone) : null,
+    email: contact.email ? RecruitingComms.maskEmail(contact.email) : null,
+  };
+}
+async function deliverOfferComms({ offer, application, ownerName, snapshot }, actor) {
+  const RecruitingComms = require('./recruiting-comms');
+  const to = sendTargetsOf(application);
   const stillEligible = async (conn = db) => {
     const row = await conn('job_offers').where({ id: offer.id }).first('status', 'token');
     const app = await conn('job_applications').where({ id: application.id }).first('status');
@@ -883,8 +896,8 @@ async function deliverOfferComms({ offer, application, ownerName, snapshot }, ac
   };
   try {
     const comms = await RecruitingComms.sendStageComms(application, 'offer_sent', {
-      sms: Boolean(contact.phone),
-      email: Boolean(contact.email),
+      sms: Boolean(to.sms),
+      email: Boolean(to.email),
       by: actor.id,
       stillEligible,
       offerId: offer.id,

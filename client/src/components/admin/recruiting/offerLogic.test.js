@@ -12,9 +12,8 @@ import {
   isStaleWrite,
   isStartWeekday,
   isValidDay,
-  maskEmail,
-  maskPhone,
   offerErrorMessage,
+  sendChannels,
   stepDateFor,
 } from './offerLogic';
 
@@ -44,11 +43,13 @@ describe('offer helpers', () => {
     expect(expiryLabel(new Date('2026-12-11T15:20:00Z'))).toBe('Fri, Dec 18, 2026');
   });
 
-  it('masks phone and email', () => {
-    expect(maskPhone('9415551234')).toBe('(941) ***-1234');
-    expect(maskPhone('12')).toBe('');
-    expect(maskEmail('jordan@example.com')).toBe('j***@example.com');
-    expect(maskEmail('x')).toBe('');
+  // The server names the channels Send tries; a mask it could not make ('***') is still a channel.
+  it('says what Send will do from the channels the server names', () => {
+    expect(sendChannels({ sms: '(941) ***-1234', email: 'j***@example.com' })).toBe('one text and one email');
+    expect(sendChannels({ sms: '***', email: null })).toBe('one text');
+    expect(sendChannels({ sms: null, email: '***' })).toBe('one email');
+    expect(sendChannels({ sms: null, email: null })).toBeNull();
+    expect(sendChannels(undefined)).toBeNull();
   });
 
   // Save, Send and Discard all answer DRAFT_CHANGED, and Send and Discard answer DRAFT_HASH_REQUIRED: the words must
