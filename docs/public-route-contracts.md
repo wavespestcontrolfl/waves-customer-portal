@@ -4186,13 +4186,13 @@ create customer/account rows or guess a customer name from message prose.
 Substantive messages ring the sender's one `new_lead` bell row (keyed on a
 hash of the number; each new text rewrites it, rings it again and pushes)
 linking to the inbox; reactions, empty messages and courtesy-only replies do not;
-`GATE_RING_NEW_CONTACTS` (owner 2026-11-04, dark): a text from a number with no
+Owner 2026-11-04: a text from a number with no
 customer record to a location line or a Google Business Profile tracking line
 rings that same row (title names the line, e.g. "New text from the Parrish (Pest)
 line"), and the quiet `inbound-text` Activity row is then skipped; if the ring fails
 the quiet row is written as before. Not rung: the AI assistant line, a tech line,
 the internal alert line, a staff sender, a reaction, a courtesy closer, a text a
-spam screen judged a sales pitch. Gate off = byte-identical;
+spam screen judged a sales pitch;
 ordinary inbound SMS is persisted before reschedule or lead-intake consumption,
 including replies that return early. STOP/HELP/START handling (opt-out
 suppression + the `<Message>` confirmation TwiML) applies only to a sender
@@ -4409,7 +4409,42 @@ the new-lead / existing-customer Customer 360 note so the office can give
 the sign host the $25 thank-you credit. STAFF-ONLY: it never joins
 `message`, the AI triage prose or the Lead Response Agent's message, and
 the agent's `get_lead_details` tool strips it; a missing, blank or
-non-string value is a no-op; and both accept an OPTIONAL `heard_about` —
+non-string value is a no-op; and both accept an OPTIONAL `quiz` object —
+the hub's two quiz pages (`/pest-control-quiz/`, `/lawn-care-quiz/`: the
+shared quote form with three tap questions in front of its contact steps,
+owner *build* 2026-11-19). Shape `{ kind, seeing, property }`, read from
+that exact key and reduced to FIXED tokens by `normalizeQuiz`
+(`server/services/lead-quiz.js`): `kind` `pest` | `lawn`; `seeing` one of
+that quiz's nine tiles (pest: `ants`, `roaches`, `spiders`, `rodents`,
+`termites`, `wasps`, `mosquitoes`, `bedbugs`, `unsure`; lawn: `weeds`,
+`patches`, `thinning`, `yellowing`, `bugs`, `fungus`, `shrubs`, `palms`,
+`unsure`); `property` `house` | `townhome` | `condo` | `business`. An
+unknown `kind`, a non-object or an absent key is a no-op; an unknown
+`seeing` / `property` is SILENTLY DROPPED and the rest kept; no other key
+of the object and no typed text is ever stored. The third quiz answer is
+the `timeline` field above. Stored in `extracted_data.quiz` (kept through
+the AI triage's extracted_data replace; a `quiz` or `timeline` key in the
+model's output is dropped before both triage writes, so it can never
+replace or supply the visitor's answers; kept on the unverified hold's
+stage too) and written as a "Pest Quiz: Roaches, condo,
+wants it today" line on the new-lead / existing-customer Customer 360 note
+and on the unverified hold's lead activity note.
+The new-lead bell reads "<name> via Pest Quiz (<zip>) - Roaches, condo,
+wants it today" when all three answers are known and name a problem
+(`quizNamesRequest`); a "Not sure" or partly answered quiz keeps the
+service line beside the answers ("- Wants Pest Control - Not sure, condo,
+wants it today"); the lead's source row (`lead_source_id`) is NOT changed by
+a quiz: a quiz is a form, not a traffic source.
+`property: business` is a stated commercial premises: it sets the intake's
+`isCommercial`, so the readiness gate records
+`commercial_category_conflict`, the lead row is marked `is_commercial`, and
+no residential draft is priced (under `GATE_UNIT_SCOPE_GUARDRAILS`, as for
+every other commercial signal). The quiz answers are NOT a pricing input:
+`property` never becomes the draft's property type. They are not
+staff-only: the Lead Response Agent may read them. The response is
+unchanged. Safe in either deploy order: a portal without this change
+ignores the unknown key and files an ordinary form lead;
+and both accept an OPTIONAL `heard_about` —
 the quote form's self-reported "How did you hear about us?" answer,
 validated against a FIXED allowlist (`server/services/heard-about.js`
 `sanitizeHeardAbout`, shared with the online quote wizard): `google_search`, `google_maps`, `chatgpt`,
@@ -5203,7 +5238,10 @@ assessed-neighbor sample/range that back the admin estimator's home-size
 estimate for an unassessed vacant parcel) and MINUS the staff-only
 `permitBuildingFacts` block (the home's own building permit number, issue/CO
 dates and plan figures behind the admin estimator's new-construction home-size
-estimate; `GATE_LOOKUP_PERMIT_FACTS`), with a story count the permit filled
+estimate; `GATE_LOOKUP_PERMIT_FACTS`) and MINUS the staff-only roof-style
+evidence (`countyRoofRaw`, `roofStyleHint`, `roofTileStyle`: the county's own
+roof words and the barrel-vs-flat tile reads, owner 2026-11-19, data only and
+not yet priced), with a story count the permit filled
 (`storiesSource: 'permit'`) returned to the default (`stories: 1`,
 `storiesSource: 'default'`) and the `homeSqFt` verify flag's prose replaced by
 the shared source-free vacant-parcel copy — `publicEnrichedProfile` strips all of
@@ -5954,9 +5992,15 @@ logs (`redact-request-url.js`). No query parameters are read. The render cache i
 token.
 `/r/:code` (referral click-track + redirect to the marketing site; also
 OUTSIDE the `/api/` limiter — carries its own 30/min limiter and a
-url-safe 4-32 code format gate before any DB read; every hit below the
-gate writes a `referral_clicks` row, malformed/unknown codes redirect
-home without touching the DB).
+url-safe 4-32 code format gate before any DB read; a malformed code
+redirects home without touching the DB. A well-formed code is looked up:
+an active promoter (or a merged alias of one) writes a `referral_clicks`
+row on every hit and redirects with `?ref=`; a legacy
+`customers.referral_code` redirects with `?ref=` and writes no click row;
+an unknown code redirects home. On a promoter hit, a crawler, link-preview,
+scanner or empty user agent (`utils/bot-ua.js` plus the empty check) still
+redirects and gets a row with `device_type` 'bot', but is never a unique
+click and never raises `total_clicks`).
 The estimate `/data` response includes `verifiedStaffPreview: true` only
 when `adminPreview=1` is accompanied by a valid staff bearer token. The
 customer SPA uses that verified field (or the existing verified
@@ -7407,9 +7451,7 @@ a clash or a raced edit) books the re-service exactly as before. GET and
 `/api/public/moving/:token` (GET, plus `POST /:token/check` and
 `POST /:token/submit`; the moving page the office sends a customer who is
 moving, by email from the Customer 360 Moving card or by text from the
-Communications composer, always on a staff click). Dark behind
-`GATE_MOVING_FLOW` (strict `'true'`, read per request): off, every route is
-the generic 404 before any DB read. 48-hex token format gate on
+Communications composer, always on a staff click). 48-hex token format gate on
 `customer_moves.token`; a malformed, unknown or closed move is the same
 generic 404. Privacy headers (`Cache-Control: private, no-store`,
 `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`) on every
@@ -7438,7 +7480,7 @@ alert (deduped per move), and answers `{ ok, receipt, view }` with fixed
 receipt sentences. It changes no visit, price, property or primary address
 and sends nothing to a customer.
 Move pause (moving PR 2b, owner Q4, 2026-11-02): while `GATE_MOVING_PAUSE`
-is on (strict `'true'`, read per request, needs `GATE_MOVING_FLOW`), the
+is on (strict `'true'`, read per request), the
 receipt of a submit with no checked address on file and a move-out date
 follows the customer's billing lane (`customer-moves.js` `pauseLane`): a
 customer billed per visit reads that the visits pause after the move-out
@@ -7483,7 +7525,7 @@ accept right after it locks the estimate row, for every branch including the
 one-time accept (stale = the generic 404), and the converter for every other
 accept path (409 `MOVE_ESTIMATE_STALE`, rolled back). A new-home estimate is
 never a multi-property group member or anchor. While `GATE_MOVING_ESTIMATE` is on
-(strict `'true'`, read per request, needs `GATE_MOVING_FLOW`), the submitted,
+(strict `'true'`, read per request), the submitted,
 in-area move linked to the estimate (`customer_moves.estimate_id`,
 `moveForEstimate`) limits the first visit: `available-slots` / `find-slots`
 offer no day before the move-in date (the rolling window opens on it, a
@@ -8333,7 +8375,7 @@ server, no SSE). Each tool call is a `tool_health_events` row (source
 `mcp-knowledge`) with its outcome and time, never its arguments or answer.
 Treat the auth ordering and the read-only tool surface as
 security-critical).
-`/api/mcp-admin` (POST; token-only JSON-RPC — the owner's READ-ONLY MCP server over an allow-list of Intelligence Bar read tools for Claude Code, `server/routes/mcp-admin.js`; owner decision 2026-10-30). Separate from `/api/mcp` on purpose: that credential stays knowledge-only. The only credential is the owner's mcp_read key (`server/services/mcp-admin-key.js`): an HS256 JWT of TYPE `mcp_read`, never `access`, so every staff verifier (`isStaffAccessToken`) refuses it and it can never act as a staff session; it lives 30 days and is minted only by `ops/agents/mint-mcp-admin-key.js` (audit row `mcp.admin_key.mint`, key never printed). Mounted like `/api/mcp`: the global `/api/` limiter (per IP) runs first, then a pre-parser chain ahead of the global JSON parser — `noStore` (Cache-Control no-store, X-Robots-Tag noindex, Referrer-Policy no-referrer on every outcome), `mcpAdminAuth`, a 60/min limiter keyed per login (after auth, so a dark or unauthenticated probe never reaches it), a 64 kb JSON parse and the JSON-RPC body-error handler. `mcpAdminAuth` layers, in order: 403 unless `GATE_MCP_ADMIN_READ=true` (before any key or DB read); 401 without a Bearer; 401 when the JWT signature, expiry or type fails (the format gate — no DB read before it); then one `technicians` read by id and 401 unless the row is still an active admin on the IB full-access list with no forced password change and `auth_token_version` equal to the key's (a password change or reset revokes every key); 503 if that read fails. EXCEPTION to the generic-404 baseline, as for `/api/mcp`: an MCP client needs real 401/403 statuses, so dark answers 403 and credential failures 401; only a holder of a validly signed key can see the expired/revoked wording. Batches cap at 10 messages and 3 tools/call; GET is 405 (no SSE). Responses: each tool answer keeps only its `TOOL_FIELDS` paths (`keepPaths`; a field a tool adds later never leaves), strings are cut at 160 characters, a listed DATE field (`CALENDAR_DAY_PATHS`; pg sends a DATE as UTC midnight) leaves as `YYYY-MM-DD` while every timestamp keeps its time, and every answer carries an untrusted-text line; `list_commercial_proposals` (owner 2026-11-01, proposal readiness) lists the authored, unarchived commercial proposals (`scope` open, the default, or all; `limit` up to 50, `offset`, `next_offset`) as ids, codes, dates and flags only: `estimate_id`, `estimate_number`, `status`, `customer_id`, `created_at`, `sent_at`, `viewed_at`, `expires_at`, `bill_by_invoice`, `payment_terms`, `building_use`, `closed_online`, `signing` (`state`, `blocked`; null with `GATE_COMMERCIAL_PROPOSAL_SIGN` off, never the builder's note text) and `first_visit` (`state`, `reason`, `visit_date` when booked; null with `GATE_COMMERCIAL_FIRST_VISIT` off), from the same functions the builder's Readiness card calls, and never a title, name, address, note, line text or price; `get_call_log` and `get_open_commitments` (owner 2026-11-17, structured fields only) send call facts: per call `id`, `direction`, `from`, `to`, `customer`, `tier`, `status`, `duration_seconds`, `has_recording`, `has_transcript`, `time`, `answered_by` (the staff member who took the forwarded call), `call_nature`, `disposition`, `visit_status`, `quote_promised`, `service_category`, `voicemail` and `spam` (the last seven from the call's V2 extraction, read only when it passed its schema; null otherwise), plus the paging fields; per open promise `id`, `party`, `kind`, `due_at`, `effective_due_at`, `snoozed_until`, `overdue`, `call_at`, `customer`, `customer_id`, `call_log_id`, `source` and `possibly_kept` (`kind`, `basis`), plus the totals and `implicit_due_rules`; a transcript, transcript excerpt, match excerpt, transcript paging, summary, sentiment, recording link, promise `description` and the `link` never leave; `get_day_summary` sends `visit_price_total` (each visit's set price, a $0 one included, or its prepaid amount when no price is set) with `visits_with_price` and `visits_without_price`, so a visit with no price is counted, never given a guessed amount; a schema refusal (`invalid_input`) keeps the failing arguments' `path` and `rule`, never their values; `GATE_CLAUDE_INPUT_GUARD` (security audit run 3, dark by default, read at call time, strict `=== 'true'`; off = the answers above) changes two answers: `needs_me` keeps an alert's `why` only for the categories `system`, `llm_cost` and `agents` raised by no registry trigger (the bar's `needs_me` item now carries `category` and `trigger`, neither of which leaves this route), and every other alert's `why` becomes the fixed line `text withheld: may quote an outside sender; look the item up by id` (ids, `headline`, area and severity stay); `list_gap_reports` marks every non-system gap row `quoted_words`, so its `wanted` and `tried` text leaves as `[withheld: N characters]` (the Intelligence Bar writes its rows from model text or tool refusals, never from words the owner typed); each call is a `tool_health_events` row (source `mcp-admin`) without arguments or answer. `initialize` carries server `instructions` (Claude Code puts them in each session's system prompt): what never comes back, how to read dates (`Z` timestamps are UTC, `time_window` values are Eastern wall-clock times) and pages, and that tool names in the Intelligence Bar's descriptions that are not on this server are not to be substituted. Tools run through `ActionRegistry.execute` and must be action-policy `kind: read` with no approval (a reclassified tool drops out); no write tool, no general admin read (`read_admin_data`) and no tool without its own reviewed field list may be added. Kill switch: unset the gate. `server/tests/mcp-admin-route.test.js` pins the auth order, the allow-list and the projections).
+`/api/mcp-admin` (POST; token-only JSON-RPC — the owner's READ-ONLY MCP server over an allow-list of Intelligence Bar read tools for Claude Code, `server/routes/mcp-admin.js`; owner decision 2026-10-30). Separate from `/api/mcp` on purpose: that credential stays knowledge-only. The only credential is the owner's mcp_read key (`server/services/mcp-admin-key.js`): an HS256 JWT of TYPE `mcp_read`, never `access`, so every staff verifier (`isStaffAccessToken`) refuses it and it can never act as a staff session; it lives 30 days and is minted only by `ops/agents/mint-mcp-admin-key.js` (audit row `mcp.admin_key.mint`, key never printed). Mounted like `/api/mcp`: the global `/api/` limiter (per IP) runs first, then a pre-parser chain ahead of the global JSON parser — `noStore` (Cache-Control no-store, X-Robots-Tag noindex, Referrer-Policy no-referrer on every outcome), `mcpAdminAuth`, a 60/min limiter keyed per login (after auth, so a dark or unauthenticated probe never reaches it), a 64 kb JSON parse and the JSON-RPC body-error handler. `mcpAdminAuth` layers, in order: 403 unless `GATE_MCP_ADMIN_READ=true` (before any key or DB read); 401 without a Bearer; 401 when the JWT signature, expiry or type fails (the format gate — no DB read before it); then one `technicians` read by id and 401 unless the row is still an active admin on the IB full-access list with no forced password change and `auth_token_version` equal to the key's (a password change or reset revokes every key); 503 if that read fails. EXCEPTION to the generic-404 baseline, as for `/api/mcp`: an MCP client needs real 401/403 statuses, so dark answers 403 and credential failures 401; only a holder of a validly signed key can see the expired/revoked wording. Batches cap at 10 messages and 3 tools/call; GET is 405 (no SSE). Responses: each tool answer keeps only its `TOOL_FIELDS` paths (`keepPaths`; a field a tool adds later never leaves), strings are cut at 160 characters, a listed DATE field (`CALENDAR_DAY_PATHS`; pg sends a DATE as UTC midnight) leaves as `YYYY-MM-DD` while every timestamp keeps its time, and every answer carries an untrusted-text line; `list_commercial_proposals` (owner 2026-11-01, proposal readiness) lists the authored, unarchived commercial proposals (`scope` open, the default, or all; `limit` up to 50, `offset`, `next_offset`) as ids, codes, dates and flags only: `estimate_id`, `estimate_number`, `status`, `customer_id`, `created_at`, `sent_at`, `viewed_at`, `expires_at`, `bill_by_invoice`, `payment_terms`, `building_use`, `closed_online`, `signing` (`state`, `blocked`; null with `GATE_COMMERCIAL_PROPOSAL_SIGN` off, never the builder's note text) and `first_visit` (`state`, `reason`, `visit_date` when booked; null with `GATE_COMMERCIAL_FIRST_VISIT` off), from the same functions the builder's Readiness card calls, and never a title, name, address, note, line text or price; `get_call_log` and `get_open_commitments` (owner 2026-11-17, structured fields only) send call facts: per call `id`, `direction`, `from`, `to`, `customer`, `tier`, `status`, `duration_seconds`, `has_recording`, `has_transcript`, `time`, `answered_by` (the staff member who took the forwarded call), `call_nature`, `disposition`, `visit_status`, `quote_promised`, `service_category`, `voicemail` and `spam` (the last seven from the call's V2 extraction, read only when it passed its schema; null otherwise), plus the paging fields; per open promise `id`, `party`, `kind`, `due_at`, `effective_due_at`, `snoozed_until`, `overdue`, `call_at`, `customer`, `customer_id`, `call_log_id`, `source` and `possibly_kept` (`kind`, `basis`), plus the totals and `implicit_due_rules`; a transcript, transcript excerpt, match excerpt, transcript paging, summary, sentiment, recording link, promise `description` and the `link` never leave; `get_day_summary` sends `visit_price_total` (each visit's set price, a $0 one included, or its prepaid amount when no price is set) with `visits_with_price` and `visits_without_price`, so a visit with no price is counted, never given a guessed amount; a schema refusal (`invalid_input`) keeps the failing arguments' `path` and `rule`, never their values; two answers hold back words (security audit run 3): `needs_me` keeps an alert's `why` only for the categories `system`, `llm_cost` and `agents` raised by no registry trigger (the bar's `needs_me` item now carries `category` and `trigger`, neither of which leaves this route), and every other alert's `why` becomes the fixed line `text withheld: may quote an outside sender; look the item up by id` (ids, `headline`, area and severity stay); `list_gap_reports` marks every non-system gap row `quoted_words`, so its `wanted` and `tried` text leaves as `[withheld: N characters]` (the Intelligence Bar writes its rows from model text or tool refusals, never from words the owner typed); each call is a `tool_health_events` row (source `mcp-admin`) without arguments or answer. `initialize` carries server `instructions` (Claude Code puts them in each session's system prompt): what never comes back, how to read dates (`Z` timestamps are UTC, `time_window` values are Eastern wall-clock times) and pages, and that tool names in the Intelligence Bar's descriptions that are not on this server are not to be substituted. Tools run through `ActionRegistry.execute` and must be action-policy `kind: read` with no approval (a reclassified tool drops out); no write tool, no general admin read (`read_admin_data`) and no tool without its own reviewed field list may be added. Kill switch: unset the gate. `server/tests/mcp-admin-route.test.js` pins the auth order, the allow-list and the projections).
 `/api/ops/digest` and `/api/ops/digest/resolve` (POST; machine-to-machine
 — the external Waves ops crons on the owner's Mac post their FIX:/ACT:
 findings so they land as `ops_digest` admin bell rows (the Waves Ops lane

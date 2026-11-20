@@ -614,45 +614,38 @@ describe('customer-question manifest 2026-11-18', () => {
   test('every outline heading passes the live name check, and no heading or outline direction trips the publish guardrails', () => {
     const { checkRedactionPassedAllLanes } = require('../services/content/content-quality-gate')._internals;
     const contentGuardrails = require('../services/content/content-guardrails');
-    const prior = process.env.GATE_CONTENT_PII_ALL_LANES;
-    process.env.GATE_CONTENT_PII_ALL_LANES = 'true';
-    try {
-      const failures = [];
-      const asHeading = (heading) => `## ${heading}\n\nGuidance for homes in Sarasota and Bradenton.`;
-      const nameFails = (heading) => !checkRedactionPassedAllLanes({ body: asHeading(heading), frontmatter: {} }).ok;
-      const blocking = (body, service) => (contentGuardrails.evaluate({ body, frontmatter: {} }, { targetIsBlog: true, service }).findings || [])
-        .filter((f) => f.severity === 'P0' || f.severity === 'P1')
-        .map((f) => f.code);
-      for (const brief of manifest.briefs) {
-        const { service } = composeSeedBrief(manifest, brief.id);
-        for (const item of brief.outline) {
-          const colon = item.indexOf(':');
-          const label = (colon > 0 ? item.slice(0, colon) : item).trim();
-          const direction = colon > 0 ? item.slice(colon + 1) : '';
-          const isFaq = /^faq$/i.test(label);
-          const headings = isFaq
-            ? direction.split(';').map((q) => q.trim()).filter(Boolean).map((q) => `${q.charAt(0).toUpperCase()}${q.slice(1)}?`)
-            : [label];
-          for (const heading of headings) {
-            if (nameFails(heading)) failures.push(`${brief.id} name check: ${heading}`);
-            const codes = blocking(asHeading(heading), service);
-            if (codes.length) failures.push(`${brief.id} guardrails ${codes.join(',')}: ${heading}`);
-          }
-          if (!isFaq && direction) {
-            const codes = blocking(direction.replace(/\(link [^)]*\)/g, ''), service);
-            if (codes.length) failures.push(`${brief.id} guardrails ${codes.join(',')}: ${label}`);
-          }
+    const failures = [];
+    const asHeading = (heading) => `## ${heading}\n\nGuidance for homes in Sarasota and Bradenton.`;
+    const nameFails = (heading) => !checkRedactionPassedAllLanes({ body: asHeading(heading), frontmatter: {} }).ok;
+    const blocking = (body, service) => (contentGuardrails.evaluate({ body, frontmatter: {} }, { targetIsBlog: true, service }).findings || [])
+      .filter((f) => f.severity === 'P0' || f.severity === 'P1')
+      .map((f) => f.code);
+    for (const brief of manifest.briefs) {
+      const { service } = composeSeedBrief(manifest, brief.id);
+      for (const item of brief.outline) {
+        const colon = item.indexOf(':');
+        const label = (colon > 0 ? item.slice(0, colon) : item).trim();
+        const direction = colon > 0 ? item.slice(colon + 1) : '';
+        const isFaq = /^faq$/i.test(label);
+        const headings = isFaq
+          ? direction.split(';').map((q) => q.trim()).filter(Boolean).map((q) => `${q.charAt(0).toUpperCase()}${q.slice(1)}?`)
+          : [label];
+        for (const heading of headings) {
+          if (nameFails(heading)) failures.push(`${brief.id} name check: ${heading}`);
+          const codes = blocking(asHeading(heading), service);
+          if (codes.length) failures.push(`${brief.id} guardrails ${codes.join(',')}: ${heading}`);
+        }
+        if (!isFaq && direction) {
+          const codes = blocking(direction.replace(/\(link [^)]*\)/g, ''), service);
+          if (codes.length) failures.push(`${brief.id} guardrails ${codes.join(',')}: ${label}`);
         }
       }
-      expect(failures).toEqual([]);
-      // Both checks are live in this test: a name in a heading still holds
-      // the draft, and a banned phrase in a heading still fails it.
-      expect(nameFails('What John Smith found')).toBe(true);
-      expect(blocking(asHeading('Do plug-in repellers need EPA approval?'), 'pest')).toContain('REENTRY_SAFETY_CLAIM');
-    } finally {
-      if (prior === undefined) delete process.env.GATE_CONTENT_PII_ALL_LANES;
-      else process.env.GATE_CONTENT_PII_ALL_LANES = prior;
     }
+    expect(failures).toEqual([]);
+    // Both checks are live in this test: a name in a heading still holds
+    // the draft, and a banned phrase in a heading still fails it.
+    expect(nameFails('What John Smith found')).toBe(true);
+    expect(blocking(asHeading('Do plug-in repellers need EPA approval?'), 'pest')).toContain('REENTRY_SAFETY_CLAIM');
   });
 
   // CQ10's Waves section gives what the pest identifier tells a customer with
@@ -821,17 +814,10 @@ describe('customer-question manifest 2026-11-18', () => {
     const verify = composeSeedBrief(manifest, 'CQ09').voice_constraints.operator_brief.verify_notes.join(' ');
     expect(verify).toContain('your local poison control center');
     expect(verify).not.toMatch(/Poison Control/);
-    const prior = process.env.GATE_CONTENT_PII_ALL_LANES;
-    process.env.GATE_CONTENT_PII_ALL_LANES = 'true';
-    try {
-      const draft = (line) => ({ body: `Guidance for homes in Sarasota and Bradenton.\n\n${line}\n`, frontmatter: {} });
-      expect(checkRedactionPassedAllLanes(draft('For an exposure, call your local poison control center or 911, or see a doctor.')).ok).toBe(true);
-      // Control: the capitalized form holds the draft.
-      expect(checkRedactionPassedAllLanes(draft('Call Poison Control or 911.')).ok).toBe(false);
-    } finally {
-      if (prior === undefined) delete process.env.GATE_CONTENT_PII_ALL_LANES;
-      else process.env.GATE_CONTENT_PII_ALL_LANES = prior;
-    }
+    const draft = (line) => ({ body: `Guidance for homes in Sarasota and Bradenton.\n\n${line}\n`, frontmatter: {} });
+    expect(checkRedactionPassedAllLanes(draft('For an exposure, call your local poison control center or 911, or see a doctor.')).ok).toBe(true);
+    // Control: the capitalized form holds the draft.
+    expect(checkRedactionPassedAllLanes(draft('Call Poison Control or 911.')).ok).toBe(false);
   });
 
   // The completion gate's conversion CTA is judged on the link anchor: it
@@ -852,14 +838,7 @@ describe('customer-question manifest 2026-11-18', () => {
     expect(hasConversionCta(body, brief)).toBe(true);
     // Control: the wording this replaced does not qualify.
     expect(hasConversionCta(`Guidance for homes in Sarasota and Bradenton.\n\n[the contact page](${href})\n`, brief)).toBe(false);
-    const prior = process.env.GATE_CONTENT_PII_ALL_LANES;
-    process.env.GATE_CONTENT_PII_ALL_LANES = 'true';
-    try {
-      expect(checkRedactionPassedAllLanes({ body, frontmatter: {} }).ok).toBe(true);
-    } finally {
-      if (prior === undefined) delete process.env.GATE_CONTENT_PII_ALL_LANES;
-      else process.env.GATE_CONTENT_PII_ALL_LANES = prior;
-    }
+    expect(checkRedactionPassedAllLanes({ body, frontmatter: {} }).ok).toBe(true);
   });
 
   test.each(['CQ01', 'CQ02', 'CQ03', 'CQ04', 'CQ05', 'CQ06', 'CQ07', 'CQ08', 'CQ09', 'CQ10', 'CQ11', 'CQ12'])('%s composes as a regional post with a hub link the gate accepts, a CTA route and the series rule', (id) => {

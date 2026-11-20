@@ -12,15 +12,17 @@
  *     technicians comes with the second technician's shift build (page D4);
  *   - the totals for the next STAFFED_DAYS staffed days and the 7-day view, with the staffed days it could not
  *     measure;
- *   - the live ad rule's campaigns at that hour (`ad_shadow.live`), to compare the counts with.
+ *   - the live ad rule's campaigns at that hour (`ad_shadow.live`), to compare the counts with;
+ *   - the slot rule's decision (`ad_shadow.decision`, decideSlotRule): full or the 1% floor, from the finder that offers
+ *     a lead its times (routes/booking.js availabilityForPin).
  * It measures only: nothing here changes a visit, a time, a budget or a message. Every opening's start and length are
  * stored, so a rule can be counted again from the rows.
  *
- * The counts are room in the route as booked, not a booking engine's answer. This check has no customer address, so
- * it cannot ask the dispatch picker (scheduling/arrival-route.js) or the /book page whether a job fits. Either can
+ * The counts are room in the route as booked, not a booking engine's answer. A count has no customer address, so it
+ * cannot say whether the dispatch picker (scheduling/arrival-route.js) or the /book page would place a job. Either can
  * refuse a counted job (a stop already late, a route through unassigned work) or place one the count leaves out (a
- * customer near the route, a reordered route). So no budget decision is made here: that follows in its own build,
- * which checks openings with the booking engine.
+ * customer near the route, a reordered route). So the decision is not taken from the counts: decideSlotRule asks the
+ * booking engine's own offer finder about one stated job at stated addresses (each service zone's center).
  *
  * Today is not measured here. Its room depends on where the van is now, which comes in a follow-up that reuses the
  * staff placement's own reading of the stop under way (scheduling/arrival-route.js) and leaves every state it cannot
@@ -47,7 +49,7 @@ const { _internals: { groupRouteStops, storedOrderStale, clockOrder } } = requir
 const {
   promisedWindowOrder, currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration,
 } = require('../route-reorder-window-fit');
-const { SHIFT } = require('../scheduling/policy');
+const { SHIFT, capacityEnabled } = require('../scheduling/policy');
 const { allocationKey } = require('../scheduling/visit-capacity');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
@@ -58,6 +60,11 @@ const STAFFED_DAYS = 3;
 const DEMAND_DAYS = 7;
 // How far ahead to look for STAFFED_DAYS staffed days (a holiday week can close several in a row).
 const SCAN_DAYS = 14;
+// The slot rule's stated job (decideSlotRule): the /book funnel's pest control visit, at its funnel length.
+const STANDARD_SERVICE_KEY = 'pest_control';
+// The slot rule's own label on its asks (availabilityForPin `surface`): the customer route check logs them as
+// surface=route_check, apart from a customer's /book search, and applies the same rules.
+const PROBE_SURFACE = 'route_check';
 // A job slot's parts (close-gaps SLOT_MIN: the 60-minute median job and its added drive). The drive comes first, so
 // the service can start on the hour (AGENTS.md).
 const JOB_MIN = 60;
@@ -461,6 +468,83 @@ async function measureOne(conn, env, { day, techId, rows, occupancy }) {
 }
 
 /**
+ * The slot rule's decision (ad budget rule v2, owner 2026-11-19 "do whatever you reccomend": any slot = full budget,
+ * else the 1% floor), asked of the booking engine, not taken from the counts. It asks the finder that offers a lead its
+ * times: routes/booking.js availabilityForPin, the one pin reader that /book's offers, the lead reply agent's
+ * next-available check and the text drafter's OPEN TIMES share (scheduling/text-offer-times.js), with the stated job
+ * (STANDARD_SERVICE_KEY) at each service zone's center. So every rule a /book offer keeps is in the answer: the
+ * customer window, the notice window, the zone route days, the occupancy mirror, the customer route check.
+ * A slot counts on one of the next staffed days the totals count, searched through the last of them (`through`), and
+ * only from a technician the run counts that day: the finder gets the run's `crew` (from `staffed`: a Sunday only with
+ * a stop booked) and offers each date only from it, before it picks one technician per start. A Sunday whose stops
+ * read failed has no known crew: its slots are not counted (byDate null). The finder reads the live tables itself,
+ * just after the snapshot.
+ * One database, one clock. The finder reads the shared handle (models/db) in every module it calls (find-time, the
+ * occupancy mirror, the zone route days, the customer route check), and none of them takes a connection. So the run
+ * reads that handle too (runRouteCheck has no other), and the crew and the bookings come from one database. The finder
+ * gets the run's clock (`now`: the offer window and the notice window). Its own wall-clock reads (find-time's same-day
+ * floor, the van's place today) touch only the wall clock's today, which the decision never counts while the run is on
+ * that day. A run on another ET day than the wall clock's (a test or replay clock, a run that crossed midnight) gets no
+ * decision: 'unknown', reason 'other_day', with no ask.
+ * The asks carry their own label (PROBE_SURFACE): the customer route check logs them apart from customer searches.
+ * Openings only. The asks take no fallback list (`verifiedOnly`): where /book would serve a list it could not check (a
+ * failed occupancy read; a customer route check that failed, ran out of time or could not score a route), the ask
+ * throws and the zone has no answer. The crew's ask keeps no floor: the customer route check keeps a whole week when
+ * none of its slots survive, but over the crew's slots that is not /book's floor. So when the crew has no slot, the
+ * zone also asks /book's own pool (no crew): if /book's check would keep its whole week (every slot in it would make a
+ * customer late, and /book shows them anyway), that ask throws and the zone has no answer; else the crew's zero
+ * stands. A crew slot needs no such ask: /book offers that start either way (its own pick there is the same
+ * technician, or one with no stop that day, whom the check never removes).
+ * Shadow only: nothing reads the decision, no budget changes, nothing is held, and nothing is paid for (paidLookups
+ * false buys no road lookup and reads no forecast; a zone center is a pin, so nothing is geocoded). Under capacity
+ * routing /book itself buys road times, so there the answer is the free drive model's (`travel: 'modeled'`): a
+ * borderline slot can differ from /book's.
+ *   mode 'full': some zone has a slot. 'floor': every zone answered for every date and none has a slot, or no staffed
+ *   day is ahead. 'unknown': no slot, and the zones, a zone's answer or a date's crew could not be read (`reason`, a
+ *   zone's `error`, or a null in byDate), or the run is not on the wall clock's day (reason 'other_day'). A zone with
+ *   no pin, or /book off, gets no answer (`no_offer`): an error, never "no slot".
+ */
+async function decideSlotRule({ now, dates, crew }) {
+  if (etDateString(new Date()) !== etDateString(now)) return { mode: 'unknown', reason: 'other_day', dates };
+  if (!dates.length) return { mode: 'floor', reason: 'no_staffed_days', dates };
+  const zones = (await db('service_zones').select('zone_name', 'center_lat', 'center_lng'))
+    .sort((a, b) => String(a.zone_name).localeCompare(String(b.zone_name)));
+  if (!zones.length) return { mode: 'unknown', reason: 'no_zones', dates };
+  const { availabilityForPin } = require('../../routes/booking')._internals;
+  const asked = [];
+  for (const zone of zones) {
+    const byDate = {};
+    let first = null;
+    try {
+      const ask = (extra) => availabilityForPin({
+        lat: zone.center_lat, lng: zone.center_lng, serviceKey: STANDARD_SERVICE_KEY, paidLookups: false,
+        through: dates[dates.length - 1], now, surface: PROBE_SURFACE, verifiedOnly: true, ...extra,
+      });
+      const offer = await ask({ crew });
+      if (!offer) throw new Error('no_offer');
+      for (const day of dates) {
+        if (!crew.get(day)) {
+          byDate[day] = null;
+          continue;
+        }
+        const starts = (offer.days.find((d) => d.date === day)?.slots || []).map((s) => s.start_time).sort();
+        byDate[day] = starts.length;
+        first ||= starts.length ? `${day} ${starts[0]}` : null;
+      }
+      // No crew slot: /book's own pool says whether its check would keep the whole week (the ask throws).
+      if (!first && !(await ask({}))) throw new Error('no_offer');
+      asked.push({ zone: zone.zone_name, byDate, first });
+    } catch (err) {
+      asked.push({ zone: zone.zone_name, byDate, first: null, error: String(err.message).slice(0, 200) });
+    }
+  }
+  const anySlot = asked.some((z) => Object.values(z.byDate).some((n) => n > 0));
+  const unread = asked.some((z) => z.error || Object.values(z.byDate).includes(null));
+  const mode = anySlot ? 'full' : (unread ? 'unknown' : 'floor');
+  return { mode, service: STANDARD_SERVICE_KEY, ...(capacityEnabled() ? { travel: 'modeled' } : {}), dates, zones: asked };
+}
+
+/**
  * One hourly run: every read in one read-only snapshot, then one route_check_runs row written outside it. A run-wide
  * read failing (technicians, blackout days, absences, start points, departure time) still writes the hour's row,
  * status 'failed', with the error in its totals.
@@ -471,29 +555,40 @@ async function measureOne(conn, env, { day, techId, rows, occupancy }) {
  * status (`duplicate: true`), so job health keeps a failed hour failed and never clears it.
  * run_hour is the hour the run starts, which is its tick's hour: a tick waits at most SLOT_WAIT_MAX_MS (10 minutes)
  * past :30 for a slot (utils/cron-lock.js).
+ * The run reads the shared handle only, the one the decision's finder reads (decideSlotRule): it takes no connection.
  */
-async function runRouteCheck({ conn = db, now = new Date() } = {}) {
+async function runRouteCheck({ now = new Date() } = {}) {
   const today = etDateString(now);
   const hour = etParts(now).hour;
   let run;
   try {
-    run = await inSnapshot(conn, (reader) => measureRun(reader, now));
+    run = await inSnapshot(db, (reader) => measureRun(reader, now));
   } catch (err) {
     logger.warn(`[route-check] ${today}: run failed (${err.message}); recorded`);
     run = { status: 'failed', days: [], totals: { error: String(err.message).slice(0, 200) }, ad: {} };
   }
-  const written = await conn(TABLE).insert({
+  // A decision the run could not make, or an ask that failed, is an error of the run, as an unread campaign list is.
+  if (run.status !== 'failed') {
+    const decision = await decideSlotRule({ now, dates: run.totals.next.dates, crew: run.crew }).catch((err) => {
+      logger.warn(`[route-check] ${today}: slot-rule decision failed (${err.message})`);
+      return { mode: 'unknown', error: String(err.message).slice(0, 200) };
+    });
+    run.ad.decision = decision;
+    if (decision.mode === 'unknown' || decision.zones?.some((z) => z.error)) run.status = 'completed_with_errors';
+  }
+  const written = await db(TABLE).insert({
     run_at: now, service_date: today, run_hour: hour, status: run.status,
     days: JSON.stringify(run.days), totals: JSON.stringify(run.totals), ad_shadow: JSON.stringify(run.ad),
   }).onConflict(['service_date', 'run_hour']).ignore().returning('id');
   if (!written.length) {
-    const recorded = await conn(TABLE).where({ service_date: today, run_hour: hour }).first('status');
+    const recorded = await db(TABLE).where({ service_date: today, run_hour: hour }).first('status');
     const status = recorded?.status || 'failed';
     logger.info(`[route-check] ${today} ${hour}:00 already recorded (${status}) by another instance; this run wrote nothing`);
     return { status, duplicate: true, totals: {}, days: 0 };
   }
   if (run.status !== 'failed') {
-    logger.info(`[route-check] ${run.status}: next ${run.totals.next.dates.length} staffed days slots=${run.totals.next.slots}`);
+    logger.info(`[route-check] ${run.status}: next ${run.totals.next.dates.length} staffed days slots=${run.totals.next.slots}`
+      + ` decision=${run.ad.decision.mode}`);
   }
   return { status: run.status, totals: run.totals, days: run.days.length };
 }
@@ -516,10 +611,14 @@ async function measureRun(conn, now) {
     techBlind: !require('../scheduling/occupancy').techScopedConfirmActive(),
   };
   const days = [];
+  // Who works each measured date, for the slot-rule decision. A Sunday whose stops read failed counts every technician
+  // above (its room unknown, never left out), but who works it is unknown: null.
+  const crew = new Map();
   for (const day of datesToMeasure(elig, today, stopsOn)) {
     const rows = await rowsOn(day);
     const withStops = await withStopsOn(day);
     const working = elig.techIds.filter((techId) => staffed(elig, day, techId, !withStops || withStops.has(techId)));
+    crew.set(day, !withStops && weekday(day) === 0 ? null : new Set(working.map(String)));
     if (!rows) {
       for (const techId of working) days.push({ date: day, technician_id: techId, staffed: true, skip: 'FAILED' });
       continue;
@@ -545,14 +644,14 @@ async function measureRun(conn, now) {
     return { live: null, error: String(err.message).slice(0, 200) };
   });
   const failed = ad.live === null || days.some((d) => d.skip === 'FAILED');
-  return { status: failed ? 'completed_with_errors' : 'completed', days, totals, ad };
+  return { status: failed ? 'completed_with_errors' : 'completed', days, totals, ad, crew };
 }
 
 module.exports = {
   runRouteCheck,
   _internals: {
     recoverable, physicalStops, heldSpans, unheldWork, hourSlots, simulateBookedDay, latestHomeDeparture, measureTechDay, staffed,
-    datesToMeasure, summarize, unmeasurable, DISPATCH_DAY_END,
-    STAFFED_DAYS, DEMAND_DAYS,
+    datesToMeasure, summarize, unmeasurable, DISPATCH_DAY_END, decideSlotRule,
+    STAFFED_DAYS, DEMAND_DAYS, STANDARD_SERVICE_KEY, PROBE_SURFACE,
   },
 };

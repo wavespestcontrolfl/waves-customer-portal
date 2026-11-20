@@ -1340,9 +1340,11 @@ async function getSettings() {
     base_url: normalizeReferralBaseUrl(DEFAULT_REFERRAL_BASE_URL),
     referrer_reward_cents: 2500,
     referee_discount_cents: 2500,
-    bonus_silver_cents: 5000,
-    bonus_gold_cents: 7500,
-    bonus_platinum_cents: 10000,
+    // Tier bonuses only ever inflated the promoter ledger, never the real
+    // account credit (flat referrer reward); 0 since 20261120090000.
+    bonus_silver_cents: 0,
+    bonus_gold_cents: 0,
+    bonus_platinum_cents: 0,
     milestone_3_bonus_cents: 2500,
     milestone_5_bonus_cents: 5000,
     milestone_10_bonus_cents: 10000,

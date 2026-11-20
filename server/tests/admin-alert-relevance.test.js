@@ -1486,7 +1486,7 @@ describe('customer-contact classes', () => {
       expect((await verdictFor(trackingText(), { pending: false, backAt: at(10) })).reason).toBe('Answered by a call');
       expect((await verdictFor(trackingText(), { pending: false })).reason).toBe('Answered, or no reply needed');
       expect((await verdictFor(trackingText(), { shared: true, pending: false })).reason).toBeNull();
-      // A text to a location or Google profile line rings the same row (GATE_RING_NEW_CONTACTS, owner 2026-11-04): the
+      // A text to a location or Google profile line rings the same row (owner 2026-11-04): the
       // line only changes the payload's source, so it is the same class and closes by the same rule once answered.
       const officeText = () => trackingText({ metadata: { triggerKey: 'new_lead', dedupeKey: 'sms-tracking-thread:0123456789abcdef0123456789abcdef',
         payload: { twilioSid: SID, name: null, phone: '+12025550101', source: 'the Parrish (Pest) line', message: 'Do you treat for ants?' } } });

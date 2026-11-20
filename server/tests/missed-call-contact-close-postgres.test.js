@@ -22,7 +22,8 @@ jest.setTimeout(60000);
 (SKIP ? describe.skip : describe)('missed-call bell, contact close, on PostgreSQL', () => {
   let database;
   const schema = `call_contact_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['call_log', 'sms_log', 'scheduled_services', 'estimates', 'leads', 'message_drafts', 'customers', 'notifications', 'audit_log'];
+  // invoices: the retire pass's visit-underway clause reads it.
+  const tables = ['call_log', 'sms_log', 'scheduled_services', 'invoices', 'estimates', 'leads', 'message_drafts', 'customers', 'notifications', 'audit_log'];
   const CALL_AT = new Date('2026-10-20T17:05:00Z');
   const mins = (m) => new Date(CALL_AT.getTime() + m * 60 * 1000);
   const BIZ = '+19412975749';

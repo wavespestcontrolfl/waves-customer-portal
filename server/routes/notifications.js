@@ -6,7 +6,7 @@ const db = require('../models/db');
 const { accountPropertyIds, resolvePrimaryProfileId, appPropertyScopeEnabled, accountSavedProperties } = require('../services/account-properties');
 const PropertyTexts = require('../services/property-notification-prefs');
 const rateLimit = require('express-rate-limit');
-const { gateEnvValue, appFirstAnyDeviceLive, portalEmailResubscribeLive } = require('../config/feature-gates');
+const { gateEnvValue, portalEmailResubscribeLive } = require('../config/feature-gates');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
@@ -159,8 +159,7 @@ const CHANNEL_DB_COLUMNS = [
   // owner's explicit Text choice.
   'service_reminder_72h_channel_explicit',
   'service_reminder_24h_channel',
-  // Explicit-Text markers for the routed notices (GATE_APP_FIRST_ANY_DEVICE,
-  // owner 2026-11-04). Like the 72 hour stamp they travel WITH their channel to
+  // Explicit-Text markers for the routed notices (owner 2026-11-04). Like the 72 hour stamp they travel WITH their channel to
   // the primary-profile row, where the routing reads both. The receipt marker
   // is per charged row, like payment_receipt_channel, so it is not listed.
   'service_reminder_24h_channel_explicit',
@@ -199,7 +198,7 @@ const PREF_SELECT = [
   'payment_receipt_channel',
 ];
 
-// GATE_APP_FIRST_ANY_DEVICE (owner 2026-11-04): the routed notices go to a
+// Owner 2026-11-04: the routed notices go to a
 // customer's app unless the customer chose Text. A stored 'sms' is a choice only
 // when its marker is true; the seeded default is not. key -> [column, marker].
 const APP_FIRST_CHOICE_COLUMNS = {
@@ -284,7 +283,7 @@ function shownReceiptChannel(existing, appShown) {
 }
 
 // Marks the routed notices a customer wrote as explicit choices, Text included
-// (GATE_APP_FIRST_ANY_DEVICE: only the customer switches back to text). The
+// (only the customer switches back to text). The
 // receipt choice is per row and its legacy form is echoed by a full billing
 // save, so an echo of what the page showed is not a choice.
 function explicitChoiceStamps(updates, existing, opts) {
@@ -519,13 +518,13 @@ async function ensurePrefs(customerId) {
 }
 
 
-// GATE_APP_FIRST_ANY_DEVICE (owner 2026-11-04): the settings page shows App for
+// Owner 2026-11-04: the settings page shows App for
 // a routed notice the customer never chose Text for, once the account holder
 // has the phone app, because that is where the notice goes. It shows only where
 // the page can render App (appPreferences), never to a contact session, and
 // fails closed: any doubt shows the stored value.
 async function appFirstDisplayActive(req) {
-  if (req.contactSession || !appFirstAnyDeviceLive() || !appPreferencesAvailable(req)
+  if (req.contactSession || !appPreferencesAvailable(req)
     || !gateEnvValue('GATE_PUSH_CHANNEL_ROUTING')) return false;
   try {
     // A phone not opened in 30 days (GATE_APP_FIRST_STALE_TEXT, customerStatus appStale) still
