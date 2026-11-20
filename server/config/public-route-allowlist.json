@@ -772,7 +772,7 @@
     {
       "router": "server/routes/pay-v2.js",
       "mount": "/api/pay",
-      "reason": "Tokenized invoice payment page (format-gated tokens; the /pay contract). promo-code is the same token contract behind GATE_PAY_PROMO_CODE (owner 2026-11-18: the customer types a promo code on the pay page; it saves the code on the invoice only, the credit posts and applies at the /setup that follows)",
+      "reason": "Tokenized invoice payment page (format-gated tokens; the /pay contract). promo-code is the same token contract behind GATE_PAY_PROMO_CODE (owner 2026-11-18: the customer types a promo code on the pay page; it saves the code on the invoice only, the credit posts and applies at the /setup that follows). plan-choice is the same token contract behind GATE_PAY_PLAN_CHOICE (owner 2026-11-19: on the first invoice of an accepted plan the customer picks annual prepay; it mints one unpaid prepay invoice at a server-derived price and charges, sends and voids nothing)",
       "routes": [
         "GET /api/pay/:token",
         "GET /api/pay/:token/attachments/:attachmentId",
@@ -782,6 +782,7 @@
         "POST /api/pay/:token/consent",
         "POST /api/pay/:token/error",
         "POST /api/pay/:token/finalize",
+        "POST /api/pay/:token/plan-choice",
         "POST /api/pay/:token/promo-code",
         "POST /api/pay/:token/quote",
         "POST /api/pay/:token/setup",
