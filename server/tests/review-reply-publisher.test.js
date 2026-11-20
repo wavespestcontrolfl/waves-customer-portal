@@ -683,6 +683,26 @@ describe('publishReviewReply', () => {
     expect(state.rows[0]).toMatchObject({ review_reply: null, reply_updated_at: null });
   });
 
+  test('an editor timeout compares the slot its claim read: a runner draft stored before the claim gives way to the attempt', async () => {
+    process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
+    const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
+    mockLock.mockImplementationOnce(async (id, fn) => {
+      // A runner stores its draft after the publisher's first read, before the
+      // claim (a new row object: the first read keeps what it saw).
+      state.rows[0] = { ...state.rows[0], auto_reply_status: 'drafted', auto_reply_draft: 'Runner words.', review_reply: '[DRAFT] Runner words.' };
+      out.result = await fn();
+      return out;
+    });
+    mockGbp.replyToReview.mockImplementationOnce(() => new Promise(() => {}));
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const p = publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana, the owner here.', actor: { type: 'admin' }, allowOverwrite: true });
+    const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_UNCERTAIN });
+    await jest.advanceTimersByTimeAsync(31000);
+    await assertion;
+    jest.useRealTimers();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana, the owner here.', auto_reply_version: 'human', review_reply: null });
+  });
+
   // An Intelligence Bar post whose PUT times out (non-overwrite path).
   async function ibTimeout({ duringPut } = {}) {
     process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
