@@ -52,7 +52,8 @@ const { recordingReadyAt } = require('../utils/call-timeline');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 
 // The processor's own length rule (over 10 s; with GATE_SHORT_CALL_RECORDING_SWEEP
-// on, any recording of a call under 24 h old): a row it skips by design is never a stall.
+// on, also a shorter first pass of a call under 24 h old, and every stall
+// candidate is a first pass): a row it skips by design is never a stall.
 const { sweepLengthSql, sweepLengthOk } = require('../config/call-extraction-retry');
 // The pipeline legitimately takes minutes (CDN settle + transcription +
 // extraction); the sweep itself only picks fresh rows up after 10. Alert

@@ -5,7 +5,8 @@
 // in-memory processing timers died with the old container, and the 5-minute
 // sweep (processAllPending), the restart-safe backstop, took only recordings
 // over 10 seconds. GATE_SHORT_CALL_RECORDING_SWEEP lets the sweep take a
-// shorter recording while its call is under 24 hours old. One length rule
+// shorter recording on its first pass while its call is under 24 hours old; a
+// retry state or a finished one keeps the 10-second floor. One length rule
 // (config/call-extraction-retry.js) feeds the sweep and every reader that
 // mirrors it (getStats, the stall watchdog, the ops queue, the agent-control
 // run list). Gate off, every rule is byte-identical to before.
@@ -33,7 +34,8 @@ async function withGate(value, fn) {
 }
 
 const OLD_FLOOR_SQL = 'COALESCE(recording_duration_seconds, duration_seconds, 0) > 10';
-const WINDOW_SQL = "COALESCE(recording_duration_seconds, duration_seconds, 0) > 0 AND created_at > NOW() - INTERVAL '24 hours'";
+const WINDOW_SQL = "COALESCE(recording_duration_seconds, duration_seconds, 0) > 0 AND created_at > NOW() - INTERVAL '24 hours'"
+  + " AND (processing_status IS NULL OR processing_status IN ('pending', 'processing'))";
 
 describe('the sweep length rule', () => {
   const { sweepLengthSql, sweepLengthOk, SWEEP_MIN_SECONDS, SHORT_RECORDING_SWEEP_HOURS } = require('../config/call-extraction-retry');
@@ -54,7 +56,7 @@ describe('the sweep length rule', () => {
     }
   });
 
-  test('gate on: a short recording counts while its call is under 24 hours old', async () => {
+  test('gate on: a short recording counts on its first pass while its call is under 24 hours old', async () => {
     await withGate('true', () => {
       expect(sweepLengthSql()).toBe(`(${OLD_FLOOR_SQL} OR (${WINDOW_SQL}))`);
       expect(sweepLengthOk(row(8, 1), NOW)).toBe(true);
@@ -75,14 +77,17 @@ describe('the sweep length rule', () => {
     });
   });
 
-  test('the any-age rule, for a reader that reports a past failure: the old floor gate off, any recording gate on', async () => {
-    const { sweepLengthAnyAgeSql } = require('../config/call-extraction-retry');
-    for (const value of [undefined, 'false', '1', 'TRUE']) {
-      await withGate(value, () => expect(sweepLengthAnyAgeSql()).toBe(OLD_FLOOR_SQL));
-    }
+  test('gate on: a retry state or a finished one keeps the 10-second floor (the gate adds no retries)', async () => {
     await withGate('true', () => {
-      expect(sweepLengthAnyAgeSql()).toBe('COALESCE(recording_duration_seconds, duration_seconds, 0) > 0');
-      expect(sweepLengthAnyAgeSql()).not.toContain('INTERVAL');
+      // A first pass: never claimed, queued, or a claim the sweep may find stale.
+      for (const status of [null, 'pending', 'processing']) {
+        expect(sweepLengthOk(row(8, 1, { processing_status: status }), NOW)).toBe(true);
+      }
+      for (const status of ['no_transcription', 'extraction_failed', 'processed', 'voicemail', 'spam', 'customer_creation_failed', 'lead_creation_failed']) {
+        expect(sweepLengthOk(row(8, 1, { processing_status: status }), NOW)).toBe(false);
+        // Over 10 seconds the state does not matter, as before.
+        expect(sweepLengthOk(row(11, 1, { processing_status: status }), NOW)).toBe(true);
+      }
     });
   });
 });
@@ -137,9 +142,13 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
   const SID_LONG = sid('s4'); // 60 s, never processed, 20 min old: the old floor already took it
   // No transcript after a try: the processor left transcription_status pending.
   const SID_SHORT_AT_CAP = sid('s5'); // 8 s, 3 tries (the cap), 2 h old: the claim refuses it, so it takes no slot
-  const SID_SHORT_RETRY = sid('s6'); // 8 s, 1 try, 2 h old: its own capped branch retries it
+  const SID_SHORT_RETRY = sid('s6'); // 8 s, 1 try, 2 h old: a retry state keeps the 10-second floor, gate on or off
   const SID_LONG_AT_CAP = sid('s7'); // 60 s, 3 tries: never a candidate, gate on or off
-  const ALL_SIDS = [SID_SHORT, SID_SHORT_OLD, SID_SHORT_SETTLING, SID_LONG, SID_SHORT_AT_CAP, SID_SHORT_RETRY, SID_LONG_AT_CAP];
+  const SID_SHORT_DIED = sid('s8'); // 8 s, its first pass claimed it 30 min ago and stopped beating: a deploy killed the pass
+  // 8 s voicemail whose transcript was never stored: it matches the stuck-transcript
+  // fallback and the claim accepts a voicemail row, so the gate must never run it again.
+  const SID_SHORT_VOICEMAIL = sid('s9');
+  const ALL_SIDS = [SID_SHORT, SID_SHORT_OLD, SID_SHORT_SETTLING, SID_LONG, SID_SHORT_AT_CAP, SID_SHORT_RETRY, SID_LONG_AT_CAP, SID_SHORT_DIED, SID_SHORT_VOICEMAIL];
   const REC = 'RE' + '9'.repeat(32);
   const minutesAgo = (m) => new Date(Date.now() - m * 60 * 1000);
 
@@ -177,6 +186,11 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
     await insertCall(SID_SHORT_AT_CAP, { seconds: 8, createdMinutesAgo: 120, updatedMinutesAgo: 60, ...noTranscript(3) });
     await insertCall(SID_SHORT_RETRY, { seconds: 8, createdMinutesAgo: 120, updatedMinutesAgo: 60, ...noTranscript(1) });
     await insertCall(SID_LONG_AT_CAP, { seconds: 60, createdMinutesAgo: 120, updatedMinutesAgo: 60, ...noTranscript(3) });
+    await insertCall(SID_SHORT_DIED, {
+      seconds: 8, createdMinutesAgo: 40, updatedMinutesAgo: 30,
+      processing_status: 'processing', processing_started_at: minutesAgo(30), processing_heartbeat_at: minutesAgo(30),
+    });
+    await insertCall(SID_SHORT_VOICEMAIL, { seconds: 8, createdMinutesAgo: 120, updatedMinutesAgo: 60, processing_status: 'voicemail' });
   });
 
   afterAll(async () => {
@@ -190,9 +204,9 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
     });
   });
 
-  test('gate on: the stranded short call is swept too; a day-old one, one still settling and one at the cap are not', async () => {
+  test('gate on: a stranded short first pass is swept too; a day-old one, one still settling, and a short retry or finished row are not', async () => {
     await withGate('true', async () => {
-      expect(await candidates()).toEqual([SID_SHORT, SID_LONG, SID_SHORT_RETRY].sort());
+      expect(await candidates()).toEqual([SID_SHORT, SID_LONG, SID_SHORT_DIED].sort());
     });
   });
 

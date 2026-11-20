@@ -251,17 +251,16 @@ describe('adapters project onto the canonical shape', () => {
     expect(callLog.fromRow({ ...eligible, recording_url: '' }).lifecycle).toBe('terminal');
     expect(callLog.fromRow({ ...eligible, duration_seconds: 8, recording_duration_seconds: null }).lifecycle).toBe('terminal');
     expect(callLog.fromRow({ ...eligible, duration_seconds: 8, recording_duration_seconds: 40 }).lifecycle).toBe('queued');
-    // … and with GATE_SHORT_CALL_RECORDING_SWEEP on (owner 2026-11-19 "FIX") the sweep also takes a short recording while its call is under 24 h old
+    // … and with GATE_SHORT_CALL_RECORDING_SWEEP on (owner 2026-11-19 "FIX") the sweep takes a short recording only on its FIRST pass:
+    // a retry state keeps the 10-second floor, so a short failure 1 h old is terminal, gate on as off, and a long one still retries
     const gateBefore = process.env.GATE_SHORT_CALL_RECORDING_SWEEP;
     process.env.GATE_SHORT_CALL_RECORDING_SWEEP = 'true';
     try {
-      expect(callLog.fromRow({ ...eligible, duration_seconds: 8, recording_duration_seconds: null, created_at: realAgo(36e5) }).lifecycle).toBe('queued');
-      expect(callLog.fromRow({ ...eligible, duration_seconds: 8, recording_duration_seconds: null, created_at: realAgo(25 * 36e5) }).lifecycle).toBe('terminal');
-      // … a short no_transcription retry too, but only under the attempt cap: at the cap it is terminal at once, not queued until the call turns 24 h old
+      expect(callLog.fromRow({ ...eligible, duration_seconds: 8, recording_duration_seconds: null, created_at: realAgo(36e5) }).lifecycle).toBe('terminal');
       const shortNoTranscript = { ...base, processing_status: 'no_transcription', duration_seconds: 8, recording_duration_seconds: null, created_at: realAgo(36e5) };
-      expect(callLog.fromRow({ ...shortNoTranscript, extraction_attempts: 1 }).lifecycle).toBe('queued');
+      expect(callLog.fromRow({ ...shortNoTranscript, extraction_attempts: 1 }).lifecycle).toBe('terminal');
       expect(callLog.fromRow({ ...shortNoTranscript, extraction_attempts: CALL_EXTRACTION_MAX_ATTEMPTS }).lifecycle).toBe('terminal');
-      expect(callLog.fromRow({ ...shortNoTranscript, extraction_attempts: 1, created_at: realAgo(25 * 36e5) }).lifecycle).toBe('terminal');
+      expect(callLog.fromRow({ ...eligible, duration_seconds: 8, recording_duration_seconds: 40 }).lifecycle).toBe('queued');
     } finally {
       if (gateBefore === undefined) delete process.env.GATE_SHORT_CALL_RECORDING_SWEEP;
       else process.env.GATE_SHORT_CALL_RECORDING_SWEEP = gateBefore;

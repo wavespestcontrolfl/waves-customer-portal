@@ -236,44 +236,23 @@ describe('getOpsQueue scan cap', () => {
 });
 
 // GATE_SHORT_CALL_RECORDING_SWEEP (owner 2026-11-19 "FIX"): the sweep takes a
-// short recording only while its call is under 24 hours old. "Retry scheduled"
-// follows that window; a short call's failure stays listed after it closes.
-describe('call lane with GATE_SHORT_CALL_RECORDING_SWEEP on', () => {
+// short recording only on its first pass while its call is under 24 hours old.
+// Every call scan reads that one rule, so the lane cannot disagree with the
+// sweep, and a retry state keeps the 10-second floor, gate on or off.
+describe('call lane: the sweep\'s own length rule, gate on and off', () => {
   const GATE = 'GATE_SHORT_CALL_RECORDING_SWEEP';
   const callsLane = () => LANES.find((l) => l.key === 'calls').run();
   let gateBefore;
   beforeEach(() => {
     gateBefore = process.env[GATE];
-    process.env[GATE] = 'true';
   });
   afterEach(() => {
     if (gateBefore === undefined) delete process.env[GATE];
     else process.env[GATE] = gateBefore;
   });
 
-  test('a short call retries only inside its 24-hour window; past it, or at the cap, it is a failure', async () => {
-    const SHORT = { recording_url: 'https://api.twilio.com/rec', recording_duration_seconds: 8, duration_seconds: 29 };
-    const call = (id, over) => ({ id, from_phone: '+15550000200', direction: 'inbound', ...SHORT, ...over });
-    fixtures.call_log = [
-      call('s1', { processing_status: 'no_transcription', extraction_attempts: 1, created_at: ago(60), updated_at: ago(20) }),
-      call('s2', { processing_status: 'no_transcription', extraction_attempts: 1, created_at: ago(25 * 60), updated_at: ago(30) }),
-      call('s3', { processing_status: 'no_transcription', extraction_attempts: 3, created_at: ago(30 * 60), updated_at: ago(40) }),
-      call('s4', { processing_status: 'extraction_failed', extraction_attempts: 1, created_at: ago(26 * 60), updated_at: ago(50) }),
-      call('s5', { processing_status: 'extraction_failed', extraction_attempts: 1, created_at: ago(90), updated_at: ago(55) }),
-      // A PAN-quarantined masked transcript is taken again whatever its length.
-      call('s6', { processing_status: 'extraction_failed', extraction_attempts: 1, created_at: ago(26 * 60), updated_at: ago(58), recording_url: null, recording_duration_seconds: 4, transcription: '[masked]', transcription_metadata: JSON.stringify({ pan_detected: true }) }),
-    ];
-    const lane = await callsLane();
-    const item = (id) => lane.items.find((i) => i.id === id);
-    expect(item('s1')).toMatchObject({ status: 'pending', detail: 'no transcript yet — retry scheduled (1/3)' });
-    expect(item('s2')).toMatchObject({ status: 'failed', detail: 'no transcript (1/3) — a short call past its 24-hour sweep window, no automatic retry', at: ago(30) });
-    expect(item('s3')).toMatchObject({ status: 'failed', detail: 'no transcript after 3 attempts — no automatic retry' });
-    expect(item('s4')).toMatchObject({ status: 'failed', detail: 'extraction failed (1/3) — a short call past its 24-hour sweep window, no automatic retry' });
-    expect(item('s5')).toMatchObject({ status: 'pending', detail: 'extraction failed, retry scheduled (1/3)' });
-    expect(item('s6')).toMatchObject({ status: 'pending', detail: 'extraction failed, retry scheduled (1/3)' });
-  });
-
-  test('the scans: the 24-hour window decides a retry; a reported failure is judged with no age limit', async () => {
+  test('every call scan sends the sweep\'s rule; its 24-hour window holds only a first pass', async () => {
+    const { sweepLengthSql } = require('../config/call-extraction-retry');
     // A real knex builder with no connection: awaiting a call_log scan records its SQL.
     const kx = require('knex')({ client: 'pg' });
     const db = require('../models/db');
@@ -286,36 +265,29 @@ describe('call lane with GATE_SHORT_CALL_RECORDING_SWEEP on', () => {
       return qb;
     });
     const FLOOR = 'COALESCE(recording_duration_seconds, duration_seconds, 0) > 10';
-    const ANY_AGE = 'COALESCE(recording_duration_seconds, duration_seconds, 0) > 0 or';
-    const WINDOW = "INTERVAL '24 hours'";
+    const WINDOW = "INTERVAL '24 hours' AND (processing_status IS NULL OR processing_status IN ('pending', 'processing'))";
     const scans = async () => {
       sent.length = 0;
       await callsLane();
-      return {
-        live: sent.find((s) => s.includes("in ('pending', 'processing')")),
-        retry: sent.find((s) => s.includes("'no_transcription'")),
-        failed: sent.find((s) => s.includes("'extraction_failed'")),
-      };
+      return [
+        sent.find((s) => s.includes("in ('pending', 'processing')") && !s.includes("'no_transcription'")),
+        sent.find((s) => s.includes("'no_transcription'")),
+        sent.find((s) => s.includes("'extraction_failed'")),
+      ];
     };
     try {
+      process.env[GATE] = 'true';
+      expect(sweepLengthSql()).toContain(WINDOW);
       const on = await scans();
-      expect(on.live).toContain(WINDOW);
-      // The under-cap branch (a retry) carries the window; the recent-failure branch after it does not.
-      const [retryBranch, failureBranch] = on.retry.split('"updated_at" >');
-      // … and a retry needs a recording (the sweep's PAN transcript-only branch never takes no_transcription).
-      expect(retryBranch).toContain("COALESCE(extraction_attempts, 0) < 3 and NULLIF(btrim(recording_url), '') IS NOT NULL and");
-      expect(retryBranch).toContain(WINDOW);
-      expect(failureBranch).toContain(ANY_AGE);
-      expect(failureBranch).not.toContain(WINDOW);
-      expect(on.failed).toContain(ANY_AGE);
-      expect(on.failed).not.toContain(WINDOW);
+      for (const s of on) expect(s).toContain(sweepLengthSql());
+      // A no_transcription retry needs a recording (the sweep's PAN transcript-only branch never takes that state).
+      expect(on[1]).toContain("COALESCE(extraction_attempts, 0) < 3 and NULLIF(btrim(recording_url), '') IS NOT NULL");
 
       delete process.env[GATE];
       const off = await scans();
-      for (const s of [off.live, off.retry, off.failed]) {
+      for (const s of off) {
         expect(s).toContain(FLOOR);
-        expect(s).not.toContain(ANY_AGE);
-        expect(s).not.toContain(WINDOW);
+        expect(s).not.toContain("INTERVAL '24 hours'");
       }
     } finally {
       db.mockImplementation(fallback);

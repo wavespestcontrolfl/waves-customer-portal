@@ -25783,10 +25783,9 @@ const CallRecordingProcessor = {
                 // A stuck transcript on a row no retry lane owns. The retry
                 // states have their own capped branches below; admitted here
                 // too, an at-cap one came back every tick, the claim refused
-                // it, and it took one of the 20 slots (with
-                // GATE_SHORT_CALL_RECORDING_SWEEP on, an empty short recording
-                // for 24 hours), and an extraction_failed one skipped its
-                // 7-day creation fence (pre-push Codex P1).
+                // it, and it took one of the 20 slots, and an
+                // extraction_failed one skipped its 7-day creation fence
+                // (pre-push Codex P1).
                 this.where('transcription_status', 'pending').whereNull('transcription')
                   .whereRaw("processing_status IS DISTINCT FROM 'no_transcription' AND processing_status IS DISTINCT FROM 'extraction_failed'");
               });
@@ -25818,9 +25817,11 @@ const CallRecordingProcessor = {
       })
       .where(function () {
         // The length rule (config/call-extraction-retry.js): over 10 s, or,
-        // with GATE_SHORT_CALL_RECORDING_SWEEP on, any recording of a call
-        // under 24 h old, so a short call whose in-memory timer a deploy
-        // wiped is swept too (owner 2026-11-19, "FIX").
+        // with GATE_SHORT_CALL_RECORDING_SWEEP on, a shorter recording on its
+        // first pass (NULL, pending, or a stale processing claim) while the
+        // call is under 24 h old, so a short call whose in-memory timer a
+        // deploy wiped is swept too (owner 2026-11-19, "FIX"). A retry state
+        // or a finished one keeps the 10-second floor: no new retries.
         this.whereRaw(sweepLengthSql())
           // Quarantined rows already proved they carry real content (a card
           // readback was heard) — never duration-filter them out.

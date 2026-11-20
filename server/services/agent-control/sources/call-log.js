@@ -71,9 +71,9 @@ const RETRY_WINDOW_MS = Number(EXTRACTION_RETRY_WINDOW_DAYS) * 864e5;
 // a row is claimable only with a non-empty recording — or, for every state
 // but no_transcription, a PAN-quarantined MASKED transcript (its transcript-
 // only branch) — AND real content: the processor's length rule (over 10 s;
-// with GATE_SHORT_CALL_RECORDING_SWEEP on, any recording of a call under
-// 24 h old), or PAN-quarantined (a card readback was heard). A retry state
-// without them is never reclaimed.
+// with GATE_SHORT_CALL_RECORDING_SWEEP on, also a shorter first pass of a
+// call under 24 h old, never a retry state), or PAN-quarantined (a card
+// readback was heard). A retry state without them is never reclaimed.
 function claimable(c, status, now = Date.now()) {
   const recording = !!(c.recording_url && c.recording_url !== '');
   const pan = c.pan_detected === true;
