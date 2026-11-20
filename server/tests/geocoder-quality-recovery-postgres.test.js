@@ -102,9 +102,7 @@ postgres('geocoder quality recovery on isolated PostgreSQL', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     process.env.GATE_ROUTE_REORDER = 'true';
-    // Deliberately keep route-order repair off: this suite verifies coordinate
-    // and warning reconciliation, while repair has its own PG suite.
-    process.env.GATE_ROUTE_REORDER_REPAIR = 'false';
+    process.env.GATE_ROUTE_REORDER_REPAIR = 'true';
     process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS = 'true';
     process.env.GATE_SCHEDULE_QUALITY_ALERTS = 'true';
     geocodeAddressWithStatus.mockResolvedValue({ location: PIN, permanent: false });
@@ -245,6 +243,9 @@ postgres('geocoder quality recovery on isolated PostgreSQL', () => {
   }, 30000);
 
   test('a failed refresh beyond the nightly band retains its date and later clears the real warning', async () => {
+    // Repair off here: this test breaks the ledger table on purpose, and the repair writer's own ledger insert would
+    // abort the outer transaction before the measurement savepoint can fail alone. Repair has its own PG suite.
+    process.env.GATE_ROUTE_REORDER_REPAIR = 'false';
     const lateDate = '2026-10-08';
     await insertService(RECOVERED, { scheduled_date: lateDate });
     expect(await refreshScheduleQualityAlerts({ dates: [lateDate], now: NOW }, mockConnection))
