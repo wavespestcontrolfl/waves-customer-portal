@@ -21,9 +21,13 @@
  * - a start tag with the hidden or popover attribute, a dir other than ltr, a label on an option (which a browser
  *   can show in place of its content), or a style attribute that can hide it or reorder its text (a display,
  *   visibility or content-visibility declaration whose value is none, hidden, collapse or a function such as var();
- *   a direction other than ltr; a unicode-bidi other than normal); or a style sheet with such a declaration in a
- *   rule whose selector can match an element of the page (canMatch). A CSS escape or an import, which can spell or
- *   load any style, counts as such a declaration;
+ *   a direction other than ltr; a unicode-bidi other than normal); or a style sheet (a style element with no type,
+ *   or of type text/css: isStyleSheet) with such a declaration in a rule whose selector can match an element of the
+ *   page (canMatch). A CSS escape or an import, which can spell or load any style, counts as such a declaration. Of
+ *   two attributes with one name, a browser keeps the first, and so does this;
+ * - a style that can show what a script, a style or the title holds, whose text this drops (a display other than
+ *   none, or an all: SHOWING_RE): in a style attribute of one of them, or in a sheet rule whose selector can match
+ *   one of them (canMatchTextElement: any but one whose last compound is led by the name of another element);
  * - a run of text that holds a right-to-left letter (Hebrew, Arabic and the like) or a direction control other than
  *   the left-to-right mark (RIGHT_TO_LEFT_RE). Without them, and without the dir, direction and unicode-bidi above, a
  *   browser shows each line's text in the order it is written;
@@ -33,15 +37,21 @@
  * plainPage does not lay the page out. Where a browser shows a box (a float, a position, a table's caption and its
  * head and foot rows, which a browser shows above or below its other rows), its size, colour, opacity, transform
  * and font, letter case, what a style or the browser adds around it (generated content such as a list marker), a
- * display other than none, an image's alt text (shown only when the image cannot load) and what a script does when
- * it runs are not read. A reader can rely on the text the page holds and the order in which it is written, not on
- * where or how a browser shows it: the source's own styles, images and scripts must not hide or add what its
- * reader needs.
+ * display other than none on an element plainPage keeps, an image's alt text (shown only when the image cannot
+ * load) and what a script does when it runs are not read. A reader can rely on the text the page holds and the order
+ * in which it is written, not on where or how a browser shows it: the source's own styles, images and scripts must
+ * not hide or add what its reader needs. Where this cannot judge a style, it counts it as one that can hide or show:
+ * a sheet whatever its media (print only, a screen width), and a selector with a pseudo-class or an attribute as one
+ * that can match. So a page can be refused though a browser shows all of it, but it is never read as shown when it
+ * can hide or show text in a way listed above.
  *
  * htmlText(html) is the text of a part of a page plainPage rebuilt, as a browser shows it by default: an inline tag
  * (INLINE_TAGS) joins the text on both sides, and any other tag parts it with a space. A browser can part or join
  * words elsewhere (a style that changes a tag's display, such as a span shown as a block; an image it shows as
- * nothing), so a reader that must not depend on where words part compares text with its spaces taken out.
+ * nothing), and it draws some characters this keeps as nothing (a joiner, a variation selector, a tag character: the
+ * default-ignorable code points outside INVISIBLE_RE, which shape what a browser shows, such as an emoji). So a
+ * reader that must not depend on where words part compares text with its spaces and its default-ignorable code
+ * points (\p{Default_Ignorable_Code_Point}) taken out.
  */
 
 const { decodeHTML } = require('entities');
@@ -84,9 +94,11 @@ const PLAIN_ELEMENTS = new Set([...INLINE_TAGS, 'address', 'article', 'aside', '
 // The attributes of a tag whose attributes start at `i`, and the index just past the ">" that ends it, or null when
 // the page ends first. Each attribute is a name (its first character may be "=", and a quote or a "<" in it is part
 // of it), then optionally "=" and a value. A quoted value runs to its closing quote, so a ">" inside it does not end
-// the tag; an unquoted one runs to white space or ">". A "/" between attributes reads as white space.
+// the tag; an unquoted one runs to white space or ">". A "/" between attributes reads as white space. An attribute
+// whose name an earlier one of the tag has is read past and dropped, as a browser drops it.
 function readAttributes(html, i) {
   const attributes = [];
+  const names = new Set();
   let at = i;
   for (;;) {
     at = skip(html, at, isGap);
@@ -94,7 +106,10 @@ function readAttributes(html, i) {
     if (html[at] === '>') return { attributes, end: at + 1 };
     const nameEnd = skip(html, at + 1, inAttributeName);
     const attribute = { name: html.slice(at, nameEnd).toLowerCase(), value: '' };
-    attributes.push(attribute);
+    if (!names.has(attribute.name)) {
+      names.add(attribute.name);
+      attributes.push(attribute);
+    }
     at = skip(html, nameEnd, isSpace);
     if (html[at] !== '=') continue;
     at = skip(html, at + 1, isSpace);
@@ -114,9 +129,11 @@ function readAttributes(html, i) {
 
 // A style's text read left to right, as CSS reads it: a comment becomes a space, and a string or an unquoted url()
 // (whose "/*" or quote is part of the address) is emptied, so none of them can hide a declaration from a test or add
-// one to it; the "<!--" and "-->" a style sheet may wrap itself in are out. A CSS escape ("\6e one" spells "none")
-// can spell any style, so a style that holds a backslash is not read this way: it counts as one that can hide.
-const CSS_SKIP_RE = /\/\*[\s\S]*?(?:\*\/|$)|"[^"\n\r\f]*"?|'[^'\n\r\f]*'?|(?<![-\w\u0080-\uffff])url\(\s*(?=[^\s"'])[^)]*(?:\)|$)/gi;
+// one to it; the "<!--" and "-->" a style sheet may wrap itself in are out. A "url(" is a url() only where a token
+// starts: after a name character (a NUL reads as one), a "#" or an "@" it is part of a name, a hash ("#url") or an
+// at-keyword, and a "/*" after it opens a comment. A CSS escape ("\6e one" spells "none") can spell any style, so a
+// style that holds a backslash is not read this way: it counts as one that can hide.
+const CSS_SKIP_RE = /\/\*[\s\S]*?(?:\*\/|$)|"[^"\n\r\f]*"?|'[^'\n\r\f]*'?|(?<![-\w#@\x00\u0080-\uffff])url\(\s*(?=[^\s"'])[^)]*(?:\)|$)/gi;
 const flatCss = (css) => css.replace(CSS_SKIP_RE, (skipped) => (skipped[0] === '/' ? ' ' : '""')).replace(/<!--|-->/g, ' ');
 // Whether one declaration (a run of a style's flat text between ";", "{" and "}") can hide its element or reorder its
 // text: display, visibility or content-visibility with a value of none, hidden or collapse, or with a function (var(),
@@ -124,6 +141,10 @@ const flatCss = (css) => css.replace(CSS_SKIP_RE, (skipped) => (skipped[0] === '
 // A custom property (--display) sets nothing by itself. Each run is read once, so no style can make it slow.
 const HIDING_RE = /^\s*(?:(?:display|visibility|content-visibility)\s*:[\s\S]*(?:none|hidden|collapse|\()|direction\s*:(?!\s*ltr\b)|unicode-bidi\s*:(?!\s*normal\b))/i;
 const hidingStyle = (css) => css.includes('\\') || flatCss(css).split(/[;{}]/).some((run) => HIDING_RE.test(run));
+// Whether one declaration can show what a script, a style or the title holds (a browser shows none of them by
+// default, and plainPage drops their text): a display with any value but none, or an all, which can reset display.
+const SHOWING_RE = /^\s*(?:display\s*:(?!\s*none\s*(?:!\s*important\s*)?$)|all\s*:)/i;
+const showingStyle = (css) => css.includes('\\') || flatCss(css).split(/[;{}]/).some((run) => SHOWING_RE.test(run));
 // An attribute value with its character references decoded as a browser decodes them in an attribute: as in text
 // (decodeHTML), except that a named reference without its ";" is kept as written unless it is a whole legacy name
 // (one HTML lets go without ";") before anything but "=": "&quotA", "&quot=" and "&notit;" stay, "&quot " does not.
@@ -138,6 +159,12 @@ const hides = (element, attributes) => attributes.some(({ name, value }) => name
   || (name === 'dir' && decodeAttribute(value).toLowerCase() !== 'ltr')
   || (element === 'option' && name === 'label')
   || (name === 'style' && hidingStyle(decodeAttribute(value))));
+// Whether a style element is a style sheet a browser can apply: one with no type, or with a type that is empty or
+// text/css in any case. Some browsers read only the type's first part ("text/css; charset=utf-8"), so that part, its
+// white space aside, decides; any other type ("text/plain") leaves the element inert. A sheet's media (print only, a
+// screen width) are not judged: it counts whatever they are.
+const isStyleSheet = (attributes) => attributes.every(({ name, value }) => name !== 'type'
+  || ['', 'text/css'].includes(decodeAttribute(value).split(';')[0].trim().toLowerCase()));
 // The class and id names of a start tag: ".name" for each class and "#name" for its id, in lower case (a page in
 // quirks mode matches them in any case).
 const namesOf = (attributes) => attributes.flatMap(({ name, value }) => {
@@ -150,21 +177,39 @@ const namesOf = (attributes) => attributes.flatMap(({ name, value }) => {
 // or an id no element has. Any other selector (a pseudo-class, an attribute, "*") may match any element.
 const canMatch = (selector, names) => selector.split(',').some((part) => !/^[-\w \t\n\r\f.#>+~]*$/.test(part)
   || (part.match(/[.#][-\w]+/g) || []).every((name) => names.has(name.toLowerCase())));
-// Whether a style sheet can hide an element of a page whose elements have the class and id names `names`: it holds a
-// backslash, or an import (a sheet this cannot read); or it holds a hiding declaration whose rule this cannot tell
-// (one with no rule, or one after a nested rule), or whose rule's selector can match an element. The sheet is read
+// Whether a selector can match a script, a style or the title: an at-rule's prelude (which this cannot tell), or a
+// part (between commas) whose last compound selector is not led by the name of another element, with only classes,
+// ids, pseudo-classes without arguments and attribute tests after it ("a.top:link", "input[type=text]"). Only CSS
+// white space or a combinator ends a compound: a no-break space is part of a name.
+const TYPE_LED_RE = /(?:^|[ \t\n\r\f>+~])([A-Za-z][-\w]*)(?:[.#][-\w]+|::?[-\w]+|\[[^\]]*\])*[ \t\n\r\f]*$/;
+const canMatchTextElement = (selector) => selector.includes('@') || selector.split(',').some((part) => {
+  const subject = TYPE_LED_RE.exec(part);
+  return !subject || TEXT_ELEMENTS.has(subject[1].toLowerCase());
+});
+// Whether a style sheet can hide an element of a page whose elements have the class and id names `names`, or show
+// what a script, a style or the title holds: it holds a backslash, or an import (a sheet this cannot read); or it
+// holds a hiding declaration (HIDING_RE) whose rule this cannot tell (one with no rule, or one after a nested rule)
+// or whose rule's selector can match an element (canMatch), or a showing declaration (SHOWING_RE) whose rule this
+// cannot tell or whose selector can match a script, a style or the title (canMatchTextElement). The sheet is read
 // once, run by run: a "{" opens a block, whose selector (the run before it) is judged once, and a "}" ends one.
 function sheetCanHide(css, names) {
   if (css.includes('\\')) return true;
   const flat = flatCss(css);
   if (/@import/i.test(flat)) return true;
-  // Whether the block the walk is in can match an element: true where this cannot tell.
+  // Whether the block the walk is in can match an element, and a script, a style or the title: true where this
+  // cannot tell.
   let matches = true;
+  let matchesText = true;
   let before = '';
   for (const [, mark, run] of flat.matchAll(/([;{}]?)([^;{}]*)/g)) {
-    if (mark === '{') matches = canMatch(before, names);
-    else if (mark === '}') matches = true;
-    if (matches && HIDING_RE.test(run)) return true;
+    if (mark === '{') {
+      matches = canMatch(before, names);
+      matchesText = canMatchTextElement(before);
+    } else if (mark === '}') {
+      matches = true;
+      matchesText = true;
+    }
+    if ((matches && HIDING_RE.test(run)) || (matchesText && SHOWING_RE.test(run))) return true;
     before = run;
   }
   return false;
@@ -194,8 +239,8 @@ function textElementEnd(html, i, name) {
 }
 
 // The tag at `i` ("<" or "</", then a letter): its rebuilt form and the index just past it (for a script, a style or
-// the title, past its end tag), or null. It adds a style sheet's text to page.sheets, and a start tag's class and id
-// names to page.names.
+// the title, past its end tag), or null. It adds a style sheet's text (isStyleSheet) to page.sheets, and a start
+// tag's class and id names to page.names.
 function readTag(html, i, page) {
   const endTag = html[i + 1] === '/';
   const start = i + (endTag ? 2 : 1);
@@ -207,8 +252,10 @@ function readTag(html, i, page) {
   // Every start tag's class and id names count for the style sheets: a script's, a style's and the title's too.
   if (!endTag) namesOf(read.attributes).forEach((named) => page.names.add(named));
   if (!endTag && TEXT_ELEMENTS.has(known)) {
+    // A style attribute that can show what the element holds, whose text this drops.
+    if (read.attributes.some(({ name, value }) => name === 'style' && showingStyle(decodeAttribute(value)))) return null;
     const close = textElementEnd(html, read.end, known);
-    if (close && known === 'style') page.sheets.push(html.slice(read.end, close.contentEnd));
+    if (close && known === 'style' && isStyleSheet(read.attributes)) page.sheets.push(html.slice(read.end, close.contentEnd));
     return close && { text: '', end: close.end };
   }
   // A browser ignores an end tag's attributes.
@@ -265,13 +312,14 @@ function plainPage(html, tags) {
 
 // Characters a browser draws as nothing that join or shape no glyph: the soft hyphen, the zero-width space, the
 // left-to-right mark (plainPage refuses the other direction controls), the word joiner and the invisible operators,
-// and the byte-order mark. The joiners (U+200C, U+200D) are not among them: they shape what a browser shows, such as
-// an emoji sequence.
+// and the byte-order mark. The joiners (U+200C, U+200D) and the other default-ignorable code points (a variation
+// selector, a tag character) are not among them: they shape what a browser shows, such as an emoji sequence.
 const INVISIBLE_RE = /[\u00ad\u200b\u200e\u2060-\u2064\ufeff]/g;
 
 // The text a browser shows for a part of a page plainPage rebuilt: an inline tag (INLINE_TAGS) out with nothing in
-// its place, any other tag (a cell, a row, a paragraph, a line break, an image) a space, the references decoded, the INVISIBLE_RE characters and NUL characters taken out (so
-// "Callba&shy;ck" reads "Callback"; a browser drops a NUL in text), and runs of white space made one space.
+// its place, any other tag (a cell, a row, a paragraph, a line break, an image) a space, the references decoded, the
+// INVISIBLE_RE characters and NUL characters taken out (so "Callba&shy;ck" reads "Callback"; a browser drops a NUL
+// in text), and runs of white space made one space.
 function htmlText(html) {
   return decodeHTML(String(html || '').replace(/<\/?([a-z][a-z0-9]*)>/g, (tag, name) => (INLINE_TAGS.has(name) ? '' : ' ')))
     .replace(INVISIBLE_RE, '')

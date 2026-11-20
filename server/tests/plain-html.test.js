@@ -82,6 +82,11 @@ describe('plainPage', () => {
       '<td style="display:\\6e one">x', '<td style="--state:none; display:var(--state)">x', '<td style="content-visibility: var(--v)">x',
       // An unquoted url() keeps a "/*" as part of its address, and a quoted one is a string: neither opens a comment.
       '<td style="background:url(/icons/*/dot.png); display:none">x', "<td style='background: url(\"a)b\"); display: none'>x",
+      // After a "#" (a hash: "#url"), an "@" or a NUL, "url(" starts no url(): the "/*" after it opens a comment.
+      '<td style="--x: #url(/* ) \' */); display:none">x', '<td style="--x: @url(/* ) \' */); display:none">x',
+      '<td style="--x: a\u0000url(/* ) \' */); display:none">x',
+      // Of two attributes with one name, a browser keeps the first.
+      '<td style="display:none" style="color:red">x',
       // In an attribute, a reference without its ";" before a letter, a digit or "=" stays as written: no quote opens.
       '<td style="font-family: &quotA; display: none">x', '<td style="font-family: &quot=x; display: none">x',
       // A browser can show a cell's text in another order than it is written.
@@ -97,8 +102,10 @@ describe('plainPage', () => {
       // A whole legacy reference before a space is decoded in an attribute too: these quotes hold the declaration.
       + '<td style="font-family: &quot x; display: none &quot;">G'
       // Left to right is the order a browser shows by default, and a custom property sets nothing by itself.
-      + '<td dir=LTR style="direction: ltr; unicode-bidi: normal; --display: none; --visibility: hidden">H'))
-      .toBe('<td>A</td><td>B<td>C<td>D<td>G<td>H');
+      + '<td dir=LTR style="direction: ltr; unicode-bidi: normal; --display: none; --visibility: hidden">H'
+      // A browser drops an attribute whose name an earlier one of the tag has.
+      + '<td style="color:red" STYLE="display:none" dir=ltr dir=rtl>K'))
+      .toBe('<td>A</td><td>B<td>C<td>D<td>G<td>H<td>K');
     // Each declaration is read once, and each rule's selector is judged once: a long style reads quickly.
     const started = Date.now();
     expect(plain(`<td style="${'display:'.repeat(40000)}">E`)).toBe('<td>E');
@@ -107,7 +114,7 @@ describe('plainPage', () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
-  test('a style sheet gives null when a rule in it can hide an element of the page or reorder its text', () => {
+  test('a style sheet gives null when a rule in it can hide an element of the page or reorder its text, and so does a style that can show a script, a style or the title', () => {
     const hiding = ['<style>td.c { display: none }</style><td class="a c">x', '<style>.Banner{visibility:hidden}</style><td class=BANNER>x',
       '<style>#Main { display: none }</style><td id=main>x', '<style>.banner { display: none }</style><td class="b&#97;nner">x',
       // A selector of a type name only, a list part, a pseudo-class or "*" may match any element.
@@ -124,13 +131,36 @@ describe('plainPage', () => {
       '<style>/* " */ td.c { display: none } /* " */</style><td class=c>x',
       // A script's, a style's and the title's class and id names count too.
       '<style>.marker + table { display: none }</style><script class=marker></script><table><tr><td>x</table>',
-      '<style>td { direction: rtl }</style><td>x'];
+      '<style>td { direction: rtl }</style><td>x',
+      // A style element is a sheet with no type, or with a type that is empty or text/css (its first part, in any
+      // case), whatever its media; of two types, the first counts.
+      '<style type="TEXT/CSS">td { display: none }</style><td>x', '<style type="">td { display: none }</style><td>x',
+      '<style type="text/css; charset=utf-8">td { display: none }</style><td>x',
+      '<style media=print>td { display: none }</style><td>x', '<style type=text/css type=text/plain>td { display: none }</style><td>x',
+      // A display other than none, or an all, can show what a script, a style or the title holds: a rule counts unless
+      // its selector's last compound is led by another element's name (a no-break space parts nothing), and so does a
+      // declaration with no rule, after a nested rule, or in an at-rule.
+      '<style>* { display: block }</style><td>x', '<style>head, Title { display: block }</style><td>x',
+      '<style>script { all: unset }</style><td>x', '<style>.x { display: inline }</style><script class=x>y</script><td>x',
+      '<style>.x:not(a b, c) { display: block }</style><td>x', '<style>head > :first-child { display: block }</style><td>x',
+      '<style>.x\u00a0b { display: block }</style><td>x', '<style>script { @media screen { display: block } }</style><td>x',
+      '<style>display: block</style><td>x', '<style>a { b { color: red } display: block }</style><td>x',
+      '<title style="display: block">Callback</title><td>x', '<script style="display:inline">y</script><td>x',
+      '<title style="d\\69splay: block">Callback</title><td>x'];
     for (const cell of hiding) expect(plain(`<table><tr><td>Routine</td>${cell}</table>`)).toBeNull();
     // A hiding rule whose selector names a class or an id no element has hides nothing (the state's pages hold two);
     // a sheet's "<!--" and "-->" are no part of a selector, and a string or a comment is not a declaration.
     expect(plain('<style type="text/css"><!-- .leftNav {display:none;} @media print { .banner {display:none;} -->\r\n'
       + 'td { font-size: 13px; content: "display: none"; --display: none; unicode-bidi: normal } /* td { display: none } */'
       + '</style><td class="list" id=x>A')).toBe('<td>A');
+    // A style element of another type is inert, and of two class attributes a browser keeps the first.
+    expect(plain('<style type="text/plain">td { display: none }</style><style>.b { display: none }</style><td class=a class=b>A'))
+      .toBe('<td>A');
+    // A display in a rule led by another element's name (as on the state's pages), or none on a script, a style or the
+    // title, shows nothing this drops.
+    expect(plain('<style>li a:top { display: block } a.top:link { display: block } input[type=text] { display: inline-block }'
+      + ' .x { display: none }</style><title style="color: red; display: none; content: \'a;display:block\'">T</title><td>A'))
+      .toBe('<td>A');
   });
 
   test('a run of text that holds a right-to-left letter or a direction control gives null: a browser can show it in another order', () => {
