@@ -855,15 +855,25 @@ function slotTaken(slotId) {
 // Owner rule B per truck (GATE_MULTI_TECH_CONFIRM, 2026-11-19, zone-day-funnel.js truckMayTakeDate): a far-south hold
 // never sends a second truck south on a day another truck already drives there. Read on the caller's transaction,
 // under the date lock it took first, where a hold starts to hold its day: a new hold (reserveSlot, `zone` = the zone
-// it stamps), and a lapsed hold that an extend revives or an accept graduates (`estimate`: the zone resolves as
-// reserveSlot resolved it; a lapsed hold stopped counting, so another truck may have taken the day). Slot-taken when
+// it stamps), and a lapsed hold that an extend revives or an accept graduates (a lapsed hold stopped counting, so
+// another truck may have taken the day). A lapsed hold keeps the zone stamped on it (`stamp`, the row's `zone`), so
+// that stamp decides; an unstamped hold resolves its zone from `estimate`, as reserveSlot did. Slot-taken when
 // refused. Gate off or no technician: nothing is read.
-async function refuseOtherTruckSouthDay(conn, { date, techId, slotId, zone = null, estimate = null }) {
+async function refuseOtherTruckSouthDay(conn, { date, techId, slotId, zone = null, stamp = null, estimate = null }) {
   const funnel = require('./scheduling/zone-day-funnel');
   if (techId == null || !funnel.perTruckLive()) return;
-  // A zone that cannot be resolved skips the check, as reserveSlot's own zone checks do.
-  const estimateZone = zone || (estimate ? await resolveEstimateZone(conn, estimate).catch(() => null) : null);
+  // An unstamped hold whose zone cannot be resolved skips the check, as reserveSlot's own zone checks do.
+  const estimateZone = zone
+    || (stamp ? await stampedZone(conn, stamp) : null)
+    || (estimate ? await resolveEstimateZone(conn, estimate).catch(() => null) : null);
   if (!(await funnel.truckMayTakeDate(conn, { estimateZone, date, technicianId: techId }))) throw slotTaken(slotId);
+}
+
+// A hold's zone stamp (zoneSlugOf of the zone reserveSlot resolved) back to its service_zones row, whose cities the
+// stop read matches unstamped rows by. A stamp no row carries any more still names its zone by its slug.
+async function stampedZone(conn, stamp) {
+  const zones = await conn('service_zones').select('id', 'cities', 'zone_name');
+  return zones.find((z) => zoneSlugOf(z) === stamp) || { zone_name: stamp, cities: [] };
 }
 
 // A fresh gate read right before a write. A make-room hold whose gate went off while the locks were waited on is the
@@ -2246,7 +2256,7 @@ async function commitReservation({
     if (row._lapsed) {
       const heldDate = dateOnly(row.scheduled_date);
       await refuseOtherTruckSouthDay(client, {
-        estimate, date: heldDate, techId: row.technician_id,
+        stamp: row.zone, estimate, date: heldDate, techId: row.technician_id,
         slotId: `${heldDate}_${String(row.window_start).slice(0, 5).replace(':', '-')}_${row.technician_id}`,
       });
     }
@@ -3024,7 +3034,7 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
       }
       // Owner rule B per truck: while lapsed, another truck may have taken this hold's far-south day.
       await refuseOtherTruckSouthDay(trx, {
-        estimate, date: scheduledDate, techId: row.technician_id,
+        stamp: row.zone, estimate, date: scheduledDate, techId: row.technician_id,
         slotId: `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`,
       });
     }

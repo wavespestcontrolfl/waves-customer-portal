@@ -501,10 +501,12 @@ describe('Codex #4737 r5 P1: the booking is bound to the validated location', ()
     const zone = { id: 'zone-1', zone_name: 'Bradenton', cities: ['Bradenton'] };
     await callbackVisit.slotGuard(trx, { zone });
     expect(mockTruckMayTakeDate).toHaveBeenCalledWith(trx, { estimateZone: zone, date: FUTURE_DATE, technicianId: 'tech-1' });
-    // The commit's rebuild reads the funnel zone from the address's own city first, as that booking stamps it.
+    // The commit's rebuild reads the funnel zone from the address's own city first, then its text, and the booking
+    // resolves its zone from the same address the same way (callbackVisit.zoneAddress), so the two agree.
     expect(mockBuildAvailability).toHaveBeenCalledWith(expect.objectContaining({
       rangeFrom: FUTURE_DATE, rangeTo: FUTURE_DATE, zoneFunnelAddress: '123 Palm Ave, Bradenton, FL, 34209', zoneFunnelCity: 'Bradenton',
     }));
+    expect(callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, Bradenton, FL, 34209', city: 'Bradenton' });
   });
 
   test('bookAssessmentVisit hands an estimate page\'s guard to the booking transaction unchanged', async () => {
@@ -518,8 +520,10 @@ describe('Codex #4737 r5 P1: the booking is bound to the validated location', ()
       bookingLocation: { lat: 27.4, lng: -82.5 }, source: 'estimate_assessment_link', alertLabel: 'x', estimateGuard,
     });
     expect(createSelfBooking.mock.calls[0][0].callbackVisit.estimateGuard).toBe(estimateGuard);
-    // The estimate page books its signed technician with no far-south re-check (offer-time funnel only).
+    // The estimate page books its signed technician with no far-south re-check (offer-time funnel only), and its
+    // visit's zone stays the customer's city.
     expect(createSelfBooking.mock.calls[0][0].callbackVisit).not.toHaveProperty('slotGuard');
+    expect(createSelfBooking.mock.calls[0][0].callbackVisit).not.toHaveProperty('zoneAddress');
   });
 
   test('booking.js checks expectedLocation under the customer-comms fence, before any insert', () => {

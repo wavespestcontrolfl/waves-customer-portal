@@ -31,6 +31,7 @@ const {
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
 const { resolveZoneRouteDaySlug } = require('../services/scheduling/zone-route-days');
+const { resolveEstimateZone } = require('../services/slot-zone');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes, effectiveEndMinutes } = require('../services/scheduling/travel-gap');
 const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
 const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
@@ -2666,7 +2667,11 @@ async function createSelfBooking(payload = {}) {
     // callbackVisit.slotGuard(trx, { zone }) (the lead assessment link): the
     // caller's own re-check of this slot on the booking transaction, under the
     // date lock, given the zone this booking stamps on its visit; false
-    // refuses it as a taken slot.
+    // refuses it as a taken slot. callbackVisit.zoneAddress ({ address, city },
+    // the lead assessment link): the booking address the caller's list resolved
+    // its zone from; this booking's zone resolves the same way
+    // (resolveEstimateZone: the city, then the address text) in place of the
+    // customer's city, so the list, the slot guard and the stamp agree.
     const paidInternalVisit = callbackVisit && callbackVisit.isCallback === false
       && Number.isFinite(Number(callbackVisit.billing?.estimatedPrice)) && Number(callbackVisit.billing.estimatedPrice) > 0
       ? { estimatedPrice: Math.round(Number(callbackVisit.billing.estimatedPrice) * 100) / 100 }
@@ -3458,11 +3463,15 @@ async function createSelfBooking(payload = {}) {
 
     const confCode = generateConfirmationCode();
 
-    // Resolve zone from city (best-effort, for reporting)
-    const zones = await db('service_zones').select('*');
-    const zone = zones.find(z => (z.cities || []).some(c =>
-      c.toLowerCase() === (customer.city || '').toLowerCase()
-    )) || null;
+    // Resolve zone from city (best-effort, for reporting). A caller that names
+    // the booking address its list resolved a zone from (callbackVisit.zoneAddress)
+    // gets that zone: a city no zone lists ('North Venice') then resolves from
+    // the address text, as its list did.
+    const zone = callbackVisit?.zoneAddress
+      ? await resolveEstimateZone(db, callbackVisit.zoneAddress)
+      : (await db('service_zones').select('*')).find(z => (z.cities || []).some(c =>
+        c.toLowerCase() === (customer.city || '').toLowerCase()
+      )) || null;
 
     // ALLOWLIST, never echo: the persisted/displayed label derives from the
     // slot_sig-VERIFIED serviceKey first, then from allowlist-matching the
@@ -4399,8 +4408,8 @@ async function createSelfBooking(payload = {}) {
 
       // callbackVisit.slotGuard (the lead assessment link, owner rule B per truck): under the date lock taken first,
       // after the idempotent replay, the caller re-checks its slot on THIS transaction with the zone this booking
-      // stamps on its visit (`zone`, the customer's city). Two commits that rebuilt the same new far-south day before
-      // either inserted would otherwise send a second truck south (zone-day-funnel.js truckMayTakeDate).
+      // stamps on its visit (`zone`, from callbackVisit.zoneAddress). Two commits that rebuilt the same new far-south
+      // day before either inserted would otherwise send a second truck south (zone-day-funnel.js truckMayTakeDate).
       if (typeof callbackVisit?.slotGuard === 'function' && !(await callbackVisit.slotGuard(trx, { zone }))) {
         throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
           statusCode: 409,

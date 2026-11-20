@@ -411,6 +411,7 @@ describe('slot reservation helpers', () => {
     const funnel = require('../services/scheduling/zone-day-funnel');
     const { refuseOtherTruckSouthDay } = slotReservation._internals;
     const VENICE = { id: 'zone-ven', zone_name: 'Venice / North Port', cities: ['Venice'] };
+    const SARASOTA = { id: 'zone-sar', zone_name: 'Sarasota / Lakewood Ranch', cities: ['Sarasota'] };
     const ESTIMATE = { id: 'estimate-456', address: '1 Test Way, Venice, FL 34285' };
     const ARGS = { estimate: ESTIMATE, date: '2027-05-20', techId: 'tech-1', slotId: '2027-05-20_09-00_tech-1' };
     let spies = [];
@@ -442,6 +443,22 @@ describe('slot reservation helpers', () => {
       expect(mayTake).not.toHaveBeenCalled();
     });
 
+    // A lapsed hold keeps its zone stamp when it revives or graduates, so the stamp decides, not the estimate's address
+    // as it reads now (edited to Sarasota while the Venice hold lapsed).
+    test.each([
+      ['venice', [SARASOTA, VENICE], VENICE],
+      ['sarasota', [SARASOTA, VENICE], SARASOTA],
+      ['port charlotte', [SARASOTA, VENICE], { zone_name: 'port charlotte', cities: [] }],
+    ])('a hold stamped %s: the stamp decides the zone, never the estimate\'s current address', async (stamp, zones, expected) => {
+      const mayTake = jest.fn().mockResolvedValue(false);
+      spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
+      const trx = jest.fn(() => ({ select: jest.fn().mockResolvedValue(zones) }));
+      const args = { ...ARGS, stamp, estimate: { ...ESTIMATE, address: '1 Test Way, Sarasota, FL 34231' } };
+      await expect(refuseOtherTruckSouthDay(trx, args)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      expect(mayTake).toHaveBeenCalledWith(trx, { estimateZone: expected, date: '2027-05-20', technicianId: 'tech-1' });
+      expect(trx.mock.calls).toEqual([['service_zones']]);
+    });
+
     test('a zone that cannot be resolved skips the rule, as the hold\'s own zone checks do', async () => {
       const mayTake = jest.fn().mockResolvedValue(true);
       spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
@@ -451,11 +468,11 @@ describe('slot reservation helpers', () => {
     });
 
     // Placement (the lapsed paths are proven against Postgres in reservation-hold-grace-postgres.test.js): only a
-    // lapsed hold, after the date lock and the rival-hold check, before the technician check.
+    // lapsed hold, after the date lock and the rival-hold check, before the technician check, with the hold's stamp.
     test.each([
       ['commitReservation', 'if (row._lapsed) {', 'await refuseOtherTruckSouthDay(client, {'],
       ['extendReservation', 'if (alreadyLapsed) {', 'await refuseOtherTruckSouthDay(trx, {'],
-    ])('%s runs it for a lapsed hold, under its date lock, before the technician check', (fn, lapsedBranch, call) => {
+    ])('%s runs it for a lapsed hold with its zone stamp, under its date lock, before the technician check', (fn, lapsedBranch, call) => {
       const src = require('fs').readFileSync(require('path').join(__dirname, '../services/slot-reservation.js'), 'utf8');
       const body = src.slice(src.indexOf(`async function ${fn}(`));
       const dateLock = body.indexOf('await acquireOccupancyLock(');
@@ -466,6 +483,7 @@ describe('slot reservation helpers', () => {
       expect(branch).toBeGreaterThan(dateLock);
       expect(at).toBeGreaterThan(branch);
       expect(at).toBeLessThan(techCheck);
+      expect(body.slice(at, body.indexOf('});', at))).toContain('stamp: row.zone,');
     });
   });
 

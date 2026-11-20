@@ -826,6 +826,25 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       await expect(createSelfBooking(assessment(slotGuard))).resolves.toMatchObject({ ok: true, body: { replayed: true } });
       expect(slotGuard).not.toHaveBeenCalled();
     });
+
+    // callbackVisit.zoneAddress (the lead link): the zone resolves from the booking address as the link's list resolved
+    // it, its city first, then its text, never the customer's city. A city no zone lists ('North Venice') takes the
+    // zone its text names, so the guard checks, and the visit is stamped with, the zone the list offered under.
+    test.each([
+      ['a city no zone lists: the address text decides', { address: '9 Palm Way, North Venice, FL, 34275', city: 'North Venice' }, 'venice'],
+      ['a listed city decides over the text', { address: '100 Venice Ave, Osprey, FL, 34229', city: 'Osprey' }, 'sarasota'],
+    ])('zoneAddress, %s', async (_label, zoneAddress, stamped) => {
+      const VENICE_ZONE = { id: 'zone-2', zone_name: 'Venice / North Port', cities: ['Venice', 'North Port'] };
+      const tables = db.getMockImplementation();
+      db.mockImplementation((table) => (table === 'service_zones' ? { select: () => Promise.resolve([CITY_ZONE, VENICE_ZONE]) } : tables(table)));
+      const slotGuard = jest.fn().mockResolvedValue(true);
+      const payload = assessment(slotGuard);
+      payload.callbackVisit.zoneAddress = zoneAddress;
+      await expect(createSelfBooking(payload)).rejects.toThrow(SENTINEL);
+      const zone = stamped === 'venice' ? VENICE_ZONE : CITY_ZONE;
+      expect(slotGuard.mock.calls[0][1]).toEqual({ zone });
+      expect(capturedScheduledInsert).toMatchObject({ zone: stamped });
+    });
   });
 
   test("someone ELSE's estimate UUID books UNLINKED (no source_estimate_id stamp) with a warn", async () => {

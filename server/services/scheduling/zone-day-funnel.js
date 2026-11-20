@@ -65,14 +65,16 @@
  * technician). Two bookings can still pick the same new day for two trucks
  * before either is written, so each writer re-checks the truck under its date
  * lock (truckMayTakeDate) with the zone it stamps on its row: the assessment
- * link's booking transaction (createSelfBooking callbackVisit.slotGuard, the
- * zone of the customer's city), and the estimate page's holds where a hold
- * starts to hold its day (a new hold, and a lapsed hold that an extend revives
- * or an accept graduates: a lapsed hold stops counting, so another truck may
- * have taken the day). The assessment link's offer reads the zone from the
- * address's own city first (resolveEstimateZone's city), as that booking
- * stamps it, so the offer never shows a time the check refuses. Off, every
- * zone day is the fleet's, as with one truck.
+ * link's booking transaction (createSelfBooking callbackVisit.slotGuard), and
+ * the estimate page's holds where a hold starts to hold its day (a new hold,
+ * and a lapsed hold that an extend revives or an accept graduates: a lapsed
+ * hold stops counting, so another truck may have taken the day; it keeps its
+ * own zone stamp, which decides). The assessment link's list and its booking
+ * resolve the zone from the one booking address the same way
+ * (resolveEstimateZone: its city, then its text; createSelfBooking
+ * callbackVisit.zoneAddress), so the offer never shows a time the check
+ * refuses, and the visit's stamp makes it a zone stop for the next booking.
+ * Off, every zone day is the fleet's, as with one truck.
  *
  * Fail-open like blackout-dates: any lookup failure disables the funnel for
  * that request (full pool offered) — a scattered offer beats no offer.

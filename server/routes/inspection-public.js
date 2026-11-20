@@ -779,9 +779,12 @@ async function serviceAreaFailure(location, address = null) {
   return null;
 }
 
-// The address as the text the south-zone day funnel resolves its zone from (null when there is none).
-function zoneFunnelText(address) {
-  return [address?.line1, address?.line2, address?.city, address?.state, address?.zip].filter(Boolean).join(', ') || null;
+// The address as the south-zone day funnel resolves its zone from: its text and its city (resolveEstimateZone: the
+// city first, then the text), or null when there is no text. One shape for the list (zoneFunnelAddress /
+// zoneFunnelCity) and the booking (callbackVisit.zoneAddress), so the two resolve the same zone.
+function zoneFunnelInputs(address) {
+  const text = [address?.line1, address?.line2, address?.city, address?.state, address?.zip].filter(Boolean).join(', ');
+  return text ? { address: text, city: address?.city || null } : null;
 }
 
 // A customer row's address in the {line1, line2, city, state, zip} shape the booking address uses.
@@ -795,6 +798,7 @@ const customerAddressFields = (cust) => ({
 async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null }) {
   const booking = require('./booking');
   const { buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
+  const zoneInputs = zoneFunnelInputs(address);
   return buildBookingAvailability({
     lat: coords.lat,
     lng: coords.lng,
@@ -830,7 +834,7 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     // same gate and grace value.
     bookArrivalGrace: true,
     ...(timeOfDay ? { timeOfDay } : {}),
-    ...(zoneFunnelText(address) ? { zoneFunnelAddress: zoneFunnelText(address), zoneFunnelCity: address?.city || null } : {}),
+    ...(zoneInputs ? { zoneFunnelAddress: zoneInputs.address, zoneFunnelCity: zoneInputs.city } : {}),
   });
 }
 
@@ -2298,6 +2302,7 @@ function parseCommitBody(body) {
 async function bookAssessmentVisit({
   booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe,
   source = 'inspection_link', alertLabel = '🔁 Free consultation self-booked:', estimateGuard = null, slotGuard = null,
+  zoneAddress = null,
 }) {
   const { createSelfBooking } = booking._internals;
   return createSelfBooking({
@@ -2335,6 +2340,9 @@ async function bookAssessmentVisit({
       ...(estimateGuard ? { estimateGuard } : {}),
       // The lead link's far-south truck re-check under the booking's date lock (owner rule B per truck).
       ...(slotGuard ? { slotGuard } : {}),
+      // The lead link's booking address, as its list resolved the zone (zoneFunnelInputs): the visit's zone, and so
+      // the slot guard's, resolves the same way.
+      ...(zoneAddress ? { zoneAddress } : {}),
     },
   });
 }
@@ -2685,8 +2693,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // always uses the global `db` connection and can do real network I/O
     // of its own (a gated weather-outlook call), neither of which may run
     // while that lock is held.
+    const bookingAddress = locationMoved ? customerAddressFields(custRow) : resolved.address;
     const bookingSlot = locationMoved
-      ? await revalidateSlotAt(bookingLocation, { date, time, config, catalog, leadId: lead.id, address: customerAddressFields(custRow) })
+      ? await revalidateSlotAt(bookingLocation, { date, time, config, catalog, leadId: lead.id, address: bookingAddress })
       : slot;
     if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: customerAddressFields(custRow), range, config, catalog, leadId: lead.id });
 
@@ -2718,12 +2727,13 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     let fencedUniverse = null;
     // Owner rule B per truck, under the booking's date lock: two commits can rebuild the same new far-south day
     // before either inserts, each with a different truck; the second finds the first's stop and gets SLOT_TAKEN.
-    // createSelfBooking hands over the zone it stamps on the visit (the customer's city), so the check and the row
-    // agree.
+    // createSelfBooking hands over the zone it stamps on the visit, resolved from the booking address as this link's
+    // list resolved it (zoneAddress: its city, then its text), so the list, the check and the row agree.
     const slotGuard = (conn, { zone = null } = {}) => truckMayTakeDate(conn, {
       estimateZone: zone, date, technicianId: bookingSlot.technician_id ?? null,
     });
-    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, slotGuard, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), fenceIds: async (conn) => { fencedUniverse = await leadFenceIds(conn, lead.id, verified, custRow.id); return fencedUniverse; }, revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id, fencedUniverse) } });
+    const zoneAddress = zoneFunnelInputs(bookingAddress);
+    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, slotGuard, zoneAddress, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), fenceIds: async (conn) => { fencedUniverse = await leadFenceIds(conn, lead.id, verified, custRow.id); return fencedUniverse; }, revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id, fencedUniverse) } });
 
     if (!result.ok) {
       return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, range, config, catalog, verified });
