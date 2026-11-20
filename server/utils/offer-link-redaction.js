@@ -413,14 +413,23 @@ function unitsIn(view, from, to) {
 }
 
 // Each found token split over several units of a view is marked. A token whole inside one unit is left to that unit's
-// own reading, unless only the joined text decoded as a whole shows it there.
+// own reading, unless only the joined text decoded as a whole shows it there. The found tokens a unit's own readings
+// hold are read once per unit, in one pass over its runs of hex (foundAt): one unit may hold thousands of links.
 function splitMarks(views, linked) {
   const marks = new Map();
+  const held = new Map();
+  const holds = (u, token) => {
+    if (!held.has(u)) {
+      const tokens = new Set();
+      for (const flat of u.stages) for (const at of foundAt(flat, linked)) tokens.add(flat.slice(at, at + 64));
+      held.set(u, tokens);
+    }
+    return held.get(u).has(token);
+  };
   for (const view of views) {
     for (const at of foundAt(view.text, linked)) {
       const parts = unitsIn(view, at, at + 64);
-      const token = view.text.slice(at, at + 64);
-      const ownReading = parts.length === 1 && (!view.back || parts[0].u.stages.some((flat) => flat.includes(token)));
+      const ownReading = parts.length === 1 && (!view.back || holds(parts[0].u, view.text.slice(at, at + 64)));
       if (parts.length && !ownReading) markParts(marks, parts);
     }
   }

@@ -290,10 +290,13 @@ describe('CareersOfferPage — open state', () => {
   // A server from before the version answers a save with the choice only. The
   // page must not lose its version (a signature without one skips the check),
   // so it reads the offer and signs with the version that read carries.
-  it('reads the offer when a text choice is saved without a version, and signs with the version of that read', async () => {
+  it.each([
+    ['a version', { textConsent: true }],
+    ['the choice', { version: '2026-12-11T15:24:00.000Z' }],
+  ])('reads the offer when a text choice save answers without %s, and signs with the version of that read', async (label, saved) => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
-      .mockResolvedValueOnce(jsonResponse({ textConsent: true })) // saved, no version
+      .mockResolvedValueOnce(jsonResponse(saved)) // saved, but the answer cannot be applied
       .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true, version: '2026-12-11T15:25:00.000Z' })))
       .mockResolvedValueOnce(jsonResponse({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' }));
     globalThis.fetch = fetchMock;
@@ -328,6 +331,33 @@ describe('CareersOfferPage — open state', () => {
     renderPage();
     expect(await screen.findByText(/load that offer link/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Accept and sign' })).toBeNull();
+  });
+
+  // Only an explicit open state with its version shows the signing controls.
+  it.each([
+    ['an empty answer', {}],
+    ['an unknown state', { ...openPayload(), state: 'pending' }],
+  ])('shows the load error, not the offer, when the offer read is %s', async (label, body) => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(body));
+    renderPage();
+    expect(await screen.findByText(/load that offer link/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Accept and sign' })).toBeNull();
+  });
+
+  // A 200 that does not name the answer cannot be read: the page reads the
+  // offer, as for a lost reply, and never claims the signature as its own.
+  it('reads the offer when the signature answer names no state, and shows what the read says', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({}))
+      .mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedName: 'Jordan Rivera', signedAt: '2026-12-12T13:15:00.000Z' })));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    expect(await screen.findByText(/^This offer was signed by Jordan Rivera on Sat, Dec 12, 2026\./)).toBeInTheDocument();
+    expect(screen.queryByText(/You signed this offer/)).toBeNull();
+    expect(fetchMock.mock.calls[2][1]).toBeUndefined(); // a read, not a write
   });
 
   // An applicant who unticks the box must not sign believing texts are off

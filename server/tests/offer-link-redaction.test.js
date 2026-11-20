@@ -457,6 +457,17 @@ describe('a large text costs work in proportion to its length', () => {
     expect(stored.split(portalUrl('/careers/offer/[link hidden]')).length - 1).toBe(6000);
   }, 120000);
 
+  test('16,000 distinct links in one unit with an escape (so the text is also decoded as a whole) are all hidden', () => {
+    // About 1.3 s of CPU here. On the round 30 code it took about 8.7 s, growing with the square of the count (each
+    // token was looked up in a scan of its whole unit).
+    const tokens = Array.from({ length: 16000 }, (_, i) => createHash('sha256').update(`decoded unit ${i}`).digest('hex'));
+    const body = `${tokens.map((t) => portalUrl(`/careers/offer/${t}`)).join(',')},%41`;
+    let stored;
+    expect(cpuMs(() => { stored = redactOfferLinks(body); })).toBeLessThan(4000);
+    expect(stored).not.toMatch(/[0-9a-f]{64}/);
+    expect(stored.split(portalUrl('/careers/offer/[link hidden]')).length - 1).toBe(16000);
+  }, 120000);
+
   test('8,000 distinct links run together in one unit are all hidden and pinned in order', () => {
     const tokens = Array.from({ length: 8000 }, (_, i) => createHash('sha256').update(`one unit ${i}`).digest('hex'));
     // Not the sent spelling, so the unit is hidden whole: one standard hidden link per token, in source order.

@@ -393,9 +393,9 @@ function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, 
       await confirm();
       return;
     }
-    if (res.status >= 500 || (res.ok && !hasVersion(res.body))) {
+    if (res.status >= 500 || (res.ok && !(hasVersion(res.body) && typeof res.body.textConsent === 'boolean'))) {
       // A gateway error can arrive after the write committed, and a save whose
-      // reply has no version leaves the page without one: ask the server.
+      // reply lacks the choice or the version cannot be applied: ask the server.
       lostSave.current = true;
       await confirm();
       return;
@@ -499,7 +499,7 @@ function useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUn
     setError('');
     try {
       const res = await postJson(token, suffix, payload);
-      if (res.status >= 500) throw new Error('unknown outcome'); // may have committed: handled below
+      checkDefinite(res, suffix); // a reply that may have committed throws: handled below
       if (lost && !res.ok && res.status !== 404 && res.status !== 409) {
         // Refused before the offer was checked (a 429, a 400): the lost send
         // may still land. Keep it the only action, and read in case it has.
@@ -782,6 +782,20 @@ const ANSWERED_STATES = ['signed', 'declined', 'date_requested'];
 // version is never lost: the read counts as failed, and the save is checked
 // with a read. Signing stays locked until a read carries a version.
 const hasVersion = (body) => typeof body?.version === 'string' && body.version.length > 0;
+// The states the offer read answers. A read with any other state, or an open
+// one without a version, is not shown (a failed read): only an explicit open
+// state with its version shows the signing controls.
+const OFFER_STATES = ['open', 'signed', 'declined', 'date_requested', 'expired', 'withdrawn', 'superseded'];
+const usableOffer = (body) => OFFER_STATES.includes(body?.state) && (body.state !== 'open' || hasVersion(body));
+// The answer each action's success names. A 200 that names any other is a
+// reply that cannot be read: the page reads the offer, as for a lost reply.
+const ANSWER_STATE = { '/accept': 'signed', '/date-request': 'date_requested', '/decline': 'declined' };
+// Throws for a reply that may have committed without saying what it did: a
+// gateway error, or a 200 that does not name the action's answer.
+function checkDefinite(res, suffix) {
+  if (res.status >= 500) throw new Error('unknown outcome');
+  if (res.ok && res.body?.state !== ANSWER_STATE[suffix]) throw new Error('unreadable answer');
+}
 
 async function readOffer(token) {
   const res = token ? await fetch(offerUrl(token)) : { status: 404 };
@@ -792,7 +806,7 @@ async function readOffer(token) {
   }
   if (!res.ok) throw new Error('temporary');
   const body = await res.json();
-  if (body?.state === 'open' && !hasVersion(body)) throw new Error('temporary');
+  if (!usableOffer(body)) throw new Error('temporary');
   return body;
 }
 
@@ -884,7 +898,7 @@ function OfferPage({ token }) {
 
   if (loading) return <LoadingState />;
   if (error === 'notfound') return <NotValidState />;
-  if (error === 'temporary' || !data) {
+  if (error === 'temporary' || !usableOffer(data)) {
     return <Column><PublicLoadError resource="offer link" onRetry={() => setLoadAttempt((a) => a + 1)} /></Column>;
   }
   if (CLOSED_STATES.includes(data.state)) return <ClosedState data={data} />;

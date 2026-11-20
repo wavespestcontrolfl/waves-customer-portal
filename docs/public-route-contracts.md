@@ -8701,7 +8701,10 @@ and a change since then (another tab's text choice) answers the same 409 `{state
 a date request or a decline never fixes a text choice the applicant did not see. A body without `version` is the
 contract before it and is answered as before, with no version check; the page always sends one. The page never
 applies an open read or a text-choice save without a `version` (a server from before it): such a read counts as failed,
-and such a save is checked with a read, so signing stays locked until a read carries a version. Each acts only from state `open`; any
+and such a save is checked with a read, so signing stays locked until a read carries a version. It shows the signing
+controls only for a read whose state is explicitly `open`; a read with no known state also counts as failed, and an
+action's 200 that does not name its answer (`signed`, `date_requested`, `declined`) is treated as a lost reply: the
+page reads the offer. Each acts only from state `open`; any
 other state answers 409 with the current state body (an identical replay of a signature, the same name in any letter
 case, answers 200 with the stored signature and a replay mark, `{state:'signed', signedAt, signedName, replay: true}`:
 it signs nothing, so the page names the signer and never says "You signed"). The page tells an answer in the first
