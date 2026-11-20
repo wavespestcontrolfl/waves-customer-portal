@@ -1466,6 +1466,26 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     expect(await screen.findByRole('heading', { name: /Casey Morgan — / })).toBeInTheDocument();
   });
 
+  // A date request leaves the stage at Offer. A bell link for the applicant already on screen re-reads the offer card,
+  // so it shows the requested day; the id and the stage alone would not trigger a read.
+  it('a bell link to the applicant already open re-reads the offer card', async () => {
+    const out = offerRecord({ status: 'sent', timeline: [] });
+    let current = out;
+    setupFetch({}, { offer: () => res(200, offerPayload({ current })), detail: detailFixture({ status: 'offer' }) });
+    function Bell() {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => navigate('/?application=app-1')}>bell</button>;
+    }
+    render(<MemoryRouter><Bell /><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    await screen.findByRole('heading', { name: /Jordan Rivera — / });
+    expect(await screen.findByTestId('offer-card')).toBeInTheDocument();
+    expect(screen.queryByText(/Asked to start/)).toBeNull();
+    current = { ...out, status: 'date_requested', requestedStartDate: '2027-01-18', dateRequestNote: 'Need two more weeks' };
+    fireEvent.click(screen.getByText('bell'));
+    expect(await within(screen.getByTestId('offer-card')).findByText(/Asked to start Mon, Jan 18, 2027/)).toBeInTheDocument();
+  });
+
   // A Try again on one applicant can finish after the owner opened another applicant's form. When its read finds the
   // first draft gone, it closes only its own form: the other form and its typed edits stay.
   it("a Try again that finds the draft gone after the owner opened another applicant's form leaves that form open", async () => {

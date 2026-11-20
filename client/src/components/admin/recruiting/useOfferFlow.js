@@ -99,6 +99,10 @@ export default function useOfferFlow(applicationId, applicationStatus) {
     // form (for another applicant, or again for this one) leaves that form and its edits alone.
     closeForm: (key) => setForm((open) => (open && open.key === key ? null : open)),
     reload: () => (applicationId ? reload(applicationId) : null),
+    // An explicit open of an application (a list click, a bell link) re-reads its offer even when the id and the stage
+    // stay the same: a date request or an answer changes the offer, not the stage. Stable. For an id that is not the
+    // open one it does nothing (the effect above reads a newly opened application itself).
+    reloadFor: reload,
     retry,
   };
 }

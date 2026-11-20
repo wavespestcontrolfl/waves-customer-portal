@@ -1104,6 +1104,7 @@ export default function RecruitingPage() {
   }, []);
 
   const offerFlow = useOfferFlow(detail?.id, detail?.status);
+  const reloadOfferFor = offerFlow.reloadFor;
   // The offer form open now, if any: the draft it opened on, the offers out the owner saw first, and its key.
   const { draft: formDraft, seenOut, key: formKey } = offerFlow.form || {};
   const stageWorkflow = useStageChangeWorkflow(detail, tab, load, applyStageAnswer, Boolean(detailRefreshError), offerFlow.reload);
@@ -1131,7 +1132,12 @@ export default function RecruitingPage() {
       setReplyMedia(data.reply_media || {});
       setSamePhone(data.same_phone || []);
       setDetailRefreshError(null);
-      if (!refresh) stageWorkflow.resetForNewApplicant();
+      if (!refresh) {
+        stageWorkflow.resetForNewApplicant();
+        // An explicit open (a list click, a bell link) re-reads the offer card too: a date request or an answer changes
+        // the offer without changing the stage. For another applicant this does nothing; its offer is read on open.
+        reloadOfferFor(id);
+      }
     } catch (err) {
       if (seq !== detailSeq.current) return;
       // A failed in-place re-read stays on the detail (the list reload clears the page error).
@@ -1141,7 +1147,7 @@ export default function RecruitingPage() {
         setError(err.message);
       }
     }
-  }, [stageWorkflow]);
+  }, [stageWorkflow, reloadOfferFor]);
 
   const closeDetail = useCallback(() => {
     detailSeq.current += 1; // invalidate any in-flight open

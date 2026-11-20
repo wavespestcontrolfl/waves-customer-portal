@@ -167,6 +167,20 @@ describe("OfferDialog", () => {
     expect(sendOffer).toHaveBeenCalledWith("app-1", "offer-1", "hash-1", "out-1");
   });
 
+  // The read after a send is newer than its answer: another session may withdraw the offer in between. The result
+  // follows that read, and keeps the send's own delivery outcomes.
+  it("a send result follows the read after it: an offer withdrawn since reads as no longer open, with no Revise advice", async () => {
+    sendOffer.mockResolvedValueOnce({ offer: draftRow({ status: "sent" }), comms: { sms: { outcome: "failed" }, email: { outcome: "failed" } } });
+    const after = { ...panel(draftRow()), current: draftRow({ status: "withdrawn" }) };
+    render(<Harness initial={panel(draftRow())} reads={[]} onSent={async () => after} />);
+    fireEvent.click(screen.getByRole("button", { name: "Send offer" }));
+    const ask = await screen.findByRole("dialog", { name: "Send offer" });
+    fireEvent.click(within(ask).getByRole("button", { name: "Send offer" }));
+    expect(await screen.findByText("This offer is no longer open.")).toBeInTheDocument();
+    expect(screen.queryByText("The offer is open.")).toBeNull();
+    expect(screen.queryByText(/use Revise/)).toBeNull();
+  });
+
   // A send refused for a reason the form does not show (the Terms lost their issued status, say): nothing was sent. The
   // question closes, the form re-reads the offer and the application, and Send follows that read; while the read fails,
   // Send stays off and Try again reads.

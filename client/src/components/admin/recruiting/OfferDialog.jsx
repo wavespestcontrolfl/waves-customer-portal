@@ -172,9 +172,19 @@ function openDraft(data) {
   return [data.draft, data.current].find((o) => o && o.status === "draft") || null;
 }
 
-// Every offer the read holds (the current one, a revision, the history), by id.
+// Every offer the read holds: the current one, a revision, the history.
+function offersOf(data) {
+  return [data.current, data.draft, ...(data.history || [])].filter(Boolean);
+}
+
+// Every offer the read holds, by id.
 function offerIdsOf(data) {
-  return new Set([data.current, data.draft, ...(data.history || [])].filter(Boolean).map((o) => o.id));
+  return new Set(offersOf(data).map((o) => o.id));
+}
+
+// The offer with this id in a read; null with no read, or for an offer the read does not hold.
+function offerIn(data, id) {
+  return (data && offersOf(data).find((o) => o.id === id)) || null;
 }
 
 function initialDraftId(draft, data) {
@@ -573,7 +583,11 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, on
       // The answer's offer row is read after delivery: it can already be withdrawn or replaced. An answer without this
       // offer and the channels never gets here (sendOffer throws it as a lost answer, and the read decides).
       setResult({ comms: out.comms, offerStatus: out.offer.status });
-      await onSent();
+      // The read after the send is newer than its answer (another session may withdraw or replace the offer in
+      // between), so the result follows that read's status for this offer; the delivery outcomes stay the send's own.
+      // A read that still shows the offer as a draft is not newer: the send left draft before it answered.
+      const now = offerIn(await onSent(), out.offer.id);
+      if (now && now.status !== "draft") setResult({ comms: out.comms, offerStatus: now.status });
       setConfirming(false);
     } catch (err) {
       await writeFailed(err, "send");
