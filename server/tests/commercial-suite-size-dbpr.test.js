@@ -98,6 +98,13 @@ describe('eachDbprCsvRow', () => {
     expect(rows).toEqual(parseDbprCsv(text));
   }, 30000);
 
+  test('an async onRow is awaited before the reader resolves, and its rejection rejects the reader', async () => {
+    const seen = [];
+    await eachDbprCsvRow(big, async (row) => { await new Promise((resolve) => { setImmediate(resolve); }); seen.push(row); });
+    expect(seen).toHaveLength(900);
+    await expect(eachDbprCsvRow(big, async () => { throw new Error('store down'); })).rejects.toThrow('store down');
+  }, 30000);
+
   test('an empty file has no header and no rows; an unclosed quote rejects', async () => {
     const rows = [];
     await expect(eachDbprCsvRow('', (row) => rows.push(row))).resolves.toEqual([]);
