@@ -12,10 +12,10 @@
  * history removed, and the model answers with the end date and the email's own words for it.
  * An answer is kept only when those words are whole words of the email, they name that day
  * as the last day their sentence names (so not the first day of a range), and the day falls
- * from the day the email came to a year after it. Any miss (no API
- * key, API error, refusal, a reply that is not the JSON asked for, words not found, words for
- * another day, a date out of range, "no end" on an email a cap cut short) leaves that line
- * on the date patterns.
+ * from the day the email came to a year after it. Any miss (no API key, API error, refusal, a
+ * reply that is not the JSON asked for, words not found, words for another day, a date out of
+ * range, words that run to a cap's cut, "no end" on an email the model did not read whole, a
+ * subject over SUBJECT_CHARS) leaves that line on the date patterns.
  *
  * Spend: one Haiku call per deal email, at most MAX_READS a run, on the scheduled Monday run
  * only (the catch-up reruns use the date patterns). A read costs at most about $0.002 (20,000
@@ -31,7 +31,7 @@ const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 const { anthropicText } = require('../llm/call');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 const { etDateString } = require('../../utils/datetime-et');
-const { stripQuotedHistory } = require('./quoted-history');
+const { stripQuotedHistory, NUMERIC_DATE } = require('./deal-email-text');
 
 let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -43,7 +43,8 @@ const BODY_HTML_CHARS = BODY_TEXT_CHARS * 6;
 // What the model reads, links removed: the subject and the text together. The longest deal
 // email in the trial was 15,215.
 const MODEL_TEXT_CHARS = 20000;
-// A subject is one line: at most this many characters of it go to the model.
+// A subject is one line. One longer than this is not read at all (its line keeps the date
+// patterns): a cut subject could end mid-date, "Ends May 3" of "May 30".
 const SUBJECT_CHARS = 300;
 // The most deals one run reads, newest first; the rest keep the date-pattern line.
 const MAX_READS = 20;
@@ -92,10 +93,46 @@ function dropBlocks(html, tag) {
   }
 }
 
+// Where the <blockquote> at `open` ends (just past its own closing tag), or -1 when it never closes.
+function quoteEnd(lower, open) {
+  let depth = 0;
+  let nextOpen = open;
+  let nextClose = lower.indexOf('</blockquote', open);
+  while (nextClose !== -1) {
+    if (nextOpen !== -1 && nextOpen < nextClose) {
+      depth += 1;
+      nextOpen = lower.indexOf('<blockquote', nextOpen + 1);
+    } else {
+      depth -= 1;
+      if (depth === 0) {
+        const gt = lower.indexOf('>', nextClose);
+        return gt === -1 ? -1 : gt + 1;
+      }
+      nextClose = lower.indexOf('</blockquote', nextClose + 1);
+    }
+  }
+  return -1;
+}
+
+// Drops each <blockquote> whole, with any quote nested in it: mail clients put a quoted message
+// in one, often with no "On ... wrote:" line. An unclosed one ends the text.
+function dropQuotes(html) {
+  const lower = html.toLowerCase();
+  let out = '';
+  let at = 0;
+  for (;;) {
+    const open = lower.indexOf('<blockquote', at);
+    if (open === -1) return out + html.slice(at);
+    out += `${html.slice(at, open)} `;
+    at = quoteEnd(lower, open);
+    if (at === -1) return out;
+  }
+}
+
 // Tags out, line breaks kept (<br> and the end of a paragraph, div, row, item or heading).
 const BREAK_TAG = /^(?:br\s*\/?|\/(?:p|div|tr|li|h[1-6]))\s*$/i;
 function htmlText(html) {
-  const body = dropBlocks(dropBlocks(html, 'script'), 'style');
+  const body = dropQuotes(dropBlocks(dropBlocks(html, 'script'), 'style'));
   let out = '';
   let at = 0;
   for (;;) {
@@ -118,23 +155,27 @@ const flatten = (s) => s
   .trim();
 
 /**
- * The email as the model reads it: { subject, text, cut }. The text is body_text, else
- * body_html with tags removed (line breaks kept); entities decoded, links removed, spaces and
- * blank lines collapsed, and quoted reply history dropped, as the date patterns drop it. The
- * subject (links out, one line) is capped at SUBJECT_CHARS and the text at what is left of
- * MODEL_TEXT_CHARS. `cut` is true when a cap dropped part of the email: the body re-read cap
- * (unless it cut only quoted history, which is dropped anyway), the model cap or the subject cap.
+ * The email as the model reads it: { subject, text, cut, partial }, or null when the subject
+ * (links out, one line) runs past SUBJECT_CHARS. The text is body_text, else body_html with
+ * tags removed (line breaks kept); entities decoded, links removed, spaces and blank lines
+ * collapsed, and quoted reply history dropped, as the date patterns drop it (in HTML, every
+ * <blockquote> too), then capped at what the subject leaves of MODEL_TEXT_CHARS. `cut` is true
+ * when a cap cut the end of the text: the body re-read cap (unless it cut only quoted history,
+ * which is dropped anyway) or the model cap. `partial` is true when the model does not read
+ * all of the email: a cap cut it, or a <blockquote> was dropped, which may be quoted mail or a
+ * styled block of this email.
  */
 function readableEmail(email) {
+  const subject = flatten(String(email?.subject || '')).replace(/\n/g, ' ');
+  if (subject.length > SUBJECT_CHARS) return null;
   const text = typeof email?.body_text === 'string' && email.body_text.trim() ? email.body_text : null;
   const html = typeof email?.body_html === 'string' ? email.body_html : '';
   const read = flatten(decodeEntities(text ?? htmlText(html)));
   const whole = stripQuotedHistory(read).trim();
-  const fullSubject = flatten(String(email?.subject || '')).replace(/\n/g, ' ');
-  const subject = fullSubject.slice(0, SUBJECT_CHARS);
   const room = MODEL_TEXT_CHARS - subject.length;
   const readCut = whole.length === read.length && (text !== null ? text.length >= BODY_TEXT_CHARS : html.length >= BODY_HTML_CHARS);
-  return { subject, text: whole.slice(0, room), cut: readCut || whole.length > room || fullSubject.length > SUBJECT_CHARS };
+  const cut = readCut || whole.length > room;
+  return { subject, text: whole.slice(0, room), cut, partial: cut || (text === null && /<blockquote/i.test(html)) };
 }
 
 // Compare text the way a reader would: one space for any run of spaces, any case, and the
@@ -178,7 +219,6 @@ function isCalendarDay(iso) {
 // "tonight" or "tomorrow" must land on it. Words with no day in them prove nothing.
 // "March 1-30" names its closing day alone (group 3); "Mar 2 - 12/31" and "Nov 3 - 11:59 PM" do not.
 const NAMED_DATE = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.? ?(\d{1,2})(?:st|nd|rd|th)?(?: ?(?:-|to|through|thru) ?(\d{1,2})(?:st|nd|rd|th)?(?![/\d:]))?\b(?:,? ?(20\d{2})\b)?/g;
-const NUMERIC_DATE = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?\b/g;
 const ISO_DATE = /\b(20\d{2})-(\d{2})-(\d{2})\b/g;
 const MONTH_KEYS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
@@ -246,10 +286,10 @@ const YEAR_AFTER = /^(?:,? ?20\d{2}\b|\/(?:\d{4}|\d{2})\b)/;
 const AFTER_CHARS = RANGE_GAP + 24;
 
 /**
- * Where the quoted words sit in the email, or null: { text, wordsEnd }, the words as the
- * email has them and then up to AFTER_CHARS of what follows. The words must sit at word
- * edges ("April 3" is not in "April 30"), and a year the email writes right after a quoted
- * day joins them, so the date is checked whole.
+ * Where the quoted words sit in the email, or null: { text, wordsEnd, nearEnd }, the words as
+ * the email has them and then up to AFTER_CHARS of what follows; nearEnd when the email ends
+ * before that. The words must sit at word edges ("April 3" is not in "April 30"), and a year
+ * the email writes right after a quoted day joins them, so the date is checked whole.
  */
 function wholeWordsInEmail(hay, needle) {
   const edge = (outside, inside) => !outside || !WORD_CHAR.test(outside) || !WORD_CHAR.test(inside);
@@ -258,7 +298,7 @@ function wholeWordsInEmail(hay, needle) {
     if (edge(hay[at - 1], needle[0]) && edge(hay[end], needle[needle.length - 1])) {
       const year = /\d$/.test(needle) ? YEAR_AFTER.exec(hay.slice(end, end + 7)) : null;
       const wordsEnd = needle.length + (year ? year[0].length : 0);
-      return { text: hay.slice(at, at + wordsEnd + AFTER_CHARS), wordsEnd };
+      return { text: hay.slice(at, at + wordsEnd + AFTER_CHARS), wordsEnd, nearEnd: at + wordsEnd + AFTER_CHARS > hay.length };
     }
   }
   return null;
@@ -266,9 +306,9 @@ function wholeWordsInEmail(hay, needle) {
 
 /**
  * Checks one parsed answer against the email. { ok: true, endDate, quote } (endDate null =
- * the email states no end), or { ok: false, reason }.
+ * the email states no end), or { ok: false, reason }. `cut`: a cap cut the end of emailText.
  */
-function checkAnswer(answer, emailText, receivedAt) {
+function checkAnswer(answer, emailText, receivedAt, cut = false) {
   if (!answer || !Object.prototype.hasOwnProperty.call(answer, 'end_date')) return { ok: false, reason: 'invalid_json' };
   // "No end" needs both values null: a quote beside a null date, or no quote key, is a malformed reply.
   if (answer.end_date === null) return answer.quote === null ? { ok: true, endDate: null, quote: null } : { ok: false, reason: 'half_null' };
@@ -284,6 +324,8 @@ function checkAnswer(answer, emailText, receivedAt) {
   if (needle.length < QUOTE_MIN_CHARS || !/[a-z]/.test(needle)) return { ok: false, reason: 'no_quote' };
   const place = wholeWordsInEmail(comparable(emailText), needle);
   if (place === null) return { ok: false, reason: 'quote_not_found' };
+  // Words that run to a cut cannot be checked whole: "May 3" may have been "May 30", and a range may go on past it.
+  if (cut && place.nearEnd) return { ok: false, reason: 'quote_at_cut' };
   if (!quoteNamesDay(place, endDate, away)) return { ok: false, reason: 'quote_date_mismatch' };
   return { ok: true, endDate, quote };
 }
@@ -292,7 +334,9 @@ function checkAnswer(answer, emailText, receivedAt) {
 async function readOne(client, email) {
   try {
     const received = new Date(email.received_at);
-    const { subject, text: body, cut } = readableEmail(email);
+    const readable = readableEmail(email);
+    if (readable === null) return { ok: false, reason: 'long_subject' };
+    const { subject, text: body, cut, partial } = readable;
     if (!body && !subject) return { ok: false, reason: 'empty' };
     let response;
     try {
@@ -310,10 +354,10 @@ async function readOne(client, email) {
     // The ledger files both of these as failed calls on its own.
     if (response.stop_reason === 'refusal') return { ok: false, reason: 'refusal' };
     if (response.stop_reason === 'max_tokens') return { ok: false, reason: 'max_tokens' };
-    const read = checkAnswer(parseAnswer(anthropicText(response)), `${subject}\n${body}`, received);
+    const read = checkAnswer(parseAnswer(anthropicText(response)), `${subject}\n${body}`, received, cut);
     if (!read.ok) ledgerCallRejected(response, read.reason === 'invalid_json' ? 'invalid_json' : 'schema_invalid');
-    // "No end" on part of an email proves nothing: the end may sit in the part a cap dropped.
-    if (read.ok && read.endDate === null && cut) return { ok: false, reason: 'no_end_in_cut_text' };
+    // "No end" on part of an email proves nothing: the end may sit in the part a cap or the <blockquote> drop left out.
+    if (read.ok && read.endDate === null && partial) return { ok: false, reason: 'no_end_in_cut_text' };
     return read;
   } catch (err) {
     logger.warn(`[siteone-deals] end-date read failed: ${err?.message || 'error'}`);
