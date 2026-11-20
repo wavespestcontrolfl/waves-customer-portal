@@ -212,6 +212,18 @@ describe('the banner', () => {
     expect(await beforePush()).toBe(false);
   });
 
+  test('just before the push the lead is judged again: a person who reached it meanwhile, or a failed read, says no', async () => {
+    await run();
+    const { beforePush } = reminders()[0][2];
+    expect(await beforePush()).toBe(true);
+    // A person texted the lead after the sweep read its page.
+    mockBundles.byId['n-1'] = { textAt: est('05', '15:01') };
+    expect(await beforePush()).toBe(false);
+    mockBundles.byId = {};
+    mockBundles.fail = true;
+    expect(await beforePush()).toBe(false);
+  });
+
   test('a banner that throws is logged and never reaches the sweep', async () => {
     triggerNotification.mockRejectedValueOnce(new Error('push down'));
     const result = await runLeadCallReminder({ now: NOW });

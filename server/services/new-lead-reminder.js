@@ -12,7 +12,8 @@
  * At most one push per bell row: it is stamped first, in one statement fenced on the row being open and unchanged since
  * it was read (metadata.newLeadRealertAt), under notifyAdmin's lock for the bell's dedupe key. Stamp first, then send:
  * a send that fails after its stamp is lost, never repeated. The push goes only while the row is still an open bell in
- * the bell feed with exactly the stamped metadata (a bell that rang again since then sends nothing).
+ * the bell feed with exactly the stamped metadata (a bell that rang again since then sends nothing), and while the lead
+ * still waits when judged again with fresh reads just before it goes (lead-reminder-sweep.js).
  *
  * - The clock counts only Monday to Saturday, 8:00 AM to 6:00 PM America/New_York (callback-cards staffedDeadline;
  *   holidays are not skipped). Nothing is sent outside those hours. A push more than 2 business hours past its due time
@@ -27,7 +28,7 @@
  *   metadata.triggerKey new_lead, within 15 minutes of the lead's creation; every other bell, such as a repeat form, a
  *   form attached to an open call lead or an email follow-up's draft, is a fresh inquiry); a person's
  *   text or call, or a Gmail send, or a visit
- *   booked, reached the lead's customer or phone since 5 minutes before that bell's inquiry began (for the intake bell:
+ *   booked, reached the lead's customer or phone after that bell's inquiry began (for the intake bell:
  *   the earlier of the bell and the lead's first_contact_at, else created_at; for a later bell: the bell itself; a bell that
  *   names an email, metadata.emailId, counts from that message's received_at; the push deadline stays on the bell);
  *   a person's email to the lead's own address since the same moment (one the shared linkage ties to this lead's customer,
@@ -54,7 +55,6 @@ const PUSH_STAMP = 'newLeadRealertAt';
 const PUSH_AFTER_MINUTES = 15;
 const PUSH_LATE_MINUTES = 120;
 const WINDOW_MS = 48 * 60 * 60 * 1000;
-const WITNESS_SLACK_MS = 5 * 60 * 1000;
 // A bell written within this long of the lead's creation was raised with the lead itself (the intake bell, or the call
 // lead's bell minutes after the call); a later one is a fresh inquiry on a lead already on file.
 const INTAKE_BELL_MS = 15 * 60 * 1000;
@@ -151,7 +151,8 @@ function inquiryOf({ askedAt, lead, intakeTrigger = false }, emailAt = null) {
   const starts = [askedAt.getTime()];
   if (intake) starts.push(new Date(lead.first_contact_at || lead.created_at).getTime());
   if (emailAt) starts.push(emailAt.getTime());
-  return { intake, anchor: new Date(Math.min(...starts) - WITNESS_SLACK_MS) };
+  // No look-back before the start: a person's call or text just before a fresh form is not an answer to it.
+  return { intake, anchor: new Date(Math.min(...starts)) };
 }
 
 // The leads that still wait on a person, each item with `lead` and `customerId`. Throws when a read fails: no verdict.

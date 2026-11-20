@@ -248,12 +248,12 @@ describe('the 15-minute push (no gate)', () => {
     expect(opts).toMatchObject({ pushOnly: true, adminOnly: true, bellAuthorized: true });
   });
 
-  test('witnesses are read from before the lead came in, not only after the bell', async () => {
+  test('witnesses are read from when the lead came in, not only after the bell', async () => {
     mockState.rows = [row('n-1', { createdAt: est('09', '10:08') })];
     mockState.leads = [lead({ created_at: est('09', '10:00') })];
     await run(est('09', '10:30'));
     const [[items]] = loadContactBundles.mock.calls;
-    expect(items).toEqual([{ id: 'n-1', kind: 'customer', bellAt: est('09', '09:55'), refs: { customerId: CUST, phone: '+19415550100' } }]);
+    expect(items).toEqual([{ id: 'n-1', kind: 'customer', bellAt: est('09', '10:00'), refs: { customerId: CUST, phone: '+19415550100' } }]);
   });
 
   test('a row already stamped sends nothing again: at most one push per bell row', async () => {
@@ -289,7 +289,7 @@ describe('the 15-minute push (no gate)', () => {
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
     expect(pushes()[0][1]).toMatchObject({ alertRowId: 'rf-1', alertLink: `/admin/leads?lead=${LEAD}` });
     // A later inquiry: the witnesses count from the form itself, not from when the lead came in.
-    expect(loadContactBundles.mock.calls[0][0][0].bellAt).toEqual(est('09', '09:55'));
+    expect(loadContactBundles.mock.calls[0][0][0].bellAt).toEqual(est('09', '10:00'));
 
     jest.clearAllMocks();
     mockState.rows = [repeatFormRow('rf-2')];
@@ -304,7 +304,7 @@ describe('the 15-minute push (no gate)', () => {
     mockState.rows = [repeatFormRow('rf-1')];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
     // Judged from the form itself, never from the lead's first contact, and the call is not read.
-    expect(loadContactBundles.mock.calls[0][0][0].bellAt).toEqual(est('09', '09:55'));
+    expect(loadContactBundles.mock.calls[0][0][0].bellAt).toEqual(est('09', '10:00'));
     expect(mockState.calls.filter((c) => c.table === 'call_log')).toEqual([]);
 
     // The new-lead bell written with that lead is its intake bell: the answered call settles it.
@@ -323,6 +323,21 @@ describe('the 15-minute push (no gate)', () => {
     expect(await beforePush()).toBe(false);
     mockState.open = {};
     mockState.failOpen = true;
+    expect(await beforePush()).toBe(false);
+  });
+
+  test('the push judges the lead again just before it goes: a person who reached it meanwhile, a closed lead or a failed read says no', async () => {
+    await run(PUSH_NOW);
+    const { beforePush } = pushes()[0][2];
+    expect(await beforePush()).toBe(true);
+    // A person texted the lead after the sweep read its page, while the stamp waited on its lock.
+    mockBundles.byId = { 'n-1': { textAt: est('09', '10:21') } };
+    expect(await beforePush()).toBe(false);
+    mockBundles.byId = {};
+    mockBundles.fail = true;
+    expect(await beforePush()).toBe(false);
+    mockBundles.fail = false;
+    mockState.leads = [lead({ status: 'lost' })];
     expect(await beforePush()).toBe(false);
   });
 
@@ -534,7 +549,7 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     mockState.emails = [{ to_address: 'pat@example.invalid', cc_address: null, bcc_address: null, received_at: est('09', '09:50') }];
     expect(await run(est('09', '10:20'))).toMatchObject({ due: 1, pushed: 0 });
     const [[items]] = loadContactBundles.mock.calls;
-    expect(items[0].bellAt).toEqual(est('09', '09:35'));
+    expect(items[0].bellAt).toEqual(est('09', '09:40'));
   });
 
   test('a fresh form on a lead made days ago is judged from its own bell: the earlier contact and the old call do not suppress it', async () => {
@@ -544,7 +559,7 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     mockState.answered = [{ twilio_call_sid: CALL_SID }];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
     const [[items]] = loadContactBundles.mock.calls;
-    expect(items[0].bellAt).toEqual(est('09', '09:55'));
+    expect(items[0].bellAt).toEqual(est('09', '10:00'));
     expect(mockState.calls.filter((c) => c.table === 'call_log')).toEqual([]);
   });
 
@@ -556,9 +571,23 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     mockState.emails = [{ to_address: 'pat@example.invalid', cc_address: null, bcc_address: null, received_at: est('09', '09:40') }];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
     const [[items]] = loadContactBundles.mock.calls;
-    expect(items[0].bellAt).toEqual(est('09', '09:15'));
+    expect(items[0].bellAt).toEqual(est('09', '09:20'));
     // One batched read of the messages, whatever the batch size; the push clock stays on the bell.
     expect(mockState.calls.filter((c) => c.table === 'emails')).toHaveLength(1);
+  });
+
+  test('a person\'s call just before a fresh form is not an answer to it: only contact after the form counts', async () => {
+    // A person talked with the caller until 9:58; at 10:00 the web form attached to that call lead and rang the trigger.
+    mockState.leads = [lead({ created_at: est('09', '09:40'), twilio_call_sid: CALL_SID })];
+    mockState.rows = [row('n-1', { metadata: { payload: { leadId: LEAD, attachedCallLead: true } } })];
+    mockBundles.byId = { 'n-1': { inAt: est('09', '09:58') } };
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
+
+    // A person's call back after the form answers it.
+    jest.clearAllMocks();
+    mockState.rows = [row('n-2', { metadata: { payload: { leadId: LEAD, attachedCallLead: true } } })];
+    mockBundles.byId = { 'n-2': { backAt: est('09', '10:02') } };
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
   });
 
   test('a form the webhook attached to an open call lead is a later inquiry: the answered call that made the lead does not settle it', async () => {
@@ -568,7 +597,7 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     mockState.answered = [{ twilio_call_sid: CALL_SID }];
     mockState.rows = [row('n-1', { metadata: { payload: { leadId: LEAD, attachedCallLead: true } } })];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
-    expect(loadContactBundles.mock.calls[0][0][0].bellAt).toEqual(est('09', '09:55'));
+    expect(loadContactBundles.mock.calls[0][0][0].bellAt).toEqual(est('09', '10:00'));
     expect(mockState.calls.filter((c) => c.table === 'call_log')).toEqual([]);
   });
 
@@ -586,7 +615,7 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     mockState.emailRows = [{ id: EMAIL, received_at: est('09', '09:58') }];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
     // Judged from the message, never from the lead's first contact, and the call is not read.
-    expect(loadContactBundles.mock.calls[0][0][0].bellAt).toEqual(est('09', '09:53'));
+    expect(loadContactBundles.mock.calls[0][0][0].bellAt).toEqual(est('09', '09:58'));
     expect(mockState.calls.filter((c) => c.table === 'call_log')).toEqual([]);
 
     // The trigger's own bell for that lead is its intake bell: the answered call settles it.
@@ -605,7 +634,7 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     mockState.leads = [lead({ customer_id: null, phone: null })];
     await run(PUSH_NOW);
     const query = mockState.calls.find((c) => c.table === 'emails as er');
-    expect(query.wheres).toContainEqual(['er.received_at', '>', est('09', '09:55')]);
+    expect(query.wheres).toContainEqual(['er.received_at', '>', est('09', '10:00')]);
   });
 
   test('a failed witness read or lead read is no verdict: nothing is sent or stamped', async () => {

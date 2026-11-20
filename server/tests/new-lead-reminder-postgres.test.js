@@ -163,22 +163,27 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
     expect(pushesFor(webBell.id)).toHaveLength(0);
   }, 180000);
 
-  test('a bell that rang again or moved to Activity between its stamp and its push sends nothing', async () => {
+  test('a bell that rang again or moved to Activity, or whose lead converted, between its stamp and its push sends nothing', async () => {
     const rerung = await leadOnFile();
     const moved = await leadOnFile();
+    const converted = await leadOnFile();
     const rerungBell = await repeatFormBell(rerung.customer, rerung.lead, mins(-20));
     const movedBell = await newLeadBell(moved.lead, mins(-20));
+    const convertedBell = await newLeadBell(converted.lead, mins(-20));
     // What a fresh form does to the standing bell (notifyAdmin's ringing refresh advances rungAt), and what routing to
     // Claude's queue does (feed activity), landing after the stamp and before the push.
     const changes = { [rerungBell.id]: { rungAt: mins(-1).toISOString() }, [movedBell.id]: { feed: 'activity' } };
     mockBeforeDispatch = async (id) => {
       if (changes[id]) await db('notifications').where({ id }).update({ metadata: db.raw('metadata || ?::jsonb', [JSON.stringify(changes[id])]) });
+      // A person booked the lead while its stamp waited: the bell row is untouched, the lead is not.
+      if (id === convertedBell.id) await db('leads').where({ id: converted.lead.id }).update({ converted_at: mins(-1) });
     };
     await run();
     expect(dispatchedFor(rerungBell.id)).toEqual([false]);
     expect(dispatchedFor(movedBell.id)).toEqual([false]);
-    // Both keep their stamp: at most one push per bell (a ring reaches the phones itself).
-    for (const bell of [rerungBell, movedBell]) {
+    expect(dispatchedFor(convertedBell.id)).toEqual([false]);
+    // All keep their stamp: at most one push per bell (a ring reaches the phones itself).
+    for (const bell of [rerungBell, movedBell, convertedBell]) {
       expect(metaOf(await db('notifications').where({ id: bell.id }).first())[reminder.PUSH_STAMP]).toBe(NOW.toISOString());
     }
   }, 180000);

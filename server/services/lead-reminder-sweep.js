@@ -13,7 +13,8 @@
  * The stamp waits on notifyAdmin's advisory lock for the bell's dedupe key, the lock a refresh of that bell reads and
  * rewrites its metadata under; nothing here row-locks a bell or a lead. Just before a push goes, the row must still be
  * an open bell in the bell feed with exactly the metadata that was stamped: a bell that rang again, moved to Activity
- * or lost its stamp since then sends nothing.
+ * or lost its stamp since then sends nothing. The reminder then judges the lead again with fresh reads (its own
+ * `waiting`): a person who reached the lead, or a lead closed or quoted, since the page was read sends nothing.
  */
 
 const db = require('../models/db');
@@ -102,9 +103,10 @@ async function rowStillOpen(id, label, stamped = null) {
 
 // The push, with the row's own words. alertRowId gives it its own push tag per bell row. `stamped` is the row's
 // metadata as the stamp left it (rowStillOpen). `ready` (optional) is asked with a fresh clock just before dispatch,
-// before the open-row read and again after it: false means the reminder's hours, or this item's late window, closed
-// since the sweep began. Never throws.
-async function sendPush({ row, customerId, stamped = null }, label, ready = () => true) {
+// before the reads and again after them: false means the reminder's hours, or this item's late window, closed since the
+// sweep began. `stillWaiting` (optional, async) judges the lead again after the open-row read: false means a person
+// reached it, or it closed, since the page was read. Never throws.
+async function sendPush({ row, customerId, stamped = null }, label, ready = () => true, stillWaiting = async () => true) {
   try {
     const { triggerNotification } = require('./notification-triggers');
     return await triggerNotification(TRIGGER_KEY, {
@@ -114,7 +116,7 @@ async function sendPush({ row, customerId, stamped = null }, label, ready = () =
       // bellAuthorized: the bell row's writer rang it (bell: true), so the push keeps that answer. pushOnly: the row is
       // not rewritten. adminOnly: nothing goes to a lead, a customer or a technician.
       pushOnly: true, adminOnly: true, bellAuthorized: true,
-      beforePush: async () => ready() && (await rowStillOpen(row.id, label, stamped)) && ready(),
+      beforePush: async () => ready() && (await rowStillOpen(row.id, label, stamped)) && (await stillWaiting()) && ready(),
     });
   } catch (err) {
     logger.warn(`[${label}] push failed for notification ${row.id}: ${safeError(err)}`);
@@ -122,10 +124,21 @@ async function sendPush({ row, customerId, stamped = null }, label, ready = () =
   }
 }
 
+// One item judged again by its reminder's `waiting`, with fresh reads, just before its push goes. A failed read sends
+// nothing: the dispatcher sends when this check throws, so it never throws.
+async function waitingNow(kind, item) {
+  try {
+    return (await kind.waiting([item])).length > 0;
+  } catch (err) {
+    logger.warn(`[${kind.label}] wait check failed for notification ${item.row.id}, no push: ${safeError(err)}`);
+    return false;
+  }
+}
+
 /**
  * One scan for a reminder `kind`: { label, stamp, match, windowMs, dueItems(rows, now), waiting(items), inHours?(date) }.
  * dueItems picks the rows due now; waiting(items) returns those that still wait on a person and throws when a read
- * fails (no verdict: nothing is sent on that page). `inHours(date)` is the reminder's own hours rule, asked with a fresh
+ * fails (no verdict: nothing is sent on that page). Each push asks waiting([item]) again just before it goes. `inHours(date)` is the reminder's own hours rule, asked with a fresh
  * clock (`clock`, default the real time) before each item is stamped and again at each push's dispatch: the parent
  * sweep's `now` can be old by the time its closes and the reads above have finished. When the hours have closed the
  * sweep stops with the rest unstamped, for the next open sweep while they are still inside their late window. An item
@@ -165,7 +178,7 @@ async function runSweep(kind, { now, pageSize = PAGE_SIZE, clock = () => new Dat
       try {
         if (!(await stampOnce(stamp, item, now, () => ready() && !expired(item)))) continue;
         total.sent += 1;
-        sends.push(sendPush({ ...item, stamped: stampedMeta(stamp, item.meta, now) }, label, () => ready() && !expired(item)));
+        sends.push(sendPush({ ...item, stamped: stampedMeta(stamp, item.meta, now) }, label, () => ready() && !expired(item), () => waitingNow(kind, item)));
       } catch (err) {
         logger.warn(`[${label}] notification ${item.row.id} not stamped: ${safeError(err)}`);
       }
@@ -179,4 +192,4 @@ async function runSweep(kind, { now, pageSize = PAGE_SIZE, clock = () => new Dat
   return { ...total, sends };
 }
 
-module.exports = { runSweep, TRIGGER_KEY, __private: { candidateQuery, stampOnce, rowStillOpen, sendPush, resumeAfter, PAGE_SIZE, MAX_PAGES } };
+module.exports = { runSweep, TRIGGER_KEY, __private: { candidateQuery, stampOnce, rowStillOpen, sendPush, waitingNow, resumeAfter, PAGE_SIZE, MAX_PAGES } };
