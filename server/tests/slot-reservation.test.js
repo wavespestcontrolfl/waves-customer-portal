@@ -418,6 +418,10 @@ describe('slot reservation helpers', () => {
         update: jest.fn().mockReturnThis(),
         returning: jest.fn().mockResolvedValue([{ id: 'held-1', reservation_expires_at: '2027-05-20T13:30:00.000Z' }]),
       };
+      const deleteBuilder = {
+        where: jest.fn().mockReturnThis(), whereNull: jest.fn().mockReturnThis(), whereNotNull: jest.fn().mockReturnThis(),
+        del: jest.fn().mockResolvedValue(1),
+      };
       const liveHold = {
         id: 'held-1', scheduled_date: '2027-05-20', window_start: '09:00:00', technician_id: 'tech-1',
         estimated_duration_minutes: 90, reservation_expires_at: '2027-05-20T13:05:00.000Z', zone,
@@ -425,14 +429,14 @@ describe('slot reservation helpers', () => {
       const trx = makeTrx({
         estimateBuilder: makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Generic estimate service', address: '1 Test Way, Venice, FL 34285' }),
         technicianBuilder: makeTechnicianBuilder(),
-        scheduledBuilders: [makeLiveHoldsBuilder([liveHold]), makeGlobalProbeBuilder([]), refreshBuilder],
+        scheduledBuilders: [makeLiveHoldsBuilder([liveHold]), makeGlobalProbeBuilder([]), verdict ? refreshBuilder : deleteBuilder],
         zones: [VENICE],
       });
       db.transaction = jest.fn(async (callback) => callback(trx));
       const mayTake = jest.fn(async () => verdict);
       spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
       const run = slotReservation.reserveSlot({ estimateId: 'estimate-456', slotId: signedSlotId(SLOT), selectedFrequency: 'quarterly' });
-      return { run, refreshBuilder, trx, mayTake };
+      return { run, refreshBuilder, deleteBuilder, trx, mayTake };
     }
 
     test.each([
@@ -447,9 +451,13 @@ describe('slot reservation helpers', () => {
       if (zone) expect(written).not.toHaveProperty('zone');
     });
 
-    test('a re-tap on another truck\'s far-south day: slot-taken, the hold is not refreshed', async () => {
-      const { run, refreshBuilder } = retapVeniceHold({ verdict: false });
+    // Pre-push P1 on c08db66cc0: a refused hold can only lose at accept, so it is superseded like a clashing one: its
+    // delete commits before the 409, and it no longer blocks its truck's hour until it expires.
+    test('a re-tap on another truck\'s far-south day: slot-taken, and the hold is released, not refreshed', async () => {
+      const { run, refreshBuilder, deleteBuilder } = retapVeniceHold({ verdict: false });
       await expect(run).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: signedSlotId(SLOT) });
+      expect(deleteBuilder.where).toHaveBeenCalledWith({ id: 'held-1' });
+      expect(deleteBuilder.del).toHaveBeenCalledTimes(1);
       expect(refreshBuilder.update).not.toHaveBeenCalled();
     });
   });
@@ -568,7 +576,7 @@ describe('slot reservation helpers', () => {
     // branch), after the date lock and the rival-hold check, before the technician check, with the hold's stamp.
     test.each([
       ['commitReservation', 'if (row._lapsed && row.source_estimate_id) {', '\n    const zoneStamp = await refuseOtherTruckSouthDay(client, {'],
-      ['extendReservation', 'if (alreadyLapsed) {', '\n    const zoneStamp = await refuseOtherTruckSouthDay(trx, {'],
+      ['extendReservation', 'if (alreadyLapsed) {', '\n    const zoneStamp = await truckSouthDayStamp(trx, {'],
     ])('%s runs it for every hold with its zone stamp, under its date lock, before the technician check', (fn, rivalBranch, call) => {
       const src = require('fs').readFileSync(require('path').join(__dirname, '../services/slot-reservation.js'), 'utf8');
       const body = src.slice(src.indexOf(`async function ${fn}(`));

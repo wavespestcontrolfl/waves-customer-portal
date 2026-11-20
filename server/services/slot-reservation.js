@@ -859,13 +859,15 @@ function slotTaken(slotId) {
 // writer waits on the date lock, which the writer's NOW() (its transaction's start) does not show, and an unstamped
 // hold is not on the stop read at all (no zone, no customer city). The stop read uses the real clock (zoneStopDays),
 // so a live hold on its own truck's day passes on its own row. A hold's zone stamp (`stamp`, the row's `zone`) decides
-// its zone; an unstamped hold resolves it from `estimate`, as reserveSlot did. Slot-taken when refused. Returns the
+// its zone; an unstamped hold resolves it from `estimate`, as reserveSlot did. Returns null when refused, else the
 // stamp an unstamped hold takes (`{ zone }`, when the check read a funneled zone), so the next booking's stop read
-// sees this truck's day; else `{}`. An accept passes `graduate` (the customer the hold graduates to, and the row's
-// service address city): a hold whose own zone is not a funneled one is then checked in the funneled zone its written
-// row's city places it in (graduatedFunnelZone). Either gate off (GATE_MULTI_TECH_CONFIRM, GATE_SOUTH_ZONE_DAY_FUNNEL)
-// or no technician: nothing is read.
-async function refuseOtherTruckSouthDay(conn, { date, techId, slotId, zone = null, stamp = null, estimate = null, graduate = null }) {
+// sees this truck's day; else `{}`. A write that keeps an existing hold (a re-tap, an extend) supersedes it when
+// refused, so its delete commits before the 409 and the hold no longer blocks its truck's hour (pre-push P1 on
+// c08db66cc0); a new hold and an accept are slot-taken (refuseOtherTruckSouthDay). An accept passes `graduate` (the
+// customer the hold graduates to, and the row's service address city): a hold whose own zone is not a funneled one is
+// then checked in the funneled zone its written row's city places it in (graduatedFunnelZone). Either gate off
+// (GATE_MULTI_TECH_CONFIRM, GATE_SOUTH_ZONE_DAY_FUNNEL) or no technician: nothing is read.
+async function truckSouthDayStamp(conn, { date, techId, zone = null, stamp = null, estimate = null, graduate = null }) {
   const funnel = require('./scheduling/zone-day-funnel');
   if (techId == null || !funnel.perTruckLive() || !funnel.funnelOn()) return {};
   // An unstamped hold whose zone cannot be resolved skips the check, as reserveSlot's own zone checks do.
@@ -873,8 +875,14 @@ async function refuseOtherTruckSouthDay(conn, { date, techId, slotId, zone = nul
     || (stamp ? await stampedZone(conn, stamp) : null)
     || (estimate ? await resolveEstimateZone(conn, estimate).catch(() => null) : null);
   const checkZone = funnel.isFunnelZone(estimateZone) ? estimateZone : (await graduatedFunnelZone(conn, stamp, graduate)) || estimateZone;
-  if (!(await funnel.truckMayTakeDate(conn, { estimateZone: checkZone, date, technicianId: techId }))) throw slotTaken(slotId);
+  if (!(await funnel.truckMayTakeDate(conn, { estimateZone: checkZone, date, technicianId: techId }))) return null;
   return !stamp && funnel.isFunnelZone(estimateZone) ? { zone: zoneSlugOf(estimateZone) } : {};
+}
+
+async function refuseOtherTruckSouthDay(conn, args) {
+  const zoneStamp = await truckSouthDayStamp(conn, args);
+  if (!zoneStamp) throw slotTaken(args.slotId);
+  return zoneStamp;
 }
 
 // The funneled zone the stop read will place an accepted hold in by its city, or null. The accept writes the hold's
@@ -1775,10 +1783,17 @@ async function reserveSlot({
         // catalogLink/catalogServiceId/serviceType were resolved above from
         // the SAME serviceProfile the fresh-create path below stamps a new
         // row with — reused here, not re-queried.
-        // Owner rule B per truck, as on every hold write (refuseOtherTruckSouthDay): this re-tap keeps a hold that may
+        // Owner rule B per truck, as on every hold write (truckSouthDayStamp): this re-tap keeps a hold that may
         // have run out while the request waited on the date lock, or that has no zone stamp; an unstamped hold keeps the
-        // funneled zone the check read (`zoneStamp`).
-        const zoneStamp = await refuseOtherTruckSouthDay(trx, { stamp: sameSlotHold.zone, estimate, date, techId, slotId });
+        // funneled zone the check read (`zoneStamp`). Refused, the hold is superseded as above.
+        const zoneStamp = await truckSouthDayStamp(trx, { stamp: sameSlotHold.zone, estimate, date, techId });
+        if (!zoneStamp) {
+          await uncommittedHoldQuery(trx, { scheduledServiceId: sameSlotHold.id }).del();
+          logger.warn('[slot-reservation] superseded hold on another truck\'s far-south day on same-slot refresh', {
+            estimateId, slotId, scheduledServiceId: sameSlotHold.id,
+          });
+          return { staleHoldSuperseded: true };
+        }
         requireMakeRoomStillOn(makeRoom, slotId);
         const [refreshed] = await trx('scheduled_services')
           .where({ id: sameSlotHold.id })
@@ -3069,13 +3084,32 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
         throw err;
       }
     }
-    // Owner rule B per truck, on every extend (refuseOtherTruckSouthDay: not only an `alreadyLapsed` hold, which reads
+    // Supersede — same narrow still-uncommitted predicate releaseReservation
+    // uses — rather than leave a hold extending is guaranteed to lose at
+    // commit occupying the window until it eventually expires.
+    // Same still-uncommitted predicate releaseReservation uses — shared,
+    // not re-typed (pre-push audit P1). releaseReservation itself can't be
+    // called here: it runs on the pool, and this txn already holds a FOR
+    // UPDATE lock on exactly this row, so it would deadlock against us.
+    // Sentinel, not a throw (hold-grace self-audit): throwing here would roll the
+    // txn back INCLUDING this delete, leaving the superseded hold alive
+    // and consuming the window until expiry. Same pattern as reserveSlot's
+    // refresh branch — commit the delete, then raise outside.
+    const supersede = async () => {
+      await uncommittedHoldQuery(trx, { scheduledServiceId: row.id, estimateId }).del();
+      return {
+        staleHoldSuperseded: true,
+        slotId: `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id || 'unassigned'}`,
+      };
+    };
+    // Owner rule B per truck, on every extend (truckSouthDayStamp: not only an `alreadyLapsed` hold, which reads
     // this transaction's NOW()): another truck may have taken this hold's far-south day while it was lapsed or
     // unstamped. An unstamped hold keeps the funneled zone the check read (`zoneStamp`, in the expiry write below).
-    const zoneStamp = await refuseOtherTruckSouthDay(trx, {
+    // Refused, the hold is superseded (pre-push P1 on c08db66cc0).
+    const zoneStamp = await truckSouthDayStamp(trx, {
       stamp: row.zone, estimate, date: scheduledDate, techId: row.technician_id,
-      slotId: `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`,
     });
+    if (!zoneStamp) return supersede();
     // The SAME definitive validity checks commitReservation runs (codex r10
     // P2). Occupancy alone is not enough: if the office de-listed the held
     // technician or blacked the day out after the reserve, the commit refuses
@@ -3134,24 +3168,7 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
     // The gate read again right before the writes (Codex pre-push P1): a make-room hold whose gate went off while its
     // proof ran is superseded like one that no longer proves (its probes above skipped the stops it would move).
     const makeRoomGateOff = !!makeRoom && !makeRoomHoldsOn();
-    if (clash.length || makeRoomRefused || makeRoomGateOff) {
-      // Supersede — same narrow still-uncommitted predicate releaseReservation
-      // uses — rather than leave a hold extending is guaranteed to lose at
-      // commit occupying the window until it eventually expires.
-      // Same still-uncommitted predicate releaseReservation uses — shared,
-      // not re-typed (pre-push audit P1). releaseReservation itself can't be
-      // called here: it runs on the pool, and this txn already holds a FOR
-      // UPDATE lock on exactly this row, so it would deadlock against us.
-      await uncommittedHoldQuery(trx, { scheduledServiceId: row.id, estimateId }).del();
-      // Sentinel, not a throw (hold-grace self-audit): throwing here would roll the
-      // txn back INCLUDING this delete, leaving the superseded hold alive
-      // and consuming the window until expiry. Same pattern as reserveSlot's
-      // refresh branch — commit the delete, then raise outside.
-      return {
-        staleHoldSuperseded: true,
-        slotId: `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id || 'unassigned'}`,
-      };
-    }
+    if (clash.length || makeRoomRefused || makeRoomGateOff) return supersede();
 
     // A make-room hold keeps the chain just proven, whether or not the expiry moves.
     if (makeRoom && !require('node:util').isDeepStrictEqual(row.make_room_moves, makeRoom.payload)) {

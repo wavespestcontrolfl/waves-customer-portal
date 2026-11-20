@@ -2045,7 +2045,8 @@ describe('POST /:token commit', () => {
         return [{ id: 'zone-v', zone_name: zoneLookup === 'unfunneled' ? 'Sarasota / Central' : 'Venice / North Port', cities: ['Nokomis'] }];
       });
       listResults.service_zones = zoneReads;
-      firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+      // Unlinked until phase 1 links it: the 409's fresh times read the trusted customer again (nextCommitRefresh).
+      firstResults.leads = leadLinkedAfterWrite({ ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' });
       firstResults.call_log = { from_phone: '+19415550101' };
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
       seedPhoneHousehold({
@@ -2435,6 +2436,34 @@ describe('POST /:token commit', () => {
       });
 
       expect(refresh).toEqual({ location: null, addressChanged: false });
+    });
+
+    // Pre-push P1 on c08db66cc0: at the same pin, the fresh times are built with the trusted customer the next commit
+    // loads, read again, not phase 1's copy: staff may have changed the profile's city since (Nokomis to Venice here),
+    // and times built from the old city would offer an hour the next commit refuses. A failed read builds none: the page
+    // reloads its list for the address it holds.
+    test.each([
+      ['builds with the trusted customer read again', () => {
+        firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+        firstResults.call_log = { from_phone: '+19415550101' };
+        seedPhoneHousehold({ id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, address_line1: '123 Palm Ave', city: 'Venice', state: 'FL', zip: '34209', phone: '9415550101' });
+      }, { location: { lat: 27.4, lng: -82.5 }, customer: { id: 'cust-9', city: 'Venice' } }],
+      ['carries no times when that read fails', () => {
+        firstResults.leads = () => { throw new Error('leads unreadable'); };
+      }, { location: null }],
+    ])('a typed address refused at the same pin %s', async (_label, seed, expected) => {
+      mockFarSouthGates.funnel = true;
+      seed();
+      const { nextCommitRefresh } = inspectionPublicRouter._test;
+      const verified = require('../utils/lead-consultation-token').verifyLeadConsultationToken(mintLeadConsultationToken(LEAD_ID));
+
+      const refresh = await nextCommitRefresh({
+        lead: { id: LEAD_ID }, verified, resolved: { source: 'supplied' }, custRow: { id: 'cust-9', city: 'Nokomis' },
+        bookingAddress: { line1: '123 Palm Ave', city: 'Laurel' }, bookingLocation: { lat: 27.4, lng: -82.5 }, locationMoved: false,
+      });
+
+      expect(refresh).toMatchObject(expected);
+      if (!expected.customer) expect(refresh).toEqual({ location: null });
     });
 
     // Codex #4737 r9 pre-push P1: the matched profile is re-read under its

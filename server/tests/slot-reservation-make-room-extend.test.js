@@ -291,10 +291,14 @@ describe('extendReservation — a far-south hold per truck (owner rule B)', () =
     expect(update.update).toHaveBeenCalledWith({ reservation_expires_at: '2027-05-20T13:40:00.000Z' });
   });
 
-  test('another truck\'s far-south day: slot-taken, the hold is not revived', async () => {
+  // Pre-push P1 on c08db66cc0: a refused hold, live or lapsed, can only lose at accept, so it is superseded like a
+  // clashing one: its delete commits before the 409, and a live one no longer blocks its truck's hour until it expires.
+  test.each([['lapsed', true], ['live', false]])('another truck\'s far-south day: slot-taken, and the %s hold is released, not kept', async (_label, lapsed) => {
     spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockResolvedValue(false)];
-    const { update } = harness({ hold: { ...LAPSED, zone: null }, destinationProbe: false, probeRuns: false, estimate: VENICE_ESTIMATE, zones: [VENICE] });
+    const { dead, update } = harness({ hold: { ...LAPSED, zone: null, _already_lapsed: lapsed }, destinationProbe: false, probeRuns: false, superseded: true, estimate: VENICE_ESTIMATE, zones: [VENICE] });
     await expect(extend()).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: `${DATE}_09-00_tech-1` });
+    expect(dead.where).toHaveBeenCalledWith({ id: 'hold-1' });
+    expect(dead.del).toHaveBeenCalledTimes(1);
     expect(update.update).not.toHaveBeenCalled();
   });
 });

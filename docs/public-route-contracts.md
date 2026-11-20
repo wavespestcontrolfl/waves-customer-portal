@@ -1425,8 +1425,9 @@ unstamped hold is stamped with the funneled zone its check read, so the next
 booking sees it. An accept whose hold has no funneled zone of its own is also
 checked in the funneled zone its written row's city places it in (the service
 address's, else the accepting customer's), as the stop read reads such a row by
-that city. The answer is the existing `SLOT_UNAVAILABLE`. The stop read
-counts a hold by the real clock, so a hold that ran out while its writer waited
+that city. The answer is the existing `SLOT_UNAVAILABLE`; a refused re-tap or
+extend also deletes its hold, as one that now clashes does, so the day keeps
+one truck south. The stop read counts a hold by the real clock, so a hold that ran out while its writer waited
 on the date lock no longer holds the day, and it counts an unstamped stop by the
 cities of every funneled zone, as it counts a stamp. The assessment
 link's list and its booking resolve the zone from the one booking address the
@@ -7702,8 +7703,9 @@ that address and the trusted customer, as the lists and the next commit's first
 check read them. A booking refused after phase one (its re-check or the booking
 itself), with the funnel on, carries fresh times only when the page's next
 commit reads this one's inputs: an address typed (the page sends it again) at
-the same pin. They are built there with that address and the trusted customer,
-as the next commit's first build reads them. Any other refusal after phase one
+the same pin. They are built there with that address and the trusted customer
+read again (phase one's copy can be stale by then), as the next commit's first
+build reads them. A failed read, and any other refusal after phase one,
 answers `availability: null`, and the page reloads its own list (GET, or
 `POST /:token/availability` with the address it holds), which reads the same
 resolver and trusted customer as its next commit. A booking moved to a matched

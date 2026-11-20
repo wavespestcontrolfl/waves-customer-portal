@@ -628,8 +628,10 @@ function storedAddressCandidates(lead, custRow) {
 // P1s on e88162fc27, 903ecc5ff0, 910b741125 and 0cdae8374e). The next commit
 // reads this commit's own inputs only when the page sends a typed address
 // again (it re-sends the address its gate resolved) and the booking stayed at
-// that pin: then the fresh times are built here, with that address and this
-// customer, as the next commit's first build reads them. Any other refusal carries no times (`location` null), and
+// that pin: then the fresh times are built here, with that address and the
+// trusted customer read again, as the next commit's first build reads them
+// (phase 1's copy can be stale by now: pre-push P1 on c08db66cc0); a failed
+// read carries none. Any other refusal carries no times (`location` null), and
 // the page reloads its own list (GET, or POST /:token/availability with a
 // typed address), which reads the same resolver and trusted customer as the
 // next commit. A booking moved to a matched profile's other stored location
@@ -642,15 +644,15 @@ function storedAddressCandidates(lead, custRow) {
 // refusal carries fresh times at the booking location, the answer the switch
 // restores (pre-push P1 on 7cdf34198a).
 async function nextCommitRefresh({ lead, verified, resolved, custRow, bookingAddress, bookingLocation, locationMoved }) {
-  const typed = resolved.source === 'supplied';
-  if (!funnelOn() || (typed && !locationMoved)) return { location: bookingLocation, address: bookingAddress, customer: custRow };
-  if (!typed) return { location: null };
+  if (!funnelOn()) return { location: bookingLocation, address: bookingAddress, customer: custRow };
+  if (resolved.source !== 'supplied') return { location: null };
   const nextCust = await loadLead(db, lead.id)
     .then((nextLead) => (nextLead ? loadTrustedCustomer(db, nextLead, verified) : null))
     .catch((err) => {
       logger.warn(`[inspection-public] next-commit customer read failed for lead ${lead.id}: ${err.message}`);
       return null;
     });
+  if (!locationMoved) return nextCust ? { location: bookingLocation, address: bookingAddress, customer: nextCust } : { location: null };
   return { location: null, addressChanged: nextCust != null && String(nextCust.id) === String(custRow.id) };
 }
 
