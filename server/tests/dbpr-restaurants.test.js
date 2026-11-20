@@ -163,6 +163,14 @@ describe('parseLicenseRows and the phone rule', () => {
     expect(counts).toEqual({ malformed: 2, valid: 1 });
   });
 
+  test('a NUL character becomes a space, so its insert batch still goes in', () => {
+    const withNul = licRow({ app: '7002' }).replace('"SAMPLE DINER"', '"SAMPLE\0DINER"').replace('"200 SAMPLE TRL"', '"200 SAMPLE\0TRL"');
+    const out = svc.parseLicenseRows(parseDbprCsv(licCsv([licRow(), withNul])), 'new_license');
+    expect(out.map((r) => r.source_key)).toEqual(['7001', '7002']);
+    expect(out[1]).toMatchObject({ business_name: 'SAMPLE DINER', address: '200 SAMPLE TRL UNIT 3' });
+    expect(JSON.stringify(out)).not.toContain('\\u0000');
+  });
+
   test('a seat count too big for the integer column is left blank, so its batch still inserts', () => {
     const rows = parseDbprCsv(licCsv([licRow({ seats: '999999999' }), licRow({ app: '7002', seats: '9999999999' })]));
     expect(svc.parseLicenseRows(rows, 'new_license').map((r) => r.seats)).toEqual([999999999, null]);

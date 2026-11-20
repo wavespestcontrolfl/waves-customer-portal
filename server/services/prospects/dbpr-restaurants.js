@@ -73,8 +73,10 @@ function syncDisabled(env = process.env) {
 
 // ── Parsers (pure) ──────────────────────────────────────────────
 
+// PostgreSQL text and jsonb refuse a NUL character, and one in any field would fail its whole insert batch: it
+// becomes a space here, where every stored text value passes.
 const clean = (v, max) => {
-  const s = String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
+  const s = String(v == null ? '' : v).replaceAll('\0', ' ').replace(/\s+/g, ' ').trim();
   return (max ? s.slice(0, max) : s) || null;
 };
 
