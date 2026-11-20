@@ -1256,6 +1256,22 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       await expect(findUnmintedSetupFeeObligation({ sourceEstimateId: est.id, customerId, visitPlanRow: first }, trx)).resolves.toMatchObject({ owed: true });
     });
 
+    test('a yes whose time moved (a recording recovery) is not the word the card shows: an old preview is refused, and the sweep rewrites the card', async () => {
+      const { card } = await filed();
+      const before = await listed(card.id);
+      expect(before.call_phone_yes).toMatchObject({ can_accept: true });
+      // The same call and the same words, read again as a post-call row: its derived start moves ten minutes earlier.
+      await trx('call_log').where({ id: payloadOf(card).yes_call_log_id })
+        .update({ metadata: JSON.stringify({ source: 'twilio_recording_status_recovered' }), duration_seconds: 600 });
+      expect((await listed(card.id)).call_phone_yes).toMatchObject({ can_accept: false, preview_token: null });
+      const out = await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: card.updated_at, preview_token: before.call_phone_yes.preview_token });
+      expect(out.status).toBe(409);
+      await sweep();
+      const [rewritten] = await cards(card.call_log_id);
+      expect(payloadOf(rewritten).yes_at).not.toBe(payloadOf(card).yes_at);
+      expect((await listed(card.id)).call_phone_yes).toMatchObject({ can_accept: true });
+    });
+
     test('the terms warning is read live: an estimate re-priced after its last delivery shows it before the tap (the shadow line is from filing)', async () => {
       const { est, card } = await filed();
       expect((await listed(card.id)).call_phone_yes).toMatchObject({ can_accept: true, terms_note: null });
@@ -1341,6 +1357,15 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
         const expectedUpdatedAt = await version();
         return trx.transaction((t) => step({ expectedUpdatedAt, ...over })(t, { estimate: estimateRow }));
       };
+      // Another transaction holds the property-preferences lock (a property-role change takes it before customer-comms):
+      // the step refuses at once, never waiting while the accept holds customer-comms.
+      const other = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
+      try {
+        await other.transaction(async (o) => {
+          await o.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+          await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'customer_busy' });
+        });
+      } finally { await other.destroy(); }
       // The card: another version than the screen showed, closed by another admin, or not naming this estimate.
       await expect(run({ expectedUpdatedAt: new Date(Date.now() - DAY) })).rejects.toMatchObject({ phoneYesRefusal: 'card_changed' });
       await trx('triage_items').where({ id: card.id }).update({ status: 'dismissed' });
@@ -1411,7 +1436,10 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     test('the price step refuses a short schedule, a price it cannot resolve, a series the converter did not book, and a price decision on the series', async () => {
       const { customerId, est, visitId } = await phoneYes();
       const visitRow = await trx('scheduled_services').where({ id: visitId }).first();
-      const run = (conversion, shown = PER_VISIT) => trx.transaction((t) => PhoneYesPrivate.priceSeriesStepForTest({ customerId, visit: visitRow, seen: {}, shown })(t, { estimate: est, conversion }));
+      const shownPlan = { perVisit: PER_VISIT, cadence: 'quarterly' };
+      const run = (conversion, shown = shownPlan) => trx.transaction((t) => PhoneYesPrivate.priceSeriesStepForTest({ customerId, visit: visitRow, seen: {}, shown })(t, { estimate: est, conversion }));
+      // The card's cadence names cover every cadence the seeder books.
+      expect(Object.keys(PhoneYesPrivate.PEST_CADENCE_PLANS).sort()).toEqual(Object.keys(require('../services/estimate-converter').PEST_CADENCE_CATALOG_KEYS).sort());
       const conversion = { membershipEmail: { perApplicationAmount: PER_VISIT }, recurringScheduleCheck: { ok: true, gaps: [] } };
       // The converter's own check found the plan short of visits (or could not run): nothing is priced.
       await expect(run({ ...conversion, recurringScheduleCheck: { ok: false, gaps: [{ kind: 'missing_application' }] } }))
@@ -1422,7 +1450,7 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       await trx('customers').where({ id: customerId }).update({ billing_mode: 'per_application', per_application_fee: PER_VISIT });
       await expect(run({ ...conversion, membershipEmail: { perApplicationAmount: null } })).rejects.toMatchObject({ phoneYesRefusal: 'price_unresolved' });
       // A converter price that is not the one the card showed before the tap (planTermsOf).
-      await expect(run(conversion, PER_VISIT + 1)).rejects.toMatchObject({ phoneYesRefusal: 'price_not_shown' });
+      await expect(run(conversion, { ...shownPlan, perVisit: PER_VISIT + 1 })).rejects.toMatchObject({ phoneYesRefusal: 'plan_not_shown' });
       // The visit is still a one-off: no series was booked from it.
       await expect(run(conversion)).rejects.toMatchObject({ phoneYesRefusal: 'series_not_booked' });
       expect((await trx('scheduled_services').where({ id: visitId }).first()).estimated_price).toBeNull();
@@ -1447,6 +1475,8 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       await trx('scheduled_services').where({ id: childId }).update({ self_pay_override: true });
       await expect(run(conversion)).rejects.toMatchObject({ phoneYesRefusal: 'visit_payer' });
       await trx('scheduled_services').where({ id: childId }).update({ self_pay_override: false });
+      // A series booked on another cadence than the card showed (the card named the plan by the line's visit count).
+      await expect(run(conversion, { ...shownPlan, cadence: 'monthly' })).rejects.toMatchObject({ phoneYesRefusal: 'plan_not_shown' });
       // A clean series is stamped at the plan price.
       await run(conversion);
       const stamped = await trx('scheduled_services').whereIn('id', [visitId, childId]).select('estimated_price');

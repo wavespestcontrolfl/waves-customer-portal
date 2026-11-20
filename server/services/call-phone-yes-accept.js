@@ -62,6 +62,15 @@ const SETTLED_ESTIMATE_STATUSES = ['accepted', 'declined'];
 // hand (estimate-accept-effects membershipFeeLine; one-time work rows never carry this name).
 const MEMBERSHIP_FEE_LINE_NAME = 'WaveGuard membership fee';
 const PEST_FAMILY = new Set(['pest_control']);
+// Each pest cadence the seeder books (estimate-converter PEST_CADENCE_CATALOG_KEYS), its visits a year and the card's
+// name for it. The card names the plan by the line's visit count; the accept checks the booked parent's
+// recurring_pattern against it (priceSeriesStep).
+const PEST_CADENCE_PLANS = {
+  quarterly: { visits: 4, plan: 'Quarterly plan' },
+  bimonthly: { visits: 6, plan: 'Every-other-month plan' },
+  monthly: { visits: 12, plan: 'Monthly plan' },
+  semiannual: { visits: 2, plan: 'Twice-a-year plan' },
+};
 
 // `?.() === true`: a test's whole-module gate mock without this reader reads as off (the #7910 pattern).
 const live = () => require('../config/feature-gates').callPhoneYesAcceptLive?.() === true;
@@ -572,8 +581,9 @@ async function yesState(card, { customerId, ids, since }, conn = db) {
   }
   // The yes the card shows must be the customer's latest word, from the same call with the same words.
   const now = heardFields(heard.yes, { noYes: heard.noYes });
-  const same = !stale && ['yes_heard', 'yes_rechecking', 'yes_call_log_id', 'caller_words', 'no_yes_reason']
-    .every((k) => now[k] === (typeof now[k] === 'boolean' ? p[k] === true : (p[k] ?? null)));
+  // WORD_FIELDS, the yes time included: a recording recovery can move the same call's start, and with it the terms
+  // warning (termsMayDiffer reads the yes time).
+  const same = !stale && WORD_FIELDS.every((k) => now[k] === (typeof now[k] === 'boolean' ? p[k] === true : (p[k] ?? null)));
   return same ? null : { refresh: heard.yes, noYes: heard.noYes };
 }
 
@@ -742,7 +752,8 @@ const TAP_UNAVAILABLE = {
   word_changed: "The caller's word changed since the card loaded. Reload and look again.",
   word_not_current: "The caller's words on the card are not the latest word about this estimate. Reload in 10 minutes, or accept it from the estimate.",
   catalog_busy: 'The service catalog is being updated. Try again in a minute.',
-  price_not_shown: "The plan's per-visit price would not be the one the card showed. Accept it from the estimate instead.",
+  plan_not_shown: "The plan's visits or per-visit price would not be the ones the card showed. Accept it from the estimate instead.",
+  customer_busy: 'Another change to this customer is being saved. Try again in a minute.',
   accept_failed: 'The accept failed. Try again, or accept it from the estimate.',
 };
 const whyNot = (reason) => TAP_UNAVAILABLE[reason] || REASONS[reason] || TAP_UNAVAILABLE.accept_failed;
@@ -763,13 +774,15 @@ function tapPreviewTokenOf(evaluation, terms) {
   const facts = [
     String(evaluation.estimate.id), Manual.estimateRowPin(evaluation.estimate),
     String(evaluation.visit.id), Manual.bookedVisitsPinOf([evaluation.visit]),
-    terms ? [terms.plan, cents(terms.perVisit)] : null,
+    // The caller's word with its time: a yes that moved (a recording recovery) can change the terms warning.
+    tapWordOf(evaluation).key,
+    terms ? [terms.cadence, cents(terms.perVisit)] : null,
   ];
   return require('crypto').createHash('sha256').update(JSON.stringify(facts)).digest('hex').slice(0, 32);
 }
 
 // The caller's word as one comparable string: the card's yes fields (the ones the sweep compares, yesState).
-const WORD_FIELDS = ['yes_heard', 'yes_rechecking', 'yes_call_log_id', 'caller_words', 'no_yes_reason'];
+const WORD_FIELDS = ['yes_heard', 'yes_rechecking', 'yes_call_log_id', 'yes_at', 'caller_words', 'no_yes_reason'];
 const wordKeyOf = (f) => JSON.stringify(WORD_FIELDS.map((k) => (k === 'yes_heard' || k === 'yes_rechecking' ? f[k] === true : (f[k] ?? null))));
 // The word the evaluation read, and its window, for the tap to read again under its lock.
 function tapWordOf(evaluation) {
@@ -821,8 +834,10 @@ async function tapCheck(shown, { now }) {
 // The plan the tap accepts and its per-visit price, by the converter's own rule for one recurring unit
 // (estimate-converter.js perApplicationChargeForAccept): the accepted cadence, else the one the estimate's data implies;
 // billing-cadence.js resolveBillingCadence and perApplicationChargeAmount on the row's monthly and annual totals; the
-// pest selection's visit count, else the line's. The accept pins it: priceSeriesStep refuses a converter price that
-// differs, so the price the card shows is the price the plan's visits carry. Null when no price can be read.
+// pest selection's visit count, else the line's. The plan is named by that visit count, the one both price rules
+// divide by (the billing cadence's own name can differ: a legacy top-level frequency beside the pest line's). The
+// accept pins both: priceSeriesStep refuses a converter price or a booked cadence that differs, so the card shows the
+// plan the visits are booked and priced on. Null when either cannot be read.
 function planTermsOf(estimate) {
   const BillingCadence = require('./billing-cadence');
   const Converter = require('./estimate-converter');
@@ -834,12 +849,12 @@ function planTermsOf(estimate) {
   const monthlyRate = parseFloat(estimate.monthly_total || 0);
   const annualRate = parseFloat(estimate.annual_total || 0);
   const billingCadence = BillingCadence.resolveBillingCadence({ monthlyRate, annualRate, frequencyKey, estimateData: data, fallbackFrequencyKey: frequencyKey });
+  const visits = Number(Converter.acceptedPestSelectionVisits(unit, selected) ?? Converter.visitsPerYearForRecurringService(unit));
   const perVisit = Number(BillingCadence.perApplicationChargeAmount({
-    billingCadence, annualRate, monthlyRate,
-    visitsPerYear: Converter.acceptedPestSelectionVisits(unit, selected) ?? Converter.visitsPerYearForRecurringService(unit),
-    serviceKey: Converter.recurringServiceKey(unit),
+    billingCadence, annualRate, monthlyRate, visitsPerYear: visits, serviceKey: Converter.recurringServiceKey(unit),
   }));
-  return perVisit > 0 ? { plan: billingCadence.planLabel, perVisit } : null;
+  const cadence = Object.keys(PEST_CADENCE_PLANS).find((key) => PEST_CADENCE_PLANS[key].visits === visits);
+  return perVisit > 0 && cadence ? { plan: PEST_CADENCE_PLANS[cadence].plan, cadence, perVisit } : null;
 }
 
 // The WaveGuard membership fee, when the estimate carries one. The standard accept bills no setup fee, and completion
@@ -903,7 +918,12 @@ function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdat
     // and address saves), then the call's triage lock (admin-triage.js: the customer row before the call lock). Under
     // the triage lock no sweep rewrites or closes the card, and no other action settles it, until this accept commits
     // or rolls back.
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+    // The property-preferences lock is taken WITHOUT waiting: the accept already holds customer-comms, and a
+    // property-role change takes property-preferences first and then waits for customer-comms
+    // (property-role-proposals.js), so a wait here could deadlock. A held lock refuses (customer_busy); the other change
+    // finishes, and the office taps again. Taken, it is this transaction's: the converter's own take later is immediate.
+    const pp = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS ok', ['property-preferences', String(customerId)]);
+    if (pp.rows?.[0]?.ok !== true) throw stop('customer_busy');
     await require('../utils/customer-comms-lock').lockCustomerComms(trx, customerId);
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
     await lockTriageCall(trx, bookingCallId);
@@ -975,7 +995,7 @@ function priceSeriesStep({ customerId, visit, seen, shown }) {
     const customer = await trx('customers').where({ id: customerId, billing_mode: 'per_application' }).first('per_application_fee');
     if (!(amount > 0) || cents(customer?.per_application_fee) !== cents(amount)) throw stop('price_unresolved');
     // The price the card showed before the tap (planTermsOf), and no other.
-    if (cents(amount) !== cents(shown)) throw stop('price_not_shown');
+    if (cents(amount) !== cents(shown?.perVisit)) throw stop('plan_not_shown');
     // The series: the visit as a recurring parent linked to the estimate on a pest cadence catalog row, its next visits
     // on the same row, and no other visit linked to the estimate.
     const { PEST_CADENCE_CATALOG_KEYS } = require('./estimate-converter');
@@ -989,6 +1009,8 @@ function priceSeriesStep({ customerId, visit, seen, shown }) {
     // The catalog row of the cadence booked, not only some pest cadence row: the converter can keep a visit's own
     // service when the cadence's row is missing, so a quarterly series could carry a monthly identity.
     if (!parent || PEST_CADENCE_CATALOG_KEYS[parent.recurring_pattern] !== parent.service_key) throw stop('series_not_booked');
+    // The cadence the card showed, and no other.
+    if (parent.recurring_pattern !== shown?.cadence) throw stop('plan_not_shown');
     const children = await trx('scheduled_services').where({ recurring_parent_id: parent.id })
       .select('id', 'service_id', 'payer_id', 'self_pay_override', ...MONEY_FIELDS);
     const series = [parent, ...children];
@@ -1065,7 +1087,7 @@ async function acceptPhoneYesCard({ item, adminUserId = null, previewToken = nul
         visit, customerId, bookingCallId: item.call_log_id, cardId: item.id, expectedUpdatedAt, word,
       }),
       beforeCommit: async (trx, ctx) => {
-        await priceSeriesStep({ customerId, visit, seen, shown: terms.perVisit })(trx, ctx);
+        await priceSeriesStep({ customerId, visit, seen, shown: terms })(trx, ctx);
         // The caller's word, read again last, with its calls locked through the commit.
         await wordStillStep({ customerId, word })(trx);
         // The card closes with the accept, in its transaction: a card another admin closed or changed since rolls the
@@ -1110,6 +1132,6 @@ module.exports = {
     fileCardForTest: fileCard, applyCardStateForTest: applyCardState,
     // The tap's two steps inside the accept, driven directly.
     linkVisitStepForTest: linkVisitStep, priceSeriesStepForTest: priceSeriesStep, wordStillStepForTest: wordStillStep, tapWordOfForTest: tapWordOf,
-    lockCustomerEstimatesForTest: lockCustomerEstimates,
+    lockCustomerEstimatesForTest: lockCustomerEstimates, PEST_CADENCE_PLANS,
   },
 };
