@@ -412,7 +412,7 @@ describe("Reviews workspace foundation", () => {
       const path = String(url);
       if (options.method === "POST") {
         posts.push({ path, body: JSON.parse(options.body || "{}") });
-        return response({ success: true });
+        return response({ success: true, updated: 1, skippedOverCap: 2 });
       }
       if (path.includes("/admin/reviews/incentives/attribution-queue?")) return response({ items: [] });
       if (path.includes("/admin/reviews/incentives?")) {
@@ -435,5 +435,6 @@ describe("Reviews workspace foundation", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Mark Pending Paid/ }));
     await waitFor(() => expect(posts.map((p) => p.path)).toEqual(["/api/admin/reviews/incentives/mark-paid"]));
     expect(posts[0].body).toEqual({ ids: ["p-ok"] });
+    expect(await screen.findByText("Marked 1 paid; 2 skipped (over the monthly cap)")).toBeInTheDocument();
   });
 });

@@ -532,6 +532,30 @@ postgres('payroll review bonus import', () => {
       expect(await markPaid([b], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 0, skippedOverCap: 1 });
     });
 
+    it('savePolicy refuses a bad value in any field with a 422 and leaves the stored cap 15 alone', async () => {
+      await storePolicy(JSON.stringify({ enabled: true, amountCents: 1500, monthlyCapCount: 15 }));
+      const stored = async () => (await trx('system_settings').where({ key: POLICY_ROW.key }).first()).value;
+      const before = await stored();
+      const bad = {
+        enabled: ['true', {}], amountCents: [{}, [], NaN, '12abc', -1, 2.5], currency: [{}, 'US'],
+        minRating: [{}, '3', 9], requireCustomerMatchForGoogle: ['no', {}], programStartsAt: [{}, 'junk'],
+        monthlyCapCount: [{}, [], NaN, '15x', 0, 5000],
+      };
+      for (const [field, values] of Object.entries(bad)) {
+        for (const value of values) {
+          await expect(savePolicy({ [field]: value }, trx)).rejects.toMatchObject({ code: 'review_policy_invalid', statusCode: 422 });
+        }
+      }
+      expect(await stored()).toBe(before);
+      expect(await getPolicyStrict(trx)).toMatchObject({ monthlyCapCount: 15, amountCents: 1500 });
+      // A stored row holding a bad field is unreadable to a payment, like a garbled one.
+      await storePolicy(JSON.stringify({ monthlyCapCount: { x: 1 } }));
+      const bonusTech = await readyTech('Sample Alpha');
+      const bonus = await payout(bonusTech, '2026-09-15T15:00:00Z');
+      await expect(markPaid([bonus], { conn: trx, paidBy: ADMIN_ID })).rejects.toMatchObject({ code: 'review_policy_malformed' });
+      expect((await payoutRow(bonus)).status).toBe('earned');
+    });
+
     it('the dashboard and the CSV export fail when the policy cannot be read', async () => {
       await readyTech('Sample Alpha');
       await trx.raw('alter table system_settings rename to system_settings_unreadable');

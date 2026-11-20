@@ -1575,4 +1575,36 @@ describe('monthly cap policy (owner 2026-11-20 D4)', () => {
     const failing = () => ({ where: () => ({ first: async () => { throw new Error('connection lost'); } }) });
     await expect(ReviewIncentives.getPolicyStrict(failing)).rejects.toThrow('connection lost');
   });
+
+  test('validatePolicyStrict refuses a bad value in any field and never coerces', () => {
+    const { validatePolicyStrict } = ReviewIncentives;
+    const bad = {
+      enabled: ['true', 1, {}, []],
+      amountCents: ['500', {}, [], NaN, Infinity, -1, 2.5, '12abc'],
+      currency: [5, {}, 'US', 'USDX'],
+      eligibleSources: ['google_review', {}, [1]],
+      minRating: ['3', {}, 0, 6, 2.5, NaN],
+      requireCustomerMatchForGoogle: ['yes', 0, {}],
+      programStartsAt: [{}, [], 5, 'not a date', '2026-13-45'],
+      monthlyCapCount: ['15', '12abc', {}, [], NaN, 0, 2.5, 1001],
+    };
+    for (const [field, values] of Object.entries(bad)) {
+      for (const value of values) {
+        let thrown = null;
+        try { validatePolicyStrict({ monthlyCapCount: 15, [field]: value }); } catch (err) { thrown = err; }
+        expect([field, String(value), thrown?.code, thrown?.statusCode]).toEqual([field, String(value), 'review_policy_invalid', 422]);
+      }
+    }
+    expect(validatePolicyStrict({ monthlyCapCount: 15, programStartsAt: '2026-01-01T00:00:00Z', note: 'kept' }))
+      .toMatchObject({ monthlyCapCount: 15, amountCents: 500, programStartsAt: '2026-01-01T00:00:00.000Z', note: 'kept' });
+    expect(validatePolicyStrict({ monthlyCapCount: null, programStartsAt: null }).monthlyCapCount).toBeNull();
+    expect(() => validatePolicyStrict([])).toThrow(expect.objectContaining({ code: 'review_policy_invalid' }));
+  });
+
+  test('getPolicyStrict treats a stored row with a bad field as unreadable', async () => {
+    await expect(ReviewIncentives.getPolicyStrict(storedRow('{"monthlyCapCount":"15"}')))
+      .rejects.toMatchObject({ code: 'review_policy_malformed' });
+    await expect(ReviewIncentives.getPolicyStrict(storedRow({ amountCents: {} })))
+      .rejects.toMatchObject({ code: 'review_policy_malformed' });
+  });
 });

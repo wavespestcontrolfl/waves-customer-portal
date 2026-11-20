@@ -184,6 +184,43 @@ async function getPolicy(conn = db) {
   }
 }
 
+// One strict validator for the review bonus policy (owner 2026-11-20 D4). Every known field is checked by
+// type first, then range; no coercion (a numeric string, an object, NaN or "12abc" is refused). Unknown keys
+// pass through as the lenient parser lets them. Used on a save (the patch and the merged result), on the
+// stored row, and so on every payment read.
+const POLICY_FIELD_CHECKS = {
+  enabled: (v) => typeof v === 'boolean',
+  amountCents: (v) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0,
+  currency: (v) => typeof v === 'string' && /^[A-Za-z]{3}$/.test(v),
+  eligibleSources: (v) => Array.isArray(v) && v.every((source) => typeof source === 'string'),
+  minRating: (v) => typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 5,
+  requireCustomerMatchForGoogle: (v) => typeof v === 'boolean',
+  programStartsAt: (v) => v === null || (typeof v === 'string' && normalizedIsoDate(v) !== null),
+  monthlyCapCount: (v) => v === null || (typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 1000),
+};
+
+/** Checks the fields present in `fields` and returns them normalized; throws a 422 on any bad one. */
+function checkPolicyFields(fields) {
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    throw operationalError('The review bonus settings must be an object', 422, 'review_policy_invalid');
+  }
+  const checked = {};
+  for (const [name, value] of Object.entries(fields)) {
+    const check = POLICY_FIELD_CHECKS[name];
+    if (value === undefined) continue;
+    if (check && !check(value)) {
+      throw operationalError(`The review bonus setting "${name}" is not valid`, 422, 'review_policy_invalid');
+    }
+    checked[name] = name === 'programStartsAt' && value !== null ? normalizedIsoDate(value) : value;
+  }
+  return checked;
+}
+
+/** A whole policy: absent fields take the defaults, every present field must be valid. Throws on a bad one. */
+function validatePolicyStrict(fields) {
+  return { ...DEFAULT_POLICY, ...checkPolicyFields(fields), eligibleSources: PAYOUT_ELIGIBLE_SOURCES };
+}
+
 /**
  * The policy for a payment decision. Unlike getPolicy it THROWS on a database error and on a stored
  * row that is not a decodable policy object (malformed JSON, an array, a scalar): a failed or garbled
@@ -202,7 +239,12 @@ async function getPolicyStrict(conn = db, key = POLICY_KEY) {
   if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) {
     throw operationalError('The review bonus policy is stored in a form that cannot be read', 500, 'review_policy_malformed');
   }
-  return parsePolicy(decoded);
+  try {
+    return validatePolicyStrict(decoded);
+  } catch (err) {
+    if (err.code !== 'review_policy_invalid') throw err;
+    throw operationalError(`The stored review bonus policy cannot be read (${err.message})`, 500, 'review_policy_malformed');
+  }
 }
 
 /**
@@ -257,7 +299,9 @@ async function savePolicy(rawPatch = {}, conn = db, { key = POLICY_KEY } = {}) {
   // 2026-11-20 D4). A failed read must not overwrite a stored cap with the defaults. While the stored
   // row is unreadable a partial patch is refused: only an explicit full replacement (replace: true
   // with every field) overwrites it.
-  const { replace = false, ...policyPatch } = rawPatch || {};
+  const { replace = false, ...rawFields } = rawPatch || {};
+  // A bad field is refused (422) before anything is read or written: the stored row stays as it was.
+  const policyPatch = checkPolicyFields(rawFields);
   return conn.transaction(async (trx) => {
     await lockPolicy(trx, { key });
     let current;
@@ -277,7 +321,7 @@ async function savePolicy(rawPatch = {}, conn = db, { key = POLICY_KEY } = {}) {
       }
       current = {};
     }
-    const policy = parsePolicy({ ...current, ...policyPatch });
+    const policy = validatePolicyStrict({ ...current, ...policyPatch });
     const now = new Date();
     await trx('system_settings')
       .insert({
@@ -1932,6 +1976,7 @@ module.exports = {
   withMonthRank,
   isOverMonthlyCap,
   getPolicyStrict,
+  validatePolicyStrict,
   getPolicyForPayment,
   lockPolicy,
   lockPayoutRows,

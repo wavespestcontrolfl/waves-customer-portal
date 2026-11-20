@@ -830,6 +830,19 @@ function monthlyCapLabel(policy) {
     ? `${policy.monthlyCapCount} reviews a month`
     : "No monthly cap";
 }
+// Owner 2026-11-20 D4: say so when the server skipped payouts over the monthly cap.
+function paidNoticeFor(result) {
+  if (!(result?.skippedOverCap > 0)) return null;
+  return `Marked ${result.updated || 0} paid; ${result.skippedOverCap} skipped (over the monthly cap)`;
+}
+function PaidNotice({ text }) {
+  if (!text) return null;
+  return (
+    <Card className="p-[12px] mb-[14px] text-ui-body text-zinc-900" role="status">
+      {text}
+    </Card>
+  );
+}
 function payoutStatusLabel(p) {
   if (p.status === "paid") return "Paid";
   return p.overMonthlyCap ? "Over monthly cap — not paid" : "Pending";
@@ -1025,6 +1038,7 @@ function ReviewIncentivesPanel() {
   const [markingPaid, setMarkingPaid] = useState(false);
   const [readError, setReadError] = useState(null);
   const [actionError, setActionError] = useState(null);
+  const [paidNotice, setPaidNotice] = useState(null);
   const [queue, setQueue] = useState([]);
   const [queueLoading, setQueueLoading] = useState(false);
   const [activeRepairId, setActiveRepairId] = useState(null);
@@ -1104,11 +1118,13 @@ function ReviewIncentivesPanel() {
     setQueueLoading(false);
     setMarkingPaid(true);
     setActionError(null);
+    setPaidNotice(null);
     try {
-      await adminFetch("/admin/reviews/incentives/mark-paid", {
+      const result = await adminFetch("/admin/reviews/incentives/mark-paid", {
         method: "POST",
         body: JSON.stringify({ ids }),
       });
+      setPaidNotice(paidNoticeFor(result));
       load();
     } catch (e) {
       setActionError(e.message);
@@ -1328,6 +1344,7 @@ function ReviewIncentivesPanel() {
           {actionError}
         </Card>
       )}
+      <PaidNotice text={paidNotice} />
 
       {loading ? (
         <div className="text-ink-secondary p-[48px] text-center">
