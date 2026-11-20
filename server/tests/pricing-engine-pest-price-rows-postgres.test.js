@@ -29,7 +29,21 @@ postgres('recurring pest price rows (live Postgres)', () => {
     const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
     const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
     if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
-    database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
+    // The driver copies every query parameter of a connection string into its settings, so ?host=, ?port= or
+    // ?connectionString= would name another server than the one checked above. A URL with a query is refused,
+    // and the pool gets the parts this guard read, never the URL text.
+    if (target.search) throw new Error('DATABASE_URL must not carry query parameters');
+    database = require('knex')({
+      client: 'pg',
+      connection: {
+        host: target.hostname,
+        port: target.port ? Number(target.port) : undefined,
+        user: decodeURIComponent(target.username) || undefined,
+        password: decodeURIComponent(target.password) || undefined,
+        database: target.pathname.slice(1),
+      },
+      pool: { min: 0, max: 2 },
+    });
   });
 
   afterAll(async () => {
