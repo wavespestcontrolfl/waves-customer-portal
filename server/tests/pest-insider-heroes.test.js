@@ -177,6 +177,19 @@ describe('taking new art', () => {
     expect(validateHeroes(JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8'))).T03.artFile).toBe(`t03-${now.T03.art}.webp`);
   }, 60000);
 
+  test('refuses a heroes file that is already broken, and removes nothing (an old art value never names a path)', async () => {
+    fs.writeFileSync(path.join(input, 't03.png'), await t03png(true));
+    const raw = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8'));
+    raw.heroes.T03 = { art: '../../canary' };
+    fs.writeFileSync(path.join(root, MANIFEST), JSON.stringify(raw));
+    fs.writeFileSync(path.join(root, 'canary.webp'), 'keep me');
+    const before = state();
+    const refused = run('--execute');
+    expect([refused.status, refused.stderr]).toEqual([1, expect.stringContaining('T03: art must be null or')]);
+    expect(state()).toEqual(before);
+    expect(fs.readFileSync(path.join(root, 'canary.webp'), 'utf8')).toBe('keep me');
+  }, 60000);
+
   test('runs one import at a time: while another holds the lock, it stops and writes nothing', async () => {
     fs.writeFileSync(path.join(input, 't03.png'), await t03png(true));
     fs.writeFileSync(path.join(root, `${MANIFEST}.lock`), '1\n');

@@ -83,8 +83,10 @@ function heroesFileText(raw) {
 const tempName = (file, tag) => path.join(path.dirname(file), `.${path.basename(file)}.${tag}.tmp`);
 const readHeroes = () => JSON.parse(fs.readFileSync(HEROES_FILE, 'utf8'));
 
-// The heroes file with this batch's art, checked by heroes.js.
+// The heroes file with this batch's art, checked by heroes.js. The current
+// file is checked first: its old art hashes name the files removed later.
 function merged(raw, batch) {
+  validateHeroes(raw);
   const next = { ...raw, heroes: { ...raw.heroes } };
   for (const item of batch) next.heroes[item.id] = { art: item.art };
   validateHeroes(next);
@@ -117,7 +119,8 @@ function removeOldArt(raw, next, batch, artDir) {
   const named = new Set(Object.entries(next.heroes).filter(([, h]) => h.art).map(([id, h]) => `${id.toLowerCase()}-${h.art}.webp`));
   for (const item of batch) {
     const old = raw.heroes[item.id] && raw.heroes[item.id].art;
-    const oldFile = old ? `${item.id.toLowerCase()}-${old}.webp` : null;
+    // only a checked hash names a file: 16 hex, no path in it
+    const oldFile = /^[0-9a-f]{16}$/.test(String(old)) ? `${item.id.toLowerCase()}-${old}.webp` : null;
     if (!oldFile || named.has(oldFile)) continue;
     try {
       fs.rmSync(path.join(artDir, oldFile), { force: true });
