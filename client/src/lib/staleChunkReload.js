@@ -58,7 +58,7 @@
 
 import { isAdminPath } from './adminBookmarkMeta';
 import {
-  browserOffline, isPageUse, PAGE_USE_EVENTS, reloadBlocker, selfReloadBarred, waitForWork,
+  isPageUse, PAGE_USE_EVENTS, reloadBlocker, selfReloadBarred, waitForWork,
 } from './portalReload';
 
 export const CHUNK_RELOAD_FLAG = 'chunk-reload-attempted';
@@ -280,11 +280,13 @@ function selfReloadRuledOut() {
 // Whether a screen for missing staff code (App.jsx, components/LazyPanel.jsx)
 // says the portal has a new version: only when the server names a newer
 // build (`newer`, lib/portalVersion.js), as for the Reload bar, the device is
-// online, and the one reload for a missing chunk has not run here. A chunk
-// can also fail from an asset fault or an outage; then the screen asks to
-// check the connection.
-export function missingCodeIsNewVersion(newer) {
-  if (!newer || browserOffline()) return false;
+// online (`offline`: false), and the one reload for a missing chunk has not
+// run here. A chunk can also fail from an asset fault or an outage; then the
+// screen asks to check the connection. The screens pass both from
+// subscriptions (useNewerBuild, useBrowserOffline in PortalUpdate.jsx), so
+// the text changes while it shows.
+export function missingCodeIsNewVersion(newer, offline) {
+  if (!newer || offline) return false;
   try {
     return !chunkReloadAttempted();
   } catch {

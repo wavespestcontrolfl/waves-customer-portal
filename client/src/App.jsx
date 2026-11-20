@@ -5,7 +5,7 @@ import {
   CHUNK_RELOAD_FLAG, isChunkError, isStaleChunkReloadPending, markStaleChunkReloadPending, missingCodeIsNewVersion,
   noteChunkLoaded, reloadForMissingCode, staffTab, takeChunkReload, usedOnThisStaffPage,
 } from './lib/staleChunkReload';
-import { PortalUpdateBar, PortalUpdateGate, useHoldAwareReload, useNewerBuild, usePageUsed } from './components/PortalUpdate';
+import { PortalUpdateBar, PortalUpdateGate, useBrowserOffline, useHoldAwareReload, useNewerBuild, usePageUsed } from './components/PortalUpdate';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
 import { CUSTOMER_SURFACE } from './theme-customer';
@@ -275,7 +275,7 @@ import BiometricGate from './components/BiometricGate';
 import PublicFunnelTracking from './components/analytics/PublicFunnelTracking';
 import useAdminBookmarkMeta from './hooks/useAdminBookmarkMeta';
 import useAdminViewport from './hooks/useAdminViewport';
-import { isAdminPath, isFieldPath } from './lib/adminBookmarkMeta';
+import { isAdminPath, isFieldPath, routerPath } from './lib/adminBookmarkMeta';
 import AdminTabRedirect from './components/admin/AdminTabRedirect';
 // Static, not lazy: on a phone the Settings tab is the one full admin menu, and
 // the service worker caches a lazy page only after a first visit, so a lazy
@@ -311,9 +311,9 @@ function showReloadToast() {
 // page move, it asks once about the page too, as the bar does after a use.
 function ChunkLoadFallback({ newVersion = false }) {
   // A staff page in view or at the address (staffTab: Back changes the
-  // address before the routes render), or a /tech URL. Case-insensitive, as
-  // the routes match: /ADMIN/... is a staff page too.
-  const operatorPath = staffTab() || /^\/tech(\/|$)/i.test(window.location.pathname);
+  // address before the routes render), or a /tech URL. Both are read as the
+  // routes match them (routerPath): /ADMIN/... is a staff page too.
+  const operatorPath = staffTab() || /^\/tech(\/|$)/.test(routerPath(window.location.pathname));
   const { named, heldText, tryReload, clearNamed } = useHoldAwareReload(null, clearChunkReloadFlag);
   // The staff layout can stay around this screen, the Ask Waves draft
   // included: a use of the page clears what the button named, so it asks
@@ -390,7 +390,7 @@ function RouteFallback({ label = 'Loading...' }) {
 // screen asks to check the connection.
 function MissingPageCode() {
   const [blocker, setBlocker] = useState(null);
-  const newVersion = missingCodeIsNewVersion(useNewerBuild());
+  const newVersion = missingCodeIsNewVersion(useNewerBuild(), useBrowserOffline());
   useEffect(() => {
     let current = true;
     reloadForMissingCode({ current: () => current }).then((reason) => {

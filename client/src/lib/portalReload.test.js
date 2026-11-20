@@ -52,6 +52,7 @@ describe('reloadDueAtMove', () => {
     expect(reloadDueAtMove('/admin', NOW, '/admin/pipeline')).toBe(false);
     expect(reloadDueAtMove('/admin/', NOW, '/admin/pipeline')).toBe(false);
     expect(reloadDueAtMove('/Admin', NOW, '/admin/pipeline')).toBe(false);
+    expect(reloadDueAtMove('/%61dmin', NOW, '/admin/pipeline')).toBe(false);
     // The dashboard landing reloads. Today, for a technician or with Field
     // view on, does not.
     expect(reloadDueAtMove('/admin/dashboard', NOW, '/admin')).toBe(true);
@@ -63,10 +64,14 @@ describe('reloadDueAtMove', () => {
     expect(reloadDueAtMove('/billing', NOW)).toBe(false);
     expect(reloadDueAtMove('/admin/today', NOW)).toBe(false);
     expect(reloadDueAtMove('/admin/today/visit/1', NOW)).toBe(false);
+    // Read as the routes match it: an encoded segment still opens Today.
+    expect(reloadDueAtMove('/admin/%74oday', NOW)).toBe(false);
+    expect(reloadDueAtMove('/%61dmin/dashboard', NOW)).toBe(true);
     // Nor at a move away from a field page: a time-clock punch there can
     // still be waiting for the location.
     expect(reloadDueAtMove('/admin/pipeline', NOW, '/admin/today')).toBe(false);
     expect(reloadDueAtMove('/admin/pipeline', NOW, '/admin/today/truck-check')).toBe(false);
+    expect(reloadDueAtMove('/admin/pipeline', NOW, '/%61dmin/today')).toBe(false);
     expect(reloadDueAtMove('/admin/pipeline', NOW, '/admin/dashboard')).toBe(true);
     platform.wavesAdmin = true;
     expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(false);

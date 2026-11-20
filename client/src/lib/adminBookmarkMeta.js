@@ -46,14 +46,31 @@ export const FIELD_BOOKMARK_META = {
 
 const FIELD_MANIFESTS = [FIELD_BOOKMARK_META.manifest, "/tech-manifest.json"];
 
-// Case-insensitive, as React Router matches /ADMIN/TODAY too (pre-push P1).
+// A path as React Router matches it: case-insensitive, with each segment
+// decoded (decodePath in @remix-run/router). An encoded "/" stays inside its
+// segment, and a path that does not decode stays as it is. So /ADMIN/TODAY,
+// /%61dmin/today and /admin/%74oday all open Today, and the predicates below
+// say so (pre-push P1s).
+export function routerPath(pathname) {
+  const path = String(pathname || "");
+  try {
+    return path
+      .split("/")
+      .map((segment) => decodeURIComponent(segment).replace(/\//g, "%2F"))
+      .join("/")
+      .toLowerCase();
+  } catch {
+    return path.toLowerCase();
+  }
+}
+
 export function isFieldPath(pathname) {
-  const path = String(pathname || "").toLowerCase();
+  const path = routerPath(pathname);
   return path === "/admin/today" || path.startsWith("/admin/today/");
 }
 
 export function isAdminPath(pathname) {
-  const path = String(pathname || "").toLowerCase();
+  const path = routerPath(pathname);
   return path === "/admin" || path.startsWith("/admin/");
 }
 

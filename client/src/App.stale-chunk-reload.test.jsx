@@ -785,6 +785,49 @@ describe('on a staff page', () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
+  // React Router decodes each segment before it matches: both addresses open
+  // a staff page, the second one Today (routerPath, lib/adminBookmarkMeta.js).
+  test('an encoded address is judged as the routes match it: held work keeps an encoded staff page, and an encoded field page never reloads by itself', () => {
+    vi.stubGlobal('location', { ...window.location, pathname: '/%61dmin/dashboard', reload });
+    holding = true;
+    const held = preloadErrorEvent();
+    handleVitePreloadError(held, reload);
+    expect(held.defaultPrevented).toBe(false);
+    holding = false;
+    vi.stubGlobal('location', { ...window.location, pathname: '/admin/%74oday', reload });
+    const field = preloadErrorEvent();
+    handleVitePreloadError(field, reload);
+    expect(field.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+  });
+
+  test('after the one reload, a /tech address, plain or encoded, gets the staff retry screen, not the customer one', async () => {
+    sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+    for (const pathname of ['/tech/route', '/%74ech/route']) {
+      vi.stubGlobal('location', { ...window.location, pathname, reload });
+      const view = renderInBoundary(lazyWithRetry(missingChunk));
+      expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Try Again' })).not.toBeInTheDocument();
+      view.unmount();
+    }
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('a page whose code is missing follows the device: back online with a newer build named, its screen says new version; offline again, it asks to check the connection', async () => {
+    const onLine = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    nameNewerBuild();
+    renderInBoundary(lazyWithRetry(missingChunk));
+    expect(await screen.findByText('Check your connection and try again.')).toBeInTheDocument();
+    onLine.mockReturnValue(true);
+    fireEvent(window, new Event('online'));
+    expect(screen.getByText('The portal has a new version.')).toBeInTheDocument();
+    onLine.mockReturnValue(false);
+    fireEvent(window, new Event('offline'));
+    expect(screen.getByText('Check your connection and try again.')).toBeInTheDocument();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
   test('a mixed-case staff URL gets the staff retry screen, which asks before it reloads', async () => {
     vi.stubGlobal('location', { ...window.location, pathname: '/ADMIN/Dashboard', reload });
     holding = true;

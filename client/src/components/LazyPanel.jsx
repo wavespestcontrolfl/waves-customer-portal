@@ -1,7 +1,6 @@
 import { lazy } from 'react';
-import { browserOffline } from '../lib/portalReload';
 import { isChunkError, isStaleChunkReloadPending, missingCodeIsNewVersion, staffTab } from '../lib/staleChunkReload';
-import { PortalReloadPrompt, useNewerBuild } from './PortalUpdate';
+import { PortalReloadPrompt, useBrowserOffline, useNewerBuild } from './PortalUpdate';
 
 // React.lazy for a part of a staff page: a tab, a panel, a sheet. A route's
 // page uses App.jsx's lazyWithRetry. When the live build no longer serves the
@@ -31,12 +30,14 @@ function PanelPending() {
 
 // It says the portal has a new version only when the server names a newer
 // build (missingCodeIsNewVersion). Offline, the part's code may be fine and
-// only out of reach; otherwise the cause is unknown. A part that loads its
-// code with its own import() shows it too (CustomersPageV2.jsx).
+// only out of reach; otherwise the cause is unknown. The text follows both
+// while it shows. A part that loads its code with its own import() shows it
+// too (CustomersPageV2.jsx).
 export function MissingPanelCode() {
-  const newVersion = missingCodeIsNewVersion(useNewerBuild());
+  const offline = useBrowserOffline();
+  const newVersion = missingCodeIsNewVersion(useNewerBuild(), offline);
   let message = 'This part of the page did not load. Check your connection and try again.';
-  if (browserOffline()) message = 'This part of the page did not load: this device is offline.';
+  if (offline) message = 'This part of the page did not load: this device is offline.';
   else if (newVersion) message = 'This part of the page did not load: the portal has a new version.';
   return (
     <PortalReloadPrompt

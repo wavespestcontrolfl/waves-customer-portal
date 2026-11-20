@@ -21,6 +21,7 @@ let reload;
 
 const PROMPT = 'This part of the page did not load: the portal has a new version.';
 const CONNECTION = 'This part of the page did not load. Check your connection and try again.';
+const OFFLINE = 'This part of the page did not load: this device is offline.';
 
 // The server names a newer build than this page loaded, as after a deploy
 // (lib/portalVersion.js). Only then does the prompt say new version.
@@ -85,11 +86,17 @@ test('a part whose code is missing on a held staff tab shows a Reload prompt in 
   expect(reload).not.toHaveBeenCalled();
 });
 
-test('offline, the prompt says the device is offline, not that the portal has a new version', async () => {
-  vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+test('offline, the prompt says the device is offline, not that the portal has a new version; it follows the device as it comes back and goes offline again', async () => {
+  const onLine = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
   nameNewerBuild();
   renderPage(lazyPanel(missingChunk));
-  expect(await screen.findByText('This part of the page did not load: this device is offline.')).toBeInTheDocument();
+  expect(await screen.findByText(OFFLINE)).toBeInTheDocument();
+  onLine.mockReturnValue(true);
+  fireEvent(window, new Event('online'));
+  expect(screen.getByText(PROMPT)).toBeInTheDocument();
+  onLine.mockReturnValue(false);
+  fireEvent(window, new Event('offline'));
+  expect(screen.getByText(OFFLINE)).toBeInTheDocument();
   expect(reload).not.toHaveBeenCalled();
 });
 

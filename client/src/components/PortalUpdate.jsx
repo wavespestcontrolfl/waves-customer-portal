@@ -3,7 +3,7 @@ import { useLocation, useNavigationType } from 'react-router-dom';
 import { Button } from './ui';
 import { isAdminPath, isFieldPath } from '../lib/adminBookmarkMeta';
 import { newerBuild, subscribePortalVersion } from '../lib/portalVersion';
-import { isPageUse, PAGE_USE_EVENTS, reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/portalReload';
+import { browserOffline, isPageUse, PAGE_USE_EVENTS, reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/portalReload';
 import { notePageInView, notePageMove } from '../lib/staleChunkReload';
 
 // Wraps the route tree (App.jsx). At a page move that is due a reload
@@ -137,6 +137,22 @@ export function usePageUsed(pathname, onUse) {
 // version (App.jsx, LazyPanel.jsx).
 export function useNewerBuild() {
   return useSyncExternalStore(subscribePortalVersion, newerBuild, () => null);
+}
+
+function subscribeOnlineState(listener) {
+  window.addEventListener('online', listener);
+  window.addEventListener('offline', listener);
+  return () => {
+    window.removeEventListener('online', listener);
+    window.removeEventListener('offline', listener);
+  };
+}
+
+// Whether the browser reports itself offline (browserOffline). A screen for
+// missing code that reads it changes as the device goes offline or comes
+// back (App.jsx, LazyPanel.jsx).
+export function useBrowserOffline() {
+  return useSyncExternalStore(subscribeOnlineState, browserOffline, () => false);
 }
 
 // Every staff page, Waves Admin and the field pages included: says that a
