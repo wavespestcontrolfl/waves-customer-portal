@@ -2151,33 +2151,44 @@ async function ledgerProgress(trx, send) {
   return { got, left, refused: refusedCount };
 }
 
+// Why a planned issue did not go out: its 'failed' outcome, with the 'outcome' alert.
+const notOut = (why, more = {}) => ({ status: 'failed', reason: `did not go out: ${why}`, alert: 'outcome', ...more });
+const SEND_ENDED = Object.freeze({ sent: 'its send ended', failed: 'its send failed', sending: 'its send stopped part way' });
+
+/**
+ * What a send's delivery ledger says of its planned issue once the send is 'sent' or 'failed', or its
+ * claim went stale: 'sent' ({ status, revokeClaim, got }) when every planned reader it can still
+ * reach got it, else why it did not go out. plannedSendOutcome reads it the minute the send ends, and
+ * settledOutcome every later minute of a 'failed' issue whose send is 'sent', so the two never give a
+ * different outcome or different words for the same ledger. The ledger decides, never the send's
+ * recipient_count: a worker that stopped after SendGrid took a batch leaves that count at 0, and the
+ * delivery webhooks can still move the send to 'sent' (reconcileNewsletterSendStatus).
+ */
+async function ledgerOutcome(trx, send, stale = false) {
+  const { got, left, refused } = await ledgerProgress(trx, send);
+  // Every planned reader it can still reach got it: 'sent', with nothing to resume, whatever the
+  // send's own status says. A failure after its last batch leaves the send 'failed' until the
+  // webhooks' reconcileNewsletterSendStatus moves it to 'sent'; a stale claim after its last batch
+  // is released as 'sent' (settlePlannedIssue), the same write.
+  if (left === 0 && got > 0) return { status: 'sent', revokeClaim: stale, got };
+  // No reader got it and none is left: every planned reader failed the send-time re-check ('skipped'), or the plan held none.
+  if (send.status === 'sent' && left === 0 && refused === 0) return notOut('no planned reader was still eligible when it sent');
+  const how = SEND_ENDED[send.status];
+  return got > 0
+    ? notOut(`${how} after ${got} of ${got + left} readers got it; Resume in Newsletter → History sends it to the rest`, { revokeClaim: stale })
+    : notOut(`${how}, and no reader got it`, { revokeClaim: stale });
+}
+
 /**
  * What became of a 'scheduled' planned issue's send: sent ({ status: 'sent' }, quietly), why it did
  * not go out ({ status: 'failed', reason, alert, revert, revokeClaim }), or null while it still may.
  */
 async function plannedSendOutcome(issue, send, now, trx) {
-  const notOut = (why, more = {}) => ({ status: 'failed', reason: `did not go out: ${why}`, alert: 'outcome', ...more });
   if (!send) return notOut('its draft no longer exists');
   // sendingClaimIsStale is false for any status but 'sending'. A stale claim is revoked with the
   // outcome, so its paused worker can send no further batch.
   const stale = sendingClaimIsStale(send, now);
-  if (['sent', 'failed'].includes(send.status) || stale) {
-    // The delivery ledger decides, never the send's recipient_count: a worker that stopped after
-    // SendGrid took a batch leaves that count at 0, and the delivery webhooks can still move the
-    // send to 'sent' (reconcileNewsletterSendStatus).
-    const { got, left, refused } = await ledgerProgress(trx, send);
-    // Every planned reader it can still reach got it: 'sent', with nothing to resume, whatever the
-    // send's own status says. A failure after its last batch leaves the send 'failed' until the
-    // webhooks' reconcileNewsletterSendStatus moves it to 'sent'; a stale claim after its last batch
-    // is released as 'sent' (settlePlannedIssue), the same write.
-    if (left === 0 && got > 0) return { status: 'sent', revokeClaim: stale };
-    // No reader got it and none is left: every planned reader failed the send-time re-check ('skipped'), or the plan held none.
-    if (send.status === 'sent' && left === 0 && refused === 0) return notOut('no planned reader was still eligible when it sent');
-    const how = { sent: 'its send ended', failed: 'its send failed', sending: 'its send stopped part way' }[send.status];
-    return got > 0
-      ? notOut(`${how} after ${got} of ${got + left} readers got it; Resume in Newsletter → History sends it to the rest`, { revokeClaim: stale })
-      : notOut(`${how}, and no reader got it`, { revokeClaim: stale });
-  }
+  if (['sent', 'failed'].includes(send.status) || stale) return ledgerOutcome(trx, send, stale);
   const windowEnd = issueSendAt(dateOnlyString(issue.issue_date)).getTime() + SEND_WINDOW_MS;
   // Still able to go out: before the window's end, or a send in progress (its deadline stops it).
   if (now.getTime() < windowEnd || send.status === 'sending') return null;
@@ -2196,7 +2207,9 @@ async function plannedSendOutcome(issue, send, now, trx) {
  * reconcileNewsletterSendStatus then sets it 'sent') becomes 'sent': quietly if nobody was told it
  * failed (alertToldAt), else with one correction (alert 'recovered', told once by its own mark,
  * recoveredToldAt). It is then read as any 'sent' one is; a correction that reached no one is owed
- * only while it holds (nobody left to resume, and no block told since). Otherwise what nobody was told yet: a
+ * only while it holds (nobody left to resume, and no block told since). Else a 'failed' one whose
+ * send is 'sent' stays 'failed', in the words its ledger gives now (ledgerOutcome, as the minute its
+ * send ended read it): its alert, while nobody was told, says them; told, only its reason changes. Otherwise what nobody was told yet: a
  * 'failed' one (its reason), a 'sent' one whose finished send has readers a Resume would still
  * mail (a provider block after SendGrid accepted the batch resets a reader's delivery), which
  * stays 'sent' (alert 'blocked', told once by its own mark, blockedToldAt, so the issue is still
@@ -2210,13 +2223,17 @@ async function settledOutcome(issue, send, trx) {
   const diagnostics = issueDiagnostics(issue);
   const sendSent = send?.status === 'sent';
   if (issue.status === 'failed' && sendSent) {
-    const { got, left } = await ledgerProgress(trx, send);
-    if (got > 0 && left === 0) {
+    const read = await ledgerOutcome(trx, send);
+    if (read.status === 'sent') {
       const failureToldAt = await alertToldAt(trx, issue.id, diagnostics, 'outcome');
       if (!failureToldAt) return { status: 'sent', reason: null };
       // The failure was told; this correction is not yet.
-      return { status: 'sent', reason: recoveredReason(got), alert: 'recovered', failureToldAt };
+      return { status: 'sent', reason: recoveredReason(read.got), alert: 'recovered', failureToldAt };
     }
+    // Still 'failed' as its ledger reads now (a Resume that reached some, confirmations that came
+    // late, or readers it reached that bounced later), in the words the minute its send ended would
+    // give now. Told already: only its reason changes (no write when it is already current).
+    return diagnostics.outcomeToldAt ? { ...read, alert: null } : read;
   }
   if (diagnostics.outcomeToldAt) return null;
   if (issue.status === 'failed') return { status: 'failed', reason: issue.reason || 'did not go out', alert: 'outcome' };

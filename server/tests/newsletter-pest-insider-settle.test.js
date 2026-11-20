@@ -398,6 +398,34 @@ test('a failed issue whose send became sent (a Resume that finished, or delivery
   ]);
 });
 
+const PARTLY_80 = 'did not go out: its send ended after 80 of 85 readers got it; Resume in Newsletter → History sends it to the rest';
+const NO_READER = 'did not go out: its send ended, and no reader got it';
+const FAILURE_TOLD = { outcomeToldAt: '2026-12-03T12:30:00.000Z' };
+const PARTLY = { got: 80, left: 5 };
+// Every reader it reached bounced later: none reached, 5 a Resume would still mail.
+const NONE_NOW = { got: 0, left: 5, refused: 80 };
+test.each([
+  ['some readers left; told: its reason takes the counts now, with no second alert', FAILURE_TOLD, NO_READER, PARTLY, PARTLY_80, false],
+  ['some readers left; not told yet: its alert says the counts now, never the stale words that no reader got it', {}, NO_READER, PARTLY, PARTLY_80, true],
+  ['some readers left; told, the minute after it failed with these counts (plannedSendOutcome): nothing to write or tell', FAILURE_TOLD, PARTLY_80, PARTLY, null, false],
+  ['every reader it reached bounced later; told: its reason says no reader got it', FAILURE_TOLD, PARTLY_80, NONE_NOW, NO_READER, false],
+  ['every reader it reached bounced later; not told yet: its alert says no reader got it, never the stale count', {}, PARTLY_80, NONE_NOW, NO_READER, true],
+])('a failed issue whose send is sent stays failed while its ledger says so, in the words the minute its send ended would give now: %s', async (_label, diagnostics, reason, counts, reasonNow, alerted) => {
+  const { writes } = fakeDb({ issues: [{ ...ISSUE, status: 'failed', reason, diagnostics }], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts });
+  const rewritten = reasonNow ? [{ table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'failed', reason: reasonNow }) }] : [];
+
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: reasonNow ? 1 : 0 });
+  expect(writes).toEqual(alerted ? [...rewritten, toldMark('issue-1', 'failed')] : rewritten);
+  // No flip: no new episode, so its marks and alert keys stay.
+  if (reasonNow) expect(writes[0].patch).not.toHaveProperty('diagnostics');
+  if (alerted) {
+    expect(mockTrigger).toHaveBeenCalledTimes(1);
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+      errors: [reasonNow.charAt(0).toUpperCase() + reasonNow.slice(1)], outcome: true,
+    }), { dedupeKey: 'pest-insider-outcome:issue-1' });
+  } else expect(mockTrigger).not.toHaveBeenCalled();
+});
+
 const RECOVERED_85 = 'went out after all: 85 readers got it, after a Resume or delivery confirmations that came late; there is nothing to resume';
 // Recovered from a failure the owner was told at 12:30; the correction reached no one yet.
 const UNTOLD_CORRECTION = { ...ISSUE, status: 'sent', reason: RECOVERED_85, diagnostics: { episode: 1, failureToldAt: '2026-12-03T12:30:00.000Z' } };
