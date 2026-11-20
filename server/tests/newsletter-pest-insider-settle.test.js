@@ -16,8 +16,15 @@ jest.mock('../services/newsletter-event-selection', () => ({
   parseLockedEventIds: jest.fn(() => []),
 }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: (...args) => mockTrigger(...args) }));
+// The archived-link repair a Resume runs first (a set-based UPDATE): settle runs it before it counts
+// the readers a Resume would still mail.
+jest.mock('../services/newsletter-subscribers', () => ({
+  ...jest.requireActual('../services/newsletter-subscribers'),
+  relinkArchivedLinkedSubscribers: jest.fn(async () => ({ relinked: 0 })),
+}));
 
 const db = require('../models/db');
+const { relinkArchivedLinkedSubscribers: relink } = require('../services/newsletter-subscribers');
 const { settlePlannedIssues } = require('../services/newsletter-sender');
 
 // Thursday, December 3, 2026: 7:00 AM EST send time; the window ends at 10:00 AM EST (15:00Z).
@@ -33,9 +40,10 @@ const AUTO_QUEUED = {
 
 // An in-memory stand-in for the tables. `counts`: the delivery ledger's readers who got it (got),
 // readers a Resume would still mail (left: outstandingEligibleDeliveries, the joined query), readers
-// whose mail servers refused it for good (refused: a hard bounce, which keeps its sent_at), and
-// for a planned issue the rows that query lists (rows: the subscriber, its address and customers).
-const CHAIN = ['where', 'whereRaw', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereExists', 'whereNotExists', 'withMaterialized', 'join', 'joinRaw', 'select', 'forUpdate'];
+// whose mail servers refused it for good (refused: a hard bounce, which keeps its sent_at), its
+// recipients (every row but a skipped one) and its last accepted batch (lastSentAt), and for a
+// planned issue the rows that query lists (rows: the subscriber, its address and customers).
+const CHAIN = ['where', 'whereRaw', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereExists', 'whereNotExists', 'withMaterialized', 'join', 'joinRaw', 'select', 'forUpdate'];
 // `bells`: admin notification rows by their dedupeKey (the alert a worker wrote).
 function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { got: 85, left: 0 }, bells = [] } = {}) {
   const writes = [];
@@ -56,12 +64,16 @@ function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { got: 85, l
       });
     });
     q.count = jest.fn(() => q);
+    q.max = jest.fn(() => { q.calls.add('max'); return q; });
     q.first = jest.fn(async () => {
       reads.push({ table, locked: q.calls.has('forUpdate') });
       if (table === 'newsletter_send_deliveries') {
-        // The Resume predicate joins the subscribers; a hard bounce has bounced_at; "not yet" is the
-        // no-success filter; else the total, hard bounces included (they keep their sent_at).
+        // The Resume predicate joins the subscribers; the last batch is a max; the recipients leave
+        // out skipped rows; a hard bounce has bounced_at; "not yet" is the no-success filter; else
+        // the total, hard bounces included (they keep their sent_at).
         if (q.calls.has('join')) return { c: counts.left };
+        if (q.calls.has('max')) return { at: counts.lastSentAt ?? null };
+        if (q.calls.has('whereNot')) return { c: counts.recipients ?? counts.got + counts.left + (counts.refused || 0) };
         if (q.calls.has('whereNotNull')) return { c: counts.refused || 0 };
         if (q.calls.has('whereNotIn')) return { c: counts.left };
         return { c: counts.got + counts.left + (counts.refused || 0) };
@@ -76,6 +88,7 @@ function fakeDb({ issues = [ISSUE], sends = [AUTO_QUEUED], counts = { got: 85, l
       && (!q.statusIn || q.statusIn.includes(row.status))
       && (!q.raws.some((sql) => sql.includes("outcomeToldAt' is null")) || !told(row))
       && (!q.raws.some((sql) => sql.includes("outcomeToldAt' is not null")) || told(row))
+      && (!q.raws.some((sql) => sql.includes("failureToldAt' is not null")) || Boolean(row.diagnostics && row.diagnostics.failureToldAt))
       && (!q.calls.has('whereExists') || sends.some((send) => send.id === row.send_id && send.status === 'sent')))).then(resolve, reject);
     q.update = jest.fn(async (patch) => { writes.push({ table, conds: q.conds, patch }); events.push(`write ${table}`); return 1; });
     return q;
@@ -162,16 +175,35 @@ test('a claim that went stale part way is revoked with the outcome, so its pause
   expect(mockTrigger.mock.calls[0][1].errors).toEqual(['Did not go out: its send stopped part way after 10 of 85 readers got it; Resume in Newsletter → History sends it to the rest']);
 });
 
-test('a claim that went stale after its last batch, with every planned reader done, is released as sent, and the issue is sent, with no alert', async () => {
-  const { writes } = fakeDb({ sends: [{ ...AUTO_QUEUED, status: 'sending', updated_at: new Date('2026-12-03T13:00:00Z') }], counts: { got: 85, left: 0 } });
+test('a claim that went stale after its last batch, with every planned reader done, is released as sent with what its finalize would have written; the issue is sent, with no alert', async () => {
+  const lastBatch = new Date('2026-12-03T12:01:30Z');
+  const { writes } = fakeDb({
+    sends: [{ ...AUTO_QUEUED, status: 'sending', sent_at: null, recipient_count: 0, updated_at: new Date('2026-12-03T13:00:00Z') }],
+    counts: { got: 85, left: 0, recipients: 86, lastSentAt: lastBatch },
+  });
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
   expect(writes.map(({ table, conds, patch }) => [table, conds[0], patch.status])).toEqual([
     ['newsletter_sends', { id: 'send-1', status: 'sending' }, 'sent'],
+    // Its calendar week, as finalize advances it.
+    ['newsletter_calendar', { send_id: 'send-1' }, 'sent'],
     ['pest_insider_issues', { id: 'issue-1' }, 'sent'],
   ]);
-  expect(writes[0].patch).toMatchObject({ sending_claim_token: null });
+  // Its recipients from the ledger (every row but a skipped one), and when it went out: the public
+  // archive lists a send by its sent_at.
+  expect(writes[0].patch).toMatchObject({ sending_claim_token: null, recipient_count: 86, sent_at: lastBatch });
   expect(mockTrigger).not.toHaveBeenCalled();
+});
+
+test('a stale claim released as sent keeps the sent_at an earlier attempt wrote', async () => {
+  const firstAttempt = new Date('2026-12-03T12:00:40Z');
+  const { writes } = fakeDb({
+    sends: [{ ...AUTO_QUEUED, status: 'sending', sent_at: firstAttempt, updated_at: new Date('2026-12-03T13:00:00Z') }],
+    counts: { got: 85, left: 0, lastSentAt: new Date('2026-12-03T12:01:30Z') },
+  });
+
+  await settlePlannedIssues(IN_WINDOW);
+  expect(writes[0].patch).toMatchObject({ status: 'sent', recipient_count: 85, sent_at: firstAttempt });
 });
 
 test('a send that failed after its last batch, with every planned reader done, leaves nothing to resume: the issue is sent, with no alert', async () => {
@@ -193,6 +225,50 @@ test.each([
   expect(writes[0].patch).toEqual(expect.objectContaining({ status: text ? 'failed' : 'sent' }));
   if (text) expect(mockTrigger.mock.calls[0][1].errors).toEqual([text]);
   else expect(mockTrigger).not.toHaveBeenCalled();
+});
+
+test.each([
+  ['every reader hard-bounced', { got: 0, left: 0, refused: 85 }],
+  ['every reader bounced or was blocked', { got: 0, left: 5, refused: 80 }],
+])('a sent issue no reader got after all (%s) becomes failed, with one alert', async (_label, counts) => {
+  const sent = { ...ISSUE, status: 'sent' };
+  const { writes } = fakeDb({ issues: [sent], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts });
+
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
+  expect(writes).toEqual([
+    { table: 'pest_insider_issues', conds: [{ id: 'issue-1' }], patch: expect.objectContaining({ status: 'failed', reason: 'did not go out: its send ended, and no reader got it' }) },
+    toldMark('issue-1', 'failed'),
+  ]);
+  expect(mockTrigger).toHaveBeenCalledTimes(1);
+  expect(mockTrigger.mock.calls[0][1].errors).toEqual(['Did not go out: its send ended, and no reader got it']);
+  expect(mockTrigger.mock.calls[0][2]).toEqual({ dedupeKey: 'pest-insider-outcome:issue-1' });
+});
+
+test('a sent issue some of whose readers hard-bounced stays sent, with no alert', async () => {
+  const { writes } = fakeDb({ issues: [{ ...ISSUE, status: 'sent' }], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 80, left: 0, refused: 5 } });
+
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 0 });
+  expect(writes).toEqual([]);
+  expect(mockTrigger).not.toHaveBeenCalled();
+});
+
+test('the archived-link repair runs in the settle transaction before it counts the readers a Resume would mail', async () => {
+  fakeDb({ sends: [{ ...AUTO_QUEUED, status: 'sent' }] });
+
+  await settlePlannedIssues(IN_WINDOW);
+  expect(relink).toHaveBeenCalledTimes(1);
+  expect(relink.mock.calls[0][0]).not.toBe(db);
+  const ledgerReads = db.mock.calls.map(([table], i) => [table, db.mock.invocationCallOrder[i]]).filter(([table]) => table === 'newsletter_send_deliveries');
+  expect(relink.mock.invocationCallOrder[0]).toBeLessThan(ledgerReads[ledgerReads.length - 1][1]);
+});
+
+test('a failed archived-link repair leaves the issue to the next minute: nothing is written or told', async () => {
+  const { writes } = fakeDb({ sends: [{ ...AUTO_QUEUED, status: 'sent' }] });
+  relink.mockRejectedValueOnce(new Error('canceling statement due to lock timeout'));
+
+  expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 0 });
+  expect(writes).toEqual([]);
+  expect(mockTrigger).not.toHaveBeenCalled();
 });
 
 test("a sent issue whose readers' mail servers blocked it after SendGrid accepted it gets one alert; the row stays sent", async () => {
@@ -439,6 +515,12 @@ test('a failed row past the lookback is no longer listed', async () => {
   lists[2].whereExists.mock.calls[0][0].call(sendQuery);
   expect(sendQuery.where).toHaveBeenCalledWith('newsletter_sends.status', 'sent');
   expect(sendQuery.whereRaw).toHaveBeenCalledWith("newsletter_sends.updated_at >= now() - ?::int * interval '1 day'", [14]);
+  // A correction that reached no one is listed by the recovery's own write, not the issue date.
+  expect(lists[3].where).toHaveBeenCalledWith({ status: 'sent' });
+  expect(lists[3].whereRaw).toHaveBeenCalledWith("diagnostics->>'failureToldAt' is not null");
+  expect(lists[3].whereRaw).toHaveBeenCalledWith("diagnostics->>'outcomeToldAt' is null");
+  expect(lists[3].whereRaw).toHaveBeenCalledWith("updated_at >= now() - ?::int * interval '1 day'", [14]);
+  expect(lists[3].whereRaw).not.toHaveBeenCalledWith("issue_date >= (now() at time zone 'America/New_York')::date - ?::int", [14]);
 });
 
 test('a failed issue, told or not, whose send became sent is settled once, also when it is on two lists', async () => {

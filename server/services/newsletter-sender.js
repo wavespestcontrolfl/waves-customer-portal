@@ -2111,6 +2111,10 @@ async function ledgerProgress(trx, send) {
     .where((q) => q.whereIn('status', TERMINAL_SUCCESS_STATUSES).orWhereNotNull('sent_at').orWhereNotNull('delivered_at')
       .orWhereNotNull('opened_at').orWhereNotNull('clicked_at'))
     .count('* as c').first();
+  // Relinked first, like the resume precheck and hasOutstandingDeliveries: a reader whose archived
+  // link has a live same-email twin is one a Resume would mail. Inside this transaction the sweep
+  // nests as a savepoint under its own lock; a failure leaves this issue to the next minute.
+  await NewsletterSubscribers.relinkArchivedLinkedSubscribers(trx);
   const outstanding = outstandingEligibleDeliveries(send.id, { database: trx });
   const plan = sendHoldout(send.segment_filter);
   const left = plan
@@ -2160,13 +2164,14 @@ async function plannedSendOutcome(issue, send, now, trx) {
 
 /**
  * A planned issue that is no longer 'scheduled', read again. A 'failed' one whose send has since
- * recovered to 'sent' with every planned reader done (delivery confirmations that came after the
- * send was marked failed, as after a lost SendGrid response; the webhook's
+ * become 'sent' with every planned reader done (a Resume that finished, or delivery confirmations
+ * that came after the send was marked failed, as after a lost SendGrid response; the webhook's
  * reconcileNewsletterSendStatus then sets it 'sent') becomes 'sent': quietly if nobody was told it
  * failed (failureAlertAt), else with one correction (alert 'recovered'). Otherwise what nobody was told yet: a
- * 'failed' one (its reason), or a 'sent' one whose finished send has readers a Resume would still
+ * 'failed' one (its reason), a 'sent' one whose finished send has readers a Resume would still
  * mail (a provider block after SendGrid accepted the batch resets a reader's delivery), which
- * stays 'sent'. Null when there is nothing to change or tell.
+ * stays 'sent', or a 'sent' one no reader got after all (every one bounced or blocked it), which
+ * becomes 'failed'. Null when there is nothing to change or tell.
  */
 async function settledOutcome(issue, send, trx) {
   const diagnostics = issueDiagnostics(issue);
@@ -2189,7 +2194,11 @@ async function settledOutcome(issue, send, trx) {
   if (issue.status !== 'sent' || send?.status !== 'sent') return null;
   // A correction an earlier minute could not deliver.
   if (diagnostics.failureToldAt) return { status: 'sent', reason: issue.reason, alert: 'recovered' };
-  const { got, left } = await ledgerProgress(trx, send);
+  const { got, left, refused } = await ledgerProgress(trx, send);
+  // No reader got it after all: after its send ended and the issue was marked sent, every reader's
+  // mail server bounced it (final) or blocked it (a Resume retries those). The outcome a scheduled
+  // issue whose send ended this way gets (plannedSendOutcome).
+  if (got === 0 && (left > 0 || refused > 0)) return { status: 'failed', reason: 'did not go out: its send ended, and no reader got it', alert: 'outcome' };
   return left > 0
     ? { status: 'sent', reason: `went out to ${got} readers, but ${left} readers' mail servers blocked it after SendGrid accepted it; Resume in Newsletter → History sends it to them`, alert: 'outcome' }
     : null;
@@ -2205,6 +2214,28 @@ async function failureAlertAt(trx, issueId, diagnostics) {
     .whereRaw("metadata->>'dedupeKey' = ?", [`pest-insider-outcome:${issueId}`])
     .first('created_at');
   return bell ? new Date(bell.created_at).toISOString() : null;
+}
+
+/**
+ * A stale claim's release, as the resume path releases one: its worker's next heartbeat finds no
+ * claim. `status` is the outcome's: 'sent' when every planned reader got it, else 'failed'. A 'sent'
+ * one gets what its worker's finalize would have written: its recipients (every ledger row but a
+ * skipped one, as finalize counts them), when it went out (an earlier attempt's sent_at, else its
+ * last accepted batch; the public archive lists a send by it), and its calendar week. A Waves Pest
+ * Insider send features no event and is never shared to social (planned with auto_share_social
+ * off), so nothing else of finalize applies. Runs in the settle transaction, which holds the send row.
+ */
+async function releaseStaleClaim(trx, send, status) {
+  const release = { status, sending_claim_token: null, updated_at: new Date() };
+  const finished = status === 'sent';
+  if (finished) {
+    const ledger = () => trx('newsletter_send_deliveries').where({ send_id: send.id });
+    const recipients = await ledger().whereNot('status', SKIPPED_DELIVERY_STATUS).count('* as c').first();
+    release.recipient_count = Number(recipients?.c) || 0;
+    release.sent_at = send.sent_at || (await ledger().max('sent_at as at').first())?.at || new Date();
+  }
+  await trx('newsletter_sends').where({ id: send.id, status: 'sending' }).update(release);
+  if (finished) await trx('newsletter_calendar').where({ send_id: send.id }).update({ status: 'sent', updated_at: new Date() });
 }
 
 /**
@@ -2229,13 +2260,7 @@ async function settlePlannedIssue({ id, send_id: sendId }, now) {
       });
       await trx('newsletter_calendar').where({ send_id: send.id }).update({ status: 'drafted', updated_at: new Date() });
     }
-    // The stale claim's release, as the resume path releases one: its worker's next heartbeat finds no
-    // claim. A send whose every planned reader got it is released as 'sent' (main's
-    // reconcileNewsletterSendStatus writes the same), any other as 'failed'.
-    if (outcome.revokeClaim) {
-      await trx('newsletter_sends').where({ id: send.id, status: 'sending' })
-        .update({ status: outcome.status === 'sent' ? 'sent' : 'failed', sending_claim_token: null, updated_at: new Date() });
-    }
+    if (outcome.revokeClaim) await releaseStaleClaim(trx, send, outcome.status);
     // The row always records the outcome.
     const reason = 'reason' in outcome ? (outcome.reason && outcome.reason.slice(0, 500)) : issue.reason;
     const changed = outcome.status !== issue.status || reason !== issue.reason || Boolean(outcome.failureToldAt);
@@ -2272,6 +2297,7 @@ async function settlePlannedIssue({ id, send_id: sendId }, now) {
 
 const SETTLE_LOOKBACK_SQL = "issue_date >= (now() at time zone 'America/New_York')::date - ?::int";
 const RECOVERED_SEND_LOOKBACK_SQL = "newsletter_sends.updated_at >= now() - ?::int * interval '1 day'";
+const ISSUE_CHANGE_LOOKBACK_SQL = "updated_at >= now() - ?::int * interval '1 day'";
 
 /**
  * The one place that tells the owner a planned Waves Pest Insider issue did not go out as its
@@ -2291,9 +2317,12 @@ const RECOVERED_SEND_LOOKBACK_SQL = "newsletter_sends.updated_at >= now() - ?::i
  * - a 'failed' issue whose send has since become 'sent' with every planned reader done (a Resume
  *   that finished, or late delivery confirmations) becomes 'sent', with one correction if the
  *   owner was told it failed. This step owns that change: the send's finalize leaves a 'failed'
- *   row alone.
+ *   row alone. A correction that reached no one is retried for the lookback from that change;
+ * - a 'sent' issue no reader got after all (every reader's mail server bounced or blocked it)
+ *   becomes 'failed', with one alert.
  * A hard bounce is final: no Resume can reach that reader, it never counts as reached, and it
- * raises no alert of its own.
+ * raises no alert of its own. The readers a Resume would still mail are counted after the same
+ * archived-link repair a Resume runs first.
  */
 async function settlePlannedIssues(now = new Date()) {
   const scheduled = await db('pest_insider_issues').where({ status: 'scheduled' }).select('id', 'send_id');
@@ -2311,8 +2340,15 @@ async function settlePlannedIssues(now = new Date()) {
         .whereRaw(RECOVERED_SEND_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS]);
     })
     .select('id', 'send_id');
+  // A correction an earlier minute could not deliver: by the recovery's own write (the issue's
+  // updated_at), so one that came from a Resume long after the issue is retried too.
+  const corrections = await db('pest_insider_issues').where({ status: 'sent' })
+    .whereRaw("diagnostics->>'failureToldAt' is not null")
+    .whereRaw("diagnostics->>'outcomeToldAt' is null")
+    .whereRaw(ISSUE_CHANGE_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS])
+    .select('id', 'send_id');
   // One settle per issue a minute, also when it is on two lists.
-  const rows = new Map([...scheduled, ...untold, ...recovered].map((row) => [row.id, row]));
+  const rows = new Map([...scheduled, ...untold, ...recovered, ...corrections].map((row) => [row.id, row]));
   let settled = 0;
   for (const row of rows.values()) {
     try {
