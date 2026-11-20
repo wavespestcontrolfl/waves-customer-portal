@@ -58,9 +58,9 @@ describe('parseInspectionRows', () => {
 
   test('an area row cut short before Violation 35 is counted, never passed over as a visit without code 35', () => {
     const short = inspRow({ visit: '9002' }).split(',').slice(0, 40).join(','); // ends at Violation 24
-    const counts = { malformed: 0 };
+    const counts = { malformed: 0 }; // a caller's partial counter object gets the missing count
     expect(svc.parseInspectionRows(parseDbprCsv(inspCsv([inspRow(), short])), counts).map((r) => r.source_key)).toEqual(['9001']);
-    expect(counts.malformed).toBe(1);
+    expect(counts).toEqual({ malformed: 1, valid: 1 });
   });
 
   test('a row cut before its county is counted, never passed over as outside the area', () => {
@@ -91,7 +91,7 @@ describe('parseInspectionRows', () => {
     ]));
     const counts = { malformed: 0 };
     expect(svc.parseInspectionRows(rows, counts).map((r) => [r.source_key, r.license_id])).toEqual([['9101', '5001']]);
-    expect(counts.malformed).toBe(5);
+    expect(counts).toEqual({ malformed: 5, valid: 1 });
   });
 
   test('keeps only code-35 visits in the three counties outside Punta Gorda, with trimmed headers and a plain date', () => {
@@ -105,6 +105,8 @@ describe('parseInspectionRows', () => {
       // Punta Gorda is not served (owner ruling 2026-10-22): by city name, or by a ZIP only Punta Gorda uses.
       inspRow({ visit: '9007', county: 'Charlotte', city: 'PUNTA GORDA', zip: '33983' }),
       inspRow({ visit: '9008', county: 'Charlotte', city: '', zip: '33950' }),
+      // A NUL inside the city is cleaned before the check, as it is before storing: 33983 alone does not exclude.
+      inspRow({ visit: '9011', county: 'Charlotte', city: 'PUNTA\0GORDA', zip: '33983' }),
       // The shared county test (call-triage-flags.js): any case, with or without the word County.
       inspRow({ visit: '9009', county: 'SARASOTA COUNTY' }),
       inspRow({ visit: '9010', county: 'Lee County' }),
@@ -146,7 +148,7 @@ describe('parseLicenseRows and the phone rule', () => {
     ]));
     const counts = { malformed: 0 };
     expect(svc.parseLicenseRows(rows, 'new_license', counts).map((r) => r.source_key)).toEqual(['A'.repeat(40)]);
-    expect(counts.malformed).toBe(4);
+    expect(counts).toEqual({ malformed: 4, valid: 1 });
   });
 
   test('a row cut short is skipped and counted; an empty cell is still a cell', () => {

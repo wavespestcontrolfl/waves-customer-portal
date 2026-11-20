@@ -68,9 +68,11 @@ function parseUsDate(value) {
 
 // The three served counties (the shared county test: "Sarasota" and "Sarasota County" both count), less the places
 // inside them Waves does not serve (Punta Gorda, owner ruling 2026-10-22). services/excluded-localities.js is the one
-// list of those places; it decides by city name or by a Punta Gorda-only ZIP.
+// list of those places; it decides by city name or by a Punta Gorda-only ZIP. Each value is cleaned first, as it is
+// stored: a check on the raw value could pass a city whose stored copy is excluded ("PUNTA\0GORDA" stores as
+// "PUNTA GORDA").
 function inServiceArea(county, city, zip) {
-  return isInServiceAreaCounty(county) && !isExcludedLocality(city) && !isExcludedZip(zip);
+  return isInServiceAreaCounty(clean(county)) && !isExcludedLocality(clean(city)) && !isExcludedZip(clean(zip));
 }
 
 // A trailing extension ("x12", "ext. 12", "extension 12", "#12") is dropped first, so its digits never join the number.
@@ -109,7 +111,9 @@ function hasEveryColumn(row, kind) {
  * in the area with a bad report id, date or violation-35 count, is skipped and counted in counts.malformed; a row in
  * the area that passes counts in counts.valid, cited or not.
  */
-function parseInspectionRows(rows, counts = { malformed: 0, valid: 0 }) {
+function parseInspectionRows(rows, counts = {}) {
+  counts.malformed ??= 0;
+  counts.valid ??= 0;
   const out = [];
   for (const row of rows) {
     if (!hasEveryColumn(row, 'inspection')) {
@@ -159,7 +163,9 @@ function parseInspectionRows(rows, counts = { malformed: 0, valid: 0 }) {
  * is skipped and counted in counts.malformed: once stored, a known key only refreshes last_seen_at, so a corrected
  * copy in a later file could never fill it in. A row kept counts in counts.valid.
  */
-function parseLicenseRows(rows, kind, counts = { malformed: 0, valid: 0 }) {
+function parseLicenseRows(rows, kind, counts = {}) {
+  counts.malformed ??= 0;
+  counts.valid ??= 0;
   const out = [];
   for (const row of rows) {
     if (!hasEveryColumn(row, kind)) {
