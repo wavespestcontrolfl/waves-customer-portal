@@ -261,7 +261,14 @@ const TRIGGER_REGISTRY = {
       const bodyParts = [
         `${p.name || 'A prospect'}${p.source ? ' via ' + p.source : ''}${p.area ? ' (' + p.area + ')' : p.zip ? ' (' + p.zip + ')' : ''}`,
       ];
-      if (p.service) bodyParts.push(`Wants ${p.service}`);
+      // A quiz lead names its three tap answers (fixed tokens from
+      // services/lead-quiz.js, e.g. "Roaches, condo, wants it today"). They
+      // stand in for the service line only when all three are known and name
+      // a problem (quizNamesRequest); a "Not sure" or partly answered quiz
+      // keeps the service line, so the bell never reads only "Ants" or only
+      // "wants it today".
+      if (p.service && !(p.quizAnswers && p.quizNamesRequest)) bodyParts.push(`Wants ${p.service}`);
+      if (p.quizAnswers) bodyParts.push(p.quizAnswers);
       if (p.phone) bodyParts.push(`Phone: ${maskPhone(p.phone)}`);
       if (p.message) bodyParts.push(p.leadId ? 'Message included on lead record' : 'Message in the SMS inbox');
       return {
