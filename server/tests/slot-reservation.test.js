@@ -539,6 +539,31 @@ describe('slot reservation helpers', () => {
       expect(mayTake).toHaveBeenCalledWith(failing, { estimateZone: null, date: '2027-05-20', technicianId: 'tech-1' });
     });
 
+    // Pre-push P1 on 69974e9e5d: an accept writes the hold's customer, and the stop read (zoneStopDays) reads a row with
+    // no zone stamp it trusts (none, or the fallthrough 'lakewood_ranch') by its city, its service address's else its
+    // customer's. A hold whose own zone is not funneled is checked in the funneled zone that city places the written
+    // row in, by the stop read's own matcher; a stamp it trusts decides. The row takes no stamp from that city.
+    test.each([
+      ['no stamp, a street-only estimate, a Venice customer', null, '1 Test Way', null, 'Venice', VENICE],
+      ['the fallthrough stamp, a Venice customer', 'lakewood_ranch', '1 Test Way, Lakewood Ranch, FL', null, 'Venice', VENICE],
+      ['no stamp, the service address in Sarasota, a Venice customer', null, '1 Test Way', 'Sarasota', 'Venice', null],
+      ['no stamp, a Sarasota customer', null, '1 Test Way', null, 'Sarasota', null],
+      ['a Sarasota stamp, a Venice customer: the stamp decides', 'sarasota', '1 Test Way', null, 'Venice', SARASOTA],
+    ])('accept: %s', async (_label, stamp, address, serviceCity, customerCity, checked) => {
+      const mayTake = jest.fn().mockResolvedValue(true);
+      spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
+      const customerRead = jest.fn().mockResolvedValue({ city: customerCity });
+      const trx = jest.fn((table) => {
+        if (table === 'service_zones') return { select: jest.fn().mockResolvedValue([SARASOTA, VENICE]) };
+        if (table === 'customers') return { where: jest.fn().mockReturnValue({ first: customerRead }) };
+        throw new Error(`unexpected table ${table}`);
+      });
+      const args = { ...ARGS, stamp, estimate: { ...ESTIMATE, address }, graduate: { customerId: 'customer-1', serviceCity } };
+      await expect(refuseOtherTruckSouthDay(trx, args)).resolves.toEqual({});
+      expect(mayTake).toHaveBeenCalledWith(trx, { estimateZone: checked, date: '2027-05-20', technicianId: 'tech-1' });
+      expect(customerRead).toHaveBeenCalledWith('city');
+    });
+
     // Placement: every hold, lapsed or live (at the function body's own level, not inside the lapsed-only rival
     // branch), after the date lock and the rival-hold check, before the technician check, with the hold's stamp.
     test.each([
@@ -567,7 +592,9 @@ describe('slot reservation helpers', () => {
       ['lapsed stamped', 'venice', true, {}],
       ['live unstamped', null, false, { zone: 'venice' }],
       ['live stamped', 'venice', false, {}],
-    ])('accept: a %s hold is checked and graduates with the zone its check read on the row', async (_label, zone, lapsed, stamped) => {
+      // Pre-push P1 on 69974e9e5d: a street-only estimate, accepted by a Venice customer: checked in Venice, no stamp.
+      ['live unstamped street-only', null, false, {}, '1 Test Way'],
+    ])('accept: a %s hold is checked and graduates with the zone its check read on the row', async (_label, zone, lapsed, stamped, address = ESTIMATE.address) => {
       const mayTake = jest.fn().mockResolvedValue(true);
       spies = [jest.spyOn(funnel, 'perTruckLive').mockReturnValue(true), jest.spyOn(funnel, 'truckMayTakeDate').mockImplementation(mayTake)];
       const chainOf = (first) => {
@@ -590,16 +617,17 @@ describe('slot reservation helpers', () => {
         if (table === 'service_zones') return { select: jest.fn().mockResolvedValue([SARASOTA, VENICE]) };
         if (table === 'technicians') return makeAssignableTechnicianBuilder();
         if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
+        if (table === 'customers') return { where: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue({ city: 'Venice' }) }) };
         throw new Error(`unexpected table ${table}`);
       });
       trx.raw = jest.fn((sql) => ({ raw: sql }));
       await expect(slotReservation.commitReservation({
-        scheduledServiceId: 'scheduled-123', customerId: 'customer-1', estimate: { ...ESTIMATE, service_interest: 'Pest Control' }, trx,
+        scheduledServiceId: 'scheduled-123', customerId: 'customer-1', estimate: { ...ESTIMATE, address, service_interest: 'Pest Control' }, trx,
       })).resolves.toMatchObject({ id: 'scheduled-123' });
       expect(mayTake).toHaveBeenCalledWith(trx, { estimateZone: VENICE, date: '2027-05-20', technicianId: 'tech-1' });
       const [written] = updateBuilder.update.mock.calls[0];
       expect(written).toMatchObject({ customer_id: 'customer-1', reservation_expires_at: null, ...stamped });
-      if (zone) expect(written).not.toHaveProperty('zone');
+      if (!stamped.zone) expect(written).not.toHaveProperty('zone');
     });
   });
 

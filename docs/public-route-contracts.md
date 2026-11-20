@@ -1422,7 +1422,10 @@ the second answers `SLOT_TAKEN`. The estimate page's holds check the same rule
 under their date lock at every hold write, live or lapsed (a new hold, a
 same-slot re-tap, an extend and an accept), in the zone stamped on the hold; an
 unstamped hold is stamped with the funneled zone its check read, so the next
-booking sees it. The answer is the existing `SLOT_UNAVAILABLE`. The stop read
+booking sees it. An accept whose hold has no funneled zone of its own is also
+checked in the funneled zone its written row's city places it in (the service
+address's, else the accepting customer's), as the stop read reads such a row by
+that city. The answer is the existing `SLOT_UNAVAILABLE`. The stop read
 counts a hold by the real clock, so a hold that ran out while its writer waited
 on the date lock no longer holds the day, and it counts an unstamped stop by the
 cities of every funneled zone, as it counts a stamp. The assessment

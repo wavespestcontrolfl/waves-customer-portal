@@ -861,17 +861,35 @@ function slotTaken(slotId) {
 // so a live hold on its own truck's day passes on its own row. A hold's zone stamp (`stamp`, the row's `zone`) decides
 // its zone; an unstamped hold resolves it from `estimate`, as reserveSlot did. Slot-taken when refused. Returns the
 // stamp an unstamped hold takes (`{ zone }`, when the check read a funneled zone), so the next booking's stop read
-// sees this truck's day; else `{}`. Either gate off (GATE_MULTI_TECH_CONFIRM, GATE_SOUTH_ZONE_DAY_FUNNEL) or no
-// technician: nothing is read.
-async function refuseOtherTruckSouthDay(conn, { date, techId, slotId, zone = null, stamp = null, estimate = null }) {
+// sees this truck's day; else `{}`. An accept passes `graduate` (the customer the hold graduates to, and the row's
+// service address city): a hold whose own zone is not a funneled one is then checked in the funneled zone its written
+// row's city places it in (graduatedFunnelZone). Either gate off (GATE_MULTI_TECH_CONFIRM, GATE_SOUTH_ZONE_DAY_FUNNEL)
+// or no technician: nothing is read.
+async function refuseOtherTruckSouthDay(conn, { date, techId, slotId, zone = null, stamp = null, estimate = null, graduate = null }) {
   const funnel = require('./scheduling/zone-day-funnel');
   if (techId == null || !funnel.perTruckLive() || !funnel.funnelOn()) return {};
   // An unstamped hold whose zone cannot be resolved skips the check, as reserveSlot's own zone checks do.
   const estimateZone = zone
     || (stamp ? await stampedZone(conn, stamp) : null)
     || (estimate ? await resolveEstimateZone(conn, estimate).catch(() => null) : null);
-  if (!(await funnel.truckMayTakeDate(conn, { estimateZone, date, technicianId: techId }))) throw slotTaken(slotId);
+  const checkZone = funnel.isFunnelZone(estimateZone) ? estimateZone : (await graduatedFunnelZone(conn, stamp, graduate)) || estimateZone;
+  if (!(await funnel.truckMayTakeDate(conn, { estimateZone: checkZone, date, technicianId: techId }))) throw slotTaken(slotId);
   return !stamp && funnel.isFunnelZone(estimateZone) ? { zone: zoneSlugOf(estimateZone) } : {};
+}
+
+// The funneled zone the stop read will place an accepted hold in by its city, or null. The accept writes the hold's
+// customer (`graduate.customerId`), and the stop read (zoneStopDays rowMatchesZone) reads a row with no zone stamp it
+// trusts (none, or the fallthrough one) by its city: its service address's, else its customer's. So a hold whose
+// estimate resolves to no funneled zone, accepted by a customer in a far-south city, is checked there; the stop read's
+// own matcher (rowInFunnelZones) decides, and a stamp it trusts decides as it will on the written row. The row takes
+// no stamp from that city: it stays read by it (pre-push P1 on 69974e9e5d).
+async function graduatedFunnelZone(conn, stamp, graduate) {
+  if (!graduate?.customerId) return null;
+  const funnel = require('./scheduling/zone-day-funnel');
+  const customer = await conn('customers').where({ id: graduate.customerId }).first('city');
+  const row = { zone: stamp, service_city: graduate.serviceCity || null, customer_city: customer?.city || null };
+  const zones = await funnel.funnelZoneRows(conn);
+  return zones.find((z) => funnel.rowInFunnelZones(row, [z])) || null;
 }
 
 // A hold's zone stamp (zoneSlugOf of the zone reserveSlot resolved) back to its service_zones row, whose cities the
@@ -2270,9 +2288,11 @@ async function commitReservation({
     // Owner rule B per truck, on every accept (refuseOtherTruckSouthDay: not only a `_lapsed` hold, which reads this
     // transaction's NOW()): another truck may have taken this hold's far-south day while it was lapsed or unstamped.
     // Same slot-unavailable recovery as the technician check below (the customer re-picks a time). An unstamped hold
-    // graduates with the funneled zone the check read (`zoneStamp`, in `updates` below).
+    // graduates with the funneled zone the check read (`zoneStamp`, in `updates` below). The hold graduates to
+    // `customerId`, whose city the stop read reads the row by when it keeps no funneled stamp (`graduate`).
     const zoneStamp = await refuseOtherTruckSouthDay(client, {
       stamp: row.zone, estimate, date: lockedDate, techId: row.technician_id,
+      graduate: { customerId, serviceCity: row.service_address_city },
       slotId: `${lockedDate}_${String(row.window_start).slice(0, 5).replace(':', '-')}_${row.technician_id}`,
     });
 
