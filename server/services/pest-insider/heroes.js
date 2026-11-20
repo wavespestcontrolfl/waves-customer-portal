@@ -13,8 +13,10 @@
  * wave band, drawn by code alone.
  *
  * Loaded from server/data/pest-insider-heroes-v1.json: fact id -> { art },
- * where art is the first 16 hex of the sha256 of the fact's art file
- * (ops/agents/pest-insider-art/<fact>.webp), or null. The pictures are drawn
+ * where art is the first 16 hex of the sha256 of the fact's art file, or
+ * null. The art file carries that hash in its name
+ * (ops/agents/pest-insider-art/<fact>-<art>.webp), so new art never
+ * overwrites the art the heroes file names. The pictures are drawn
  * on a Mac by ops/agents/pest-insider-heroes.js and ship with the portal
  * (client/public/pest-insider/heroes/). Each file name carries a hash of
  * everything drawn on it (title, tag, art), so a changed title or new art
@@ -63,7 +65,7 @@ function validateHeroes(raw) {
     const file = `${id.toLowerCase()}-${hash}.jpg`;
     heroes[id] = Object.freeze({
       ...shown,
-      artFile: hero.art ? `${id.toLowerCase()}.webp` : null,
+      artFile: hero.art ? `${id.toLowerCase()}-${hero.art}.webp` : null,
       file,
       url: `${HERO_BASE_URL}${file}`,
       // The picture's words are the title; the art has none.

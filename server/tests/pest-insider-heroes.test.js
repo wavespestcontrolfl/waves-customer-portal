@@ -57,7 +57,7 @@ describe('the top picture list', () => {
     const plain = validateHeroes({ heroes: { T03: { art: null } } }).T03;
     const withArt = validateHeroes({ heroes: { T03: { art: '0123456789abcdef' } } }).T03;
     expect(plain.file).not.toBe(withArt.file);
-    expect([plain.artFile, withArt.artFile]).toEqual([null, 't03.webp']);
+    expect([plain.artFile, withArt.artFile]).toEqual([null, 't03-0123456789abcdef.webp']);
     expect(HERO_BASE_URL).toBe('https://portal.wavespestcontrol.com/pest-insider/heroes/');
   });
 
@@ -115,7 +115,7 @@ describe('taking new art', () => {
     const noCard = FACTS.find((f) => !f.reserve && !cardFor(f.id)).id;
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-insider-art-'));
     try {
-      const png = await sharp(path.join(ROOT, ART_DIR, 't03.webp')).png().toBuffer();
+      const png = await sharp(path.join(ROOT, ART_DIR, HEROES.T03.artFile)).png().toBuffer();
       fs.writeFileSync(path.join(dir, 't03.png'), png);
       const before = snapshot();
       const dry = run(dir);
@@ -130,6 +130,23 @@ describe('taking new art', () => {
       expect(run(dir, '--execute').status).toBe(1);
       expect(snapshot()).toEqual(before);
     } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60000);
+
+  test('runs one import at a time: while another holds the lock, it stops and writes nothing', async () => {
+    const sharp = require('sharp');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-insider-art-'));
+    const lock = path.join(ROOT, 'server/data/pest-insider-heroes-v1.json.lock');
+    try {
+      fs.writeFileSync(path.join(dir, 't03.png'), await sharp(path.join(ROOT, ART_DIR, HEROES.T03.artFile)).flop().png().toBuffer());
+      fs.writeFileSync(lock, '1\n', { flag: 'wx' });
+      const before = snapshot();
+      const held = run(dir, '--execute');
+      expect([held.status, held.stderr]).toEqual([1, expect.stringContaining('Another import holds server/data/pest-insider-heroes-v1.json.lock')]);
+      expect(snapshot()).toEqual(before);
+    } finally {
+      fs.rmSync(lock, { force: true });
       fs.rmSync(dir, { recursive: true, force: true });
     }
   }, 60000);

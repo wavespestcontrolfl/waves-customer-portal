@@ -2,9 +2,10 @@
  * pest-insider-art-import.js — MUTATES (dry-run default; no database, no send): takes new art for the Pest Insider top pictures
  *
  * Each <dir>/<fact>.png (lower-case fact id, a wide picture) is cut to
- * 1164x652 and saved as ops/agents/pest-insider-art/<fact>.webp, and the
- * first 16 hex of its sha256 goes into server/data/pest-insider-heroes-v1.json.
- * Then draw the top pictures: node ops/agents/pest-insider-heroes.js --execute
+ * 1164x652 and saved as ops/agents/pest-insider-art/<fact>-<art>.webp, where
+ * <art> is the first 16 hex of its sha256, and <art> goes into
+ * server/data/pest-insider-heroes-v1.json. Then draw the top pictures:
+ * node ops/agents/pest-insider-heroes.js --execute
  *
  *   node ops/agents/pest-insider-art-import.js <dir> [--execute] [--only T03,R01]
  *
@@ -12,14 +13,20 @@
  *     --execute    write the art files and the heroes file
  *     --only ids   only these facts
  *
- * All or nothing. Step 1 writes nothing: every picture is cut, and the new
- * heroes file must pass heroes.js validateHeroes (a main fact with a card),
- * so a fact with no card, a reserve fact or a broken PNG stops the whole
- * batch. Step 2 writes each new file under a temporary name next to its
- * target, then renames the art into place and the heroes file last (each
- * rename is atomic). If a step fails, the art this run replaced is put back,
- * art it added is removed, and its temporary files are removed, so the
- * heroes file and the art files never disagree.
+ * All or nothing, one import at a time:
+ * - Step 1 writes nothing: every picture is cut, and the new heroes file must
+ *   pass heroes.js validateHeroes (a main fact with a card), so a fact with
+ *   no card, a reserve fact or a broken PNG stops the whole batch.
+ * - Step 2 holds a lock file, so a second import stops until the first one
+ *   is done. It reads
+ *   the heroes file again, writes each new art file under its own hash name
+ *   (never over art the heroes file names), then swaps in the new heroes
+ *   file with one atomic rename. That rename is the only switch: until it,
+ *   the heroes file names the old art, which is still there; after it, the
+ *   new art. The old art of the facts it changed is removed last.
+ * - If step 2 fails before the switch, the art it added is removed. A run
+ *   that is killed leaves at most an art file no fact names (the heroes test
+ *   names it) and its lock file (remove it once no import runs).
  *
  * The art: ChatGPT on the owner's plan (owner 2026-11-19: "just use
  * chatgpt"), through Codex on the Mac with Codex's built-in image tool, never
@@ -58,9 +65,19 @@ function heroesFileText(raw) {
   return `{\n  "version": ${raw.version},\n  "notes": ${JSON.stringify(raw.notes)},\n  "heroes": {\n${lines.join(',\n')}\n  }\n}\n`;
 }
 
+const tempName = (file, tag) => path.join(path.dirname(file), `.${path.basename(file)}.${tag}.tmp`);
+const readHeroes = () => JSON.parse(fs.readFileSync(HEROES_FILE, 'utf8'));
+
+// The heroes file with this batch's art, checked by heroes.js.
+function merged(raw, batch) {
+  const next = { ...raw, heroes: { ...raw.heroes } };
+  for (const item of batch) next.heroes[item.id] = { art: item.art };
+  validateHeroes(next);
+  return next;
+}
+
 // Step 1: cut every picture and check the new heroes file. Writes nothing.
 async function stage() {
-  const raw = JSON.parse(fs.readFileSync(HEROES_FILE, 'utf8'));
   const artDir = path.join(repoRoot, ART_DIR);
   const batch = [];
   for (const name of fs.readdirSync(dir).filter((f) => /^[a-z]\d\d\.png$/.test(f)).sort()) {
@@ -70,46 +87,66 @@ async function stage() {
       .resize(HERO_WIDTH * 2, HERO_HEIGHT * 2, { fit: 'cover', position: 'centre' })
       .webp({ quality: 82, effort: 6 })
       .toBuffer();
-    batch.push({ id, target: path.join(artDir, `${id.toLowerCase()}.webp`), webp, art: sha16(webp) });
+    const art = sha16(webp);
+    batch.push({ id, art, webp, target: path.join(artDir, `${id.toLowerCase()}-${art}.webp`) });
   }
-  const next = { ...raw, heroes: { ...raw.heroes } };
-  for (const item of batch) next.heroes[item.id] = { art: item.art };
-  validateHeroes(next);
-  return { batch, artDir, text: heroesFileText(next) };
+  merged(readHeroes(), batch);
+  return { batch, artDir };
 }
 
-// Step 2: temporary files first, then atomic renames, the heroes file last.
-function publish({ batch, artDir, text }) {
+// After the swap: the old art of each changed fact, once no fact names it.
+// A file that cannot be removed only gets a warning (the import is done).
+function removeOldArt(raw, next, batch, artDir) {
+  const named = new Set(Object.entries(next.heroes).filter(([, h]) => h.art).map(([id, h]) => `${id.toLowerCase()}-${h.art}.webp`));
+  for (const item of batch) {
+    const old = raw.heroes[item.id] && raw.heroes[item.id].art;
+    const oldFile = old ? `${item.id.toLowerCase()}-${old}.webp` : null;
+    if (!oldFile || named.has(oldFile)) continue;
+    try {
+      fs.rmSync(path.join(artDir, oldFile), { force: true });
+    } catch (err) {
+      console.warn(`Imported, but ${oldFile} could not be removed (${err.code || err.message}); remove it by hand.`);
+    }
+  }
+}
+
+// Step 2, under the lock: new art under hash names, then one atomic swap of
+// the heroes file, then the old art of the changed facts is removed.
+function publish({ batch, artDir }) {
   fs.mkdirSync(artDir, { recursive: true });
-  const tag = `${process.pid}.${Date.now()}`;
-  const temp = (file) => path.join(path.dirname(file), `.${path.basename(file)}.${tag}.tmp`);
-  const temps = [];
-  const placed = [];
+  const lock = `${HEROES_FILE}.lock`;
   try {
-    for (const item of batch) {
-      temps.push(temp(item.target));
-      fs.writeFileSync(temp(item.target), item.webp, { flag: 'wx' });
-    }
-    temps.push(temp(HEROES_FILE));
-    fs.writeFileSync(temp(HEROES_FILE), text, { flag: 'wx' });
-    for (const item of batch) {
-      placed.push({ target: item.target, old: fs.existsSync(item.target) ? fs.readFileSync(item.target) : null });
-      fs.renameSync(temp(item.target), item.target);
-    }
-    fs.renameSync(temp(HEROES_FILE), HEROES_FILE);
+    fs.writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' });
   } catch (err) {
-    // The heroes file is renamed last, so it still names the old art: put the old art back.
-    for (const { target, old } of placed.reverse()) {
-      if (old) {
-        fs.writeFileSync(`${temp(target)}.back`, old);
-        fs.renameSync(`${temp(target)}.back`, target);
-      } else {
-        fs.rmSync(target, { force: true });
-      }
-    }
-    for (const file of temps) fs.rmSync(file, { force: true });
-    console.error('Import failed; the art files and the heroes file are as they were.');
+    if (err.code === 'EEXIST') throw new Error(`Another import holds ${path.relative(repoRoot, lock)}. If none is running, remove that file.`);
     throw err;
+  }
+  const tag = `${process.pid}.${Date.now()}`;
+  const added = [];
+  let swapped = false;
+  try {
+    const raw = readHeroes();
+    const next = merged(raw, batch);
+    for (const item of batch) {
+      const existed = fs.existsSync(item.target);
+      if (existed && sha16(fs.readFileSync(item.target)) === item.art) continue;
+      fs.writeFileSync(tempName(item.target, tag), item.webp, { flag: 'wx' });
+      fs.renameSync(tempName(item.target, tag), item.target);
+      if (!existed) added.push(item.target);
+    }
+    fs.writeFileSync(tempName(HEROES_FILE, tag), heroesFileText(next), { flag: 'wx' });
+    fs.renameSync(tempName(HEROES_FILE, tag), HEROES_FILE);
+    swapped = true;
+    removeOldArt(raw, next, batch, artDir);
+  } catch (err) {
+    if (!swapped) {
+      for (const file of added) fs.rmSync(file, { force: true });
+      console.error('Import failed; the heroes file and the art it names are as they were.');
+    }
+    throw err;
+  } finally {
+    for (const file of [...batch.map((item) => tempName(item.target, tag)), tempName(HEROES_FILE, tag)]) fs.rmSync(file, { force: true });
+    fs.rmSync(lock, { force: true });
   }
 }
 
