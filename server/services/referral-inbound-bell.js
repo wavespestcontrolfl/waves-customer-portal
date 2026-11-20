@@ -22,7 +22,7 @@ const crypto = require('crypto');
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { referralInboundBellLive } = require('../config/feature-gates');
+const { referralInboundBellLive, isEnabled } = require('../config/feature-gates');
 const { composeAdminAlert, raiseAdminAlert, cutAtWord, MAX_WHY_CHARS, MAX_BUTTON_LABEL_CHARS } = require('./admin-alert-compose');
 const { fitAction, shortDateET, tidyName } = require('./admin-alert-names');
 const episodes = require('./admin-alert-episodes');
@@ -246,7 +246,8 @@ async function syncReferralInboundBells({ now = new Date() } = {}) {
   // Every listed card, plus every open row: a row whose card is gone (or past the list's first 50) is read alone.
   const ids = new Set(open.map((key) => key.slice(KEY_PREFIX.length)).filter((id) => UUID_RE.test(id)));
   for (const card of await inbound.listInboundReferrals(db)) ids.add(String(card.customerId));
-  const deferred = (await engine.getSettings()).require_service_completion === true;
+  // GATE_REFERRAL_STEP2 defers every conversion (referral-engine convertReferral), so the card is confirmable.
+  const deferred = (await engine.getSettings()).require_service_completion === true || (isEnabled ? isEnabled('referralStep2') : false);
   for (const customerId of ids) {
     try {
       tally[await syncCard(customerId, { now, deferred })] += 1;

@@ -29,6 +29,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const engine = require('./referral-engine');
+const { isEnabled } = require('../config/feature-gates');
 const { MEMBERSHIP_TIER_SQL } = require('./billing-lane');
 const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 const { isPromoterPhoneCollision } = require('./referral-errors');
@@ -456,7 +457,8 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
     .orderBy('ss.id', 'asc')
     .first('ss.id');
   result.creditsNow = Boolean(firstVisit);
-  if (firstVisit && settings.require_service_completion) {
+  // GATE_REFERRAL_STEP2 defers every conversion to the first paid service (referral-engine convertReferral).
+  if (firstVisit && (settings.require_service_completion || isEnabled('referralStep2'))) {
     try {
       const credit = await engine.creditReferralOnFirstService({ customerId, serviceId: firstVisit.id });
       result.credited = credit ? { referrerDollars: credit.referrerDollars, refereeDollars: credit.refereeDollars } : null;
@@ -489,6 +491,7 @@ module.exports = {
   CODE_RE,
   customerForCode,
   sameHousehold,
+  performedRecurringVisits,
   listInboundReferrals,
   sureReferrerOf,
   confirmInboundReferral,

@@ -1458,6 +1458,9 @@ function initScheduledJobs() {
         // (GATE_ESTIMATE_REFERRAL_CODE): the customer may not have been on a
         // plan yet when the accept ran its step.
         await require('./estimate-referral-code').sweepTypedReferralCodes();
+        // GATE_REFERRAL_STEP2: the member's reward waits for the friend's first plan visit to be paid; this tries
+        // those referrals again (referral-engine sweepReferralsAwaitingPayment).
+        await require('./referral-engine').sweepReferralsAwaitingPayment();
       });
     } catch (err) {
       logger.error(`[estimate-promo-code] hourly sweep failed: ${err.message}`);

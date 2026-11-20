@@ -11,6 +11,8 @@ const { postCreditMovement, round2 } = require('./customer-credit');
 const { toE164, isLikelyE164, phoneMatchDigits } = require('../utils/phone');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 const { promoterPhoneInUseError } = require('./referral-errors');
+const { isEnabled } = require('../config/feature-gates');
+const step2 = require('./referral-step2');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -744,6 +746,11 @@ function referralError(statusCode, code, message) {
   return err;
 }
 
+// GATE_REFERRAL_STEP2: the settings convertReferral runs on. Gate off: the settings as loaded.
+function withStep2Deferral(settings) {
+  return isEnabled('referralStep2') ? { ...settings, require_service_completion: true } : settings;
+}
+
 // A reward has been staged/credited for this referral iff conversion already
 // ran against it — regardless of what `status` says now.
 const STAGED_REWARD_STATUSES = ['pending_service', 'earned', 'paid', 'superseded'];
@@ -761,7 +768,10 @@ function referralRewardAlreadyStaged(referral) {
 // caller commits), so a refusal also undoes what the caller wrote.
 async function convertReferral(referralId, { customerId, tier, monthlyValue, trx: callerTrx = null, deferredOnly = false } = {}) {
   if (callerTrx && !deferredOnly) throw new Error('convertReferral joins a caller transaction only when deferredOnly');
-  const settings = await getSettings();
+  // GATE_REFERRAL_STEP2: Step 2 governs the member's reward, so conversion is deferred to the friend's first paid
+  // service whatever require_service_completion says. The immediate promoter-balance payout would skip the near
+  // rate and the yearly cap (creditReferralOnFirstService never selects an already-earned referral).
+  const settings = withStep2Deferral(await getSettings());
 
   // Calculate reward (base + tier bonus)
   let rewardCents = settings.referrer_reward_cents;
@@ -1070,6 +1080,13 @@ async function updateReferralStatus(referralId, { status, adminNotes, lostReason
   });
 }
 
+// The member's reward as the dashboards show it: the amount a settled Step 2 referral actually paid
+// (referrer_credit_cents, $0 at the yearly cap included), else the amount staged at conversion.
+function referralRewardAmount(r) {
+  if (r.referrer_credit_cents !== null && r.referrer_credit_cents !== undefined) return Number(r.referrer_credit_cents) / 100;
+  return parseFloat(r.referrer_reward_amount || r.credit_amount || 0);
+}
+
 // ---------------------------------------------------------------------------
 // 4b. creditReferralOnFirstService — issue the real $25-each account credits
 // ---------------------------------------------------------------------------
@@ -1150,6 +1167,12 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
   const settings = await getSettings();
   const refereeCents = Number(settings.referee_discount_cents) || 0;
   const refereeDollars = round2(refereeCents / 100);
+  const step2On = isEnabled('referralStep2');
+
+  // GATE_REFERRAL_STEP2: nothing is paid (the friend's flat credit included) until the friend's first plan visit is
+  // PAID. Closeout calls this for a performed visit whose invoice is only issued; returning here consumes no guard,
+  // and sweepReferralsAwaitingPayment calls this again once the invoice settles.
+  if (step2On && !(await firstVisitSettled(db, customerId, serviceId))) return null;
 
   const outcome = await db.transaction(async (trx) => {
     // Re-read under lock; these guards are the single-use protection.
@@ -1166,7 +1189,13 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
     // tier bonuses (bonus_<tier>_cents) live ONLY in the bypassed promoter-balance
     // ledger and must never inflate the real account credit — the agreed reward is
     // a flat $25, so a Silver/Gold/Platinum signup still credits a flat $25.
-    const referrerDollars = round2((Number(settings.referrer_reward_cents) / 100) || 0);
+    // GATE_REFERRAL_STEP2: the amount is $25, $50 near, or nothing at the yearly cap (step2MemberCredit).
+    const memberCredit = step2On
+      ? await step2MemberCredit(trx, { referral, friendCustomerId: customerId, settings })
+      : null;
+    const referrerDollars = memberCredit
+      ? memberCredit.dollars
+      : round2((Number(settings.referrer_reward_cents) / 100) || 0);
     // The pending DRAIN, by contrast, uses the exact amount staged into the
     // promoter's pending at conversion (base + any tier bonus, FROZEN on the
     // referral) so the non-cashable tracker zeroes out. Finite-check so a frozen
@@ -1203,7 +1232,11 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
       first_service_completed: true,
       referrer_reward_status: 'earned',
       referee_credited: true,
-      referrer_credited: true,
+      referrer_credited: !memberCredit || memberCredit.dollars > 0,
+      ...(memberCredit ? {
+        referrer_credit_cents: Math.round(memberCredit.dollars * 100),
+        referrer_reward_reason: memberCredit.reason,
+      } : {}),
       status: 'credited',
       updated_at: new Date(),
     });
@@ -1224,13 +1257,151 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
       });
     }
 
-    return { skipped: false, referral, referrerDollars };
+    return { skipped: false, referral, referrerDollars, memberCredit };
   });
 
   if (outcome.skipped) return null;
 
   logger.info(`[ReferralEngine] First recurring service for customer ${customerId} → credited referral ${outcome.referral.id}: referrer $${outcome.referrerDollars}, referee $${refereeDollars}`);
-  return { referralId: outcome.referral.id, referrerDollars: outcome.referrerDollars, refereeDollars };
+  return {
+    referralId: outcome.referral.id,
+    referrerDollars: outcome.referrerDollars,
+    refereeDollars,
+    ...(outcome.memberCredit ? { referrerReason: outcome.memberCredit.reason } : {}),
+  };
+}
+
+// The friend's first performed plan visit (the one the member's reward waits on), or null.
+async function firstPerformedPlanVisit(conn, customerId) {
+  const { performedRecurringVisits } = require('./referral-inbound');
+  return performedRecurringVisits(conn)
+    .where('ss.customer_id', customerId)
+    .orderBy('ss.scheduled_date', 'asc')
+    .orderBy('ss.id', 'asc')
+    .first('ss.id', 'ss.scheduled_date', 'ss.prepaid_at', 'ss.first_application_invoice_id');
+}
+
+// Every invoice that bills a visit, however it was minted: its own scheduled_service_id link, the invoice of one of
+// its service records (completion closeout), the invoice of a visit-completion packet that carries it (a packet
+// invoice has no scheduled_service_id of its own), and the first-application invoice stamped on the visit.
+async function invoicesBillingVisit(conn, visit) {
+  return conn('invoices as i')
+    .where(function billsVisit() {
+      this.where('i.scheduled_service_id', visit.id)
+        .orWhereIn('i.service_record_id', conn('service_records').where({ scheduled_service_id: visit.id }).select('id'))
+        .orWhereIn('i.visit_completion_packet_id', conn('visit_completion_packets').where({ visit_id: visit.id }).select('id'))
+        .orWhereIn('i.visit_completion_packet_id', conn('visit_completion_packet_items').where({ scheduled_service_id: visit.id }).select('packet_id'));
+      if (visit.first_application_invoice_id) this.orWhere('i.id', visit.first_application_invoice_id);
+    })
+    .select('i.id', 'i.status');
+}
+
+// A visit with no invoice of its own is settled only when it is provably paid for another way: a prepaid stamp on
+// the visit (annual prepay and prepaid visits), or a monthly member whose dues are collected (paid or processing
+// payment, or a live dues invoice) for the visit's month. Anything else has not been paid for, so the reward waits.
+async function visitCoveredWithoutInvoice(conn, customerId, visit) {
+  if (visit.prepaid_at) return true;
+  const { resolveBillingLane, monthlyDuesCollected } = require('./billing-lane');
+  const customer = await conn('customers').where({ id: customerId }).first('billing_mode', 'monthly_rate', 'waveguard_tier');
+  if (!customer || resolveBillingLane(customer).mode !== 'monthly_membership') return false;
+  const { parseETDateTime } = require('../utils/datetime-et');
+  const { dateOnlyString } = require('../utils/date-only');
+  const day = dateOnlyString(visit.scheduled_date);
+  return monthlyDuesCollected(conn, customerId, day ? parseETDateTime(`${day}T12:00`) : new Date(), { openInvoiceCovers: false });
+}
+
+// Whether the friend's first performed plan visit (the passed visit when none is on record yet) is settled.
+async function firstVisitSettled(conn, customerId, serviceId) {
+  const visit = (await firstPerformedPlanVisit(conn, customerId))
+    || await conn('scheduled_services').where({ id: serviceId, customer_id: customerId }).first('id', 'scheduled_date', 'prepaid_at', 'first_application_invoice_id');
+  if (!visit) return false;
+  const invoices = await invoicesBillingVisit(conn, visit);
+  return step2.visitSettled(invoices, invoices.length ? false : await visitCoveredWithoutInvoice(conn, customerId, visit));
+}
+
+// GATE_REFERRAL_STEP2 retry for the payment wait above. A referral whose friend has a performed first plan visit
+// but whose invoice was unpaid at closeout is tried again here, so the member is paid once it settles. A bounded
+// sweep in the existing hourly scheduler block was chosen over a hook on every place an invoice becomes paid
+// (Stripe webhook, saved-card charge, Terminal, cash and check entry, credit cover): one place, no new coupling in
+// the payment code, at most an hour of delay on a reward that waits on payment anyway. A referral stays eligible
+// until its reward is paid or the referral is rejected or superseded; the one bound is a year since conversion
+// (a friend who has not paid in a year is not coming back, and the query stays small). Each pass takes the next
+// 200 rows on a rotating cursor over (converted_at, id), so a backlog of unpaid referrals at the front can never
+// starve the ones behind it; the cursor wraps at the end and restarts from the front after a restart. The friend
+// is the one customer the phone names (referrals hold no customer id): two matching profiles are skipped as
+// ambiguous, never guessed.
+const AWAITING_PAYMENT_WINDOW_DAYS = 365;
+const AWAITING_PAYMENT_LIMIT = 200;
+let awaitingPaymentCursor = null;
+async function sweepReferralsAwaitingPayment({ now = new Date() } = {}) {
+  if (!isEnabled('referralStep2')) return { checked: 0, credited: 0 };
+  const eligible = () => db('referrals')
+    .where({ status: 'signed_up', referrer_reward_status: 'pending_service', first_service_completed: false })
+    .where('converted_at', '>=', new Date(now.getTime() - AWAITING_PAYMENT_WINDOW_DAYS * 86400000))
+    .orderBy([{ column: 'converted_at', order: 'asc' }, { column: 'id', order: 'asc' }])
+    .limit(AWAITING_PAYMENT_LIMIT)
+    .select('id', 'referee_phone', 'converted_at');
+  let waiting = awaitingPaymentCursor
+    ? await eligible().where(function afterCursor() {
+      this.where('converted_at', '>', awaitingPaymentCursor.at)
+        .orWhere(function sameInstant() { this.where('converted_at', awaitingPaymentCursor.at).where('id', '>', awaitingPaymentCursor.id); });
+    })
+    : await eligible();
+  if (!waiting.length && awaitingPaymentCursor) {
+    awaitingPaymentCursor = null;
+    waiting = await eligible();
+  }
+  const last = waiting[waiting.length - 1];
+  awaitingPaymentCursor = waiting.length < AWAITING_PAYMENT_LIMIT || !last ? null : { at: last.converted_at, id: last.id };
+  let credited = 0;
+  for (const row of waiting) {
+    try {
+      const variants = phoneMatchDigits(normalizePhone(row.referee_phone) || row.referee_phone);
+      if (!variants.length) continue;
+      const friends = await db('customers')
+        .whereNull('deleted_at')
+        .whereRaw(`${PHONE_DIGITS_SQL('phone')} IN (${variants.map(() => '?').join(', ')})`, variants)
+        .select('id');
+      if (friends.length !== 1) continue;
+      const visit = await firstPerformedPlanVisit(db, friends[0].id);
+      if (visit && await creditReferralOnFirstService({ customerId: friends[0].id, serviceId: visit.id })) credited += 1;
+    } catch (err) {
+      logger.warn(`[ReferralEngine] awaiting-payment sweep: referral ${row.id} not credited: ${err.code || err.message}`);
+    }
+  }
+  return { checked: waiting.length, credited };
+}
+
+// Step 2's member credit for the friend's first paid recurring service, inside creditReferralOnFirstService's
+// transaction with the referral row locked. { dollars, reason }: 'near' (both homes have a map point and the
+// straight-line distance is within step2_near_radius_miles), 'standard', or 'cap_reached' (dollars 0: the member
+// already has step2_annual_credit_cap credits this America/New_York calendar year). The member's customer row is
+// locked first, so two friends' first services for one member count one after the other, and the credit posted
+// next (postCreditMovement locks the same row) is inside that count for the next one.
+async function step2MemberCredit(trx, { referral, friendCustomerId, settings, now = new Date() }) {
+  const memberId = referral.referrer_customer_id;
+  if (!memberId) return { dollars: 0, reason: null };
+  await trx('customers').where({ id: memberId }).forUpdate().first('id');
+
+  const { start, end } = step2.etYearBounds(now);
+  // The member's own credits only: a credit that joins the referral to the member as its referrer. The friend
+  // credit a member once got as a friend is not one of the ten.
+  const earned = await trx('customer_credit_ledger as l')
+    .join('referrals as r', 'r.id', 'l.referral_id')
+    .where('l.customer_id', memberId)
+    .where('l.source', 'referral')
+    .where('l.delta', '>', 0)
+    .whereRaw('r.referrer_customer_id = l.customer_id')
+    .where('l.created_at', '>=', start)
+    .where('l.created_at', '<', end)
+    .count({ n: 'l.id' })
+    .first();
+  if (step2.capReached(Number(earned?.n || 0), settings)) return { dollars: 0, reason: 'cap_reached' };
+
+  const homes = await trx('customers').whereIn('id', [memberId, friendCustomerId]).select('id', 'latitude', 'longitude');
+  const homeOf = (id) => homes.find((h) => h.id === id);
+  const { cents, reason } = step2.memberCredit(homeOf(memberId), homeOf(friendCustomerId), settings);
+  return { dollars: round2(cents / 100), reason };
 }
 
 // ---------------------------------------------------------------------------
@@ -1340,6 +1511,7 @@ async function getSettings() {
     base_url: normalizeReferralBaseUrl(DEFAULT_REFERRAL_BASE_URL),
     referrer_reward_cents: 2500,
     referee_discount_cents: 2500,
+    ...step2.STEP2_DEFAULTS,
     // Tier bonuses only ever inflated the promoter ledger, never the real
     // account credit (flat referrer reward); 0 since 20261120090000.
     bonus_silver_cents: 0,
@@ -1364,13 +1536,22 @@ async function getSettings() {
 // ---------------------------------------------------------------------------
 const SETTING_BOOLEAN_KEYS = ['program_active', 'auto_credit_enabled', 'require_service_completion'];
 const SETTING_TEMPLATE_KEYS = ['invite_sms_template', 'reward_sms_template', 'milestone_sms_template'];
-const SETTING_COUNT_KEYS = ['max_referrals_per_month', 'cooldown_days'];
+const SETTING_COUNT_KEYS = ['max_referrals_per_month', 'cooldown_days', 'step2_annual_credit_cap'];
 
 // Money and count settings feed promoter balances and fraud limits, so a
 // negative, fractional or non-numeric value must never reach the table. No
 // upper bound on purpose: that is a business decision. Every column is
 // nullable and the form posts the whole row back, so a stored null passes
 // through unchanged rather than blocking an unrelated save.
+// A distance setting: a number of miles, fractions allowed.
+function validateMiles(key, value) {
+  const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) {
+    throw referralError(400, 'INVALID_SETTING', `${key} must be a number that is 0 or more`);
+  }
+  return n;
+}
+
 function validateSettingValue(key, value) {
   if (value === null) return null;
   if (key.endsWith('_cents') || SETTING_COUNT_KEYS.includes(key)) {
@@ -1380,6 +1561,7 @@ function validateSettingValue(key, value) {
     }
     return n;
   }
+  if (key === 'step2_near_radius_miles') return validateMiles(key, value);
   if (SETTING_BOOLEAN_KEYS.includes(key)) {
     if (typeof value !== 'boolean') throw referralError(400, 'INVALID_SETTING', `${key} must be true or false`);
     return value;
@@ -1401,6 +1583,7 @@ async function updateSettings(updates) {
     'milestone_3_bonus_cents', 'milestone_5_bonus_cents', 'milestone_10_bonus_cents',
     'min_payout_cents', 'auto_credit_enabled', 'require_service_completion',
     'max_referrals_per_month', 'cooldown_days',
+    'step2_referrer_reward_cents', 'step2_near_referrer_reward_cents', 'step2_near_radius_miles', 'step2_annual_credit_cap',
     'invite_sms_template', 'reward_sms_template', 'milestone_sms_template',
   ];
 
@@ -1446,7 +1629,7 @@ async function getPromoterStats(promoterId) {
       id: r.id,
       name: r.referee_name || `${r.referral_first_name || ''} ${r.referral_last_name || ''}`.trim(),
       status: r.status,
-      rewardAmount: parseFloat(r.referrer_reward_amount || r.credit_amount || 0),
+      rewardAmount: referralRewardAmount(r),
       rewardStatus: r.referrer_reward_status || (r.referrer_credited ? 'earned' : 'pending'),
       createdAt: r.created_at,
       convertedAt: r.converted_at,
@@ -1487,7 +1670,7 @@ async function getProgramAnalytics(startDate, endDate) {
         db.raw("COUNT(*) FILTER (WHERE status IN ('pending','contacted','estimated','sms_failed')) as pending"),
         db.raw("COUNT(*) FILTER (WHERE (status = 'signed_up' OR status = 'credited') AND referrer_reward_status IS DISTINCT FROM 'superseded') as converted"),
         db.raw("COUNT(*) FILTER (WHERE status = 'rejected' OR lost_reason IS NOT NULL) as lost"),
-        db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') AND referrer_reward_status IS DISTINCT FROM 'superseded' THEN referrer_reward_amount ELSE 0 END), 0) as total_rewards_dollars"),
+        db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') AND referrer_reward_status IS DISTINCT FROM 'superseded' THEN COALESCE(referrer_credit_cents / 100.0, referrer_reward_amount) ELSE 0 END), 0) as total_rewards_dollars"),
         db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') AND referrer_reward_status IS DISTINCT FROM 'superseded' THEN converted_monthly_value ELSE 0 END), 0) as total_monthly_value"),
       ).first(),
     db('referral_clicks')
@@ -1567,6 +1750,7 @@ module.exports = {
   convertReferral,
   updateReferralStatus,
   creditReferralOnFirstService,
+  sweepReferralsAwaitingPayment,
   sendDueReferralRewardEmails,
   nextRewardEmailAt,
   recentRewardCreditsQuery,

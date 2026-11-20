@@ -172,7 +172,10 @@ router.get('/', async (req, res, next) => {
         name: r.referee_name || `${r.referral_first_name || ''} ${r.referral_last_name || ''}`.trim(),
         phone: maskPhone(r.referee_phone || r.referral_phone),
         status: r.status,
-        rewardAmount: parseFloat(r.referrer_reward_amount || r.credit_amount || 0),
+        // A settled Step 2 referral shows what the member actually earned ($0 at the yearly cap included).
+        rewardAmount: r.referrer_credit_cents != null
+          ? Number(r.referrer_credit_cents) / 100
+          : parseFloat(r.referrer_reward_amount || r.credit_amount || 0),
         rewardStatus: r.referrer_reward_status || (r.referrer_credited ? 'earned' : 'pending'),
         createdAt: r.created_at,
         convertedAt: r.converted_at,
