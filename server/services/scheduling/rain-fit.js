@@ -162,9 +162,11 @@ async function withCatalogKeys(items, db, { gate = 'GATE_BOOKING_RAIN_RANK', str
   const out = [];
   for (const { name, serviceKey } of list) {
     try {
-      const profile = await resolveCompletionProfileForScheduledService(
-        { service_type: name, service_key_snapshot: serviceKey || undefined }, db, { strict },
-      );
+      const row = { service_type: name, service_key_snapshot: serviceKey || undefined };
+      // A strict caller runs the resolver strict too; the others keep its default call.
+      const profile = await (strict
+        ? resolveCompletionProfileForScheduledService(row, db, { strict: true })
+        : resolveCompletionProfileForScheduledService(row, db));
       out.push({ name, serviceKey: profile?.serviceKey || null, findingsType: profile?.findingsType || null });
     } catch (err) {
       if (strict) throw err;

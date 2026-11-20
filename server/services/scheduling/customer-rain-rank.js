@@ -142,12 +142,14 @@ async function estimateServiceIdentities(rows, { profile, db, deps = {}, strict 
 }
 
 // The catalog key for a quote line without one, or null. A failed lookup reads
-// the label alone; with `strict` it throws instead (the fill list keeps a job
-// it cannot read out of rain: day-replan/fill-list.js).
+// the label alone; with `strict` it throws instead, the lookup's own reads
+// included (catalogLinkForProfile strictAllowanceRead), for the fill list,
+// which keeps a job it cannot read out of rain (day-replan/fill-list.js).
 async function catalogKeyForRow(profile, service, { db, deps = {}, strict = false }) {
   try {
     const lookup = deps.catalogLinkForProfile || require('../slot-reservation').catalogLinkForProfile;
-    const link = await lookup(db, { ...profile, services: [service] });
+    const visit = { ...profile, services: [service] };
+    const link = await (strict ? lookup(db, visit, { strictAllowanceRead: true }) : lookup(db, visit));
     return (link && link.service_key) || null;
   } catch (err) {
     if (strict) throw err;

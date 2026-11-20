@@ -192,14 +192,14 @@ describe('withCatalogKeys', () => {
       { name: 'Rodent Trapping Service', serviceKey: 'rodent_trapping_svc', findingsType: 'rodent_trapping' },
       { name: 'Waves Assessment', serviceKey: null, findingsType: null },
     ]);
-    expect(resolver).toHaveBeenCalledWith({ service_type: 'Rodent Trapping Service', service_key_snapshot: undefined }, db, { strict: false });
+    expect(resolver).toHaveBeenCalledWith({ service_type: 'Rodent Trapping Service', service_key_snapshot: undefined }, db);
   });
 
   test('gate on: a key the screen sent settles the identity ahead of the name', async () => {
     process.env.GATE_BOOKING_RAIN_RANK = 'true';
     const resolver = jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null }));
     const out = await load(resolver)([{ name: 'Shared Label', serviceKey: 'wdo_inspection' }], {});
-    expect(resolver).toHaveBeenCalledWith({ service_type: 'Shared Label', service_key_snapshot: 'wdo_inspection' }, {}, { strict: false });
+    expect(resolver).toHaveBeenCalledWith({ service_type: 'Shared Label', service_key_snapshot: 'wdo_inspection' }, {});
     expect(out).toEqual([{ name: 'Shared Label', serviceKey: 'wdo_inspection', findingsType: null }]);
   });
 
