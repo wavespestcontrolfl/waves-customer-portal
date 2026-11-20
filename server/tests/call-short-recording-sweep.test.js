@@ -111,6 +111,19 @@ describe('the sweep query text', () => {
     // The in-memory timers keep the first 10 minutes: the fresh branch still waits for the CDN settle.
     expect(on).toContain(`"updated_at" < NOW() - INTERVAL '10 minutes'`);
   });
+
+  test('the stuck-transcript fallback leaves the retry states to their own capped branches', async () => {
+    // Pre-push Codex P1: an empty transcription leaves transcription_status
+    // pending, so an at-cap no_transcription row matched this fallback every
+    // tick; the claim refused it and it took one of the 20 slots.
+    const FALLBACK = `"transcription_status" = 'pending' and "transcription" is null and processing_status IS DISTINCT FROM 'no_transcription' AND processing_status IS DISTINCT FROM 'extraction_failed'`;
+    for (const value of [undefined, 'true']) {
+      const sql = await withGate(value, () => processor.pendingCandidatesQuery().toString());
+      expect(sql).toContain(FALLBACK);
+      // The retry branches keep the cap.
+      expect(sql).toContain(`"processing_status" = 'no_transcription' and COALESCE(extraction_attempts, 0) < 3`);
+    }
+  });
 });
 
 maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)', () => {
@@ -122,11 +135,15 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
   const SID_SHORT_OLD = sid('s2'); // 8 s, never processed, 25 h old
   const SID_SHORT_SETTLING = sid('s3'); // 8 s, recording landed 3 min ago: its in-memory timer still owns it
   const SID_LONG = sid('s4'); // 60 s, never processed, 20 min old: the old floor already took it
-  const ALL_SIDS = [SID_SHORT, SID_SHORT_OLD, SID_SHORT_SETTLING, SID_LONG];
+  // No transcript after a try: the processor left transcription_status pending.
+  const SID_SHORT_AT_CAP = sid('s5'); // 8 s, 3 tries (the cap), 2 h old: the claim refuses it, so it takes no slot
+  const SID_SHORT_RETRY = sid('s6'); // 8 s, 1 try, 2 h old: its own capped branch retries it
+  const SID_LONG_AT_CAP = sid('s7'); // 60 s, 3 tries: never a candidate, gate on or off
+  const ALL_SIDS = [SID_SHORT, SID_SHORT_OLD, SID_SHORT_SETTLING, SID_LONG, SID_SHORT_AT_CAP, SID_SHORT_RETRY, SID_LONG_AT_CAP];
   const REC = 'RE' + '9'.repeat(32);
   const minutesAgo = (m) => new Date(Date.now() - m * 60 * 1000);
 
-  const insertCall = (s, { seconds, createdMinutesAgo, updatedMinutesAgo }) => db('call_log').insert({
+  const insertCall = (s, { seconds, createdMinutesAgo, updatedMinutesAgo, ...over }) => db('call_log').insert({
     twilio_call_sid: s,
     direction: 'inbound',
     from_phone: '+15555550134',
@@ -141,6 +158,7 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
     created_at: minutesAgo(createdMinutesAgo),
     updated_at: minutesAgo(updatedMinutesAgo),
     metadata: JSON.stringify({ source: 'voice_webhook', fixture: 'short-recording-sweep' }),
+    ...over,
   });
 
   const candidates = async () => (await processor.pendingCandidatesQuery().whereIn('twilio_call_sid', ALL_SIDS))
@@ -155,6 +173,10 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
     await insertCall(SID_SHORT_OLD, { seconds: 8, createdMinutesAgo: 25 * 60, updatedMinutesAgo: 25 * 60 - 1 });
     await insertCall(SID_SHORT_SETTLING, { seconds: 8, createdMinutesAgo: 4, updatedMinutesAgo: 3 });
     await insertCall(SID_LONG, { seconds: 60, createdMinutesAgo: 20, updatedMinutesAgo: 19 });
+    const noTranscript = (attempts) => ({ processing_status: 'no_transcription', extraction_attempts: attempts });
+    await insertCall(SID_SHORT_AT_CAP, { seconds: 8, createdMinutesAgo: 120, updatedMinutesAgo: 60, ...noTranscript(3) });
+    await insertCall(SID_SHORT_RETRY, { seconds: 8, createdMinutesAgo: 120, updatedMinutesAgo: 60, ...noTranscript(1) });
+    await insertCall(SID_LONG_AT_CAP, { seconds: 60, createdMinutesAgo: 120, updatedMinutesAgo: 60, ...noTranscript(3) });
   });
 
   afterAll(async () => {
@@ -162,15 +184,15 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
     await db.destroy();
   });
 
-  test('gate off: only the long call is swept, as before', async () => {
+  test('gate off: only the long call is swept, as before; a long call at the attempt cap takes no slot', async () => {
     await withGate(undefined, async () => {
       expect(await candidates()).toEqual([SID_LONG]);
     });
   });
 
-  test('gate on: the stranded short call is swept too; a day-old one and one still settling are not', async () => {
+  test('gate on: the stranded short call is swept too; a day-old one, one still settling and one at the cap are not', async () => {
     await withGate('true', async () => {
-      expect(await candidates()).toEqual([SID_SHORT, SID_LONG].sort());
+      expect(await candidates()).toEqual([SID_SHORT, SID_LONG, SID_SHORT_RETRY].sort());
     });
   });
 

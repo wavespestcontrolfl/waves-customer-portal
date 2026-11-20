@@ -25780,7 +25780,15 @@ const CallRecordingProcessor = {
             this.whereNull('processing_status')
               .orWhere('processing_status', 'pending')
               .orWhere(function () {
-                this.where('transcription_status', 'pending').whereNull('transcription');
+                // A stuck transcript on a row no retry lane owns. The retry
+                // states have their own capped branches below; admitted here
+                // too, an at-cap one came back every tick, the claim refused
+                // it, and it took one of the 20 slots (with
+                // GATE_SHORT_CALL_RECORDING_SWEEP on, an empty short recording
+                // for 24 hours), and an extraction_failed one skipped its
+                // 7-day creation fence (pre-push Codex P1).
+                this.where('transcription_status', 'pending').whereNull('transcription')
+                  .whereRaw("processing_status IS DISTINCT FROM 'no_transcription' AND processing_status IS DISTINCT FROM 'extraction_failed'");
               });
           })
           .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
@@ -26152,10 +26160,14 @@ const CallRecordingProcessor = {
       db.raw("COUNT(*) FILTER (WHERE processing_status IN ('no_transcription', 'extraction_failed', 'customer_creation_failed', 'lead_creation_failed')) as failed"),
       // `retrying` mirrors processAllPending's eligibility (Codex #3736 r16
       // P2): the failure state alone is not "queued work" — the row must
-      // still carry audio (or a PAN-marked stored transcript) and clear the
-      // sweep's duration floor, or the sweep will never pick it up.
-      db.raw(`COUNT(*) FILTER (WHERE ((processing_status = 'no_transcription' AND COALESCE(extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)}) OR (processing_status = 'extraction_failed' AND COALESCE(extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)} AND created_at > NOW() - INTERVAL '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'))`
-        + " AND (NULLIF(btrim(recording_url), '') IS NOT NULL OR ((transcription_metadata::jsonb ->> 'pan_detected') = 'true' AND transcription IS NOT NULL))"
+      // still carry audio (or, for extraction_failed only, a PAN-marked
+      // stored transcript: the sweep's transcript-only branch never takes
+      // no_transcription) and clear the sweep's length rule, or the sweep
+      // will never pick it up.
+      db.raw(`COUNT(*) FILTER (WHERE ((processing_status = 'no_transcription' AND COALESCE(extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)}`
+        + " AND NULLIF(btrim(recording_url), '') IS NOT NULL)"
+        + ` OR (processing_status = 'extraction_failed' AND COALESCE(extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)} AND created_at > NOW() - INTERVAL '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'`
+        + " AND (NULLIF(btrim(recording_url), '') IS NOT NULL OR ((transcription_metadata::jsonb ->> 'pan_detected') = 'true' AND transcription IS NOT NULL))))"
         + ` AND (${sweepLengthSql()} OR (transcription_metadata::jsonb ->> 'pan_detected') = 'true')) as retrying`),
       db.raw("COUNT(*) FILTER (WHERE review_status IN ('open', 'in_progress')) as review_open"),
       // Live parked audio only: an entry still carrying a URL, or one whose

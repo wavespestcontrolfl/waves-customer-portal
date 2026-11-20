@@ -128,8 +128,10 @@ function sweepTakesAgain(r, now) {
 
 // A no_transcription / extraction_failed row is a scheduled retry only while
 // it is under the processor's attempt cap, inside extraction_failed's
-// creation fence (no_transcription has none), and taken again by the sweep
-// (10-min spacing). Anything else is a failure, with the reason.
+// creation fence (no_transcription has none), with audio for a
+// no_transcription retry (the sweep's PAN transcript-only branch never takes
+// that state), and taken again by the sweep (10-min spacing). Anything else
+// is a failure, with the reason.
 function callFailureState(r, now) {
   const max = CALL_EXTRACTION_MAX_ATTEMPTS;
   const attempts = Number(r.extraction_attempts) || 0;
@@ -141,6 +143,9 @@ function callFailureState(r, now) {
         ? `no transcript after ${attempts} attempts — no automatic retry`
         : `extraction failed after ${attempts} attempts — triage filed`,
     };
+  }
+  if (noTranscript && !String(r.recording_url || '').trim()) {
+    return { status: 'failed', detail: `no transcript (${attempts}/${max}) — no recording to retry, no automatic retry` };
   }
   if (!noTranscript && !(new Date(r.created_at) > since(RECENT_DAYS))) {
     // Outside the sweep's creation fence: nothing will retry it automatically
@@ -208,9 +213,13 @@ async function laneCallProcessing() {
   // AND inside the sweep's length rule it is a scheduled retry; otherwise it
   // is terminal (no sweep revisits it), windowed by the failure event like
   // extraction_failed and judged by the any-age length rule.
+  // A retry needs a recording: the sweep's PAN transcript-only branch never
+  // takes this state, so a quarantined row with only its masked transcript is
+  // listed as a failure (recent branch), never as a scheduled retry.
   const retryRows = await db('call_log').where('processing_status', 'no_transcription')
     .where(function retryOrRecentFailure() {
-      this.where((q) => eligible(q.whereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])))
+      this.where((q) => eligible(q.whereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+        .whereRaw("NULLIF(btrim(recording_url), '') IS NOT NULL")))
         .orWhere((q) => eligible(q.where('updated_at', '>', since(RECENT_DAYS)), sweepLengthAnyAgeSql()));
     })
     .orderBy('updated_at', 'desc')

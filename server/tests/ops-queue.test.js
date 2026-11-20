@@ -302,7 +302,8 @@ describe('call lane with GATE_SHORT_CALL_RECORDING_SWEEP on', () => {
       expect(on.live).toContain(WINDOW);
       // The under-cap branch (a retry) carries the window; the recent-failure branch after it does not.
       const [retryBranch, failureBranch] = on.retry.split('"updated_at" >');
-      expect(retryBranch).toContain('COALESCE(extraction_attempts, 0) < 3');
+      // … and a retry needs a recording (the sweep's PAN transcript-only branch never takes no_transcription).
+      expect(retryBranch).toContain("COALESCE(extraction_attempts, 0) < 3 and NULLIF(btrim(recording_url), '') IS NOT NULL and");
       expect(retryBranch).toContain(WINDOW);
       expect(failureBranch).toContain(ANY_AGE);
       expect(failureBranch).not.toContain(WINDOW);
@@ -320,6 +321,18 @@ describe('call lane with GATE_SHORT_CALL_RECORDING_SWEEP on', () => {
       db.mockImplementation(fallback);
       await kx.destroy();
     }
+  });
+});
+
+describe('call lane: a no_transcription retry needs a recording', () => {
+  test('a PAN-quarantined row with only its masked transcript is a failure, never a scheduled retry', async () => {
+    // pendingCandidatesQuery takes no_transcription only from a recording: its
+    // PAN transcript-only branch admits pending / processing / extraction_failed.
+    fixtures.call_log = [
+      { id: 'q1', from_phone: '+15550000301', direction: 'inbound', processing_status: 'no_transcription', extraction_attempts: 1, created_at: ago(90), updated_at: ago(30), recording_url: null, recording_duration_seconds: 45, transcription: '[masked]', transcription_metadata: JSON.stringify({ pan_detected: true }) },
+    ];
+    const lane = await LANES.find((l) => l.key === 'calls').run();
+    expect(lane.items).toEqual([expect.objectContaining({ id: 'q1', status: 'failed', detail: 'no transcript (1/3) — no recording to retry, no automatic retry', at: ago(30) })]);
   });
 });
 
