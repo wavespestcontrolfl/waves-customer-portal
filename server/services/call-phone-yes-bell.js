@@ -208,7 +208,9 @@ async function runBellPass({ listCards, readCard, now = new Date() }) {
       logger.warn(`[call-phone-yes] bell skipped for card ${entry.id}: ${e.code || e.name || 'error'}`);
     }
   }
-  const replaced = listed.map((card) => card.id).filter((id) => written.has(dueKey(id)) && written.get(filedKey(id)) === true);
+  // Also a filed row a person already marked Done: the system close takes it over (done_by is the latest closer), so
+  // Recently Done cannot bring its words back beside the time-short row. Rows already closed this way are skipped.
+  const replaced = listed.map((card) => card.id).filter((id) => written.has(dueKey(id)) && written.has(filedKey(id)));
   await Episodes.closeAdminAlertKeys(db, replaced.map(filedKey), 'phone_yes_time_short', {
     now, resolution: 'Replaced by the alert that time runs short on this card',
   });

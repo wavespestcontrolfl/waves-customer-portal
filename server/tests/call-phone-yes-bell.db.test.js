@@ -265,18 +265,21 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
   });
 
   // A system close takes the row over (done_by is the latest closer, doneColumns), and Reopen undoes only a person's
-  // close: no row can stand open and auto-cleared for a closed card.
-  test('a row a person marked Done before the card closed cannot be reopened once the card closes', async () => {
+  // close: a filed row a person marked Done cannot come back once the card closes or the time-short row replaces it.
+  test.each([
+    ['the card closes', (card) => trx('triage_items').where({ id: card.id }).update({ status: 'resolved', resolved_at: new Date() }), 'phone_yes_card_closed'],
+    ['time runs short', (card) => trx('scheduled_services').where({ id: card.visitId }).update({ scheduled_date: etDay(1) }), 'phone_yes_time_short'],
+  ])('a filed row a person marked Done cannot be reopened once %s', async (_label, change, reason) => {
     const card = await phoneYesCard();
     await pass();
     const { filed } = await bellsOf(card.id);
     await trx('notifications').where({ id: filed.id }).update({ done_at: new Date(Date.now() - 60000), done_by: '123' });
-    await trx('triage_items').where({ id: card.id }).update({ status: 'resolved', resolved_at: new Date() });
+    await change(card);
     await pass();
 
     const closed = (await bellsOf(card.id)).filed;
     expect(closed.done_by).toBe('episodes');
-    expect(closed.metadata).toEqual(expect.objectContaining({ autoCleared: true, autoClearedReason: 'phone_yes_card_closed' }));
+    expect(closed.metadata).toEqual(expect.objectContaining({ autoCleared: true, autoClearedReason: reason }));
     const { token } = await trx('notifications').where({ id: filed.id }).first(trx.raw('done_at::text AS token'));
     await expect(NotificationService.reopenAdminDone(String(filed.id), { expectedDoneAt: token })).resolves.toBe('not_reopenable');
     expect((await bellsOf(card.id)).filed.done_at).not.toBeNull();

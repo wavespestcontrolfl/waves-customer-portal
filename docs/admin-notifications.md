@@ -698,7 +698,8 @@ was heard or the yes is being read again; "check <who>'s booked visit" once an e
 linked), subject the booking call, link `/admin/communications#tab=triage` (the card and its tap), done-when `phone_yes_card_closed`.
 Keys `call-phone-yes:<card id>` (filed) and `call-phone-yes-due:<card id>` (time short), both without `dedupeOpenOnly`: a closed row
 still holds its key, so each key rings at most once and no `RERING` entry is owed. Once the time-short row exists, the filed row
-closes (every pass retries that close, and a raise that wrote no row closes nothing), so a card has one open row; a card filed when
+closes (every pass retries that close, and a raise that wrote no row closes nothing), so a card has one open row; the close also
+takes over a filed row a person already marked Done, so Reopen cannot bring it back beside the time-short row; a card filed when
 time is already short rings the time-short bell alone, and nothing rings for a card after its time-short bell. Between rings the
 open row is rewritten quietly when the card's words change (a yes taken back, an estimate accepted, the visit moved):
 `refreshOnDedupe` with `ringOnRefresh` false, so no ring, no banner, and the row keeps its read state. The bell never stores the
