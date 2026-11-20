@@ -44,6 +44,8 @@ const { DEFAULT_WEIGHTS, DEFAULT_CUT_LINES, seasonWindow, weightedScore, scoreBa
 
 // A report is on time when it went out within this many hours of the completion record.
 const REPORT_ON_TIME_HOURS = 24;
+// A send may land a little before the visit's completion stamp (the stamp is written after the completion commits).
+const CLOSEOUT_SLACK_MS = 60 * 60000;
 // Callbacks per 100 visits at which the callbacks part reaches 0.
 const CALLBACK_RATE_AT_ZERO = 10;
 
@@ -210,7 +212,7 @@ const ON_TIME_COHORT_SQL = `
  * On-time share, or null when there is nothing to measure OR a record's on-time answer is unknown:
  * a confirmed send with no readable time and no other on-time proof (a send that may have been on
  * time is never counted late). Exempt records (no customer report owed) are left out; any confirmed
- * send within REPORT_ON_TIME_HOURS of the record being created is on time; otherwise late.
+ * send of this closeout (not long before its completion) within REPORT_ON_TIME_HOURS of the record being created is on time; otherwise late.
  */
 async function readOnTime(rawTechnicianId, window, conn = db) {
   const technicianId = requireTechnician(rawTechnicianId);
@@ -226,8 +228,11 @@ async function readOnTime(rawTechnicianId, window, conn = db) {
     if (found.exempt) continue;
     owed += 1;
     // the window starts when the visit became complete (a record reused by the pest-recap rail keeps its old created_at)
-    const deadline = (found.completedAt || new Date(row.created_at)).getTime() + limitMs;
-    if (found.firstConfirmedSendAt && found.firstConfirmedSendAt.getTime() <= deadline) onTime += 1;
+    const completedMs = (found.completedAt || new Date(row.created_at)).getTime();
+    const deadline = completedMs + limitMs;
+    // only a send of THIS closeout counts: one long before completion belongs to an earlier closeout of a reused record
+    const eligible = found.sendTimes.map((at) => at.getTime()).filter((ms) => ms >= completedMs - CLOSEOUT_SLACK_MS);
+    if (eligible.some((ms) => ms <= deadline)) onTime += 1;
     else if (found.confirmedWithoutTime) return null; // may have gone out on time: unknown, not late
   }
   return owed ? percent(onTime, owed) : null;

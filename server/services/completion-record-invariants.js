@@ -511,10 +511,11 @@ const EVIDENCE_SENDS_SQL = `
     FROM sib JOIN service_report_deliveries d ON d.service_record_id = sib.sib_id
    WHERE sib.report_view_token IS NOT NULL AND d.status = 'sent'
   UNION ALL
-  SELECT record_id, 'email', m.sent_at, NULL
+  SELECT record_id, CASE WHEN m.sent_at IS NOT NULL THEN 'email' ELSE 'email_delivered_only' END,
+         COALESCE(m.sent_at, m.delivered_at), NULL
     FROM sib JOIN email_messages m ON m.idempotency_key LIKE 'service_report_ready:%'
                                  AND split_part(m.idempotency_key, ':', 2) = sib.sib_id::text
-   WHERE m.sent_at IS NOT NULL
+   WHERE m.sent_at IS NOT NULL OR m.delivered_at IS NOT NULL
   UNION ALL
   SELECT record_id, 'pest_recap_text', a.sent_at, NULL
     FROM sib JOIN messaging_audit_log a ON a.metadata->>'service_record_id' = sib.sib_id::text
@@ -578,8 +579,13 @@ function foldSendRows(rows, out) {
       continue;
     }
     const at = evidenceSendTime(row);
-    if (!at) entry.confirmedWithoutTime = true;
-    else if (!entry.firstConfirmedSendAt || at < entry.firstConfirmedSendAt) entry.firstConfirmedSendAt = at;
+    // delivered with no stored send time: the delivery time is an UPPER bound on the send, so it proves
+    // an on-time send when it is on time, and otherwise leaves the send time unknown
+    if (!at || row.kind === 'email_delivered_only') entry.confirmedWithoutTime = true;
+    if (at) {
+      entry.sendTimes.push(at);
+      if (!entry.firstConfirmedSendAt || at < entry.firstConfirmedSendAt) entry.firstConfirmedSendAt = at;
+    }
   }
   return sets;
 }
@@ -592,12 +598,13 @@ function foldSendRows(rows, out) {
  *                          on a visit whose report is waived too (a required report email is still owed)
  *   firstConfirmedSendAt   the earliest readable time of any confirmed send (Date) or null
  *   confirmedWithoutTime   some confirmed send has no readable time (stored time missing or malformed)
+ *   sendTimes              every readable confirmed send time (a delivered-only email contributes its delivery time)
  *   completedAt            when the visit last became complete (COMPLETED_MARKER_AT, the detectors' own anchor)
  * A record with no evidence at all is { exempt: false, firstConfirmedSendAt: null, confirmedWithoutTime: false }.
  */
 async function deliveryEvidenceForRecords(recordIds, knex = db) {
   const ids = [...new Set((recordIds || []).map((id) => String(id).toLowerCase()))];
-  const out = new Map(ids.map((id) => [id, { exempt: false, firstConfirmedSendAt: null, confirmedWithoutTime: false, completedAt: null }]));
+  const out = new Map(ids.map((id) => [id, { exempt: false, firstConfirmedSendAt: null, confirmedWithoutTime: false, completedAt: null, sendTimes: [] }]));
   if (!ids.length) return out;
   const [exempt, sends] = await Promise.all([
     knex.raw(EVIDENCE_EXEMPT_SQL, [ids.join(',')]),

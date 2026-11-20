@@ -144,6 +144,7 @@ describe('tech rewards scores input checks', () => {
       t.string('status');
       t.string('idempotency_key');
       t.timestamp('sent_at', { useTz: true });
+      t.timestamp('delivered_at', { useTz: true });
     });
     await db.schema.withSchema(mockSchema).createTable('service_recaps', (t) => {
       t.bigIncrements('id');
@@ -500,6 +501,24 @@ describe('tech rewards scores input checks', () => {
       expect(await scores.readOnTime(tech, WINDOW)).toBe(0);
     });
 
+    test('onTime: a delivered email with no send time proves an on-time send, else leaves the time unknown', async () => {
+      const record = await visit(tech); // created 2026-04-10T15:00Z
+      await db('email_messages').insert({ idempotency_key: `service_report_ready:${record.id}:primary`, status: 'delivered', sent_at: null, delivered_at: ts('2026-04-10T15:05:00Z') });
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100); // delivered within the window: sent within it too
+      await db('email_messages').del();
+      await db('email_messages').insert({ idempotency_key: `service_report_ready:${record.id}:primary`, status: 'delivered', sent_at: null, delivered_at: ts('2026-04-12T15:05:00Z') });
+      expect(await scores.readOnTime(tech, WINDOW)).toBeNull(); // delivered late, sent time unknown: not late
+    });
+
+    test('onTime: a send long before completion belongs to an earlier closeout and does not credit', async () => {
+      // record reused by the recap rail: created 04-07, completed 04-10 15:00
+      const record = await visit(tech, { created_at: ts('2026-04-07T15:00:00Z'), recap_sms_sent_at: ts('2026-04-10T15:00:00Z') });
+      await db('email_messages').insert({ idempotency_key: `service_report_ready:${record.id}:primary`, status: 'sent', sent_at: ts('2026-04-07T16:00:00Z') });
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(0); // the old closeout's email is stale
+      await db('email_messages').insert({ idempotency_key: `service_report_ready:${record.id}:primary`, status: 'sent', sent_at: ts('2026-04-10T14:30:00Z') }); // 30 min before the stamp: same closeout
+      expect(await scores.readOnTime(tech, WINDOW)).toBe(100);
+    });
+
     test('audit: match share of audited visits in the window months', async () => {
       expect(await scores.readAudit(tech, WINDOW)).toBeNull();
       const add = async (month, result, technicianId = tech) => db('tech_protocol_audits').insert({
@@ -633,6 +652,30 @@ describe('tech rewards scores input checks', () => {
       // goes to tech's April 1 visit: 1 callback in 2 visits -> 0
       expect(await scores.readCallbacks(tech, WINDOW)).toBe(0);
       expect(await scores.readCallbacks(other, WINDOW)).toBeNull();
+    });
+
+    test('callbacks: a flagged incomplete record beside a completed unflagged sibling is one callback visit, in both counts', async () => {
+      const customer_id = randomUUID();
+      await visit(tech, { customer_id, service_date: '2026-04-01', created_at: ts('2026-04-01T14:00:00Z') });
+      await visit(tech, { customer_id: randomUUID(), service_date: '2026-04-02' });
+      const svc = await scheduled(other);
+      await visit(other, { customer_id, scheduled_service_id: svc.id, service_date: '2026-04-10', is_callback: true, status: 'incomplete', created_at: ts('2026-04-10T14:00:00Z') });
+      await visit(other, { customer_id, scheduled_service_id: svc.id, service_date: '2026-04-10', created_at: ts('2026-04-10T14:05:00Z') }); // completed, flag only on the sibling
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(0); // 1 callback in 2 visits
+      expect(await scores.readCallbacks(other, WINDOW)).toBeNull(); // and not a regular visit of its technician
+    });
+
+    test('callbacks: the canonical (newest performed) sibling decides the category, not the first by id', async () => {
+      const customer_id = randomUUID();
+      const lawnTech = await db('technicians').insert({ name: 'Fixture Three' }).returning('id').then((rows) => rows[0].id);
+      await visit(tech, { customer_id, service_type: 'Quarterly Pest Control', service_date: '2026-04-01', created_at: ts('2026-04-01T14:00:00Z') });
+      await visit(lawnTech, { customer_id, service_type: 'Lawn Fertilization', service_date: '2026-04-02', created_at: ts('2026-04-02T14:00:00Z') });
+      const svc = await scheduled(other);
+      // the older sibling (a lawn re-service) has the SMALLER id, the newer (a pest re-service) the larger
+      await visit(other, { id: '00000000-0000-4000-8000-000000000001', customer_id, scheduled_service_id: svc.id, service_type: 'Lawn Fertilization', service_date: '2026-04-10', is_callback: true, created_at: ts('2026-04-10T14:00:00Z') });
+      await visit(other, { id: 'ffffffff-0000-4000-8000-000000000001', customer_id, scheduled_service_id: svc.id, service_type: 'Quarterly Pest Control', service_date: '2026-04-10', is_callback: true, created_at: ts('2026-04-10T14:05:00Z') });
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(0); // the pest callback corrects the pest visit
+      expect(await scores.readCallbacks(lawnTech, WINDOW)).toBe(100);
     });
 
     test('every read takes an uppercase technician id like the lowercase one', async () => {
