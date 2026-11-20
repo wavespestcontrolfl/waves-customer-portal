@@ -155,18 +155,25 @@ function noteHighest(highest, key, number) {
   if (key && number) highest.set(key, Math.max(highest.get(key) || 0, number));
 }
 
+// The record with the highest visit number any copy of its visit gave (noteHighest), or the record as it is.
+function raiseVisit(record, visits) {
+  const highest = visits.get(record.source_key);
+  return highest ? { ...record, detail: { ...record.detail, visitNumber: highest } } : record;
+}
+
 /**
  * Inspection rows -> one record per visit that cited violation 35, in the three counties. A row cut short, or a row
  * in the area with a bad report id, date (or one after `today`, when given), violation-35 count or visit number, is
  * skipped and counted in counts.malformed; a row in the area that passes counts in counts.valid, cited or not.
- * Every copy of a visit in the area whose visit number reads, cited or not, valid or not, raises the record's visit
- * number: a visit any copy names as a later visit (a callback listed once more as visit 1) is never a first visit.
+ * Every copy of a visit in the area whose visit number reads, cited or not, valid or not, notes it in `visits`, and
+ * each record takes the highest: a visit any copy names as a later visit (a callback listed once more as visit 1)
+ * is never a first visit. loadFile reads a row at a time, so it passes one `visits` for the whole file and raises
+ * the kept records again once every row is read.
  */
-function parseInspectionRows(rows, counts = {}, today = null) {
+function parseInspectionRows(rows, counts = {}, today = null, visits = new Map()) {
   counts.malformed ??= 0;
   counts.valid ??= 0;
   const out = [];
-  const highestVisit = new Map();
   for (const row of rows) {
     if (!hasEveryColumn(row, 'inspection')) {
       counts.malformed += 1;
@@ -182,7 +189,7 @@ function parseInspectionRows(rows, counts = {}, today = null) {
     const eventDate = parseUsDate(row['Inspection Date']);
     const cited = wholeNumber(row['Violation 35']);
     const visitNumber = visitNumberOf(row['Visit Number']);
-    noteHighest(highestVisit, sourceKey, visitNumber);
+    noteHighest(visits, sourceKey, visitNumber);
     // A row without both report ids is left out: its report could never be read, and once stored it would block a
     // corrected copy (a known key only refreshes last_seen_at). A later file with the ids adds it.
     if (!ID_RE.test(sourceKey || '') || !ID_RE.test(licenseId || '') || !eventDate || (today && eventDate > today) || cited === null
@@ -218,10 +225,7 @@ function parseInspectionRows(rows, counts = {}, today = null) {
       },
     });
   }
-  return out.map((record) => {
-    const highest = highestVisit.get(record.source_key);
-    return highest ? { ...record, detail: { ...record.detail, visitNumber: highest } } : record;
-  });
+  return out.map((record) => raiseVisit(record, visits));
 }
 
 /**
@@ -432,6 +436,8 @@ async function loadFile(kind, fetchText, now) {
   const years = new Map();
   // Good rows in the area, cited or not, by fiscal year.
   const goodByYear = new Map();
+  // The highest visit number each inspection visit's copies give, from anywhere in the file (parseInspectionRows).
+  const visits = new Map();
   // A row at a time, so the server keeps answering requests and only the kept records stay in memory.
   const header = await eachDbprCsvRow(text, (row, { cells, columns }) => {
     rowsRead += 1;
@@ -448,7 +454,7 @@ async function loadFile(kind, fetchText, now) {
       years.set(year, { rows: seen.rows + 1, newest: day > seen.newest ? day : seen.newest });
     }
     const good = counts.valid;
-    records.push(...(kind === 'inspection' ? parseInspectionRows([row], counts, today) : parseLicenseRows([row], kind, counts, today)));
+    records.push(...(kind === 'inspection' ? parseInspectionRows([row], counts, today, visits) : parseLicenseRows([row], kind, counts, today)));
     if (counts.valid > good && day) goodByYear.set(fiscalYearOf(day), (goodByYear.get(fiscalYearOf(day)) || 0) + 1);
   });
   // A required column missing from the header is renamed or gone. One named twice would take the later cell (a
@@ -473,7 +479,9 @@ async function loadFile(kind, fetchText, now) {
   const otherYears = [...goodByYear].reduce((sum, [y, rows]) => (y === fiscalYear ? sum : sum + rows), 0);
   counts.malformed += otherYears;
   counts.valid -= otherYears;
-  const kept = records.filter((record) => fiscalYearOf(record.event_date) === fiscalYear);
+  // A copy of a visit later in the file than its kept record (a callback listed again, uncited) raises it here, once
+  // every row is read. Only inspection rows fill `visits`.
+  const kept = records.filter((record) => fiscalYearOf(record.event_date) === fiscalYear).map((record) => raiseVisit(record, visits));
   // Malformed rows over a tenth of the rows that count mean a changed format (a new date format, rows of a new
   // width), not a stray row: the file fails, even beside good rows. With no good row, one malformed row fails it. The
   // rows that count are the good and malformed ones: malformed counts rows in the area and rows that cannot be placed

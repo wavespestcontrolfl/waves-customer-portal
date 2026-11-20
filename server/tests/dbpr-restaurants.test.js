@@ -291,6 +291,23 @@ describe('syncRestaurantProspects', () => {
   });
   afterAll(() => { delete process.env.DBPR_PROSPECT_SYNC_DISABLED; });
 
+  test('a visit any copy in the file names as a later visit is stored as that visit, in either row order', async () => {
+    // The import reads a row at a time: the uncited visit-2 copy may come after the cited visit-1 copy, or before it.
+    const callback = (line) => line.replace('"34208","1","1","Food"', '"34208","1","2","Food"');
+    expect(callback(inspRow({ visit: '9001', v35: 0 }))).toContain('"34208","1","2","Food"');
+    const stored = () => upserts.filter((r) => r.kind === 'inspection').map((r) => [r.source_key, r.detail.visitNumber])
+      .sort((a, b) => a[0].localeCompare(b[0]));
+    for (const lines of [
+      [inspRow({ visit: '9001' }), inspRow({ visit: '9003' }), callback(inspRow({ visit: '9001', v35: 0 }))],
+      [callback(inspRow({ visit: '9001', v35: 0 })), inspRow({ visit: '9003' }), inspRow({ visit: '9001' })],
+    ]) {
+      store = makeStore();
+      const result = await sync({ fetchText: makeFetch({ '7fdinspi.csv': () => inspCsv(lines) }), store });
+      expect(result.failures).toBe(0);
+      expect(stored()).toEqual([['9001', 2], ['9003', 1]]);
+    }
+  });
+
   test('upserts every kind under its own key, once per (kind, source_key)', async () => {
     store = makeStore();
     fetchText = makeFetch();
