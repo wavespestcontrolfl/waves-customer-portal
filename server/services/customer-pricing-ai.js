@@ -1454,14 +1454,14 @@ async function planStartHint(db, customer, options, currentServiceKeys, ownedSer
   if (require('../config/feature-gates').portalPlanStartLive?.() !== true) return {};
   const restart = require('./cancellation-resolution/restart');
   if (!restart.planStartAccountOpen(customer) || currentServiceKeys.length || ownedServiceKeys.length) return {};
-  const optionIds = options
+  const bookable = options
     .filter((option) => restart.PLAN_START_SERVICE_KEYS.includes(option.serviceKey)
       && Number(option.monthly) > 0
       && engineResults.has(option.id) && !restart.engineResultNeedsReview(engineResults.get(option.id))
       && restart.planStartOptionBookable(option.serviceKey,
-        variantsForService(option.serviceKey, '', false).find((variant) => variant?.id === option.id)))
-    .map((option) => option.id);
-  if (!optionIds.length) return {};
+        variantsForService(option.serviceKey, '', false).find((variant) => variant?.id === option.id)));
+  if (!bookable.length) return {};
+  let seed;
   try {
     // A stored commercial type: the mint's stored-type guard refuses it (a resolved commercial
     // type prices commercial lines, which the review check above already drops).
@@ -1469,12 +1469,19 @@ async function planStartHint(db, customer, options, currentServiceKeys, ownedSer
     // A live row the pricing loaders skip (a rodent plan, a commercial row) or a prepay
     // term still covering today owns a plan: no offer.
     if (await restart.ownsAnyRecurringService(db, customer.id)) return {};
-    if (!(await restart.singlePremisesStreet(db, customer, { strict: true }))) return {};
+    const street = await restart.singlePremisesStreet(db, customer, { strict: true });
+    if (!street) return {};
+    // The accepted-estimate seed the mint prices with (codex pre-push P1): its review
+    // markers refuse the mint, so they offer no button. Unreadable fails closed, as the mint does.
+    seed = await require('./service-report/cross-sell').loadEstimateSeed(db, customer.id, street);
   } catch (err) {
     logger.warn(`[customer-pricing-ai] plan-start account read failed — no offer: ${err.message}`);
     return {};
   }
-  return { planStart: { optionIds } };
+  const optionIds = bookable
+    .filter((option) => !restart.seedRefusesPrice(seed, [restart.pricingKeyFor(option.serviceKey)]))
+    .map((option) => option.id);
+  return optionIds.length ? { planStart: { optionIds } } : {};
 }
 
 function summarizeProperty(context) {

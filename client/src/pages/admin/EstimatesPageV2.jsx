@@ -3613,9 +3613,14 @@ const EDITABLE_ESTIMATE_STATUSES = [
   "viewed",
   "send_failed",
 ];
+// The server refuses an in-place edit of a customer's own mint
+// (admin-estimate-persistence.js REVISE_REFUSED_MINT_SOURCES), so the menus
+// never offer one.
+const EDIT_REFUSED_SOURCES = ["plan_restart", "plan_start"];
 function canEditEstimateInPlace(estimate) {
   return (
     EDITABLE_ESTIMATE_STATUSES.includes(estimate.status) &&
+    !EDIT_REFUSED_SOURCES.includes(estimate.source) &&
     !!String(estimate.token || "").trim() &&
     !estimate.isCommercialProposal &&
     !estimate.archivedAt

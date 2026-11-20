@@ -212,6 +212,19 @@ it("offers no Schedule, Mark Won or Annual Prepay on an open plan-start quote, w
   }
 });
 
+it("offers no Edit estimate on a customer's own mint at desktop width (codex pre-push P1)", async () => {
+  const staff = { ...active, token: "qa-token" };
+  const restart = { ...staff, id: "qa-plan-restart", customerName: "Synthetic Plan Restart", source: "plan_restart" };
+  loadActive.mockImplementation(async () => response({ estimates: [staff, restart] }));
+  mount(1440);
+  await screen.findByText("Synthetic Plan Restart");
+  fireEvent.click(screen.getByRole("button", { name: "Actions for Synthetic Plan Restart" }));
+  expect(screen.queryByText("Edit estimate")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Actions for Synthetic Plan Restart" }));
+  fireEvent.click(screen.getByRole("button", { name: "Actions for Synthetic Active" }));
+  expect(screen.getByText("Edit estimate")).toBeInTheDocument();
+});
+
 it("keeps a reopened estimate booking draft while a cancelled booking refreshes", async () => {
   const refresh = deferred();
   mount(1440);

@@ -112,6 +112,34 @@ function planStartQuoteMismatch({ bundle, row, data, family, shown, servesAsIs }
 // Pricing-ai speaks 'termite' for the termite_bait family (LINE_SERVICE_KEYS).
 const pricingKeyFor = (family) => (family === 'termite_bait' ? 'termite' : family);
 
+// The seed guards a priced quote must pass (codex pre-push P0; cross-sell's
+// own tree guard): an accepted estimate at this street that carried its own
+// verification markers, or, for a Tree & Shrub price, a stored zero tree
+// count of unknown provenance. The mint refuses such a price, and the card's
+// plan-start hint offers no button for it (codex pre-push P1).
+function seedRefusesPrice(seed, pricingKeys) {
+  return seed?.requiresFieldVerification === true
+    || (pricingKeys.includes('tree_shrub') && seed?.zeroTreeCountAmbiguous === true);
+}
+
+// A 'sending' claim this fresh is a send in flight, whatever expires_at says
+// (codex pre-push P1): a staff resend claimed just before expiry refreshes
+// expires_at only after the provider handoff. The claim stamps updated_at.
+// Sends finish in seconds; an older claim with a lapsed expiry is a crashed one.
+const SEND_CLAIM_LIVE_MS = 15 * 60 * 1000;
+function sendInFlight(row, now) {
+  const { priorMintStillLive } = require('../service-report/click-estimate-mint');
+  if (!['sending', 'scheduled'].includes(row.status)) return false;
+  if (priorMintStillLive(row, now)) return true;
+  return row.status === 'sending' && now - new Date(row.updated_at || 0) < SEND_CLAIM_LIVE_MS;
+}
+
+// Two estimate street keys name the same home: the property-scope standard
+// (codex pre-push P1), so a ZIP or city filled in after the mint keeps it.
+function sameHome(a, b) {
+  return require('../service-report/visit-property-scope').sameResolvedProperty(a, b);
+}
+
 class RestartUnavailableError extends Error {
   constructor(code, message) {
     super(message);
@@ -919,9 +947,7 @@ async function mintPricedEstimate({
   // own tree guard (codex pre-push P0) — never becomes a customer-visible
   // price. The customer gets the priced-by-hand 409.
   const raw = recomputed.rawEngineResult || {};
-  if (engineResultNeedsReview(raw)
-    || propertySeed?.requiresFieldVerification === true
-    || (toPrice.includes('tree_shrub') && propertySeed?.zeroTreeCountAmbiguous === true)) {
+  if (engineResultNeedsReview(raw) || seedRefusesPrice(propertySeed, toPrice)) {
     throw new RestartUnavailableError('pricing_unavailable', 'This one needs a quick hand-check before we can price it online.');
   }
 
@@ -985,7 +1011,7 @@ async function mintPricedEstimate({
     // stored address must key to today's primary premises; else the lineage
     // archives and a fresh quote is minted at the current address.
     if (matchesLive(liveData)
-      && linkage.normalizedEstimateStreet(live.address) === primaryStreet
+      && sameHome(linkage.normalizedEstimateStreet(live.address), primaryStreet)
       && cents(monthlyTotal) === cents(live.monthly_total)
       && cents(annualTotal) === cents(live.annual_total)
       && cents(onetimeTotal) === cents(live.onetime_total)
@@ -1009,18 +1035,17 @@ async function mintPricedEstimate({
     .whereNull('archived_at')
     .whereNot('status', 'accepted')
     .forUpdate()
-    .select('id', 'status', 'archived_at', 'expires_at');
+    .select('id', 'status', 'archived_at', 'expires_at', 'updated_at');
   // Mid-delivery lineage refuses the mint FIRST (codex GH r19 P0 — the
   // same guard click-estimate-mint applies): an operator send claims the
   // row 'sending' and its finalization does not reject an archived row,
   // so archiving here would let the provider deliver a token we just
   // killed; a 'scheduled' send would be silently retired before its
-  // worker runs. A crashed 'sending' claim (expiry window lapsed) is dead
-  // and archives normally — priorMintStillLive draws the same live/stale
-  // line the click-mint uses. Sends finish in seconds; the customer's next
-  // tap proceeds.
-  const { priorMintStillLive } = require('../service-report/click-estimate-mint');
-  if (lineage.some((row) => ['sending', 'scheduled'].includes(row.status) && priorMintStillLive(row, nowDate))) {
+  // worker runs. A crashed 'sending' claim (expiry window lapsed, and the
+  // claim itself no longer fresh) is dead and archives normally
+  // (sendInFlight). Sends finish in seconds; the customer's next tap
+  // proceeds.
+  if (lineage.some((row) => sendInFlight(row, nowDate))) {
     throw new RestartUnavailableError('delivery_in_flight', 'This quote is on its way to you right now — give it a moment, then try again.');
   }
   // Minting a replacement: archive that lineage first — an EXPIRED restart
@@ -1486,7 +1511,7 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
   // The mint's bar again (the price was standalone and residential): no plan
   // membership on the row, no commercial type, no live recurring service of
   // any kind, and the one premises the estimate is addressed to.
-  if (!planStartAccountOpen(fresh) || commercial || ownsPlan || !premisesStreet || quotedStreet !== premisesStreet) throw changed();
+  if (!planStartAccountOpen(fresh) || commercial || ownsPlan || !premisesStreet || !sameHome(quotedStreet, premisesStreet)) throw changed();
 }
 
 module.exports = {
@@ -1505,6 +1530,8 @@ module.exports = {
   accountHasOtherProfile,
   singlePremisesStreet,
   engineResultNeedsReview,
+  seedRefusesPrice,
+  pricingKeyFor,
   mintPlanStartEstimate,
   assertPlanStartAcceptEligible,
   _test: { liveRestartEstimate, ownedResidualFamilies, planStartQuoteMismatch },

@@ -389,9 +389,18 @@ describe('mintRestartEstimate', () => {
     await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() }))
       .rejects.toMatchObject({ code: 'delivery_in_flight' });
 
-    // A CRASHED 'sending' claim (window lapsed) is dead — archives + mints.
+    // A resend claimed just before expiry is in flight while its claim is fresh, whatever
+    // expires_at says: the send refreshes the expiry only after the handoff (codex pre-push P1).
     tables.estimates[0].status = 'sending';
     tables.estimates[0].expires_at = '2020-01-01';
+    tables.estimates[0].updated_at = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() }))
+      .rejects.toMatchObject({ code: 'delivery_in_flight' });
+    expect(tables.estimates).toHaveLength(1);
+    expect(tables.estimates[0].archived_at == null).toBe(true);
+
+    // A CRASHED 'sending' claim (window lapsed, claim no longer fresh) is dead — archives + mints.
+    tables.estimates[0].updated_at = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
     expect(result.reused).toBe(false);
     expect(tables.estimates.find((e) => e.id === 'est-sending').archived_at != null).toBe(true);

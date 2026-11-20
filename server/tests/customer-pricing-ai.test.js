@@ -2131,14 +2131,36 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
   let owns;
   let premises;
   let otherProfile;
+  let seed;
   beforeEach(() => {
+    // The accepted-estimate seed the mint prices with: none on file unless a test says so.
+    seed = jest.spyOn(crossSell, 'loadEstimateSeed').mockResolvedValue(null);
     owns = jest.spyOn(restart, 'ownsAnyRecurringService').mockResolvedValue(false);
     // The strict proof's account read (another profile on the account); plan-start.test.js runs it on rows.
     otherProfile = jest.spyOn(restart, 'accountHasOtherProfile').mockResolvedValue(false);
     // The mint's single-premises proof, at its home (cross-sell); the street checks run for real.
     premises = jest.spyOn(crossSell, 'customerHasOnlyPrimaryPremises').mockResolvedValue(true);
   });
-  afterEach(() => { delete process.env.GATE_PORTAL_PLAN_START; owns.mockRestore(); premises.mockRestore(); otherProfile.mockRestore(); });
+  afterEach(() => { delete process.env.GATE_PORTAL_PLAN_START; owns.mockRestore(); premises.mockRestore(); otherProfile.mockRestore(); seed.mockRestore(); });
+
+  test('applies the mint\'s seed checks: no button for a price the mint would refuse (codex pre-push P1)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    // The seed is read at the street the strict premises proof returned.
+    expect((await ask(plain())).planStart?.optionIds?.length).toBeGreaterThan(0);
+    expect(seed).toHaveBeenCalledWith(null, 'cust-lead', expect.stringMatching(/^1/));
+    // An accepted estimate there carried its own field-verification markers: no option books.
+    seed.mockResolvedValue({ requiresFieldVerification: true });
+    expect('planStart' in await ask(plain())).toBe(false);
+    // An ambiguous zero tree count refuses only a Tree & Shrub price.
+    seed.mockResolvedValue({ zeroTreeCountAmbiguous: true });
+    expect((await ask(plain())).planStart?.optionIds?.length).toBeGreaterThan(0);
+    const trees = await ask(plain(), null, 'I am interested in adding tree and shrub care');
+    expect(trees.options.some((o) => o.serviceKey === 'tree_shrub')).toBe(true);
+    expect('planStart' in trees).toBe(false);
+    // An unreadable seed fails closed, as the mint does.
+    seed.mockRejectedValue(new Error('seed read failed'));
+    expect('planStart' in await ask(plain())).toBe(false);
+  });
 
   test('lists the options the route can book, only when the gate is on and the account has no plan', async () => {
     process.env.GATE_PORTAL_PLAN_START = 'true';

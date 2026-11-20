@@ -853,6 +853,14 @@ describe('mintPlanStartEstimate', () => {
       expect(tables.estimates.find((r) => r.id === next.estimateId).address).toBe('1 Main St, Parrish, FL 34219');
     });
 
+    test('a live quote stored at the same home without the ZIP the account has since gained is reused (codex pre-push P1)', async () => {
+      const first = await mint();
+      tables.estimates[0].address = '1 Main St, Parrish, FL';
+      const next = await mint({ randomBytes: () => Buffer.from('0123456789abcdef') });
+      expect(next).toMatchObject({ reused: true, estimateId: first.estimateId });
+      expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeFalsy();
+    });
+
     test('same option but today\'s totals drifted from the stored offer: the lineage is archived and re-minted', async () => {
       const first = await mint();
       const drifted = engineLine('pest_control', 33.33);
@@ -920,6 +928,14 @@ describe('assertPlanStartAcceptEligible', () => {
 
   test('a still-plain account owning no recurring service accepts', async () => {
     await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).resolves.toBeUndefined();
+  });
+
+  test('a quote stored without the ZIP the account has since gained names the same home and accepts (codex pre-push P1)', async () => {
+    tables.estimates[0].address = '1 Main St, Parrish, FL';
+    await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).resolves.toBeUndefined();
+    // Another city on both sides is another home.
+    tables.estimates[0].address = '1 Main St, Palmetto, FL 34219';
+    await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
   });
 
   test.each([
