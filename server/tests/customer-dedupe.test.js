@@ -625,7 +625,7 @@ describe('mergeSingletonPrefRow', () => {
     const timerKeys = (updated) => Object.keys(updated || {}).filter((k) => TIMER_COLUMNS.includes(k));
 
     it('never fills it column by column: a Rain Bird winner does not take the loser\'s Hunter model or answer', async () => {
-      for (const options of [undefined, { copyNewSod: true }]) {
+      for (const options of [undefined, { copyNewSod: true }, { copyTimer: true }]) {
         const { trx, state } = stubTrx({ winnerRow: prefs('W', rainBird), loserRow: prefs('L', x2, { pet_details: 'one dog' }) });
         await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L', options);
         expect(state.updated.pet_details).toBe('one dog'); // ordinary fields still fill
@@ -633,13 +633,16 @@ describe('mergeSingletonPrefRow', () => {
       }
     });
 
-    it('SAME home: a winner with no timer takes the loser\'s whole timer; different homes: it takes none of it', async () => {
+    it('SAME home for the timer (copyTimer): a winner with no timer takes the loser\'s whole timer; otherwise it takes none of it', async () => {
       const same = stubTrx({ winnerRow: prefs('W', none), loserRow: prefs('L', x2) });
-      await mergeSingletonPrefRow(same.trx, 'property_preferences', 'customer_id', 'W', 'L', { copyNewSod: true });
+      await mergeSingletonPrefRow(same.trx, 'property_preferences', 'customer_id', 'W', 'L', { copyTimer: true });
       expect(same.state.updated).toMatchObject(x2);
-      const different = stubTrx({ winnerRow: prefs('W', none), loserRow: prefs('L', x2, { pet_details: 'one dog' }) });
-      await mergeSingletonPrefRow(different.trx, 'property_preferences', 'customer_id', 'W', 'L');
-      expect(timerKeys(different.state.updated)).toEqual([]);
+      // The new-sod premise alone does not carry it: the timer has its own (timerHomeFollowsMerge).
+      for (const options of [undefined, { copyNewSod: true }, { copyNewSod: true, copyTimer: false }]) {
+        const different = stubTrx({ winnerRow: prefs('W', none), loserRow: prefs('L', x2, { pet_details: 'one dog' }) });
+        await mergeSingletonPrefRow(different.trx, 'property_preferences', 'customer_id', 'W', 'L', options);
+        expect(timerKeys(different.state.updated)).toEqual([]);
+      }
     });
   });
 
@@ -1904,6 +1907,29 @@ describe('executeMerge', () => {
           expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: X2, kept: true });
           expect(result.repointed['property_preferences.sprinkler_timer_cleared']).toBeUndefined();
         }
+      });
+
+      // The timer reads the kept customer's address as the merge leaves it: a street-only kept customer takes the
+      // loser's unit in the backfill, so the box on the loser's wall is on theirs. The new-sod record keeps its own
+      // premise (the pre-merge units differ), unchanged here.
+      it('a street-only kept customer that takes the loser\'s unit: the timer stays and is journaled as kept; the sod record keeps its premise', async () => {
+        const { prefUpdates, result, recorded } = await merge(
+          { address_line1: '100 Main St', address_line2: 'Apt 4', city: 'Bradenton', zip: '34205' },
+          { timer: X2 },
+        );
+        expect(touchesTimer(prefUpdates)).toBe(false);
+        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: X2, kept: true });
+        expect(result.repointed['property_preferences.sprinkler_timer_cleared']).toBeUndefined();
+        expect(result.repointed['property_preferences.new_sod_cleared']).toBe(1);
+      });
+
+      it('the kept customer has another unit of the same street: different homes, the timer is cleared', async () => {
+        const { prefUpdates, recorded } = await merge(
+          { address_line1: '100 Main St', address_line2: 'Apt 4', city: 'Bradenton', zip: '34205' },
+          { timer: X2, winnerAddr: { address_line1: '100 Main St', address_line2: 'Apt 9', city: 'Bradenton', zip: '34205' } },
+        );
+        expect(prefUpdates).toContainEqual([{ id: 'pp-1' }, NO_TIMER]);
+        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: X2, kept: false });
       });
 
       it('different homes, no timer on the row: nothing to clear, the empty timer is still journaled for the undo guard', async () => {

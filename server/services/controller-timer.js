@@ -23,10 +23,11 @@ function hasControllerTimer(row) {
   return CONTROLLER_TIMER_FIELDS.some((field) => row?.[field] != null);
 }
 
-// A same-home customer merge: the surviving row takes the other row's whole timer only when it has none
-// (not one field of its own). Whole or nothing. Returns the columns to set ({} = leave the row alone).
-function controllerTimerToCarry(winnerRow, loserRow) {
-  if (hasControllerTimer(winnerRow) || !hasControllerTimer(loserRow)) return {};
+// A customer merge: the surviving row takes the other row's whole timer only on a same-home merge (sameHome must
+// be exactly true) and only when it has none (not one field of its own). Whole or nothing. Returns the columns to
+// set ({} = leave the row alone). A row without the timer columns (another preferences table) has none to carry.
+function controllerTimerToCarry(winnerRow, loserRow, sameHome) {
+  if (sameHome !== true || hasControllerTimer(winnerRow) || !hasControllerTimer(loserRow)) return {};
   return controllerTimerOf(loserRow);
 }
 

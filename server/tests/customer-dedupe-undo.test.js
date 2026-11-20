@@ -1655,10 +1655,10 @@ describe('revertMerge', () => {
   describe('an inherited address goes back while a sprinkler timer stays with the kept customer', () => {
     const X2 = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
     const NO_TIMER = { irrigation_controller_brand: null, irrigation_controller_model: null, irrigation_controller_app: null };
-    const revertWithPrefs = async (prefsRow, backfills = { address_line1: '9 Inherited Ln', city: 'Sampleville' }) => {
+    const revertWithPrefs = async (prefsRow, backfills = { address_line1: '9 Inherited Ln', city: 'Sampleville' }, winnerOwn = {}) => {
       const journal = baseJournal();
       journal.winner_backfills = { email: 'loser.testcase@example.com', stripe_customer_id: 'cus_only', ...backfills };
-      const winner = { ...baseWinner(), ...backfills };
+      const winner = { ...baseWinner(), ...winnerOwn, ...backfills };
       const tables = { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } };
       if (prefsRow) tables.property_preferences = { stillOnWinner: [], firstRow: { id: 'pp-9', customer_id: WINNER, ...prefsRow } };
       const { trx, state } = buildRevertTrx({ journal, winner, loser: baseLoser(), tables });
@@ -1685,6 +1685,20 @@ describe('revertMerge', () => {
     it('an undo that leaves the kept customer\'s address alone never reads the timer', async () => {
       const { error } = await revertWithPrefs(X2, {});
       expect(error).toBeUndefined();
+    });
+
+    // The kept customer had its own street; the merge only completed a blank place or added a unit.
+    const OWN_STREET = { address_line1: '100 Sample St', city: 'Bradenton' };
+    it('only a ZIP goes back (the home does not change): proceeds, the kept customer\'s own timer stays', async () => {
+      const { error, state } = await revertWithPrefs(X2, { zip: '34205' }, OWN_STREET);
+      expect(error).toBeUndefined();
+      expect(state.winnerPatch).toMatchObject({ zip: null });
+      expect(state.winnerPatch).not.toHaveProperty('address_line1');
+    });
+
+    it('an inherited unit goes back (the home changes): REFUSES while a timer is on file', async () => {
+      const { error } = await revertWithPrefs(X2, { address_line2: 'Apt 4' }, OWN_STREET);
+      expect(error).toMatchObject({ statusCode: 409, message: expect.stringMatching(/sprinkler timer is on file for the kept customer/) });
     });
   });
 

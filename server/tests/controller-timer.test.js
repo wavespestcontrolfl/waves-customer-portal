@@ -23,10 +23,15 @@ test('any non-null column is a timer: the columns are independently nullable', (
 });
 
 test('a same-home merge carries the other row\'s whole timer, and only onto a row that has none at all', () => {
-  expect(controllerTimerToCarry(NO_TIMER, X2)).toEqual(X2);
-  expect(controllerTimerToCarry({}, { irrigation_controller_brand: 'rain_bird' })).toEqual({ ...NO_TIMER, irrigation_controller_brand: 'rain_bird' });
-  expect(controllerTimerToCarry({}, LONE_ANSWER)).toEqual(LONE_ANSWER);
-  expect(controllerTimerToCarry({ irrigation_controller_brand: 'rain_bird' }, X2)).toEqual({});
-  expect(controllerTimerToCarry(LONE_ANSWER, X2)).toEqual({}); // never overwrites one field of the winner's own
-  expect(controllerTimerToCarry(X2, NO_TIMER)).toEqual({});
+  expect(controllerTimerToCarry(NO_TIMER, X2, true)).toEqual(X2);
+  expect(controllerTimerToCarry({}, { irrigation_controller_brand: 'rain_bird' }, true)).toEqual({ ...NO_TIMER, irrigation_controller_brand: 'rain_bird' });
+  expect(controllerTimerToCarry({}, LONE_ANSWER, true)).toEqual(LONE_ANSWER);
+  expect(controllerTimerToCarry({ irrigation_controller_brand: 'rain_bird' }, X2, true)).toEqual({});
+  expect(controllerTimerToCarry(LONE_ANSWER, X2, true)).toEqual({}); // never overwrites one field of the winner's own
+  expect(controllerTimerToCarry(X2, NO_TIMER, true)).toEqual({});
+});
+
+test('only an explicit same-home answer carries it: a different-homes or unknown merge, or a row with no timer columns, carries nothing', () => {
+  for (const sameHome of [false, undefined, null, 'true', 1]) expect(controllerTimerToCarry(NO_TIMER, X2, sameHome)).toEqual({});
+  expect(controllerTimerToCarry({ id: 'np-1', sms_opt_in: true }, { id: 'np-2', sms_opt_in: false }, true)).toEqual({});
 });
