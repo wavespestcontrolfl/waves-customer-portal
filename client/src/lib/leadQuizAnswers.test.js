@@ -22,6 +22,14 @@ describe("quizAnswerLine", () => {
     expect(quizAnswerLine({ kind: "tree" })).toBeNull();
   });
 
+  test("a tile from the other quiz is not an answer", () => {
+    expect(quizAnswerLine({ kind: "pest", seeing: "weeds", property: "house" }))
+      .toEqual({ name: "Pest Quiz", answers: "house" });
+    expect(quizAnswerLine({ kind: "lawn", seeing: "roaches", property: "house" }))
+      .toEqual({ name: "Lawn Quiz", answers: "house" });
+    expect(quizAnswerLine({ kind: "lawn", seeing: "unsure" })).toEqual({ name: "Lawn Quiz", answers: "Not sure" });
+  });
+
   test("a prototype name is not a token", () => {
     expect(quizAnswerLine({ kind: "constructor" })).toBeNull();
     expect(quizAnswerLine({ kind: "__proto__" })).toBeNull();

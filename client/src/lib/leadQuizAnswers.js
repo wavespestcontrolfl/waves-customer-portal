@@ -4,24 +4,32 @@
 // webhook did not allowlist is never shown. The third answer, "How soon?", is
 // the lead's declared timeline and has its own line.
 const QUIZ_NAMES = { pest: "Pest Quiz", lawn: "Lawn Quiz" };
+// Each quiz's own nine tiles, as the webhook allowlists them
+// (server/services/lead-quiz.js QUIZ_SEEING): a lawn tile on a pest quiz is
+// not an answer and prints nothing.
 const QUIZ_SEEING_LABELS = {
-  ants: "Ants",
-  roaches: "Roaches",
-  spiders: "Spiders",
-  rodents: "Rodents",
-  termites: "Termites",
-  wasps: "Wasps",
-  mosquitoes: "Mosquitoes",
-  bedbugs: "Bed bugs",
-  weeds: "Weeds",
-  patches: "Patches",
-  thinning: "Thinning",
-  yellowing: "Yellowing",
-  bugs: "Lawn bugs",
-  fungus: "Fungus",
-  shrubs: "Shrubs",
-  palms: "Palms",
-  unsure: "Not sure",
+  pest: {
+    ants: "Ants",
+    roaches: "Roaches",
+    spiders: "Spiders",
+    rodents: "Rodents",
+    termites: "Termites",
+    wasps: "Wasps",
+    mosquitoes: "Mosquitoes",
+    bedbugs: "Bed bugs",
+    unsure: "Not sure",
+  },
+  lawn: {
+    weeds: "Weeds",
+    patches: "Patches",
+    thinning: "Thinning",
+    yellowing: "Yellowing",
+    bugs: "Lawn bugs",
+    fungus: "Fungus",
+    shrubs: "Shrubs",
+    palms: "Palms",
+    unsure: "Not sure",
+  },
 };
 const QUIZ_PROPERTIES = ["house", "townhome", "condo", "business"];
 
@@ -36,7 +44,7 @@ export function quizAnswerLine(quiz) {
   const name = quiz && typeof quiz === "object" ? labelFor(QUIZ_NAMES, quiz.kind) : null;
   if (!name) return null;
   const answers = [
-    labelFor(QUIZ_SEEING_LABELS, quiz.seeing),
+    labelFor(QUIZ_SEEING_LABELS[quiz.kind], quiz.seeing),
     QUIZ_PROPERTIES.includes(quiz.property) ? quiz.property : null,
   ].filter(Boolean);
   return { name, answers: answers.join(", ") };
