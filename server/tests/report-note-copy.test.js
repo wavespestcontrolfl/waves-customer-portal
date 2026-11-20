@@ -82,8 +82,24 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
 });
 
 describe('visitReportCustomerCopy: one rule for a record', () => {
+  // A pest visit: the note stands only on a pest report (phase 1).
+  const PEST = { service_line: 'pest' };
+
   test('the note wins over a titled report in the notes column', () => {
-    expect(visitReportCustomerCopy({ technician_notes: TITLED, structured_notes: stored() }).body).toBe(NOTE);
+    expect(visitReportCustomerCopy({ ...PEST, technician_notes: TITLED, structured_notes: stored() }).body).toBe(NOTE);
+  });
+
+  test('a note stands only on a pest record; a row read without the line column shows none', () => {
+    expect(visitReportCustomerCopy({ service_line: null, service_type: 'Quarterly Pest Control', technician_notes: TITLED, structured_notes: stored() }).body).toBe(NOTE);
+    for (const row of [
+      { service_line: 'lawn', service_type: 'Quarterly Pest Control' },
+      { service_line: null, service_type: 'Lawn Care' },
+      { service_type: 'Quarterly Pest Control' },
+    ]) {
+      const parsed = visitReportCustomerCopy({ ...row, technician_notes: TITLED, structured_notes: stored() });
+      expect(parsed.body).toBeNull();
+      expect(parsed.violations).toEqual(['report_note_service_line']);
+    }
   });
 
   test('a record with no note keeps the titled report', () => {
@@ -96,12 +112,12 @@ describe('visitReportCustomerCopy: one rule for a record', () => {
 
   test('a refused note never falls back to the notes column', () => {
     const refused = stored({ text: 'I treated the lanai. It is safe for pets now.' });
-    expect(visitReportCustomerCopy({ technician_notes: TITLED, structured_notes: refused }).body).toBeNull();
+    expect(visitReportCustomerCopy({ ...PEST, technician_notes: TITLED, structured_notes: refused }).body).toBeNull();
   });
 
   test('a note in any other shape, or notes that cannot be read, never fall back to a titled report in the notes column', () => {
     [...MALFORMED, ...UNREADABLE].forEach((notes) => (
-      expect(visitReportCustomerCopy({ technician_notes: TITLED, structured_notes: notes }).body).toBeNull()
+      expect(visitReportCustomerCopy({ ...PEST, technician_notes: TITLED, structured_notes: notes }).body).toBeNull()
     ));
   });
 });

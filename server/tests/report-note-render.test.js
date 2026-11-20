@@ -308,7 +308,10 @@ describe('a typed visit never takes the note', () => {
 });
 
 describe('summaryCopySignature: the PDF key follows the note', () => {
+  // A pest row as the PDF queue reads it: the render reads service_records.*,
+  // and the cache lookup names the line columns.
   const raw = (overrides = {}) => ({
+    service_line: 'pest', service_type: 'Quarterly Pest Control',
     technician_notes: 'found fire ant hill out back spot treated', technician_name: 'Jordan Rivers', structured_notes: stored(), ...overrides,
   });
 

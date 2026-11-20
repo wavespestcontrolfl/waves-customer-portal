@@ -811,7 +811,9 @@ async function loadCompletedVisits(customerId, limit = 5) {
     .orderBy('service_date', 'desc')
     .orderBy('id', 'desc')
     .limit(limit)
-    .select('service_date', 'service_type', 'technician_notes', 'structured_notes', 'status', 'service_data');
+    // service_line: the stored line decides whether the technician's own note
+    // may be spoken, as on the web report (visitReportCustomerCopy).
+    .select('service_date', 'service_type', 'service_line', 'technician_notes', 'structured_notes', 'status', 'service_data');
   return rows.map((svc) => {
     // ⭐ PARSER-APPROVED COPY ONLY — speaking a visit's notes down the phone is
     // a REPORT path. customerSafeVisitNotes (context-aggregator.js) is the one

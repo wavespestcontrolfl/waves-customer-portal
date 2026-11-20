@@ -74,7 +74,9 @@ describe('customerSafeVisitNotes — the ONLY sanctioned tech-notes egress', () 
   // 2026-10-01: customers see only the report text, never the tech's raw
   // note): it reads the service record, not the note alone.
   const REVIEWED = 'WHAT WE DID:\nTreated the exterior perimeter and swept eaves.\nWHAT WE FOUND:\nLight ant activity near the lanai.';
+  // A row as service_records.* reads it: the line columns are always there.
   const record = (overrides = {}) => ({
+    service_line: null, service_type: 'Quarterly Pest Control',
     technician_notes: REVIEWED, structured_notes: null, service_data: null, completion_source: null, ...overrides,
   });
   const gate = process.env.GATE_REPORT_WRITER_RULES;
@@ -164,6 +166,11 @@ describe('customerSafeVisitNotes — the ONLY sanctioned tech-notes egress', () 
     expect(customerSafeVisitNotes(own({ service_type: 'Quarterly Pest Control' }))).toBe('I treated the lanai and swept the webs.');
     for (const line of ['lawn', 'tree_shrub', 'mosquito']) expect(customerSafeVisitNotes(own({ service_line: line }))).toBeNull();
     expect(customerSafeVisitNotes(own({ service_type: 'Lawn Care' }))).toBeNull();
+    // A row read without the service_line column cannot tell a lawn visit with
+    // a generic type from a pest visit, so its note is not shown.
+    const noLineColumn = own({ service_line: 'pest' });
+    delete noLineColumn.service_line;
+    expect(customerSafeVisitNotes(noLineColumn)).toBeNull();
     // A record with no note keeps today's rule on every line.
     expect(customerSafeVisitNotes(record({ service_line: 'lawn' }))).toBe('Treated the exterior perimeter and swept eaves. Light ant activity near the lanai.');
   });

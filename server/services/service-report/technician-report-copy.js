@@ -440,12 +440,16 @@ function printedReportSummary(parsed, service = {}) {
 const REPORT_NOTE_SERVICE_LINES = new Set(['pest']);
 
 // The line a record's report renders as, by the rule report-data.js uses to
-// pick the layout (a record with no line and no type renders as pest).
+// pick the layout: the stored service_line, else the line its service type
+// names (a record with no line and no type renders as pest). A row read
+// without the service_line column cannot tell a lawn visit with a generic
+// type from a pest visit, so it has no line, and a note on it is no text.
 function reportServiceLine(record) {
+  if (!record || !Object.prototype.hasOwnProperty.call(record, 'service_line')) return null;
   // Required here: the line table loads the service-type normalizer, which
   // the copy rules do not need.
   const { detectServiceLine } = require('./service-line-configs');
-  return record?.service_line || detectServiceLine(record?.service_type);
+  return record.service_line || detectServiceLine(record.service_type);
 }
 
 // The customer copy of a visit record's report text: the technician's own

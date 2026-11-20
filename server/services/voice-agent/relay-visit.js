@@ -334,7 +334,9 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
       }
     }
   }
-  const record = await query.first('id', 'service_date', 'service_type', 'technician_notes',
+  // service_line: the stored line decides whether the technician's own note
+  // may be spoken, as on the web report (visitReportCustomerCopy).
+  const record = await query.first('id', 'service_date', 'service_type', 'service_line', 'technician_notes',
     'structured_notes', 'status', 'started_at', 'ended_at', 'advisory', 'service_data');
   if (!record) {
     return wanted

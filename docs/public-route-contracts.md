@@ -3061,7 +3061,9 @@ technician paragraphs, each under its own gate, still take that note as their
 input, as they do on any visit today.) The payload changes existing fields
 and adds the one key below: `summary` is the note when the summary rule accepts it
 (only on a pest report, the line the report renders as, `service_line` or else
-`detectServiceLine(service_type)`, and only on a visit with no frozen typed
+`detectServiceLine(service_type)`; a reader whose row has no `service_line`
+column shows no note, so every reader reads the column, the voice agent's two
+visit queries included; and only on a visit with no frozen typed
 card, primary or companion), a `cleaned`
 note signed ` — <first name>` (the identity snapshot's name, never a generic
 label). Otherwise it is what the report builds with no free text (the lawn visit

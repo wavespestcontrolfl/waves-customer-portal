@@ -726,6 +726,56 @@ describe('get_service_report', () => {
   });
 });
 
+// ⭐ THE TECHNICIAN'S OWN NOTE ON THE PHONE: THE STORED LINE DECIDES, AS ON THE
+// WEB REPORT. The note stands only on a pest report (visitReportCustomerCopy).
+// The web report reads service_records.*, so a visit's stored service_line wins
+// over the line its service type names. The voice queries name their columns,
+// so this double returns only the columns a query names: a query that drops
+// service_line reads no line, and the note is not spoken.
+describe("the technician's own note on the phone: the stored line decides, as on the web report", () => {
+  const noteRecord = (line) => ({
+    id: 'sr-n', service_date: '2026-07-31', status: 'completed', service_data: null,
+    technician_notes: 'fire ants by the back door, gate code 4471',
+    structured_notes: JSON.stringify({
+      reportNote: { v: 1, text: 'I found a fire ant hill near the back of the house and spot-treated it.', source: 'cleaned' },
+    }),
+    ...line,
+  });
+  function primeNamedColumns(record) {
+    primeDb({ service_records: [record] });
+    const b = builders.service_records;
+    const named = (cols) => (cols && cols.length
+      ? Object.fromEntries(cols.flat().filter((c) => c in record).map((c) => [c, record[c]]))
+      : record);
+    let selected = null;
+    b.select = jest.fn((...cols) => { selected = cols; return b; });
+    b.first = jest.fn((...cols) => Promise.resolve(named(cols)));
+    b.then = (resolve, reject) => Promise.resolve([named(selected)]).then(resolve, reject);
+  }
+  const ctx = { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true };
+
+  test('a pest visit whose service type names no line: both tools speak the note', async () => {
+    for (const tool of ['get_service_report', 'get_service_history']) {
+      primeNamedColumns(noteRecord({ service_type: 'General Service', service_line: 'pest' }));
+      const out = await executeTool(tool, {}, ctx);
+      expect(out).toContain('I found a fire ant hill');
+      expect(out).not.toContain('4471');
+      assertNoWrites();
+    }
+  });
+
+  test('a visit stored as lawn whose service type reads as pest: neither tool speaks the note', async () => {
+    for (const tool of ['get_service_report', 'get_service_history']) {
+      primeNamedColumns(noteRecord({ service_type: 'Pest Control', service_line: 'lawn' }));
+      const out = await executeTool(tool, {}, ctx);
+      expect(out).toContain('July 31');
+      expect(out).not.toContain('fire ant');
+      expect(out).not.toContain('4471');
+      assertNoWrites();
+    }
+  });
+});
+
 describe('Prompt', () => {
   test('gate-on prompt covers the tech-ETA and visit-report rules with per-application wording', () => {
     const p = buildBasePrompt(true);
