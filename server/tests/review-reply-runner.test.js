@@ -2097,3 +2097,27 @@ describe('admin actions', () => {
     expect(await Runner.skipAutoReply('lr')).toBe(true);
   });
 });
+
+describe('isMachineStoredDraft — the pipeline\'s own stored text, unchanged', () => {
+  const row = { auto_reply_draft: 'Hi Dana, pipeline words.', auto_reply_status: Runner.STATUS.FAILED, auto_reply_reason: 'google_uncertain_cleared', auto_reply_version: 'reply-v3' };
+
+  test('holds for an automatic draft or kept attempt in any draft-holding status, the slot full or empty', () => {
+    for (const status of [Runner.STATUS.DRAFTED, Runner.STATUS.PARKED, Runner.STATUS.FAILED, Runner.STATUS.SKIPPED]) {
+      expect(Runner.isMachineStoredDraft({ ...row, auto_reply_status: status }, ' Hi Dana, pipeline words. ')).toBe(true);
+    }
+    expect(Runner.isMachineStoredDraft({ ...row, auto_reply_version: null }, row.auto_reply_draft)).toBe(true);
+  });
+
+  test('never for edited text, a posted or queued row, a person\'s attempt or an Agent Ops draft', () => {
+    expect(Runner.isMachineStoredDraft(row, 'Hi Dana, other words.')).toBe(false);
+    for (const status of [Runner.STATUS.POSTED, Runner.STATUS.QUEUED]) {
+      expect(Runner.isMachineStoredDraft({ ...row, auto_reply_status: status }, row.auto_reply_draft)).toBe(false);
+    }
+    for (const version of ['human', 'agent_ops']) {
+      expect(Runner.isMachineStoredDraft({ ...row, auto_reply_version: version }, row.auto_reply_draft)).toBe(false);
+    }
+    expect(Runner.isMachineStoredDraft({ ...row, auto_reply_reason: Runner.AGENT_OPS_DRAFT, auto_reply_version: null }, row.auto_reply_draft)).toBe(false);
+    expect(Runner.isMachineStoredDraft({ ...row, auto_reply_draft: null }, '')).toBe(false);
+    expect(Runner.isMachineStoredDraft(null, 'x')).toBe(false);
+  });
+});
