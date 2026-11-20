@@ -636,6 +636,29 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     expect(homesDiffer({ ...BEFORE, address_line1: '123 Main St Apt 4', address_line2: 'Apt 4' }, { ...BEFORE, address_line1: '123 Main St', address_line2: 'Apt 4' })).toBe(false);
   });
 
+  test('sameHomeOnFile: the same home with the same ZIP and city on file; a blank on one side is a difference', () => {
+    // The merge undo puts a cleared sprinkler timer back only on this match (pre-push P1, 2026-11-20): homesDiffer
+    // reads a blank city or ZIP as no evidence, so "100 Sample St, 34205" and "100 Sample St, Tampa" pass it.
+    const { homesDiffer, sameHomeOnFile } = require('../services/customer-address-fanout');
+    const home = { address_line1: '100 Sample St', address_line2: null, city: 'Bradenton', zip: '34205' };
+    expect(sameHomeOnFile(home, { ...home })).toBe(true);
+    // Spelling, case and a ZIP+4 are not differences (homesDiffer's normalization); blank is blank.
+    expect(sameHomeOnFile(home, { ...home, address_line1: '100 SAMPLE STREET', city: 'BRADENTON', zip: '34205-1234' })).toBe(true);
+    expect(sameHomeOnFile({ ...home, city: null, zip: null }, { ...home, city: '', zip: undefined })).toBe(true);
+    // A place blank on one side and set on the other: homesDiffer passes it, sameHomeOnFile does not.
+    const zipOnly = { ...home, city: null };
+    const cityElsewhere = { ...home, city: 'Tampa', zip: null };
+    expect(homesDiffer(zipOnly, cityElsewhere)).toBe(false);
+    expect(sameHomeOnFile(zipOnly, cityElsewhere)).toBe(false);
+    expect(sameHomeOnFile(zipOnly, home)).toBe(false);
+    expect(sameHomeOnFile(home, { ...home, zip: null })).toBe(false);
+    // Any change of the place on file counts, even a postal alias on the same ZIP.
+    expect(sameHomeOnFile(home, { ...home, city: 'Lakewood Ranch' })).toBe(false);
+    // Another home is never the same home.
+    expect(sameHomeOnFile(home, { ...home, address_line2: 'Apt 4' })).toBe(false);
+    expect(sameHomeOnFile(home, { ...home, zip: '34236' })).toBe(false);
+  });
+
   test('homesDiffer reads a street line that also holds its city and ZIP as that address saved in parts (owner 2026-11-02)', () => {
     // The lead form's one-line address copied into line 1 (owner 2026-10-30): cleaning the copy up is not a move.
     const { homesDiffer } = require('../services/customer-address-fanout');

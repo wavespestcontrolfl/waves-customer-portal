@@ -240,13 +240,16 @@ function premiseFields(row) {
   return { ...row, address_line1: split.line1, address_line2: row.address_line2 || split.line2, city: split.city, zip: split.zip };
 }
 
+function zip5(value) {
+  return String(value || '').replace(/\D/g, '').slice(0, 5);
+}
+
 // Two customer rows describe DIFFERENT homes (normalized street, unit, zip,
 // city) — the premise test the sprinkler-settings move guard uses, shared
 // with the customer merge (a duplicate pair can be the old and new home).
 function homesDiffer(rowA, rowB) {
   const a = premiseFields(rowA);
   const b = premiseFields(rowB);
-  const zip5 = (v) => String(v || '').replace(/\D/g, '').slice(0, 5);
   // Street + unit resolved the way snapshotMatchesContact does: an inline
   // unit on line 1 ("123 Main St Apt 4") is the same premise as line 1 +
   // line 2 ("123 Main St" / "Apt 4") — a cleanup is never a move. Both unit
@@ -277,6 +280,19 @@ function homesDiffer(rowA, rowB) {
   return pa.street !== pb.street
     || pa.unit !== pb.unit
     || placeDiffers;
+}
+
+// The same home (not homesDiffer) with the same place on file: the ZIP and the
+// city are each blank on both rows or the same on both. homesDiffer reads a
+// blank city or ZIP as no evidence, since completing one is not a move. A
+// check that puts a record back on the home it describes needs the evidence
+// itself to match: "100 Sample St, 34205" and "100 Sample St, Tampa" pass
+// homesDiffer and can be two towns (the merge undo's kept sprinkler timer).
+function sameHomeOnFile(rowA, rowB) {
+  if (homesDiffer(rowA, rowB)) return false;
+  const a = premiseFields(rowA);
+  const b = premiseFields(rowB);
+  return zip5(a?.zip) === zip5(b?.zip) && addressMatchKey(a?.city) === addressMatchKey(b?.city);
 }
 
 async function propagateCustomerAddressChange({ before, after }, conn = db) {
@@ -539,6 +555,7 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
 module.exports = {
   addressMatchKey,
   homesDiffer,
+  sameHomeOnFile,
   markSprinklerSettingsMoved,
   formatAddressBounded,
   snapshotMatchesContact,

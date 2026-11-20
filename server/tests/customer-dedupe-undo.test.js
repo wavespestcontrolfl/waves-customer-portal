@@ -1699,6 +1699,27 @@ describe('revertMerge', () => {
       expect(timerWrites(state)).toEqual([{ table: 'property_preferences', where: { id: 'pp-9', customer_id: WINNER }, payload: X2 }]);
     });
 
+    // homesDiffer reads a blank city or ZIP as no evidence; the restore needs the place on file to match too
+    // (pre-push P1, 2026-11-20): the timer goes back only on the same home with the same ZIP and city.
+    it.each([
+      ['the same street in another town since (a ZIP on file then, only a city now)', { address_line1: '100 Sample St', city: null, zip: '34205' }, { address_line1: '100 Sample St', city: 'Tampa', zip: null }],
+      ['a blank city filled in since (the safe side)', { address_line1: '100 Sample St', city: null, zip: '34205' }, { address_line1: '100 Sample St', city: 'Bradenton', zip: '34205' }],
+    ])('%s: nothing is put back, and the undo says so', async (_label, ownBefore, ownNow) => {
+      const entry = { ...CLEARED_BY_MERGE, home: { address_line2: null, ...ownBefore } };
+      const { error, state, result } = await revertWithPrefs(EMPTY_SINCE_MERGE, { address_line2: 'Apt 4' }, ownNow, entry);
+      expect(error).toBeUndefined();
+      expect(timerWrites(state)).toEqual([]);
+      expect(result.skipped).toContainEqual({ key: 'property_preferences.kept_customer_sprinkler_timer', reason: 'home_changed_since_merge' });
+    });
+
+    it('the same home with the same ZIP and city on file: the timer goes back', async () => {
+      const own = { address_line1: '100 Sample St', city: 'Bradenton', zip: '34205' };
+      const entry = { ...CLEARED_BY_MERGE, home: { ...own, address_line2: null } };
+      const { error, state } = await revertWithPrefs(EMPTY_SINCE_MERGE, { address_line2: 'Apt 4' }, own, entry);
+      expect(error).toBeUndefined();
+      expect(timerWrites(state)).toEqual([{ table: 'property_preferences', where: { id: 'pp-9', customer_id: WINNER }, payload: X2 }]);
+    });
+
     it('a journal entry without the home it describes: nothing is put back, and the undo says so', async () => {
       const { error, state, result } = await revertWithPrefs(EMPTY_SINCE_MERGE, { address_line2: 'Apt 4' }, OWN_STREET, { row_id: 'pp-9', before: X2 });
       expect(error).toBeUndefined();
@@ -4020,6 +4041,78 @@ describe('revertMerge', () => {
       newestThrows = true;
       body = await (await fetch(`${base}/dup/merges`)).json();
       expect(body.merges[0].revertible).toBe(false);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('GET /merges: moved-preference-row mirror — a sprinkler timer or sod record entered since on a row the merge moved whole reads revertible:false, one read per page, fail-closed', async () => {
+    const express = require('express');
+    const X2 = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
+    const EMPTY = {
+      irrigation_controller_brand: null, irrigation_controller_model: null, irrigation_controller_app: null,
+      sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null,
+    };
+    const journalRow = (recordedExtra = {}) => ({
+      id: JOURNAL, winner_customer_id: WINNER, loser_customer_id: LOSER, tier: 'manual', performed_by: 'admin:test',
+      created_at: '2026-07-30T04:00:00Z', undone_at: null, undone_by: null,
+      loser_snapshot: JSON.stringify({ id: LOSER, first_name: 'Loser', last_name: null }),
+      repointed_ids: JSON.stringify({
+        version: 1,
+        tables: { 'leads.customer_id': ['lead-1'], 'property_preferences.customer_id': ['pp-1'] },
+        stripe_transferred_id: null, payment_method_flags: {}, collision_handlers: [],
+        ...recordedExtra,
+      }),
+      evidence: JSON.stringify({}),
+      winner_first_name: 'Winner', winner_last_name: 'Testcase', winner_active: true, winner_deleted_at: null,
+      winner_stripe_customer_id: null, loser_row_id: LOSER, loser_row_deleted_at: '2026-07-30T04:40:00Z',
+    });
+    let journal = journalRow();
+    let prefRows = [];
+    let prefThrows = false;
+    const prefReads = [];
+    installDb((table, q) => {
+      if (table === 'customer_merge_journal as j') return [journal];
+      if (table === 'customer_merge_journal') return [{ winner_customer_id: WINNER, max_created: '2026-07-30T04:00:00Z' }];
+      if (table === 'property_preferences') {
+        prefReads.push(q.args('whereIn'));
+        if (prefThrows) throw new Error('lookup down');
+        return prefRows;
+      }
+      return [];
+    });
+    const app = express();
+    app.use('/dup', require('../routes/admin-customer-duplicates'));
+    const server = await new Promise((resolve) => { const s = app.listen(0, () => resolve(s)); });
+    try {
+      const base = `http://127.0.0.1:${server.address().port}`;
+      const revertible = async () => (await (await fetch(`${base}/dup/merges`)).json()).merges[0].revertible;
+      // An old journal names the moved row only by its FK row id; the row is empty on the kept customer: offered.
+      prefRows = [{ id: 'pp-1', customer_id: WINNER, ...EMPTY }];
+      expect(await revertible()).toBe(true);
+      expect(prefReads).toEqual([['id', ['pp-1']]]);
+      // A timer entered on that row since: the undo refuses, so the page does not offer it (old and new journals).
+      prefRows = [{ id: 'pp-1', customer_id: WINNER, ...EMPTY, ...X2 }];
+      expect(await revertible()).toBe(false);
+      journal = journalRow({ moved_pref_timer: { row_id: 'pp-1', before: X2 } });
+      expect(await revertible()).toBe(false);
+      // The row moved on since: the undo does not return it, so its timer is not this undo's to judge.
+      prefRows = [{ id: 'pp-1', customer_id: 'cccccccc-0000-0000-0000-000000000009', ...EMPTY, ...X2 }];
+      expect(await revertible()).toBe(true);
+      // A sod record entered since on the journaled row: the new-sod guard refuses whoever holds the row (as on main).
+      journal = journalRow({ moved_pref_new_sod: { row_id: 'pp-1', before: { ...EMPTY, sod_laid_on: '2026-07-01' } } });
+      prefRows = [{ id: 'pp-1', customer_id: 'cccccccc-0000-0000-0000-000000000009', ...EMPTY, sod_laid_on: '2026-08-01' }];
+      expect(await revertible()).toBe(false);
+      // Fail-closed: a failed read marks the merge non-revertible.
+      prefRows = [{ id: 'pp-1', customer_id: WINNER, ...EMPTY }];
+      prefThrows = true;
+      expect(await revertible()).toBe(false);
+      // A merge that moved no preferences row reads nothing.
+      prefThrows = false;
+      prefReads.length = 0;
+      journal = { ...journalRow(), repointed_ids: JSON.stringify({ version: 1, tables: { 'leads.customer_id': ['lead-1'] }, stripe_transferred_id: null, payment_method_flags: {}, collision_handlers: [] }) };
+      expect(await revertible()).toBe(true);
+      expect(prefReads).toEqual([]);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }

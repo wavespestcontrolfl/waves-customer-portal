@@ -1591,6 +1591,24 @@ function movedPrefTimerToUndo(recorded, returnedPrefIds) {
   return entry.row_id && returnedPrefIds.has(entry.row_id) ? entry : null;
 }
 
+// The whole records the merge cleared on a preferences row it moved whole, as the undo guards and restores them:
+// [{ entry, columns, key, refusal }]. The new-sod record is judged on its journaled row whoever holds it now (as on
+// main); the timer only on a row this undo returns (movedPrefTimerToUndo). Shared by revertMerge and the merges
+// list's mirror (movedPrefUndoRefusals), so the list never offers an undo this guard refuses.
+function movedPrefRecordsOf(recorded, returnedPrefIds) {
+  return [
+    { entry: recorded.moved_pref_new_sod, columns: NEW_SOD_COLUMNS, key: 'property_preferences.new_sod',
+      refusal: 'A sod record was entered for the kept customer after this merge moved the loser\'s preferences row to it; undoing would hand that record to the restored customer. Clear or move that record first, then revert (the original record is in the journal)' },
+    { entry: movedPrefTimerToUndo(recorded, returnedPrefIds), columns: CONTROLLER_TIMER_FIELDS, key: 'property_preferences.sprinkler_timer',
+      refusal: 'A sprinkler timer was entered for the kept customer after this merge moved the loser\'s preferences row to it; undoing would hand that timer to the restored customer. Clear that timer first, then revert (the original timer is in the journal)' },
+  ].filter(({ entry }) => entry && entry.row_id && entry.before);
+}
+
+// A value in any column of the record on its row now: the merge left none there, so it was entered since.
+function movedPrefRecordRefuses(row, { columns }) {
+  return Boolean(row) && columns.some((c) => row[c] != null);
+}
+
 // Two preference rows fold (both customers have one; mergeSingletonPrefRow): the fold can overwrite or clear the kept
 // customer's timer, and it deletes the other row with its timer. Such a merge is never auto-undone (the undo refuses
 // and says to restore by hand from the journal), so the journal keeps both timers as they were, each with its owner
@@ -1616,10 +1634,44 @@ async function guardMovedPrefRecords(trx, records, refuse) {
   for (const record of records) {
     const { entry, columns, refusal } = record;
     const row = await trx('property_preferences').where({ id: entry.row_id }).forUpdate().first('id', 'customer_id', ...columns);
-    if (row && columns.some((c) => row[c] != null)) refuse(refusal);
+    if (movedPrefRecordRefuses(row, record)) refuse(refusal);
     if (columns.some((c) => entry.before[c] != null)) toRestore.push(record);
   }
   return toRestore;
+}
+
+// The merges list's mirror of guardMovedPrefRecords (route contract: never offer an undo the endpoint would 409).
+// journals: [{ id, winnerId, recorded }] for the listed merges not undone. One read of every preference row they
+// journaled as moved; the rows still on the kept customer are the ones the undo returns (its reverse-repoint
+// verify). Returns the journal ids whose undo the guard refuses. A failed read returns every journal that names a
+// moved preference row (fail closed).
+async function movedPrefUndoRefusals(database, journals) {
+  const rowIdsOf = (recorded) => {
+    const movedIds = recorded?.tables?.['property_preferences.customer_id'];
+    return [recorded?.moved_pref_new_sod?.row_id, recorded?.moved_pref_timer?.row_id, ...(Array.isArray(movedIds) ? movedIds : [])]
+      .filter((rowId) => rowId != null);
+  };
+  const candidates = journals.filter(({ recorded }) => recorded?.tables && rowIdsOf(recorded).length);
+  if (!candidates.length) return new Set();
+  let rowById;
+  try {
+    const rows = await database('property_preferences')
+      .whereIn('id', [...new Set(candidates.flatMap(({ recorded }) => rowIdsOf(recorded)))])
+      .select('id', 'customer_id', ...NEW_SOD_COLUMNS, ...CONTROLLER_TIMER_FIELDS);
+    rowById = new Map(rows.map((row) => [String(row.id), row]));
+  } catch (err) {
+    logger.warn(`[customer-dedupe] moved preference rows lookup for revertible flags failed (marking affected merges non-revertible): ${err.message}`);
+    return new Set(candidates.map(({ id }) => id));
+  }
+  const refused = new Set();
+  for (const { id, winnerId, recorded } of candidates) {
+    const movedIds = recorded.tables['property_preferences.customer_id'];
+    const returnedPrefIds = new Set((Array.isArray(movedIds) ? movedIds : [])
+      .filter((rowId) => String(rowById.get(String(rowId))?.customer_id) === String(winnerId)));
+    const records = movedPrefRecordsOf(recorded, returnedPrefIds);
+    if (records.some((record) => movedPrefRecordRefuses(rowById.get(String(record.entry.row_id)), record))) refused.add(id);
+  }
+  return refused;
 }
 
 // Puts each journaled record back, only where the row belongs to ownerId (the loser again, for a row the undo
@@ -1639,9 +1691,11 @@ async function restoreMovedPrefRecords(trx, toRestore, ownerId, skipped) {
 // move), a sprinkler timer on their preferences row describes the home they lose, whoever entered it: the undo
 // refuses (the same posture as the unstamped-visit guard). An empty row takes back the timer this merge cleared
 // there because its backfill changed their home (`journaled`, settleKeptPrefTimer's entry), but only when the undo
-// returns them to the home that timer describes (`journaled.home`, their address before the merge, by homesDiffer):
-// after a move since (a new street with the same unit, say) it describes neither home, so it stays cleared and is
-// reported in `skipped`. A later merge that stamps their row without moving them changes nothing here.
+// returns them to the home that timer describes with the same place on file (`journaled.home`, their address before
+// the merge, by sameHomeOnFile: a city or ZIP blank on one side and set on the other counts as a change). After a
+// move since (a new street with the same unit, or the same street in another town) it describes neither home, so it
+// stays cleared and is reported in `skipped`. A later merge that stamps their row without moving them changes
+// nothing here.
 // Returns the records for restoreMovedPrefRecords: [] or one.
 async function guardKeptTimerOnInheritedHome(trx, winner, winnerPatch, journaled, { refuse, skipped }) {
   const fanout = require('./customer-address-fanout');
@@ -1654,7 +1708,7 @@ async function guardKeptTimerOnInheritedHome(trx, winner, winnerPatch, journaled
   }
   if (!journaled || row?.id !== journaled.row_id) return [];
   const key = 'property_preferences.kept_customer_sprinkler_timer';
-  if (!journaled.home || fanout.homesDiffer(journaled.home, afterUndo)) {
+  if (!journaled.home || !fanout.sameHomeOnFile(journaled.home, afterUndo)) {
     skipped.push({ key, reason: 'home_changed_since_merge' });
     return [];
   }
@@ -6300,15 +6354,10 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // carrying the winner's record (a different home). The same refusal as colliding rows: a clear reason,
     // zero writes, restore by hand.
     // The sprinkler timer on file is guarded the same way (a customer can set it from the app), on the rows
-    // this undo returns: a timer there other than the one the merge left is not the restored customer's.
+    // this undo returns: the merge left none there, so a timer there now is not the restored customer's.
+    // movedPrefRecordsOf lists both records; the merges list mirrors this guard (movedPrefUndoRefusals).
     const returnedPrefIds = new Set(plans.filter((plan) => plan.table === 'property_preferences').flatMap((plan) => plan.ids));
-    const clearedOnMovedRow = [
-      { entry: recorded.moved_pref_new_sod, columns: NEW_SOD_COLUMNS, key: 'property_preferences.new_sod',
-        refusal: 'A sod record was entered for the kept customer after this merge moved the loser\'s preferences row to it; undoing would hand that record to the restored customer. Clear or move that record first, then revert (the original record is in the journal)' },
-      { entry: movedPrefTimerToUndo(recorded, returnedPrefIds), columns: CONTROLLER_TIMER_FIELDS, key: 'property_preferences.sprinkler_timer',
-        refusal: 'A sprinkler timer was entered for the kept customer after this merge moved the loser\'s preferences row to it; undoing would hand that timer to the restored customer. Clear that timer first, then revert (the original timer is in the journal)' },
-    ].filter(({ entry }) => entry && entry.row_id && entry.before);
-    const movedPrefRecordsToRestore = await guardMovedPrefRecords(trx, clearedOnMovedRow, refuse);
+    const movedPrefRecordsToRestore = await guardMovedPrefRecords(trx, movedPrefRecordsOf(recorded, returnedPrefIds), refuse);
 
     const repointedBack = {};
     for (const plan of plans) {
@@ -7800,6 +7849,7 @@ module.exports = {
   runAutoMergeSweep,
   runRedPairAutoDismissSweep,
   revertMerge,
+  movedPrefUndoRefusals,
   recordLinkedProperty,
   // The shared effect reader — callers that disclose "what would move" (the
   // IB merge preview and its under-lock recheck) read the SAME FK,
