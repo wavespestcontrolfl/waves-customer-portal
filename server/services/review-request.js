@@ -4984,7 +4984,18 @@ const ReviewService = {
     const { getServiceContact } = require("./customer-contact");
     // The SMS identity also waits for a contact's own YES (recipient-optin.js).
     const { resolveServiceContactSmsRecipient } = require("./recipient-optin");
-    const contact = await resolveServiceContactSmsRecipient(customer);
+    // A yearly (SMS-only) send resolves strictly: a failed recipient read retries the step
+    // instead of texting the account holder on a fallback. Other sends keep the fallback.
+    let contact;
+    try {
+      contact = await resolveServiceContactSmsRecipient(customer, { failClosed: smsOnly });
+    } catch (err) {
+      if (!smsOnly) throw err;
+      logger.warn(`[review] yearly recipient lookup failed (customerId=${customer.id}): ${err.code || "error"}`);
+      return manageRetryVia === "sequence"
+        ? { ok: false, retryable: true, reason: "recipient_unavailable" }
+        : { ok: false, terminal: true, reason: "recipient_unavailable" };
+    }
     const emailContact = getServiceContact(customer);
 
     // Load consent prefs once. Channel resolution is OPT-OUT-AWARE and honors

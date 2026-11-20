@@ -192,14 +192,14 @@ function contactAllows(row, column, channel = 'sms') {
 
 // Map<phoneKey, row> for one customer. Missing table → empty map; any other
 // read error throws (the callers hold).
-async function loadContactPrefRows(customerId, { dbh = db } = {}) {
+async function loadContactPrefRows(customerId, { dbh = db, failClosed = false } = {}) {
   const rows = new Map();
   if (!customerId) return rows;
   let found;
   try {
     found = await dbh(TABLE).where({ customer_id: customerId }).select('phone_key', ...CONTACT_PREF_COLUMNS);
   } catch (err) {
-    if (err && err.code === '42P01' && !(dbh && dbh.isTransaction)) {
+    if (err && err.code === '42P01' && !(dbh && dbh.isTransaction) && !failClosed) {
       logger.warn('[contact-prefs] table missing — no per-contact choices');
       return rows;
     }
@@ -209,10 +209,10 @@ async function loadContactPrefRows(customerId, { dbh = db } = {}) {
   return rows;
 }
 
-async function getContactPrefRow(customerId, phone, { dbh = db } = {}) {
+async function getContactPrefRow(customerId, phone, { dbh = db, failClosed = false } = {}) {
   const key = phoneKey(phone);
   if (!key) return null;
-  return (await loadContactPrefRows(customerId, { dbh })).get(key) || null;
+  return (await loadContactPrefRows(customerId, { dbh, failClosed })).get(key) || null;
 }
 
 // Send-path filter: drops service-contact-role recipients (customer-contact.js
@@ -385,7 +385,7 @@ async function contactDeclinesChannel(customerId, contact, channel = 'sms', { db
   }
   let row;
   try {
-    row = await getContactPrefRow(customerId, contact.phone, { dbh });
+    row = await getContactPrefRow(customerId, contact.phone, { dbh, failClosed });
   } catch (err) {
     if ((dbh && dbh.isTransaction) || failClosed) throw err;
     logger.warn(`[contact-prefs] read failed (${err.message}) — holding the service contact's ${channel}`);
