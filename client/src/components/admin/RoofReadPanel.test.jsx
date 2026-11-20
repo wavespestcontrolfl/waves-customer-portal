@@ -657,6 +657,23 @@ describe("saving only what changed", () => {
     expect(patches()).toHaveLength(0);
   });
 
+  it("lets an untouched checkbox follow a hide choice another tab saved, and never reverses it", async () => {
+    await opened();
+    expect(screen.getByRole("checkbox", SHOW)).toBeChecked();
+    // A count save comes back with the points hidden by another tab.
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_final_count: 2, hide_on_estimate: true, tech_pins: SAVED }) }));
+    fireEvent.change(screen.getByLabelText("Entry points the tech counted"), { target: { value: "2" } });
+    fireEvent.click(screen.getByTestId("roof-read-save"));
+    await screen.findByText("Saved.");
+    expect(screen.getByRole("checkbox", SHOW)).not.toBeChecked();
+    // A later points save sends the points only, not a hide_on_estimate the staff member never chose.
+    fireEvent.click(frame(), { clientX: 100, clientY: 50 });
+    fetchMock.mockImplementationOnce(() => reply({ read: READ({ hide_on_estimate: true, tech_pins: [...SAVED, { x: 0.5, y: 0.5, type: "other", note: null }] }) }));
+    fireEvent.click(screen.getByTestId("roof-read-points-save"));
+    await screen.findByText("Points saved.");
+    expect(Object.keys(lastBody()).sort()).toEqual(["crop", "pins"]);
+  });
+
   it("needs the map point to save edited points", async () => {
     fetchMock.mockImplementationOnce(() => reply({ status: "ok", cached: false, read: READ({ tech_pins: SAVED }), image_url: IMAGE }));
     const { rerender } = render(<RoofReadPanel spot={SPOT} estimateId={EST} />);

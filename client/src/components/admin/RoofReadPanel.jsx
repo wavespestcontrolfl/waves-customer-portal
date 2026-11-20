@@ -245,6 +245,9 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
   const [points, setPoints] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [showOnEstimate, setShowOnEstimate] = useState(true);
+  // True only after staff click the checkbox here: an untouched checkbox follows the server, so a save from this panel
+  // never reverses a hide choice another tab made.
+  const [hideEdited, setHideEdited] = useState(false);
   const [pointsEdited, setPointsEdited] = useState(false);
   const [pointsState, setPointsState] = useState({ busy: false, msg: "", err: "" });
   // The county photo: points are placed on it, so nothing can be added until it has loaded.
@@ -298,6 +301,7 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
         setPoints(pointsFrom(body.read, nextId));
         setSelectedId(null);
         setShowOnEstimate(!body.read.hide_on_estimate);
+        setHideEdited(false);
         setPointsEdited(false);
         setPointsState({ busy: false, msg: "", err: "" });
         setImageState("loading");
@@ -347,6 +351,8 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
         return;
       }
       setResult((prev) => ({ ...prev, read: body.read }));
+      // An untouched checkbox follows the server (another tab may have hidden the points).
+      if (!hideEdited) setShowOnEstimate(!body.read.hide_on_estimate);
       // What the server holds now, then clear the edited markers.
       setCount(body.read.tech_final_count == null ? "" : String(body.read.tech_final_count));
       setTechFlags(techFlagsFrom(body.read));
@@ -365,7 +371,7 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
   // A suggestion stays hidden while any point, saved or not, names it as its source, even after the point moved or changed type.
   const suggestions = read ? suggestionsFrom(read).filter((sg) => !points.some((p) => p.source === sg.key)) : [];
   // Whether the checkbox differs from what the server holds: only then is hide_on_estimate sent.
-  const hideChanged = !!read && !showOnEstimate !== Boolean(read.hide_on_estimate);
+  const hideChanged = !!read && hideEdited && !showOnEstimate !== Boolean(read.hide_on_estimate);
   const selected = points.find((p) => p.id === selectedId) || null;
 
   const edited = (fn) => { fn(); setPointsEdited(true); setPointsState((st) => (st.busy ? st : { busy: false, msg: "", err: "" })); };
@@ -436,6 +442,7 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
       setPoints(pointsFrom(body.read, nextId));
       setSelectedId(null);
       setShowOnEstimate(!body.read.hide_on_estimate);
+      setHideEdited(false);
       setPointsEdited(false);
       setPointsState({ busy: false, msg: "Points saved.", err: "" });
     } catch {
@@ -540,7 +547,7 @@ export default function RoofReadPanel({ spot, addressDoubt = false, estimateId =
               label="Show these points on the customer estimate"
               checked={showOnEstimate}
               disabled={!estimateId || pointsState.busy}
-              onChange={() => { setShowOnEstimate((v) => !v); setPointsState((st) => (st.busy ? st : { busy: false, msg: "", err: "" })); }}
+              onChange={() => { setShowOnEstimate((v) => !v); setHideEdited(true); setPointsState((st) => (st.busy ? st : { busy: false, msg: "", err: "" })); }}
             />
             <div className="flex items-center gap-3 flex-wrap">
               <Button variant="secondary" size="sm" onClick={savePoints} loading={pointsState.busy} disabled={pointsState.busy || !estimateId} data-testid="roof-read-points-save">
