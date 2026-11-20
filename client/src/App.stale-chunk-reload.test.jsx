@@ -81,8 +81,9 @@ function renderInBoundary(Page) {
 // redirect. Hands back a move: a path, or -1 for Back. The Blog page's code
 // never arrives. With `transitions`, each move is a transition, as
 // BrowserRouter makes it in App.jsx: a move to Blog then stays out of view,
-// and its render is dropped when another move replaces it.
-function renderGate(entries, { transitions = false } = {}) {
+// and its render is dropped when another move replaces it. `pages`: the page
+// for a path, such as one whose code is missing, in place of the default.
+function renderGate(entries, { transitions = false, pages = {} } = {}) {
   let navigate;
   function Navigator() {
     navigate = useNavigate();
@@ -99,7 +100,9 @@ function renderGate(entries, { transitions = false } = {}) {
         <Suspense fallback={<div>Loading the page</div>}>
           <Routes>
             <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
-            <Route path="/admin/blog" element={<Blog />} />
+            {Object.entries({ '/admin/blog': Blog, ...pages }).map(([path, Page]) => (
+              <Route key={path} path={path} element={<Page />} />
+            ))}
             <Route path="*" element={<Where />} />
           </Routes>
         </Suspense>
@@ -383,11 +386,9 @@ describe('on a staff page', () => {
     expect(screen.queryByText('Check your connection and try again.')).not.toBeInTheDocument();
   });
 
-  test('held work keeps the tab: the preload error neither reloads nor swallows the import, and leaves the one-shot flag', () => {
+  test('held work keeps the tab: a page whose code is missing does not reload, and leaves the one-shot flag', async () => {
     holding = true;
-    const stale = preloadErrorEvent();
-    handleVitePreloadError(stale, reload);
-    expect(stale.defaultPrevented).toBe(false);
+    await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBe('card-payment');
     expect(reload).not.toHaveBeenCalled();
     expect(isStaleChunkReloadPending()).toBe(false);
     expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
@@ -399,9 +400,6 @@ describe('on a staff page', () => {
     const uninstall = installPortalVersionWatch({ target });
     try {
       const read = target.fetch('/api/admin/auth/me');
-      const stale = preloadErrorEvent();
-      handleVitePreloadError(stale, reload);
-      expect(stale.defaultPrevented).toBe(false);
       renderInBoundary(lazyWithRetry(missingChunk));
       // No answer named a newer build: the wait does not say new version.
       expect(await screen.findByText('Loading...')).toBeInTheDocument();
@@ -530,9 +528,7 @@ describe('on a staff page', () => {
     expect(await screen.findByText('Check your connection and try again.')).toBeInTheDocument();
     expect(screen.getByText('Loaded page')).toBeInTheDocument();
     expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
-    const stale = preloadErrorEvent();
-    handleVitePreloadError(stale, reload);
-    expect(stale.defaultPrevented).toBe(false);
+    await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBe('reloaded');
     expect(reload).not.toHaveBeenCalled();
   });
 
@@ -552,9 +548,6 @@ describe('on a staff page', () => {
   test('on a field page a missing chunk never reloads by itself: the page says new version, and its Reload reloads', async () => {
     vi.stubGlobal('location', { ...window.location, pathname: '/admin/today/protocols', reload });
     nameNewerBuild();
-    const stale = preloadErrorEvent();
-    handleVitePreloadError(stale, reload);
-    expect(stale.defaultPrevented).toBe(false);
     renderInBoundary(lazyWithRetry(missingChunk));
     expect(await screen.findByText('The portal has a new version.')).toBeInTheDocument();
     expect(reload).not.toHaveBeenCalled();
@@ -583,30 +576,25 @@ describe('on a staff page', () => {
   // The gate notes each move (notePageMove, notePageInView). Each move below
   // ends on /admin/dashboard, the location this describe stubs, unless a
   // test stubs another.
-  test('Back from a field page, with no use of it, opens a page that never reloads by itself, from the moment the address changes', () => {
-    const move = renderGate(['/admin/dashboard', '/admin/today']);
+  test('Back from a field page, with no use of it, opens a page that never reloads by itself, from the moment the address changes: its missing code gets the retry screen, and the one-shot flag stays clear', async () => {
+    nameNewerBuild();
+    const move = renderGate(['/admin/dashboard', '/admin/today'], { pages: { '/admin/dashboard': lazyWithRetry(missingChunk) } });
     // Back changes the address first: it names the dashboard, as this
     // describe stubs it, while Today is still in view.
-    const early = preloadErrorEvent();
-    handleVitePreloadError(early, reload);
-    expect(early.defaultPrevented).toBe(false);
-    expect(reload).not.toHaveBeenCalled();
+    await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBe('manual');
     move(-1);
-    expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
-    const stale = preloadErrorEvent();
-    handleVitePreloadError(stale, reload);
-    expect(stale.defaultPrevented).toBe(false);
+    expect(await screen.findByText('The portal has a new version.')).toBeInTheDocument();
     expect(reload).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
   });
 
-  test('a redirect continues the move away from a field page: Today, then /admin, then the dashboard', () => {
-    const move = renderGate(['/admin/today']);
+  test('a redirect continues the move away from a field page: Today, then /admin, then the dashboard, whose missing code gets the retry screen', async () => {
+    nameNewerBuild();
+    const move = renderGate(['/admin/today'], { pages: { '/admin/dashboard': lazyWithRetry(missingChunk) } });
     move('/admin');
-    expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
-    const stale = preloadErrorEvent();
-    handleVitePreloadError(stale, reload);
-    expect(stale.defaultPrevented).toBe(false);
+    expect(await screen.findByText('The portal has a new version.')).toBeInTheDocument();
     expect(reload).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
   });
 
   test('a move between other staff pages, with nothing open, still lets a page whose code is missing reload at once', async () => {
@@ -637,7 +625,7 @@ describe('on a staff page', () => {
 
   // React drops the render of a move that Back undoes while the new page's
   // code loads: the page stays in view, with its use and its move.
-  test('a move that never comes into view keeps the use of the page: Back while the next page loads', () => {
+  test('a move that never comes into view keeps the use of the page: Back while the next page loads', async () => {
     const stop = watchPageUse(document);
     try {
       const move = renderGate(['/admin/dashboard'], { transitions: true });
@@ -646,9 +634,7 @@ describe('on a staff page', () => {
       expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
       move(-1);
       expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
-      const stale = preloadErrorEvent();
-      handleVitePreloadError(stale, reload);
-      expect(stale.defaultPrevented).toBe(false);
+      await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBe('page-use');
       expect(reload).not.toHaveBeenCalled();
     } finally {
       stop();
@@ -657,7 +643,7 @@ describe('on a staff page', () => {
 
   // While a move is not yet in view, the address already names the next
   // page. A use then is a use of the page still in view.
-  test('a use while the next page loads counts for the page in view: Back to that page keeps the tab', () => {
+  test('a use while the next page loads counts for the page in view: Back to that page keeps the tab', async () => {
     const stop = watchPageUse(document);
     try {
       const move = renderGate(['/admin/dashboard'], { transitions: true });
@@ -668,26 +654,32 @@ describe('on a staff page', () => {
       vi.stubGlobal('location', { ...window.location, pathname: '/admin/dashboard', reload });
       move(-1);
       expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
-      const stale = preloadErrorEvent();
-      handleVitePreloadError(stale, reload);
-      expect(stale.defaultPrevented).toBe(false);
+      await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBe('page-use');
       expect(reload).not.toHaveBeenCalled();
     } finally {
       stop();
     }
   });
 
-  test('a use while the next page loads keeps the tab at a missing chunk of that page: a reload would drop the page in view', () => {
+  // The page the use was on closes as the next page comes into view, so the
+  // reload drops nothing the move did not.
+  test('a use while the next page loads: that page\'s missing code reloads only once it is in view, never over the page the use was on', async () => {
     const stop = watchPageUse(document);
+    let failBlog;
+    let usedPageInViewAtReload = null;
+    reload.mockImplementation(() => { usedPageInViewAtReload = screen.queryByText('/admin/dashboard') !== null; });
     try {
-      const move = renderGate(['/admin/dashboard'], { transitions: true });
-      move('/admin/blog');
+      const move = renderGate(['/admin/dashboard'], {
+        transitions: true,
+        pages: { '/admin/blog': lazyWithRetry(() => new Promise((_, reject) => { failBlog = reject; })) },
+      });
       vi.stubGlobal('location', { ...window.location, pathname: '/admin/blog', reload });
+      move('/admin/blog');
       fireEvent.input(document.body);
-      const stale = preloadErrorEvent();
-      handleVitePreloadError(stale, reload);
-      expect(stale.defaultPrevented).toBe(false);
-      expect(reload).not.toHaveBeenCalled();
+      expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
+      await act(async () => { failBlog(new TypeError('Failed to fetch dynamically imported module: /assets/Blog-old.js')); });
+      await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+      expect(usedPageInViewAtReload).toBe(false);
     } finally {
       stop();
     }
@@ -717,55 +709,52 @@ describe('on a staff page', () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
-  test('a move from a customer page gets the staff rules once the address names a staff page: held work keeps the tab', () => {
+  test('a move from a customer page gets the staff rules once the address names a staff page: the preload error leaves the import to fail, and held work keeps the tab', async () => {
     renderGate(['/']);
     holding = true;
     const stale = preloadErrorEvent();
     handleVitePreloadError(stale, reload);
     expect(stale.defaultPrevented).toBe(false);
+    await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBe('card-payment');
     expect(reload).not.toHaveBeenCalled();
   });
 
-  test('a move to a field page bars the reload before that page is in view', () => {
+  test('a move to a field page bars the reload before that page is in view', async () => {
     renderGate(['/admin/dashboard']);
     vi.stubGlobal('location', { ...window.location, pathname: '/admin/today', reload });
-    const stale = preloadErrorEvent();
-    handleVitePreloadError(stale, reload);
-    expect(stale.defaultPrevented).toBe(false);
+    await expect(reloadForMissingCode({ pathname: '/admin/today', reload })).resolves.toBe('manual');
     expect(reload).not.toHaveBeenCalled();
   });
 
-  test('a move that never comes into view keeps the bar on a page a move from a field page opened', () => {
+  test('a move that never comes into view keeps the bar on a page a move from a field page opened', async () => {
     const move = renderGate(['/admin/today'], { transitions: true });
     move('/admin/dashboard');
     expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
     move('/admin/blog');
     move(-1);
     expect(screen.getByText('/admin/dashboard')).toBeInTheDocument();
-    const stale = preloadErrorEvent();
-    handleVitePreloadError(stale, reload);
-    expect(stale.defaultPrevented).toBe(false);
+    await expect(reloadForMissingCode({ pathname: '/admin/dashboard', reload })).resolves.toBe('manual');
     expect(reload).not.toHaveBeenCalled();
   });
 
-  test('a move from a field page bars the reload before the new page is in view', () => {
-    const move = renderGate(['/admin/today'], { transitions: true });
-    move('/admin/blog');
-    expect(screen.getByText('/admin/today')).toBeInTheDocument();
+  test('a move from a field page bars the reload: the next page\'s missing code gets the retry screen once that page is in view, and the one-shot flag stays clear', async () => {
+    nameNewerBuild();
+    const move = renderGate(['/admin/today'], { transitions: true, pages: { '/admin/blog': lazyWithRetry(missingChunk) } });
     vi.stubGlobal('location', { ...window.location, pathname: '/admin/blog', reload });
-    const stale = preloadErrorEvent();
-    handleVitePreloadError(stale, reload);
-    expect(stale.defaultPrevented).toBe(false);
+    move('/admin/blog');
+    expect(await screen.findByText('The portal has a new version.')).toBeInTheDocument();
+    expect(screen.queryByText('/admin/today')).not.toBeInTheDocument();
     expect(reload).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
   });
 
-  test('in Waves Admin a missing chunk never reloads by itself', () => {
+  test('in Waves Admin a page whose code is missing never reloads by itself: it gets the retry screen, and the one-shot flag stays clear', async () => {
     window.webkit = { messageHandlers: { wavesAdmin: { postMessage: vi.fn() } } };
     try {
-      const stale = preloadErrorEvent();
-      handleVitePreloadError(stale, reload);
-      expect(stale.defaultPrevented).toBe(false);
+      renderInBoundary(lazyWithRetry(missingChunk));
+      expect(await screen.findByText('Couldn’t load this page')).toBeInTheDocument();
       expect(reload).not.toHaveBeenCalled();
+      expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
     } finally {
       delete window.webkit;
     }
@@ -828,17 +817,13 @@ describe('on a staff page', () => {
 
   // React Router decodes each segment before it matches: both addresses open
   // a staff page, the second one Today (routerPath, lib/adminBookmarkMeta.js).
-  test('an encoded address is judged as the routes match it: held work keeps an encoded staff page, and an encoded field page never reloads by itself', () => {
+  test('an encoded address is judged as the routes match it: an encoded staff page gets the staff rules, and an encoded field page never reloads by itself', async () => {
     vi.stubGlobal('location', { ...window.location, pathname: '/%61dmin/dashboard', reload });
-    holding = true;
-    const held = preloadErrorEvent();
-    handleVitePreloadError(held, reload);
-    expect(held.defaultPrevented).toBe(false);
-    holding = false;
+    const staff = preloadErrorEvent();
+    handleVitePreloadError(staff, reload);
+    expect(staff.defaultPrevented).toBe(false);
     vi.stubGlobal('location', { ...window.location, pathname: '/admin/%74oday', reload });
-    const field = preloadErrorEvent();
-    handleVitePreloadError(field, reload);
-    expect(field.defaultPrevented).toBe(false);
+    await expect(reloadForMissingCode({ pathname: '/admin/%74oday', reload })).resolves.toBe('manual');
     expect(reload).not.toHaveBeenCalled();
     expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
   });
