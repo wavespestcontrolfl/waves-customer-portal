@@ -89,36 +89,43 @@ function withDeadline(call, label, ms = GOOGLE_CALL_TIMEOUT_MS) {
  * stored time whose rating and comment text also match. Anything else
  * resolves to null (NO_RESOURCE) — a reply must never land on the wrong
  * review. (The original admin-route fallback accepted the first same-name
- * review; that lenience is gone for every caller.)
+ * review; that lenience is gone for every caller.) A failed read of Google's
+ * list is not "no match": it throws GOOGLE_FAILED with the cause, so the
+ * runner retries a temporary one (a timeout, 429, 5xx) on the same long
+ * ladder as a failed getReview.
  */
 async function resolveGbpReviewName(review, { conn = db } = {}) {
   if (review.gbp_review_name) return review.gbp_review_name;
   if (!review.location_id) return null;
+  const loc = WAVES_LOCATIONS.find((l) => l.id === review.location_id);
+  if (!loc?.googleLocationResourceName) return null;
+  let gbpReviews;
   try {
-    const loc = WAVES_LOCATIONS.find((l) => l.id === review.location_id);
-    if (!loc?.googleLocationResourceName) return null;
     // GBP caps pageSize at 50; the helper pages until exhausted.
-    const gbpReviews = await withDeadline((signal) => gbp.getAllLocationReviews(loc.googleLocationResourceName, review.location_id, 50, { signal }), 'GBP getAllLocationReviews', GOOGLE_CALL_TIMEOUT_MS * 2);
-    const rName = (review.reviewer_name || '').toLowerCase();
-    const rTime = review.review_created_at ? new Date(review.review_created_at).getTime() : 0;
-    const rRating = Number(review.star_rating) || 0;
-    const rText = String(review.review_text || '').trim();
-    const ratingOf = (g) => ({ ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 }[String(g.starRating || '').toUpperCase()] || Number(g.starRating) || 0);
-    const candidates = gbpReviews.filter((g) => {
-      const gName = (g.reviewer?.displayName || '').toLowerCase();
-      const gTime = g.createTime ? new Date(g.createTime).getTime() : 0;
-      return gName === rName && gTime && rTime && Math.abs(gTime - rTime) <= 24 * 60 * 60 * 1000
-        && ratingOf(g) === rRating
-        && String(g.comment || '').trim() === rText;
-    });
-    if (candidates.length === 1 && candidates[0].name) {
-      await conn('google_reviews').where({ id: review.id }).update({ gbp_review_name: candidates[0].name });
-      return candidates[0].name;
-    }
-    if (candidates.length > 1) logger.warn(`GBP resource name lookup ambiguous for review ${review.id} (${candidates.length} candidates) — not resolved`);
+    gbpReviews = await withDeadline((signal) => gbp.getAllLocationReviews(loc.googleLocationResourceName, review.location_id, 50, { signal }), 'GBP getAllLocationReviews', GOOGLE_CALL_TIMEOUT_MS * 2);
   } catch (lookupErr) {
     logger.warn(`GBP resource name lookup failed: ${lookupErr.message}`);
+    throw new ReviewReplyError(CODES.GOOGLE_FAILED, `GBP resource name lookup failed: ${lookupErr.message}`, { status: 502, cause: lookupErr });
   }
+  const rName = (review.reviewer_name || '').toLowerCase();
+  const rTime = review.review_created_at ? new Date(review.review_created_at).getTime() : 0;
+  const rRating = Number(review.star_rating) || 0;
+  const rText = String(review.review_text || '').trim();
+  const ratingOf = (g) => ({ ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 }[String(g.starRating || '').toUpperCase()] || Number(g.starRating) || 0);
+  const candidates = gbpReviews.filter((g) => {
+    const gName = (g.reviewer?.displayName || '').toLowerCase();
+    const gTime = g.createTime ? new Date(g.createTime).getTime() : 0;
+    return gName === rName && gTime && rTime && Math.abs(gTime - rTime) <= 24 * 60 * 60 * 1000
+      && ratingOf(g) === rRating
+      && String(g.comment || '').trim() === rText;
+  });
+  if (candidates.length === 1 && candidates[0].name) {
+    // The match stands even when saving it fails: the next publish looks it up again.
+    await conn('google_reviews').where({ id: review.id }).update({ gbp_review_name: candidates[0].name })
+      .catch((e) => logger.warn(`GBP resource name not saved for review ${review.id}: ${e.message}`));
+    return candidates[0].name;
+  }
+  if (candidates.length > 1) logger.warn(`GBP resource name lookup ambiguous for review ${review.id} (${candidates.length} candidates) — not resolved`);
   return null;
 }
 

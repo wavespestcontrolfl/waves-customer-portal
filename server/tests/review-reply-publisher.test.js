@@ -684,6 +684,16 @@ describe('publishReviewReply', () => {
       .rejects.toMatchObject({ code: CODES.NO_RESOURCE });
   });
 
+  test('a failed read of Google\'s review list is a Google failure with its cause, not NO_RESOURCE: the runner retries it on the long ladder', async () => {
+    state.rows[0].gbp_review_name = null;
+    mockGbp.getAllLocationReviews.mockRejectedValueOnce(Object.assign(new Error('GBP getAllLocationReviews 503: backend error'), { googleStatus: 503 }));
+    const err = await publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } }).catch((e) => e);
+    expect(err).toMatchObject({ code: CODES.GOOGLE_FAILED, status: 502 });
+    expect(err.cause).toMatchObject({ googleStatus: 503 });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    expect(state.rows[0].review_reply).toBeNull();
+  });
+
   test('location without credentials → NOT_CONFIGURED', async () => {
     mockGbp.isLocationConfigured.mockResolvedValueOnce(false);
     await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'admin' } }))
