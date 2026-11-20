@@ -1961,14 +1961,18 @@ describe('POST /:token commit', () => {
     // own, so a later stop read (zone-day-funnel.js zoneStopDays) reads it by the profile's city when it has no zone
     // stamp; the zone is checked and stamped, and a 409's fresh times built, from that same city, never the typed one (a
     // typed city no zone lists would let the check pass a visit later read as south). The slot is not built again at
-    // the same pin: the check under the date lock refuses a truck that city's zone day does not allow.
-    test('a matched profile at the same pin with another city on file: the booking and a 409\'s fresh times use the profile\'s address', async () => {
+    // the same pin: the check under the date lock refuses a truck that city's zone day does not allow. A profile with
+    // no city on file keeps the typed address (its zone stamp alone decides then).
+    test.each([
+      ['another city on file', 'West Bradenton', { zoneFunnelAddress: '123 Palm Ave, West Bradenton, FL, 34209', zoneFunnelCity: 'West Bradenton' }],
+      ['no city on file', null, { zoneFunnelAddress: '123 Palm Ave, Bradenton, FL, 34209', zoneFunnelCity: 'Bradenton' }],
+    ])('a matched profile at the same pin with %s: the booking and a 409\'s fresh times use that address', async (_label, profileCity, expected) => {
       firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
       firstResults.call_log = { from_phone: '+19415550101' };
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
       const existingCustomer = {
         id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
-        address_line1: '123 Palm Ave', city: 'West Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
+        address_line1: '123 Palm Ave', city: profileCity, state: 'FL', zip: '34209', phone: '9415550101',
         latitude: 27.4, longitude: -82.5, // the default mockGeocode pin: the location does not move
       };
       seedPhoneHousehold(existingCustomer);
@@ -1981,11 +1985,10 @@ describe('POST /:token commit', () => {
       expect(res.statusCode).toBe(409);
       expect(res.body.code).toBe('SLOT_TAKEN');
       const typed = { zoneFunnelAddress: '123 Palm Ave, Bradenton, FL, 34209', zoneFunnelCity: 'Bradenton' };
-      const profile = { zoneFunnelAddress: '123 Palm Ave, West Bradenton, FL, 34209', zoneFunnelCity: 'West Bradenton' };
       expect(mockBuildAvailability).toHaveBeenCalledTimes(2);
       expect(mockBuildAvailability.mock.calls[0][0]).toMatchObject(typed); // the anti-forgery rebuild, as the list
-      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: profile.zoneFunnelAddress, city: 'West Bradenton' });
-      expect(mockBuildAvailability.mock.calls[1][0]).toMatchObject(profile); // the 409's fresh times
+      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: expected.zoneFunnelAddress, city: expected.zoneFunnelCity });
+      expect(mockBuildAvailability.mock.calls[1][0]).toMatchObject(expected); // the 409's fresh times
     });
 
     // Codex #4737 r9 pre-push P1: the matched profile is re-read under its
