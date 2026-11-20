@@ -3874,12 +3874,20 @@ const StripeService = {
           // renewal charge could consume — same entry rule as the stamp.
           await db.transaction(async (trx) => {
             await require('./annual-prepay-renewals').acquireTermiteGateForCharge(trx, { paymentIds: [paymentId] });
-            return returnAppliedCreditOnRefund({
+            await returnAppliedCreditOnRefund({
               invoiceId: inv.id,
               createdBy: 'system:refund',
               refundId: refund.id,
               paymentId,
             }, trx);
+            // Keep the returned-money Dispatch episode in the SAME commit as
+            // the invoice's refunded transition. A refund.failed delivery can
+            // otherwise restore the invoice between this commit and a later
+            // observer, leaving both observations looking paid and erasing the
+            // episode the office must review. Ordinary invoices return quickly
+            // inside reconcileInvoice without taking Dispatch locks.
+            return require('./commercial-prepay-dispatch-review')
+              .reconcileInvoice(trx, inv.id);
           });
         }
       } catch (creditErr) {

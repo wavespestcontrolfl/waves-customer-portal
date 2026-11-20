@@ -19,6 +19,16 @@ jest.mock('../services/notification-service', () => ({
   create: jest.fn(async () => ({ id: 'synthetic-notification' })),
   notifyAdmin: jest.fn(async () => {}),
 }));
+let mockStripeClient;
+jest.mock('stripe', () => jest.fn(() => mockStripeClient));
+jest.mock('../config/stripe-config', () => ({
+  secretKey: 'sk_test_synthetic',
+  publishableKey: 'pk_test_synthetic',
+  apiVersion: '2024-12-18.acacia',
+}));
+jest.mock('../services/payment-lifecycle-email', () => ({
+  sendRefundIssued: jest.fn(async () => undefined),
+}));
 jest.mock('../services/stripe', () => ({
   assertNoInvoiceChargeReconciliationPending: jest.fn(async () => {}),
   retrievePaymentIntent: jest.fn(async () => null),
@@ -250,6 +260,39 @@ postgres('commercial prepay deposit/card refund proof', () => {
       estimateId: ids.estimateId,
       amount: 55,
     }));
+  });
+
+  test('the admin full-refund entry records the returned-money review in its production transaction', async () => {
+    const ids = await seedOriginal();
+    mockStripeClient = {
+      refunds: {
+        create: jest.fn(async (params) => ({
+          id: `re_admin_${randomUUID().replaceAll('-', '').slice(0, 16)}`,
+          status: 'succeeded',
+          amount: params.amount ?? ids.cardAmount * 100,
+          created: Math.floor(Date.now() / 1000),
+        })),
+      },
+    };
+
+    // Bypass this fixture's narrow service mock so the public admin refund
+    // entry and its real commercial-prepay updater run; only the external
+    // Stripe SDK client is synthetic.
+    const StripeService = jest.requireActual('../services/stripe');
+    await expect(StripeService.refund(ids.paymentId, {}))
+      .resolves.toEqual(expect.objectContaining({
+        id: ids.paymentId,
+        status: 'refunded',
+        refund_issued_amount: ids.cardAmount,
+      }));
+
+    expect(mockStripeClient.refunds.create).toHaveBeenCalledWith(
+      expect.objectContaining({ payment_intent: ids.paymentIntentId }),
+      expect.objectContaining({ idempotencyKey: expect.stringContaining(`refund_pay_${ids.paymentId}_rest_`) }),
+    );
+    await expect(trx('invoices').where({ id: ids.invoiceId }).first('status'))
+      .resolves.toMatchObject({ status: 'refunded' });
+    await expect(reviews(ids.invoiceId)).resolves.toHaveLength(1);
   });
 
   test('an ordinary exact deposit return succeeds without Dispatch proof evidence', async () => {

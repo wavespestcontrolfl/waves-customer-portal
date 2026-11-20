@@ -314,13 +314,15 @@ describe('processing-to-paid commercial restoration is one fenced transaction', 
     const fenceAt = mockState.updates.findIndex((row) => row.table === 'raw'
       && row.payload.bindings?.[0] === 'stripe.pi.payment'
       && row.payload.bindings?.[1] === 'pi_test_1');
+    const customerAt = mockState.updates.findIndex((row) => row.table === 'customers:share-lock');
     const paymentAt = mockState.updates.findIndex((row) => row.table === 'payments'
       && row.inTrx && row.payload.status === 'paid');
     const invoiceAt = mockState.updates.findIndex((row) => row.table === 'invoices'
       && row.inTrx && row.payload.status === 'paid');
     const reviewAt = mockState.updates.findIndex((row) => row.table === 'commercial-review');
     expect(fenceAt).toBeGreaterThanOrEqual(0);
-    expect(paymentAt).toBeGreaterThan(fenceAt);
+    expect(customerAt).toBeGreaterThan(fenceAt);
+    expect(paymentAt).toBeGreaterThan(customerAt);
     expect(invoiceAt).toBeGreaterThan(paymentAt);
     expect(reviewAt).toBeGreaterThan(invoiceAt);
     expect(mockState.updates[reviewAt]).toMatchObject({
@@ -396,13 +398,16 @@ describe('the withdrawal is re-read under the settlement lock', () => {
     expect(alert.payload.alert_type).toBe('wh_payer_billed_settled');
     expect(alert.payload.alert_type.length).toBeLessThanOrEqual(30);
     expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toBeFalsy();
-    // Merge fence before the settlement locks, in executeMerge's order
-    // (customers, then payments), so the two cannot deadlock.
-    const lockAt = mockState.updates.findIndex((u) => u.table === 'customers:share-lock');
+    // Both processing and succeeded deliveries take the PI fence before the
+    // merge/customer lock. Row locks remain customers, then payments.
+    const piFenceAt = mockState.updates.findIndex((u) => u.table === 'raw'
+      && u.payload.bindings?.[0] === 'stripe.pi.payment');
+    const customerLockAt = mockState.updates.findIndex((u) => u.table === 'customers:share-lock');
     const flipAt = mockState.updates.findIndex((u) => u.table === 'payments');
-    expect(lockAt).toBeGreaterThanOrEqual(0);
-    expect(mockState.updates[lockAt].payload).toContain(WINNER);
-    expect(flipAt).toBeGreaterThan(lockAt);
+    expect(piFenceAt).toBeGreaterThanOrEqual(0);
+    expect(customerLockAt).toBeGreaterThan(piFenceAt);
+    expect(mockState.updates[customerLockAt].payload).toContain(WINNER);
+    expect(flipAt).toBeGreaterThan(customerLockAt);
   });
 });
 

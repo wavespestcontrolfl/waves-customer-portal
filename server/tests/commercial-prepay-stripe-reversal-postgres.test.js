@@ -1055,7 +1055,157 @@ postgres('commercial prepay Stripe reversal writers', () => {
     expect(episodes.filter((row) => row.payload.paymentRestored === true)).toHaveLength(1);
   });
 
-  test('failed saved-card recovery releases only its reservation and preserves earlier applied credit', async () => {
+  test('saved-card ACH processing provenance restores Dispatch after attempt success exactly once', async () => {
+    const customerId = await seedCustomer();
+    const originalPi = `pi_saved_ach_original_${randomUUID().slice(0, 12)}`;
+    const originalCharge = `ch_saved_ach_original_${randomUUID().slice(0, 12)}`;
+    const sale = await seedSale({ customerId, paymentIntentId: originalPi, chargeId: originalCharge });
+    await seedPayment(sale, {
+      paymentIntentId: originalPi,
+      chargeId: originalCharge,
+      metadata: { invoice_id: sale.invoiceId, base_amount: 55, card_surcharge: 0 },
+    });
+    const webhook = require('../routes/stripe-webhook');
+    const returnedEpisode = await refundAndAcknowledge(webhook, sale, {
+      paymentIntentId: originalPi,
+      chargeId: originalCharge,
+    });
+
+    await require('../services/customer-credit').postCreditMovement({
+      customerId,
+      delta: 15,
+      source: 'manual',
+      note: 'Synthetic saved-card ACH recovery funding',
+      createdBy: 'synthetic',
+    }, trx);
+    await trx('invoices').where({ id: sale.invoiceId }).update({
+      status: 'sent',
+      paid_at: null,
+      payment_recorded_at: null,
+      stripe_payment_intent_id: null,
+      stripe_charge_id: null,
+      credit_applied: 0,
+      total: 55,
+      // Keep the deferred processing acknowledgment inert in this writer
+      // regression; customer communication is covered by its own suite.
+      ach_processing_notified_at: new Date(),
+    });
+
+    const attemptId = randomUUID();
+    const replacementPi = `pi_saved_ach_recovery_${randomUUID().slice(0, 12)}`;
+    const replacementCharge = `ch_saved_ach_recovery_${randomUUID().slice(0, 12)}`;
+    const paymentMethodId = `pm_saved_ach_${randomUUID().slice(0, 12)}`;
+    await trx('stripe_invoice_charge_attempts').insert({
+      id: attemptId,
+      invoice_id: sale.invoiceId,
+      stripe_payment_method_id: paymentMethodId,
+      idempotency_key: `synthetic-saved-ach:${attemptId}`,
+      status: 'ambiguous',
+      stripe_payment_intent_id: replacementPi,
+      amount: 40,
+      credit_applied_delta: 15,
+      credit_applied_total: 15,
+      error_message: 'Synthetic timeout after Stripe accepted the ACH debit',
+      resolved_at: null,
+    });
+    const processingIntent = {
+      id: replacementPi,
+      status: 'processing',
+      amount: 4000,
+      amount_received: 0,
+      payment_method: paymentMethodId,
+      payment_method_types: ['us_bank_account'],
+      metadata: {
+        saved_card_attempt_id: attemptId,
+        waves_invoice_id: sale.invoiceId,
+        waves_customer_id: customerId,
+        source: 'admin_card_on_file',
+        base_amount: '40',
+        card_surcharge: '0',
+        surcharge_policy_version: 'synthetic-ach-v1',
+      },
+    };
+    mockStripePaymentIntentRetrieve.mockResolvedValue(processingIntent);
+
+    await webhook._handlePaymentIntentProcessing(
+      processingIntent,
+      Math.floor(Date.now() / 1000),
+      `evt_processing_${randomUUID().slice(0, 12)}`,
+    );
+
+    await expect(trx('stripe_invoice_charge_attempts').where({ id: attemptId }).first())
+      .resolves.toMatchObject({ status: 'ambiguous', resolved_at: null });
+    await expect(trx('payments').where({ stripe_payment_intent_id: replacementPi }).first())
+      .resolves.toMatchObject({
+        status: 'processing',
+        amount: '40.00',
+        metadata: expect.objectContaining({
+          invoice_id: sale.invoiceId,
+          source: 'admin_card_on_file',
+          saved_card_attempt_id: attemptId,
+        }),
+      });
+    await expect(trx('customer_credit_ledger').where({ invoice_id: sale.invoiceId }))
+      .resolves.toEqual([
+        expect.objectContaining({
+          delta: '-15.00',
+          note: `Account credit consumed by processing saved-card attempt ${attemptId}`,
+        }),
+      ]);
+    expect(await reviews(sale.invoiceId)).toEqual([
+      expect.objectContaining({ id: returnedEpisode.id, resolved_at: expect.any(Date) }),
+    ]);
+
+    const settledIntent = {
+      ...processingIntent,
+      status: 'succeeded',
+      amount_received: 4000,
+      latest_charge: replacementCharge,
+    };
+    mockStripePaymentIntentRetrieve.mockResolvedValue(settledIntent);
+    mockStripeChargeRetrieve.mockResolvedValue({
+      id: replacementCharge,
+      amount: 4000,
+      receipt_url: 'https://example.invalid/synthetic-ach-receipt',
+      balance_transaction: { created: Math.floor(Date.now() / 1000) },
+      payment_method_details: {
+        type: 'us_bank_account',
+        us_bank_account: { last4: '6789' },
+      },
+    });
+
+    await webhook._handlePaymentIntentSucceeded(settledIntent, Math.floor(Date.now() / 1000));
+
+    await expect(trx('stripe_invoice_charge_attempts').where({ id: attemptId }).first())
+      .resolves.toMatchObject({
+        status: 'succeeded',
+        stripe_payment_intent_id: replacementPi,
+        resolved_at: expect.any(Date),
+      });
+    await expect(trx('payments').where({ stripe_payment_intent_id: replacementPi }).first())
+      .resolves.toMatchObject({
+        status: 'paid',
+        amount: '40.00',
+        metadata: expect.objectContaining({ source: 'admin_card_on_file' }),
+      });
+    let episodes = await reviews(sale.invoiceId);
+    expect(episodes).toHaveLength(2);
+    expect(episodes.find((row) => row.id !== returnedEpisode.id)).toEqual(expect.objectContaining({
+      resolved_at: null,
+      payload: expect.objectContaining({ paymentRestored: true }),
+    }));
+
+    await webhook._handlePaymentIntentSucceeded(settledIntent, Math.floor(Date.now() / 1000));
+    await expect(trx('payments').where({ stripe_payment_intent_id: replacementPi }))
+      .resolves.toHaveLength(1);
+    await expect(trx('customer_credit_ledger').where({ invoice_id: sale.invoiceId }))
+      .resolves.toHaveLength(1);
+    episodes = await reviews(sale.invoiceId);
+    expect(episodes).toHaveLength(2);
+    expect(episodes.filter((row) => row.payload.paymentRestored === true)).toHaveLength(1);
+  });
+
+  test('failed saved-card ACH releases its processing debit and preserves earlier applied credit', async () => {
     const customerId = await seedCustomer();
     const failedPi = `pi_saved_release_${randomUUID().slice(0, 12)}`;
     const sale = await seedSale({
@@ -1102,7 +1252,7 @@ postgres('commercial prepay Stripe reversal writers', () => {
         delta: -15,
         balance_after: 0,
         source: 'adjustment',
-        note: `Account credit reserved for saved-card reconciliation attempt ${attemptId}`,
+        note: `Account credit consumed by processing saved-card attempt ${attemptId}`,
         created_by: 'system:saved_card_reconciliation',
         created_at: new Date(startedAt + 60_000),
       },
@@ -1130,7 +1280,7 @@ postgres('commercial prepay Stripe reversal writers', () => {
         expect.objectContaining({ delta: '-10.00', source: 'invoice_application' }),
         expect.objectContaining({
           delta: '-15.00',
-          note: `Account credit reserved for saved-card reconciliation attempt ${attemptId}`,
+          note: `Account credit consumed by processing saved-card attempt ${attemptId}`,
         }),
         expect.objectContaining({
           delta: '15.00',

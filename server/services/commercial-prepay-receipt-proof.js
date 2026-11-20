@@ -323,10 +323,20 @@ function savedCardMovementKind(row, savedCardEvidence) {
       return { kind: 'application', savedCardAttemptId: String(attempt.id) };
     }
   }
-  const consumedByAttempt = note.match(/^Account credit consumed by (?:reconciled|processing) saved-card attempt (.+)$/);
-  if (consumedByAttempt) {
-    const attempt = savedCardEvidence.succeededById.get(String(consumedByAttempt[1]));
+  const reconciledByAttempt = note.match(/^Account credit consumed by reconciled saved-card attempt (.+)$/);
+  if (reconciledByAttempt) {
+    const attempt = savedCardEvidence.succeededById.get(String(reconciledByAttempt[1]));
     if (attempt && Math.abs(deltaCents) === attempt.creditDeltaCents) return 'application';
+  }
+  const processingByAttempt = note.match(/^Account credit consumed by processing saved-card attempt (.+)$/);
+  if (processingByAttempt) {
+    const attemptId = String(processingByAttempt[1]);
+    const succeeded = savedCardEvidence.succeededById.get(attemptId);
+    if (succeeded && Math.abs(deltaCents) === succeeded.creditDeltaCents) return 'application';
+    const failed = savedCardEvidence.failedById.get(attemptId);
+    if (failed && Math.abs(deltaCents) === failed.creditDeltaCents) {
+      return { kind: 'application', savedCardAttemptId: attemptId };
+    }
   }
   const byOrphanPi = note.match(/^Account credit reserved for saved-card reconciliation orphan PI (.+)$/);
   if (byOrphanPi) {

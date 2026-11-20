@@ -1923,16 +1923,19 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // flip back so Stripe's redelivery repeats the whole check, instead of a
   // swallowed read leaving the invoice paid with no alert (audit P1).
   const updated = await db.transaction(async (trx) => {
-    // Merge fence first: the payer-billed alert below may insert under this
-    // transaction, and its customer lock must come before the payment and
-    // invoice locks, in the order executeMerge takes them.
+    // Processing takes this PI fence before its customer lock. Keep the same
+    // order here so concurrent processing/succeeded deliveries for one PI
+    // cannot each hold the lock the other needs.
+    await lockPaymentIntentPaymentRow(trx, piId);
+    // The payer-billed alert below may insert under this transaction. Its
+    // customer lock still precedes every payment-row and invoice-row lock,
+    // preserving executeMerge's row-lock order after the shared PI fence.
     if (invoiceForTenderGuard?.id) {
       await lockAlertCustomers(trx, [invoiceForTenderGuard.customer_id, paymentIntent.metadata?.waves_customer_id]);
     }
-    // Full refunds use this same fence. Take it before the processing-row
-    // promotion so they see either the old processing receipt or the fully
-    // committed paid invoice + restoration review, never paid money alone.
-    await lockPaymentIntentPaymentRow(trx, piId);
+    // Full refunds use the PI fence acquired above, so they see either the
+    // old processing receipt or the fully committed paid invoice +
+    // restoration review, never paid money alone.
     const flipped = await trx('payments')
       .where({ stripe_payment_intent_id: piId, status: 'processing' })
       .update(paymentUpdates);
@@ -2306,7 +2309,17 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       amount: chargedTotal,
     });
     if (attemptResolved) {
+      savedCardAttemptForTenderGuard.status = 'succeeded';
       logger.info(`[stripe-webhook] Repaired settled saved-card attempt ${savedCardAttemptForTenderGuard.id} for PI ${piId}`);
+    }
+    // A processing ACH row was reconciled before this durable attempt could
+    // become succeeded, so its credit proof was intentionally unconfirmed.
+    // Re-observe after the attempt transition (and on a succeeded retry) so
+    // that exact saved-card provenance can restore Dispatch. Uncaught: a
+    // transient failure must leave this webhook retryable.
+    if (recordedCommercialSale && savedCardAttemptForTenderGuard.status === 'succeeded') {
+      await require('../services/commercial-prepay-dispatch-review')
+        .reconcileInvoice(db, invoiceForTenderGuard.id);
     }
   }
 
@@ -6515,7 +6528,7 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
   const metadataBaseAmount = Number(paymentIntent.metadata?.base_amount ?? invoice?.total ?? amount);
   const metadataCardSurcharge = Number(paymentIntent.metadata?.card_surcharge ?? 0);
 
-  const paymentMetadata = JSON.stringify({
+  const paymentMetadata = {
     invoice_id: invoice?.id || paymentIntent.metadata?.waves_invoice_id || null,
     base_amount: metadataBaseAmount,
     card_surcharge: metadataCardSurcharge,
@@ -6526,7 +6539,7 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
     // jsonb_sets payment_state and settled_event_at), so the pause veto and
     // the auto-clear can exclude payer-funded ACH money too.
     ...(invoice?.payer_id ? { payer_id: invoice.payer_id } : {}),
-  });
+  };
 
   if (!invoice?.id) {
     logger.warn(`[stripe-webhook] No invoice found for ACH processing PI: ${piId}`);
@@ -6600,6 +6613,17 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
       matchingSavedCardAttempt.status = 'ambiguous';
     }
 
+    // Only a PI that passed the locked attempt matcher may carry this source.
+    // The succeeded event promotes this same row in place, so the durable
+    // provenance must be present from processing onward.
+    const serializedPaymentMetadata = JSON.stringify({
+      ...paymentMetadata,
+      ...(matchingSavedCardAttempt ? {
+        source: 'admin_card_on_file',
+        saved_card_attempt_id: String(matchingSavedCardAttempt.id),
+      } : {}),
+    });
+
     let creditAdjustment = null;
     if (matchingSavedCardAttempt) {
       creditAdjustment = savedCardCreditAdjustment({
@@ -6669,7 +6693,7 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
           status: 'processing',
           failure_reason: null,
           amount,
-          metadata: paymentMetadata,
+          metadata: serializedPaymentMetadata,
         });
     } else {
       if (!lockedInvoice?.customer_id) return;
@@ -6691,7 +6715,7 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
         card_brand: null,
         status: 'processing',
         description: `Invoice ${invoice.invoice_number} (bank payment pending)`,
-        metadata: paymentMetadata,
+        metadata: serializedPaymentMetadata,
       });
     }
 
@@ -9476,6 +9500,7 @@ module.exports._handleSetupIntentFailed = handleSetupIntentFailed;
 module.exports._resolveOrphanSucceededPaymentIntentIfSettled = resolveOrphanSucceededPaymentIntentIfSettled;
 module.exports._handlePaymentIntentFailed = handlePaymentIntentFailed;
 module.exports._handlePaymentIntentCanceled = handlePaymentIntentCanceled;
+module.exports._handlePaymentIntentProcessing = handlePaymentIntentProcessing;
 module.exports._dispatchAchProcessingAcknowledgment = dispatchAchProcessingAcknowledgment;
 module.exports._isMachineInitiatedPaymentIntent = isMachineInitiatedPaymentIntent;
 module.exports._isCustomerInitiatedPaymentIntent = isCustomerInitiatedPaymentIntent;
