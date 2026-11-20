@@ -690,7 +690,9 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
   if (event === 'dropped' && reason === 'spam reporting address') {
     if (delivery.complained_at) return null;
     return {
-      delivery: { status: 'complained', complained_at: now, updated_at: now },
+      // The reason marks the drop: a reader's own spam report (below) writes none, and a planned
+      // issue's ledger counts a drop as refused, a report as reached (newsletter-sender refusedDelivery).
+      delivery: { status: 'complained', complained_at: now, bounce_reason: reason, updated_at: now },
       sendIncrement: 'complained_count',
       reconcileSendStatus: true,
       subscriberAction: delivery.subscriber_id ? 'force_unsubscribe' : null,

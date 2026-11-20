@@ -966,14 +966,14 @@ describe('newsletter computeNewsletterEventUpdates', () => {
         subscriberAt: now,
       });
     });
-    test('dropped provider spam report marks the subscriber complained', () => {
+    test('dropped provider spam report marks the subscriber complained, and records the drop reason a reader\'s own report lacks', () => {
       const u = computeNewsletterEventUpdates(
         { event: 'dropped', reason: 'Spam Reporting Address' },
         fresh(),
         now,
       );
       expect(u).toEqual({
-        delivery: { status: 'complained', complained_at: now, updated_at: now },
+        delivery: { status: 'complained', complained_at: now, bounce_reason: 'spam reporting address', updated_at: now },
         sendIncrement: 'complained_count',
         reconcileSendStatus: true,
         subscriberAction: 'force_unsubscribe',

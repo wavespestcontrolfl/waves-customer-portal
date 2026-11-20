@@ -156,7 +156,7 @@ async function alternateSuggestionLine(send) {
 const { assertInternalEmailRecipient, normalizeEmail } = require('../utils/internal-email-recipients');
 
 const PROOF_SUBJECT_RE = /\[PROOF-([0-9a-f]{8})\]/i;
-// A planned issue's FYI banner heading: it opens the copy's text (pestInsiderBannerText/Html,
+// A planned issue's FYI banner heading: it opens the copy's text part (pestInsiderBannerText,
 // isProofCopyItself).
 const FYI_BANNER_HEADING = 'Sends by itself — no reply needed';
 const DEFAULT_PROOF_RECIPIENT = 'contact@wavespestcontrol.com';
@@ -406,24 +406,25 @@ function verifiedHoldSender(email, fyiTos) {
   return hasAlignedAuth(email.authentication_results, domainFromAddress(from), { strict: true });
 }
 
-// A proof copy's own subject (sendNewsletterProof): its FYI: or ACT: prefix right before its token,
-// with no reply or forward prefix ahead of it.
-const PROOF_COPY_SUBJECT_RE = /^\s*(?:FYI|ACT)\s*:\s*\[PROOF-[0-9a-f]{8}\]/i;
+// A planned issue's FYI copy's own subject (sendNewsletterProof): its FYI: prefix right before its
+// token, with no reply or forward prefix ahead of it.
+const PROOF_COPY_SUBJECT_RE = /^\s*FYI\s*:\s*\[PROOF-[0-9a-f]{8}\]/i;
 
-const foldText = (text) => String(text || '').replace(/\s+/g, ' ').toLowerCase();
+const foldText = (text) => String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
 
 /**
  * The FYI copy itself, wherever it lands (in this mailbox when the proof address is this mailbox, a
- * group that relays it, or a rule that forwards it on): it has the copy's own subject, and its own
- * text, not a quote of it, carries the banner heading (pestInsiderBannerText/Html). It carries the
- * token and the HOLD line, so whoever it comes from, it is never an answer to itself. A reply has
- * its sender's own words on top, the copy quoted below: it holds, also one from the address the
- * copy came from, and also one whose sender removed the reply prefix.
+ * group that relays it, or a rule that forwards it on): it has the copy's own subject, and its text
+ * part opens with the banner heading (sendNewsletterProof puts pestInsiderBannerText first). It
+ * carries the token and the HOLD line, so whoever it comes from, it is never an answer to itself.
+ * A reply opens with its sender's own words, whatever quotes the copy below them: it holds, also
+ * one from the address the copy came from, and also one whose sender removed the reply prefix.
+ * A message with no text part is never taken for the copy (the copy always has one); that guess
+ * can only hold an issue, never send one.
  */
 function isProofCopyItself(email) {
-  if (!PROOF_COPY_SUBJECT_RE.test(String(email?.subject || ''))) return false;
-  const top = extractTopReplyText(email?.body_text || htmlReplyToText(email?.body_html));
-  return foldText(top).includes(foldText(FYI_BANNER_HEADING));
+  return PROOF_COPY_SUBJECT_RE.test(String(email?.subject || ''))
+    && foldText(email?.body_text).startsWith(foldText(FYI_BANNER_HEADING));
 }
 
 /**
@@ -594,7 +595,7 @@ function autoSendBannerText(recipientCount) {
 
 // The owner's copy of a Waves Pest Insider issue the auto-send switch queued. The HOLD deadline is
 // half an hour before the 7:00 AM send, so the reply has reached the mailbox when the send-time
-// check reads it (holdReplyOnRecord). Its heading opens the copy's text (isProofCopyItself).
+// check reads it (holdReplyOnRecord). Its heading opens the copy's text part (isProofCopyItself).
 function pestInsiderBannerHtml(recipientCount, issueContext) {
   return `<div class="dm-box" style="border:2px solid #04395E;border-radius:8px;padding:14px 16px;margin:0 0 20px;background:#f4f8fb;font-family:Arial,Helvetica,sans-serif;">
 <p style="margin:0 0 6px;font-size:15px;font-weight:bold;color:#04395E;">${FYI_BANNER_HEADING}</p>

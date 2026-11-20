@@ -25,7 +25,7 @@ jest.mock('../services/newsletter-subscribers', () => ({
 
 const db = require('../models/db');
 const { relinkArchivedLinkedSubscribers: relink } = require('../services/newsletter-subscribers');
-const { settlePlannedIssues } = require('../services/newsletter-sender');
+const { settlePlannedIssues, SPAM_REPORT_DROP_REASON } = require('../services/newsletter-sender');
 
 // Thursday, December 3, 2026: 7:00 AM EST send time; the window ends at 10:00 AM EST (15:00Z).
 const IN_WINDOW = new Date('2026-12-03T14:00:00Z');
@@ -331,7 +331,7 @@ test.each([
   else expect(mockTrigger).not.toHaveBeenCalled();
 });
 
-test('a refusal is a hard bounce or a message SendGrid dropped for an address on its unsubscribe list, with or without an acceptance timestamp; a complaint or an unsubscribe after delivery is reached', async () => {
+test('a refusal is a hard bounce or a message SendGrid dropped for an address on its unsubscribe or spam-report list, with or without an acceptance timestamp; a reader\'s own complaint or unsubscribe is reached', async () => {
   const queries = [];
   fakeDb({ issues: [{ ...ISSUE, status: 'sent' }], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 0, left: 0, refused: 85 } });
   const real = db.getMockImplementation();
@@ -339,23 +339,25 @@ test('a refusal is a hard bounce or a message SendGrid dropped for an address on
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
   expect(mockTrigger.mock.calls[0][1].errors).toEqual(['Did not go out: its send ended, and no reader got it']);
-  // The refusals: a hard bounce, or the unsubscribe drop's status with no delivery, open or click (a
-  // reader's own unsubscribe after delivery writes only unsubscribed_at).
+  // The refusals: a hard bounce, or a drop with no delivery, open or click: the unsubscribe drop's
+  // status (a reader's own unsubscribe after delivery writes only unsubscribed_at), or the spam-report
+  // drop's recorded reason (the webhook records it; a reader's own spam report records none).
+  expect(SPAM_REPORT_DROP_REASON).toBe('spam reporting address');
   const refused = queries.find((q) => !q.notGroup && q.nested.some(([m, column]) => m === 'whereNotNull' && column === 'bounced_at'));
   expect(refused.nested).toEqual(expect.arrayContaining([
-    ['whereNotNull', 'bounced_at'], ['where', 'status', 'unsubscribed'],
+    ['whereNotNull', 'bounced_at'], ['where', 'status', 'unsubscribed'], ['orWhere', 'bounce_reason', SPAM_REPORT_DROP_REASON],
     ['whereNull', 'delivered_at'], ['whereNull', 'opened_at'], ['whereNull', 'clicked_at'],
   ]));
   // With or without an acceptance timestamp: a drop can land before the sender records one.
   expect(refused.nested.map(([m]) => m)).not.toContain('orWhereNotNull');
-  // 'complained' is also a reader's own spam report after delivery, so it is never read as a drop.
+  // The status 'complained' is also a reader's own spam report, so it is never read as a drop.
   expect(JSON.stringify(refused.nested)).not.toContain('complained');
   // Reached: a success signal, or a reader's own spam report or unsubscribe (only a delivered message
   // gets one, also when the sender lost SendGrid's acceptance), and not that refusal.
   const reached = queries.find((q) => q.notGroup);
   expect(reached.nested).toEqual(expect.arrayContaining([
     ['orWhereNotNull', 'sent_at'], ['orWhereNotNull', 'complained_at'], ['orWhereNotNull', 'unsubscribed_at'],
-    ['whereNotNull', 'bounced_at'], ['where', 'status', 'unsubscribed'],
+    ['whereNotNull', 'bounced_at'], ['where', 'status', 'unsubscribed'], ['orWhere', 'bounce_reason', SPAM_REPORT_DROP_REASON],
   ]));
 });
 

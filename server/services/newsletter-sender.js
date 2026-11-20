@@ -2091,17 +2091,22 @@ function issueDiagnostics(issue) {
   return diagnostics || {};
 }
 
+// The reason routes/webhooks-sendgrid.js records for a message SendGrid dropped for an address on its
+// spam-report list. A reader's own spam report after delivery records none.
+const SPAM_REPORT_DROP_REASON = 'spam reporting address';
+
 /**
  * Refused for good, and never mailed again by a Resume: a hard bounce (bounced_at; it keeps the sent_at
  * SendGrid's acceptance wrote), or a message SendGrid dropped, never delivering it, for an address on
  * its unsubscribe list (routes/webhooks-sendgrid.js writes status 'unsubscribed' only then; a reader's
- * own unsubscribe after delivery writes only unsubscribed_at). Either, with or without an acceptance
- * timestamp: a drop can land before the sender records one, or after it lost SendGrid's answer.
- * SendGrid's drop for an address on its spam-report list writes 'complained', as a reader's spam
- * report after delivery does, so the two cannot be told apart, and such a row counts as reached.
+ * own unsubscribe after delivery writes only unsubscribed_at) or on its spam-report list (the webhook
+ * records SPAM_REPORT_DROP_REASON; a reader's own spam report writes the same 'complained' with no
+ * reason). Each, with or without an acceptance timestamp: a drop can land before the sender records
+ * one, or after it lost SendGrid's answer.
  */
 function refusedDelivery(q) {
-  return q.whereNotNull('bounced_at').orWhere((dropped) => dropped.where('status', 'unsubscribed')
+  return q.whereNotNull('bounced_at').orWhere((dropped) => dropped
+    .where((drop) => drop.where('status', 'unsubscribed').orWhere('bounce_reason', SPAM_REPORT_DROP_REASON))
     .whereNull('delivered_at').whereNull('opened_at').whereNull('clicked_at'));
 }
 
@@ -2441,4 +2446,4 @@ async function markEventsFeatured(send) {
 module.exports = {
   applyRetryableDeliveryFilter,
   outstandingEligibleDeliveries,
-  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, withMailboxCustomers, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale, settlePlannedIssues };
+  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, withMailboxCustomers, SKIPPED_DELIVERY_STATUS, SPAM_REPORT_DROP_REASON, markEventsFeatured, sendingClaimIsStale, settlePlannedIssues };

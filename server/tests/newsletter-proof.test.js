@@ -1283,6 +1283,15 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
     expect(await holdReplyOnRecord(SEND)).toBe(true);
   });
 
+  test.each([
+    ['the copy pasted under it with no quote marks', (copy) => `HOLD\n\n${copy}`],
+    ['the copy under an attribution line in another language', (copy) => `HOLD\n\nAm Mi., 5. Aug. 2026 um 13:05 schrieb Waves <newsletter@news.wavespestcontrol.com>:\n${copy}`],
+  ])("a reply that kept the copy's own subject holds when its sender's words open it, with %s", async (_shape, body) => {
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com';
+    wireMailbox({ searched: [received('owner@example.com', signedBy('example.com'), { subject: FYI_SUBJECT, body_text: body(FYI_COPY_TEXT) })] });
+    expect(await holdReplyOnRecord(SEND)).toBe(true);
+  });
+
   test('a reply to a forwarded copy of the FYI (Re: Fwd:) is a reply: its HOLD stops the issue', async () => {
     wireMailbox({ searched: [reply({ subject: `Re: Fwd: ${FYI_SUBJECT}`, body_text: 'HOLD' })] });
     expect(await holdReplyOnRecord(SEND)).toBe(true);
