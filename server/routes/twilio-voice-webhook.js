@@ -871,10 +871,26 @@ async function screenCandidate(from, stirVerstat) {
   }
 }
 
+// Press-1 prompt words. The end of the first prompt lives in ONE constant so
+// it can be swapped later (owner 2026-11-20 is choosing between endings).
+const PRECONNECT_PROMPT_END = 'We screen out spam calls. To reach our office, press 1.';
+const PRECONNECT_SECOND_TRY = 'This is a recording. To reach our office, press any key, or stay on the line to leave a message.';
+
+// Opening line for the line the caller dialed. A spoke site speaks its own
+// brand (spokenName), never "Waves in <town>"; a location or GBP line speaks
+// Waves plus its town (spokenTown); everything else is plain "Waves".
+function preconnectOpening(numberConfig) {
+  if (numberConfig?.spokenName) return `Thanks for calling ${numberConfig.spokenName}.`;
+  if (numberConfig?.spokenTown) return `Thanks for calling Waves in ${numberConfig.spokenTown}.`;
+  return 'Thanks for calling Waves.';
+}
+
 // Pass/fail re-enter THIS route via query params (?screened=1 / ?screenfail=1)
 // so the normal routing, idempotency claim, and voicemail flows are reused
 // verbatim — no new public webhook route exists.
-function buildPreconnectChallengeTwiML() {
+// Words: owner 2026-11-20. Spoke-site lines never say "Waves in" a town (they
+// say the site's own name). Any key still passes (any digit hits ?screened=1).
+function buildPreconnectChallengeTwiML(numberConfig = null) {
   const twiml = new VoiceResponse();
   const gatherOpts = {
     input: 'dtmf',
@@ -885,10 +901,10 @@ function buildPreconnectChallengeTwiML() {
   };
   twiml
     .gather(gatherOpts)
-    .say({ voice: SAY_VOICE }, 'Thank you for calling Waves Pest Control. To be connected, please press one.');
+    .say({ voice: SAY_VOICE }, `${preconnectOpening(numberConfig)} ${PRECONNECT_PROMPT_END}`);
   twiml
     .gather(gatherOpts)
-    .say({ voice: SAY_VOICE }, 'Please press one to be connected.');
+    .say({ voice: SAY_VOICE }, PRECONNECT_SECOND_TRY);
   twiml.redirect({ method: 'POST' }, '/api/webhooks/twilio/voice?screenfail=1');
   return twiml.toString();
 }
@@ -1561,7 +1577,7 @@ router.post('/voice', async (req, res) => {
     } else if (screenDecision === 'gate') {
       // The trigger (B or exchange) is on the row: metadata.preconnect_screen_exchange.
       logger.info(`[preconnect-screen] challenging unknown caller ${maskPhone(From)} (${maskSid(CallSid)})`);
-      return res.type('text/xml').send(buildPreconnectChallengeTwiML());
+      return res.type('text/xml').send(buildPreconnectChallengeTwiML(numberConfig));
     }
 
     // ── Tech line (GATE_TECH_LINES): the holder rings before anything else ──
@@ -4796,6 +4812,7 @@ router._test = {
   SPANISH_MENU_PROMPT,
   LANGUAGE_MENU_ACTION,
   buildPreconnectChallengeTwiML,
+  preconnectOpening,
   findCustomerPhoneMatches,
   knownCallerPhoneExists,
   preconnectScreenDecision,

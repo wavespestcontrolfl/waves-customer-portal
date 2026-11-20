@@ -1,12 +1,15 @@
 const TWILIO_NUMBERS = {
   // ── Location Lines ──────────────────────────────────────────
+  // spokenTown / spokenName (here and on the tracking lists below): the press-1
+  // prompt speaks these. A spoke site's spokenName is its brand from the astro
+  // repo's src/data/domains.json brandName; wavespestcontrol.com entries have none.
   locations: {
     // The 'bradenton' GBP line is branded "Waves Pest Control Lakewood
     // Ranch" on Google but is the Bradenton office (13649 Luxe Ave).
-    'bradenton': { number: '+19413187612', formatted: '(941) 318-7612', label: 'Lakewood Ranch GBP — Bradenton office (Pest)' },
-    'parrish': { number: '+19412972817', formatted: '(941) 297-2817', label: 'Parrish (Pest)' },
-    'sarasota': { number: '+19412972606', formatted: '(941) 297-2606', label: 'Sarasota (Pest)' },
-    'venice': { number: '+19412973337', formatted: '(941) 297-3337', label: 'Venice (Pest)' },
+    'bradenton': { number: '+19413187612', formatted: '(941) 318-7612', label: 'Lakewood Ranch GBP — Bradenton office (Pest)', spokenTown: 'Lakewood Ranch' },
+    'parrish': { number: '+19412972817', formatted: '(941) 297-2817', label: 'Parrish (Pest)', spokenTown: 'Parrish' },
+    'sarasota': { number: '+19412972606', formatted: '(941) 297-2606', label: 'Sarasota (Pest)', spokenTown: 'Sarasota' },
+    'venice': { number: '+19412973337', formatted: '(941) 297-3337', label: 'Venice (Pest)', spokenTown: 'Venice' },
   },
 
   // Main Waves company line (general). Default outbound / caller-ID
@@ -82,17 +85,17 @@ const TWILIO_NUMBERS = {
     { number: '+19412975749', formatted: '(941) 297-5749', domain: 'wavespestcontrol.com', area: 'General', location: 'bradenton', page: 'main site' },
     { number: '+19413187612', formatted: '(941) 318-7612', domain: 'wavespestcontrol.com', area: 'Bradenton', location: 'bradenton', page: '/pest-control-bradenton-fl/' },
     { number: '+19412972606', formatted: '(941) 297-2606', domain: 'wavespestcontrol.com', area: 'Sarasota', location: 'sarasota', page: '/pest-control-sarasota-fl/' },
-    { number: '+19412838194', formatted: '(941) 283-8194', domain: 'bradentonflexterminator.com', area: 'Bradenton', location: 'bradenton' },
-    { number: '+19413265011', formatted: '(941) 326-5011', domain: 'bradentonflpestcontrol.com', area: 'Bradenton', location: 'bradenton' },
-    { number: '+19412972671', formatted: '(941) 297-2671', domain: 'sarasotaflpestcontrol.com', area: 'Sarasota', location: 'sarasota' },
-    { number: '+19412135203', formatted: '(941) 213-5203', domain: 'palmettoexterminator.com', area: 'Palmetto', location: 'parrish' },
-    { number: '+19412943355', formatted: '(941) 294-3355', domain: 'palmettoflpestcontrol.com', area: 'Palmetto', location: 'parrish' },
-    { number: '+19419098995', formatted: '(941) 909-8995', domain: 'parrishexterminator.com', area: 'Parrish', location: 'parrish' },
-    { number: '+19412535279', formatted: '(941) 253-5279', domain: 'parrishpestcontrol.com', area: 'Parrish', location: 'parrish' },
-    { number: '+19413187765', formatted: '(941) 318-7765', domain: 'sarasotaflexterminator.com', area: 'Sarasota', location: 'sarasota' },
-    { number: '+19412998937', formatted: '(941) 299-8937', domain: 'veniceexterminator.com', area: 'Venice', location: 'venice' },
-    { number: '+19412411388', formatted: '(941) 241-1388', domain: 'veniceflpestcontrol.com', area: 'Venice', location: 'venice' },
-    { number: '+19412589109', formatted: '(941) 258-9109', domain: 'northportflpestcontrol.com', area: 'North Port / Port Charlotte', location: 'venice' },
+    { number: '+19412838194', formatted: '(941) 283-8194', domain: 'bradentonflexterminator.com', area: 'Bradenton', location: 'bradenton', spokenName: 'Bradenton Exterminator' },
+    { number: '+19413265011', formatted: '(941) 326-5011', domain: 'bradentonflpestcontrol.com', area: 'Bradenton', location: 'bradenton', spokenName: 'Bradenton Pest Control' },
+    { number: '+19412972671', formatted: '(941) 297-2671', domain: 'sarasotaflpestcontrol.com', area: 'Sarasota', location: 'sarasota', spokenName: 'Sarasota Pest Control' },
+    { number: '+19412135203', formatted: '(941) 213-5203', domain: 'palmettoexterminator.com', area: 'Palmetto', location: 'parrish', spokenName: 'Palmetto Exterminator' },
+    { number: '+19412943355', formatted: '(941) 294-3355', domain: 'palmettoflpestcontrol.com', area: 'Palmetto', location: 'parrish', spokenName: 'Palmetto Pest Control' },
+    { number: '+19419098995', formatted: '(941) 909-8995', domain: 'parrishexterminator.com', area: 'Parrish', location: 'parrish', spokenName: 'Parrish Exterminator' },
+    { number: '+19412535279', formatted: '(941) 253-5279', domain: 'parrishpestcontrol.com', area: 'Parrish', location: 'parrish', spokenName: 'Parrish Pest Control' },
+    { number: '+19413187765', formatted: '(941) 318-7765', domain: 'sarasotaflexterminator.com', area: 'Sarasota', location: 'sarasota', spokenName: 'Sarasota Exterminator' },
+    { number: '+19412998937', formatted: '(941) 299-8937', domain: 'veniceexterminator.com', area: 'Venice', location: 'venice', spokenName: 'Venice Exterminator' },
+    { number: '+19412411388', formatted: '(941) 241-1388', domain: 'veniceflpestcontrol.com', area: 'Venice', location: 'venice', spokenName: 'Venice Pest Control' },
+    { number: '+19412589109', formatted: '(941) 258-9109', domain: 'northportflpestcontrol.com', area: 'North Port / Port Charlotte', location: 'venice', spokenName: 'North Port Pest Control' },
     { number: '+19412402066', formatted: '(941) 240-2066', domain: 'wavespestcontrol.com', area: 'North Port', location: 'venice', page: '/pest-control-north-port-fl/' },
     // Website-only line (2026-11-19): the hub site swaps it in for visitors on
     // pages that show the main line. It is NOT shared: not a GBP phone, not on
@@ -112,11 +115,11 @@ const TWILIO_NUMBERS = {
 
   // ── Lawn Care Domain Tracking ───────────────────────────────
   lawnDomainTracking: [
-    { number: '+19413041850', formatted: '(941) 304-1850', domain: 'bradentonfllawncare.com', area: 'Bradenton', location: 'bradenton' },
-    { number: '+19412691692', formatted: '(941) 269-1692', domain: 'sarasotafllawncare.com', area: 'Sarasota', location: 'sarasota' },
-    { number: '+19412077456', formatted: '(941) 207-7456', domain: 'parrishfllawncare.com', area: 'Parrish', location: 'parrish' },
-    { number: '+19414131227', formatted: '(941) 413-1227', domain: 'venicelawncare.com', area: 'Venice', location: 'venice' },
-    { number: '+19412413824', formatted: '(941) 241-3824', domain: 'waveslawncare.com', area: 'General', location: 'bradenton' },
+    { number: '+19413041850', formatted: '(941) 304-1850', domain: 'bradentonfllawncare.com', area: 'Bradenton', location: 'bradenton', spokenName: 'Bradenton Lawn Care' },
+    { number: '+19412691692', formatted: '(941) 269-1692', domain: 'sarasotafllawncare.com', area: 'Sarasota', location: 'sarasota', spokenName: 'Sarasota Lawn Care' },
+    { number: '+19412077456', formatted: '(941) 207-7456', domain: 'parrishfllawncare.com', area: 'Parrish', location: 'parrish', spokenName: 'Parrish Lawn Care' },
+    { number: '+19414131227', formatted: '(941) 413-1227', domain: 'venicelawncare.com', area: 'Venice', location: 'venice', spokenName: 'Venice Lawn Care' },
+    { number: '+19412413824', formatted: '(941) 241-3824', domain: 'waveslawncare.com', area: 'General', location: 'bradenton', spokenName: 'Waves Lawn Care' },
   ],
 
   // ── Other ───────────────────────────────────────────────────
@@ -156,10 +159,10 @@ const TWILIO_NUMBERS = {
   // untouched. All route to /voice, so every GBP call lands in call_log
   // stamped location='GBP — <City>' / numberType='gbp_tracking'.
   gbpTracking: {
-    bradenton: { number: '+19413521572', formatted: '(941) 352-1572', label: 'GBP — Bradenton', location: 'bradenton', area: 'Bradenton' },
-    parrish: { number: '+19413840224', formatted: '(941) 384-0224', label: 'GBP — Parrish', location: 'parrish', area: 'Parrish' },
-    sarasota: { number: '+19414910407', formatted: '(941) 491-0407', label: 'GBP — Sarasota', location: 'sarasota', area: 'Sarasota' },
-    venice: { number: '+19414774880', formatted: '(941) 477-4880', label: 'GBP — Venice', location: 'venice', area: 'Venice' },
+    bradenton: { number: '+19413521572', formatted: '(941) 352-1572', label: 'GBP — Bradenton', location: 'bradenton', area: 'Bradenton', spokenTown: 'Bradenton' },
+    parrish: { number: '+19413840224', formatted: '(941) 384-0224', label: 'GBP — Parrish', location: 'parrish', area: 'Parrish', spokenTown: 'Parrish' },
+    sarasota: { number: '+19414910407', formatted: '(941) 491-0407', label: 'GBP — Sarasota', location: 'sarasota', area: 'Sarasota', spokenTown: 'Sarasota' },
+    venice: { number: '+19414774880', formatted: '(941) 477-4880', label: 'GBP — Venice', location: 'venice', area: 'Venice', spokenTown: 'Venice' },
   },
 
   // ── Field Tech Lines ────────────────────────────────────────
