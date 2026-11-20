@@ -193,7 +193,26 @@ function attemptBoundFor(caseCreatedAt) {
   return Number.isNaN(t) ? caseCreatedAt : new Date(t - ATTEMPT_SLACK_MS).toISOString();
 }
 
-async function cancelledFamiliesFor(customerId, dbh = db) {
+// The customer's newest cancellation request, savepoint-isolated (codex GH r25 P2: dbh is usually
+// the mint or accept transaction, and a pg statement error here would abort it). The mint falls back
+// to case-only correlation when the read fails. The accept re-check passes `strict`: there a failed
+// read is a failed read (RESTART_RECHECK_RETRY), never "no request", which would fail the quote's
+// stored request id as a changed account and drop a valid hold (codex pre-push P1).
+async function latestCancellationRequest(dbh, customerId, strict) {
+  try {
+    return await dbh.transaction((sp) => sp('service_requests')
+      .where({ customer_id: customerId, category: 'cancellation' })
+      .orderBy('created_at', 'desc')
+      .first('id', 'created_at'));
+  } catch (err) {
+    if (strict) throw err;
+    return null;
+  }
+}
+
+// `strict` (true from the accept re-check only): an unreadable evidence read throws instead of
+// falling back.
+async function cancelledFamiliesFor(customerId, dbh = db, strict) {
   // Newest case regardless of status: when a cancellation partially
   // completes (case left 'open' while the customer is already stamped
   // churned), an OLDER committed case's scope must never answer for it —
@@ -208,18 +227,9 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
   // while the request that just cancelled the account has no case at all
   // (codex GH r8 P1). A case that is not the latest request's record
   // contributes neither scope nor correlation — the request itself does.
-  // Savepoint-isolated (codex GH r25 P2): dbh is usually the mint/accept
-  // outer transaction, and a pg statement error here would abort IT — the
-  // catch below would swallow the error yet every later query still fails
-  // ("current transaction is aborted"), turning the intended case-only
-  // fallback into a 500. Same shape as the seed, prepay, and turf reads.
-  let latestRequest = null;
-  try {
-    latestRequest = await dbh.transaction((sp) => sp('service_requests')
-      .where({ customer_id: customerId, category: 'cancellation' })
-      .orderBy('created_at', 'desc')
-      .first('id', 'created_at'));
-  } catch { /* unreadable — fall back to case-only correlation */ }
+  // Unreadable = case-only correlation, except under `strict`
+  // (latestCancellationRequest).
+  const latestRequest = await latestCancellationRequest(dbh, customerId, strict);
   const current = latest && (!latestRequest
     || String(latest.service_request_id || '') === String(latestRequest.id))
     ? latest : null;
@@ -282,7 +292,11 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
           if (etCalendarDayOf(anchorTs) < staleBefore) return staleAttempt();
         }
       }
-    } catch { /* unreadable — keep the legacy correlation */ }
+    } catch (err) {
+      // Unreadable: the mint keeps the legacy correlation. The accept re-check must not skip
+      // the binding that refuses a stale attempt, so under `strict` this is a failed read.
+      if (strict) throw err;
+    }
   }
   const scope = current && current.status === 'committed' ? parseJson(current.scope, []) : [];
   const scoped = (Array.isArray(scope) ? scope : []).filter((f) => RESTARTABLE_FAMILIES.includes(f));
@@ -1543,7 +1557,9 @@ async function readRestartAcceptState(trx, estimate) {
   // The LATEST attempt's families, under the same locks: a reactivate-then-recancel with a
   // different scope leaves an unexpired older token whose families still pass the churn and
   // residual checks (codex GH r8 P1); the quote must describe the cancellation the account is in.
-  state.latestAttempt = await cancelledFamiliesFor(state.fresh.id, trx);
+  // Strict: an evidence read that fails is a failed read here, not a missing request or binding
+  // (codex pre-push P1), so the caller answers the retry code.
+  state.latestAttempt = await cancelledFamiliesFor(state.fresh.id, trx, true);
   return state;
 }
 
