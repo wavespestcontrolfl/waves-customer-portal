@@ -219,6 +219,12 @@ describe('builderPermits', () => {
     expect(permits).toEqual([{ id: 'P-1', issuedDate: '2026-11-16', status: 'Permit Issued', address: '200 SAMPLE TRL', city: 'PARRISH', zip: '34219', typeOfWork: null }]);
   });
 
+  test.each([[''], [null], [undefined]])('an empty key (%s) returns no permits and runs no query', async (key) => {
+    expect(await builderPermits({ kind: 'pool', key })).toEqual([]);
+    expect(mockRaw).not.toHaveBeenCalled();
+    expect(mockSnapshots).toEqual([]);
+  });
+
   test('an unknown builder returns no permits and runs one query', async () => {
     mockRaw.mockResolvedValueOnce({ rows: [{ name: 'OTHER POOLS INC' }] });
     expect(await builderPermits({ kind: 'home', key: 'NOBODY' })).toEqual([]);
