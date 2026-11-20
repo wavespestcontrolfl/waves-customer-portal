@@ -3058,8 +3058,8 @@ that root shows the state the render's key was computed under
 (`reportPdfReadySelector` in `server/services/service-report/pdf.js`). A page
 built in the other state (a rolling restart's overlap), or by a page bundle or
 server from before this key, never matches: the render times out and nothing
-is stored. Every other record renders the same in both states and waits for
-the report root alone. A record that carries the technician's own note
+is stored. Every other record renders the same in both states and does not
+check that state. A record that carries the technician's own note
 (`carriesReportNote`; its PDF key has `-rn`) waits the same way for its note
 state: in `mode=pdf` its payload also carries `reportNote`
 (`reportNoteRenderState`): `shown:` and the 8-hex digest of the signed note as
@@ -3068,7 +3068,10 @@ key's `-tr` part names), else `withheld`. The PDF document shows it on its root
 (`data-report-note`), and both providers print only once that root shows the
 state of the caller's own build. A page built from another read of the record
 (the note or the signing name changed between the two reads) never matches. No
-other record, and no other mode, carries the key.
+other record, and no other mode, carries the key, so a record with no note
+waits for a root that shows no note state (`:not([data-report-note])`): a
+record that gained a note after the caller's read never prints under the
+caller's key either.
 
 The technician's own note (owner 2026-11-19, the report speed plan; reader
 `visitReportCustomerCopy`, `technician-report-copy.js`): a completed visit may

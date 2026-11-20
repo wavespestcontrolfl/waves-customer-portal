@@ -53,14 +53,17 @@ function assertPdfBuffer(buf, provider) {
 // report-copy reportDependsOnWriterRules) waits for its root showing the
 // state this render's key is computed under (renderWriterRulesState; /data
 // names it in PDF mode). Every other record renders the same in both states,
-// so it waits for the root alone, also in a restart overlap. A record that
+// so it does not check that state, also in a restart overlap. A record that
 // carries the technician's own note also waits for the root showing the note
-// state of the caller's build (technician-report-copy reportNoteRenderState).
+// state of the caller's build (technician-report-copy reportNoteRenderState),
+// and every other record for a root that shows no note state: a record that
+// gained a note after the caller read it never prints under the caller's key
+// (pre-push audit on 685c3266d4).
 function reportPdfReadySelector(dependsOnWriterRules = true, reportNoteState = null) {
   const root = dependsOnWriterRules
     ? `.service-report-v1[data-writer-rules="${require('./technician-report-copy').renderWriterRulesState()}"]`
     : '.service-report-v1';
-  return reportNoteState ? `${root}[data-report-note="${reportNoteState}"]` : root;
+  return `${root}${reportNoteState ? `[data-report-note="${reportNoteState}"]` : ':not([data-report-note])'}`;
 }
 
 async function renderReportPdfWithCloudflare(url, { serviceRecordId, readySelector = '.service-report-v1' } = {}) {

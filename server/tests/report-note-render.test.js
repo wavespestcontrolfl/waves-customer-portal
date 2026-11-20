@@ -125,11 +125,15 @@ describe('the report payload', () => {
   });
 
   test('a cleaned note that names a fixed drying time is refused: no summary from it', async () => {
-    const text = 'I treated the perimeter. The spray dries in 30 minutes.';
-    expect(visitReportCustomerCopy({ ...SERVICE, structured_notes: JSON.stringify(stored({ text })) }).body).toBeNull();
-    const data = await build({ structured_notes: JSON.stringify(stored({ text })) });
-    expect(data).not.toHaveProperty('summaryIsOwnNote');
-    expect(JSON.stringify(data)).not.toContain('dries in 30');
+    for (const [text, figure] of [
+      ['I treated the perimeter. The spray dries in 30 minutes.', 'dries in 30'],
+      ['I treated the perimeter. Allow a 30-minute drying period.', '30-minute drying'],
+    ]) {
+      expect(visitReportCustomerCopy({ ...SERVICE, structured_notes: JSON.stringify(stored({ text })) }).body).toBeNull();
+      const data = await build({ structured_notes: JSON.stringify(stored({ text })) });
+      expect(data).not.toHaveProperty('summaryIsOwnNote');
+      expect(JSON.stringify(data)).not.toContain(figure);
+    }
   });
 
   test('a note with no technician name on the record is not signed', async () => {

@@ -4342,6 +4342,11 @@ function findingsSchemaForType(projectType, { serviceKey = null, companion = fal
 // forms (codex r48 #3420).
 const TIME_FIGURE_SRC = '(?:\\d+(?:\\.\\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty[-\\s]?five|forty|fifty|sixty|ninety|half\\s+an?|a\\s+half|a\\s+couple(?:\\s+of)?|a\\s+few|several|an?)';
 const TIME_UNIT_SRC = '(?:minutes?|mins?|hours?|hrs?|half[-\\s]?hours?)';
+// Between a figure and its unit: spaces, a hyphen or a dash ("a 30-minute
+// drying period", "a 30–minute wait") state the same fixed time (pre-push
+// audit on 685c3266d4). A plus is not a gap: the bed bug prep texts and guides
+// say to dry bedding "on high 30+ min", laundry copy a reply may quote.
+const FIGURE_UNIT_GAP_SRC = '[\\s\\u2010-\\u2015-]*';
 // One entry-verb alternation shared by the duration and clock-time shapes
 // (codex r52/r53). "keep an eye out" carries no of/off/away-from and stays
 // legal; "avoid" is scoped to treated-surface nouns so agronomic
@@ -4395,8 +4400,8 @@ const BANNED_CUSTOMER_COPY = [
   // direct enter/occupancy instructions state the same timing without a
   // "re-" prefix ("Enter the treated area after thirty minutes") —
   // codex r51
-  new RegExp(`\\b${REENTRY_VERB_SRC}\\b[^.!?]{0,40}\\b${TIME_FIGURE_SRC}\\s*(?:more\\s+)?${TIME_UNIT_SRC}\\b`, 'i'),
-  new RegExp(`\\b${TIME_FIGURE_SRC}\\s*${TIME_UNIT_SRC}\\b[^.!?]{0,40}\\b${REENTRY_VERB_SRC}\\b`, 'i'),
+  new RegExp(`\\b${REENTRY_VERB_SRC}\\b[^.!?]{0,40}\\b${TIME_FIGURE_SRC}${FIGURE_UNIT_GAP_SRC}(?:more\\s+)?${TIME_UNIT_SRC}\\b`, 'i'),
+  new RegExp(`\\b${TIME_FIGURE_SRC}${FIGURE_UNIT_GAP_SRC}${TIME_UNIT_SRC}\\b[^.!?]{0,40}\\b${REENTRY_VERB_SRC}\\b`, 'i'),
   // clock-time forms (codex r53): forward takes any temporal preposition;
   // the reverse direction takes DEADLINE prepositions only, so "We arrived
   // at 2 PM and entered through the side gate" stays legal.

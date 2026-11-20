@@ -609,6 +609,14 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The spray dries in 30 minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('It dries within half an hour of the application.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Keep people and pets out until the spray dries.')).toBeNull();
+    // a hyphen or dash between the figure and its unit states the same fixed
+    // time (pre-push audit on 685c3266d4)
+    expect(reportCopyRejection('Allow a 30-minute drying period.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('Allow a 30\u2013minute drying period.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('Plan on a two-hour wait before re-entry.')).toMatch(/^banned:/);
+    // a plus is not a gap: the bed bug prep copy ("dry on high 30+ min") stays legal
+    expect(reportCopyRejection('Wash and dry all bedding on high heat 30+ minutes.')).toBeNull();
+    expect(reportCopyRejection('We spent a 30-minute stretch on the perimeter.')).toBeNull();
     // dog/cat re-entry, awarded EPA approval, long alphabetic passwords (r78)
     expect(reportCopyRejection('Let your dog outside after thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('The cats can go outside in 2 hours.')).toMatch(/^banned:/);
