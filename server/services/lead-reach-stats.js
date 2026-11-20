@@ -16,8 +16,9 @@
  *   - a call a person spoke on: an outbound call the lead answered (personCallBackSql),
  *     or an inbound call a person answered (answered_by = 'human'). The call that
  *     created the lead counts when a person answered it (matched by twilio_call_sid),
- *     because that is the lead's first contact; any other call must come after
- *     first_contact_at. A call with no trustworthy end (callEndedAtSql) counts for nothing. The
+ *     because that is the lead's first contact; any other call must reach a person after
+ *     first_contact_at (one with no known answer time that rang before it and ended after it may
+ *     have, so bucketReach judges it). A call with no trustworthy end (callEndedAtSql) counts for nothing. The
  *     time a call reached a person is when the staff phone accepted an inbound call
  *     (forward_acceptance.accepted_at) or the customer's leg connected on an outbound bridge call
  *     (customer_leg ended_at minus duration_seconds); with neither it is somewhere between the
@@ -44,12 +45,13 @@
  *
  * Whose contact it is, the same rules as lead-contact-sync.js (contactSkipReason): phone and email
  * evidence counts for a lead only when the contact row is not another customer's and no other open
- * lead (or other lead in this figure) shares that phone or email. A sent email's customer comes from
- * its Gmail thread and its recipients (emailOwners). The originating call is the one exception: it is
+ * lead (or other lead in this figure) shares that phone or email. A sent email's customer is the one
+ * email-customer-link.js emailCustomerLink settles, read for the batch (emailOwners); a send it cannot
+ * settle is no evidence. The originating call is the one exception: it is
  * matched by its twilio_call_sid, whatever callback number the lead gave. A call has one owner,
  * resolved once (indexEvidence): the processor's settled stamp (metadata.lead_id), then a cohort
  * lead's originating sid, then the phone it was on; it credits that lead alone.
- * Read-only: five batched queries for the whole cohort (a sent email adds two set queries for its
+ * Read-only: five batched queries for the whole cohort (a sent email adds three set queries for its
  * owner), never one per lead.
  */
 
@@ -59,7 +61,7 @@ const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staf
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { callEndedAtSql, callStartedAtSql } = require('./sms-pending-conversations');
-const { personSentFilter, capturedRecipients } = require('./email/email-customer-link');
+const { personSentFilter, capturedRecipients, extractEmailAddresses } = require('./email/email-customer-link');
 const { openLeadIdentities, contactSkipReason, usablePhoneKey, leadEmail } = require('./lead-contact-sync');
 const { leadMatchesEstimateContact } = require('./lead-estimate-link');
 const { NON_ENGAGED_LEAD_STATUSES } = require('./lead-statuses');
@@ -109,27 +111,29 @@ const SETTLED_CALL_SQL = "(cl.processing_token IS NULL AND (cl.processing_status
 // customer leg only on some calls (metadata.customer_leg = { status, duration_seconds, ended_at },
 // twilio-voice-webhook.js /outbound-dial-complete): when it is there the customer connected at
 // ended_at minus duration_seconds. When it is not, the only bound is the call's own end (callEndedAtSql,
-// start plus duration): see crossesWindow in reachTimes.
+// start plus duration): see bucketReach. The phone branch reads every call that ENDED after the earliest
+// first contact: one that rang before a lead's first contact can still reach a person after it.
 async function personCalls(conn, peers, sids, leadIds, since) {
   if (!peers.length && !sids.length && !leadIds.length) return [];
   const started = callStartedAtSql('cl');
+  const ended = callEndedAtSql('cl');
   const peerSql = `(CASE WHEN cl.direction = 'inbound' THEN ${phoneIdentitySql('cl.from_phone')} ELSE ${phoneIdentitySql('cl.to_phone')} END)`;
   const rows = await whereNotSandboxCall(conn('call_log as cl'), 'cl.source')
     .where('cl.status', 'completed')
     .whereIn('cl.direction', ['inbound', 'outbound'])
-    .whereRaw(`${callEndedAtSql('cl')} IS NOT NULL`)
+    .whereRaw(`${ended} IS NOT NULL`)
     .where((spoke) => spoke
       .where((placed) => placed.where('cl.direction', 'outbound').whereRaw(personCallBackSql('cl')))
       .orWhere((answered) => answered.where('cl.direction', 'inbound').where('cl.answered_by', 'human')))
     .where((mine) => mine
-      .where((onPhone) => onPhone.whereRaw(`${started} > ?`, [since]).whereRaw(`${peerSql} = ANY(?)`, [peers]))
+      .where((onPhone) => onPhone.whereRaw(`${ended} > ?`, [since]).whereRaw(`${peerSql} = ANY(?)`, [peers]))
       .orWhereIn('cl.twilio_call_sid', sids)
       // A later call the processor settled onto one of these leads carries another sid and may carry
       // another phone.
       .orWhere((stamped) => stamped.whereRaw("cl.metadata->>'lead_id' = ANY(?)", [leadIds]).whereRaw(SETTLED_CALL_SQL)))
     .select('cl.twilio_call_sid as sid', 'cl.customer_id', conn.raw(`${started} as at`), conn.raw(`${peerSql} as peer`),
       conn.raw("cl.metadata->>'lead_id' as stamp_lead_id"), conn.raw(`${SETTLED_CALL_SQL} as settled`),
-      'cl.direction', conn.raw(`${callEndedAtSql('cl')} as ended_at`),
+      'cl.direction', conn.raw(`${ended} as ended_at`),
       conn.raw("cl.metadata->'forward_acceptance'->>'accepted' as accepted"),
       conn.raw("cl.metadata->'forward_acceptance'->>'accepted_at' as accepted_at"),
       conn.raw("cl.metadata->'customer_leg'->>'ended_at' as leg_ended_at"),
@@ -169,36 +173,51 @@ async function sidOwnersOf(conn, calls) {
   return new Map(rows.filter((r) => r.twilio_call_sid).map((r) => [String(r.twilio_call_sid), String(r.id)]));
 }
 
-// Who a batch of Gmail SENT rows belongs to, Map(row id -> customer id, AMBIGUOUS, or null). Email
-// sync leaves customer_id empty on mail sent from the office, so the owner comes from the same two
-// linkages as email-customer-link.js emailCustomerLink, read for the whole batch in two set
-// queries: (a) customers linked to inbound rows of the send's Gmail thread, (b) active customers whose
-// own email is a recipient. More than one distinct customer is ambiguous, never a guess. This is the
-// resolver's linkage without its thread-reach refinement (threadSendReachesCustomer), so it can only
-// skip more sends than the resolver would, never credit one the resolver would refuse.
+// Who a batch of Gmail SENT rows belongs to, Map(row id -> customer id, null, or AMBIGUOUS), by the same
+// precedence as email-customer-link.js emailCustomerLink (email sync leaves customer_id empty on mail sent
+// from the office), read for the whole batch in three set queries:
+//  - more than one customer linked in the send's Gmail thread: unsettled;
+//  - one: that customer only when the send provably reaches them (threadSendReachesCustomer: a recipient
+//    is their email or an address they wrote from in the thread, and no recipient is another active
+//    customer's email), else unsettled;
+//  - none: the active customers whose own email is a recipient: one is that customer, none is null (the
+//    send names no customer), more than one is unsettled.
+// An unsettled send is AMBIGUOUS, which contactSkipReason reads as another customer's: no lead's
+// evidence, never a guess. Rows reach here only with their recipients captured (capturedRecipients).
 const AMBIGUOUS_CUSTOMER = 'ambiguous-customer';
 async function emailOwners(conn, rows) {
   const threads = uniq(rows.map((row) => row.gmail_thread_id));
   const recipients = uniq(rows.flatMap((row) => capturedRecipients(row) || []));
-  const [threadRows, customerRows] = await Promise.all([
+  const [threadRows, recipientRows] = await Promise.all([
     threads.length
-      ? conn('emails').whereIn('gmail_thread_id', threads).whereNotNull('customer_id').select('id', 'gmail_thread_id', 'customer_id')
+      ? conn('emails').whereIn('gmail_thread_id', threads).whereNotNull('customer_id').select('id', 'gmail_thread_id', 'customer_id', 'from_address')
       : [],
     recipients.length
       ? conn('customers').whereNull('deleted_at').whereNotNull('email')
         .whereIn(conn.raw('LOWER(TRIM(email))'), recipients).select('id', conn.raw('LOWER(TRIM(email)) as address'))
       : [],
   ]);
+  // The thread customers' own emails; a deleted customer is not here, so no send reaches them.
+  const threadCustomerIds = uniq(threadRows.map((t) => idOrNull(t.customer_id)));
+  const emailOf = new Map((threadCustomerIds.length
+    ? await conn('customers').whereIn('id', threadCustomerIds).whereNull('deleted_at').select('id', 'email')
+    : []).map((c) => [String(c.id), c.email]));
   const owners = new Map();
   for (const row of rows) {
-    const found = new Set();
-    if (row.customer_id != null) found.add(String(row.customer_id));
-    for (const t of threadRows) {
-      if (row.gmail_thread_id && String(t.gmail_thread_id) === String(row.gmail_thread_id) && String(t.id) !== String(row.id)) found.add(String(t.customer_id));
-    }
-    const mine = new Set(capturedRecipients(row) || []);
-    for (const c of customerRows) if (mine.has(c.address)) found.add(String(c.id));
-    owners.set(String(row.id), found.size > 1 ? AMBIGUOUS_CUSTOMER : ([...found][0] ?? null));
+    const mine = capturedRecipients(row) || [];
+    const named = uniq(recipientRows.filter((c) => mine.includes(c.address)).map((c) => String(c.id)));
+    const inThread = row.gmail_thread_id ? threadRows.filter((t) => String(t.gmail_thread_id) === String(row.gmail_thread_id)) : [];
+    const threadCustomers = uniq(inThread.filter((t) => String(t.id) !== String(row.id)).map((t) => String(t.customer_id)));
+    let owner;
+    if (threadCustomers.length > 1) owner = AMBIGUOUS_CUSTOMER;
+    else if (threadCustomers.length === 1) {
+      const [customer] = threadCustomers;
+      const theirs = new Set([emailOf.get(customer), ...inThread.filter((t) => String(t.customer_id) === customer).map((t) => t.from_address)]
+        .flatMap(extractEmailAddresses));
+      const reaches = emailOf.has(customer) && mine.some((addr) => theirs.has(addr)) && named.every((id) => id === customer);
+      owner = reaches ? customer : AMBIGUOUS_CUSTOMER;
+    } else owner = named.length > 1 ? AMBIGUOUS_CUSTOMER : (named[0] ?? null);
+    owners.set(String(row.id), owner);
   }
   return owners;
 }
@@ -216,7 +235,7 @@ async function personEmails(conn, addresses, since) {
     .whereRaw('NOT EXISTS (SELECT 1 FROM seo_link_prospects slp WHERE slp.outreach_thread_ref IN (er.gmail_thread_id, er.gmail_id))')
     .where('er.received_at', '>', since)
     .whereRaw(`EXISTS (SELECT 1 FROM unnest(?::text[]) AS a(addr) WHERE strpos(${recipientText}, a.addr) > 0)`, [addresses])
-    .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.cc_address', 'er.bcc_address', 'er.customer_id', 'er.received_at as at');
+    .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.cc_address', 'er.bcc_address', 'er.received_at as at');
   if (!rows.length) return [];
   // A row whose recipients are not all known (Cc/Bcc never captured) names no one: another customer may
   // have been copied, so it is no evidence (the resolver's own guard, capturedRecipients).
@@ -239,12 +258,20 @@ async function personEmails(conn, addresses, since) {
 // per-delivery record names who sent it, so judgeReach treats only the deliveries beyond the proven
 // automated ones as possibly a person's: not judged, never "never reached".
 const FIRST_DELIVERED_SQL = "e.estimate_data #>> '{deliveryState,firstDeliveredAt}'";
-const AUTOMATED_SQL = "(COALESCE(e.estimate_data->'automation'->'autoSend'->>'result', '') = 'sent' OR COALESCE(e.estimate_data->'automation'->'moveAutoSend'->>'result', '') = 'sent')";
+const automatedSql = (a) => `(COALESCE(${a}.estimate_data->'automation'->'autoSend'->>'result', '') = 'sent' OR COALESCE(${a}.estimate_data->'automation'->'moveAutoSend'->>'result', '') = 'sent')`;
+// A group send records its automation on the one estimate it sent (lead-estimate-auto-send.js), but
+// sendEstimateNow publishes and stamps the delivery of every sibling in the group. So a sibling is
+// automated when another member of its group is, with one proven delivery (the publication); a further
+// delivery of the sibling may be a person's.
+const GROUP_AUTOMATED_SQL = `EXISTS (SELECT 1 FROM estimates g WHERE e.estimate_group_id IS NOT NULL
+  AND g.estimate_group_id = e.estimate_group_id AND g.id <> e.id AND ${automatedSql('g')})`;
+const AUTOMATED_SQL = `(${automatedSql('e')} OR ${GROUP_AUTOMATED_SQL})`;
 // Real deliveries the automation's own records prove: the lead auto-send's send, the moving job's
 // overnight email, and its recorded morning text (a second delivery of the same estimate).
-const AUTO_DELIVERIES_SQL = `(CASE WHEN COALESCE(e.estimate_data->'automation'->'autoSend'->>'result', '') = 'sent' THEN 1 ELSE 0 END
+const AUTO_DELIVERIES_SQL = `GREATEST(CASE WHEN COALESCE(e.estimate_data->'automation'->'autoSend'->>'result', '') = 'sent' THEN 1 ELSE 0 END
   + CASE WHEN COALESCE(e.estimate_data->'automation'->'moveAutoSend'->>'result', '') = 'sent' THEN 1 ELSE 0 END
-  + CASE WHEN COALESCE(e.estimate_data->'automation'->'moveAutoSend'->>'textResult', '') = 'sent' THEN 1 ELSE 0 END)`;
+  + CASE WHEN COALESCE(e.estimate_data->'automation'->'moveAutoSend'->>'textResult', '') = 'sent' THEN 1 ELSE 0 END,
+  CASE WHEN ${GROUP_AUTOMATED_SQL} THEN 1 ELSE 0 END)`;
 const DELIVERIES_SQL = "(CASE WHEN jsonb_typeof(e.estimate_data #> '{deliveryState,deliveredAt}') = 'array' THEN jsonb_array_length(e.estimate_data #> '{deliveryState,deliveredAt}') ELSE 0 END)";
 async function estimateSends(conn, cohort) {
   if (!cohort.length) return [];
@@ -268,11 +295,16 @@ async function estimateSends(conn, cohort) {
       if (named && !named.estimate_id && leadMatchesEstimateContact(named, row)) leadId = String(named.id);
     }
     if (!leadId || !byId.has(leadId)) return [];
-    // The second real delivery in time: with the first automated, it is the earliest a person could have sent one.
+    // The second real delivery in time: with the first automated, it is the earliest a person could have
+    // sent one. deliveredAt keeps only the newest entries (DELIVERY_HISTORY_MAX in admin-estimates.js):
+    // when its oldest entry is not the first delivery, older ones were dropped, and the second delivery
+    // may be any time after the first.
+    const first = asMs(row.at);
     const times = (Array.isArray(row.delivered_at) ? row.delivered_at : []).map(asMs).filter((t) => t != null).sort((a, b) => a - b);
+    const complete = first != null && times.length > 0 && times[0] <= first;
     return [{
-      leadId, at: asMs(row.at), automated: !!row.automated, deliveries: Number(row.deliveries) || 0, autoDeliveries: Number(row.auto_deliveries) || 0,
-      resendAt: times[1] ?? null,
+      leadId, at: first, automated: !!row.automated, deliveries: Number(row.deliveries) || 0, autoDeliveries: Number(row.auto_deliveries) || 0,
+      resendAt: complete ? (times[1] ?? null) : first,
     }];
   });
 }
@@ -343,13 +375,20 @@ function reachItems(lead, index, owners) {
   const customerId = idOrNull(lead.customer_id);
   const keys = [`phone:${usablePhoneKey(lead.phone)}`, `email:${leadEmail(lead.email)}`];
   // Contact on the lead's phone or email must come after first_contact_at, and must be this lead's:
-  // not another customer's, not an identity another lead shares.
+  // not another customer's, not an identity another lead shares. A call with no known answer time
+  // (spanEnd) that rang before first contact and ended after it may have reached the person after it.
+  const mayFollow = (w) => (w.spanEnd ?? w.at) > firstAt;
   const byIdentity = keys.flatMap((key) => index.byKey.get(key) || [])
-    .filter((w) => w.at > firstAt && !contactSkipReason(w, customerId, owners));
+    .filter((w) => mayFollow(w) && !contactSkipReason(w, customerId, owners));
   // A call owned by this lead counts after first contact; the originating call is its first contact
   // even though it came before first_contact_at.
-  const owned = (index.owned.get(id) || []).filter((w) => w.at > firstAt || (sid && w.sid === sid));
-  const items = [...byIdentity, ...owned].map((w) => ({ earliest: w.at, latest: w.spanEnd ?? w.at }));
+  const isOrigin = (w) => !!sid && w.sid === sid;
+  const owned = (index.owned.get(id) || []).filter((w) => mayFollow(w) || isOrigin(w));
+  // That straddling call may also have reached the person before first contact, which never counts:
+  // possible from first contact on, never certain.
+  const items = [...byIdentity, ...owned].map((w) => (w.at > firstAt || isOrigin(w)
+    ? { earliest: w.at, latest: w.spanEnd ?? w.at }
+    : { earliest: firstAt, latest: null }));
   for (const e of index.estimates.get(id) || []) {
     // A first delivery nothing automated is a person's. After an automated first delivery, deliveries
     // beyond the ones the automation's records prove may be a person's; the earliest such one is the

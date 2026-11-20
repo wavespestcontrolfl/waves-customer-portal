@@ -248,6 +248,16 @@ describe('judgeReach', () => {
   });
 
   // Round 4, finding 3: uncertainty only matters when it could change the bucket.
+  test('a call with no answer time that rang before first contact and ended after it is possible, never certain', () => {
+    const l = lead(1);
+    const call = (start, end) => ({ key: phoneKey(l), scope: 'phone', customerId: null, sid: 'CA-1', at: at(start), spanEnd: at(end) });
+    const run = (calls, texts = []) => judgeReach([l], { ...none, calls, texts }).get('1');
+    expect(run([call(-2, 5)])).toBe(NOT_JUDGED); // may have reached them at minute 3, or before first contact
+    expect(run([call(-2, -1)])).toBe(null); // over before first contact: no contact
+    expect(run([call(-2, 5)], [{ key: phoneKey(l), scope: 'phone', customerId: null, at: at(4) }])).toBe(4); // a proven contact inside the window
+    expect(run([call(-2, 40)], [{ key: phoneKey(l), scope: 'phone', customerId: null, at: at(30) }])).toBe(NOT_JUDGED); // could be inside it
+  });
+
   test('a resend after a proven late contact leaves the lead judged; one that could be inside the window does not', () => {
     const a = lead(1);
     const b = lead(2);
@@ -280,6 +290,8 @@ function fakeConn(rowsByTable) {
       get: (_t, prop) => {
         if (prop === 'then') return (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
         if (prop === 'whereRaw') return (sql) => { (conn.raws[name] = conn.raws[name] || []).push(String(sql)); return builder; };
+        // A grouped condition (where/orWhere with a callback) runs on the same builder, so its SQL is recorded too.
+        if (['where', 'orWhere', 'andWhere'].includes(prop)) return (...args) => { if (typeof args[0] === 'function') args[0](builder); return builder; };
         return () => builder;
       },
     });
@@ -338,17 +350,90 @@ describe('loadLeadReachStats', () => {
   test('an outbound email in another customer\'s thread does not credit a lead with the same address', async () => {
     const addr = 'pat.fixture@example.invalid';
     const mine = lead(1, { email: addr, phone: '+19415550301', customer_id: 'cust-b' });
-    const sent = { id: 'm1', gmail_thread_id: 't1', to_address: addr, cc_address: '', bcc_address: '', customer_id: null, at: new Date(at(5)) };
-    const run = (threadCustomer, customers = []) => loadLeadReachStats([mine], {
+    const sent = { id: 'm1', gmail_thread_id: 't1', to_address: addr, cc_address: '', bcc_address: '', at: new Date(at(5)) };
+    // customers: 1st read = active customers named by the recipients, 2nd read = the thread customers' own emails.
+    const run = (threadCustomer, named, threadEmails) => loadLeadReachStats([mine], {
       conn: fakeConn({
-        emails: { queue: [[sent], [{ id: 'in1', gmail_thread_id: 't1', customer_id: threadCustomer }]] },
-        customers,
+        emails: { queue: [[sent], [{ id: 'in1', gmail_thread_id: 't1', customer_id: threadCustomer, from_address: null }]] },
+        customers: { queue: [named, threadEmails] },
       }),
     });
-    expect(await run('cust-a')).toMatchObject({ reachedWithin: 0, neverReached: 1 });
-    expect(await run('cust-b')).toMatchObject({ reachedWithin: 1, neverReached: 0 });
+    expect(await run('cust-a', [], [{ id: 'cust-a', email: 'other.fixture@example.invalid' }])).toMatchObject({ reachedWithin: 0, neverReached: 1 });
+    expect(await run('cust-b', [{ id: 'cust-b', address: addr }], [{ id: 'cust-b', email: addr }])).toMatchObject({ reachedWithin: 1, neverReached: 0 });
     // The thread says one customer and the recipient address another: ambiguous, never a guess.
-    expect(await run('cust-b', [{ id: 'cust-c', address: addr }])).toMatchObject({ reachedWithin: 0, neverReached: 1 });
+    expect(await run('cust-b', [{ id: 'cust-c', address: addr }], [{ id: 'cust-b', email: 'other.fixture@example.invalid' }]))
+      .toMatchObject({ reachedWithin: 0, neverReached: 1 });
+  });
+
+  // Round 5, finding 3: thread membership alone is not enough; the send must reach the thread customer,
+  // exactly as emailCustomerLink's threadSendReachesCustomer has it.
+  test('a send in the lead customer\'s thread counts only when it provably reaches that customer', async () => {
+    const addr = 'pat.fixture@example.invalid';
+    const mine = lead(1, { email: addr, phone: '+19415550301', customer_id: 'cust-b' });
+    const sent = { id: 'm1', gmail_thread_id: 't1', to_address: addr, cc_address: '', bcc_address: '', at: new Date(at(5)) };
+    const run = (threadRows, threadEmails = [{ id: 'cust-b', email: 'b.office@example.invalid' }]) => loadLeadReachStats([mine], {
+      conn: fakeConn({ emails: { queue: [[sent], threadRows] }, customers: { queue: [[], threadEmails] } }),
+    });
+    // The lead's address is neither the customer's email nor an address they wrote from in the thread.
+    expect(await run([{ id: 'in1', gmail_thread_id: 't1', customer_id: 'cust-b', from_address: 'b.office@example.invalid' }]))
+      .toMatchObject({ reachedWithin: 0, neverReached: 1 });
+    // The customer wrote in the thread from the lead's address: the send reaches them.
+    expect(await run([{ id: 'in1', gmail_thread_id: 't1', customer_id: 'cust-b', from_address: `Pat Fixture <${addr}>` }]))
+      .toMatchObject({ reachedWithin: 1 });
+    // A deleted thread customer: no send reaches them.
+    expect(await run([{ id: 'in1', gmail_thread_id: 't1', customer_id: 'cust-b', from_address: addr }], []))
+      .toMatchObject({ reachedWithin: 0, neverReached: 1 });
+    // Two customers in the thread: never a guess.
+    expect(await run([
+      { id: 'in1', gmail_thread_id: 't1', customer_id: 'cust-b', from_address: addr },
+      { id: 'in2', gmail_thread_id: 't1', customer_id: 'cust-z', from_address: 'z.fixture@example.invalid' },
+    ], [{ id: 'cust-b', email: addr }, { id: 'cust-z', email: 'z.fixture@example.invalid' }])).toMatchObject({ reachedWithin: 0, neverReached: 1 });
+  });
+
+  // Round 5, finding 1: a group auto-send records its automation on the estimate it sent but stamps
+  // every published sibling's delivery.
+  test('a sibling a group auto-send published counts as automated, with one proven delivery', async () => {
+    const conn = fakeConn({});
+    const raws = [];
+    conn.raw = (sql) => { raws.push(String(sql)); return sql; };
+    await loadLeadReachStats([lead(1)], { conn });
+    const automated = raws.find((sql) => sql.endsWith(' as automated'));
+    const autoDeliveries = raws.find((sql) => sql.endsWith(' as auto_deliveries'));
+    for (const sql of [automated, autoDeliveries]) {
+      expect(sql).toContain('g.estimate_group_id = e.estimate_group_id AND g.id <> e.id');
+      expect(sql).toContain("g.estimate_data->'automation'->'autoSend'->>'result'");
+    }
+    // The sibling's own proven count, or one (its publication) when only another member is automated.
+    expect(autoDeliveries).toMatch(/^GREATEST\(/);
+    expect(autoDeliveries).toMatch(/THEN 1 ELSE 0 END\) as auto_deliveries$/);
+  });
+
+  // Round 5, finding 5: deliveredAt keeps only the newest 25 deliveries.
+  test('a trimmed delivery history makes the resend possible any time after the first delivery', async () => {
+    const mine = lead(1);
+    const text = { peer: mine.phone.replace('+1', ''), customer_id: null, at: new Date(at(20)) };
+    const history = (firstMinute) => Array.from({ length: 25 }, (_, i) => new Date(at(firstMinute + i)).toISOString());
+    const run = (deliveredAt) => loadLeadReachStats([mine], {
+      conn: fakeConn({
+        sms_log: [text],
+        estimates: [{ id: 'e1', linked_lead_id: 1, at: new Date(at(2)).toISOString(), automated: true, auto_deliveries: 1, deliveries: 25, delivered_at: deliveredAt }],
+      }),
+    });
+    // Complete from the first delivery: the second is at minute 30, after the window, so the lead stays judged.
+    expect(await run([new Date(at(2)).toISOString(), ...history(30).slice(1)])).toMatchObject({ reachedLater: 1, notJudged: 0 });
+    // The oldest entries were dropped: the second delivery could have been at minute 3.
+    expect(await run(history(30))).toMatchObject({ cohort: 0, notJudged: 1 });
+  });
+
+  // Round 5, finding 4: a call that rang before first contact can reach the person after it.
+  test('the phone call read keeps calls that ended after first contact, not only ones that started after it', async () => {
+    const { callEndedAtSql, callStartedAtSql } = require('../services/sms-pending-conversations');
+    const conn = fakeConn({
+      call_log: [{ peer: lead(1).phone.replace('+1', ''), direction: 'inbound', at: new Date(at(-1)), ended_at: new Date(at(10)), accepted: 'true', accepted_at: new Date(at(1)).toISOString() }],
+    });
+    expect(await loadLeadReachStats([lead(1)], { conn })).toMatchObject({ reachedWithin: 1 });
+    expect(conn.raws.call_log).toContain(`${callEndedAtSql('cl')} > ?`);
+    expect(conn.raws.call_log).not.toContain(`${callStartedAtSql('cl')} > ?`);
   });
 
   // Round 2, finding 3: the public-quote mirror carries the lead id only in estimate_data.lead_id.
