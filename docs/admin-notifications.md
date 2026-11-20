@@ -254,9 +254,8 @@ customer's message by this rule.
    masked like every bell body, then the masked number; with a name on file for the number
    (`nameOnFileForPhone`), the name leads the title and the why ends "via <the line>".
    Its link and Call follow the latest text.
-   `GATE_RING_NEW_CONTACTS` (owner 2026-11-04, "ring new", dark) gives a number with no
-   customer record texting a location line or a Google Business Profile line the same row
-   (`ringUnknownOfficeText`, source "the Parrish (Pest) line"), and the quiet `inbound-text`
+   A number with no customer record (owner 2026-11-04, "ring new") texting a location line
+   or a Google Business Profile line rings the same row (`ringUnknownOfficeText`, source "the Parrish (Pest) line"), and the quiet `inbound-text`
    Activity row is skipped when the ring lands (kept when it fails). The AI line, tech lines,
    staff senders, reactions and courtesy closers are not rung. The `tracking_text` sweep class
    closes these rows once a person answers, like a tracking-line row.
@@ -280,7 +279,7 @@ customer's message by this rule.
    lock for the customer's key before it reads or locks the row. An email follow-up keeps one row
    per promise (`email-commitment:<promise id>`).
    A customer's number that keeps failing texts is one subject too (owner 2026-11-04, "fix check",
-   `GATE_DEAD_NUMBER_ALERT`, `server/services/dead-number-alert.js`): the second failed text in a row (Twilio 30003 or
+   `server/services/dead-number-alert.js`): the second failed text in a row (Twilio 30003 or
    30005; no delivered text in between, ordered by send time) to the same number in 180 days raises ONE row,
    "Customers — Jane D.'s phone can't get texts" (`dedupeKey` `dead-number:<customerId>:<last10>`, open-only,
    done-when `phone_replaced`). It closes at the customer's next delivered text when that text went to the dead
@@ -347,6 +346,11 @@ customer's message by this rule.
    (`server/services/auto-dispatch/check-down-notice.js`) rings once per outage and is never
    held back by the allowance; it counts toward it. A tool that has stopped moving visits is
    the notice that must reach a person.
+   Exception (owner ruling 2026-11-19, decision page "Same-time visit check", option A): a new
+   same-start pair for tomorrow (`server/services/same-start-visits-check.js`, the schedule
+   watchdog's last class) always rings, even when the run's allowance is spent, and it counts
+   toward it; so does a new pair later today whose start is still ahead. By the next run the
+   pair may be under way. At most one bell per customer.
    Far double bookings (owner audit 2026-10-22, decision D1):
    a visit auto-dispatch leaves in conflict more than 14 days out is a line on one standing
    Activity row (ops digest `auto-dispatch-far-conflicts`, audience fyi), outside the allowance
@@ -384,8 +388,8 @@ customer's message by this rule.
    marked them read). A text promise the run only took off a customer's alert that stayed open goes back on that
    alert without a ring (`restoreSmsCommitmentAlerts`); when a person has closed that alert since, the promise's
    next overdue check rings a fresh one.
-   Quiet policy (owner ruling 2026-11-04, "IF THE ALERT IS OVER 3 DAYS OLD,, IT SHOULD FALL OFF";
-   `GATE_ALERT_QUIET_FALL_OFF`): a second policy of the same module, `runAdminAlertQuietPolicy` in
+   Quiet policy (owner ruling 2026-11-04, "IF THE ALERT IS OVER 3 DAYS OLD,, IT SHOULD FALL OFF"):
+   a second policy of the same module, `runAdminAlertQuietPolicy` in
    `server/services/admin-alert-retention.js`. It shares the nightly policy's candidates, activity stamps, `RERING`
    registry, version-fenced writer and cursor helpers, and differs in cadence (its own cron, every 10 minutes, its own
    lock and its own cursor key) and rules. An open bell row with no new activity for 72 hours is marked done
@@ -587,16 +591,16 @@ nothing; a write inside a nested transaction waits for the outermost commit). It
 `pushOnly`, to admin-role phones, with the row's own title, body and link and a tag per row. A new kind of this sort is one
 line in `BELL_BANNER_KINDS`, one registry entry whose `build` takes `alertTitle` / `alertBody` / `alertLink`, and a sound line.
 
-New-lead email banner (owner 2026-11-04, "ring new"; gate `GATE_RING_NEW_CONTACTS`, dark): a lead created from an email, and a follow-up email that completed a quote request, put ONE phone
+New-lead email banner (owner 2026-11-04, "ring new"): a lead created from an email, and a follow-up email that completed a quote request, put ONE phone
 banner on the owner's phone at any hour (kind `new_lead_email`, the New lead sound). The writer (`email-actions.js`) keys the
 existing `new_lead` bell row on the email id (`email-lead:<lead|draft>:<email id>`) and names the kind with
 `notifyAdmin`'s `bannerKind` option, which is never stored on the row; a retry or re-sync finds the row and sends no
-second banner, and no second bell row is written. Gate off: the unkeyed row and no banner, as before.
+second banner, and no second bell row is written.
 
-Lead call-back reminder banner (owner 2026-11-05, "remind"; gate `GATE_LEAD_CALL_REMINDER`, dark): two kinds of lead
+Lead call-back reminder banner (owner 2026-11-05, "remind"): two kinds of lead
 bell reach only the portal bell. A "Missed call request" bell (`lead-call-reply-missed:<callLogId>`, a press-1 ring nobody
 answered) and a night call-back bell (`lead-call-text-followup:<requestId>`, raised by `lead-call-text-followup.js`
-`raiseLeadBell`) send no banner. With the gate on, the alert-relevance sweep (every 10 minutes, after its closes) runs
+`raiseLeadBell`) send no bell banner of their own. The alert-relevance sweep (every 10 minutes, after its closes) runs
 `server/services/lead-call-reminder.js`. A bell of those kinds that is still open one business hour after its latest
 event (the follow-up SLA's clock, 8 AM to 8 PM ET) sends ONE banner (`lead_call_reminder`, the Missed call sound) when
 nobody has reached the lead since. "Reached" uses the shared contact witnesses after that event: a person's text, a call
@@ -607,7 +611,7 @@ body and link, led by "Reminder: nobody has reached this lead yet.", `pushOnly` 
 The bell row is not rewritten: it is stamped `metadata.leadCallReminderAt` in one statement fenced on the row being open
 and unchanged since it was read, so a row sends at most one banner. The stamp is not a ring, so the 3-day quiet fall-off
 still counts from the bell's own event. The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead
-still waits for a call") or by unsetting the gate. It sends nothing to a lead.
+still waits for a call"). It sends nothing to a lead.
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.
@@ -626,7 +630,28 @@ trigger, sent `pushOnly`: no bell row, admin-role phones only, and one banner pe
 day missed while the server was down is not made up). The owner turns it off in Push Settings (Alerts group,
 "Morning summary: items waiting for you"). It sends nothing to a customer.
 
-The owner's open-visit banner (owner 2026-11-04, "banner"; `GATE_OWNER_NUDGE_BANNER`, dark): the 7 PM open-visit nudge
+The 9 AM "Call today" banner (owner 2026-11-19, plan page "Lead to Customer Plan", phase 1; no gate, an internal admin
+push): one banner a day to the admin phones says "Call today: N estimates" ("1 estimate" when one), body "Follow up on
+these recently active estimates." (the list can include an estimate that was called before the customer reopened it,
+or one called without an answer, so the words never claim nobody has called), and a tap opens `/admin/estimates?view=call_today`, the Estimates page on its Call
+today filter. N is that page's own list: `services/estimate-call-today-push.js` takes the rows the page loads (`estimateListQuery` in
+`services/estimate-call-list.js`, the list route's own selection: sent-list rows, newest 2,000, unarchived), then applies `isCallTodayEstimate` from
+`shared/estimate-call-today.cjs` (the one home of the rule; the page imports it too) to rows built by
+`callTodayFields` in `services/estimate-call-list.js` (the same mapping the list route uses). The words carry a count
+only, never a customer name or phone. With nothing on the list it sends nothing. It is the `estimate_call_today`
+trigger (area Estimates, fyi, expires in 7 days), sent `pushOnly`: no bell row, admin-role phones only, one banner per ET
+day (the send first takes a `sms_send_claims` row `estimate_call_today:<ET date>`; a day missed while the server was down
+is not made up). The banner expires with its day: it carries `expiresAt` (the next ET midnight, `pushExpiryFor` in
+`notification-triggers.js`), which web push sends as its TTL, APNs as `apns-expiration` and FCM as `android.ttl`, so a
+phone offline past the day never shows an old count. The banner counts as sent only when a phone accepted it: with push off, no device to send to, or one of the dispatcher's own pre-send skips (`claude_queue`, `bell_policy`, `superseded_before_push`; a failed device counter comes first) the day's claim is released
+(a later run may try); after a device failure, no result at all, or any result it does not recognize, it is kept (no second banner). A device the push service skipped because its provider has no credentials (APNs, FCM or web push not configured) is a failure, not a skip: its claim is released and the run reports `push_not_configured`, so job health shows a banner lost for want of keys. The dispatcher marks a
+throw in its push path (`pushFailed`; it leaves `push: null`, like a push that is off): a throw in its recipient lookup, or in the push
+block before the first device's banner is built (the subscription lookup), reached no provider, so its claim is released; a throw after a
+device send began may have reached a phone, so its claim is kept. Both are failures. A count, claim or delivery failure
+throws inside the cron's `runExclusive` callback, so job health records the run as failed; a skip stays a success. The cron is `0 9 * * *` in `America/New_York` (`scheduler.js`). Each admin turns it off in Push Settings
+(Alerts group, "Morning list: estimates to call today"). It sends nothing to a customer.
+
+The owner's open-visit banner (owner 2026-11-04, "banner"): the 7 PM open-visit nudge
 (`server/services/tech-open-visit-nudge.js`) reaches the owner as a Waves Admin banner instead of a text. It is the
 `open_visits_nudge` trigger, sent `pushOnly` to his own admin user only (`onlyUserIds`): no bell row, one banner per ET day
 (the nudge's own per-technician claim), same words as the text, a tap opens `/tech`. It counts as delivered only when a phone

@@ -7276,6 +7276,7 @@ describe('syncTermForInvoicePayment visit-invoice hook (covered-status semantics
         query({ rows: visitRows }), // reconcile coverage read
       ],
       invoices: [
+        query({ first: undefined }), // plan-choice release read: not an accept-minted first invoice
         query({ first: { id: 'inv-visit', status: 'paid', payment_recorded_at: '2026-07-01', annual_prepay_covered_term_id: null } }),
       ],
       payments: [query({ first: undefined })],
@@ -7314,6 +7315,7 @@ describe('syncTermForInvoicePayment visit-invoice hook (covered-status semantics
         query({ rows: visitRows }),
       ],
       invoices: [
+        query({ first: undefined }), // plan-choice release read: not an accept-minted first invoice
         query({ first: { id: 'inv-visit', status: 'prepaid', payment_recorded_at: null, annual_prepay_covered_term_id: null } }),
       ],
       payments: [query({ first: undefined })],

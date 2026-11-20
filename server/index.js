@@ -323,6 +323,14 @@ app.use('/api/social/series', require('./middleware/no-store').noStore, (req, re
 // response the page never reads, so this route sets no CORS headers.
 app.use('/api/public/blog-read-depth', require('./routes/public-blog-read-depth'));
 
+// Anonymous, cookie-free quote-form and quiz step counter — a near copy of
+// the read-depth beacon above (routes/public-form-steps.js). Same position
+// rules: ABOVE the global cors(), the `/api/` limiter and the body parsers,
+// its own per-IP limiter and capped text parse, terminal 404, no CORS
+// headers. No gate: it only counts anonymous daily totals and cannot message,
+// charge, reprice, delete data or spend money.
+app.use('/api/public/form-steps', require('./routes/public-form-steps'));
+
 // /book "Can't find a time?" preferred-time request (GATE_BOOK_PREFERRED_TIME,
 // dark). The guard (no-store/noindex/no-referrer headers + the generic
 // unknown-route 404 while the gate is off) is mounted ABOVE the global cors()
@@ -902,7 +910,7 @@ app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 app.use('/api/admin/schedule/:serviceId/property-areas', require('./routes/admin-property-service-areas').serviceRouter);
 app.use('/api/admin/customers/:customerId/properties/:propertyId/areas', require('./routes/admin-property-service-areas').propertyRouter);
 app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'));
-// Moving link routes (GATE_MOVING_FLOW): per-route requireAdmin, so technician paths on the shared prefix fall through.
+// Moving link routes: per-route requireAdmin, so technician paths on the shared prefix fall through.
 app.use('/api/admin/customers', require('./routes/admin-customer-moves'));
 app.use('/api/admin/customers/:customerId/consumer-notices', require('./routes/admin-consumer-notices'));
 app.use('/api/admin/customers', adminCustomerRoutes);
@@ -1004,8 +1012,8 @@ app.use('/api/public/appointment', require('./routes/appointment-public'));
 app.use('/api/public/secure-card', require('./routes/secure-card-public'));
 app.use('/api/public/prep', require('./routes/prep-public'));
 app.use('/api/public/price-change', require('./routes/price-change-public'));
-// Customer moving page (GATE_MOVING_FLOW): the link the office sends a customer who is moving. Token-gated on
-// customer_moves.token; every route 404s until the gate is on.
+// Customer moving page: the link the office sends a customer who is moving. Token-gated on
+// customer_moves.token.
 app.use('/api/public/moving', require('./routes/moving-public'));
 app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'));
 app.use('/api/public/lawn-assessment', photoAssessmentDailyLimiter, require('./routes/public-lawn-assessment'));
@@ -1185,6 +1193,8 @@ app.use('/api/admin/email', require('./routes/admin-email'));
 app.use('/api/admin/bid-desk', require('./routes/admin-bid-desk'));
 // Bid kit (admin only).
 app.use('/api/admin/bid-kit', require('./routes/admin-bid-kit'));
+// Prospects: the Builders permit list (admin only, read only).
+app.use('/api/admin/prospects', require('./routes/admin-prospects'));
 // Trip link summary (staff only, read only).
 app.use('/api/admin/trip-link', require('./routes/admin-trip-link'));
 app.use('/api/admin/pricing-config', require('./routes/admin-pricing-config'));

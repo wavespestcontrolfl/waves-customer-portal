@@ -36,11 +36,10 @@ const candidateSlots = require('../services/auto-dispatch/candidate-slots');
 
 const { findValidCandidateSlots, territoryCoverForVisit, _internals } = candidateSlots;
 const GATE = 'GATE_TERRITORY_NIGHT_RUN';
-const ENV = { gate: process.env[GATE], drive: process.env.GATE_DRIVE_TIME_CALIBRATION, shared: process.env.GATE_AUTO_DISPATCH_SHARED_MODEL };
+const ENV = { gate: process.env[GATE], shared: process.env.GATE_AUTO_DISPATCH_SHARED_MODEL };
 
 beforeEach(() => {
   process.env[GATE] = 'true';
-  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   jest.clearAllMocks();
   probeMoveConflicts.mockResolvedValue({ rows: [], snapshot: [] });
   lineTech.liveServiceLine.mockReset().mockResolvedValue('general');
@@ -49,7 +48,7 @@ beforeEach(() => {
 });
 afterEach(() => { delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL; });
 afterAll(() => {
-  for (const [key, value] of [[GATE, ENV.gate], ['GATE_DRIVE_TIME_CALIBRATION', ENV.drive], ['GATE_AUTO_DISPATCH_SHARED_MODEL', ENV.shared]]) {
+  for (const [key, value] of [[GATE, ENV.gate], ['GATE_AUTO_DISPATCH_SHARED_MODEL', ENV.shared]]) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
 });

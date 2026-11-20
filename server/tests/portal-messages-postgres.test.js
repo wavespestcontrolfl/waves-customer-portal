@@ -29,6 +29,22 @@ jest.mock('../services/portal-ask-push', () => ({
   shortName: (first, last) => [first, last ? `${last[0]}.` : ''].filter(Boolean).join(' '),
 }));
 
+// The photo bucket: a stored photo gets a key under the customer's folder, a view link names its lifetime.
+const mockBucket = { stored: [], deleted: [] };
+jest.mock('../utils/funnel-photos', () => ({
+  ...jest.requireActual('../utils/funnel-photos'),
+  uploadFunnelPhotoToS3: jest.fn(async ({ rowId, keyPrefix, index }) => {
+    const key = `photos/${rowId}/${keyPrefix}_${index}_${mockBucket.stored.length}.jpg`;
+    mockBucket.stored.push(key);
+    return key;
+  }),
+}));
+jest.mock('../services/photos', () => ({
+  CUSTOMER_DWELL_TTL_SECONDS: 86400,
+  getViewUrl: jest.fn(async (key, ttl) => `https://bucket.example/view?photo=${encodeURIComponent(key)}&ttl=${ttl}`),
+  deletePhoto: jest.fn(async (key) => { mockBucket.deleted.push(key); }),
+}));
+
 afterAll(async () => { if (!SKIP) await require('../models/db').destroy(); });
 
 maybeDescribe('portal messages (live Postgres)', () => {
@@ -623,6 +639,82 @@ maybeDescribe('portal messages (live Postgres)', () => {
     await expect(PortalMessages.staffThread(randomUUID())).rejects.toMatchObject({ status: 404 });
     process.env.GATE_PORTAL_MESSAGES = 'false';
     await expect(PortalMessages.staffThread(row.id)).rejects.toMatchObject({ status: 404 });
+  });
+
+  const jpeg = async () => ({
+    mimetype: 'image/jpeg',
+    buffer: await require('sharp')({ create: { width: 12, height: 12, channels: 3, background: '#7a8' } }).jpeg().toBuffer(),
+  });
+
+  test('a photo with no words is saved under the customer folder, shows as a signed link on both sides, lists as [Photo], and rings the office', async () => {
+    const pat = await customer();
+    const sent = await PortalMessages.customerPost({ customer: pat, body: '', files: [await jpeg()] });
+    const key = mockBucket.stored.at(-1);
+    expect(key.startsWith(`photos/portal-messages/${pat.id}/photo_0_`)).toBe(true);
+    expect(sent).toEqual({ id: sent.id, from: 'you', body: '', createdAt: expect.anything(), photos: [{ url: `https://bucket.example/view?photo=${encodeURIComponent(key)}&ttl=86400` }] });
+
+    const [row] = await thread(pat.id);
+    const saved = await db('messages').where({ id: sent.id }).first('body', 'media');
+    expect(saved.body).toBeNull();
+    expect(saved.media).toEqual([{ type: 'photo', key, contentType: 'image/jpeg', size: expect.any(Number) }]);
+
+    // The customer's page and the office's thread carry a link each, never the key or the stored row.
+    const mine = await PortalMessages.customerThread(pat.id);
+    expect(mine.messages).toEqual([sent]);
+    const office = await PortalMessages.staffThread(row.id);
+    expect(office.messages).toEqual([expect.objectContaining({ direction: 'inbound', body: '', photos: [{ url: expect.stringContaining('&ttl=3600') }] })]);
+    expect(Object.keys(office.messages[0])).not.toContain('media');
+
+    const item = (await require('../services/portal-inbox').list()).items.find((i) => i.kind === 'message' && i.id === row.id);
+    expect(item.customerMessage).toBe('[Photo]');
+    const [bell] = await openAdminBells('portalConversationId', row.id);
+    expect(bell.body).toBe('They sent a photo in the portal and are waiting for an answer');
+    expect(bell.metadata).toMatchObject({ portalMessageId: sent.id });
+
+    // Words and a photo: the words lead and the preview marks the photo.
+    await PortalMessages.customerPost({ customer: pat, body: 'By the back door.', files: [await jpeg()] });
+    const again = (await require('../services/portal-inbox').list()).items.find((i) => i.kind === 'message' && i.id === row.id);
+    expect(again.customerMessage).toBe('[Photo]\nBy the back door. [Photo]');
+  });
+
+  test('a refused photo saves nothing and leaves nothing in the bucket; a retried send keeps one message and one set of photos', async () => {
+    const pat = await customer();
+    mockBucket.deleted.length = 0;
+    const before = mockBucket.stored.length;
+    await expect(PortalMessages.customerPost({ customer: pat, body: 'Look', files: [await jpeg(), { mimetype: 'image/jpeg', buffer: Buffer.from('not a picture') }] }))
+      .rejects.toMatchObject({ code: 'invalid_photo', status: 400 });
+    // The first photo was stored before the second was refused: it is removed again.
+    expect(mockBucket.deleted).toEqual(mockBucket.stored.slice(before));
+    await expect(PortalMessages.customerPost({ customer: pat, body: '', files: [await jpeg(), await jpeg(), await jpeg(), await jpeg()] }))
+      .rejects.toMatchObject({ code: 'too_many_photos', status: 400 });
+    await expect(PortalMessages.customerPost({ customer: pat, body: '   ' })).rejects.toMatchObject({ code: 'empty', status: 400 });
+    expect(await thread(pat.id)).toEqual([]);
+
+    const requestId = randomUUID();
+    const first = await PortalMessages.customerPost({ customer: pat, body: '', clientRequestId: requestId, files: [await jpeg()] });
+    const kept = mockBucket.stored.at(-1);
+    mockBucket.deleted.length = 0;
+    const retry = await PortalMessages.customerPost({ customer: pat, body: '', clientRequestId: requestId, files: [await jpeg()] });
+    expect(retry).toEqual(first);
+    expect(mockBucket.deleted).toEqual([mockBucket.stored.at(-1)]);
+    expect(mockBucket.deleted).not.toContain(kept);
+    const [row] = await thread(pat.id);
+    expect(await db('messages').where({ conversation_id: row.id })).toHaveLength(1);
+  });
+
+  test('the after-hours assistant is started for words alone, never for a message with a photo', async () => {
+    const pat = await customer();
+    process.env.GATE_PORTAL_MESSAGES_NIGHT_AI = 'true';
+    const answer = jest.spyOn(require('../services/portal-messages-night-ai'), 'answerAfterHours').mockResolvedValue(null);
+    try {
+      await PortalMessages.customerPost({ customer: pat, body: 'What is this?', files: [await jpeg()] });
+      expect(answer).not.toHaveBeenCalled();
+      await PortalMessages.customerPost({ customer: pat, body: 'Hello?' });
+      expect(answer).toHaveBeenCalledTimes(1);
+    } finally {
+      answer.mockRestore();
+      delete process.env.GATE_PORTAL_MESSAGES_NIGHT_AI;
+    }
   });
 
   test('an answer to a portal message closes its bell, and the customer sees both sides in order', async () => {

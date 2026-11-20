@@ -72,6 +72,15 @@ try {
 // for immediate delivery; low-priority pushes stay deferrable on purpose.
 const URGENCY_BY_PRIORITY = { urgent: 'high', high: 'high', normal: 'normal', low: 'low' };
 
+// The push service's TTL. ephemeral is deliver now or never (0). A notification with its own expiresAt (an ISO time)
+// lives only until then: the service drops it undelivered after that, so a phone offline past it never shows a stale
+// banner (Web Push otherwise keeps it for weeks). apns.js and fcm.js read the same field. Otherwise the service default.
+function webPushTtl(notification, now = Date.now()) {
+  if (notification.ephemeral) return { TTL: 0 };
+  const at = Date.parse(notification.expiresAt || '');
+  return Number.isFinite(at) ? { TTL: Math.max(0, Math.floor((at - now) / 1000)) } : {};
+}
+
 // Waves Admin (the iOS staff app) stores its bundle and APNs environment with
 // its token (admin-push.js native-subscribe): its route is the one extra
 // apns.send argument. Every other iOS row passes none, so apns.send keeps the
@@ -126,7 +135,7 @@ async function sendSubscription(sub, notification, options) {
     await webpush.sendNotification(
       JSON.parse(sub.subscription_data),
       JSON.stringify(notification),
-      { timeout: 8000, urgency: URGENCY_BY_PRIORITY[notification.priority] || 'normal', ...(notification.ephemeral ? { TTL: 0 } : {}) },
+      { timeout: 8000, urgency: URGENCY_BY_PRIORITY[notification.priority] || 'normal', ...webPushTtl(notification) },
     );
     return { sent: true };
   } catch (err) {
@@ -216,7 +225,7 @@ async function contactDevicesAllowed(subs, purpose, customerId, database = db) {
 class PushNotificationService {
   // opts.contactKey: a contact session's own status — only that contact's
   // devices count; a holder's status never counts a contact device.
-  // opts.withReachable: routing only (GATE_APP_FIRST_ANY_DEVICE) also reads
+  // opts.withReachable: routing only also reads
   // `reachable`; the customer-facing status routes keep their exact shape.
   // `reachable` also needs a check-in within APP_FIRST_STALE_DAYS while
   // GATE_APP_FIRST_STALE_TEXT is on (appFirstStaleFloor), so every reader follows it.
@@ -237,7 +246,7 @@ class PushNotificationService {
       registered: rows.length > 0,
       fresh: rows.some((row) => providers[row.platform] && new Date(row.updated_at).getTime() >= cutoff),
       // Any active holder device whose provider is configured, however long
-      // ago the app last checked in (GATE_APP_FIRST_ANY_DEVICE).
+      // ago the app last checked in.
       // appStale: the 30-day floor alone kept a holder phone app from counting (routing then
       // sends the text AND the app alert, GATE_APP_FIRST_STALE_TEXT).
       ...(withReachable ? { reachable, appStale: Boolean(reachableSince) && !reachable && deliverable.length > 0 } : {}),

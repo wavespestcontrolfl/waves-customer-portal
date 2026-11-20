@@ -51,12 +51,6 @@ const express = require('express');
 const db = require('../models/db');
 const findTimeRouter = require('../routes/admin-schedule-find-time');
 
-const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
-beforeAll(() => { delete process.env.GATE_DRIVE_TIME_CALIBRATION; });
-afterAll(() => {
-  if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
-  else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
-});
 
 // A real filterable table: `.where({col: val})` / `.where('t.col', val)`
 // narrows the row set, `.whereNotIn` excludes, a 3-arg operator form (the

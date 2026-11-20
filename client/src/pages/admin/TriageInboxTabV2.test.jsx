@@ -1444,3 +1444,110 @@ describe('call_phone_yes card', () => {
     expect(within(el).queryByText('No yes heard')).toBeNull();
   });
 });
+
+// The card's tap, "Accept as pay per application": the server decides what it can do right now (item.call_phone_yes),
+// so the screen holds no copy of the rule.
+describe('call_phone_yes card tap', () => {
+  const tapCard = {
+    ...ordinary, id: 'py', call_log_id: 'call-11', first_name: 'Pat', last_name: 'Sampleton', reason_code: 'call_phone_yes',
+    feedback_verdict: null, severity: 'advisory', updated_at: '2026-11-19T15:00:00.000Z',
+    payload: JSON.stringify({ flag: 'call_phone_yes', yes_heard: false, estimate_id: 'est-7', auto_would_accept: false, auto_message: 'No yes was heard on the call.' }),
+    call_phone_yes_tap: true,
+  };
+  const canAccept = { can_accept: true, preview_token: 'tok-py-1', estimate_id: 'est-7', visit_id: 'svc-1', visit_date: '2026-12-01', message: null };
+  // The list carries no tap state; the card reads it from its own route.
+  const load = (state = canAccept, item = tapCard) => adminFetch.mockImplementation(async (url) => {
+    if (String(url).startsWith('/admin/triage?')) return { items: [item], counts: { open: 1, resolved: 0, dismissed: 0 } };
+    if (url === `/admin/triage/${item.id}/call-phone-yes`) return state;
+    return { ok: true };
+  });
+
+  it('says what the accept does, and the one tap runs the version-bound accept route, never a call verdict', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    expect(await within(el).findByText(/The visit on 2026-12-01 becomes the plan's first visit/)).toBeInTheDocument();
+    expect(within(el).getByText(/The customer gets what Mark accepted sends: the membership email, if the customer can get email\. No text goes out\./)).toBeInTheDocument();
+    fireEvent.click(within(el).getByRole('button', { name: 'Accept as pay per application' }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/py/accept-call-phone-yes', {
+      method: 'POST', body: JSON.stringify({ expected_updated_at: tapCard.updated_at, preview_token: 'tok-py-1' }),
+    }));
+    expect(adminFetch.mock.calls.some(([url]) => String(url).includes('/verdict'))).toBe(false);
+  });
+
+  it("shows the server's plain reason and no accept button when the tap would be refused", async () => {
+    load({ can_accept: false, preview_token: null, message: 'The tap cannot accept this one. The customer already has a live plan or a WaveGuard membership. Accept it from the estimate.' });
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    expect(await within(el).findByText(/The customer already has a live plan/)).toBeInTheDocument();
+    expect(within(el).queryByRole('button', { name: /Accept as pay per application/ })).toBeNull();
+  });
+
+  it("a 409 refusal reloads the list and shows the server's message", async () => {
+    adminFetch.mockImplementation(async (url) => {
+      if (String(url).includes('/accept-call-phone-yes')) {
+        throw Object.assign(new Error('Nothing was accepted. The estimate, the visit or the call changed since the card loaded. Reload and look again.'), { status: 409 });
+      }
+      if (url === '/admin/triage/py/call-phone-yes') return canAccept;
+      return { items: [tapCard], counts: { open: 1, resolved: 0, dismissed: 0 } };
+    });
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    fireEvent.click(await within(el).findByRole('button', { name: 'Accept as pay per application' }));
+    expect(await screen.findByText(/Nothing was accepted\. The estimate, the visit or the call changed since the card loaded\./)).toBeInTheDocument();
+  });
+
+  it('a card that names more than one estimate says which one the tap accepts; a card with one says nothing extra', () => {
+    const two = JSON.stringify({ ...JSON.parse(tapCard.payload), estimate_id: null, estimate_ids: ['est-6', 'est-7'] });
+    render(<PhoneYesEvidence payload={two} phoneYes={canAccept} isOpenView isAdmin onAcceptPhoneYes={() => {}} />);
+    expect(screen.getByText(/^It accepts estimate 2\. The visit on 2026-12-01 becomes the plan's first visit/)).toBeInTheDocument();
+    cleanup();
+    render(<PhoneYesEvidence payload={tapCard.payload} phoneYes={canAccept} isOpenView isAdmin onAcceptPhoneYes={() => {}} />);
+    expect(screen.getByText(/^The visit on 2026-12-01 becomes the plan's first visit/)).toBeInTheDocument();
+  });
+
+  it('the list carries no tap state: the card reads it when it shows, says it is checking, and a failed read offers no tap', async () => {
+    let answer;
+    adminFetch.mockImplementation((url) => {
+      if (String(url).startsWith('/admin/triage?')) return Promise.resolve({ items: [tapCard], counts: { open: 1, resolved: 0, dismissed: 0 } });
+      if (url === '/admin/triage/py/call-phone-yes') return new Promise((resolve, reject) => { answer = { resolve, reject }; });
+      return Promise.resolve({ ok: true });
+    });
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    expect(await within(el).findByText('Checking what the tap can do…')).toBeInTheDocument();
+    expect(within(el).queryByRole('button', { name: /Accept as pay per application/ })).toBeNull();
+    answer.reject(Object.assign(new Error('boom'), { status: 500 }));
+    expect(await within(el).findByText('The estimate could not be read just now. Reload and try again.')).toBeInTheDocument();
+    expect(within(el).queryByRole('button', { name: /Accept as pay per application/ })).toBeNull();
+    expect(adminFetch.mock.calls.filter(([url]) => url === '/admin/triage/py/call-phone-yes')).toHaveLength(1);
+  });
+
+  it('a card the list does not mark (gate off, or not an admin) reads nothing', async () => {
+    load(canAccept, { ...tapCard, call_phone_yes_tap: undefined });
+    render(<TriageInboxTabV2 isAdmin />);
+    await screen.findByText('Pat Sampleton');
+    expect(adminFetch.mock.calls.some(([url]) => String(url).endsWith('/call-phone-yes'))).toBe(false);
+    expect(screen.queryByRole('button', { name: /Accept as pay per application/ })).toBeNull();
+  });
+
+  it('the plan and its per-visit price, the live terms warning and the fee note are shown before the tap', () => {
+    const terms = 'The estimate may not show the terms the caller heard: its prices changed after it was last sent, or it was sent again after the yes.';
+    const fee = 'This accept does not bill the WaveGuard membership fee. If the fee is still owed when the first visit is completed, that visit is held for the office to bill it.';
+    render(<PhoneYesEvidence payload={tapCard.payload} phoneYes={{ ...canAccept, plan: 'Quarterly plan', per_visit: 45, terms_note: terms, fee_note: fee }} isOpenView isAdmin onAcceptPhoneYes={() => {}} />);
+    expect(screen.getByText('Quarterly plan at $45.00 a visit.')).toBeInTheDocument();
+    expect(screen.getByText(terms)).toBeInTheDocument();
+    expect(screen.getByText(fee)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Accept as pay per application' })).toBeInTheDocument();
+  });
+
+  it('a non-admin gets no button, only the note; a closed card offers nothing', () => {
+    render(<PhoneYesEvidence payload={tapCard.payload} phoneYes={canAccept} isOpenView isAdmin={false} onAcceptPhoneYes={() => {}} />);
+    expect(screen.queryByRole('button', { name: /Accept as pay per application/ })).toBeNull();
+    expect(screen.getByText('Accepting needs an admin.')).toBeInTheDocument();
+    cleanup();
+    render(<PhoneYesEvidence payload={tapCard.payload} phoneYes={canAccept} isOpenView={false} isAdmin onAcceptPhoneYes={() => {}} />);
+    expect(screen.queryByRole('button', { name: /Accept as pay per application/ })).toBeNull();
+    expect(screen.queryByText('Accepting needs an admin.')).toBeNull();
+  });
+});
