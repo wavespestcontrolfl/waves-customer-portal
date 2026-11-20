@@ -106,46 +106,12 @@ jest.setTimeout(30000);
     return serviceRecordId;
   }
   const qualified = () => _private.collectCandidates('qualified_lead', RANGE);
-  // A quote-wizard repeat run: its own lead row, marked with the original's id.
-  const repeatOf = (root, fields) => lead(null, {
-    lead_type: 'quote_wizard', status: 'won', extracted_data: JSON.stringify({ duplicate_of_lead_id: root.id }), ...fields,
-  });
 
   test('a qualified lead later marked junk or non-engaged is not collected, whatever its case or spacing', async () => {
     const c = await customer();
     const real = await lead(c);
     for (const status of [' Spam ', 'DUPLICATE', 'disqualified', 'handled', 'cancelled']) await lead(c, { status });
     expect((await qualified()).map((x) => x.leadId)).toEqual([real.id]);
-  });
-
-  test('a won quote-wizard repeat of a won lead is one conversion on the same estimate, and two on another estimate', async () => {
-    // One sale: the original and its repeat are both won on one estimate.
-    const c = await customer();
-    const estimate = randomUUID();
-    const original = await lead(c, { status: 'won', estimate_id: estimate });
-    await repeatOf(original, { customer_id: c.id, estimate_id: estimate });
-    // Two sales: the repeat was won on a different estimate.
-    const c2 = await customer({ email: 'pat.two@example.com', phone: '+19415550111' });
-    const contact2 = { email: 'pat.two@example.com', phone: '+19415550111' };
-    const original2 = await lead(c2, { status: 'won', estimate_id: randomUUID(), ...contact2 });
-    const repeat2 = await repeatOf(original2, { customer_id: c2.id, estimate_id: randomUUID(), ...contact2 });
-    expect((await qualified()).map((x) => x.leadId).sort()).toEqual([original.id, original2.id, repeat2.id].sort());
-  });
-
-  test('a won repeat yields to an open original that qualified on its own; an unqualified or junk original holds nothing', async () => {
-    // Each deal is one person, with their own contact.
-    const deal = async (n, originalFields) => {
-      const contact = { email: `pat.deal${n}@example.com`, phone: `+1941555030${n}` };
-      const c = await customer(contact);
-      const original = await lead(c, { ...contact, ...originalFields });
-      return { original, repeat: await repeatOf(original, { customer_id: c.id, ...contact }) };
-    };
-    // The estimate went out on the original (is_qualified), it stays open, and the repeat wins.
-    const held = await deal(1, { status: 'estimate_sent', is_qualified: true });
-    const unqualified = await deal(2, { status: 'new', is_qualified: false });
-    const junk = await deal(3, { status: 'disqualified', is_qualified: true });
-    expect((await qualified()).map((x) => x.leadId).sort())
-      .toEqual([held.original.id, unqualified.repeat.id, junk.repeat.id].sort());
   });
 
   // The row order of a job's leads is the plan's, so the owner-cell lead goes in first and last.

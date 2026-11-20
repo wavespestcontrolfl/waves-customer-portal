@@ -17,7 +17,7 @@ const { runExclusive } = require('../../utils/cron-lock');
 const { loadMarketingSuppression, normPhone: consentNormPhone } = require('./ad-audience-consent');
 const matchFields = require('./ad-match-fields');
 const { isInternalTestContact } = require('../internal-test-customers');
-const { NON_ENGAGED_LEAD_STATUSES, sameDealAncestorSql } = require('../lead-statuses');
+const { NON_ENGAGED_LEAD_STATUSES } = require('../lead-statuses');
 
 let _googleapis;
 function getGoogle() {
@@ -59,14 +59,6 @@ const CONVERSIONS = {
 // (lead-statuses.js: cancelled, spam, duplicate, handled) plus disqualified. A
 // lead later marked one of these must not go out even though is_qualified is sticky.
 const JUNK_LEAD_STATUSES = [...NON_ENGAGED_LEAD_STATUSES, 'disqualified'];
-// Lead statuses that make a lead a Qualified Lead (as does is_qualified).
-const QUALIFYING_LEAD_STATUSES = ['qualified', 'booked', 'converted', 'won'];
-const sqlList = (values) => values.map((v) => `'${v}'`).join(', ');
-// A lead that would upload as a Qualified Lead on its own: the qualified-lead
-// query's two status filters (qualifying, then not junk), over any alias. The
-// one-deal rule asks it of a repeat's original.
-const qualifyingLeadSql = (alias) => `(${alias}.is_qualified IS TRUE OR LOWER(COALESCE(${alias}.status, '')) IN (${sqlList(QUALIFYING_LEAD_STATUSES)}))`
-  + ` AND LOWER(TRIM(COALESCE(${alias}.status, ''))) NOT IN (${sqlList(JUNK_LEAD_STATUSES)})`;
 
 function boolEnv(name, defaultValue = false) {
   const raw = process.env[name];
@@ -585,21 +577,12 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
     .whereRaw(`${eventTimestampSql} < ?::timestamptz`, [addDateStringDays(endDate, 1)])
     .where((q) => {
       q.where('l.is_qualified', true)
-        .orWhereRaw(`LOWER(COALESCE(l.status, '')) IN (${sqlList(QUALIFYING_LEAD_STATUSES)})`);
+        .orWhereRaw("LOWER(COALESCE(l.status, '')) IN ('qualified', 'booked', 'converted', 'won')");
     })
     // is_qualified is sticky, so a lead later marked junk or non-engaged still
     // matches above. It is dropped here, before the limit, so junk never takes
     // an upload slot from an older real lead.
     .whereRaw(`LOWER(TRIM(COALESCE(l.status, ''))) NOT IN (${JUNK_LEAD_STATUSES.map(() => '?').join(', ')})`, JUNK_LEAD_STATUSES)
-    // One deal, one Qualified Lead. A quote-wizard repeat whose original (up
-    // its marker chain, on the same deal: lead-statuses.js sameDealAncestorSql)
-    // qualifies on its own yields to it, before the limit. The original went
-    // out when it qualified, or goes out now, with the first click. This is
-    // wider than the second-win rule (a won original only): an original that
-    // qualified when its estimate went out, and stays open while the repeat
-    // wins, still holds the deal. A repeat won on another estimate is another
-    // sale and stays.
-    .whereRaw(`NOT ${sameDealAncestorSql('l', qualifyingLeadSql('chain'), ['is_qualified'])}`)
     .select(
       'l.id',
       'l.estimate_id',
@@ -1312,8 +1295,6 @@ module.exports = {
     exclusionReason,
     mergeFamilyContacts,
     JUNK_LEAD_STATUSES,
-    QUALIFYING_LEAD_STATUSES,
-    qualifyingLeadSql,
     googleAddressParts,
     hashedUserData,
     mapCompletedJobCandidate,

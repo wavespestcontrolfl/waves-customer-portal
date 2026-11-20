@@ -37,8 +37,6 @@ const {
   dedupeCandidatesByTransaction,
   destinationFor,
   JUNK_LEAD_STATUSES,
-  QUALIFYING_LEAD_STATUSES,
-  qualifyingLeadSql,
   collectCandidates,
   hashedUserData,
   mapCompletedJobCandidate,
@@ -775,17 +773,6 @@ describe('test records and junk leads (owner 2026-11-19)', () => {
     expect(junk.bindings).toEqual(JUNK_LEAD_STATUSES);
     // ...before the limit: the filter is part of the same query the limit caps.
     expect(chain.whereRaw.mock.invocationCallOrder[raws.indexOf(junk)]).toBeLessThan(chain.limit.mock.invocationCallOrder[0]);
-    // One deal, one Qualified Lead: a repeat whose original qualifies on its own (the same two
-    // filters, over the original) yields to it, also before the limit.
-    expect(QUALIFYING_LEAD_STATUSES).toEqual(['qualified', 'booked', 'converted', 'won']);
-    expect(chain.orWhereRaw).toHaveBeenCalledWith("LOWER(COALESCE(l.status, '')) IN ('qualified', 'booked', 'converted', 'won')");
-    expect(qualifyingLeadSql('chain')).toBe("(chain.is_qualified IS TRUE OR LOWER(COALESCE(chain.status, '')) IN ('qualified', 'booked', 'converted', 'won'))"
-      + " AND LOWER(TRIM(COALESCE(chain.status, ''))) NOT IN ('cancelled', 'spam', 'duplicate', 'handled', 'disqualified')");
-    const { sameDealAncestorSql } = require('../services/lead-statuses');
-    const oneDeal = raws.find((r) => r.sql === `NOT ${sameDealAncestorSql('l', qualifyingLeadSql('chain'), ['is_qualified'])}`);
-    expect(oneDeal).toBeDefined();
-    expect(oneDeal.sql).toMatch(/SELECT o\.status, o\.deleted_at, o\.customer_id, .* o\.email, o\.is_qualified, /);
-    expect(chain.whereRaw.mock.invocationCallOrder[raws.indexOf(oneDeal)]).toBeLessThan(chain.limit.mock.invocationCallOrder[0]);
   });
 
   test('an internal test record is skipped as internal_test (owner cell, test name, linked test customer)', () => {
