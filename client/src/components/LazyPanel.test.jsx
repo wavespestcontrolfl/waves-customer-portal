@@ -5,7 +5,7 @@
 // bar: it names what holds the tab and asks once about the page first.
 import React, { Suspense } from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { lazyPanel } from './LazyPanel';
@@ -97,6 +97,27 @@ test('offline, the prompt says the device is offline, not that the portal has a 
   onLine.mockReturnValue(false);
   fireEvent(window, new Event('offline'));
   expect(screen.getByText(OFFLINE)).toBeInTheDocument();
+  expect(reload).not.toHaveBeenCalled();
+});
+
+// A part that draws its own dialog, such as Today's job card: in its place,
+// the prompt would sit out of view with no way to close it.
+test('a part that draws its own dialog shows its prompt in a dialog of that name, whose Close or Escape calls the part\'s own onClose and never reloads', async () => {
+  nameNewerBuild();
+  const onClose = vi.fn();
+  const JobCard = lazyPanel(missingChunk, { dialog: 'Job card' });
+  function Opened() { return <JobCard service={{ id: 'one' }} onClose={onClose} />; }
+  renderPage(Opened, '/admin/today');
+  const dialog = await screen.findByRole('dialog', { name: 'Job card' });
+  expect(within(dialog).getByText(PROMPT)).toBeInTheDocument();
+  expect(screen.getByText('Page body')).toBeInTheDocument();
+  tap(within(dialog).getByRole('button', { name: 'Close' }));
+  expect(onClose).toHaveBeenCalledTimes(1);
+  // The shared Dialog moves focus into itself and starts to listen for
+  // Escape in one effect, which can run after the dialog shows.
+  await waitFor(() => expect(dialog).toContainElement(document.activeElement));
+  fireEvent.keyDown(document, { key: 'Escape' });
+  expect(onClose).toHaveBeenCalledTimes(2);
   expect(reload).not.toHaveBeenCalled();
 });
 

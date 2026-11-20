@@ -63,7 +63,8 @@ function hasSignal(now) {
 // So a move to it is not a page move: the move on to the page it lands on
 // decides. The gate judges that redirect, like every redirect, as part of the
 // move it continues (PortalUpdateGate in components/PortalUpdate.jsx).
-const adminIndex = (pathname) => /^\/admin\/?$/.test(routerPath(pathname));
+// The router matches it with any number of trailing slashes: /admin///.
+const adminIndex = (pathname) => /^\/admin\/*$/.test(routerPath(pathname));
 
 // Waves Admin never reloads by itself, nor does a field page, at a move to or
 // away from one (see the top of this file). The stale-chunk reload asks it

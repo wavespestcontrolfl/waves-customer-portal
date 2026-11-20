@@ -78,6 +78,7 @@ function Home() {
   return (
     <>
       <button type="button" onClick={() => navigate('/admin')}>Home</button>
+      <button type="button" onClick={() => navigate(-1)}>Back</button>
       <button type="button" onClick={() => navigate('/admin/leads')}>Leads</button>
     </>
   );
@@ -87,9 +88,9 @@ function Where() {
   return <output data-testid="where">{useLocation().pathname}</output>;
 }
 
-function renderWithIndex(landing, start = '/admin/pipeline') {
+function renderWithIndex(landing, start = '/admin/pipeline', entries = [start]) {
   return render(
-    <MemoryRouter initialEntries={[start]}>
+    <MemoryRouter initialEntries={entries} initialIndex={entries.length - 1}>
       <Where />
       <PortalUpdateGate fallback={<p>Loading the new version...</p>}>
         <Routes>
@@ -194,6 +195,19 @@ describe('PortalUpdateGate', () => {
     renderWithIndex('/admin/today');
     goLive('bbb222bbb222');
     fireEvent.click(screen.getByText('Home'));
+    expect(await screen.findByText('Today')).toBeTruthy();
+    await act(async () => {});
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  // The router decodes each segment and allows trailing slashes, so this is
+  // the same index and the same redirect (routerPath, lib/adminBookmarkMeta.js).
+  // An in-app link drops trailing slashes; a history entry keeps the address
+  // as it was opened, so Back reaches it as written.
+  test('Back to the /admin index written another way, encoded and with more slashes, that lands on Today keeps the tab too', async () => {
+    renderWithIndex('/admin/today', '/admin/pipeline', ['/%61dmin///', '/admin/pipeline']);
+    goLive('bbb222bbb222');
+    fireEvent.click(screen.getByText('Back'));
     expect(await screen.findByText('Today')).toBeTruthy();
     await act(async () => {});
     expect(reload).not.toHaveBeenCalled();

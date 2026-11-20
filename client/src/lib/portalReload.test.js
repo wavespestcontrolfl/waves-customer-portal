@@ -53,6 +53,9 @@ describe('reloadDueAtMove', () => {
     expect(reloadDueAtMove('/admin/', NOW, '/admin/pipeline')).toBe(false);
     expect(reloadDueAtMove('/Admin', NOW, '/admin/pipeline')).toBe(false);
     expect(reloadDueAtMove('/%61dmin', NOW, '/admin/pipeline')).toBe(false);
+    // The router matches it with any number of trailing slashes too.
+    expect(reloadDueAtMove('/admin///', NOW, '/admin/pipeline')).toBe(false);
+    expect(reloadDueAtMove('/%61dmin///', NOW, '/admin/pipeline')).toBe(false);
     // The dashboard landing reloads. Today, for a technician or with Field
     // view on, does not.
     expect(reloadDueAtMove('/admin/dashboard', NOW, '/admin')).toBe(true);

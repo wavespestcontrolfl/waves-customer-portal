@@ -1,6 +1,7 @@
 import { lazy } from 'react';
 import { isChunkError, isStaleChunkReloadPending, missingCodeIsNewVersion, staffTab } from '../lib/staleChunkReload';
 import { PortalReloadPrompt, useBrowserOffline, useNewerBuild } from './PortalUpdate';
+import { Button, Dialog, DialogBody, DialogFooter } from './ui';
 
 // React.lazy for a part of a staff page: a tab, a panel, a sheet. A route's
 // page uses App.jsx's lazyWithRetry. When the live build no longer serves the
@@ -8,7 +9,13 @@ import { PortalReloadPrompt, useBrowserOffline, useNewerBuild } from './PortalUp
 // the part shows a Reload prompt in its place. The rest of the page and the
 // staff layout stay, the Ask Waves draft included: a plain React.lazy would
 // throw to the boundary around the whole route tree.
-export function lazyPanel(factory) {
+// `dialog`: the name of the dialog that a part draws itself, such as Today's
+// job card. Its prompt then shows in a dialog of that name. In the part's
+// place, the prompt would sit where the part is in the page, out of view and
+// with no way to close it. The dialog's Close calls the part's own `onClose`
+// and never reloads.
+export function lazyPanel(factory, { dialog } = {}) {
+  const Missing = dialog ? missingPanelDialog(dialog) : MissingPanelCode;
   return lazy(async () => {
     try {
       const mod = await factory();
@@ -17,10 +24,25 @@ export function lazyPanel(factory) {
       return mod;
     } catch (err) {
       if (isStaleChunkReloadPending()) return { default: PanelPending };
-      if (isChunkError(err) && staffTab()) return { default: MissingPanelCode };
+      if (isChunkError(err) && staffTab()) return { default: Missing };
       throw err;
     }
   });
+}
+
+function missingPanelDialog(name) {
+  return function MissingPanelDialog({ onClose }) {
+    return (
+      <Dialog open onClose={onClose} size="sm" aria-label={name}>
+        <DialogBody>
+          <MissingPanelCode />
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="secondary" className="min-h-11" onClick={onClose}>Close</Button>
+        </DialogFooter>
+      </Dialog>
+    );
+  };
 }
 
 function PanelPending() {

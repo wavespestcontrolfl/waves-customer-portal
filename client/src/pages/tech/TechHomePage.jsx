@@ -113,12 +113,15 @@ const ProjectDetail = lazyPanel(() =>
 // The visit job card (product checks, mix amounts, label limits, Order more)
 // is the Schedule's ProtocolPanel, opened here from the Today visit (owner
 // 2026-11-04). It reads the same technician-scoped job-card route. Lazy so the
-// Schedule page stays out of the Today bundle until first use.
-const ProtocolPanel = lazyPanel(() =>
-  import('../admin/SchedulePage').then((m) => ({ default: m.ProtocolPanel })),
+// Schedule page stays out of the Today bundle until first use. It draws its
+// own dialog, so when a deploy removed its code, its Reload prompt shows in a
+// "Job card" dialog whose Close clears the visit (`dialog` in LazyPanel.jsx).
+const ProtocolPanel = lazyPanel(
+  () => import('../admin/SchedulePage').then((m) => ({ default: m.ProtocolPanel })),
+  { dialog: 'Job card' },
 );
 
-function JobCardOverlay({ service, onClose }) {
+export function JobCardOverlay({ service, onClose }) {
   if (!service) return null;
   return <Suspense fallback={null}><ProtocolPanel service={service} onClose={onClose} /></Suspense>;
 }
