@@ -21,12 +21,14 @@
  *   pass heroes.js validateHeroes (a main fact with a card), so a fact with
  *   no card, a reserve fact or a broken PNG stops the whole batch.
  * - Step 2 holds a lock file, so a second import stops until the first one
- *   is done. It reads
- *   the heroes file again, writes each new art file under its own hash name
- *   (never over art the heroes file names), then swaps in the new heroes
- *   file with one atomic rename. That rename is the only switch: until it,
- *   the heroes file names the old art, which is still there; after it, the
- *   new art. The old art of the facts it changed is removed last.
+ *   is done. It reads the heroes file again and writes each new art file
+ *   under its own hash name with an atomic link, which never replaces a
+ *   file: a file already at that name must hold that art, or the import
+ *   stops before it writes. Then one atomic rename swaps in the new heroes
+ *   file, if the heroes file is still the one it read. That rename is the
+ *   only switch: until it, the heroes file names the old art, which is still
+ *   there; after it, the new art. The old art of the facts it changed is
+ *   removed last.
  * - If step 2 fails before the switch, the art it added is removed. A run
  *   that is killed leaves at most an art file no fact names (the heroes test
  *   names it) and its lock file (remove it once no import runs).
@@ -163,16 +165,23 @@ function publish({ batch, artDir }) {
   const added = [];
   let swapped = false;
   try {
-    const raw = readHeroes();
+    const read = fs.readFileSync(HEROES_FILE, 'utf8');
+    const raw = JSON.parse(read);
     const next = merged(raw, batch);
-    for (const item of batch) {
-      const existed = fs.existsSync(item.target);
-      if (existed && sha16(fs.readFileSync(item.target)) === item.art) continue;
+    // A hash name holds exactly the art of its hash. A file there with other
+    // bytes (a hand edit, a cut-short copy) is not this import's to replace.
+    const toWrite = batch.filter((item) => {
+      if (!fs.existsSync(item.target)) return true;
+      if (sha16(fs.readFileSync(item.target)) === item.art) return false;
+      throw new Error(`${path.relative(root, item.target)} is there but does not hold the art its name says. Look at it and remove it by hand, then import again.`);
+    });
+    for (const item of toWrite) {
       fs.writeFileSync(tempName(item.target, tag), item.webp, { flag: 'wx' });
-      fs.renameSync(tempName(item.target, tag), item.target);
-      if (!existed) added.push(item.target);
+      fs.linkSync(tempName(item.target, tag), item.target);
+      added.push(item.target);
     }
     fs.writeFileSync(tempName(HEROES_FILE, tag), heroesFileText(next), { flag: 'wx' });
+    if (fs.readFileSync(HEROES_FILE, 'utf8') !== read) throw new Error('The heroes file changed while this import ran. Import again.');
     fs.renameSync(tempName(HEROES_FILE, tag), HEROES_FILE);
     swapped = true;
     removeOldArt(raw, next, batch, artDir);

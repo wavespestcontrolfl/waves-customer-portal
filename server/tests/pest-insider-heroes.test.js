@@ -212,6 +212,17 @@ describe('taking new art', () => {
     expect(fs.readFileSync(path.join(root, 'canary.webp'), 'utf8')).toBe('keep me');
   }, 60000);
 
+  test('never replaces a file: a file already at the new art name must hold that art, or the import stops and changes nothing', async () => {
+    fs.writeFileSync(path.join(input, 't03.png'), await t03png(true));
+    const art = /T03 {2}art ([0-9a-f]{16})/.exec(run().stdout)[1];
+    fs.writeFileSync(path.join(root, ART_DIR, `t03-${art}.webp`), 'a hand edit');
+    const before = state();
+    const stopped = run('--execute');
+    expect([stopped.status, stopped.stderr]).toEqual([1, expect.stringContaining(`t03-${art}.webp is there but does not hold the art its name says`)]);
+    expect(state()).toEqual(before);
+    expect(fs.readFileSync(path.join(root, ART_DIR, `t03-${art}.webp`), 'utf8')).toBe('a hand edit');
+  }, 60000);
+
   test('runs one import at a time: while another holds the lock, it stops and writes nothing', async () => {
     fs.writeFileSync(path.join(input, 't03.png'), await t03png(true));
     fs.writeFileSync(path.join(root, `${MANIFEST}.lock`), '1\n');
