@@ -223,8 +223,17 @@ describe('toggle_show_one_time_option on a customer\'s own plan quote (codex pre
     expect(writes).toEqual([]);
   });
 
-  test('an option already on stays reachable: the tool turns it OFF', async () => {
-    const { database, writes } = makeDatabase({ estimate: quote('plan_restart', { show_one_time_option: true }) });
+  // Turning it back OFF would make a quote the page already refused acceptable again (tenth pre-push audit).
+  test.each(['plan_restart', 'plan_start'])('a %s quote refuses the option OFF too, with no write', async (source) => {
+    const { database, writes } = makeDatabase({ estimate: quote(source, { show_one_time_option: true }) });
+    mockDb.mockImplementation(withModify(database));
+    const result = await executeEstimateTool('toggle_show_one_time_option', { estimate_identifier: ESTIMATE_ID, enabled: false });
+    expect(result.error).toBe(require('../services/admin-estimate-persistence').selfServeMintEditRefusal({ source }));
+    expect(writes).toEqual([]);
+  });
+
+  test('a staff estimate still turns the option OFF', async () => {
+    const { database, writes } = makeDatabase({ estimate: quote('admin', { show_one_time_option: true }) });
     mockDb.mockImplementation(withModify(database));
     const result = await executeEstimateTool('toggle_show_one_time_option', { estimate_identifier: ESTIMATE_ID, enabled: false });
     expect(result.error).toBeUndefined();

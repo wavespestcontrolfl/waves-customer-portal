@@ -99,7 +99,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-it("offers no 1× option or invoice mode on a customer's own plan quote unless one is already on (codex pre-push r29 on #8132)", async () => {
+it("offers no 1× option or invoice mode on a customer's own plan quote, even one already on (codex pre-push r29 on #8132; tenth pre-push audit)", async () => {
   const rows = [
     { ...ESTIMATES[0], id: "estimate-own", customerName: "Own Mint", source: "plan_restart" },
     {
@@ -135,10 +135,10 @@ it("offers no 1× option or invoice mode on a customer's own plan quote unless o
   expect(screen.queryByRole("button", { name: "1× Option: Off" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Invoice mode: Off" })).not.toBeInTheDocument();
   closeMenu();
-  // An option already on stays listed, so staff can turn it off.
+  // The server refuses turning one back off too, so an option already on is not listed either.
   await menuFor("Own Mint On");
-  expect(screen.getByRole("button", { name: "1× Option: On" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Invoice mode: On" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "1× Option: On" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Invoice mode: On" })).not.toBeInTheDocument();
   closeMenu();
   await menuFor("Staff Quote");
   expect(screen.getByRole("button", { name: "1× Option: Off" })).toBeInTheDocument();

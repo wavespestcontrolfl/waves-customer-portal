@@ -2132,7 +2132,8 @@ customer refuses, and the re-check reads and locks no other customer. Otherwise 
 error reads "This account changed since this estimate was created — please go back to your portal
 for a current price.") and writes nothing. The same code, with "This estimate changed since it was
 created", refuses an estimate that has the one-time option or invoice billing on: the mint sets
-neither and staff can no longer turn either on, so such a row was changed by staff before that rule.
+neither and staff can no longer change either, on or off, so such a row was changed by staff before
+that rule, and it stays refused until the customer's next portal tap replaces it with a fresh quote.
 The accept answers this refusal before it checks any field of the request body (contact fields,
 slot, service mode, payment), so an invoice-mode quote, whose page sends no slot, gets it rather
 than `plan_start_slot_required`. The re-check answers it again on both options as the row reads
@@ -2168,7 +2169,9 @@ before this 409, because the page drops it on that answer; Stripe unable to conf
 answers that 409 from every card step (the modal mint, the replace-method call and the inline
 pre-mint), from the reserve and from its slot reads (the slot picker hands a 409 up through
 `onRefusal`: the list, a picked date and the date search) with the same banner, and reads it on a
-hold extension as a no-booking answer (release the hold, then reload into the banner). The office's stuck-booking
+hold extension as a no-booking answer (release the hold, then reload into the banner). A load whose
+`/data` carries the mark and still lists a live hold releases that hold with the same
+release-then-refresh recovery, once per hold, and never adopts it. The office's stuck-booking
 alert treats both codes as routine, since the banner walks the customer back to the portal. A re-check that cannot read its state, or that finds the
 customer's property-preferences key held by another change (the re-check tries that key and never
 waits on it while it holds the comms key), answers 409

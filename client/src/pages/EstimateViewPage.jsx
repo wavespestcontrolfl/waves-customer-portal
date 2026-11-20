@@ -6448,6 +6448,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // The hold a recovery could not finish releasing/refreshing — the banner's
   // Retry re-runs that recovery instead of only re-fetching slots.
   const pendingRecoveryHoldRef = useRef(null);
+  // The hold a refused plan quote's /data load already released (the hydration effect): once per hold, so a /data
+  // that still lists it cannot start a release-and-reload loop.
+  const refusedQuoteHoldReleaseRef = useRef(null);
   // Rendered state for the same fact: a ref cannot drive the banner, and a
   // no_booking recovery lands on 'configure', which has no slot banner — so
   // a failed release left the stale contract in place with nothing to tap
@@ -6464,6 +6467,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // banner is up from the start (codex pre-push P1).
   const [staleQuoteReply, setStaleQuoteNote] = useState(null);
   const staleQuoteNote = staleQuoteReply || data?.estimate?.quoteRefusal?.error || null;
+  // The /data mark alone (the hold hydration below releases the hold such a load still offers).
+  const quoteRefusalCode = data?.estimate?.quoteRefusal?.code || null;
   // Recovery releases the hold and re-reads the contract. Until BOTH land,
   // `data.estimate.acceptance` still describes the dead hold, so leaving the
   // payment buttons live let a customer re-adopt the very hold being deleted
@@ -7279,6 +7284,18 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     const held = existingAppointment?.isHold && existingAppointment?.reservationExpiresAt
       ? existingAppointment
       : null;
+    // A refused plan quote holds no time (codex pre-push P1): when /data marks it (estimate.quoteRefusal) and still
+    // offers a live hold, the hold is released through the same release-then-refresh recovery a refused answer runs
+    // (refuseStaleQuoteRef), and never adopted. Not mid-confirmSetup (recoverFromDeadHold refuses then, and the
+    // confirm's own extend or accept gets the refusal).
+    if (held && quoteRefusalCode) {
+      if (!inlineConfirmBusyRef.current && refusedQuoteHoldReleaseRef.current !== held.id) {
+        refusedQuoteHoldReleaseRef.current = held.id;
+        pendingRecoveryHoldRef.current = held.id;
+        recoverFromDeadHold('configure');
+      }
+      return;
+    }
     if (!held) {
       // Refreshed server data no longer offers a hold: drop an adopted one we
       // seeded earlier rather than leaving a countdown on a row that is gone.
@@ -7306,7 +7323,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // Re-seeding is idempotent: the updater returns `prev` unchanged once the
     // same hold+expiry is in place, so this cannot loop.
   }, [existingAppointment?.id, existingAppointment?.isHold, existingAppointment?.reservationExpiresAt,
-    reservation?.scheduledServiceId, ctaPhase]);
+    reservation?.scheduledServiceId, ctaPhase, quoteRefusalCode, recoverFromDeadHold]);
 
   // ONE place that turns an extend outcome into page state (codex r7 P1).
   // The wrapper and the 0:00 rescue both needed identical handling three

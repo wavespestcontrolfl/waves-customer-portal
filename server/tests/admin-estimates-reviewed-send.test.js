@@ -2109,9 +2109,25 @@ describe('a customer\'s own plan quote takes no staff delivery option (codex pre
     expect(mutations).toEqual([]);
   });
 
-  test('an option already on stays reachable: staff can turn it OFF', async () => {
+  // Turning one back OFF would make a quote the page already refused acceptable again on the same estimate, where a
+  // card that tab captured and dropped could be replayed (tenth pre-push audit). Such a quote is replaced instead.
+  test.each([
+    ['plan_restart', 'showOneTimeOption', 'show_one_time_option'], ['plan_restart', 'billByInvoice', 'bill_by_invoice'],
+    ['plan_start', 'showOneTimeOption', 'show_one_time_option'], ['plan_start', 'billByInvoice', 'bill_by_invoice'],
+  ])('a %s quote refuses %s OFF too: an option already on stays on, with no write', async (source, option, column) => {
     row.status = 'sent';
-    row.source = 'plan_restart';
+    row.source = source;
+    row[column] = true;
+    const response = await invoke('/:id', 'patch', { [option]: false });
+    expect(response.statusCode).toBe(409);
+    expect(response.body.error).toBe(require('../services/admin-estimate-persistence').selfServeMintEditRefusal({ source }));
+    expect(mutations).toEqual([]);
+    expect(row[column]).toBe(true);
+  });
+
+  test('a staff estimate still turns an option OFF', async () => {
+    row.status = 'sent';
+    row.source = 'admin';
     row.bill_by_invoice = true;
     const response = await invoke('/:id', 'patch', { billByInvoice: false });
     expect(response.body).toEqual({ success: true });

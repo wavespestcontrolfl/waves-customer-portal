@@ -90,6 +90,21 @@ describe('a refused plan quote (RESTART_STATE_CHANGED / PLAN_START_STATE_CHANGED
     expect(answer).toBeLessThan(generic);
   });
 
+  it('a refused quote\'s /data load releases the hold it still offers, once per hold, and never adopts it (codex pre-push P1)', () => {
+    expect(pageSource).toContain('const quoteRefusalCode = data?.estimate?.quoteRefusal?.code || null;');
+    const eff = pageSource.slice(pageSource.indexOf('// A RELOADED page must start the clock immediately'), pageSource.indexOf('// ONE place that turns an extend outcome into page state'));
+    const release = eff.indexOf('if (held && quoteRefusalCode) {');
+    expect(release).toBeGreaterThan(-1);
+    // Before the adoption, and it returns either way.
+    expect(release).toBeLessThan(eff.indexOf('setReservation((prev) => {'));
+    const branch = eff.slice(release, eff.indexOf('if (!held) {'));
+    expect(branch).toContain("if (!inlineConfirmBusyRef.current && refusedQuoteHoldReleaseRef.current !== held.id) {");
+    expect(branch).toContain('pendingRecoveryHoldRef.current = held.id;');
+    expect(branch).toContain("recoverFromDeadHold('configure');");
+    expect(branch.trimEnd().endsWith('return;\n    }')).toBe(true);
+    expect(eff).toContain('ctaPhase, quoteRefusalCode, recoverFromDeadHold]');
+  });
+
   it('hands the slot picker the same answer for its slot reads (codex pre-push P1)', () => {
     expect(pageSource).toContain('onRefusal={(status, body) => refuseStaleQuoteRef.current(status, body)}');
   });
