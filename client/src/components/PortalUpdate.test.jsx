@@ -142,6 +142,18 @@ describe('PortalUpdateBar', () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
+  test('names every held work at once; Reload anyway then reloads', () => {
+    renderAt('/admin/dashboard');
+    goLive('bbb222bbb222');
+    noticeOpen = true;
+    paying = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
+    expect(screen.getByText('A schedule notice is still open. A Tap to Pay payment is still open.')).toBeTruthy();
+    expect(reload).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Reload anyway' }));
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
   test('a page move clears the named work', () => {
     renderAt('/admin/dashboard');
     goLive('bbb222bbb222');

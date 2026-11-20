@@ -3,7 +3,7 @@ import { useLocation } from 'react-router-dom';
 import { Button } from './ui';
 import { isAdminPath } from '../lib/adminBookmarkMeta';
 import { newerBuild, subscribePortalVersion } from '../lib/portalVersion';
-import { reloadBlocker, reloadDueAtMove, reloadForNewBuild } from '../lib/portalReload';
+import { reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/portalReload';
 
 // Wraps the route tree (App.jsx). At a page move that is due a reload
 // (lib/portalReload.js) it shows `fallback` in place of the routes, so the old
@@ -44,27 +44,29 @@ const HOLD_TEXT = {
 
 // Every staff page, Waves Admin and the field pages included: says that a
 // newer version is live. Its button obeys the same holds as the automatic
-// reload; when one holds, the bar names it and offers "Reload anyway". Each
-// click asks again, so "Reload anyway" only reloads past the work it named,
-// and a page move or a new build clears the named work.
+// reload; when work holds it, the bar names every held work and offers
+// "Reload anyway". Each click asks again, so "Reload anyway" reloads only
+// when nothing holds that the bar has not named. A page move or a new build
+// clears the named work.
 export function PortalUpdateBar() {
   const { pathname } = useLocation();
   const build = useSyncExternalStore(subscribePortalVersion, newerBuild, () => null);
-  const [held, setHeld] = useState(null);
-  useEffect(() => { setHeld(null); }, [build, pathname]);
+  const [held, setHeld] = useState([]);
+  useEffect(() => { setHeld((named) => (named.length ? [] : named)); }, [build, pathname]);
   if (!build || !isAdminPath(pathname)) return null;
 
   const tryReload = () => {
-    const blocker = reloadBlocker();
-    if (blocker && blocker !== held) setHeld(blocker);
+    const blockers = reloadBlockers();
+    if (blockers.some((name) => !held.includes(name))) setHeld(blockers);
     else window.location.reload();
   };
+  const heldText = [...new Set(held.map((name) => HOLD_TEXT[name] || 'Something in this tab is still open.'))].join(' ');
   return (
     <div role="status" style={{ bottom: 'calc(80px + env(safe-area-inset-bottom, 0px))' }}
       className="fixed left-1/2 z-[10990] box-border flex w-max max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-3 rounded-sm border-hairline border-zinc-300 bg-white px-4 py-2 font-sans text-sm text-zinc-900 shadow-lg">
-      <span>{held ? (HOLD_TEXT[held] || 'Something in this tab is still open.') : 'A new version of the portal is ready.'}</span>
+      <span>{held.length ? heldText : 'A new version of the portal is ready.'}</span>
       <Button className="min-h-11 shrink-0 text-sm" onClick={tryReload}>
-        {held ? 'Reload anyway' : 'Reload'}
+        {held.length ? 'Reload anyway' : 'Reload'}
       </Button>
     </div>
   );

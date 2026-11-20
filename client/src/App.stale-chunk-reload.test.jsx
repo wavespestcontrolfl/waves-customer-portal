@@ -165,12 +165,17 @@ test('held work on a staff page keeps the tab: the preload error neither reloads
   expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
 });
 
-test('held work on a staff page gets the retry screen for a page whose chunk is gone, with no reload', async () => {
+test.each([
+  ['code', 'Failed to fetch dynamically imported module: /assets/Gone-abc123.js'],
+  ['stylesheet', 'Unable to preload CSS for /assets/Gone-abc123.css'],
+])('held work on a staff page gets the retry screen for a page whose %s is gone, with no reload', async (_part, message) => {
   window.history.pushState({}, '', '/admin/communications');
   holding = true;
-  const GonePage = lazyWithRetry(() => Promise.reject(new Error('Failed to fetch dynamically imported module: /assets/Gone-abc123.js')));
+  const GonePage = lazyWithRetry(() => Promise.reject(new Error(message)));
   renderInBoundary(GonePage);
   expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  expect(screen.queryByText('Something went wrong')).not.toBeInTheDocument();
+  expect(reported.calls).toHaveLength(0);
   expect(isStaleChunkReloadPending()).toBe(false);
   expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
 });

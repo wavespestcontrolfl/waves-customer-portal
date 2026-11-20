@@ -359,7 +359,9 @@ export function lazyWithRetry(factory) {
       // failed too: same reload, same placeholder.
       if (isStaleChunkReloadPending()) return { default: RouteFallback };
       const msg = String(err?.message || '');
-      const isChunkError = /Failed to fetch dynamically imported module|Importing a module script failed|ChunkLoadError/i.test(msg);
+      // "Unable to preload CSS" is Vite's error for a page stylesheet the
+      // live build no longer serves: the same stale chunk.
+      const isChunkError = /Failed to fetch dynamically imported module|Importing a module script failed|ChunkLoadError|Unable to preload CSS/i.test(msg);
       if (isChunkError) {
         // Held work on a staff page keeps the tab (lib/portalReload.js); the
         // retry screen's button reloads when the person is ready.

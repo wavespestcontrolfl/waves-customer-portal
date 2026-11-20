@@ -75,6 +75,18 @@ describe('reloadDueAtMove', () => {
   });
 });
 
+describe('offline', () => {
+  test('a tab the browser reports offline is not due, and never reloads or records the build', async () => {
+    liveBuild('bbb222bbb222');
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(false);
+    const reload = vi.fn();
+    await expect(reloadForNewBuild({ reload })).resolves.toBe('offline');
+    expect(reload).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem('portal-reloaded-for')).toBeNull();
+  });
+});
+
 describe('staffReloadBlocker', () => {
   test('names held work on staff pages only, for the stale-chunk reload', () => {
     holding = true;

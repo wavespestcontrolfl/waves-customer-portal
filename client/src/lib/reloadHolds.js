@@ -10,12 +10,18 @@ export function registerReloadHold(name, isHeld) {
   checks.set(name, isHeld);
 }
 
-// The first registered work that holds the reload, or null.
-export function reloadHoldName() {
+// Every registered work that holds the reload now, in registration order.
+export function reloadHoldNames() {
+  const names = [];
   for (const [name, isHeld] of checks) {
     let held;
     try { held = Boolean(isHeld()); } catch { held = true; }
-    if (held) return name;
+    if (held) names.push(name);
   }
-  return null;
+  return names;
+}
+
+// The first of them, or null.
+export function reloadHoldName() {
+  return reloadHoldNames()[0] ?? null;
 }
