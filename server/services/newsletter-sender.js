@@ -2194,7 +2194,7 @@ async function plannedSendOutcome(issue, send, now, trx) {
  * become 'sent' with every planned reader done (a Resume that finished, or delivery confirmations
  * that came after the send was marked failed, as after a lost SendGrid response; the webhook's
  * reconcileNewsletterSendStatus then sets it 'sent') becomes 'sent': quietly if nobody was told it
- * failed (failureAlertAt), else with one correction (alert 'recovered', told once by its own mark,
+ * failed (alertToldAt), else with one correction (alert 'recovered', told once by its own mark,
  * recoveredToldAt). It is then read as any 'sent' one is; a correction that reached no one is owed
  * only while it holds (nobody left to resume, and no block told since). Otherwise what nobody was told yet: a
  * 'failed' one (its reason), a 'sent' one whose finished send has readers a Resume would still
@@ -2212,7 +2212,7 @@ async function settledOutcome(issue, send, trx) {
   if (issue.status === 'failed' && sendSent) {
     const { got, left } = await ledgerProgress(trx, send);
     if (got > 0 && left === 0) {
-      const failureToldAt = await failureAlertAt(trx, issue.id, diagnostics);
+      const failureToldAt = await alertToldAt(trx, issue.id, diagnostics, 'outcome');
       if (!failureToldAt) return { status: 'sent', reason: null };
       // The failure was told; this correction is not yet.
       return { status: 'sent', reason: recoveredReason(got), alert: 'recovered', failureToldAt };
@@ -2221,15 +2221,18 @@ async function settledOutcome(issue, send, trx) {
   if (diagnostics.outcomeToldAt) return null;
   if (issue.status === 'failed') return { status: 'failed', reason: issue.reason || 'did not go out', alert: 'outcome' };
   if (issue.status !== 'sent' || !sendSent) return null;
-  const { got, left, refused } = await ledgerProgress(trx, send);
+  const { got, left } = await ledgerProgress(trx, send);
   // No reader got it after all: after its send ended and the issue was marked sent, every reader's
-  // mail server bounced it or SendGrid dropped it (final), or it was blocked (a Resume retries those).
-  // The outcome a scheduled issue whose send ended this way gets (plannedSendOutcome).
-  if (got === 0 && left + refused > 0) return { status: 'failed', reason: 'did not go out: its send ended, and no reader got it', alert: 'outcome' };
+  // mail server bounced it or SendGrid dropped it (final), or it was blocked (a Resume retries
+  // those, while its reader can still be mailed). The outcome a scheduled issue whose send ended
+  // this way gets (plannedSendOutcome), also when nobody is left to resume.
+  if (got === 0) return { status: 'failed', reason: 'did not go out: its send ended, and no reader got it', alert: 'outcome' };
   if (left === 0) {
     // A correction an earlier minute could not deliver, in words from the counts now: owed only
-    // while nobody is left to resume and no block was told since it (that alert said it went out).
-    const correctionOwed = diagnostics.failureToldAt && !diagnostics.recoveredToldAt && !diagnostics.blockedToldAt;
+    // while nobody is left to resume and no block was told since it (that alert said it went out;
+    // its keyed bell row counts, for a worker that stopped before it wrote the mark).
+    const correctionOwed = diagnostics.failureToldAt && !diagnostics.recoveredToldAt
+      && !(await alertToldAt(trx, issue.id, diagnostics, 'blocked'));
     // Else nobody left to resume: a 'sent' issue carries no reason, so a blocked one, told or not,
     // clears, quietly (no write when it is already clear).
     return correctionOwed ? { status: 'sent', reason: recoveredReason(got), alert: 'recovered' } : { status: 'sent', reason: null };
@@ -2239,14 +2242,18 @@ async function settledOutcome(issue, send, trx) {
   return diagnostics.blockedToldAt ? { status: 'sent', reason } : { status: 'sent', reason, alert: 'blocked' };
 }
 
+// Each alert's told mark on the issue row.
+const TOLD_MARKS = Object.freeze({ outcome: 'outcomeToldAt', blocked: 'blockedToldAt', recovered: 'recoveredToldAt' });
+
 /**
- * When the owner was told a planned issue did not go out, or null: its told mark, or, for a worker
- * that delivered the alert and stopped before it wrote that mark, the alert's own keyed bell row.
+ * When the owner was told a planned issue's alert ('outcome': it did not go out; 'blocked'), or
+ * null: its told mark, or, for a worker that delivered the alert and stopped before it wrote that
+ * mark, the alert's own keyed bell row.
  */
-async function failureAlertAt(trx, issueId, diagnostics) {
-  if (diagnostics.outcomeToldAt) return diagnostics.outcomeToldAt;
+async function alertToldAt(trx, issueId, diagnostics, alert) {
+  if (diagnostics[TOLD_MARKS[alert]]) return diagnostics[TOLD_MARKS[alert]];
   const bell = await trx('notifications').where({ recipient_type: 'admin' })
-    .whereRaw("metadata->>'dedupeKey' = ?", [issueAlertKey('outcome', issueId, diagnostics.failureToldAt)])
+    .whereRaw("metadata->>'dedupeKey' = ?", [issueAlertKey(alert, issueId, diagnostics.failureToldAt)])
     .first('created_at');
   return bell ? new Date(bell.created_at).toISOString() : null;
 }
@@ -2340,7 +2347,7 @@ async function settlePlannedIssue({ id, send_id: sendId }, now) {
   // #8139 wrote a blocked or recovered alert's mark as outcomeToldAt, and keyed each alert by its issue
   // alone. No issue carries those: production had no planned issues when this shipped, and only
   // GATE_PEST_INSIDER_AUTO_SEND makes one sent, so there is no compat read for them (CLAUDE.md rule 16).
-  const mark = { blocked: 'blockedToldAt', recovered: 'recoveredToldAt' }[outcome.alert] || 'outcomeToldAt';
+  const mark = TOLD_MARKS[outcome.alert];
   const marked = await db('pest_insider_issues').where({ id, status: outcome.status })
     .whereRaw('diagnostics->>?::text is null', [mark])
     .update({
@@ -2386,9 +2393,13 @@ const ISSUE_CHANGE_LOOKBACK_SQL = "updated_at >= now() - ?::int * interval '1 da
  */
 async function settlePlannedIssues(now = new Date()) {
   const scheduled = await db('pest_insider_issues').where({ status: 'scheduled' }).select('id', 'send_id');
+  // What nobody was told yet: a 'failed' issue with no told outcome, and every 'sent' one (never
+  // marked so). By its issue date or by its own last change (updated_at), so one a Resume long after
+  // the issue made 'sent', told or quietly, or that failed again after that, is read too.
   const untold = await db('pest_insider_issues').whereIn('status', ['failed', 'sent'])
     .whereRaw("diagnostics->>'outcomeToldAt' is null")
-    .whereRaw(SETTLE_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS])
+    .where((recent) => recent.whereRaw(SETTLE_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS])
+      .orWhereRaw(ISSUE_CHANGE_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS]))
     .select('id', 'send_id');
   // A failed issue, told or not, whose send has since become 'sent' (a Resume that finished, or late
   // delivery confirmations): by the send's own last change, so a Resume long after the issue counts.
@@ -2400,14 +2411,8 @@ async function settlePlannedIssues(now = new Date()) {
         .whereRaw(RECOVERED_SEND_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS]);
     })
     .select('id', 'send_id');
-  // A sent issue by its own last change (the issue's updated_at), whatever it was told: one that
-  // recovered from a failure, told or quiet, from a Resume long after the issue is read too (its
-  // correction while that is owed, and the checks any sent issue gets).
-  const corrections = await db('pest_insider_issues').where({ status: 'sent' })
-    .whereRaw(ISSUE_CHANGE_LOOKBACK_SQL, [SETTLE_LOOKBACK_DAYS])
-    .select('id', 'send_id');
   // One settle per issue a minute, also when it is on two lists.
-  const rows = new Map([...scheduled, ...untold, ...recovered, ...corrections].map((row) => [row.id, row]));
+  const rows = new Map([...scheduled, ...untold, ...recovered].map((row) => [row.id, row]));
   let settled = 0;
   for (const row of rows.values()) {
     try {
