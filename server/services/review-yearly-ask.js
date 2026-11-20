@@ -2,7 +2,8 @@
  * Yearly review ask (Tech Rewards plan D6-R1, owner ruling 2026-11-20).
  *
  * A daily job finds recurring customers whose service anniversary just passed (12+ months
- * since their first completed recurring visit) and who have not reviewed, then enrolls ONE
+ * since their service start: customers.member_since, or their first completed recurring visit
+ * when that is earlier or member_since is blank) and who have not reviewed, then enrolls ONE
  * review ask for each through the existing review cadence path (ReviewService
  * .startReviewSequence), so every guard that path already holds still applies at send time:
  * the 30-day cooldown, the 3 asks per 180 days cap, the 72 h spacing, the opt-out and
@@ -75,12 +76,15 @@ function shiftYmd(todayYmd, days) {
   return etDateString(addETDays(new Date(`${todayYmd}T12:00:00Z`), days));
 }
 
-// Customers with a completed recurring visit at least a year old and one in the last 180 days.
+// Current recurring customers (a completed recurring visit in the last 180 days) whose service
+// started at least a year ago. Service start = the earlier of customers.member_since and the first
+// completed recurring visit: portal visit history only begins in 2026-04, so member_since is the
+// record of a longer relationship. The 180-day recurring visit keeps one-time customers out.
 // Narrow on purpose: the window and every exclusion run after, on a short list.
 async function loadTenuredRecurringCustomers(todayYmd) {
   const result = await db.raw(
     `SELECT cu.id AS customer_id,
-            MIN(v.scheduled_date)::text AS first_on
+            LEAST(cu.member_since::date, MIN(v.scheduled_date)::date)::text AS first_on
        FROM customers cu
        JOIN scheduled_services v ON v.customer_id = cu.id
       WHERE v.status = 'completed'
@@ -88,8 +92,8 @@ async function loadTenuredRecurringCustomers(todayYmd) {
         AND cu.deleted_at IS NULL
         AND cu.active IS DISTINCT FROM false
         AND COALESCE(cu.has_left_google_review, false) = false
-      GROUP BY cu.id
-     HAVING MIN(v.scheduled_date) <= ?::date
+      GROUP BY cu.id, cu.member_since
+     HAVING LEAST(cu.member_since::date, MIN(v.scheduled_date)::date) <= ?::date
         AND MAX(v.scheduled_date) >= ?::date`,
     [shiftYmd(todayYmd, -365), shiftYmd(todayYmd, -STILL_SERVED_DAYS)],
   );
