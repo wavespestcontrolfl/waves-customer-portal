@@ -291,6 +291,35 @@ describe('CareersOfferPage — open state', () => {
     expect(bodyOf(fetchMock, 3)).toEqual({ consent: true, version: VERSION });
   });
 
+  // The same for a text choice: a resend that reaches a server without /v2 says nothing about the save whose reply
+  // was lost, so the page reads the offer, and signing stays locked while the read holds the old choice.
+  it('keeps the choice and the lock when a resend after a lost consent reply answers 404 and the read holds the old value', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockRejectedValueOnce(new Error('offline')) // POST consent true: reply lost
+      .mockResolvedValueOnce(jsonResponse(openPayload())) // the read: the lost save has not landed yet
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404)) // Try again reaches a server without /v2
+      .mockResolvedValueOnce(jsonResponse(openPayload())) // the read: still the old choice
+      .mockResolvedValueOnce(jsonResponse({ textConsent: true, version: '2026-12-11T15:21:00.000Z' })); // Try again: saved
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled());
+    expect(screen.getByText(/We could not confirm that choice/)).toBeInTheDocument();
+    expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
+    expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
+    expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
+    expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
+    expect(fetchMock.mock.calls[5][0]).toMatch(/\/v2\/text-consent$/);
+    expect(bodyOf(fetchMock, 5)).toEqual({ consent: true, version: VERSION });
+  });
+
   it('keeps the choice and the lock when the read after a lost reply still holds the old value, until the choice is sent again', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true })))
@@ -695,6 +724,36 @@ describe('CareersOfferPage — open state', () => {
     expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026\. Welcome to Waves\./)).toBeInTheDocument();
     expect(fetchMock.mock.calls[3][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}/v2/accept$`));
     expect(bodyOf(fetchMock, 3)).toEqual({ signedName: 'Jordan Rivera', version: VERSION });
+  });
+
+  // A resend can reach a server without the /v2 routes (a mixed deploy or a rollback) while the first send still waits
+  // for the offer. Its 404 says nothing about that send, so the send stays the only action until a read or a resend
+  // settles it.
+  it('after a lost sign reply, a resend that answers 404 keeps the send the only action while the read says open', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockRejectedValueOnce(new Error('offline')) // sign: reply lost
+      .mockResolvedValueOnce(jsonResponse(openPayload())) // the read: the sign has not landed yet
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404)) // the resend reaches a server without /v2
+      .mockResolvedValueOnce(jsonResponse(openPayload())) // the read: still open
+      .mockResolvedValueOnce(jsonResponse({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' })); // the next resend signs
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled());
+    expect(screen.getByText('We could not confirm that. Check your connection and try again.')).toBeInTheDocument();
+    expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Decline' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Ask for another start date' })).toBeDisabled();
+    expect(screen.getByLabelText('Text me about this offer')).toBeDisabled();
+    expect(screen.getByLabelText('Type your full name to sign')).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026\. Welcome to Waves\./)).toBeInTheDocument();
+    expect(fetchMock.mock.calls[5][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}/v2/accept$`));
+    expect(bodyOf(fetchMock, 5)).toEqual({ signedName: 'Jordan Rivera', version: VERSION });
   });
 
   it('after a lost decline reply and a failed read, the resend is the same decline and its answer is shown', async () => {

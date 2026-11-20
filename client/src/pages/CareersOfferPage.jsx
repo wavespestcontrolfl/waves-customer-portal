@@ -403,9 +403,16 @@ function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, 
       await confirm();
       return;
     }
-    if (lostSave.current && !res.ok && res.status !== 404 && res.status !== 409) {
+    if (lostSave.current && !res.ok && res.status !== 409) {
       // Refused, but an earlier save of this choice may still have landed: keep
-      // the choice and the lock until a save or a read settles it.
+      // the choice and the lock until a save or a read settles it. A 404 (a
+      // server without the /v2 routes, or a dead link) says nothing about that
+      // save, so the page reads at once: the read shows a choice that landed,
+      // or a dead link, and otherwise keeps the choice and the lock.
+      if (res.status === 404) {
+        await confirm();
+        return;
+      }
       setUnconfirmed(true);
       setSaving(false);
       return;
@@ -503,18 +510,20 @@ function useOfferAction({ token, onApplied, onRefused, onReload, onUnknown }) {
     try {
       const res = await postJson(token, suffix, payload);
       checkDefinite(res, suffix); // a reply that may have committed throws: handled below
-      if (lost && !res.ok && res.status !== 404 && res.status !== 409) {
-        // Refused before the offer was checked (a 429, a 400): the lost send
-        // may still land. Keep it the only action, and read in case it has.
-        // A 400 refuses the same payload as invalid, so the lost send was
-        // refused too or ended long ago (a date that passed at midnight): an
-        // open read then frees the fields for a new value.
-        setError(res.body?.error || '');
+      if (lost && !res.ok && res.status !== 409) {
+        // Refused before the offer was checked: a 429, a 400, or a 404 from a
+        // server without the /v2 routes (a mixed deploy or a rollback) while
+        // the lost send may still wait for the offer. The lost send may still
+        // land. Keep it the only action, and read in case it has (a 404 read
+        // shows a dead link). A 400 refuses the same payload as invalid, so
+        // the lost send was refused too or ended long ago (a date that passed
+        // at midnight): an open read then frees the fields for a new value.
+        if (res.status !== 404) setError(res.body?.error || '');
         const after = await onReload();
         if (res.status === 400 && after === 'open') setLost(null);
         return;
       }
-      setLost(null); // a definite answer: a 404 or a 409 wrote nothing
+      setLost(null); // a definite answer: a 409, or a 404 with no lost send, wrote nothing
       if (res.status === 404 || res.status === 409) {
         // A 409 says where the offer stands: the page shows it at once, so a
         // failed read cannot leave the old offer on screen. A 404 is read
