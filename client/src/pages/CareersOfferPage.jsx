@@ -108,6 +108,13 @@ const ERROR_BANNER_STYLE = {
 
 const REFRESH_ERROR = 'We could not refresh this offer. Check your connection and try again.';
 const NOT_SAVED_ERROR = 'That did not go through. Please try again.';
+// A definite 404 on an answer while the offer still reads open: the server does not have
+// the routes this tab's page posts to (a rollback, or a deploy in progress), so trying
+// again repeats the 404. Reloading loads the page the server serves now.
+const RELOAD_ERROR = 'That did not go through. Please reload this page and try again.';
+// What an answer that wrote nothing says while the offer still reads open: after a 409 (made
+// on an older read) trying again works; after a 404 only a reload does.
+const notSavedError = (status) => (status === 404 ? RELOAD_ERROR : NOT_SAVED_ERROR);
 const CONNECTION_ERROR = 'Could not save that. Check your connection and try again.';
 // A send whose reply was lost: it may still go through, so it is not called failed.
 const LOST_ERROR = 'We could not confirm that. Check your connection and try again.';
@@ -436,10 +443,10 @@ function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, 
         setSaving(false);
         return;
       }
-      // Still open: the change was made on an older read and refused. The box
-      // now shows the stored choice; say so, so no one signs on a choice that
-      // was never saved.
-      if (after === 'open') setError(NOT_SAVED_ERROR);
+      // Still open: the change was made on an older read and refused (a 409),
+      // or reached a server without its route (a 404). The box now shows the
+      // stored choice; say so, so no one signs on a choice that was never saved.
+      if (after === 'open') setError(notSavedError(res.status));
     } else if (!res.ok) setError(res.body?.error || CONNECTION_ERROR);
     setSaving(false);
     onPending(false);
@@ -465,7 +472,22 @@ function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, 
           </div>
         </div>
       )}
-      {error && <div style={ERROR_BANNER_STYLE} role="alert">{error}</div>}
+      <ErrorBanner error={error} />
+    </div>
+  );
+}
+
+// An error line. After a definite 404 with an open read it offers a reload (RELOAD_ERROR).
+function ErrorBanner({ error }) {
+  if (!error) return null;
+  return (
+    <div style={ERROR_BANNER_STYLE} role="alert">
+      {error}
+      {error === RELOAD_ERROR && (
+        <div style={{ marginTop: 8 }}>
+          <BrandButton variant="secondary" onClick={() => window.location.reload()}>Reload page</BrandButton>
+        </div>
+      )}
     </div>
   );
 }
@@ -533,7 +555,7 @@ function useOfferAction({ token, onApplied, onRefused, onReload, onUnknown }) {
         if (res.status === 409 && onRefused(res.body)) return;
         const after = await onReload();
         if (after === 'failed') onUnknown();
-        else if (after === 'open') setError(NOT_SAVED_ERROR);
+        else if (after === 'open') setError(notSavedError(res.status));
         return;
       }
       if (!res.ok) {
@@ -590,7 +612,7 @@ function DateRequestPanel({ onSubmit, onCancel, busy, frozen, locked, error }) {
       />
       {touched && problem && <div style={{ ...ERROR_BANNER_STYLE, marginTop: 8 }} role="alert">{problem}</div>}
       <NoteField id="offer-date-note" label="Note (optional)" value={note} onChange={setNote} disabled={frozen} />
-      {error && <div style={ERROR_BANNER_STYLE} role="alert">{error}</div>}
+      <ErrorBanner error={error} />
       <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
         <BrandButton variant="secondary" disabled={locked} onClick={onCancel}>Cancel</BrandButton>
         <BrandButton
@@ -610,7 +632,7 @@ function DeclinePanel({ onSubmit, onCancel, busy, frozen, locked, error }) {
     <div role="group" aria-label="Decline this offer" style={{ marginTop: 16, padding: 14, border: '1px solid var(--border-strong, #C7D7E2)', borderRadius: 'var(--radius-md, 10px)' }}>
       <p style={BODY_STYLE}>Are you sure you want to decline this offer?</p>
       <NoteField id="offer-decline-reason" label="Reason (optional)" value={reason} onChange={setReason} disabled={frozen} />
-      {error && <div style={ERROR_BANNER_STYLE} role="alert">{error}</div>}
+      <ErrorBanner error={error} />
       <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
         <BrandButton variant="secondary" disabled={locked} onClick={onCancel}>Cancel</BrandButton>
         <BrandButton disabled={locked} onClick={() => onSubmit(reason.trim() ? { reason: reason.trim() } : {})}>
@@ -722,7 +744,7 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onO
             accept.run('/accept', { signedName: name.trim(), version: data.version });
           }}
         />
-        {accept.error && <div style={ERROR_BANNER_STYLE} role="alert">{accept.error}</div>}
+        <ErrorBanner error={accept.error} />
         <LostBanner action={accept} />
         {unknown && (
           <div style={ERROR_BANNER_STYLE} role="alert">

@@ -1007,10 +1007,11 @@ function parseSignedName(value) {
 const sameName = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
 
 /** POST /:token/v2/accept. `version`: see changedSince. */
-// The terms a signature binds, as the page shows them (offerFormat.hasOfferFacts): the job, a real start date, an hourly
-// rate of whole cents (at least one cent), the week, who they report to, pay day and the Terms, and a pay step only with
-// both its rate and its date (no raise: both null). buildSnapshot freezes a checked draft, so a gap here is a bug; the
-// check holds for every client, a tab from before the page's own check included.
+// The terms a signature binds, as the page shows them, by the page's own rule (offerFormat.hasOfferFacts and
+// exactAmount, which this mirrors): the job, a real start date, an hourly rate as a number of whole cents (at least one
+// cent), the week, who they report to, pay day and the Terms, and a pay step only with both its rate and its date (no
+// raise: both null). buildSnapshot freezes a checked draft with numeric rates, so a gap here is a bug; the check holds
+// for every client, a tab from before the page's own check included.
 const textFact = (value) => typeof value === 'string' && value.trim() !== '';
 const centsFact = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0.01
   && /^\d+\.\d{2}$/.test(value.toFixed(2)) && Number(value.toFixed(2)) === value;

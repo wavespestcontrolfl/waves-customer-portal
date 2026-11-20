@@ -428,6 +428,7 @@ jest.setTimeout(120000);
       test.each([
         ['no hourly rate', { hourlyRate: null }],
         ['an hourly rate that shows as $0.00', { hourlyRate: 0.001 }],
+        ['an hourly rate sent as text', { hourlyRate: '23.00' }],
         ['a step rate with no step date', { stepEffectiveOn: null }],
         ['no pay step fields', { stepRate: undefined, stepEffectiveOn: undefined }],
         ['no job', { jobTitle: ' ' }],

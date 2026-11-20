@@ -26,8 +26,8 @@ function openPayload(overrides = {}) {
     firstName: 'Jordan',
     jobTitle: 'Pest Control Technician',
     startDate: '2027-01-04',
-    hourlyRate: '23.00',
-    stepRate: '25.00',
+    hourlyRate: 23,
+    stepRate: 25,
     stepEffectiveOn: '2027-04-05',
     hoursLine: '40 paid hours each full week, four 10-hour days, Monday to Thursday',
     reportTo: 'Sam Carter, owner',
@@ -228,8 +228,9 @@ describe('CareersOfferPage — open state', () => {
   });
 
   // A server without the /v2 routes (a mixed deploy or a rollback) answers 404 for a live offer: the page reads the
-  // offer before it calls the link dead, and an open read keeps the offer and says the answer did not go through.
-  it('keeps the offer when a consent save answers 404 and the read says open', async () => {
+  // offer before it calls the link dead. An open read keeps the offer, says the answer did not go through, and offers a
+  // reload, since only the page the server serves now can answer.
+  it('keeps the offer when a consent save answers 404 and the read says open, and offers a reload', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404))
@@ -238,13 +239,23 @@ describe('CareersOfferPage — open state', () => {
     renderPage();
     const box = await screen.findByLabelText('Text me about this offer');
     fireEvent.click(box);
-    expect(await screen.findByText('That did not go through. Please try again.')).toBeInTheDocument();
+    expect(await screen.findByText('That did not go through. Please reload this page and try again.')).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'This link is not valid.' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Text me about this offer')).not.toBeChecked();
     expect(fetchMock).toHaveBeenCalledTimes(3);
+    const originalLocation = window.location;
+    const reload = vi.fn();
+    Reflect.deleteProperty(window, 'location');
+    window.location = { ...originalLocation, reload };
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'Reload page' }));
+      expect(reload).toHaveBeenCalledTimes(1);
+    } finally {
+      window.location = originalLocation;
+    }
   });
 
-  it('keeps the offer when a signature answers 404 and the read says open, and signs nothing on screen', async () => {
+  it('keeps the offer when a signature answers 404 and the read says open, signs nothing on screen, and offers a reload', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404))
@@ -254,7 +265,8 @@ describe('CareersOfferPage — open state', () => {
     const accept = await screen.findByRole('button', { name: 'Accept and sign' });
     fireEvent.change(screen.getByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
     fireEvent.click(accept);
-    expect(await screen.findByText('That did not go through. Please try again.')).toBeInTheDocument();
+    expect(await screen.findByText('That did not go through. Please reload this page and try again.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reload page' })).toBeInTheDocument();
     expect(screen.queryByText(/You signed this offer/)).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'This link is not valid.' })).not.toBeInTheDocument();
     expect(fetchMock.mock.calls[2][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}$`)); // the read
@@ -311,6 +323,7 @@ describe('CareersOfferPage — open state', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled());
     expect(screen.getByText(/We could not confirm that choice/)).toBeInTheDocument();
     expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reload page' })).toBeNull(); // the save's outcome is unknown: no reload
     expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
     expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
@@ -420,12 +433,13 @@ describe('CareersOfferPage — open state', () => {
     ['open without the start date', openPayload({ startDate: null })],
     ['open with a start date that is not a day', openPayload({ startDate: '2027-02-30' })],
     ['open without the hourly rate', openPayload({ hourlyRate: null })],
-    ['open with a zero hourly rate', openPayload({ hourlyRate: '0.00' })],
+    ['open with a zero hourly rate', openPayload({ hourlyRate: 0 })],
+    ['open with an hourly rate sent as text', openPayload({ hourlyRate: '23.00' })],
     ['open with a step rate and no step date', openPayload({ stepEffectiveOn: null })],
     ['open with a step date and no step rate', openPayload({ stepRate: null })],
     ['open without the pay step fields', openPayload({ stepRate: undefined, stepEffectiveOn: undefined })],
-    ['open with an hourly rate that shows as $0.00', openPayload({ hourlyRate: '0.001' })],
-    ['open with a step rate the page would round', openPayload({ stepRate: '25.005' })],
+    ['open with an hourly rate that shows as $0.00', openPayload({ hourlyRate: 0.001 })],
+    ['open with a step rate the page would round', openPayload({ stepRate: 25.005 })],
     ['open without the job', openPayload({ jobTitle: ' ' })],
     ['open without the week', openPayload({ hoursLine: null })],
     ['open without who they report to', openPayload({ reportTo: '' })],
@@ -749,6 +763,7 @@ describe('CareersOfferPage — open state', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled());
     expect(screen.getByText('We could not confirm that. Check your connection and try again.')).toBeInTheDocument();
     expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reload page' })).toBeNull(); // the send's outcome is unknown: no reload
     expect(screen.getByRole('button', { name: 'Decline' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Ask for another start date' })).toBeDisabled();
     expect(screen.getByLabelText('Text me about this offer')).toBeDisabled();
