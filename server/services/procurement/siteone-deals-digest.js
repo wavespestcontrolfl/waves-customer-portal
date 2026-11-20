@@ -30,6 +30,7 @@
  */
 const logger = require('../logger');
 const { hasAlignedAuth } = require('../email/inbox-hygiene');
+const { stripQuotedHistory } = require('./quoted-history');
 const { etWeekStart, etParts, etDateString, parseETDateTime } = require('../../utils/datetime-et');
 
 const WINDOW_DAYS = 7;
@@ -159,22 +160,6 @@ const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8,
 const MONTH_DAY = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b(?:,?\s+(20\d{2})\b)?/gi;
 // m/d, m/d/yy, m/d/yyyy. Not part of a longer number or path, and not a fraction of a unit ("1/2 gal").
 const NUMERIC_DATE = /(?<![\d/.])(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?(?![\d/])(?!\s*(?:oz|lbs?|gal|gallons?|inch|in\b|"|%|cups?|pt|qt|tons?|acres?|ac\b))/gi;
-const QUOTED_HISTORY = [
-  /^[ \t]*From:/im,
-  /^[ \t>]*-{2,}[ \t]*Original Message[ \t]*-{2,}/im,
-  /^[ \t>]*On\s[\s\S]{0,250}?\swrote:/im,
-];
-
-/** Drops quoted reply history: everything from its first marker line on. */
-function stripQuotedHistory(text) {
-  let end = text.length;
-  for (const re of QUOTED_HISTORY) {
-    const m = re.exec(text);
-    if (m && m.index < end) end = m.index;
-  }
-  return text.slice(0, end);
-}
-
 const pad2 = (n) => String(n).padStart(2, '0');
 const isoOf = (y, m, d) => `${y}-${pad2(m)}-${pad2(d)}`;
 function validYmd(y, m, d) {

@@ -8,10 +8,11 @@
  * The bell's date patterns read only the first 6,000 characters of an email and take its
  * earliest date. On the 11 real deal emails from Apr 6 to Nov 19 they were right on 6: an
  * end date in fine print past the cut, an end written in words ("ending on Thursday") and a
- * rep's time off went wrong. Here each deal email is read whole, links removed, and the model
- * answers with the end date and the email's own words for it. An answer is kept only when
- * those words are whole words of the email, they name that day (not the first day of a
- * range), and the day falls from the day the email came to a year after it. Any miss (no API
+ * rep's time off went wrong. Here each deal email is read whole, links and quoted reply
+ * history removed, and the model answers with the end date and the email's own words for it.
+ * An answer is kept only when those words are whole words of the email, they name that day
+ * as the last day their sentence names (so not the first day of a range), and the day falls
+ * from the day the email came to a year after it. Any miss (no API
  * key, API error, refusal, a reply that is not the JSON asked for, words not found, words for
  * another day, a date out of range, "no end" on an email a cap cut short) leaves that line
  * on the date patterns.
@@ -30,6 +31,7 @@ const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 const { anthropicText } = require('../llm/call');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 const { etDateString } = require('../../utils/datetime-et');
+const { stripQuotedHistory } = require('./quoted-history');
 
 let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -38,8 +40,11 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 // characters, most of it tracking links, and its HTML is 3 to 6 times the size of its text.
 const BODY_TEXT_CHARS = 30000;
 const BODY_HTML_CHARS = BODY_TEXT_CHARS * 6;
-// What the model reads, links removed. The longest deal email in the trial was 15,215.
+// What the model reads, links removed: the subject and the text together. The longest deal
+// email in the trial was 15,215.
 const MODEL_TEXT_CHARS = 20000;
+// A subject is one line: at most this many characters of it go to the model.
+const SUBJECT_CHARS = 300;
 // The most deals one run reads, newest first; the rest keep the date-pattern line.
 const MAX_READS = 20;
 // The end date must fall on or after the day the email came, and at most this many days later.
@@ -103,23 +108,33 @@ function htmlText(html) {
   }
 }
 
+// Links out, line ends unified, spaces and blank lines collapsed.
+const flatten = (s) => s
+  .replace(/https?:\/\/\S+/g, ' ')
+  .replace(/\r\n?/g, '\n')
+  .replace(/[ \t\u00a0]+/g, ' ')
+  .replace(/ ?\n ?/g, '\n')
+  .replace(/\n{2,}/g, '\n')
+  .trim();
+
 /**
- * The email as the model reads it: body_text, else body_html with tags removed (line breaks
- * kept); entities decoded, links removed, spaces and blank lines collapsed, capped. `cut` is
- * true when a cap (the body re-read or the model's text) dropped part of it.
+ * The email as the model reads it: { subject, text, cut }. The text is body_text, else
+ * body_html with tags removed (line breaks kept); entities decoded, links removed, spaces and
+ * blank lines collapsed, and quoted reply history dropped, as the date patterns drop it. The
+ * subject (links out, one line) is capped at SUBJECT_CHARS and the text at what is left of
+ * MODEL_TEXT_CHARS. `cut` is true when a cap dropped part of the email: the body re-read cap
+ * (unless it cut only quoted history, which is dropped anyway), the model cap or the subject cap.
  */
 function readableEmail(email) {
   const text = typeof email?.body_text === 'string' && email.body_text.trim() ? email.body_text : null;
   const html = typeof email?.body_html === 'string' ? email.body_html : '';
-  const whole = decodeEntities(text ?? htmlText(html))
-    .replace(/https?:\/\/\S+/g, ' ')
-    .replace(/\r\n?/g, '\n')
-    .replace(/[ \t\u00a0]+/g, ' ')
-    .replace(/ ?\n ?/g, '\n')
-    .replace(/\n{2,}/g, '\n')
-    .trim();
-  const readCut = text !== null ? text.length >= BODY_TEXT_CHARS : html.length >= BODY_HTML_CHARS;
-  return { text: whole.slice(0, MODEL_TEXT_CHARS), cut: readCut || whole.length > MODEL_TEXT_CHARS };
+  const read = flatten(decodeEntities(text ?? htmlText(html)));
+  const whole = stripQuotedHistory(read).trim();
+  const fullSubject = flatten(String(email?.subject || '')).replace(/\n/g, ' ');
+  const subject = fullSubject.slice(0, SUBJECT_CHARS);
+  const room = MODEL_TEXT_CHARS - subject.length;
+  const readCut = whole.length === read.length && (text !== null ? text.length >= BODY_TEXT_CHARS : html.length >= BODY_HTML_CHARS);
+  return { subject, text: whole.slice(0, room), cut: readCut || whole.length > room || fullSubject.length > SUBJECT_CHARS };
 }
 
 // Compare text the way a reader would: one space for any run of spaces, any case, and the
@@ -167,17 +182,16 @@ const NUMERIC_DATE = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?\b/g;
 const ISO_DATE = /\b(20\d{2})-(\d{2})-(\d{2})\b/g;
 const MONTH_KEYS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-// The first day of a range is not an end. A date or day word opens one when a dash or a range
-// word comes right before the next date or day word, in the same sentence and at most RANGE_GAP
-// characters on: "March 1 - April 30", "11/1-11/30", "Monday through Friday", "today through
-// Sunday". Anything may sit before the join ("March 1 (Sunday) at 12:01 a.m. ET – April 30"),
-// and a weekday after it ("3/2 through Thu., 4/30"). It leans to "range": a refused answer
-// keeps the date-pattern line.
+// The end of an offer is the last day its sentence names. A day in the words is not the end
+// when a date or day word for another day follows it in the same sentence, at most RANGE_GAP
+// characters on: then it may open a range ("March 1 - April 30", "11/1-11/30", "between March
+// 1 and April 30", "Monday through Friday", "March 1 (Sunday) at 12:01 a.m. ET until close of
+// business April 30"). A weekday that labels the day itself ("April 30 (Thursday)") is the same
+// day. This leans to "not the end": a refused answer keeps the date-pattern line.
 const RANGE_GAP = 48;
-const RANGE_JOIN = /(?:-|\b(?:to|through|thru|until|till)\b)[ ,.]*(?:\b(?:sun|mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?)(?:day)?\b[ ,.]*)?$/;
+// A sentence ends at ". ", "! ", "? " or "; " before a letter; "a.m." and "p.m." do not end one.
 const SENTENCE_END = /[.!?;] [a-z]/;
-// A day word right after a date labels it: "March 1 (Sunday)", "March 1, Sunday".
-const LABEL_GAP = /^ ?[(,]? ?$/;
+const oneSentence = (stretch) => !SENTENCE_END.test(stretch.replace(/\b([ap])\.m\./g, '$1m'));
 // Words that name a day without a date.
 const DAY_WORD = /\b(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday|today|tonight|tomorrow)\b/g;
 
@@ -199,41 +213,36 @@ function dayMarks(text) {
   return [...quoteDates(text), ...words].sort((a, b) => a.at - b.at);
 }
 
-/** True when mark d opens a range (see RANGE_JOIN). A day word that labels d is stepped over. */
-const opensRange = (text, d, marks) => {
-  const i = marks.findIndex((n) => n.at >= d.end);
-  const labelled = i !== -1 && Boolean(marks[i].word) && LABEL_GAP.test(text.slice(d.end, marks[i].at));
-  const next = marks[labelled ? i + 1 : i];
-  if (!next || next.at - d.end > RANGE_GAP) return false;
-  // "a.m." and "p.m." do not end a sentence.
-  const gap = text.slice(d.end, next.at).replace(/\b([ap])\.m\./g, '$1m');
-  return !SENTENCE_END.test(gap) && RANGE_JOIN.test(gap);
-};
-
 /**
- * True when the words name endDate; `away` is its day count from the ET day the email came.
- * `text` is the words (text.slice(0, wordsEnd)) and then the email right after them, so a
- * range the quote stops short of still shows its first day as a start, not an end. A date
- * in the words decides; with none, a weekday at most a week on, "today"/"tonight" or
- * "tomorrow" must land on endDate.
+ * True when the words name endDate as the last day of their sentence; `away` is its day count
+ * from the ET day the email came. `text` is the words (text.slice(0, wordsEnd)) and then the
+ * email right after them, so a range the quote stops short of still shows its first day as a
+ * start. A date in the words decides; with none, a weekday at most a week on, "today"/"tonight"
+ * or "tomorrow" must land on endDate.
  */
 function quoteNamesDay({ text, wordsEnd }, endDate, away) {
   const [year, month, day] = endDate.split('-').map(Number);
+  const weekday = WEEKDAYS[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
+  const relative = { today: away === 0, tonight: away === 0, tomorrow: away === 1 };
+  // Names endDate's day: its date, its weekday (also as a label), or a relative word that lands on it.
+  const sameDay = (d) => (d.word
+    ? d.word === weekday || relative[d.word] === true
+    : d.month === month && d.day === day && (d.year === null || d.year === year));
   const marks = dayMarks(text);
   const said = marks.filter((d) => d.end <= wordsEnd);
-  const ends = said.filter((d) => !opensRange(text, d, marks));
-  if (said.some((d) => !d.word)) {
-    return ends.some((d) => !d.word && d.month === month && d.day === day && (d.year === null || d.year === year));
-  }
-  const weekday = WEEKDAYS[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
-  const lands = { [weekday]: away <= 7, today: away === 0, tonight: away === 0, tomorrow: away === 1 };
-  return ends.some((d) => lands[d.word] === true);
+  const dated = said.some((d) => !d.word);
+  // With no date in the words, a weekday names a day at most a week on.
+  const named = said.filter((d) => (dated ? !d.word : d.word !== weekday || away <= 7) && sameDay(d));
+  // Another day after d in its sentence. The stretch takes that day's first letter, so ". Monday" ends the sentence.
+  const anotherDayAfter = (d) => marks.some((n) => n.at >= d.end && n.at - d.end <= RANGE_GAP && !sameDay(n)
+    && oneSentence(text.slice(d.end, n.at + 1)));
+  return named.some((d) => !anotherDayAfter(d));
 }
 
 const WORD_CHAR = /[a-z0-9]/;
 // A year the email writes right after a quoted day: "April 30" + ", 2027", "5/15" + "/27".
 const YEAR_AFTER = /^(?:,? ?20\d{2}\b|\/(?:\d{4}|\d{2})\b)/;
-// Room after the words for a range's join, what may sit before it, and the date it runs to.
+// Room after the words for another day RANGE_GAP characters on, and that day's own words.
 const AFTER_CHARS = RANGE_GAP + 24;
 
 /**
@@ -283,8 +292,7 @@ function checkAnswer(answer, emailText, receivedAt) {
 async function readOne(client, email) {
   try {
     const received = new Date(email.received_at);
-    const subject = String(email.subject || '').replace(/\s+/g, ' ').trim();
-    const { text: body, cut } = readableEmail(email);
+    const { subject, text: body, cut } = readableEmail(email);
     if (!body && !subject) return { ok: false, reason: 'empty' };
     let response;
     try {
@@ -358,6 +366,6 @@ async function readDealEndDates(conn, deals) {
 
 module.exports = {
   readDealEndDates,
-  MAX_READS, BODY_TEXT_CHARS, BODY_HTML_CHARS, MODEL_TEXT_CHARS,
+  MAX_READS, BODY_TEXT_CHARS, BODY_HTML_CHARS, MODEL_TEXT_CHARS, SUBJECT_CHARS,
   _test: { readableEmail, checkAnswer, parseAnswer, SYSTEM_PROMPT },
 };
