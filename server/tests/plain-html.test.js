@@ -80,13 +80,16 @@ describe('plainPage', () => {
       "<td style='visibility: hidden'>x", '<td style=visibility:collapse>x', '<td style="content-visibility: hidden">x',
       // A CSS escape can spell any style ("\6e one" is "none"), and a function can stand for any value.
       '<td style="display:\\6e one">x', '<td style="--state:none; display:var(--state)">x', '<td style="content-visibility: var(--v)">x',
-      // An unquoted url() keeps a "/*" as part of its address, and a quoted one is a string: neither opens a comment.
-      '<td style="background:url(/icons/*/dot.png); display:none">x', "<td style='background: url(\"a)b\"); display: none'>x",
-      // After a "#" (a hash: "#url"), an "@" or a NUL, "url(" starts no url(): the "/*" after it opens a comment.
-      '<td style="--x: #url(/* ) \' */); display:none">x', '<td style="--x: @url(/* ) \' */); display:none">x',
-      '<td style="--x: a\u0000url(/* ) \' */); display:none">x',
+      // A quoted url() is a string, which holds no declaration. An unquoted one whose address holds a "/*" or a quote
+      // counts, whatever follows it, as CSS can read it in two ways: after a "#", an "@" or a name character (a NUL,
+      // a U+00D7 too) a "url(" is part of a longer name and its "/*" opens a comment; where a token starts (after a
+      // "<!--" too) it opens a url(), whose "/*" or quote is part of its address.
+      "<td style='background: url(\"a)b\"); display: none'>x", '<td style="background:url(/icons/*/dot.png)">x',
+      "<td style=\"background: url(a'b.png)\">x", '<td style="--x: #url(/* ) \' */); display:none">x',
+      '<td style="--x: @url(/* ) \' */); display:none">x', '<td style="--x: a\u0000url(/* ) \' */); display:none">x',
+      '<td style="--x: <!--url(/*); display:none">x', '<td style="--x: \u00d7url(/* ) \' */); display:none">x',
       // CSS white space is a space, a tab or a line break: after a no-break space, "url(" opens a url() that runs to
-      // the first ")", so the quote in it opens no string. A browser does not draw what a table column holds.
+      // the first ")". A browser does not draw what a table column holds.
       '<td style="background: url(&nbsp;\'a); display:none; \')">x', '<td style="display: table-column">x',
       // Of two attributes with one name, a browser keeps the first.
       '<td style="display:none" style="color:red">x',
@@ -100,8 +103,9 @@ describe('plainPage', () => {
     // tag's attributes do nothing.
     expect(plain('<td style="font-size: 13px; overflow: hidden; list-style-type: none; content: \'display: none\'">A</td hidden>'
       + '<td style="dis/**/play: none /* display: none */">B'
-      // "-url(" is a function, not a url(): its "/*" opens a comment. A line break does not end a declaration.
-      + '<td style="x: -url(/*); display: none; y: */; display: block">C<td style="color: red\n display: none">D'
+      // A url() whose address holds no "/*" and no quote reads alike either way. A line break ends no declaration.
+      + '<td style="background: URL( /i/dot.png ) no-repeat, url(\'a.png\'); x: -url(a b)">C'
+      + '<td style="color: red\n display: none">D'
       // A whole legacy reference before a space is decoded in an attribute too: these quotes hold the declaration.
       + '<td style="font-family: &quot x; display: none &quot;">G'
       // Left to right is the order a browser shows by default, and a custom property sets nothing by itself.
@@ -114,6 +118,8 @@ describe('plainPage', () => {
     expect(plain(`<td style="${'display:'.repeat(40000)}">E`)).toBe('<td>E');
     expect(plain(`<style>td { ${'display:'.repeat(40000)} }</style><td>F`)).toBe('<td>F');
     expect(plain(`<style>${'.a, '.repeat(20000)}.z { ${'display: none; '.repeat(20000)}}</style><td>G`)).toBe('<td>G');
+    // A selector of 60,000 attribute tests left open counts (it may match anything), and is judged quickly.
+    expect(plain(`<style>${'a[ '.repeat(60000)}{ display: block }</style><td>H`)).toBeNull();
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
@@ -125,10 +131,12 @@ describe('plainPage', () => {
       '<style>.x:not(.y) { display: none }</style><td>x', '<style>* { visibility: hidden }</style><td>x',
       // A declaration with no rule, or one after a nested rule, has no selector to read.
       '<style>display: none</style><td>x', '<style>.a { .b { color: red } display: none }</style><td>x',
-      // A function can stand for any value, and an unquoted url() keeps its "/*" as part of the address.
-      '<style>td { --d: none; display: var(--d) }</style><td>x', '<style>td { background: url(/i/*/d.png); display: none }</style><td>x',
-      // After a no-break space, "url(" opens a url(), whose quote opens no string; a browser does not draw a column group.
+      // A function can stand for any value, and a sheet with an unquoted url() whose address holds a "/*" or a quote
+      // counts whatever its rules.
+      '<style>td { --d: none; display: var(--d) }</style><td>x', '<style>.absent { background: url(/i/*/d.png) }</style><td>x',
+      // After a no-break space, "url(" opens a url(); a browser does not draw a column group.
       '<style>td { background: url(\u00a0\'a); display: none; \') }</style><td>x', '<style>td { display: TABLE-COLUMN-GROUP }</style><td>x',
+      '<style>td { --x: <!--url(/*); display: none }</style><td>x',
       // A "-->" right after a name is part of it: ".nav-->" is the class "nav--" and a ">".
       '<style>.nav--> b { display: none }</style><td class="nav--"><b>x</b>',
       // A CSS escape can spell any style, and an import loads a sheet this cannot read.
@@ -160,9 +168,10 @@ describe('plainPage', () => {
       '<title style="d\\69splay: block">Callback</title><td>x'];
     for (const cell of hiding) expect(plain(`<table><tr><td>Routine</td>${cell}</table>`)).toBeNull();
     // A hiding rule whose selector names a class or an id no element has hides nothing (the state's pages hold two);
-    // a sheet's "<!--" and "-->" are no part of a selector, and a string or a comment is not a declaration.
+    // a sheet's "<!--" and "-->" are no part of a selector, and a string, a url() or a comment is not a declaration.
     expect(plain('<style type="text/css"><!-- .leftNav {display:none;} @media print { .banner {display:none;} -->\r\n'
-      + 'td { font-size: 13px; content: "display: none"; --display: none; unicode-bidi: normal } /* td { display: none } */'
+      + 'td { font-size: 13px; content: "display: none"; --display: none; unicode-bidi: normal;'
+      + ' background: url("../i/bg2.png"), url(/i/dot.png) } /* td { display: none } */'
       + '</style><td class="list" id=x>A')).toBe('<td>A');
     // A style element of another type is inert, and of two class attributes a browser keeps the first.
     expect(plain('<style type="text/plain">td { display: none }</style><style>.b { display: none }</style><td class=a class=b>A'))
