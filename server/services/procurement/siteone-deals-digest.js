@@ -252,15 +252,17 @@ function shortDate(date) {
 }
 
 /**
- * The deadline part of a line. `aiRead` is the AI end-date read ({ endDate, quote }; endDate
- * null = the email states no end), absent when the gate is off or the read failed; then the
- * date patterns decide, as they always have.
+ * The deadline part of a line. `aiRead` is the AI end-date read ({ endDate, quote,
+ * priceIncrease }; endDate null = the email states no end; priceIncrease = endDate is the day
+ * a new price starts, so the line says "price rises", not "ends"), absent when the gate is off
+ * or the read failed; then the date patterns decide, as they always have.
  */
 function deadlineNote(email, received, aiRead) {
   if (aiRead?.endDate) {
     const [year, month, day] = aiRead.endDate.split('-').map(Number);
     const sameYear = year === etParts(received).year;
-    return `ends ${MONTH_NAMES[month - 1]} ${day}${sameYear ? '' : `, ${year}`} ("${clip(aiRead.quote, QUOTE_CLIP)}")`;
+    const what = aiRead.priceIncrease === true ? 'price rises' : 'ends';
+    return `${what} ${MONTH_NAMES[month - 1]} ${day}${sameYear ? '' : `, ${year}`} ("${clip(aiRead.quote, QUOTE_CLIP)}")`;
   }
   if (aiRead) return 'deadline not stated';
   const deadline = extractDeadline(`${email.subject || ''}\n${bodyPlainText(email)}`, received);

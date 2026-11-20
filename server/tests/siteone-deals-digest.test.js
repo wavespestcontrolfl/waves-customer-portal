@@ -457,6 +457,16 @@ describe('runSiteOneDealsDigest', () => {
       expect(note.endsWith('…")')).toBe(true);
       expect(note.length).toBe('ends Nov 30 ("'.length + 140 + '")'.length);
     });
+
+    // Pre-push audit on be6684f834 (P1): the day a price increase starts read as the day the offer ends.
+    test('gate on: a price increase says "price rises" on the day the new price starts', async () => {
+      process.env[GATE] = 'true';
+      const { db } = fakeDb({ emails: [gateEmails()[1]] });
+      mockReadEndDates.mockResolvedValue(new Map([[32, { endDate: '2026-12-01', quote: 'Prices increase effective December 1', priceIncrease: true }]]));
+      const notify = jest.fn().mockResolvedValue({ id: 1 });
+      await runSiteOneDealsDigest({ now, db, notify, aiEndDates: true });
+      expect(notify.mock.calls[0][2].detail.split(' · ')[3]).toBe('price rises Dec 1 ("Prices increase effective December 1")');
+    });
   });
 });
 

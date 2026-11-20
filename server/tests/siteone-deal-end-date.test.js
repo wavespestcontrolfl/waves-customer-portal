@@ -82,6 +82,15 @@ describe('readableEmail', () => {
     expect(readableEmail({ body_text: longThread })).toEqual({ subject: '', text: 'Ends Friday.', cut: false, partial: false });
   });
 
+  // Pre-push audit on be6684f834 (P1): a ">" line with no "On ... wrote:" line above it was read.
+  test('drops each line that starts with ">", and the email counts as partly read', () => {
+    expect(readableEmail({ body_text: 'Thanks for the update.\n> Flash sale ends tomorrow.\n>> Older: ends Friday\nSam' }))
+      .toEqual({ subject: '', text: 'Thanks for the update.\nSam', cut: false, partial: true });
+    expect(readableEmail({ body_text: '> Flash sale ends tomorrow.' })).toEqual({ subject: '', text: '', cut: false, partial: true });
+    // A ">" inside a line is no quote mark.
+    expect(readableEmail({ body_text: 'Spend > $500, get 5% back. Ends May 1.' }).partial).toBe(false);
+  });
+
   // Pre-push audit on 8cdbc9728d (P1): an HTML reply kept its <blockquote> when no "On ... wrote:" line marked it.
   test('HTML: every <blockquote> is dropped whole, nested ones too, and the email counts as partly read', () => {
     const html = '<div>Thanks, ordering now.</div><blockquote type="cite"><div>Flash sale ends tomorrow.</div>'
@@ -134,11 +143,20 @@ describe('checkAnswer', () => {
     ['a year the email writes right after the words', 'Points double through April 16', '2027-04-16'],
     ['a numeric year the email writes right after the words', 'Rebate forms due 5/15', '2026-05-15'],
   ])('kept: %s', (_label, quote, endDate) => {
-    expect(checkAnswer({ end_date: endDate, quote }, email, received)).toEqual({ ok: true, endDate, quote: quote.replace(/\s+/g, ' ').trim() });
+    expect(checkAnswer({ end_date: endDate, quote }, email, received)).toEqual({ ok: true, endDate, quote: quote.replace(/\s+/g, ' ').trim(), priceIncrease: false });
   });
 
   test('null = the email states no end', () => {
-    expect(checkAnswer({ end_date: null, quote: null }, email, received)).toEqual({ ok: true, endDate: null, quote: null });
+    expect(checkAnswer({ end_date: null, quote: null }, email, received)).toEqual({ ok: true, endDate: null, quote: null, priceIncrease: false });
+  });
+
+  // Pre-push audit on be6684f834 (P1): "Prices increase effective May 1" read as the last day at the old price.
+  test('a price increase: the date is the day the new price starts, and the answer says so', () => {
+    const notice = 'Subject\nPrices increase effective May 1. Order now.';
+    const answer = { end_date: '2026-05-01', quote: 'Prices increase effective May 1', price_increase: true };
+    expect(checkAnswer(answer, notice, received)).toEqual({ ok: true, endDate: '2026-05-01', quote: 'Prices increase effective May 1', priceIncrease: true });
+    // Only a JSON true counts.
+    expect(checkAnswer({ ...answer, price_increase: 'true' }, notice, received).priceIncrease).toBe(false);
   });
 
   test.each([
@@ -179,6 +197,16 @@ describe('checkAnswer', () => {
     const december = new Date('2026-12-20T15:00:00Z');
     expect(checkAnswer({ end_date: '2027-01-15', quote: 'offer ends January 15, 2026' }, winter, december)).toEqual({ ok: false, reason: 'quote_date_mismatch' });
     expect(checkAnswer({ end_date: '2027-01-15', quote: 'Bonus points end January 15' }, winter, december).ok).toBe(true);
+  });
+
+  // Pre-push audit on be6684f834 (P1): "ends today, April 15" passed as April 15 a year on.
+  test('a date with no year is its next time on or after the day the email came', () => {
+    const today = 'Subject\nDiscount ends today, April 15. Rebate forms due 4/15.';
+    const refused = { ok: false, reason: 'quote_date_mismatch' };
+    expect(checkAnswer({ end_date: '2027-04-15', quote: 'Discount ends today, April 15' }, today, received)).toEqual(refused);
+    expect(checkAnswer({ end_date: '2027-04-15', quote: 'Rebate forms due 4/15' }, today, received)).toEqual(refused);
+    expect(checkAnswer({ end_date: '2026-04-15', quote: 'Discount ends today, April 15' }, today, received).ok).toBe(true);
+    expect(checkAnswer({ end_date: '2026-04-15', quote: 'Rebate forms due 4/15' }, today, received).ok).toBe(true);
   });
 
   // Pre-push audit on b21fc449c9 (P1): the first day of a quoted range passed as its end.
@@ -331,8 +359,8 @@ describe('readDealEndDates', () => {
     const found = await readDealEndDates(conn, [deal(1, { subject: 'Last Chance  for 10% Off' }), deal(2)]);
 
     expect([...found.entries()]).toEqual([
-      [1, { endDate: '2026-04-30', quote: 'Offers valid March 1 – April 30, 2026.' }],
-      [2, { endDate: null, quote: null }],
+      [1, { endDate: '2026-04-30', quote: 'Offers valid March 1 – April 30, 2026.', priceIncrease: false }],
+      [2, { endDate: null, quote: null, priceIncrease: false }],
     ]);
     // Bodies: one query, by id, under their own column names and widths.
     expect(calls.tables).toEqual(['emails']);
@@ -397,7 +425,7 @@ describe('readDealEndDates', () => {
     ]);
     mockCreate.mockResolvedValue(reply('{"end_date": null, "quote": null}'));
     const found = await readDealEndDates(conn, [deal(1), deal(2), deal(3), deal(4), deal(5)]);
-    expect([...found.entries()]).toEqual([[4, { endDate: null, quote: null }]]);
+    expect([...found.entries()]).toEqual([[4, { endDate: null, quote: null, priceIncrease: false }]]);
     expect(mockRejected).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith('[siteone-deals] end dates: 1 of 5 deals read by AI; date patterns kept for 4 no_end_in_cut_text');
   });
@@ -421,6 +449,18 @@ describe('readDealEndDates', () => {
 
     expect(found.size).toBe(0);
     expect(mockCreate.mock.calls[0][0].messages[0].content).toBe('Received: 2026-04-15 (US Eastern)\nSubject: Deal 1\n\nThanks for the order.');
+    expect(logger.info).toHaveBeenCalledWith('[siteone-deals] end dates: 0 of 1 deals read by AI; date patterns kept for 1 quote_not_found');
+  });
+
+  // Pre-push audit on be6684f834 (P1): a ">" line with no attribution line went to the model and counted as proof.
+  test('a line that starts with ">" is not sent and is no proof', async () => {
+    const { conn } = fakeConn([{ id: 1, body_text: 'Thanks for the update.\n> Flash sale ends tomorrow.', body_html: null }]);
+    mockCreate.mockResolvedValue(reply('{"end_date": "2026-04-16", "quote": "Flash sale ends tomorrow"}'));
+
+    const found = await readDealEndDates(conn, [deal(1)]);
+
+    expect(found.size).toBe(0);
+    expect(mockCreate.mock.calls[0][0].messages[0].content).toBe('Received: 2026-04-15 (US Eastern)\nSubject: Deal 1\n\nThanks for the update.');
     expect(logger.info).toHaveBeenCalledWith('[siteone-deals] end dates: 0 of 1 deals read by AI; date patterns kept for 1 quote_not_found');
   });
 
