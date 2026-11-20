@@ -276,6 +276,21 @@ describe('parseInspectionReport', () => {
     expect(svc.parseInspectionReport(b)).toEqual({ pestEvidence: false, findings: [] });
   });
 
+  test('each violations row is read whole: a code alone in the Observation cell is text; an unreadable code cell is no answer', () => {
+    // A 35B row whose observation is a 35A code alone: text, not a second finding.
+    expect(svc.parseInspectionReport(reportPage('<tr><td>35B-03-4</td><td>&nbsp;</td><td>35A-02-8</td></tr>')))
+      .toEqual({ pestEvidence: false, findings: [] });
+    // A row whose code cannot be read beside a readable 35B row: no answer, never "no pests".
+    const b = fixture('report-35b.html');
+    const starred = b.replace('</table>', '<tr><td><u>35A-02-8*</u></td><td>&nbsp;&nbsp;</td><td>High Priority - Live flies at the bar.</td></tr>\n</table>');
+    expect(starred).toContain('35A-02-8*');
+    expect(svc.parseInspectionReport(starred)).toBeNull();
+    // A row with an observation and no code cell: no answer either.
+    expect(svc.parseInspectionReport(b.replace('</table>', '<tr><td>High Priority - Live flies at the bar.</td></tr>\n</table>'))).toBeNull();
+    // A row of blank cells is skipped.
+    expect(svc.parseInspectionReport(b.replace('</table>', '<tr><td>&nbsp;</td><td> </td></tr>\n</table>'))).toEqual({ pestEvidence: false, findings: [] });
+  });
+
   test('a cell or a row without its end tag still counts, so a 35A code cell without </td> is never read as "no pests"', () => {
     const whole = svc.parseInspectionReport(fixture('report-35a.html'));
     // The two 35A code cells lose </td> (HTML allows it); the 35B cell keeps it.
