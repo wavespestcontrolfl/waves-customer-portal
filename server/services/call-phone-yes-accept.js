@@ -777,6 +777,11 @@ function tapRefusal(reason) {
 }
 const stop = (reason) => Object.assign(new Error(reason), { phoneYesRefusal: reason });
 
+// The two notes the card shows beside the plan (tapStateOf: the terms warning and the fee note), as one comparable
+// value. The token carries it, and the price step reads it again on the accept's own locked row. `yes`: the caller's
+// yes as the evaluation read it, or null.
+const notesKeyOf = (estimate, yes) => JSON.stringify([termsMayDiffer(estimate, yes?.at ?? null), feeNoteOf(estimate)]);
+
 // What the card showed, as one opaque token: the estimate and its row version, the booked visit as read, the caller's
 // word, the plan and its price, and the two notes beside them. The card reads it (tapStateOf, GET /:id/call-phone-yes)
 // and the tap sends it back, so an edit or a reschedule since, or a note the office has not seen, asks for a fresh look.
@@ -789,7 +794,7 @@ function tapPreviewTokenOf(evaluation, terms) {
     tapWordOf(evaluation).key,
     terms ? [terms.cadence, cents(terms.perVisit)] : null,
     // The terms warning and the fee note as tapStateOf shows them: a delivery snapshot can change with no row version.
-    termsMayDiffer(evaluation.estimate, evaluation.yes?.at ?? null), feeNoteOf(evaluation.estimate),
+    notesKeyOf(evaluation.estimate, evaluation.yes),
   ];
   return require('crypto').createHash('sha256').update(JSON.stringify(facts)).digest('hex').slice(0, 32);
 }
@@ -1009,6 +1014,9 @@ function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdat
 // customer-level fee carries), never a guess. The label stays as booked (the converter never relabels service_type).
 function priceSeriesStep({ customerId, visit, seen, shown }) {
   return async (trx, { estimate, conversion }) => {
+    // The notes the card showed beside the plan, read again on the accept's own locked row: a delivery snapshot can
+    // change with no row version, after the token check and before the lock.
+    if (notesKeyOf(estimate, shown.yes) !== shown.notesKey) throw stop('changed_since_check');
     // The converter's own check of the plan it booked: every application the estimate sells is on the calendar.
     if (conversion?.recurringScheduleCheck?.ok !== true) throw stop('series_incomplete');
     const amount = Number(conversion?.membershipEmail?.perApplicationAmount);
@@ -1092,6 +1100,8 @@ async function acceptPhoneYesCard({ item, adminUserId = null, previewToken = nul
   const { estimate, visit } = evaluation;
   const seen = {};
   const word = tapWordOf(evaluation);
+  // What the card showed: the plan, its price and the two notes (the token matched them).
+  const shown = { ...terms, yes: evaluation.yes, notesKey: notesKeyOf(estimate, evaluation.yes) };
   let result;
   try {
     result = await Manual.markEstimateManuallyAccepted({
@@ -1107,7 +1117,7 @@ async function acceptPhoneYesCard({ item, adminUserId = null, previewToken = nul
         visit, customerId, bookingCallId: item.call_log_id, cardId: item.id, expectedUpdatedAt, word,
       }),
       beforeCommit: async (trx, ctx) => {
-        await priceSeriesStep({ customerId, visit, seen, shown: terms })(trx, ctx);
+        await priceSeriesStep({ customerId, visit, seen, shown })(trx, ctx);
         // The caller's word, read again last, with its calls locked through the commit.
         await wordStillStep({ customerId, word })(trx);
         // The card closes with the accept, in its transaction: a card another admin closed or changed since rolls the
@@ -1151,7 +1161,7 @@ module.exports = {
   _private: {
     fileCardForTest: fileCard, applyCardStateForTest: applyCardState,
     // The tap's two steps inside the accept, driven directly.
-    linkVisitStepForTest: linkVisitStep, priceSeriesStepForTest: priceSeriesStep, wordStillStepForTest: wordStillStep, tapWordOfForTest: tapWordOf,
+    linkVisitStepForTest: linkVisitStep, priceSeriesStepForTest: priceSeriesStep, notesKeyOfForTest: notesKeyOf, wordStillStepForTest: wordStillStep, tapWordOfForTest: tapWordOf,
     lockCustomerEstimatesForTest: lockCustomerEstimates, PEST_CADENCE_PLANS, planTermsOfForTest: planTermsOf,
   },
 };

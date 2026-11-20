@@ -1486,10 +1486,10 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
         .toBeNull();
     });
 
-    test('the price step refuses a short schedule, a price it cannot resolve, a series the converter did not book, and a price decision on the series', async () => {
+    test('the price step refuses notes the card did not show, a short schedule, a price it cannot resolve, a series the converter did not book, and a price decision on the series', async () => {
       const { customerId, est, visitId } = await phoneYes();
       const visitRow = await trx('scheduled_services').where({ id: visitId }).first();
-      const shownPlan = { perVisit: PER_VISIT, cadence: 'quarterly' };
+      const shownPlan = { perVisit: PER_VISIT, cadence: 'quarterly', yes: null, notesKey: PhoneYesPrivate.notesKeyOfForTest(est, null) };
       const run = (conversion, shown = shownPlan) => trx.transaction((t) => PhoneYesPrivate.priceSeriesStepForTest({ customerId, visit: visitRow, seen: {}, shown })(t, { estimate: est, conversion }));
       // The card names every cadence the converter seeds a residential pest plan on, and no other.
       const Converter = require('../services/estimate-converter');
@@ -1497,6 +1497,8 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
         .filter((cadence) => Converter.supportsConverterFollowUpSeeding({ name: 'Pest Control', service: 'pest_control' }, {}, cadence));
       expect(Object.keys(PhoneYesPrivate.PEST_CADENCE_PLANS).sort()).toEqual(seeded.sort());
       const conversion = { membershipEmail: { perApplicationAmount: PER_VISIT }, recurringScheduleCheck: { ok: true, gaps: [] } };
+      // The card showed a terms warning that the accept's own locked row no longer reads: nothing is priced.
+      await expect(run(conversion, { ...shownPlan, notesKey: JSON.stringify([true, null]) })).rejects.toMatchObject({ phoneYesRefusal: 'changed_since_check' });
       // The converter's own check found the plan short of visits (or could not run): nothing is priced.
       await expect(run({ ...conversion, recurringScheduleCheck: { ok: false, gaps: [{ kind: 'missing_application' }] } }))
         .rejects.toMatchObject({ phoneYesRefusal: 'series_incomplete' });
