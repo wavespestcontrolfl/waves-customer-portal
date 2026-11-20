@@ -155,7 +155,7 @@ describe('buildCallIntelligence', () => {
 describe('describeProcessing — honest phases', () => {
   const base = { recording_url: 'https://api.twilio.com/x.mp3', recording_duration_seconds: 45, extraction_attempts: 0 };
   const PAN_ONLY = { recording_url: null, recording_duration_seconds: 4, transcription: '[masked]', transcription_metadata: JSON.stringify({ pan_detected: true }) };
-  const NO_RECORDING = { recording_url: null, recording_duration_seconds: null, direction: 'inbound', status: 'completed', duration_seconds: 40, created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString() };
+  const NO_RECORDING = { twilio_call_sid: 'CA' + '0'.repeat(32), recording_url: null, recording_duration_seconds: null, direction: 'inbound', status: 'completed', duration_seconds: 40, created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString() };
   test.each([
     [{ processing_status: null }, 'queued', false],
     [{ processing_status: null, recording_url: null }, 'waiting_for_recording', false],
@@ -179,6 +179,7 @@ describe('describeProcessing — honest phases', () => {
     [{ processing_status: 'no_transcription', ...NO_RECORDING, duration_seconds: 8 }, 'failed', false],
     [{ processing_status: 'no_transcription', ...NO_RECORDING, created_at: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString() }, 'failed', false],
     [{ processing_status: 'no_transcription', ...NO_RECORDING, source: 'tech_voice' }, 'failed', false],
+    [{ processing_status: 'no_transcription', ...NO_RECORDING, twilio_call_sid: null }, 'failed', false],
     [{ processing_status: 'no_transcription', recording_url: null }, 'failed', false],
     [{ processing_status: 'extraction_failed', extraction_attempts: 3 }, 'failed', false],
     // Older than the sweep's retry window: no automatic retry is coming (codex gh-r9 P2).
@@ -221,6 +222,7 @@ describe('describeProcessing — honest phases', () => {
     const start = src.indexOf('  async recoverMissingRecentRecordings() {');
     const recovery = src.slice(start, src.indexOf('.limit(25);', start));
     expect(recovery).toContain('whereNotSandboxCall(qb)');
+    expect(recovery).toContain(".whereNotNull('twilio_call_sid')");
     expect(recovery).toContain(".where({ direction: 'inbound', status: 'completed' })");
     expect(recovery).toContain(".where('created_at', '>=', db.raw(\"NOW() - INTERVAL '7 days'\"))");
     expect(recovery).toContain(".where('duration_seconds', '>', 10);");

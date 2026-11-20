@@ -16,9 +16,8 @@ const EXTRACTION_RETRY_WINDOW_DAYS = 7;
 // call that ended during a deploy (often a cancel) still gets its transcript.
 // Every other state keeps the 10-second floor, gate on or off: a short call
 // that ended in no_transcription or extraction_failed is not retried, and a
-// finished one is not run again. So the gate adds no retries, and a reader
-// that judges a retry by the attempt cap alone (callback reconciliation, the
-// estimate guard) meets no new state.
+// finished one is not run again. So the gate adds no retries; such a short
+// retry state is settled below the attempt cap (shortRetrySettled, below).
 // Every reader that mirrors the sweep's eligibility (getStats, the stall
 // watchdog, the ops queue, the agent-control run list) uses this rule, so
 // none of them can disagree with the sweep. Callers keep their own
@@ -62,6 +61,44 @@ function sweepLengthOk(row, now = Date.now()) {
   return Number.isFinite(created) && created > new Date(now).getTime() - SHORT_RECORDING_SWEEP_HOURS * 3600 * 1000;
 }
 
+// A retry state (no_transcription / extraction_failed) on a recording of
+// 10 s or less, not PAN-quarantined, is SETTLED below the attempt cap: the
+// sweep keeps its floor for retry states, gate on or off, and recording
+// recovery and the live-text pass take only calls with no recording. No pass
+// revisits it unless someone reprocesses it, and that claim is in flight
+// again. Readers that judge "still retrying" by the cap and the 7-day window
+// read it as settled too: the estimate guard (callReprocessInFlight), the
+// callback reconciliation (call-commitments' exhaustedExtractionSql) and the
+// promise-chaser bell, so a linked estimate, a parent's cards or a chaser
+// alert never wait on a retry that will not come (pre-push Codex P1, round 7).
+// Every JS caller selects processing_status and SHORT_RETRY_COLUMNS.
+const SHORT_RETRY_COLUMNS = ['recording_url', 'recording_duration_seconds', 'duration_seconds', 'transcription_metadata'];
+const RETRY_STATES = ['no_transcription', 'extraction_failed'];
+
+// One call_log row. Fails closed: a row read without processing_status or
+// SHORT_RETRY_COLUMNS is never settled by this rule.
+function shortRetrySettled(row) {
+  const read = (c) => row != null && Object.prototype.hasOwnProperty.call(row, c);
+  if (!read('processing_status') || !SHORT_RETRY_COLUMNS.every(read)) return false;
+  if (!RETRY_STATES.includes(row.processing_status) || !String(row.recording_url || '').trim()) return false;
+  let meta = row.transcription_metadata;
+  try {
+    if (typeof meta === 'string') meta = JSON.parse(meta);
+  } catch {
+    meta = null;
+  }
+  if (String(meta?.pan_detected) === 'true') return false;
+  return (Number(row.recording_duration_seconds ?? row.duration_seconds ?? 0) || 0) <= SWEEP_MIN_SECONDS;
+}
+
+// The SQL twin, over a call_log alias (the table itself by default).
+function shortRetrySettledSql(t = 'call_log') {
+  return `(${t}.processing_status IN (${RETRY_STATES.map((s) => `'${s}'`).join(', ')})`
+    + ` AND NULLIF(btrim(${t}.recording_url), '') IS NOT NULL`
+    + ` AND COALESCE(${t}.recording_duration_seconds, ${t}.duration_seconds, 0) <= ${SWEEP_MIN_SECONDS}`
+    + ` AND (${t}.transcription_metadata::jsonb ->> 'pan_detected') IS DISTINCT FROM 'true')`;
+}
+
 module.exports = {
   CALL_EXTRACTION_MAX_ATTEMPTS,
   EXTRACTION_RETRY_WINDOW_DAYS,
@@ -70,4 +107,7 @@ module.exports = {
   sweepLengthSql,
   failureReportLengthSql,
   sweepLengthOk,
+  SHORT_RETRY_COLUMNS,
+  shortRetrySettled,
+  shortRetrySettledSql,
 };

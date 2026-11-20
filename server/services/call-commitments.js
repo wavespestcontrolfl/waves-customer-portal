@@ -2266,16 +2266,18 @@ const RETRYABLE_PARENT_STATUSES = ["pending", "processing", "extraction_failed",
 // SQL twin over a call_log alias, for the lapse scan (constants inlined: the
 // scan's raw query binds by position).
 // An extraction_failed row the sweep no longer retries (config/call-extraction-retry:
-// attempts at the cap, or older than the window) is SETTLED, not spam: no pass
-// will ever say spam about it, so nothing it settled may wait on one.
+// attempts at the cap, or older than the window, or a recording of 10 s or less)
+// is SETTLED, not spam: no pass will ever say spam about it, so nothing it
+// settled may wait on one.
 const exhaustedExtractionSql = (t) => {
-  const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS } = require("../config/call-extraction-retry");
+  const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS, shortRetrySettledSql } = require("../config/call-extraction-retry");
   // Mirrors pendingCandidatesQuery: an extraction_failed row retries under the
   // attempt cap inside the 7-day creation window; a no_transcription row
   // retries under the cap with no window (adoption resets the count). Past
-  // either, no pass revisits the row.
+  // either, no pass revisits the row; nor does it a retry state on a
+  // recording of 10 s or less, which keeps the sweep's floor (pre-push Codex P1).
   const atCap = `COALESCE(${t}.extraction_attempts, 0) >= ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)}`;
-  return `((${t}.processing_status = 'extraction_failed' AND (${atCap} OR ${t}.created_at < now() - interval '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days')) OR (${t}.processing_status = 'no_transcription' AND ${atCap}))`;
+  return `((${t}.processing_status = 'extraction_failed' AND (${atCap} OR ${t}.created_at < now() - interval '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days')) OR (${t}.processing_status = 'no_transcription' AND ${atCap}) OR ${shortRetrySettledSql(t)})`;
 };
 // POSITIVE proof (the office returned the call, a conversation connected):
 // a genuinely processed call only. An exhausted failure is never evidence of

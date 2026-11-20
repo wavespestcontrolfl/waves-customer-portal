@@ -29,14 +29,14 @@ function addressText(addr) {
 
 // Recording recovery (recoverMissingRecentRecordings in
 // call-recording-processor.js) looks a missing recording up at Twilio only
-// for an answered inbound call over 10 s, under 7 days old, that is not an
-// internal call; a test pins this twin to that query.
+// for an answered inbound call with a Twilio call SID, over 10 s, under 7
+// days old, that is not an internal call; a test pins this twin to that query.
 // GATE_LIVE_CALL_BACKUP_TRANSCRIPT's live-text pass works only from that
 // lookup's misses.
 const LOOKUP_MIN_SECONDS = 10;
 const LOOKUP_MAX_AGE_DAYS = 7;
 function recordingLookupOwed(call, now = Date.now()) {
-  return call.direction === 'inbound' && call.status === 'completed' && !isInternalCallSource(call.source)
+  return !!call.twilio_call_sid && call.direction === 'inbound' && call.status === 'completed' && !isInternalCallSource(call.source)
     && Number(call.duration_seconds) > LOOKUP_MIN_SECONDS
     // No creation time is never inside the window (NaN compares false).
     && now - Date.parse(call.created_at) < LOOKUP_MAX_AGE_DAYS * 864e5;

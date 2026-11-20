@@ -103,6 +103,82 @@ describe('the sweep length rule', () => {
   });
 });
 
+// A short call's failed retry state is never retried (the sweep keeps its floor for retry states, gate on or off;
+// recording recovery and the live-text pass take only calls with no recording). Readers that judged "still
+// retrying" by the attempt cap alone read it as settled now (pre-push Codex P1, round 7): the estimate guard,
+// so a linked estimate is not blocked for good, and the callback reconciliation.
+describe('a short call\'s failed retry state is settled below the attempt cap', () => {
+  const { shortRetrySettled, SHORT_RETRY_COLUMNS } = require('../config/call-extraction-retry');
+  const { callReprocessInFlight } = require('../utils/estimate-claim-sql');
+  const row = (over = {}) => ({
+    processing_status: 'no_transcription', processing_token: null, extraction_attempts: 1, created_at: new Date().toISOString(),
+    recording_url: 'https://api.twilio.com/x.mp3', recording_duration_seconds: 8, duration_seconds: 29, transcription_metadata: null,
+    ...over,
+  });
+
+  test('gate on or off: a recorded retry state of 10 s or less is settled; over 10 s, PAN, no recording or another state is not', async () => {
+    for (const value of [undefined, 'true']) {
+      await withGate(value, () => {
+        expect(shortRetrySettled(row())).toBe(true);
+        expect(shortRetrySettled(row({ processing_status: 'extraction_failed' }))).toBe(true);
+        expect(shortRetrySettled(row({ recording_duration_seconds: 10 }))).toBe(true);
+        expect(shortRetrySettled(row({ recording_duration_seconds: 11 }))).toBe(false);
+        // COALESCE semantics, as in the sweep: no recorded length falls back to the call's.
+        expect(shortRetrySettled(row({ recording_duration_seconds: null, duration_seconds: 40 }))).toBe(false);
+        expect(shortRetrySettled(row({ transcription_metadata: JSON.stringify({ pan_detected: true }) }))).toBe(false);
+        expect(shortRetrySettled(row({ recording_url: ' ' }))).toBe(false);
+        expect(shortRetrySettled(row({ processing_status: 'processed' }))).toBe(false);
+        expect(shortRetrySettled(row({ processing_status: null }))).toBe(false);
+      });
+    }
+  });
+
+  test('fails closed: a row read without the columns the rule needs is never settled by it', () => {
+    for (const column of ['processing_status', ...SHORT_RETRY_COLUMNS]) {
+      const unread = row();
+      delete unread[column];
+      expect(shortRetrySettled(unread)).toBe(false);
+    }
+  });
+
+  test('the estimate guard: a short failed retry no longer holds its estimate; an active claim, a long or PAN retry, or an unread row still does', () => {
+    expect(callReprocessInFlight(row())).toBe(false);
+    expect(callReprocessInFlight(row({ processing_status: 'extraction_failed' }))).toBe(false);
+    expect(callReprocessInFlight(row({ processing_token: 'pass-token' }))).toBe(true);
+    expect(callReprocessInFlight(row({ recording_duration_seconds: 45 }))).toBe(true);
+    expect(callReprocessInFlight(row({ transcription_metadata: { pan_detected: true } }))).toBe(true);
+    const unread = row();
+    delete unread.recording_url;
+    expect(callReprocessInFlight(unread)).toBe(true);
+  });
+
+  test('the guard\'s own reads load the columns the rule reads: the send guard, its list form, the settled generation', async () => {
+    const { callSideBlockForEstimateData, callSideBlocksForEstimates, settledCallGeneration } = require('../utils/estimate-claim-sql');
+    // A fake knex that returns ONLY the selected columns, as Postgres does: a read that leaves a column out fails closed.
+    const fakeDb = (callRow) => () => {
+      const pick = (cols) => Object.fromEntries(cols.filter((c) => c in callRow).map((c) => [c, callRow[c]]));
+      const q = { where: () => q, whereIn: () => q, first: async (...cols) => pick(cols), select: async (...cols) => [pick(cols)] };
+      return q;
+    };
+    const data = { estimatorEngine: { callLogId: 'call-1' } };
+    const full = (over) => ({ id: 'call-1', metadata: null, twilio_call_sid: `CA${'f'.repeat(32)}`, processing_generation: 4, ...row(over) });
+    for (const [callRow, blocked] of [[full({}), false], [full({ recording_duration_seconds: 45 }), true]]) {
+      const dbc = fakeDb(callRow);
+      expect(await callSideBlockForEstimateData(dbc, data)).toBe(blocked ? 'call_reprocessing' : null);
+      expect((await callSideBlocksForEstimates(dbc, [{ id: 'est-1', status: 'draft', data }])).get('est-1')).toBe(blocked ? 'call_reprocessing' : undefined);
+      expect(await settledCallGeneration(dbc, 'call-1')).toBe(blocked ? null : 4);
+    }
+  });
+
+  test('every other estimate-guard call site loads the columns the rule reads', () => {
+    const fs = require('fs');
+    for (const file of ['../services/admin-estimate-persistence', '../services/estimator-engine/index']) {
+      const src = fs.readFileSync(require.resolve(file), 'utf8');
+      expect(src.split('SHORT_RETRY_COLUMNS);').length).toBe(src.split('callReprocessInFlight(').length);
+    }
+  });
+});
+
 describe('the sweep query text', () => {
   let processor;
   let db;
@@ -268,6 +344,23 @@ maybeDescribe('the sweep picks up a short call a deploy stranded (live Postgres)
         expect(out).toMatchObject({ success: false, skipped: true });
         const row = await db('call_log').where({ twilio_call_sid: target }).first('processing_status', 'processing_token');
         expect(row).toEqual({ processing_status: 'voicemail', processing_token: null });
+      });
+    }
+  });
+
+  test('the callback reconciliation and the estimate guard read a short failed retry as settled, gate on or off', async () => {
+    const { exhaustedExtractionSql } = require('../services/call-commitments');
+    const { SHORT_RETRY_COLUMNS } = require('../config/call-extraction-retry');
+    const { callReprocessInFlight } = require('../utils/estimate-claim-sql');
+    for (const value of [undefined, 'true']) {
+      await withGate(value, async () => {
+        const settled = await db('call_log').whereIn('twilio_call_sid', ALL_SIDS).whereRaw(exhaustedExtractionSql('call_log')).pluck('twilio_call_sid');
+        // The 8 s retry under the cap joins the two at the cap; the quarantined retry (no floor) stays open.
+        expect(settled.sort()).toEqual([SID_SHORT_AT_CAP, SID_SHORT_RETRY, SID_LONG_AT_CAP].sort());
+        const read = (sid) => db('call_log').where({ twilio_call_sid: sid })
+          .first('processing_token', 'processing_status', 'extraction_attempts', 'created_at', ...SHORT_RETRY_COLUMNS);
+        expect(callReprocessInFlight(await read(SID_SHORT_RETRY))).toBe(false);
+        expect(callReprocessInFlight(await read(SID_PAN_RETRY))).toBe(true);
       });
     }
   });

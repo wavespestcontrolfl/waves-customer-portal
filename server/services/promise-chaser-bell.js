@@ -684,7 +684,7 @@ async function sweepPromiseChasers({ pageSize = 200 } = {}) {
   // cross-file reuse in this sweep (notification-triggers.js, below) is
   // lazy for the same reason. Cached by Node after the first tick either way.
   const settledStatuses = [...require('./call-recording-processor').COMPLETED_STATUSES];
-  const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
+  const { CALL_EXTRACTION_MAX_ATTEMPTS, shortRetrySettledSql } = require('../config/call-extraction-retry');
   let rang = 0;
   let cursor = null;
   for (;;) {
@@ -732,9 +732,13 @@ async function sweepPromiseChasers({ pageSize = 200 } = {}) {
       // time valve (Codex #5019 r20 P2): every other unfinished state can
       // still be retried and keep the promise, so it never rings.
       // no_transcription shares the cap (codex #6271 r39/r51): at the cap the
-      // sweep retries neither lane, so both rows are settled.
+      // sweep retries neither lane, so both rows are settled. So is either
+      // lane on a recording of 10 s or less, below the cap: the sweep never
+      // retries it (config/call-extraction-retry, shortRetrySettledSql; its
+      // default alias is this query's table).
       .whereRaw(`(processing_status IN (${settledStatuses.map(() => '?').join(', ')})
-        OR (processing_status IN ('extraction_failed', 'no_transcription') AND COALESCE(extraction_attempts, 0) >= ?))`,
+        OR (processing_status IN ('extraction_failed', 'no_transcription') AND COALESCE(extraction_attempts, 0) >= ?)
+        OR ${shortRetrySettledSql()})`,
         [...settledStatuses, CALL_EXTRACTION_MAX_ATTEMPTS])
       // Eligibility, not the window, is what keeps a dark-period call from
       // ringing (see module docstring) — a call the /voice webhook did not

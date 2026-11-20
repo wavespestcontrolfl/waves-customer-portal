@@ -40,7 +40,7 @@ const OWED_READ_HOURS = 2;
 // A call that still owes a read: one not in a final state whose row changed in the last OWED_READ_HOURS. Final: read
 // ('processed'), judged not a conversation ('voicemail', 'spam'), or a failed read no pass revisits (call-commitments'
 // exhaustedExtractionSql: a failed extraction at its retry cap or past its 7-day creation window, a missing transcript
-// at its cap). The row's last change is its insert, a
+// at its cap, or either on a recording of 10 s or less). The row's last change is its insert, a
 // claim, the heartbeat a running pass writes every minute (processing_heartbeat_at only), or replaced audio (the
 // recording webhook sets the status back to NULL and bumps updated_at), so a long read and an old call with new audio
 // are waited for too. Bounded in time on purpose, so no processor path is copied here: a row no pass will finish (a
