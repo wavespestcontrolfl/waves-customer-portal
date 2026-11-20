@@ -40,6 +40,9 @@ const { validateNewsletterDraft } = require('../newsletter-validator');
 // switch and the validator's claim rules all key on it.
 const NEWSLETTER_TYPE = 'pest-insider-monthly';
 
+// A planned item's id for the diagnostics, or null when the plan has none.
+const idOrNull = (item, key) => (item ? item[key] : null);
+
 const copyFailReason = (copy) => `copy_check_failed: ${copy.problems.map((p) => `${p.part}: ${p.reason}`).join('; ')}`;
 
 // The send validator itself, on the issue as rendered. It reads the whole
@@ -74,10 +77,9 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFact
     liveToolUrls,
     recentToolIds: recent.toolIds || [],
   });
-  const toolId = tool ? tool.productId : null;
-  diagnostics.factId = leadFact ? leadFact.id : null;
-  diagnostics.speciesSlug = idItem ? idItem.slug : null;
-  diagnostics.toolId = toolId;
+  diagnostics.factId = idOrNull(leadFact, 'id');
+  diagnostics.speciesSlug = idOrNull(idItem, 'slug');
+  diagnostics.toolId = idOrNull(tool, 'productId');
   if (!leadFact || !idItem) return { ok: false, reason, issue: null, diagnostics };
   if (leadFact.recheck_before_send && !recheckedFactIds.includes(leadFact.id)) {
     return { ok: false, reason: `recheck_needed: ${leadFact.id}`, issue: null, diagnostics };
@@ -90,7 +92,7 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFact
   }
   // The same for the tool: the planner picks only a tool whose link is live.
   if (tool && !liveToolUrls.includes(tool.url)) {
-    return { ok: false, reason: `no_live_tool: ${toolId}`, issue: null, diagnostics };
+    return { ok: false, reason: `no_live_tool: ${tool.productId}`, issue: null, diagnostics };
   }
 
   const copy = checkIssueCopy({ leadFact, species: idItem });

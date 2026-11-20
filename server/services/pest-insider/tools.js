@@ -65,9 +65,11 @@ function entryProblem(entry, counts) {
   const { name } = entry;
   if (typeof name !== 'string' || !NAME.test(name) || bannedReason(name)) return 'name must be a plain generic name in sentence case ("Rain gauge")';
   if (salesWordProblem(name)) return `name has ${salesWordProblem(name)}`;
-  if (!Array.isArray(entry.lines) || entry.lines.length < 1 || entry.lines.length > 2) return 'needs 1 or 2 lines';
+  if (!Array.isArray(entry.lines) || ![1, 2].includes(entry.lines.length)) return 'needs 1 or 2 lines';
   for (const line of entry.lines) {
-    if (typeof line !== 'string' || !line.trim() || line !== line.trim() || /[\r\n]/.test(line)) return 'each line must be one trimmed line of text';
+    // toolLineProblem's plain-sentence rule refuses a blank, untrimmed or
+    // two-line string.
+    if (typeof line !== 'string') return 'each line must be text';
     const reason = toolLineProblem(line, { name });
     if (reason) return `line "${line}": ${reason}`;
   }
