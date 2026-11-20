@@ -358,45 +358,57 @@ describe('syncRestaurantProspects', () => {
     expect(result.files).toMatchObject({ inspection: { failed: true }, new_license: { kept: 1 }, owner_change: { kept: 1 } });
   });
 
-  const visitsCsv = (count) => inspCsv(Array.from({ length: count }, (_, i) => inspRow({ visit: String(9001 + i) })));
+  const visitsCsv = (count, date) => inspCsv(Array.from({ length: count }, (_, i) => inspRow({ visit: String(9001 + i), date })));
 
-  test('a read with under 90% of the rows of the last complete read is short: its rows go in and the run fails', async () => {
+  test('a read with under 90% of the rows of the fullest complete read is short, every run until a full file comes back', async () => {
     store = makeStore();
     reads.inspection = { fiscalYear: '2026-07-01', rows: 20 };
     // 17 rows, every one whole: a download that stopped early on a row end.
     fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(17) });
-    const result = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2026-11-19T15:36:00Z') });
+    const result = await svc.syncRestaurantProspects({ fetchText, store });
     expect(result.files.inspection).toEqual({ kept: 17, malformed: 0, upserted: 17, short: true });
     expect(result.failures).toBe(1);
-    expect(logger.warn).toHaveBeenCalledWith('[dbpr-prospects] inspection file is short: 17 rows, the last complete read had 20');
-    // The short read is the measure for the next one, so rows the state withdrew fail one run at most.
-    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 17 });
-    const next = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2026-11-26T15:36:00Z') });
-    expect(next.failures).toBe(0);
+    expect(logger.warn).toHaveBeenCalledWith('[dbpr-prospects] inspection file is short: 17 rows, the fullest complete read had 20');
+    // A short read never becomes the measure: the same cut fails again.
+    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 20 });
+    expect((await svc.syncRestaurantProspects({ fetchText, store })).files.inspection.short).toBe(true);
+    // A full file passes and moves the measure up.
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(22) });
+    expect((await svc.syncRestaurantProspects({ fetchText, store })).failures).toBe(0);
+    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 22 });
   });
 
-  test('90% passes and every row counts, kept or not; a new fiscal year and under 20 rows are not checked', async () => {
+  test('90% passes without lowering the measure, and every row counts, kept or not', async () => {
     store = makeStore();
     reads.inspection = { fiscalYear: '2026-07-01', rows: 20 };
     // 18 rows: 2 kept, 16 outside the area.
     const rows = Array.from({ length: 18 }, (_, i) => inspRow({ visit: String(9001 + i), county: i < 2 ? 'Manatee' : 'Hillsborough' }));
     fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv(rows) });
-    let result = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2026-11-19T15:36:00Z') });
+    const result = await svc.syncRestaurantProspects({ fetchText, store });
     expect(result.files.inspection).toEqual({ kept: 2, malformed: 0, upserted: 2 });
-    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 18 });
-    // July 8: a new fiscal year. Its 3 rows are not measured against the 18 of the year before.
-    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(3) });
-    result = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2027-07-08T15:36:00Z') });
-    expect(result.files.inspection).toEqual({ kept: 3, malformed: 0, upserted: 3 });
-    expect(reads.inspection).toEqual({ fiscalYear: '2027-07-01', rows: 3 });
-    // Under 20 rows in the last read: 1 row after 19 is not checked.
-    reads.inspection = { fiscalYear: '2027-07-01', rows: 19 };
-    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(1) });
-    result = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2027-07-15T15:36:00Z') });
-    expect(result.files.inspection).toEqual({ kept: 1, malformed: 0, upserted: 1 });
+    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 20 });
   });
 
-  test('a read is saved only after every row is stored: a failed write keeps the last complete read', async () => {
+  test('a read belongs to the fiscal year of its rows: a late file is last year\'s, a file started over is measured afresh', async () => {
+    store = makeStore();
+    reads.inspection = { fiscalYear: '2026-07-01', rows: 20 };
+    // July 6, 2027, and the state has not started the file over: its rows are last year's, one stray date aside.
+    const late = [...Array.from({ length: 19 }, (_, i) => inspRow({ visit: String(9001 + i), date: '06/28/2027' })), inspRow({ visit: '9101', date: '07/02/2027' })];
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv(late) });
+    expect((await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2027-07-06T15:36:00Z') })).failures).toBe(0);
+    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 20 });
+    // Started over: 3 rows of the new year are its first measure, not a short read.
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(3, '07/06/2027') });
+    const restarted = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2027-07-13T15:36:00Z') });
+    expect(restarted.files.inspection).toEqual({ kept: 3, malformed: 0, upserted: 3 });
+    expect(reads.inspection).toEqual({ fiscalYear: '2027-07-01', rows: 3 });
+    // Under 20 rows in the measure the check waits: 1 row after 19 passes.
+    reads.inspection = { fiscalYear: '2027-07-01', rows: 19 };
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(1, '07/06/2027') });
+    expect((await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2027-07-20T15:36:00Z') })).failures).toBe(0);
+  });
+
+  test('a read is saved only after every row is stored: a failed write keeps the measure', async () => {
     store = makeStore();
     reads.inspection = { fiscalYear: '2026-07-01', rows: 20 };
     // The inspection rows fail to store; the other two files store.
@@ -404,22 +416,13 @@ describe('syncRestaurantProspects', () => {
       if (records.some((record) => record.kind === 'inspection')) throw new Error('connection lost');
       return records.length;
     });
-    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(5) });
-    const result = await svc.syncRestaurantProspects({ fetchText, store, now: new Date('2026-11-19T15:36:00Z') });
+    // 22 rows: a full read, so only the failed write keeps it from becoming the measure.
+    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(22) });
+    const result = await svc.syncRestaurantProspects({ fetchText, store });
     expect(result.files.inspection).toEqual({ failed: true });
     expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 20 });
     expect(store.saveRead).not.toHaveBeenCalledWith('inspection', expect.anything());
-  });
-
-  test.each([
-    ['2026-07-01T03:59:00Z', '2025-07-01'], // 11:59 PM on June 30, Eastern
-    ['2026-07-01T04:00:00Z', '2026-07-01'],
-    ['2027-03-01T15:00:00Z', '2026-07-01'],
-  ])('at %s a read belongs to the fiscal year from %s', async (now, fiscalYear) => {
-    store = makeStore();
-    fetchText = makeFetch();
-    await svc.syncRestaurantProspects({ fetchText, store, now: new Date(now) });
-    expect(store.saveRead.mock.calls.map(([, read]) => read.fiscalYear)).toEqual([fiscalYear, fiscalYear, fiscalYear]);
+    expect(store.saveRead).toHaveBeenCalledWith('new_license', { fiscalYear: '2026-07-01', rows: 1 });
   });
 
   test('a license row with a cell added or lost is malformed; the usual 36 cells and a full 38 load', async () => {
