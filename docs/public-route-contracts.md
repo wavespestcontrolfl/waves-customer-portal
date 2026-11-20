@@ -4655,7 +4655,16 @@ still sends the reader to the event. The per-IP over-budget path records
 nothing and applies the same rules. Gate off = the behaviour
 above this note, unchanged)
 — rate-limited, read-only for posts/rss,
-double-opt-in for subscribe (the response is unchanged and uniform; `source` is free text,
+double-opt-in for subscribe (the response is unchanged and uniform; `source` is free text.
+Bot check first (`server/services/newsletter-signup-screen.js`, owner 2026-11-20): a body whose
+`website` (the website form's hidden field) is anything but absent, null or blank text; a body with
+source `astro-website` or `out_of_area_waitlist` (the astro `NewsletterSignup` form) whose `formMs`
+(ms from the form appearing to the submit) is present but not a number or under 1000; or such a body
+with no `formMs` whose Origin header is not on the CORS allowlist (`config/cors-origins.js`; forms
+built before the check send no `formMs`, and a browser on a fleet page always sends its Origin)
+writes no row, sends no email, logs one line with the reason and the known source only (never the
+address), and answers the same `{ success: true, pending: true }`; every other source needs no
+`formMs`;
 and ONLY `source: "out_of_area_waitlist"` also reads the optional body `zip` / `city`
 strings (newer sites; they win) and the optional `tags` array (older sites send only
 `["out_of_area_waitlist", "zip:NNNNN", "city:slug"]`), keeping at most one `zip:` tag that is exactly 5 digits and one `city:` tag normalized to a

@@ -22,6 +22,7 @@ const {
   WAITLIST_SOURCE, applyWaitlistTags,
 } = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
+const { screenPublicSignup, sourceLabel } = require('../services/newsletter-signup-screen');
 const AutomationRunner = require('../services/automation-runner');
 const { resolveAnswer, recordQuizResponse, getQuiz, quizBookingUrl } = require('../services/newsletter-quiz');
 const {
@@ -437,8 +438,19 @@ router.post('/feedback/:token/:reaction', feedbackLimiter, async (req, res) => {
 // Layered rate-limited: global /api/ limiter (index.js) plus the per-IP
 // subscribeLimiter above to cap signup-spam without affecting other
 // public endpoints.
+//
+// Bot check (services/newsletter-signup-screen.js): a signup that fills the
+// website form's hidden field, a website-form signup with too-short form
+// timing, or one with no form timing that does not come from a fleet page's
+// browser (Origin), is dropped before any row or email. It gets the same
+// answer as a real signup so a bot cannot tell.
 router.post('/subscribe', subscribeLimiter, async (req, res) => {
   try {
+    const screen = screenPublicSignup(req.body, { origin: req.headers?.origin });
+    if (screen.drop) {
+      logger.info(`[newsletter] public signup dropped reason=${screen.reason} source=${sourceLabel(req.body)}`);
+      return res.json({ success: true, pending: true });
+    }
     const result = await subscribeOrResubscribe({
       email: req.body.email,
       firstName: req.body.firstName || null,
