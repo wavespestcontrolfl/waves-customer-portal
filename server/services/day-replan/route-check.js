@@ -487,14 +487,15 @@ async function measureOne(conn, env, { day, techId, rows, occupancy }) {
  * that day. A run on another ET day than the wall clock's (a test or replay clock, a run that crossed midnight) gets no
  * decision: 'unknown', reason 'other_day', with no ask.
  * The asks carry their own label (PROBE_SURFACE): the customer route check logs them apart from customer searches.
- * Openings only. The asks take no fallback list (`verifiedOnly`): where /book would serve a list it could not check (a
- * failed occupancy read; a customer route check that failed, ran out of time or could not score a route), the ask
- * throws and the zone has no answer. The crew's ask keeps no floor: the customer route check keeps a whole week when
- * none of its slots survive, but over the crew's slots that is not /book's floor. So when the crew has no slot, the
- * zone also asks /book's own pool (no crew): if /book's check would keep its whole week (every slot in it would make a
- * customer late, and /book shows them anyway), that ask throws and the zone has no answer; else the crew's zero
- * stands. A crew slot needs no such ask: /book offers that start either way (its own pick there is the same
- * technician, or one with no stop that day, whom the check never removes).
+ * Openings only. The asks take no fallback list (`verifiedOnly`): where /book would serve a list it could not check (an
+ * unreadable closed-day list, service-line map or territory; a failed occupancy read; a customer route check that
+ * failed, ran out of time or could not score a route), the ask throws and the zone has no answer. The crew's ask keeps
+ * no floor: the customer route check keeps a whole week when none of its slots survive, but over the crew's slots that
+ * is not /book's floor. So when the crew has no slot, the zone also asks /book's own pool (no crew): if /book's check
+ * would keep its whole week (every slot in it would make a customer late, and /book shows them anyway), that ask
+ * throws and the zone has no answer. Else its starts from a day's crew count as the crew's do (one can open between
+ * the two reads), and with none the crew's zero stands. A crew slot needs no such ask: /book offers that start either
+ * way (its own pick there is the same technician, or one with no stop that day, whom the check never removes).
  * Shadow only: nothing reads the decision, no budget changes, nothing is held, and nothing is paid for (paidLookups
  * false buys no road lookup and reads no forecast; a zone center is a pin, so nothing is geocoded). Under capacity
  * routing /book itself buys road times, so there the answer is the free drive model's (`travel: 'modeled'`): a
@@ -515,24 +516,33 @@ async function decideSlotRule({ now, dates, crew }) {
   for (const zone of zones) {
     const byDate = {};
     let first = null;
-    try {
-      const ask = (extra) => availabilityForPin({
-        lat: zone.center_lat, lng: zone.center_lng, serviceKey: STANDARD_SERVICE_KEY, paidLookups: false,
-        through: dates[dates.length - 1], now, surface: PROBE_SURFACE, verifiedOnly: true, ...extra,
-      });
-      const offer = await ask({ crew });
-      if (!offer) throw new Error('no_offer');
+    // An offer's starts per date from that date's crew; a date with no known crew counts nothing (null).
+    const tally = (offer) => {
       for (const day of dates) {
-        if (!crew.get(day)) {
+        const works = crew.get(day);
+        if (!works) {
           byDate[day] = null;
           continue;
         }
-        const starts = (offer.days.find((d) => d.date === day)?.slots || []).map((s) => s.start_time).sort();
+        const starts = (offer.days.find((d) => d.date === day)?.slots || [])
+          .filter((s) => works.has(String(s.technician_id))).map((s) => s.start_time).sort();
         byDate[day] = starts.length;
         first ||= starts.length ? `${day} ${starts[0]}` : null;
       }
-      // No crew slot: /book's own pool says whether its check would keep the whole week (the ask throws).
-      if (!first && !(await ask({}))) throw new Error('no_offer');
+    };
+    try {
+      const ask = async (extra) => {
+        const offer = await availabilityForPin({
+          lat: zone.center_lat, lng: zone.center_lng, serviceKey: STANDARD_SERVICE_KEY, paidLookups: false,
+          through: dates[dates.length - 1], now, surface: PROBE_SURFACE, verifiedOnly: true, ...extra,
+        });
+        if (!offer) throw new Error('no_offer');
+        return offer;
+      };
+      tally(await ask({ crew }));
+      // No crew slot: /book's own pool says whether its check would keep the whole week (the ask throws), and a crew
+      // start it offers (one that opened between the two reads) counts.
+      if (!first) tally(await ask({}));
       asked.push({ zone: zone.zone_name, byDate, first });
     } catch (err) {
       asked.push({ zone: zone.zone_name, byDate, first: null, error: String(err.message).slice(0, 200) });
