@@ -193,6 +193,36 @@ describe("A different customer or lead link clears the roof style, even with the
     expect(screen.getByRole("textbox", { name: "Service address" })).toHaveValue(ADDRESS);
   }, 30000);
 
+  it("picking the SAME customer or lead again keeps the pick and the feet", async () => {
+    const { container } = await openWithPick("Jamie");
+    fireEvent.click(await screen.findByRole("button", { name: /Jamie Fixture/ }));
+    await waitFor(() => expect(container.querySelector("#estimate-exclRoofStyle").value).toBe(""));
+    const pickAgain = () => {
+      fireEvent.change(container.querySelector("#estimate-exclRoofStyle"), { target: { value: "barrel_tile" } });
+      fireEvent.change(container.querySelector("#estimate-exclBarrelEaveFt"), { target: { value: "40" } });
+    };
+    pickAgain();
+    // The customer picker, same customer again.
+    fireEvent.change(screen.getByRole("textbox", { name: /Search customers/ }), { target: { value: "Jamie F" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Jamie Fixture/ }));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: /Search customers/ })).toHaveValue(""));
+    expect(container.querySelector("#estimate-exclRoofStyle").value).toBe("barrel_tile");
+    expect(container.querySelector("#estimate-exclBarrelEaveFt").value).toBe("40");
+  }, 30000);
+
+  it("the lead picker keeps the pick for the same lead and clears it for another", async () => {
+    const { container } = await openWithPick("Dana");
+    fireEvent.click(await screen.findByRole("button", { name: /Dana Sample.*Lead/ }));
+    await waitFor(() => expect(container.querySelector("#estimate-exclRoofStyle").value).toBe(""));
+    fireEvent.change(container.querySelector("#estimate-exclRoofStyle"), { target: { value: "barrel_tile" } });
+    fireEvent.change(container.querySelector("#estimate-exclBarrelEaveFt"), { target: { value: "40" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /Search customers/ }), { target: { value: "Dana S" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Dana Sample.*Lead/ }));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: /Search customers/ })).toHaveValue(""));
+    expect(container.querySelector("#estimate-exclRoofStyle").value).toBe("barrel_tile");
+    expect(container.querySelector("#estimate-exclBarrelEaveFt").value).toBe("40");
+  }, 30000);
+
   it("a new lead with no address clears the pick and the feet", async () => {
     const { container } = await openWithPick("Dana");
     fireEvent.click(await screen.findByRole("button", { name: /Dana Sample.*Lead/ }));

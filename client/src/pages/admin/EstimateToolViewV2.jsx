@@ -3128,7 +3128,8 @@ export default function EstimateToolViewV2({
       customerId: c.id || "",
       propertyId: "",
       // A different link is a different home: the roof style and eave feet were confirmed for the old one, address or not.
-      ...roofStyleReset(),
+      // Picking the SAME customer again keeps them.
+      ...((c.id || "") !== f.customerId ? roofStyleReset() : {}),
       ...(adoptAddress
         ? { ...(c.address && c.address !== f.address ? clearedPropertyFields() : {}), address: c.address || f.address }
         : {}),
@@ -3173,7 +3174,8 @@ export default function EstimateToolViewV2({
       leadId: lead.id,
       customerId: "",
       propertyId: "",
-      ...roofStyleReset(),
+      // The same lead picked again keeps the pick; a different lead, or a lead replacing a customer, is a different home.
+      ...(lead.id !== f.leadId || f.customerId ? roofStyleReset() : {}),
       ...(leadAddress && leadAddress !== f.address ? clearedPropertyFields() : {}),
       address: leadAddress || f.address,
       customerName: name || f.customerName || "",

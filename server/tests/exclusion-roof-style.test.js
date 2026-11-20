@@ -98,10 +98,30 @@ describe('priceRodentExclusionV2 roof style', () => {
     const odd = priceRodentExclusionV2({ advancedWireMeshPoints: 1, roofStyle: 'barrel_tile', barrelEaveFt: 40, waiveInspection: true });
     expect(odd.price).toBe(668);
     expect(component(odd, 'wire_mesh_points').price).toBe(188);
-    // Closure only, and a fractional measurement: a whole-dollar closure, nothing to reconcile.
+    // Round once: a fractional measurement keeps its cent amount on the closure row and the install total rounds.
+    const tile = priceRodentExclusionV2({ advancedWireMeshPoints: 1, roofStyle: 'flat_tile', waiveInspection: true });
+    expect(component(tile, 'wire_mesh_points').price).toBe(187.5);
+    const cents = priceRodentExclusionV2({ advancedWireMeshPoints: 1, roofStyle: 'barrel_tile', barrelEaveFt: 33.3, waiveInspection: true });
+    expect(cents.price).toBe(587);
+    expect(component(cents, 'barrel_eave_closure').price).toBe(399.6);
+    expect(component(cents, 'wire_mesh_points').price).toBe(187.4);
+    expect(cents.lineItems.reduce((sum, li) => Math.round((sum + li.price) * 100) / 100, 0)).toBe(587);
+    // No other row: the closure row takes the remainder, and the rows still sum to the price.
     const only = priceRodentExclusionV2({ roofStyle: 'barrel_tile', barrelEaveFt: 33.3, waiveInspection: true });
-    expect(component(only, 'barrel_eave_closure').price).toBe(400);
-    expect(only.lineItems.reduce((sum, li) => sum + li.price, 0)).toBe(only.price);
+    expect(only.price).toBe(400);
+    expect(only.lineItems.map((li) => [li.component, li.price])).toEqual([['barrel_eave_closure', 400]]);
+    const big = priceRodentExclusionV2({ roofStyle: 'barrel_tile', barrelEaveFt: 100.3, waiveInspection: true });
+    expect(big.price).toBe(1204);
+    expect(big.lineItems.reduce((sum, li) => sum + li.price, 0)).toBe(1204);
+  });
+
+  test('whole home with zero counts and a closure above the home minimum: the closure is the only row and sums to the price', () => {
+    const result = priceRodentExclusionV2({
+      sealScope: 'whole_home', homeSqFt: 2000, roofStyle: 'barrel_tile', barrelEaveFt: 100.3, waiveInspection: true,
+    });
+    expect(result.price).toBe(1204);
+    expect(result.lineItems.map((li) => li.component)).toEqual(['barrel_eave_closure']);
+    expect(result.lineItems[0].price).toBe(1204);
   });
 
   test('zero, empty or bad feet add no closure line and say it needs a measurement', () => {
@@ -549,7 +569,7 @@ describe('barrel eave feet are validated before any coercion', () => {
   const direct = (barrelEaveFt) => gateOn(() => generateEstimate(baseInput({
     services: { exclusion: { pricingVersion: 'v2', advancedWireMeshPoints: 1, waiveInspection: true, roofStyle: 'barrel_tile', barrelEaveFt } },
   })));
-  const BAD = [true, false, 'abc', '4 0', '1e3', -1, '-1', Infinity, NaN, {}, [], [40]];
+  const BAD = [true, false, 'abc', '4 0', '1e3', -1, '-1', Infinity, NaN, {}, [], [40], '9'.repeat(400)];
 
   test('the route accepts a finite number >= 0 or a numeric string, and empty = 0', () => {
     expect([40, '40', ' 40 ', '12.5', 0, '0', '', null, undefined].map(route)).toEqual([40, 40, 40, 12.5, 0, 0, 0, 0, 0]);

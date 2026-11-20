@@ -47,7 +47,11 @@ function roofStyleReplaySignal(estData) {
 function parseBarrelEaveFt(value) {
   if (value === undefined || value === null || value === '') return 0;
   if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? value : null;
-  if (typeof value === 'string') return /^\s*\d+(\.\d+)?\s*$/.test(value) ? Number(value) : null;
+  if (typeof value === 'string') {
+    // A long digit string converts to Infinity: check the result, not just the text.
+    const parsed = /^\s*\d+(\.\d+)?\s*$/.test(value) ? Number(value) : NaN;
+    return Number.isFinite(parsed) ? parsed : null;
+  }
   return null;
 }
 
