@@ -89,6 +89,11 @@ function setupDb(firstResults = {}, updateResults = {}) {
     return builder;
   });
   db.transaction = jest.fn(async (callback) => callback(db));
+  // notifyAdmin's dedupe transaction takes an advisory lock with trx.raw (always on since the ring-new gate went).
+  db.raw = jest.fn(async (sql, bindings) => {
+    state.raws.push({ table: null, sql, bindings });
+    return { rows: [] };
+  });
 
   return state;
 }
