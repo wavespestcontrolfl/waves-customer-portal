@@ -370,6 +370,29 @@ const DAY = 86400000;
       });
     });
 
+    test('two live households share the friend\'s phone: the near home completing is paid $25 standard, never $50', async () => {
+      const member = await customer(HOME);
+      const near = await planFriend({ latitude: HOME.latitude + 0.005, longitude: HOME.longitude });
+      await planFriend({ phone: near.phone, latitude: HOME.latitude + 0.02, longitude: HOME.longitude });
+      const visit = await recurringVisit(near.id, { status: 'completed' });
+      const ref = await referral(member, near, { ageDays: 2 });
+      await convert(ref, near);
+      await firstService(near, visit);
+      expect(await amounts(member.id)).toEqual([25]);
+      expect(await row(ref.id)).toMatchObject({ referrer_credit_cents: 2500, referrer_reward_reason: 'standard' });
+    });
+
+    test('the same phone on a deleted profile does not make the friend ambiguous: near still pays $50', async () => {
+      const member = await customer(HOME);
+      const near = await planFriend({ latitude: HOME.latitude + 0.005, longitude: HOME.longitude });
+      await planFriend({ phone: near.phone, deleted_at: new Date() });
+      const visit = await recurringVisit(near.id, { status: 'completed' });
+      const ref = await referral(member, near, { ageDays: 2 });
+      await convert(ref, near);
+      await firstService(near, visit);
+      expect(await amounts(member.id)).toEqual([50]);
+    });
+
     test('a friend within half a mile: the member gets $50', async () => {
       const { member, friend, visit, ref } = await performed({
         memberFields: HOME, friendFields: { latitude: HOME.latitude + 0.005, longitude: HOME.longitude },
@@ -748,6 +771,15 @@ const DAY = 86400000;
       expect(await sendReferralInviteEmail({ customerId: member.id })).toBeNull();
       expect(sendTemplate).not.toHaveBeenCalled();
       await db('referral_program_settings').insert(saved);
+    });
+
+    test('gate on, program paused: the offer promises nothing and no invitation goes', async () => {
+      const member = await customer({ email: 'member@example.invalid' });
+      await db('referral_program_settings').where({ id: 1 }).update({ program_active: false });
+      expect(await engine.step2OfferStrict(db, member.id)).toMatchObject({ programPaused: true, rewardPerReferral: 0, standardReward: 0, nearReward: 0 });
+      expect(await sendReferralInviteEmail({ customerId: member.id })).toBeNull();
+      expect(sendTemplate).not.toHaveBeenCalled();
+      await db('referral_program_settings').where({ id: 1 }).update({ program_active: true });
     });
 
     test('gate on, member at the yearly limit: the member-reward part is dropped', async () => {

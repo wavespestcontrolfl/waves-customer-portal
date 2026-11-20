@@ -751,11 +751,15 @@ describe('referral_nudge at delivery (GATE_REFERRAL_STEP2)', () => {
     }));
   });
 
-  test('unreadable program settings send no promise either', async () => {
-    jest.spyOn(engine, 'step2OfferStrict').mockResolvedValue(null);
-    nudgeQueues();
-    await expect(sendStep('enrollment-n')).resolves.toMatchObject({ blocked: true });
-    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  test('unreadable program settings, or a paused program, defer the send: the enrollment is never cancelled', async () => {
+    for (const offer of [null, { capReached: false, programPaused: true }]) {
+      jest.spyOn(engine, 'step2OfferStrict').mockResolvedValue(offer);
+      const { enrollmentUpdate } = nudgeQueues();
+      await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: false, deferred: true });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ next_send_at: expect.any(Date) }));
+      expect(enrollmentUpdate.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled' }));
+    }
   });
 
   test('a member under the limit still gets it, and the gate off never checks', async () => {

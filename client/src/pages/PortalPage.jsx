@@ -14207,8 +14207,8 @@ function ReferTab({ customer, onSwitchTab }) {
               {earnsCredit ? 'Refer and Earn' : 'Refer a Neighbor'}
             </h1>
             <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
-              {atYearlyLimit && Number(data.annualCap) > 0
-                ? `You earned ${Number(data.annualCap)} credits this year, the most we give. Thank you! Credits start again January 1.`
+              {atYearlyLimit && Number(data.creditsThisYear) > 0
+                ? `You earned ${Number(data.creditsThisYear)} credits this year, the most we give. Thank you! Credits start again January 1.`
                 : earnsCredit
                   ? `Share your Waves link with neighbors. You earn ${money(rewardPerReferral)} account credit when a referral starts service.`
                   : 'Share your Waves link with neighbors who could use a hand with pest or lawn care.'}
@@ -18827,4 +18827,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { buildArticles, useLearnArticles, ScoreRing, LawnHealthCard, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, PropertyScopeSelect, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
+export { buildArticles, useLearnArticles, ScoreRing, LawnHealthCard, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, PropertyScopeSelect, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ReferTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };

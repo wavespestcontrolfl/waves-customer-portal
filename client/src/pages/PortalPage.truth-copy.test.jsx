@@ -22,7 +22,7 @@ vi.mock('../utils/api', () => {
 });
 
 import api from '../utils/api';
-import { ScheduleTab, ServiceTracker, DashboardTab, MyPlanTab } from './PortalPage';
+import { ScheduleTab, ServiceTracker, DashboardTab, MyPlanTab, ReferTab } from './PortalPage';
 
 const customer = {
   id: 'cust-1', firstName: 'Pat', lastName: 'Customer',
@@ -247,5 +247,21 @@ describe('referral reward honesty', () => {
 
     expect(await screen.findByText('View details')).toBeInTheDocument();
     expect(screen.queryByText(/\$25 credit/)).not.toBeInTheDocument();
+  });
+
+  it('the Refer tab at the yearly limit says how many credits were earned, not the limit setting', async () => {
+    api.getReferrals.mockResolvedValue({
+      stats: { totalReferrals: 8, converted: 8 },
+      rewardPerReferral: 0,
+      standardReward: 25,
+      capReached: true,
+      annualCap: 5,
+      creditsThisYear: 8,
+    });
+
+    render(<ReferTab customer={customer} onSwitchTab={() => {}} />);
+
+    expect(await screen.findByText(/You earned 8 credits this year/)).toBeInTheDocument();
+    expect(screen.queryByText(/You earned 5 credits/)).not.toBeInTheDocument();
   });
 });

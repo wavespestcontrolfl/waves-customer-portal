@@ -634,8 +634,8 @@ async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destinat
         // credit (postCreditMovement), not referral balance — the email must
         // point the promoter at the right ledger.
         reward_line: destination === 'account_credit'
-          ? `Your $${Math.round(rewardDollars)} referral reward has been added to your account as a credit — it applies automatically to your next invoice.`
-          : `Your $${Math.round(rewardDollars)} referral reward has been added to your referral balance.`,
+          ? `Your ${step2.formatDollars(rewardDollars)} referral reward has been added to your account as a credit — it applies automatically to your next invoice.`
+          : `Your ${step2.formatDollars(rewardDollars)} referral reward has been added to your referral balance.`,
         // CTA points at the ledger the reward actually landed in: account
         // credits live on the billing tab, referral balance on the refer tab.
         cta_label: destination === 'account_credit' ? 'View my account credit' : 'View my referral balance',
@@ -895,7 +895,7 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue, trx
             const rewardSms = await renderReferralSms('referral_reward', {
               referrer_name: promoter.first_name,
               referee_name: referral.referee_name || referral.referral_first_name || 'your friend',
-              reward_amount: `$${Math.round(rewardDollars)}`,
+              reward_amount: `${step2.formatDollars(rewardDollars)}`,
             }, settings.reward_sms_template, {
               workflow: 'referral_reward',
               entity_type: 'referral',
@@ -1421,7 +1421,12 @@ async function step2OfferFor(conn, memberId, settings) {
 async function step2OfferStrict(conn, memberId) {
   try {
     const live = await getLiveSettings(conn);
-    return live ? await step2OfferFor(conn, memberId, live) : null;
+    if (!live) return null;
+    const offer = await step2OfferFor(conn, memberId, live);
+    // A paused program (program_active off) promises nothing, as the rest of the engine treats it.
+    return live.program_active === false || live.program_active === 0
+      ? { ...offer, rewardPerReferral: 0, standardReward: 0, nearReward: 0, programPaused: true }
+      : offer;
   } catch (err) {
     logger.warn(`[ReferralEngine] Step 2 offer unavailable: ${err.code || err.message}`);
     return null;
@@ -1434,6 +1439,16 @@ async function step2OfferStrict(conn, memberId) {
 // already has step2_annual_credit_cap credits this America/New_York calendar year). The member's customer row is
 // locked first, so two friends' first services for one member count one after the other, and the credit posted
 // next (postCreditMovement locks the same row) is inside that count for the next one.
+// True when the phone belongs to more than one live (not deleted or merged away) customer profile.
+async function phoneSharedByLiveProfiles(conn, phone) {
+  const variants = phoneMatchDigits(normalizePhone(phone) || phone || '');
+  if (!variants.length) return false;
+  const row = await conn('customers').whereNull('deleted_at')
+    .whereRaw(`${PHONE_DIGITS_SQL('phone')} IN (${variants.map(() => '?').join(', ')})`, variants)
+    .count('id as n').first();
+  return Number(row && row.n) > 1;
+}
+
 async function step2MemberCredit(trx, { referral, friendCustomerId, settings }) {
   const memberId = referral.referrer_customer_id;
   if (!memberId) return { dollars: 0, reason: null };
@@ -1444,10 +1459,15 @@ async function step2MemberCredit(trx, { referral, friendCustomerId, settings }) 
   // Both homes through the review-aware reader (customer-geocode-review), not the raw columns: a pin the office
   // marked needs_pin, outside_area or unverified is no map point, and a valid primary-property pin counts.
   const rows = await trx('customers').whereIn('id', [memberId, friendCustomerId])
-    .select('id', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+    .select('id', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
   const homes = await Promise.all(rows.map((row) => reviewedCustomerLocation(row, trx)));
   const homeOf = (id) => homes.find((h) => h.id === id);
-  const { cents, reason } = step2.memberCredit(homeOf(memberId), homeOf(friendCustomerId), settings);
+  // The referral finds its friend by phone, and two households can share one. When the completing customer's phone
+  // belongs to more than one live profile, the referral is not provably for this home, so the near bonus is not paid:
+  // $25 standard, the lower amount on doubt. (An ambiguous friend home is treated as no map point.)
+  const friendRow = rows.find((r) => r.id === friendCustomerId);
+  const ambiguous = await phoneSharedByLiveProfiles(trx, friendRow && friendRow.phone);
+  const { cents, reason } = step2.memberCredit(homeOf(memberId), ambiguous ? null : homeOf(friendCustomerId), settings);
   return { dollars: round2(cents / 100), reason };
 }
 

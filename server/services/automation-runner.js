@@ -247,20 +247,29 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
     return blockSendAndCancelEnrollment({ enrollment, sendId,
       reason: 'The customer accepted the estimate', cancelReason: 'estimate_accepted' });
   }
-  if (template.key === 'referral_nudge' && await referralNudgeWithheld(enrollment.customer_id)) {
-    return blockSendAndCancelEnrollment({ enrollment, sendId,
-      reason: 'The member reached the yearly referral credit limit', cancelReason: 'referral_yearly_limit' });
+  if (template.key === 'referral_nudge') {
+    const verdict = await referralNudgeVerdict(enrollment.customer_id);
+    if (verdict === 'defer') {
+      // Standing unknown (settings or ledger unreadable) or the program paused: try again later; the once-ever
+      // enrollment is never cancelled on a doubt.
+      return deferPaymentFailedForHold({ enrollment, sendId, reason: 'Referral offer unavailable; referral nudge deferred' });
+    }
+    if (verdict === 'cap') {
+      return blockSendAndCancelEnrollment({ enrollment, sendId,
+        reason: 'The member reached the yearly referral credit limit', cancelReason: 'referral_yearly_limit' });
+    }
   }
   return null;
 }
 
 // GATE_REFERRAL_STEP2, checked again at delivery (the member can reach the limit after the sequence was queued, or
 // before the gate was switched on): the referral_nudge copy promises a credit for each referral, so a member at the
-// yearly limit, or a program whose settings cannot be read, is not sent it. Gate off: never withheld.
-async function referralNudgeWithheld(customerId) {
-  if (!customerId || ((require('../config/feature-gates').gates) || {}).referralStep2 !== true) return false;
+// yearly limit is cancelled; one whose standing cannot be read, or a paused program, is deferred. Gate off: never withheld.
+async function referralNudgeVerdict(customerId) {
+  if (!customerId || ((require('../config/feature-gates').gates) || {}).referralStep2 !== true) return 'send';
   const offer = await require('./referral-engine').step2OfferStrict(db, customerId);
-  return !offer || offer.capReached;
+  if (!offer || offer.programPaused) return 'defer';
+  return offer.capReached ? 'cap' : 'send';
 }
 
 // A payment-failed notice is billing mail, so it goes through the shared
