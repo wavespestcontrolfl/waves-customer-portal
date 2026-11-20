@@ -6,6 +6,7 @@
  * Adam manually enables them after verifying each one works.
  *
  * Set these as environment variables on Railway:
+ *   GATE_ROOF_ENTRY_READ=true (owner 2026-11-19: staff-only roof read. From a free county aerial photo of the home, one vision model call flags the likely rodent entry-point types on the roof (returns, vent stacks, vents, chimney, utility lines, eaves, trees touching) so the technician knows where to look and the estimate is not short. It has a gate because every read is a paid vision call; a read of the same property is reused for 90 days. Off, POST /api/admin/roof-entry-read and PATCH /api/admin/roof-entry-read/:id/tech-count answer 404 {enabled:false} from the router, after the portal's global API middleware (rate limit, body parsing), with no route-level database read, staff login, image fetch or model call. Nothing reaches a customer. Strict `=== 'true'`, read at call time via roofEntryReadLive(); dark by default. Kill: unset)
  *   GATE_EXCLUSION_WHOLE_HOME=true (owner 2026-11-19: the rodent exclusion estimate offers a "Whole home" seal beside the usual spot seal. A whole-home seal replaces the $195 / $295 job floor with the home-size minimum from Settings (today $395 up to 1,500 sq ft, $595 up to 2,500, $895 up to 4,000, $1,295 above) and includes a 1-year re-entry guarantee in the price; renewing it costs the usual guarantee tier price ($199 / $249 / $299). The customer estimate then states the included guarantee. It changes prices, so the owner flips it. Read at call time via exclusionWholeHomeLive(), strict 'true', dark by default. Off = every estimate without a whole-home pick prices and reads exactly as before, the admin estimate tool hides the seal scope choice, and a NEW request that still asks for a whole-home seal is refused (the estimate engine, fail closed); an estimate already quoted as whole-home keeps its terms. Kill = unset.)
  *   GATE_TECH_ESTIMATES=true (owner 2026-11-09, "GO, FOR ALL": a technician prices and, in later steps, sends an estimate from the phone. It has a gate because the later steps text and email customers and because the price preview runs the paid property lookup. Off, every /api/tech/estimates route answers 404 {enabled:false} before any customer read. On, a route also needs the technician's own Can create estimates switch (technicians.can_create_estimates, off by default); an admin login always passes. Steps 1 and 2a price and save a draft estimate (sold by = the creator) and read his own; nothing is sent. Pest lines only (general pest, mosquito, rodent, termite), each open to a technician only when his job type for it is Qualified. Strict `=== 'true'`, read at call time via techEstimatesLive(); dark by default. Kill: unset.)
  *   GATE_LIVE_CALL_TRANSCRIPTION=true (owner 2026-11-16 "ok build all", live-call suite PR 1: when a staff member presses 1 to take an inbound call, Twilio Real-Time Transcription starts on the caller's call, both sides, and each final utterance is saved card-number scrubbed in call_live_utterances through POST /api/webhooks/twilio/live-transcription. It collects text only; the features that read it come later. Read via isEnabled('liveCallTranscription') at boot, strict 'true', dark by default; off = no transcription starts and the press-1 TwiML is unchanged. Spends money when on (Twilio, $0.027 a call minute): owner flip only. Kill: delete the variable.)
@@ -9414,6 +9415,15 @@ function techEstimatesLive() {
 // GATE_TECH_ESTIMATES reader, on its own line so gate PRs never conflict.
 module.exports.techEstimatesLive = techEstimatesLive;
 
+// GATE_ROOF_ENTRY_READ read at CALL time, strict `=== 'true'`, dark (owner 2026-11-19). It has a gate because each
+// roof read is a paid vision-model call. Off = both /api/admin/roof-entry-read routes answer 404 {enabled:false} from the
+// router, after the portal's global API middleware (rate limit, body parsing), with no route-level database read, staff
+// login, image fetch or model call. Kill = unset.
+function roofEntryReadLive() {
+  return process.env.GATE_ROOF_ENTRY_READ === 'true';
+}
+// GATE_ROOF_ENTRY_READ reader, on its own line so gate PRs never conflict.
+module.exports.roofEntryReadLive = roofEntryReadLive;
 // GATE_EXCLUSION_WHOLE_HOME read at CALL time, strict `=== 'true'`, dark (owner 2026-11-19). It changes prices, so the owner
 // flips it. The estimate engine (wholeHomeSealInputs) is the ONE pricing decision: off = a new whole-home request is refused,
 // a stored estimate re-priced as sold keeps its terms, and the estimate tool hides the scope choice. Kill = unset.
