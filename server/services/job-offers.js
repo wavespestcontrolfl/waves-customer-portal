@@ -343,6 +343,9 @@ function contactOf(application) {
 }
 const firstNameOf = (application) => String(contactOf(application).name).trim().split(/\s+/)[0] || 'there';
 const ownerReportTo = (name) => `${name}, owner`;
+// The signer a draft's preview names (Signed by, Reports to) when the reader is not an owner account. Only an owner
+// account sends, and the Send names the owner who sends it, so another admin's preview names no one: never the reader.
+const UNNAMED_SIGNER = "[owner's name]";
 const ownerFirstName = (snapshot) => String((snapshot && snapshot.owner && snapshot.owner.name) || 'Adam').trim().split(/\s+/)[0] || 'Adam';
 
 // ----------------------------------------------------------------- state
@@ -535,8 +538,11 @@ async function adminPanel(applicationId, actor, now = new Date()) {
   // current = the offer that is out (sent / date_requested), else the open draft, else the newest of any status.
   // draft = a revision in progress: the open draft when it is not itself current.
   const current = out || draft || rows[0] || null;
-  const revision = draft && current && draft.id !== current.id ? draft : null;
-  const defaults = { ...defaultsFor(now), reportTo: ownerReportTo(actor.name), payDayLine, expiresAt: iso(expiryFor(now)) };
+  const revision = draft && draft.id !== current.id ? draft : null; // a draft makes current non-null (out || draft)
+  // The preview names the reader as the signer only for an owner account (who would send it). The draft hash keeps the
+  // reader's own name: for another admin it is only the token their save is checked against, by that same name.
+  const signer = actor.ownerAccount ? actor.name : UNNAMED_SIGNER;
+  const defaults = { ...defaultsFor(now), reportTo: ownerReportTo(signer), payDayLine, expiresAt: iso(expiryFor(now)) };
   // The letter preview follows the draft being worked on; with no draft it is the frozen letter of the offer that is out.
   const shown = draft || out;
   // With no draft, the preview is the letter the applicant received (the frozen snapshot of the current offer, closed or
@@ -545,7 +551,7 @@ async function adminPanel(applicationId, actor, now = new Date()) {
   const view = frozen
     ? asObject(frozen.snapshot)
     : previewView({
-      offerInput: shown ? inputOfRow(shown) : defaults, application, actor, terms, payDayLine, now,
+      offerInput: shown ? inputOfRow(shown) : defaults, application, actor: { ...actor, name: signer }, terms, payDayLine, now,
       expiresAt: iso(expiryFor(now)),
     });
   return {
@@ -859,11 +865,11 @@ async function commitSend(applicationId, offerId, actor, now, draftHash, expecte
     const offer = await loadOffer(trx, applicationId, offerId, { lock: true });
     const name = await actorName(trx, actor);
     const { terms, payDayLine } = await assertSendable(trx, application, offer, { now, ownerName: name, draftHash });
-    // The owner sends on a read of the offers out now (the offer read's outStamp). An answer, a date request or any
-    // other write to them since that read refuses the send, before anything is replaced or sent: the owner sees it
-    // first. Every offer writer locks the application row first, so this read holds until the commit.
+    // The owner sends on a read of the offers out now (the offer read's outStamp, which sendOffer requires). An answer, a
+    // date request or any other write to them since that read refuses the send, before anything is replaced or sent: the
+    // owner sees it first. Every offer writer locks the application row first, so this read holds until the commit.
     const outNow = (await liveOffersOf(trx, applicationId, { lock: true })).filter((o) => OUT_STATUSES.includes(o.status));
-    if (expectedOut != null && offerStampOf(outNow) !== expectedOut) {
+    if (offerStampOf(outNow) !== expectedOut) {
       throw new OfferError(409, 'OFFERS_CHANGED', 'The offer you sent before changed after you opened this, so nothing was sent.');
     }
     await supersedePrior(trx, applicationId, offer, now);
@@ -947,9 +953,14 @@ const outcomesOf = (comms) => ({
 
 /** POST /:id/offer/:offerId/send */
 // expectedOut: the offer read's outStamp, which the page always sends; null skips the check.
-async function sendOffer(applicationId, offerId, actor, draftHash, now = new Date(), { expectedOut = null } = {}) {
+async function sendOffer(applicationId, offerId, actor, draftHash, now = new Date(), { expectedOut } = {}) {
   if (typeof draftHash !== 'string' || !draftHash) {
     throw new OfferError(400, 'DRAFT_HASH_REQUIRED', 'Send needs the hash of the preview you reviewed.');
+  }
+  // And the offers out the owner reviewed (the read's outStamp): without it, a Send could replace an answer or a date
+  // request the owner never saw.
+  if (typeof expectedOut !== 'string' || !expectedOut) {
+    throw new OfferError(400, 'OUT_STAMP_REQUIRED', 'Send needs the offers out you reviewed. Open the offer again, then send.');
   }
   const committed = await commitSend(applicationId, offerId, actor, now, draftHash, expectedOut);
   const comms = await deliverOfferComms(committed, actor);
