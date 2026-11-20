@@ -85,9 +85,10 @@ describe('estimateMidCheckout', () => {
 
     await expect(_private.estimateMidCheckout('est-1')).resolves.toBe(true);
 
-    // The hold row is found by the estimate it was made for, still unexpired.
+    // The hold row is found by the estimate it was made for, still committable: live, or lapsed by less
+    // than the commit grace (10 minutes by default; commitReservation still graduates it).
     expect(stubs.scheduled_services.calls.whereIn).toEqual([['source_estimate_id', ['est-1']]]);
-    expect(stubs.scheduled_services.calls.whereRaw[0][0]).toMatch(/reservation_expires_at > NOW\(\)/);
+    expect(stubs.scheduled_services.calls.whereRaw[0]).toEqual(['reservation_expires_at > NOW() - make_interval(mins => ?)', [10]]);
   });
 
   test('a card step touched in the last 20 minutes means the customer is booking', async () => {
@@ -478,6 +479,26 @@ describe('provider-boundary checkout check (sendDualChannel with an outcome)', (
     expect(db.transaction.mock.calls.at(-1)[1]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
     expect(seen.map(([table]) => table)).toEqual(expect.arrayContaining(['estimates', 'scheduled_services', 'estimate_checkout_events']));
     expect(seen.every(([, within]) => within)).toBe(true);
+  });
+
+  test('a deadline that passes while the reads wait is seen: the clock is read again after them', async () => {
+    const start = Date.now();
+    arrange({ est: { ...OPEN, expires_at: new Date(start + 60000) } });
+    const outcome = {};
+    const check = await installedCheck(outcome);
+    const tables = db.getMockImplementation();
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(start);
+    db.mockImplementation((table) => {
+      // The checkout lookup is slow: the deadline passes while it runs.
+      if (table === 'estimate_checkout_events') clock.mockReturnValue(start + 120000);
+      return tables(table);
+    });
+    try {
+      await expect(check()).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'estimate_not_sendable' });
+      expect(outcome).toEqual({ finalReason: 'estimate-expired' });
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   test('the never-viewed expiry reminder is final once the estimate is opened', async () => {

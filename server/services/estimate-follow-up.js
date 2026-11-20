@@ -124,9 +124,13 @@ async function checkoutEstimateIds(estimateId, groupId, conn) {
 async function estimateMidCheckout(estimateId, { throwOnError = false, conn = db, groupId = null } = {}) {
   try {
     const ids = await checkoutEstimateIds(estimateId, groupId, conn);
+    // A hold the customer can still commit: live, or lapsed by less than the
+    // commit grace (slot-reservation.js commitGraceMinutes: commitReservation
+    // still graduates it, so the customer may still be confirming).
+    const { commitGraceMinutes } = require("./slot-reservation");
     const hold = await conn("scheduled_services")
       .whereIn("source_estimate_id", ids)
-      .whereRaw("reservation_expires_at > NOW()")
+      .whereRaw("reservation_expires_at > NOW() - make_interval(mins => ?)", [commitGraceMinutes()])
       .first("id");
     if (hold) return true;
     const card = await conn("estimate_checkout_events")
@@ -345,16 +349,22 @@ function followupFinalVerdict(est, { stage = null, quotedExpiresAt = null, nowMs
 // it shows either the hold (a wait) or the accepted row (a final no). A failed
 // read, the checkout lookup's included, throws; the caller decides what an
 // unreadable state means (both legs make it a retryable non-send).
-async function followupMayStillSend(estimateId, { stage = null, quotedExpiresAt = null, nowMs = Date.now() } = {}) {
+// `nowMs` (tests) pins the clock; otherwise it is read at each use, and once
+// more after the reads, so a deadline that passed while the pool or the reads
+// waited is seen.
+async function followupMayStillSend(estimateId, { stage = null, quotedExpiresAt = null, nowMs = null } = {}) {
   const { FINAL_CHECK_SNAPSHOT } = require("./estimate-consultation-offer");
+  const clock = () => nowMs ?? Date.now();
   return db.transaction(async (trx) => {
     const est = await trx("estimates").where({ id: estimateId }).first();
     if (!est) return { ok: false, final: true, reason: "estimate-missing" };
-    const reason = followupFinalVerdict(est, { stage, quotedExpiresAt, nowMs });
+    const reason = followupFinalVerdict(est, { stage, quotedExpiresAt, nowMs: clock() });
     if (reason) return { ok: false, final: true, reason };
     if (await estimateMidCheckout(est.id, { conn: trx, groupId: est.estimate_group_id, throwOnError: true })) {
-      return { ok: false, final: false, reason: "customer-mid-checkout", retryAt: new Date(nowMs + CHECKOUT_ACTIVE_MINUTES * 60000) };
+      return { ok: false, final: false, reason: "customer-mid-checkout", retryAt: new Date(clock() + CHECKOUT_ACTIVE_MINUTES * 60000) };
     }
+    const late = followupFinalVerdict(est, { stage, quotedExpiresAt, nowMs: clock() });
+    if (late) return { ok: false, final: true, reason: late };
     return { ok: true };
   }, FINAL_CHECK_SNAPSHOT);
 }
