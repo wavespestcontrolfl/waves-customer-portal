@@ -418,6 +418,25 @@ function rowReader(conn) {
   };
 }
 
+/**
+ * Who works today, a Sunday: a technician with a stop booked (`booked`, the day's stops read) or a stop already done,
+ * which that read leaves out (replan.loadDayStops: completed visits excluded). A technician whose last stop today is
+ * done still works it, and the office's finder still offers that route (its route stops keep completed work). null when
+ * either read failed: who works today is unknown.
+ */
+async function sundayWorkToday(conn, today, booked) {
+  if (booked === null) return null;
+  try {
+    const done = await recoverable(conn, (c) => c('scheduled_services')
+      .where({ scheduled_date: today, status: 'completed' })
+      .select('technician_id', 'customer_id', 'reservation_expires_at', 'status'));
+    return new Set([...booked, ...techsWithStops(done)]);
+  } catch (err) {
+    logger.warn(`[route-check] ${today}: completed stops read failed (${err.message})`);
+    return null;
+  }
+}
+
 // The rows dispatch's capacity model keeps (arrival-route.js loadArrivalRouteContext): a window start, a time window, or
 // work done or under way. Any other row is a placeholder, inert to that model and so to the check: it is not a stop, it
 // staffs no Sunday and it holds no time (pre-push audit round 39).
@@ -529,20 +548,23 @@ async function decideSlotRule({ now, dates, crew }) {
   // Today joins while the office can still book a job there that ends by the day's end, and someone works it (or who
   // does is unknown: a Sunday whose stops read failed).
   const sameDay = sameDayOpen(new Date()) && (todayCrew === null || todayCrew?.size > 0);
+  // The office lists open times only while its box is shown (find-time-hints openTimesBoxLive). Hidden, today has no
+  // answer and nothing is asked: the list counted is not there to book from.
+  const listed = sameDay && require('../scheduling/find-time-hints').openTimesBoxLive();
   const counted = sameDay ? [today, ...dates] : dates;
   if (!counted.length) return { mode: 'floor', reason: 'no_staffed_days', dates: counted };
   const zones = (await db('service_zones').select('zone_name', 'center_lat', 'center_lng'))
     .sort((a, b) => String(a.zone_name).localeCompare(String(b.zone_name)));
   if (!zones.length) return { mode: 'unknown', reason: 'no_zones', dates: counted };
   const asked = [];
-  for (const zone of zones) asked.push(await zoneAnswer(zone, { now, today, sameDay, dates, crew }));
+  const todayAsk = { sameDay, techs: listed ? todayCrew : null };
+  for (const zone of zones) asked.push(await zoneAnswer(zone, { now, today, todayAsk, dates, crew }));
   const anySlot = asked.some((z) => Object.values(z.byDate).some((n) => n > 0));
   const unread = asked.some((z) => z.error || Object.values(z.byDate).includes(null));
   const mode = anySlot ? 'full' : (unread ? 'unknown' : 'floor');
   return {
     mode, service: STANDARD_SERVICE_KEY, ...(capacityEnabled() ? { travel: 'modeled' } : {}), dates: counted,
-    // The office's finder drives today's best hours on Google road times; this ask buys none.
-    ...(sameDay ? { sameDay: { date: today, ...(pickerRoadCheckLive() ? { travel: 'modeled' } : {}) } } : {}),
+    ...(sameDay ? { sameDay: { date: today, ...(listed ? sameDayTravel() : { box: 'off' }) } } : {}),
     zones: asked,
   };
 }
@@ -553,7 +575,7 @@ async function decideSlotRule({ now, dates, crew }) {
  * other's answer standing, as any slot is full. byDate: a date's start count, null when that date has no answer;
  * first: the zone's first slot, the dates in order.
  */
-async function zoneAnswer(zone, { now, today, sameDay, dates, crew }) {
+async function zoneAnswer(zone, { now, today, todayAsk, dates, crew }) {
   const byDate = {};
   const errors = [];
   let first = null;
@@ -561,9 +583,9 @@ async function zoneAnswer(zone, { now, today, sameDay, dates, crew }) {
     byDate[day] = starts ? starts.length : null;
     first ||= starts?.length ? `${day} ${starts[0]}` : null;
   };
-  if (sameDay) {
+  if (todayAsk.sameDay) {
     try {
-      const answer = await sameDayStarts(zone, today, crew.get(today));
+      const answer = await sameDayStarts(zone, today, todayAsk.techs);
       record(today, answer.starts);
       errors.push(...answer.errors);
     } catch (err) {
@@ -606,6 +628,12 @@ async function zoneAnswer(zone, { now, today, sameDay, dates, crew }) {
  * D2: "today only while a job ends by 18:00"): its earliest same-day start, on `clock`, is STAFF_SAME_DAY_LEAD_MIN out,
  * rounded up to the hour.
  */
+// The office's finder drives today's best hours on Google road times; this ask buys none, so the answer is the free drive
+// model's. Under capacity routing that finder buys none either.
+function sameDayTravel() {
+  return pickerRoadCheckLive() ? { travel: 'modeled' } : {};
+}
+
 function sameDayOpen(clock) {
   const { hour, minute } = etParts(clock);
   return ceilHour(hour * 60 + minute + STAFF_SAME_DAY_LEAD_MIN) + JOB_MIN <= DISPATCH_DAY_END;
@@ -746,8 +774,9 @@ async function measureRun(conn, now) {
   // Who works each measured date, for the slot-rule decision. A Sunday whose stops read failed counts every technician
   // above (its room unknown, never left out), but who works it is unknown: null.
   const crew = new Map();
-  // Today's crew too, for the decision's same-day ask, by the same rule. Only a Sunday reads today's stops.
-  const todayStops = weekday(today) === 0 ? await withStopsOn(today) : new Set();
+  // Today's crew too, for the decision's same-day ask, by the same rule. Only a Sunday reads today's stops, its work done
+  // included (sundayWorkToday).
+  const todayStops = weekday(today) === 0 ? await sundayWorkToday(conn, today, await withStopsOn(today)) : new Set();
   crew.set(today, todayStops === null ? null
     : new Set(elig.techIds.filter((techId) => staffed(elig, today, techId, todayStops.has(techId)))));
   for (const day of datesToMeasure(elig, today, stopsOn)) {

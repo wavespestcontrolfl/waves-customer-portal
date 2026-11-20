@@ -437,6 +437,16 @@ function hintSearchPlan({ hint, summary, openTimes = false, from, to, maxTo, tod
   return { summary: true, from: start, to: end, verdictDate, step: 60 };
 }
 
+/**
+ * True while New Appointment shows its open-times box: the box asks (GATE_OPEN_TIMES_BOX) and the hints answer
+ * (GATE_BEST_TIME_HINTS; off, every hint search returns `gated`). Read at call time: the pickers ask it through
+ * GET /admin/schedule/find-time/ui, and the route check's slot rule counts that list only while it is shown.
+ */
+function openTimesBoxLive() {
+  const { gateEnvValue } = require('../../config/feature-gates');
+  return gateEnvValue('GATE_BEST_TIME_HINTS') && gateEnvValue('GATE_OPEN_TIMES_BOX');
+}
+
 /** Last date a summary search may cover: `from` + maxDays - 1. */
 function summaryRangeEnd(from, to, maxDays = SUMMARY_MAX_DAYS) {
   let last = from;
@@ -752,6 +762,6 @@ async function buildHintSummary(plan, everyStart, {
 
 module.exports = {
   validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, scorePickedHourByTech,
-  hintSearchPlan, buildHintSummary, summarizeHintDays, summaryRangeEnd, SUMMARY_MAX_DAYS, OPEN_TIMES_MAX_DAYS, loadSummaryDayFacts,
+  hintSearchPlan, buildHintSummary, summarizeHintDays, summaryRangeEnd, SUMMARY_MAX_DAYS, OPEN_TIMES_MAX_DAYS, loadSummaryDayFacts, openTimesBoxLive,
   pickBestRows, buildBestRows, buildOpenTimes, rainForWindow,
 };

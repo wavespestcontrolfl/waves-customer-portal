@@ -367,6 +367,13 @@ describe('runRouteCheck', () => {
       'setTimeout', 'clearTimeout'],
   }));
   afterEach(() => jest.useRealTimers());
+  // New Appointment's open-times box is shown (production, 11-20), so today's list is there to count.
+  const BOX_GATES = ['GATE_BEST_TIME_HINTS', 'GATE_OPEN_TIMES_BOX'];
+  const savedBoxGates = BOX_GATES.map((name) => process.env[name]);
+  beforeEach(() => { for (const name of BOX_GATES) process.env[name] = 'true'; });
+  afterEach(() => BOX_GATES.forEach((name, i) => {
+    if (savedBoxGates[i] === undefined) delete process.env[name]; else process.env[name] = savedBoxGates[i];
+  }));
 
   // The slot rule's input: the service zones' centers (synthetic pins).
   const ZONES = [
@@ -387,10 +394,11 @@ describe('runRouteCheck', () => {
   // `campaigns` an Error: the campaign read throws. `taken`: the unique key's rows (key -> row), shared across runs.
   // `zones`: the zone rows the decision reads (an Error throws). `techs`: the assignable technicians' ids.
   function fakeConn({
-    campaigns = [{ id: 'c1', status: 'paused', budget_mode: 'stop' }], taken = new Map(), zones = ZONES, techs = [TECH],
+    campaigns = [{ id: 'c1', status: 'paused', budget_mode: 'stop' }], taken = new Map(), zones = ZONES, techs = [TECH], done = [],
   } = {}) {
     const writes = [];
     const conflicts = [];
+    const doneReads = [];
     const handle = (table) => {
       let filter = {};
       const q = {
@@ -406,6 +414,11 @@ describe('runRouteCheck', () => {
           if (table === 'service_zones') {
             if (zones instanceof Error) throw zones;
             return zones;
+          }
+          if (table === 'scheduled_services') {
+            doneReads.push(filter);
+            if (done instanceof Error) throw done;
+            return done;
           }
           return [];
         },
@@ -432,7 +445,7 @@ describe('runRouteCheck', () => {
     db.mockImplementation(handle);
     db.raw = (sql) => sql;
     delete db.transaction;
-    return { conn: db, writes, conflicts };
+    return { conn: db, writes, conflicts, doneReads };
   }
 
   beforeEach(() => {
@@ -980,6 +993,20 @@ describe('runRouteCheck', () => {
       await runRouteCheck({ now: SUNDAY });
       expect(JSON.parse(free.writes[0][1].ad_shadow).decision.dates).not.toContain('2026-11-22');
       expect(findAvailableSlots).not.toHaveBeenCalled();
+      expect(free.doneReads).toEqual([{ scheduled_date: '2026-11-22', status: 'completed' }]);
+      // Today's only stop is done (the day's stops read leaves completed visits out): TECH still works today.
+      const finished = fakeConn({ done: [{ technician_id: TECH, customer_id: 'c1', reservation_expires_at: null, status: 'completed' }] });
+      await runRouteCheck({ now: SUNDAY });
+      expect(JSON.parse(finished.writes[0][1].ad_shadow).decision.dates[0]).toBe('2026-11-22');
+      expect(findAvailableSlots.mock.calls.map(([ask]) => [ask.dateFrom, ask.technicianId])).toEqual([['2026-11-22', TECH], ['2026-11-22', TECH]]);
+      // That read failing: who works today is unknown, so today has no answer, and nothing is asked.
+      findAvailableSlots.mockClear();
+      const doneUnread = fakeConn({ done: new Error('timeout') });
+      expect((await runRouteCheck({ now: SUNDAY })).status).toBe('completed_with_errors');
+      const unknownCrew = JSON.parse(doneUnread.writes[0][1].ad_shadow).decision;
+      expect(unknownCrew).toMatchObject({ mode: 'unknown', sameDay: { date: '2026-11-22' } });
+      expect(unknownCrew.zones.map((z) => [z.byDate['2026-11-22'], z.error])).toEqual([[null, undefined], [null, undefined]]);
+      expect(findAvailableSlots).not.toHaveBeenCalled();
       // Today's stops unread: who works it is unknown, so today has no answer, and nothing is asked.
       replan.loadDayStops.mockImplementation(async (_c, date) => {
         if (date === '2026-11-22') throw new Error('timeout');
@@ -987,6 +1014,7 @@ describe('runRouteCheck', () => {
       });
       const unread = fakeConn();
       expect((await runRouteCheck({ now: SUNDAY })).status).toBe('completed_with_errors');
+      expect(unread.doneReads).toEqual([]);
       const decision = JSON.parse(unread.writes[0][1].ad_shadow).decision;
       expect(decision).toMatchObject({ mode: 'unknown', sameDay: { date: '2026-11-22' } });
       expect(decision.zones.map((z) => [z.byDate['2026-11-22'], z.error])).toEqual([[null, undefined], [null, undefined]]);
@@ -1093,6 +1121,29 @@ describe('runRouteCheck', () => {
     expect(JSON.parse(unread.writes[0][1].ad_shadow).decision.zones[0]).toMatchObject({
       byDate: { '2026-11-19': null }, error: 'snapshot down',
     });
+  });
+
+  test("slot rule, today (A2): with New Appointment's open-times box hidden, today has no answer and nothing is asked", async () => {
+    for (const hidden of ['GATE_OPEN_TIMES_BOX', 'GATE_BEST_TIME_HINTS']) {
+      process.env.GATE_BEST_TIME_HINTS = 'true';
+      process.env.GATE_OPEN_TIMES_BOX = 'true';
+      delete process.env[hidden];
+      findAvailableSlots.mockClear();
+      inactiveCapabilitiesForServices.mockClear();
+      availabilityForPin.mockImplementation(async () => ({ days: [] }));
+      const none = fakeConn();
+      expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+      const decision = JSON.parse(none.writes[0][1].ad_shadow).decision;
+      expect([hidden, decision.mode, decision.dates[0], decision.sameDay]).toEqual([hidden, 'unknown', '2026-11-19', { date: '2026-11-19', box: 'off' }]);
+      expect(decision.zones.map((z) => [z.byDate['2026-11-19'], z.error])).toEqual([[null, undefined], [null, undefined]]);
+      expect(findAvailableSlots).not.toHaveBeenCalled();
+      expect(inactiveCapabilitiesForServices).not.toHaveBeenCalled();
+      // /book's slot still decides.
+      availabilityForPin.mockImplementation(async ({ lat }) => (lat === 27.1 ? offerOn('2026-11-21', ['10:00']) : { days: [] }));
+      const some = fakeConn();
+      await runRouteCheck({ now: NOW });
+      expect(JSON.parse(some.writes[0][1].ad_shadow).decision).toMatchObject({ mode: 'full', sameDay: { box: 'off' } });
+    }
   });
 
   test("slot rule, today (A2): under capacity routing the office's finder buys no roads and starts today from the route as booked", async () => {
