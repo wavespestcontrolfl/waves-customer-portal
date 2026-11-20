@@ -1192,7 +1192,7 @@ describe('revertMerge', () => {
       expect(sodRestores(state)).toEqual([]);
     });
 
-    // The sprinkler timer on file of the same moved row: its own journal entry ({ row_id, before, kept }).
+    // The sprinkler timer on file of the same moved row: its own journal entry ({ row_id, before, kept, home_changed_at }).
     describe('the sprinkler timer on that row', () => {
       const X2 = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
       const RAIN_BIRD = { irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null, irrigation_controller_app: null };
@@ -1200,7 +1200,7 @@ describe('revertMerge', () => {
       const NO_SOD = { sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null };
       const journalWithTimer = (entry) => {
         const journal = journalWithSod();
-        journal.repointed_ids.moved_pref_timer = { row_id: 'pp-1', before: X2, kept: false, ...entry };
+        journal.repointed_ids.moved_pref_timer = { row_id: 'pp-1', before: X2, kept: false, home_changed_at: null, ...entry };
         return journal;
       };
       const timerRestores = (state) => state.flagRestores.filter((r) => r.table === 'property_preferences' && 'irrigation_controller_brand' in r.payload);
@@ -1275,6 +1275,25 @@ describe('revertMerge', () => {
             expectRefused(await revert(kept(), { rowNow: { ...X2, irrigation_controller_app: 'no' }, winnerAddr }));
           },
         );
+
+        // The row's home stamp: a move since clears the timer, so a timer there now came after the move.
+        const MOVED_AT = new Date('2026-11-10T15:00:00.000Z');
+        it('a move since (the home stamp moved on), then the same answers entered again: REFUSES', async () => {
+          expectRefused(await revert(kept(), { rowNow: { ...X2, irrigation_home_changed_at: MOVED_AT } }));
+        });
+
+        it('a move since cleared the timer: the original goes back to the loser', async () => {
+          const { state, error } = await revert(kept(), { rowNow: { ...NO_TIMER, irrigation_home_changed_at: MOVED_AT } });
+          expect(error).toBeUndefined();
+          expect(timerRestores(state)).toEqual([{ table: 'property_preferences', where: { id: 'pp-1', customer_id: LOSER }, payload: X2 }]);
+        });
+
+        it('the journaled home stamp still matches the row: the kept timer goes back untouched', async () => {
+          const STAMPED = new Date('2026-11-01T14:00:00.000Z');
+          const { state, error } = await revert(journalWithTimer({ kept: true, home_changed_at: STAMPED.getTime() }), { rowNow: { ...X2, irrigation_home_changed_at: STAMPED } });
+          expect(error).toBeUndefined();
+          expect(timerRestores(state)).toEqual([]);
+        });
 
         it('a kept entry with an empty timer: any timer on the row now REFUSES', async () => {
           expectRefused(await revert(journalWithTimer({ kept: true, before: NO_TIMER }), { rowNow: X2 }));
