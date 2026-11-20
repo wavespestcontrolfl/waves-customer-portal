@@ -11202,10 +11202,10 @@ const OUT_OF_AREA_HOLD_REASON = 'out_of_service_area_hold';
 //    dictated number is unverified, and for this lead the phone is the only reachback.
 // hasWorkableLeadSignal reads the stamp: a live caller who gave only a phone number then makes a
 // customer-less lead in Needs Review, where before the call made none. The processor stamps once,
-// just before the Step 4 write, so only a pass that reaches the lead step stores it (true or
-// false). The hard veto, the tech follow-up and the spam/voicemail exits store none, so the ads
-// attribution mirror (phoneSuccessorActuallyLinked) keeps the old verdict for a call the processor
-// never linked.
+// just before the Step 4 write and the Step 4b gate. From the end of V2 adoption until then the
+// field reads false (model output can carry any key), so the hard veto, the tech follow-up and the
+// spam/voicemail exits store false, and the ads attribution mirror (phoneSuccessorActuallyLinked)
+// keeps the old verdict for a call the processor never linked.
 function stampCallerIdReachback(extracted, adoptedV2Extraction, { leadPhone = null, callerId = null } = {}) {
   const reachback = !!adoptedV2Extraction
     && !callEndedWithNothingToDo(adoptedV2Extraction)
@@ -12916,6 +12916,10 @@ const CallRecordingProcessor = {
       // Only while the no-price assessment lane is live (gate off: the persisted record is unchanged).
       if (assessmentLaneActive) extracted = { ...extracted, pre_adoption_price_fields: preAdoptionPriceFields(preAdoptionExtracted) };
     }
+    // `caller_id_reachback` is the processor's own stamp (stampCallerIdReachback, just before Step 4).
+    // Model output can carry any key (normalizeCallExtraction keeps extra fields), so from here on it
+    // reads false: an exit before the lead step stores false, never a model-written true.
+    extracted = { ...extracted, caller_id_reachback: false };
 
     // (Hold helpers live above the tech follow-up and voicemail returns: both arm the hold too; codex #6112 r10/r12 P2.)
     // Codex round 7 P1 (PR #4807): the NUMBER-keyed hold is persisted AT

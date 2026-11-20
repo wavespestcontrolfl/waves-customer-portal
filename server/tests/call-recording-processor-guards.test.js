@@ -1459,7 +1459,7 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     expect(stampCallerIdReachback({ ...stored, caller_id_reachback: true }, null, phones).caller_id_reachback).toBe(false);
   });
 
-  test('the processor stamps the reachback from the ADOPTED V2 extraction and the lead phone, after every exit that skips the lead step (pre-push P1 x3)', () => {
+  test('the processor stamps the reachback from the ADOPTED V2 extraction and the lead phone, after every exit that skips the lead step (pre-push P1 x4)', () => {
     // 1. A valid V2 result in shadow mode, or with CALL_EXTRACTION_V2_PRIMARY=false,
     //    may not drive the canonical writes: the stamp reads only the extraction
     //    the adoption block used.
@@ -1468,6 +1468,9 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     //    ads attribution mirror cannot treat it as a linked phone-only call.
     // 3. The stamp compares the phone Step 4b keys the lead on with the call's
     //    own number, both resolved before it.
+    // 4. Model output can carry any key, so the field is reset to false right
+    //    after adoption, before every early exit: an exit stores false, never a
+    //    model-written true.
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     const at = (needle) => {
       expect(src.split(needle).length - 1).toBe(1);
@@ -1483,6 +1486,13 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     expect(assign).toBeGreaterThan(adoptionIf);
     expect(assign).toBeLessThan(blockEnd);
     expect(src.split('adoptedV2Extraction = ').length - 1).toBe(2);
+    // The reset: once, after the adoption block, before every early exit.
+    const reset = at('extracted = { ...extracted, caller_id_reachback: false };');
+    expect(reset).toBeGreaterThan(blockEnd);
+    expect(reset).toBeLessThan(at('return finalizeTechFollowUpCall({'));
+    expect(reset).toBeLessThan(at("return { success: true, skipped: true, reason: extracted.is_spam ? 'spam' : 'voicemail' };"));
+    expect(reset).toBeLessThan(at("return { success: true, skipped: true, reason: 'v2_canonical_write_blocked' };"));
+    expect(src.split('caller_id_reachback:').length - 1).toBe(2);
     // One call site: after every early exit, before the Step 4 write and the Step 4b gate.
     expect(src.split('stampCallerIdReachback(').length - 1).toBe(2);
     expect(stamp).toBeGreaterThan(at('return finalizeTechFollowUpCall({'));
