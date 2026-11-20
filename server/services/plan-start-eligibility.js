@@ -143,8 +143,8 @@ function isCommercialPropertyType(propertyType) {
 // only a mirror of the PRIMARY property's type (and the mirror can be behind),
 // and nothing on it mirrors a property's occupancy. So an account that reads
 // residential by its own row can have a saved property that says commercial:
-// by its occupancy (the mark the office sets, and the tax and estimate tools
-// read) or by its own type.
+// by its occupancy (the property's own mark, which the tax rule and the
+// estimate tools read) or by its own type.
 // EVERY active property counts, not only the primary one: this proof gets no
 // property to answer for, so it answers for the account, fail closed. A
 // property that was removed (active = false) says nothing.
