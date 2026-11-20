@@ -1013,6 +1013,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         // The bell's Call (alert-call-button.js) dials the lead row's number, or this customer's when the lead row
         // failed and leadId above is the customer id.
         customerId: customer.id,
+        // True when this form attached to an open call lead instead of creating one: its bell is then a later inquiry,
+        // judged from the form, never settled by the call that made the lead (new-lead-reminder.js inquiryOf).
+        attachedCallLead,
       });
       // suppressed counts as HANDLED (internal test customer) — the legacy
       // SMS fallback must not re-create the alert the suppression removed.

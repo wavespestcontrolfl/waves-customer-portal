@@ -121,7 +121,14 @@ const CUSTOMER_UNREAD_INBOUND_SQL = `(
       AND NOT EXISTS (SELECT 1 FROM messages tw WHERE tw.twilio_sid = ul.twilio_sid AND tw.channel = 'sms'))
 )`;
 
-const NOTIFICATION_VERSION_SQL = "md5(jsonb_build_array(title, body, link, detail, metadata)::text)";
+// The lead reminders' once-only stamps (lead-call-reminder.js leadCallReminderAt, new-lead-reminder.js newLeadRealertAt):
+// bookkeeping the bell never shows, so they are left out of the version. A stamp that lands after an admin opened the
+// bell then never refuses that admin's Done (409 changed). The reminders fence their own writes on the whole metadata
+// (lead-reminder-sweep.js). A row without these keys keeps the version it had. Only an object can carry them: any other
+// metadata (null, an array, a scalar) is hashed as stored, because `-` on a JSON scalar is an error.
+const REMINDER_STAMP_KEYS = Object.freeze(['leadCallReminderAt', 'newLeadRealertAt']);
+const VERSIONED_METADATA_SQL = `CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata${REMINDER_STAMP_KEYS.map((key) => ` - '${key}'`).join('')} ELSE metadata END`;
+const NOTIFICATION_VERSION_SQL = `md5(jsonb_build_array(title, body, link, detail, ${VERSIONED_METADATA_SQL})::text)`;
 // GATE_ALERT_BELL_ORDER: where a row sits in the admin bell. 0 = metadata.severity is 'needs-you'; 1 = no severity label
 // (an older or unconverted alert stays above known FYI rows); 2 = any other severity. Inside a rank: newest first.
 const BELL_RANK_SQL = "(CASE WHEN metadata->>'severity' = 'needs-you' THEN 0 WHEN COALESCE(metadata->>'severity', '') = '' THEN 1 ELSE 2 END)";
@@ -1428,6 +1435,7 @@ module.exports._private = {
   normalizeAdminNotificationText,
   excludeActivityOnlyFromBell,
   NOTIFICATION_VERSION_SQL,
+  REMINDER_STAMP_KEYS,
   doneColumns,
   openToCloser,
   isPersonDoneBy,

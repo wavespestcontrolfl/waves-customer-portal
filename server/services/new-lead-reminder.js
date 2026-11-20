@@ -23,9 +23,9 @@
  *   only after the bell: a "New call lead" bell is written minutes after a call a person already answered. Reached =
  *   the lead is deleted, not open or already converted (lead-statuses.js isOpenLeadRow: spam, cancelled, won, lost and the like
  *   are out), or has an estimate sent or viewed; the call that made the lead was
- *   answered by a person (only for the lead's intake bell: the one the new-lead trigger writes, metadata.triggerKey
- *   new_lead, within 15 minutes of the lead's creation; every other bell, such as a repeat form or an email follow-up's
- *   draft, is a fresh inquiry); a person's
+ *   answered by a person (only for the lead's intake bell: the one the new-lead trigger writes for a lead it created,
+ *   metadata.triggerKey new_lead, within 15 minutes of the lead's creation; every other bell, such as a repeat form, a
+ *   form attached to an open call lead or an email follow-up's draft, is a fresh inquiry); a person's
  *   text or call, or a Gmail send, or a visit
  *   booked, reached the lead's customer or phone since 5 minutes before that bell's inquiry began (for the intake bell:
  *   the earlier of the bell and the lead's first_contact_at, else created_at; for a later bell: the bell itself; a bell that
@@ -103,8 +103,9 @@ const candidateQuery = (since, cursor, pageSize) => sweep.__private.candidateQue
 
 // The rows with a push due now: { row, meta, askedAt, leadId, expiresAt, intakeTrigger }. A row that names no lead (a
 // tracking-line text, or a repeat form from a customer row with no lead row) cannot be judged, so it sends nothing.
-// intakeTrigger: the new-lead trigger wrote this bell (notification-triggers.js new_lead, metadata.triggerKey), which it
-// does only when a lead is created; inquiryOf reads it.
+// intakeTrigger: the new-lead trigger wrote this bell (notification-triggers.js new_lead, metadata.triggerKey) for a lead
+// it created. A form the webhook attached to an open call lead rings the same trigger, marked payload.attachedCallLead
+// (lead-webhook.js): that lead was made by the call, so its bell is not the intake. inquiryOf reads it.
 function dueItems(rows, now) {
   const { bellEventAt, parseMeta, refsFromRow } = relevance();
   const floor = now.getTime() - WINDOW_MS;
@@ -116,7 +117,7 @@ function dueItems(rows, now) {
     if (!leadId || !askedAt || askedAt.getTime() <= floor || meta[PUSH_STAMP]) continue;
     const { dueAt, expiresAt } = pushWindow(askedAt, PUSH_AFTER_MINUTES, PUSH_LATE_MINUTES);
     if (dueAt.getTime() > now.getTime() || expiresAt.getTime() < now.getTime()) continue;
-    items.push({ row, meta, askedAt, leadId, expiresAt, intakeTrigger: meta.triggerKey === 'new_lead' });
+    items.push({ row, meta, askedAt, leadId, expiresAt, intakeTrigger: meta.triggerKey === 'new_lead' && !meta.payload?.attachedCallLead });
   }
   return items;
 }
@@ -136,11 +137,13 @@ async function emailReceivedAt(items) {
 
 // When the inquiry this bell reports began, and whether it is the lead's intake bell. The intake bell is the one the
 // new-lead trigger writes when it creates a lead (notification-triggers.js, metadata.triggerKey new_lead: the relevance
-// sweep's own definition, its new_lead class), within 15 minutes of the lead's creation. It looks back to the lead's
+// sweep's own definition, its new_lead class; not a form attached to an open call lead), within 15 minutes of the
+// lead's creation. It looks back to the lead's
 // first contact (an email lead's first_contact_at is the message's receipt time, before the classification that created
 // the lead), and the call that made the lead counts only for it. Every other bell is a fresh inquiry about a lead already
-// on file, however soon after the lead it came: a repeat form (category lead), or a bell written straight to the bell
-// (notifyAdmin('new_lead'): an email follow-up's draft, a duplicate submission). Its evidence counts only from the bell
+// on file, however soon after the lead it came: a repeat form (category lead), a form attached to an open call lead, or a
+// bell written straight to the bell (notifyAdmin('new_lead'): an email follow-up's draft, a duplicate submission). Its
+// evidence counts only from the bell
 // itself, or, for a bell that names an email (`emailAt`, the message's received_at), from the message. The push deadline
 // stays on the bell.
 function inquiryOf({ askedAt, lead, intakeTrigger = false }, emailAt = null) {

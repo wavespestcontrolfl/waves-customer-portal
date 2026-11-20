@@ -68,10 +68,13 @@ const stampedMeta = (stamp, meta, now) => ({ ...meta, [stamp]: now.toISOString()
 // dedupe key is stamped under notifyAdmin's advisory lock for that key (notification-service.js dedupeAndInsert): a
 // refresh reads the row and writes its whole metadata back under that lock, so a stamp landing between its read and
 // its write would be overwritten, and the bell could push a second time. With the lock the stamp waits for the
-// refresh, whose new metadata then fails the fence; a refresh after the stamp merges onto it and keeps it.
-async function stampOnce(stamp, { row, meta }, now) {
+// refresh, whose new metadata then fails the fence; a refresh after the stamp merges onto it and keeps it. `ready`
+// (optional) is asked again once the lock is held: a stamp that waited past the reminder's hours or the item's late
+// window is not written, so the next open sweep can still judge the bell.
+async function stampOnce(stamp, { row, meta }, now, ready = () => true) {
   return db.transaction(async (trx) => {
     if (meta.dedupeKey) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${meta.dedupeKey}`]);
+    if (!ready()) return false;
     const landed = await trx('notifications')
       .where({ id: row.id, recipient_type: 'admin' })
       .whereNull('done_at')
@@ -160,7 +163,7 @@ async function runSweep(kind, { now, pageSize = PAGE_SIZE, clock = () => new Dat
       // Its late window closed while the reads above ran: not stamped, and no later sweep finds it due.
       if (expired(item)) continue;
       try {
-        if (!(await stampOnce(stamp, item, now))) continue;
+        if (!(await stampOnce(stamp, item, now, () => ready() && !expired(item)))) continue;
         total.sent += 1;
         sends.push(sendPush({ ...item, stamped: stampedMeta(stamp, item.meta, now) }, label, () => ready() && !expired(item)));
       } catch (err) {

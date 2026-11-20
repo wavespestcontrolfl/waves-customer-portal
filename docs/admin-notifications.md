@@ -608,7 +608,8 @@ The bell row is not rewritten: it is stamped `metadata.leadCallReminderAt` in on
 and unchanged since it was read, under notifyAdmin's advisory lock for the row's dedupe key (a refresh rewrites the
 metadata under that lock), so a row sends at most one banner. The banner goes only while the row is still an open bell in
 the bell feed with exactly the stamped metadata: a bell that rang again or moved to Activity since the stamp sends
-nothing. The stamp is not a ring, so the 3-day quiet fall-off
+nothing. Neither reminder's stamp is part of the bell's content version (`NOTIFICATION_VERSION_SQL` leaves out
+`REMINDER_STAMP_KEYS`), so a stamp that lands after an admin opened the bell never refuses that admin's Done. The stamp is not a ring, so the 3-day quiet fall-off
 still counts from the bell's own event. The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead
 still waits for a call") or by unsetting the gate. It sends nothing to a lead.
 
@@ -623,15 +624,17 @@ are not skipped), and nothing is sent outside those hours: they are judged again
 each push goes, and a sweep that runs past 6 PM stops and leaves the rest unstamped. A push more than 2 business hours past due is dropped,
 also when that time passes while the sweep reads (checked again before the stamp, and before and after the push's open-row read). Bells of
 the last 48 hours only. The push is stamped first, fenced on the row being open and unchanged (`metadata.newLeadRealertAt`),
-under the same dedupe-key lock, so a row gets at most one; as with the call-back reminder, it goes only while the row is
+under the same dedupe-key lock (the hours and the late window are asked again once the lock is held), so a row gets
+at most one; as with the call-back reminder, it goes only while the row is
 still an open bell in the bell feed with exactly the stamped metadata. The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead still waits for a
 call"). "Reached" is judged on the lead, whatever the close gates say, and not only after the bell (a "New call lead" bell
 is written minutes after a call a person already answered): a deleted lead, a lead outside the shared open-lead predicate
 (`lead-statuses.js`: status new, contacted, estimate_sent or estimate_viewed, and not converted, so spam, cancelled, won, lost and the
 like are out), or one with an estimate sent or viewed; the call that made the lead answered by a
-person (`answered_by = 'human'`; only for the intake bell: the one the new-lead trigger writes, `metadata.triggerKey`
+person (`answered_by = 'human'`; only for the intake bell: the one the new-lead trigger writes for a lead it created, `metadata.triggerKey`
 `new_lead` as the relevance sweep's `new_lead` class defines it, within 15 minutes of the lead's creation; every other
-bell, such as a repeat form or an email follow-up's draft, is a fresh inquiry); a person's text, call or Gmail send, or a visit booked, for the lead's customer or phone since 5 minutes
+bell, such as a repeat form, a form attached to an open call lead (`payload.attachedCallLead`, lead-webhook.js) or an
+email follow-up's draft, is a fresh inquiry); a person's text, call or Gmail send, or a visit booked, for the lead's customer or phone since 5 minutes
 before the bell's inquiry began (the shared contact witnesses, kind `customer`; for the intake bell, the
 earlier of the bell and the lead's `first_contact_at`, else `created_at`; for a later bell, such as a form sent again on a
 lead made days ago, the bell itself); a person's email to the lead's own address since that moment (only one the shared email linkage,

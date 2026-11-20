@@ -6,7 +6,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const mockState = {};
 const resetState = () => Object.assign(mockState, {
-  rows: [], leads: [], answered: [], estimates: [], emails: [], emailRows: [], handedOff: null, customer: null, customerRows: [], links: {}, stampResults: [], open: {}, calls: [], failLeads: false, failOpen: false, pages: null, onOpenRead: null,
+  rows: [], leads: [], answered: [], estimates: [], emails: [], emailRows: [], handedOff: null, customer: null, customerRows: [], links: {}, stampResults: [], open: {}, calls: [], failLeads: false, failOpen: false, pages: null, onOpenRead: null, onRaw: null,
 });
 resetState();
 jest.mock('../models/db', () => {
@@ -52,7 +52,10 @@ jest.mock('../models/db', () => {
     });
     return chain;
   });
-  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  db.raw = jest.fn((sql, bindings) => {
+    if (mockState.onRaw) mockState.onRaw(sql, bindings);
+    return { sql, bindings };
+  });
   // The stamp's transaction runs on the same stub.
   db.transaction = jest.fn(async (work) => work(db));
   return db;
@@ -198,9 +201,10 @@ describe('business hours and the late window are asked again at dispatch', () =>
 
   test('a push stamped inside the hours is refused by its beforePush check once the hours have closed', async () => {
     mockState.rows = [row('n-1', { createdAt: est('09', '17:40') })];
-    let calls = 0;
-    const clock = () => (calls++ === 0 ? est('09', '17:59') : est('09', '18:01'));
-    const result = await runNewLeadReminder({ now: est('09', '17:59'), clock });
+    let at = est('09', '17:59');
+    // The hours close once the stamp is written, before the push goes.
+    mockState.onRaw = (sql) => { if (String(sql).startsWith('COALESCE(metadata')) at = est('09', '18:01'); };
+    const result = await runNewLeadReminder({ now: est('09', '17:59'), clock: () => at });
     await Promise.all(result.sends);
     expect(pushes()).toHaveLength(1);
     expect(await pushes()[0][2].beforePush()).toBe(false);
@@ -332,6 +336,23 @@ describe('the 15-minute push (no gate)', () => {
     const stamped = { ...row('n-1').metadata, [PUSH_STAMP]: PUSH_NOW.toISOString() };
     expect(read.raws).toContainEqual(['metadata IS NOT DISTINCT FROM ?::jsonb', [JSON.stringify(stamped)]]);
     expect(read.raws).toContainEqual(["metadata->'retired' IS NULL"]);
+  });
+
+  test('a stamp that waited on the dedupe-key lock until 6 PM is not written, so the next open sweep can still judge it', async () => {
+    let at = est('09', '17:59');
+    mockState.rows = [repeatFormRow('rf-1', est('09', '17:40'))];
+    // A refresh of the bell holds its lock until 6:00 PM.
+    mockState.onRaw = (sql) => { if (String(sql).includes('pg_advisory_xact_lock')) at = est('09', '18:00'); };
+    const result = await runNewLeadReminder({ now: est('09', '17:59'), clock: () => at });
+    await Promise.all(result.sends || []);
+    expect(result).toMatchObject({ due: 1, pushed: 0 });
+    expect(updates()).toEqual([]);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('both reminders\' stamps are left out of the bell version, so a stamp never refuses an admin\'s Done', () => {
+    const { REMINDER_STAMP_KEYS } = jest.requireActual('../services/notification-service')._private;
+    expect([...REMINDER_STAMP_KEYS].sort()).toEqual([PUSH_STAMP, require('../services/lead-call-reminder').__private.STAMP].sort());
   });
 
   test('a bell with a dedupe key is stamped under notifyAdmin\'s lock for that key; one without takes no lock', async () => {
@@ -538,6 +559,17 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     expect(items[0].bellAt).toEqual(est('09', '09:15'));
     // One batched read of the messages, whatever the batch size; the push clock stays on the bell.
     expect(mockState.calls.filter((c) => c.table === 'emails')).toHaveLength(1);
+  });
+
+  test('a form the webhook attached to an open call lead is a later inquiry: the answered call that made the lead does not settle it', async () => {
+    // A person answered the call that made the lead at 9:52; the caller sent the web form at 10:00, and the webhook
+    // attached it to that open call lead (payload.attachedCallLead) and rang the new-lead trigger.
+    mockState.leads = [lead({ created_at: est('09', '09:52'), twilio_call_sid: CALL_SID })];
+    mockState.answered = [{ twilio_call_sid: CALL_SID }];
+    mockState.rows = [row('n-1', { metadata: { payload: { leadId: LEAD, attachedCallLead: true } } })];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
+    expect(loadContactBundles.mock.calls[0][0][0].bellAt).toEqual(est('09', '09:55'));
+    expect(mockState.calls.filter((c) => c.table === 'call_log')).toEqual([]);
   });
 
   test('only the new-lead trigger\'s bell is the intake bell: an email follow-up\'s draft bell is a later inquiry, however soon it came', async () => {

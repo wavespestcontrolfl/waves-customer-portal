@@ -87,6 +87,11 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
     return r;
   };
   const metaOf = (row) => (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {});
+  // The bell's content version as the bell list and the Done fence read it (notification-service.js).
+  const versionOf = async (id) => {
+    const { NOTIFICATION_VERSION_SQL } = require('../services/notification-service')._private;
+    return (await db('notifications').where({ id }).first(db.raw(`${NOTIFICATION_VERSION_SQL} AS version`))).version;
+  };
   // A lead on file for three days and still a lead (pipeline_stage new_lead), with its own customer row and phone.
   const leadOnFile = async () => {
     const onFile = mins(-3 * 24 * 60);
@@ -132,6 +137,7 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
     const formBell = await repeatFormBell(formLead.customer, formLead.lead, mins(-20));
     const webBell = await newLeadBell(webLead.lead, mins(-20));
     const callBell = await missedCallBell(webLead.customer, webLead.lead, mins(-20));
+    const versionsBefore = { [formBell.id]: await versionOf(formBell.id), [webBell.id]: await versionOf(webBell.id) };
     // As the writer stored it: category lead, its key in metadata, the lead in metadata and in the link.
     expect(formBell).toMatchObject({ category: 'lead', link: `/admin/leads?lead=${formLead.lead.id}` });
     expect(metaOf(formBell)).toMatchObject({ dedupeKey: `lead-repeat-form:${formLead.customer.id}`, leadId: formLead.lead.id });
@@ -145,6 +151,8 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
     expect(dispatchedFor(webBell.id)).toEqual([true]);
     for (const bell of [formBell, webBell]) {
       expect(metaOf(await db('notifications').where({ id: bell.id }).first())[reminder.PUSH_STAMP]).toBe(NOW.toISOString());
+      // The stamp is not part of the bell's version: an admin's Done fenced on the version read before it still lands.
+      expect(await versionOf(bell.id)).toBe(versionsBefore[bell.id]);
     }
     expect(metaOf(await db('notifications').where({ id: callBell.id }).first())).not.toHaveProperty(reminder.PUSH_STAMP);
 
@@ -174,4 +182,19 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
       expect(metaOf(await db('notifications').where({ id: bell.id }).first())[reminder.PUSH_STAMP]).toBe(NOW.toISOString());
     }
   }, 180000);
+
+  // Every metadata shape a row can hold gets a version, and any shape without the reminder stamps keeps the version the
+  // plain hash gave it: `-` on a JSON scalar is an error, and one such row would break the whole bell list.
+  test('the bell version reads every metadata shape, and leaves every unstamped row as it was', async () => {
+    const { NOTIFICATION_VERSION_SQL } = require('../services/notification-service')._private;
+    const plain = 'md5(jsonb_build_array(title, body, link, detail, metadata)::text)';
+    const { rows } = await db.raw(
+      `SELECT ${NOTIFICATION_VERSION_SQL} AS version, ${plain} AS plain FROM (VALUES
+        ('t', 'b', NULL::text, NULL::text, '"scalar"'::jsonb), ('t', 'b', NULL, NULL, '7'::jsonb),
+        ('t', 'b', NULL, NULL, NULL::jsonb), ('t', 'b', NULL, NULL, '["newLeadRealertAt"]'::jsonb),
+        ('t', 'b', 'l', 'd', '{"a": 1}'::jsonb)) AS v(title, body, link, detail, metadata)`,
+    );
+    expect(rows).toHaveLength(5);
+    for (const row of rows) expect(row.version).toBe(row.plain);
+  });
 });

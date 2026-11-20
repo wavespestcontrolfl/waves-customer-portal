@@ -175,5 +175,5 @@ module.exports = {
   runLeadCallReminder,
   TRIGGER_KEY,
   KEY_PREFIXES,
-  __private: { inSendHours, dueAtFor, dueItems, reached, estimateHandedOff, openLeadItems, stillWaiting, stampReminder, rowStillOpen, sendReminder, candidateQuery, CLOSED_LEAD_STATUSES },
+  __private: { inSendHours, dueAtFor, dueItems, reached, estimateHandedOff, openLeadItems, stillWaiting, stampReminder, rowStillOpen, sendReminder, candidateQuery, CLOSED_LEAD_STATUSES, STAMP },
 };
