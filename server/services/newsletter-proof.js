@@ -414,16 +414,18 @@ const foldText = (text) => String(text || '').replace(/\s+/g, ' ').trim().toLowe
 
 /**
  * The FYI copy itself, wherever it lands (in this mailbox when the proof address is this mailbox, a
- * group that relays it, or a rule that forwards it on): it has the copy's own subject, and its text
- * part opens with the banner heading (sendNewsletterProof puts pestInsiderBannerText first). It
- * carries the token and the HOLD line, so whoever it comes from, it is never an answer to itself.
- * A reply opens with its sender's own words, whatever quotes the copy below them: it holds, also
- * one from the address the copy came from, and also one whose sender removed the reply prefix.
- * A message with no text part is never taken for the copy (the copy always has one); that guess
- * can only hold an issue, never send one.
+ * group that relays it, or a rule that forwards it on). It carries the token and the HOLD line, so
+ * whoever it comes from, it is never an answer to itself. It is an original message: the parser
+ * read no In-Reply-To (in_reply_to null), where every reply names the message it answers. It also
+ * has the copy's own subject, and its text part opens with the banner heading (sendNewsletterProof
+ * puts pestInsiderBannerText first). So a reply holds, whatever its subject or layout, also one from
+ * the address the copy came from. A message whose In-Reply-To was never read (in_reply_to undefined)
+ * or that has no text part is never taken for the copy; that guess can only hold an issue, never
+ * send one.
  */
 function isProofCopyItself(email) {
-  return PROOF_COPY_SUBJECT_RE.test(String(email?.subject || ''))
+  return email?.in_reply_to === null
+    && PROOF_COPY_SUBJECT_RE.test(String(email?.subject || ''))
     && foldText(email?.body_text).startsWith(foldText(FYI_BANNER_HEADING));
 }
 

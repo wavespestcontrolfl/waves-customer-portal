@@ -66,3 +66,12 @@ describe('parseMessage Cc/Bcc capture', () => {
     expect(parsed.bcc_address).toBe('');
   });
 });
+
+describe('parseMessage In-Reply-To capture', () => {
+  test('reads the message a reply answers; null on an original message (newsletter-proof isProofCopyItself)', () => {
+    const original = msgWith(null);
+    const answer = { ...original, payload: { headers: [...original.payload.headers, { name: 'In-Reply-To', value: '<copy-1@news.example.invalid>' }] } };
+    expect(parseMessage(answer).in_reply_to).toBe('<copy-1@news.example.invalid>');
+    expect(parseMessage(original).in_reply_to).toBeNull();
+  });
+});

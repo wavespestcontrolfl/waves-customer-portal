@@ -1118,12 +1118,21 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     process.env.NEWSLETTER_PROOF_APPROVERS = `owner@example.com, ${PI_QUEUED.from_email}`;
     const { issuesChain } = wireDb({ sends: { first: PI_QUEUED }, issues: { first: { ...ISSUE, status: 'scheduled' } } });
     expect(await maybeHandleProofApproval({
-      ...HOLD, subject: HOLD.subject.slice(4), from_address: PI_QUEUED.from_email, label_ids: ['INBOX'],
+      ...HOLD, subject: HOLD.subject.slice(4), from_address: PI_QUEUED.from_email, label_ids: ['INBOX'], in_reply_to: null,
       authentication_results: 'mx.google.com; dkim=pass header.i=@wavespestcontrol.com header.s=s1 header.b=abc',
       body_text: 'SENDS BY ITSELF — NO REPLY NEEDED\nThis Waves Pest Insider issue goes to 85 readers. To skip this issue, reply HOLD by 6:30 AM ET that day.',
     })).toBe(false);
     expect(issuesChain.update).not.toHaveBeenCalled();
     expect(mockTrigger).not.toHaveBeenCalled();
+  });
+
+  test("a reply that kept the copy's own subject, with HOLD typed inside the unquoted copy, holds the issue: it names the message it answers", async () => {
+    const { issuesChain } = wireDb({ sends: { first: PI_QUEUED }, issues: { first: { ...ISSUE, status: 'scheduled' } } });
+    expect(await maybeHandleProofApproval({
+      ...HOLD, subject: HOLD.subject.slice(4), in_reply_to: '<fyi-copy@news.wavespestcontrol.com>',
+      body_text: 'SENDS BY ITSELF — NO REPLY NEEDED\nHOLD\nThis Waves Pest Insider issue goes to 85 readers. To skip this issue, reply HOLD by 6:30 AM ET that day.',
+    })).toBe(true);
+    expect(issuesChain.update).toHaveBeenCalled();
   });
 
   test("a reply from the FYI copy's own sender, set as an approver, still holds the issue: only the copy itself is left out", async () => {
@@ -1265,7 +1274,7 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
     ['relayed by a group at the address it went to, under that address', () => {}, { diagnostics: { fyiTo: { 'proofs@wavespestcontrol.com': true } } }, 'proofs@wavespestcontrol.com', 'wavespestcontrol.com'],
   ])("the FYI copy itself is not a HOLD, in either witness, also with %s: it carries the token and the HOLD line", async (_label, configure, issue, from, domain) => {
     configure();
-    const copy = received(from, signedBy(domain), { subject: FYI_SUBJECT, body_text: FYI_COPY_TEXT });
+    const copy = received(from, signedBy(domain), { subject: FYI_SUBJECT, body_text: FYI_COPY_TEXT, in_reply_to: null });
     wireMailbox({ stored: [copy], searched: [copy] });
     expect(await holdReplyOnRecord(SEND, issue)).toBe(false);
   });
@@ -1289,6 +1298,20 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
   ])("a reply that kept the copy's own subject holds when its sender's words open it, with %s", async (_shape, body) => {
     process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com';
     wireMailbox({ searched: [received('owner@example.com', signedBy('example.com'), { subject: FYI_SUBJECT, body_text: body(FYI_COPY_TEXT) })] });
+    expect(await holdReplyOnRecord(SEND)).toBe(true);
+  });
+
+  test("a reply that kept the copy's own subject, with HOLD typed under the banner heading in an unquoted copy, holds: it names the message it answers", async () => {
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com';
+    const [heading, ...rest] = FYI_COPY_TEXT.split('\n');
+    const inline = [heading, 'HOLD', ...rest].join('\n');
+    wireMailbox({ searched: [received('owner@example.com', signedBy('example.com'), { subject: FYI_SUBJECT, body_text: inline, in_reply_to: '<fyi-copy@news.wavespestcontrol.com>' })] });
+    expect(await holdReplyOnRecord(SEND)).toBe(true);
+  });
+
+  test('a message whose In-Reply-To was never read is never taken for the copy: that guess can only hold the issue', async () => {
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com, newsletter@news.wavespestcontrol.com';
+    wireMailbox({ searched: [received('newsletter@news.wavespestcontrol.com', signedBy('news.wavespestcontrol.com'), { subject: FYI_SUBJECT, body_text: FYI_COPY_TEXT })] });
     expect(await holdReplyOnRecord(SEND)).toBe(true);
   });
 

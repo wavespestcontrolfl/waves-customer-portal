@@ -342,10 +342,16 @@ test('a refusal is a hard bounce or a message SendGrid dropped for an address on
   // The refusals: a hard bounce, or a drop with no delivery, open or click: the unsubscribe drop's
   // status (a reader's own unsubscribe after delivery writes only unsubscribed_at), or the spam-report
   // drop's recorded reason (the webhook records it; a reader's own spam report records none).
+  // Each drop test reads a NULL status or reason as false (IS NOT DISTINCT FROM), so the reached
+  // count's NOT never meets an unknown: newsletter-pest-insider-ledger-postgres.test.js runs it.
   expect(SPAM_REPORT_DROP_REASON).toBe('spam reporting address');
+  const NULL_SAFE_DROPS = [
+    ['whereRaw', '?? is not distinct from ?', ['status', 'unsubscribed']],
+    ['orWhereRaw', '?? is not distinct from ?', ['bounce_reason', SPAM_REPORT_DROP_REASON]],
+  ];
   const refused = queries.find((q) => !q.notGroup && q.nested.some(([m, column]) => m === 'whereNotNull' && column === 'bounced_at'));
   expect(refused.nested).toEqual(expect.arrayContaining([
-    ['whereNotNull', 'bounced_at'], ['where', 'status', 'unsubscribed'], ['orWhere', 'bounce_reason', SPAM_REPORT_DROP_REASON],
+    ['whereNotNull', 'bounced_at'], ...NULL_SAFE_DROPS,
     ['whereNull', 'delivered_at'], ['whereNull', 'opened_at'], ['whereNull', 'clicked_at'],
   ]));
   // With or without an acceptance timestamp: a drop can land before the sender records one.
@@ -357,7 +363,7 @@ test('a refusal is a hard bounce or a message SendGrid dropped for an address on
   const reached = queries.find((q) => q.notGroup);
   expect(reached.nested).toEqual(expect.arrayContaining([
     ['orWhereNotNull', 'sent_at'], ['orWhereNotNull', 'complained_at'], ['orWhereNotNull', 'unsubscribed_at'],
-    ['whereNotNull', 'bounced_at'], ['where', 'status', 'unsubscribed'], ['orWhere', 'bounce_reason', SPAM_REPORT_DROP_REASON],
+    ['whereNotNull', 'bounced_at'], ...NULL_SAFE_DROPS,
   ]));
 });
 

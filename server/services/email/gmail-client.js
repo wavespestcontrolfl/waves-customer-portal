@@ -174,6 +174,9 @@ function parseMessage(msg) {
     // RFC Message-ID — required (with In-Reply-To/References) for a reply
     // draft to join the source thread.
     message_id: getHeader('Message-ID') || null,
+    // In-Reply-To: every reply names the message it answers; null when the header is absent (an
+    // original message, such as a newsletter proof's FYI copy: newsletter-proof isProofCopyItself).
+    in_reply_to: getHeader('In-Reply-To') || null,
     reply_to: replyTo,
     // RFC 8058 one-click consent — POST is only allowed when the sender
     // explicitly declared it.

@@ -645,7 +645,7 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
   let proofHandled = false;
   try {
     const { maybeHandleProofApproval } = require('../newsletter-proof');
-    proofHandled = await maybeHandleProofApproval(email);
+    proofHandled = await maybeHandleProofApproval({ ...email, in_reply_to: parsed.in_reply_to });
   } catch (err) {
     logger.error(`[email-sync] Proof-approval check failed for ${email.id}: ${err?.message || err}`);
   }

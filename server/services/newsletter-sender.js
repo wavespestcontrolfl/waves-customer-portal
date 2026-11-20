@@ -2105,8 +2105,12 @@ const SPAM_REPORT_DROP_REASON = 'spam reporting address';
  * one, or after it lost SendGrid's answer.
  */
 function refusedDelivery(q) {
+  // IS NOT DISTINCT FROM reads a NULL status or reason as false, never unknown: ledgerProgress counts
+  // reached rows with whereNot(refusedDelivery), and NOT unknown would drop an accepted row that has
+  // no reason (most rows) from that count.
   return q.whereNotNull('bounced_at').orWhere((dropped) => dropped
-    .where((drop) => drop.where('status', 'unsubscribed').orWhere('bounce_reason', SPAM_REPORT_DROP_REASON))
+    .where((drop) => drop.whereRaw('?? is not distinct from ?', ['status', 'unsubscribed'])
+      .orWhereRaw('?? is not distinct from ?', ['bounce_reason', SPAM_REPORT_DROP_REASON]))
     .whereNull('delivered_at').whereNull('opened_at').whereNull('clicked_at'));
 }
 
@@ -2316,6 +2320,9 @@ async function settlePlannedIssue({ id, send_id: sendId }, now) {
     logger.error(`[newsletter-scheduler] Pest Insider issue ${id}: its alert reached no one; the next minute tries again`);
     return settled.changed;
   }
+  // #8139 wrote a blocked alert's mark as outcomeToldAt. No issue carries that: production had no
+  // planned issues when this shipped, and only GATE_PEST_INSIDER_AUTO_SEND makes one sent, so there is
+  // no compat read for it (CLAUDE.md rule 16).
   const mark = outcome.alert === 'blocked' ? 'blockedToldAt' : 'outcomeToldAt';
   const marked = await db('pest_insider_issues').where({ id, status: outcome.status })
     .whereRaw('diagnostics->>?::text is null', [mark])
@@ -2446,4 +2453,4 @@ async function markEventsFeatured(send) {
 module.exports = {
   applyRetryableDeliveryFilter,
   outstandingEligibleDeliveries,
-  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, withMailboxCustomers, SKIPPED_DELIVERY_STATUS, SPAM_REPORT_DROP_REASON, markEventsFeatured, sendingClaimIsStale, settlePlannedIssues };
+  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, withMailboxCustomers, SKIPPED_DELIVERY_STATUS, SPAM_REPORT_DROP_REASON, ledgerProgress, markEventsFeatured, sendingClaimIsStale, settlePlannedIssues };
