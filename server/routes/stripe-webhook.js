@@ -3902,7 +3902,12 @@ async function handleChargeRefunded(charge) {
               // returnAppliedCreditOnRefund's terminal transition (codex
               // #3591 r45 P1) — by the time this legacy flip runs the
               // status is already 'refunded', so it matches nothing.
-              await returnAppliedCreditOnRefund({ invoiceId: invId, createdBy: 'system:refund_webhook' }, trx);
+              await returnAppliedCreditOnRefund({
+                invoiceId: invId,
+                createdBy: 'system:refund_webhook',
+                refundId,
+                paymentId: row.id,
+              }, trx);
               await trx('invoices')
                 .where({ id: invId })
                 .whereIn('status', ['paid', 'processing'])
@@ -4158,7 +4163,12 @@ async function handleChargeRefunded(charge) {
       }
       if (invId && invoiceOwned) {
         const { returnAppliedCreditOnRefund } = require('../services/customer-credit');
-        await returnAppliedCreditOnRefund({ invoiceId: invId, createdBy: 'system:refund_webhook' }, trx);
+        await returnAppliedCreditOnRefund({
+          invoiceId: invId,
+          createdBy: 'system:refund_webhook',
+          refundId,
+          paymentId: pmt?.id || null,
+        }, trx);
         // Part of this bill was paid by hand (a part payment): the card refund cannot return it, so the office decides.
         const handCents = await handPartsPaidCents(trx, invId);
         if (handCents > 0) mixedRefunds.push({ invoiceId: invId, handCents });

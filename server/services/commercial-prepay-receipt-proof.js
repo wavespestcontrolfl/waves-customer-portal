@@ -245,6 +245,16 @@ function fullRefund(payment) {
   return payment.status === 'refunded' || payment.refund_status === 'full' || fullLostDispute;
 }
 
+function paymentCarriesRefundProof(payment, depositReturn) {
+  if (!depositReturn?.refundId) return false;
+  if (depositReturn.paymentId && String(payment.id || '') !== depositReturn.paymentId) return false;
+  const value = metadata(payment.metadata);
+  const stampedIds = Array.isArray(value.stamped_refund_ids)
+    ? value.stamped_refund_ids.map(String) : [];
+  return String(payment.stripe_refund_id || '') === depositReturn.refundId
+    || stampedIds.includes(depositReturn.refundId);
+}
+
 async function hasUnresolvedCombinedPartialCase(conn, invoice, payments) {
   if (!invoice.stripe_charge_id
     || !payments.some((payment) => metadata(payment.metadata).combined_payment === true)) return false;
@@ -309,7 +319,9 @@ function savedCardMovementKind(row, savedCardEvidence) {
   const reservedByAttempt = note.match(/^Account credit reserved for saved-card reconciliation attempt (.+)$/);
   if (reservedByAttempt) {
     const attempt = savedCardEvidence.reservableById.get(String(reservedByAttempt[1]));
-    if (attempt && Math.abs(deltaCents) === attempt.creditDeltaCents) return 'application';
+    if (attempt && Math.abs(deltaCents) === attempt.creditDeltaCents) {
+      return { kind: 'application', savedCardAttemptId: String(attempt.id) };
+    }
   }
   const consumedByAttempt = note.match(/^Account credit consumed by (?:reconciled|processing) saved-card attempt (.+)$/);
   if (consumedByAttempt) {
@@ -319,12 +331,16 @@ function savedCardMovementKind(row, savedCardEvidence) {
   const byOrphanPi = note.match(/^Account credit reserved for saved-card reconciliation orphan PI (.+)$/);
   if (byOrphanPi) {
     const attempt = savedCardEvidence.reservableByPi.get(String(byOrphanPi[1]));
-    if (attempt && Math.abs(deltaCents) === attempt.creditDeltaCents) return 'application';
+    if (attempt && Math.abs(deltaCents) === attempt.creditDeltaCents) {
+      return { kind: 'application', savedCardAttemptId: String(attempt.id) };
+    }
   }
   const released = note.match(/^Account credit released after failed saved-card attempt (.+)$/);
   if (released) {
     const attempt = savedCardEvidence.failedById.get(String(released[1]));
-    if (attempt && deltaCents === attempt.creditDeltaCents) return 'saved_card_release';
+    if (attempt && deltaCents === attempt.creditDeltaCents) {
+      return { kind: 'saved_card_release', savedCardAttemptId: String(attempt.id) };
+    }
   }
   return null;
 }
@@ -353,11 +369,16 @@ function creditMovementKind(invoice, row, savedCardEvidence) {
 }
 
 function creditMovementEvidence(invoice, rows, savedCardEvidence) {
-  const movements = rows.map((row) => ({
-    delta: exactCents(row.delta),
-    kind: creditMovementKind(invoice, row, savedCardEvidence),
-    at: millis(row.created_at),
-  })).filter(({ delta }) => delta !== 0);
+  const movements = rows.map((row) => {
+    const classification = creditMovementKind(invoice, row, savedCardEvidence);
+    return {
+      delta: exactCents(row.delta),
+      kind: typeof classification === 'string' ? classification : classification?.kind,
+      savedCardAttemptId: typeof classification === 'object'
+        ? classification?.savedCardAttemptId : null,
+      at: millis(row.created_at),
+    };
+  }).filter(({ delta }) => delta !== 0);
   const groups = [];
   let invalidTimestamp = false;
   for (const movement of movements.filter(({ kind }) => kind)) {
@@ -376,13 +397,17 @@ function creditMovementEvidence(invoice, rows, savedCardEvidence) {
 
 function creditGroupTotals(group) {
   const applications = group.movements.filter(({ kind }) => kind === 'application');
-  const returns = group.movements.filter(({ kind }) => kind !== 'application');
+  const savedCardReleases = group.movements.filter(({ kind }) => kind === 'saved_card_release');
+  const returns = group.movements.filter(({ kind }) => kind !== 'application'
+    && kind !== 'saved_card_release');
   return {
     invalidSign: applications.some(({ delta }) => delta >= 0)
-      || returns.some(({ delta }) => delta <= 0),
+      || [...returns, ...savedCardReleases].some(({ delta }) => delta <= 0),
     appliedCents: applications.reduce((sum, movement) => sum - movement.delta, 0),
     returnedCents: returns.reduce((sum, movement) => sum + movement.delta, 0),
     returnKinds: new Set(returns.map(({ kind }) => kind)),
+    savedCardApplications: applications.filter(({ savedCardAttemptId }) => savedCardAttemptId),
+    savedCardReleases,
   };
 }
 
@@ -446,11 +471,37 @@ async function committedCreditEvidence(conn, invoice, requiredCents) {
   let sawApplication = false;
   let latestApplicationAt = null;
   const refundEpisodes = [];
+  const savedCardReservations = new Map();
+  const releasedSavedCardReservations = new Set();
   for (const group of evidence.groups) {
-    const { invalidSign, appliedCents, returnedCents, returnKinds } = creditGroupTotals(group);
+    const {
+      invalidSign,
+      appliedCents,
+      returnedCents,
+      returnKinds,
+      savedCardApplications,
+      savedCardReleases,
+    } = creditGroupTotals(group);
     if (invalidSign) return null;
-    const beforeReturns = consumed + appliedCents;
-    if (beforeReturns > requiredCents) return null;
+    for (const application of savedCardApplications) {
+      const attemptId = application.savedCardAttemptId;
+      if (savedCardReservations.has(attemptId) || releasedSavedCardReservations.has(attemptId)) return null;
+      savedCardReservations.set(attemptId, -application.delta);
+    }
+    let releasedSavedCardCents = 0;
+    for (const release of savedCardReleases) {
+      const attemptId = release.savedCardAttemptId;
+      const reservationCents = savedCardReservations.get(attemptId);
+      if (!attemptId || releasedSavedCardReservations.has(attemptId)
+        || reservationCents !== release.delta) return null;
+      savedCardReservations.delete(attemptId);
+      releasedSavedCardReservations.add(attemptId);
+      releasedSavedCardCents += release.delta;
+    }
+    const beforeSavedCardReleases = consumed + appliedCents;
+    if (beforeSavedCardReleases > requiredCents) return null;
+    if (releasedSavedCardCents > beforeSavedCardReleases) return null;
+    const beforeReturns = beforeSavedCardReleases - releasedSavedCardCents;
     if (appliedCents > 0) {
       sawApplication = true;
       latestApplicationAt = group.at;
@@ -564,11 +615,18 @@ async function readReceiptState(conn, invoice) {
       if (refundTimes.some((at) => at == null)) return 'unconfirmed';
       const refundCompletedAt = Math.max(...refundTimes);
       // The deposit return must cover this invoice's whole deposit share and
-      // occur no earlier than this provider-refund episode. An older release
-      // (or one attached to another invoice) cannot complete a later refund.
+      // belong to this provider-refund episode. Current writers bind it to
+      // the refund/payment identity; legacy evidence falls back to its
+      // immutable event time. payments.updated_at is deliberately not used
+      // against bound proof because a harmless webhook replay touches it.
       const returnedDepositCents = depositReturn?.returnedCents || 0;
+      const durableDepositRefundProof = !!depositReturn?.refundId;
+      const depositRefundMatches = durableDepositRefundProof
+        && money.filter(fullRefund).some((payment) => paymentCarriesRefundProof(payment, depositReturn));
       if (depositCents > 0 && (depositBacked || returnedDepositCents !== depositCents
-        || depositReturn.returnedAt < refundCompletedAt)) return 'unconfirmed';
+        || (durableDepositRefundProof
+          ? !depositRefundMatches
+          : depositReturn.returnedAt < refundCompletedAt))) return 'unconfirmed';
       const creditMissing = missing - returnedDepositCents;
       if (creditMissing === 0) return 'cancelled';
       if (creditMissing < 0) return 'unconfirmed';

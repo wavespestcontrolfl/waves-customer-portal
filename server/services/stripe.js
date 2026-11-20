@@ -3874,7 +3874,12 @@ const StripeService = {
           // renewal charge could consume — same entry rule as the stamp.
           await db.transaction(async (trx) => {
             await require('./annual-prepay-renewals').acquireTermiteGateForCharge(trx, { paymentIds: [paymentId] });
-            return returnAppliedCreditOnRefund({ invoiceId: inv.id, createdBy: 'system:refund' }, trx);
+            return returnAppliedCreditOnRefund({
+              invoiceId: inv.id,
+              createdBy: 'system:refund',
+              refundId: refund.id,
+              paymentId,
+            }, trx);
           });
         }
       } catch (creditErr) {

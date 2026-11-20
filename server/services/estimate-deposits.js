@@ -2078,6 +2078,11 @@ async function readInvoiceDepositCreditReturn(invoice, trx = db) {
     || !Number.isSafeInteger(value.restoredCents)
     || value.requestedCents <= 0 || value.restoredCents !== value.requestedCents
     || !Array.isArray(value.allocations) || !value.allocations.length) return null;
+  const refundProof = value.refundProof == null ? null : value.refundProof;
+  if (refundProof && (typeof refundProof !== 'object'
+    || typeof refundProof.refundId !== 'string' || !refundProof.refundId.trim()
+    || (refundProof.paymentId != null
+      && (typeof refundProof.paymentId !== 'string' || !refundProof.paymentId.trim())))) return null;
 
   const returned = new Map();
   const depositIds = new Set();
@@ -2100,7 +2105,12 @@ async function readInvoiceDepositCreditReturn(invoice, trx = db) {
   if (new Set(owned.map((row) => String(row.id))).size !== required.size) return null;
   const returnedAt = event.created_at ? new Date(event.created_at).getTime() : NaN;
   if (!Number.isFinite(returnedAt)) return null;
-  return { returnedCents, returnedAt };
+  return {
+    returnedCents,
+    returnedAt,
+    refundId: refundProof ? String(refundProof.refundId) : null,
+    paymentId: refundProof?.paymentId != null ? String(refundProof.paymentId) : null,
+  };
 }
 
 // Reverse a voided invoice's deposit consumption. The voided invoice's own
@@ -2116,7 +2126,12 @@ async function readInvoiceDepositCreditReturn(invoice, trx = db) {
 // committing beside a still-consumed ledger with no retry path — a blocked
 // void beats stranded money, and the human resolving the alert unblocks it.
 // Returns dollars restored on full success.
-async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
+async function restoreDepositCreditForVoidedInvoice({
+  invoice,
+  trx = db,
+  refundId = null,
+  paymentId = null,
+}) {
   const items = (() => {
     try {
       const raw = invoice?.line_items;
@@ -2240,6 +2255,16 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
         requestedCents: totalRequestedCents,
         restoredCents: totalRestoredCents,
         allocations: exactInvoiceAllocations,
+        // A refund webhook may replay long after the deposit was returned
+        // and legitimately touch payments.updated_at again. Bind mixed
+        // deposit/card proof to the provider refund identity instead of that
+        // mutable timestamp. Void/cancel returns have no provider identity.
+        ...(refundId ? {
+          refundProof: {
+            refundId: String(refundId),
+            ...(paymentId != null ? { paymentId: String(paymentId) } : {}),
+          },
+        } : {}),
       },
     });
     const netInvoiceCents = Math.max(0, Math.round(((Number(terminalInvoice.subtotal) || 0)

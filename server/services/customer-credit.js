@@ -551,7 +551,12 @@ const { afterCommit, outermostTransaction } = require('../utils/trx-commit-promi
  * replays and the admin-refund/webhook pair; a shortfall throws (same contract
  * as the void path) so the caller's trx rolls back and Stripe retries the event.
  */
-async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, trx) {
+async function returnAppliedCreditOnRefund({
+  invoiceId,
+  createdBy = 'system',
+  refundId = null,
+  paymentId = null,
+}, trx) {
   const inv = await trx('invoices').where({ id: invoiceId }).forUpdate()
     .first('id', 'customer_id', 'invoice_number', 'status', 'credit_applied', 'line_items', 'scheduled_service_id');
   if (!inv) return { restored: 0 };
@@ -603,7 +608,12 @@ async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, 
     // must run at most once per invoice, which the terminal gate guarantees.
      
     const { restoreDepositCreditForVoidedInvoice } = require('./estimate-deposits');
-    await restoreDepositCreditForVoidedInvoice({ invoice: inv, trx });
+    await restoreDepositCreditForVoidedInvoice({
+      invoice: inv,
+      trx,
+      refundId,
+      paymentId,
+    });
     // A fully refunded STAMPED membership-dues invoice stops covering its month
     // exactly like a void does: visits that completed under it are unbilled.
     // Raise the same "rebill the month" office alert AFTER the caller's

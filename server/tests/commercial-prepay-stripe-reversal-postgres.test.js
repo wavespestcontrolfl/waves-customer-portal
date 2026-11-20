@@ -48,6 +48,7 @@ jest.mock('../services/notification-triggers', () => ({
 jest.mock('../services/payment-lifecycle-email', () => ({
   sendRefundIssued: jest.fn(async () => ({ ok: true })),
 }));
+jest.mock('../services/customer-health', () => ({ scoreCustomer: jest.fn(async () => {}) }));
 jest.mock('../services/stripe', () => ({
   ...jest.requireActual('../services/stripe'),
   assertNoInvoiceChargeReconciliationPending: jest.fn(async () => {}),
@@ -268,7 +269,8 @@ postgres('commercial prepay Stripe reversal writers', () => {
 
   afterEach(async () => {
     jest.restoreAllMocks();
-    await trx.rollback();
+    jest.useRealTimers();
+    if (trx && !(typeof trx.isCompleted === 'function' && trx.isCompleted())) await trx.rollback();
     trx = null;
   });
 
@@ -404,6 +406,150 @@ postgres('commercial prepay Stripe reversal writers', () => {
     ]);
     await expect(reviews(first.invoiceId)).resolves.toHaveLength(2);
     await expect(reviews(second.invoiceId)).resolves.toHaveLength(2);
+  });
+
+  test('mixed deposit/card refund proof survives a later webhook replay transaction', async () => {
+    const customerId = await seedCustomer();
+    const paymentIntentId = `pi_deposit_replay_${randomUUID().slice(0, 12)}`;
+    const chargeId = `ch_deposit_replay_${randomUUID().slice(0, 12)}`;
+    const refundId = `re_deposit_replay_${randomUUID().slice(0, 12)}`;
+    const sale = await seedSale({ customerId, paymentIntentId, chargeId });
+    await trx('invoices').where({ id: sale.invoiceId }).update({
+      total: 40,
+      line_items: JSON.stringify([
+        ...setupLine(55),
+        {
+          description: 'Deposit credit (paid at acceptance)',
+          quantity: 1,
+          unit_price: -15,
+          amount: -15,
+          category: 'deposit_credit',
+          estimate_id: sale.estimateId,
+        },
+      ]),
+    });
+    const [deposit] = await trx('estimate_deposits').insert({
+      estimate_id: sale.estimateId,
+      customer_id: customerId,
+      amount: 15,
+      credited_amount: 15,
+      refunded_amount: 0,
+      status: 'credited',
+      stripe_payment_intent_id: `pi_original_deposit_${randomUUID().slice(0, 12)}`,
+      credited_invoice_id: sale.invoiceId,
+    }).returning('*');
+    const payment = await seedPayment(sale, {
+      paymentIntentId,
+      chargeId,
+      amount: 40,
+      baseCents: 4000,
+      metadata: { invoice_id: sale.invoiceId, base_amount: 40, card_surcharge: 0 },
+    });
+    const charge = fullRefund({
+      chargeId,
+      paymentIntentId,
+      refundId,
+      amountCents: 4000,
+    });
+    mockStripeChargeRetrieve.mockResolvedValue({ id: chargeId, amount: 4000 });
+
+    // Commit the fixture so both webhook deliveries run as independent root
+    // transactions, matching Stripe redelivery rather than nested savepoints.
+    await trx.commit();
+    trx = null;
+    mockPg = database;
+
+    const review = require('../services/commercial-prepay-dispatch-review');
+    const skippedFirstSync = jest.spyOn(review, 'reconcileInvoice').mockResolvedValue('cancelled');
+    const webhook = require('../routes/stripe-webhook');
+    await webhook._handleChargeRefunded(charge);
+    skippedFirstSync.mockRestore();
+
+    await expect(database('dispatch_alerts')
+      .where({ type: 'commercial_prepay_setup_review' })
+      .whereRaw("payload->>'sourceInvoiceId' = ?", [String(sale.invoiceId)]))
+      .resolves.toHaveLength(0);
+    const [evidence] = await database('audit_log').where({
+      action: 'invoice.deposit_credit.returned',
+      resource_type: 'invoices',
+      resource_id: sale.invoiceId,
+    });
+    expect(evidence.metadata).toEqual(expect.objectContaining({
+      version: 2,
+      refundProof: {
+        refundId,
+        paymentId: String(payment.id),
+      },
+      allocations: [{
+        depositId: String(deposit.id),
+        estimateId: sale.estimateId,
+        returnedCents: 1500,
+      }],
+    }));
+    // Make the first provider stamp deterministically older than the deposit
+    // proof. The replay below replaces it with a newer updated_at; proof must
+    // continue to follow the refund id, not this mutable timestamp.
+    await database('payments').where({ id: payment.id }).update({
+      updated_at: new Date(Date.now() - 60_000),
+    });
+    const firstPayment = await database('payments').where({ id: payment.id }).first();
+    await expect(review.readReceiptState(
+      database,
+      await database('invoices').where({ id: sale.invoiceId }).first(),
+    )).resolves.toBe('cancelled');
+
+    const mismatchedProof = await database.transaction();
+    try {
+      await mismatchedProof('audit_log').where({ id: evidence.id }).update({
+        metadata: {
+          ...evidence.metadata,
+          refundProof: { refundId: `re_foreign_${randomUUID().slice(0, 12)}`, paymentId: String(payment.id) },
+        },
+      });
+      await expect(review.readReceiptState(
+        mismatchedProof,
+        await mismatchedProof('invoices').where({ id: sale.invoiceId }).first(),
+      )).resolves.toBe('unconfirmed');
+    } finally {
+      await mismatchedProof.rollback();
+    }
+
+    // Capture root-transaction after-commit work so this test can run every
+    // committed-state verification to completion before Jest destroys Knex.
+    const committedEffects = [];
+    const afterCommit = jest.spyOn(require('../utils/trx-commit-promise'), 'afterCommit')
+      .mockImplementation((_trx, effect) => { committedEffects.push(effect); });
+    const emit = jest.fn();
+    require('../sockets').getIo.mockReturnValue({ to: jest.fn(() => ({ emit })) });
+    await webhook._handleChargeRefunded(charge);
+    expect(committedEffects).not.toHaveLength(0);
+    await Promise.all(committedEffects.map((effect) => effect()));
+    afterCommit.mockRestore();
+    expect(emit).toHaveBeenCalledWith(
+      'dispatch:alert',
+      expect.objectContaining({
+        type: 'commercial_prepay_setup_review',
+        payload: expect.objectContaining({ sourceInvoiceId: sale.invoiceId }),
+      }),
+    );
+
+    const replayedPayment = await database('payments').where({ id: payment.id }).first();
+    expect(new Date(replayedPayment.updated_at).getTime())
+      .toBeGreaterThan(new Date(firstPayment.updated_at).getTime());
+    await expect(database('audit_log').where({
+      action: 'invoice.deposit_credit.returned',
+      resource_type: 'invoices',
+      resource_id: sale.invoiceId,
+    })).resolves.toHaveLength(1);
+    await expect(database('dispatch_alerts')
+      .where({ type: 'commercial_prepay_setup_review' })
+      .whereRaw("payload->>'sourceInvoiceId' = ?", [String(sale.invoiceId)]))
+      .resolves.toEqual([
+        expect.objectContaining({
+          resolved_at: null,
+          payload: expect.objectContaining({ sourceInvoiceId: sale.invoiceId }),
+        }),
+      ]);
   });
 
   test('lost dispute closure proves a whole invoice allocation, while a partial remains unconfirmed', async () => {
@@ -577,7 +723,7 @@ postgres('commercial prepay Stripe reversal writers', () => {
     expect(await reviews(sale.invoiceId)).toEqual([]);
   });
 
-  test('synchronous confirm records restoration before a later refund starts a new returned episode', async () => {
+  test('synchronous confirm uses the production sale lookup and records restoration before a later refund', async () => {
     const customerId = await seedCustomer();
     const originalPi = `pi_confirm_original_${randomUUID().slice(0, 12)}`;
     const originalCharge = `ch_confirm_original_${randomUUID().slice(0, 12)}`;
@@ -602,6 +748,11 @@ postgres('commercial prepay Stripe reversal writers', () => {
     });
     const intent = succeededIntent({ invoiceId: sale.invoiceId, paymentIntentId: replacementPi, chargeId: replacementCharge });
     mockSucceededCard(intent);
+
+    // This module is not mocked in this suite. Pin the production export and
+    // its true result before confirmInvoicePayment calls the same lookup.
+    await expect(require('../services/commercial-prepay-sale-record')
+      .hasRecordedUnbookedSale(trx, sale.invoiceId)).resolves.toBe(true);
 
     const review = require('../services/commercial-prepay-dispatch-review');
     const realReconcile = review.reconcileInvoice;
@@ -823,6 +974,108 @@ postgres('commercial prepay Stripe reversal writers', () => {
     expect(episodes.filter((row) => row.payload.paymentRestored === true)).toHaveLength(1);
   });
 
+  test('failed saved-card recovery releases only its reservation and preserves earlier applied credit', async () => {
+    const customerId = await seedCustomer();
+    const failedPi = `pi_saved_release_${randomUUID().slice(0, 12)}`;
+    const sale = await seedSale({
+      customerId,
+      paymentIntentId: failedPi,
+      chargeId: null,
+    });
+    await trx('invoices').where({ id: sale.invoiceId }).update({
+      status: 'processing',
+      paid_at: null,
+      payment_recorded_at: null,
+      stripe_payment_intent_id: failedPi,
+      credit_applied: 25,
+      total: 55,
+    });
+    const attemptId = randomUUID();
+    await trx('stripe_invoice_charge_attempts').insert({
+      id: attemptId,
+      invoice_id: sale.invoiceId,
+      stripe_payment_method_id: `pm_failed_release_${attemptId.slice(0, 12)}`,
+      idempotency_key: `synthetic-failed-release:${attemptId}`,
+      status: 'ambiguous',
+      stripe_payment_intent_id: failedPi,
+      amount: 30,
+      credit_applied_delta: 15,
+      credit_applied_total: 25,
+      resolved_at: null,
+    });
+    const startedAt = Date.now() - 120_000;
+    await trx('customer_credit_ledger').insert([
+      {
+        customer_id: customerId,
+        invoice_id: sale.invoiceId,
+        delta: -10,
+        balance_after: 15,
+        source: 'invoice_application',
+        note: 'Account credit applied before saved-card attempt',
+        created_by: 'synthetic',
+        created_at: new Date(startedAt),
+      },
+      {
+        customer_id: customerId,
+        invoice_id: sale.invoiceId,
+        delta: -15,
+        balance_after: 0,
+        source: 'adjustment',
+        note: `Account credit reserved for saved-card reconciliation attempt ${attemptId}`,
+        created_by: 'system:saved_card_reconciliation',
+        created_at: new Date(startedAt + 60_000),
+      },
+    ]);
+
+    await expect(require('../services/stripe').resolveFailedInvoiceSavedCardChargeAttempt({
+      attemptId,
+      invoiceId: sale.invoiceId,
+      customerId,
+      stripePaymentIntentId: failedPi,
+      failureMessage: 'Synthetic terminal decline',
+      declineCode: 'card_declined',
+      database: trx,
+    })).resolves.toBe(true);
+
+    await expect(trx('invoices').where({ id: sale.invoiceId }).first())
+      .resolves.toMatchObject({
+        credit_applied: '10.00',
+        stripe_payment_intent_id: null,
+      });
+    await expect(trx('stripe_invoice_charge_attempts').where({ id: attemptId }).first())
+      .resolves.toMatchObject({ status: 'failed', resolved_at: expect.any(Date) });
+    await expect(trx('customer_credit_ledger').where({ invoice_id: sale.invoiceId }).orderBy('created_at'))
+      .resolves.toEqual(expect.arrayContaining([
+        expect.objectContaining({ delta: '-10.00', source: 'invoice_application' }),
+        expect.objectContaining({
+          delta: '-15.00',
+          note: `Account credit reserved for saved-card reconciliation attempt ${attemptId}`,
+        }),
+        expect.objectContaining({
+          delta: '15.00',
+          note: `Account credit released after failed saved-card attempt ${attemptId}`,
+        }),
+      ]));
+
+    const replacementPi = `pi_after_saved_release_${randomUUID().slice(0, 12)}`;
+    await trx('invoices').where({ id: sale.invoiceId }).update({
+      status: 'paid',
+      paid_at: new Date(),
+      stripe_payment_intent_id: replacementPi,
+      stripe_charge_id: null,
+    });
+    await seedPayment(sale, {
+      paymentIntentId: replacementPi,
+      chargeId: null,
+      amount: 45,
+      baseCents: 4500,
+      metadata: { invoice_id: sale.invoiceId, base_amount: 45, card_surcharge: 0 },
+    });
+    const invoice = await trx('invoices').where({ id: sale.invoiceId }).first();
+    await expect(require('../services/commercial-prepay-dispatch-review')
+      .readReceiptState(trx, invoice)).resolves.toBe('active');
+  });
+
   test('a wrong-payer processing row cannot create a restored review during webhook settlement', async () => {
     const customerId = await seedCustomer();
     const originalPi = `pi_wrong_payer_original_${randomUUID().slice(0, 12)}`;
@@ -876,6 +1129,10 @@ postgres('commercial prepay Stripe reversal writers', () => {
   });
 
   test('payer-statement dispute closure never writes commercial invoice receipt proof', async () => {
+    const reviewIdsBefore = await trx('dispatch_alerts')
+      .where({ type: 'commercial_prepay_setup_review' })
+      .orderBy('id')
+      .pluck('id');
     const [payer] = await trx('payers').insert({
       display_name: 'Synthetic AP',
       payment_terms: 'net30',
@@ -913,6 +1170,9 @@ postgres('commercial prepay Stripe reversal writers', () => {
     const row = await trx('payments').where({ stripe_charge_id: chargeId }).first('metadata');
     expect(row.metadata).toEqual(expect.objectContaining({ dispute_final: 'lost' }));
     expect(row.metadata).not.toHaveProperty('dispute_full_payment');
-    expect(await trx('dispatch_alerts').where({ type: 'commercial_prepay_setup_review' })).toEqual([]);
+    expect(await trx('dispatch_alerts')
+      .where({ type: 'commercial_prepay_setup_review' })
+      .orderBy('id')
+      .pluck('id')).toEqual(reviewIdsBefore);
   });
 });
