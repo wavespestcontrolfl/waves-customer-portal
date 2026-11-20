@@ -71,9 +71,11 @@ describe('a refused plan quote (RESTART_STATE_CHANGED / PLAN_START_STATE_CHANGED
       expect(pageSource.slice(at, depsAt)).toContain('if (staleQuoteNote) return;');
       expect(pageSource.slice(depsAt, pageSource.indexOf(']);', depsAt))).toMatch(/\bstaleQuoteNote\b/);
     }
-    // Both payment button groups turn off, and the time picker freezes.
+    // Both payment button groups turn off. The time picker and its pick-a-time prompt are not
+    // rendered at all: a frozen picker still took keyboard input (codex pre-push P1).
     expect(pageSource.match(/disabled=\{readOnlyPreview \|\| consumerNoticeBlocked \|\| !!staleQuoteNote \|\| /g)).toHaveLength(2);
-    expect(pageSource).toContain("style={ctaPhase === 'submitting' || staleQuoteNote ? { pointerEvents: 'none', opacity: 0.65 } : undefined}");
+    expect(pageSource).toContain('{staleQuoteNote ? null : canShowSlotPicker ? (');
+    expect(pageSource).toContain('{!staleQuoteNote && canShowSlotPicker && pickTimePrompt > 0 && !selectedSlotId');
   });
 
   it('keeps its banner above the slot banners, below only a stuck hold release', () => {

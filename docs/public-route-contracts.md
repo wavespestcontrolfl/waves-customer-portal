@@ -2138,8 +2138,8 @@ slot, service mode, payment), so an invoice-mode quote, whose page sends no slot
 than `plan_start_slot_required`. The re-check answers it again on both options as the row reads
 under the estimate row lock, before the comms lock (a writer from before the write refusal can
 commit between the accept's read and that lock). The estimate page answers both state-changed codes with a banner that keeps the server's
-message and links back to the portal, never "Refresh times", and turns off its time picker and
-payment choices for that quote. A re-check that cannot read its state, or that finds the
+message and links back to the portal, never "Refresh times", shows no time picker, and turns
+off its payment choices for that quote. A re-check that cannot read its state, or that finds the
 customer's property-preferences key held by another change (the re-check tries that key and never
 waits on it while it holds the comms key), answers 409
 `{ error, code: 'PLAN_START_RECHECK_RETRY' }` with a retry line and writes nothing; the estimate page

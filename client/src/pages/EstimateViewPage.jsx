@@ -10706,9 +10706,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     <div id={BOOKING_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {/* Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): right above the accept controls; absent with the gate off. */}
             <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} />
-            {canShowSlotPicker && pickTimePrompt > 0 && !selectedSlotId
+            {!staleQuoteNote && canShowSlotPicker && pickTimePrompt > 0 && !selectedSlotId
               ? <SlotIssueBanner key={pickTimePrompt} kind="pick_time" /> : null}
-            {canShowSlotPicker ? (
+            {/* A refused plan quote shows no picker at all (codex pre-push P1): no time
+                on this page can accept it, and a frozen picker still took keyboard input. */}
+            {staleQuoteNote ? null : canShowSlotPicker ? (
               // SlotPicker takes no disabled prop, so freeze it from out here
               // while a reserve/accept is in flight (ctaPhase 'submitting'
               // renders this configure layout): pointer-events blocks taps,
@@ -10722,11 +10724,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               // review (or after a failed accept returns to review), where
               // its selectSlot(null) would clear the slot behind the
               // still-live reservation.
-              // A refused plan quote freezes it too (codex pre-push P1): no
-              // time on this page can accept that quote.
               <div
-                aria-disabled={ctaPhase === 'submitting' || !!staleQuoteNote || undefined}
-                style={ctaPhase === 'submitting' || staleQuoteNote ? { pointerEvents: 'none', opacity: 0.65 } : undefined}
+                aria-disabled={ctaPhase === 'submitting' || undefined}
+                style={ctaPhase === 'submitting' ? { pointerEvents: 'none', opacity: 0.65 } : undefined}
               >
                 <SlotPicker
                   website={websiteMode}
