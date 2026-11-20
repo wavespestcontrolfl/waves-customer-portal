@@ -2149,10 +2149,11 @@ function ScheduleFlowPage({ flow }) {
   // ignoreHeldAddress: the held address was just invalidated (an address
   // race — Codex #4737 r10 pre-push P1); this call's closure still holds
   // it, so the plain GET (the customer's current address) is used instead.
-  // Every answer is applied, and the call resolves to whether it brought a
-  // list (listMissing): only a refusal's reload (confirm) takes none as a
-  // failure. "Show all open times" shows the answer as it is, a changed
-  // address with no times included (pre-push P1 on 64c12c96f4).
+  // Every answer is applied, and the call resolves to it (to nothing when
+  // superseded): only a refusal's reload (confirm) reads it, and takes no
+  // list (listMissing) as a failure. "Show all open times" shows the answer
+  // as it is, a changed address with no times included (pre-push P1 on
+  // 64c12c96f4).
   const refreshInspectionAvailability = useCallback(async ({ signal, ignoreHeldAddress = false } = {}) => {
     if (flow === 'inspection' && resolvedAddress && !ignoreHeldAddress) {
       const { res, body } = await postInspectionAvailability(token, resolvedAddress, { signal });
@@ -2162,7 +2163,7 @@ function ScheduleFlowPage({ flow }) {
       // page, as the gate and the slot search do (Codex #4737 r11 pre-push P1).
       if (body.state && body.state !== 'ok') setData(body);
       else mergeData({ availability: body.availability, needs_address: false });
-      return !listMissing(body);
+      return body;
     }
     const res = await fetch(availabilityUrl, { signal });
     if (signal?.aborted) return;
@@ -2170,7 +2171,7 @@ function ScheduleFlowPage({ flow }) {
     const body = await res.json();
     if (signal?.aborted) return;
     setData(body);
-    return !listMissing(body);
+    return body;
   }, [flow, resolvedAddress, token, availabilityUrl, mergeData]);
 
   // Waves AI date/time search — swaps in the matching window's availability
@@ -2275,6 +2276,23 @@ function ScheduleFlowPage({ flow }) {
         setResult({ ...body, ...resultMarks });
         return;
       }
+      // Inspection only: the commit answers any of GET's own terminal
+      // states (already_booked/converted/gone) when eligibility changed
+      // since page load — idempotent replay, or a race with another
+      // booking. Replace `data` with the response body itself (it's the
+      // SAME shape GET returns) so the existing blocked() rendering path
+      // shows the right card immediately, uniformly for every terminal
+      // state — not just ALREADY_BOOKED, which previously left converted/
+      // gone falling through to a generic "something went wrong" line
+      // (Codex pre-push P1, 2026-09-24). The state is the link's, not an
+      // address's, so it applies even after the page moved on to another
+      // address (pre-push P1 on 0bef4d7e3c).
+      if (inspectionLike && res.ok && body.state && body.state !== 'ok') {
+        supersedeSearches();
+        setSelectedSlot(null);
+        setData(body);
+        return;
+      }
       // A refusal that lands after the page moved on belongs to the old page:
       // the new list is on screen, and this answer's times, address and
       // message are not for it (pre-push P1s on 6db4e39ca7 and a8a0462d10).
@@ -2295,20 +2313,6 @@ function ScheduleFlowPage({ flow }) {
       const inlineRefusal = inspectionLike && INSPECTION_INLINE_REFUSALS.get(body.error);
       if (inlineRefusal) {
         setSubmitError(inlineRefusal);
-        return;
-      }
-      // Inspection only: the commit answers any of GET's own terminal
-      // states (already_booked/converted/gone) when eligibility changed
-      // since page load — idempotent replay, or a race with another
-      // booking. Replace `data` with the response body itself (it's the
-      // SAME shape GET returns) so the existing blocked() rendering path
-      // shows the right card immediately, uniformly for every terminal
-      // state — not just ALREADY_BOOKED, which previously left converted/
-      // gone falling through to a generic "something went wrong" line
-      // (Codex pre-push P1, 2026-09-24).
-      if (inspectionLike && res.ok && body.state && body.state !== 'ok') {
-        setSelectedSlot(null);
-        setData(body);
         return;
       }
       if (flow === 'reservice' && body.code === 'LOCATION_REVIEW_REQUIRED') {
@@ -2364,10 +2368,10 @@ function ScheduleFlowPage({ flow }) {
           const { signal } = loadAbortRef.current;
           setSearchClosed(true);
           const done = await refreshInspectionAvailability({ signal, ignoreHeldAddress: Boolean(body.address_changed) })
-            .catch(() => false)
-            .then((listed) => {
+            .catch(() => null)
+            .then((answer) => {
               if (signal.aborted) return true;
-              if (!listed) {
+              if (!answer || listMissing(answer)) {
                 mergeData({ availability: null });
                 setSubmitError('That time was just taken, and we couldn\'t load the latest open times. Please reload this page, or text us and we\'ll help.');
                 return true;
@@ -2376,7 +2380,10 @@ function ScheduleFlowPage({ flow }) {
               // not one of these times (pre-push P1 on f49f71aa78).
               setSelectedSlot(null);
               setSearchClosed(false);
-              return false;
+              // An answer with no openings (a terminal state, the address
+              // form, booking_unavailable or service_area_unavailable) shows
+              // its own card: no "latest open times" (pre-push P1 on 0bef4d7e3c).
+              return !answer.availability;
             });
           if (done) return;
         } else {

@@ -1064,6 +1064,62 @@ describe('InspectionPage: an address race without availability refreshes at the 
     expect(screen.queryByText(/Something went wrong/i)).not.toBeInTheDocument();
   });
 
+  // Pre-push P1 on 0bef4d7e3c: a terminal state is the link's, not an
+  // address's. A booking that answers `gone` after the customer moved on to
+  // another address still replaces the page.
+  it('a terminal answer that lands after a change of address still replaces the page', async () => {
+    let resolveCommit = null;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/availability') && opts.method === 'POST') {
+        return Promise.resolve(jsonResponse({ availability: mondayAvailability('09:00', '9:00 AM'), needs_address: false }));
+      }
+      if (opts.method === 'POST') return new Promise((resolve) => { resolveCommit = resolve; });
+      return Promise.resolve(jsonResponse(okPayload()));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(resolveCommit).not.toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: 'Different address?' }));
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '9 Gulf Dr, Sarasota, FL 34231' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+    expect(await screen.findByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i })).toBeInTheDocument();
+    await act(async () => {
+      resolveCommit(jsonResponse({ state: 'gone', lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: null } }));
+    });
+    expect(await screen.findByText("We couldn't find that lead")).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i })).not.toBeInTheDocument();
+  });
+
+  // Pre-push P1 on 0bef4d7e3c: a refusal's reload that answers no times on
+  // purpose shows that answer's card, never "here are the latest open times".
+  it.each([
+    ['service_area_unavailable', /couldn.t confirm your service area just now/i],
+    ['booking_unavailable', /don't have open times to offer online right now/i],
+  ])('a refusal whose reload answers %s → that card, and no "latest open times"', async (flag, copy) => {
+    let getCalls = 0;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (opts.method === 'POST') return Promise.resolve(jsonResponse({ error: 'That time is no longer open.', code: 'SLOT_TAKEN', availability: null }, 409));
+      getCalls += 1;
+      return Promise.resolve(jsonResponse(getCalls === 1 ? okPayload() : okPayload({ availability: null, [flag]: true })));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    expect(await screen.findByText(copy)).toBeInTheDocument();
+    await new Promise((r) => { setTimeout(r, 20); });
+    expect(screen.queryByText(/latest open times/i)).not.toBeInTheDocument();
+    expect(getCalls).toBe(2);
+  });
+
   // Pre-push P1 on 8f40c19990: a search still running when the refusal lands
   // must not put its times back over the reload's.
   it('a search still running when the refusal lands → its late times never show', async () => {

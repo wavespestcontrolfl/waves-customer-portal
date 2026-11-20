@@ -7756,12 +7756,14 @@ it runs is not kept: the reload's list drops it, even when it offers the same st
 "Show all open times" applies its answer as it is: with no list, the old times, pick
 and address leave, and the page shows the answer's address and no times. A terminal state, the address form, or the GET's own no-times answers
 (`service_area_unavailable`, `booking_unavailable`) in that answer still replace the
-page. Any answer but a booking also drops a search still running, so its late times
+page, and the page then shows no "latest open times" message. Any answer but a booking also drops a search still running, so its late times
 never land over the page, and that search ends quietly (no search error). The reload runs under the page's request controller: a
 change of address while it runs supersedes it, and it then applies no list,
 clears nothing and shows no message. A refusal that lands after a change of
 address, a reload or another link (which remounts the page) belongs to the old page,
 and the page applies none of it: no times, no dropped address, no message, no reload.
+A terminal state (`already_booked`, `converted`, `gone`) is the link's, not an
+address's, so the commit's terminal answer still replaces the page.
 A booking that fails after that (a network error) shows no message either. A booking always shows. With the
 funnel off, every refusal carries fresh times at the booking location, as
 before. No field,
