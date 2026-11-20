@@ -575,10 +575,19 @@ async function resolveServiceAddress(lead, custRow, suppliedAddress) {
 
 // Whether a geocode review quarantines this typed address for this profile: the profile is blocked, has an address on
 // file, and the typed address is not proven another property (profileAffirmativelyDiffers). resolveServiceAddress
-// then answers `unresolved`, and a refused booking answers that refusal (nextCommitRefresh; pre-push P1s on 23dfae53de
-// and 172712852a).
+// then answers `unresolved`.
 function quarantineRefusesSupplied(custRow, supplied) {
   return Boolean(custRow?.geocode_review_blocked && custRow.address_line1 && !profileAffirmativelyDiffers(custRow, supplied));
+}
+
+// Phase 1's review rule for a linked profile (provisionLinkedCustomer): a profile a geocode review blocks
+// (`blockedRow`) books only a typed address that is affirmatively another property than the address on file
+// (`storedRow`); with no address on file, none. Stricter than the list's rule above, which lets a typed address
+// through for a profile with no address on file. A refused booking's refresh reads this rule for the profile its next
+// commit loads (nextCommitRefresh; pre-push P1 on 756cfc2628).
+function reviewRefusesBooking(blockedRow, storedRow, resolved) {
+  if (!blockedRow?.geocode_review_blocked) return false;
+  return !(resolved.source === 'supplied' && storedRow.address_line1 && profileAffirmativelyDiffers(storedRow, resolved.address));
 }
 
 // The page's typed address as structured fields, or null when none.
@@ -640,16 +649,20 @@ function storedAddressCandidates(lead, custRow) {
 // read carries none. An address a geocode review now quarantines for that
 // customer answers the next commit's own refusal (`failure`
 // 'address_unresolved', which sendSlotTaken sends in place of SLOT_TAKEN), so
-// the page shows its address message, not the times it holds
-// (quarantineRefusesSupplied; pre-push P1s on 23dfae53de and 172712852a). Any other refusal carries no times (`location` null), and
+// the page shows its address message, not the times it holds. The rule is the
+// next commit's phase 1 rule (reviewRefusesBooking; pre-push P1s on
+// 23dfae53de, 172712852a and 756cfc2628). Any other refusal carries no times (`location` null), and
 // the page reloads its own list (GET, or POST /:token/availability with a
 // typed address), which reads the same resolver and trusted customer as the
 // next commit. A booking moved to a matched profile's other stored location
-// says so (`address_changed`) when that profile is the trusted customer the
-// next commit loads: the page drops the typed address, so its reload and its
-// next commit read that profile, where this booking was going. Otherwise the
-// typed address stays: without it, the next commit would reach another
-// profile. A failed read keeps it too. With the funnel off
+// says so (`address_changed`) when the next commit, with no address typed,
+// resolves to that very property: the same profile as the trusted customer it
+// loads, with the stored pin and address phase 1 adopted (storedCoordsResolution,
+// as resolveServiceAddress reads them). The page then drops the typed address,
+// so its reload and its next commit read that profile, where this booking was
+// going. Otherwise the typed address stays: without it, the next commit would
+// reach another profile, or a property staff moved since phase 1 (pre-push P1
+// on 756cfc2628). A failed read keeps it too. With the funnel off
 // (GATE_SOUTH_ZONE_DAY_FUNNEL) no list or commit reads a zone, so every
 // refusal carries fresh times at the booking location, the answer the switch
 // restores (pre-push P1 on 7cdf34198a).
@@ -663,10 +676,13 @@ async function nextCommitRefresh({ lead, verified, resolved, custRow, bookingAdd
       return null;
     });
   if (!locationMoved) {
-    if (quarantineRefusesSupplied(nextCust, resolved.address)) return { location: null, failure: 'address_unresolved' };
+    if (reviewRefusesBooking(nextCust, nextCust, resolved)) return { location: null, failure: 'address_unresolved' };
     return nextCust ? { location: bookingLocation, address: bookingAddress, customer: nextCust } : { location: null };
   }
-  return { location: null, addressChanged: nextCust != null && String(nextCust.id) === String(custRow.id) };
+  const stored = nextCust && String(nextCust.id) === String(custRow.id) ? storedCoordsResolution(nextCust) : null;
+  const sameProperty = Boolean(stored) && sameLocation(stored.location, bookingLocation)
+    && require('node:util').isDeepStrictEqual(customerAddressFields(nextCust), bookingAddress);
+  return { location: null, addressChanged: sameProperty };
 }
 
 // Everything the page's own booking address resolves from when no address
@@ -2073,12 +2089,7 @@ async function provisionLinkedCustomer(trx, {
     return { locationFailure: 'address_unresolved' };
   }
   provisioned = freshCustRow;
-  const explicitDifferentAddress = [
-    resolved.source === 'supplied',
-    Boolean(storedCustRow.address_line1),
-    profileAffirmativelyDiffers(storedCustRow, resolved.address),
-  ].every(Boolean);
-  if (freshCustRow.geocode_review_blocked && !explicitDifferentAddress) {
+  if (reviewRefusesBooking(freshCustRow, storedCustRow, resolved)) {
     return { locationFailure: 'address_unresolved' };
   }
   // A supplied address that is NOT the linked profile's own address is

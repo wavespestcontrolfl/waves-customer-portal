@@ -7701,16 +7701,19 @@ the same pin. They are built there with that address and the trusted customer
 read again (phase one's copy can be stale by then), as the next commit's first
 build reads them. A typed address a geocode review now quarantines for that
 customer answers the next commit's own `422 address_unresolved` in place of
-`SLOT_TAKEN`, and the page shows its address message. A failed read, and any
+`SLOT_TAKEN`, by the rule the next commit's phase one applies (a blocked
+profile with no address on file takes no typed address there), and the page
+shows its address message. A failed read, and any
 other refusal after phase one, answer `availability: null`, and the page
 reloads its own list (GET, or
 `POST /:token/availability` with the address it holds), which reads the same
 resolver and trusted customer as its next commit. A booking moved to a matched
 profile's other stored location also answers `address_changed: true` when that
-profile is the trusted customer the next commit loads: the page drops the typed
-address, so its reload and its retry read that profile's stored location and
-address. When the next commit would load another profile, or that read fails,
-the typed address stays. A failed build answers with no times too. With the
+profile is the trusted customer the next commit loads and still has the stored
+pin and address phase one adopted: the page drops the typed address, so its
+reload and its retry read that profile's stored location and address. When the
+next commit would load another profile, staff changed that profile's pin or
+address since phase one, or that read fails, the typed address stays. A failed build answers with no times too. With the
 funnel off, every refusal carries fresh times at the booking location, as
 before. No field,
 status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search

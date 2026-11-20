@@ -2036,35 +2036,54 @@ describe('POST /:token commit', () => {
     // Pre-push P1s on 23dfae53de and 172712852a: staff sent the profile's pin to a geocode review while this booking ran.
     // The next commit's resolver answers `address_unresolved` for the same typed address, so the refusal answers that,
     // not SLOT_TAKEN: the page shows its address message instead of the times it holds, and builds no fresh times.
-    test('a same-pin booking refused after staff blocked the address: the answer is address_unresolved', async () => {
+    // Pre-push P1 on 756cfc2628: the same when staff also cleared the address on file under a verified review (the row no
+    // longer carries its address): the list's own rule would let the typed address through, but the next commit's phase 1
+    // refuses it (reviewRefusesBooking). Either way the retry gets that same refusal and books nothing.
+    test.each([
+      ['sent the address to review', 'needs_pin', {}],
+      ['cleared the address on file under a verified review', 'verified', {
+        address_line1: null, address_line2: null, city: null, state: null, zip: null, latitude: null, longitude: null,
+      }],
+    ])('a same-pin booking refused after staff %s: the answer is address_unresolved, and the retry\'s too', async (_label, status, cleared) => {
       Object.assign(mockFarSouthGates, { funnel: true });
       gateState.reviewLive = true;
       let blocked = false;
       firstResults.customer_geocode_reviews = () => (blocked ? {
-        customer_id: 'cust-9', status: 'needs_pin', address_snapshot: ['123 Palm Ave', null, 'Bradenton', 'FL', '34209'],
+        customer_id: 'cust-9', status, address_snapshot: ['123 Palm Ave', null, 'Bradenton', 'FL', '34209'],
         latitude: null, longitude: null, updated_at: new Date(),
       } : null);
       firstResults.leads = leadLinkedAfterWrite({ ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' });
       firstResults.call_log = { from_phone: '+19415550101' };
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
-      seedPhoneHousehold({
+      const profile = {
         id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, address_line1: '123 Palm Ave', address_line2: null,
         city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
         latitude: 27.4, longitude: -82.5, // the default mockGeocode pin: the location does not move
-      });
+      };
+      seedPhoneHousehold(profile);
       listResults.scheduled_services = [];
-      mockBuildAvailability.mockResolvedValueOnce({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] });
+      const open = { days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] };
+      mockBuildAvailability.mockResolvedValueOnce(open).mockResolvedValueOnce(open);
       mockCreateSelfBooking.mockImplementationOnce(async () => {
         blocked = true;
+        Object.assign(profile, cleared);
         return { ok: false, status: 409, error: 'That time is no longer open.' };
       });
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const typed = { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL 34209' };
 
-      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL 34209' });
+      const res = await callPost(token, typed);
 
       expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
       expect(res.statusCode).toBe(422);
       expect(res.body).toEqual({ error: 'address_unresolved' });
       expect(mockBuildAvailability).toHaveBeenCalledTimes(1);
+
+      const retry = await callPost(token, typed);
+
+      expect(retry.statusCode).toBe(422);
+      expect(retry.body).toEqual({ error: 'address_unresolved' });
+      expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
     });
 
     // Owner rule B per truck (pre-push P1 on 46fd83d04f): the typed city is in no zone while the matched profile's city
@@ -2486,6 +2505,34 @@ describe('POST /:token commit', () => {
       expect(refresh).toEqual({ location: null, addressChanged: false });
     });
 
+    // Pre-push P1 on 756cfc2628: a moved booking drops the typed address only when the next commit, with none typed,
+    // resolves to the property this booking moved to: the same profile, with the stored pin and address phase 1 adopted.
+    // Staff may have moved that profile since; the next commit would then book the new property, so the typed address
+    // stays.
+    test.each([
+      ['its stored pin and address unchanged', true, {}],
+      ['a new pin since phase 1', false, { latitude: 27.5, longitude: -82.6 }],
+      ['a new address since phase 1', false, { address_line1: '9 Home St' }],
+    ])('a typed address whose booking moved to the trusted profile, %s: address_changed %s', async (_label, expected, edit) => {
+      mockFarSouthGates.funnel = true;
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      const adopted = {
+        address_line1: '123 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.1, longitude: -82.2,
+      };
+      seedPhoneHousehold({ id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, phone: '9415550101', ...adopted, ...edit });
+      const { nextCommitRefresh } = inspectionPublicRouter._test;
+      const verified = require('../utils/lead-consultation-token').verifyLeadConsultationToken(mintLeadConsultationToken(LEAD_ID));
+
+      const refresh = await nextCommitRefresh({
+        lead: { id: LEAD_ID }, verified, resolved: { source: 'supplied' }, custRow: { id: 'cust-9', ...adopted },
+        bookingAddress: { line1: '123 Palm Ave', line2: null, city: 'Bradenton', state: 'FL', zip: '34209' },
+        bookingLocation: { lat: 27.1, lng: -82.2 }, locationMoved: true,
+      });
+
+      expect(refresh).toEqual({ location: null, addressChanged: expected });
+    });
+
     // Pre-push P1 on c08db66cc0: at the same pin, the fresh times are built with the trusted customer the next commit
     // loads, read again, not phase 1's copy: staff may have changed the profile's city since (Nokomis to Venice here),
     // and times built from the old city would offer an hour the next commit refuses. A failed read builds none: the page
@@ -2512,6 +2559,21 @@ describe('POST /:token commit', () => {
         firstResults.customer_geocode_reviews = {
           customer_id: 'cust-9', status: 'needs_pin', address_snapshot: ['123 Palm Ave', null, 'Venice', 'FL', '34209'],
           latitude: null, longitude: null, updated_at: new Date(),
+        };
+      }, { location: null, failure: 'address_unresolved' }],
+      // Pre-push P1 on 756cfc2628: the next commit's phase 1 refuses a typed address for a blocked profile with no
+      // address on file (reviewRefusesBooking), though the list's own rule lets it through, so the refusal answers that.
+      ['answers the next commit\'s phase 1 refusal for a blocked profile with no address on file', () => {
+        gateState.reviewLive = true;
+        firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+        firstResults.call_log = { from_phone: '+19415550101' };
+        seedPhoneHousehold({
+          id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, address_line1: null, address_line2: null,
+          city: null, state: null, zip: null, phone: '9415550101',
+        });
+        firstResults.customer_geocode_reviews = {
+          customer_id: 'cust-9', status: 'verified', address_snapshot: ['123 Palm Ave', null, 'Venice', 'FL', '34209'],
+          latitude: 27.4, longitude: -82.5, updated_at: new Date(),
         };
       }, { location: null, failure: 'address_unresolved' }],
     ])('a typed address refused at the same pin %s', async (_label, seed, expected) => {
