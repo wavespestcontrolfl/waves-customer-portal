@@ -38,6 +38,8 @@ function fixture(url, label = "Current") {
     equipment: { systemName: "Fixture calibrated rig", carrierGalPer1000: 2 },
     items: [{ raw: "Fixture selected product", product: { name: `${label} mix product` }, jobMix: { amount: 2.9, amountUnit: "oz" }, fullTankMix: { amount: 5.8, amountUnit: "oz" } }],
   };
+  // The Plan tab's lawn plan read (GET /admin/treatment-plans/:id), unused by these cases.
+  if (path.includes("/treatment-plans/")) return { plan: { propertyGate: {}, protocol: { base: [], conditional: [] } } };
   throw new Error(`Unexpected request: ${path}`);
 }
 

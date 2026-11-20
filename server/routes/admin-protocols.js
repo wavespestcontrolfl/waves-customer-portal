@@ -37,6 +37,7 @@ const {
   v13NorthPortReferenceWarnings,
   v13VisitLimits,
   settleCatchUpForVisit,
+  normalizeOptionList,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const { activeProtocolProducts } = require('../services/lawn-protocol-retired');
@@ -1839,6 +1840,14 @@ router.get('/product-label/:productId', async (req, res, next) => {
 // router. Raw access codes ride ONLY in strip.access.codes (tap-to-reveal).
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// The Plan tab's "Use" ticks on "if needed" lawn lines, as the treatment-plan
+// route reads them (the engine's own comma-list parse); null = not a list of product ids.
+const MAX_SELECTED_CONDITIONAL_IDS = 50;
+function selectedConditionalIds(raw) {
+  const ids = normalizeOptionList(raw);
+  return ids.length <= MAX_SELECTED_CONDITIONAL_IDS && ids.every((id) => UUID_RE.test(id)) ? ids : null;
+}
+
 // GET /api/admin/protocols/job-card/mix?serviceId=&productId=&gallons=110|1 —
 // the Tank section's search helper: amount of one product for that much
 // water on the visit's rig (the appointment's assigned equipment), or with
@@ -1876,8 +1885,11 @@ router.get('/job-card/mix', async (req, res, next) => {
     if (rig && !UUID_RE.test(rig)) return res.status(400).json({ error: 'rig must be an equipment system id' });
     const gallons = rig ? null : Number(req.query.gallons);
     if (!rig && ![110, 1].includes(gallons)) return res.status(400).json({ error: 'gallons must be 110 or 1' });
+    // The Tank search reads the plan the card shows: the Use ticks ride along.
+    const selectedConditionalProductIds = selectedConditionalIds(req.query.selectedConditionalProductIds);
+    if (!selectedConditionalProductIds) return res.status(400).json({ error: 'Invalid selectedConditionalProductIds' });
     if (!(await techOwnsVisit(req, serviceId))) return res.status(404).json({ error: 'Product or visit not found' });
-    const mix = await jobCard.mixForProduct(productId, gallons, { serviceId, includePricing: viewerSeesPricing(req), ...(rig ? { equipmentSystemId: rig, technicianId: isTechnicianRequest(req) ? req.technicianId : null } : {}) });
+    const mix = await jobCard.mixForProduct(productId, gallons, { serviceId, includePricing: viewerSeesPricing(req), selectedConditionalProductIds, ...(rig ? { equipmentSystemId: rig, technicianId: isTechnicianRequest(req) ? req.technicianId : null } : {}) });
     if (!mix) return res.status(404).json({ error: 'Product or visit not found' });
     res.json({ enabled: true, ...mix });
   } catch (err) {
@@ -1937,8 +1949,10 @@ router.get('/job-card/:serviceId', async (req, res, next) => {
   try {
     if (!jobCard.jobCardEnabled()) return res.json({ enabled: false });
     if (!UUID_RE.test(req.params.serviceId)) return res.status(400).json({ error: 'Invalid service id' });
+    const selectedConditionalProductIds = selectedConditionalIds(req.query.selectedConditionalProductIds);
+    if (!selectedConditionalProductIds) return res.status(400).json({ error: 'Invalid selectedConditionalProductIds' });
     if (!(await techOwnsVisit(req, req.params.serviceId))) return res.status(404).json({ error: 'Service not found' });
-    const card = await jobCard.buildJobCard(req.params.serviceId, { includePricing: viewerSeesPricing(req) });
+    const card = await jobCard.buildJobCard(req.params.serviceId, { includePricing: viewerSeesPricing(req), selectedConditionalProductIds });
     if (!card) return res.status(404).json({ error: 'Service not found' });
     if (!(await techOwnsVisit(req, req.params.serviceId))) return res.status(404).json({ error: 'Service not found' });
     res.json(card);

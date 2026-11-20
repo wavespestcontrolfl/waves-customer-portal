@@ -4,6 +4,7 @@ const db = require('../models/db');
 const ClickGuard = require('../services/review-click-guard');
 const TwilioService = require('../services/twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { websiteLineRefusal } = require('../services/website-line-contact');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
@@ -568,6 +569,9 @@ async function sendSmsHandler(req, res, next) {
     // A technician texts from an office line or its own tech line only; any
     // other line is ignored and the default office line is used.
     const fromNumber = technicianAllowedFromNumber(req, requestedFromNumber);
+    // A website-only line texts only someone who already called or texted it.
+    const websiteLineBlock = await websiteLineRefusal(fromNumber, to);
+    if (websiteLineBlock) return res.status(400).json({ error: websiteLineBlock, code: 'WEBSITE_LINE_FIRST_CONTACT' });
     let trustedCustomerId;
     if (customerId) {
       const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');

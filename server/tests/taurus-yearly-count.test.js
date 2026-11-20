@@ -90,11 +90,41 @@ describe('applicationConcentration', () => {
     expect(applicationConcentration(row({ quantity_applied: 4, quantity_unit: 'oz' }))).toBe('high');
     expect(applicationConcentration(row({ application_rate: '3.2', rate_unit: 'oz' }))).toBe('high');
     expect(applicationConcentration(row({ application_rate: 4, rate_unit: 'fl oz' }))).toBe('high');
-    // The house amount itself, a smaller one, or an amount in another unit stays 0.03%.
+    // The house amount itself, a smaller one, or an amount that is no volume stays 0.03%.
     expect(applicationConcentration(row({ quantity_applied: '1.600', quantity_unit: 'fl_oz' }))).toBe('low');
     expect(applicationConcentration(row({ application_rate: 1.6, rate_unit: 'oz' }))).toBe('low');
-    expect(applicationConcentration(row({ quantity_applied: 2, quantity_unit: 'gal' }))).toBe('low');
+    expect(applicationConcentration(row({ quantity_applied: 3.2, quantity_unit: 'g' }))).toBe('low');
     expect(applicationConcentration(row({ quantity_applied: 3.2 }))).toBe('low');
+  });
+
+  it('converts a gallon or mL amount of product to fl oz like the fl oz entry it equals', () => {
+    // 0.025 gal = 3.2 fl oz (the old 0.06% tank); 0.0125 gal = 1.6 fl oz (the house mix).
+    expect(applicationConcentration(row({ quantity_applied: '0.025', quantity_unit: 'gal' }))).toBe('high');
+    expect(applicationConcentration(row({ quantity_applied: '0.0125', quantity_unit: 'gal' }))).toBe('low');
+    expect(applicationConcentration(row({ application_rate: 0.025, rate_unit: 'gal' }))).toBe('high');
+    expect(applicationConcentration(row({ quantity_applied: 94.6, quantity_unit: 'ml' }))).toBe('high'); // 3.2 fl oz
+    expect(applicationConcentration(row({ quantity_applied: 47.3, quantity_unit: 'ml' }))).toBe('low'); // 1.6 fl oz
+    // The ledger keeps 3 decimals in the amount's unit: 0.0125 gal is saved as 0.013 gal (1.664 fl oz), still the house mix.
+    expect(applicationConcentration(row({ quantity_applied: '0.013', quantity_unit: 'gal' }))).toBe('low');
+    expect(applicationConcentration(row({ quantity_applied: '0.014', quantity_unit: 'gal' }))).toBe('high');
+    expect(applicationConcentration(row({ quantity_applied: '1.602', quantity_unit: 'fl_oz' }))).toBe('high');
+    // A rate is saved to 3 decimals too (service_products.application_rate): 0.0125 gal is saved as 0.013, the house mix.
+    expect(applicationConcentration(row({ application_rate: '0.0125', rate_unit: 'gal' }))).toBe('low');
+    expect(applicationConcentration(row({ application_rate: '0.0130', rate_unit: 'gal' }))).toBe('low');
+    expect(applicationConcentration(row({ application_rate: '0.0140', rate_unit: 'gal' }))).toBe('high');
+    // A per-gallon rate in mL: 23.7 mL/gal = 0.8 fl oz/gal.
+    expect(applicationConcentration(row({ application_rate: '23.7', rate_unit: 'ml/gal' }))).toBe('high');
+    expect(applicationConcentration(row({ application_rate: '11.8', rate_unit: 'ml/gal' }))).toBe('low');
+  });
+
+  it("counts the old Fast Complete sheet's row (4 fl oz house total + a seeded 0.2 fl oz/gal spot rate) as 0.06%", () => {
+    const oldSheet = { application_date: '2026-11-12', quantity_applied: '4.000', quantity_unit: 'fl_oz', application_rate: '0.2000', rate_unit: 'fl_oz/gal' };
+    expect(applicationConcentration(row(oldSheet))).toBe('high');
+    // Before the ruling a low per-gallon rate still counts with the house amount or less (the rollout-day sheet).
+    expect(applicationConcentration(row({ ...oldSheet, application_date: '2026-11-19', quantity_applied: '1.600', application_rate: '0.4000' }))).toBe('low');
+    expect(applicationConcentration(row({ ...oldSheet, quantity_applied: null, quantity_unit: null }))).toBe('low');
+    // From the ruling date on, the recorded tank concentration decides (more house-strength mix stays 0.03%).
+    expect(applicationConcentration(row({ ...oldSheet, application_date: NEW }))).toBe('low');
   });
 
   it('lets a recorded concentration decide over the amount (two house-strength tanks stay 0.03%)', () => {
@@ -133,7 +163,7 @@ describe('taurusYearlyCount', () => {
   it('passes the home, the visit to leave out, the ET year window and the name rule; one read-only query', async () => {
     const knex = ledger([]);
     const out = await taurusYearlyCount(VISIT, { knex, now: new Date('2027-01-01T04:00:00Z') });
-    expect(out).toEqual({ high: 0, low: 0, count: 0, eligible: true, eligibleHigh: true, year: 2026 });
+    expect(out).toEqual({ high: 0, low: 0, count: 0, eligible: true, eligibleHigh: true, year: 2026, beforeRuling: false });
     expect(knex.raw).toHaveBeenCalledTimes(1);
     const [sql, bindings] = knex.raw.mock.calls[0];
     expect(bindings).toEqual({
@@ -161,7 +191,7 @@ describe('taurusYearlyCount', () => {
       row({ service_record_id: null, application_date: NEW }),
     ]);
     // rec-a: one 0.06%; rec-b: two rows, one 0.06% -> one 0.06%; the record-less row is its own 0.03% application.
-    expect(await taurusYearlyCount(VISIT, { knex, now: new Date('2026-12-10T15:00:00Z') })).toEqual({ high: 2, low: 1, count: 3, eligible: false, eligibleHigh: false, year: 2026 });
+    expect(await taurusYearlyCount(VISIT, { knex, now: new Date('2026-12-10T15:00:00Z') })).toEqual({ high: 2, low: 1, count: 3, eligible: false, eligibleHigh: false, year: 2026, beforeRuling: false });
   });
 
   it.each([
@@ -170,8 +200,21 @@ describe('taurusYearlyCount', () => {
     ['one 0.06% and one 0.03% leave room', [row({ application_date: OLD }), row()], { high: 1, low: 1, eligible: true }],
     ['one 0.06% and two 0.03% use the year up', [row({ application_date: OLD }), row(), row()], { high: 1, low: 2, eligible: false }],
     ['two 0.06% use the year up', [row({ application_date: OLD }), row({ application_date: OLD })], { high: 2, low: 0, eligible: false }],
+    ["two of the old Fast Complete sheet's rows use the year up", [1, 2].map(() => row({
+      application_date: OLD, quantity_applied: '4.000', quantity_unit: 'fl_oz', application_rate: '0.2000', rate_unit: 'fl_oz/gal',
+    })), { high: 2, low: 0, eligible: false }],
   ])('%s', async (_name, rows, expected) => {
     expect(await taurusYearlyCount(VISIT, { knex: ledger(rows) })).toMatchObject(expected);
+  });
+
+  it('says when the visit may be dated before the 0.03% ruling (its day or today), for the close-out warning', async () => {
+    const knex = ledger([]);
+    const at = (scheduled_date, now) => taurusYearlyCount({ ...VISIT, scheduled_date }, { knex, now: new Date(now) });
+    expect(await at('2026-11-19', '2026-11-25T15:00:00Z')).toMatchObject({ beforeRuling: true });
+    expect(await at('2026-11-21', '2026-11-19T20:00:00Z')).toMatchObject({ beforeRuling: true });
+    expect(await at('2026-11-20', '2026-11-20T15:00:00Z')).toMatchObject({ beforeRuling: false });
+    expect(await at(null, '2026-11-20T04:30:00Z')).toMatchObject({ beforeRuling: true }); // 11:30 PM ET on Nov 19
+    expect(await at(null, '2026-12-10T15:00:00Z')).toMatchObject({ beforeRuling: false });
   });
 
   it('checks both years for a visit scheduled in another year than today, and is eligible only when both are', async () => {

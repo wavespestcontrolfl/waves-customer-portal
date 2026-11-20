@@ -7,10 +7,16 @@
  * the process before any portal module loads. The build itself calls no
  * model: every lead sentence is the fact bank's reviewed copy.
  *
- *   node ops/agents/pest-insider-sample.js <outDir> [YYYY-MM-DD ...]
+ *   node ops/agents/pest-insider-sample.js <outDir> [YYYY-MM-DD ...] [--assume-live]
  *
  *     <outDir>        where the files go (created if missing)
  *     dates           send dates (ET); default 2026-12-03 and 2026-12-17
+ *     --assume-live   count every reviewed blog post as live (no web request)
+ *
+ * Each issue links its lead fact's blog post, so a fact leads only when its
+ * post is live. The script first asks the website for every reviewed post
+ * (read-only GET requests, posts.checkLivePosts), as a send does;
+ * --assume-live skips those requests, for a run with no network.
  *
  * Dates run in order: each issue's fact and species count as "recent" for the
  * next one, the way the real schedule will. So each date must be a real
@@ -37,9 +43,10 @@ const dates = dateArgs.length ? dateArgs : ['2026-12-03', '2026-12-17'];
 
 const usage = (why) => {
   if (why) console.error(`pest-insider-sample: ${why}`);
-  console.error('usage: node ops/agents/pest-insider-sample.js <outDir> [YYYY-MM-DD ...]  (each date once, in order)');
+  console.error('usage: node ops/agents/pest-insider-sample.js <outDir> [YYYY-MM-DD ...] [--assume-live]  (each date once, in order)');
   process.exit(2);
 };
+const assumeLive = flags.delete('--assume-live');
 if (!outDir || flags.size || dates.some((d) => !/^\d{4}-\d{2}-\d{2}$/.test(d))) usage();
 // A repeated or earlier date would count its own issue as recent and write
 // over another issue's files (pre-push round 23).
@@ -69,6 +76,7 @@ const { buildIssue } = require('../../server/services/pest-insider');
 const { sendDateET } = require('../../server/services/pest-insider/facts');
 const { wrapIssueHtml } = require('../../server/services/pest-insider/render');
 const { RECENT_WINDOW } = require('../../server/services/pest-insider/plan');
+const { POSTS, POST_URLS, postUrl, checkLivePosts } = require('../../server/services/pest-insider/posts');
 
 // An impossible day (2027-02-30) is refused here too, before any file is written.
 for (const d of dates) {
@@ -83,26 +91,38 @@ function saveIssue(sendDate, issue) {
   return base;
 }
 
-fs.mkdirSync(outDir, { recursive: true });
-const recent = { factIds: [], speciesSlugs: [] };
-let failed = 0;
-for (const sendDate of dates) {
-  const result = buildIssue({
-    sendDate,
-    recent: { factIds: recent.factIds.slice(-RECENT_WINDOW), speciesSlugs: recent.speciesSlugs.slice(-RECENT_WINDOW) },
-  });
-  const d = result.diagnostics;
-  console.log(`\n== ${sendDate}  fact ${d.factId}  species ${d.speciesSlug}`);
-  if (result.ok) {
-    console.log(`   subject: ${result.issue.subject}\n   preview: ${result.issue.preview}`);
-    console.log(`   wrote ${saveIssue(sendDate, result.issue)}.html and .txt`);
-    // Only a built issue counts toward the rotation, like a sent one will.
-    recent.factIds.push(d.factId);
-    recent.speciesSlugs.push(d.speciesSlug);
-  } else {
-    failed += 1;
-    console.log(`   NOT BUILT: ${result.reason}`);
+async function main() {
+  const livePostFactIds = assumeLive ? Object.keys(POSTS) : await checkLivePosts();
+  // Facts can share a post (D02 and D03), so posts and facts are counted apart.
+  const livePosts = new Set(livePostFactIds.map(postUrl)).size;
+  console.log(`blog posts: ${livePosts} of ${POST_URLS.length} reviewed posts ${assumeLive ? 'counted as live (--assume-live)' : 'answered as live'}; ${livePostFactIds.length} of ${Object.keys(POSTS).length} linked facts can lead`);
+  fs.mkdirSync(outDir, { recursive: true });
+  const recent = { factIds: [], speciesSlugs: [] };
+  let failed = 0;
+  for (const sendDate of dates) {
+    const result = buildIssue({
+      sendDate,
+      livePostFactIds,
+      recent: { factIds: recent.factIds.slice(-RECENT_WINDOW), speciesSlugs: recent.speciesSlugs.slice(-RECENT_WINDOW) },
+    });
+    const d = result.diagnostics;
+    console.log(`\n== ${sendDate}  fact ${d.factId}  species ${d.speciesSlug}`);
+    if (result.ok) {
+      console.log(`   subject: ${result.issue.subject}\n   preview: ${result.issue.preview}`);
+      console.log(`   wrote ${saveIssue(sendDate, result.issue)}.html and .txt`);
+      // Only a built issue counts toward the rotation, like a sent one will.
+      recent.factIds.push(d.factId);
+      recent.speciesSlugs.push(d.speciesSlug);
+    } else {
+      failed += 1;
+      console.log(`   NOT BUILT: ${result.reason}`);
+    }
+    for (const p of d.problems) console.log(`   PROBLEM (${p.part}): ${p.reason}${p.text ? ` | ${p.text}` : ''}`);
   }
-  for (const p of d.problems) console.log(`   PROBLEM (${p.part}): ${p.reason}${p.text ? ` | ${p.text}` : ''}`);
+  return failed ? 1 : 0;
 }
-process.exit(failed ? 1 : 0);
+
+main().then((code) => process.exit(code), (err) => {
+  console.error(`pest-insider-sample: ${err.message}`);
+  process.exit(1);
+});

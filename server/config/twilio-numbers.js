@@ -94,6 +94,20 @@ const TWILIO_NUMBERS = {
     { number: '+19412411388', formatted: '(941) 241-1388', domain: 'veniceflpestcontrol.com', area: 'Venice', location: 'venice' },
     { number: '+19412589109', formatted: '(941) 258-9109', domain: 'northportflpestcontrol.com', area: 'North Port / Port Charlotte', location: 'venice' },
     { number: '+19412402066', formatted: '(941) 240-2066', domain: 'wavespestcontrol.com', area: 'North Port', location: 'venice', page: '/pest-control-north-port-fl/' },
+    // Website-only line (2026-11-19): the hub site swaps it in for visitors on
+    // pages that show the main line. It is NOT shared: not a GBP phone, not on
+    // citations or invoices, never a default caller ID (getOutboundNumber).
+    // Automated replies ride the line the caller dialed (missed-call text-back,
+    // booking-link text, voicemail text), so this line only ever reaches
+    // someone who dialed it from the website, and a call to it still proves a
+    // website visit.
+    // Kept AFTER the main-line entry on purpose: the main line stays the first
+    // wavespestcontrol.com entry, and every lookup here is by number, never by
+    // domain. Explicit label: the missed-call alert otherwise names it
+    // "Bradenton website (Pest)". `page` is the landing page URL: the April
+    // seed (20260401000096) copies it into lead_sources.landing_page_url on a
+    // fresh database, and production's row (20261119120000) has the same URL.
+    { number: '+19412542617', formatted: '(941) 254-2617', domain: 'wavespestcontrol.com', area: 'General', location: 'bradenton', page: 'https://wavespestcontrol.com', label: 'Main site web-only line' },
   ],
 
   // ── Lawn Care Domain Tracking ───────────────────────────────
