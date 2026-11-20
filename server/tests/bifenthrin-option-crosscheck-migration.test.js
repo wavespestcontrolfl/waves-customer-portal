@@ -468,15 +468,27 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
     // The legacy lookup can queue a SiteOne price before the product has a quote from SiteOne, and approving it then inserts one at
     // the approval's own price and pack (applyPriceApproval): a stale one is superseded too (pre-push audit at the ninth push).
     test('a pending SiteOne approval for a product with no SiteOne quote yet is superseded; another vendor\'s stays', async () => {
-      const db = world({ vendors: [], catalog: [catalogRow({ best_price: '30.90', best_price_amount_cached: '30.9000' })] });
+      // A catalog price with no quote names none (the quote ids are foreign keys).
+      const noQuote = catalogRow({
+        best_price: '30.90', best_price_amount_cached: '30.9000', best_vendor_pricing_id: null, best_price_vendor_id_cached: null,
+      });
+      const db = world({ vendors: [], catalog: [{ ...noQuote }] });
       db.price_approvals = [
         pendingLegacy('a58', '58.42', { new_quantity: '1 gal' }),
         pendingLegacy('a31', '31.50', { new_quantity: '1 gal' }), // another price: an admin's call
         pendingLegacy('a58other', '58.42', { new_quantity: '1 gal', vendor_id: 'ven2' }), // another vendor
       ];
-      await migration.up(fakeKnex(db));
+      const knex = fakeKnex(db);
+      await migration.up(knex);
       expect(statusOf(db.price_approvals)).toEqual({ a58: 'rejected', a31: 'pending', a58other: 'pending' });
       expect(warn).toHaveBeenCalledWith(expect.stringMatching(/pending price approvals a58 would put a stale price/));
+      // Closing an approval changes no quote, so nothing recalculates: with no current quote, a recalculation would clear the catalog
+      // price job costing reads (pre-push audit at the tenth push).
+      expect(inventory.recalcBestPrice).not.toHaveBeenCalled();
+      expect(db.products_catalog[0]).toEqual(noQuote);
+      await migration.down(knex);
+      expect(db.products_catalog[0]).toEqual(noQuote);
+      expect(inventory.recalcBestPrice).not.toHaveBeenCalled();
     });
 
     test('a pending approval at the stale price beside a SiteOne row already at $30.90 is superseded alone; down() leaves it closed', async () => {
@@ -489,7 +501,7 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       const knex = fakeKnex(db);
       await migration.up(knex);
       expect(db.price_approval_events[0]).toMatchObject({ approval_status: 'rejected', rejected_by: migration.TAG });
-      expect(db.products_catalog[0]).toMatchObject({ best_price: 30.9, best_vendor_pricing_id: 'v1', best_price_status: 'current' });
+      expect(db.products_catalog[0]).toEqual(reconciled); // closing an approval changes no quote, so nothing recalculates
       expect(auditKeys(db)).toEqual(['inventory:lesco_crosscheck_plus_stale', 'onetime_preslab', 'onetime_trenching']);
       await migration.down(knex);
       expect(db.price_approval_events[0]).toMatchObject({ approval_status: 'rejected', rejected_by: migration.TAG });
@@ -546,7 +558,8 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       });
       const knex = fakeKnex(db);
       await migration.up(knex);
-      expect(db.products_catalog[0]).toMatchObject({ cost_per_unit: null, cost_unit: null, best_price: 30.9 });
+      expect(db.products_catalog[0]).toMatchObject({ cost_per_unit: null, cost_unit: null, best_price: '30.90' });
+      expect(inventory.recalcBestPrice).not.toHaveBeenCalled(); // clearing a unit cost changes no quote
       expect(auditKeys(db)).toEqual(['inventory:lesco_crosscheck_plus_stale', 'onetime_preslab', 'onetime_trenching']);
       const after = snapshot(db);
       await migration.up(knex);

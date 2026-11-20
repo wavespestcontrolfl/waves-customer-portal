@@ -12,35 +12,42 @@ const { generateEstimate } = require('../services/pricing-engine/estimate-engine
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
 
-// The deprecated client engine (client/src/lib/estimateEngine.js calculateEstimate), bundled as the drift test bundles it, with the
-// pre-swap costs in its source: Talak ($41.57 / 96 oz) on both bifenthrin keys of both lines, and the lower Taurus cost the trench
-// describe below configures ($30 / 78 oz). Its one-time rows carry a name and no service.
-let preSwapClientEstimate;
-function clientEstimate(form) {
-  if (!preSwapClientEstimate) {
-    const fs = require('fs');
-    const path = require('path');
-    const file = path.resolve(__dirname, '../../client/src/lib/estimateEngine.js');
-    const swap = (source, from, to, count) => {
-      expect(source.split(from).length - 1).toBe(count);
-      return source.split(from).join(to);
-    };
-    let source = fs.readFileSync(file, 'utf8');
-    source = swap(source, 'containerCost: 30.90,\n    containerOz: 128,', 'containerCost: 41.57,\n    containerOz: 96,', 4);
-    source = swap(source, 'containerCost: 95.00, // mirrors SPECIALTY.trenching', 'containerCost: 30.00, // mirrors SPECIALTY.trenching', 1);
-    const out = require('esbuild').buildSync({
-      stdin: { contents: source, resolveDir: path.dirname(file), sourcefile: 'estimateEngine.js', loader: 'js' },
-      bundle: true, format: 'cjs', platform: 'node', write: false, logLevel: 'silent',
-    });
-    const module = { exports: {} };
-    new Function('module', 'exports', 'require', out.outputFiles[0].text)(module, module.exports, require);
-    preSwapClientEstimate = module.exports.calculateEstimate;
-  }
-  return preSwapClientEstimate({
-    homeSqFt: 2400, stories: 1, lotSqFt: 9000, propertyType: 'single_family', urgency: 'NONE', isAfterHours: false, isRecurringCustomer: false,
-    ...form,
-  });
-}
+// Rows the deprecated client engine (client/src/lib/estimateEngine.js calculateEstimate) wrote before the bottle swap, frozen from
+// main (a68674a9eb: Talak at $41.57 / 96 oz on both bifenthrin keys, the full trench volume) for a 2,400 sq ft one-story home on a
+// 9,000 sq ft lot, with the lower Taurus cost the trench describe below configures ($30 / 78 oz). The client source now prices the
+// new bottle and the label's half volume, so it can no longer write them (pre-push audit at the tenth push). Their one-time rows
+// carry a name and no service.
+const CLIENT_ROWS = {
+  // svcPreslab: true, preslabSqft: 6832, preslabProductKey: 'talstar_p'
+  preSlab: {
+    name: 'Pre-Slab', displayName: 'Pre-Slab Termiticide Treatment', price: 993,
+    detail: '6,832 sf | Talak 7.9 F | 683.2 oz | 8 units | Basic 1-yr warranty', psSqft: 6832, productKey: 'talstar_p',
+    productLabel: 'Talak 7.9 F - Bifenthrin', activeIngredient: 'bifenthrin', chemistryType: 'repellent_pyrethroid',
+    positioning: 'standard_repellent', productOz: 683.2, units: 8, btl: 8, containersRequired: 8, containerOz: 96,
+    containerCost: 41.57, chemicalCostPerOz: 0.433, allocatedProductCost: 295.84, productCost: 295.84,
+    fullContainerProductCost: 332.56, laborHrs: 5, laborCost: 175, equipCost: 15, complianceAdminCost: 25, driveCost: 11.67,
+    includeDriveCost: true, cost: 522.51, rawPrice: 987, usageStepSqFt: 100, usageStepPricedSqFt: 6900, usageStepPrice: 993,
+    jobContext: 'standalone', preSlabJobContext: 'standalone', preSlabJobContextLabel: 'Standalone one-off job',
+    contextualFloor: 510, contextualMinimumBasis: 'Standalone one-off job, over 1,250 sqft', floorBeforeVolumeDiscount: 510,
+    floorAfterVolumeDiscount: 510, priceBeforeVolumeDiscount: 993, priceAfterVolumeDiscount: 993, volDisc: false,
+    volumeDiscount: 'none', volumeDiscountMultiplier: 1, basePrice: 993, warrAdd: 0, warrantyTier: 'BASIC',
+    warrantyLabel: 'Basic 1-yr warranty', warrantyStatus: 'Basic 1-yr warranty', warrantyExtendedSelected: false,
+    labelConfirmed: false, requiresManualReview: true, manualReviewReasons: ['pre_slab_label_confirmation_required'],
+    certificateOfComplianceRequired: true,
+    warningText: 'Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145). Confirm the Talak label supports pre-construction subterranean termite treatment.',
+  },
+  // svcTrenching: true, trenchingPerimeterLF: 400, trenchingProductKey: 'talstar_p', trenchingApplicationRate: 'high'
+  trench: {
+    name: 'Trenching', price: 4996, detail: '300 LF dirt + 100 LF concrete | Talak 7.9 F', productKey: 'talstar_p',
+    productLabel: 'Talak 7.9 F - Bifenthrin', activeIngredient: 'bifenthrin', chemistryType: 'repellent_pyrethroid',
+    positioning: 'standard_repellent', applicationRate: 'high', trenchDepthFt: 0.5, dirtFinishedGallons: 60,
+    concreteFinishedGallons: 24, finishedGallons: 84, productOz: 168, allocatedChemicalCost: 72.75, includedChemicalCost: 25.85,
+    productSurcharge: 68, baseInstallBeforePremium: 4400, trenchDepthPriceMultiplier: 1, highRatePriceMultiplier: 1.12,
+    baseInstallPrice: 4928, warrantyTier: 'none', warrantyAdder: 0, labelConfirmed: false,
+    warningText: 'Bifenthrin repellent barrier (Atticus Talak 7.9 F). Do not attach long repair-and-retreat warranty without admin approval.',
+    requiresManualReview: true, quoteRequired: false,
+  },
+};
 const REPLAY_DEPS = { needsSync: () => false, syncConstantsFromDB: async () => {}, withTrustedCatalogPricing: async (inputs) => inputs, translateV2CallToV1Input: null };
 
 describe('termite measurement overrides and safeguards', () => {
@@ -282,6 +289,7 @@ describe('termite measurement overrides and safeguards', () => {
       // The full volume: no reduced-volume warning and no reduced-volume review (the configured high rate decides it, not the tool).
       expect(fullHigh.warnings.join(' ')).not.toMatch(/reduced finished volume/);
       expect(fullHigh.manualReviewReasons).not.toContain('reduced_volume_confirmation_required');
+      expect(fullHigh.manualReviewReasons).toContain('off_label_amount_confirmation_required'); // 6 fl oz, not the label's 4
       products.talstar_p.productOzPerFinishedGallonAtStandardRate = 0.75;
       const movedPair = trench({ applicationRate: 'high' });
       expect(movedPair).toMatchObject({ finishedGallons: 80, productOz: 120 });
@@ -337,9 +345,10 @@ describe('termite measurement overrides and safeguards', () => {
   // The chart halves the label's own volume, 4.0 gal per 10 LF per foot of depth (production's setting, read 2026-11-20). A configured
   // volume off the chart keeps it at the high rate: half of it is not the label's reduced volume, and would price too little product
   // (pre-push audit at the fourth push).
-  // That dilution at a volume off its chart is neither labeled amount, so the line stays in review whatever its label check, at
-  // either rate; the label's standard dilution off the chart does not (pre-push audit at the eighth push).
-  test('a configured trench volume off the label chart keeps that volume at the bifenthrin high rate, in review', () => {
+  // The label's amount is 4 fl oz of concentrate per 10 LF per foot of depth (its 0.06% at the full volume, its 0.12% at half). Any
+  // dilution and volume that put down another amount go to review whatever the label check, at either rate (pre-push audits at the
+  // eighth and tenth pushes: the standard 1 fl oz a gallon at 3 gal puts down 3 fl oz).
+  test('a configured trench volume off the label chart keeps that volume, and any amount off the label goes to review', () => {
     const trenching = require('../services/pricing-engine/constants').SPECIALTY.trenching;
     const saved = trenching.finishedGallonsPer10LFPerFtDepth;
     const savedStandard = trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate;
@@ -352,25 +361,34 @@ describe('termite measurement overrides and safeguards', () => {
       const offChart = trench();
       expect(offChart).toMatchObject({ finishedGallons: 60, productOz: 120, labelConfirmed: true, requiresManualReview: true });
       expect(offChart.warnings.join(' ')).not.toMatch(/reduced finished volume/);
-      expect(offChart.warnings.join(' ')).toMatch(/off the label volume chart/);
+      expect(offChart.warnings.join(' ')).toMatch(/put down 6 fl oz of concentrate per 10 linear feet per foot of depth, not the label's 4 fl oz/);
       expect(offChart.manualReviewReasons).not.toContain('reduced_volume_confirmation_required');
-      expect(offChart.manualReviewReasons).toContain('off_chart_volume_confirmation_required');
-      const standardOffChart = trench({}); // the label's 0.06% (1 fl oz) off the chart: no off-chart review
-      expect(standardOffChart.manualReviewReasons || []).not.toContain('off_chart_volume_confirmation_required');
+      expect(offChart.manualReviewReasons).toContain('off_label_amount_confirmation_required');
+      // The label's 0.06% (1 fl oz a gallon) at 3 gal puts down 3 fl oz: in review too, with its checked label box.
+      const standardOffChart = trench({});
+      expect(standardOffChart).toMatchObject({ finishedGallons: 60, productOz: 60, labelConfirmed: true, requiresManualReview: true });
+      expect(standardOffChart.manualReviewReasons).toContain('off_label_amount_confirmation_required');
+      expect(standardOffChart.warnings.join(' ')).toMatch(/put down 3 fl oz of concentrate .* not the label's 4 fl oz/);
       expect(standardOffChart.concentrationLabel).toBe('0.06%');
-      trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate = 2; // the audit's case: the standard rate at 0.12%
+      trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate = 2; // the eighth push's case: the standard rate at 0.12%
       const standardAtTwo = trench({});
       expect(standardAtTwo).toMatchObject({ finishedGallons: 60, productOz: 120, labelConfirmed: true, requiresManualReview: true });
-      expect(standardAtTwo.manualReviewReasons).toContain('off_chart_volume_confirmation_required');
+      expect(standardAtTwo.manualReviewReasons).toContain('off_label_amount_confirmation_required');
       // The line names the dilution it priced, the high rate's, not the standard 0.06% (pre-push audit at the ninth push).
       expect(standardAtTwo.concentrationLabel).toBe('high_rate');
       expect(offChart.concentrationLabel).toBe('high_rate');
+      trenching.finishedGallonsPer10LFPerFtDepth = 4; // the chart's volume: a standard rate moved off 1 fl oz is off the label too
+      trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate = 0.8;
+      expect(trench({}).manualReviewReasons).toContain('off_label_amount_confirmation_required');
       trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate = savedStandard;
-      trenching.finishedGallonsPer10LFPerFtDepth = 4; // the chart's: 80 labeled gallons, halved
-      const onChart = trench();
+      const onChart = trench(); // 80 labeled gallons, halved: 4 fl oz per 10 LF per foot of depth
       expect(onChart).toMatchObject({ finishedGallons: 40, productOz: 80 });
       expect(onChart.manualReviewReasons).toContain('reduced_volume_confirmation_required');
-      expect(onChart.manualReviewReasons).not.toContain('off_chart_volume_confirmation_required');
+      expect(onChart.manualReviewReasons).not.toContain('off_label_amount_confirmation_required');
+      const standard = trench({}); // production's setting: the label's amount, so no amount review
+      expect(standard).toMatchObject({ finishedGallons: 80, productOz: 80, labelConfirmed: true });
+      expect(standard.manualReviewReasons).not.toContain('off_label_amount_confirmation_required');
+      expect(standard.warnings.join(' ')).not.toMatch(/fl oz of concentrate/);
     } finally {
       trenching.finishedGallonsPer10LFPerFtDepth = saved;
       trenching.products.talstar_p.productOzPerFinishedGallonAtStandardRate = savedStandard;
@@ -1259,11 +1277,8 @@ describe('a sent pre-slab quote keeps the container cost it priced with', () => 
 
   // A row the deprecated client engine wrote ('Pre-Slab', no service) holds the same cost basis (pre-push audit 8).
   test('a quote the client engine priced keeps its container cost on both replay paths', async () => {
-    const quoted = clientEstimate({ svcPreslab: true, preslabSqft: 6832, preslabProductKey: 'talstar_p' });
-    const row = quoted.oneTime.items.find((item) => item.name === 'Pre-Slab');
-    expect(row.service).toBeUndefined();
-    expect(row).toMatchObject({ price: 993, ...TALAK });
-    const stored = { engineInputs: input(), result: quoted };
+    const row = CLIENT_ROWS.preSlab;
+    const stored = { engineInputs: input(), result: { oneTime: { items: [row] } } };
     expect(replay.preSlabTermiticideKnobSignalForReplay(stored)).toEqual(TALAK);
     const { extractEngineInputs } = require('../routes/estimate-public');
     expect(slabLine(generateEstimate(extractEngineInputs(stored))).price).toBe(993);
@@ -1368,18 +1383,17 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
     expect(priced(extra, pin).price).toBe(want.sent);
   });
 
-  // A row the deprecated client engine wrote ('Trenching', no service) holds the same four fields (pre-push audit 8).
+  // A row the deprecated client engine wrote ('Trenching', no service) holds the same four fields (pre-push audit 8). Main's client
+  // priced the high rate at the full volume, so its pin matches that volume, and both replay paths keep its $4,996 (pre-push audit
+  // at the tenth push).
   test('a quote the client engine priced keeps its surcharge on both replay paths', async () => {
-    const quoted = clientEstimate({ svcTrenching: true, trenchingPerimeterLF: 400, trenchingProductKey: 'talstar_p', trenchingApplicationRate: 'high' });
-    const row = quoted.oneTime.items.find((item) => item.name === 'Trenching');
-    expect(row.service).toBeUndefined();
-    expect(row).toMatchObject({ price: 4943, ...PIN });
-    const stored = { engineInputs: input(), result: quoted };
-    expect(replay.trenchingKnobSignalForReplay(stored)).toEqual(PIN);
+    const row = CLIENT_ROWS.trench;
+    const stored = { engineInputs: input(), result: { oneTime: { items: [row] } } };
+    expect(replay.trenchingKnobSignalForReplay(stored)).toEqual({ ...PIN, productOz: 168, productSurcharge: 68 });
     const { extractEngineInputs } = require('../routes/estimate-public');
-    expect(trenchLine(generateEstimate(extractEngineInputs(stored))).price).toBe(4943);
+    expect(trenchLine(generateEstimate(extractEngineInputs(stored))).price).toBe(4996);
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
-    expect(trenchLine((await serverRecomputeFromEstimateData(stored, { ...REPLAY_DEPS, replaySavedPricingKnobs: true })).rawEngineResult).price).toBe(4943);
+    expect(trenchLine((await serverRecomputeFromEstimateData(stored, { ...REPLAY_DEPS, replaySavedPricingKnobs: true })).rawEngineResult).price).toBe(4996);
     const other = { result: { oneTime: { items: [{ ...row, name: 'Bora-Care' }, { ...row, service: 'bora_care' }] } } };
     expect(replay.trenchingKnobSignalForReplay(other)).toBeNull();
   });
