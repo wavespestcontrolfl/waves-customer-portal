@@ -105,6 +105,42 @@ describe('publishReviewReply', () => {
     expect(JSON.parse(state.activity[0].metadata).source).toBe('ib');
   });
 
+  test('owner 2026-11-19: a reply that says "our app" (the owner\'s never list) is refused before anything is written, on every path', async () => {
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad our app helps.', actor: { type: 'admin' }, allowOverwrite: true }))
+      .rejects.toMatchObject({ code: CODES.APP_NAME, status: 422, message: expect.stringContaining('says "our app"') });
+    // The runner and the Intelligence Bar post agent text: the strict rule.
+    for (const actor of [{ type: 'ib' }, { type: 'auto' }]) {
+      await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad our app helps.', actor, allowOverwrite: actor.type !== 'auto' }))
+        .rejects.toMatchObject({ code: CODES.APP_NAME, status: 422, message: expect.stringContaining('came from an AI draft and says "app"') });
+    }
+    expect(mockLock).not.toHaveBeenCalled();
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    expect(state.rows[0].review_reply).toBeNull();
+    expect(state.activity).toEqual([]);
+    // The name posts, and so do other uses of the word in a person's reply: a word test cannot tell the App Store from a verb.
+    for (const text of ['Thanks Dana. Glad the Waves app helps.', 'Thanks Dana. Did the Waves app store your service notes?', 'Thanks Dana. Get the Waves app on the App Store.']) {
+      state.rows[0].review_reply = null;
+      const r = await publishReviewReply({ reviewId: 'rev-1', text, actor: { type: 'admin' }, allowOverwrite: true });
+      expect(r.googlePosted).toBe(true);
+      expect(state.rows[0].review_reply).toBe(text);
+    }
+  });
+
+  test('owner 2026-11-19: a post that started from an AI or Agent Ops draft meets the strict app-name rule; a person\'s own words meet the never list', async () => {
+    const { asDraft } = require('../services/review-reply/draft-prefix');
+    const machine = 'Thanks Dana. Glad our customer app helps.';
+    const refused = { code: CODES.APP_NAME, status: 422, message: expect.stringContaining('came from an AI draft and says "app"') };
+    // The caller says the post started from an AI or Agent Ops draft (Use Draft, AI Reply, a restored agent draft), edited or not.
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: machine, actor: { type: 'admin' }, allowOverwrite: true, fromDraft: true })).rejects.toMatchObject(refused);
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    // No row state is read to guess: a person's own reply, typed while an Agent Ops draft stands, meets the never list only.
+    Object.assign(state.rows[0], { auto_reply_draft: null, auto_reply_version: 'agent_ops', review_reply: asDraft('Hi Dana, thank you for the kind review.') });
+    const own = 'Thanks Dana. Get the Waves app on the App Store.';
+    const r = await publishReviewReply({ reviewId: 'rev-1', text: own, actor: { type: 'admin' }, allowOverwrite: true });
+    expect(r.googlePosted).toBe(true);
+    expect(state.rows[0].review_reply).toBe(own);
+  });
+
   test('P0: a human reply that lands between the pre-check and the publish claim aborts inside the claim', async () => {
     mockLock.mockImplementationOnce(async (id, fn) => {
       state.rows[0].review_reply = 'A person replied meanwhile';
@@ -618,6 +654,21 @@ describe('publishReviewReply', () => {
     // codex r75: the manual attempt's exact text + a manual version ride the
     // park, so the clearing sync hands it back to a person, not the auto lane.
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana.', auto_reply_version: 'human', auto_reply_mode: null });
+  });
+
+  test('owner 2026-11-19: a timed-out post that started from an AI draft keeps that origin (version agent_ops) for its restored [DRAFT]', async () => {
+    process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
+    state.rows[0].auto_reply_status = null;
+    const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
+    mockLock.mockImplementationOnce(async (id, fn) => { out.result = await fn(); return out; });
+    mockGbp.replyToReview.mockImplementationOnce(() => new Promise(() => {}));
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const p = publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad the Waves app helps.', actor: { type: 'admin' }, allowOverwrite: true, fromDraft: true });
+    const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_UNCERTAIN });
+    await jest.advanceTimersByTimeAsync(31000);
+    await assertion;
+    jest.useRealTimers();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops', auto_reply_mode: null });
   });
 
   test('a non-overwriting PUT timeout on a never-queued (NULL state) row still records google_uncertain', async () => {
