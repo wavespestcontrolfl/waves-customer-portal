@@ -7,7 +7,7 @@ import "@testing-library/jest-dom/vitest";
 import { MemoryRouter } from "react-router-dom";
 import { cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import EstimateToolViewV2 from "./EstimateToolViewV2";
+import EstimateToolViewV2, { roofReadEstimateIdFor } from "./EstimateToolViewV2";
 
 configure({ asyncUtilTimeout: 15000 });
 vi.setConfig({ testTimeout: 30000 });
@@ -210,3 +210,18 @@ describe("resets", () => {
     expect(screen.getByTestId("roof-read-no-spot")).toBeInTheDocument();
   });
 });
+
+describe("roofReadEstimateIdFor (the panel's estimate and its reset key use this one value)", () => {
+  it("prefers a draft saved this session", () => {
+    expect(roofReadEstimateIdFor("saved-1", { id: "open-1", address: "1 Test Lane" }, "9 Other Way")).toBe("saved-1");
+  });
+  it("uses a reopened estimate only while the form shows its saved address", () => {
+    const editMode = { id: "open-1", address: "1 Test Lane" };
+    expect(roofReadEstimateIdFor(null, editMode, " 1 Test Lane ")).toBe("open-1");
+    expect(roofReadEstimateIdFor(null, editMode, "9 Other Way")).toBeNull();
+  });
+  it("is null with no estimate", () => {
+    expect(roofReadEstimateIdFor(null, null, "1 Test Lane")).toBeNull();
+  });
+});
+

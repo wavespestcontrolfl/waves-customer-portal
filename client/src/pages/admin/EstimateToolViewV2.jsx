@@ -67,6 +67,15 @@ import { formatCalendarDate, moveEstimateForm } from "../../lib/moveEstimateForm
 import { MISTING_FORM_DEFAULTS, NO_MISTING, defaultMistingLabel, mistingOption, readMistingAvailability } from "../../lib/mosquitoMisting";
 import MistingLayoutDesigner from "../../components/admin/MistingLayoutDesigner";
 import RoofReadPanel, { roofSpotFrom, roofAddressDoubtful } from "../../components/admin/RoofReadPanel";
+
+// The estimate a roof read belongs to: a draft saved this session, or a reopened estimate only while the form
+// still shows that estimate's saved address (an edited address is a different roof). The panel is keyed on the
+// same value, so it restarts exactly when the estimate it writes to changes.
+export function roofReadEstimateIdFor(savedId, editMode, address) {
+  if (savedId) return savedId;
+  if (editMode?.id && String(editMode.address || "").trim() === String(address || "").trim()) return editMode.id;
+  return null;
+}
 import ScopeQuestionPrompt, { SCOPE_QUESTION } from "../../components/admin/ScopeQuestionPrompt";
 
 const SCOPE_STALE_NOTICE = "The business type changed. Run Property Lookup again before pricing.";
@@ -8571,10 +8580,10 @@ export default function EstimateToolViewV2({
                     <RoofReadPanel
                       // A new estimate id (the draft was saved) also restarts the panel: a read taken before it
                       // belongs to the pre-draft context, so staff tap again and get this estimate's own copy.
-                      key={`${roofReadEpoch}|${form.address}|${form.customerId || ""}|${form.leadId || ""}|${form.propertyId || ""}|${savedId || editMode?.id || ""}|${lookupMeta?.roofSpot?.lat ?? ""},${lookupMeta?.roofSpot?.lng ?? ""}`}
+                      key={`${roofReadEpoch}|${form.address}|${form.customerId || ""}|${form.leadId || ""}|${form.propertyId || ""}|${roofReadEstimateIdFor(savedId, editMode, form.address) || ""}|${lookupMeta?.roofSpot?.lat ?? ""},${lookupMeta?.roofSpot?.lng ?? ""}`}
                       spot={lookupMeta?.address === String(form.address || "").trim() ? lookupMeta?.roofSpot || null : null}
                       addressDoubt={lookupMeta?.address === String(form.address || "").trim() && lookupMeta?.roofAddressDoubt === true}
-                      estimateId={savedId || (editMode?.id && String(editMode.address || "").trim() === String(form.address || "").trim() ? editMode.id : null)}
+                      estimateId={roofReadEstimateIdFor(savedId, editMode, form.address)}
                       customerId={form.customerId || null}
                     />
                   )}
