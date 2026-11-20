@@ -1193,6 +1193,23 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toContain('Thanks for having us out today.');
   });
 
+  it("prints the technician's own note as stored, with or without a reconciled lawn result", () => {
+    // Their signed words (summaryIsOwnNote): no legacy recap fix applies.
+    const note = 'Thanks for having us out today. I treated the front beds for fire ants, and you should see activity ease over the next 1-2 weeks. — Dana';
+    const data = { ...BASE_DATA, typedReport: null, summary: note, summarySource: 'technician_report', summaryIsOwnNote: true };
+    const plain = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(plain.container.textContent).toContain(note);
+    const reconciled = {
+      ...data,
+      reportV2: { todaysResult: 'I treated the front beds for fire ants, and you should see activity ease over the next 1-2 weeks.', insights: [{ headline: 'Thin turf', whatWeSaw: 'Shade thinning.' }] },
+    };
+    const lawn = render(<ServiceReportDocument data={reconciled} token="tok123" />);
+    expect(lawn.container.textContent).toContain(note);
+    // A technician report that is not the note is still cleaned.
+    const titled = render(<ServiceReportDocument data={{ ...reconciled, summaryIsOwnNote: undefined }} token="tok123" />);
+    expect(titled.container.textContent).not.toContain('Thanks for having us out today.');
+  });
+
   it("prints the whole reconciled technician's report ahead of a typed report's frozen body", () => {
     // The typed snapshot froze the report at completion with an old rain
     // figure; the reconciliation corrected data.summary. The PDF prints the
@@ -2245,5 +2262,21 @@ describe('the PDF document root shows the payload writer-rules state', () => {
     const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok" />);
     expect(container.querySelector('.service-report-v1')).not.toBeNull();
     expect(container.querySelector('[data-writer-rules]')).toBeNull();
+  });
+});
+
+// Every PDF waits, in the same way, for the root showing the note state of
+// the render's own build (server reportNoteRenderState:
+// `[data-report-note="shown:<digest>"|"withheld"|"none"]`; 'none' on a record
+// without the technician's own note).
+describe("the PDF document root shows the payload's own-note state", () => {
+  it.each(['shown:1a2b3c4d', 'withheld', 'none'])('matches the PDF ready selector for %s', (state) => {
+    const { container } = render(<ServiceReportDocument data={{ ...BASE_DATA, writerRules: 'on', reportNote: state }} token="tok" />);
+    expect(container.querySelector(`.service-report-v1[data-writer-rules="on"][data-report-note="${state}"]`)).not.toBeNull();
+  });
+
+  it('carries no note state when the payload names none', () => {
+    const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok" />);
+    expect(container.querySelector('[data-report-note]')).toBeNull();
   });
 });

@@ -505,7 +505,22 @@ snapshot: a row with a detail or a recommendation, or one whose title the
 completion form's `structured_notes.formObservations` lists. A bare title (the
 form's free-text observations, a `[Found]` line of the raw technician note
 among them) never prints, as in the report document, the texting prompt and
-the voice relay.
+the voice relay. On a record that carries the technician's own note
+(`carriesReportNote`), a label proves a row only when it passes that record's
+screen (`noteRecordCopyViolations`: `customerCopyViolations` and any time
+figure, below), as that record's report lists do. There a row whose
+only text is the stock detail completion writes for a picked label
+(`STRUCTURED_OBSERVATION_FINDING_DETAIL`) is that label alone, so it stands
+only when the label passes the same screen. There every text field a customer
+reads passes the screen first: a row whose title fails it is dropped, and a
+detail or a recommendation that fails it is left out of its row. A row with no
+text left is then dropped too, the stored "no activity" row of the pest,
+mosquito, termite and rodent lines among them (its fixed detail, "were clear",
+fails the screen). The texting prompt (`loadLatestVisitFindings`)
+and the voice relay (`get_service_report`) run `provenFindingRows` too, after
+their own rule that a row needs a detail or a recommendation. Each reads every
+finding of the visit, with no cap before the screens (production, 2026-11-20:
+at most 4 on one visit), and cuts to its limit (5 and 6) after the filters.
 
 Pest rain outlook (owner 2026-10-24; no new route, token, key, privacy or
 rate-limit surface): on the pest-line service-report payload
@@ -763,7 +778,10 @@ raw note). The invoice keeps the note as it stood when billed, which on older
 invoices is the raw note, so the route screens it on the way out against the
 visit's own record (`service_records` by the invoice's `service_record_id` and
 `customer_id`). A raw note, a combined-visit invoice (it keeps none) or a
-missing record returns null.
+missing record returns null. So does a visit whose record carries the
+technician's own note (`structured_notes.reportNote`, `carriesReportNote`): its
+invoice kept the raw note, and the note on the record is not the copy that was
+billed.
 
 Part payments (billing audit 2026-10-30): `/api/pay/:token` returns
 `invoice.amountPaid`, the money the office already recorded on this
@@ -3098,8 +3116,169 @@ that root shows the state the render's key was computed under
 (`reportPdfReadySelector` in `server/services/service-report/pdf.js`). A page
 built in the other state (a rolling restart's overlap), or by a page bundle or
 server from before this key, never matches: the render times out and nothing
-is stored. Every other record renders the same in both states and waits for
-the report root alone.
+is stored. Every other record renders the same in both states and does not
+check that state. A record that carries the technician's own note
+(`carriesReportNote`; its PDF key has `-rn`) waits the same way for its note
+state: in `mode=pdf` its payload also carries `reportNote`
+(`reportNoteRenderState`): `shown:` and the 8-hex digest of the signed note as
+it prints when the summary is the note (`summaryIsOwnNote`; the digest the
+key's `-tr` part names), else `withheld`. The PDF document shows it on its root
+(`data-report-note`), and both providers print only once that root shows the
+state of the caller's own build. A page built from another read of the record
+(the note or the signing name changed between the two reads) never matches.
+Every other `mode=pdf` payload carries `reportNote: 'none'`, and a record with
+no note waits for a root that shows it (`[data-report-note="none"]`): a record
+that gained a note after the caller's read never prints under the caller's
+key, and neither does a page bundle from before the note reader, which shows
+no note state at all (pre-push audit round 29). No other mode carries the key.
+
+The technician's own note (owner 2026-11-19, the report speed plan; reader
+`visitReportCustomerCopy`, `technician-report-copy.js`): a completed visit may
+carry `structured_notes.reportNote = { v: 1, text, source: 'cleaned' | 'fixed' }`.
+Nothing writes it yet (its writer ships later, behind `GATE_REPORT_OWN_NOTE`). A
+render reads it from the record whatever a gate says, so a report already sent
+keeps its text. On such a record `technician_notes` holds the technician's raw
+note, and no reader below shows a line of it. (The lawn and tree & shrub
+technician paragraphs, each under its own gate, still take that note as their
+input, as they do on any visit today.) The payload changes existing fields
+and adds the one key below: `summary` is the note when the summary rule accepts it
+(only on a pest report, the line the report renders as, `service_line` or else
+`detectServiceLine(service_type)`; a reader whose row has no `service_line`
+column shows no note, so every reader reads the column, the voice agent's two
+visit queries included; only on a visit with no frozen typed
+card, primary or companion; and never on a visit whose recorded outcome applied
+nothing, `inspection_only` or `customer_declined`, callback or not, read from
+the stored `service_data` and structured notes as the callback copy reads it,
+since a callback's report leads with the outcome copy and its PDF prints no
+summary there; and never on a visit whose `service_data` is present but cannot
+be read: a string that does not parse to an object, a value that is not one, or
+a `protocol` inside it that cannot be read, since it hides the outcome and the
+frozen typed cards this rule checks; absent `service_data` reads as none), a `cleaned`
+note signed ` — <first name>` (the identity snapshot's name, never a generic
+label). The note, and every list value and finding field below on such a
+record, passes `noteRecordCopyViolations`: `customerCopyViolations`; the
+access check (`heldAccessCode`), which withholds a value that holds a
+code-shaped number or speaks of getting in, whatever the code is: a
+code-shaped number, whatever words surround it (3 or more digits, with up to 3
+spaces, line breaks or hyphens between any two: "I punched 1234 into the
+padlock", "1 2 3 4"; or 3 or more number words in a row: "one two three four";
+a figure with a unit, "150 feet", is withheld too); any word about getting in
+("I used the word ROSE to unlock the side gate"): a gate, a lock, latch, key,
+keypad, lockbox, fob, buzzer, intercom or opener, a code, PIN, passcode,
+password, passphrase or combination ("a combination of ants" too), a magic,
+secret or pass word, access or gaining entry; how anyone or anything gets in
+("I punched rose into the security panel to get inside"): getting or letting
+in, inside, into, through or past, entering, keying a word in (punch, tap,
+dial, input, key or type in, press, say), and a security panel, alarm, call
+box or touch pad, so a pest that gets in is refused too ("entry points" and
+"inside" alone stay legal); and a door, garage, entrance, entry (not "entry
+points") or lanai in a sentence that opens it or keys a word in (open,
+unlatch, say, type, punch, press), with a colon or a dash after it, or with a
+word in capitals on its line ("through" and "with" stay legal).
+It catches every value the completion access-code check
+(`COMPLETION_ACCESS_CODE_RE`) and the visit-history reader's redactor
+(`redactAccessCodes`) caught: each needs a run of digits or a code noun.
+Production, 2026-11-20, read-only, counts only: the code shape added 10 of 401
+raw pest technician notes; the words about getting in and the door rules add
+15 more, and 7 of 474 pest recaps; no finding field or form value. And any time a technician can give: any word that names hours, minutes or seconds, with
+or without a figure ("30+ minutes", "eighteen minutes", "½ hour", "a few
+minutes"); a figure with h, m or s ("90s"); a clock time in any marked form ("3:30", any
+pm or a.m., "four am", "3 o'clock", "half past three", "four in the
+afternoon") or as an hour after at, after, until, till, by, before, around,
+past, between or from ("after four"), a 24-hour clock there too ("at 1600");
+overnight, tonight, tomorrow, noon or midnight. AGENTS.md bans a fixed re-entry or drying time, and a figure can be
+written in more ways than any list names, so a marker alone decides (the unit
+word, the clock marker, the time word before an hour) and each match withholds
+the copy. A count after such a time word ("at 3 stations") is withheld too.
+Days stay legal (the next visit, when results show), except in a sentence
+that names drying or re-entry ("dry", "re-enter", "keep … off", "stay …
+inside", "off-limits", "avoid"), the people and pets a re-entry line is
+about, or a customer's permission to use the place again ("you can use it",
+"feel free to use", "it is fine to enjoy", "the treated patio is fine to
+use"): there any figure or number word withholds the copy ("11/22", "2d"),
+and so does a day word (a unit from a day up, a weekday, full or short
+("until Sat."), "today", a part of
+the day or a meal, a month other than "may", a season other than "fall"), so
+"until dry" is the only time such a sentence may give. The re-entry verbs the
+complete screen already pairs with minutes and hours (`REENTRY_VERB_SRC`:
+return, come back, walk on, use the treated area, ready for use, …) withhold a
+sentence with a day word too ("You can return to the treated area in two
+days."), unless the verb follows I, we, the technician or the team: that is a
+follow-up ("I will return in two weeks to check the stations"). A full stop ends that sentence only before a capital letter
+or the end, and never after "approx." or a like abbreviation ("1.5 days",
+"approx. two days", "approx. Two days" stay in it); a line break does not.
+The text is cut into sentences before these rules run, by a split that tells
+a capital from a small letter (the rules themselves ignore case).
+"Keep an eye out" is no keep-off. The ordinal "second" and "am" after
+anything but a number stay legal, and so does a part of the day with no hour
+outside such a sentence.
+Production count (read-only, 2026-11-20): the rule matches 47 of 474 pest
+customer recaps and 56 of 401 technician notes, none of the form lists or
+finding fields; the access-code check matches none. Otherwise it is what the report builds with no free text (the lawn visit
+summary, or on a live view a narrative of the typed card under that narrative's
+own gate, which reads an empty recap) or empty, never `customerRecap`. A
+refused or malformed note is no text, and the raw column is never its fallback.
+A note on a record of any other line is no text too: the lawn and tree & shrub
+reports take the note in their own later step, and the termite, rodent, mosquito
+and palm reports with the typed visits.
+Stored notes that cannot be read (a top-level value that is not an object)
+count as a note on every reader below too. Every frozen card's `todaysResult`
+drops a body it took from report text (`bodySource: 'technician_report'`) and
+keeps its headline. The
+protocol lists (`actions`, `observations`, `recommendations`) carry only what the
+completion form recorded (`structured_notes.formProtocolActions`,
+`formObservations`, `formRecommendations`), never tagged lines of the raw note,
+and each value passes `noteRecordCopyViolations` as it renders. Completion
+writes `formProtocolActions` (the picked labels that pass
+`customerCopyViolations`) beside the merged `protocolActionsCompleted` on every
+visit, and stores `formRecommendations` through the same screen: a refused
+value stays in the merged `recommendations` only, and every report reader
+already screens that list as it renders, so no report changes. `findings` drops
+a row with a bare title (no detail, no recommendation; text of only spaces
+counts as none), a stored row whose only text is the stock detail unless its
+label passes `noteRecordCopyViolations`, and any row whose title fails that
+screen; a detail
+or a recommendation that fails it is left out of its row, so a row with no text
+left drops, the stored "no activity" row of the pest, mosquito, termite and
+rodent lines among them (`provenFindingRows`, as in the readers above). The
+pest report's concern pass, which softens a stored "no activity" row when the
+customer flagged something, never runs on such a record, so the stored row
+reaches that screen as stored. The render adds no "no activity" row of its own
+either: the form's lists being empty proves nothing beside a note. The lawn
+write gate's report build reads stored notes that cannot be read as stored,
+never an object it rebuilt around its frozen facts, so it reads them as the
+live report does. The PDF key hashes the summary as it prints, and on such a
+record it always carries `-rn` (just before any `-fson`/`-fsoff` part), summary
+or not. The visit notes on the other surfaces (`customerSafeVisitNotes`) run
+the same rule. The Documents API
+PDF (`routes/documents.js` `generateServiceReportPDF`, at the signed-in
+`/api/documents/service-report/:serviceRecordId` and the shared
+`/api/documents/shared/:token`) prints every record's observation and
+recommendation lists from the completion form's values (`buildProtocolPayload`
+`structuredObservations` / `structuredRecommendations`, screened as above on
+such a record), never the merged `structured_notes` lists (which fold in raw
+`[Found]` / `[Next]` lines) or `ai_report`, on a record with no note too. On
+every record each value passes `customerCopyViolations` before it prints (the
+web payload screens its recommendations with it too), and a value the
+access check catches drops (`heldAccessCode`: a code-shaped number or any word
+about getting in, as on a note record; production, 2026-11-20, read-only: no
+form value of the 11 records with form lists); a refused value is left out. That
+PDF prints the service title frozen at completion, but it judges whether the
+note may stand from the stored row, as the web report does: a row with no
+stored `service_line` takes the line its stored `service_type` names before
+the frozen title replaces the type (`applyReportIdentitySnapshotToLegacyPdf`),
+so a visit corrected after completion (pest to lawn) prints its note in
+neither place. The payload adds
+one key and no query parameter: `summaryIsOwnNote: true`, present only when
+`summary` is the note (on such a record a `technician_report` summary is always
+the note). The page's Visit Summary and the PDF print that summary as stored
+(`printedVisitSummary`), never through `cleanVisitSummary`'s fixes for the
+stored legacy recap, and the lawn layout takes no applied sentence out of it. A record whose stored notes are an object without
+`reportNote` renders exactly as before, and its payload has no
+`summaryIsOwnNote` key; its Documents API PDF prints the form's lists, as
+above (production 2026-11-20, read-only: 3 of 654 completed visits lose a line
+from that PDF, none from the last 30 days; no visit has `ai_report` lists; no
+stored form value fails the screen).
 
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
@@ -6736,7 +6915,9 @@ server-rendered page reads the same pack, so the two paths cannot drift.
 `/api/documents/shared/:token` (read-only shared-document fetch incl.
 on-the-fly service-report PDFs — customer PII by design; 64-hex format
 gate, 24h expiry with 410, access-count audit, 30/15min limiter,
-`no-store`).
+`no-store`; a visit that carries the technician's own note prints the
+web report's screened form lists, never the merged note lists or
+`ai_report`).
 `POST /api/stripe/terminal/validate-handoff` (machine-to-machine burn of
 the 60s single-use handoff JWT — the token IS the auth; see the atomic
 terminal-handoff burn rule in AGENTS.md. THIRD-PARTY BILL-TO WITHDRAWAL
