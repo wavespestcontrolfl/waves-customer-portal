@@ -941,9 +941,12 @@ function lateBudget(classRings, combinedBooking) {
 const capHit = () => logger.warn(`[schedule-integrity] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
 
 // The days each standing bell under `prefix` carries: the newest row per key,
-// the one a delivery lands on (notifyAdmin's own lookup). A key whose newest
-// row is auto-cleared maps to null: a delivery there reopens it and rings.
-async function standingBellDays(prefix) {
+// the one a delivery lands on (notifyAdmin's own lookup). Under episodes a key
+// whose newest row is auto-cleared maps to null: the reopen wrapper reopens it
+// and it rings. Killed, notifyAdmin refreshes that same row and judges a new
+// day against the days it stores (a refresh keeps the autoCleared stamp), so
+// those days count as carried.
+async function standingBellDays(prefix, episodes) {
   const rows = await db('notifications').where({ recipient_type: 'admin' })
     .whereRaw("starts_with(metadata->>'dedupeKey', ?)", [prefix])
     .orderBy('created_at', 'desc')
@@ -952,7 +955,7 @@ async function standingBellDays(prefix) {
   for (const row of rows) {
     const key = String(row.dedupe_key || '');
     if (!key.startsWith(prefix) || days.has(key)) continue;
-    days.set(key, row.auto_cleared === 'true' ? null : (Array.isArray(row.item_keys) ? row.item_keys.map(String) : []));
+    days.set(key, episodes && row.auto_cleared === 'true' ? null : (Array.isArray(row.item_keys) ? row.item_keys.map(String) : []));
   }
   return days;
 }
@@ -985,7 +988,7 @@ async function ringWithinBudget(alerts, { episodes, now, budget, prefix, alwaysR
   let held = 0;
   const over = [];
   let undelivered = 0;
-  const standing = alerts.length ? await standingBellDays(prefix) : new Map();
+  const standing = alerts.length ? await standingBellDays(prefix, episodes) : new Map();
   const firstNewDay = (alert) => {
     const carried = standing.get(alert[0]) || [];
     // itemKeys run in date order, so the first one missing is the earliest.

@@ -1362,17 +1362,24 @@ describe('same-start visits (class 5)', () => {
     expect(result).toMatchObject({ alerted: 1 });
   });
 
-  test('kill switch off: past the budget only a bell whose earliest new day is tomorrow rings; a bell that already shows tomorrow and gains a later day waits, as does a later new pair', async () => {
+  test('kill switch off: past the budget only a bell whose earliest new day is tomorrow rings; a bell that already shows tomorrow (an auto-cleared row too) and gains a later day waits, as does a later new pair', async () => {
     alertEpisodesLive.mockReturnValue(false);
     const tomorrow = pairAlert('cust-pair-1');
     tomorrow[3] = { ...tomorrow[3], itemKeys: ['2026-08-05', '2026-08-10'] };
     // Its bell shows Aug 5 (tomorrow); Sep 10 is new and not urgent.
     const knownTomorrow = pairAlert('cust-pair-3');
     knownTomorrow[3] = { ...knownTomorrow[3], itemKeys: ['2026-08-05', '2026-09-10'] };
+    // The same on a row auto-cleared while episodes ran: killed, notifyAdmin
+    // refreshes that row and judges Sep 10 against its stored days.
+    const clearedTomorrow = pairAlert('cust-pair-4');
+    clearedTomorrow[3] = { ...clearedTomorrow[3], itemKeys: ['2026-08-05', '2026-09-10'] };
     // The class's own order: earliest first day first.
-    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [tomorrow, knownTomorrow, pairAlert('cust-pair-2')], failed: false });
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [tomorrow, knownTomorrow, clearedTomorrow, pairAlert('cust-pair-2')], failed: false });
     runCombinedBookingCheck.mockResolvedValueOnce({ checked: 10, problems: 10, rings: 10 });
-    makeDbMock({ bellRows: [{ dedupe_key: 'same-start-visits:cust-pair-3', auto_cleared: null, item_keys: ['2026-08-05'] }] });
+    makeDbMock({ bellRows: [
+      { dedupe_key: 'same-start-visits:cust-pair-3', auto_cleared: null, item_keys: ['2026-08-05'] },
+      { dedupe_key: 'same-start-visits:cust-pair-4', auto_cleared: 'true', item_keys: ['2026-08-05'] },
+    ] });
     expect(await runInner({ now: NOW })).toMatchObject({ alerted: 1 });
     expect(NotificationService.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey)).toEqual(['same-start-visits:cust-pair-1']);
     // Killed: the bells that wait get no quiet update and no close.
