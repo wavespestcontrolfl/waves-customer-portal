@@ -34,7 +34,7 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
   });
   afterAll(async () => { if (db) await rows().del(); });
 
-  test('lastRead and saveRead keep the newest complete read of a file in system_settings', async () => {
+  test('saveRead keeps one measure per file: a newer year or more rows replace it, never fewer, even from runs that overlap', async () => {
     const kind = `t${RUN}`; // its own setting key, removed below
     const settings = () => db('system_settings').where({ key: `restaurant_prospects_read_${kind}` });
     try {
@@ -43,11 +43,22 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
       await svc.saveRead(kind, { fiscalYear: '2026-07-01', rows: 6712 });
       expect(await svc.lastRead(kind)).toEqual({ fiscalYear: '2026-07-01', rows: 6712 });
       expect(await settings()).toHaveLength(1);
-      // A value that is not a read is no measure.
+      // Fewer rows in the same year never lower it, one after another or from runs that overlap.
+      await svc.saveRead(kind, { fiscalYear: '2026-07-01', rows: 6600 });
+      expect(await svc.lastRead(kind)).toEqual({ fiscalYear: '2026-07-01', rows: 6712 });
+      await Promise.all([6650, 6720, 6690].map((rows) => svc.saveRead(kind, { fiscalYear: '2026-07-01', rows })));
+      expect(await svc.lastRead(kind)).toEqual({ fiscalYear: '2026-07-01', rows: 6720 });
+      // A newer fiscal year replaces it, however few its rows.
+      await svc.saveRead(kind, { fiscalYear: '2027-07-01', rows: 12 });
+      expect(await svc.lastRead(kind)).toEqual({ fiscalYear: '2027-07-01', rows: 12 });
+      // A value that is not a read is no measure, and the next read replaces it.
       await settings().update({ value: 'not json' });
       expect(await svc.lastRead(kind)).toBeNull();
       await settings().update({ value: JSON.stringify({ fiscalYear: 'later', rows: 5 }) });
       expect(await svc.lastRead(kind)).toBeNull();
+      await svc.saveRead(kind, { fiscalYear: '2026-07-01', rows: 3 });
+      expect(await svc.lastRead(kind)).toEqual({ fiscalYear: '2026-07-01', rows: 3 });
+      expect(await settings()).toHaveLength(1);
     } finally {
       await settings().del();
     }

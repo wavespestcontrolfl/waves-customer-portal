@@ -273,14 +273,15 @@ async function bumpAttempts(id) {
 
 // The fullest complete read of each file in its fiscal year, kept in system_settings: how many rows it held and the
 // fiscal year. The job saves it only after every row of a read is stored and only from a read that is not short, so
-// a read cut off by a failed write, a deploy or a short download never becomes the measure.
+// a read cut off by a failed write, a deploy or a short download never becomes the measure. saveRead keeps the
+// fullest: under a row lock, only a newer fiscal year or more rows in the same year replace the stored read, so two
+// runs that overlap never lower it.
 const readSettingKey = (kind) => `restaurant_prospects_read_${kind}`;
 
-async function lastRead(kind) {
-  const row = await db('system_settings').where({ key: readSettingKey(kind) }).first('value');
+// A stored read, or null for anything else: a damaged year would make every later read look stale.
+function parseRead(text) {
   try {
-    const value = JSON.parse(row && row.value);
-    // Anything else is no measure: a damaged year would make every later read look stale.
+    const value = JSON.parse(text);
     const valid = value && /^\d{4}-07-01$/.test(value.fiscalYear) && Number.isInteger(value.rows) && value.rows >= 0;
     return valid ? { fiscalYear: value.fiscalYear, rows: value.rows } : null;
   } catch {
@@ -288,10 +289,22 @@ async function lastRead(kind) {
   }
 }
 
+async function lastRead(kind) {
+  const row = await db('system_settings').where({ key: readSettingKey(kind) }).first('value');
+  return parseRead(row && row.value);
+}
+
 async function saveRead(kind, read) {
+  const key = readSettingKey(kind);
   const value = JSON.stringify({ fiscalYear: read.fiscalYear, rows: read.rows });
-  await db('system_settings').insert({ key: readSettingKey(kind), value, category: 'prospects' })
-    .onConflict('key').merge({ value, updated_at: db.fn.now() });
+  await db.transaction(async (trx) => {
+    await trx('system_settings').insert({ key, value, category: 'prospects' }).onConflict('key').ignore();
+    const row = await trx('system_settings').where({ key }).forUpdate().first('value');
+    const stored = parseRead(row && row.value);
+    const fuller = !stored || read.fiscalYear > stored.fiscalYear
+      || (read.fiscalYear === stored.fiscalYear && read.rows > stored.rows);
+    if (fuller) await trx('system_settings').where({ key }).update({ value, updated_at: db.fn.now() });
+  });
 }
 
 // ── Weekly job ──────────────────────────────────────────────────
@@ -417,9 +430,8 @@ async function syncFiles(deps, result) {
         result.files[kind][problem.flag] = true;
         logger.warn(`[dbpr-prospects] ${kind} file ${problem.text}`);
       } else if (fiscalYear) {
-        // Saved only once every row of this read is stored. Within a year the measure only grows.
-        const rows = last && last.fiscalYear === fiscalYear ? Math.max(last.rows, rowsRead) : rowsRead;
-        await deps.store.saveRead(kind, { fiscalYear, rows });
+        // Saved only once every row of this read is stored; saveRead keeps the fullest read of the year.
+        await deps.store.saveRead(kind, { fiscalYear, rows: rowsRead });
       }
     } catch (err) {
       result.failures += 1;

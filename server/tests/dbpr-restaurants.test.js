@@ -222,7 +222,13 @@ describe('syncRestaurantProspects', () => {
     return {
       upsertRecords: jest.fn(async (records) => { upserts.push(...records); return records.length; }),
       lastRead: jest.fn(async (kind) => reads[kind] || null),
-      saveRead: jest.fn(async (kind, read) => { reads[kind] = read; }),
+      // As the real store: only a newer fiscal year, or more rows in the same year, replaces the stored read.
+      saveRead: jest.fn(async (kind, read) => {
+        const stored = reads[kind];
+        if (!stored || read.fiscalYear > stored.fiscalYear || (read.fiscalYear === stored.fiscalYear && read.rows > stored.rows)) {
+          reads[kind] = read;
+        }
+      }),
     };
   }
   const files = {
