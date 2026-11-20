@@ -20,8 +20,9 @@
  *     characters of its sha256 (textHash). When the text changes, the old
  *     review no longer counts (staleReviews), so new words get a fresh look.
  * The tests fail when a text with a part word has no entry, when an entry's
- * text changed since its review, or when an issue that names a part would
- * go out without its picture.
+ * text changed since its review, when any entry fails its checks, or when
+ * an issue that names a part would go out without its picture. At run time
+ * an entry that fails its checks only loses its picture (checkParts).
  *
  * ops/agents/pest-insider-parts.js draws each picture from the photos in
  * PHOTO_DIR into PART_DIR as <id>-<hash>.jpg. The hash covers everything
@@ -215,44 +216,66 @@ function picture(id, entry, photos) {
 /**
  * Checks the parts file against the shown texts (`textOf.facts(id)`,
  * `textOf.species(slug)`: the text, or null for no such entry). Returns
- * frozen { facts, species } maps of { parts, picture|null }. Throws on the
- * first problem.
+ * { parts, problems }: parts = frozen { facts, species } maps of
+ * { parts, picture|null } with only the entries that pass; problems = one
+ * line for each photo or entry that does not. It never throws, so a species
+ * that loses its catalog approval, or a copy edit, costs that entry its
+ * picture and never breaks an issue. The tests require no problems.
  */
-function validateParts(raw, textOf = { facts: factText, species: speciesText }) {
+function checkParts(raw, textOf = { facts: factText, species: speciesText }) {
   if (!raw || typeof raw !== 'object' || [raw.photos, raw.facts, raw.species].some((m) => !m || typeof m !== 'object' || Array.isArray(m))) {
-    throw new Error('pest-insider parts: the file has photos, facts and species maps');
+    return { parts: Object.freeze({ facts: Object.freeze({}), species: Object.freeze({}) }), problems: Object.freeze(['the file has photos, facts and species maps']) };
   }
+  const problems = [];
+  const photos = {};
   for (const [file, photo] of Object.entries(raw.photos)) {
     const problem = photoProblem(file, photo);
-    if (problem) throw new Error(`pest-insider parts: ${problem}`);
+    if (problem) problems.push(problem);
+    else photos[file] = photo;
   }
   const out = {};
   for (const kind of ['facts', 'species']) {
     const checked = {};
     for (const [id, entry] of Object.entries(raw[kind])) {
       const text = textOf[kind](id);
-      if (text === null) throw new Error(`pest-insider parts: ${kind}.${id}: no such ${kind === 'facts' ? 'fact' : 'species'}`);
-      const problem = entryProblem(entry, text, raw.photos);
-      if (problem) throw new Error(`pest-insider parts: ${kind}.${id}: ${problem}`);
-      checked[id] = Object.freeze({ parts: Object.freeze([...entry.parts]), picture: entry.parts.length ? picture(id, entry, raw.photos) : null });
+      // A photo with a problem is left out above, so an entry using it fails here too.
+      const problem = text === null ? `no such ${kind === 'facts' ? 'fact' : 'species'}` : entryProblem(entry, text, photos);
+      if (problem) {
+        problems.push(`${kind}.${id}: ${problem}`);
+        continue;
+      }
+      checked[id] = Object.freeze({ parts: Object.freeze([...entry.parts]), picture: entry.parts.length ? picture(id, entry, photos) : null });
     }
     out[kind] = Object.freeze(checked);
   }
-  return Object.freeze(out);
+  return { parts: Object.freeze(out), problems: Object.freeze(problems) };
+}
+
+/** checkParts for the tests and the drawer: the parts maps, or a throw on the first problem. */
+function validateParts(raw, textOf) {
+  const { parts, problems } = checkParts(raw, textOf);
+  if (problems.length) throw new Error(`pest-insider parts: ${problems[0]}`);
+  return parts;
 }
 
 /** { facts: { id: { parts, picture } }, species: { slug: { parts, picture } } }, checked and frozen. */
-const PARTS = validateParts(data);
+const { parts: PARTS, problems: PART_PROBLEMS } = checkParts(data);
+if (PART_PROBLEMS.length) {
+  // Lazy, as in schedule.js: the logger loads only when there is something to say.
+  require('../logger').warn(`[pest-insider parts] ${PART_PROBLEMS.length} part entries show no picture: ${PART_PROBLEMS.join('; ')}`);
+}
 
 /**
  * Entries whose text changed since a person reviewed it: [{ kind, id, text16, now }].
- * The load checks above still hold (own words, named parts), so a changed
- * text never breaks a send; the test fails instead, and asks for a review.
+ * checkParts still checks own words and named parts against the new text;
+ * the test fails on any stale entry and asks for a review.
  */
 function staleReviews(raw = data, textOf = { facts: factText, species: speciesText }) {
   return ['facts', 'species'].flatMap((kind) => Object.entries(raw[kind])
-    .map(([id, entry]) => ({ kind, id, text16: entry.text16, now: textHash(textOf[kind](id)) }))
-    .filter((row) => row.text16 !== row.now));
+    .map(([id, entry]) => ({ kind, id, text16: entry.text16, text: textOf[kind](id) }))
+    // A missing text is a problem checkParts reports; here it has no hash.
+    .filter((row) => row.text !== null && row.text16 !== textHash(row.text))
+    .map(({ kind: k, id, text16, text }) => ({ kind: k, id, text16, now: textHash(text) })));
 }
 
 const entryOf = (map, key) => (typeof key === 'string' && Object.prototype.hasOwnProperty.call(map, key) ? map[key] : null);
@@ -262,6 +285,6 @@ const partPictureForFact = (id) => entryOf(PARTS.facts, id)?.picture || null;
 const partPictureForSpecies = (slug) => entryOf(PARTS.species, slug)?.picture || null;
 
 module.exports = {
-  PART_DESIGN, PART_WIDTH, PART_HEIGHT, PART_BASE_URL, PART_DIR, PHOTO_DIR, LICENSES, PHOTO_SITES, DIAGRAMS, PART_WORDS, PARTS,
-  panelSize, partWordsIn, factText, speciesText, textHash, validateParts, staleReviews, partPictureForFact, partPictureForSpecies,
+  PART_DESIGN, PART_WIDTH, PART_HEIGHT, PART_BASE_URL, PART_DIR, PHOTO_DIR, LICENSES, PHOTO_SITES, DIAGRAMS, PART_WORDS, PARTS, PART_PROBLEMS,
+  panelSize, partWordsIn, factText, speciesText, textHash, checkParts, validateParts, staleReviews, partPictureForFact, partPictureForSpecies,
 };

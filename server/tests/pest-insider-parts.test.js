@@ -6,8 +6,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const {
-  PARTS, PART_DIR, PHOTO_DIR, PART_BASE_URL, PART_WIDTH, PART_HEIGHT, PART_DESIGN, LICENSES, DIAGRAMS,
-  panelSize, partWordsIn, factText, speciesText, textHash, validateParts, staleReviews, partPictureForFact, partPictureForSpecies,
+  PARTS, PART_PROBLEMS, PART_DIR, PHOTO_DIR, PART_BASE_URL, PART_WIDTH, PART_HEIGHT, PART_DESIGN, LICENSES, DIAGRAMS,
+  panelSize, partWordsIn, factText, speciesText, textHash, checkParts, validateParts, staleReviews, partPictureForFact, partPictureForSpecies,
 } = require('../services/pest-insider/parts');
 const { FACTS } = require('../services/pest-insider/facts');
 const { POSTS, POST_URLS, postUrl } = require('../services/pest-insider/posts');
@@ -28,6 +28,10 @@ describe('the part rule', () => {
       ...SPECIES.filter((species) => partWordsIn(species.fact).length && !PARTS.species[species.slug]).map((species) => `species ${species.slug}: ${partWordsIn(species.fact).join(', ')}`),
     ];
     expect(missing).toEqual([]);
+  });
+
+  test('every entry passes its checks, so each shows its picture', () => {
+    expect(PART_PROBLEMS).toEqual([]);
   });
 
   test('each list still matches the text a person reviewed (text16)', () => {
@@ -179,6 +183,22 @@ describe('the email', () => {
     expect(r.text_body).not.toContain(PART_BASE_URL);
     expect(r.text_body).not.toContain('Cropped and labeled');
   });
+
+  test('an issue still builds when a species with a parts entry loses its catalog approval', () => {
+    jest.isolateModules(() => {
+      const plan = jest.requireActual('../services/pest-insider/plan');
+      const warn = jest.fn();
+      jest.doMock('../services/pest-insider/plan', () => ({ ...plan, SPECIES: plan.SPECIES.filter((s) => s.slug !== 'earwig') }));
+      jest.doMock('../services/logger', () => ({ warn, info: jest.fn(), error: jest.fn() }));
+      const parts = require('../services/pest-insider/parts');
+      const render = require('../services/pest-insider/render');
+      expect(parts.PART_PROBLEMS).toEqual(['species.earwig: no such species']);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('species.earwig: no such species'));
+      const html = render.renderIssue({ ...BASE, lead: leadFor('T03'), idItem: speciesItem('puss-caterpillar') }).html_body;
+      expect(html).toContain(parts.partPictureForFact('T03').url);
+      expect(html).toContain(parts.partPictureForSpecies('puss-caterpillar').url);
+    });
+  });
 });
 
 describe('validateParts', () => {
@@ -217,6 +237,33 @@ describe('validateParts', () => {
     ['an entry for no species', (d) => { d.species['not-a-bug'] = { parts: [], why: 'none' }; }, /species.not-a-bug: no such species/],
     ['a file with no photos map', (d) => { delete d.photos; }, /the file has photos, facts and species maps/],
   ])('refuses %s', (_label, mutate, message) => refuse(mutate, message));
+
+  test('at run time a failing entry only loses its picture: a species that loses its approval', () => {
+    const { parts, problems } = checkParts(raw, { facts: factText, species: (slug) => (slug === 'earwig' ? null : speciesText(slug)) });
+    expect(problems).toEqual(['species.earwig: no such species']);
+    expect(parts.species.earwig).toBeUndefined();
+    expect([Boolean(parts.species['puss-caterpillar'].picture), Boolean(parts.facts.T03.picture)]).toEqual([true, true]);
+  });
+
+  test('at run time a failing entry only loses its picture: a copy edit that drops the named part', () => {
+    const { parts, problems } = checkParts(raw, { facts: factText, species: (slug) => (slug === 'earwig' ? 'Earwigs hide under wet mulch by day.' : speciesText(slug)) });
+    expect(problems).toEqual(['species.earwig: the text does not name pincers']);
+    expect(Object.keys(parts.species)).toEqual(Object.keys(raw.species).filter((slug) => slug !== 'earwig'));
+  });
+
+  test('at run time a photo with a problem takes only the pictures that use it', () => {
+    const d = JSON.parse(JSON.stringify(raw));
+    d.photos['fire-ant-91208856.jpg'].license = 'CC BY-SA 4.0';
+    const { parts, problems } = checkParts(d);
+    expect(problems).toEqual([expect.stringMatching(/^photo fire-ant-91208856\.jpg: license/), expect.stringMatching(/^facts\.T03: .*no photo fire-ant-91208856\.jpg/)]);
+    expect(parts.facts.T03).toBeUndefined();
+    expect(Boolean(parts.facts.T01.picture)).toBe(true);
+  });
+
+  test('at run time a broken file shows no pictures and never throws', () => {
+    expect(checkParts(null).problems).toEqual(['the file has photos, facts and species maps']);
+    expect(checkParts({ photos: {}, facts: {}, species: [] }).parts).toEqual({ facts: {}, species: {} });
+  });
 
   test('the shown texts are the lead fact (title and lead) and the species fact', () => {
     expect(factText('T03')).toContain('look at the waist and antennae');

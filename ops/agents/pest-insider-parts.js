@@ -47,7 +47,7 @@ process.env.WAVES_LOCAL_DEV = '1';
 
 const { chromium } = require('playwright');
 const sharp = require('sharp');
-const { PARTS, PART_DIR, PHOTO_DIR, PART_WIDTH, PART_HEIGHT } = require('../../server/services/pest-insider/parts');
+const { PARTS, PART_PROBLEMS, PART_DIR, PHOTO_DIR, PART_WIDTH, PART_HEIGHT } = require('../../server/services/pest-insider/parts');
 const { WAVES_COLORS: C } = require('../../server/services/pest-insider/cards');
 const { fontStyle } = require('./pest-insider-fonts');
 
@@ -217,6 +217,8 @@ async function fitHeading(page) {
 }
 
 (async () => {
+  // The email skips an entry that fails its checks; the drawer stops instead.
+  if (PART_PROBLEMS.length) { console.error(`The parts file has problems; nothing drawn:\n  ${PART_PROBLEMS.join('\n  ')}`); process.exit(1); }
   const pictures = Object.values(PARTS).flatMap((map) => Object.entries(map)).filter(([, entry]) => entry.picture);
   const known = new Set(Object.values(PARTS).flatMap((map) => Object.keys(map)));
   const unknown = only ? [...only].filter((id) => !known.has(id)) : [];
