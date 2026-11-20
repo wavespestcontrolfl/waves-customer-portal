@@ -48,6 +48,8 @@ beforeEach(() => {
     q.update = jest.fn(async (patch) => { updates.push([table, patch]); return 1; });
     return q;
   });
+  // A transaction reaches the same tables.
+  db.transaction = jest.fn(async (work) => work((table) => db(table)));
 });
 
 afterEach(() => { delete process.env.GATE_NEWSLETTER_AUTO_SEND; });
@@ -92,6 +94,9 @@ test('a planned Waves Pest Insider issue is held on Cancel schedule, so its plan
   scheduledSend = { ...scheduledSend, newsletter_type: 'pest-insider-monthly', proof_approval_email_id: null };
   await postCancel();
   expect(updates.find(([table]) => table === 'pest_insider_issues')[1]).toMatchObject({ status: 'held', reason: 'Cancel schedule in History' });
+  // One transaction: the send, its week and its planned issue commit together, the send first.
+  expect(db.transaction).toHaveBeenCalledTimes(1);
+  expect(updates.map(([table]) => table)).toEqual(['newsletter_sends', 'newsletter_calendar', 'pest_insider_issues']);
 });
 
 test('deleting a planned Waves Pest Insider draft locks the send, holds its issue, then deletes the draft', async () => {

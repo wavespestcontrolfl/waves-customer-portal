@@ -244,23 +244,30 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
     });
   });
 
-  test('a send that fails before its claim marks its planned issue failed (nothing went out)', async () => {
+  // The tick reads the row at READ_AT; sendCampaign throws before its claim here (no SendGrid in
+  // tests, and no row to read). Nothing claimed the row: it is still scheduled, not sending.
+  const READ_AT = new Date('2026-12-02T12:05:00Z');
+  function wirePreClaimFailure({ changedSinceRead }) {
     const updates = [];
     db.mockImplementation((table) => {
       const q = { conds: [] };
       ['whereNull', 'whereIn', 'whereRaw', 'orderBy', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
       q.where = jest.fn((cond) => { q.conds.push(cond); return q; });
-      q.limit = jest.fn(async () => [AUTO_QUEUED_INSIDER]);
+      q.limit = jest.fn(async () => [{ ...AUTO_QUEUED_INSIDER, updated_at: READ_AT }]);
       q.first = jest.fn(async () => (table === 'pest_insider_issues' ? PLANNED : undefined));
-      // Nothing claimed the row: it is still scheduled, not sending.
+      // A row changed since the read also fails the version guard of the 'scheduled' flip.
       q.update = jest.fn(async (patch) => {
         updates.push({ table, patch, conds: q.conds });
-        return q.conds.some((cond) => cond && cond.status === 'sending') ? 0 : 1;
+        if (q.conds.some((cond) => cond && cond.status === 'sending')) return 0;
+        return table === 'newsletter_sends' && changedSinceRead ? 0 : 1;
       });
       return q;
     });
+    return updates;
+  }
 
-    // sendCampaign throws before its claim here (no SendGrid in tests, and no row to read).
+  test('a send that fails before its claim marks its planned issue failed (nothing went out), and the owner is told', async () => {
+    const updates = wirePreClaimFailure({ changedSinceRead: false });
     await processScheduledSends();
 
     expect(updates.map(({ table, patch }) => ({ table, patch }))).toEqual([
@@ -270,6 +277,19 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
     ]);
     // The 'sending' flip is bound to this tick's own claim token: never another worker's send.
     expect(updates[0].conds).toContainEqual({ id: 'send-pi-2', status: 'sending', sending_claim_token: expect.any(String) });
+    // The 'scheduled' flip is bound to the version this tick read, as the claim is.
+    expect(updates[1].conds).toEqual([{ id: 'send-pi-2', status: 'scheduled' }, 'updated_at', 'proof_approved_at']);
+    // The owner was told it would send Thursday: one alert says it did not.
+    expect(mockTrigger).toHaveBeenCalledTimes(1);
+    expect(mockTrigger.mock.calls[0][1].errors).toEqual([expect.stringMatching(/^Stopped at send time: it failed before it started: /)]);
+  });
+
+  test('a pre-claim failure on a row changed since this tick read it leaves the row and its planned issue as they are', async () => {
+    const updates = wirePreClaimFailure({ changedSinceRead: true });
+    await processScheduledSends();
+
+    expect(updates.map(({ table }) => table)).toEqual(['newsletter_sends', 'newsletter_sends']);
+    expect(mockTrigger).not.toHaveBeenCalled();
   });
 
   test('a planned issue that cannot be read is left scheduled for the next tick: no failure, no alert', async () => {

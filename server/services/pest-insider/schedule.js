@@ -278,6 +278,7 @@ const REASON_COPY = [
   [/^gate_off$/, 'GATE_NEWSLETTER_PROOF_APPROVAL is off, so the FYI copy did not go out'],
   [/^auto_send_off$/, 'GATE_PEST_INSIDER_AUTO_SEND turned off during the run, so the FYI copy did not go out'],
   [/^no_approvers_configured$/, 'NEWSLETTER_PROOF_APPROVERS is empty, so the FYI copy did not go out'],
+  [/^fyi_recipient_not_approver$/, 'its FYI copy would go to an address not in NEWSLETTER_PROOF_APPROVERS, so a HOLD reply could not stop it'],
   [/^sendgrid_not_configured$/, 'SendGrid is not set up, so the FYI copy did not go out'],
   [/^proof_send_failed$/, 'SendGrid did not accept the FYI copy'],
   [/^proof_already_sent$/, 'an earlier run started its FYI copy but never queued it'],

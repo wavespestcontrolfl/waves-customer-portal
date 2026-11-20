@@ -70,7 +70,7 @@ const {
 
 function chain(overrides = {}) {
   const q = {};
-  ['where', 'whereRaw', 'whereNull', 'whereNotNull', 'whereIn', 'select', 'orderBy', 'limit']
+  ['where', 'whereRaw', 'whereNull', 'whereNotNull', 'whereIn', 'select', 'orderBy', 'limit', 'forUpdate']
     .forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => overrides.first);
   q.update = jest.fn(async () => (overrides.update !== undefined ? overrides.update : 1));
@@ -943,9 +943,25 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
   const PI_FYI_DRAFT = { ...PI_DRAFT, proof_token: 'ab12cd34', proof_sent_at: PROOF_STAMP, updated_at: PROOF_STAMP };
   const APPROVED = { ...HOLD, id: 'email-4', body_text: 'approved' };
 
+  test('a planned issue whose FYI address cannot reply HOLD gets no copy and is not queued, and the owner is told', async () => {
+    // The approvers list does not name the proof address, so a HOLD reply from it would be ignored.
+    process.env.NEWSLETTER_PROOF_EMAIL = 'proofs@wavespestcontrol.com';
+    const { sendsChain, issuesChain } = wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE } });
+    mockTrigger.mockResolvedValueOnce({ bellWritten: true });
+
+    expect(await sendNewsletterProof('send-1')).toEqual({ skipped: true, reason: 'fyi_recipient_not_approver', notified: true });
+    expect(mockSendOne).not.toHaveBeenCalled();
+    expect(sendsChain.update).not.toHaveBeenCalled();
+    expect(issuesChain.update).not.toHaveBeenCalled();
+  });
+
   test('HOLD before its queueing landed holds the planned row, and a send queued in between goes back to draft', async () => {
     const { sendsChain, issuesChain } = wireDb({ sends: { first: PI_FYI_DRAFT }, issues: { first: ISSUE } });
     expect(await maybeHandleProofApproval(HOLD)).toBe(true);
+
+    // One transaction, the send row locked before the issue row: the queueing's order.
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(sendsChain.forUpdate.mock.invocationCallOrder[0]).toBeLessThan(issuesChain.update.mock.invocationCallOrder[0]);
 
     expect(issuesChain.whereIn).toHaveBeenCalledWith('status', ['drafted', 'scheduled']);
     expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'held', reason: 'HOLD reply from the owner' }));
@@ -972,9 +988,25 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     }
   });
 
-  test('HOLD holds the queued issue and its planned row', async () => {
+  test.each([
+    ['queued', () => PI_QUEUED],
+    ['not queued yet', () => PI_FYI_DRAFT],
+  ])('a HOLD whose writes fail (%s) changes nothing, and the owner is told to stop the issue by hand', async (_label, sendRow) => {
+    // The reply is read once: the alert is the owner's only sign that the HOLD did not apply.
+    const failing = jest.fn(async () => { throw new Error('connection reset'); });
+    wireDb({ sends: { first: sendRow() }, issues: { first: ISSUE, extra: { update: failing } } });
+    expect(await maybeHandleProofApproval(HOLD)).toBe(true);
+
+    expect(failing).toHaveBeenCalledTimes(1);
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+      errors: ['The HOLD reply could not be applied (connection reset), so this issue may still send. To stop it, press Cancel schedule in Newsletter → History, or Delete if it shows as a draft.'],
+    }));
+  });
+
+  test('HOLD holds the queued issue and its planned row, in one transaction', async () => {
     const { sendsChain, issuesChain } = wireDb({ sends: { first: PI_QUEUED } });
     expect(await maybeHandleProofApproval(HOLD)).toBe(true);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(sendsChain.update.mock.calls[0][0]).toEqual(expect.objectContaining({ status: 'draft', scheduled_for: null }));
     expect(issuesChain.where).toHaveBeenCalledWith({ send_id: 'send-1' });
     expect(issuesChain.whereIn).toHaveBeenCalledWith('status', ['drafted', 'scheduled']);

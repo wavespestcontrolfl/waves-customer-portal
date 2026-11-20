@@ -652,6 +652,15 @@ async function sendNewsletterProof(sendId) {
   // A planned issue is only ever proofed as an FYI copy, so its replies always follow the FYI
   // rules (handlePlannedIssueReply). With its switch off nothing proofs or queues it.
   if (issueContext && !pestInsiderAutoSendLive()) return { skipped: true, reason: 'auto_send_off' };
+  // Its FYI copy offers HOLD as the owner's one way to stop it, and a reply counts only from
+  // NEWSLETTER_PROOF_APPROVERS: a copy addressed anywhere else is neither sent nor queued.
+  if (issueContext && !approvalSenders().includes(proofRecipient())) {
+    const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id,
+      subject: send.subject,
+      errors: ['Its FYI copy would go to the proof address (NEWSLETTER_PROOF_EMAIL, or the default), which is not in NEWSLETTER_PROOF_APPROVERS, so a HOLD reply could not stop the issue. Nothing was sent or queued.'],
+    });
+    return { skipped: true, reason: 'fyi_recipient_not_approver', notified };
+  }
   if (!calendarContext.valid) {
     const errors = ['The linked calendar must target its own future issue Tuesday at exactly 6:00 AM ET.'];
     const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors });
@@ -772,6 +781,16 @@ async function sendNewsletterProof(sendId) {
   }
 }
 
+// A HOLD reply is read once (the inbox sync never retries it). When its writes fail, nothing
+// changed, so the owner is told that the issue may still send and how to stop it by hand.
+async function notifyHoldFailed(send, err) {
+  logger.error(`[newsletter-proof] HOLD for send ${send.id} failed: ${err.message}`);
+  await notifyProof('newsletter_proof_blocked', { sendId: send.id,
+    subject: send.subject,
+    errors: [`The HOLD reply could not be applied (${String(err.message).slice(0, 200)}), so this issue may still send. To stop it, press Cancel schedule in Newsletter → History, or Delete if it shows as a draft.`],
+  });
+}
+
 /**
  * HOLD reply on an auto-queued issue: back to draft and the week skipped, so
  * neither the catch-up nor the Monday autopilot proofs or queues it again
@@ -784,19 +803,26 @@ async function holdAutoQueuedIssue(send, token, from) {
     logger.info(`[newsletter-proof] HOLD for send ${send.id} arrived while it was ${send.status} — nothing to stop`);
     return true;
   }
-  const held = await db('newsletter_sends')
-    .where({ id: send.id, proof_token: token, status: 'scheduled' })
-    .whereNotNull('proof_approved_at')
-    .whereNull('proof_approval_email_id')
-    .update({ status: 'draft', scheduled_for: null, proof_token: null, proof_approved_at: null, updated_at: new Date() });
+  // One transaction: the send goes back to draft only together with its skipped week and its held
+  // planned issue, so a failed write never leaves an issue queued under a draft.
+  const held = await db.transaction(async (trx) => {
+    const reverted = await trx('newsletter_sends')
+      .where({ id: send.id, proof_token: token, status: 'scheduled' })
+      .whereNotNull('proof_approved_at')
+      .whereNull('proof_approval_email_id')
+      .update({ status: 'draft', scheduled_for: null, proof_token: null, proof_approved_at: null, updated_at: new Date() });
+    if (!reverted) return false;
+    await trx('newsletter_calendar').where({ send_id: send.id }).update({ status: 'skipped', updated_at: new Date() });
+    // A held Waves Pest Insider issue stays held: the planner never proofs or queues it again.
+    if (send.newsletter_type === PEST_INSIDER_TYPE) {
+      await moveIssueForSend(send.id, ['drafted', 'scheduled'], 'held', { reason: 'HOLD reply from the owner', database: trx });
+    }
+    return true;
+  }).catch(async (err) => { await notifyHoldFailed(send, err); return null; });
+  if (held === null) return true;
   if (!held) {
     logger.info(`[newsletter-proof] HOLD for send ${send.id} lost a race with the send — nothing to stop`);
     return true;
-  }
-  await db('newsletter_calendar').where({ send_id: send.id }).update({ status: 'skipped', updated_at: new Date() });
-  // A held Waves Pest Insider issue stays held: the planner never proofs or queues it again.
-  if (send.newsletter_type === PEST_INSIDER_TYPE) {
-    await moveIssueForSend(send.id, ['drafted', 'scheduled'], 'held', { reason: 'HOLD reply from the owner' });
   }
   logger.info(`[newsletter-proof] send ${send.id} held by ${maskEmail(from)} — week skipped`);
   return true;
@@ -816,14 +842,21 @@ async function handlePlannedIssueReply(send, token, from, replyText) {
     return true;
   }
   if (isHoldReply(replyText)) {
-    const held = await moveIssueForSend(send.id, ['drafted', 'scheduled'], 'held', { reason: 'HOLD reply from the owner' });
-    if (held) {
-      await db('newsletter_sends')
-        .where({ id: send.id, proof_token: token, status: 'scheduled' })
-        .whereNotNull('proof_approved_at')
-        .whereNull('proof_approval_email_id')
-        .update({ status: 'draft', scheduled_for: null, proof_token: null, proof_approved_at: null, updated_at: new Date() });
-    }
+    // One transaction, the send row locked first, as the queueing locks it: a queueing in flight
+    // either commits first (and both rows go back here) or rolls back on the held row.
+    const held = await db.transaction(async (trx) => {
+      await trx('newsletter_sends').where({ id: send.id }).forUpdate().first('id');
+      const moved = await moveIssueForSend(send.id, ['drafted', 'scheduled'], 'held', { reason: 'HOLD reply from the owner', database: trx });
+      if (moved) {
+        await trx('newsletter_sends')
+          .where({ id: send.id, proof_token: token, status: 'scheduled' })
+          .whereNotNull('proof_approved_at')
+          .whereNull('proof_approval_email_id')
+          .update({ status: 'draft', scheduled_for: null, proof_token: null, proof_approved_at: null, updated_at: new Date() });
+      }
+      return moved;
+    }).catch(async (err) => { await notifyHoldFailed(send, err); return null; });
+    if (held === null) return true;
     logger.info(`[newsletter-proof] HOLD for planned issue send ${send.id} by ${maskEmail(from)}: ${held ? 'held' : 'nothing to hold'}`);
     return true;
   }

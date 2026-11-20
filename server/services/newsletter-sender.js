@@ -1811,17 +1811,26 @@ async function revertBlockedScheduledSend(row, reason) {
   // A planned Waves Pest Insider issue stopped at send time does not go out:
   // its date has a fixed send time, and the planner never queues it again.
   await markIssueSendFailed(row, `stopped at send time: ${reason}`);
+  await notifyStoppedAtSendTime(row, reason);
+  return true;
+}
+
+// One "Stopped at send time" alert: the owner's last word on this send said it would go out.
+// Never throws. An alert that reached no one (no bell row, no push) is logged as an error.
+async function notifyStoppedAtSendTime(row, reason) {
   try {
     const { triggerNotification } = require('./notification-triggers');
-    await triggerNotification('newsletter_proof_blocked', {
+    const delivery = await triggerNotification('newsletter_proof_blocked', {
       sendId: row.id,
       subject: row.subject,
       errors: [`Stopped at send time: ${reason}`],
     });
+    if (!(delivery && (delivery.bellWritten === true || Number(delivery.push?.sent) > 0))) {
+      logger.error(`[newsletter-scheduler] stop notice for ${row.id} reached no one`);
+    }
   } catch (e) {
     logger.warn(`[newsletter-scheduler] stop notice for ${row.id} failed: ${e.message}`);
   }
-  return true;
 }
 
 /**
@@ -2006,13 +2015,18 @@ async function processScheduledSends() {
         // reached 'sending' and would otherwise stay 'scheduled' — due
         // forever, retried every tick, invisible as a failure. Same
         // status-guarded flip as the route's fire-and-forget catch.
-        const failedBeforeClaim = !flipped && await db('newsletter_sends')
-          .where({ id: row.id, status: 'scheduled' })
-          .update({ status: 'failed', updated_at: new Date() });
-        // Nothing went out, so a planned issue's row says so. After the
-        // claim some readers may have it: that row stays as it is, and a
-        // resume that finishes the send moves it to sent.
+        // Bound to the version this tick read, as the claim is: a row
+        // cancelled, edited or rescheduled since then is left as it is now.
+        const preClaim = db('newsletter_sends').where({ id: row.id, status: 'scheduled' });
+        if (row.updated_at) preClaim.where('updated_at', '<', noLaterThan(row.updated_at));
+        if (row.proof_approved_at) preClaim.where('proof_approved_at', '<', noLaterThan(row.proof_approved_at));
+        const failedBeforeClaim = !flipped && await preClaim.update({ status: 'failed', updated_at: new Date() });
+        // Nothing went out, so a planned issue's row says so, and the owner,
+        // told that a Pest Insider issue would send, is told it did not.
+        // After the claim some readers may have it: that row stays as it
+        // is, and a resume that finishes the send moves it to sent.
         if (failedBeforeClaim) await markIssueSendFailed(row, `send failed before it started: ${err.message}`);
+        if (failedBeforeClaim && row.newsletter_type === PEST_INSIDER_TYPE) await notifyStoppedAtSendTime(row, `it failed before it started: ${err.message}`);
       } catch { /* swallow */ }
     }
   }
