@@ -3,7 +3,7 @@
  * timeline of what happened (times in Eastern) and the owner's actions.
  * Rows stack on a phone; time sits beside the label from the sm width up.
  */
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   ActionFeedback,
   Badge,
@@ -136,14 +136,14 @@ function closeCopy(target, firstName, liveOffer) {
     return {
       title: "Discard draft",
       message: liveOffer
-        ? `Discard this draft? The offer you sent to ${firstName} stays open and his link keeps working.`
+        ? `Discard this draft? The offer you sent to ${firstName} stays open and their link keeps working.`
         : "Discard this draft? Nothing was sent.",
       confirm: "Discard draft",
     };
   }
   return {
     title: "Withdraw offer",
-    message: `Withdraw this offer for ${firstName}? His link stops working. Nothing is sent.`,
+    message: `Withdraw this offer for ${firstName}? Their link stops working. Nothing is sent.`,
     confirm: "Withdraw",
   };
 }
@@ -247,6 +247,14 @@ function OfferActions({ offer, draft, busy, stale, canAct, canMakeOffer, onMakeO
   );
 }
 
+// The Withdraw or Discard question stays valid only while the owner may act on a read that
+// worked, and the record it was opened for is still on screen as it was (the same status
+// and, for a draft, the same hash): the write carries what the owner saw.
+function closeStillValid(target, { offer, draft, canAct }) {
+  const now = [draft, offer].find((o) => o?.id === target.id);
+  return canAct && Boolean(now) && now.status === target.status && (target.status !== "draft" || now.draftHash === target.draftHash);
+}
+
 export default function OfferTimeline({ applicationId, firstName, offer, draft, history, canMakeOffer, ownerActions, refreshError, onMakeOffer, onChanged, onOpenDraft, onEdit }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -298,6 +306,13 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
     if (outcome !== "failed") setClosing(null);
   };
 
+  // A read that changes the record, fails, or takes away the owner's access while the question
+  // is open closes the question; its final click writes only while it is still valid.
+  const closeReady = Boolean(closing) && closeStillValid(closing, { offer, draft, canAct });
+  useEffect(() => {
+    if (closing && !busy && !closeReady) setClosing(null);
+  }, [closing, busy, closeReady]);
+
   const viewSigned = (target) =>
     act(
       async () => {
@@ -347,7 +362,7 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
             setClosing(null);
             setError(null);
           }}
-          onConfirm={closeTarget}
+          onConfirm={() => (closeReady ? closeTarget() : setClosing(null))}
         />
       )}
     </div>

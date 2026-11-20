@@ -196,6 +196,24 @@ describe("OfferDialog", () => {
     expect(sendOffer).not.toHaveBeenCalled();
   });
 
+  // A form with no draft yet keeps the owner's typing when a read shows another admin's first draft: the form shows it
+  // as changed, and only Show the new version replaces the typing.
+  it("keeps the owner's typing when Try again finds another admin's first draft, until they load it", async () => {
+    const outside = {};
+    const theirs = draftRow({ id: "offer-2", hourlyRate: 27, draftHash: "hash-9" });
+    render(<Harness initial={{ ...panel(draftRow()), current: null, letterPreview: null }} reads={[panel(theirs)]} outside={outside} />);
+    fireEvent.change(rate(), { target: { value: "24" } });
+    act(() => outside.fail());
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("This draft changed. Review the new version.")).toBeInTheDocument();
+    expect(rate()).toHaveValue(24);
+    expect(rate()).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Send offer" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show the new version" }));
+    expect(rate()).toHaveValue(27);
+    expect(rate()).toBeEnabled();
+  });
+
   // The send's result shows at once, but the card behind still shows the draft until the read after the send lands.
   it("keeps Close off until the read after a send lands", async () => {
     let landed;

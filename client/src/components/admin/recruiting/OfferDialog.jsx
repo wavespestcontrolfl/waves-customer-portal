@@ -204,8 +204,9 @@ function applyEdit(cur, key, value) {
 
 function sendNote(ownerActions, sends, firstName) {
   if (!ownerActions) return "Only the owner can send this offer. You can save the draft.";
-  const who = sends ? `Sends ${sends} to ${firstName}.` : offerErrorMessage({ body: { code: "NO_CONTACT" } });
-  return `${who} Nothing goes out until you press Send offer.`;
+  // No phone or email on file: Send stays off (formView), so the note says only that.
+  if (!sends) return offerErrorMessage({ body: { code: "NO_CONTACT" } });
+  return `Sends ${sends} to ${firstName}. Nothing goes out until you press Send offer.`;
 }
 
 // What is on screen is the draft this form pinned when it loaded it (`pinned`, a
@@ -218,8 +219,9 @@ function formView({ edits, pinned, data, contact, busy, locked }) {
   const fields = { ...base, ...edits };
   const { startError, fieldsOk } = fieldChecks(fields);
   const dirty = !pinned || FIELD_KEYS.some((k) => fields[k] !== base[k]);
-  // Send needs the letter preview of this exact draft on screen: what the owner reads is what goes out.
-  const sendReady = data.viewer?.ownerActions === true && Boolean(pinned?.draftHash) && Boolean(letterFor(data, pinned)) && !dirty && fieldsOk && data.termsIssued && !locked;
+  // Send needs a phone or an email to send to, and the letter preview of this exact draft on
+  // screen: what the owner reads is what goes out.
+  const sendReady = data.viewer?.ownerActions === true && Boolean(sendChannels(contact)) && Boolean(pinned?.draftHash) && Boolean(letterFor(data, pinned)) && !dirty && fieldsOk && data.termsIssued && !locked;
   return {
     base,
     fields,
@@ -242,8 +244,10 @@ function formView({ edits, pinned, data, contact, busy, locked }) {
 // a read has succeeded and holds the draft this form is about.
 function formLock({ data, draftId, pinned, needRead, conflict }) {
   const latest = reviewedDraft(data, draftId);
-  const newer = latest || (conflict && !draftId ? openDraft(data) : null);
-  const changed = !needRead && (conflict || (Boolean(pinned) && (!latest || latest.draftHash !== pinned.draftHash)));
+  // A form with no draft yet: an open draft in the read is another admin's (this form's own
+  // save sets draftId first). It shows as changed, with the owner's edits kept, until they load it.
+  const newer = latest || (!draftId ? openDraft(data) : null);
+  const changed = !needRead && (conflict || Boolean(!draftId && newer) || (Boolean(pinned) && (!latest || latest.draftHash !== pinned.draftHash)));
   return { newer, changed, locked: needRead || changed || Boolean(draftId && !pinned) };
 }
 
@@ -334,11 +338,12 @@ function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, on
   // expects (Try again re-reads). A draft the form already pins (`kept`; after a save, the
   // version that save wrote) is never swapped for another version of itself: formLock shows
   // a newer one as changed, for the owner to review before Send. A form with no draft of
-  // that id pins the one in the read; with no expected id (another admin created the first
-  // draft meanwhile) the open draft in the read is adopted.
+  // that id pins the one in the read. With no expected id (a form with no draft yet), a read
+  // that works only ends the wait: an open draft in it is another admin's, and formLock shows
+  // it as changed, edits kept, until the owner loads it (Show the new version).
   const refresh = async (expectId, kept = pinned) => {
     const next = await onChanged();
-    const found = next && (expectId ? reviewedDraft(next, expectId) : openDraft(next));
+    const found = next && expectId ? reviewedDraft(next, expectId) : null;
     if (found && found.id !== kept?.id) {
       setPinned(found);
       setEdits({});

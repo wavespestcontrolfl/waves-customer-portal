@@ -360,16 +360,15 @@ describe('RecruitingPage offer flow: form', () => {
     expect(await screen.findByText(`Send this offer to Jordan? ${sentence}`)).toBeInTheDocument();
   });
 
-  it('with no phone or email the confirm promises nothing and the server NO_CONTACT sentence shows', async () => {
-    setupFetch(
-      { 'POST /admin/careers/app-1/offer/offer-1/send': () => res(409, { error: 'x', code: 'NO_CONTACT' }) },
-      { offer: offerPayload({ current: offerRecord() }), detail: detailFixture({ contact_snapshot: { name: 'Jordan Rivera' } }) },
-    );
+  it('with no phone or email Send stays off, the form says nothing can be sent, and nothing is posted', async () => {
+    const { calls } = setupFetch({}, { offer: offerPayload({ current: offerRecord() }), detail: detailFixture({ contact_snapshot: { name: 'Jordan Rivera' } }) });
     await openForm();
-    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
-    const confirm = (await screen.findByText('Send this offer to Jordan?')).closest('[role="dialog"]');
-    fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
-    expect(await screen.findAllByText('This applicant has no phone or email on file, so nothing can be sent.')).not.toHaveLength(0);
+    expect(screen.getByText('This applicant has no phone or email on file, so nothing can be sent.')).toBeInTheDocument();
+    const send = screen.getByRole('button', { name: 'Send offer' });
+    expect(send).toBeDisabled();
+    fireEvent.click(send);
+    expect(screen.queryByText('Send this offer to Jordan?')).toBeNull();
+    expect(calls.some((c) => c.path.endsWith('/send'))).toBe(false);
   });
 
   it('shows the terms blockers and keeps Send off when the terms are not issued', async () => {
@@ -558,12 +557,12 @@ describe('RecruitingPage offer flow: read failures, re-offers and drafts', () =>
     // The sent offer's own action is Withdraw offer and its confirm says the link stops.
     fireEvent.click(within(card).getByRole('button', { name: 'Withdraw offer' }));
     const withdrawDialog = (await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]');
-    expect(withdrawDialog).toHaveTextContent('His link stops working');
+    expect(withdrawDialog).toHaveTextContent('Their link stops working');
     fireEvent.click(within(withdrawDialog).getByRole('button', { name: 'Cancel' }));
     // The draft's action never promises that the link stops.
     fireEvent.click(within(card).getByRole('button', { name: 'Discard this draft — the offer you sent stays open' }));
     const discardDialog = (await screen.findByText(/Discard this draft\? The offer you sent/)).closest('[role="dialog"]');
-    expect(discardDialog).toHaveTextContent('stays open and his link keeps working');
+    expect(discardDialog).toHaveTextContent('stays open and their link keeps working');
     expect(discardDialog).not.toHaveTextContent('stops working');
     fireEvent.click(within(discardDialog).getByRole('button', { name: 'Discard draft' }));
     await waitFor(() => expect(calls.filter((c) => c.path === '/admin/careers/app-1/offer/offer-2/withdraw')).toHaveLength(1));
