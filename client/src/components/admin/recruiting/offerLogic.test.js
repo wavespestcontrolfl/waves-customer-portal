@@ -50,6 +50,16 @@ describe('offer helpers', () => {
     expect(maskEmail('x')).toBe('');
   });
 
+  // Save, Send and Discard all answer DRAFT_CHANGED, and Send and Discard answer DRAFT_HASH_REQUIRED: the words must
+  // not tell an owner who tried to discard or save to send.
+  it('names no action in the two draft-conflict messages', () => {
+    for (const code of ['DRAFT_CHANGED', 'DRAFT_HASH_REQUIRED']) {
+      const text = offerErrorMessage({ body: { code } });
+      expect(text).toMatch(/nothing was done/);
+      expect(text).not.toMatch(/send|save|discard/i);
+    }
+  });
+
   it('turns each 409 code into a plain sentence', () => {
     for (const code of ['TERMS_NOT_ISSUED', 'DRAFT_CHANGED', 'OFFER_CHANGED', 'DRAFT_HASH_REQUIRED', 'OFFER_NOT_DRAFT', 'NO_CONTACT', 'APPLICATION_CLOSED', 'ROLE_NOT_SUPPORTED', 'OFFER_NOT_WITHDRAWABLE', 'OFFER_NOT_REVISABLE']) {
       const text = offerErrorMessage({ message: 'HTTP 409', body: { code } });

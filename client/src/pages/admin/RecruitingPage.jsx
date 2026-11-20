@@ -1018,21 +1018,31 @@ export default function RecruitingPage() {
   // not replace an already-opened applicant B (a status/note could land on
   // the wrong person), and closing the dialog invalidates pending opens.
   const detailSeq = useRef(0);
+  // Bumped by each in-place re-read and by each stage move's answer: a re-read
+  // applies only while nothing newer has reached the open application, so an
+  // older read cannot put back a stage that a move already changed.
+  const refreshSeq = useRef(0);
+  const applyStageAnswer = useCallback((application) => {
+    refreshSeq.current += 1;
+    setDetail(application);
+  }, []);
 
-  const stageWorkflow = useStageChangeWorkflow(detail, tab, load, setDetail);
+  const stageWorkflow = useStageChangeWorkflow(detail, tab, load, applyStageAnswer);
   const offerFlow = useOfferFlow(detail?.id, detail?.status);
   const detailIdRef = useRef(null);
   detailIdRef.current = detail?.id ?? null;
 
   // refresh: re-read the open applicant in place. It never bumps detailSeq, so a
   // switch to another applicant that is still opening is not cancelled, and it
-  // applies only while that applicant is still the one on screen.
+  // applies only while that applicant is still the one on screen and nothing
+  // newer has reached it (a later re-read, or a stage move's answer: refreshSeq).
   const openDetail = useCallback(async (id, { refresh = false } = {}) => {
     const seq = refresh ? detailSeq.current : ++detailSeq.current;
+    const fresh = refresh ? ++refreshSeq.current : 0;
     try {
       const data = await adminFetch(`/admin/careers/${id}`);
       if (seq !== detailSeq.current) return; // superseded or dialog closed
-      if (refresh && detailIdRef.current !== id) return;
+      if (refresh && (detailIdRef.current !== id || fresh !== refreshSeq.current)) return;
       setDetail(data.application);
       setReplyMedia(data.reply_media || {});
       setSamePhone(data.same_phone || []);
@@ -1042,7 +1052,7 @@ export default function RecruitingPage() {
       if (seq !== detailSeq.current) return;
       // A failed in-place re-read stays on the detail (the list reload clears the page error).
       if (refresh) {
-        if (detailIdRef.current === id) setDetailRefreshError(err.message);
+        if (detailIdRef.current === id && fresh === refreshSeq.current) setDetailRefreshError(err.message);
       } else {
         setError(err.message);
       }

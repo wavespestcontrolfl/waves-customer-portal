@@ -4,7 +4,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import OfferTimeline from "./OfferTimeline";
-import { withdrawOffer } from "./offerApi";
+import { reviseOffer, withdrawOffer } from "./offerApi";
 
 vi.mock("./offerApi", () => ({ fetchSignedCopy: vi.fn(), reviseOffer: vi.fn(), withdrawOffer: vi.fn() }));
 
@@ -42,6 +42,7 @@ function card(props = {}) {
 
 beforeEach(() => {
   withdrawOffer.mockReset();
+  reviseOffer.mockReset();
 });
 
 afterEach(() => {
@@ -72,6 +73,24 @@ describe("OfferTimeline", () => {
     rerender(card({ draft: { ...draft, hourlyRate: 26, draftHash: "hash-3" } }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Discard draft" })).toBeNull());
     expect(withdrawOffer).not.toHaveBeenCalled();
+  });
+
+  // Another owner session can send the revision before the read after Revise: the editor opens only for a row the
+  // read still holds as a draft, and otherwise the refreshed card shows where the offer stands.
+  it("opens the revision's editor only while the read still holds it as a draft", async () => {
+    const revision = record({ id: "offer-2", status: "draft", draftHash: "hash-2" });
+    reviseOffer.mockResolvedValue({ offer: revision });
+    const onOpenDraft = vi.fn();
+    const { unmount } = render(card({ onOpenDraft, onChanged: async () => ({ current: { ...revision, status: "sent" }, draft: null }) }));
+    fireEvent.click(screen.getByRole("button", { name: "Revise" }));
+    await waitFor(() => expect(reviseOffer).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Revise" })).toBeEnabled());
+    expect(onOpenDraft).not.toHaveBeenCalled();
+    expect(screen.queryByText("The new draft could not be loaded. Try again.")).toBeNull();
+    unmount();
+    render(card({ onOpenDraft, onChanged: async () => ({ current: record(), draft: revision }) }));
+    fireEvent.click(screen.getByRole("button", { name: "Revise" }));
+    await waitFor(() => expect(onOpenDraft).toHaveBeenCalledWith(revision));
   });
 
   it("withdraws what the owner saw while the question is still valid", async () => {

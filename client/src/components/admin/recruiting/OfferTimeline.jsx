@@ -290,11 +290,13 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
   const revise = (startDate) =>
     act(async () => {
       const { offer: draft } = await reviseOffer(applicationId, offer.id, offer.status, startDate);
-      // Open the new draft only after a read that holds it; on a failed read the
-      // section's Try again stays on screen.
+      // Open the new draft only after a read that still holds it as a draft; on a
+      // failed read the section's Try again stays on screen. Another owner session
+      // may have sent it meanwhile: the refreshed card then shows where it stands.
       const next = await onChanged();
-      if (next && [next.draft, next.current].some((o) => o?.id === draft.id)) onOpenDraft(draft);
-      else if (next) setError("The new draft could not be loaded. Try again.");
+      const held = next ? [next.draft, next.current].find((o) => o?.id === draft.id) : null;
+      if (held?.status === "draft") onOpenDraft(held);
+      else if (next && !held) setError("The new draft could not be loaded. Try again.");
     });
 
   const closeTarget = async () => {

@@ -149,11 +149,12 @@ const ERROR_TEXT = {
   NO_CONTACT: "This applicant has no phone or email on file, so nothing can be sent.",
   APPLICATION_CLOSED: "This application is closed (hired, rejected or withdrawn). Move it back before sending an offer.",
   ROLE_NOT_SUPPORTED: "Offers are for technician applications only.",
-  DRAFT_CHANGED: "This draft changed after you opened it. Review the new preview, then send.",
+  // Save, Send and Discard all answer these two codes: the words name no action.
+  DRAFT_CHANGED: "This draft changed after you opened it, so nothing was done. Review the new version first.",
   OFFER_CHANGED: "This offer changed after you opened it. Review it again.",
   OFFER_NOT_WITHDRAWABLE: "This offer expired before you withdrew it. Nothing was changed.",
   OFFER_NOT_REVISABLE: "This offer expired before you revised it. Make a new offer instead.",
-  DRAFT_HASH_REQUIRED: "The draft could not be checked. Reload the offer, review the preview, then send.",
+  DRAFT_HASH_REQUIRED: "The draft could not be checked, so nothing was done. Reload the offer and review it first.",
 };
 
 // err = the Error the offer API helper throws (err.body.code on a 409).

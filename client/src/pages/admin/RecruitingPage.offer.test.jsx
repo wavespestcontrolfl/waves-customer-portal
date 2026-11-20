@@ -284,7 +284,7 @@ describe('RecruitingPage offer flow: form', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
     const confirmDialog = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
     fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Send offer' }));
-    expect(await screen.findByText('This draft changed after you opened it. Review the new preview, then send.')).toBeInTheDocument();
+    expect(await screen.findByText('This draft changed after you opened it, so nothing was done. Review the new version first.')).toBeInTheDocument();
     // Nothing replaces the form by itself: it is read-only, with no Send, until the owner loads the new version.
     expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(23);
     expect(screen.getByLabelText('Hourly rate ($)')).toBeDisabled();
@@ -683,6 +683,48 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     expect(screen.getByText('Riley Park')).toBeInTheDocument();
   });
 
+  // A stage move's answer is newer than a re-read still out after an offer action: that read must not put the old
+  // stage back when it lands later.
+  it('a stage move that lands while the re-read after an offer action is still out keeps its stage', async () => {
+    let current = offerRecord({ status: 'sent', timeline: [] });
+    let holdRead = false;
+    let releaseRead;
+    const detail = detailFixture({ status: 'offer' });
+    setupFetch(
+      {
+        'POST /admin/careers/app-1/offer/offer-1/withdraw': () => {
+          current = offerRecord({ status: 'withdrawn', timeline: [] });
+          holdRead = true;
+          return res(200, { offer: current });
+        },
+        'GET /admin/careers/app-1': () => {
+          if (!holdRead) return res(200, { application: detail });
+          holdRead = false;
+          // The re-read after the withdraw: it read the stage before the move, and it lands after it.
+          return new Promise((resolve) => { releaseRead = () => resolve(res(200, { application: detail })); });
+        },
+        'PATCH /admin/careers/app-1/status': () => res(200, { application: detailFixture({ status: 'reviewed' }), sent: {} }),
+      },
+      { offer: () => res(200, offerPayload({ current })), detail },
+    );
+    await openDetail();
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Withdraw offer' }));
+    const confirm = (await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Withdraw' }));
+    await waitFor(() => expect(releaseRead).toBeDefined());
+    fireEvent.click(screen.getByRole('button', { name: 'Reviewed' }));
+    const stage = (await screen.findByRole('heading', { name: 'Move to Reviewed' })).closest('[role="dialog"]');
+    const confirmButton = within(stage).getByRole('button', { name: 'Confirm' });
+    await waitFor(() => expect(confirmButton).not.toBeDisabled());
+    fireEvent.click(confirmButton);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Reviewed' })).toBeNull());
+    releaseRead();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByRole('button', { name: 'Reviewed' })).toBeNull(); // the detail still reads Reviewed
+    expect(screen.queryByText(/could not be reloaded after the offer change/)).toBeNull();
+  });
+
   it('a failed application re-read after an offer change stays on the detail with Try again, and stage moves wait for it', async () => {
     let failDetail = false;
     let current = offerRecord({ status: 'sent', timeline: [] });
@@ -833,7 +875,7 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     );
     fireEvent.change(screen.getByLabelText('Hours'), { target: { value: 'Mon to Thu, 8 hours' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
-    expect(await screen.findByText('This draft changed after you opened it. Review the new preview, then send.')).toBeInTheDocument();
+    expect(await screen.findByText('This draft changed after you opened it, so nothing was done. Review the new version first.')).toBeInTheDocument();
     // What the owner typed stays visible, read-only, until they choose to load the newer version.
     expect(screen.getByLabelText('Hours')).toHaveValue('Mon to Thu, 8 hours');
     expect(screen.getByLabelText('Hours')).toBeDisabled();
@@ -842,7 +884,7 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(24));
     expect(screen.getByLabelText('Hours')).toHaveValue(DEFAULTS.hoursLine);
     expect(screen.getByLabelText('Hours')).not.toBeDisabled();
-    expect(screen.queryByText('This draft changed after you opened it. Review the new preview, then send.')).toBeNull();
+    expect(screen.queryByText('This draft changed after you opened it, so nothing was done. Review the new version first.')).toBeNull();
   });
 
   it('Escape does not close the dialog while a save runs', async () => {
@@ -899,7 +941,7 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     fireEvent.click(screen.getByRole('button', { name: 'Offer' }));
     fireEvent.change(await screen.findByLabelText('Hours'), { target: { value: 'Mon to Thu, 8 hours' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
-    expect(await screen.findByText('This draft changed after you opened it. Review the new preview, then send.')).toBeInTheDocument();
+    expect(await screen.findByText('This draft changed after you opened it, so nothing was done. Review the new version first.')).toBeInTheDocument();
     expect(screen.getByLabelText('Hours')).toHaveValue('Mon to Thu, 8 hours');
     expect(screen.getByLabelText('Hours')).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Show the new version' }));
