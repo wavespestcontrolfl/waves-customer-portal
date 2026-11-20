@@ -11120,6 +11120,10 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
     const tapSession = tokenSessionIdentity(tapToken);
     const tapSessionActive = () => [api.token, localStorage.getItem('waves_token')]
       .every((token) => token === tapToken || sameRequestSession(tapSession, tokenSessionIdentity(token)));
+    // Another tab already changed the account, and this tab has not heard of it yet: the start would
+    // mint under the old token and could replace that account's quote and free its slot hold (codex
+    // pre-push P1). Send nothing; the storage handler brings this tab up to date.
+    if (!tapSessionActive()) return;
     setMinting(true);
     setStartingPlan(true);
     const { serviceKey, id: optionId, monthly, perVisit, dueAtStart, oneTime, setupFee } = selected;

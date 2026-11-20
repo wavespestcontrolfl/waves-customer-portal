@@ -1091,14 +1091,16 @@ describe('assertPlanStartAcceptEligible', () => {
     await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).rejects.toMatchObject({ status: 409 });
   });
 
-  test('an unreadable state fails closed and takes the comms lock then the customer row lock first', async () => {
+  test('an unreadable state fails closed; the check takes the comms key, then the property-preferences key, then the customer row (codex pre-push P1: the converter\'s order)', async () => {
     const ops = [];
     await actualRestart.assertPlanStartAcceptEligible(fakeTrx(ops), ESTIMATE);
-    const lockAt = ops.findIndex((o) => o.startsWith('raw:'));
+    const commsAt = ops.findIndex((o) => o.startsWith('raw:') && o.includes('customer-comms:cust-1'));
+    const prefsAt = ops.findIndex((o) => o.startsWith('raw:') && o.includes('"property-preferences","cust-1"'));
     const customerAt = ops.findIndex((o) => o === 'read:customers:forUpdate');
     const rowsAt = ops.findIndex((o) => o === 'read:scheduled_services');
-    expect(lockAt).toBeGreaterThanOrEqual(0);
-    expect(customerAt).toBeGreaterThan(lockAt);
+    expect(commsAt).toBeGreaterThanOrEqual(0);
+    expect(prefsAt).toBeGreaterThan(commsAt);
+    expect(customerAt).toBeGreaterThan(prefsAt);
     expect(rowsAt).toBeGreaterThan(customerAt);
     const failingTrx = fakeTrx(null, () => { throw new Error('pg down'); });
     await expect(actualRestart.assertPlanStartAcceptEligible(failingTrx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });

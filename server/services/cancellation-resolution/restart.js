@@ -1520,10 +1520,18 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
     // The home the mint priced (codex pre-push P0): a staff address change rewrites the address
     // column above on an open quote, but never this key.
     pricedHome = planStart?.premisesKey;
-    // Same lock order as the restart accept: comms advisory key, then the
-    // customers row FOR UPDATE, then the reads. The whole row, as the mint
-    // reads it: the premises proof needs the address and the multi-home flag.
+    // Comms advisory key, then the property-preferences key, then the
+    // customers row FOR UPDATE, then the reads: the order every recurring
+    // accept already takes, because the converter that runs after this check
+    // takes the property-preferences key before its own customers row lock
+    // (codex pre-push P1). Taking the row here first would deadlock against a
+    // turf-profile save that holds that key and waits for the row; the
+    // converter's second acquire is a re-entrant no-op. The whole row, as the
+    // mint reads it: the premises proof needs the address and the multi-home flag.
     await lockCustomerComms(trx, row?.customer_id);
+    if (row?.customer_id) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(row.customer_id)]);
+    }
     fresh = row?.customer_id
       ? await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').forUpdate().first()
       : null;

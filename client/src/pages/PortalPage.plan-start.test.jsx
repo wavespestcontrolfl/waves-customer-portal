@@ -262,6 +262,25 @@ it.each(REPLIES.flatMap(([replyLabel, reply]) => ACCOUNT_SWITCHES.map(([switchLa
   });
 });
 
+it.each(ACCOUNT_SWITCHES.slice(1))('a tap after the account changed %s sends nothing, files nothing and shows nothing (codex pre-push P1)', async (_label, switchAccount) => {
+  api.token = TAP_TOKEN;
+  const { alerts, stop } = watchAlerts();
+  try {
+    await priceIt(priced(OFFER));
+    const start = await screen.findByRole('button', { name: 'See my price and book' });
+    switchAccount();
+    fireEvent.click(start);
+    await act(async () => {});
+    expect(api.startPlan).not.toHaveBeenCalled();
+    expect(api.createRequest).not.toHaveBeenCalled();
+    expect(alerts).toEqual([]);
+    expect(screen.getByRole('button', { name: 'See my price and book' })).toBeEnabled();
+  } finally {
+    stop();
+    api.token = null;
+  }
+});
+
 it.each(ACCOUNT_SWITCHES)('the hand-off checks the session again before it opens the estimate: an account changed %s opens nothing (codex pre-push P0s)', async (_label, switchAccount) => {
   await withNavigation(async (assign) => {
     api.token = TAP_TOKEN;
