@@ -1483,15 +1483,16 @@ describe('processDueAutoReplies — state machine', () => {
     expect(await Runner.pipelineDraftGuard(draft, { draftToken: token })({ ...fresh, review_text: 'Edited review' , auto_reply_grounding: { ...stored, fingerprint: Runner.reviewFingerprint({ ...base, review_text: 'Edited review' }) } })).toMatch(/changed since this draft was loaded/);
     // Token matches and nothing changed → posts (even an edited draft).
     expect(await Runner.pipelineDraftGuard(draft + ' Edited.', { draftToken: token })(fresh)).toBeNull();
-    // Owner 2026-11-19: a stored draft written before the app-name rule is agent text. Posted
-    // unchanged it must say "the Waves app"; the person's edit of it is their own words.
+    // Owner 2026-11-19: a reply that came from an AI draft must say "the Waves app": the stored draft
+    // posted unchanged (one stored before the rule can say "our app"), or any text sent with a draft
+    // token, edited or not. A reply a person writes with no draft is their own words.
     mockOffAppName.mockClear().mockReturnValueOnce('app');
-    expect(await Runner.pipelineDraftGuard(draft)(fresh)).toMatch(/does not say "the Waves app"/);
+    expect(await Runner.pipelineDraftGuard(draft)(fresh)).toMatch(/came from an AI draft and does not say "the Waves app"/);
     expect(mockOffAppName).toHaveBeenCalledWith(draft);
     mockOffAppName.mockClear().mockReturnValueOnce('app');
-    expect(await Runner.pipelineDraftGuard(draft, { draftToken: token })(fresh)).toMatch(/does not say "the Waves app"/);
+    expect(await Runner.pipelineDraftGuard(draft + ' Edited.', { draftToken: token })(fresh)).toMatch(/does not say "the Waves app"/);
     mockOffAppName.mockClear();
-    expect(await Runner.pipelineDraftGuard(draft + ' Edited.', { draftToken: token })(fresh)).toBeNull();
+    expect(await Runner.pipelineDraftGuard('My own reply.')(fresh)).toBeNull();
     expect(mockOffAppName).not.toHaveBeenCalled();
     // Posted meanwhile via Post now → refuse, the person must reload.
     expect(await Runner.pipelineDraftGuard(draft, { draftToken: token })({ ...fresh, auto_reply_status: 'posted', review_reply: draft })).toMatch(/cleared since it was loaded/);
@@ -1502,6 +1503,11 @@ describe('processDueAutoReplies — state machine', () => {
     const gt = Runner.groundingToken(plain, { account: { city: 'Venice', tenure: 'new' } });
     expect(gt).toBe(`${Runner.reviewFingerprint(plain)}|fp:Venice|new`);
     expect(await Runner.pipelineDraftGuard('AI text', { groundingToken: gt })(plain)).toBeNull();
+    // An AI Reply editor opened before the app-name rule can post its draft unchanged after it: the token
+    // marks the text as an AI draft, so the app name is checked.
+    mockOffAppName.mockClear().mockReturnValueOnce('app');
+    expect(await Runner.pipelineDraftGuard('Thanks for using our app.', { groundingToken: gt })(plain)).toMatch(/came from an AI draft and does not say "the Waves app"/);
+    expect(mockOffAppName).toHaveBeenCalledWith('Thanks for using our app.');
     // codex r67: a text-bound token accepts only the approved draft.
     const gtText = Runner.groundingToken(plain, { account: { city: 'Venice', tenure: 'new' } }, 'AI text');
     expect(await Runner.pipelineDraftGuard('AI text', { groundingToken: gtText })(plain)).toBeNull();
