@@ -6,7 +6,10 @@ const SKIP = !process.env.DATABASE_URL;
 
 jest.mock('../models/db', () => {
   const db = (...args) => mockPg(...args);
-  for (const name of ['raw', 'transaction', 'queryBuilder', 'ref']) db[name] = (...args) => mockPg[name](...args);
+  for (const name of ['raw', 'queryBuilder', 'ref']) db[name] = (...args) => mockPg[name](...args);
+  // Each transaction's settings are kept, so a test can check the list's snapshot (inside a test's own transaction
+  // knex opens a savepoint and the settings do not apply; the real database opens BEGIN TRANSACTION with them).
+  db.transaction = (...args) => { mockTransactionSettings.push(args[1]); return mockPg.transaction(...args); };
   for (const name of ['schema', 'fn']) Object.defineProperty(db, name, { get: () => mockPg[name] });
   return db;
 });
@@ -19,6 +22,7 @@ const describeDb = SKIP ? describe.skip : describe;
 jest.setTimeout(60000);
 let database;
 let mockPg;
+const mockTransactionSettings = [];
 
 // 2026-11-19 12:00 ET. 30 days: Oct 21 to Nov 19. 90 days: Aug 22 to Nov 19. New: first read on or after Nov 12 17:00Z.
 const NOW = new Date('2026-11-19T17:00:00Z');
@@ -141,21 +145,120 @@ describeDb('Restaurants list (PostgreSQL)', () => {
     expect([late.from, late.through]).toEqual(['2026-10-21', '2026-11-19']);
   });
 
+  test('the counts cover the whole period when the list stops at 1,000 rows', async () => {
+    const licenses = Array.from({ length: 1000 }, () => prospect({ event_date: '2026-11-18' }));
+    for (let i = 0; i < licenses.length; i += 250) await mockPg('restaurant_prospects').insert(licenses.slice(i, i + 250));
+    // Older than every license above, so past the cap.
+    await mockPg('restaurant_prospects').insert([
+      prospect({ kind: 'owner_change', event_date: '2026-10-25' }),
+      prospect({ kind: 'owner_change', event_date: '2026-10-24' }),
+      prospect({ kind: 'inspection', event_date: '2026-10-22', pest_evidence: true, detail: JSON.stringify({ findings: ROACHES }) }),
+      prospect({ kind: 'inspection', event_date: '2026-10-22', pest_evidence: false }), // 35B only: not counted
+    ]);
+    const result = await listRestaurants({ days: 30, now: NOW });
+    expect(result.rows).toHaveLength(1000);
+    expect(result.rows.every((row) => row.reason === 'new_restaurant')).toBe(true);
+    expect(result.counts).toEqual({ new_restaurant: 1000, new_owner: 2, pest_finding: 1 });
+  });
+
+  test('the pest count holds answered 35A inspections only: unread ones, callbacks and 35B-only answers are left out', async () => {
+    const unread = (over) => prospect({ kind: 'inspection', event_date: '2026-11-15', pest_evidence: null, ...over });
+    await mockPg('restaurant_prospects').insert([
+      unread({ detail: JSON.stringify({ visitNumber: 1 }) }), // still to be read
+      unread({ detail: JSON.stringify({ visitNumber: 1 }), detail_attempts: 3 }), // could not be read
+      unread({ detail: JSON.stringify({ visitNumber: 2 }) }), // a callback
+      prospect({ kind: 'inspection', event_date: '2026-11-15', pest_evidence: false }), // answered, 35B only
+      prospect({ kind: 'inspection', event_date: '2026-11-15', pest_evidence: true, detail: JSON.stringify({ findings: ROACHES }) }),
+    ]);
+    const result = await listRestaurants({ days: 30, now: NOW });
+    expect(result.counts.pest_finding).toBe(1);
+    expect(result.rows.map((row) => row.reason)).toEqual(['pest_finding']);
+  });
+
   test('before the first file read the answer is empty, with no read time', async () => {
     const result = await listRestaurants({ days: 30, now: NOW });
     expect(result).toEqual({
-      days: 30, from: '2026-10-21', through: '2026-11-19', readAt: null,
-      counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, rows: [],
+      days: 30, from: '2026-10-21', through: '2026-11-19', readAt: null, readUnfinishedSince: null, readFailedAt: null,
+      reportsRead: false, counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, rows: [],
     });
   });
 
-  test('a good run that kept no row still sets the read time; a failed run after it leaves the last good read', async () => {
+  test('a good run sets the read time; a failed run after it keeps the last good read and names the failure', async () => {
     await mockPg('job_health').insert(syncRun({ last_success_at: daysAgo(1), last_started_at: daysAgo(1), last_finished_at: daysAgo(1) }));
     const quiet = await listRestaurants({ days: 30, now: NOW });
-    expect([quiet.readAt, quiet.rows]).toEqual([daysAgo(1).toISOString(), []]);
+    expect([quiet.readAt, quiet.readFailedAt, quiet.rows]).toEqual([daysAgo(1).toISOString(), null, []]);
     await mockPg('job_health').where({ job_name: SYNC_JOB })
       .update({ last_started_at: NOW, last_finished_at: NOW, last_status: 'failed', consecutive_failures: 1 });
-    expect((await listRestaurants({ days: 30, now: NOW })).readAt).toBe(daysAgo(1).toISOString());
+    const failed = await listRestaurants({ days: 30, now: NOW });
+    expect([failed.readAt, failed.readFailedAt]).toEqual([daysAgo(1).toISOString(), NOW.toISOString()]);
+    // A run that started after the failure and has not finished is named, and the last finished run's outcome stays.
+    const start = new Date(NOW.getTime() + 60000);
+    await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_started_at: start, last_status: 'running' });
+    const reading = await listRestaurants({ days: 30, now: start });
+    expect([reading.readUnfinishedSince, reading.readFailedAt]).toEqual([start.toISOString(), NOW.toISOString()]);
+    // A good run after it clears the failure: it writes the finish and the success with one value.
+    const later = new Date(NOW.getTime() + 120000);
+    await mockPg('job_health').where({ job_name: SYNC_JOB })
+      .update({ last_finished_at: later, last_success_at: later, last_status: 'success', consecutive_failures: 0 });
+    const good = await listRestaurants({ days: 30, now: later });
+    expect([good.readAt, good.readUnfinishedSince, good.readFailedAt]).toEqual([later.toISOString(), null, null]);
+    // The next run starts. It has not finished, however long ago it started: cron-lock settles a dead run as failed
+    // (settleDeadRunningJobs), and then its finish names the failure.
+    const next = new Date(later.getTime() + 60000);
+    await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_started_at: next, last_status: 'running' });
+    const soon = await listRestaurants({ days: 30, now: next });
+    expect([soon.readAt, soon.readUnfinishedSince, soon.readFailedAt]).toEqual([later.toISOString(), next.toISOString(), null]);
+    const days = await listRestaurants({ days: 30, now: new Date(next.getTime() + 3 * DAY_MS) });
+    expect([days.readUnfinishedSince, days.readFailedAt]).toEqual([next.toISOString(), null]);
+    const settled = new Date(next.getTime() + 15 * 60000);
+    await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_finished_at: settled, last_status: 'failed' });
+    const dead = await listRestaurants({ days: 30, now: settled });
+    expect([dead.readUnfinishedSince, dead.readFailedAt]).toEqual([null, settled.toISOString()]);
+    await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_started_at: later, last_finished_at: later });
+    // A failed first run, with no good read before it.
+    await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_success_at: null, last_status: 'failed' });
+    expect((await listRestaurants({ days: 30, now: NOW })).readFailedAt).toBe(later.toISOString());
+  });
+
+  test('reportsRead says whether any inspection report has been read, answered either way, in any period', async () => {
+    // Unread inspections, and an answer on a row of another kind, do not count.
+    await mockPg('restaurant_prospects').insert([
+      prospect({ kind: 'inspection', source_key: '9101', event_date: '2026-11-14', pest_evidence: null }),
+      prospect({ kind: 'inspection', source_key: '9102', event_date: '2026-11-13', pest_evidence: null }),
+      prospect({ source_key: 'NEW-1', event_date: '2026-11-12', pest_evidence: false }),
+    ]);
+    expect((await listRestaurants({ days: 30, now: NOW })).reportsRead).toBe(false);
+    // One answered inspection, 35B only and outside the period: a report has been read.
+    await mockPg('restaurant_prospects').insert(prospect({ kind: 'inspection', source_key: '9103', event_date: '2026-06-01', pest_evidence: false }));
+    const result = await listRestaurants({ days: 30, now: NOW });
+    expect([result.reportsRead, result.rows.map((row) => row.name).length]).toEqual([true, 1]);
+  });
+
+  test('the rows and the job state are read in one read-only REPEATABLE READ snapshot', async () => {
+    mockTransactionSettings.length = 0;
+    await listRestaurants({ days: 30, now: NOW });
+    // knex adds its own keys to the settings it is given.
+    expect(mockTransactionSettings).toEqual([expect.objectContaining({ isolationLevel: 'repeatable read', readOnly: true })]);
+  });
+
+  test('the reads run one at a time on the snapshot\'s connection: the pg driver deprecates overlapping queries', async () => {
+    const isRead = (query) => /^\s*select\b/i.test((query && query.sql) || '');
+    let inFlight = 0;
+    let most = 0;
+    let reads = 0;
+    const start = (query) => { if (isRead(query)) { reads += 1; inFlight += 1; most = Math.max(most, inFlight); } };
+    const end = (_answer, query) => { if (isRead(query)) inFlight -= 1; };
+    database.on('query', start);
+    database.on('query-response', end);
+    database.on('query-error', end);
+    try {
+      await listRestaurants({ days: 30, now: NOW });
+    } finally {
+      database.removeListener('query', start);
+      database.removeListener('query-response', end);
+      database.removeListener('query-error', end);
+    }
+    expect([reads, most]).toEqual([3, 1]);
   });
 
   test('a period that is not offered is refused before any read', async () => {

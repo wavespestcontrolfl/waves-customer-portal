@@ -1,7 +1,9 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { scrubSentryText } = require('../utils/sentry-scrub');
-const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
+const {
+  etParts, etDateString, addETDays, parseETDateTime, validCalendarDate,
+} = require('../utils/datetime-et');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const featureGates = require('../config/feature-gates');
 const { STAFF_TIME_ZONE } = require('../utils/staff-time-work-date');
@@ -188,6 +190,26 @@ async function getPolicy(conn = db) {
 // type first, then range; no coercion (a numeric string, an object, NaN or "12abc" is refused). Unknown keys
 // pass through as the lenient parser lets them. Used on a save (the patch and the merged result), on the
 // stored row, and so on every payment read.
+// The program cutoff as a SAVE accepts it (owner 2026-11-20 D4): a real calendar date-only value (stored as
+// the instant of that Eastern midnight, via the repo's parseETDateTime) or a timestamp with an explicit offset
+// (Z or +hh:mm). An impossible date or time, or an offset-free timestamp (Railway's UTC would decide it), is
+// refused. Returns the UTC ISO instant to store, or null. Read paths do not use it: a stored value keeps the
+// meaning it always had.
+const CUTOFF_STAMP = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|([+-])(\d{2}):?(\d{2}))$/;
+function parseProgramCutoffForSave(value) {
+  if (typeof value !== 'string') return null;
+  if (validCalendarDate(value)) {
+    const startOfDay = parseETDateTime(`${value}T00:00`);
+    return Number.isNaN(startOfDay.getTime()) ? null : startOfDay.toISOString();
+  }
+  const m = CUTOFF_STAMP.exec(value);
+  if (!m || !validCalendarDate(m[1])) return null;
+  const [, , hh, mm, ss, , oh, om] = m;
+  if (Number(hh) > 23 || Number(mm) > 59 || Number(ss || 0) > 59 || Number(oh || 0) > 23 || Number(om || 0) > 59) return null;
+  const stamp = new Date(value);
+  return Number.isNaN(stamp.getTime()) ? null : stamp.toISOString();
+}
+
 const POLICY_FIELD_CHECKS = {
   enabled: (v) => typeof v === 'boolean',
   // Upper bound = the payout amount_cents column (PG integer).
@@ -308,6 +330,12 @@ async function savePolicy(rawPatch = {}, conn = db, { key = POLICY_KEY } = {}) {
   const { replace = false, ...rawFields } = rawPatch;
   // A bad field is refused (422) before anything is read or written: the stored row stays as it was.
   const policyPatch = checkPolicyFields(rawFields);
+  // The cutoff is stricter on a save: what is stored is always an unambiguous instant.
+  if (typeof rawFields.programStartsAt === 'string') {
+    const instant = parseProgramCutoffForSave(rawFields.programStartsAt);
+    if (!instant) throw operationalError('The review bonus setting "programStartsAt" is not valid', 422, 'review_policy_invalid');
+    policyPatch.programStartsAt = instant;
+  }
   return conn.transaction(async (trx) => {
     await lockPolicy(trx, { key });
     let current;
@@ -1990,6 +2018,7 @@ module.exports = {
   toCsv,
   __private: {
     parsePolicy,
+    parseProgramCutoffForSave,
     qualifiesReviewRequest,
     qualifiesGoogleReview,
     weekPeriodFor,

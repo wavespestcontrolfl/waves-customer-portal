@@ -168,6 +168,11 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, technici
       visitKeys.alreadyReviewed = await ReviewService.alreadyReviewedForVisit(serviceId);
       visitKeys.firstAskReasons = ReviewService.firstAskOptOutReasons();
     }
+    // GATE_REVIEW_LATE_CLOSE_ASK: whether a backdated closeout of this visit now would keep the review ask (closed within 3
+    // days of the worked day). The panel then stops showing a backdated closeout's review box as suppressed.
+    if (require('../config/feature-gates').reviewLateCloseAskLive() && serviceId) {
+      visitKeys.lateCloseAskKept = await require('../services/review-visit-day').lateCloseAskKeptForVisit(serviceId);
+    }
     res.json({
       ...visitKeys,
       at: at.toISOString(),
@@ -536,6 +541,11 @@ router.post('/:id/reply', async (req, res, next) => {
     const unchangedAgentText = !!current && current.auto_reply_version === 'agent_ops' && (slotDraft === submitted
       || (!current.review_reply && !!current.auto_reply_draft && current.auto_reply_status === AutoReply.STATUS.PARKED
         && AutoReply.RECONCILE_REASONS.has(current.auto_reply_reason) && String(current.auto_reply_draft).trim() === submitted));
+    // The pipeline's stored draft (the [DRAFT] in the slot is its text)
+    // submitted unchanged without Use Draft: the same snapshot and machine
+    // origin as Use Draft.
+    const storedDraftFits = slotDraft != null && !!current.auto_reply_draft && slotDraft === String(current.auto_reply_draft).trim();
+    const unchangedStoredDraft = storedDraftFits && slotDraft === submitted;
     const result = await ReplyPublisher.publishReviewReply({
       reviewId: req.params.id,
       text: replyText,
@@ -544,7 +554,7 @@ router.post('/:id/reply', async (req, res, next) => {
       // A draft or grounding token, or a restored agent draft, marks text
       // that started from an AI or Agent Ops draft (Use Draft, AI Reply),
       // edited or not: the publisher checks the app name strictly.
-      fromDraft: Boolean(useDraft || (typeof groundingToken === 'string' && groundingToken) || fromAgentDraft === true || unchangedAgentText),
+      fromDraft: Boolean(useDraft || (typeof groundingToken === 'string' && groundingToken) || fromAgentDraft === true || unchangedAgentText || unchangedStoredDraft),
       // A human posting closes out a pending/posted auto-reply state on the
       // row; a never-queued row keeps NULL.
       autoFields: AutoReply.manualReplyCloseFields(db),
@@ -567,12 +577,11 @@ router.post('/:id/reply', async (req, res, next) => {
         const fromToken = AutoReply.parseGroundingToken(groundingToken)?.account;
         if (fromToken) return fromToken;
         if (!current) return undefined;
-        // "Use Draft" (draftToken only): the stored pipeline draft's snapshot
-        // carries the account fingerprint it was grounded on (codex r50).
-        // Unchanged agent text (above): the account facts its attempt
-        // recorded, as Post now.
-        const snapshotFits = unchangedAgentText
-          || (useDraft && slotDraft != null && !!current.auto_reply_draft && slotDraft === String(current.auto_reply_draft).trim());
+        // "Use Draft" (draftToken), or the stored draft pasted unchanged: the
+        // stored pipeline draft's snapshot carries the account fingerprint it
+        // was grounded on (codex r50). Unchanged agent text (above): the
+        // account facts its attempt recorded, as Post now.
+        const snapshotFits = unchangedAgentText || ((useDraft || unchangedStoredDraft) && storedDraftFits);
         if (!snapshotFits) return undefined;
         const g = current.auto_reply_grounding;
         const snap = !g ? null : (typeof g === 'string' ? (() => { try { return JSON.parse(g); } catch { return null; } })() : g);

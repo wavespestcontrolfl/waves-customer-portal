@@ -140,6 +140,15 @@ describe('POST /admin/reviews/:id/reply — the account facts for the post-PUT c
     expect(await expectedAccountFor({ replyText: text, fromAgentDraft: true })).toBe('acct-recorded');
   });
 
+  test('a stored pipeline draft pasted into the editor unchanged (no Use Draft) keeps its snapshot and its machine origin; edited text does not', async () => {
+    row = { review_reply: '[DRAFT] Hi Dana, pipeline words.', auto_reply_draft: 'Hi Dana, pipeline words.', auto_reply_version: 'reply-v3', auto_reply_status: 'drafted', auto_reply_grounding: { fingerprint: 'f'.repeat(40), accountFingerprint: 'acct-stored' } };
+    expect(await expectedAccountFor({ replyText: 'Hi Dana, pipeline words.' })).toBe('acct-stored');
+    expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(true);
+    Publisher.publishReviewReply.mockClear();
+    expect(await expectedAccountFor({ replyText: 'Hi Dana, pipeline words, and thanks.' })).toBeUndefined();
+    expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(false);
+  });
+
   test('a restored agent draft pasted into the editor unchanged (no Use Draft) keeps its account facts and its agent origin', async () => {
     expect(await expectedAccountFor({ replyText: text })).toBe('acct-recorded');
     expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(true);

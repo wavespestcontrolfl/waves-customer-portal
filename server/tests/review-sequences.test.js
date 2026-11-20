@@ -4532,6 +4532,26 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(out3).toEqual({ enrolled: false, reason: 'not_completion_invoice' });
   });
 
+  test('a backdated closeout pays out by its frozen ask only (GATE_REVIEW_LATE_CLOSE_ASK)', async () => {
+    mockGates.reviewSequences = true;
+    // Frozen false (the usual backfill, or a kept ask a blocking suppression turned off): the payment never asks.
+    const off = makeMock({
+      customers: [{ id: 'lc-1', first_name: 'Eli', last_name: 'F', phone: '+19410000091', nearest_location_id: 'venice' }],
+      service_records: [{ id: 'sr-lc1', customer_id: 'lc-1', structured_notes: JSON.stringify({ backfill: true, requestReview: false, visitOutcome: 'completed' }) }],
+    });
+    db.mockImplementation(off);
+    expect(await ReviewService.enrollForPaidInvoice({ id: 'inv-lc1', customer_id: 'lc-1', service_record_id: 'sr-lc1' }))
+      .toEqual({ enrolled: false, reason: 'completion_opted_out' });
+    expect(off.__state.rows.review_sequences).toHaveLength(0);
+    // Frozen true (a kept late-close ask whose visit-time enrollment has not answered): the payment keeps it.
+    const on = makeMock({
+      customers: [{ id: 'lc-2', first_name: 'Gus', last_name: 'H', phone: '+19410000092', nearest_location_id: 'venice' }],
+      service_records: [{ id: 'sr-lc2', customer_id: 'lc-2', structured_notes: JSON.stringify({ backfill: true, requestReview: true, visitOutcome: 'completed' }) }],
+    });
+    db.mockImplementation(on);
+    expect((await ReviewService.enrollForPaidInvoice({ id: 'inv-lc2', customer_id: 'lc-2', service_record_id: 'sr-lc2' })).enrolled).toBe(true);
+  });
+
   test('a visit whose visit-time ask answered gets no second ask from its payment', async () => {
     mockGates.reviewSequences = true;
     const mock = makeMock({
