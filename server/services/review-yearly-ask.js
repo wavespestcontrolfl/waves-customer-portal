@@ -21,7 +21,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 const YEARLY_STARTED_BY = 'yearly';
 const YEARLY_DECISION_REASON = 'yearly_anniversary';
@@ -105,12 +105,11 @@ const defaultReads = {
       .first('id');
     return Boolean(row);
   },
+  async customerRow(customerId) {
+    return db('customers').where({ id: customerId }).first();
+  },
   async activeSequence(customerId) {
     const row = await db('review_sequences').where({ customer_id: customerId, status: 'active' }).first('id');
-    return Boolean(row);
-  },
-  async linkedGoogleReview(customerId) {
-    const row = await db('google_reviews').where({ customer_id: customerId }).whereNull('missing_since').first('id');
     return Boolean(row);
   },
 };
@@ -128,10 +127,15 @@ async function exclusionReason(customerId, { now, reads, services }) {
   const { ReviewService, ClickGuard } = services;
   const yearAgo = new Date(now.getTime() - YEARLY_REPEAT_DAYS * DAY_MS);
   if (await reads.yearlyAskSince(customerId, yearAgo)) return 'yearly_ask_in_365_days';
-  if (await reads.linkedGoogleReview(customerId)) return 'has_google_review';
+  if (await ReviewService.customerHasLinkedGoogleReview(customerId)) return 'has_google_review';
   if (await ClickGuard.probableReviewer(customerId)) return 'probable_reviewer';
   const allowed = await ReviewService.reviewSmsAllowedNow(customerId);
   if (!allowed || allowed.allowed !== true) return `not_allowed_${(allowed && allowed.reason) || 'unknown'}`;
+  // The dispatcher's own recipient + suppression checks, before a batch slot or a sequence is used.
+  const customer = await reads.customerRow(customerId);
+  if (!customer) return 'no_customer';
+  const reachable = await ReviewService.smsRecipientReachable(customer);
+  if (!reachable || reachable.reachable !== true) return `sms_${(reachable && reachable.reason) || 'unreachable'}`;
   if (await reads.activeSequence(customerId)) return 'active_sequence';
   if (await ClickGuard.tapPauseActive(customerId)) return 'review_link_tap_in_180_days';
   const stats = await ReviewService.getDeliveredAskStats(customerId);
@@ -163,7 +167,7 @@ async function enrollPicked(picked, { now, services, summary }) {
       const firstTouchAt = ReviewService.__private.nextCadenceTickAt(now);
       const result = await ReviewService.startReviewSequence({
         customerId: pick.customerId,
-        plan: OUTREACH.RECURRING_SEQUENCE_PLAN,
+        plan: OUTREACH.RECURRING_SEQUENCE_PLAN.map((step) => ({ ...step, notAfter: askDeadline(pick.anniversaryOn).toISOString() })),
         startedBy: YEARLY_STARTED_BY,
         firstTouchAt,
         decision: ReviewService.__private.sequenceDecision({
@@ -181,10 +185,30 @@ async function enrollPicked(picked, { now, services, summary }) {
   }
 }
 
+// The last moment the ask may go: the end of the 14th ET day after the anniversary. It rides on
+// the enrollment's plan step (review_sequences.plan, a jsonb the runner never rewrites for this
+// source), so a payment hold or retry cannot push the text past the window.
+function askDeadline(anniversaryOn) {
+  return parseETDateTime(`${shiftYmd(anniversaryOn, ANNIVERSARY_WINDOW_DAYS)}T23:59:59`);
+}
+
+function planDeadlineMs(seq) {
+  try {
+    const plan = Array.isArray(seq.plan) ? seq.plan : JSON.parse(seq.plan || '[]');
+    const step = plan.find((st) => st && st.notAfter);
+    return step ? new Date(step.notAfter).getTime() : null;
+  } catch {
+    return NaN;
+  }
+}
+
 // Checked by the cadence runner at dispatch for a started_by 'yearly' sequence: the retire
-// reason ('yearly_gate_off', 'tap_pause'), 'lookup_failed' (defer, send nothing) or null.
-async function dispatchStopReason(seq, { ClickGuard = require('./review-click-guard') } = {}) {
+// reason ('yearly_gate_off', 'anniversary_window_over', 'tap_pause'), 'lookup_failed' (defer,
+// send nothing) or null. A row with no readable deadline is retired, never sent.
+async function dispatchStopReason(seq, { ClickGuard = require('./review-click-guard'), now = new Date() } = {}) {
   if (!gateLive()) return 'yearly_gate_off';
+  const deadlineMs = planDeadlineMs(seq);
+  if (deadlineMs === null || Number.isNaN(deadlineMs) || now.getTime() > deadlineMs) return 'anniversary_window_over';
   try {
     return (await ClickGuard.tapPauseActive(seq.customer_id)) ? 'tap_pause' : null;
   } catch (err) {
@@ -259,6 +283,7 @@ module.exports = {
   anniversaryWindow,
   exclusionReason,
   dispatchStopReason,
+  askDeadline,
   YEARLY_STARTED_BY,
   ANNIVERSARY_WINDOW_DAYS,
   MAX_ENROLL_PER_RUN,

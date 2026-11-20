@@ -8344,8 +8344,8 @@ describe('the drafter\'s date is the day the visit was worked (review-visit-day.
 // Yearly review ask (started_by 'yearly', services/review-yearly-ask.js): dispatch-time rules.
 describe('Yearly review ask at dispatch', () => {
   const DAY = 86400000;
-  const yearly = (customerId, startedBy = 'yearly') => ({ id: `seq-y-${customerId}`, customer_id: customerId, status: 'active', current_step: 0, touches_sent: 0,
-    started_by: startedBy, plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+  const yearly = (customerId, startedBy = 'yearly', notAfter = new Date(Date.now() + 5 * DAY).toISOString()) => ({ id: `seq-y-${customerId}`, customer_id: customerId, status: 'active', current_step: 0, touches_sent: 0,
+    started_by: startedBy, plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask', notAfter }]),
     started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000) });
   const cust = (id, extra = {}) => ({ id, first_name: 'Yo', last_name: 'T', phone: '+19410000199', email: 'yo@x.com', nearest_location_id: 'bradenton', ...extra });
   const tap = (customerId) => ({ id: `rr-y-${customerId}`, customer_id: customerId, channel: 'sms', status: 'opened',
@@ -8372,6 +8372,33 @@ describe('Yearly review ask at dispatch', () => {
     db.mockImplementation(mock);
     await ReviewService.processReviewSequences();
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a row past its anniversary deadline is retired with no send', async () => {
+    mockGates.reviewYearlyAsk = true;
+    const mock = makeMock({ customers: [cust('y-7')], review_sequences: [yearly('y-7', 'yearly', new Date(Date.now() - DAY).toISOString())] });
+    db.mockImplementation(mock);
+    await ReviewService.processReviewSequences();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('anniversary_window_over');
+  });
+
+  test('a linked review with missing_since set stops the row (the one predicate)', async () => {
+    mockGates.reviewYearlyAsk = true;
+    const mock = makeMock({ customers: [cust('y-8')], review_sequences: [yearly('y-8')], google_reviews: [{ id: 'g1', customer_id: 'y-8', missing_since: new Date() }] });
+    db.mockImplementation(mock);
+    await ReviewService.processReviewSequences();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('reviewed');
+    expect(await ReviewService.customerHasLinkedGoogleReview('y-8')).toBe(true);
+  });
+
+  test('smsRecipientReachable: no phone and a suppressed phone are unreachable', async () => {
+    db.mockImplementation(makeMock({ customers: [], messaging_suppression: [{ phone: '+19410000199', active: true }] }));
+    expect(await ReviewService.smsRecipientReachable(cust('y-9', { phone: null }))).toEqual({ reachable: false, reason: 'no_phone' });
+    expect(await ReviewService.smsRecipientReachable(cust('y-9'))).toEqual({ reachable: false, reason: 'phone_suppressed' });
+    db.mockImplementation(makeMock({ customers: [], messaging_suppression: [] }));
+    expect(await ReviewService.smsRecipientReachable(cust('y-9'))).toEqual({ reachable: true, reason: null });
   });
 
   test('a tap 40 days ago retires the yearly row with no send', async () => {
