@@ -891,6 +891,7 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
   test('the system prompt carries the rule and the version moved to reply-v3', () => {
     const sys = Drafter.buildSystemPrompt(grounding(), 'service_quality');
     expect(sys).toContain('call it "the Waves app"');
+    expect(sys).toContain('"the Waves Pest Control app" or "App Store"');
     expect(sys).toContain('Never "the app", "our app", "your app"');
     expect(Drafter.REPLY_VERSION).toBe('reply-v3');
   });
@@ -927,13 +928,16 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
     expect(Drafter.offAppName('Glad it helps. The Waves app is new, and the Waves app is free.')).toBeNull();
     expect(Drafter.offAppName('Thanks for using The Waves app.')).toBe('The Waves app');
     expect(Drafter.offAppName('Glad it helps. the Waves app is new.')).toBe('the Waves app');
-    // "apps", "application", "app-based" and the App Store are other words; "the app stores" is the app.
-    expect(Drafter.offAppName('Happy to apply the apps and our application, the App Store and the app-based tools.')).toBeNull();
-    expect(Drafter.offAppName('Find the Waves app in the App Store.')).toBeNull();
+    // "apps", "apply" and "application" are other words; "the app stores" is the app.
+    expect(Drafter.offAppName('Happy to apply the apps and our application.')).toBeNull();
     expect(Drafter.offAppName('Good news: the app stores your service notes.')).toBe('the app');
-    // "store" may be a verb: only the proper name, spelled "App Store", passes.
+    // No exceptions: "app-based" and every "App Store" are rejected too, so the model writes the reply without them.
     expect(Drafter.offAppName('Thanks for letting our app store your service notes.')).toBe('our app');
     expect(Drafter.offAppName('Find the Waves app in the app store.')).toBe('the app');
+    expect(Drafter.offAppName('Find the Waves app in the App Store.')).toBe('the App');
+    expect(Drafter.offAppName('Find us in the Waves Pest Control App Store.')).toBe('the Waves Pest Control App');
+    expect(Drafter.offAppName('Thanks for trying the app-based reminders.')).toBe('the app');
+    expect(Drafter.offAppName('Thanks for trying the Waves app-based reminders.')).toBeNull();
   });
   test('a draft that says "the app" is stored as "the Waves app" on the first attempt', async () => {
     const g = grounding({ text: appReview });
