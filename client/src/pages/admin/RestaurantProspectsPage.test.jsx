@@ -101,10 +101,10 @@ it("a success answer whose body cannot be read shows Try again, and recovers", a
   expect(await screen.findByText("SAMPLE GRILL")).toBeInTheDocument();
 });
 
-it("before the first good read it says the files have not been read, and claims no counts", async () => {
+it("before the first full read, with no rows, it says not every file has been read, and claims no counts", async () => {
   route({ "/admin/prospects/restaurants?days=30": () => reply({ ...LIST30, readAt: null, counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, rows: [] }) });
   renderPage();
-  expect(await screen.findByText("The state files have not been read yet.")).toBeInTheDocument();
+  expect(await screen.findByText("Not every state file has been read yet.")).toBeInTheDocument();
   expect(screen.queryByText(/new restaurants?,/)).toBeNull();
   expect(screen.queryByRole("table")).toBeNull();
 });
@@ -117,7 +117,7 @@ it("rows from a first run that did not read every file show with a not-complete 
   expect(screen.queryByText(/pest findings?/)).toBeNull();
   expect(screen.queryByText(/new restaurants?,/)).toBeNull();
   expect(rowOf(screen.getByRole("table", { name: "Restaurants" }), "SAMPLE GRILL")).toBeInTheDocument();
-  expect(screen.queryByText("The state files have not been read yet.")).toBeNull();
+  expect(screen.queryByText("Not every state file has been read yet.")).toBeNull();
 });
 
 it("a read with nothing in the window shows the zero counts and an empty message", async () => {

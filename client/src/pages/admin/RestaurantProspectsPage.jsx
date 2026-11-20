@@ -139,9 +139,9 @@ export default function RestaurantProspectsPage({ embedded = false }) {
 
       {loading && <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Loading restaurants…</div>}
       {error && <ActionFeedback error onRetry={load} className="mb-3">{error}</ActionFeedback>}
-      {/* Before the first good read there is no window to claim counts for. */}
+      {/* Before the first full read there is no window to claim counts for; a first run may have read one file. */}
       {data && !data.readAt && data.rows.length === 0 && (
-        <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">The state files have not been read yet.</div>
+        <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Not every state file has been read yet.</div>
       )}
       {data && (data.readAt || data.rows.length > 0) && (
         <>
