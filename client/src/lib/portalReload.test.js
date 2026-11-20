@@ -10,7 +10,7 @@ vi.mock('../native/platform', () => ({ isWavesAdminApp: () => platform.wavesAdmi
 import { installPortalVersionWatch, noteServerAnswer, resetPortalVersionForTests } from './portalVersion';
 import { registerReloadHold } from './reloadHolds';
 import { countDeviceWrite } from './deviceWrites';
-import { RECENT_ANSWER_MS, WRITE_WAIT_MS, reloadBlockers, reloadDueAtMove, reloadForNewBuild, staffReloadBlocker } from './portalReload';
+import { ACTION_QUIET_MS, RECENT_ANSWER_MS, WRITE_WAIT_MS, reloadBlockers, reloadDueAtMove, reloadForNewBuild, staffReloadBlocker } from './portalReload';
 
 const NOW = 1_000_000;
 let holding = false;
@@ -35,9 +35,11 @@ afterEach(() => {
 });
 
 describe('reloadDueAtMove', () => {
-  test('a move to a staff page in an out-of-date tab is due a reload', () => {
+  test('a move to a staff page in an out-of-date tab is due a reload, but not within 10 s of an action on the page it leaves', () => {
     liveBuild('bbb222bbb222');
     expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(true);
+    expect(reloadDueAtMove('/admin/pipeline', NOW, NOW - ACTION_QUIET_MS + 1)).toBe(false);
+    expect(reloadDueAtMove('/admin/pipeline', NOW, NOW - ACTION_QUIET_MS)).toBe(true);
   });
 
   test('never while the tab runs the live build', () => {

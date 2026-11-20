@@ -13,11 +13,16 @@ import { reloadBlockers, reloadDueAtMove, reloadForNewBuild } from '../lib/porta
 // App.jsx's RoutesErrorBoundary keys the route tree on the pathname, so every
 // page move already remounts the staff layout and all it holds in React state
 // (the Ask Waves prompt included). Work that outlives a move is in a module
-// or in storage, and registers a hold (reloadHolds.js).
+// or in storage, and registers a hold (reloadHolds.js). Work that an action
+// started may have no save open yet, so a move soon after an action on the
+// page waits for a later move.
 export function PortalUpdateGate({ fallback, children }) {
   const { pathname } = useLocation();
+  const lastAction = useLastPageAction();
   const [gate, setGate] = useState({ pathname, reloading: false });
-  if (gate.pathname !== pathname) setGate({ pathname, reloading: reloadDueAtMove(pathname) });
+  if (gate.pathname !== pathname) {
+    setGate({ pathname, reloading: reloadDueAtMove(pathname, Date.now(), lastAction.current.at) });
+  }
 
   useEffect(() => {
     if (!gate.reloading) return undefined;
@@ -68,25 +73,34 @@ export function useHoldAwareReload(resetKey, beforeReload, pageUsed) {
   return { named: held.length > 0, heldText, tryReload };
 }
 
-// A use of the page in view since it opened: a tap, a click, a key or a
-// field change anywhere but on this bar. The bar's Reload reloads that page
-// in place, and a page keeps unsaved work in many ways: a field, a toggle, a
-// picked slot, a signature on a canvas, a shape drawn on a map. No list of
-// controls names them all, so after any use the bar asks once first. A page
-// move ends the use: the move closes the page and its work. The automatic
-// reload waits for a move, so it never needs this.
-function usePageUsed(pathname) {
-  const used = useRef(false);
-  useEffect(() => { used.current = false; }, [pathname]);
+// The last action on the page, as { at, count }: a tap, a click, a key or a
+// field change anywhere but on the Reload bar or on a link (a link only
+// moves). A touch that scrolls is no action: it ends with no pointerup.
+const ACTION_TYPES = ['pointerup', 'click', 'keydown', 'input', 'change'];
+function useLastPageAction() {
+  const last = useRef({ at: -Infinity, count: 0 });
   useEffect(() => {
-    const noteUse = (event) => {
-      if (event.target instanceof Element && !event.target.closest('[data-portal-update-bar]')) used.current = true;
+    const note = (event) => {
+      if (!(event.target instanceof Element) || event.target.closest('[data-portal-update-bar], a[href]')) return;
+      last.current = { at: Date.now(), count: last.current.count + 1 };
     };
-    const types = ['pointerdown', 'click', 'keydown', 'input', 'change'];
-    types.forEach((type) => document.addEventListener(type, noteUse, true));
-    return () => types.forEach((type) => document.removeEventListener(type, noteUse, true));
+    ACTION_TYPES.forEach((type) => document.addEventListener(type, note, true));
+    return () => ACTION_TYPES.forEach((type) => document.removeEventListener(type, note, true));
   }, []);
-  return () => used.current;
+  return last;
+}
+
+// A use of the page in view: an action since it opened. The bar's Reload
+// reloads that page in place, and a page keeps unsaved work in many ways: a
+// field, a toggle, a picked slot, a signature on a canvas, a shape drawn on a
+// map. No list of controls names them all, so after any use the bar asks
+// once first. A page move ends the use: the move closes the page and its
+// work.
+function usePageUsed(pathname) {
+  const last = useLastPageAction();
+  const opened = useRef(0);
+  useEffect(() => { opened.current = last.current.count; }, [last, pathname]);
+  return () => last.current.count > opened.current;
 }
 
 // Every staff page, Waves Admin and the field pages included: says that a
