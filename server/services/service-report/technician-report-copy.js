@@ -677,7 +677,8 @@ function customerCopyViolations(text) {
 // people and pets a re-entry line is about, or a customer's permission to
 // use the place again ("you can use it", "feel free to use"): there any figure or number word
 // decides ("pets can return 11/22", "keep off 2d"), and so does a day word: a
-// unit ("dries in half a day", "keep pets off for two days"), a weekday,
+// unit ("dries in half a day", "keep pets off for two days"), a weekday (also
+// short: "until Sat."),
 // "today", a part of the day ("dry by this evening"), a month or a season.
 // Inside such a sentence the only time a note may give is the idiom "until
 // dry". The re-entry verbs the complete screen pairs with minutes and hours
@@ -736,12 +737,13 @@ const NOTE_DRY_REENTRY_SRC = `(?<!\\p{L})(?:${[
   '(?:pets?|dogs?|cats?|pupp(?:y|ies)|kittens?|kids?|child(?:ren)?|toddlers?|bab(?:y|ies)|people|family|anyone|everyone|guests?)',
   `(?:you(?:\\s*['\u2019]ll|\\s+will|\\s+can|\\s+may|\\s+could|\\s+should|\\s+might)(?:\\s+(?:safely|then|now|also|soon|easily))?(?:\\s+be\\s+able\\s+to)?|you(?:\\s+are|['\u2019]re)\\s+(?:free|welcome|able|good|okay|ok|fine|clear|cleared|safe)\\s+to|feel\\s+free\\s+to|(?:it\\s+is|it['\u2019]s|it\\s+will\\s+be|it['\u2019]ll\\s+be)\\s+(?:safe|fine|ok|okay|alright|all\\s+right)\\s+to)\\s+(?:use|enjoy|resume|reopen)`,
 ].join('|')})(?!\\p{L})`;
-// A day word: a unit from a day up, a weekday, today, a part of the day or a
+// A day word: a unit from a day up, a weekday (full or short: "Sat",
+// "Thurs"), today, a part of the day or a
 // meal, a month (not "may", the verb), a season (not "fall", the verb), a
 // date written with a slash ("11/22"), or a figure with d or w ("2d").
 const NOTE_DAY_WORD_SRC = `(?:(?<!\\p{L})(?:${[
   'days?|nights?|weeks?|weekends?|fortnights?|months?|today',
-  'monday|tuesday|wednesday|thursday|friday|saturday|sunday',
+  'monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|weds|thu|thur|thurs|fri|sat|sun',
   'mornings?|afternoons?|evenings?|sunset|sundown|sunrise|dawn|dusk|lunch(?:time)?|dinner(?:time)?|bedtime|breakfast',
   'january|february|march|april|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec',
   'spring|summer|autumn|winter',

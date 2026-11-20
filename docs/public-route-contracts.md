@@ -3116,7 +3116,8 @@ that names drying or re-entry ("dry", "re-enter", "keep … off", "stay …
 inside", "off-limits", "avoid"), the people and pets a re-entry line is
 about, or a customer's permission to use the place again ("you can use it",
 "feel free to use", "it is fine to enjoy"): there any figure or number word withholds the copy ("11/22", "2d"),
-and so does a day word (a unit from a day up, a weekday, "today", a part of
+and so does a day word (a unit from a day up, a weekday, full or short
+("until Sat."), "today", a part of
 the day or a meal, a month other than "may", a season other than "fall"), so
 "until dry" is the only time such a sentence may give. The re-entry verbs the
 complete screen already pairs with minutes and hours (`REENTRY_VERB_SRC`:

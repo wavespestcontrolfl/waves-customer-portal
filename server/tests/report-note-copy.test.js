@@ -112,18 +112,21 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       'I treated the lanai. Pets can return after four.',
       'I treated the lanai. Keep pets inside until 4.',
       'I treated the lanai. Keep pets inside between 2 and 4.',
-      // Each part of the rule alone: no other part catches these.
-      'I treated the lanai. The dog can go out once it is 3:30.',
-      'I treated the lanai. Pets can return once it is four PM.',
-      'I treated the lanai. Pets can go out once it is nine-ish a.m.',
-      'I treated the lanai. Pets can go out once it is seven am.',
-      'I treated the lanai. Pets can go out once it is 3 o\'clock.',
-      'I treated the lanai. Pets can go out once it is four in the afternoon.',
-      'I treated the lanai. Pets can go out at a quarter to four.',
+      // Each part of the rule alone: no other part catches these. No line
+      // names a pet, a person, drying or re-entry, so the sentence rules
+      // (the next tests) stay out of them.
+      'I treated the lanai. The work ended once it was 3:30.',
+      'I treated the lanai. The work ended once it was four PM.',
+      'I treated the lanai. The work ended once it was nine-ish a.m.',
+      'I treated the lanai. The work ended once it was seven am.',
+      'I treated the lanai. The work ended once it was 3 o\'clock.',
+      'I treated the lanai. The work ended once it was four in the afternoon.',
+      'I treated the lanai. The work ended at a quarter to four.',
+      'I treated the lanai. The work ended after four.',
       // A 24-hour clock after a time word.
-      'I treated the lanai. Pets may re-enter at 1600.',
-      'I treated the lanai. Pets may re-enter after 0830.',
-      'I treated the lanai. Keep pets inside until 2400.',
+      'I treated the lanai. The work ended at 1600.',
+      'I treated the lanai. The work ended after 0830.',
+      'I treated the lanai. The work ran until 2400.',
       'I treated the perimeter. The spray dries in 30 minutes.',
       'I treated the perimeter. Allow a 30-minute drying period.',
       'I treated the lanai. Return to the treated area after 30+ minutes.',
@@ -175,6 +178,8 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       'I treated the yard. The dog can go out in two days.',
       'I treated the yard. In two days the treated lawn will be dry.',
       'I treated the yard. Keep off the lawn until Monday.',
+      'I treated the patio. The patio is off limits until Sat.',
+      'I treated the yard. Keep pets off the lawn until Thurs.',
       'I treated the yard. Keep off the treated grass for the rest of today.',
       'I treated the yard. The spray will be dry by this evening.',
       'I treated the yard. Stay inside until after lunch.',
@@ -212,6 +217,8 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       // "may" the verb and "fall" the verb are no month or season.
       'I treated the lanai. Pets may return once it is dry.',
       'I treated the lanai. The webs fall away once the spray is dry.',
+      // A follow-up on a short weekday names no drying or re-entry.
+      'I placed bait in the garage. I will check the stations on Thurs.',
       // The technician's own use is no permission to the customer.
       'I placed bait in the garage. I will use a new bait in two weeks.',
       // A full stop before a capital ends the sentence.
