@@ -5,6 +5,8 @@
  * measure, judged and saved under a lock (settleRead). It refuses
  * any database but a private QA one or CI's, and its rows carry a per-run business marker so cleanup touches only them.
  */
+const fs = require('fs');
+const path = require('path');
 const { randomUUID } = require('crypto');
 
 const SKIP = !process.env.DATABASE_URL;
@@ -151,22 +153,34 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     expect(found.map((r) => r.business_name)).toEqual(['SAMPLE DINER TWO']);
   });
 
-  test('pending reads only unanswered inspections under 3 attempts inside the window, newest first', async () => {
+  test('pending reads only unanswered first visits under 3 attempts inside the window, newest first', async () => {
+    const first = (violation35) => ({ disposition: 'Warning Issued', violation35, visitNumber: 1 });
     await svc.upsertRecords([
-      rec(10, { event_date: '2026-11-01' }),
-      rec(11, { event_date: '2026-11-15', detail: { disposition: 'Warning Issued', violation35: 2, visitNumber: 2 } }),
-      rec(12, { event_date: '2026-09-01' }),
-      rec(13, { event_date: '2026-11-16' }), rec(14, { event_date: '2026-11-17', kind: 'new_license' }),
+      rec(10, { event_date: '2026-10-21', detail: first(1) }),
+      rec(11, { event_date: '2026-11-15', detail: first(2) }),
+      rec(12, { event_date: '2026-09-01', detail: first(1) }),
+      rec(13, { event_date: '2026-11-16', detail: first(1) }), rec(14, { event_date: '2026-11-17', kind: 'new_license' }),
+      // A callback, and a row stored before the visit number was kept: the parser answers for neither.
+      rec(15, { event_date: '2026-11-18', detail: { disposition: 'Warning Issued', violation35: 1, visitNumber: 2 } }),
+      rec(16, { event_date: '2026-11-19' }),
     ]);
     const stored = await rows();
     const id = (n) => stored.find((r) => r.source_key === key(n)).id;
     await db('restaurant_prospects').where({ id: id(13) }).update({ detail_attempts: 3 });
     await svc.bumpAttempts(id(10));
-    const pending = await svc.pendingInspections({ cutoff: '2026-10-05', limit: 100 });
-    const mine = pending.filter((p) => [10, 11, 12, 13, 14].some((n) => p.id === id(n)));
+    const pending = async () => (await svc.pendingInspections({ cutoff: '2026-10-05', limit: 100 }))
+      .filter((p) => [10, 11, 12, 13, 14, 15, 16].some((n) => p.id === id(n)));
+    const mine = await pending();
     expect(mine.map((p) => p.id)).toEqual([id(11), id(10)]);
-    // The file's count and visit number ride along with the visit's date; a row stored without them has none.
-    expect(mine.map((p) => [p.violation35, p.visitNumber, p.visitDate])).toEqual([[2, 2, '2026-11-15'], [null, null, '2026-11-01']]);
+    // The file's count and visit number ride along with the visit's date.
+    expect(mine.map((p) => [p.violation35, p.visitNumber, p.visitDate])).toEqual([[2, 1, '2026-11-15'], [1, 1, '2026-10-21']]);
+    // A pending row is the parser's input as it is: the 35B-only page of 10/21/2026 (one 35 row) answers "no pests".
+    const page = fs.readFileSync(path.join(__dirname, 'fixtures', 'dbpr-restaurants', 'report-35b.html'), 'utf8');
+    expect(svc.parseInspectionReport(page, mine[1])).toEqual({ pestEvidence: false, findings: [] });
+    expect(svc.parseInspectionReport(page, { ...mine[1], violation35: 2 })).toBeNull();
+    // The old row becomes eligible once a re-read of the file fills its visit number.
+    await svc.upsertRecords([rec(16, { event_date: '2026-11-19', detail: first(1) })]);
+    expect((await pending()).map((p) => p.id)).toEqual([id(16), id(11), id(10)]);
     const [one] = await svc.pendingInspections({ cutoff: '2026-10-05', limit: 1 });
     expect(one).toBeDefined();
     expect((await rows().where({ id: id(10) }))[0].detail_attempts).toBe(1);

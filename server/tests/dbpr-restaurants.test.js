@@ -236,16 +236,16 @@ describe('parseInspectionReport', () => {
   });
 
   test('35B only is not pest evidence, and the page footer never lands in a finding', () => {
-    expect(parse(fixture('report-35b.html'), { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
+    expect(parse(fixture('report-35b.html'), { violation35: 1 })).toEqual({ pestEvidence: false, findings: [] });
     const lastIs35A = parse(fixture('report-35a.html').replace('08A-05-6', '35A-07-1'));
     expect(JSON.stringify(lastIs35A)).not.toMatch(/Blair Stone|850-555/);
   });
 
   test('a 35A code quoted in a 35B note, or in an HTML comment, is not pest evidence', () => {
     const quoted = fixture('report-35b.html').replace('back door propped open.', 'back door propped open; see 35A-02-8 at the last visit.');
-    expect(parse(quoted, { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
+    expect(parse(quoted, { violation35: 1 })).toEqual({ pestEvidence: false, findings: [] });
     const commented = fixture('report-35b.html').replace('<table>', '<table><!-- <tr><td>35A-02-8</td><td>old row</td></tr> -->');
-    expect(parse(commented, { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
+    expect(parse(commented, { violation35: 1 })).toEqual({ pestEvidence: false, findings: [] });
   });
 
   test('a page with no inspection section is a failed read, not "no pests"', () => {
@@ -268,8 +268,8 @@ describe('parseInspectionReport', () => {
     expect(parse(page('x'.repeat(2000))).findings[0].text).toHaveLength(400);
     expect(parse(page('ROACH\0ES')).findings[0].text).toBe('ROACH ES');
     // A 35 row with no observation text cannot answer: a code alone is not a finding.
-    expect(parse(page('&nbsp;'), { cited35: 1 })).toBeNull();
-    expect(parse(reportPage('<tr><td>35B-03-4</td><td></td></tr>'), { cited35: 1 })).toBeNull();
+    expect(parse(page('&nbsp;'), { violation35: 1 })).toBeNull();
+    expect(parse(reportPage('<tr><td>35B-03-4</td><td></td></tr>'), { violation35: 1 })).toBeNull();
     // The cap cuts between characters: an emoji across it is kept whole or left out, never cut in half.
     const emoji = parse(page(`${'x'.repeat(399)}\u{1FAB3}yy`)).findings[0].text;
     expect(emoji).toBe(`${'x'.repeat(399)}\u{1FAB3}`);
@@ -279,21 +279,21 @@ describe('parseInspectionReport', () => {
   test('a code counts only inside the violations table: a lone 35A code in another table or the footer is no answer, never pests', () => {
     const b = fixture('report-35b.html');
     const reference = b.replace('<p>2601 Blair Stone Road', '<table><tr><td>Code</td><td>Meaning</td></tr><tr><td>35A-02-8</td><td>Pests</td></tr></table><p>2601 Blair Stone Road');
-    expect(parse(reference, { cited35: 1 })).toBeNull();
+    expect(parse(reference, { violation35: 1 })).toBeNull();
     const footer = b.replace('<p>2601 Blair Stone Road, Tallahassee FL 32399</p>', '<table><tr><td>35A-02-8</td><td>2601 Blair Stone Road</td></tr></table>');
     expect(footer).toContain('<td>35A-02-8</td><td>2601 Blair Stone Road');
-    expect(parse(footer, { cited35: 1 })).toBeNull();
+    expect(parse(footer, { violation35: 1 })).toBeNull();
     // A violations table without its head row is not the table either: no answer.
-    expect(parse(b.replace(/<tr><td><font><u><b>Violation[\s\S]*?<\/tr>\n/, ''), { cited35: 1 })).toBeNull();
+    expect(parse(b.replace(/<tr><td><font><u><b>Violation[\s\S]*?<\/tr>\n/, ''), { violation35: 1 })).toBeNull();
     // The page as it is still answers.
-    expect(parse(b, { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
+    expect(parse(b, { violation35: 1 })).toEqual({ pestEvidence: false, findings: [] });
   });
 
   test('on a follow-up report only the first visit\'s own 35 rows meet the file\'s count; a later visit gets no answer', () => {
     const row = (code, notes) => `<tr><td>${code}</td><td>&nbsp;</td><td>${notes}</td></tr>`;
     const door = row('35B-01-4', 'Basic - - From initial inspection : Basic - Gap under the back door. '
       + '- From follow-up inspection 2026-09-03: **Time Extended**');
-    const read = (rows, cited35) => parse(reportPage(rows, '08/28/2026'), { cited35, visitDate: '2026-08-28', visitNumber: 1 });
+    const read = (rows, violation35) => parse(reportPage(rows, '08/28/2026'), { violation35, visitDate: '2026-08-28', visitNumber: 1 });
     // The first visit cited the door: no pests.
     expect(read(door, 1)).toEqual({ pestEvidence: false, findings: [] });
     // Two counted, one of the first visit's: the other could be 35A. A row first cited at a follow-up is not its.
@@ -303,40 +303,40 @@ describe('parseInspectionReport', () => {
     const flies = row('35A-02-8', 'High Priority - From follow-up inspection 2026-09-03: Live flies.');
     expect(read(`${door}${flies}`, 1)).toEqual({ pestEvidence: false, findings: [] });
     // A later visit gets no answer, even on its own page with its 35B row still open.
-    expect(parse(reportPage(door, '09/03/2026'), { cited35: 1, visitDate: '2026-09-03', visitNumber: 2 })).toBeNull();
+    expect(parse(reportPage(door, '09/03/2026'), { violation35: 1, visitDate: '2026-09-03', visitNumber: 2 })).toBeNull();
   });
 
   test('a page that lists fewer violation-35 rows than the file counted cannot answer: the missing one could be 35A', () => {
     const b = fixture('report-35b.html');
-    expect(parse(b, { cited35: 2 })).toBeNull();
-    expect(parse(b, { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
+    expect(parse(b, { violation35: 2 })).toBeNull();
+    expect(parse(b, { violation35: 1 })).toEqual({ pestEvidence: false, findings: [] });
     // A follow-up report may list more than the visit counted (earlier visits' rows).
-    expect(parse(fixture('report-35a.html'), { cited35: 1 })).toMatchObject({ pestEvidence: true });
+    expect(parse(fixture('report-35a.html'), { violation35: 1 })).toMatchObject({ pestEvidence: true });
     // A row stored before the count was kept has none: a 35A row still answers, but "no pests" needs the count.
-    expect(parse(b, { cited35: null })).toBeNull();
+    expect(parse(b, { violation35: null })).toBeNull();
     expect(parse(b)).toBeNull();
-    expect(parse(fixture('report-35a.html'), { cited35: null })).toMatchObject({ pestEvidence: true });
+    expect(parse(fixture('report-35a.html'), { violation35: null })).toMatchObject({ pestEvidence: true });
   });
 
   test('each violations row is read whole: a code alone in the Observation cell is text; an unreadable code cell is no answer', () => {
     // A row added at the end of the violations table, the page's last table.
     const last = (html, tr) => html.replace(/<\/table>(?![\s\S]*<\/table>)/, `${tr}\n</table>`);
     // A 35B row whose observation is a 35A code alone: text, not a second finding.
-    expect(parse(reportPage('<tr><td>35B-03-4</td><td>&nbsp;</td><td>35A-02-8</td></tr>'), { cited35: 1 }))
+    expect(parse(reportPage('<tr><td>35B-03-4</td><td>&nbsp;</td><td>35A-02-8</td></tr>'), { violation35: 1 }))
       .toEqual({ pestEvidence: false, findings: [] });
     // A row whose code cannot be read beside a readable 35B row: no answer, never "no pests".
     const b = fixture('report-35b.html');
     const starred = last(b, '<tr><td><u>35A-02-8*</u></td><td>&nbsp;&nbsp;</td><td>High Priority - Live flies at the bar.</td></tr>');
     expect(starred).toContain('35A-02-8*');
-    expect(parse(starred, { cited35: 1 })).toBeNull();
+    expect(parse(starred, { violation35: 1 })).toBeNull();
     // A row whose code cell is blank, its observation a 35A code alone: cells keep their places, so no answer.
     const blankCode = last(b, '<tr><td></td><td>&nbsp;&nbsp;</td><td>35A-02-8</td></tr>');
     expect(blankCode).toContain('<td></td><td>&nbsp;&nbsp;</td><td>35A-02-8</td>');
-    expect(parse(blankCode, { cited35: 1 })).toBeNull();
+    expect(parse(blankCode, { violation35: 1 })).toBeNull();
     // A row with an observation and no code cell: no answer either.
-    expect(parse(last(b, '<tr><td>High Priority - Live flies at the bar.</td></tr>'), { cited35: 1 })).toBeNull();
+    expect(parse(last(b, '<tr><td>High Priority - Live flies at the bar.</td></tr>'), { violation35: 1 })).toBeNull();
     // A row of blank cells is skipped.
-    expect(parse(last(b, '<tr><td>&nbsp;</td><td> </td></tr>'), { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
+    expect(parse(last(b, '<tr><td>&nbsp;</td><td> </td></tr>'), { violation35: 1 })).toEqual({ pestEvidence: false, findings: [] });
   });
 
   test('a cell or a row without its end tag still counts, so a 35A code cell without </td> is never read as "no pests"', () => {
@@ -379,7 +379,7 @@ describe('parseInspectionReport', () => {
     const door = '<tr><td>35B-01-4</td><td>&nbsp;</td><td>Basic - - From initial inspection : Basic - Gap under the back door. '
       + '- From follow-up inspection 2026-09-03: **Time Extended**</td></tr>';
     const page = reportPage(`${flies}\n${door}`, '08/28/2026');
-    const read = (visitDate, visitNumber, html = page) => parse(html, { cited35: 1, visitDate, visitNumber });
+    const read = (visitDate, visitNumber, html = page) => parse(html, { violation35: 1, visitDate, visitNumber });
     // The first visit cited it: pests, its own note first.
     expect(read('2026-08-28', 1)).toMatchObject({ pestEvidence: true, findings: [{ code: '35A-02-8' }] });
     expect(read('2026-08-28', 1).findings[0].text).toMatch(/^High Priority - From initial inspection : High Priority - Live flies at the bar\. /);
@@ -406,12 +406,12 @@ describe('parseInspectionReport', () => {
     const other = '<tr><td>22-11-4</td><td>&nbsp;</td><td>Basic - - From initial inspection : Basic - Soiled shelf.</td></tr>';
     expect(read('2026-08-28', 1, reportPage(`${plain}\n${other}`, '08/28/2026'))).toBeNull();
     // A report with no visit labels answers for the first visit only: a later visit's note may clear the citation.
-    expect(parse(fixture('report-35a.html'), { cited35: 1, visitDate: '2026-10-20', visitNumber: 1 }))
+    expect(parse(fixture('report-35a.html'), { violation35: 1, visitDate: '2026-10-20', visitNumber: 1 }))
       .toMatchObject({ pestEvidence: true });
     const cleared = reportPage('<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - No flies observed.</td></tr>', '10/20/2026');
     for (const visitNumber of [2, 3, null, undefined]) {
-      expect(parse(cleared, { cited35: 1, visitDate: '2026-10-20', visitNumber })).toBeNull();
-      expect(parse(fixture('report-35a.html'), { cited35: 1, visitDate: '2026-10-20', visitNumber })).toBeNull();
+      expect(parse(cleared, { violation35: 1, visitDate: '2026-10-20', visitNumber })).toBeNull();
+      expect(parse(fixture('report-35a.html'), { violation35: 1, visitDate: '2026-10-20', visitNumber })).toBeNull();
     }
     // A visit label with no observation after it cannot be read, whichever note it is.
     for (const notes of [
@@ -420,13 +420,13 @@ describe('parseInspectionReport', () => {
       'From initial inspection : Live flies at the bar. - From follow-up inspection 2026-09-03:',
     ]) {
       const empty = reportPage(`<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - ${notes}</td></tr>`, '08/28/2026');
-      expect(parse(empty, { cited35: 1, visitDate: '2026-08-28' })).toBeNull();
+      expect(parse(empty, { violation35: 1, visitDate: '2026-08-28' })).toBeNull();
     }
   });
 
   test('a page answers only for the visit whose date its inspection table gives', () => {
     const rows = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - Live flies at the bar.</td></tr>';
-    const read = (html, visitDate) => parse(html, { cited35: 1, visitDate, visitNumber: 1 });
+    const read = (html, visitDate) => parse(html, { violation35: 1, visitDate, visitNumber: 1 });
     expect(read(reportPage(rows, '10/20/2026'), '2026-10-20')).toMatchObject({ pestEvidence: true });
     // Another visit's page: no answer.
     expect(read(reportPage(rows, '10/20/2026'), '2026-11-16')).toBeNull();
@@ -451,7 +451,7 @@ describe('parseInspectionReport', () => {
     expect(parse(reportPage(rows, '13/45/2026'))).toBeNull();
     // The fixtures carry the real layout.
     expect(parse(fixture('report-35a.html'), { visitDate: '2026-10-20' })).toMatchObject({ pestEvidence: true });
-    expect(parse(fixture('report-35b.html'), { cited35: 1, visitDate: '2026-10-21' })).toEqual({ pestEvidence: false, findings: [] });
+    expect(parse(fixture('report-35b.html'), { violation35: 1, visitDate: '2026-10-21' })).toEqual({ pestEvidence: false, findings: [] });
   });
 });
 

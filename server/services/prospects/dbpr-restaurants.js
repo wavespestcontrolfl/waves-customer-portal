@@ -380,11 +380,11 @@ function readReportTables(page) {
  * - each 35 row has observation text, and every visit label on them reads and has text after it. On a follow-up
  *   report (any violations row labelled with its visit) each 35 row must be labelled, and its initial note is the
  *   first visit's citation;
- * - it lists at least as many 35A or 35B rows of the read visit as the file counted for it (cited35): the missing
+ * - it lists at least as many 35A or 35B rows of the read visit as the file counted for it (violation35): the missing
  *   one could be 35A. Without the count only a 35A row answers.
  * findings holds the visit's 35A rows, each with its initial note first, cut at FINDING_TEXT_MAX.
  */
-function parseInspectionReport(html, { cited35 = null, visitDate = null, visitNumber = null } = {}) {
+function parseInspectionReport(html, { violation35 = null, visitDate = null, visitNumber = null } = {}) {
   // Only an inspection's first visit gets an answer. The list shows pests only, and the first visit's own row answers
   // for the inspection; a sighting first cited at a callback is not read.
   if (visitNumber !== 1) return null;
@@ -409,7 +409,7 @@ function parseInspectionReport(html, { cited35 = null, visitDate = null, visitNu
   const rows35A = ofVisit.filter((row) => /^35A-/.test(row.code));
   // Fewer of the visit's 35 rows than the file counted: the missing one could be 35A. Without the count (a row stored
   // before it was kept), only a 35A row answers: "no pests" needs the count.
-  if (Number.isInteger(cited35) ? ofVisit.length < cited35 : !rows35A.length) return null;
+  if (Number.isInteger(violation35) ? ofVisit.length < violation35 : !rows35A.length) return null;
   const findings = rows35A.map((row) => ({ code: row.code, text: capText(initialNoteFirst(row)) }));
   return { pestEvidence: findings.length > 0, findings };
 }
@@ -448,6 +448,9 @@ async function pendingInspections({ cutoff, limit }) {
     .whereNull('pest_evidence')
     .where('detail_attempts', '<', REPORT_MAX_ATTEMPTS)
     .where('event_date', '>=', cutoff)
+    // First visits only: the parser answers for no other. A row stored before the visit number was kept waits until a
+    // re-read of the file fills it.
+    .whereRaw("detail->>'visitNumber' = '1'")
     .orderBy('event_date', 'desc')
     .limit(limit)
     .select(
@@ -456,7 +459,7 @@ async function pendingInspections({ cutoff, limit }) {
       db.raw(`detail->>'visitNumber' AS "visitNumber"`),
       db.raw(`to_char(event_date, 'YYYY-MM-DD') AS "visitDate"`),
     );
-  // violation35 and visitNumber are null on a row stored before they were kept, until a re-read fills them.
+  // The file's count, the visit number and the visit's date, by the names the parser reads: a row is its input as it is.
   return rows.map((row) => ({ ...row, violation35: wholeNumber(row.violation35), visitNumber: wholeNumber(row.visitNumber) }));
 }
 
