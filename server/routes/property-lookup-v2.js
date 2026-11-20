@@ -5398,6 +5398,14 @@ function isAssociationCommercialJob({ commercialRiskType = null, commercialSubty
     || /^(?:hoa|multifamily)/.test(String(commercialSubtype || ''));
 }
 
+// The Seal scope pick of the admin estimate tool, as services.exclusion fields. {} unless the pick is
+// Whole home AND GATE_EXCLUSION_WHOLE_HOME is on, so every other request is untouched.
+function wholeHomeSealFields(options, home) {
+  if (options.exclSealScope !== 'whole_home') return {};
+  if (require('../config/feature-gates').exclusionWholeHomeLive?.() !== true) return {};
+  return { sealScope: 'whole_home', ...home };
+}
+
 function translateV2CallToV1Input(profile, selectedServices, options) {
   const p = profile || {};
   const o = options || {};
@@ -6016,9 +6024,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     };
   }
   if (sel.has('EXCLUSION')) {
+    // Whole-home seal (GATE_EXCLUSION_WHOLE_HOME, dark): an all-zero count still prices the home-size
+    // minimum, so the pick alone selects the V2 shape. Gate off = the field is never read.
+    const wholeHomeSeal = wholeHomeSealFields(o, { homeSqFt, stories, roofType: p.roofType });
     const hasV2Fields = (o.exclStandardWireMesh || o.exclAdvancedWireMesh ||
       o.exclStandardBirdBox || o.exclTileHighBirdBox || o.exclCustomBirdBox ||
-      o.exclMeshSoftLF || o.exclMeshConcreteLF);
+      o.exclMeshSoftLF || o.exclMeshConcreteLF || wholeHomeSeal.sealScope);
     if (hasV2Fields) {
       services.exclusion = {
         pricingVersion: 'v2',
@@ -6031,6 +6042,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
         meshConcreteLF: o.exclMeshConcreteLF || 0,
         waiveInspection: !!o.exclWaiveInspection,
         urgency, afterHours,
+        ...wholeHomeSeal,
       };
     } else {
       services.exclusion = {

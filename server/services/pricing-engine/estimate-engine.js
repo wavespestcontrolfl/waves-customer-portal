@@ -860,6 +860,22 @@ function stripBedBugInternalPricing(result) {
   return clean;
 }
 
+// Whole-home rodent seal (GATE_EXCLUSION_WHOLE_HOME): the V2 pricer inputs for a request that asks for it,
+// else null (a spot seal, or the gate off). The home size is the request's, else the property footprint.
+function wholeHomeSealInputs(exclusion, property) {
+  if (exclusion.sealScope !== 'whole_home') return null;
+  if (require('../../config/feature-gates').exclusionWholeHomeLive?.() !== true) return null;
+  return {
+    sealScope: 'whole_home',
+    homeSqFt: exclusion.homeSqFt || property.footprint || 2000,
+    stories: exclusion.stories || property.stories || 1,
+    roofType: exclusion.roofType || property.roofType || 'shingle',
+  };
+}
+
+// A priced exclusion result that already includes the 1-year re-entry guarantee.
+const includesReentryGuarantee = (result) => result?.includesReentryGuarantee === true;
+
 // ── Generate Complete Estimate ────────────────────────────────
 function generateEstimate(input) {
   const services = input.services || {};
@@ -2237,7 +2253,10 @@ function generateEstimate(input) {
     // a positive count; an all-zero V2 request still prices the point-only
     // floor + inspection fee as a firm line (pre-audit of the codex #3594 r4
     // pattern). Unscoped → manual quote.
+    // A whole-home seal (gate on) is priced from the HOME's size, which a commercial
+    // property has no minimum table for: it never counts as a scoped one-time.
     scopedOneTime: services.exclusion.pricingVersion === 'v2'
+      && !wholeHomeSealInputs(services.exclusion, property)
       && ['standardWireMeshPoints', 'advancedWireMeshPoints', 'standardBirdBoxes', 'tileHighBirdBoxes',
         'customBirdBoxes', 'meshSoftLF', 'meshConcreteLF']
         .some((k) => Number(services.exclusion[k]) > 0),
@@ -2260,6 +2279,7 @@ function generateEstimate(input) {
         approvedTotalForWaiver: services.exclusion.approvedTotal || 0,
         urgency: services.exclusion.urgency || 'ROUTINE',
         afterHours: services.exclusion.afterHours || false,
+        ...wholeHomeSealInputs(services.exclusion, property),
       });
       rodentExclusionV2Summary = result;
       // Per-section rows (wire mesh points / bird boxes / linear mesh, plus
@@ -2400,7 +2420,9 @@ function generateEstimate(input) {
   // Rodent guarantee — gated. Caller must pass eligibility flags explicitly;
   // we no longer auto-fire on any trap + exclusion presence. Caller signals
   // intent by setting services.rodentGuarantee = { eligibility: {...} }.
-  if (services.rodentGuarantee && !useCommercialManualQuote(services.rodentGuarantee, 'pest_control')) {
+  // A whole-home exclusion already includes the 1-year re-entry guarantee: no second, paid line.
+  if (services.rodentGuarantee && !includesReentryGuarantee(rodentExclusionV2Summary)
+    && !useCommercialManualQuote(services.rodentGuarantee, 'pest_control')) {
     const opts = typeof services.rodentGuarantee === 'object' ? services.rodentGuarantee : {};
     // Prefer the V2 summary: the estimate carries V2 exclusion as per-section
     // rows, and a section row has no aggregate equivalent-point fields.

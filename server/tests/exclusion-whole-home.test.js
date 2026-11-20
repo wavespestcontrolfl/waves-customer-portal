@@ -1,0 +1,242 @@
+// Whole-home rodent exclusion (GATE_EXCLUSION_WHOLE_HOME, owner 2026-11-19): a home-size
+// minimum replaces the job floor and the 1-year re-entry guarantee is in the price.
+// Gate off, or a spot seal, must stay exactly as it was.
+const {
+  generateEstimate,
+  priceRodentExclusionV2,
+  priceRodentGuarantee,
+} = require('../services/pricing-engine');
+const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+const { resolveOneTimeServiceCopy } = require('../services/estimate-one-time-copy');
+const { normalizeOneTimeBreakdown } = require('../routes/estimate-public');
+const { exclusionWholeHomeLive } = require('../config/feature-gates');
+
+const BULLET = 'Includes a 1-year re-entry guarantee: if a rodent gets back in through the work we sealed, Waves reseals and traps at no extra charge.';
+
+function withGate(value, fn) {
+  const prior = process.env.GATE_EXCLUSION_WHOLE_HOME;
+  if (value === undefined) delete process.env.GATE_EXCLUSION_WHOLE_HOME;
+  else process.env.GATE_EXCLUSION_WHOLE_HOME = value;
+  try { return fn(); } finally {
+    if (prior === undefined) delete process.env.GATE_EXCLUSION_WHOLE_HOME;
+    else process.env.GATE_EXCLUSION_WHOLE_HOME = prior;
+  }
+}
+
+const gateOn = (fn) => withGate('true', fn);
+
+function baseInput(overrides = {}) {
+  return {
+    homeSqFt: 2000,
+    stories: 1,
+    lotSqFt: 10000,
+    propertyType: 'single_family',
+    zone: 'A',
+    features: { shrubs: 'moderate', trees: 'moderate', complexity: 'standard' },
+    ...overrides,
+  };
+}
+
+const GUARANTEE_ELIGIBLE = {
+  trappingCompleted: true,
+  exclusionCompleted: true,
+  sanitationCompletedOrPhotoBaseline: true,
+  noActivityAfterFinalTrapCheck: true,
+};
+
+describe('GATE_EXCLUSION_WHOLE_HOME reader', () => {
+  test('reads at call time and only for exactly true', () => {
+    expect(withGate(undefined, exclusionWholeHomeLive)).toBe(false);
+    expect(withGate('1', exclusionWholeHomeLive)).toBe(false);
+    expect(withGate('TRUE', exclusionWholeHomeLive)).toBe(false);
+    expect(withGate('true', exclusionWholeHomeLive)).toBe(true);
+  });
+});
+
+describe('priceRodentExclusionV2 whole-home seal', () => {
+  const spot = { standardWireMeshPoints: 2, waiveInspection: true };
+
+  test('gate off: sealScope is ignored and the result is identical to a spot seal', () => {
+    const plain = priceRodentExclusionV2({ ...spot, homeSqFt: 3000 });
+    const asked = withGate(undefined, () => priceRodentExclusionV2({ ...spot, sealScope: 'whole_home', homeSqFt: 3000 }));
+    expect(asked).toEqual(plain);
+    expect(asked.includesReentryGuarantee).toBeUndefined();
+    expect(asked.price).toBe(195);
+  });
+
+  test('gate on, spot seal (default or explicit): unchanged, no guarantee flag', () => {
+    const plain = withGate(undefined, () => priceRodentExclusionV2(spot));
+    gateOn(() => {
+      expect(priceRodentExclusionV2(spot)).toEqual(plain);
+      expect(priceRodentExclusionV2({ ...spot, sealScope: 'spot', homeSqFt: 3000 })).toEqual(plain);
+    });
+  });
+
+  test.each([
+    [1200, 395, 199],
+    [1500, 395, 199],
+    [1501, 595, 199],
+    [2500, 595, 199],
+    [2501, 895, 249],
+    [4000, 895, 249],
+    [4001, 1295, 299],
+  ])('home of %i sq ft: minimum %i, guarantee renewal %i', (homeSqFt, minimum, renewal) => {
+    gateOn(() => {
+      const result = priceRodentExclusionV2({ ...spot, sealScope: 'whole_home', homeSqFt });
+      expect(result.price).toBe(minimum);
+      expect(result.floor).toBe(minimum);
+      expect(result).toMatchObject({
+        sealScope: 'whole_home',
+        includesReentryGuarantee: true,
+        reentryGuaranteeMonths: 12,
+        guaranteeRenewalPrice: renewal,
+      });
+      // The renewal price is the tier priceRodentGuarantee charges for the same home.
+      expect(priceRodentGuarantee({ homeSqFt, equivalentExclusionPoints: result.equivalentExclusionPoints }).price).toBe(renewal);
+      const minimumRow = result.lineItems.find((li) => li.component === 'whole_home_minimum');
+      expect(minimumRow.label).toBe('Rodent Exclusion — Whole-home seal minimum');
+      expect(result.lineItems.reduce((sum, li) => sum + li.price, 0)).toBe(minimum);
+      expect(result.lineItems.every((li) => li.includesReentryGuarantee === true && li.guaranteeRenewalPrice === renewal)).toBe(true);
+    });
+  });
+
+  test('items above the minimum keep the item total and add no minimum row', () => {
+    gateOn(() => {
+      const result = priceRodentExclusionV2({
+        standardWireMeshPoints: 10, advancedWireMeshPoints: 2, sealScope: 'whole_home', homeSqFt: 1200, waiveInspection: true,
+      });
+      expect(result.price).toBe(10 * 75 + 2 * 150);
+      expect(result.lineItems.map((li) => li.component)).toEqual(['wire_mesh_points']);
+      expect(result.includesReentryGuarantee).toBe(true);
+    });
+  });
+
+  test('an all-zero whole-home request still quotes its minimum as a row, plus the inspect fee unless waived', () => {
+    gateOn(() => {
+      const result = priceRodentExclusionV2({ sealScope: 'whole_home', homeSqFt: 2200 });
+      expect(result.lineItems.map((li) => [li.component, li.price])).toEqual([
+        ['whole_home_minimum', 595],
+        ['inspect_fee', 75],
+      ]);
+      expect(result.price).toBe(670);
+    });
+  });
+
+  test('the renewal price follows the home tier (stories, equivalent points, mesh)', () => {
+    gateOn(() => {
+      const twoStory = priceRodentExclusionV2({ sealScope: 'whole_home', homeSqFt: 1800, stories: 2, waiveInspection: true });
+      expect(twoStory.guaranteeRenewalPrice).toBe(249);
+      const manyPoints = priceRodentExclusionV2({ sealScope: 'whole_home', homeSqFt: 1800, standardWireMeshPoints: 16, waiveInspection: true });
+      expect(manyPoints.guaranteeRenewalPrice).toBe(299);
+    });
+  });
+});
+
+describe('estimate engine with a whole-home exclusion', () => {
+  const exclusion = (extra = {}) => ({ pricingVersion: 'v2', standardWireMeshPoints: 2, waiveInspection: true, ...extra });
+
+  test('gate off: a whole-home request prices as a spot seal', () => {
+    const spot = withGate(undefined, () => generateEstimate(baseInput({ services: { exclusion: exclusion() } })));
+    const asked = withGate(undefined, () => generateEstimate(baseInput({ services: { exclusion: exclusion({ sealScope: 'whole_home' }) } })));
+    expect(asked.lineItems).toEqual(spot.lineItems);
+    expect(asked.lineItems.some((li) => li.includesReentryGuarantee)).toBe(false);
+  });
+
+  test('gate on: home size comes from the request, else the property footprint', () => {
+    gateOn(() => {
+      const fromRequest = generateEstimate(baseInput({ services: { exclusion: exclusion({ sealScope: 'whole_home', homeSqFt: 3200 }) } }));
+      expect(fromRequest.lineItems.filter((li) => li.service === 'rodent_exclusion')
+        .reduce((sum, li) => sum + li.price, 0)).toBe(895);
+      const fromProperty = generateEstimate(baseInput({ homeSqFt: 1400, services: { exclusion: exclusion({ sealScope: 'whole_home' }) } }));
+      expect(fromProperty.lineItems.filter((li) => li.service === 'rodent_exclusion')
+        .reduce((sum, li) => sum + li.price, 0)).toBe(395);
+    });
+  });
+
+  test('gate on: no second, paid guarantee line beside an included guarantee', () => {
+    const services = (sealScope) => ({
+      exclusion: exclusion({ sealScope, homeSqFt: 2000 }),
+      rodentGuarantee: { eligibility: GUARANTEE_ELIGIBLE },
+    });
+    gateOn(() => {
+      const whole = generateEstimate(baseInput({ services: services('whole_home') }));
+      expect(whole.lineItems.some((li) => li.service === 'rodent_guarantee')).toBe(false);
+      expect(whole.lineItems.filter((li) => li.service === 'rodent_exclusion').every((li) => li.includesReentryGuarantee === true)).toBe(true);
+      // A spot seal still sells the guarantee as the paid extra.
+      const spot = generateEstimate(baseInput({ services: services('spot') }));
+      expect(spot.lineItems.find((li) => li.service === 'rodent_guarantee')).toMatchObject({ eligible: true, price: 199 });
+    });
+  });
+
+  test('commercial property: a whole-home request never becomes a firm price', () => {
+    gateOn(() => {
+      for (const counts of [{}, { standardWireMeshPoints: 3 }]) {
+        const estimate = generateEstimate(baseInput({
+          propertyType: 'commercial',
+          services: { exclusion: exclusion({ sealScope: 'whole_home', standardWireMeshPoints: 0, ...counts }) },
+        }));
+        expect(estimate.lineItems.some((li) => li.service === 'rodent_exclusion' && li.price > 0)).toBe(false);
+      }
+    });
+  });
+
+  test('the flag and renewal price reach the mapped estimate and the public breakdown rows', () => {
+    gateOn(() => {
+      const mapped = mapV1ToLegacyShape(generateEstimate(baseInput({
+        services: { exclusion: exclusion({ sealScope: 'whole_home', homeSqFt: 2000 }) },
+      })));
+      const rows = normalizeOneTimeBreakdown({ result: mapped }).items.filter((r) => r.service === 'rodent_exclusion');
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.every((r) => r.includesReentryGuarantee === true && r.guaranteeRenewalPrice === 199)).toBe(true);
+    });
+    const spotMapped = withGate(undefined, () => mapV1ToLegacyShape(generateEstimate(baseInput({ services: { exclusion: exclusion() } }))));
+    const spotRows = normalizeOneTimeBreakdown({ result: spotMapped }).items.filter((r) => r.service === 'rodent_exclusion');
+    expect(spotRows.every((r) => !('includesReentryGuarantee' in r))).toBe(true);
+  });
+});
+
+describe('customer copy for an included re-entry guarantee', () => {
+  const row = { service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 595, includesReentryGuarantee: true, guaranteeRenewalPrice: 249 };
+
+  test('a flagged row states the guarantee and the renewal price', () => {
+    const copy = resolveOneTimeServiceCopy(row);
+    expect(copy.includes).toContain(BULLET);
+    expect(copy.terms).toBe('Pay on service day. Renew the guarantee yearly for $249.');
+  });
+
+  test('the satisfaction and none scopes keep it for that row only', () => {
+    for (const guaranteeScope of ['satisfaction', 'none']) {
+      const copy = resolveOneTimeServiceCopy(row, { guaranteeScope });
+      expect(copy.includes).toContain(BULLET);
+      expect(copy.terms).toBe('Pay on service day. Renew the guarantee yearly for $249.');
+      // The rest of the plan-terms claims are still stripped.
+      expect(copy.includes.join(' ')).not.toMatch(/no contract/i);
+    }
+  });
+
+  test('fail closed: no flag, a false flag or a text-only hint carries no guarantee wording', () => {
+    for (const item of [
+      { service: 'rodent_exclusion', label: 'Rodent Exclusion', guaranteeRenewalPrice: 249 },
+      { ...row, includesReentryGuarantee: false },
+      { ...row, includesReentryGuarantee: 'true' },
+      { service: 'rodent_exclusion', label: 'Rodent Exclusion', detail: 'Includes a 1-year re-entry guarantee' },
+    ]) {
+      for (const guaranteeScope of ['all', 'satisfaction', 'none']) {
+        const copy = resolveOneTimeServiceCopy(item, { guaranteeScope });
+        expect(copy.includes).not.toContain(BULLET);
+        expect(copy.terms).not.toMatch(/renew/i);
+      }
+    }
+  });
+
+  test('the flag does not put the guarantee on another service', () => {
+    const copy = resolveOneTimeServiceCopy({ service: 'bed_bug', label: 'Bed Bug Heat Treatment', includesReentryGuarantee: true, guaranteeRenewalPrice: 249 }, { guaranteeScope: 'satisfaction' });
+    expect(copy.includes).not.toContain(BULLET);
+  });
+
+  test('a flagged row with no renewal price keeps the normal terms and states no renewal', () => {
+    const copy = resolveOneTimeServiceCopy({ ...row, guaranteeRenewalPrice: null }, { guaranteeScope: 'satisfaction' });
+    expect(copy.includes).toContain(BULLET);
+    expect(copy.terms).not.toMatch(/renew/i);
+  });
+});

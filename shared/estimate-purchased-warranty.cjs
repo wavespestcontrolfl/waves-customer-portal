@@ -4,6 +4,34 @@
 // must use the same purchase evidence. Read the existing authored JSON pack
 // for its exact bullet instead of maintaining a second customer-facing string.
 const { warrantyBullet: PURCHASED_TRENCHING_WARRANTY_BULLET } = require('../server/services/estimate-one-time-copy.json').termite_trenching;
+const { reentryBullet: INCLUDED_REENTRY_GUARANTEE_BULLET, termsReentry: REENTRY_TERMS_TEMPLATE } = require('../server/services/estimate-one-time-copy.json').rodent_exclusion;
+
+// A whole-home rodent exclusion (GATE_EXCLUSION_WHOLE_HOME) includes a 1-year
+// re-entry guarantee in its price. Only the priced row's own flag can say so:
+// text, labels and details never establish it (fail closed).
+function hasIncludedReentryGuarantee(item = {}) {
+  return !!item && typeof item === 'object' && item.includesReentryGuarantee === true;
+}
+
+// The terms line of a row that includes the guarantee, with its yearly renewal
+// price. Null without a positive saved price: the row then keeps its normal terms.
+function includedReentryTerms(item = {}) {
+  const renewal = hasIncludedReentryGuarantee(item) ? Number(item.guaranteeRenewalPrice) : 0;
+  return renewal > 0 ? REENTRY_TERMS_TEMPLATE.replace('{renewal}', String(renewal)) : null;
+}
+
+// The row keys that carry the included guarantee to the customer page: the
+// flag, its length in months and the yearly renewal price. {} unless the flag is true.
+function includedReentryGuaranteeFields(item = {}) {
+  if (!hasIncludedReentryGuarantee(item)) return {};
+  const months = Number(item.reentryGuaranteeMonths);
+  const renewal = Number(item.guaranteeRenewalPrice);
+  return {
+    includesReentryGuarantee: true,
+    reentryGuaranteeMonths: months > 0 ? months : null,
+    guaranteeRenewalPrice: renewal > 0 ? renewal : null,
+  };
+}
 
 function trenchingServiceIdentity(item = {}) {
   if (!item || typeof item !== 'object') return '';
@@ -335,6 +363,9 @@ module.exports = {
   preSlabWarrantyDecision,
   reconcilePricedPreSlabWarrantyEvidence,
   hasPurchasedTrenchingWarranty,
+  hasIncludedReentryGuarantee,
+  includedReentryGuaranteeFields,
+  includedReentryTerms,
   matchingTrenchingWarrantyRow,
   rawOneTimeWarrantyEvidenceItems,
   reconcileTrenchingWarrantyEvidence,
@@ -342,4 +373,5 @@ module.exports = {
   trenchingServiceIdentity,
   trenchingWarrantyDecision,
   PURCHASED_TRENCHING_WARRANTY_BULLET,
+  INCLUDED_REENTRY_GUARANTEE_BULLET,
 };
