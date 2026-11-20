@@ -61,6 +61,21 @@ describe('a refused plan quote (RESTART_STATE_CHANGED / PLAN_START_STATE_CHANGED
     expect(branch).toContain("recoverFromDeadHold('configure');");
   });
 
+  it('locks booking and payment while its banner is up (codex pre-push P1)', () => {
+    // The reserve, the confirm and the accept itself each refuse it, and list it as a dependency,
+    // so a callback created before the refusal never runs on the stale value.
+    for (const name of ['const handlePaymentChoice = useCallback(', 'const handleConfirm = useCallback(', 'const performAccept = useCallback(']) {
+      const at = pageSource.indexOf(name);
+      expect(at).toBeGreaterThan(-1);
+      const depsAt = pageSource.indexOf('\n  }, [', at);
+      expect(pageSource.slice(at, depsAt)).toContain('if (staleQuoteNote) return;');
+      expect(pageSource.slice(depsAt, pageSource.indexOf(']);', depsAt))).toMatch(/\bstaleQuoteNote\b/);
+    }
+    // Both payment button groups turn off, and the time picker freezes.
+    expect(pageSource.match(/disabled=\{readOnlyPreview \|\| consumerNoticeBlocked \|\| !!staleQuoteNote \|\| /g)).toHaveLength(2);
+    expect(pageSource).toContain("style={ctaPhase === 'submitting' || staleQuoteNote ? { pointerEvents: 'none', opacity: 0.65 } : undefined}");
+  });
+
   it('keeps its banner above the slot banners, below only a stuck hold release', () => {
     // A stuck release keeps its retry first (codex r10 P2); once it clears,
     // the refused-quote banner stays in every phase.

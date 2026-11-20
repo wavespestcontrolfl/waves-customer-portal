@@ -2135,9 +2135,11 @@ created", refuses an estimate that has the one-time option or invoice billing on
 neither and staff can no longer turn either on, so such a row was changed by staff before that rule.
 The accept answers this refusal before it checks any field of the request body (contact fields,
 slot, service mode, payment), so an invoice-mode quote, whose page sends no slot, gets it rather
-than `plan_start_slot_required`; the re-check answers it again, judging the row the accept read
-before any lock or read of its own. The estimate page answers both state-changed codes with a
-banner that keeps the server's message and links back to the portal, never "Refresh times". A re-check that cannot read its state, or that finds the
+than `plan_start_slot_required`. The re-check answers it again on both options as the row reads
+under the estimate row lock, before the comms lock (a writer from before the write refusal can
+commit between the accept's read and that lock). The estimate page answers both state-changed codes with a banner that keeps the server's
+message and links back to the portal, never "Refresh times", and turns off its time picker and
+payment choices for that quote. A re-check that cannot read its state, or that finds the
 customer's property-preferences key held by another change (the re-check tries that key and never
 waits on it while it holds the comms key), answers 409
 `{ error, code: 'PLAN_START_RECHECK_RETRY' }` with a retry line and writes nothing; the estimate page
@@ -2155,7 +2157,7 @@ the quote was made for (the same eligible families, case id and request id). The
 still belong to the customer the accept read before its row lock: one that a merge or its undo
 moved to another customer refuses, and the re-check reads and locks no other customer. An estimate
 with the one-time option or invoice billing on refuses too, ahead of the request-body checks and
-before any lock or read (the plan_start rule above), so a one-time request on it gets this code
+again on the row as read under the estimate row lock (the plan_start rule above), so a one-time request on it gets this code
 rather than `restart_quote_frozen`. Otherwise it answers 409 `{ error, code: 'RESTART_STATE_CHANGED' }` and writes nothing. A re-check that cannot
 read its state, or that finds the customer's property-preferences key held by another change,
 answers 409 `{ error, code: 'RESTART_RECHECK_RETRY' }` with a retry line and writes nothing; the

@@ -1446,11 +1446,24 @@ describe('assertRestartAcceptEligible', () => {
     expect(ops.some((op) => op.startsWith('read:customers') || op.startsWith('raw:'))).toBe(false);
   });
 
-  test.each(['bill_by_invoice', 'show_one_time_option'])('a quote staff changed (%s on, as the handler read it) refuses as changed before any lock or read (codex pre-push P0)', async (column) => {
+  test.each(['bill_by_invoice', 'show_one_time_option'])('a quote staff changed after the handler read it (%s on the locked row) refuses as changed and takes no lock (codex pre-push P1)', async (column) => {
+    // The handler read the row with both options off; a writer from before the write refusal
+    // turned one on before the accept took the estimate row lock. Reads return only the columns
+    // they name, as Postgres does, so the re-check must select both options.
+    const namedColumns = (table) => {
+      const b = builder(table);
+      const first = b.first;
+      b.first = async (...cols) => {
+        const row = await first();
+        return row && cols.length ? Object.fromEntries(cols.filter((c) => c in row).map((c) => [c, row[c]])) : row;
+      };
+      return b;
+    };
+    tables.estimates[0][column] = true;
     const ops = [];
-    await expect(actualRestart.assertRestartAcceptEligible(fakeTrx(ops), { ...RESTART_ESTIMATE, [column]: true }))
+    await expect(actualRestart.assertRestartAcceptEligible(fakeTrx(ops, namedColumns), RESTART_ESTIMATE))
       .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED', message: expect.stringMatching(/restart quote changed since it was created/) });
-    expect(ops).toEqual([]);
+    expect(ops).toEqual(['read:estimates']);
   });
 
   test('an unacquirable advisory lock fails closed with the retry code (never proceeds unfenced)', async () => {

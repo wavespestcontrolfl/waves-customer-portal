@@ -7834,6 +7834,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(CONSUMER_NOTICE_HINT);
       return;
     }
+    // A refused plan quote takes no hold (codex pre-push P1): its banner sends the customer to the portal.
+    if (staleQuoteNote) return;
     // Belt and braces behind the disabled buttons (codex r11 P2): a retained
     // callback or a keyboard event that skips `disabled` must not re-adopt a
     // hold that recovery is deleting, or one it failed to delete.
@@ -7955,7 +7957,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [readOnlyPreview, consumerNoticeBlocked, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
+  }, [readOnlyPreview, consumerNoticeBlocked, staleQuoteNote, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     // With per-service combos: combo-axis sections (pest + lawn/tree) are
@@ -8052,6 +8054,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(CONSUMER_NOTICE_HINT);
       return;
     }
+    // A refused plan quote accepts nothing, also from a card or deposit
+    // step that finishes later (codex pre-push P1).
+    if (staleQuoteNote) return;
     // Required-field guard mirrors confirmDisabled below (defense in depth —
     // the button is disabled while this is true, but a stale disabled-state
     // read should never let a request through with a required field blank).
@@ -8531,7 +8536,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     } finally {
       acceptInFlightRef.current = false;
     }
-  }, [readOnlyPreview, consumerNoticeBlocked, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactPhoneGap, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
+  }, [readOnlyPreview, consumerNoticeBlocked, staleQuoteNote, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactPhoneGap, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -8545,6 +8550,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(CONSUMER_NOTICE_HINT);
       return;
     }
+    // A refused plan quote mints no intent and accepts nothing (codex pre-push P1).
+    if (staleQuoteNote) return;
     // No card step and no accept while the estimate has no phone: the server
     // refuses both. The review button is disabled for it; this covers every
     // other entry (the annual-prepay confirm).
@@ -8784,7 +8791,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       }
     }
     await performAccept();
-  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept, readOnlyPreview, consumerNoticeBlocked, extendHoldAndSettle, noteRenderedRecurringConsent]);
+  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept, readOnlyPreview, consumerNoticeBlocked, staleQuoteNote, extendHoldAndSettle, noteRenderedRecurringConsent]);
 
   const handleDepositSuccess = useCallback(async (paymentIntentId) => {
     depositPaymentIntentIdRef.current = paymentIntentId;
@@ -10354,7 +10361,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 // unmounts the inline Payment Element mid-confirmSetup and
                 // the in-flight handleConfirm closure would book the OLD
                 // choice the UI no longer shows.
-                disabled={readOnlyPreview || consumerNoticeBlocked || ctaPhase === 'submitting' || inlineConfirmBusy || recoveryInFlight || recoveryStuck}
+                disabled={readOnlyPreview || consumerNoticeBlocked || !!staleQuoteNote || ctaPhase === 'submitting' || inlineConfirmBusy || recoveryInFlight || recoveryStuck}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 extraInvoiceRows={rodentSetupInvoiceRows}
@@ -10715,9 +10722,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               // review (or after a failed accept returns to review), where
               // its selectSlot(null) would clear the slot behind the
               // still-live reservation.
+              // A refused plan quote freezes it too (codex pre-push P1): no
+              // time on this page can accept that quote.
               <div
-                aria-disabled={ctaPhase === 'submitting' || undefined}
-                style={ctaPhase === 'submitting' ? { pointerEvents: 'none', opacity: 0.65 } : undefined}
+                aria-disabled={ctaPhase === 'submitting' || !!staleQuoteNote || undefined}
+                style={ctaPhase === 'submitting' || staleQuoteNote ? { pointerEvents: 'none', opacity: 0.65 } : undefined}
               >
                 <SlotPicker
                   website={websiteMode}
@@ -10758,7 +10767,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 // payment options the customer will get. Forcing cta.canAccept
                 // false server-side would fall through to the null-terminal
                 // "expired" card and destroy the preview's purpose.
-                disabled={readOnlyPreview || consumerNoticeBlocked || ctaPhase === 'submitting' || recoveryInFlight || recoveryStuck}
+                disabled={readOnlyPreview || consumerNoticeBlocked || !!staleQuoteNote || ctaPhase === 'submitting' || recoveryInFlight || recoveryStuck}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 extraInvoiceRows={rodentSetupInvoiceRows}

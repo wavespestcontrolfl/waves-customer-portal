@@ -1084,11 +1084,14 @@ describe('assertPlanStartAcceptEligible', () => {
     expect(ops.filter((o) => o.includes('cust-2'))).toEqual([]);
   });
 
-  test.each(['bill_by_invoice', 'show_one_time_option'])('a quote staff changed (%s on, as the handler read it) refuses as changed before any lock or read (codex pre-push P0)', async (column) => {
+  test.each(['bill_by_invoice', 'show_one_time_option'])('a quote staff changed after the handler read it (%s on the locked row) refuses as changed and takes no lock (codex pre-push P1)', async (column) => {
+    // The handler read the row with both options off; a writer from before the write refusal
+    // turned one on before the accept took the estimate row lock.
+    tables.estimates[0][column] = true;
     const ops = [];
-    await expect(actualRestart.assertPlanStartAcceptEligible(fakeTrx(ops, namedColumns), { ...ESTIMATE, [column]: true }))
+    await expect(actualRestart.assertPlanStartAcceptEligible(fakeTrx(ops, namedColumns), ESTIMATE))
       .rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED', message: expect.stringMatching(/This estimate changed since it was created/) });
-    expect(ops).toEqual([]);
+    expect(ops).toEqual(['read:estimates']);
   });
 
   test('a quote stored without the ZIP the account has since gained names the same home and accepts (codex pre-push P1)', async () => {
