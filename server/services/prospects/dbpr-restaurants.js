@@ -329,8 +329,10 @@ function htmlText(html) {
 // "High Priority - - From initial inspection : ... - From follow-up inspection 2026-09-03: ...".
 const VISIT_NOTE_RE = /(?:-\s*)?From (?:initial inspection|follow-up inspection (\d{4}-\d\d-\d\d))\s*:/g;
 // Any mention of a visit label, read by VISIT_NOTE_RE or not: any case, and any separator inside "follow-up",
-// "call back" or "re-inspection" (a dash of another kind, a space). A row where the two counts differ cannot be read.
-const VISIT_LABEL_RE = /\bfrom\s+(?:initial|follow\W{0,3}up|call\W{0,3}back|re\W{0,3})\s*inspection/gi;
+// "call back" or "re-inspection" (a dash of another kind). It reads the row's text with every space taken out, so a
+// tag inside a word ("inspec<wbr>tion", which htmlText makes a space) cannot hide one. A row where the two counts
+// differ cannot be read.
+const VISIT_LABEL_RE = /from(?:initial|follow\W{0,3}up|call\W{0,3}back|re\W{0,3})inspection/gi;
 // Whether the inspection table's visit row is the read visit's, as a first visit: its date reads (and is visitDate
 // when given), and its inspection type names a first visit (namesFirstVisit, the rule saveReport checks too).
 function isFirstVisitRow(visit, visitDate) {
@@ -343,7 +345,7 @@ function isFirstVisitRow(visit, visitDate) {
 // read (another date form, other case): such a row cannot be tied to a visit.
 function visitNotes(text) {
   const marks = [...text.matchAll(VISIT_NOTE_RE)];
-  if ((text.match(VISIT_LABEL_RE) || []).length !== marks.length) return { unreadable: true };
+  if ((text.replace(/\s+/g, '').match(VISIT_LABEL_RE) || []).length !== marks.length) return { unreadable: true };
   if (!marks.length) return { routine: true };
   const ends = marks.map((mark, i) => (i + 1 < marks.length ? marks[i + 1].index : text.length));
   // A label with no observation after it ("From initial inspection : - From follow-up …") cannot be read.
@@ -386,6 +388,7 @@ function readReportTables(page) {
   let codeColumn = -1; // the Violation column's position while in the violations table, else -1
   let dateColumn = -1; // the Inspection Date column's position from its head row to the table's end, else -1
   let typeColumn = -1; // the Inspection Type column's position in that head row, -1 when it has none
+  let violationsEnd = null; // where the last violations table's reading ended (a table tag), null while in it
   let row = []; // the cell texts of the row being read, blank cells kept so each keeps its position
   const endRow = () => {
     if (codeColumn >= 0 && row.some(Boolean)) {
@@ -412,23 +415,28 @@ function readReportTables(page) {
     }
     endRow();
     const column = violationsColumn(row);
-    if (column >= 0) codeColumn = column;
+    if (column >= 0) {
+      codeColumn = column;
+      violationsEnd = null;
+    }
     if (/^table$/i.test(match[2])) {
       if (!match[0].startsWith('</') && (codeColumn >= 0 || dateColumn >= 0)) unreadable = true;
+      if (codeColumn >= 0) violationsEnd = match.index;
       codeColumn = -1;
       dateColumn = -1;
     }
     row = [];
   }
   endRow();
-  return { entries, unreadable, visits };
+  return { entries, unreadable, visits, violationsEnd };
 }
 
 /**
  * Report page HTML -> { inspectionType, pestEvidence, findings: [{ code, text }] }, or null when the page cannot
  * answer. No answer is a failed read, retried later, never "no pests". inspectionType is the page's own visit row's
  * type, which saveReport checks again. The page answers only when:
- * - it is whole (the state office footer closes it): an error page or a page cut short gives no answer;
+ * - it is whole: the state office footer follows its violations table, so an error page, a page cut short (inside
+ *   that table or after it) or a page with the footer text only above the table gives no answer;
  * - it is one first visit's: its inspection table lists one visit, whose date reads (and is visitDate when given)
  *   and whose inspection type names a first visit (namesFirstVisit: given, and no callback, follow-up or
  *   re-inspection);
@@ -454,7 +462,8 @@ function parseInspectionReport(html, { violation35 = null, visitDate = null, vis
   const page = String(html || '').replace(/<!--[\s\S]*?-->|<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ');
   const whole = htmlText(page);
   if (!/Inspection Information/.test(whole) || !PAGE_FOOTER_RE.test(whole)) return null;
-  const { entries, unreadable, visits } = readReportTables(page);
+  const { entries, unreadable, visits, violationsEnd } = readReportTables(page);
+  if (violationsEnd === null || !PAGE_FOOTER_RE.test(htmlText(page.slice(violationsEnd)))) return null;
   // A page that lists two visits, whose date does not read, of another visit, or of a callback cannot answer.
   if (visits.length !== 1 || !isFirstVisitRow(visits[0], visitDate)) return null;
   const rows35 = entries.filter((entry) => /^35[AB]-/.test(entry.code)).map((entry) => {

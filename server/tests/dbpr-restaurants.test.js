@@ -539,6 +539,39 @@ describe('parseInspectionReport', () => {
       .toMatchObject({ pestEvidence: true });
   });
 
+  test('a tag inside a visit label cannot hide it: a callback-only citation never reads as the first visit\'s', () => {
+    const read = (rows) => parse(reportPage(rows, '10/20/2026'), { violation35: 1, visitDate: '2026-10-20' });
+    const row = (text) => `<tr><td>35A-02-8</td><td>&nbsp;</td><td>${text}</td></tr>`;
+    expect(read(row('High Priority - Live roaches under the sink.'))).toMatchObject({ pestEvidence: true });
+    // A tag inside a word, in the code's place or not, still reads as the same text.
+    expect(read(row('High Priority - Live ro<wbr>aches under the sink.'))).toMatchObject({ pestEvidence: true });
+    // A label split by a tag, anywhere in it: the row cannot be tied to a visit, so no answer.
+    for (const label of ['From follow-up inspec<wbr>tion 2026-11-10:', 'Fr<b>om</b> follow-up inspection 2026-11-10:',
+      'From fol<span>low-up</span> inspection 2026-11-10:', 'From follow-<wbr>up inspection 2026-11-10:', 'From initial in<wbr>spection :']) {
+      expect(read(row(`High Priority - - ${label} Live roaches under the sink.`))).toBeNull();
+    }
+  });
+
+  test('the footer must follow the violations table: a page cut short, or with the footer text only above it, gives no answer', () => {
+    const rows = '<tr><td>35B-01-1</td><td>&nbsp;</td><td>Outer door not self-closing.</td></tr>';
+    const read = (html) => parse(html, { violation35: 1, visitDate: '2026-10-20' });
+    const page = reportPage(rows, '10/20/2026');
+    expect(read(page)).toEqual({ pestEvidence: false, findings: [] });
+    const footer = '<p>2601 Blair Stone Road</p>';
+    expect(page.endsWith(`</table>${footer}`)).toBe(true);
+    // The footer text above the tables, and the page cut after the 35B row (inside the table, or just after it).
+    const body = page.slice(0, -footer.length);
+    expect(read(`${footer}${body.slice(0, -'</table>'.length)}`)).toBeNull();
+    expect(read(`${footer}${body}`)).toBeNull();
+    // The real layout: the footer text above it, and the page cut after the 35B row, before the next row.
+    const real = fixture('report-35b.html');
+    const readReal = (html) => parse(html, { violation35: 1, visitDate: '2026-10-21' });
+    expect(readReal(real)).toEqual({ pestEvidence: false, findings: [] });
+    const realCut = real.slice(0, real.indexOf('<tr><td><u>25-06-4</u>'));
+    expect(realCut).toContain('35B-03-4');
+    expect(readReal(`<p>2601 Blair Stone Road, Tallahassee FL 32399</p>${realCut}`)).toBeNull();
+  });
+
   test('a page answers only for the visit whose date its inspection table gives', () => {
     const rows = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - Live flies at the bar.</td></tr>';
     const read = (html, visitDate) => parse(html, { violation35: 1, visitDate, visitNumber: 1 });
