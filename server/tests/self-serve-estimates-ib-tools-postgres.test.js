@@ -137,6 +137,27 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     expect(rows.filter((row) => row.flag)).toHaveLength(6);
   });
 
+  test('a delivery stamp reads as an instant only in ISO form, in SQL and JavaScript alike, and never aborts a query (codex pre-push P1)', async () => {
+    const { deliveryInstantSql, firstDeliveredAtMs, sentAtSql } = require('../services/self-serve-estimates');
+    // PostgreSQL reads 'now', 'infinity' and 'today'; JavaScript rolls Feb 30
+    // over to March. Each is present but unreadable, so the send is dated by sent_at.
+    const stamps = ['2005-07-04T15:00:00.000Z', 'now', 'infinity', 'today', '2005-02-30T15:00:00.000Z', 'not a date'];
+    const { rows } = await trx.raw(`
+      SELECT e.stamp, ${deliveryInstantSql('e', 'firstDeliveredAt')} AS first_delivered,
+             ${deliveryInstantSql('e', 'lastDeliveredAt')} AS last_delivered, ${sentAtSql('e')} AS sent_anchor
+      FROM (SELECT s.stamp, 'plan_start'::text AS source, ?::timestamptz AS sent_at,
+                   jsonb_build_object('deliveryState', jsonb_build_object('firstDeliveredAt', s.stamp, 'lastDeliveredAt', s.stamp)) AS estimate_data
+            FROM jsonb_array_elements_text(?::jsonb) AS s(stamp)) e`, [AT, JSON.stringify(stamps)]);
+    expect(rows.map((row) => row.stamp).sort()).toEqual([...stamps].sort());
+    for (const row of rows) {
+      const js = firstDeliveredAtMs({ deliveryState: { firstDeliveredAt: row.stamp } });
+      expect([row.stamp, row.first_delivered?.getTime() ?? null, row.last_delivered?.getTime() ?? null])
+        .toEqual([row.stamp, js, js]);
+      expect([row.stamp, row.sent_anchor.toISOString()]).toEqual([row.stamp, js == null ? new Date(AT).toISOString() : row.stamp]);
+    }
+    expect(rows.filter((row) => row.first_delivered).map((row) => row.stamp)).toEqual([stamps[0]]);
+  });
+
   test('the Pipeline board lists a self-serve quote once staff deliver it, and never a plan restart quote (codex pre-push P1)', async () => {
     const { fetchEstimates } = require('../routes/admin-pipeline').__private;
     await seed();

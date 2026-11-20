@@ -54,9 +54,41 @@ function isUndeliveredSelfServe(source, estimateData) {
   return SELF_SERVE_ESTIMATE_SOURCES.includes(String(source || '')) && !hasDeliveryStamp(estimateData);
 }
 
+// The one rule for reading a deliveryState stamp (the send path writes
+// toISOString()) as an instant, here and in estimate-draft-retire.js: an ISO
+// shape AND a value PostgreSQL can read. The shape alone lets an ISO-looking
+// but impossible value (Feb 30) abort a whole query at the cast;
+// pg_input_is_valid alone accepts special literals such as 'now' and
+// 'infinity', which would date a send anew on every read, or never (codex
+// pre-push P1). Such a stamp is present but unreadable. `expr` is SQL text
+// built from code constants; the pattern holds no ?, as these strings go into
+// raw SQL with bindings.
+const ISO_DATE_PREFIX = '^[0-9]{4}-[0-9]{2}-[0-9]{2}';
+function isoInstantSql(expr) {
+  return `(${expr} ~ '${ISO_DATE_PREFIX}' AND pg_input_is_valid(${expr}, 'timestamptz'))`;
+}
+
+// The stamp deliveryState.<key> of the row under `alias` as a timestamptz,
+// NULL when absent or unreadable, so a bad stamp never aborts a query. `key`
+// is a code constant, never input.
+function deliveryInstantSql(alias, key) {
+  const stamp = `(${alias}.estimate_data #>> '{deliveryState,${key}}')`;
+  return `(CASE WHEN ${isoInstantSql(stamp)} THEN ${stamp}::timestamptz END)`;
+}
 function firstDeliveredAtSql(alias) {
-  const stamp = deliveryStampSql(alias);
-  return `(CASE WHEN pg_input_is_valid(${stamp}, 'timestamptz') THEN (${stamp})::timestamptz END)`;
+  return deliveryInstantSql(alias, 'firstDeliveredAt');
+}
+
+// The same first delivery in JavaScript (win/loss), in epoch ms, null where
+// SQL reads NULL: JavaScript reads no special literal, but rolls an
+// impossible day over (Feb 30 to Mar 1), which PostgreSQL refuses.
+function firstDeliveredAtMs(estimateData) {
+  const stamp = estimateData?.deliveryState?.firstDeliveredAt;
+  const date = typeof stamp === 'string' ? new RegExp(ISO_DATE_PREFIX).exec(stamp) : null;
+  const ms = date ? Date.parse(stamp) : NaN;
+  if (!Number.isFinite(ms)) return null;
+  const [year, month, day] = date[0].split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day)).getUTCDate() === day ? ms : null;
 }
 function selfServeOr(alias, selfServeSql, otherSql) {
   return `(CASE WHEN ${alias}.source IN (${SELF_SERVE_SOURCES_SQL}) THEN ${selfServeSql} ELSE ${otherSql} END)`;
@@ -109,5 +141,5 @@ function countableViewAtSql(alias) {
 
 module.exports = {
   SELF_SERVE_ESTIMATE_SOURCES, whereNotUndeliveredSelfServe, isUndeliveredSelfServe, undeliveredSelfServeSql,
-  sentAtSql, countableViewAtSql,
+  sentAtSql, countableViewAtSql, isoInstantSql, deliveryInstantSql, firstDeliveredAtMs,
 };

@@ -95,8 +95,9 @@ function dateRange(period) {
 // The Eastern calendar days from..to (YYYY-MM-DD, both inclusive) as the
 // half-open window [fromTs, toTs) of real instants, for a timestamptz
 // column (codex pre-push P1): a naive 'YYYY-MM-DDT00:00:00' string reads in
-// the database session's zone, 4-5 hours off the business day. The same
-// bounds as get_report_engagement.
+// the database session's zone, 4-5 hours off the business day.
+// get_report_engagement, get_estimate_funnel and compare_periods all read
+// their bounds here.
 function etDayWindow(from, to) {
   if (!validCalendarDate(from) || !validCalendarDate(to)) {
     return { error: 'date_from and date_to must be real YYYY-MM-DD dates' };
@@ -1150,14 +1151,11 @@ async function getReportEngagement(input = {}) {
   // Inclusive lower bound: 29 days back + today = exactly 30 ET calendar days.
   const from = input.date_from || etDateString(addETDays(now, -29));
   const to = input.date_to || etDateString(now);
-  if (!validCalendarDate(from) || !validCalendarDate(to)) {
-    return { error: 'date_from and date_to must be real YYYY-MM-DD dates' };
-  }
   // ET wall-clock day bounds as real Dates — the send timestamps are
   // timestamptz, so a naive string here would shift the window 4-5 hours.
-  const fromTs = parseETDateTime(`${from}T00:00`);
-  const toTs = parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${to}T12:00`), 1))}T00:00`);
-  if (!(fromTs < toTs)) return { error: 'date_from must be on or before date_to' };
+  const bounds = etDayWindow(from, to);
+  if (bounds.error) return { error: bounds.error };
+  const { fromTs, toTs } = bounds;
 
   const actionFlags = REPORT_ACTION_EVENTS
     .map((name) => `BOOL_OR(sre.event_name = '${name}') AS ${name}`)

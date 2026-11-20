@@ -110,7 +110,10 @@ describe('composeUnworkedCommsDigest', () => {
     // even when a concurrent accept wins the send claim.
     // lastDeliveredAt compared against the task boundary itself (audit on
     // 573ee332e) — never mere existence paired with mutable sent_at.
-    expect(block).toMatch(/\(fe\.estimate_data #>> '\{deliveryState,lastDeliveredAt\}'\)::timestamptz > t\.created_at/);
+    // Read through the guarded reader: a malformed stamp leaves the task open
+    // and never aborts the whole query (codex pre-push P1).
+    expect(block).toMatch(/\$\{deliveryInstantSql\('fe', 'lastDeliveredAt'\)\} > t\.created_at/);
+    expect(block).not.toMatch(/lastDeliveredAt\}'\)::timestamptz/);
     expect(block).not.toMatch(/sentChannels/);
     expect(block).not.toMatch(/channels,email,ok/);
   });
