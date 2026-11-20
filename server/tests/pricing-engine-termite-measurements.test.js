@@ -264,6 +264,8 @@ describe('termite measurement overrides and safeguards', () => {
     const confirmed = trench({ applicationRate: 'high', labelBottle: 'lesco_crosscheck_plus' });
     expect(confirmed.labelConfirmed).toBe(true);
     expect(confirmed.manualReviewReasons).not.toContain('label_confirmation_required');
+    expect(confirmed.manualReviewReasons).not.toContain('reduced_volume_confirmation_required'); // its box names the conditions
+    expect(standard.manualReviewReasons || []).not.toContain('reduced_volume_confirmation_required'); // the labeled volume
     const products = require('../services/pricing-engine/constants').SPECIALTY.trenching.products;
     const savedHigh = products.talstar_p.productOzPerFinishedGallonAtHighRate;
     // The label charts one adjustment, its 0.12% dilution (2 fl oz a finished gallon) at half the volume, whatever the configured
@@ -280,6 +282,12 @@ describe('termite measurement overrides and safeguards', () => {
       expect(movedPair.warnings.join(' ')).not.toMatch(/reduced finished volume/);
       products.talstar_p.productOzPerFinishedGallonAtHighRate = 2;
       expect(trench({ applicationRate: 'high' })).toMatchObject({ finishedGallons: 40, productOz: 80 });
+      // A standard rate configured at the label's 2 oz halves the volume too. The label box names the reduced-volume conditions
+      // only at the high rate, so that line stays in review whatever its label check (pre-push audit 30).
+      products.talstar_p.productOzPerFinishedGallonAtStandardRate = 2;
+      const standardAtTwo = trench({ labelBottle: 'lesco_crosscheck_plus' });
+      expect(standardAtTwo).toMatchObject({ finishedGallons: 40, productOz: 80, labelConfirmed: true, requiresManualReview: true });
+      expect(standardAtTwo.manualReviewReasons).toContain('reduced_volume_confirmation_required');
     } finally {
       products.talstar_p.productOzPerFinishedGallonAtHighRate = savedHigh;
       products.talstar_p.productOzPerFinishedGallonAtStandardRate = savedStandard;
