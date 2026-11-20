@@ -7679,11 +7679,10 @@ reads that address from the booking's own customer row, not from a copy the
 commit read earlier. An address that resolves to no zone takes
 the customer's city on file, as a visit with no zone stamp is read later by its
 customer's city. Phase one keeps the profile's city when a typed address
-matches the profile, so a refusal's fresh times and the retry read the zone
-this commit read. When phase one corrects the profile in place to another typed
-address, the booking still checks and stamps the zone of the city its first
-check read; its refusal's fresh times and the retry read the corrected
-profile's city, the same one. With the funnel on, the booking transaction also refuses with
+matches the profile, so the booking, a refusal's fresh times and the retry
+read the zone the list read. A profile phase one corrects in place to another
+typed address takes that address's city for all three: the city on file
+named the old address. With the funnel on, the booking transaction also refuses with
 `CUSTOMER_CHANGED_RETRY` when the customer's address changed after its zone read it, and the
 page gets the answer an account change under the booking fence already gets:
 `SLOT_TAKEN` with `address_changed: true`, the address on file and no times, or

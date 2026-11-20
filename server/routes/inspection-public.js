@@ -2114,8 +2114,9 @@ async function provisionLinkedCustomer(trx, {
     // pin) keeps the row's city on file: the two names are one place, and
     // the far-south funnel reads the city name, so a typed name no zone lists
     // would take the property out of the zone its list read, for this commit,
-    // its refusal's times and every retry (owner rule B, pre-push P1 on
-    // 7a682696f6).
+    // its refusal's times and every retry (owner rule B, pre-push P1s on
+    // 850a6a79f0 and 7a682696f6). Another address takes its own city: the
+    // city on file named the old one.
     const city = storedCustRow.city && matchesStoredAddress ? storedCustRow.city : resolved.address.city;
     const after = {
       address_line1: resolved.address.line1,
@@ -2395,8 +2396,8 @@ async function bookAssessmentVisit({
       ...(estimateGuard ? { estimateGuard } : {}),
       // The lead link's far-south truck re-check under the booking's date lock (owner rule B per truck).
       ...(slotGuard ? { slotGuard } : {}),
-      // The lead link's booking address (zoneFunnelInputs) and the customer city it falls back to, as its list resolved
-      // the zone, given the booking's own customer row: the visit's zone, and so the slot guard's, resolves the same way.
+      // The lead link's booking address, as its list resolved the zone (zoneFunnelInputs), given the booking's own
+      // customer row: the visit's zone, and so the slot guard's, resolves the same way.
       ...(zoneAddress ? { zoneAddress } : {}),
     },
   });
@@ -2756,33 +2757,29 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // while that lock is held.
     // The booking address is the profile's own there; at the same pin it stays
     // the typed address, as the list and the next commit's own check read it.
+    // With the funnel on, createSelfBooking reads its zone from that address,
+    // else from its customer's city on file (slot-zone.js leadBookingZone;
+    // owner rule B, pre-push P1s on 3e6fd14320, 3b494d3581 and 46fd83d04f).
+    // Phase 1 keeps the profile's city when a typed address matches the
+    // profile (provisionLinkedCustomer; pre-push P1s on 850a6a79f0 and
+    // 7a682696f6), so that city stays the one the first build read.
+    // Every build here passes that address and this customer, so it reads the
+    // same zone. When the city decides and is not the city the first build
+    // read, the slot is re-checked; a 409 answers fresh times only as
+    // nextCommitRefresh says. With the funnel off the booking reads no zone
+    // address, so nothing is looked up here. A failed lookup re-checks nothing
+    // (logged); the booking still checks its own zone under its date lock
+    // (pre-push P1 on 84c9b2d840).
     const bookingAddress = locationMoved ? customerAddressFields(custRow) : resolved.address;
-    // With the funnel on, createSelfBooking resolves its zone from leadBookingZone's two inputs, which this function
-    // gives for its own customer row: the booking address's zone, else the zone of the customer city it falls back to
-    // (slot-zone.js; owner rule B, pre-push P1s on 3e6fd14320, 3b494d3581 and 46fd83d04f). The address is the typed
-    // (or the lead's) one, or the row's own when the booking uses the profile's, which the booking's lock fences
-    // (pre-push P1 on 5fc5e4d648: a copy read here could be stale by then). The city is the row's own, but a typed
-    // address on the profile the first build read keeps that build's city, the zone its list offered: phase 1 can
-    // correct that profile in place to the typed address, and a city in no zone would leave the visit unchecked and
-    // unstamped (pre-push P1 on 850a6a79f0). A typed address that matches the profile keeps its city there.
-    const zoneAddress = (cust) => (locationMoved || resolved.source === 'customer'
-      ? [zoneFunnelInputs(customerAddressFields(cust)), cust.city]
-      : [zoneFunnelInputs(bookingAddress), checkedCustomer && cust.id === checkedCustomer.id ? checkedCustomer.city : cust.city]);
-    // Phase 1's row here. A re-check build passes this address and this customer, so it reads the same zone. When the
-    // city decides and is not the city the first build read, the slot is re-checked; a 409 answers fresh times only as
-    // nextCommitRefresh says. With the funnel off the booking reads no zone address, so nothing is looked up here. A
-    // failed lookup re-checks nothing (logged); the booking still checks its own zone under its date lock (pre-push P1
-    // on 84c9b2d840).
-    const [zoneInputs, zoneCity] = zoneAddress(custRow);
     const { zone: bookingZone, fromCustomer } = funnelOn()
-      ? await leadBookingZone(db, zoneInputs, zoneCity).catch((err) => {
+      ? await leadBookingZone(db, zoneFunnelInputs(bookingAddress), custRow.city).catch((err) => {
         logger.warn(`[inspection-public] lead zone lookup failed for lead ${lead.id}: ${err.message}`);
         return { fromCustomer: false };
       })
       : { fromCustomer: false };
     const nextCommit = { lead, verified, resolved, custRow, bookingAddress, bookingLocation, locationMoved };
     const bookingSlot = await revalidateSlotAt(bookingLocation, {
-      slot, moved: locationMoved, zoneMoved: fromCustomer && zoneCity !== checkedCustomer?.city, zone: bookingZone,
+      slot, moved: locationMoved, zoneMoved: fromCustomer && custRow.city !== checkedCustomer?.city, zone: bookingZone,
       date, time, config, catalog, leadId: lead.id, address: bookingAddress, customer: custRow,
     });
     if (!bookingSlot) return sendSlotTaken(res, { ...(await nextCommitRefresh(nextCommit)), range, config, catalog, leadId: lead.id });
@@ -2815,12 +2812,17 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     let fencedUniverse = null;
     // Owner rule B per truck, under the booking's date lock: two commits can rebuild the same new far-south day
     // before either inserts, each with a different truck; the second finds the first's stop and gets SLOT_TAKEN.
-    // createSelfBooking hands over the zone it stamps on the visit, resolved from zoneAddress as this link's list
-    // resolved it (its city decides, its text only without one, then the fallback city), so the list, the check and the
-    // row agree.
+    // createSelfBooking hands over the zone it stamps on the visit, resolved from the booking address as this link's
+    // list resolved it (zoneAddress: its city decides, its text only without one), so the list, the check and the row agree.
     const slotGuard = (conn, { zone = null } = {}) => truckMayTakeDate(conn, {
       estimateZone: zone, date, technicianId: bookingSlot.technician_id ?? null,
     });
+    // That address, given createSelfBooking's own customer row: the typed (or the lead's) address, or, when the
+    // booking uses the profile's own address, the row's address as the booking reads it, which its lock fences
+    // (pre-push P1 on 5fc5e4d648: a copy of the profile read here could be stale by then).
+    const zoneAddress = (cust) => zoneFunnelInputs(
+      locationMoved || resolved.source === 'customer' ? customerAddressFields(cust) : bookingAddress,
+    );
     const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, slotGuard, zoneAddress, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), fenceIds: async (conn) => { fencedUniverse = await leadFenceIds(conn, lead.id, verified, custRow.id); return fencedUniverse; }, revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id, fencedUniverse) } });
 
     if (!result.ok) {

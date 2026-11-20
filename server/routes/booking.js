@@ -2747,14 +2747,13 @@ async function createSelfBooking(payload = {}) {
     // caller's own re-check of this slot on the booking transaction, under the
     // date lock, given the zone this booking stamps on its visit; false
     // refuses it as a taken slot. callbackVisit.zoneAddress(customer) (the lead
-    // assessment link): given this booking's own customer row, the two inputs
-    // the caller's list resolved its zone from, as [address, customerCity]:
-    // the booking address ({ address, city }, or null), a typed address or
-    // that row's own address when the booking uses the profile's, and the
-    // customer city on file it falls back to, that row's own or, for a typed
-    // address on the profile the caller's first check read, the city that
-    // check read. This booking's zone is slot-zone.js leadBookingZone of those
-    // two, so the list, the slot guard and the stamp agree.
+    // assessment link): given this booking's own customer row, the booking
+    // address the caller's list resolved its zone from ({ address, city }, or
+    // null): a typed address, or that row's own address when the booking uses
+    // the profile's; this booking's zone is that address's zone, resolved the
+    // same way, else the zone of this booking's customer's city on file
+    // (slot-zone.js leadBookingZone), so the list, the slot guard and the
+    // stamp agree.
     const paidInternalVisit = callbackVisit && callbackVisit.isCallback === false
       && Number.isFinite(Number(callbackVisit.billing?.estimatedPrice)) && Number(callbackVisit.billing.estimatedPrice) > 0
       ? { estimatedPrice: Math.round(Number(callbackVisit.billing.estimatedPrice) * 100) / 100 }
@@ -3547,20 +3546,18 @@ async function createSelfBooking(payload = {}) {
     const confCode = generateConfirmationCode();
 
     // Resolve zone from city (best-effort, for reporting). A caller that names
-    // the inputs its list resolved a zone from (callbackVisit.zoneAddress, given
-    // this booking's own customer row) gets that zone: a city no zone lists
+    // the booking address its list resolved a zone from (callbackVisit.zoneAddress,
+    // given this booking's own customer row) gets that zone: a city no zone lists
     // ('North Venice') takes the zone whose city its name contains, as its list
     // did. Only with the far-south funnel on (GATE_SOUTH_ZONE_DAY_FUNNEL): off, no
-    // list resolved a zone, and the customer's city decides as before. When that
-    // address resolves to no zone, the customer city the caller names decides
-    // (slot-zone.js leadBookingZone): this row's own, or, for a typed address on
-    // the profile the caller's first check read, that check's city, which the
-    // caller's own write may have replaced (pre-push P1 on 850a6a79f0). Every
-    // other customer field the zone reads comes from this booking's own row,
-    // which the fence below re-checks (owner rule B, pre-push P1s on 3e6fd14320,
-    // 3b494d3581 and 5fc5e4d648).
+    // list resolved a zone, and the customer's city decides as before. The
+    // customer's city also decides when that address resolves to no zone
+    // (slot-zone.js leadBookingZone): a visit with no zone stamp is read later by
+    // its customer's city. Every customer field the zone reads comes from this
+    // booking's own row, which the fence below re-checks (owner rule B, pre-push
+    // P1s on 3e6fd14320, 3b494d3581 and 5fc5e4d648).
     const zone = callbackVisit?.zoneAddress && funnelOn()
-      ? (await leadBookingZone(db, ...callbackVisit.zoneAddress(customer))).zone
+      ? (await leadBookingZone(db, callbackVisit.zoneAddress(customer), customer.city)).zone
       : (await db('service_zones').select('*')).find(z => (z.cities || []).some(c =>
         c.toLowerCase() === (customer.city || '').toLowerCase()
       )) || null;
