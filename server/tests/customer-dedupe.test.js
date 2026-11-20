@@ -724,6 +724,13 @@ describe('mergeSingletonPrefRow', () => {
       expect(await rewrites([{ customer_id: 'L', ...X2 }], { winnerAddr: at('100 1st St NE'), loserAddr: at('100 1st Street Northeast') })).toEqual({ [ADOPTED]: X2_TEXT });
     });
 
+    it('a slash house number follows; a condo street with no unit on either side does not', async () => {
+      const at = (address_line1, extra = {}) => ({ address_line1, city: 'Bradenton', zip: '34205', ...extra });
+      expect(await rewrites([{ customer_id: 'L', ...X2 }], { winnerAddr: at('123/2 Main St'), loserAddr: at('123/2 Main St') })).toEqual({ [ADOPTED]: X2_TEXT });
+      expect(await rewrites([{ customer_id: 'L', ...X2 }], { winnerAddr: at('500 Bay Dr'), loserAddr: at('500 Bay Dr', { property_type: 'condo' }) })).toEqual({ [CLEARED]: X2_TEXT });
+      expect(await rewrites([{ customer_id: 'L', ...X2 }], { winnerAddr: at('500 Bay Dr', { address_line2: 'Unit 12' }), loserAddr: at('500 Bay Dr', { address_line2: 'Unit 12', property_type: 'condo' }) })).toEqual({ [ADOPTED]: X2_TEXT });
+    });
+
     it('two rows fold at the same PO box: a mailing address, not a home, so the loser\'s timer is dropped', async () => {
       const PO_BOX = { address_line1: 'PO Box 42', city: 'Bradenton', zip: '34205' };
       expect(await rewrites([{ customer_id: 'L', ...X2 }, { customer_id: 'W', ...NONE }], { winnerAddr: PO_BOX, loserAddr: PO_BOX })).toEqual({ [DROPPED]: X2_TEXT });
@@ -2093,6 +2100,11 @@ describe('executeMerge', () => {
             [{ address_line1: '123 4th St W', city: 'Bradenton', zip: '34205' }, { winnerAddr: { address_line1: '12 34th St W', city: 'Bradenton', zip: '34205' } }, { loserFollows: false, winnerStays: true }],
             // Street words compare canonically: 100 1st Street Northeast is 100 1st St NE.
             [{ address_line1: '100 1st Street Northeast', city: 'Bradenton', zip: '34205' }, { winnerAddr: { address_line1: '100 1st St NE', city: 'Bradenton', zip: '34205' } }, { loserFollows: true, winnerStays: true }],
+            // A slash house number is a house number.
+            [{ address_line1: '123/2 Main St', city: 'Bradenton', zip: '34205' }, { winnerAddr: { address_line1: '123/2 Main St', city: 'Bradenton', zip: '34205' } }, { loserFollows: true, winnerStays: true }],
+            // A condo on either record needs a named, equal unit: with none, the street is a building, not a home.
+            [{ address_line1: '500 Bay Dr', city: 'Bradenton', zip: '34205', property_type: 'condo' }, { winnerAddr: { address_line1: '500 Bay Dr', city: 'Bradenton', zip: '34205' } }, { loserFollows: false, winnerStays: true }],
+            [{ address_line1: '500 Bay Dr', address_line2: 'Unit 12', city: 'Bradenton', zip: '34205' }, { winnerAddr: { address_line1: '500 Bay Dr', address_line2: 'Unit 12', city: 'Bradenton', zip: '34205', property_type: 'condo' } }, { loserFollows: true, winnerStays: true }],
           ]) {
             fold.mockClear();
             const { recorded } = await merge(loserAddr, { ...options, collide: true, timer: X2 });

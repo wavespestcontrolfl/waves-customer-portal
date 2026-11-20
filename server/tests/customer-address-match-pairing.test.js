@@ -11,7 +11,7 @@ jest.mock('../services/estimator-engine/address-compare', () => {
 });
 
 const compare = require('../services/estimator-engine/address-compare');
-const { pairCustomersAtSameAddress, _private } = require('../services/customer-address-match');
+const { pairCustomersAtSameAddress, sameHouseholdAddress, _private } = require('../services/customer-address-match');
 
 beforeEach(() => compare.sameStreetAddress.mockClear());
 
@@ -127,5 +127,39 @@ describe('bucketing never disagrees with the pairwise comparator (property-style
       }
     }
     expect(accepted).toBeGreaterThan(50);
+  });
+});
+
+describe('sameHouseholdAddress: the pairwise rule on two customer rows', () => {
+  const at = (address_line1, extra = {}) => ({ address_line1, city: 'Sarasota', zip: '34231', ...extra });
+  test('the house number stays apart from the street, and street words compare canonically', () => {
+    expect(sameHouseholdAddress(at('12 34th St W'), at('123 4th St W'))).toBe(false);
+    expect(sameHouseholdAddress(at('100 1st St NE'), at('100 1st Street Northeast'))).toBe(true);
+  });
+  test('a slash or range house number is a house number; a PO box, a bare street name or no street is not', () => {
+    expect(sameHouseholdAddress(at('123/2 Example Loop'), at('123/2 Example Loop'))).toBe(true);
+    expect(sameHouseholdAddress(at('123-125 Example Loop'), at('123-125 Example Loop'))).toBe(true);
+    expect(sameHouseholdAddress(at('PO Box 42'), at('PO Box 42'))).toBe(false);
+    expect(sameHouseholdAddress(at('Example Loop'), at('Example Loop'))).toBe(false);
+    expect(sameHouseholdAddress(at(null), at(null))).toBe(false);
+  });
+  test('a unit on one side only is another home; a stacked building needs a named, equal unit', () => {
+    expect(sameHouseholdAddress(at('100 Example Loop'), at('100 Example Loop'))).toBe(true);
+    expect(sameHouseholdAddress(at('100 Example Loop'), at('100 Example Loop', { address_line2: 'Unit 4' }))).toBe(false);
+    expect(sameHouseholdAddress(at('100 Example Loop', { multiUnit: true }), at('100 Example Loop'))).toBe(false);
+    expect(sameHouseholdAddress(at('100 Example Loop', { multiUnit: true, address_line2: 'Unit 4' }), at('100 Example Loop', { address_line2: 'Apt 4' }))).toBe(true);
+  });
+  test('it agrees with the queue: a pair is a household exactly when pairCustomersAtSameAddress pairs it', () => {
+    const rows = [
+      at('100 Example Loop'), at('100 EXAMPLE LOOP'), at('100 Example Loop', { address_line2: 'Unit 4' }),
+      at('100 Example Loop', { address_line2: 'Apt 4', multiUnit: true }), at('100 Example Loop', { multiUnit: true }),
+      at('101 Example Loop'), at('PO Box 9'), at('100 Example Loop', { zip: '34232' }),
+    ];
+    for (let i = 0; i < rows.length; i += 1) {
+      for (let j = i + 1; j < rows.length; j += 1) {
+        const queue = pairCustomersAtSameAddress([{ ...rows[i], customerId: 'a', matchedVia: 'primary' }, { ...rows[j], customerId: 'b', matchedVia: 'primary' }]);
+        expect([i, j, sameHouseholdAddress(rows[i], rows[j])]).toEqual([i, j, queue.length === 1]);
+      }
+    }
   });
 });

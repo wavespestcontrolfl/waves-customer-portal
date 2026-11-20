@@ -46,8 +46,7 @@ const logger = require('./logger');
 const { HOLD_FLAG, isDisputeHoldReason, embedPriorHoldReason, withoutPriorHoldReason, priorHoldReasonOf } = require('./collections/collection-hold');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { BILLING_DELIVERY_FIELDS, mergedBillingChannelUpdates } = require('./billing-delivery-channels');
-const { pairCustomersAtSameAddress } = require('./customer-address-match');
-const { sameStreetAddress } = require('./estimator-engine/address-compare');
+const { pairCustomersAtSameAddress, sameHouseholdAddress } = require('./customer-address-match');
 const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
 const { isResidenceProperty } = require('./customer-properties');
 const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
@@ -1531,26 +1530,27 @@ function newSodBeforeImage(row) {
 
 // The sprinkler timer's premises for one merge, read from the kept customer's address AS THE MERGE LEAVES IT (their
 // own plus the address backfill predictWinnerBackfills applies). (The new-sod record keeps sodFollowsMerge.)
-// - loserFollows: the loser's home is that home. A street-only kept customer that takes the loser's unit, or an
-//   addressless one that takes the loser's whole address, has the loser's home after the merge. A loser with no
-//   street address (no address, or one without a house number: a PO box, a bare street name; normalizeStreetKey,
-//   the household matcher's rule) is unknown: false. Two customers can share a mailing address and not a home.
-//   The two homes compare by the canonical comparator the duplicates queue confirms one household with
-//   (sameStreetAddress, requireExactUnit; pairCustomersAtSameAddress): the house number stays apart from the street
+// - loserFollows: the loser's home is that home, by the duplicates queue's rule for one household
+//   (sameHouseholdAddress, the pairwise rule of pairCustomersAtSameAddress). Both need a street line with a leading
+//   house number: a PO box or a bare street name has none, and two customers can share a mailing address and not a
+//   home. The canonical comparator must match with an exact unit: the house number stays apart from the street
 //   ("12 34th St" is not "123 4th St"), street words compare canonically ("Street"/"St", "Northeast"/"NE"), a unit
-//   on one side only is another home, and a ZIP or a city on both sides must agree. (homesDiffer squashes the
-//   street to bare letters and digits, which is right for an address edit's typing, not for two records.)
+//   on one side only is another home, and a ZIP or a city on both sides must agree. A condo type on either record
+//   (isStackedUnitPropertyType on customers.property_type, the value the primary property mirrors) needs a named,
+//   equal unit: two condo records with no unit are a building, not a household. A street-only kept customer that
+//   takes the loser's unit, or an addressless one that takes the loser's whole address, has the loser's home after
+//   the merge. (homesDiffer squashes the street to bare letters and digits, which suits an address edit's typing,
+//   not two records.)
 // - winnerStays: the kept customer's own home is unchanged, by the test an address edit uses (homesDiffer, as in
 //   propagateCustomerAddressChange). A backfilled unit or a first address changes it, so their own timer is
 //   settled as an address edit would settle it (cleared), never kept on a home it was not entered for.
 function timerPremiseOf(winner, loser) {
   const fanout = require('./customer-address-fanout');
+  const { isStackedUnitPropertyType } = require('./estimator-engine/unit-scope-model');
   const after = { ...winner, ...predictWinnerBackfills(winner, loser).backfills };
-  // One customer row's address as one line, the household matcher's form (customer-address-match).
-  const line = (row) => [row?.address_line1, row?.address_line2, row?.city, row?.zip].filter(Boolean).join(', ');
+  const multiUnit = isStackedUnitPropertyType(after.property_type) || isStackedUnitPropertyType(loser?.property_type);
   return {
-    loserFollows: !!normalizeStreetKey(loser?.address_line1)
-      && sameStreetAddress(line(after), line(loser), { requireExactUnit: true }),
+    loserFollows: sameHouseholdAddress({ ...after, multiUnit }, { ...loser, multiUnit }),
     winnerStays: !fanout.homesDiffer(winner, after),
   };
 }
