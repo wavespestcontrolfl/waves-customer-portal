@@ -127,7 +127,7 @@ test('every estimates query dated by the send reads sentAtSql, never the sent_at
   expect(recorded.filter((r) => r.method === 'whereRaw' && r.args[0] === sendDated).length).toBe(2);
 });
 
-test('compare_periods dates estimate events by Eastern calendar day and churn by its DATE; a day that does not exist is an error, not a query (codex pre-push P1)', async () => {
+test('compare_periods dates estimate events by Eastern calendar day, and churn by its DATE or else its updated_at Eastern day; a day that does not exist is an error, not a query (codex pre-push P1)', async () => {
   const { sentAtSql } = require('../services/self-serve-estimates');
   recorded.length = 0;
   const out = await executeDashboardTool('compare_periods', {
@@ -140,10 +140,11 @@ test('compare_periods dates estimate events by Eastern calendar day and churn by
   const NOV = ['2026-11-01T04:00:00.000Z', '2026-12-01T05:00:00.000Z'];
   expect(windows(sentAtSql('e'))).toEqual([OCT, NOV]);
   expect(windows('e.accepted_at')).toEqual([OCT, NOV]);
-  // churned_at is a DATE: its bounds stay the calendar strings.
-  const churn = recorded.filter((r) => r.method === 'whereRaw' && String(r.args[0]).startsWith('COALESCE(c.churned_at'))
-    .map((r) => r.args[1]).sort();
-  expect(churn).toEqual([['2026-10-01T00:00:00', '2026-10-31T23:59:59'], ['2026-11-01T00:00:00', '2026-11-30T23:59:59']]);
+  // churned_at is a DATE, compared by calendar day; a row without one falls
+  // back to updated_at within the same Eastern bounds.
+  const churn = recorded.filter((r) => r.method === 'whereRaw' && String(r.args[0]).startsWith('(c.churned_at BETWEEN ? AND ? OR (c.churned_at IS NULL AND c.updated_at >= ? AND c.updated_at < ?))'))
+    .map((r) => [...r.args[1].slice(0, 2), ...r.args[1].slice(2).map((d) => d.toISOString())]).sort();
+  expect(churn).toEqual([['2026-10-01', '2026-10-31', ...OCT], ['2026-11-01', '2026-11-30', ...NOV]]);
 
   recorded.length = 0;
   expect(await executeDashboardTool('compare_periods', { period_a: 'last_year', period_b: 'this_month' }))

@@ -144,10 +144,10 @@ const SENT_CHANNELS_SQL = (alias) => `(jsonb_array_length(
     CASE WHEN jsonb_typeof(${alias}.estimate_data #> '{deliveryState,sentChannels}') = 'array'
       THEN ${alias}.estimate_data #> '{deliveryState,sentChannels}' ELSE '[]'::jsonb END) > 0
   AND ${alias}.viewed_at IS NOT NULL)`;
-// Shape AND validity, the one rule for a deliveryState stamp
-// (self-serve-estimates.js): the shape regex alone lets an ISO-looking but
-// invalid value abort the whole candidate query at the cast, and
-// pg_input_is_valid alone accepts special literals such as 'infinity'.
+// Shape AND validity, shared with the watchers (self-serve-estimates.js
+// isoInstantSql): the shape regex alone lets an ISO-looking but invalid value
+// abort the whole candidate query at the cast, and pg_input_is_valid alone
+// accepts special literals such as 'infinity'.
 const ISO_INSTANT_SQL = isoInstantSql;
 const DELIVERED_AT_SQL = (alias) => ISO_INSTANT_SQL(`(${alias}.estimate_data #>> '{deliveryState,lastDeliveredAt}')`);
 const SENT_TIME_SQL = (alias) => `(CASE

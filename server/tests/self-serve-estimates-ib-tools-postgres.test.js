@@ -41,10 +41,11 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
   beforeAll(() => {
     const connection = process.env.DATABASE_URL;
     const url = new URL(connection);
-    const localCI = ['localhost', '127.0.0.1'].includes(url.hostname);
-    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
-      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
-    if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
+    // Real rows are written: only CI's disposable database or a dedicated
+    // waves_qa_<32 hex> one, never a shared or forwarded database (codex pre-push P1).
+    const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
+    const privateQA = /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
+    if (!ciTest && !privateQA) throw new Error('Use the disposable CI database or a dedicated waves_qa_<32 hex> database');
     database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 2 } });
     require('../models/db').connection = database;
     ({ executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools'));
@@ -137,31 +138,32 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     expect(rows.filter((row) => row.flag)).toHaveLength(6);
   });
 
-  test('a delivery stamp reads as an instant only as a complete ISO instant, in SQL and JavaScript alike, and never aborts a query (codex pre-push P1)', async () => {
+  test('the reports read a first delivery only as a complete ISO instant, in SQL and JavaScript alike; the watchers read any real timestamp; no stamp aborts a query (codex pre-push P1)', async () => {
     const { deliveryInstantSql, firstDeliveredAtMs, sentAtSql } = require('../services/self-serve-estimates');
-    const readable = ['2005-07-04T15:00:00.000Z', '2005-07-04T15:00:00Z', '2005-07-04T11:00:00.5-04:00'];
-    // PostgreSQL reads 'now', 'infinity', 'today', a zone name, a missing
-    // offset and microseconds; JavaScript rolls Feb 30 over to March and reads
-    // year 0 and hour 24. Each is present but unreadable in both, so the send
-    // is dated by sent_at.
-    const stamps = [...readable, 'now', 'infinity', 'today', '2005-07-04 15:00:00 America/New_York',
-      '2005-07-04T15:00:00', '2005-07-04', '2005-07-04T15:00:00.123456Z', '2005-02-30T15:00:00.000Z',
-      '0000-01-01T00:00:00Z', '2005-07-04T24:00:00Z', 'not a date'];
+    const iso = ['2005-07-04T15:00:00.000Z', '2005-07-04T15:00:00Z', '2005-07-04T11:00:00.5-04:00', '2005-07-04T15:00:00.123456Z'];
+    // Real timestamps PostgreSQL alone reads (JavaScript cannot, or reads
+    // them differently): the reports date such a send by sent_at; the watchers read them.
+    const pgOnly = ['2005-07-04 15:00:00 America/New_York', '2005-07-04T15:00:00', '2005-07-04', '2005-07-04T24:00:00Z'];
+    // No instant for anyone: special literals, a day that does not exist, year 0.
+    const none = ['now', 'infinity', 'today', '2005-02-30T15:00:00.000Z', '0000-01-01T00:00:00Z', 'not a date'];
+    const stamps = [...iso, ...pgOnly, ...none];
     const { rows } = await trx.raw(`
-      SELECT e.stamp, ${deliveryInstantSql('e', 'firstDeliveredAt')} AS first_delivered,
-             ${deliveryInstantSql('e', 'lastDeliveredAt')} AS last_delivered, ${sentAtSql('e')} AS sent_anchor
+      SELECT e.stamp, ${deliveryInstantSql('e', 'lastDeliveredAt')} AS last_delivered, ${sentAtSql('e')} AS sent_anchor,
+             ${sentAtSql('e')} IS DISTINCT FROM e.sent_at AS report_delivered
       FROM (SELECT s.stamp, 'plan_start'::text AS source, ?::timestamptz AS sent_at,
                    jsonb_build_object('deliveryState', jsonb_build_object('firstDeliveredAt', s.stamp, 'lastDeliveredAt', s.stamp)) AS estimate_data
             FROM jsonb_array_elements_text(?::jsonb) AS s(stamp)) e`, [AT, JSON.stringify(stamps)]);
     expect(rows.map((row) => row.stamp).sort()).toEqual([...stamps].sort());
     for (const row of rows) {
       const js = firstDeliveredAtMs({ deliveryState: { firstDeliveredAt: row.stamp } });
-      expect([row.stamp, row.first_delivered?.getTime() ?? null, row.last_delivered?.getTime() ?? null])
-        .toEqual([row.stamp, js, js]);
-      // The same fallback in both: an unreadable stamp dates the send by sent_at.
+      // One anchor in SQL and JavaScript: the first delivery, else sent_at.
       expect([row.stamp, row.sent_anchor.getTime()]).toEqual([row.stamp, js ?? Date.parse(AT)]);
     }
-    expect(rows.filter((row) => row.first_delivered).map((row) => row.stamp).sort()).toEqual([...readable].sort());
+    const read = (key) => rows.filter((row) => row[key]).map((row) => row.stamp).sort();
+    expect(read('report_delivered')).toEqual([...iso].sort());
+    expect(stamps.filter((stamp) => firstDeliveredAtMs({ deliveryState: { firstDeliveredAt: stamp } }) != null).sort())
+      .toEqual([...iso].sort());
+    expect(read('last_delivered')).toEqual([...iso, ...pgOnly].sort());
   });
 
   test('the Pipeline board lists a self-serve quote once staff deliver it, and never a plan restart quote (codex pre-push P1)', async () => {
@@ -231,6 +233,22 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     const after = await funnel();
     expect(after.funnel.accepted - before.funnel.accepted).toBe(2);
     expect(after.avg_response_hours).toBe('24.0');
+  });
+
+  test('compare_periods counts a churn by its churned_at day, or else by the Eastern day of updated_at, in any session zone (codex pre-push P1)', async () => {
+    await trx.raw("SET LOCAL TIME ZONE 'UTC'");
+    const churned = async () => {
+      const out = await executeDashboardTool('compare_periods', { period_a: '2006-02', period_b: '2006-01', metrics: ['churn'] });
+      return [out.period_a.metrics.churned, out.period_b.metrics.churned];
+    };
+    const before = await churned();
+    // No churned_at, last updated 10 PM Eastern on January 31 (3 AM UTC, February 1); and one churned January 31.
+    const noDate = await insertCustomer();
+    const dated = await insertCustomer();
+    await trx('customers').where({ id: noDate }).update({ active: false, churned_at: null, updated_at: '2006-02-01T03:00:00Z' });
+    await trx('customers').where({ id: dated }).update({ active: false, churned_at: '2006-01-31', updated_at: '2006-02-15T15:00:00Z' });
+    const after = await churned();
+    expect([after[0] - before[0], after[1] - before[1]]).toEqual([0, 2]);
   });
 
   test('a send on the last Eastern evening of a month counts in that month, in any session zone (codex pre-push P1)', async () => {

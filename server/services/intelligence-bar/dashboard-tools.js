@@ -403,11 +403,8 @@ async function comparePeriods(input) {
   //     activity can't skew period-over-period deltas.
   async function getMetrics(from, to) {
     // Estimate events are timestamptz: Eastern calendar days, as the funnel
-    // counts them. Churn keeps these strings: churned_at is a DATE, which
-    // reads as midnight in the session's zone, the zone the strings read in.
+    // counts them.
     const bounds = etDayWindow(from, to);
-    const fromTs = `${from}T00:00:00`;
-    const toTs = `${to}T23:59:59`;
     const m = {};
     if (wantAll || metrics.includes('revenue')) {
       const rev = await excludeInternalPayments(
@@ -470,11 +467,16 @@ async function comparePeriods(input) {
       m.estimates_accepted = parseInt(ea?.count || 0);
     }
     if (wantAll || metrics.includes('churn')) {
+      // churned_at is a DATE: calendar days, both ends included. A row
+      // without one falls back to updated_at, a timestamptz: the Eastern
+      // bounds, so the database session's zone never moves it a day (codex
+      // pre-push P1).
+      const [updatedInWindow, updatedBounds] = inWindowRaw('c.updated_at', bounds);
       const ch = await excludeInternalCustomers(
         db({ c: 'customers' })
           .where('c.active', false)
           .whereNull('c.deleted_at')
-          .whereRaw('COALESCE(c.churned_at, c.updated_at) BETWEEN ? AND ?', [fromTs, toTs])
+          .whereRaw(`(c.churned_at BETWEEN ? AND ? OR (c.churned_at IS NULL AND ${updatedInWindow}))`, [from, to, ...updatedBounds])
       ).count('* as count').first();
       m.churned = parseInt(ch?.count || 0);
     }

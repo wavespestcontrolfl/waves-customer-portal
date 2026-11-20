@@ -54,21 +54,16 @@ function isUndeliveredSelfServe(source, estimateData) {
   return SELF_SERVE_ESTIMATE_SOURCES.includes(String(source || '')) && !hasDeliveryStamp(estimateData);
 }
 
-// The one rule for reading a deliveryState stamp as an instant, here and in
-// estimate-draft-retire.js. The send path writes toISOString(). A stamp is an
-// instant only in that complete ISO form with an explicit offset, AND when
-// PostgreSQL can read it, so SQL and JavaScript agree on every stamp (codex
-// pre-push P1). The form alone lets an impossible day (Feb 30) abort a whole
-// query at the cast; pg_input_is_valid alone accepts 'now', 'infinity' and a
-// zone name that JavaScript cannot read, so a send would date anew on every
-// read, or differ between the funnel and win/loss. Any other stamp is present
-// but unreadable. `expr` is SQL text built from code constants. The pattern
-// holds no ? ({0,1} instead): these strings go into raw SQL with bindings.
-const ISO_INSTANT_PATTERN = '^(19|20)[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])'
-  + 'T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]{1,3}){0,1}(Z|[+-](0[0-9]|1[0-4]):[0-5][0-9])$';
-const ISO_INSTANT_RE = new RegExp(ISO_INSTANT_PATTERN);
+// A deliveryState stamp PostgreSQL reads as a real instant: a date shape AND
+// a value it can read. The shape alone lets an ISO-looking but impossible
+// value (Feb 30) abort a whole query at the cast; pg_input_is_valid alone
+// accepts special literals such as 'now' and 'infinity' (codex pre-push P1).
+// The readers that read a stamp in SQL alone share it: the two watchers, and
+// estimate-draft-retire.js, whose rule it was. `expr` is SQL text built from
+// code constants. No ? in a pattern here: these strings go into raw SQL with
+// bindings.
 function isoInstantSql(expr) {
-  return `(${expr} ~ '${ISO_INSTANT_PATTERN}' AND pg_input_is_valid(${expr}, 'timestamptz'))`;
+  return `(${expr} ~ '^[0-9]{4}-' AND pg_input_is_valid(${expr}, 'timestamptz'))`;
 }
 
 // The stamp deliveryState.<key> of the row under `alias` as a timestamptz,
@@ -78,14 +73,25 @@ function deliveryInstantSql(alias, key) {
   const stamp = `(${alias}.estimate_data #>> '{deliveryState,${key}}')`;
   return `(CASE WHEN ${isoInstantSql(stamp)} THEN ${stamp}::timestamptz END)`;
 }
-function firstDeliveredAtSql(alias) {
-  return deliveryInstantSql(alias, 'firstDeliveredAt');
-}
 
-// The same first delivery in JavaScript (win/loss, the service-line card), in
-// epoch ms, null exactly where SQL reads NULL. JavaScript rolls an impossible
-// day over (Feb 30 to Mar 1), which PostgreSQL refuses, so that day is
-// checked here.
+// The reports date a send by firstDeliveredAt in SQL (the Intelligence Bar)
+// and in JavaScript (win/loss, the service-line card). Both must read the
+// same instant, or both none (codex pre-push P1), so both read only a
+// complete ISO instant with an explicit offset: what the send path writes
+// (toISOString()), up to the microseconds PostgreSQL's own JSON carries.
+// PostgreSQL alone also reads a zone name or a missing offset; JavaScript
+// alone rolls an impossible day over (Feb 30 to Mar 1), so that day is
+// checked in JavaScript too. Any other stamp is present but unreadable in
+// both, and both date the send by sent_at. {0,1} stands for ?.
+const ISO_INSTANT_PATTERN = '^(19|20)[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])'
+  + 'T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]{1,6}){0,1}(Z|[+-](0[0-9]|1[0-4]):[0-5][0-9])$';
+const ISO_INSTANT_RE = new RegExp(ISO_INSTANT_PATTERN);
+function firstDeliveredAtSql(alias) {
+  const stamp = `(${alias}.estimate_data #>> '{deliveryState,firstDeliveredAt}')`;
+  return `(CASE WHEN ${stamp} ~ '${ISO_INSTANT_PATTERN}' AND pg_input_is_valid(${stamp}, 'timestamptz') THEN ${stamp}::timestamptz END)`;
+}
+// In epoch ms; JavaScript keeps whole milliseconds, so it lands on the same
+// side of every day and month boundary as PostgreSQL's microseconds.
 function firstDeliveredAtMs(estimateData) {
   const stamp = estimateData?.deliveryState?.firstDeliveredAt;
   if (typeof stamp !== 'string' || !ISO_INSTANT_RE.test(stamp)) return null;
