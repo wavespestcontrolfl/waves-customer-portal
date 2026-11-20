@@ -4,9 +4,15 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockRaw = jest.fn();
+// A read inside the snapshot transaction reaches mockRaw with a third argument, 'snapshot', so a test can tell them apart.
+const mockSnapshots = [];
 jest.mock('../models/db', () => {
   const db = () => { throw new Error('the builders list uses raw SQL only'); };
   db.raw = (...args) => mockRaw(...args);
+  db.transaction = async (work, options) => {
+    mockSnapshots.push(options);
+    return work({ raw: (sql, bindings) => mockRaw(sql, bindings, 'snapshot') });
+  };
   return db;
 });
 
@@ -21,12 +27,22 @@ describe('builderKey', () => {
   test.each([
     ['SAMPLE POOLS LLC', 'SAMPLE POOLS'],
     ['Sample Pools, L.L.C.', 'SAMPLE POOLS'],
+    // A comma is a word break, with or without the space after it.
+    ['Sample Pools,LLC', 'SAMPLE POOLS'],
     ['  sample   pools  inc. ', 'SAMPLE POOLS'],
     ['SAMPLE POOLS CO INC', 'SAMPLE POOLS'],
     ["Sample's Pools & Spas Corporation", 'SAMPLES POOLS SPAS'],
     ['SAMPLE POOLS INCORPORATED', 'SAMPLE POOLS'],
     ['SAMPLE HOMES LTD', 'SAMPLE HOMES'],
     ['SAMPLE COMPANY', 'SAMPLE'],
+    // An accent never splits a word, so "Peña" matches a customer typed "Pena".
+    ['Peña Pools LLC', 'PENA POOLS'],
+    ['PEÑA POOLS', 'PENA POOLS'],
+    // A curly apostrophe is an apostrophe.
+    ['Sample’s Pools', 'SAMPLES POOLS'],
+    // Letters of another alphabet stay letters: two such names never share a key.
+    ['Пул Плюс LLC', 'ПУЛ ПЛЮС'],
+    ['Пул Мир LLC', 'ПУЛ МИР'],
   ])('%s -> %s', (input, expected) => expect(builderKey(input)).toBe(expected));
 
   test('keeps a name that is only company words, and returns empty for blank input', () => {
@@ -110,7 +126,7 @@ describe('mergeBuilders', () => {
 });
 
 describe('listBuilders', () => {
-  beforeEach(() => mockRaw.mockReset());
+  beforeEach(() => { mockRaw.mockReset(); mockSnapshots.length = 0; });
 
   function answer({ groups = [], newest = null, customers = [] } = {}) {
     mockRaw.mockImplementation(async (sql) => {
@@ -160,6 +176,14 @@ describe('listBuilders', () => {
     expect(aggregate[0]).toMatch(/LOWER\(COALESCE\(permit_type, ''\)\) = 'residential'/);
   });
 
+  test('the newest date and the counts are read in one read-only REPEATABLE READ snapshot', async () => {
+    answer({ newest: '2026-11-16' });
+    await listBuilders({ kind: 'pool', now: new Date('2026-11-19T15:00:00Z') });
+    expect(mockSnapshots).toEqual([{ isolationLevel: 'repeatable read', readOnly: true }]);
+    const inSnapshot = mockRaw.mock.calls.filter((call) => call[2] === 'snapshot').map(([sql]) => sql);
+    expect(inSnapshot).toEqual([expect.stringMatching(/AS newest/), expect.stringMatching(/GROUP BY/)]);
+  });
+
   test('a failed customer lookup fails the list, so no customer is shown as a fresh prospect', async () => {
     mockRaw.mockImplementation(async (sql) => {
       if (/FROM customers/.test(sql)) throw new Error('boom');
@@ -177,7 +201,7 @@ describe('listBuilders', () => {
 });
 
 describe('builderPermits', () => {
-  beforeEach(() => mockRaw.mockReset());
+  beforeEach(() => { mockRaw.mockReset(); mockSnapshots.length = 0; });
 
   test('finds every spelling that folds into the key, then reads the newest permits for those names', async () => {
     mockRaw
@@ -189,6 +213,9 @@ describe('builderPermits', () => {
     expect(mockRaw.mock.calls[1][1]).toEqual(['2026-11-19', 'SAMPLE POOLS LLC', 'SAMPLE POOLS, L.L.C.', 10]);
     for (const [sql] of mockRaw.mock.calls) expect(sql).toMatch(/issued_date <= \?::date/);
     expect(mockRaw.mock.calls[1][0]).toMatch(/ORDER BY issued_date DESC/);
+    // The spellings and the job sites come from one read-only REPEATABLE READ snapshot.
+    expect(mockSnapshots).toEqual([{ isolationLevel: 'repeatable read', readOnly: true }]);
+    expect(mockRaw.mock.calls.map((call) => call[2])).toEqual(['snapshot', 'snapshot']);
     expect(permits).toEqual([{ id: 'P-1', issuedDate: '2026-11-16', status: 'Permit Issued', address: '200 SAMPLE TRL', city: 'PARRISH', zip: '34219', typeOfWork: null }]);
   });
 

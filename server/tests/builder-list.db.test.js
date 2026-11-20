@@ -107,14 +107,19 @@ describeDb('Builders list (PostgreSQL)', () => {
   test('a builder that matches an active payer or a live customer company is flagged; an inactive payer is not', async () => {
     await mockPg('pool_permit_records').insert([
       pool(), pool({ contractor_name: 'FRESH POOLS INC', contractor_license: 'CPC444' }), pool({ contractor_name: 'IDLE POOLS LLC', contractor_license: 'CPC666' }),
+      // The county spells it with the accent; the payer was typed without it.
+      pool({ contractor_name: 'PEÑA SAMPLE POOLS LLC', contractor_license: 'CPC888' }),
     ]);
     await mockPg('payers').insert([
       { display_name: 'Sample Pools, LLC', active: true },
       { display_name: 'Idle Pools', company_name: 'Idle Pools LLC', active: false },
+      { display_name: 'Pena Sample Pools', active: true },
     ]);
     const result = await listBuilders({ kind: 'pool', now: NOW });
     const flags = Object.fromEntries(result.builders.map((builder) => [builder.key, builder.isCustomer]));
-    expect(flags).toEqual({ 'SAMPLE POOLS': true, 'FRESH POOLS': false, 'IDLE POOLS': false });
+    expect(flags).toEqual({ 'SAMPLE POOLS': true, 'FRESH POOLS': false, 'IDLE POOLS': false, 'PENA SAMPLE POOLS': true });
+    const sites = await builderPermits({ kind: 'pool', key: 'PENA SAMPLE POOLS', now: NOW });
+    expect(sites).toHaveLength(1);
   });
 
   test('job sites: every spelling of the builder, newest first, the limit applied, no other builder, no canceled permit', async () => {
