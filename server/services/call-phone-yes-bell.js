@@ -6,8 +6,10 @@
  * on the card expires within 24 hours, or the soonest visit to come that keeps the card open starts within 48 hours. Only a
  * card with status open rings or is rewritten (the sweep keeps only those current). Each ring also sends a phone banner to
  * the admins (bell-banners.js kind call_phone_yes, 7:00 AM to 9:00 PM Eastern; a ring at night stays in the bell, and the
- * 8 AM banner counts it). The caller's words are redacted as every bell body is, and access codes and payment details
- * are masked too, because the why can reach a phone's lock screen. Nothing here texts, emails or calls a customer.
+ * 8 AM banner counts it). The bell never holds the caller's words (headline, why, detail or metadata): a spoken turn
+ * can hold a gate code or a card number, no screen catches every form, and the why reaches a phone's lock screen. The
+ * card in Triage shows them, as the SMS reader's review bell leaves a text's words on the text. Nothing here texts,
+ * emails or calls a customer.
  *
  * Contract: docs/admin-notifications.md. Category `estimate` with `bell: true` (as the other estimate bells), area
  * Estimates, severity needs-you, who person, subject the booking call (one card per call), link the Triage tab, where the
@@ -86,14 +88,7 @@ const STATE_TEXT = {
   // The yes may come from an earlier call than the one that booked the visit, so the why names no call.
   yes: {
     action: (who) => `accept ${who}'s estimate`,
-    why: ({ visitDay, words }) => {
-      const tail = visitDay ? ` on a call, and the visit is ${visitDay}.` : ' on a call.';
-      const quote = compose.firstSentence(words).replace(/\.+$/, '');
-      // Words that break the why's rules (a date, an exclamation mark, a bracket such as a mask) give way to plain words,
-      // also when the cut to fit would drop the part that breaks them.
-      const quoted = quote && !compose.breaksAlertRules(quote) ? Names.whyWithQuote({ lead: 'The caller said ', quote, tail }) : '';
-      return quoted && !compose.breaksAlertRules(quoted) ? quoted : `The caller said yes to pay per application${tail}`;
-    },
+    why: ({ visitDay }) => `The caller said yes to pay per application on a call${visitDay ? `, and the visit is ${visitDay}` : ''}.`,
   },
   rechecking: {
     action: (who) => `check ${who}'s estimate`,
@@ -111,34 +106,19 @@ const DUE_WHY = {
   visit_soon: ({ visitDay }) => `The visit the call booked is ${visitDay}, and its card in Triage is still open.`,
 };
 
-// The caller's words in the bell: access codes and payment details masked (redactAccessCodes, as visit notes are), then
-// redacted as every bell body is (contact details, street addresses), because the why can reach a phone's lock screen.
-// Codes first: the phone mask would keep a card number's last four digits. A mask leaves a bracket, which the why's
-// rules refuse, so the why falls back to plain words rather than quote it.
-function bellWords(raw) {
-  const { redactAccessCodes } = require('./context-aggregator');
-  return Names.redactedWords(redactAccessCodes(raw));
-}
-
 // The bell's words: the headline's action, the one-sentence why and the detail. The card's payload and summary give
-// them, so the bell says what the card shows; the detail keeps the caller's whole words.
+// them (the summary is the sweep's own copy), so the bell says what the card shows. The caller's words stay on the card.
 function textFor({ name, card, expiresAt = null, several = false, visit = null, due = null }) {
   const payload = typeof card.payload === 'string' ? JSON.parse(card.payload) : (card.payload || {});
   const state = cardStateOf(payload);
   const start = visitStart(visit);
   const visitDay = start ? formatETDayDate(start) : null;
-  // The words go with the yes in every state (a card whose estimate was accepted still carries them), not with the headline.
-  const words = payload.yes_heard === true && payload.caller_words ? bellWords(payload.caller_words) : '';
-  const facts = { booked: visitDay ? ` for ${visitDay}` : '', words, expiresAt, several, visitDay };
+  const facts = { booked: visitDay ? ` for ${visitDay}` : '', expiresAt, several, visitDay };
+  const where = `Open Communications, then Triage, to see the card${payload.yes_heard === true ? " and the caller's words" : ''}.`;
   return {
     action: Names.fitAction('Estimates', name, [STATE_TEXT[state].action]),
     why: due ? DUE_WHY[due](facts) : STATE_TEXT[state].why(facts),
-    detail: [
-      card.summary,
-      // The caller's whole turn: a condition or a take-back can sit at its end.
-      words ? `The caller's words: “${words}”.` : null,
-      'Open Communications, then Triage, to see the card.',
-    ].filter(Boolean).join(' '),
+    detail: [card.summary, where].filter(Boolean).join(' '),
   };
 }
 

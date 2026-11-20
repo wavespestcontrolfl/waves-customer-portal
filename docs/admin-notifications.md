@@ -56,7 +56,9 @@ quote in `detail`. One exception: the SMS reader's review bell ("Comms — check
 note") never stores the text, because a text can hold a code or a word that opens a door and no
 screen catches every form; the bell list reads it from the text itself while it serves the list
 (`withTextNoteSources` in `server/services/sms-operational-actions.js`, admin role only, masked
-the same way) and the bell shows it in quotes as `source_text`. `server/services/admin-alert-names.js` has the helpers (`fitAction` keeps a
+the same way) and the bell shows it in quotes as `source_text`. The phone-yes card bell (`server/services/call-phone-yes-bell.js`)
+never stores the caller's words either, for the same reason (a spoken turn can hold a gate code or a card number); the card in
+Triage shows them. `server/services/admin-alert-names.js` has the helpers (`fitAction` keeps a
 long name inside the 60-character headline; `whyWithQuote` budgets the quote; `nameOnFileForPhone` names the
 person behind a number with no customer link: the customer records on it, then estimates, then leads, only when
 they agree on one person. The promise chaser, a text to a website line and a voicemail use it; owner 2026-10-21 and
@@ -688,8 +690,9 @@ Phone-yes card bell (owner 2026-11-18 "ok go", phone-yes step 1, page v4; under 
 `server/services/call-phone-yes-bell.js`, run by the phone-yes sweep (every 10 minutes while the gate is on, after its filing and its
 moot close), rings the bell once for each `call_phone_yes` card when it is filed, and once more while the card is open and time runs
 short: an open estimate on the card expires within 24 hours, or the soonest visit to come that keeps the card open (a pest visit the
-call booked, on the calendar and not linked to an estimate) starts within 48 hours. Only a card with status `open` rings or is
-rewritten, since the sweep keeps only those current; a claimed card (`in_progress`) keeps its row until it closes. Category `estimate` with
+call booked, on the calendar and not linked to an estimate) starts within 48 hours. Only a card with status `open` whose check
+finished in that run rings or is rewritten (the moot pass reads each card's yes again; a card whose check failed may hold a yes the
+caller took back, and a failed pass rings nothing); a claimed card (`in_progress`) keeps its row until it closes. Category `estimate` with
 `bell: true`, headline "Estimates — accept <who>'s estimate" for a card with the caller's yes ("check <who>'s estimate" when no yes
 was heard or the yes is being read again; "check <who>'s booked visit" once an estimate on the card was accepted and the visit is not
 linked), subject the booking call, link `/admin/communications#tab=triage` (the card and its tap), done-when `phone_yes_card_closed`.
@@ -698,11 +701,11 @@ still holds its key, so each key rings at most once and no `RERING` entry is owe
 closes (every pass retries that close, and a raise that wrote no row closes nothing), so a card has one open row; a card filed when
 time is already short rings the time-short bell alone, and nothing rings for a card after its time-short bell. Between rings the
 open row is rewritten quietly when the card's words change (a yes taken back, an estimate accepted, the visit moved):
-`refreshOnDedupe` with `ringOnRefresh` false, so no ring, no banner, and the row keeps its read state. The caller's words have
-access codes and payment details masked (`redactAccessCodes`), then are redacted as every bell body is, because the why can reach a
-phone's lock screen. The why quotes the caller's first sentence when the whole sentence passes the why rules (a mask leaves a
-bracket, which they refuse), and uses plain words otherwise; `detail` holds the card's summary and the caller's whole words while
-the card carries a yes, also once an estimate is accepted. Each card rings in a transaction of its own that holds its call's
+`refreshOnDedupe` with `ringOnRefresh` false, so no ring, no banner, and the row keeps its read state. The bell never stores the
+caller's words (headline, why, detail or metadata), as the SMS reader's review bell keeps a text's words off its row: a spoken turn
+can hold a gate code or a card number, no screen catches every form, and the why reaches a phone's lock screen. The why says the
+caller said yes to pay per application and names the visit day; `detail` holds the card's summary and points to the card in
+Triage, which shows the words. Each card rings in a transaction of its own that holds its call's
 triage lock (`lockTriageCall`, which every card writer takes first) and reads the card again there, so a card the tap accepts or
 a person claims while the pass runs rings nothing. Each ring sends a phone banner with the New lead sound
 (`bell-banners.js` kind `call_phone_yes`, 7:00 AM to 9:00 PM Eastern; the 8 AM banner counts a ring at night). The same pass closes

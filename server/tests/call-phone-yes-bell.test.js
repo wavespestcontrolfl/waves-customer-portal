@@ -86,16 +86,9 @@ describe('the words, by card state', () => {
   });
 
   test.each([
-    ['a yes: the first words, cut to fit', { yes_heard: true, caller_words: WORDS }, VISIT,
-      "accept Pat Sampleton's estimate",
-      "The caller said “Let's do the quarterly plan, just bill me each…” on a call, and the visit is Tue, Nov 24."],
-    ['a yes: the first sentence of two, without its full stop', { yes_heard: true, caller_words: 'Sounds good. Bill me each visit.' }, VISIT,
-      "accept Pat Sampleton's estimate", 'The caller said “Sounds good” on a call, and the visit is Tue, Nov 24.'],
-    ['a yes with an exclamation mark: plain words', { yes_heard: true, caller_words: 'Yes! Put me on the plan.' }, VISIT,
+    ['a yes', { yes_heard: true, caller_words: WORDS }, VISIT,
       "accept Pat Sampleton's estimate", 'The caller said yes to pay per application on a call, and the visit is Tue, Nov 24.'],
-    ['a yes whose words carry a date: plain words', { yes_heard: true, caller_words: 'Yes, start 2026-11-24 and bill each time' }, VISIT,
-      "accept Pat Sampleton's estimate", 'The caller said yes to pay per application on a call, and the visit is Tue, Nov 24.'],
-    ['a yes with no words and no visit', { yes_heard: true }, null,
+    ['a yes and no visit on the calendar', { yes_heard: true, caller_words: WORDS }, null,
       "accept Pat Sampleton's estimate", 'The caller said yes to pay per application on a call.'],
     ['no yes heard', { yes_heard: false }, VISIT,
       "check Pat Sampleton's estimate", 'A call booked a pest visit for Tue, Nov 24 while an estimate is open; no yes was heard.'],
@@ -128,36 +121,26 @@ describe('the words, by card state', () => {
     expect(passesRules(text).headline.length).toBeLessThanOrEqual(60);
   });
 
-  // The why can reach a phone's lock screen: a credential in the first sentence is never quoted, and the detail masks it.
+  // The why reaches a phone's lock screen, and no screen catches every form of a code (the first case passes the access
+  // code redactor): the caller's words never reach the bell, in any state. The card in Triage shows them.
   test.each([
+    ['a gate code in number words with no code word', 'Yes, use four five four five at the gate. Bill me per application.', /four five/],
     ['a gate code in digits', 'Yes, bill me each time, the gate code is 4545. Thanks.', /4545/],
-    ['a gate code in number words', 'Sure, put me on the plan, the gate code is four five four five.', /four five/],
-    ['a card number', 'Yes, and charge my card 4111 1111 1111 1111 each time.', /1111/],
-  ])('%s in the first sentence: plain words in the why, a mask in the detail', (_label, words, secret) => {
-    const text = textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, caller_words: words }), visit: VISIT });
-    expect(text.why).toBe('The caller said yes to pay per application on a call, and the visit is Tue, Nov 24.');
-    expect(text.detail).toContain('[redacted]');
-    expect(text.detail).not.toMatch(secret);
-    expect(() => passesRules(text)).not.toThrow();
+    ['a card number', 'Yes, and charge my card 4111 1111 1111 1111 each time.', /4111|1111/],
+  ])("%s: the caller's words never reach the bell", (_label, words, secret) => {
+    for (const payload of [{ yes_heard: true, caller_words: words }, { yes_heard: true, caller_words: words, estimate_accepted: true }]) {
+      for (const due of [null, 'visit_soon']) {
+        const text = JSON.stringify(textFor({ name: 'Pat Sampleton', card: card(payload), visit: VISIT, due }));
+        expect(text).not.toMatch(secret);
+        expect(text).not.toMatch(/[“”]/);
+      }
+    }
   });
 
-  test('a gate code after the first sentence: the yes is quoted, and the detail masks the code', () => {
-    const text = textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, caller_words: 'Yes, the plan is fine. Oh and 4545 is the gate code.' }), visit: VISIT });
-    expect(text.why).toBe('The caller said “Yes, the plan is fine” on a call, and the visit is Tue, Nov 24.');
-    expect(text.detail).toContain('“Yes, the plan is fine. Oh and [redacted] is the gate code.”');
-  });
-
-  test("the detail keeps the caller's whole turn, also a long one with a condition at its end", () => {
-    const long = `${'Yes, the quarterly plan is fine, and you can bill me each time you come out to the house. '.repeat(8)}But only if the price stays the same.`;
-    const { detail } = textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, caller_words: long }), visit: VISIT });
-    expect(long.length).toBeGreaterThan(700);
-    expect(detail).toContain(`“${long}”`);
-  });
-
-  test("the detail is the card's summary, the caller's whole words and where the card is", () => {
+  test("the detail is the card's summary and where to see the card, and the caller's words while it carries a yes", () => {
     const { detail } = textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, caller_words: WORDS }), visit: VISIT });
-    expect(detail).toBe(`The card says this. The caller's words: “${WORDS}”. Open Communications, then Triage, to see the card.`);
-    // A card whose estimate was accepted still carries the yes, so its words stay when the headline changes.
+    expect(detail).toBe("The card says this. Open Communications, then Triage, to see the card and the caller's words.");
+    // A card whose estimate was accepted still carries the yes.
     expect(textFor({ name: 'Pat Sampleton', card: card({ yes_heard: true, caller_words: WORDS, estimate_accepted: true }), visit: VISIT }).detail)
       .toBe(detail);
     expect(textFor({ name: 'Pat Sampleton', card: card({ yes_heard: false }), visit: VISIT }).detail)

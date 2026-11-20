@@ -45,6 +45,7 @@ const acceptance = require('../services/estimate-manual-acceptance');
 const { sendMembershipStarted } = require('../services/account-membership-email');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { notifyAdmin } = require('../services/notification-service');
+const Word = require('../services/call-phone-yes-word');
 const {
   runCallPhoneYesSweep, evaluatePhoneYes, REASON_CODE, REASONS, ACCEPT_SOURCE, TAP_REFUSALS, acceptPhoneYesCard, FEE_NOTE, _private: PhoneYesPrivate,
 } = require('../services/call-phone-yes-accept');
@@ -199,6 +200,24 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     // One card per call, ever.
     await expect(sweep()).resolves.toMatchObject({ filed: 0, closed: 0 });
     spy.mockRestore();
+  });
+
+  test('a card whose check fails in a run rings nothing in that run, and rings once a check passes', async () => {
+    await phoneYes();
+    await sweep();
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    // The notification service is a stub here, so no bell row stands: every run whose check passes rings again.
+    notifyAdmin.mockClear();
+    const read = jest.spyOn(Word, 'callerWord').mockRejectedValue(Object.assign(new Error('read failed'), { code: 'ETEST' }));
+    try {
+      await sweep();
+    } finally {
+      read.mockRestore();
+    }
+    // A yes that could not be read again may have been taken back: nothing rings and the row is not rewritten.
+    expect(notifyAdmin).not.toHaveBeenCalled();
+    await sweep();
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
   test.each([

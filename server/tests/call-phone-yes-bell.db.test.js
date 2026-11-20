@@ -106,7 +106,9 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     return { id, customerId, callLogId, visitId, estimateIds };
   }
 
-  const pass = () => ringOpenCardsForTest(new Date());
+  // The bell pass as the sweep runs it, after a moot pass whose check finished for every card.
+  const pass = async () => ringOpenCardsForTest(new Date(),
+    new Set((await trx('triage_items').where({ reason_code: 'call_phone_yes' }).pluck('id')).map(String)));
   const filedKey = (cardId) => `call-phone-yes:${cardId}`;
   const dueKey = (cardId) => `call-phone-yes-due:${cardId}`;
   // The card's bell rows by key: { filed, due } (undefined when that key never rang).
@@ -123,7 +125,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     .filter(([result, { metadata }]) => metadata.triageItemId === String(cardId) && metadata.triggerKey === 'call_phone_yes'
       && skipReason(result, metadata) === null).length;
 
-  test("a filed card rings one bell with the card's words and one phone banner; the next pass rings nothing", async () => {
+  test("a filed card rings one bell in the card's state, with none of the caller's words, and one banner; the next pass rings nothing", async () => {
     const card = await phoneYesCard();
     await pass();
 
@@ -134,11 +136,11 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
       category: 'estimate', title: "Estimates — accept Pat Sampleton's estimate", link: '/admin/communications#tab=triage',
       read_at: null, done_at: null,
     }));
-    expect(filed.body).toMatch(/^The caller said “Let's do the quarterly plan, just bill me/);
-    expect(filed.body.endsWith(`” on a call, and the visit is ${dayWords(5)}.`)).toBe(true);
-    expect(filed.body.length).toBeLessThanOrEqual(110);
-    // The detail keeps the caller's whole words.
-    expect(filed.detail).toContain(`“${WORDS}”`);
+    expect(filed.body).toBe(`The caller said yes to pay per application on a call, and the visit is ${dayWords(5)}.`);
+    expect(filed.detail).toBe('Caller said yes to pay per application on the call. The estimate is not accepted yet. '
+      + "Open Communications, then Triage, to see the card and the caller's words.");
+    // The caller's words stay on the card: nothing of them in the row.
+    expect(JSON.stringify(filed)).not.toMatch(/quarterly/);
     expect(filed.metadata).toEqual(expect.objectContaining({
       area: 'Estimates', severity: 'needs-you', who: 'person', doneWhen: 'phone_yes_card_closed',
       subject: { type: 'call', id: card.callLogId }, triageItemId: card.id, callLogId: card.callLogId, customerId: card.customerId,
@@ -174,7 +176,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     await pass();
     const after = await bellsOf(card.id);
     expect(after.count).toBe(2);
-    expect(after.due.body.endsWith(`” on a call, and the visit is ${dayWords(6)}.`)).toBe(true);
+    expect(after.due.body).toBe(`The caller said yes to pay per application on a call, and the visit is ${dayWords(6)}.`);
     expect(after.due.read_at).toBeNull();
     expect(bannersFor(card.id)).toBe(2);
   });
@@ -307,7 +309,7 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     // The lawn visit tomorrow is no reason; the pest visit is in five days.
     let bells = await bellsOf(card.id);
     expect(bells).toEqual(expect.objectContaining({ due: undefined, count: 1 }));
-    expect(bells.filed.body.endsWith(`” on a call, and the visit is ${dayWords(5)}.`)).toBe(true);
+    expect(bells.filed.body).toBe(`The caller said yes to pay per application on a call, and the visit is ${dayWords(5)}.`);
 
     // The call's second pest visit, tomorrow: time runs short.
     await addVisit(card, { days: 1 });
