@@ -22,13 +22,7 @@ async function loadGapCandidate(serviceId, conn) {
   if (service.auto_dispatch_locked || service.auto_dispatch_excluded) return { unavailable: 'candidate_locked_or_excluded' };
   const preferences = await getCustomerSchedulingPreferences(service.customer_id, service.service_type, conn, { serviceId: service.service_id, serviceKey: service.service_key_snapshot });
   const deactivated = await conn('technician_capabilities').where({ service_category: preferences.service_category, active: false }).pluck('technician_id');
-  const { seedingFamilyKey, comboRouteFamiliesFromCatalogKey } = require('../estimate-converter');
-  const catalog = service.service_id ? await conn('services').where('id', service.service_id).first('service_key') : null;
-  const identity = catalog?.service_key || service.service_key_snapshot;
-  const combo = comboRouteFamiliesFromCatalogKey(identity);
-  const families = combo.length ? combo : [seedingFamilyKey({ service: identity, name: service.service_type })];
-  const holds = await conn('plan_holds').where({ customer_id: service.customer_id, status: 'active' })
-    .whereIn('family_key', families).select('starts_on', 'resume_on');
+  const holds = await planHoldsFor(conn, service.customer_id, [service]);
   let siblingDates = [];
   if (service.is_recurring) {
     const parentId = service.recurring_parent_id || service.id;
@@ -125,6 +119,25 @@ async function leadGapCandidate(lead, visit, conn) {
     { serviceId: visit.id, serviceKey: service.service_key_snapshot });
   const deactivated = await deactivatedFor(conn, [service]);
   return { service, preferences, holds: [], siblingDates: [], deactivated, label: visit.name, prospective: true, dayOpen: () => true };
+}
+
+/**
+ * The customer's active plan holds ({ starts_on, resume_on }) over every plan family the services in `rows` belong to
+ * ({ service_type, service_id?, service_key_snapshot? }): a service's catalog key (by service_id, else its key snapshot)
+ * names a combo's families (estimate-converter.js comboRouteFamiliesFromCatalogKey), else its one seeding family
+ * (seedingFamilyKey). A failed read throws.
+ */
+async function planHoldsFor(conn, customerId, rows) {
+  const { seedingFamilyKey, comboRouteFamiliesFromCatalogKey } = require('../estimate-converter');
+  const families = [];
+  for (const row of rows) {
+    const catalog = row.service_id ? await conn('services').where('id', row.service_id).first('service_key') : null;
+    const identity = catalog?.service_key || row.service_key_snapshot;
+    const combo = comboRouteFamiliesFromCatalogKey(identity);
+    families.push(...(combo.length ? combo : [seedingFamilyKey({ service: identity, name: row.service_type })]));
+  }
+  return conn('plan_holds').where({ customer_id: customerId, status: 'active' })
+    .whereIn('family_key', [...new Set(families)]).select('starts_on', 'resume_on');
 }
 
 /**
@@ -238,4 +251,4 @@ function analyzeGapCandidate(candidate, rows, {
       : 'Fits preserve the dispatch order produced by the existing save. They do not authorize a date/time change or create a booking hold.' };
 }
 
-module.exports = { loadGapCandidate, estimateGapCandidate, leadGapCandidate, deactivatedFor, analyzeGapCandidate };
+module.exports = { loadGapCandidate, estimateGapCandidate, leadGapCandidate, planHoldsFor, deactivatedFor, analyzeGapCandidate };

@@ -30,7 +30,7 @@
  * Plan visit (owner *2a*, movableVisits): a booked and placed recurring visit may move up to MOVE_UP_DAYS days
  * earlier. It is loaded and checked as the gap tool checks a saved visit (loadGapCandidate and analyzeGapCandidate: the
  * customer's rules, the series' other dates and due date, a paused or stopped plan, a visit locked from moves, a series'
- * first visit) on the days before its own, with its add-on services in the capability and mowing-day rules
+ * first visit) on the days before its own, with its add-on services in the capability, plan hold and mowing-day rules
  * (planVisitCandidate). Left out: a visit whose 24-hour reminder will not go out (owner 2026-11-07 lock), and one that
  * shares its day with another live visit of the same customer (a move would split that visit). Every booked customer
  * was told a day: staff call first.
@@ -45,7 +45,7 @@ const { isInternalTestContact } = require('../internal-test-customers');
 const { isAssessmentServiceRow } = require('../assessment-booking');
 const { dayStopsQuery } = require('../scheduling/day-stops');
 const { QUALITY_EXCLUDED_STATUSES, dayStopSelect } = require('../scheduling/day-quality');
-const { estimateGapCandidate, leadGapCandidate, loadGapCandidate, deactivatedFor, analyzeGapCandidate } = require('../scheduling/gap-candidates');
+const { estimateGapCandidate, leadGapCandidate, loadGapCandidate, planHoldsFor, deactivatedFor, analyzeGapCandidate } = require('../scheduling/gap-candidates');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
 const { dayDepartureMinutes } = require('../scheduling/departure-time');
 const { shiftDateStr } = require('../auto-dispatch/dates');
@@ -126,7 +126,9 @@ async function openEstimates(conn, now) {
  * the lead's ask (service_interest; a multi-service ask joins its parts with " + ") that names a Waves Assessment, or an
  * inspection on the Leads screen's service list. `catalog`: the rows its Schedule button offers (active and sellable);
  * an inspection is a row the catalog files under 'inspection', named with or without its " Service" ending. A bare
- * "Inspection" is the assessment, as the Leads screen names it (utils/lead-service-display.js). Pure.
+ * "Inspection" is the assessment, as the Leads screen names it (utils/lead-service-display.js). The stored text alone
+ * names the ask, as on the Leads screen (routes/admin-leads.js serviceDisplayFor): a staff edit changes the text but
+ * keeps leads.service_key, so the key can name a service the lead no longer asks for. Pure.
  */
 function leadVisit(serviceInterest, catalog) {
   const assessment = catalog.find(isAssessmentServiceRow) || null;
@@ -147,11 +149,11 @@ function leadVisit(serviceInterest, catalog) {
  * The open leads that asked for a look, newest first, at most MAX_LEADS ({ leads: [{ lead, visit }] }): new or
  * contacted, from the last LEAD_DAYS days, not deleted, not commercial, with a live customer record and no estimate on
  * the lead, that asked for a Waves Assessment or an inspection (leadVisit). Each customer once, by its newest such lead.
- * Left out first, so they never take a place: internal test contacts; a customer with an open estimate (sent or viewed
- * and not expired: it is on the estimate list) or an estimate made since the lead came in (the quote happened); a
- * customer with a live visit or hold on or after the day the lead came in (it is booked or was served). An older closed
- * estimate (an earlier job) and a cancelled, skipped, no-show or rescheduled visit never hide a new ask. A failed read
- * throws.
+ * Left out first, so they never take a place: internal test contacts; a customer with an open estimate (sent or viewed,
+ * not archived or expired: it is on the estimate list) or an estimate made since the lead came in, archived or not (the
+ * quote happened); a customer with a live visit or hold on or after the day the lead came in (it is booked or was
+ * served). An older closed estimate (an earlier job) and a cancelled, skipped, no-show or rescheduled visit never hide a
+ * new ask. A failed read throws.
  */
 async function openLeads(conn, now) {
   const since = new Date(now.getTime() - LEAD_DAYS * 24 * 3600 * 1000);
@@ -174,10 +176,9 @@ async function openLeads(conn, now) {
   }
   if (!asked.length) return { leads: [] };
   const ids = [...seen];
-  const estimates = await conn('estimates').whereIn('customer_id', ids).whereNull('archived_at')
-    .select('customer_id', 'status', 'created_at', 'expires_at');
+  const estimates = await conn('estimates').whereIn('customer_id', ids).select('customer_id', 'status', 'created_at', 'expires_at', 'archived_at');
   const visits = await liveRows(conn('scheduled_services').whereIn('customer_id', ids), now).select('customer_id', 'scheduled_date');
-  const open = (e) => OPEN_ESTIMATE_STATUSES.includes(e.status) && (!e.expires_at || new Date(e.expires_at) > now);
+  const open = (e) => !e.archived_at && OPEN_ESTIMATE_STATUSES.includes(e.status) && (!e.expires_at || new Date(e.expires_at) > now);
   const quoted = (lead) => estimates.some((e) => String(e.customer_id) === String(lead.customer_id)
     && (open(e) || new Date(e.created_at) >= new Date(lead.created_at)));
   const cameIn = (lead) => etDateString(new Date(lead.created_at));
@@ -188,8 +189,9 @@ async function openLeads(conn, now) {
 /**
  * A booked plan visit as a gap candidate, or null when the gap tool refuses it (loadGapCandidate: locked or excluded, a
  * stopped or lapsed plan, an inactive customer). A new stop, open only on the days up to MOVE_UP_DAYS before its own.
- * The technician capability and mowing-day rules cover its add-on services too (`addOns`: scheduled_service_addons
- * rows, as the rain pass reads them), as they cover every service an estimate's visit performs. A failed read throws.
+ * The technician capability, plan hold and mowing-day rules cover its add-on services too (`addOns`:
+ * scheduled_service_addons rows, as the rain pass reads them), as they cover every service an estimate's visit performs.
+ * A failed read throws.
  */
 async function planVisitCandidate(conn, row, day, addOns) {
   const loaded = await loadGapCandidate(row.id, conn);
@@ -197,9 +199,10 @@ async function planVisitCandidate(conn, row, day, addOns) {
   const extra = addOns.filter((a) => String(a.scheduled_service_id) === String(row.id))
     .map((a) => ({ service_type: a.service_name, service_id: a.service_id, service_key_snapshot: a.service_key_snapshot }));
   const deactivated = extra.length ? [...new Set([...loaded.deactivated, ...await deactivatedFor(conn, extra)])] : loaded.deactivated;
+  const holds = extra.length ? [...loaded.holds, ...await planHoldsFor(conn, loaded.service.customer_id, extra)] : loaded.holds;
   const mowing = mowingDays.unitRule(loaded.preferences, [loaded.service, ...extra]);
   const earliest = shiftDateStr(day, -MOVE_UP_DAYS);
-  return { ...loaded, deactivated, prospective: true, label: loaded.service.service_type || row.service_type,
+  return { ...loaded, deactivated, holds, prospective: true, label: loaded.service.service_type || row.service_type,
     dayOpen: (date) => date >= earliest && date < day && !mowingDays.blocksLive(date, mowing) };
 }
 
