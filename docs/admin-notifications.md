@@ -612,11 +612,13 @@ still waits for a call") or by unsetting the gate. It sends nothing to a lead.
 New-lead re-alert (owner 2026-11-19, "do phase 1 first"; no gate: the push goes to admin users only): in the 12 weeks to
 2026-11-19, 82 of 437 leads never got a call, text, email or estimate from a person and none booked. A form lead gets one bell
 and one push; 44 of 129 form bells in 30 days were never opened. The alert-relevance sweep (every 10 minutes, after its
-closes) also runs `server/services/new-lead-reminder.js`. An open `new_lead` bell that names a lead and that no person has
-reached gets ONE more phone push 15 minutes after its latest event (`lead_call_reminder`, `pushOnly`, admin users only, the
+closes) also runs `server/services/new-lead-reminder.js`. An open `new_lead` bell that names a lead, or an open repeat-form
+bell (`lead-repeat-form:`, category `lead`: a lead sent the quote form again; the relevance sweep's `lead_repeat_form`
+class), that no person has reached gets ONE more phone push 15 minutes after its latest event (`lead_call_reminder`, `pushOnly`, admin users only, the
 row's own title, body and link). The clock counts only Monday to Saturday, 8:00 AM to 6:00 PM ET (`staffedDeadline`; holidays
 are not skipped), and nothing is sent outside those hours: they are judged again with a fresh clock before each stamp and before
-each push goes, and a sweep that runs past 6 PM stops and leaves the rest unstamped. A push more than 2 business hours past due is dropped. Bells of
+each push goes, and a sweep that runs past 6 PM stops and leaves the rest unstamped. A push more than 2 business hours past due is dropped,
+also when that time passes while the sweep reads (checked again before the stamp, and before and after the push's open-row read). Bells of
 the last 48 hours only. The push is stamped first, fenced on the row being open and unchanged (`metadata.newLeadRealertAt`),
 so a row gets at most one. The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead still waits for a
 call"). "Reached" is judged on the lead, whatever the close gates say, and not only after the bell (a "New call lead" bell
@@ -628,8 +630,8 @@ on the same lead); a person's text, call or Gmail send, or a visit booked, for t
 before the bell's inquiry began (the shared contact witnesses, kind `customer`; for the bell written with the lead, the
 earlier of the bell and the lead's `first_contact_at`, else `created_at`; for a later bell, such as a form sent again on a
 lead made days ago, the bell itself); a person's email to the lead's own address since that moment (a bell that names an email, `metadata.emailId`, counts from that message's `received_at`: a follow-up
-bell is written after classification and drafting; the push deadline stays on the bell); or an estimate sent to
-the lead (`sent_at`, as `newLeadMovedOn` reads it) or handed off. A lead needs a customer, a 10-digit phone or an email
+bell is written after classification and drafting; the push deadline stays on the bell); or an estimate sent (`sent_at`, as
+`newLeadMovedOn` reads it: the one the bell names, `metadata.estimateId`, the lead's own, or any to its customer) or handed off. A lead needs a customer, a 10-digit phone or an email
 address to be judged, so a lead from email intake with no phone is judged on email and estimate evidence. A missing lead
 row, or a read that fails, sends nothing. The quiet 72 h close and the 21-day staleness are unchanged. Sends nothing to a
 lead or a customer. The scan, the once-only stamp, the open-row recheck and the push are shared with the lead call-back

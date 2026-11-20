@@ -25,21 +25,26 @@ const resumeAfter = new Map();
 
 const safeError = (err) => require('./notification-service').safeErrorSummary(err);
 
-// Open, unstamped bell rows of `kind` ({ category, stamp, keyPrefixes? }) whose latest event is after `since`, one keyset
-// page after `cursor` ({ createdAt, id }; createdAt as the database's own text, so no microsecond is lost). A refreshed
-// bell keeps its first created_at and carries its latest ring in metadata.rungAt, so either may be recent. With
-// `keyPrefixes`, only rows whose dedupeKey starts with one of them (plain text: no LIKE wildcard in any).
-function candidateQuery({ category, stamp, keyPrefixes = null }, since, cursor, pageSize) {
+// Open, unstamped bell rows of `kind` ({ stamp, match }) whose latest event is after `since`, one keyset page after
+// `cursor` ({ createdAt, id }; createdAt as the database's own text, so no microsecond is lost). A refreshed bell keeps
+// its first created_at and carries its latest ring in metadata.rungAt, so either may be recent. `match` lists the bells
+// the reminder reads, each { categories, keyPrefixes? }: a row matches an entry when its category is one of
+// `categories` and, with `keyPrefixes`, its dedupeKey starts with one of them (plain text: no LIKE wildcard in any).
+function candidateQuery({ stamp, match }, since, cursor, pageSize) {
   const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
-  return excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin', category }))
+  return excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin' }))
+    .where((any) => {
+      for (const { categories, keyPrefixes = null } of match) {
+        any.orWhere((one) => {
+          one.whereIn('category', categories);
+          if (keyPrefixes) one.where((k) => { for (const prefix of keyPrefixes) k.orWhereRaw("metadata->>'dedupeKey' LIKE ?", [`${prefix}%`]); });
+        });
+      }
+    })
     .whereNull('done_at')
     .whereRaw("metadata->'retired' IS NULL")
     .whereRaw(`metadata->>'${stamp}' IS NULL`)
     .where((q) => q.where('created_at', '>', since).orWhereRaw("metadata->>'rungAt' > ?", [since.toISOString()]))
-    .modify((q) => {
-      if (!keyPrefixes) return;
-      q.where((k) => { for (const prefix of keyPrefixes) k.orWhereRaw("metadata->>'dedupeKey' LIKE ?", [`${prefix}%`]); });
-    })
     .modify((q) => { if (cursor) q.whereRaw('(created_at, id) > (?::timestamptz, ?::uuid)', [cursor.createdAt, cursor.id]); })
     .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
     .limit(pageSize)
@@ -67,9 +72,9 @@ async function rowStillOpen(id, label) {
   }
 }
 
-// The push, with the row's own words. alertRowId gives it its own push tag per bell row. `ready` (optional) is asked once
-// more just before dispatch, with a fresh clock: false means the reminder's hours have closed since the sweep began.
-// Never throws.
+// The push, with the row's own words. alertRowId gives it its own push tag per bell row. `ready` (optional) is asked
+// with a fresh clock just before dispatch, before the open-row read and again after it: false means the reminder's
+// hours, or this item's late window, closed since the sweep began. Never throws.
 async function sendPush({ row, customerId }, label, ready = () => true) {
   try {
     const { triggerNotification } = require('./notification-triggers');
@@ -80,7 +85,7 @@ async function sendPush({ row, customerId }, label, ready = () => true) {
       // bellAuthorized: the bell row's writer rang it (bell: true), so the push keeps that answer. pushOnly: the row is
       // not rewritten. adminOnly: nothing goes to a lead, a customer or a technician.
       pushOnly: true, adminOnly: true, bellAuthorized: true,
-      beforePush: async () => ready() && rowStillOpen(row.id, label),
+      beforePush: async () => ready() && (await rowStillOpen(row.id, label)) && ready(),
     });
   } catch (err) {
     logger.warn(`[${label}] push failed for notification ${row.id}: ${safeError(err)}`);
@@ -89,20 +94,22 @@ async function sendPush({ row, customerId }, label, ready = () => true) {
 }
 
 /**
- * One scan for a reminder `kind`: { label, category, stamp, keyPrefixes?, windowMs, dueItems(rows, now),
- * waiting(items), inHours?(date) }. dueItems picks the rows due now; waiting(items) returns those that still wait on a
- * person and throws when a read fails (no verdict: nothing is sent on that page). `inHours(date)` is the reminder's own
- * hours rule, asked with a fresh clock (`clock`, default the real time) before each item is stamped and again just before
- * each push goes: the parent sweep's `now` can be old by the time its closes and the reads above have finished. When the
- * hours have closed the sweep stops with the rest unstamped, for the next open sweep while they are still inside their
- * late window. Returns { due, sent, sends }; `sends` are the
- * pushes, never awaited here. Throws only when a page cannot be read.
+ * One scan for a reminder `kind`: { label, stamp, match, windowMs, dueItems(rows, now), waiting(items), inHours?(date) }.
+ * dueItems picks the rows due now; waiting(items) returns those that still wait on a person and throws when a read
+ * fails (no verdict: nothing is sent on that page). `inHours(date)` is the reminder's own hours rule, asked with a fresh
+ * clock (`clock`, default the real time) before each item is stamped and again at each push's dispatch: the parent
+ * sweep's `now` can be old by the time its closes and the reads above have finished. When the hours have closed the
+ * sweep stops with the rest unstamped, for the next open sweep while they are still inside their late window. An item
+ * may carry `expiresAt`, the end of its late window: once the fresh clock passes it, the item is not stamped, and a
+ * push already stamped is refused at dispatch. Returns { due, sent, sends }; `sends` are the pushes, never awaited
+ * here. Throws only when a page cannot be read.
  */
 async function runSweep(kind, { now, pageSize = PAGE_SIZE, clock = () => new Date() }) {
   const { label, stamp } = kind;
   const since = new Date(now.getTime() - kind.windowMs);
   const total = { due: 0, sent: 0 };
   const ready = () => !kind.inHours || kind.inHours(clock());
+  const expired = (item) => !!item.expiresAt && clock().getTime() > item.expiresAt.getTime();
   const sends = [];
   let cursor = resumeAfter.get(stamp) || null;
   resumeAfter.delete(stamp);
@@ -124,10 +131,12 @@ async function runSweep(kind, { now, pageSize = PAGE_SIZE, clock = () => new Dat
         logger.info(`[${label}] hours closed while the sweep ran: the rest waits for the next open sweep`);
         return { ...total, sends };
       }
+      // Its late window closed while the reads above ran: not stamped, and no later sweep finds it due.
+      if (expired(item)) continue;
       try {
         if (!(await stampOnce(stamp, item, now))) continue;
         total.sent += 1;
-        sends.push(sendPush(item, label, ready));
+        sends.push(sendPush(item, label, () => ready() && !expired(item)));
       } catch (err) {
         logger.warn(`[${label}] notification ${item.row.id} not stamped: ${safeError(err)}`);
       }

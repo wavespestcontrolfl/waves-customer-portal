@@ -1784,9 +1784,9 @@ async function reminderPasses(now) {
   return { ...(leadCallReminders ? { leadCallReminders } : {}), ...(newLeadRealerts ? { newLeadRealerts } : {}) };
 }
 
-// New-lead re-alert (new-lead-reminder.js; owner 2026-11-19): an open new-lead bell nobody has reached gets ONE more phone
-// push at 15 business minutes (Monday to Saturday, 8 AM to 6 PM ET). No gate: the push goes to admin users only. After the
-// closes above, so a bell this run just closed sends nothing. A failure is logged and never fails the sweep.
+// New-lead re-alert (new-lead-reminder.js; owner 2026-11-19): an open new-lead or repeat-form bell nobody has reached gets
+// ONE more phone push at 15 business minutes (Monday to Saturday, 8 AM to 6 PM ET). No gate: the push goes to admin users
+// only. After the closes above, so a bell this run just closed sends nothing. A failure is logged and never fails the sweep.
 async function newLeadRealertPass(now) {
   try {
     const out = await require('./new-lead-reminder').runNewLeadReminder({ now });

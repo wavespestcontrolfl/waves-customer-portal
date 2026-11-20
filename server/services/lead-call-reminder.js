@@ -79,7 +79,7 @@ function dueAtFor(askedAt) {
 }
 
 // The open, unreminded call-request bell rows: the shared read (lead-reminder-sweep.js) with this reminder's bells.
-const KIND = { category: 'lead', stamp: STAMP, keyPrefixes: KEY_PREFIXES };
+const KIND = { stamp: STAMP, match: [{ categories: ['lead'], keyPrefixes: KEY_PREFIXES }] };
 const candidateQuery = (since, cursor, pageSize) => sweep.__private.candidateQuery(KIND, since, cursor, pageSize);
 
 // The rows that are due now: { row, meta, askedAt, leadId, customerId }. A row that names neither a lead nor a

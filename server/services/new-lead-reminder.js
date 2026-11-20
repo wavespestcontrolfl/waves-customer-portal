@@ -5,16 +5,18 @@
  * In production (12 weeks to 2026-11-19) 82 of 437 leads never got a call, text, email or estimate from a person, and
  * none of them booked. A form lead gets one bell and one push; 44 of 129 form bells in 30 days were never opened.
  *
- * An OPEN new-lead bell (category `new_lead`, naming a lead) that no person has reached gets ONE more phone push 15
- * minutes after the bell's latest event. No gate: the push goes to admin users only. (A second step, a ring to the
- * owner's cell at 60 minutes behind its own gate, is a separate change.)
+ * An OPEN new-lead bell (category `new_lead`, naming a lead), or the repeat-form bell (lead-webhook.js
+ * ringRepeatFormAlert: a lead sent the quote form again; the relevance sweep's lead_repeat_form class), that no person
+ * has reached gets ONE more phone push 15 minutes after the bell's latest event. No gate: the push goes to admin users
+ * only. (A second step, a ring to the owner's cell at 60 minutes behind its own gate, is a separate change.)
  * At most one push per bell row: it is stamped first, in one statement fenced on the row being open and unchanged since
  * it was read (metadata.newLeadRealertAt). Stamp first, then send: a send that fails after its stamp is lost, never
  * repeated.
  *
  * - The clock counts only Monday to Saturday, 8:00 AM to 6:00 PM America/New_York (callback-cards staffedDeadline;
  *   holidays are not skipped). Nothing is sent outside those hours. A push more than 2 business hours past its due time
- *   is dropped, so a restart cannot burst old bells.
+ *   is dropped, so a restart cannot burst old bells. Both are asked again with a fresh clock before the stamp and at
+ *   dispatch (lead-reminder-sweep.js), since the reads in between take time.
  * - Bells of the last 48 hours only (a 6 PM Saturday bell is due Monday morning).
  * - "Reached" (reachedLeads) is judged on the lead, whatever the close gates of admin-alert-relevance.js say, and NOT
  *   only after the bell: a "New call lead" bell is written minutes after a call a person already answered. Reached =
@@ -25,8 +27,9 @@
  *   booked, reached the lead's customer or phone since 5 minutes before that bell's inquiry began (for a bell raised with
  *   the lead: the earlier of the bell and the lead's first_contact_at, else created_at; for a later bell: the bell itself; a bell that
  *   names an email, metadata.emailId, counts from that message's received_at; the push deadline stays on the bell);
- *   a person's email to the lead's own address since the same moment; or an estimate was sent to the lead (sent_at, as the
- *   new-lead class of admin-alert-relevance.js reads it) or handed off to the customer. A lead needs a customer, a 10-digit
+ *   a person's email to the lead's own address since the same moment; or an estimate was sent (sent_at, as the new-lead
+ *   class of admin-alert-relevance.js reads it: the one the bell names, the lead's own, or any to its customer) or handed
+ *   off to the customer. A lead needs a customer, a 10-digit
  *   phone or an email address to be judged: an email-only lead is judged on email and estimate evidence. A lead row that is
  *   missing, or a witness read that fails, is no verdict: nothing is sent.
  * - The scan, stamp, open-row recheck and push are the shared steps of lead-reminder-sweep.js, which also carries a capped
@@ -75,19 +78,23 @@ function inBusinessHours(date) {
 // `minutes` of business time after `from`.
 const businessDueAt = (from, minutes) => require('./callback-cards').staffedDeadline(from, OFFICE, minutes);
 
-// Due now, and not so long ago that it is stale: `afterMinutes` of business time after the bell's event have passed, and
-// no more than `lateMinutes` more.
-function dueNow(askedAt, now, afterMinutes, lateMinutes) {
-  const due = businessDueAt(askedAt, afterMinutes);
-  return due.getTime() <= now.getTime() && businessDueAt(due, lateMinutes).getTime() >= now.getTime();
+// The push window of a bell whose latest event is `askedAt`: due `afterMinutes` of business time after it, and stale
+// (`expiresAt`) `lateMinutes` of business time after that.
+function pushWindow(askedAt, afterMinutes, lateMinutes) {
+  const dueAt = businessDueAt(askedAt, afterMinutes);
+  return { dueAt, expiresAt: businessDueAt(dueAt, lateMinutes) };
 }
 
-// The open, unpushed new-lead bell rows: the shared read (lead-reminder-sweep.js) with this reminder's category.
-const KIND = { category: 'new_lead', stamp: PUSH_STAMP };
-const candidateQuery = (since, cursor, pageSize) => sweep.__private.candidateQuery(KIND, since, cursor, pageSize);
+// The open, unpushed bell rows: the shared read (lead-reminder-sweep.js) of every new-lead bell, and of the repeat-form
+// bell by the relevance sweep's own class for it (its category and dedupeKey prefix), so the two read one definition.
+function kind() {
+  const repeatForm = relevance().CLASSES.find((c) => c.key === 'lead_repeat_form');
+  return { stamp: PUSH_STAMP, match: [{ categories: ['new_lead'] }, { categories: repeatForm.categories, keyPrefixes: [repeatForm.prefix] }] };
+}
+const candidateQuery = (since, cursor, pageSize) => sweep.__private.candidateQuery(kind(), since, cursor, pageSize);
 
-// The rows with a push due now: { row, meta, askedAt, leadId }. A row that names no lead (a tracking-line
-// text) cannot be judged, so it sends nothing.
+// The rows with a push due now: { row, meta, askedAt, leadId, expiresAt }. A row that names no lead (a tracking-line
+// text, or a repeat form from a customer row with no lead row) cannot be judged, so it sends nothing.
 function dueItems(rows, now) {
   const { bellEventAt, parseMeta, refsFromRow } = relevance();
   const floor = now.getTime() - WINDOW_MS;
@@ -96,8 +103,9 @@ function dueItems(rows, now) {
     const meta = parseMeta(row.metadata);
     const askedAt = bellEventAt(row);
     const leadId = refsFromRow(row).leadId;
-    if (!leadId || !askedAt || askedAt.getTime() <= floor) continue;
-    if (!meta[PUSH_STAMP] && dueNow(askedAt, now, PUSH_AFTER_MINUTES, PUSH_LATE_MINUTES)) items.push({ row, meta, askedAt, leadId });
+    if (!leadId || !askedAt || askedAt.getTime() <= floor || meta[PUSH_STAMP]) continue;
+    const { dueAt, expiresAt } = pushWindow(askedAt, PUSH_AFTER_MINUTES, PUSH_LATE_MINUTES);
+    if (dueAt.getTime() <= now.getTime() && expiresAt.getTime() >= now.getTime()) items.push({ row, meta, askedAt, leadId, expiresAt });
   }
   return items;
 }
@@ -190,19 +198,27 @@ async function personEmailed(items) {
   return ({ lead }, anchor) => !!leadEmail(lead) && sentTo.some((m) => m.at > anchor.getTime() && m.to.has(leadEmail(lead)));
 }
 
-// A quote sent to the lead since `anchor`: the lead's own estimate or any estimate to its customer with a sent_at, the way
-// the new-lead class of admin-alert-relevance.js (newLeadMovedOn) reads it. Returns the test for one item.
+// A quote sent to the lead since `anchor`, the way the new-lead class of admin-alert-relevance.js (newLeadMovedOn) reads
+// it: the estimate the bell names (an email lead's draft bell carries metadata.estimateId, and the lead may since point
+// at another draft), the lead's own estimate, or any estimate to its customer, with a sent_at. Returns the test for one
+// item.
 async function estimatesSent(items) {
+  const { refsFromRow } = relevance();
+  const named = ({ row, lead }) => [refsFromRow(row).estimateId, lead.estimate_id].filter(Boolean).map((id) => String(id).toLowerCase());
   const customerIds = [...new Set(items.map(({ lead }) => lead.customer_id).filter(Boolean).map(String))];
-  const estimateIds = [...new Set(items.map(({ lead }) => lead.estimate_id).filter(Boolean).map(String))];
+  const estimateIds = [...new Set(items.flatMap(named))];
   const rows = customerIds.length || estimateIds.length
     ? await db('estimates').whereNotNull('sent_at').where((q) => {
       if (customerIds.length) q.whereIn('customer_id', customerIds);
       if (estimateIds.length) q.orWhereIn('id', estimateIds);
     }).select('id', 'customer_id', 'sent_at')
     : [];
-  return ({ lead }, anchor) => rows.some((e) => new Date(e.sent_at).getTime() > anchor.getTime()
-    && ((lead.customer_id && String(e.customer_id) === String(lead.customer_id)) || (lead.estimate_id && String(e.id) === String(lead.estimate_id))));
+  return (item, anchor) => {
+    const { lead } = item;
+    const ids = new Set(named(item));
+    return rows.some((e) => new Date(e.sent_at).getTime() > anchor.getTime()
+      && ((lead.customer_id && String(e.customer_id) === String(lead.customer_id)) || ids.has(String(e.id).toLowerCase())));
+  };
 }
 
 /**
@@ -211,7 +227,7 @@ async function estimatesSent(items) {
  */
 async function runNewLeadReminder({ now = new Date(), pageSize, clock } = {}) {
   if (!inBusinessHours(now)) return { skipped: true, reason: 'quiet_hours' };
-  const out = await sweep.runSweep({ ...KIND, label: LABEL, windowMs: WINDOW_MS, dueItems, waiting: reachedLeads, inHours: inBusinessHours }, { now, pageSize, clock });
+  const out = await sweep.runSweep({ ...kind(), label: LABEL, windowMs: WINDOW_MS, dueItems, waiting: reachedLeads, inHours: inBusinessHours }, { now, pageSize, clock });
   if (out.sent) logger.info(`[${LABEL}] queued ${out.sent} push(es): a new lead nobody has reached`);
   return { skipped: false, due: out.due, pushed: out.sent, sends: out.sends };
 }
@@ -219,5 +235,5 @@ async function runNewLeadReminder({ now = new Date(), pageSize, clock } = {}) {
 module.exports = {
   runNewLeadReminder,
   PUSH_STAMP,
-  __private: { inBusinessHours, businessDueAt, dueNow, dueItems, reachedLeads, inquiryOf, emailReceivedAt, candidateQuery, ESTIMATE_STATUSES },
+  __private: { inBusinessHours, businessDueAt, pushWindow, kind, dueItems, reachedLeads, inquiryOf, emailReceivedAt, candidateQuery, ESTIMATE_STATUSES },
 };

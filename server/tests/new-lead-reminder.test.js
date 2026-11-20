@@ -6,7 +6,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const mockState = {};
 const resetState = () => Object.assign(mockState, {
-  rows: [], leads: [], answered: [], estimates: [], emails: [], emailRows: [], handedOff: null, customer: null, stampResults: [], open: {}, calls: [], failLeads: false, failOpen: false, pages: null,
+  rows: [], leads: [], answered: [], estimates: [], emails: [], emailRows: [], handedOff: null, customer: null, stampResults: [], open: {}, calls: [], failLeads: false, failOpen: false, pages: null, onOpenRead: null,
 });
 resetState();
 jest.mock('../models/db', () => {
@@ -24,6 +24,7 @@ jest.mock('../models/db', () => {
     if (state.table !== 'notifications') return [];
     if (state.verb === 'update') return mockState.stampResults.length ? mockState.stampResults.shift() : 1;
     if (state.verb === 'first') {
+      if (mockState.onOpenRead) mockState.onOpenRead();
       if (mockState.failOpen) throw new Error('open read failed');
       return Object.prototype.hasOwnProperty.call(mockState.open, state.id) ? mockState.open[state.id] : { done_at: null };
     }
@@ -31,7 +32,7 @@ jest.mock('../models/db', () => {
     return mockState.rows;
   };
   const db = jest.fn((table) => {
-    const state = { table, verb: 'select', id: null, update: null, wheres: [], raws: [] };
+    const state = { table, verb: 'select', id: null, update: null, wheres: [], raws: [], ins: [] };
     const chain = new Proxy({}, {
       get(_, prop) {
         if (prop === 'then') return (res, rej) => Promise.resolve().then(() => handle(state)).then(res, rej);
@@ -40,7 +41,10 @@ jest.mock('../models/db', () => {
           if (prop === 'update') [state.update] = args;
           if (prop === 'where') state.wheres.push(args);
           if (prop === 'modify') args[0](chain);
-          if (prop === 'whereRaw') state.raws.push(args);
+          // A grouped condition (where(fn), orWhere(fn)) runs on this same chain, so its parts are recorded too.
+          if ((prop === 'where' || prop === 'orWhere') && typeof args[0] === 'function') args[0](chain);
+          if (prop === 'whereIn' || prop === 'orWhereIn') state.ins.push(args);
+          if (prop === 'whereRaw' || prop === 'orWhereRaw') state.raws.push(args);
           if (prop === 'where' && args[0] && typeof args[0] === 'object' && args[0].id) state.id = args[0].id;
           return chain;
         };
@@ -169,7 +173,7 @@ describe('the clock: Monday to Saturday, 8 AM to 6 PM ET', () => {
   });
 });
 
-describe('business hours are asked again at dispatch', () => {
+describe('business hours and the late window are asked again at dispatch', () => {
   test('a sweep whose hours closed before an item was stamped sends and stamps nothing', async () => {
     mockState.rows = [row('n-1', { createdAt: est('09', '17:40') })];
     const result = await runNewLeadReminder({ now: est('09', '17:59'), clock: () => est('09', '18:01') });
@@ -186,6 +190,29 @@ describe('business hours are asked again at dispatch', () => {
     await Promise.all(result.sends);
     expect(pushes()).toHaveLength(1);
     expect(await pushes()[0][2].beforePush()).toBe(false);
+  });
+
+  // The 10:00 bell is due at 10:15 and stale after 12:15 (2 business hours later). Due when the sweep began at 12:14.
+  test('an item whose late window closes while the reads run is neither stamped nor sent', async () => {
+    const result = await runNewLeadReminder({ now: est('09', '12:14'), clock: () => est('09', '12:16') });
+    await Promise.all(result.sends);
+    expect(result).toMatchObject({ skipped: false, due: 1, pushed: 0 });
+    expect(updates()).toEqual([]);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('a push stamped inside its late window is refused when the window closes during the open-row read', async () => {
+    let late = false;
+    mockState.onOpenRead = () => { late = true; };
+    const result = await runNewLeadReminder({ now: est('09', '12:14'), clock: () => (late ? est('09', '12:16') : est('09', '12:14')) });
+    await Promise.all(result.sends);
+    expect(result).toMatchObject({ due: 1, pushed: 1 });
+    expect(await pushes()[0][2].beforePush()).toBe(false);
+    expect(late).toBe(true);
+    // Inside the window the same check says yes.
+    late = false;
+    mockState.onOpenRead = null;
+    expect(await pushes()[0][2].beforePush()).toBe(true);
   });
 });
 
@@ -226,6 +253,37 @@ describe('the 15-minute push (no gate)', () => {
   test('tracking-line text bells (no lead id) are not judged', async () => {
     mockState.rows = [{ ...row('n-1'), link: '/admin/communications?thread=x', metadata: { triggerKey: 'new_lead', payload: { twilioSid: 'SMx' } } }];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 0 });
+  });
+
+  // lead-webhook-repeat-form.test.js pins the writer's category and dedupeKey to the relevance sweep's lead_repeat_form
+  // class; the scan reads that class, so it reads the rows the writer rings.
+  test('the scan reads every new-lead bell, and the repeat-form bell by the relevance sweep\'s own class for it', async () => {
+    await run(PUSH_NOW);
+    const scan = mockState.calls.find((c) => c.table === 'notifications' && c.verb === 'select');
+    const repeatForm = require('../services/admin-alert-relevance').CLASSES.find((c) => c.key === 'lead_repeat_form');
+    expect(scan.ins).toEqual([['category', ['new_lead']], ['category', repeatForm.categories]]);
+    expect(scan.raws).toContainEqual(["metadata->>'dedupeKey' LIKE ?", [`${repeatForm.prefix}%`]]);
+  });
+
+  test('a lead who sent the quote form again, nobody reached since that form: one push, judged from the form', async () => {
+    // The row ringRepeatFormAlert writes: category lead, the lead in metadata and in the link, no triggerKey.
+    const repeatForm = (id) => ({
+      id, category: 'lead', title: 'Leads — call Pat Sample about the quote form', body: 'Pat sent the quote form; on file as a lead since Nov 2.',
+      link: `/admin/leads?lead=${LEAD}`,
+      metadata: { dedupeKey: `lead-repeat-form:${CUST}`, customerId: CUST, leadId: LEAD, source: 'lead_repeat_form', subject: { type: 'lead', id: LEAD }, doneWhen: 'lead_contacted', who: 'person' },
+      created_at: est('09', '10:00'), created_at_token: est('09', '10:00').toISOString(),
+    });
+    mockState.rows = [repeatForm('rf-1')];
+    mockState.leads = [lead({ created_at: est('02', '10:00'), status: 'contacted' })];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
+    expect(pushes()[0][1]).toMatchObject({ alertRowId: 'rf-1', alertLink: `/admin/leads?lead=${LEAD}` });
+    // A later inquiry: the witnesses count from the form itself, not from when the lead came in.
+    expect(loadContactBundles.mock.calls[0][0][0].bellAt).toEqual(est('09', '09:55'));
+
+    jest.clearAllMocks();
+    mockState.rows = [repeatForm('rf-2')];
+    mockBundles.byId['rf-2'] = { textAt: est('09', '10:05') };
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
   });
 
   test('the banner re-reads the row just before it goes: closed or gone meanwhile, or a failed read, says no', async () => {
@@ -344,6 +402,20 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     mockState.leads = [lead({ estimate_id: 'e-9' })];
     mockState.estimates = [{ id: 'e-2', customer_id: '99999999-9999-4999-8999-999999999999', sent_at: est('09', '10:05') }];
     expect(await run(PUSH_NOW)).toMatchObject({ pushed: 1 });
+  });
+
+  test('the estimate the bell names counts when it was sent, though the lead now points at another draft', async () => {
+    // An email lead's draft bell carries metadata.estimateId; a later draft moved the lead's estimate_id, and it has no customer.
+    const NAMED = '33333333-3333-4333-8333-333333333333';
+    const LATER_DRAFT = '44444444-4444-4444-8444-444444444444';
+    mockState.rows = [row('n-1', { metadata: { estimateId: NAMED } })];
+    mockState.leads = [lead({ customer_id: null, phone: null, estimate_id: LATER_DRAFT })];
+    mockState.estimates = [{ id: NAMED, customer_id: null, sent_at: est('09', '10:05') }];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
+    expect(mockState.calls.find((c) => c.table === 'estimates').ins).toEqual([['id', [NAMED, LATER_DRAFT]]]);
+    // The same quote with no bell naming it is another lead's: the bell still pushes.
+    mockState.rows = [row('n-2')];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
   });
 
   test('an estimate sent long before the lead came in does not count', async () => {
