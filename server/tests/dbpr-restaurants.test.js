@@ -280,6 +280,18 @@ describe('parseInspectionReport', () => {
     expect(svc.parseInspectionReport(b, { cited35: 1 })).toEqual({ pestEvidence: false, findings: [] });
   });
 
+  test('on a follow-up report only the read visit\'s own 35 rows meet the file\'s count', () => {
+    const door = (notes) => `<tr><td>35B-01-4</td><td>&nbsp;</td><td>Basic - - From initial inspection : Basic - Gap under the back door. ${notes}</td></tr>`;
+    const read = (rows, cited35) => svc.parseInspectionReport(reportPage(rows), { cited35, visitDate: '2026-09-03', visitNumber: 2 });
+    // An earlier visit's 35B row alone cannot stand for this visit's citation.
+    expect(read(door(''), 1)).toBeNull();
+    // A 35B row still open at this visit can.
+    expect(read(door('- From follow-up inspection 2026-09-03: **Time Extended**'), 1)).toEqual({ pestEvidence: false, findings: [] });
+    // Two counted, one of this visit's: the other could be 35A.
+    const other = '<tr><td>35B-03-4</td><td>&nbsp;</td><td>Basic - - From initial inspection : Basic - Screen torn.</td></tr>';
+    expect(read(`${door('- From follow-up inspection 2026-09-03: **Time Extended**')}${other}`, 2)).toBeNull();
+  });
+
   test('a page that lists fewer violation-35 rows than the file counted cannot answer: the missing one could be 35A', () => {
     const b = fixture('report-35b.html');
     expect(svc.parseInspectionReport(b, { cited35: 2 })).toBeNull();
@@ -370,6 +382,14 @@ describe('parseInspectionReport', () => {
       + '- From follow-up inspection 2026-09-03: Observed 2 dead roaches in dry storage.</td></tr>';
     const mixed = svc.parseInspectionReport(reportPage(`${flies}\n${roach}\n${door}`), { cited35: 1, visitDate: '2026-09-03', visitNumber: 3 });
     expect(mixed.findings.map((f) => f.code)).toEqual(['35A-09-4']);
+    // A note of the visit that clears or denies is inconclusive; a status marker after a sighting is not.
+    const note = (text) => reportPage('<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - - From initial inspection : '
+      + `High Priority - Live flies at the bar. - From follow-up inspection 2026-09-03: ${text}</td></tr>`);
+    for (const cleared of ['No live flies observed.', 'Flies were not present.', 'Flies wasn\'t seen today.', 'Corrected.']) {
+      expect(svc.parseInspectionReport(note(cleared), { cited35: 1, visitDate: '2026-09-03', visitNumber: 3 })).toBeNull();
+    }
+    expect(svc.parseInspectionReport(note('Observed 3 live flies at the bar. **Corrected On-Site**'), { cited35: 1, visitDate: '2026-09-03', visitNumber: 3 }))
+      .toMatchObject({ pestEvidence: true });
     // A routine report (no visit labels) is the read visit's own, as before.
     expect(svc.parseInspectionReport(fixture('report-35a.html'), { cited35: 1, visitDate: '2026-11-16', visitNumber: 2 }))
       .toMatchObject({ pestEvidence: true });
@@ -548,6 +568,7 @@ describe('syncRestaurantProspects', () => {
   test.each([
     ['Business (DBA-Does Business As) Name', '7fdinspi.csv', 'inspection'],
     ['Location Address', '7fdinspi.csv', 'inspection'],
+    ['Visit Number', '7fdinspi.csv', 'inspection'],
     ['Business Name', 'newfood.csv', 'new_license'],
     ['Location Street Address', 'newfood.csv', 'new_license'],
     ['Primary Phone Number', 'chgownr_food.csv', 'owner_change'],

@@ -59,7 +59,7 @@ const LICENSE_COLUMNS = [
 const REQUIRED_COLUMNS = {
   inspection: [
     'County Name', ...PLACE_COLUMNS, 'Location Address', 'Business (DBA-Does Business As) Name', 'License Number',
-    'License Type Code', 'License ID', 'Inspection Visit ID', 'Inspection Date', 'Inspection Type',
+    'License Type Code', 'License ID', 'Inspection Visit ID', 'Visit Number', 'Inspection Date', 'Inspection Type',
     'Inspection Disposition', 'Number of High Priority Violations', 'Violation 35',
   ],
   new_license: LICENSE_COLUMNS,
@@ -307,15 +307,28 @@ function visitNotes(text) {
 // Without the visit number only a dated note can match.
 const isVisitNote = (note, visit) => (visit.number === 1 ? note.date === null : note.date !== null && note.date === visit.date);
 
-// A note that records something seen, not only a status such as **Time Extended** or the priority label.
-const recordsSomething = (body) => /[a-z0-9]/i.test(body.replace(/\*\*[^*]*\*\*/g, ' ')
-  .replace(/^[\s-]*(?:High Priority|Intermediate|Basic)\b/i, ' '));
+// A word that clears or denies a sighting: "No live flies observed", "corrected", "wasn't seen".
+const CLEARED_RE = /\b(?:no|not|none|never|nothing|without|absent|absence|corrected|complied|compliance|cleared|eliminated|resolved)\b|n['’]t\b/i;
+
+// A note that records a sighting: more than a status such as **Time Extended** or the priority label, and no word
+// that clears or denies it. Anything else is inconclusive. Status markers are left out of the word test.
+function recordsSighting(body) {
+  const words = body.replace(/\*\*[^*]*\*\*/g, ' ').replace(/^[\s-]*(?:High Priority|Intermediate|Basic)\b/i, ' ');
+  return /[a-z0-9]/i.test(words) && !CLEARED_RE.test(words);
+}
+
+// Whether a row is the read visit's: every row of a routine report is; on a follow-up report, a row with a note of
+// that visit (a status alone counts here: the violation was still open at the visit).
+function ofReadVisit(text, visit) {
+  const parsed = visitNotes(text);
+  return !parsed || parsed.notes.some((note) => isVisitNote(note, visit));
+}
 
 // Pests seen at the read visit: on a routine report any 35A row; on a follow-up report only a 35A row whose note of
-// that visit records something seen. An earlier visit's citation, or a status alone, says nothing about this visit.
+// that visit records a sighting. An earlier visit's citation, a status alone or a cleared note says nothing here.
 function seenAtVisit(text, visit) {
   const parsed = visitNotes(text);
-  return !parsed || parsed.notes.some((note) => isVisitNote(note, visit) && recordsSomething(note.body));
+  return !parsed || parsed.notes.some((note) => isVisitNote(note, visit) && recordsSighting(note.body));
 }
 
 // The read visit's note first, then the others newest first (the initial note last), each with its label, so the
@@ -343,11 +356,11 @@ const capText = (text) => Array.from(text).slice(0, FINDING_TEXT_MAX).join('');
  *   observation), so a code quoted in a note, a comment or a script never starts an entry. A row whose Violation cell
  *   is not a code alone (blank, or 35A-02-8*), or a code cell outside that table (another table, the footer), means
  *   the page is not laid out as expected;
- * - it lists at least as many 35A or 35B rows as the file counted for the visit (cited35): the missing one could be
- *   35A. A follow-up report may list more, from earlier visits. Without the count only a 35A row answers;
- * - its 35A rows were seen at the read visit (visitDate, visitNumber): a follow-up report also lists earlier visits'
- *   citations, and only the read visit's own note counts, if it records something seen. 35A rows with none seen at
- *   the visit give no answer.
+ * - it lists at least as many 35A or 35B rows of the read visit (visitDate, visitNumber) as the file counted for it
+ *   (cited35): the missing one could be 35A. A follow-up report also lists earlier visits' rows; only a row with a
+ *   note of the read visit is its own. Without the count only a 35A row answers;
+ * - its 35A rows were seen at the read visit: on a follow-up report only the visit's own note counts, if it records
+ *   a sighting (not a status alone, nothing that clears it). 35A rows with none seen at the visit give no answer.
  * findings holds the 35A rows seen at the visit, each with that visit's note first, cut at FINDING_TEXT_MAX.
  */
 function parseInspectionReport(html, { cited35 = null, visitDate = null, visitNumber = null } = {}) {
@@ -385,14 +398,15 @@ function parseInspectionReport(html, { cited35 = null, visitDate = null, visitNu
     row = [];
   }
   endRow();
-  const listed35 = entries.filter((entry) => /^35[AB]-/.test(entry.code)).length;
-  if (unreadable || !listed35) return null;
   const visit = { date: visitDate, number: visitNumber };
-  const rows35A = entries.filter((entry) => /^35A-/.test(entry.code)).map((entry) => ({ code: entry.code, text: entry.parts.join(' ') }));
-  // Fewer 35 rows than the file counted: the missing one could be 35A. Without the count (a row stored before it was
-  // kept), only a 35A row answers: "no pests" needs the count.
-  if (Number.isInteger(cited35) ? listed35 < cited35 : !rows35A.length) return null;
-  // 35A rows but none seen at the read visit (earlier visits' citations on a follow-up report): no answer.
+  const rows35 = entries.filter((entry) => /^35[AB]-/.test(entry.code)).map((entry) => ({ code: entry.code, text: entry.parts.join(' ') }));
+  const ofVisit = rows35.filter((row) => ofReadVisit(row.text, visit));
+  if (unreadable || !ofVisit.length) return null;
+  const rows35A = rows35.filter((row) => /^35A-/.test(row.code));
+  // Fewer of the visit's 35 rows than the file counted: the missing one could be 35A. Without the count (a row stored
+  // before it was kept), only a 35A row answers: "no pests" needs the count.
+  if (Number.isInteger(cited35) ? ofVisit.length < cited35 : !rows35A.length) return null;
+  // 35A rows but none seen at the read visit (an earlier visit's citation, a status alone, a cleared note): no answer.
   const seen = rows35A.filter((row) => seenAtVisit(row.text, visit));
   if (rows35A.length && !seen.length) return null;
   const findings = seen.map((row) => ({ code: row.code, text: capText(visitNoteFirst(row.text, visit)) }));
@@ -409,11 +423,11 @@ function dedupeByKey(records) {
 
 // A re-read of a known row refreshes last_seen_at only: a pest_evidence answer, the findings and the attempt count
 // are never overwritten by a later file. Returns the number of rows written.
-// A re-read refreshes last_seen_at. A row stored before the file's violation-35 count or visit number was kept takes
-// them from the file; nothing else in detail changes (the findings and the first read's values stay).
+// A re-read refreshes last_seen_at. A row stored without the file's violation-35 count or visit number (before they
+// were kept, or blank: JSON null, so ->> tests it) takes them from the file; nothing else in detail changes.
 const FILL_DETAIL_SQL = `COALESCE(restaurant_prospects.detail, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
-  'violation35', CASE WHEN restaurant_prospects.detail->'violation35' IS NULL THEN excluded.detail->'violation35' END,
-  'visitNumber', CASE WHEN restaurant_prospects.detail->'visitNumber' IS NULL THEN excluded.detail->'visitNumber' END))`;
+  'violation35', CASE WHEN restaurant_prospects.detail->>'violation35' IS NULL THEN excluded.detail->'violation35' END,
+  'visitNumber', CASE WHEN restaurant_prospects.detail->>'visitNumber' IS NULL THEN excluded.detail->'visitNumber' END))`;
 
 async function upsertRecords(records) {
   const unique = dedupeByKey(records);

@@ -128,6 +128,10 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     // A row that has them keeps them.
     await svc.upsertRecords([rec(20, { detail: { disposition: 'changed', violation35: 5, visitNumber: 3 } })]);
     expect(await detail(20)).toEqual({ disposition: 'Warning Issued', violation35: 2, visitNumber: 1 });
+    // A blank visit number (JSON null) is filled when a later file has it.
+    await svc.upsertRecords([rec(22, { detail: { disposition: 'Warning Issued', violation35: 1, visitNumber: null } })]);
+    await svc.upsertRecords([rec(22, { detail: { disposition: 'Warning Issued', violation35: 1, visitNumber: 1 } })]);
+    expect(await detail(22)).toEqual({ disposition: 'Warning Issued', violation35: 1, visitNumber: 1 });
   });
 
   test('saveReport does not overwrite an answer already written', async () => {
