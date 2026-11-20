@@ -301,6 +301,28 @@ it.each(ACCOUNT_SWITCHES)('the hand-off checks the session again before it opens
   });
 });
 
+// A token from before durable sessions has no sessionId, and the API client lets a same-customer token
+// of any session stand in for it. A contact who signs in on the same customer row is another person
+// (useAuth's tokenContactKey), so the hand-off opens nothing for it (codex pre-push P0).
+const LEGACY_TAP = tokenFor({ customerId: 'cust-a' });
+const CONTACT_ON_ROW = tokenFor({ customerId: 'cust-a', sessionId: 'family-c', contactKey: 'contact-1' });
+it.each([
+  ['in this tab', () => { api.token = CONTACT_ON_ROW; }],
+  ['in another tab that this tab has not heard of yet', () => { localStorage.setItem('waves_token', CONTACT_ON_ROW); }],
+])('a holder token from before durable sessions that a contact on the same row replaces %s opens nothing (codex pre-push P0)', async (_label, switchToContact) => {
+  await withNavigation(async (assign) => {
+    api.token = LEGACY_TAP;
+    api.startPlan.mockResolvedValue({ ok: true, url: '/estimate/tok-a', estimateId: 'e1', reused: false });
+    await priceIt(priced(OFFER));
+    fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
+    await screen.findByRole('button', { name: 'Open it now' });
+    switchToContact(); // during the beat on screen
+    vi.advanceTimersByTime(1600);
+    expect(assign).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Open it now' })).toBeNull());
+  });
+});
+
 it.each(ACCOUNT_SWITCHES)('"Open it now" checks the tap\'s session when tapped: after the account changed %s, it opens nothing and drops the hand-off (codex pre-push P0s)', async (_label, switchAccount) => {
   await withNavigation(async (assign) => {
     api.token = TAP_TOKEN;

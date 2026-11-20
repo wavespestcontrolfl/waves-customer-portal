@@ -443,7 +443,9 @@ describe('mintPlanStartEstimate', () => {
     expect(quote.address).toMatch(/^9 Oak Ave/);
     await expect(actualRestart.assertPlanStartAcceptEligible(fakeTrx(), { id: quote.id }))
       .rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
-    const again = await mint({ customer: tables.customers[0], randomBytes: () => Buffer.from('0123456789abcdef') });
+    // The repeat tap stores the moved profile's own address, as production's addressForCustomer does.
+    const movedAddress = { pricingAi: { ...deps().pricingAi, addressForCustomer: require('../services/customer-pricing-ai').addressForCustomer } };
+    const again = await mint({ customer: tables.customers[0], randomBytes: () => Buffer.from('0123456789abcdef') }, movedAddress);
     expect(again.reused).toBe(false);
     expect(again.estimateId).not.toBe(first.estimateId);
   });
@@ -618,6 +620,16 @@ describe('mintPlanStartEstimate', () => {
     test('a multi-premises profile, or a proof that cannot run, is priced by hand', async () => {
       await refused('pricing_unavailable', {}, { customerHasOnlyPrimaryPremises: async () => false });
       await refused('pricing_unavailable', {}, { customerHasOnlyPrimaryPremises: async () => { throw new Error('boom'); } });
+    });
+
+    test('a profile whose stored address reads back as another home is priced by hand: its accept could never pass (codex pre-push P1)', async () => {
+      const realAddress = { pricingAi: { ...deps().pricingAi, addressForCustomer: require('../services/customer-pricing-ai').addressForCustomer } };
+      // With no city, the unit line "Building 2" reads back as the stored address's city.
+      tables.customers = [{ ...LEAD, address_line2: 'Building 2', city: null }];
+      await refused('pricing_unavailable', {}, realAddress);
+      // A unit line the parser knows reads back as the same home.
+      tables.customers = [{ ...LEAD, address_line2: 'Apt 4', city: null }];
+      await expect(mint({}, realAddress)).resolves.toMatchObject({ reused: false });
     });
 
     test('another profile on the account is priced by hand: the strict premises proof reads the whole account (codex pre-push r16 P0)', async () => {

@@ -821,6 +821,16 @@ async function mintPricedEstimate(args) {
   if (!primaryStreet) {
     throw new RestartUnavailableError('pricing_unavailable', handMessage);
   }
+  // The plan-start accept reads the home back from the stored address string
+  // (codex pre-push P1). A profile whose string parses as another home (with
+  // no city, a unit line such as "Building 2" reads as the city) could never
+  // be accepted, so plan start prices it by hand.
+  if (strict && !sameHome(
+    require('../estimate-property-linkage').normalizedEstimateStreet(mintDeps.pricingAi.addressForCustomer(fresh)),
+    primaryStreet,
+  )) {
+    throw new RestartUnavailableError('pricing_unavailable', handMessage);
+  }
   // Plan start also stores the home its price was proven for (codex pre-push P0): a staff address
   // change rewrites an open quote's address column (customer-address-fanout.js), so the accept and
   // a reuse compare the account's home with this key as well as with that column.

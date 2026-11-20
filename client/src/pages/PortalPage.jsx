@@ -1,7 +1,7 @@
 import { Fragment, useState, useEffect, useRef, useCallback, useMemo, useId, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useAuth, tokenCustomerId } from '../hooks/useAuth';
+import { useAuth, tokenCustomerId, tokenContactKey } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
 import usePortalActivity from '../hooks/usePortalActivity';
@@ -11116,14 +11116,19 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   // estimate link, or file its request, under another account. The check is the API client's own
   // (sameRequestSession); a requestSuperseded cancel means it already failed. It reads the stored
   // credential too: a login or logout in another tab rewrites waves_token before this tab's storage
-  // handler updates api.token (codex pre-push P0).
+  // handler updates api.token (codex pre-push P0). It compares the contact claim too, as useAuth does
+  // (tokenContactKey): the API client's check reads none, and it lets a same-customer token of any
+  // session stand in for a token from before durable sessions, so a contact signing in on the
+  // holder's row would pass it (codex pre-push P0).
   const startPlan = async () => {
     if (minting || startingPlan || requesting || loading || !selected) return;
     const seq = planStartSeq.current;
     const tapToken = api.token;
     const tapSession = tokenSessionIdentity(tapToken);
+    const tapContact = tokenContactKey(tapToken);
     const tapSessionActive = () => [api.token, localStorage.getItem('waves_token')]
-      .every((token) => token === tapToken || sameRequestSession(tapSession, tokenSessionIdentity(token)));
+      .every((token) => token === tapToken
+        || (sameRequestSession(tapSession, tokenSessionIdentity(token)) && tokenContactKey(token) === tapContact));
     // Another tab already changed the account, and this tab has not heard of it yet: the start would
     // mint under the old token and could replace that account's quote and free its slot hold (codex
     // pre-push P1). Send nothing; the storage handler brings this tab up to date.
