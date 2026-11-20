@@ -165,10 +165,11 @@ function raiseVisit(record, visits) {
  * Inspection rows -> one record per visit that cited violation 35, in the three counties. A row cut short, or a row
  * in the area with a bad report id, date (or one after `today`, when given), violation-35 count or visit number, is
  * skipped and counted in counts.malformed; a row in the area that passes counts in counts.valid, cited or not.
- * Every copy of a visit in the area whose visit number reads, cited or not, valid or not, notes it in `visits`, and
- * each record takes the highest: a visit any copy names as a later visit (a callback listed once more as visit 1)
- * is never a first visit. loadFile reads a row at a time, so it passes one `visits` for the whole file and raises
- * the kept records again once every row is read.
+ * Every copy of a visit whose visit number reads, in the area or not (a visit id names one visit statewide), cited
+ * or not, valid or not, notes it in `visits`, and each record takes the highest: a visit any copy names as a later
+ * visit (a callback listed once more as visit 1) is never a first visit. loadFile reads a row at a time, so it
+ * passes one `visits` for the whole file, raises the kept records again once every row is read, and hands the
+ * store every later visit, kept or not (raiseVisits).
  */
 function parseInspectionRows(rows, counts = {}, today = null, visits = new Map()) {
   counts.malformed ??= 0;
@@ -179,17 +180,17 @@ function parseInspectionRows(rows, counts = {}, today = null, visits = new Map()
       counts.malformed += 1;
       continue;
     }
+    const sourceKey = clean(row['Inspection Visit ID']);
+    const visitNumber = visitNumberOf(row['Visit Number']);
+    noteHighest(visits, sourceKey, visitNumber);
     if (hasNoCounty(row['County Name'])) {
       counts.malformed += 1;
       continue;
     }
     if (!inServiceArea(row['County Name'], row['Location City'], row['Location Zip Code'])) continue;
-    const sourceKey = clean(row['Inspection Visit ID']);
     const licenseId = clean(row['License ID'], 40);
     const eventDate = parseUsDate(row['Inspection Date']);
     const cited = wholeNumber(row['Violation 35']);
-    const visitNumber = visitNumberOf(row['Visit Number']);
-    noteHighest(visits, sourceKey, visitNumber);
     // A row without both report ids is left out: its report could never be read, and once stored it would block a
     // corrected copy (a known key only refreshes last_seen_at). A later file with the ids adds it.
     if (!ID_RE.test(sourceKey || '') || !ID_RE.test(licenseId || '') || !eventDate || (today && eventDate > today) || cited === null
@@ -374,6 +375,24 @@ async function bumpAttempts(id) {
   await db('restaurant_prospects').where({ id }).increment('detail_attempts', 1);
 }
 
+// Raises the stored visit number of each unanswered inspection a file names as a later visit ([sourceKey, number]
+// pairs, loadFile's laterVisits), whether or not the file keeps a record of it: an uncited callback copy is never
+// kept. One-way, as the re-read fill: a lower or equal number, or an answered row, never changes. The saveReport
+// guard then refuses an answer read for the old number, and pendingInspections skips the row. Returns the number of
+// rows raised. Two array bindings, so a long list never meets the binding limit.
+async function raiseVisits(laterVisits) {
+  if (!laterVisits.length) return 0;
+  const result = await db.raw(
+    `UPDATE restaurant_prospects AS r
+        SET detail = COALESCE(r.detail, '{}'::jsonb) || jsonb_build_object('visitNumber', v.n)
+       FROM unnest(?::text[], ?::int[]) AS v(source_key, n)
+      WHERE r.kind = 'inspection' AND r.source_key = v.source_key AND r.pest_evidence IS NULL
+        AND (r.detail->>'visitNumber' IS NULL OR r.detail->'visitNumber' < to_jsonb(v.n))`,
+    [laterVisits.map(([key]) => key), laterVisits.map(([, number]) => number)],
+  );
+  return result.rowCount;
+}
+
 // The fullest complete read of each file in its fiscal year, kept in system_settings: how many rows it held and the
 // fiscal year. settleRead judges a read against it and saves the read in one transaction, under a lock on the file's
 // key (judgeRead): two runs that overlap are judged one after the other, each against the measure the other left.
@@ -410,7 +429,7 @@ async function settleRead(kind, read, now) {
 
 // ── Weekly job ──────────────────────────────────────────────────
 
-const defaultStore = { upsertRecords, settleRead };
+const defaultStore = { upsertRecords, settleRead, raiseVisits };
 
 // The row width each file has, as cells minus header names. The inspection file fills every header column. The
 // license files never fill their last two (Base Risk Level, Secondary Risk Level): every row of the 2026-11-20 files
@@ -489,7 +508,11 @@ async function loadFile(kind, fetchText, now) {
   // area, or whose good rows cite nothing, succeeds. Each file holds the whole year, so a later good read still
   // writes every row.
   if (counts.malformed > (counts.valid + counts.malformed) * MALFORMED_SHARE) throw new Error('too many malformed rows');
-  return { records: kept, malformed: counts.malformed, rows: year ? year.rows : 0, fiscalYear, newest: year && year.newest };
+  // Every visit the file names as a later visit (2 or more), kept or not, for raiseVisits.
+  const laterVisits = [...visits].filter(([key, number]) => number > 1 && ID_RE.test(key));
+  return {
+    records: kept, malformed: counts.malformed, rows: year ? year.rows : 0, fiscalYear, newest: year && year.newest, laterVisits,
+  };
 }
 
 // The first day (July 1) of the fiscal year a day (YYYY-MM-DD) falls in.
@@ -548,9 +571,12 @@ function judgeRead(last, read, now) {
 async function syncFiles(deps, result) {
   for (const kind of Object.keys(FILES)) {
     try {
-      const { records, malformed, rows, fiscalYear, newest } = await loadFile(kind, deps.fetchText, deps.now);
+      const { records, malformed, rows, fiscalYear, newest, laterVisits } = await loadFile(kind, deps.fetchText, deps.now);
       const unique = dedupeByKey(records);
       result.files[kind] = { kept: unique.length, malformed, upserted: await deps.store.upsertRecords(unique) };
+      // A visit the file names as a later visit only by a copy it keeps no record of (an uncited callback) still
+      // raises its stored row, so a page read for the old number never saves and the row is never pending again.
+      if (laterVisits.length) await deps.store.raiseVisits(laterVisits);
       // Judged only once every row of this read is stored (settleRead). The rows are whole and valid, so they stay
       // written even when the read fails.
       const problem = await deps.store.settleRead(kind, { fiscalYear, rows, newest }, deps.now);
@@ -597,6 +623,7 @@ module.exports = {
   pendingInspections,
   saveReport,
   bumpAttempts,
+  raiseVisits,
   settleRead,
   judgeRead,
 };

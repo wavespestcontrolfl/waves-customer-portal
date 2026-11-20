@@ -167,6 +167,30 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     expect((await rows().where({ id: row.id }))[0].pest_evidence).toBe(false);
   });
 
+  test('a later file naming a stored first visit as a callback only by an uncited copy raises it: the stale save fails', async () => {
+    const first = { disposition: 'Warning Issued', violation35: 1, visitNumber: 1 };
+    await svc.upsertRecords([rec(30, { event_date: '2026-11-15', detail: first }), rec(31, { event_date: '2026-11-15', detail: first })]);
+    const stored = await rows();
+    const id = (n) => stored.find((r) => r.source_key === key(n)).id;
+    expect(await svc.saveReport({ id: id(31), violation35: 1, visitNumber: 1 }, { pestEvidence: false, findings: [] })).toBe(true);
+    const keys = [key(30), key(31)];
+    const pending = () => svc.pendingInspections({ cutoff: '2026-10-05', limit: 100, keys });
+    const [read] = await pending();
+    expect(read).toMatchObject({ id: id(30), violation35: 1, visitNumber: 1 });
+    // The next file lists both visits only as uncited visit 2 copies: no record; the unanswered row is raised, the
+    // answered one and a key never stored are not.
+    expect(await svc.raiseVisits([[key(30), 2], [key(31), 2], [key(98), 2]])).toBe(1);
+    expect(await svc.saveReport(read, { pestEvidence: true, findings: [{ code: '35A-02-4', text: 'x' }] })).toBe(false);
+    expect(await pending()).toEqual([]);
+    const after = await rows().whereIn('source_key', keys).orderBy('source_key');
+    expect(after.map((r) => [r.pest_evidence, r.detail.visitNumber, r.detail.violation35, r.detail.disposition]))
+      .toEqual([[null, 2, 1, 'Warning Issued'], [false, 1, 1, 'Warning Issued']]);
+    // One-way: an equal or lower number changes nothing; no pairs, no write.
+    expect(await svc.raiseVisits([[key(30), 2]])).toBe(0);
+    expect(await svc.raiseVisits([[key(30), 1]])).toBe(0);
+    expect(await svc.raiseVisits([])).toBe(0);
+  });
+
   test('saveReport does not overwrite an answer already written', async () => {
     await svc.upsertRecords([rec(3)]);
     const [row] = await rows().where({ source_key: key(3) });

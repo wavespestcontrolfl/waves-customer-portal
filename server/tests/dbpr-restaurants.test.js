@@ -246,14 +246,17 @@ describe('parseLicenseRows and the phone rule', () => {
 describe('syncRestaurantProspects', () => {
   let store;
   let upserts;
+  let raised;
   let reads;
   let fetchText;
 
   function makeStore() {
     upserts = [];
+    raised = [];
     reads = {};
     return {
       upsertRecords: jest.fn(async (records) => { upserts.push(...records); return records.length; }),
+      raiseVisits: jest.fn(async (later) => { raised.push(...later); return later.length; }),
       // As the real store, without the lock: the read is judged against the stored one and kept when it passes and
       // is fuller (judgeRead).
       settleRead: jest.fn(async (kind, read, now) => {
@@ -305,7 +308,25 @@ describe('syncRestaurantProspects', () => {
       const result = await sync({ fetchText: makeFetch({ '7fdinspi.csv': () => inspCsv(lines) }), store });
       expect(result.failures).toBe(0);
       expect(stored()).toEqual([['9001', 2], ['9003', 1]]);
+      expect(raised).toEqual([['9001', 2]]);
     }
+  });
+
+  test('a visit the file names as a later visit only by a copy it keeps no record of still goes to the store to raise', async () => {
+    // An uncited callback copy, and one outside the area (a visit id names one visit statewide): no record, a raise.
+    const callback = (line) => line.replace('"34208","1","1","Food"', '"34208","1","2","Food"');
+    const away = callback(inspRow({ visit: '9004', v35: 0, county: 'Hillsborough' }));
+    expect(away).toContain('"34208","1","2","Food"');
+    store = makeStore();
+    const lines = [callback(inspRow({ visit: '9001', v35: 0 })), away, inspRow({ visit: '9003' })];
+    const result = await sync({ fetchText: makeFetch({ '7fdinspi.csv': () => inspCsv(lines) }), store });
+    expect(result.failures).toBe(0);
+    expect(upserts.filter((r) => r.kind === 'inspection').map((r) => r.source_key)).toEqual(['9003']);
+    expect(raised).toEqual([['9001', 2], ['9004', 2]]);
+    // A file with no later visit makes no raise call.
+    store = makeStore();
+    await sync({ fetchText: makeFetch(), store });
+    expect(store.raiseVisits).not.toHaveBeenCalled();
   });
 
   test('upserts every kind under its own key, once per (kind, source_key)', async () => {
