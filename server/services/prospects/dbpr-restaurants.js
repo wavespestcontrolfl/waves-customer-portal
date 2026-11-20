@@ -171,15 +171,17 @@ function parseInspectionRows(rows, counts = { malformed: 0 }) {
 
 /**
  * New-license or ownership-change rows (same layout) -> one record per application in the three counties. A row in
- * the area that is cut short, has no application number, or one longer than the key column, is skipped and counted
- * in counts.malformed.
+ * the area that is cut short, has no application number, one longer than the key column, or no real approval date,
+ * is skipped and counted in counts.malformed: once stored, a known key only refreshes last_seen_at, so a corrected
+ * copy in a later file could never fill it in.
  */
 function parseLicenseRows(rows, kind, counts = { malformed: 0 }) {
   const out = [];
   for (const row of rows) {
     if (!inServiceArea(row['Location County'], row['Location City'], row['Location Zip Code'])) continue;
     const sourceKey = clean(row['Application Number']);
-    if (!hasEveryColumn(row, kind) || !sourceKey || sourceKey.length > KEY_MAX) {
+    const eventDate = parseUsDate(row['Application Approval Date']);
+    if (!hasEveryColumn(row, kind) || !sourceKey || sourceKey.length > KEY_MAX || !eventDate) {
       counts.malformed += 1;
       continue;
     }
@@ -197,7 +199,7 @@ function parseLicenseRows(rows, kind, counts = { malformed: 0 }) {
       county: clean(row['Location County'], 40),
       phone: pickPhone(row),
       seats: wholeNumber(row['Number of Seats']),
-      event_date: parseUsDate(row['Application Approval Date']),
+      event_date: eventDate,
       detail: { applicationType: clean(row['Application Type'], 120) },
     });
   }

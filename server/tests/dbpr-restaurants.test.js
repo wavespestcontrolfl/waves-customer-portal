@@ -127,13 +127,14 @@ describe('parseLicenseRows and the phone rule', () => {
     expect(out[1].seats).toBeNull();
   });
 
-  test('an application number longer than the key column is skipped and counted, never cut', () => {
+  test('an application number longer than the key column, or a date that is not a real day, is skipped and counted', () => {
     const rows = parseDbprCsv(licCsv([
       licRow({ app: 'A'.repeat(40) }), licRow({ app: 'A'.repeat(41) }), licRow({ app: '' }), licRow({ app: '7009', county: 'Polk' }),
+      licRow({ app: '7010', date: '02/30/2026' }), licRow({ app: '7011', date: '' }),
     ]));
     const counts = { malformed: 0 };
     expect(svc.parseLicenseRows(rows, 'new_license', counts).map((r) => r.source_key)).toEqual(['A'.repeat(40)]);
-    expect(counts.malformed).toBe(2);
+    expect(counts.malformed).toBe(4);
   });
 
   test('a row cut short is skipped and counted; an empty cell is still a cell', () => {

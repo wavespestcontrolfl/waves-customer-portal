@@ -72,27 +72,31 @@ describe('parseDbprCsv', () => {
 });
 
 describe('eachDbprCsvRow', () => {
-  // Many slices, with a quoted line break in every row, so some slice ends inside a quoted field.
-  const big = csv(Array.from({ length: 1500 }, (_, i) => ({
+  // Several 32 KB slices, with a quoted line break in every row, so slices end inside records and quoted fields.
+  const big = csv(Array.from({ length: 900 }, (_, i) => ({
     'Business Name': `TEST DINER ${i}`, 'Location Street Address': `${i} TEST ST\nSUITE ${i}`, 'Location Zip Code': '00000',
   })));
 
-  test('reads the same rows as parseDbprCsv and resolves with the trimmed header', async () => {
+  test.each([
+    ['CRLF', big],
+    ['CR only', big.replace(/\r\n/g, '\r')],
+  ])('%s line ends: the same rows as parseDbprCsv, with a turn for the server before the end', async (_, text) => {
     const rows = [];
-    const header = await eachDbprCsvRow(big, (row) => rows.push(row));
-    expect(rows).toEqual(parseDbprCsv(big));
-    expect(header).toEqual(DBPR_HEADER);
-  });
-
-  test('gives the server a turn before the file is done', async () => {
-    const rows = [];
-    const done = eachDbprCsvRow(big, (row) => rows.push(row));
+    const done = eachDbprCsvRow(text, (row) => rows.push(row));
     await new Promise((resolve) => { setImmediate(resolve); });
     expect(rows.length).toBeGreaterThan(0);
-    expect(rows.length).toBeLessThan(1500);
-    await done;
-    expect(rows).toHaveLength(1500);
-  });
+    expect(rows.length).toBeLessThan(900);
+    expect(await done).toEqual(DBPR_HEADER);
+    expect(rows).toEqual(parseDbprCsv(text));
+  }, 30000);
+
+  // One run of characters outside the BMP; with no lead or one, some slice cut falls between a pair's halves.
+  test.each(['', 'x'])('a slice cut never splits a character in two (lead %j)', async (lead) => {
+    const text = csv([{ 'Business Name': `${lead}${'\u{1F41C}'.repeat(40000)}` }]);
+    const rows = [];
+    await eachDbprCsvRow(text, (row) => rows.push(row));
+    expect(rows).toEqual(parseDbprCsv(text));
+  }, 30000);
 
   test('an empty file has no header and no rows; an unclosed quote rejects', async () => {
     const rows = [];

@@ -61,11 +61,12 @@ function parseDbprCsv(text) {
 
 // The same parse for an extract read inside the web server (the weekly
 // restaurant sync). In one call, a fiscal year of district inspections
-// blocks requests for seconds and keeps every row. Here the text goes in a
-// slice at a time (a slice ends at a line end; csv-parse joins a quoted
-// field across slices), requests get a turn between slices, and onRow sees
-// each row as it is read. Resolves with the trimmed header ([] for an empty
-// file). A parse error, or an error onRow throws, rejects.
+// blocks requests for seconds and keeps every row. Here the text goes in
+// fixed-size slices, whatever its line ends (csv-parse carries a record
+// across slices; a cut never splits a character), requests get a turn
+// between slices, and onRow sees each row as it is read. Resolves with the
+// trimmed header ([] for an empty file). A parse error, or an error onRow
+// throws, rejects.
 const DBPR_SLICE_CHARS = 32 * 1024;
 
 async function eachDbprCsvRow(text, onRow) {
@@ -78,8 +79,9 @@ async function eachDbprCsvRow(text, onRow) {
   reading.catch(() => {});
   const source = String(text || '');
   for (let at = 0; at < source.length && !parser.destroyed;) {
-    const lineEnd = source.indexOf('\n', at + DBPR_SLICE_CHARS);
-    const end = lineEnd === -1 ? source.length : lineEnd + 1;
+    let end = Math.min(at + DBPR_SLICE_CHARS, source.length);
+    // Each write is encoded on its own: keep the two halves of a character outside the BMP together.
+    if (end < source.length && /[\uDC00-\uDFFF]/.test(source[end])) end -= 1;
     parser.write(source.slice(at, end));
     at = end;
     await new Promise((resolve) => { setImmediate(resolve); });
