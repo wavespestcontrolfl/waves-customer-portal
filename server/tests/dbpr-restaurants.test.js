@@ -458,18 +458,22 @@ describe('syncRestaurantProspects', () => {
     expect(cut.files.inspection.short).toBe(true);
   });
 
-  test('a later fiscal year than today\'s, or no row from the last 14 days, fails and never becomes the measure', async () => {
+  test('a row dated after today is malformed and never stored; a file with no readable date, or none from the last 14 days, fails', async () => {
     store = makeStore();
     reads.inspection = { fiscalYear: '2026-07-01', rows: 20 };
-    // A cut file whose one row has a mistyped year: a later fiscal year than today's (Nov 19, 2026).
+    // One row dated after today (Nov 19, 2026) beside 21 good ones: it is malformed and never stored.
+    const rows = [...Array.from({ length: 21 }, (_, i) => inspRow({ visit: String(9001 + i) })), inspRow({ visit: '9101', date: '11/20/2026' })];
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv(rows) });
+    expect((await sync({ fetchText, store })).files.inspection).toEqual({ kept: 21, malformed: 1, upserted: 21 });
+    expect(upserts.map((record) => record.source_key)).not.toContain('9101');
+    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 22 });
+    // A cut file whose one row has a mistyped year: no good row, so it fails and the measure stays.
     fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(1, '03/02/2031') });
-    const future = await sync({ fetchText, store });
-    expect(future.files.inspection).toEqual({ kept: 1, malformed: 0, upserted: 1, future: true });
-    expect(logger.warn).toHaveBeenCalledWith('[dbpr-prospects] inspection file is from a later fiscal year (2030-07-01) than today\'s');
-    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 20 });
-    // So the next full file is measured as before, and passes.
-    fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(22) });
-    expect((await sync({ fetchText, store })).failures).toBe(0);
+    expect((await sync({ fetchText, store })).files.inspection).toEqual({ failed: true });
+    // A cut file of rows outside the area whose dates do not read: nothing to measure it by.
+    fetchText = makeFetch({ '7fdinspi.csv': () => inspCsv([inspRow({ visit: '9001', county: 'Polk', date: '2026-11-16' })]) });
+    expect((await sync({ fetchText, store })).files.inspection).toEqual({ failed: true });
+    expect(reads.inspection).toEqual({ fiscalYear: '2026-07-01', rows: 22 });
     // Frozen: the newest row is 15 days old, and the state posts every day.
     fetchText = makeFetch({ '7fdinspi.csv': () => visitsCsv(22, '11/04/2026') });
     const frozen = await sync({ fetchText, store });

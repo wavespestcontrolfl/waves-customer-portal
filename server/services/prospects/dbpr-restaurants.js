@@ -25,8 +25,7 @@
  * or on); the scheduler checks it before the run starts, so job_health keeps the last real outcome. A read with under
  * 90% of the rows of the fullest complete read of the same file and fiscal year is short (a download that stopped
  * early): its rows are written and the run fails (readProblem). That measure is kept in system_settings. A copy of
- * an older fiscal year than one already read, a file with no row from the last 14 days, or a file of a later fiscal
- * year than today's fails the same way.
+ * an older fiscal year than one already read, or a file with no row from the last 14 days, fails the same way.
  */
 
 const db = require('../../models/db');
@@ -321,8 +320,7 @@ async function loadFile(kind, fetchText, now, last) {
   const records = [];
   const today = etDateString(now);
   let rowsRead = 0;
-  // How many rows fall in each fiscal year, by the row's own date, and the newest date up to today (a mistyped later
-  // date never makes a file look fresh).
+  // How many rows fall in each fiscal year, by the row's own date, and the newest date.
   const years = new Map();
   let newest = null;
   // A row at a time, so the server keeps answering requests and only the kept records stay in memory.
@@ -333,10 +331,16 @@ async function loadFile(kind, fetchText, now, last) {
       return;
     }
     const day = parseUsDate(row[DATE_COLUMN[kind]]);
+    // A row dated after today (Eastern) is a mistyped date. Stored, it would stay wrong: a corrected copy of a known
+    // row only refreshes last_seen_at. It is malformed, and it never makes a file look fresh or of a later year.
+    if (day && day > today) {
+      counts.malformed += 1;
+      return;
+    }
     if (day) {
       const year = fiscalYearOf(day);
       years.set(year, (years.get(year) || 0) + 1);
-      if (day <= today && (!newest || day > newest)) newest = day;
+      if (!newest || day > newest) newest = day;
     }
     records.push(...(kind === 'inspection' ? parseInspectionRows([row], counts) : parseLicenseRows([row], kind, counts)));
   });
@@ -353,7 +357,10 @@ async function loadFile(kind, fetchText, now, last) {
   // Malformed rows and not one good row in the area mean a changed format (a new date format, say), not a quiet
   // week: the file fails. A file whose rows all fall outside the area, or whose good rows cite nothing, succeeds.
   if (!counts.valid && counts.malformed) throw new Error('no good row in the area');
-  // The fiscal year most rows fall in (null when no row has a date), so one stray date never moves a file.
+  // Rows without one readable date leave nothing to measure the file by (a cut file of rows outside the area, say):
+  // it fails. Only a header alone, above, reads with no fiscal year.
+  if (rowsRead && !years.size) throw new Error('no dated row');
+  // The fiscal year most rows fall in (null for a header alone), so one stray date never moves a file.
   const fiscalYear = [...years].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
   return { records, malformed: counts.malformed, rowsRead, fiscalYear, newest };
 }
@@ -367,7 +374,6 @@ function fiscalYearOf(day) {
 // Each file holds one fiscal year and only grows until the state starts it over, so a full read holds at least about
 // as many rows as the fullest complete read of the same year (the measure). A download that stopped early but ends on
 // a whole row passes every check in loadFile. So a complete read also fails when (readProblem):
-//   future  its fiscal year is later than today's: a mistyped year or a wrong file;
 //   stale   its fiscal year is earlier than the measure's (an older copy, a cache say), or no row is from the last
 //           14 days (a frozen file: the state posts every day; this also ends a June file served on into July);
 //   short   it holds under 90% of the measure's rows (under 20 rows in the measure the check waits).
@@ -379,16 +385,14 @@ function fiscalYearOf(day) {
 const SHORT_SHARE = 0.9;
 const SHORT_MIN_ROWS = 20;
 const FRESH_DAYS = 14;
-const READ_FLAGS = ['future', 'stale', 'short'];
+const READ_FLAGS = ['stale', 'short'];
 
 // Whole days from one plain date to a later one.
 const dayDiff = (from, to) => Math.round((Date.parse(to) - Date.parse(from)) / (24 * 60 * 60 * 1000));
 
 function readProblem(last, read, today) {
+  // A header alone in the first week of July (loadFile) has no year to measure.
   if (!read.fiscalYear) return null;
-  if (read.fiscalYear > fiscalYearOf(today)) {
-    return { flag: 'future', text: `is from a later fiscal year (${read.fiscalYear}) than today's` };
-  }
   if (last && read.fiscalYear < last.fiscalYear) {
     return { flag: 'stale', text: `is stale: its rows are from the fiscal year that began ${read.fiscalYear}, after a read of ${last.fiscalYear}` };
   }
