@@ -10,13 +10,17 @@
  * end date in fine print past the cut, an end written in words ("ending on Thursday") and a
  * rep's time off went wrong. Here each deal email is read whole, links removed, and the model
  * answers with the end date and the email's own words for it. An answer is kept only when
- * those words are in the email and the date is a real day from the day the email came to a
- * year after it. Any miss (no API key, API error, refusal, a reply that is not the JSON
- * asked for, words not found, a date out of range) leaves that line on the date patterns.
+ * those words are in the email, they name that day, and the day falls from the day the email
+ * came to a year after it. Any miss (no API key, API error, refusal, a reply that is not the
+ * JSON asked for, words not found, words for another day, a date out of range) leaves that
+ * line on the date patterns.
  *
- * Spend: one Haiku call per deal email, at most MAX_READS a run, on the Monday run only.
- * The trial on the 11 emails cost $0.0002 to $0.0018 a read: under 1 cent a month. Every
- * call is in the AI cost ledger (lane siteone_deal_end_date). Reads only; writes nothing.
+ * Spend: one Haiku call per deal email, at most MAX_READS a run, on the scheduled Monday run
+ * only (the catch-up reruns use the date patterns). A read costs at most about $0.002 (20,000
+ * characters in, 2,048 tokens out); the trial on the 11 emails cost $0.0002 to $0.0018 a
+ * read. At about 2 deal emails a month that is under 1 cent a month; at the cap it is about
+ * $0.04 a week. Every call is in the AI cost ledger (lane siteone_deal_end_date). Reads only;
+ * writes nothing.
  */
 
 const logger = require('../logger');
@@ -150,13 +154,42 @@ function isCalendarDay(iso) {
   return dt.getUTCFullYear() === Number(m[1]) && dt.getUTCMonth() === Number(m[2]) - 1 && dt.getUTCDate() === Number(m[3]);
 }
 
+// The quoted words must name the day. A calendar date in them must be that day (and that
+// year, when they give one); with no calendar date, a weekday at most a week on, "today" /
+// "tonight" or "tomorrow" must land on it. Words with no day in them prove nothing.
+const NAMED_DATE = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.? ?(\d{1,2})(?:st|nd|rd|th)?\b(?:,? ?(20\d{2})\b)?/g;
+const NUMERIC_DATE = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?\b/g;
+const ISO_DATE = /\b(20\d{2})-(\d{2})-(\d{2})\b/g;
+const MONTH_KEYS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+/** Every calendar date the (comparable) words name, as { month, day, year } (year null when not given). */
+function quoteDates(flat) {
+  const named = [...flat.matchAll(NAMED_DATE)].map((m) => [MONTH_KEYS.indexOf(m[1].slice(0, 3)) + 1, m[2], m[3]]);
+  const numeric = [...flat.matchAll(NUMERIC_DATE)].map((m) => [m[1], m[2], m[3] && m[3].length === 2 ? `20${m[3]}` : m[3]]);
+  const iso = [...flat.matchAll(ISO_DATE)].map((m) => [m[2], m[3], m[1]]);
+  return [...named, ...numeric, ...iso].map(([month, day, year]) => ({ month: Number(month), day: Number(day), year: year ? Number(year) : null }));
+}
+
+/** True when the words name endDate; `away` is its day count from the ET day the email came. */
+function quoteNamesDay(flat, endDate, away) {
+  const [year, month, day] = endDate.split('-').map(Number);
+  const dates = quoteDates(flat);
+  if (dates.length) return dates.some((d) => d.month === month && d.day === day && (d.year === null || d.year === year));
+  const weekday = WEEKDAYS[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
+  return (away <= 7 && new RegExp(`\\b${weekday}\\b`).test(flat))
+    || (away === 0 && /\b(?:today|tonight)\b/.test(flat))
+    || (away === 1 && /\btomorrow\b/.test(flat));
+}
+
 /**
  * Checks one parsed answer against the email. { ok: true, endDate, quote } (endDate null =
  * the email states no end), or { ok: false, reason }.
  */
 function checkAnswer(answer, emailText, receivedAt) {
   if (!answer || !Object.prototype.hasOwnProperty.call(answer, 'end_date')) return { ok: false, reason: 'invalid_json' };
-  if (answer.end_date === null) return { ok: true, endDate: null, quote: null };
+  // "No end" needs both values null: a quote beside a null date, or no quote key, is a malformed reply.
+  if (answer.end_date === null) return answer.quote === null ? { ok: true, endDate: null, quote: null } : { ok: false, reason: 'half_null' };
   const endDate = typeof answer.end_date === 'string' ? answer.end_date.trim() : '';
   if (!isCalendarDay(endDate)) return { ok: false, reason: 'bad_date' };
   const away = dayNumber(endDate) - dayNumber(etDateString(new Date(receivedAt)));
@@ -168,6 +201,7 @@ function checkAnswer(answer, emailText, receivedAt) {
   const needle = flat.replace(EDGE_MARKS, '');
   if (needle.length < QUOTE_MIN_CHARS || !/[a-z]/.test(needle)) return { ok: false, reason: 'no_quote' };
   if (!comparable(emailText).includes(needle)) return { ok: false, reason: 'quote_not_found' };
+  if (!quoteNamesDay(flat, endDate, away)) return { ok: false, reason: 'quote_date_mismatch' };
   return { ok: true, endDate, quote };
 }
 

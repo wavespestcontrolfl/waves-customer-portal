@@ -5,10 +5,12 @@
  * Pins: what the model reads (whole email, links removed, entities decoded, HTML tags out with
  * line breaks kept, capped) and that the HTML scan stays linear on a hostile body; an answer is
  * kept only with a real calendar day from the received ET day to a year on and with the email's
- * own words (spaces, case, curly quotes, dashes and edge marks aside); null = no end; the request
- * (Haiku pin, lane, prompt, one call per deal up to the cap, bodies re-read in one query); and
- * every miss (no key, body read failure, API error, refusal, cut reply, bad JSON, words not found)
- * leaves no entry, so the bell keeps its date-pattern line. Fakes only: no network, no database.
+ * own words (spaces, case, curly quotes, dashes and edge marks aside) that name that day (a date
+ * in them, else a weekday within a week, "tonight" or "tomorrow"); null = no end only beside a
+ * null quote; the request (Haiku pin, lane, prompt, one call per deal up to the cap, bodies
+ * re-read in one query); and every miss (no key, body read failure, API error, refusal, cut
+ * reply, bad JSON, words not found, words for another day, half-null) leaves no entry, so the
+ * bell keeps its date-pattern line. Fakes only: no network, no database.
  * All names and text are synthetic.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -64,16 +66,21 @@ describe('endDateText', () => {
 });
 
 describe('checkAnswer', () => {
-  const email = 'Subject line\nLast chance for 10% off. *Offers valid March 1 – April 30, 2026. Early Order Program ending on Thursday.';
-  const received = new Date('2026-04-15T14:00:00Z');
+  const email = 'Subject line\nLast chance for 10% off. *Offers valid March 1 – April 30, 2026. Early Order Program ending on Thursday. '
+    + 'Rebate forms due 5/15/26. Flash sale ends tonight. Free hat ends tomorrow. Points double through April 16, 2027. Spring marketing 15 percent promo.';
+  const received = new Date('2026-04-15T14:00:00Z'); // Wednesday Apr 15, 10 AM ET
 
   test.each([
-    ['exact words', 'Offers valid March 1 – April 30, 2026.'],
-    ['case, spaces and a plain hyphen for the en dash', 'offers  valid MARCH 1 - April 30, 2026'],
-    ['curly quotes and edge marks', '“*Offers valid March 1 – April 30, 2026.”'],
-    ['an end in words', 'Early Order Program ending on Thursday'],
-  ])('kept: %s', (_label, quote) => {
-    expect(checkAnswer({ end_date: '2026-04-30', quote }, email, received)).toEqual({ ok: true, endDate: '2026-04-30', quote: quote.replace(/\s+/g, ' ').trim() });
+    ['exact words', 'Offers valid March 1 – April 30, 2026.', '2026-04-30'],
+    ['case, spaces and a plain hyphen for the en dash', 'offers  valid MARCH 1 - April 30, 2026', '2026-04-30'],
+    ['curly quotes and edge marks', '“*Offers valid March 1 – April 30, 2026.”', '2026-04-30'],
+    ['a weekday: the Thursday after a Wednesday email', 'Early Order Program ending on Thursday', '2026-04-16'],
+    ['a numeric date with a two-digit year', 'Rebate forms due 5/15/26', '2026-05-15'],
+    ['"tonight" is the day the email came', 'Flash sale ends tonight', '2026-04-15'],
+    ['"tomorrow" is the next day', 'Free hat ends tomorrow', '2026-04-16'],
+    ['a year on is still in range', 'Points double through April 16, 2027', '2027-04-16'],
+  ])('kept: %s', (_label, quote, endDate) => {
+    expect(checkAnswer({ end_date: endDate, quote }, email, received)).toEqual({ ok: true, endDate, quote: quote.replace(/\s+/g, ' ').trim() });
   });
 
   test('null = the email states no end', () => {
@@ -83,6 +90,8 @@ describe('checkAnswer', () => {
   test.each([
     ['no answer', null, 'invalid_json'],
     ['no end_date key', { quote: 'Offers valid March 1' }, 'invalid_json'],
+    ['a null date beside words', { end_date: null, quote: 'Offers valid March 1 – April 30, 2026' }, 'half_null'],
+    ['a null date with no quote key', { end_date: null }, 'half_null'],
     ['not a calendar day', { end_date: '2026-02-30', quote: 'Offers valid March 1 – April 30, 2026' }, 'bad_date'],
     ['words for a date', { end_date: 'April 30', quote: 'Offers valid March 1 – April 30, 2026' }, 'bad_date'],
     ['before the email came', { end_date: '2026-04-14', quote: 'Offers valid March 1 – April 30, 2026' }, 'date_out_of_range'],
@@ -91,14 +100,27 @@ describe('checkAnswer', () => {
     ['a stray number', { end_date: '2026-04-30', quote: '30, 2026' }, 'no_quote'],
     ['a whole paragraph', { end_date: '2026-04-30', quote: 'x'.repeat(301) }, 'no_quote'],
     ['words not in the email', { end_date: '2026-04-30', quote: 'Offer ends April 30, 2026' }, 'quote_not_found'],
+    ['words for another day', { end_date: '2026-05-30', quote: 'Offers valid March 1 – April 30, 2026' }, 'quote_date_mismatch'],
+    ['a numeric date for another day', { end_date: '2026-05-16', quote: 'Rebate forms due 5/15/26' }, 'quote_date_mismatch'],
+    ['the weekday more than a week on', { end_date: '2026-04-23', quote: 'Early Order Program ending on Thursday' }, 'quote_date_mismatch'],
+    ['another weekday', { end_date: '2026-04-17', quote: 'Early Order Program ending on Thursday' }, 'quote_date_mismatch'],
+    ['"tonight" is not the next day', { end_date: '2026-04-16', quote: 'Flash sale ends tonight' }, 'quote_date_mismatch'],
+    ['no day in the words ("marketing 15" is not March 15)', { end_date: '2027-03-15', quote: 'Spring marketing 15 percent promo' }, 'quote_date_mismatch'],
   ])('dropped: %s', (_label, answer, reason) => {
     expect(checkAnswer(answer, email, received)).toEqual({ ok: false, reason });
   });
 
-  test('the range starts on the ET day the email came, a year on is still kept', () => {
+  test('days count from the ET day the email came', () => {
     const lateNight = new Date('2026-04-15T03:00:00Z'); // Apr 14, 11 PM ET
-    expect(checkAnswer({ end_date: '2026-04-14', quote: 'Offers valid March 1' }, email, lateNight).ok).toBe(true);
-    expect(checkAnswer({ end_date: '2027-04-16', quote: 'Offers valid March 1' }, email, received).ok).toBe(true);
+    expect(checkAnswer({ end_date: '2026-04-14', quote: 'Flash sale ends tonight' }, email, lateNight).ok).toBe(true);
+    expect(checkAnswer({ end_date: '2026-04-15', quote: 'Flash sale ends tonight' }, email, lateNight)).toEqual({ ok: false, reason: 'quote_date_mismatch' });
+  });
+
+  test('a year in the words must be the year of the date', () => {
+    const winter = 'Subject\nWinter rebate: offer ends January 15, 2026. Bonus points end January 15.';
+    const december = new Date('2026-12-20T15:00:00Z');
+    expect(checkAnswer({ end_date: '2027-01-15', quote: 'offer ends January 15, 2026' }, winter, december)).toEqual({ ok: false, reason: 'quote_date_mismatch' });
+    expect(checkAnswer({ end_date: '2027-01-15', quote: 'Bonus points end January 15' }, winter, december).ok).toBe(true);
   });
 
   test('a long run of marks in the quote is refused fast', () => {
@@ -197,25 +219,31 @@ describe('readDealEndDates', () => {
   });
 
   test('every miss leaves no entry, and a reply the code refuses is marked failed in the ledger', async () => {
-    const ids = [1, 2, 3, 4, 5, 6, 7];
-    const { conn } = fakeConn(ids.filter((id) => id !== 7).map((id) => ({ id, body_text: PROMO, body_html: null })));
+    const ids = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+    const { conn } = fakeConn(ids.filter((id) => id !== 9).map((id) => ({ id, body_text: PROMO, body_html: null })));
     const refusal = reply('', 'refusal');
     const notJson = reply('The offer ends April 30.');
     const wrongWords = reply('{"end_date": "2026-04-30", "quote": "Sale ends April 30"}');
+    const wrongDay = reply('{"end_date": "2026-05-30", "quote": "Offers valid March 1 – April 30, 2026."}');
+    const halfNull = reply('{"end_date": null, "quote": "Offers valid March 1 – April 30, 2026."}');
     mockCreate
       .mockRejectedValueOnce(Object.assign(new Error('overloaded'), { status: 529 }))
       .mockResolvedValueOnce(refusal)
       .mockResolvedValueOnce(reply('{"end_date": "2026-04-30"', 'max_tokens'))
       .mockResolvedValueOnce(notJson)
       .mockResolvedValueOnce(wrongWords)
+      .mockResolvedValueOnce(wrongDay)
+      .mockResolvedValueOnce(halfNull)
       .mockResolvedValueOnce(reply('{"end_date": "2026-04-30", "quote": "Offers valid March 1 – April 30, 2026."}'));
 
     const found = await readDealEndDates(conn, ids.map((id) => deal(id)));
 
-    expect([...found.keys()]).toEqual([6]);
-    expect(mockCreate).toHaveBeenCalledTimes(6); // no body row for 7, so no call
-    expect(mockRejected.mock.calls).toEqual([[notJson, 'invalid_json'], [wrongWords, 'schema_invalid']]);
-    expect(logger.info).toHaveBeenCalledWith('[siteone-deals] end dates: 1 of 7 deals read by AI; date patterns kept for 1 api_529, 1 refusal, 1 max_tokens, 1 invalid_json, 1 quote_not_found, 1 no_body');
+    expect([...found.keys()]).toEqual([8]);
+    expect(mockCreate).toHaveBeenCalledTimes(8); // no body row for 9, so no call
+    expect(mockRejected.mock.calls).toEqual([
+      [notJson, 'invalid_json'], [wrongWords, 'schema_invalid'], [wrongDay, 'schema_invalid'], [halfNull, 'schema_invalid'],
+    ]);
+    expect(logger.info).toHaveBeenCalledWith('[siteone-deals] end dates: 1 of 9 deals read by AI; date patterns kept for 1 api_529, 1 refusal, 1 max_tokens, 1 invalid_json, 1 quote_not_found, 1 quote_date_mismatch, 1 half_null, 1 no_body');
   });
 
   test(`reads at most ${MAX_READS} deals, newest first as given`, async () => {

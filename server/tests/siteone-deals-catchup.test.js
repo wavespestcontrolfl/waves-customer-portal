@@ -2,9 +2,13 @@
  * siteone-deals-digest missed-tick catch-up. The Monday 8:00 ET tick can be lost; the
  * Monday/Tuesday catch-up reads job_health.last_success_at to learn whether this ET week's
  * run finished, and when it did not it reads the SAME 7-day window the Monday tick would
- * have read. Fakes only: no network, no database. All names and addresses are synthetic.
+ * have read. With GATE_SITEONE_DEAL_AI_END_DATE on it still asks for no AI end dates: the
+ * Monday run may already have paid for them, so a week's reads stay at one run's cap.
+ * Fakes only: no network, no database. All names and addresses are synthetic.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+const mockReadEndDates = jest.fn();
+jest.mock('../services/procurement/siteone-deal-end-date', () => ({ readDealEndDates: (...args) => mockReadEndDates(...args) }));
 
 const { weekIsMissing, runSiteOneDealsCatchUp, scheduledTickFor } = require('../services/procurement/siteone-deals-digest');
 
@@ -124,6 +128,19 @@ describe('runSiteOneDealsCatchUp', () => {
       reads.push(calls.wheres.filter(([table]) => table === 'emails'));
     }
     expect(reads[0]).toEqual(reads[1]);
+  });
+
+  test('gate on: the catch-up rings with the date patterns and asks for no AI end dates', async () => {
+    process.env.GATE_SITEONE_DEAL_AI_END_DATE = 'true';
+    try {
+      const { db } = fakeDb({ emails: emails() });
+      const notify = jest.fn().mockResolvedValue({ id: 5 });
+      expect(await runSiteOneDealsCatchUp({ now: TUESDAY_CATCH_UP, db, notify })).toEqual({ scanned: 1, deals: 1, notified: true });
+      expect(mockReadEndDates).not.toHaveBeenCalled();
+      expect(notify.mock.calls[0][2].detail).toContain('deadline not stated');
+    } finally {
+      delete process.env.GATE_SITEONE_DEAL_AI_END_DATE;
+    }
   });
 
   test('the week already ran: reads no mail and rings no bell', async () => {

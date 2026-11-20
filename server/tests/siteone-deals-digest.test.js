@@ -358,8 +358,19 @@ describe('runSiteOneDealsDigest', () => {
       email({ id: 34, subject: 'Early order program', received_at: at('2026-10-28T15:00:00Z'), body_text: 'Book now.' }),
     ];
 
-    test.each([['unset', undefined], ['not exactly true', '1']])('gate %s: no AI read, the date patterns decide', async (_label, value) => {
+    test.each([['unset', undefined], ['not exactly true', '1']])('gate %s: no AI read even on the Monday run, the date patterns decide', async (_label, value) => {
       if (value !== undefined) process.env[GATE] = value;
+      const { db } = fakeDb({ emails: gateEmails() });
+      const notify = jest.fn().mockResolvedValue({ id: 1 });
+      await runSiteOneDealsDigest({ now, db, notify, aiEndDates: true });
+      expect(mockReadEndDates).not.toHaveBeenCalled();
+      expect(notify.mock.calls[0][2].detail.split('\n').map((line) => line.split(' · ')[3])).toEqual([
+        'deadline not stated', 'deadline 2026-11-05', 'deadline 2026-11-12', 'deadline not stated',
+      ]);
+    });
+
+    test('gate on, but not the Monday run (no aiEndDates): no AI read, the date patterns decide', async () => {
+      process.env[GATE] = 'true';
       const { db } = fakeDb({ emails: gateEmails() });
       const notify = jest.fn().mockResolvedValue({ id: 1 });
       await runSiteOneDealsDigest({ now, db, notify });
@@ -378,7 +389,7 @@ describe('runSiteOneDealsDigest', () => {
         [34, { endDate: '2027-01-15', quote: 'Orders must be placed by January 15, 2027' }],
       ]));
       const notify = jest.fn().mockResolvedValue({ id: 1 });
-      await runSiteOneDealsDigest({ now, db, notify });
+      await runSiteOneDealsDigest({ now, db, notify, aiEndDates: true });
 
       // One read for the week's deals, newest first, on the same connection.
       expect(mockReadEndDates).toHaveBeenCalledTimes(1);
@@ -399,7 +410,7 @@ describe('runSiteOneDealsDigest', () => {
       const quote = `Offers valid November 1 – November 30, 2026. ${'Terms apply to select items only. '.repeat(6)}`;
       mockReadEndDates.mockResolvedValue(new Map([[32, { endDate: '2026-11-30', quote }]]));
       const notify = jest.fn().mockResolvedValue({ id: 1 });
-      await runSiteOneDealsDigest({ now, db, notify });
+      await runSiteOneDealsDigest({ now, db, notify, aiEndDates: true });
       const note = notify.mock.calls[0][2].detail.split(' · ')[3];
       expect(note.startsWith('ends Nov 30 ("Offers valid November 1 – November 30, 2026. Terms apply')).toBe(true);
       expect(note.endsWith('…")')).toBe(true);

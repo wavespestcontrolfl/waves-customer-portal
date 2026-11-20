@@ -13,10 +13,11 @@
  *
  * Deal tests, deadlines and product names are plain string and regex rules over rows
  * already in the database: $0, no network. One exception, dark behind
- * GATE_SITEONE_DEAL_AI_END_DATE (owner 2026-11-19 "B"): with it on, each deal's end date
- * comes from one Claude Haiku read of the whole email, shown with the email's own words
- * (siteone-deal-end-date.js, under 1 cent a month); a read that fails keeps the date-
- * pattern deadline. Read-only: it writes nothing but the bell.
+ * GATE_SITEONE_DEAL_AI_END_DATE (owner 2026-11-19 "B"): with it on, the scheduled Monday
+ * run takes each deal's end date from one Claude Haiku read of the whole email, shown with
+ * the email's own words (siteone-deal-end-date.js; at most 20 reads, about $0.04 a week);
+ * a read that fails keeps the date-pattern deadline, and the catch-up reruns use the date
+ * patterns only. Read-only: it writes nothing but the bell.
  *
  * The bell follows docs/admin-notifications.md: it is raised through
  * raiseAdminAlert (headline and why inside the copy rules), and the one-line-
@@ -323,9 +324,12 @@ function candidateEmailQuery(conn, since, now) {
 /**
  * Scans the last 7 days of mail, rings ONE bell when there are deals.
  * `notify` has raiseAdminAlert's shape (category, spec, opts); tests pass a fake.
+ * `aiEndDates: true` is the scheduled Monday run only (scheduler.js): it alone may pay
+ * for the AI end-date reads, so a catch-up after a failed save or a restart pays nothing
+ * again and the week's reads stay at one run's cap.
  * Returns { scanned, deals, notified }.
  */
-async function runSiteOneDealsDigest({ now = new Date(), db, notify } = {}) {
+async function runSiteOneDealsDigest({ now = new Date(), db, notify, aiEndDates = false } = {}) {
   const conn = db || require('../../models/db');
   const raise = notify || ((...args) => require('../admin-alert-compose').raiseAdminAlert(...args));
   const since = new Date(now.getTime() - WINDOW_DAYS * 86400000);
@@ -350,9 +354,9 @@ async function runSiteOneDealsDigest({ now = new Date(), db, notify } = {}) {
     logger.warn(`[siteone-deals] product names not read: ${err.message}`);
   }
 
-  // Gate off: no model call, and every line keeps its date-pattern deadline.
+  // Gate off, or not the Monday run: no model call, and every line keeps its date-pattern deadline.
   let endDates = new Map();
-  if (require('../../config/feature-gates').siteOneDealAiEndDateLive?.() === true) {
+  if (aiEndDates === true && require('../../config/feature-gates').siteOneDealAiEndDateLive?.() === true) {
     endDates = await require('./siteone-deal-end-date').readDealEndDates(conn, deals);
   }
 
@@ -428,6 +432,8 @@ async function weekIsMissing(opts = {}) {
  * Meant to run inside runExclusive(JOB_NAME); it checks again under that lock, so
  * a tick that finished while this one waited for the lock is not run twice. That
  * second read throws on failure (see readWeekMissing), so the run is recorded as failed.
+ * It never asks for AI end dates (no aiEndDates): the Monday run may already have paid
+ * for them, so this bell keeps the date-pattern deadlines.
  */
 async function runSiteOneDealsCatchUp({ now = new Date(), db, notify } = {}) {
   if (!(await readWeekMissing({ now, db }))) return { skipped: 'already_ran' };
