@@ -137,11 +137,16 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
     expect(rows.filter((row) => row.flag)).toHaveLength(6);
   });
 
-  test('a delivery stamp reads as an instant only in ISO form, in SQL and JavaScript alike, and never aborts a query (codex pre-push P1)', async () => {
+  test('a delivery stamp reads as an instant only as a complete ISO instant, in SQL and JavaScript alike, and never aborts a query (codex pre-push P1)', async () => {
     const { deliveryInstantSql, firstDeliveredAtMs, sentAtSql } = require('../services/self-serve-estimates');
-    // PostgreSQL reads 'now', 'infinity' and 'today'; JavaScript rolls Feb 30
-    // over to March. Each is present but unreadable, so the send is dated by sent_at.
-    const stamps = ['2005-07-04T15:00:00.000Z', 'now', 'infinity', 'today', '2005-02-30T15:00:00.000Z', 'not a date'];
+    const readable = ['2005-07-04T15:00:00.000Z', '2005-07-04T15:00:00Z', '2005-07-04T11:00:00.5-04:00'];
+    // PostgreSQL reads 'now', 'infinity', 'today', a zone name, a missing
+    // offset and microseconds; JavaScript rolls Feb 30 over to March and reads
+    // year 0 and hour 24. Each is present but unreadable in both, so the send
+    // is dated by sent_at.
+    const stamps = [...readable, 'now', 'infinity', 'today', '2005-07-04 15:00:00 America/New_York',
+      '2005-07-04T15:00:00', '2005-07-04', '2005-07-04T15:00:00.123456Z', '2005-02-30T15:00:00.000Z',
+      '0000-01-01T00:00:00Z', '2005-07-04T24:00:00Z', 'not a date'];
     const { rows } = await trx.raw(`
       SELECT e.stamp, ${deliveryInstantSql('e', 'firstDeliveredAt')} AS first_delivered,
              ${deliveryInstantSql('e', 'lastDeliveredAt')} AS last_delivered, ${sentAtSql('e')} AS sent_anchor
@@ -153,9 +158,10 @@ postgres('self-serve quotes in the Intelligence Bar estimate tools against migra
       const js = firstDeliveredAtMs({ deliveryState: { firstDeliveredAt: row.stamp } });
       expect([row.stamp, row.first_delivered?.getTime() ?? null, row.last_delivered?.getTime() ?? null])
         .toEqual([row.stamp, js, js]);
-      expect([row.stamp, row.sent_anchor.toISOString()]).toEqual([row.stamp, js == null ? new Date(AT).toISOString() : row.stamp]);
+      // The same fallback in both: an unreadable stamp dates the send by sent_at.
+      expect([row.stamp, row.sent_anchor.getTime()]).toEqual([row.stamp, js ?? Date.parse(AT)]);
     }
-    expect(rows.filter((row) => row.first_delivered).map((row) => row.stamp)).toEqual([stamps[0]]);
+    expect(rows.filter((row) => row.first_delivered).map((row) => row.stamp).sort()).toEqual([...readable].sort());
   });
 
   test('the Pipeline board lists a self-serve quote once staff deliver it, and never a plan restart quote (codex pre-push P1)', async () => {
