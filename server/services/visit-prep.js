@@ -997,6 +997,9 @@ module.exports = {
   stopPhotoViewUrls,
   customerFlaggedFacts,
   techStopMemberIds,
+  // One customer upload, checked and re-encoded: also the portal thread's photos (portal-messages.js).
+  prepareUploadFile,
+  deleteUploadedObject,
   _internal: {
     detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, prepareFiles, normalizeSubmissionFields, deleteUploadedObject, stopMemberIds, normalizeToJpeg, readFactsFromContract, plantReadFactsFromResult, effectiveReadStatus,
   },

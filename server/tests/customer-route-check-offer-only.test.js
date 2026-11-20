@@ -151,8 +151,9 @@ describe('every call site of a page builder is classified (offer lists opt in, c
   test('/book: only /availability and /find-slots pass a surface; the capture-intent revalidation and the staff pick do not', () => {
     const source = read('../routes/booking.js');
     const builds = callsOf(source, 'buildFunnelAvailability').filter((c) => c.text.startsWith('({'));
-    const surfaced = builds.filter((c) => /surface: 'book'|\.\.\.\(internal \? \{\} : \{ surface: 'book' \}\)/.test(c.text));
-    // /availability, /find-slots, availabilityForPin (customer text offers only; internal = staff pick)
+    const surfaced = builds.filter((c) => /surface: 'book'|\.\.\.\(internal \? \{\} : \{ surface: (?:surface \|\| )?'book' \}\)/.test(c.text));
+    // /availability, /find-slots, availabilityForPin (customer text offers only, 'book' unless the caller names its
+    // own label, as the hourly route check's asks do; internal = staff pick)
     expect(surfaced).toHaveLength(3);
     expect(builds).toHaveLength(4);
     const revalidation = builds.find((c) => !surfaced.includes(c));

@@ -6,6 +6,8 @@
  *   GET  /api/portal-messages               -> { messages, hasMore, unread }   (?before=<ISO time> pages back)
  *   GET  /api/portal-messages/unread-count  -> { count }
  *   POST /api/portal-messages               { body, requestId? } -> { message }
+ *        or multipart: body?, requestId?, photos (up to PHOTO_MAX image files) -> { message }
+ * A message's photos come back as `photos: [{ url }]`, signed view links.
  *   POST /api/portal-messages/read          { throughId } -> { unread }
  *
  * The thread is always the signed-in customer's own row (req.customerId); no route takes a customer id.
@@ -15,6 +17,7 @@ const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const Joi = require('joi');
+const multer = require('multer');
 const { authenticate } = require('../middleware/auth');
 const featureGates = require('../config/feature-gates');
 const PortalMessages = require('../services/portal-messages');
@@ -40,6 +43,21 @@ const postSchema = Joi.object({
 });
 const readSchema = Joi.object({ throughId: Joi.string().uuid().required() });
 
+// Photos ride the same POST as multipart, read into memory only after sign-in, the gate and the limiter.
+const photoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: PortalMessages.PHOTO_MAX_BYTES, files: PortalMessages.PHOTO_MAX, fields: 2, fieldSize: PortalMessages.BODY_MAX * 8, parts: PortalMessages.PHOTO_MAX + 2 },
+}).array('photos', PortalMessages.PHOTO_MAX);
+function readPhotos(req, res, next) {
+  if (!req.is('multipart/form-data')) return next();
+  return photoUpload(req, res, (err) => {
+    if (!err) return next();
+    return err.code === 'LIMIT_FILE_SIZE'
+      ? res.status(413).json({ error: 'Each photo must be 5 MB or smaller.', code: 'invalid_photo' })
+      : res.status(400).json({ error: `Attach no more than ${PortalMessages.PHOTO_MAX} photos.`, code: 'too_many_photos' });
+  });
+}
+
 function sendError(res, next, err) {
   if (err instanceof PortalMessages.PortalMessageError) return res.status(err.status).json({ error: err.message, code: err.code });
   return next(err);
@@ -61,11 +79,14 @@ router.get('/unread-count', async (req, res, next) => {
   } catch (err) { sendError(res, next, err); }
 });
 
-router.post('/', postLimiter, async (req, res, next) => {
-  const { value, error } = postSchema.validate(req.body || {});
+router.post('/', postLimiter, readPhotos, async (req, res, next) => {
+  const files = Array.isArray(req.files) ? req.files : [];
+  // A multipart form may leave the words out (a photo alone) and sends an unset field as an empty string.
+  const sent = files.length ? { body: req.body?.body ?? '', ...(req.body?.requestId ? { requestId: req.body.requestId } : {}) } : (req.body || {});
+  const { value, error } = postSchema.validate(sent);
   if (error) return res.status(400).json({ error: error.details[0].message });
   try {
-    const message = await PortalMessages.customerPost({ customer: req.customer, body: value.body, clientRequestId: value.requestId || null });
+    const message = await PortalMessages.customerPost({ customer: req.customer, body: value.body, clientRequestId: value.requestId || null, files });
     res.status(201).json({ message });
   } catch (err) { sendError(res, next, err); }
 });

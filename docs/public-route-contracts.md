@@ -4409,7 +4409,42 @@ the new-lead / existing-customer Customer 360 note so the office can give
 the sign host the $25 thank-you credit. STAFF-ONLY: it never joins
 `message`, the AI triage prose or the Lead Response Agent's message, and
 the agent's `get_lead_details` tool strips it; a missing, blank or
-non-string value is a no-op; and both accept an OPTIONAL `heard_about` —
+non-string value is a no-op; and both accept an OPTIONAL `quiz` object —
+the hub's two quiz pages (`/pest-control-quiz/`, `/lawn-care-quiz/`: the
+shared quote form with three tap questions in front of its contact steps,
+owner *build* 2026-11-19). Shape `{ kind, seeing, property }`, read from
+that exact key and reduced to FIXED tokens by `normalizeQuiz`
+(`server/services/lead-quiz.js`): `kind` `pest` | `lawn`; `seeing` one of
+that quiz's nine tiles (pest: `ants`, `roaches`, `spiders`, `rodents`,
+`termites`, `wasps`, `mosquitoes`, `bedbugs`, `unsure`; lawn: `weeds`,
+`patches`, `thinning`, `yellowing`, `bugs`, `fungus`, `shrubs`, `palms`,
+`unsure`); `property` `house` | `townhome` | `condo` | `business`. An
+unknown `kind`, a non-object or an absent key is a no-op; an unknown
+`seeing` / `property` is SILENTLY DROPPED and the rest kept; no other key
+of the object and no typed text is ever stored. The third quiz answer is
+the `timeline` field above. Stored in `extracted_data.quiz` (kept through
+the AI triage's extracted_data replace; a `quiz` or `timeline` key in the
+model's output is dropped before both triage writes, so it can never
+replace or supply the visitor's answers; kept on the unverified hold's
+stage too) and written as a "Pest Quiz: Roaches, condo,
+wants it today" line on the new-lead / existing-customer Customer 360 note
+and on the unverified hold's lead activity note.
+The new-lead bell reads "<name> via Pest Quiz (<zip>) - Roaches, condo,
+wants it today" when all three answers are known and name a problem
+(`quizNamesRequest`); a "Not sure" or partly answered quiz keeps the
+service line beside the answers ("- Wants Pest Control - Not sure, condo,
+wants it today"); the lead's source row (`lead_source_id`) is NOT changed by
+a quiz: a quiz is a form, not a traffic source.
+`property: business` is a stated commercial premises: it sets the intake's
+`isCommercial`, so the readiness gate records
+`commercial_category_conflict`, the lead row is marked `is_commercial`, and
+no residential draft is priced (under `GATE_UNIT_SCOPE_GUARDRAILS`, as for
+every other commercial signal). The quiz answers are NOT a pricing input:
+`property` never becomes the draft's property type. They are not
+staff-only: the Lead Response Agent may read them. The response is
+unchanged. Safe in either deploy order: a portal without this change
+ignores the unknown key and files an ordinary form lead;
+and both accept an OPTIONAL `heard_about` —
 the quote form's self-reported "How did you hear about us?" answer,
 validated against a FIXED allowlist (`server/services/heard-about.js`
 `sanitizeHeardAbout`, shared with the online quote wizard): `google_search`, `google_maps`, `chatgpt`,
@@ -5957,9 +5992,15 @@ logs (`redact-request-url.js`). No query parameters are read. The render cache i
 token.
 `/r/:code` (referral click-track + redirect to the marketing site; also
 OUTSIDE the `/api/` limiter — carries its own 30/min limiter and a
-url-safe 4-32 code format gate before any DB read; every hit below the
-gate writes a `referral_clicks` row, malformed/unknown codes redirect
-home without touching the DB).
+url-safe 4-32 code format gate before any DB read; a malformed code
+redirects home without touching the DB. A well-formed code is looked up:
+an active promoter (or a merged alias of one) writes a `referral_clicks`
+row on every hit and redirects with `?ref=`; a legacy
+`customers.referral_code` redirects with `?ref=` and writes no click row;
+an unknown code redirects home. On a promoter hit, a crawler, link-preview,
+scanner or empty user agent (`utils/bot-ua.js` plus the empty check) still
+redirects and gets a row with `device_type` 'bot', but is never a unique
+click and never raises `total_clicks`).
 The estimate `/data` response includes `verifiedStaffPreview: true` only
 when `adminPreview=1` is accompanied by a valid staff bearer token. The
 customer SPA uses that verified field (or the existing verified
@@ -8987,6 +9028,67 @@ a write failure is warn-logged by error kind ONLY). No cookie, user agent
 or referrer is ever read; the network address is used only by the
 one-minute per-IP limiter; nothing per-visitor is ever stored or logged. This is a pure aggregate count, never
 a session/visitor record.)
+`/api/public/form-steps` (write; anonymous, cookie-free quote-form and quiz
+step counter — a near copy of `/api/public/blog-read-depth` above. Owner
+approval: *build* 2026-11-19, quiz funnel scope ("Step counts with no cookie"
+on the two quizzes and the main form, all 17 sites). The quote
+form on every fleet site and the hub's two quiz pages fire one `fetch(url, {
+method: 'POST', body, keepalive: true, credentials: 'omit', mode: 'no-cors' })`
+per funnel step; the response is opaque to the browser by design, so it matters
+only for tests/abuse posture. **No gate**: it counts anonymous aggregate steps
+and cannot message a customer, change a price, charge, delete data, spend money
+or add a token page, so it ships live (`waves-ship` §6), unlike the read-depth
+route's `GATE_BLOG_READ_DEPTH`. Mounted in `server/index.js` right after the
+read-depth mount, ABOVE the global `cors({ origin: allowedOrigins })`, the
+global `app.use('/api/', limiter)` and the body parsers (own 120 req/min per-IP
+limiter, `FORM_STEPS_RATE_MAX`, applied before its own `express.text({ type: ()
+=> true, limit: '1kb' })` parse, which runs for `POST /` ONLY: every other
+method and subpath reaches the terminal 404 with its body unread), so a
+visitor's beacons never spend the shared budget a customer's quote-form or
+booking calls need. The router sets no-store/
+noindex/no-referrer headers first, sets no CORS headers, and ends in a terminal
+generic unknown-route 404, so no request that reaches it (any method, any
+subpath other than `POST /`) falls through to the app's request logger. Every
+answer (the 204, the 429, the 404) carries `Cross-Origin-Resource-Policy:
+cross-origin`, replacing the `same-origin` the app's helmet sets above the
+router: a browser turns a no-cors response marked `same-origin` into a network
+error, so without it the step would count while the page's fetch rejected and
+the console logged a blocked request for every step. No answer has a body
+worth keeping same-origin (two are empty, the 404 is the generic one).
+Body: `{"f":"<form>","s":"<step>"}` as `text/plain`. The allowlist
+(`FORM_STEPS` in `server/routes/public-form-steps.js`, own-property lookup
+only) is: `quote` (the main quote form on any site) = `view`, `start`,
+`interest`, `frequency`, `family`, `product`, `cadence`, `name`, `email`,
+`phone`, `address`, `lead`; `pest_quiz` and `lawn_quiz` (same list for both) =
+`view`, `start`, `seeing`, `property`, `timeline`, `name`, `email`, `phone`,
+`address`, `lead`, `end_call`, `end_business`, `end_price`, `end_review`,
+`call_tap`, `price_tap`. An unknown form (a prototype name such as `__proto__`
+or `constructor` as the form or the step is unknown too), a step from another
+form's list, a non-JSON or non-object body, or a body over 1 KB is dropped
+silently: the answer is ALWAYS 204 (the only other answer is the limiter's
+429), sent before any write, so the response never says what counted. Only `f`
+and `s` are read; any other key in the body is ignored and never stored. `site` is derived ONLY from the `Origin` header (never the body). The
+header must be ONE serialized `https` origin with no port (`scheme://host`
+and nothing else: a bare domain, a path, a JSON list or a comma-joined pair is
+refused before the registry sees it), and its hostname must be a fleet site in
+the spoke registry (`normalizeSpokeSites`); a missing/`null`/malformed/unknown
+origin drops the beacon with 204 and writes nothing. The Origin is attribution, not
+authentication (a non-browser caller can claim any fleet origin, and an
+anonymous beacon cannot be authenticated without a visitor identifier, which
+the approved scope rules out), so the bounds on a forged beacon are the fixed allowlist and
+a cap of 2,000 per `(day, site, form, step)` bucket a day (the upsert's `WHERE
+count < 2000`).
+Stored: daily totals only, in `form_step_daily` (migration
+`20261120020000_form_step_daily.js`), one row per `(day, site, form, step)`
+via `INSERT ... ON CONFLICT DO UPDATE SET count = count + 1`, `day` computed in
+SQL as the America/New_York calendar day. The table has NO timestamp column
+(no `created_at` / `updated_at`): a bucket records how many, never when. The write is fire-and-forget after
+the 204; a failure is warn-logged by error kind ONLY. Never stored or logged: a
+visitor id, IP address, cookie, user agent, referrer, the raw body, or any
+form field value (the beacon carries a step name, never what the visitor
+typed); the network address is used only by the one-minute per-IP limiter.
+Safe in either deploy order: a site without the beacon sends nothing; a
+portal without the route answers 404 and the site ignores it.)
 Typed-decision labeler token (`POST /api/admin/typed-decisions/reviews/:id/label`
 with header `X-Labeler-Token`; `server/routes/typed-decisions-labeler.js`;
 owner 2026-10-02, "token is fine"). The Claude labeling runner (two blind

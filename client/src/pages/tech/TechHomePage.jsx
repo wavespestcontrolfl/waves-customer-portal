@@ -69,6 +69,7 @@ import { accessSheetFields } from '../../lib/schedule-access';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppointmentDetailSheet';
 import TechRecapCapture from './TechRecapCapture';
+import { useRecapRecoveryHold } from '../../lib/recapUploads';
 import { pruneRecapClipDrafts } from '../../lib/completion-resume-store';
 import useVisiblePageRefresh from '../../hooks/useVisiblePageRefresh';
 import useSavedFastCompletions, { projectReportTool, savedAtLabel, withSavedCompletions } from '../../hooks/useSavedFastCompletions';
@@ -377,6 +378,9 @@ export default function TechHomePage({ section = 'today' }) {
   const [recapRecoveryStore] = useState(() => ({ failedDrafts: new Map(), latestAttempts: new Map(), inFlightAttempts: new Map(), discardedMedia: new Set(), refreshServices: new Set(), nextAttempt: 0 }));
   const [recapRecoveryRevision, setRecapRecoveryRevision] = useState(0);
   const notifyRecapRecoveryChange = useCallback(() => setRecapRecoveryRevision((revision) => revision + 1), []);
+  // Failed recap clips stay here while the visit sheet is closed: they hold
+  // the reload of an out-of-date tab for as long as this page lives.
+  useRecapRecoveryHold(recapRecoveryStore);
   // Last good route this device saw for this tech today (routeSnapshot.js).
   // Hydrated before the first fetch so a reopen in a dead zone shows the
   // saved stops at once instead of a spinner that ends in a red banner.

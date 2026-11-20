@@ -129,22 +129,38 @@ jobs:
       # Lanes (2026-10-08 trial). Measured on five green runs: this job
       # set the length of every run at 16-18 min, and two steps were 8 of
       # those minutes. They now run as background steps, each on its own
-      # server, while every other step runs below on the first server exactly
-      # as before. Each lane is still serial against its own database. They
-      # sit here, not in their old places, so they start at once. The
-      # `wait-all` step at the end of the job fails if either one failed.
+      # server, while the foreground steps run below on the first server.
+      # Each lane is still serial against its own database. They sit here,
+      # not in their old places, so they start at once. The `wait-all` step
+      # at the end of the job fails if either one failed.
       # 2026-11-01: the DB-gated suites moved to the `server-db` job (their
       # lane took 14.6 of this job's 16.3 min, median of 160 runs), and the
       # closeout lane, which the 2026-10-31 sweep grew to 16.4 min, runs as
       # two lanes: closeout, gate-code and lawn suites on the third server,
       # and the sweep's suites on the second.
-      # The gate-code suites in the second command gate on
+      # 2026-11-20: this job still took 8.8 min of test time (median of 150
+      # runs, Nov 19-20), so its work now runs in two jobs, `server` and
+      # `server-pg`, with three lanes each (never four: on 4 vCPU a fourth
+      # lane slowed the other three by about 10%, measured 2026-11-01). Each
+      # lane has its own Postgres server, as before. Measured minutes per
+      # lane, from one green main run (job `server`, 136131982715):
+      #   server     first server   4.5  foreground steps (list below)
+      #              second server  4.1  audit-clone suites, then IB workflow baseline
+      #              third server   3.9  closeout packet suites
+      #   server-pg  first server   4.5  foreground steps (list below)
+      #              second server  3.5  REPAIR_TEST grep lane, billing email, own-variable suites
+      #              third server   2.5  gate-code and lawn suites
+      # The two jobs add up to the old job's steps: no suite was added or
+      # dropped. The from-empty migration gate stays here, in `server`.
+      # The gate-code suites (the closeout lane's second command, now in
+      # `server-pg`) gate on
       # `process.env.DATABASE_URL ? describe : describe.skip`, not the
       # `const SKIP` line the DB-gated step greps for, so until 2026-10-30 they
       # ran nowhere in CI. Do not add the `const SKIP` line to them, or they
       # run twice.
-      # The third command runs 64 more suites with that same gate (46 of them
-      # lawn suites), which also ran nowhere in CI until 2026-10-31.
+      # The closeout lane's third command, also in `server-pg`, runs 64 more
+      # suites with that same gate (46 of them lawn suites), which also ran
+      # nowhere in CI until 2026-10-31.
       - name: Grouped closeout and gate-code transaction tests
         id: closeout
         background: true
@@ -155,83 +171,18 @@ jobs:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
         run: |
           npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js tests/assessment-estimate-closeout-postgres.test.js
-          DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_test npx jest --ci --silent --runInBand tests/access-code-capture-postgres.test.js tests/admin-neighborhood-access-postgres.test.js tests/admin-schedule-neighborhood-gate-actions.pg.test.js tests/neighborhood-access-postgres.test.js tests/neighborhood-access-sweep-postgres.test.js tests/neighborhood-access-visit-actions-postgres.test.js tests/neighborhood-caller-link-passes-postgres.test.js tests/neighborhood-gate-fallback-postgres.test.js tests/neighborhood-naming-postgres.test.js
-          DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_test npx jest --ci --silent --runInBand \
-            tests/admin-compliance-check-limits-arena.db.test.js \
-            tests/admin-protocols-lawn-window-caps.db.test.js \
-            tests/application-limits-county.db.test.js \
-            tests/compliance-ingredient-cap-scopes.db.test.js \
-            tests/compliance-per-property-caps.db.test.js \
-            tests/compliance-rolling-year.db.test.js \
-            tests/customer-estimates-on-record.test.js \
-            tests/invoice-create-discount-stacking-postgres.test.js \
-            tests/lawn-bermuda-removal-config-migrations.db.test.js \
-            tests/lawn-bermuda-removal-pricing.test.js \
-            tests/lawn-bermuda-removal.db.test.js \
-            tests/lawn-completion-defaults.db.test.js \
-            tests/lawn-reclaimed-half-n.db.test.js \
-            tests/lawn-trouble-areas.db.test.js \
-            tests/lawn-v13-april-polymer-n.db.test.js \
-            tests/lawn-v13-chinch-tetrino-rate.db.test.js \
-            tests/lawn-v13-count-caps.db.test.js \
-            tests/lawn-v13-dec-large-patch-k.db.test.js \
-            tests/lawn-v13-dec-large-patch-k.plan.db.test.js \
-            tests/lawn-v13-december-potash-followup.db.test.js \
-            tests/lawn-v13-december-potash-rollback-guard.db.test.js \
-            tests/lawn-v13-december-potash.db.test.js \
-            tests/lawn-v13-dylox-label-limits.db.test.js \
-            tests/lawn-v13-dylox-two-a-year-description.db.test.js \
-            tests/lawn-v13-dylox-two-a-year.db.test.js \
-            tests/lawn-v13-field-rules-followup.db.test.js \
-            tests/lawn-v13-field-rules-round7.db.test.js \
-            tests/lawn-v13-field-rules-round9.db.test.js \
-            tests/lawn-v13-field-rules.db.test.js \
-            tests/lawn-v13-final-pass-blindside-catalog.db.test.js \
-            tests/lawn-v13-final-pass-limits.db.test.js \
-            tests/lawn-v13-final-pass.db.test.js \
-            tests/lawn-v13-fire-ant-granule-facts.db.test.js \
-            tests/lawn-v13-fire-ant-granule-followup.db.test.js \
-            tests/lawn-v13-fire-ant-granule-guard.db.test.js \
-            tests/lawn-v13-fire-ant-granule.db.test.js \
-            tests/lawn-v13-matrix-adds-fixes.db.test.js \
-            tests/lawn-v13-matrix-adds-round2.db.test.js \
-            tests/lawn-v13-matrix-adds-round3.db.test.js \
-            tests/lawn-v13-matrix-adds-round4.db.test.js \
-            tests/lawn-v13-matrix-adds-round5.db.test.js \
-            tests/lawn-v13-matrix-adds-round6.db.test.js \
-            tests/lawn-v13-matrix-adds-round7.db.test.js \
-            tests/lawn-v13-matrix-adds-round8.db.test.js \
-            tests/lawn-v13-matrix-adds.db.test.js \
-            tests/lawn-v13-matrix-alias-rows-advion-limits.db.test.js \
-            tests/lawn-v13-matrix-remove-july-potash.db.test.js \
-            tests/lawn-v13-mole-cricket-bait.db.test.js \
-            tests/lawn-v13-nov-large-patch-n.db.test.js \
-            tests/lawn-v13-plan.db.test.js \
-            tests/lawn-v13-preflip.db.test.js \
-            tests/lawn-v13-rolling-year.db.test.js \
-            tests/lawn-v13-three-groups.db.test.js \
-            tests/lead-funnel-breakdown-sql.test.js \
-            tests/lead-webhook-triage-carry-forward.test.js \
-            tests/pretreat-sent-snapshot-postgres.test.js \
-            tests/reclaimed-water-meters.db.test.js \
-            tests/scheduled-invoice-mint-refuses-non-live-visit-postgres.test.js \
-            tests/seo-citations-audit-states-migration.test.js \
-            tests/service-photos-postgres.test.js \
-            tests/sms-lead-extraction-postgres.test.js \
-            tests/sms-reply-outcomes-postgres.test.js \
-            tests/supplies-consumption.test.js \
-            tests/termite-renewal-bill-to-fence-postgres.test.js
       # The sweep's commands (sweep #7246 B1, 2026-10-31) run suites whose
       # own variable no step set. Every suite that reads REPAIR_TEST_DATABASE_URL
       # builds its own throwaway schema, so its grep lane picks up a new one by
-      # itself. The APP_TEST suites copy the migrated tables into a private
-      # schema. The next command sets each single-suite variable, plus
-      # DATABASE_URL, which two of those suites require to match. The
-      # audit-clone suites refuse any database not named waves_audit_*, and
-      # the IB workflow baseline wants a waves_ib_workflow_* database of its
-      # own: the first command copies the freshly migrated database to both
-      # before any suite writes to it. Nothing else connects to this server,
-      # so the copy cannot meet a busy template.
+      # itself, and the APP_TEST suites copy the migrated tables into a
+      # private schema; those suites run in the `server-pg` job. This job
+      # keeps the two commands that need the copies: the audit-clone suites
+      # refuse any database not named waves_audit_*, and the IB workflow
+      # baseline wants a waves_ib_workflow_* database of its own. The first
+      # command copies the freshly migrated database to both before any suite
+      # writes to it. Nothing else connects to this server, so the copy
+      # cannot meet a busy template. Do not move the copy away from the two
+      # commands that use it, and do not run any other suite on this server.
       # tests/ci-db-suites-reached.test.js fails when a self-skipping Postgres
       # suite reaches no step that sets its variable; the suites that cannot
       # run here yet are listed, with reasons, in
@@ -246,66 +197,6 @@ jobs:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5433/waves_test
         run: |
           node -e "const { Client } = require('pg'); const c = new Client({ connectionString: 'postgresql://waves:waves@localhost:5433/postgres' }); c.connect().then(() => c.query('CREATE DATABASE waves_audit_ci TEMPLATE waves_test')).then(() => c.query('CREATE DATABASE waves_ib_workflow_ci TEMPLATE waves_test')).then(() => c.end(), (e) => { console.error(e); process.exit(1); });"
-          grep -l 'process.env.REPAIR_TEST_DATABASE_URL' tests/*.test.js \
-            | grep -v termite-annual-renewal-decline-coverage-postgres \
-            | tee /dev/stderr \
-            | xargs npx jest --ci --silent --runInBand
-          npx jest --ci --silent --runInBand \
-            tests/billing-channel-email-authority-postgres.test.js \
-            tests/billing-channel-email-migration-postgres.test.js \
-            tests/billing-email-detail-rows-dedupe-postgres.test.js \
-            tests/billing-email-detail-rows-fill-missing-postgres.test.js \
-            tests/billing-email-detail-rows-migration-postgres.test.js \
-            tests/billing-receipt-notice-migration-postgres.test.js \
-            tests/billing-retry-email-postgres.test.js \
-            tests/estimate-email-pdf-note-fixture-copy-migration-postgres.test.js \
-            tests/estimate-email-pdf-note-migration-postgres.test.js \
-            tests/estimate-email-pdf-note-paragraph-migration-postgres.test.js \
-            tests/estimate-extension-notice-fixture-migration-postgres.test.js \
-            tests/estimate-followup-average-fixture-price-migration-postgres.test.js \
-            tests/estimate-followup-average-fixture-price-restore-migration-postgres.test.js \
-            tests/estimate-followup-average-note-migration-postgres.test.js \
-            tests/estimate-proposal-delivery-copy-migration-postgres.test.js \
-            tests/llm-cost.test.js \
-            tests/misting-layouts-migration-postgres.test.js \
-            tests/misting-layouts-service-postgres.test.js
-          U=postgresql://waves:waves@localhost:5433/waves_test
-          DATABASE_URL=$U ACTIVITY_TIMELINE_TEST_DATABASE_URL=$U ANNUAL_PLAN_DOCUMENT_TEST_DATABASE_URL=$U BLOG_RECONCILE_TEST_DATABASE_URL=$U COPY_AUDIT_TEST_DATABASE_URL=$U DISCLAIMED_HOLDS_TEST_DATABASE_URL=$U DISCOUNT_STACK_PROVENANCE_TEST_DATABASE_URL=$U IB_TEST_DATABASE_URL=$U LAWN_COPY_V6_TEST_DATABASE_URL=$U LAWN_GATE_TEST_DATABASE_URL=$U LAWN_VISIT_MEMORY_TEST_DATABASE_URL=$U LEAD_EMAIL_LINKS_TEST_DATABASE_URL=$U MANUAL_SMS_TEST_DATABASE_URL=$U RECAP_TEST_DATABASE_URL=$U SIBLING_RESPLIT_TEST_DATABASE_URL=$U SMS_OPERATIONS_TEST_DATABASE_URL=$U TEST_SCHEDULE_DB_URL=$U TS_FIELD_TEST_DATABASE_URL=$U UPDATE_DETAILS_DISCOUNT_TEST_DATABASE_URL=$U UPDATE_DETAILS_NEGATIVE_MONEY_TEST_DATABASE_URL=$U VOICE_RECOVERY_TEST_DATABASE_URL=$U \
-            npx jest --ci --silent --runInBand \
-            tests/annual-plan-documents-postgres.test.js \
-            tests/apply-credit-claim-fence-promotion-postgres.test.js \
-            tests/backfill-lead-email-links-postgres.test.js \
-            tests/billing-skip-events-schema-postgres.test.js \
-            tests/call-recording-relay-postgres.test.js \
-            tests/codex-remediation-reconcile.test.js \
-            tests/customer-activity-timeline-postgres.test.js \
-            tests/customer-billing-lock-rollout-race-postgres.test.js \
-            tests/customer-copy-audit-postgres.test.js \
-            tests/disclaimed-number-holds-postgres.test.js \
-            tests/discount-stack-pricing-provenance-postgres.test.js \
-            tests/email-commitments-postgres.test.js \
-            tests/estimate-accept-multi-unit-per-unit-pricing.postgres.test.js \
-            tests/estimate-acceptance-schedule-check.test.js \
-            tests/intelligence-bar-bill-to-postgres.test.js \
-            tests/intelligence-bar-manual-sms-reservation-postgres.test.js \
-            tests/intelligence-bar-multi-card-db.test.js \
-            tests/intelligence-bar-property-access-postgres.test.js \
-            tests/invoice-settlement-lock-order-postgres.test.js \
-            tests/lawn-copy-v6.db.test.js \
-            tests/lawn-notification-deferred.db.test.js \
-            tests/lawn-report-write-gate-watering-postgres.test.js \
-            tests/lawn-visit-memory-postgres.test.js \
-            tests/newsletter-bounce-mailbox-postgres.test.js \
-            tests/newsletter-merge-deliveries-postgres.test.js \
-            tests/pest-recap-common-products-postgres.test.js \
-            tests/schedule-estimates-pending-postgres.test.js \
-            tests/series-extension-own-stop-postgres.test.js \
-            tests/tree-shrub-field-guide.postgres.test.js \
-            tests/update-details-discount-preserved-no-addons-pg.test.js \
-            tests/update-details-negative-discount-clamp-db.test.js \
-            tests/voice-relay-close-postgres.test.js \
-            tests/voice-relay-recovery-postgres.test.js \
-            tests/voice-relay-segments-postgres.test.js
           DATABASE_URL=postgresql://waves:waves@localhost:5433/waves_audit_ci CONSULTATION_STATS_TEST_DATABASE_URL=postgresql://waves:waves@localhost:5433/waves_audit_ci npx jest --ci --silent --runInBand \
             tests/admin-customers-archive-billing-winddown.test.js \
             tests/admin-customers-churn-canonical-winddown.test.js \
@@ -347,7 +238,6 @@ jobs:
         env:
           PORTAL_CHAT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand --no-coverage tests/portal-chat-reliability-postgres.test.js
-
       - name: Customer 360 SMS read and bell transaction tests
         run: |
           node <<'JS'
@@ -467,6 +357,260 @@ jobs:
         env:
           RECEIPT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/receipt-sms-delivery-postgres.test.js
+      - name: Visit summary authorization and recovery transaction tests
+        working-directory: server
+        env:
+          VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+          DATA_HYGIENE_VAULT_KEY: ci-only-visit-summary-test-key
+        run: npx jest --ci --silent --runInBand tests/visit-completion-summary-postgres.test.js
+      - name: Wait for the two background lanes (fails if either failed)
+        wait-all:
+
+  # The second half of the old `server` job's Postgres work (2026-11-20). It
+  # runs on a runner of its own, in parallel with `server`, so neither job
+  # takes more than about 6 minutes. The from-empty migration gate stays in
+  # `server`; here the first server is migrated in the same step layout only
+  # to give these suites a schema.
+  server-pg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        # pgvector/pgvector = official postgres:16 + the vector extension,
+        # required by the knowledge_embeddings migration (Railway prod
+        # Postgres already ships pgvector).
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: waves
+          POSTGRES_PASSWORD: waves
+          POSTGRES_DB: waves_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      # Two more servers so the background lanes can run beside the
+      # foreground steps (see "Lanes" below). Separate servers, not extra
+      # databases on one server: 167 suites refuse any database not named
+      # waves_test.
+      postgres-b:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: waves
+          POSTGRES_PASSWORD: waves
+          POSTGRES_DB: waves_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      postgres-c:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: waves
+          POSTGRES_PASSWORD: waves
+          POSTGRES_DB: waves_test
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NODE_ENV: test
+      JWT_SECRET: ci-only-test-secret
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: '.nvmrc'
+          check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
+          cache: npm
+      - run: npm ci
+      - parallel:
+          - name: Migrate the first server
+            env:
+              DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+            run: npx knex migrate:latest --knexfile server/knexfile.js
+          - name: Migrate the second server
+            env:
+              DATABASE_URL: postgresql://waves:waves@localhost:5433/waves_test
+            run: npx knex migrate:latest --knexfile server/knexfile.js
+          - name: Migrate the third server
+            env:
+              DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
+            run: npx knex migrate:latest --knexfile server/knexfile.js
+      # Lanes (see the comment above the lanes in the `server` job, which
+      # holds the measured minutes). This job runs the other half of that
+      # job's work, with the same three-lane layout: foreground steps on the
+      # first server, and one background step on each of the other two. The
+      # `wait-all` step at the end of the job fails if either one failed.
+      # The gate-code suites in the closeout lane gate on
+      # `process.env.DATABASE_URL ? describe : describe.skip`, not the
+      # `const SKIP` line the DB-gated step greps for. Do not add the
+      # `const SKIP` line to them, or they run twice.
+      # The third command (46 lawn suites among 64) has the same gate.
+      - name: Grouped closeout and gate-code transaction tests
+        id: closeout
+        background: true
+        working-directory: server
+        env:
+          VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
+          REPAIR_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
+          APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
+        run: |
+          DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_test npx jest --ci --silent --runInBand tests/access-code-capture-postgres.test.js tests/admin-neighborhood-access-postgres.test.js tests/admin-schedule-neighborhood-gate-actions.pg.test.js tests/neighborhood-access-postgres.test.js tests/neighborhood-access-sweep-postgres.test.js tests/neighborhood-access-visit-actions-postgres.test.js tests/neighborhood-caller-link-passes-postgres.test.js tests/neighborhood-gate-fallback-postgres.test.js tests/neighborhood-naming-postgres.test.js
+          DATABASE_URL=postgresql://waves:waves@localhost:5434/waves_test npx jest --ci --silent --runInBand \
+            tests/admin-compliance-check-limits-arena.db.test.js \
+            tests/admin-protocols-lawn-window-caps.db.test.js \
+            tests/application-limits-county.db.test.js \
+            tests/compliance-ingredient-cap-scopes.db.test.js \
+            tests/compliance-per-property-caps.db.test.js \
+            tests/compliance-rolling-year.db.test.js \
+            tests/customer-estimates-on-record.test.js \
+            tests/invoice-create-discount-stacking-postgres.test.js \
+            tests/lawn-bermuda-removal-config-migrations.db.test.js \
+            tests/lawn-bermuda-removal-pricing.test.js \
+            tests/lawn-bermuda-removal.db.test.js \
+            tests/lawn-completion-defaults.db.test.js \
+            tests/lawn-reclaimed-half-n.db.test.js \
+            tests/lawn-trouble-areas.db.test.js \
+            tests/lawn-v13-april-polymer-n.db.test.js \
+            tests/lawn-v13-chinch-tetrino-rate.db.test.js \
+            tests/lawn-v13-count-caps.db.test.js \
+            tests/lawn-v13-dec-large-patch-k.db.test.js \
+            tests/lawn-v13-dec-large-patch-k.plan.db.test.js \
+            tests/lawn-v13-december-potash-followup.db.test.js \
+            tests/lawn-v13-december-potash-rollback-guard.db.test.js \
+            tests/lawn-v13-december-potash.db.test.js \
+            tests/lawn-v13-dylox-label-limits.db.test.js \
+            tests/lawn-v13-dylox-two-a-year-description.db.test.js \
+            tests/lawn-v13-dylox-two-a-year.db.test.js \
+            tests/lawn-v13-field-rules-followup.db.test.js \
+            tests/lawn-v13-field-rules-round7.db.test.js \
+            tests/lawn-v13-field-rules-round9.db.test.js \
+            tests/lawn-v13-field-rules.db.test.js \
+            tests/lawn-v13-final-pass-blindside-catalog.db.test.js \
+            tests/lawn-v13-final-pass-limits.db.test.js \
+            tests/lawn-v13-final-pass.db.test.js \
+            tests/lawn-v13-fire-ant-granule-facts.db.test.js \
+            tests/lawn-v13-fire-ant-granule-followup.db.test.js \
+            tests/lawn-v13-fire-ant-granule-guard.db.test.js \
+            tests/lawn-v13-fire-ant-granule.db.test.js \
+            tests/lawn-v13-matrix-adds-fixes.db.test.js \
+            tests/lawn-v13-matrix-adds-round2.db.test.js \
+            tests/lawn-v13-matrix-adds-round3.db.test.js \
+            tests/lawn-v13-matrix-adds-round4.db.test.js \
+            tests/lawn-v13-matrix-adds-round5.db.test.js \
+            tests/lawn-v13-matrix-adds-round6.db.test.js \
+            tests/lawn-v13-matrix-adds-round7.db.test.js \
+            tests/lawn-v13-matrix-adds-round8.db.test.js \
+            tests/lawn-v13-matrix-adds.db.test.js \
+            tests/lawn-v13-matrix-alias-rows-advion-limits.db.test.js \
+            tests/lawn-v13-matrix-remove-july-potash.db.test.js \
+            tests/lawn-v13-mole-cricket-bait.db.test.js \
+            tests/lawn-v13-nov-large-patch-n.db.test.js \
+            tests/lawn-v13-plan.db.test.js \
+            tests/lawn-v13-preflip.db.test.js \
+            tests/lawn-v13-rolling-year.db.test.js \
+            tests/lawn-v13-three-groups.db.test.js \
+            tests/lead-funnel-breakdown-sql.test.js \
+            tests/lead-webhook-triage-carry-forward.test.js \
+            tests/pretreat-sent-snapshot-postgres.test.js \
+            tests/reclaimed-water-meters.db.test.js \
+            tests/scheduled-invoice-mint-refuses-non-live-visit-postgres.test.js \
+            tests/seo-citations-audit-states-migration.test.js \
+            tests/service-photos-postgres.test.js \
+            tests/sms-lead-extraction-postgres.test.js \
+            tests/sms-reply-outcomes-postgres.test.js \
+            tests/supplies-consumption.test.js \
+            tests/termite-renewal-bill-to-fence-postgres.test.js
+      # The sweep's commands (sweep #7246 B1, 2026-10-31) run suites whose
+      # own variable no step set. Every suite that reads REPAIR_TEST_DATABASE_URL
+      # builds its own throwaway schema, so its grep lane picks up a new one by
+      # itself. The APP_TEST suites copy the migrated tables into a private
+      # schema. The last command sets each single-suite variable, plus
+      # DATABASE_URL, which two of those suites require to match. The audit-clone
+      # suites and the IB workflow baseline stay in the `server` job: they need
+      # the copied databases that job's first command makes.
+      # tests/ci-db-suites-reached.test.js fails when a self-skipping Postgres
+      # suite reaches no step that sets its variable; the suites that cannot
+      # run here yet are listed, with reasons, in
+      # tests/fixtures/ci-db-suites-not-run.json.
+      - name: Postgres suites with their own database variables (serial, on the second server)
+        id: own-variables
+        background: true
+        working-directory: server
+        env:
+          VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5433/waves_test
+          REPAIR_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5433/waves_test
+          APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5433/waves_test
+        run: |
+          grep -l 'process.env.REPAIR_TEST_DATABASE_URL' tests/*.test.js \
+            | grep -v termite-annual-renewal-decline-coverage-postgres \
+            | tee /dev/stderr \
+            | xargs npx jest --ci --silent --runInBand
+          npx jest --ci --silent --runInBand \
+            tests/billing-channel-email-authority-postgres.test.js \
+            tests/billing-channel-email-migration-postgres.test.js \
+            tests/billing-email-detail-rows-dedupe-postgres.test.js \
+            tests/billing-email-detail-rows-fill-missing-postgres.test.js \
+            tests/billing-email-detail-rows-migration-postgres.test.js \
+            tests/billing-receipt-notice-migration-postgres.test.js \
+            tests/billing-retry-email-postgres.test.js \
+            tests/estimate-email-pdf-note-fixture-copy-migration-postgres.test.js \
+            tests/estimate-email-pdf-note-migration-postgres.test.js \
+            tests/estimate-email-pdf-note-paragraph-migration-postgres.test.js \
+            tests/estimate-extension-notice-fixture-migration-postgres.test.js \
+            tests/estimate-followup-average-fixture-price-migration-postgres.test.js \
+            tests/estimate-followup-average-fixture-price-restore-migration-postgres.test.js \
+            tests/estimate-followup-average-note-migration-postgres.test.js \
+            tests/estimate-proposal-delivery-copy-migration-postgres.test.js \
+            tests/llm-cost.test.js \
+            tests/misting-layouts-migration-postgres.test.js \
+            tests/misting-layouts-service-postgres.test.js
+          U=postgresql://waves:waves@localhost:5433/waves_test
+          DATABASE_URL=$U ACTIVITY_TIMELINE_TEST_DATABASE_URL=$U ANNUAL_PLAN_DOCUMENT_TEST_DATABASE_URL=$U BLOG_RECONCILE_TEST_DATABASE_URL=$U COPY_AUDIT_TEST_DATABASE_URL=$U DISCLAIMED_HOLDS_TEST_DATABASE_URL=$U DISCOUNT_STACK_PROVENANCE_TEST_DATABASE_URL=$U IB_TEST_DATABASE_URL=$U LAWN_COPY_V6_TEST_DATABASE_URL=$U LAWN_GATE_TEST_DATABASE_URL=$U LAWN_VISIT_MEMORY_TEST_DATABASE_URL=$U LEAD_EMAIL_LINKS_TEST_DATABASE_URL=$U MANUAL_SMS_TEST_DATABASE_URL=$U RECAP_TEST_DATABASE_URL=$U SIBLING_RESPLIT_TEST_DATABASE_URL=$U SMS_OPERATIONS_TEST_DATABASE_URL=$U TEST_SCHEDULE_DB_URL=$U TS_FIELD_TEST_DATABASE_URL=$U UPDATE_DETAILS_DISCOUNT_TEST_DATABASE_URL=$U UPDATE_DETAILS_NEGATIVE_MONEY_TEST_DATABASE_URL=$U VOICE_RECOVERY_TEST_DATABASE_URL=$U \
+            npx jest --ci --silent --runInBand \
+            tests/annual-plan-documents-postgres.test.js \
+            tests/apply-credit-claim-fence-promotion-postgres.test.js \
+            tests/backfill-lead-email-links-postgres.test.js \
+            tests/billing-skip-events-schema-postgres.test.js \
+            tests/call-recording-relay-postgres.test.js \
+            tests/codex-remediation-reconcile.test.js \
+            tests/customer-activity-timeline-postgres.test.js \
+            tests/customer-billing-lock-rollout-race-postgres.test.js \
+            tests/customer-copy-audit-postgres.test.js \
+            tests/disclaimed-number-holds-postgres.test.js \
+            tests/discount-stack-pricing-provenance-postgres.test.js \
+            tests/email-commitments-postgres.test.js \
+            tests/estimate-accept-multi-unit-per-unit-pricing.postgres.test.js \
+            tests/estimate-acceptance-schedule-check.test.js \
+            tests/intelligence-bar-bill-to-postgres.test.js \
+            tests/intelligence-bar-manual-sms-reservation-postgres.test.js \
+            tests/intelligence-bar-multi-card-db.test.js \
+            tests/intelligence-bar-property-access-postgres.test.js \
+            tests/invoice-settlement-lock-order-postgres.test.js \
+            tests/lawn-copy-v6.db.test.js \
+            tests/lawn-notification-deferred.db.test.js \
+            tests/lawn-report-write-gate-watering-postgres.test.js \
+            tests/lawn-visit-memory-postgres.test.js \
+            tests/newsletter-bounce-mailbox-postgres.test.js \
+            tests/newsletter-merge-deliveries-postgres.test.js \
+            tests/pest-recap-common-products-postgres.test.js \
+            tests/schedule-estimates-pending-postgres.test.js \
+            tests/series-extension-own-stop-postgres.test.js \
+            tests/tree-shrub-field-guide.postgres.test.js \
+            tests/update-details-discount-preserved-no-addons-pg.test.js \
+            tests/update-details-negative-discount-clamp-db.test.js \
+            tests/voice-relay-close-postgres.test.js \
+            tests/voice-relay-recovery-postgres.test.js \
+            tests/voice-relay-segments-postgres.test.js
       - name: Plaid bank sync transaction tests
         working-directory: server
         env:
@@ -498,12 +642,6 @@ jobs:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
           DATA_HYGIENE_VAULT_KEY: ci-only-visit-summary-test-key
         run: npx jest --ci --silent --runInBand tests/visit-summary-identity-postgres.test.js
-      - name: Visit summary authorization and recovery transaction tests
-        working-directory: server
-        env:
-          VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-          DATA_HYGIENE_VAULT_KEY: ci-only-visit-summary-test-key
-        run: npx jest --ci --silent --runInBand tests/visit-completion-summary-postgres.test.js
       - name: Billing Email provider connection and reminder ledger tests
         working-directory: server
         env:

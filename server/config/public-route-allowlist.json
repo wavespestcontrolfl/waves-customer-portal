@@ -71,6 +71,17 @@
       ]
     },
     {
+      "router": "server/routes/public-form-steps.js",
+      "mount": "/api/public/form-steps",
+      "reason": "Anonymous, cookie-free form step counter for the marketing sites' quote form and the hub's two quiz pages (owner *build* 2026-11-19, quiz funnel scope: step counts with no cookie; a near copy of the blog read-depth beacon above). No gate: it only counts, and cannot message, charge, reprice, delete data or spend money. Mounted above the global cors(), the /api/ limiter and the body parsers; own per-IP limiter (120/min) ahead of a 1 KB text parse; a fixed form + step allowlist; site from the Origin header only, through the fleet registry; the same 204 for every POST, sent before any write; each (day, site, form, step) bucket stops at 2000 a day; terminal 404. Every answer is marked Cross-Origin-Resource-Policy: cross-origin so a browser accepts the no-cors reply (two answers have no body, the 404 is the generic one). Stores only the ET day, site, form, step and a count: no IP, user agent, referrer, cookie or body.",
+      "routes": [
+        "POST /api/public/form-steps",
+        "USE /api/public/form-steps (express-rate-limit({ handler#8c637dbe }))",
+        "USE /api/public/form-steps (inline function#c72894ce)",
+        "USE /api/public/form-steps (inline function#e7d9b29e)"
+      ]
+    },
+    {
       "router": "server/routes/public-map-image.js",
       "mount": "/api/public/map-image",
       "reason": "Signed satellite image proxy: the lead-form lookup, customer service report and portal station map carry short-lived HMAC-signed paths (services/signed-map-image.js, key derived from REPORT_PIN_SECRET||JWT_SECRET, 2 h expiry; 24 h for the lead-form lookup) instead of Google Static Maps URLs that embedded the server Maps key. The route reads ONLY the signed token in the path — never a query param — rebuilds the keyless Static Maps URL from the signed, range-checked lat/lng/zoom/size/scale/maptype, appends the key inside the fetch and streams the bytes, so it cannot become an open proxy or SSRF. Every refusal (bad shape/signature, expired, no key, upstream failure) answers one generic 404 with no-store/no-referrer/CORP cross-origin; its own 60 req/min per-IP (IPv6 /64) limiter (429 stamped with the same headers) fronts the mount, which is mounted in server/index.js above the global cors(), the global limiter and the body parsers (so an OPTIONS preflight also gets the router's generic 404, not cors()'s 204); no server-side image cache. The router stamps the privacy headers and applies the limiter to EVERY request under the mount (any method/subpath, case-insensitive, trailing slash) and ends in a terminal catch-all that answers the same generic 404 for anything but a valid GET/HEAD /:token (the inline USE entries — header stamp, terminal 404, and a last error handler that turns any error, e.g. a malformed percent-encoding, into that same 404 — and the limiter USE entry). See docs/public-route-contracts.md.",

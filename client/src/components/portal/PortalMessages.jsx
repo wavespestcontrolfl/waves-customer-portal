@@ -5,21 +5,28 @@
 // answers 200. Contract (server/routes/portal-messages):
 //   GET  /portal-messages[?before=ISO]  { messages oldest->newest, hasMore, unread }
 //   POST /portal-messages               { body, requestId } -> { message }
+//        or multipart with up to MAX_PHOTOS `photos`; a message's photos come back as photos: [{ url }]
 //   POST /portal-messages/read          { throughId } -> { unread }
 // PortalChat is the same thread as the Waves Chat sheet (owner 2026-11-20): the
 // thread scrolls and the message box stays pinned under it.
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import api from '../../utils/api';
 import { COLORS as B, FONTS } from '../../theme-brand';
 import { CUSTOMER_SURFACE as SHELL } from '../../theme-customer';
 import { etNowMinutes, formatETDateTime } from '../../lib/timezone';
 import { scrollBehavior } from '../../lib/scrollMotion';
+import { MMS_TOTAL_BUDGET_BYTES, fitImagesToBudget } from '../../utils/imageCompression';
 import Icon from '../Icon';
 
 export const MAX_MESSAGE_LENGTH = 2000;
 // The counter only shows when the limit is close.
 const COUNTER_FROM = 1800;
 const REFRESH_MS = 60 * 1000;
+// Photos on one message (the server's PHOTO_MAX), the types its sanitizer takes, and the size the batch is
+// compressed to before it is sent: the admin texting composer's own budget and ladder.
+export const MAX_PHOTOS = 3;
+const PHOTO_ACCEPT = 'image/jpeg,image/png,image/webp,image/heic,image/heif';
+const PHOTO_TYPE_RE = /^image\/(jpe?g|png|webp|heic|heif)$/i;
 
 export const MESSAGES_COPY = {
   title: 'Messages',
@@ -30,6 +37,10 @@ export const MESSAGES_COPY = {
   help: 'We answer between 8 AM and 8 PM, usually within one business hour.',
   tooMany: 'Too many messages in a short time. Please wait a little, or call or text our office.',
   sendFailed: 'Your message didn’t send. Check your connection and try again.',
+  addPhoto: 'Add a photo',
+  photoType: 'Photos must be JPEG, PNG, WebP or HEIC images.',
+  photoLimit: `You can send up to ${MAX_PHOTOS} photos in one message.`,
+  photosTooLarge: 'Those photos are too large to send together. Remove one and try again.',
   chatTitle: 'Waves Chat',
   chatPlaceholder: 'Message Waves',
   chatOpen: 'Open until 8 PM',
@@ -71,7 +82,9 @@ export function makeRequestId() {
 }
 
 function sendErrorText(err) {
-  if (err?.status === 400 && err.message) return err.message;
+  // The server's own words for a message or photo it refused, or photos it could not save.
+  if ([400, 413].includes(err?.status) && err.message) return err.message;
+  if (err?.code === 'photo_storage' && err.message) return err.message;
   if (err?.status === 429) return MESSAGES_COPY.tooMany;
   return MESSAGES_COPY.sendFailed;
 }
@@ -234,26 +247,42 @@ function useMarkRead(messages, ready, onUnread) {
   }, [mark]);
 }
 
-// The draft and its send. A requestId belongs to the exact text it was made
-// for: a failed send keeps both, so Try again with the same text can never save
-// the message twice, and changed text gets a new id (the first try may have been
-// saved). The draft is read-only while it sends, so nothing typed then is lost.
+// The draft, its photos and its send. A requestId belongs to the exact text and photos it was made for: a
+// failed send keeps both, so Try again with the same message can never save it twice, and a changed message
+// gets a new id (the first try may have been saved). The draft is read-only while it sends, so nothing typed
+// then is lost.
+const photoKey = (file) => `${file.name}:${file.size}:${file.lastModified}`;
+
 function useComposer(onSent, initialDraft = '') {
   const [draft, setDraft] = useState(initialDraft);
+  const [photos, setPhotos] = useState([]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const requestRef = useRef(null);
 
+  const addPhotos = (fileList) => {
+    const picked = Array.from(fileList || []);
+    const images = picked.filter((file) => PHOTO_TYPE_RE.test(file.type || ''));
+    const room = MAX_PHOTOS - photos.length;
+    setPhotos((prev) => [...prev, ...images].slice(0, MAX_PHOTOS));
+    setError(images.length < picked.length ? MESSAGES_COPY.photoType : (images.length > room ? MESSAGES_COPY.photoLimit : ''));
+  };
+  const removePhoto = (index) => setPhotos((prev) => prev.filter((_, i) => i !== index));
+
   const send = async () => {
     const text = draft.trim();
-    if (!text || sending) return;
-    if (requestRef.current?.text !== text) requestRef.current = { id: makeRequestId(), text };
+    if ((!text && !photos.length) || sending) return;
+    const content = [text, ...photos.map(photoKey)].join('\n');
+    if (requestRef.current?.content !== content) requestRef.current = { id: makeRequestId(), content };
     setSending(true);
     setError('');
     try {
-      const res = await api.sendPortalMessage(text, requestRef.current.id);
+      const fit = await fitImagesToBudget(photos, { availableBytes: MMS_TOTAL_BUDGET_BYTES });
+      if (!fit.ok) { setError(MESSAGES_COPY.photosTooLarge); return; }
+      const res = await api.sendPortalMessage(text, requestRef.current.id, fit.files);
       if (res?.message) onSent(res.message);
       setDraft('');
+      setPhotos([]);
       requestRef.current = null;
     } catch (err) {
       setError(sendErrorText(err));
@@ -261,7 +290,8 @@ function useComposer(onSent, initialDraft = '') {
       setSending(false);
     }
   };
-  return { draft, setDraft, sending, error, send };
+  const idle = sending || (!draft.trim() && !photos.length);
+  return { draft, setDraft, photos, addPhotos, removePhoto, sending, idle, error, send };
 }
 
 // Whether the server offers Messages, and the unread count for the badges.
@@ -356,6 +386,7 @@ const stamp = (value) => formatETDateTime(value, { month: 'short', day: 'numeric
 
 function MessageBubble({ message }) {
   const mine = message.from === 'you';
+  const photos = Array.isArray(message.photos) ? message.photos : [];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: mine ? 'flex-end' : 'flex-start' }}>
       <div style={{ fontSize: 14, color: SHELL.muted, marginBottom: 4 }}>
@@ -363,7 +394,20 @@ function MessageBubble({ message }) {
         {' · '}
         <time dateTime={message.createdAt}>{stamp(message.createdAt)}</time>
       </div>
-      <div style={{
+      {photos.length > 0 && (
+        <div style={{ display: 'grid', gap: 6, justifyItems: mine ? 'end' : 'start', marginBottom: message.body ? 6 : 0 }}>
+          {photos.map((photo, i) => (
+            <img
+              key={photo.url}
+              src={photo.url}
+              alt={`Photo ${i + 1} ${mine ? 'you sent' : 'from Waves'}`}
+              loading="lazy"
+              style={{ display: 'block', maxWidth: 'min(240px, 100%)', maxHeight: 320, objectFit: 'cover', borderRadius: 12, border: `1px solid ${SHELL.softBorder}` }}
+            />
+          ))}
+        </div>
+      )}
+      {message.body && <div style={{
         maxWidth: '88%',
         padding: '10px 14px',
         borderRadius: 12,
@@ -375,13 +419,79 @@ function MessageBubble({ message }) {
         background: mine ? B.glassNavy : SHELL.soft,
         color: mine ? '#fff' : SHELL.body,
         border: mine ? 'none' : `1px solid ${SHELL.softBorder}`,
-      }}>{message.body}</div>
+      }}>{message.body}</div>}
     </div>
   );
 }
 
+// The photos picked for the next message, each with a Remove button.
+function PhotoTray({ composer }) {
+  const { photos, removePhoto, sending } = composer;
+  const urls = useMemo(() => photos.map((file) => (typeof URL.createObjectURL === 'function' ? URL.createObjectURL(file) : '')), [photos]);
+  useEffect(() => () => urls.forEach((url) => { if (url) URL.revokeObjectURL(url); }), [urls]);
+  if (!photos.length) return null;
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+      {photos.map((file, i) => (
+        <div key={`${photoKey(file)}:${i}`} style={{ position: 'relative', width: 72, height: 72 }}>
+          <img src={urls[i]} alt={`Photo ${i + 1} to send`} style={{ width: 72, height: 72, objectFit: 'cover', borderRadius: 8, border: `1px solid ${SHELL.borderStrong}`, display: 'block' }} />
+          <button
+            type="button"
+            onClick={() => removePhoto(i)}
+            disabled={sending}
+            aria-label={`Remove photo ${i + 1}`}
+            style={{
+              position: 'absolute', top: -10, right: -10, width: 44, height: 44, padding: 0, border: 'none', borderRadius: 999,
+              background: 'transparent', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
+            }}
+          >
+            <span style={{
+              width: 24, height: 24, borderRadius: 999, background: B.glassNavy, color: '#fff',
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            }}>
+              <Icon name="x" size={14} strokeWidth={2.5} />
+            </span>
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// The camera button: opens the phone's photo picker (camera or library).
+function PhotoButton({ composer }) {
+  const inputRef = useRef(null);
+  return (
+    <>
+      <input
+        ref={inputRef}
+        type="file"
+        accept={PHOTO_ACCEPT}
+        multiple
+        hidden
+        data-portal-photo-input=""
+        onChange={(e) => { composer.addPhotos(e.target.files); e.target.value = ''; }}
+      />
+      <button
+        type="button"
+        onClick={() => inputRef.current?.click()}
+        disabled={composer.sending || composer.photos.length >= MAX_PHOTOS}
+        aria-label={MESSAGES_COPY.addPhoto}
+        style={{
+          width: 44, height: 44, flexShrink: 0, borderRadius: 999, padding: 0,
+          border: `1px solid ${SHELL.softBorder}`, background: '#fff', color: B.glassNavy,
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
+          opacity: composer.photos.length >= MAX_PHOTOS ? 0.5 : 1,
+        }}
+      >
+        <Icon name="camera" size={20} strokeWidth={2} />
+      </button>
+    </>
+  );
+}
+
 function Composer({ composer, composerRef }) {
-  const { draft, setDraft, sending, error, send } = composer;
+  const { draft, setDraft, sending, idle, error, send } = composer;
   const remaining = MAX_MESSAGE_LENGTH - draft.length;
   return (
     <form
@@ -418,16 +528,18 @@ function Composer({ composer, composerRef }) {
           {draft.length} / {MAX_MESSAGE_LENGTH}
         </div>
       )}
+      <PhotoTray composer={composer} />
       {error && (
         <div role="alert" style={{ fontSize: 14, color: B.red, fontWeight: 700 }}>{error}</div>
       )}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <PhotoButton composer={composer} />
         <button
           data-glass-accent=""
           data-glass-size="primary"
           type="submit"
-          disabled={sending || !draft.trim()}
-          style={{ ...primaryButton, opacity: sending || !draft.trim() ? 0.6 : 1, cursor: sending || !draft.trim() ? 'default' : 'pointer' }}
+          disabled={idle}
+          style={{ ...primaryButton, opacity: idle ? 0.6 : 1, cursor: idle ? 'default' : 'pointer' }}
         >{sending ? 'Sending…' : 'Send'}</button>
         <div style={{ fontSize: 14, color: SHELL.muted, flex: '1 1 220px' }}>{MESSAGES_COPY.help}</div>
       </div>
@@ -462,8 +574,7 @@ function Thread({ thread }) {
 
 // The message box of the Waves Chat sheet: one growing line and a round Send.
 function ChatComposer({ composer, inputRef }) {
-  const { draft, setDraft, sending, error, send } = composer;
-  const idle = sending || !draft.trim();
+  const { draft, setDraft, sending, idle, error, send } = composer;
   useEffect(() => {
     const el = inputRef.current;
     if (!el) return;
@@ -490,7 +601,9 @@ function ChatComposer({ composer, inputRef }) {
       {error && (
         <div role="alert" style={{ fontSize: 14, color: B.red, fontWeight: 700 }}>{error}</div>
       )}
+      <PhotoTray composer={composer} />
       <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
+        <PhotoButton composer={composer} />
         <textarea
           ref={inputRef}
           value={draft}
@@ -555,10 +668,13 @@ export function PortalChat({ onUnread, firstName = '', initialDraft = '', closeB
   const { messages } = thread;
   const newest = messages[messages.length - 1] || null;
   // A new message (theirs or ours) shows at the bottom; earlier pages do not move the view.
-  useEffect(() => {
+  // A photo that loads after that grows the thread: stay at the bottom unless the customer has scrolled up.
+  const atBottomRef = useRef(true);
+  const toBottom = useCallback(() => {
     const el = logRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [newest?.id, thread.status]);
+  }, []);
+  useEffect(() => { atBottomRef.current = true; toBottom(); }, [newest?.id, thread.status, toBottom]);
 
   const start = (text) => {
     if (text) composer.setDraft(text);
@@ -587,7 +703,11 @@ export function PortalChat({ onUnread, firstName = '', initialDraft = '', closeB
         {closeButton}
       </div>
 
-      <div ref={logRef} style={{
+      <div
+        ref={logRef}
+        onScroll={(e) => { const el = e.currentTarget; atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48; }}
+        onLoadCapture={() => { if (atBottomRef.current) toBottom(); }}
+        style={{
         flex: '1 1 0', minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain', WebkitOverflowScrolling: 'touch',
         padding: `16px ${gutter}`, display: 'flex', flexDirection: 'column',
       }}>
