@@ -1,39 +1,39 @@
 {
   "version": 1,
-  "notes": "Pest Insider fact cards (pest-insider/cards.js): one code-drawn picture per lead fact. Each piece is one whole clause of the fact's title or of one lead sentence, copied exactly and cut into before / big / after; it may leave out a source's name or a lead-in clause, never a word like never, not, no, if or only. The check refuses any other words. layout: number (a number in big type), statement (a key phrase in big type), months (the big words name a month range; months = [first, last] lights the month strip), versus (two pieces side by side). tag: a topic from the fixed list in cards.js. scheme: one of the three Waves color sets in cards.js (navy, gold, light), in turn down the file. After any change, draw the new cards: node ops/agents/pest-insider-cards.js --execute",
+  "notes": "Pest Insider fact cards (pest-insider/cards.js): one code-drawn picture per lead fact. Each card shows the fact's title or one lead sentence, whole and copied exactly, cut into before / big / after; it never shows part of a sentence. The check refuses any other words. layout: number (a number in big type), statement (a key phrase in big type), months (the big words name a month range; months = [first, last] lights the month strip), versus (two pieces side by side). tag: a topic from the fixed list in cards.js. scheme: one of the three Waves color sets in cards.js (navy, gold, light), in turn down the file. After any change, draw the new cards: node ops/agents/pest-insider-cards.js --execute",
   "cards": {
-    "L01": { "layout": "statement", "tag": "Lawn", "scheme": "navy", "pieces": [{ "left_out_before": "Most reclaimed irrigation water carries nitrogen and phosphorus, so", "before": "A lawn on reclaimed water may need", "big": "less fertilizer" }] },
+    "L01": { "layout": "statement", "tag": "Lawn", "scheme": "navy", "pieces": [{ "before": "UF/IFAS says reclaimed water can supply part of the nitrogen and", "big": "all of the phosphorus", "after": "that turfgrass needs" }] },
     "L02": { "layout": "statement", "tag": "Watering", "scheme": "gold", "pieces": [{ "before": "Leaf blades are", "big": "folded in half", "after": "lengthwise in an attempt to conserve water" }] },
-    "L03": { "layout": "statement", "tag": "Lawn", "scheme": "light", "pieces": [{ "left_out_before": "UF/IFAS says", "before": "Overwatering promotes", "big": "weeds", "after": "such as dollarweed and sedges" }] },
+    "L03": { "layout": "statement", "tag": "Lawn", "scheme": "light", "pieces": [{ "before": "UF/IFAS says overwatering promotes", "big": "weeds", "after": "such as dollarweed and sedges" }] },
     "L04": { "layout": "statement", "tag": "Watering", "scheme": "navy", "pieces": [{ "before": "Dew is usually present in the", "big": "predawn hours" }] },
     "L05": { "layout": "number", "tag": "Lawn", "scheme": "gold", "pieces": [{ "before": "Most St. Augustine should be cut at", "big": "3.5 to 4 inches" }] },
     "L09": { "layout": "months", "tag": "Lawn", "scheme": "light", "months": [11, 5], "pieces": [{ "before": "Large patch is most likely to show up from", "big": "November through May", "after": ", when temperatures are below 80°F and the grass stays wet for 48 hours or more" }] },
-    "L10": { "layout": "statement", "tag": "Lawn", "scheme": "navy", "pieces": [{ "left_out_before": "UF/IFAS says", "before": "Chinch bug damage usually starts in", "big": "water-stressed spots", "after": "along the lawn's edges or in full sun" }] },
+    "L10": { "layout": "statement", "tag": "Lawn", "scheme": "navy", "pieces": [{ "before": "UF/IFAS says chinch bug damage usually starts in", "big": "water-stressed spots", "after": "along the lawn's edges or in full sun" }] },
     "O01": { "layout": "months", "tag": "Fertilizer", "scheme": "gold", "months": [4, 9], "pieces": [{ "before": "In North Port, lawn fertilizer with nitrogen or phosphorus is banned from", "big": "April 1 through Sept. 30" }] },
     "O02": { "layout": "months", "tag": "Fertilizer", "scheme": "light", "months": [6, 9], "pieces": [{ "big": "June 1 to September 30", "after": ", most of Sarasota County bans nitrogen and phosphorus lawn fertilizer" }] },
-    "O03": { "layout": "statement", "tag": "Watering", "scheme": "navy", "pieces": [{ "left_out_before": "UF/IFAS adds that", "before": "When rain is enough to meet the plants' needs,", "big": "the sprinklers should be off" }] },
+    "O03": { "layout": "statement", "tag": "Watering", "scheme": "navy", "pieces": [{ "before": "UF/IFAS adds that when rain is enough to meet the plants' needs,", "big": "the sprinklers should be off" }] },
     "O04": { "layout": "number", "tag": "Watering", "scheme": "gold", "pieces": [{ "before": "The Southwest Florida Water Management District limits lawn watering to", "big": "one day a week", "after": "through March 31, 2027" }] },
     "P02": { "layout": "statement", "tag": "Palms", "scheme": "light", "pieces": [{ "before": "Palms stripped to a few fronds lost crowns", "big": "more often" }] },
     "P04": { "layout": "statement", "tag": "Palms", "scheme": "navy", "pieces": [{ "before": "Ganoderma has", "big": "no cure", "after": ", and it stays in the soil" }] },
-    "M01": { "layout": "number", "tag": "Mosquitoes", "scheme": "gold", "pieces": [{ "left_out_before": "The CDC says", "before": "Eggs can survive drying out for", "big": "up to 8 months" }] },
-    "T01": { "layout": "statement", "tag": "Termites", "scheme": "light", "pieces": [{ "left_out_before": "Unlike subterranean termites,", "before": "Drywood termite colonies live", "big": "entirely inside the wood" }] },
+    "M01": { "layout": "number", "tag": "Mosquitoes", "scheme": "gold", "pieces": [{ "before": "The CDC says eggs can survive drying out for", "big": "up to 8 months" }] },
+    "T01": { "layout": "statement", "tag": "Termites", "scheme": "light", "pieces": [{ "before": "Unlike subterranean termites, drywood termite colonies live", "big": "entirely inside the wood" }] },
     "T02": { "layout": "statement", "tag": "Termites", "scheme": "navy", "pieces": [{ "before": "In Florida, Formosan termites typically swarm", "big": "shortly after sunset", "after": ", with peak swarming activity in May" }] },
     "T03": { "layout": "months", "tag": "Termites", "scheme": "gold", "months": [12, 5], "pieces": [{ "before": "Florida's native subterranean termites swarm in winter and spring,", "big": "December through May" }] },
-    "A01": { "layout": "number", "tag": "Ants", "scheme": "light", "pieces": [{ "left_out_before": "UF/IFAS says", "before": "White-footed ant colonies range from", "big": "8,000 to 3 million ants" }] },
+    "A01": { "layout": "number", "tag": "Ants", "scheme": "light", "pieces": [{ "before": "UF/IFAS says white-footed ant colonies range from", "big": "8,000 to 3 million ants" }] },
     "A02": { "layout": "statement", "tag": "Ants", "scheme": "navy", "pieces": [{ "before": "Florida carpenter ants", "big": "do not nest in sound wood" }] },
     "R01": { "layout": "statement", "tag": "Roaches", "scheme": "gold", "pieces": [{ "before": "Big \"palmetto bugs\" are", "big": "mostly outdoor roaches" }] },
     "R02": { "layout": "versus", "tag": "Roaches", "scheme": "light", "pieces": [
       { "before": "German cockroaches can survive only", "big": "12 days", "after": "with food but no water" },
-      { "left_out_before": "However,", "before": "If only water is present with no food, cockroaches can survive for", "big": "about 42 days" }
+      { "before": "However, if only water is present with no food, cockroaches can survive for", "big": "about 42 days" }
     ] },
     "R03": { "layout": "statement", "tag": "Roaches", "scheme": "navy", "pieces": [{ "before": "German roaches ride in on", "big": "grocery bags", "after": "and breed in boxes" }] },
     "D01": { "layout": "number", "tag": "Rodents", "scheme": "gold", "pieces": [{ "before": "Rats have been known to jump", "big": "eight feet", "after": "from a tree to a house" }] },
     "D02": { "layout": "versus", "tag": "Rodents", "scheme": "light", "pieces": [
-      { "left_out_before": "The CDC says", "before": "Mice can fit through a hole", "big": "the width of a pencil" },
-      { "left_out_before": "UF/IFAS says", "before": "Rats can squeeze through cracks", "big": "one-half of an inch wide" }
+      { "before": "The CDC says mice can fit through a hole", "big": "the width of a pencil" },
+      { "before": "UF/IFAS says rats can squeeze through cracks", "big": "one-half of an inch wide" }
     ] },
     "D03": { "layout": "statement", "tag": "Rodents", "scheme": "navy", "pieces": [{ "big": "Never sweep", "after": "rodent droppings" }] },
-    "S01": { "layout": "statement", "tag": "Spiders", "scheme": "gold", "pieces": [{ "left_out_before": "But UF/IFAS says", "big": "No brown recluse specimen", "after": "has ever been collected in Tampa" }] },
+    "S01": { "layout": "statement", "tag": "Spiders", "scheme": "gold", "pieces": [{ "before": "But UF/IFAS says", "big": "no brown recluse specimen", "after": "has ever been collected in Tampa" }] },
     "S02": { "layout": "statement", "tag": "Wasps", "scheme": "light", "pieces": [{ "before": "A crushed yellowjacket can", "big": "call the colony" }] }
   }
 }

@@ -14,7 +14,9 @@
  *     --out <dir>   the folder to draw into (a preview) instead of the portal's
  *     --only ids    only these cards
  *
- * A file, once drawn, is never drawn again, changed or removed: a sent
+ * A picture is written under a temporary name and hard-linked to its own
+ * name only when whole. A file, once drawn, is never drawn again, changed
+ * or removed: a sent
  * email and the issue archive keep the exact picture URLs they were sent
  * with. A card that must look different gets a new name (its words change,
  * or CARD_DESIGN is bumped); an old file stays until a person removes it,
@@ -78,6 +80,19 @@ const MONTH_LETTERS = ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D
 async function fontsLoaded(fonts) {
   const loaded = await Promise.all(fonts.map((f) => document.fonts.load(f)));
   return loaded.every((faces) => faces.length > 0 && faces.every((face) => face.status === 'loaded'));
+}
+
+// Publishes a finished picture: written in full under a temporary name,
+// then hard-linked to its own name. The link is atomic and never replaces a
+// file, so a picture is either whole at its name or not there at all.
+function publish(outDir, file, bytes) {
+  const temp = path.join(outDir, `.${file}.${process.pid}.tmp`);
+  fs.writeFileSync(temp, bytes, { flag: 'wx' });
+  try {
+    fs.linkSync(temp, path.join(outDir, file));
+  } finally {
+    fs.rmSync(temp, { force: true });
+  }
 }
 
 const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -181,7 +196,7 @@ async function fitText(page, layout) {
     // Clear corners: the card keeps its round shape in every mail app, Outlook too.
     const shot = await page.screenshot({ clip: { x: 0, y: 0, width: CARD_WIDTH, height: CARD_HEIGHT }, omitBackground: true });
     const png = await sharp(shot).png({ palette: true, quality: 95, effort: 10, compressionLevel: 9 }).toBuffer();
-    fs.writeFileSync(path.join(outDir, card.file), png, { flag: 'wx' });
+    publish(outDir, card.file, png);
     console.log(`${id}  ${card.file}  ${card.layout}  big ${size}px  ${Math.round(png.length / 1024)} KB`);
   }
   await browser.close();

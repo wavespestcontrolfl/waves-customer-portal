@@ -7,11 +7,14 @@
  * server/data/pest-insider-heroes-v1.json. Then draw the top pictures:
  * node ops/agents/pest-insider-heroes.js --execute
  *
- *   node ops/agents/pest-insider-art-import.js <dir> [--execute] [--only T03,R01]
+ *   node ops/agents/pest-insider-art-import.js <dir> [--execute] [--only T03,R01] [--root <dir>]
  *
- *     (none)       dry run: cuts every picture and checks the batch; nothing written
- *     --execute    write the art files and the heroes file
- *     --only ids   only these facts
+ *     (none)        dry run: cuts every picture and checks the batch; nothing written
+ *     --execute     write the art files and the heroes file
+ *     --only ids    only these facts
+ *     --root <dir>  the folder that holds server/data/ and
+ *                   ops/agents/pest-insider-art/ (default: this repo; the
+ *                   tests import into a copy)
  *
  * All or nothing, one import at a time:
  * - Step 1 writes nothing: every picture is cut, and the new heroes file must
@@ -62,8 +65,8 @@ function opt(name) {
   }
   return value;
 }
-const repoRoot = path.resolve(__dirname, '../..');
-const HEROES_FILE = path.join(repoRoot, 'server/data/pest-insider-heroes-v1.json');
+const root = opt('--root') === null ? path.resolve(__dirname, '../..') : path.resolve(opt('--root'));
+const HEROES_FILE = path.join(root, 'server/data/pest-insider-heroes-v1.json');
 const dir = args[0] && !args[0].startsWith('--') ? path.resolve(args[0]) : null;
 const execute = args.includes('--execute');
 const only = opt('--only') === null ? null : new Set(opt('--only').split(',').map((s) => s.trim()).filter(Boolean));
@@ -90,7 +93,7 @@ function merged(raw, batch) {
 
 // Step 1: cut every picture and check the new heroes file. Writes nothing.
 async function stage() {
-  const artDir = path.join(repoRoot, ART_DIR);
+  const artDir = path.join(root, ART_DIR);
   const batch = [];
   for (const name of fs.readdirSync(dir).filter((f) => /^[a-z]\d\d\.png$/.test(f)).sort()) {
     const id = name.slice(0, 3).toUpperCase();
@@ -130,7 +133,7 @@ function publish({ batch, artDir }) {
   try {
     fs.writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' });
   } catch (err) {
-    if (err.code === 'EEXIST') throw new Error(`Another import holds ${path.relative(repoRoot, lock)}. If none is running, remove that file.`);
+    if (err.code === 'EEXIST') throw new Error(`Another import holds ${path.relative(root, lock)}. If none is running, remove that file.`);
     throw err;
   }
   const tag = `${process.pid}.${Date.now()}`;
@@ -164,7 +167,7 @@ function publish({ batch, artDir }) {
 
 (async () => {
   if (!dir || !fs.existsSync(dir)) {
-    console.error('Usage: node ops/agents/pest-insider-art-import.js <dir> [--execute] [--only T03,R01]');
+    console.error('Usage: node ops/agents/pest-insider-art-import.js <dir> [--execute] [--only T03,R01] [--root <dir>]');
     process.exit(2);
   }
   const staged = await stage();

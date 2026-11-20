@@ -61,11 +61,16 @@ describe('the top picture list', () => {
     expect(HERO_BASE_URL).toBe('https://portal.wavespestcontrol.com/pest-insider/heroes/');
   });
 
-  test('each picture ships with the portal as a 1164x652 JPEG (582x326 at 2x); an older picture may stay for sent emails', () => {
+  test('each picture ships with the portal as a whole 1164x652 JPEG (582x326 at 2x); an older picture may stay for sent emails', async () => {
+    const sharp = require('sharp');
     const dir = path.join(ROOT, HERO_DIR);
     const files = listed(dir);
     expect(Object.values(HEROES).map((h) => h.file).filter((f) => !files.includes(f))).toEqual([]);
-    for (const hero of Object.values(HEROES)) expect(jpegSize(fs.readFileSync(path.join(dir, hero.file)))).toEqual([1164, 652]);
+    for (const hero of Object.values(HEROES)) {
+      expect(jpegSize(fs.readFileSync(path.join(dir, hero.file)))).toEqual([1164, 652]);
+      // the whole picture decodes: a file cut short by a failed write does not
+      await expect(sharp(path.join(dir, hero.file)).raw().toBuffer()).resolves.toBeInstanceOf(Buffer);
+    }
     // every file is a top picture by name (<fact>-<hash>.jpg); a retired fact's pictures may stay
     expect(files.filter((f) => !/^[a-z]\d\d-[0-9a-f]{10}\.jpg$/.test(f))).toEqual([]);
   });
@@ -73,11 +78,12 @@ describe('the top picture list', () => {
   test('the drawing scripts never change or remove a published picture, and write only with --execute', () => {
     for (const file of ['ops/agents/pest-insider-heroes.js', 'ops/agents/pest-insider-cards.js']) {
       const src = fs.readFileSync(path.join(ROOT, file), 'utf8');
-      expect({ file, removes: /\b(unlinkSync|rmSync|rmdirSync|unlink|rm|renameSync)\(/.test(src) }).toEqual({ file, removes: false });
-      // a picture file is created once (flag wx), never overwritten
-      const pictureWrites = src.match(/fs\.writeFileSync\(path\.join\(outDir[^\n]*/g) || [];
-      expect(pictureWrites.length).toBe(1);
-      expect(pictureWrites[0]).toContain("{ flag: 'wx' }");
+      // the one file a drawing script removes is its own temporary file
+      const removals = src.match(/\b(?:unlinkSync|rmSync|rmdirSync|unlink|rm|renameSync|copyFileSync|cpSync)\([^)]*\)/g) || [];
+      expect({ file, removals }).toEqual({ file, removals: ['rmSync(temp, { force: true })'] });
+      // a picture is written whole under a temporary name (flag wx), then hard-linked to its name, which never replaces a file
+      expect((src.match(/fs\.writeFileSync\([^\n]*/g) || [])).toEqual(["fs.writeFileSync(temp, bytes, { flag: 'wx' });"]);
+      expect(src).toContain('fs.linkSync(temp, path.join(outDir, file));');
       expect(src).toContain("const execute = args.includes('--execute');");
       expect(src).toContain('MUTATES (dry-run default');
     }
@@ -106,53 +112,74 @@ describe('the top picture list', () => {
 });
 
 describe('taking new art', () => {
+  // Every import here runs in a copy (--root): its own heroes file, art folder and lock.
   const IMPORT = path.join(ROOT, 'ops/agents/pest-insider-art-import.js');
-  const run = (dir, ...more) => spawnSync(process.execPath, [IMPORT, dir, ...more], { cwd: ROOT, encoding: 'utf8', env: process.env });
-  const snapshot = () => [fs.readFileSync(path.join(ROOT, 'server/data/pest-insider-heroes-v1.json'), 'utf8'), listed(path.join(ROOT, ART_DIR)).join()];
+  const MANIFEST = 'server/data/pest-insider-heroes-v1.json';
+  const sharp = require('sharp');
+  let root;
+  let input;
+  const run = (...more) => spawnSync(process.execPath, [IMPORT, input, '--root', root, ...more], { cwd: ROOT, encoding: 'utf8', env: process.env });
+  const everything = (dir) => (fs.existsSync(dir) ? fs.readdirSync(dir).sort() : []);
+  const state = () => [fs.readFileSync(path.join(root, MANIFEST), 'utf8'), ...everything(path.join(root, 'server/data')), '|', ...everything(path.join(root, ART_DIR))];
+  const t03png = (flip) => sharp(path.join(ROOT, ART_DIR, HEROES.T03.artFile))[flip ? 'flop' : 'clone']().png().toBuffer();
+  const repo = () => [fs.readFileSync(path.join(ROOT, MANIFEST), 'utf8'), listed(path.join(ROOT, ART_DIR)).join()];
+  let repoBefore;
 
-  test('checks the whole batch before it writes: a fact with no card or a broken picture stops it, and nothing is written', async () => {
-    const sharp = require('sharp');
+  beforeAll(() => { repoBefore = repo(); });
+  afterAll(() => expect(repo()).toEqual(repoBefore));
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-insider-root-'));
+    input = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-insider-art-'));
+    fs.mkdirSync(path.join(root, 'server/data'), { recursive: true });
+    fs.mkdirSync(path.join(root, ART_DIR), { recursive: true });
+    fs.copyFileSync(path.join(ROOT, MANIFEST), path.join(root, MANIFEST));
+    fs.copyFileSync(path.join(ROOT, ART_DIR, HEROES.T03.artFile), path.join(root, ART_DIR, HEROES.T03.artFile));
+  });
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(input, { recursive: true, force: true });
+  });
+
+  test('checks the whole batch before it writes: a fact with no card, a broken picture or an empty --only stops it, and nothing is written', async () => {
     const noCard = FACTS.find((f) => !f.reserve && !cardFor(f.id)).id;
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-insider-art-'));
-    try {
-      const png = await sharp(path.join(ROOT, ART_DIR, HEROES.T03.artFile)).png().toBuffer();
-      fs.writeFileSync(path.join(dir, 't03.png'), png);
-      const before = snapshot();
-      const dry = run(dir);
-      expect([dry.status, dry.stdout]).toEqual([0, expect.stringMatching(/Dry run: 1 art file\(s\) checked; nothing written/)]);
+    fs.writeFileSync(path.join(input, 't03.png'), await t03png(false));
+    const before = state();
+    const dry = run();
+    expect([dry.status, dry.stdout]).toEqual([0, expect.stringMatching(/Dry run: 1 art file\(s\) checked; nothing written/)]);
 
-      fs.writeFileSync(path.join(dir, `${noCard.toLowerCase()}.png`), png);
-      const refused = run(dir, '--execute');
-      expect([refused.status, refused.stderr]).toEqual([1, expect.stringContaining(`${noCard}: has no card`)]);
-      fs.rmSync(path.join(dir, `${noCard.toLowerCase()}.png`));
+    fs.writeFileSync(path.join(input, `${noCard.toLowerCase()}.png`), await t03png(false));
+    const refused = run('--execute');
+    expect([refused.status, refused.stderr]).toEqual([1, expect.stringContaining(`${noCard}: has no card`)]);
+    fs.rmSync(path.join(input, `${noCard.toLowerCase()}.png`));
 
-      fs.writeFileSync(path.join(dir, 't02.png'), 'not a picture');
-      expect(run(dir, '--execute').status).toBe(1);
-      // "--only" with no fact ids never means "all"
-      expect(run(dir, '--execute', '--only').status).toBe(2);
-      expect(run(dir, '--execute', '--only', ',').status).toBe(2);
-      expect(snapshot()).toEqual(before);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
+    fs.writeFileSync(path.join(input, 't02.png'), 'not a picture');
+    expect(run('--execute').status).toBe(1);
+    // "--only" with no fact ids never means "all"
+    expect(run('--execute', '--only').status).toBe(2);
+    expect(run('--execute', '--only', ',').status).toBe(2);
+    expect(state()).toEqual(before);
+  }, 60000);
+
+  test('swaps in new art under its hash name, then removes the art it replaced, and leaves no temporary file or lock', async () => {
+    fs.writeFileSync(path.join(input, 't03.png'), await t03png(true));
+    const old = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8')).heroes;
+    const done = run('--execute');
+    expect(done.status).toBe(0);
+    const now = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8')).heroes;
+    expect(now.T03.art).not.toBe(old.T03.art);
+    expect({ ...now, T03: null }).toEqual({ ...old, T03: null });
+    expect(everything(path.join(root, ART_DIR))).toEqual([`t03-${now.T03.art}.webp`]);
+    expect(sha16(fs.readFileSync(path.join(root, ART_DIR, `t03-${now.T03.art}.webp`)))).toBe(now.T03.art);
+    expect(everything(path.join(root, 'server/data'))).toEqual(['pest-insider-heroes-v1.json']);
+    expect(validateHeroes(JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8'))).T03.artFile).toBe(`t03-${now.T03.art}.webp`);
   }, 60000);
 
   test('runs one import at a time: while another holds the lock, it stops and writes nothing', async () => {
-    const sharp = require('sharp');
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-insider-art-'));
-    const lock = path.join(ROOT, 'server/data/pest-insider-heroes-v1.json.lock');
-    let held = false;
-    try {
-      fs.writeFileSync(path.join(dir, 't03.png'), await sharp(path.join(ROOT, ART_DIR, HEROES.T03.artFile)).flop().png().toBuffer());
-      fs.writeFileSync(lock, '1\n', { flag: 'wx' }); // throws while a real import runs: then this test fails, and leaves its lock alone
-      held = true;
-      const before = snapshot();
-      const stopped = run(dir, '--execute');
-      expect([stopped.status, stopped.stderr]).toEqual([1, expect.stringContaining('Another import holds server/data/pest-insider-heroes-v1.json.lock')]);
-      expect(snapshot()).toEqual(before);
-    } finally {
-      if (held) fs.rmSync(lock, { force: true });
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
+    fs.writeFileSync(path.join(input, 't03.png'), await t03png(true));
+    fs.writeFileSync(path.join(root, `${MANIFEST}.lock`), '1\n');
+    const before = state();
+    const stopped = run('--execute');
+    expect([stopped.status, stopped.stderr]).toEqual([1, expect.stringContaining('Another import holds server/data/pest-insider-heroes-v1.json.lock')]);
+    expect(state()).toEqual(before);
   }, 60000);
 });

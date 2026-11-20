@@ -17,7 +17,9 @@
  *
  * New art comes in through ops/agents/pest-insider-art-import.js.
  *
- * A file, once drawn, is never drawn again, changed or removed: a sent
+ * A picture is written under a temporary name and hard-linked to its own
+ * name only when whole. A file, once drawn, is never drawn again, changed
+ * or removed: a sent
  * email and the issue archive keep the exact picture URLs they were sent
  * with. A picture that must look different gets a new name (new art, a new
  * title, or HERO_DESIGN bumped); an old file stays until a person removes
@@ -70,6 +72,19 @@ const sha16 = (buf) => crypto.createHash('sha256').update(buf).digest('hex').sli
 async function fontsLoaded(fonts) {
   const loaded = await Promise.all(fonts.map((f) => document.fonts.load(f)));
   return loaded.every((faces) => faces.length > 0 && faces.every((face) => face.status === 'loaded'));
+}
+
+// Publishes a finished picture: written in full under a temporary name,
+// then hard-linked to its own name. The link is atomic and never replaces a
+// file, so a picture is either whole at its name or not there at all.
+function publish(outDir, file, bytes) {
+  const temp = path.join(outDir, `.${file}.${process.pid}.tmp`);
+  fs.writeFileSync(temp, bytes, { flag: 'wx' });
+  try {
+    fs.linkSync(temp, path.join(outDir, file));
+  } finally {
+    fs.rmSync(temp, { force: true });
+  }
 }
 
 const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -151,7 +166,7 @@ async function draw(H) {
     if (!size) { console.error(`${id}: the title does not fit`); failed += 1; continue; }
     const shot = await page.screenshot({ clip: { x: 0, y: 0, width: HERO_WIDTH, height: HERO_HEIGHT } });
     const jpg = await sharp(shot).jpeg({ quality: 82, mozjpeg: true }).toBuffer();
-    fs.writeFileSync(path.join(outDir, hero.file), jpg, { flag: 'wx' });
+    publish(outDir, hero.file, jpg);
     console.log(`${id}  ${hero.file}  ${hero.art ? 'art' : 'no art'}  title ${size}px  ${Math.round(jpg.length / 1024)} KB`);
   }
   await browser.close();

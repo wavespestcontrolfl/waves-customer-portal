@@ -820,23 +820,16 @@ app.use('/og', require('./routes/og-preview'));
 app.use(express.json({ limit: '1mb', verify: require('./middleware/link-worker-auth').rawBodyVerify }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
-// Waves Pest Insider fact cards and top pictures (services/pest-insider/
-// cards.js, heroes.js) are pictures inside emails. A mail app that loads
-// pictures straight into its own view, with no image proxy, is another
-// origin, and helmet's same-origin CORP would block them there (same reason
-// as routes/public-map-image.js). After helmet, before both static mounts
-// that serve the folders.
-app.use(['/pest-insider/cards', '/pest-insider/heroes'], (req, res, next) => {
-  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
-  next();
-});
-
 // Public assets used by server-rendered customer pages. In production Vite
 // copies these into client/dist; in local API-only dev they still need to be
 // served from client/public so SSR pages can render shared brand artwork.
+// Waves Pest Insider pictures load in mail apps on other origins: both static
+// mounts set their CORP header (services/pest-insider/picture-headers.js).
+const { pictureHeaders } = require('./services/pest-insider/picture-headers');
 app.use(express.static(path.join(__dirname, '..', 'client', 'public'), {
   index: false,
   maxAge: config.nodeEnv === 'production' ? '1h' : 0,
+  setHeaders: pictureHeaders,
 }));
 
 // Request logging
@@ -1373,6 +1366,7 @@ if (config.nodeEnv === 'production') {
     maxAge: '1y',       // Cache hashed assets (/assets/*) for 1 year
     immutable: true,
     setHeaders: (res, filePath) => {
+      pictureHeaders(res, filePath);
       // But never cache index.html, sw.js, or the per-build asset list —
       // all three keep a stable filename across deploys, so the immutable
       // year above would pin the previous build's copy.

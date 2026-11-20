@@ -11,7 +11,7 @@ const { FACTS, factById } = require('../services/pest-insider/facts');
 const { POSTS } = require('../services/pest-insider/posts');
 
 const MAIN = FACTS.filter((f) => !f.reserve);
-const A01 = { layout: 'number', tag: 'Ants', scheme: 'light', pieces: [{ left_out_before: 'UF/IFAS says', before: 'White-footed ant colonies range from', big: '8,000 to 3 million ants' }] };
+const A01 = { layout: 'number', tag: 'Ants', scheme: 'light', pieces: [{ before: 'UF/IFAS says white-footed ant colonies range from', big: '8,000 to 3 million ants' }] };
 const L05 = { layout: 'number', tag: 'Lawn', scheme: 'gold', pieces: [{ before: 'Most St. Augustine should be cut at', big: '3.5 to 4 inches' }] };
 const T03_PIECE = { before: "Florida's native subterranean termites swarm in winter and spring,", big: 'December through May' };
 const refuse = (cards, message) => expect(() => validateCards({ cards })).toThrow(message);
@@ -24,24 +24,19 @@ describe('the reviewed card list', () => {
     expect(Object.isFrozen(CARDS) && Object.isFrozen(CARDS.A01) && Object.isFrozen(CARDS.A01.pieces[0])).toBe(true);
   });
 
-  test("each card's words, with the words its file names as left out, are its fact's title or a lead sentence, whole", () => {
+  test("each card's words are its fact's title or one lead sentence, whole and copied exactly", () => {
     const flat = (t) => t.replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/[.!?]$/, '').toLowerCase();
-    const raw = require('../data/pest-insider-cards-v1.json').cards;
     for (const [id, card] of Object.entries(CARDS)) {
       const fact = factById(id);
       const reviewed = [fact.title, ...fact.lead.map((s) => (typeof s === 'string' ? s : s.text))].map(flat);
-      for (const piece of raw[id].pieces) {
-        const whole = flat(pieceText({ before: piece.left_out_before, big: pieceText(piece), after: piece.left_out_after }));
-        expect({ id, whole: reviewed.includes(whole) }).toEqual({ id, whole: true });
-      }
-      // the picture shows the card's words only, never the words left out
-      expect(card.pieces.every((p) => Object.keys(p).join() === 'before,big,after')).toBe(true);
+      for (const piece of card.pieces) expect({ id, whole: reviewed.includes(flat(pieceText(piece))) }).toEqual({ id, whole: true });
       expect(card.source).toBe(sourceLine(fact));
       expect(card.alt).toBe(card.pieces.map(pieceText).join(' / '));
     }
   });
 
-  test('a card is drawn in a picture that ships with the portal; an older picture may stay for sent emails', () => {
+  test('a card is drawn in a whole picture that ships with the portal; an older picture may stay for sent emails', async () => {
+    const sharp = require('sharp');
     const dir = path.join(__dirname, '../..', CARD_DIR);
     const files = fs.readdirSync(dir).filter((f) => !f.startsWith('.'));
     expect(Object.values(CARDS).map((c) => c.file).filter((f) => !files.includes(f))).toEqual([]);
@@ -54,12 +49,14 @@ describe('the reviewed card list', () => {
       // a PNG, 1164x600 (582x300 at 2x)
       expect(png.readUInt32BE(0)).toBe(0x89504e47);
       expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([1164, 600]);
+      // the whole picture decodes: a file cut short by a failed write does not
+      await expect(sharp(png).raw().toBuffer()).resolves.toBeInstanceOf(Buffer);
     }
   });
 
   test('a change to any drawn word gives the card a new file name', () => {
     const base = validateCards({ cards: { A01 } }).A01;
-    const changed = validateCards({ cards: { A01: { ...A01, pieces: [{ left_out_before: 'UF/IFAS says', before: 'White-footed ant colonies range from 8,000 to', big: '3 million ants' }] } } }).A01;
+    const changed = validateCards({ cards: { A01: { ...A01, pieces: [{ before: 'UF/IFAS says white-footed ant colonies range from 8,000 to', big: '3 million ants' }] } } }).A01;
     const retagged = validateCards({ cards: { A01: { ...A01, layout: 'statement' } } }).A01;
     const recolored = validateCards({ cards: { A01: { ...A01, scheme: 'navy' } } }).A01;
     expect(new Set([base.file, changed.file, retagged.file, recolored.file]).size).toBe(4);
@@ -88,13 +85,12 @@ describe('the reviewed card list', () => {
     ['a piece cut after a decimal point', { L05: { ...L05, pieces: [{ big: '5 to 4 inches' }] } }, /not copied exactly/],
     ['a piece that ends before a decimal point', { L05: { ...L05, pieces: [{ before: 'Most St. Augustine should be cut at', big: '3' }] } }, /not copied exactly/],
     ['a piece cut inside grouped thousands', { A01: { ...A01, pieces: [{ big: '000 to 3 million ants' }] } }, /not copied exactly/],
-    ['a piece that leaves out "never" unnamed', { D03: { layout: 'statement', tag: 'Rodents', scheme: 'navy', pieces: [{ big: 'Sweep rodent droppings' }] } }, /not copied exactly/],
-    ['a piece that names "never" as left out', { D03: { layout: 'statement', tag: 'Rodents', scheme: 'navy', pieces: [{ left_out_before: 'Never', big: 'sweep rodent droppings' }] } }, /turns it around or limits it/],
-    ['a piece that leaves out "only" after it', { L05: { ...L05, pieces: [{ before: 'Most St. Augustine should be cut at', big: '3.5 to 4 inches', left_out_after: 'only' }] } }, /turns it around or limits it/],
-    ['a piece that drops a date unnamed', { O02: { layout: 'statement', tag: 'Fertilizer', scheme: 'light', pieces: [{ before: 'Most of Sarasota County bans', big: 'nitrogen and phosphorus lawn fertilizer' }] } }, /not copied exactly/],
-    ['a piece that drops "most" unnamed', { L05: { ...L05, pieces: [{ before: 'St. Augustine should be cut at', big: '3.5 to 4 inches' }] } }, /not copied exactly/],
+    ['a piece that drops "never"', { D03: { layout: 'statement', tag: 'Rodents', scheme: 'navy', pieces: [{ big: 'Sweep rodent droppings' }] } }, /not copied exactly/],
+    ['a piece that drops "most"', { L05: { ...L05, pieces: [{ before: 'St. Augustine should be cut at', big: '3.5 to 4 inches' }] } }, /not copied exactly/],
+    ['a rule without its dates', { O02: { layout: 'statement', tag: 'Fertilizer', scheme: 'light', pieces: [{ before: 'Most of Sarasota County bans', big: 'nitrogen and phosphorus lawn fertilizer' }] } }, /not copied exactly/],
+    ['a rule without its end date', { O04: { layout: 'number', tag: 'Watering', scheme: 'gold', pieces: [{ before: 'The Southwest Florida Water Management District limits lawn watering to', big: 'one day a week' }] } }, /not copied exactly/],
+    ['a piece without its source ("UF/IFAS says")', { A01: { ...A01, pieces: [{ before: 'White-footed ant colonies range from', big: '8,000 to 3 million ants' }] } }, /not copied exactly/],
     ['a piece that stops inside its sentence', { L09: { layout: 'months', tag: 'Lawn', scheme: 'light', months: [11, 5], pieces: [{ before: 'Large patch is most likely to show up from', big: 'November through May' }] } }, /not copied exactly/],
-    ['left-out words that are not the sentence\'s', { A01: { ...A01, pieces: [{ ...A01.pieces[0], left_out_before: 'UF says' }] } }, /not copied exactly/],
     ['no big words', { A01: { ...A01, pieces: [{ before: 'White-footed ant colonies range from' }] } }, /big words/],
     ['big words over 40 characters', { A01: { ...A01, pieces: [{ big: 'UF/IFAS says white-footed ant colonies range from 8,000 to 3 million ants' }] } }, /big words/],
     ['markup in the words', { A01: { ...A01, pieces: [{ big: '<b>8,000</b>' }] } }, /big words/],
@@ -110,26 +106,27 @@ describe('the reviewed card list', () => {
     ['months on a number card', { A01: { ...A01, months: [1, 2] } }, /only a months card/],
   ])('refuses %s', (_label, cards, message) => refuse(cards, message));
 
-  test('mail apps on other origins may load the cards and top pictures: the portal answers them with CORP cross-origin', () => {
+  test('mail apps on other origins may load the cards and top pictures: both static mounts answer them with CORP cross-origin', () => {
+    const { pictureHeaders } = require('../services/pest-insider/picture-headers');
+    const headersFor = (filePath) => { const headers = {}; pictureHeaders({ set: (k, v) => { headers[k] = v; } }, filePath); return headers; };
+    const CORP = { 'Cross-Origin-Resource-Policy': 'cross-origin' };
+    expect(headersFor('/app/client/dist/pest-insider/cards/a01-0123456789.png')).toEqual(CORP);
+    expect(headersFor('/app/client/public/pest-insider/heroes/t03-0123456789.jpg')).toEqual(CORP);
+    expect(headersFor('C:\\app\\client\\dist\\pest-insider\\cards\\a01-0123456789.png')).toEqual(CORP);
+    // nothing else the static mounts serve changes
+    for (const other of ['/app/client/dist/index.html', '/app/client/dist/assets/app.js', '/app/client/public/pest-insider/x.png',
+      '/app/client/public/pest-insider/cards/notes.txt', '/app/client/public/brand/pest-insider/cards.png']) {
+      expect({ other, headers: headersFor(other) }).toEqual({ other, headers: {} });
+    }
+    // both mounts that serve the folders call it, and no route or middleware of its own exists for them
     const src = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
-    const at = (needle) => { const i = src.indexOf(needle); expect(i).toBeGreaterThan(-1); return i; };
-    const start = at("app.use(['/pest-insider/cards', '/pest-insider/heroes'], (req, res, next) => {");
-    // after helmet sets same-origin, before both static mounts that serve the folder
-    expect(start).toBeGreaterThan(at('return strictHelmet(req, res, next);'));
-    expect(start).toBeLessThan(at("app.use(express.static(path.join(__dirname, '..', 'client', 'public'), {"));
-    expect(start).toBeLessThan(at('app.use(express.static(clientBuild, {'));
+    const local = src.slice(src.indexOf("app.use(express.static(path.join(__dirname, '..', 'client', 'public'), {"));
+    expect(local.slice(0, local.indexOf('}));'))).toContain('setHeaders: pictureHeaders,');
+    const built = src.slice(src.indexOf('app.use(express.static(clientBuild, {'));
+    expect(built.slice(0, built.indexOf('}));'))).toContain('pictureHeaders(res, filePath);');
+    expect(src).not.toMatch(/app\.(use|get)\(\s*\[?\s*'\/pest-insider/);
     expect(CARD_BASE_URL).toBe('https://portal.wavespestcontrol.com/pest-insider/cards/');
     expect(HERO_BASE_URL).toBe('https://portal.wavespestcontrol.com/pest-insider/heroes/');
-    // run the real statement against a fake app
-    const statement = src.slice(start, src.indexOf('\n});\n', start) + 4);
-    const mounts = [];
-    new Function('app', statement)({ use: (mountPath, handler) => mounts.push({ mountPath, handler }) });
-    expect(mounts.map((m) => m.mountPath)).toEqual([['/pest-insider/cards', '/pest-insider/heroes']]);
-    const headers = {};
-    const next = jest.fn();
-    mounts[0].handler({}, { set: (k, v) => { headers[k] = v; } }, next);
-    expect(headers).toEqual({ 'Cross-Origin-Resource-Policy': 'cross-origin' });
-    expect(next).toHaveBeenCalledTimes(1);
   });
 
   test('refuses a file with no cards map', () => {
