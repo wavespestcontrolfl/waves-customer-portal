@@ -1,5 +1,7 @@
 const {
   parseDbprCsv,
+  eachDbprCsvRow,
+  defaultFetchText,
   normalizeStreetName,
   matchDbprRow,
   seatsToSqft,
@@ -66,6 +68,51 @@ describe('parseDbprCsv', () => {
     const text = csv([{ 'Business Name': 'TEST, BAR & GRILL', 'Location Zip Code': '00000' }]);
     const rows = parseDbprCsv(text);
     expect(rows[0]['Business Name']).toBe('TEST, BAR & GRILL');
+  });
+});
+
+describe('eachDbprCsvRow', () => {
+  // Many slices, with a quoted line break in every row, so some slice ends inside a quoted field.
+  const big = csv(Array.from({ length: 1500 }, (_, i) => ({
+    'Business Name': `TEST DINER ${i}`, 'Location Street Address': `${i} TEST ST\nSUITE ${i}`, 'Location Zip Code': '00000',
+  })));
+
+  test('reads the same rows as parseDbprCsv and resolves with the trimmed header', async () => {
+    const rows = [];
+    const header = await eachDbprCsvRow(big, (row) => rows.push(row));
+    expect(rows).toEqual(parseDbprCsv(big));
+    expect(header).toEqual(DBPR_HEADER);
+  });
+
+  test('gives the server a turn before the file is done', async () => {
+    const rows = [];
+    const done = eachDbprCsvRow(big, (row) => rows.push(row));
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.length).toBeLessThan(1500);
+    await done;
+    expect(rows).toHaveLength(1500);
+  });
+
+  test('an empty file has no header and no rows; an unclosed quote rejects', async () => {
+    const rows = [];
+    await expect(eachDbprCsvRow('', (row) => rows.push(row))).resolves.toEqual([]);
+    expect(rows).toEqual([]);
+    await expect(eachDbprCsvRow(`${csv([])}"OPEN QUOTE,`, () => {})).rejects.toThrow(/quote/i);
+  });
+});
+
+describe('defaultFetchText', () => {
+  const realFetch = global.fetch;
+  afterEach(() => { global.fetch = realFetch; });
+
+  test('reads the body as Latin-1 text, and refuses a body past the byte cap', async () => {
+    global.fetch = jest.fn(async () => new Response(Buffer.from([0x50, 0x45, 0xd1, 0x41]))); // PEÑA in Latin-1
+    await expect(defaultFetchText('https://example.invalid/x.csv', 1000)).resolves.toBe('PEÑA');
+    global.fetch = jest.fn(async () => new Response('x'.repeat(64)));
+    await expect(defaultFetchText('https://example.invalid/x.csv', 1000, 32)).rejects.toThrow('extract too large');
+    global.fetch = jest.fn(async () => new Response('', { status: 503 }));
+    await expect(defaultFetchText('https://example.invalid/x.csv', 1000)).rejects.toThrow('HTTP 503');
   });
 });
 
