@@ -260,22 +260,28 @@ describe('CareersOfferPage — open state', () => {
     expect(bodyOf(fetchMock, 2)).toEqual({ consent: false, version: '2026-12-11T15:21:00.000Z' });
   });
 
-  it('shows the stored choice when a change made from an older version is refused, and the next change sends the new version', async () => {
+  // An applicant who unticks the box must not sign believing texts are off
+  // when the server refused that change: the page shows the stored choice and
+  // says the change did not go through.
+  it('shows the stored choice and says so when a change made from an older version is refused, and the next change sends the new version', async () => {
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true })))
       .mockResolvedValueOnce(jsonResponse({ state: 'open' }, 409)) // another tab changed the choice since this read
-      .mockResolvedValueOnce(jsonResponse(openPayload({ version: '2026-12-11T15:30:00.000Z' })))
-      .mockResolvedValueOnce(jsonResponse({ textConsent: true, version: '2026-12-11T15:31:00.000Z' }));
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true, version: '2026-12-11T15:30:00.000Z' })))
+      .mockResolvedValueOnce(jsonResponse({ textConsent: false, version: '2026-12-11T15:31:00.000Z' }));
     globalThis.fetch = fetchMock;
     renderPage();
     const box = await screen.findByLabelText('Text me about this offer');
+    expect(box).toBeChecked();
     fireEvent.click(box);
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     await waitFor(() => expect(box).toBeEnabled());
-    expect(box).not.toBeChecked();
+    expect(box).toBeChecked(); // the stored choice, not the refused one
+    expect(screen.getByText('That did not go through. Please try again.')).toBeInTheDocument();
     fireEvent.click(box);
-    await waitFor(() => expect(box).toBeChecked());
-    expect(bodyOf(fetchMock, 3)).toEqual({ consent: true, version: '2026-12-11T15:30:00.000Z' });
+    await waitFor(() => expect(box).not.toBeChecked());
+    expect(bodyOf(fetchMock, 3)).toEqual({ consent: false, version: '2026-12-11T15:30:00.000Z' });
+    expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
   });
 
   // The 409 says where the offer stands. A closed offer comes back whole, with

@@ -607,12 +607,14 @@ let takeoverAt = null;
 
 // An older worker stored any same-origin GET in its catch-all branch, and
 // the response of each page it opened as the shell, so a request key or the
-// shell's response URL can hold a job-offer link. Under the shell-refresh
+// shell's response URL can hold a job-offer link; it skipped only a
+// lowercase /api/, so it could also hold an offer API response under a
+// mixed-case /API/ key. Under the shell-refresh
 // lock, so no refresh is part-way through its commit: move the install mark
 // up to takeoverAt (never back: a newer install's mark stays), so no older
 // worker's refresh can store the shell again; then store the shell again
 // without its URL when that URL is a job-offer link, and drop job-offer
-// request keys. Not part of activation: the lock can wait on an older
+// and API request keys. Not part of activation: the lock can wait on an older
 // worker's refresh, and page requests wait for activation. Until one purge
 // has finished, each navigation tries again, so a Cache Storage error cannot
 // leave them behind (a restarted worker checks once more; the list is cheap).
@@ -630,7 +632,10 @@ async function purgePrivateLinkEntries() {
       await putShell(cache, new Response(html, { status: shell.status, statusText: shell.statusText, headers: shell.headers }), assets.length ? buildIdOf(assets) : null);
     }
     const requests = await cache.keys();
-    await Promise.all(requests.filter(request => isPrivateLinkPage(new URL(request.url).pathname)).map(request => cache.delete(request)));
+    await Promise.all(requests.filter(request => {
+      const { pathname } = new URL(request.url);
+      return isPrivateLinkPage(pathname) || isApiPath(pathname);
+    }).map(request => cache.delete(request)));
   });
   privateLinksPurged = true;
 }
@@ -640,6 +645,11 @@ self.addEventListener('activate', event => {
   event.waitUntil(sweepStaleCaches().then(() => self.clients.claim()));
   purgePrivateLinkEntries().catch(() => {});
 });
+
+// An API call, in any letter case (the server routes /API/ as /api/).
+function isApiPath(pathname) {
+  return pathname.toLowerCase().startsWith('/api/');
+}
 
 // A job-offer link page: its URL is the applicant's private signing link.
 // The page router matches each percent-decoded segment in any case, with any
@@ -655,9 +665,10 @@ function isPrivateLinkPage(pathname) {
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
 
-  // Never intercept: external requests, API calls, WebSocket
+  // Never intercept: external requests, API calls (in any letter case: the
+  // server routes /API/ as /api/), WebSocket
   if (url.origin !== self.location.origin) return;
-  if (url.pathname.startsWith('/api/')) return;
+  if (isApiPath(url.pathname)) return;
   if (url.pathname.startsWith('/ws/')) return;
   // A purge that failed is tried again on every page load, an offer's included.
   if (!privateLinksPurged && (event.request.mode === 'navigate' || event.request.destination === 'document')) {

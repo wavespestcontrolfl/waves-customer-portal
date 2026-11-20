@@ -405,12 +405,17 @@ function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, 
     if (res.status === 404) onInvalid();
     else if (res.status === 409) {
       // The 409 says where the offer stands, or the page reads it.
-      if (!onRefused(res.body) && (await onStale()) === 'failed') {
+      const after = onRefused(res.body) ? 'changed' : await onStale();
+      if (after === 'failed') {
         // The offer changed but the new state could not be read: stay locked.
         setUnconfirmed(true);
         setSaving(false);
         return;
       }
+      // Still open: the change was made on an older read and refused. The box
+      // now shows the stored choice; say so, so no one signs on a choice that
+      // was never saved.
+      if (after === 'open') setError(NOT_SAVED_ERROR);
     } else if (!res.ok) setError(res.body?.error || CONNECTION_ERROR);
     setSaving(false);
     onPending(false);

@@ -429,6 +429,27 @@ describe('service-worker private link pages', () => {
       .toEqual(['/__waves/install-commit', '/assets/index-AAA.js', '/careers/offers', '/manifest.json']);
   });
 
+  // The server routes /API/ as /api/, so an offer read in another letter case
+  // returns the applicant's offer, with the token in its URL. An older worker
+  // skipped only a lowercase /api/ and stored such a read like any file.
+  it('leaves an API call in any letter case to the browser, and drops API responses an older worker stored', async () => {
+    const cache = fakeCache();
+    const stored = fakeResponse('{"state":"open"}');
+    for (const key of [`/API/public/careers/offer/${token}`, `/Api/public/careers/offer/${token}/text-consent`, '/API/customer/me', '/manifest.json']) await cache.put(key, stored);
+    const worker = loadWorker(cache);
+    worker.setFetch(async () => fakeResponse('{"state":"open"}'));
+    for (const path of [`/API/public/careers/offer/${token}`, `/aPi/public/careers/offer/${token}`, `/api/public/careers/offer/${token}`]) {
+      for (const mode of ['cors', 'same-origin', 'no-cors']) {
+        const { response } = await worker.dispatchFetch(path, { mode });
+        expect(response).toBeUndefined(); // no respondWith: the browser fetches it
+      }
+    }
+    await worker.dispatchActivate();
+    await tick(); // the purge runs beside activation, not in it
+    expect([...cache.store.keys()].map(url => url.replace('https://portal.test', '')).sort())
+      .toEqual(['/__waves/install-commit', '/manifest.json']);
+  });
+
   // The older worker stores every page it opens as the shell, and the stored
   // response keeps that page's URL. One it opens while this worker installs
   // began after the install mark, so that mark does not stop it.

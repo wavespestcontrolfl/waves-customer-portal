@@ -11,14 +11,16 @@
  * The text is read in units, each what a browser takes as one link: a quoted HTML attribute value (a browser drops
  * tabs and line breaks inside the URL it holds), or an unbroken run of text elsewhere. Two kinds of spelling are hidden:
  * - The link as it is sent (/careers/offer/<token>): only the token is hidden, so the host and the words around it stay.
- * - Any other spelling a browser or a reader can turn back into the link. A browser decodes HTML character
- *   references (named ones too), removes dot segments, reads backslashes as slashes and drops tabs and line breaks; a
- *   reader can also undo percent-encoding, letter case, repeated slashes, full-width forms and invisible characters.
- *   A unit whose path, read that way, holds /careers/offer/<64-hex token> is replaced as a whole by the standard link
- *   with the token hidden, once for each such token in the order they appear, so the replay can rebuild each one as
- *   the link the page opens. Dot segments are resolved in each part before a "?" or "#" on its own, as a browser
- *   resolves only the path, so a query cannot remove a token from the path. Only tokens on that path are pinned:
- *   another 64-hex value (a query value) is not a link.
+ * - Any other spelling a browser or a reader can turn back into the link. Each unit is read three ways. Twice as a
+ *   browser reads it, as typed and with its HTML character references decoded once: tabs and line breaks dropped,
+ *   backslashes read as slashes, the path ending at the first "?" or "#", "." and ".." segments resolved (also written
+ *   with %2e; an empty segment counts, as in a browser), any other percent-encoding kept, and each segment decoded and
+ *   lowercased only to compare it, as the page router does. Once as a reader can: character references and
+ *   percent-encoding undone (repeated, for double encoding), full-width forms folded, invisible characters dropped,
+ *   lowercase, and each part between a "?" and a "#" read as a path. A unit in which any reading holds
+ *   /careers/offer/<64-hex token> (a repeated slash read as one) is replaced as a whole by the standard link with the
+ *   token hidden, once for each such token in the order they appear, so the replay can rebuild each one as the link
+ *   the page opens. Only those tokens are pinned: another 64-hex value (a query value) is not a link.
  * An /careers/interview/ link is not on that path and is left alone. Out of reach of any pattern: a token a person has to
  * put back together from pieces (split by spaces, or by a line break in plain text); no browser opens that as a link.
  */
@@ -52,23 +54,60 @@ function readable(unit) {
   return out.normalize('NFKC').replace(/[\t\n\r]|\p{Cf}/gu, '').replace(/\\/g, '/').toLowerCase();
 }
 
-// The offer tokens in a read unit, in order. Each part before a "?" or "#" is walked segment by segment, as a browser
-// resolves a path: "." and empty segments (repeated slashes) are skipped and ".." drops the segment before it. A segment
-// that opens with a 64-hex token right after "careers" and "offer" holds a token.
-function offerTokensIn(seen) {
+// Walks path segments as a browser resolves them: a "." segment is skipped, ".." drops the segment before it (an empty
+// one too), and an empty segment is kept. A segment that opens with a 64-hex token right after "careers" and "offer"
+// holds a token; empty segments between those are passed over, as a reader reads "//" as "/". Each stack entry keeps
+// the last two named segments at its depth, so the walk stays linear.
+function pathTokens(segments, { single, double, name }) {
   const tokens = [];
-  for (const part of seen.split(/[?#]/)) {
-    const path = [];
-    for (const segment of part.split('/')) {
-      if (segment === '..') path.pop();
-      else if (segment && segment !== '.') {
-        const token = path.at(-1) === 'offer' && CAREERS_SEGMENT_RE.test(path.at(-2) || '') && TOKEN_SEGMENT_RE.exec(segment);
-        if (token) tokens.push(token[1]);
-        path.push(segment);
-      }
+  const stack = [];
+  for (const raw of segments) {
+    if (double(raw)) stack.pop();
+    else if (!single(raw)) {
+      const segment = name(raw);
+      const [last, before] = stack.at(-1) || ['', ''];
+      const token = last === 'offer' && CAREERS_SEGMENT_RE.test(before) && TOKEN_SEGMENT_RE.exec(segment);
+      if (token) tokens.push(token[1]);
+      stack.push(segment ? [segment, last] : [last, before]);
     }
   }
   return tokens;
+}
+
+// A browser: "." and ".." count also when written with %2e. Any other percent-encoding stays part of its segment (an
+// encoded "?" or "/" is no delimiter); the segment is decoded and lowercased only to compare it.
+const BROWSER = {
+  single: (s) => /^(?:\.|%2e)$/i.test(s),
+  double: (s) => /^(?:\.|%2e){2}$/i.test(s),
+  name: (s) => percentDecode(s).toLowerCase(),
+};
+// A reader: the text is already decoded, so only plain dots count.
+const READER = { single: (s) => s === '.', double: (s) => s === '..', name: (s) => s };
+
+// The path segments a browser opens from `text`: tabs and line breaks dropped, backslashes read as slashes, cut at the
+// first "?" or "#".
+function browserSegments(text) {
+  const view = text.replace(/[\t\n\r]/g, '').replace(/\\/g, '/');
+  const end = view.search(/[?#]/);
+  return (end === -1 ? view : view.slice(0, end)).split('/');
+}
+
+// The offer tokens a unit holds in any reading, each once, in the order they appear in the reader's text.
+function offerTokensOf(unit) {
+  const seen = readable(unit);
+  // Decoding and folding never remove the letters of "careers" or "offer", so a unit whose reader's text lacks either
+  // holds no token in any reading.
+  if (!seen.includes('careers') || !seen.includes('offer')) return [];
+  const found = new Set([
+    ...pathTokens(browserSegments(unit), BROWSER),
+    ...pathTokens(browserSegments(decodeHTML(unit)), BROWSER),
+    ...seen.split(/[?#]/).flatMap((part) => pathTokens(part.split('/'), READER)),
+  ]);
+  const at = (token) => {
+    const i = seen.indexOf(token);
+    return i === -1 ? seen.length : i;
+  };
+  return [...found].sort((a, b) => at(a) - at(b));
 }
 
 // One pass, unit by unit, so each hidden link and its token keep the same order for redaction and for pinning.
@@ -80,11 +119,11 @@ function scan(text) {
       sent.push(token.toLowerCase());
       return `${path}${HIDDEN}`;
     });
-    if (!offerTokensIn(readable(kept)).length) {
+    if (!offerTokensOf(kept).length) {
       tokens.push(...sent);
       return kept;
     }
-    const found = offerTokensIn(readable(unit));
+    const found = offerTokensOf(unit);
     tokens.push(...found);
     const links = found.map(() => portalUrl(`/careers/offer/${HIDDEN}`)).join(' ');
     const quoted = /^=\s*(["'])/.exec(unit);

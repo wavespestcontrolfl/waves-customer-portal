@@ -135,6 +135,49 @@ describe('the audit preview', () => {
   });
 });
 
+// The browser decides. Node's URL is the WHATWG parser browsers use: every link it resolves to the signing page (the
+// path /careers/offer/<token> in any letter case, with no percent-encoding left, which the page alone opens) must be
+// stored without its token, as plain text and inside an href (whose character references a browser decodes first).
+describe('every link a browser opens as the signing page is stored without its token', () => {
+  const { decodeHTML } = require('entities');
+  const SIGNING_PATH = new RegExp(`^/careers/offer/${TOKEN}/*$`, 'i');
+  const opensSigningPage = (href) => {
+    try {
+      const { pathname } = new URL(href);
+      return !pathname.includes('%') && SIGNING_PATH.test(pathname);
+    } catch {
+      return false;
+    }
+  };
+  // Inserted between the parts of the path: dot segments (also encoded), a segment a ".." removes (one that carries an
+  // encoded or entity "?" or "/", or is empty), a repeated slash, backslashes (a browser reads them as slashes), and a
+  // real "?".
+  const STEPS = ['', '/.', '/%2e', '/x/..', '/x/%2e%2E', '/x%3F/..', '/x&quest;/..', '/x%2F/..', '//..', '/', '\\x\\..', '\\\\..', '/x?'];
+
+  test('in every mix of dot segments, empty segments, encoded delimiters and tails', () => {
+    let opened = 0;
+    for (const route of ['careers', 'CAREERS']) {
+      for (const a of STEPS) for (const b of STEPS) for (const c of STEPS) {
+        for (const tail of ['', '?a=/..', '/..']) {
+          const link = `https://x.test${a}/${route}${b}/Offer${c}/${TOKEN}${tail}`;
+          if (opensSigningPage(link)) {
+            opened += 1;
+            expect([link, redactOfferLinks(`Hi ${link} bye`).includes(TOKEN)]).toEqual([link, false]);
+            expect([link, offerLinkTokens(`Hi ${link} bye`)]).toEqual([link, [TOKEN]]);
+          }
+          if (opensSigningPage(decodeHTML(link))) {
+            opened += 1;
+            const html = `<a href="${link}">Read your offer</a>`;
+            expect([link, redactOfferLinks(html).includes(TOKEN)]).toEqual([link, false]);
+            expect([link, offerLinkTokens(html)]).toEqual([link, [TOKEN]]);
+          }
+        }
+      }
+    }
+    expect(opened).toBeGreaterThan(1000); // the parser opens most of them, so the check is not empty
+  }, 60000);
+});
+
 describe('the deferred replay body', () => {
   const { replayBodyFor } = require('../services/messaging/deferred-replay-registry');
   const stored = `Hi Jordan, your job offer: portal.wavespestcontrol.com/careers/offer/${OFFER_LINK_HIDDEN} It stays open until Fri, Dec 18.`;

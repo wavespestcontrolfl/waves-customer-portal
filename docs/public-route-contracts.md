@@ -8618,17 +8618,21 @@ every SPA path, and never the page; no offer token has a dot. The page itself op
 64 lowercase hex and no percent-encoding in the path (any letter case of `/careers/offer/` is fine). Any other spelling
 shows the not-valid state with no API read. Stored messages hide the token in every spelling of the link
 (`utils/offer-link-redaction.js`). The text is read in units, each what a browser takes as one link: a quoted HTML
-attribute value or an unbroken run of text. The link as sent keeps its host with the token hidden. Any other unit whose
-path, read as a browser or a reader would (HTML character references including named ones, dot segments, repeated
-slashes, backslashes, tabs and line breaks inside an attribute, letter case, percent-encoding, full-width forms,
-invisible characters), holds `/careers/offer/<64-hex token>` is stored as the standard link with the token hidden, once
-per such token in source order; dot segments are resolved in each part before a `?` or `#` on its own, as a browser
-resolves only the path. The same scan pins only those tokens (a 64-hex query value beside them is not pinned),
+attribute value or an unbroken run of text. The link as sent keeps its host with the token hidden. Each other unit is
+read as a browser reads it (as typed and with its HTML character references decoded: tabs and line breaks dropped,
+backslashes as slashes, the path cut at the first `?` or `#`, dot segments resolved also when written with `%2e`, an
+empty segment kept as a browser keeps it, other percent-encoding kept inside its segment) and as a reader can (every
+character reference and percent-encoding undone, full-width forms folded, invisible characters dropped, each part
+between `?` and `#` read as a path). A unit that holds `/careers/offer/<64-hex token>` in any letter case in any reading
+is stored as the standard link with the token hidden, once per such token in source order. A test checks every link
+that Node's WHATWG URL parser opens as the signing page across a grid of dot segments, empty segments, encoded
+delimiters and backslashes. The same scan pins only those tokens (a 64-hex query value beside them is not pinned),
 so a held text replays each one as the standard link. The service worker never handles an offer URL, in any
-request mode (`client/public/sw.js` `isPrivateLinkPage`): it stores nothing, because a stored response or request
-keeps its URL; after it takes over, it drops any offer URL an older worker stored, as a request key or as the
-shell's response URL (the purge first moves the install mark up to the takeover time, so that worker's refreshes
-still in flight cannot store it again), and it never serves its offline shell in the page's place, so the browser always fetches the page with these headers. A 30/10min per-IP limiter (prod only, `ipFallbackKey`) sits
+request mode (`client/public/sw.js` `isPrivateLinkPage`), nor an API call in any letter case (`isApiPath`: the server
+routes `/API/` as `/api/`): it stores nothing, because a stored response or request keeps its URL; after it takes
+over, it drops any offer URL or API call an older worker stored, as a request key or as the shell's response URL (the
+purge first moves the install mark up to the takeover time, so that worker's refreshes still in flight cannot store it
+again), and it never serves its offline shell in the page's place, so the browser always fetches the page with these headers. A 30/10min per-IP limiter (prod only, `ipFallbackKey`) sits
 behind the gates. GET returns `{state:'open'|'signed'|'declined'|'date_requested', firstName, jobTitle, startDate,
 hourlyRate, stepRate, stepEffectiveOn, hoursLine, reportTo, payDayLine, owner:{name,title,sentOn}, expiresAt,
 textConsent, version, signedName, signedAt, requestedStartDate, terms:{title, markdown}}` — every value is read from the
@@ -8639,7 +8643,8 @@ application the owner moved to hired/rejected/withdrawn reads `withdrawn` (that 
 GET `last_viewed_at`. POST bodies: `text-consent {consent: boolean, version}` -> `{textConsent, version}`, where
 `version` is the offer row's `updated_at` from the read the choice was made on: a choice already stored answers 200 with
 no write, and a change made from any other version answers 409 `{state:'open'}`, so a save that lands late (its reply
-was lost and the page saved the same choice again) cannot undo a later choice; `accept {signedName}` (trimmed,
+was lost and the page saved the same choice again) cannot undo a later choice (on that 409 the page reads the offer,
+shows the stored choice and says "That did not go through. Please try again."); `accept {signedName}` (trimmed,
 3 to 120 characters, at least two words) -> `{state:'signed', signedAt}`; `date-request {requestedStartDate:
 'YYYY-MM-DD' (future Monday to Thursday), note? (<= 500)}` -> `{state:'date_requested'}`; `decline {reason? (<= 500)}` ->
 `{state:'declined'}`. Each acts only from state `open`; any other state answers 409 with the current state body (an
