@@ -48,12 +48,14 @@ describe('dispatch alerts bulk resolve', () => {
       'visit_not_closed_out',
       'commercial_prepay_setup_review',
     ]);
-    expect(chain.update).toHaveBeenCalledWith({
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({
       resolved_at: 'NOW()',
       resolved_by: 'tech-1',
-    });
+      resolution_attempt_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    }));
     expect(chain.returning).toHaveBeenCalledWith([
       'id', 'type', 'severity', 'tech_id', 'job_id', 'payload', 'created_at', 'resolved_at', 'resolved_by',
+      'resolution_attempt_id',
     ]);
     expect(result.resolved).toBe(3);
     expect(result.counts).toEqual([

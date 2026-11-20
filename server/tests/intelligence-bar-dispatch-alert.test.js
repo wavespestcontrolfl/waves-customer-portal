@@ -282,7 +282,15 @@ describe('the confirmed run', () => {
     expect(done).toMatchObject({ success: true, sent_to_customer: false, alert_id: ALERT });
     expect(done.note).toMatch(/Nothing was sent to anyone/);
     expect(S.locks).toContain('dispatch_alerts');
-    expect(writes()).toEqual([{ table: 'dispatch_alerts', patch: { resolved_at: 'NOW', resolved_by: TECH }, count: 1 }]);
+    expect(writes()).toEqual([{
+      table: 'dispatch_alerts',
+      patch: {
+        resolved_at: 'NOW',
+        resolved_by: TECH,
+        resolution_attempt_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      },
+      count: 1,
+    }]);
     expect(alert()).toMatchObject({ resolved_at: 'NOW', resolved_by: TECH });
     await new Promise((r) => setImmediate(r));
     expect(mockEmit).toHaveBeenCalledTimes(1);

@@ -74,6 +74,7 @@ describe('resolveAlert auto stamp', () => {
     expect(patch.payload).toEqual(expect.objectContaining({
       __raw: expect.stringContaining("jsonb_build_object('superseded_at'"),
     }));
+    expect(patch.resolution_attempt_id).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   test('auto omitted (default) never touches payload — a human resolve stays quiet', async () => {
@@ -83,7 +84,11 @@ describe('resolveAlert auto stamp', () => {
     await dispatchAlerts.resolveAlert({ id: 'alert-1', resolvedBy: 'tech-1', trx });
 
     const patch = update.mock.calls[0][0];
-    expect(patch).toEqual({ resolved_at: 'NOW()', resolved_by: 'tech-1' });
+    expect(patch).toEqual(expect.objectContaining({
+      resolved_at: 'NOW()',
+      resolved_by: 'tech-1',
+      resolution_attempt_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    }));
     expect(patch.payload).toBeUndefined();
   });
 

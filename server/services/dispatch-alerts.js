@@ -34,6 +34,7 @@
  * real time across multiple connected dispatchers.
  */
 const db = require('../models/db');
+const { randomUUID } = require('crypto');
 const { getIo } = require('../sockets');
 const logger = require('./logger');
 
@@ -43,13 +44,26 @@ const ROOM = 'dispatch:admins';
 
 const VALID_SEVERITIES = ['info', 'warn', 'critical'];
 const ALERT_COLUMNS = ['id', 'type', 'severity', 'tech_id', 'job_id', 'payload', 'created_at', 'resolved_at', 'resolved_by'];
+const RESOLVED_ALERT_COLUMNS = [...ALERT_COLUMNS, 'resolution_attempt_id'];
 
-function sameInstant(left, right) {
-  if (left == null || right == null) return false;
-  if (left === right) return true;
-  const leftTime = new Date(left).getTime();
-  const rightTime = new Date(right).getTime();
-  return Number.isFinite(leftTime) && leftTime === rightTime;
+function publicResolvedRow(row) {
+  if (!row) return row;
+  const { resolution_attempt_id: _attempt, ...publicRow } = row;
+  return publicRow;
+}
+
+async function currentCreatedAlert(row, conn = db) {
+  const review = require('./commercial-prepay-dispatch-review');
+  if (row?.type !== review.REVIEW_TYPE) return row;
+  try {
+    const [hydrated] = await review.hydrateCurrentCustomerLinks(conn, [row]);
+    return hydrated || { ...row, payload: { ...row.payload, customerId: null } };
+  } catch (err) {
+    // The card still needs to reach Dispatch after its insert commits, but an
+    // unreadable ownership chain must never leave a stale customer link live.
+    logger.error(`[dispatch-alerts] setup-review customer-link hydration failed: ${err.message}`);
+    return { ...row, payload: { ...row.payload, customerId: null } };
+  }
 }
 
 async function emitCreatedIfPersisted(row) {
@@ -57,7 +71,7 @@ async function emitCreatedIfPersisted(row) {
     .where({ id: row.id })
     .whereNull('resolved_at')
     .first(ALERT_COLUMNS);
-  if (persisted) emitAlert(persisted);
+  if (persisted) emitAlert(await currentCreatedAlert(persisted));
 }
 
 async function emitResolvedRowsIfPersisted(rows) {
@@ -66,10 +80,13 @@ async function emitResolvedRowsIfPersisted(rows) {
   const persistedRows = await db('dispatch_alerts')
     .whereIn('id', rows.map((row) => row.id))
     .whereNotNull('resolved_at')
-    .select(ALERT_COLUMNS);
+    .select(RESOLVED_ALERT_COLUMNS);
   persistedRows.forEach((persisted) => {
     const expected = expectedById.get(String(persisted.id));
-    if (expected && sameInstant(persisted.resolved_at, expected.resolved_at)) emitResolved(persisted);
+    if (expected?.resolution_attempt_id
+      && persisted.resolution_attempt_id === expected.resolution_attempt_id) {
+      emitResolved(persisted);
+    }
   });
 }
 
@@ -140,7 +157,7 @@ async function createAlert({ type, severity, techId, jobId, payload, trx } = {})
       deferVerifiedBroadcast(trx, () => emitCreatedIfPersisted(row));
     } else {
       logger.warn('[dispatch-alerts] trx.executionPromise missing — emitting inline (test harness?)');
-      emitAlert(row);
+      emitAlert(await currentCreatedAlert(row, trx));
     }
     return row;
   }
@@ -150,7 +167,7 @@ async function createAlert({ type, severity, techId, jobId, payload, trx } = {})
     captured = await doWrite(innerTrx);
   });
   // trx committed by here.
-  emitAlert(captured);
+  emitAlert(await currentCreatedAlert(captured));
   return captured;
 }
 
@@ -209,7 +226,7 @@ async function createAlertOnce({
         deferVerifiedBroadcast(trx, () => emitCreatedIfPersisted(result.row));
       } else {
         logger.warn('[dispatch-alerts] trx.executionPromise missing — emitting inline (test harness?)');
-        emitAlert(result.row);
+        emitAlert(await currentCreatedAlert(result.row, trx));
       }
     }
     return result;
@@ -219,7 +236,7 @@ async function createAlertOnce({
   await db.transaction(async (innerTrx) => {
     result = await doWrite(innerTrx);
   });
-  if (result.created && result.row) emitAlert(result.row);
+  if (result.created && result.row) emitAlert(await currentCreatedAlert(result.row));
   return result;
 }
 
@@ -287,8 +304,16 @@ async function resolveAlert({ id, resolvedBy, trx, auto = false } = {}) {
     throw new Error('resolveAlert: id is required');
   }
 
+  const resolveAttemptId = randomUUID();
   async function doWrite(t) {
-    const patch = { resolved_at: t.fn.now(), resolved_by: resolvedBy || null };
+    const patch = {
+      resolved_at: t.fn.now(),
+      resolved_by: resolvedBy || null,
+      // Durable proof of THIS resolving UPDATE. PostgreSQL now() is stable for
+      // the whole outer transaction, so a rolled-back savepoint and its parent
+      // can have identical resolved_at values; their random attempt ids cannot.
+      resolution_attempt_id: resolveAttemptId,
+    };
     if (auto) {
       patch.payload = t.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('superseded_at', ?::text)", [new Date().toISOString()]);
     }
@@ -296,7 +321,7 @@ async function resolveAlert({ id, resolvedBy, trx, auto = false } = {}) {
       .where({ id })
       .whereNull('resolved_at')
       .update(patch)
-      .returning(['id', 'type', 'severity', 'tech_id', 'job_id', 'payload', 'created_at', 'resolved_at', 'resolved_by']);
+      .returning(RESOLVED_ALERT_COLUMNS);
     // A MANUAL resolve that lost the race still has the last word on
     // provenance: an automatic write landing just before it stamps
     // superseded_at, the manual update then matches no unresolved row, and
@@ -319,15 +344,15 @@ async function resolveAlert({ id, resolvedBy, trx, auto = false } = {}) {
   }
 
   if (trx) {
-    const row = await doWrite(trx);
-    if (!row) return null;
+    const written = await doWrite(trx);
+    if (!written) return null;
     if (trx.executionPromise) {
-      deferVerifiedBroadcast(trx, () => emitResolvedRowsIfPersisted([row]));
+      deferVerifiedBroadcast(trx, () => emitResolvedRowsIfPersisted([written]));
     } else {
       logger.warn('[dispatch-alerts] trx.executionPromise missing — emitting inline (test harness?)');
-      emitResolved(row);
+      emitResolved(written);
     }
-    return row;
+    return publicResolvedRow(written);
   }
 
   let captured;
@@ -336,7 +361,7 @@ async function resolveAlert({ id, resolvedBy, trx, auto = false } = {}) {
   });
   if (!captured) return null;
   emitResolved(captured);
-  return captured;
+  return publicResolvedRow(captured);
 }
 
 // Resolved broadcast payload is intentionally narrow: just the id and
@@ -385,6 +410,7 @@ function summarizeResolvedAlerts(rows) {
  * @returns {Promise<{resolved: number, counts: Array, alerts: Array}>}
  */
 async function resolveAllOpenAlerts({ resolvedBy, trx } = {}) {
+  const resolveAttemptId = randomUUID();
   async function doWrite(t) {
     const rows = await t('dispatch_alerts')
       .whereNull('resolved_at')
@@ -394,8 +420,9 @@ async function resolveAllOpenAlerts({ resolvedBy, trx } = {}) {
       .update({
         resolved_at: t.fn.now(),
         resolved_by: resolvedBy || null,
+        resolution_attempt_id: resolveAttemptId,
       })
-      .returning(['id', 'type', 'severity', 'tech_id', 'job_id', 'payload', 'created_at', 'resolved_at', 'resolved_by']);
+      .returning(RESOLVED_ALERT_COLUMNS);
     await clearTrackingBells(t, rows);
     return rows;
   }
@@ -419,7 +446,7 @@ async function resolveAllOpenAlerts({ resolvedBy, trx } = {}) {
   return {
     resolved: rows.length,
     counts: summarizeResolvedAlerts(rows),
-    alerts: rows,
+    alerts: rows.map(publicResolvedRow),
   };
 }
 
@@ -480,7 +507,7 @@ async function resolveAlertAsDispatcher({ id, resolvedBy, trx } = {}) {
   const row = await resolveAlert({ id, resolvedBy, trx });
   if (row) return { outcome: 'resolved', alert: row };
 
-  const existing = await conn('dispatch_alerts').where({ id }).first();
+  const existing = await conn('dispatch_alerts').where({ id }).first(ALERT_COLUMNS);
   if (!existing) return { outcome: 'not_found' };
   return { outcome: 'already_resolved', alert: existing };
 }
