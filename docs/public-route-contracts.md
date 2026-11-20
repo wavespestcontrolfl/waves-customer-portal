@@ -4435,7 +4435,7 @@ wants it today" when all three answers are known and name a problem
 service line beside the answers ("- Wants Pest Control - Not sure, condo,
 wants it today"); the lead's source row (`lead_source_id`) is NOT changed by
 a quiz: a quiz is a form, not a traffic source.
-Two admin views read the stored answers and nothing else does: the Leads
+Two admin views read the stored answers: the Leads
 screen prints them under the lead (`client/src/lib/leadQuizAnswers.js`, the
 same fixed tokens; an unknown token prints nothing), and the lead funnel's
 Quiz view splits leads by `extracted_data.quiz.kind` into Pest Quiz, Lawn
