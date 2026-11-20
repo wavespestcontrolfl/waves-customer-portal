@@ -227,8 +227,8 @@ describe('judgeReach', () => {
     expect(result.get('2')).toBe(NOT_JUDGED);
   });
 
-  // Round 3, finding 2: a staff-bridge call row starts when the employee is rung, not when the customer answers.
-  test('an outbound call is reached when the customer leg connected; with none, a call across the 15-minute edge is not judged', () => {
+  // Round 3, finding 2: a call is judged by when it reached a person, not when its row started.
+  test('a call with an exact answer time is judged by it; an answer window across the 15-minute edge is not judged', () => {
     const a = lead(1);
     const b = lead(2);
     const c = lead(3);
@@ -237,8 +237,8 @@ describe('judgeReach', () => {
     const result = judgeReach([a, b, c, d], {
       ...none,
       calls: [
-        call(a, { at: at(16), spanEnd: null }), // started at 14, the customer leg connected at 16: later, not within
-        call(b, { at: at(14), spanEnd: at(22) }), // no customer leg; started inside, ended outside: unknown
+        call(a, { at: at(16), spanEnd: null }), // answered at 16 exactly (a staff acceptance): later, not within
+        call(b, { at: at(14), spanEnd: at(22) }), // no answer time; started inside, ended outside: unknown
         call(c, { at: at(3), spanEnd: at(9) }), // started and ended inside: reached
         call(d, { at: at(20), spanEnd: at(30) }), // started after the window: later
       ],
@@ -608,6 +608,19 @@ describe('loadLeadReachStats', () => {
     expect(await run({ ended_at: new Date(at(30)) })).toMatchObject({ cohort: 0, notJudged: 1 });
     expect(await run({ ended_at: new Date(at(20)) })).toMatchObject({ reachedWithin: 0, notJudged: 1 });
     expect(await run({ ended_at: new Date(at(14.5)) })).toMatchObject({ reachedWithin: 1 });
+  });
+
+  // GitHub Codex #8138 round 1 (P2): /outbound-dial-complete stamps customer_leg.ended_at when its callback arrives.
+  test('an outbound bridge call is reached by its customer leg at the latest; a late callback leaves it uncertain, never later', async () => {
+    const run = (row) => loadLeadReachStats([lead(1)], { conn: fakeConn({ call_log: [{ peer: lead(1).phone.replace('+1', ''), direction: 'outbound', at: new Date(at(2)), ended_at: new Date(at(30)), leg_seconds: '120', ...row }] }) });
+    // Callback received at minute 14 for a 2-minute leg: answered by minute 12 at the latest, within.
+    expect(await run({ leg_ended_at: new Date(at(14)).toISOString() })).toMatchObject({ reachedWithin: 1, notJudged: 0 });
+    // The same leg's callback received 4 minutes late: the latest answer moves to 16, so the call is left out, never counted later.
+    expect(await run({ leg_ended_at: new Date(at(18)).toISOString() })).toMatchObject({ reachedWithin: 0, reachedLater: 0, notJudged: 1 });
+    // A call that started after the window is later whenever its callback came.
+    expect(await run({ at: new Date(at(20)), leg_ended_at: new Date(at(24)).toISOString() })).toMatchObject({ reachedLater: 1, notJudged: 0 });
+    // A leg stamp that puts the answer before the call's start says nothing: the call's own span decides (minute 2 to 30).
+    expect(await run({ leg_ended_at: new Date(at(3)).toISOString() })).toMatchObject({ reachedWithin: 0, notJudged: 1 });
   });
 
   // Round 4, finding 4: emailCustomerLink's own guard, shared.

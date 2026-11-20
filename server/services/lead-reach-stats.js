@@ -20,9 +20,10 @@
  *     first_contact_at (one with no known answer time that rang before it and ended after it may
  *     have, so bucketReach judges it). A call with no trustworthy end (callEndedAtSql) counts for nothing. The
  *     time a call reached a person is when the staff phone accepted an inbound call
- *     (forward_acceptance.accepted_at) or the customer's leg connected on an outbound bridge call
- *     (customer_leg ended_at minus duration_seconds); with neither it is somewhere between the
- *     call's start and its end (callTiming);
+ *     (forward_acceptance.accepted_at); on an outbound bridge call it is between the call's start
+ *     and the customer leg's end stamp minus its duration (the stamp is our receipt of the callback,
+ *     so it bounds the answer and never times it); otherwise it is somewhere between the call's
+ *     start and its end (callTiming);
  *   - an email a person sent (a Gmail SENT row, personSentFilter) to the lead's address, leaving out
  *     the SEO link outreach job's sends (its stored Gmail thread ref, seo_link_prospects);
  *   - an estimate a person sent: the lead's estimate (leads.estimate_id, or the public-quote mirror
@@ -154,9 +155,14 @@ async function personCalls(conn, peers, sids, leadIds, since) {
 
 // When a call reached a person: { at, spanEnd }. `at` is the earliest the contact could have happened;
 // `spanEnd` is the latest (the call's own end), or null when `at` is exact.
-//  - Outbound bridge call with a customer leg: exact, when that leg connected.
+//  - Outbound bridge call with a customer leg: between the call's start and the leg's end stamp minus
+//    its duration. /outbound-dial-complete stamps customer_leg.ended_at when its callback arrives, after
+//    the leg ended, so a late callback moves that bound later, never earlier: the latest the customer
+//    could have answered, not the answer time (callEndedAtSql trusts no such stamp as an end either).
 //  - Inbound call with forward_acceptance: exact, when the staff phone accepted it
-//    (metadata.forward_acceptance.accepted_at, written by /inbound-forward-accept).
+//    (metadata.forward_acceptance.accepted_at, written by /inbound-forward-accept). Twilio waits for
+//    that callback's reply before it bridges the caller, so the caller is reached at the stamp or a
+//    moment after it.
 //  - Anything else: somewhere between the call's start and its end.
 function callTiming(row) {
   const start = asMs(row.at);
@@ -165,7 +171,8 @@ function callTiming(row) {
   if (row.direction === 'outbound') {
     const legEnd = row.leg_ended_at ? Date.parse(row.leg_ended_at) : NaN;
     const legSeconds = row.leg_seconds == null || row.leg_seconds === '' ? NaN : Number(row.leg_seconds);
-    return Number.isFinite(legEnd) && Number.isFinite(legSeconds) && legSeconds >= 0 ? { at: legEnd - legSeconds * 1000, spanEnd: null } : span;
+    const latest = Number.isFinite(legEnd) && Number.isFinite(legSeconds) && legSeconds >= 0 ? legEnd - legSeconds * 1000 : NaN;
+    return latest > start ? { at: start, spanEnd: latest } : span;
   }
   const acceptedAt = row.accepted === 'true' || row.accepted === true ? asMs(row.accepted_at) : null;
   return acceptedAt != null ? { at: acceptedAt, spanEnd: null } : span;
