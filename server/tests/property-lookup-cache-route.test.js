@@ -346,14 +346,15 @@ describe('performPropertyLookup strictCacheReads', () => {
     verified_overrides: { lotSize: { value: 7200, verifiedAt: '2026-06-01T12:00:00Z', verifiedBy: 'tech' } },
   });
   // The correction read selects one column; the cache read selects the row.
-  const tableWith = ({ row, failOverrides = false, failCache = false }) => {
+  // `overrideRow`: what the correction read sees, when it differs from the row the cache read serves.
+  const tableWith = ({ row, overrideRow = row, failOverrides = false, failCache = false }) => {
     const builder = fakeTable({ row });
     builder.first = async (...columns) => {
       const overrideRead = columns.includes('verified_overrides');
       if (overrideRead ? failOverrides : failCache) {
         throw Object.assign(new Error(`connection lost near "${ADDRESS}"`), { code: '57P01' });
       }
-      return row;
+      return overrideRead ? overrideRow : row;
     };
     return builder;
   };
@@ -384,6 +385,28 @@ describe('performPropertyLookup strictCacheReads', () => {
     mockDbHandler = () => tableWith({ row: corrected(), failCache: true });
     expect(await performPropertyLookup(ADDRESS, DEFAULT)).toBeNull();
     await expect(performPropertyLookup(ADDRESS, STRICT)).rejects.toMatchObject({ code: 'LOOKUP_CACHE_READ_FAILED' });
+  });
+
+  it('the two reads disagree (a correction and a refresh landed between them): a strict hit applies the corrections of the row it serves', async () => {
+    // The first read saw the older correction (7,200). Then staff corrected the lot again (6,800) and a
+    // refresh saved the row: the row served as the hit carries the newer correction, folded into its record.
+    const earlier = cachedRow({ verified_overrides: { lotSize: { value: 7200, verifiedAt: '2026-06-01T12:00:00Z', verifiedBy: 'tech' } } });
+    const refreshed = cachedRow({ verified_overrides: { lotSize: { value: 6800, verifiedAt: '2026-06-10T12:00:00Z', verifiedBy: 'tech' } } });
+    refreshed.property_record.lotSize = 6800;
+    mockDbHandler = () => tableWith({ row: refreshed, overrideRow: earlier });
+
+    const strict = await performPropertyLookup(ADDRESS, STRICT);
+    expect(strict.meta.cache).toBe('hit');
+    expect(strict.enriched.lotSqFt).toBe(6800);
+    // The default path is not changed here: it still applies the earlier read.
+    const normal = await performPropertyLookup(ADDRESS, DEFAULT);
+    expect(normal.enriched.lotSqFt).toBe(7200);
+  });
+
+  it('a strict hit on a row with no corrections applies none, whatever the earlier read saw', async () => {
+    const earlier = cachedRow({ verified_overrides: { lotSize: { value: 7200, verifiedAt: '2026-06-01T12:00:00Z', verifiedBy: 'tech' } } });
+    mockDbHandler = () => tableWith({ row: cachedRow(), overrideRow: earlier });
+    expect((await performPropertyLookup(ADDRESS, STRICT)).enriched.lotSqFt).toBe(10043);
   });
 
   it('a strict miss is still null, and no live provider runs', async () => {

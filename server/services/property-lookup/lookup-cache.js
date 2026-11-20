@@ -337,13 +337,19 @@ async function getVerifiedOverrides(address, { strict = false } = {}) {
     const row = await db('property_lookups')
       .where({ address_hash: hash })
       .first('verified_overrides');
-    const overrides = row?.verified_overrides || {};
-    return Object.keys(overrides).length ? overrides : null;
+    return verifiedOverridesOfRow(row);
   } catch (err) {
     logger.warn('[lookup-cache] override read failed', { code: err?.code || 'none' });
     if (strict) throw strictReadFailure('verified override', err);
     return null;
   }
+}
+
+// The corrections stored on one row, in the shape getVerifiedOverrides
+// answers: the object, or null when the row has none (or there is no row).
+function verifiedOverridesOfRow(row) {
+  const overrides = row?.verified_overrides || {};
+  return Object.keys(overrides).length ? overrides : null;
 }
 
 // Backfill patch for rows cached BEFORE the FEMA NFHL provider shipped:
@@ -733,6 +739,7 @@ module.exports = {
   getCachedLookup,
   hasVerifiedOverrides,
   getVerifiedOverrides,
+  verifiedOverridesOfRow,
   isCacheDisabled,
   attachFloodZoneToCachedLookup,
   attachPoolPermitsToCachedLookup,

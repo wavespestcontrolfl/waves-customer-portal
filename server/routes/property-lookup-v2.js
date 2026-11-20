@@ -51,6 +51,7 @@ const {
   applyVerifiedOverrides,
   getCachedLookup,
   getVerifiedOverrides,
+  verifiedOverridesOfRow,
   saveLookup,
   markLookupAttempt,
   saveVerifiedOverride,
@@ -484,7 +485,8 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
   // plan start offer) must not read a failed cache or correction read as "no
   // row" or "no corrections": a cached home served without its corrections
   // prices on sizes staff already fixed. Both reads then throw
-  // LOOKUP_CACHE_READ_FAILED. Every other caller keeps the null answer.
+  // LOOKUP_CACHE_READ_FAILED, and a hit applies the corrections of the row
+  // it serves (below). Every other caller keeps the null answer.
   const strictCacheReads = options.strictCacheReads === true;
   const verifiedOverrides = await getVerifiedOverrides(address, { strict: strictCacheReads });
   if (!options.refresh) {
@@ -663,7 +665,12 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
       // attempt stamps the row", and counting only live lookups
       // undercounts served traffic (codex r36 P1). Respects persist:false.
       if (persist) await stampLookupAttempt(address, 'cache_hit', null, attemptId);
-      return await buildResultFromCachedLookup(address, cached, verifiedOverrides, t0, options);
+      // A strict hit applies the corrections stored on the SAME row that
+      // passed the freshness check, never the earlier read. A correction and
+      // a refresh save that both land between the two reads would otherwise
+      // put the older correction on top of the refreshed record.
+      const hitOverrides = strictCacheReads ? verifiedOverridesOfRow(cached) : verifiedOverrides;
+      return await buildResultFromCachedLookup(address, cached, hitOverrides, t0, options);
     }
   }
 
