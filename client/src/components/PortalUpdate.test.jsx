@@ -7,7 +7,7 @@
 import { useEffect, useState } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
+import { MemoryRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 
 vi.mock('../native/platform', () => ({ isWavesAdminApp: () => false }));
 
@@ -66,6 +66,34 @@ function TruckCheck() {
       <canvas aria-label="Signature" />
       <button type="button" onClick={() => navigate('/admin/today')}>Back</button>
     </div>
+  );
+}
+
+// Like AdminIndexRedirect: the /admin index only redirects, to Today for a
+// technician or with Field view on, else to the dashboard. Where shows the
+// tab's path when it reloads.
+function Home() {
+  const navigate = useNavigate();
+  return <button type="button" onClick={() => navigate('/admin')}>Home</button>;
+}
+
+function Where() {
+  return <output data-testid="where">{useLocation().pathname}</output>;
+}
+
+function renderWithIndex(landing) {
+  return render(
+    <MemoryRouter initialEntries={['/admin/pipeline']}>
+      <Where />
+      <PortalUpdateGate fallback={<p>Loading the new version...</p>}>
+        <Routes>
+          <Route path="/admin" element={<Navigate to={landing} replace />} />
+          <Route path="/admin/pipeline" element={<Home />} />
+          <Route path="/admin/dashboard" element={<Page name="Dashboard" />} />
+          <Route path="/admin/today" element={<Page name="Today" />} />
+        </Routes>
+      </PortalUpdateGate>
+    </MemoryRouter>,
   );
 }
 
@@ -144,6 +172,23 @@ describe('PortalUpdateGate', () => {
     fireEvent.click(screen.getByText('Open Dashboard'));
     expect(screen.getByText('Loading the new version...')).toBeTruthy();
     await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+  });
+
+  test('a move to the /admin index only redirects: the tab reloads at the page it lands on', async () => {
+    renderWithIndex('/admin/dashboard');
+    goLive('bbb222bbb222');
+    fireEvent.click(screen.getByText('Home'));
+    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId('where').textContent).toBe('/admin/dashboard');
+  });
+
+  test('a move to the /admin index that lands on Today, for a technician or with Field view on, keeps the tab', async () => {
+    renderWithIndex('/admin/today');
+    goLive('bbb222bbb222');
+    fireEvent.click(screen.getByText('Home'));
+    expect(await screen.findByText('Today')).toBeTruthy();
+    await act(async () => {});
+    expect(reload).not.toHaveBeenCalled();
   });
 
   test('held work keeps the tab: the move opens the page and the bar stays', async () => {

@@ -41,6 +41,7 @@ const HOLD_TEXT = {
   'email-draft': 'An email draft or send is still open.',
   'visit-step': 'A visit step is still in progress.',
   'tap-to-pay': 'A Tap to Pay payment is still open.',
+  'card-payment': 'A card payment is still going through.',
   dictation: 'Dictation is still turning into text.',
   'text-draft': 'A text draft is not saved in this tab.',
   'estimate-send': 'Send is locked on an estimate in this tab. A reload unlocks it.',

@@ -47,11 +47,18 @@ function hasSignal(now) {
   return !browserOffline() && heardFromServerWithin(RECENT_ANSWER_MS, now);
 }
 
+// The /admin index only redirects: to Today for a technician or with Field
+// view on, else to the dashboard (AdminFieldViewEntry, AdminIndexRedirect).
+// So a move to it is not a page move: the move on to the page it lands on
+// decides.
+const adminIndex = (pathname) => /^\/admin\/?$/i.test(String(pathname ?? ''));
+
 // `from`: the page the move leaves.
 export function reloadDueAtMove(pathname, now = Date.now(), from = null) {
   const build = newerBuild();
   return Boolean(build)
-    && isAdminPath(pathname) && !isFieldPath(pathname) && !isFieldPath(from) && !isWavesAdminApp()
+    && isAdminPath(pathname) && !adminIndex(pathname)
+    && !isFieldPath(pathname) && !isFieldPath(from) && !isWavesAdminApp()
     && hasSignal(now)
     && reloadTries(build) < RELOAD_TRIES
     && !reloadHoldName();

@@ -47,6 +47,17 @@ describe('reloadDueAtMove', () => {
     expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(false);
   });
 
+  test('a move to the /admin index is not a page move, as it only redirects; the move on to the page it lands on decides', () => {
+    liveBuild('bbb222bbb222');
+    expect(reloadDueAtMove('/admin', NOW, '/admin/pipeline')).toBe(false);
+    expect(reloadDueAtMove('/admin/', NOW, '/admin/pipeline')).toBe(false);
+    expect(reloadDueAtMove('/Admin', NOW, '/admin/pipeline')).toBe(false);
+    // The dashboard landing reloads. Today, for a technician or with Field
+    // view on, does not.
+    expect(reloadDueAtMove('/admin/dashboard', NOW, '/admin')).toBe(true);
+    expect(reloadDueAtMove('/admin/today', NOW, '/admin')).toBe(false);
+  });
+
   test('never on customer pages, the field pages or in Waves Admin', () => {
     liveBuild('bbb222bbb222');
     expect(reloadDueAtMove('/billing', NOW)).toBe(false);
