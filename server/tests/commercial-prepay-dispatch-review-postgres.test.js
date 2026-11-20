@@ -200,8 +200,56 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
     expect(current.payload.paymentRestored).toBeUndefined();
   });
 
-  test('an owner mismatch is accepted only through an active merge row naming the invoice', async () => {
+  test('a plain Knex caller rolls supersession back when replacement insertion fails', async () => {
+    const { invoiceId, sale } = await seedOriginal();
+    const review = require('../services/commercial-prepay-dispatch-review');
+    const plainKnex = { transaction: (handler) => trx.transaction(handler) };
+    await review.updateReview(trx, sale.reviewContext, 'cancelled');
+
+    const suffix = randomUUID().replace(/-/g, '');
+    const functionName = `synthetic_fail_review_${suffix}`;
+    const triggerName = `synthetic_fail_review_trigger_${suffix}`;
+    await trx.raw(`
+      CREATE FUNCTION ${functionName}() RETURNS trigger AS $$
+      BEGIN
+        RAISE EXCEPTION 'synthetic restored insert failure';
+      END;
+      $$ LANGUAGE plpgsql
+    `);
+    await trx.raw(`
+      CREATE TRIGGER ${triggerName}
+      BEFORE INSERT ON dispatch_alerts
+      FOR EACH ROW
+      WHEN (NEW.type = 'commercial_prepay_setup_review'
+        AND NEW.payload->>'paymentRestored' = 'true')
+      EXECUTE FUNCTION ${functionName}()
+    `);
+
+    await expect(review.updateReview(plainKnex, sale.reviewContext, 'active'))
+      .rejects.toThrow('synthetic restored insert failure');
+    let alerts = await reviews(invoiceId);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].resolved_at).toBeNull();
+    expect(alerts[0].payload.superseded_at).toBeUndefined();
+
+    await trx.raw(`DROP TRIGGER ${triggerName} ON dispatch_alerts`);
+    await trx.raw(`DROP FUNCTION ${functionName}()`);
+    await review.updateReview(plainKnex, sale.reviewContext, 'active');
+    alerts = await reviews(invoiceId);
+    expect(alerts).toHaveLength(2);
+    expect(alerts.filter((row) => row.payload.superseded_at == null)).toEqual([
+      expect.objectContaining({
+        resolved_at: null,
+        payload: expect.objectContaining({ paymentRestored: true }),
+      }),
+    ]);
+  });
+
+  test('current customer links follow an audited merge and undo without rewriting episode history', async () => {
     const ids = await seedOriginal();
+    const review = require('../services/commercial-prepay-dispatch-review');
+    const dispatchAlerts = require('../services/dispatch-alerts');
+    await review.updateReview(trx, ids.sale.reviewContext, 'cancelled');
     const winnerId = randomUUID();
     await trx('customers').insert({
       id: winnerId,
@@ -249,17 +297,47 @@ postgres('commercial prepay Dispatch review accepts only a verified sale context
       invoice: { id: ids.invoiceId, customer_id: winnerId },
       reviewContext: { sourceInvoiceId: ids.invoiceId, customerId: winnerId },
     });
-    await require('../services/commercial-prepay-dispatch-review')
-      .updateReview(trx, merged.reviewContext, 'cancelled');
-    expect(await reviews(ids.invoiceId)).toEqual([
-      expect.objectContaining({
-        resolved_at: null,
-        payload: expect.objectContaining({ customerId: winnerId }),
-      }),
-    ]);
+    const replayAfterMerge = await review.updateReview(trx, merged.reviewContext, 'cancelled');
+    expect(replayAfterMerge.payload.customerId).toBe(winnerId);
+    let persisted = await reviews(ids.invoiceId);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].payload.customerId).toBe(ids.customerId);
+    let hydrated = await review.hydrateCurrentCustomerLinks(trx, persisted);
+    expect(hydrated[0].payload.customerId).toBe(winnerId);
+
+    // The opposite episode is born after the merge, then acknowledged. Its
+    // stored winner link remains history even when the merge is later undone.
+    await dispatchAlerts.resolveAlert({ trx, id: persisted[0].id, resolvedBy: null });
+    await review.updateReview(trx, merged.reviewContext, 'active');
+    persisted = await reviews(ids.invoiceId);
+    const restored = persisted.find((row) => row.payload.paymentRestored === true);
+    await dispatchAlerts.resolveAlert({ trx, id: restored.id, resolvedBy: null });
+    persisted = await reviews(ids.invoiceId);
+    const historical = persisted.find((row) => row.payload.superseded_at != null);
+    const current = persisted.find((row) => row.payload.superseded_at == null);
+    expect(historical.payload.customerId).toBe(ids.customerId);
+    expect(current).toMatchObject({
+      resolved_at: expect.any(Date),
+      payload: expect.objectContaining({ customerId: winnerId, paymentRestored: true }),
+    });
+    hydrated = await review.hydrateCurrentCustomerLinks(trx, persisted);
+    expect(hydrated.find((row) => row.id === historical.id).payload.customerId).toBe(ids.customerId);
+    expect(hydrated.find((row) => row.id === current.id).payload.customerId).toBe(winnerId);
 
     await trx('customer_merge_journal').where({ id: journal.id }).update({ undone_at: trx.fn.now() });
-    await expect(sales.findUnbookedSale(trx, ids.invoiceId)).resolves.toBeNull();
+    await trx('invoices').where({ id: ids.invoiceId }).update({ customer_id: ids.customerId });
+    await trx('annual_prepay_terms').where({ id: ids.termId }).update({ customer_id: ids.customerId });
+    await trx('estimates').where({ id: ids.estimateId }).update({ customer_id: ids.customerId });
+    const unmerged = await sales.findUnbookedSale(trx, ids.invoiceId);
+    expect(unmerged.reviewContext.customerId).toBe(ids.customerId);
+
+    const replayAfterUndo = await review.updateReview(trx, unmerged.reviewContext, 'active');
+    expect(replayAfterUndo.payload.customerId).toBe(ids.customerId);
+    persisted = await reviews(ids.invoiceId);
+    expect(persisted.find((row) => row.id === current.id).payload.customerId).toBe(winnerId);
+    hydrated = await review.hydrateCurrentCustomerLinks(trx, persisted);
+    expect(hydrated.find((row) => row.id === historical.id).payload.customerId).toBe(ids.customerId);
+    expect(hydrated.find((row) => row.id === current.id).payload.customerId).toBe(ids.customerId);
   });
 
   test('bulk clear leaves the invoice review open while resolving ordinary cards', async () => {

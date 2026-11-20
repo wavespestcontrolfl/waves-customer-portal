@@ -7379,8 +7379,10 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
     if (unresolved) q.whereNull('a.resolved_at');
 
     const rows = await q;
+    const linkedRows = await require('../services/commercial-prepay-dispatch-review')
+      .hydrateCurrentCustomerLinks(db, rows);
 
-    const alerts = rows.map((r) => {
+    const alerts = linkedRows.map((r) => {
       // Address normalization, same shape as /board and /jobs/:id.
       // Null-safe — alerts can be tech-scoped or job-scoped or neither,
       // so customer/job fields may all be null.
