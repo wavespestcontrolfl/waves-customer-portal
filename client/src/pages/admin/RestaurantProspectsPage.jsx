@@ -49,10 +49,13 @@ export function readText(readAt) {
 }
 
 // The line above the list. Before the first run that read all three files (readAt null), the rows may come from one
-// file only: counts would claim zeros the state has not answered, so the line says the list is not complete.
+// file only: counts would claim zeros the state has not answered, so the line says the list is not complete. The
+// counts cover the whole period; the list stops at its newest 1,000 rows, and then says so.
 export function headlineText(data) {
   if (!data.readAt) return "Not every state file has been read yet, so this list may be missing restaurants.";
-  return `${summaryText(data)} ${readText(data.readAt)}`;
+  const total = data.counts.new_restaurant + data.counts.new_owner + data.counts.pest_finding;
+  const cut = data.rows.length < total ? ` The list shows the newest ${countText(data.rows.length)}.` : "";
+  return `${summaryText(data)} ${readText(data.readAt)}${cut}`;
 }
 
 // One request per period. A late answer for a period the owner already left is dropped.

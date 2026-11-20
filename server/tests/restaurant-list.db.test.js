@@ -141,6 +141,22 @@ describeDb('Restaurants list (PostgreSQL)', () => {
     expect([late.from, late.through]).toEqual(['2026-10-21', '2026-11-19']);
   });
 
+  test('the counts cover the whole period when the list stops at 1,000 rows', async () => {
+    const licenses = Array.from({ length: 1000 }, () => prospect({ event_date: '2026-11-18' }));
+    for (let i = 0; i < licenses.length; i += 250) await mockPg('restaurant_prospects').insert(licenses.slice(i, i + 250));
+    // Older than every license above, so past the cap.
+    await mockPg('restaurant_prospects').insert([
+      prospect({ kind: 'owner_change', event_date: '2026-10-25' }),
+      prospect({ kind: 'owner_change', event_date: '2026-10-24' }),
+      prospect({ kind: 'inspection', event_date: '2026-10-22', pest_evidence: true, detail: JSON.stringify({ findings: ROACHES }) }),
+      prospect({ kind: 'inspection', event_date: '2026-10-22', pest_evidence: false }), // 35B only: not counted
+    ]);
+    const result = await listRestaurants({ days: 30, now: NOW });
+    expect(result.rows).toHaveLength(1000);
+    expect(result.rows.every((row) => row.reason === 'new_restaurant')).toBe(true);
+    expect(result.counts).toEqual({ new_restaurant: 1000, new_owner: 2, pest_finding: 1 });
+  });
+
   test('before the first file read the answer is empty, with no read time', async () => {
     const result = await listRestaurants({ days: 30, now: NOW });
     expect(result).toEqual({

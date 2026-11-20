@@ -154,10 +154,13 @@ it("summaryText says one or many per reason; readText names the Eastern day of t
   expect(readText(null)).toBe("");
   // 11:30 PM on Nov 16 Eastern is already Nov 17 in UTC: the day named is Nov 16.
   expect(readText("2026-11-17T04:30:00.000Z")).toBe("The state files were last read on Nov 16, 2026.");
-  // headlineText claims counts only after a full read.
+  // headlineText claims counts only after a full read, and says when the list stops short of them.
   const counts = { new_restaurant: 2, new_owner: 0, pest_finding: 0 };
-  expect(headlineText({ from: "2026-10-21", through: "2026-11-19", counts, readAt: null }))
+  const window = { from: "2026-10-21", through: "2026-11-19", counts, rows: [LIST30.rows[0], LIST30.rows[0]] };
+  expect(headlineText({ ...window, readAt: null }))
     .toBe("Not every state file has been read yet, so this list may be missing restaurants.");
-  expect(headlineText({ from: "2026-10-21", through: "2026-11-19", counts, readAt: "2026-11-17T04:30:00.000Z" }))
+  expect(headlineText({ ...window, readAt: "2026-11-17T04:30:00.000Z" }))
     .toBe("2 new restaurants, 0 new owners and 0 inspections that found pests from Oct 21 to Nov 19. The state files were last read on Nov 16, 2026.");
+  expect(headlineText({ ...window, counts: { new_restaurant: 1500, new_owner: 2, pest_finding: 1 }, readAt: "2026-11-17T04:30:00.000Z" }))
+    .toBe("1,500 new restaurants, 2 new owners and 1 inspection that found pests from Oct 21 to Nov 19. The state files were last read on Nov 16, 2026. The list shows the newest 2.");
 });
