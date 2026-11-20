@@ -28,7 +28,7 @@ jest.mock('../services/day-replan/fill-list', () => ({
 
 // The rain note's own reads are its suite's (day-replan-rain-note.test.js): here, a dry forecast unless a test says so.
 jest.mock('../services/day-replan/rain-note', () => ({
-  rainNote: jest.fn(async () => ({ days: [{ day: '2026-11-18', areas: [] }], unread: [], outlooks: { sarasota: [] } })),
+  rainNote: jest.fn(async () => ({ days: [{ day: '2026-11-18', areas: [], gaps: [] }], unread: [], outlooks: { sarasota: [] } })),
 }));
 
 const { composeAdminAlert, raiseAdminAlert } = require('../services/admin-alert-compose');
@@ -293,13 +293,14 @@ describe('runOpenBlocksAlert', () => {
   });
 
   test('the rain note: each day\'s rain hours by area reach the detail and the row; a failed read never holds the notice', async () => {
+    const days = [
+      { day: '2026-11-18', areas: [{ zone: 'sarasota', spans: [{ start: 780, end: 1020, max: 80 }] },
+        { zone: 'venice_north_port', spans: [{ start: 480, end: 540, max: 60 }, { start: 840, end: 960, max: 70 }] }], gaps: [] },
+      { day: '2026-11-19', areas: [], gaps: ['palmetto', 'sarasota'] },
+      { day: '2026-11-20', areas: [{ zone: 'sarasota', spans: [{ start: 600, end: 660, max: 65 }] }], gaps: ['palmetto'] },
+    ];
     rainNote.mockResolvedValueOnce({
-      days: [
-        { day: '2026-11-18', areas: [{ zone: 'sarasota', spans: [{ start: 780, end: 1020, max: 80 }] },
-          { zone: 'venice_north_port', spans: [{ start: 480, end: 540, max: 60 }, { start: 840, end: 960, max: 70 }] }] },
-        { day: '2026-11-19', areas: [] },
-        { day: '2026-11-20', areas: [] },
-      ],
+      days,
       unread: ['parrish'],
       outlooks: { parrish: null, sarasota: [], venice_north_port: [] },
     });
@@ -309,23 +310,15 @@ describe('runOpenBlocksAlert', () => {
     expect(opts.detail).toContain([
       'Rain hours by area (NWS chance of rain 60% or more, 8:00 AM to 5:00 PM):',
       '- Wed Nov 18: Sarasota 1:00 PM to 5:00 PM (up to 80%); Venice/N.Port 8:00 AM to 9:00 AM (up to 60%), 2:00 PM to 4:00 PM (up to 70%)',
-      '- Thu Nov 19: none',
-      '- Fri Nov 20: none',
+      '- Thu Nov 19: none; no NWS reading for some hours in Palmetto, Sarasota',
+      '- Fri Nov 20: Sarasota 10:00 AM to 11:00 AM (up to 65%); no NWS reading for some hours in Palmetto',
       'The NWS forecast did not answer for Parrish.',
     ].join('\n'));
-    expect(opts.metadata.rain).toEqual({
-      days: [
-        { day: '2026-11-18', areas: [{ zone: 'sarasota', spans: [{ start: 780, end: 1020, max: 80 }] },
-          { zone: 'venice_north_port', spans: [{ start: 480, end: 540, max: 60 }, { start: 840, end: 960, max: 70 }] }] },
-        { day: '2026-11-19', areas: [] },
-        { day: '2026-11-20', areas: [] },
-      ],
-      unread: ['parrish'],
-    });
+    expect(opts.metadata.rain).toEqual({ days, unread: ['parrish'] });
 
     // No area answered: one line says so.
     raiseAdminAlert.mockClear();
-    rainNote.mockResolvedValueOnce({ days: [{ day: '2026-11-18', areas: [] }], unread: ['parrish', 'sarasota'], outlooks: { parrish: null, sarasota: null } });
+    rainNote.mockResolvedValueOnce({ days: [{ day: '2026-11-18', areas: [], gaps: [] }], unread: ['parrish', 'sarasota'], outlooks: { parrish: null, sarasota: null } });
     await runOpenBlocksAlert({ conn: saturday().conn, now: NOW });
     [, , opts] = raiseAdminAlert.mock.calls[0];
     expect(opts.detail).toContain('Rain hours: the NWS forecast did not answer this morning.');

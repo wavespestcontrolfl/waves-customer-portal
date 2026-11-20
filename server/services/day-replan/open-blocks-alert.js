@@ -268,8 +268,8 @@ function fillSummary(fill, blocks = []) {
 const areaName = (zone) => ZONE_LABELS[zone] || zone;
 
 /**
- * The rain note (rain-note.js, owner 2026-11-19 D3): each day's rain hours by area, the areas NWS did not answer, or why
- * the note was not read.
+ * The rain note (rain-note.js, owner 2026-11-19 D3): each day's rain hours by area and the areas with an hour NWS gave
+ * no reading for, the areas NWS did not answer, or why the note was not read.
  */
 function rainLines(rain) {
   if (rain.error) return [`Rain hours: not read this morning (${rain.error}).`];
@@ -278,9 +278,10 @@ function rainLines(rain) {
   }
   const spanText = (s) => `${clock(s.start)} to ${clock(s.end)} (up to ${s.max}%)`;
   const areasText = (areas) => (areas.length ? areas.map((a) => `${areaName(a.zone)} ${a.spans.map(spanText).join(', ')}`).join('; ') : 'none');
+  const gapsText = (gaps) => (gaps.length ? `; no NWS reading for some hours in ${gaps.map(areaName).join(', ')}` : '');
   return [
     `Rain hours by area (NWS chance of rain ${RAIN_PCT}% or more, ${clock(DAY_OPEN)} to ${clock(DAY_CLOSE)}):`,
-    ...rain.days.map(({ day, areas }) => `- ${dayLabel(day)}: ${areasText(areas)}`),
+    ...rain.days.map(({ day, areas, gaps }) => `- ${dayLabel(day)}: ${areasText(areas)}${gapsText(gaps)}`),
     ...(rain.unread.length ? [`The NWS forecast did not answer for ${rain.unread.map(areaName).join(', ')}.`] : []),
   ];
 }
