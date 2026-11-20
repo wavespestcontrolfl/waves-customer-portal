@@ -263,12 +263,20 @@ const ANSWERED = ["accepted", "declined", "date_requested"];
  * channel. An offer withdrawn or replaced during the send says so, with no Revise.
  */
 // offerStatus: the sent offer's status in the send's answer (offerApi sendOffer requires it).
-export function describeSend(comms, firstName, offerStatus) {
+// onCard: the offer card shows this version of the offer (the read holds it). Without it (the read after the send
+// failed), the page's clock can say only that the expiry passed: whether the applicant signed first needs a read.
+export function describeSend(comms, firstName, offerStatus, onCard = true) {
   const channels = [["text", comms?.sms], ["email", comms?.email]].filter(([, c]) => c && wasTried(c));
   const states = channels.map(([label, c]) => [label, channelState(c)]);
   const lines = states.map(([label, st]) => `The ${label} ${STATE_TEXT[st]}.`);
   if (ANSWERED.includes(offerStatus)) {
     return { headline: `Offer sent to ${firstName}.`, lines: [`${firstName} has already answered it. The offer card shows the answer.`] };
+  }
+  if (offerStatus === "expired" && !onCard) {
+    return {
+      headline: "This offer's expiry has passed.",
+      lines: [...lines, `The page could not read the offer after the send, so it cannot tell whether ${firstName} signed it before then. Close this and use Try again on the offer card.`],
+    };
   }
   if (offerStatus === "expired") {
     return { headline: "This offer is no longer open.", lines: [...lines, `It passed its expiry before ${firstName} signed it. The offer card shows it as ${STATUS_LABEL.expired}.`] };

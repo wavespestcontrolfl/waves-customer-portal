@@ -190,11 +190,13 @@ function offerIdsOf(data) {
 // replaced the offer, or the applicant answered, while the result is open) or older (a read that started during the
 // send and landed after its answer). A read of the same version is the same row read later: it can add only the
 // server's expiry, which closes a sent offer by the clock without a write. The page's clock applies the same expiry to
-// a result left open (shownOffer). Without both versions, the send's answer.
-function sentStatus(result, data) {
+// a result left open (shownOffer). Without both versions, the send's answer. onCard: the read holds the version shown,
+// so the offer card shows the same; when it does not (the read after the send failed), the send's answer is all the
+// page knows, and an expiry by the page's clock is worded as only that (describeSend).
+function sentView(result, data) {
   const now = offerIn(data, result.offer.id);
-  const newest = now && Date.parse(now.updatedAt) >= Date.parse(result.offer.updatedAt) ? now : result.offer;
-  return shownOffer(newest).status;
+  const onCard = Boolean(now) && Date.parse(now.updatedAt) >= Date.parse(result.offer.updatedAt);
+  return { offer: shownOffer(onCard ? now : result.offer), onCard };
 }
 
 function initialDraftId(draft, data) {
@@ -602,7 +604,7 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, cl
       const out = await sendOffer(applicationId, pinned.id, pinned.draftHash, reviewedOut);
       // The answer's offer row is read after delivery: it can already be withdrawn or replaced. An answer without this
       // offer and the channels never gets here (sendOffer throws it as a lost answer, and the read decides). The result
-      // keeps the send's own delivery outcomes; the status it shows follows the newest version (sentStatus).
+      // keeps the send's own delivery outcomes; the status it shows follows the newest version (sentView).
       setResult({ offer: out.offer, comms: out.comms });
       await onSent();
       setConfirming(false);
@@ -614,7 +616,8 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, cl
   };
 
   if (result) {
-    const sent = describeSend(result.comms, firstName, sentStatus(result, data));
+    const view = sentView(result, data);
+    const sent = describeSend(result.comms, firstName, view.offer.status, view.onCard);
     return (
       <>
         <DialogBody>

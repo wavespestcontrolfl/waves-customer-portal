@@ -233,12 +233,23 @@ describe("OfferDialog", () => {
   });
 
   // A result left open past the expiry: when the expiry passes, the page's clock closes the offer with no read. The read
-  // after the send still says sent, or it failed and still holds the draft: the result then shows the send's answer,
-  // and that answer's expiry counts. The clock is frozen (beforeEach) and moved by hand; the form's timer is real.
+  // after the send still says sent: the card shows the same, so the result says it closed unsigned. Or the read failed
+  // and still holds the draft: the result shows the send's answer, its expiry still counts, and the result says only
+  // that the expiry passed. The clock is frozen (beforeEach) and moved by hand; the form's timer is real.
   it.each([
-    ["the read after the send says sent", (outside, afterSend) => async () => { outside.read(afterSend); return afterSend; }],
-    ["the read after the send failed", (outside) => async () => { outside.fail(); return null; }],
-  ])("a send result left open past the offer's expiry reads as closed unsigned when the expiry passes, with no read (%s)", async (_case, onSentFor) => {
+    [
+      "the read after the send says sent",
+      (outside, afterSend) => async () => { outside.read(afterSend); return afterSend; },
+      "This offer is no longer open.",
+      "It passed its expiry before Jordan signed it. The offer card shows it as Closed unsigned.",
+    ],
+    [
+      "the read after the send failed",
+      (outside) => async () => { outside.fail(); return null; },
+      "This offer's expiry has passed.",
+      "The page could not read the offer after the send, so it cannot tell whether Jordan signed it before then. Close this and use Try again on the offer card.",
+    ],
+  ])("a send result left open past the offer's expiry says so when the expiry passes, with no read (%s)", async (_case, onSentFor, headline, line) => {
     const sentRow = draftRow({ status: "sent", updatedAt: "2026-12-12T13:15:00.000Z", expiresAt: new Date(NOW.getTime() + 300).toISOString() });
     sendOffer.mockResolvedValueOnce({ offer: sentRow, comms: { sms: { outcome: "sent" }, email: { outcome: "sent" } } });
     const outside = {};
@@ -249,8 +260,8 @@ describe("OfferDialog", () => {
     fireEvent.click(within(ask).getByRole("button", { name: "Send offer" }));
     expect(await screen.findByText("Offer sent to Jordan.")).toBeInTheDocument();
     vi.setSystemTime(new Date(NOW.getTime() + 1300));
-    expect(await screen.findByText("This offer is no longer open.", {}, { timeout: 3000 })).toBeInTheDocument();
-    expect(screen.getByText("It passed its expiry before Jordan signed it. The offer card shows it as Closed unsigned.")).toBeInTheDocument();
+    expect(await screen.findByText(headline, {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(screen.getByText(line)).toBeInTheDocument();
   });
 
   // A send refused for a reason the form does not show (the Terms lost their issued status, say): nothing was sent. The
