@@ -1192,7 +1192,7 @@ describe('revertMerge', () => {
       expect(sodRestores(state)).toEqual([]);
     });
 
-    // The sprinkler timer on file of the same moved row: its own journal entry ({ row_id, before, kept, home }).
+    // The sprinkler timer on file of the same moved row: its own journal entry ({ row_id, before, kept }).
     describe('the sprinkler timer on that row', () => {
       const X2 = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
       const RAIN_BIRD = { irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null, irrigation_controller_app: null };
@@ -1245,41 +1245,44 @@ describe('revertMerge', () => {
         expectRefused(await revert(journal, { rowNow: X2 }));
       });
 
-      // A same-home merge left the timer on the row. It described the home both customers shared: the kept
-      // customer's address right after the merge (entry.home). The undo reads their address NOW against it.
+      // A same-home merge left the timer on the row (kept). The undo compares the row with that timer, never an
+      // address: the kept customer's address now changes nothing below.
       describe('a same-home merge left the timer on the row (kept)', () => {
-        const SHARED = { address_line1: '100 Main St', city: 'Bradenton', zip: '34205' };
         const ELSEWHERE = { address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' };
-        const kept = () => journalWithTimer({ kept: true, home: { ...SHARED, address_line2: null } });
+        const kept = () => journalWithTimer({ kept: true });
 
-        it('the kept customer still has that address: the timer on the row, the original or a later pick, goes back with the row untouched', async () => {
-          for (const timerNow of [X2, RAIN_BIRD, NO_TIMER]) {
-            const { state, error } = await revert(kept(), { rowNow: timerNow, winnerAddr: { ...SHARED, address_line1: '100 MAIN STREET' } });
+        it.each([['the same address', {}], ['another address', ELSEWHERE], ['no address', { address_line1: null, city: null, zip: null }]])(
+          'the row still holds the timer the merge kept (kept customer now at %s): it goes back with the row, nothing written',
+          async (_label, winnerAddr) => {
+            const { state, error, result } = await revert(kept(), { rowNow: X2, winnerAddr });
             expect(error).toBeUndefined();
             expect(state.repointedBack.find((r) => r.table === 'property_preferences')).toMatchObject({ ids: ['pp-1'], payload: { customer_id: LOSER } });
             expect(timerRestores(state)).toEqual([]);
-          }
-        });
+            expect(result.skipped.filter((x) => x.key === 'property_preferences.sprinkler_timer')).toEqual([]);
+          },
+        );
 
-        it('a later merge stamped the row but nobody moved: the original timer still goes back (newest-first undo)', async () => {
-          const { state, error } = await revert(kept(), { rowNow: { ...X2, irrigation_home_changed_at: new Date('2026-11-10T15:00:00.000Z') }, winnerAddr: SHARED });
-          expect(error).toBeUndefined();
-          expect(timerRestores(state)).toEqual([]);
-        });
-
-        it.each([
-          ['another address', ELSEWHERE],
-          ['the same street in another ZIP', { ...SHARED, city: 'Sarasota', zip: '34236' }],
-          ['no address', { address_line1: null, city: null, zip: null }],
-        ])('the kept customer has %s now and the row carries a timer: REFUSES', async (_label, winnerAddr) => {
-          expectRefused(await revert(kept(), { rowNow: RAIN_BIRD, winnerAddr }));
-        });
-
-        it('the kept customer moved since (the move cleared the timer): the original goes back to the loser', async () => {
-          const { state, error } = await revert(kept(), { winnerAddr: ELSEWHERE });
+        it('the row is empty now (a move or staff cleared it): the kept timer goes back to the loser', async () => {
+          const { state, error } = await revert(kept(), { rowNow: NO_TIMER, winnerAddr: ELSEWHERE });
           expect(error).toBeUndefined();
           expect(timerRestores(state)).toEqual([{ table: 'property_preferences', where: { id: 'pp-1', customer_id: LOSER }, payload: X2 }]);
         });
+
+        it.each([['the same address', {}], ['another address', ELSEWHERE]])(
+          'the row holds another timer now (kept customer at %s): REFUSES, the later pick is not the loser\'s',
+          async (_label, winnerAddr) => {
+            expectRefused(await revert(kept(), { rowNow: RAIN_BIRD, winnerAddr }));
+            expectRefused(await revert(kept(), { rowNow: { ...X2, irrigation_controller_app: 'no' }, winnerAddr }));
+          },
+        );
+
+        it('a kept entry with an empty timer: any timer on the row now REFUSES', async () => {
+          expectRefused(await revert(journalWithTimer({ kept: true, before: NO_TIMER }), { rowNow: X2 }));
+        });
+      });
+
+      it('a cleared timer that the kept customer entered again, the same values: still REFUSES (the merge left the row empty)', async () => {
+        expectRefused(await revert(journalWithTimer(), { rowNow: X2 }));
       });
 
       it('a preferences row that is no longer the kept customer\'s is not judged: its timer neither blocks the undo nor is written', async () => {
@@ -1645,6 +1648,44 @@ describe('revertMerge', () => {
     expect(state.addressProbeRan).toBe(true);
     // Transaction rollback semantics: the journal was never stamped undone.
     expect(state.journalUpdate).toBe(null);
+  });
+
+  // The undo takes back an inherited address: a sprinkler timer on a preferences row that stays with the kept
+  // customer describes that home, so it would stay on file for a home they no longer have.
+  describe('an inherited address goes back while a sprinkler timer stays with the kept customer', () => {
+    const X2 = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
+    const NO_TIMER = { irrigation_controller_brand: null, irrigation_controller_model: null, irrigation_controller_app: null };
+    const revertWithPrefs = async (prefsRow, backfills = { address_line1: '9 Inherited Ln', city: 'Sampleville' }) => {
+      const journal = baseJournal();
+      journal.winner_backfills = { email: 'loser.testcase@example.com', stripe_customer_id: 'cus_only', ...backfills };
+      const winner = { ...baseWinner(), ...backfills };
+      const tables = { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } };
+      if (prefsRow) tables.property_preferences = { stillOnWinner: [], firstRow: { id: 'pp-9', customer_id: WINNER, ...prefsRow } };
+      const { trx, state } = buildRevertTrx({ journal, winner, loser: baseLoser(), tables });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      const outcome = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }).then((result) => ({ result }), (error) => ({ error }));
+      return { state, ...outcome };
+    };
+
+    it.each([['a whole timer', X2], ['a lone phone-app answer', { ...NO_TIMER, irrigation_controller_app: 'no' }]])(
+      'REFUSES (409) with %s on the kept customer\'s row, and nothing commits',
+      async (_label, timer) => {
+        const { state, error } = await revertWithPrefs(timer);
+        expect(error).toMatchObject({ statusCode: 409, message: expect.stringMatching(/sprinkler timer is on file for the kept customer/) });
+        expect(state.journalUpdate).toBeNull();
+      },
+    );
+
+    it.each([['no timer on the row', NO_TIMER], ['no preferences row', null]])('proceeds with %s', async (_label, prefsRow) => {
+      const { error, state } = await revertWithPrefs(prefsRow);
+      expect(error).toBeUndefined();
+      expect(state.winnerPatch).toMatchObject({ address_line1: null });
+    });
+
+    it('an undo that leaves the kept customer\'s address alone never reads the timer', async () => {
+      const { error } = await revertWithPrefs(X2, {});
+      expect(error).toBeUndefined();
+    });
   });
 
   it('clearing an inherited address proceeds when unstamped visits are all PRE-merge (control for the r16 guard)', async () => {
