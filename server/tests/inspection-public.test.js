@@ -1469,6 +1469,20 @@ describe('POST /:token/availability — address resolution (P1 :219)', () => {
       expect(res.body.needs_address).toBe(false);
       expect(mockGeocode).toHaveBeenCalledTimes(1);
     });
+
+    // The quarantine guards the address on file. A blocked profile with none on file (a verified review whose address
+    // the row no longer carries) still takes a typed address: quarantineRefusesSupplied, which a refused booking's
+    // fresh times also read since 23dfae53de.
+    test('a blocked profile with no address on file still resolves a typed address', async () => {
+      firstResults.customers = { ...firstResults.customers, address_line1: null, city: null, state: null, zip: null };
+      firstResults.customer_geocode_reviews = { ...firstResults.customer_geocode_reviews, status: 'verified' };
+      mockGeocode.mockResolvedValueOnce({ location: { lat: 27.41, lng: -82.51 } });
+      mockBuildAvailability.mockResolvedValueOnce({ slots: [], days: [{ date: '2027-01-10', slots: [] }] });
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const res = await callAvailability(token, { address: '123 Palm Ave, Bradenton, FL' });
+      expect(res.statusCode).toBe(200);
+      expect(mockGeocode).toHaveBeenCalledTimes(1);
+    });
   });
 });
 
