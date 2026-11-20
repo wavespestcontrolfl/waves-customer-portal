@@ -8396,6 +8396,10 @@ describe('Yearly review ask at dispatch', () => {
   test('smsRecipientReachable: no phone and a suppressed phone are unreachable', async () => {
     db.mockImplementation(makeMock({ customers: [], messaging_suppression: [{ phone: '+19410000199', active: true }] }));
     expect(await ReviewService.smsRecipientReachable(cust('y-9', { phone: null }))).toEqual({ reachable: false, reason: 'no_phone' });
+    // A seven-digit local number or an impossible area code cannot be texted; a valid international number can.
+    expect(await ReviewService.smsRecipientReachable(cust('y-9', { phone: '555-0199' }))).toEqual({ reachable: false, reason: 'invalid_phone' });
+    expect(await ReviewService.smsRecipientReachable(cust('y-9', { phone: '(120) 555-0199' }))).toEqual({ reachable: false, reason: 'invalid_phone' });
+    expect(await ReviewService.smsRecipientReachable(cust('y-9', { phone: '+447700900123' }))).toEqual({ reachable: true, reason: null });
     expect(await ReviewService.smsRecipientReachable(cust('y-9'))).toEqual({ reachable: false, reason: 'phone_suppressed' });
     db.mockImplementation(makeMock({ customers: [], messaging_suppression: [] }));
     expect(await ReviewService.smsRecipientReachable(cust('y-9'))).toEqual({ reachable: true, reason: null });
