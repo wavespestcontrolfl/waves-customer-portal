@@ -8664,10 +8664,11 @@ const IRRIGATION_EDIT_FIELDS = new Set([
   'irrigationScheduleNotes', 'wateringDays', 'irrigationSystemType', 'rainSensor', 'irrigationWaterSource', 'irrigationIssues',
 ]);
 
-// The sprinkler timer on file as one comparable value: the card calls the timer on screen "On file" only when it is
-// the one the server last returned.
-const sprinklerTimerKey = (p) => ['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp']
-  .map((field) => p?.[field] ?? '').join('|');
+// The sprinkler timer, and the same as one comparable value: the card calls the timer on screen "On file" only when
+// it is the one the server last returned.
+const SPRINKLER_TIMER_FIELDS = ['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp'];
+const sprinklerTimerOf = (p) => Object.fromEntries(SPRINKLER_TIMER_FIELDS.map((field) => [field, p?.[field] ?? null]));
+const sprinklerTimerKey = (p) => SPRINKLER_TIMER_FIELDS.map((field) => p?.[field] ?? '').join('|');
 
 // Away Watch dates. The pair saves whole or not at all, so nothing is sent until both days are chosen (one autosave
 // carries both); clearing both, or Remove, sends two nulls. A draft that loses a day before its autosave leaves
@@ -8868,8 +8869,17 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         try {
           const result = await api.updatePropertyPreferences(toSave);
           if (result && result.preferences) {
+            // A timer someone else saved while this screen was open (staff, in Customer 360) comes back in this
+            // save's row. Show it while the screen still shows the timer the server held before, i.e. the customer
+            // has no timer pick of their own on screen (unsaved or refused). Left stale, an app answer here would
+            // send the old timer back over the new one.
+            const timerBefore = sprinklerTimerKey(lastSavedRef.current);
+            const timerNow = sprinklerTimerKey(result.preferences);
             lastSavedRef.current = result.preferences;
-            setSavedTimerKey(sprinklerTimerKey(result.preferences));
+            setSavedTimerKey(timerNow);
+            if (timerNow !== timerBefore) {
+              setPrefs((prev) => (sprinklerTimerKey(prev) === timerBefore ? { ...prev, ...sprinklerTimerOf(result.preferences) } : prev));
+            }
           }
           // A pair the member withdrew while this save was in flight saved anyway: show the window the server now
           // holds, so the summary (and the inputs, when the section reopens) never hide an active Away Watch. A newer

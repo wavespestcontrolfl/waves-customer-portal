@@ -166,11 +166,13 @@ export default function SprinklerTimerCard({ brand = null, model = null, app = n
   const save = (nextBrand, nextModel, nextApp) => onChange({
     irrigationControllerBrand: nextBrand, irrigationControllerModel: nextModel, irrigationControllerApp: nextApp,
   });
-  // A new timer is a new box: the app answer on file was about the old one.
+  // A new timer is a new box: the app answer on file was about the old one. The same timer keeps its answer, and is
+  // sent again while it is not on file (the retry after a failed save).
   const pick = (nextBrand, nextModel) => {
     setPicking(false);
-    if (nextBrand === brand && nextModel === modelOnFile) return;
-    save(nextBrand, nextModel, null);
+    const same = nextBrand === brand && nextModel === modelOnFile;
+    if (same && saved) return;
+    save(nextBrand, nextModel, same ? app : null);
   };
   return (
     <section data-glass="card" style={cardStyle} aria-label="Your sprinkler timer">

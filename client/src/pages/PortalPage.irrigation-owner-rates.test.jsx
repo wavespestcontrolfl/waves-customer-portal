@@ -91,21 +91,45 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
 
   // The server refuses a timer whole (all three fields, one reason), as a 400 when the timer was the batch's only
   // change: the card shows that reason. A network failure re-queues the edit with no reason. Neither is on file.
+  // Meanwhile staff set a Rain Bird. The next save of another field leaves the refused pick beside its reason (the
+  // customer reloads to see the new timer), and carries the re-queued pick, which is the last write.
   const REFUSED = 'The home on this account changed. Reload, then set the sprinkler timer again.';
+  const STAFF_RAIN_BIRD = { irrigationControllerBrand: 'rain_bird', irrigationControllerModel: null, irrigationControllerApp: null };
   it.each([
     ['refused, with its reason', Object.assign(new Error(REFUSED), {
       rejected: ['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp'].map((field) => ({ field, message: REFUSED })),
-    }), `We could not save your timer. ${REFUSED}`, 'Not saved'],
-    ['lost to a network failure', new Error('Failed to fetch'), 'Could not save. Please check your connection and try again.', 'Not saved yet'],
-  ])('a timer whose save is %s is not called on file', async (_case, failure, shown, status) => {
+    }), `We could not save your timer. ${REFUSED}`, 'Not saved', 'Not saved'],
+    ['lost to a network failure', new Error('Failed to fetch'), 'Could not save. Please check your connection and try again.', 'Not saved yet', 'On file'],
+  ])('a timer whose save is %s is not called on file', async (_case, failure, shown, status, afterNextSave) => {
     api.getPropertyPreferences.mockResolvedValue({ preferences: { ...SPRAY_PREFS }, hasLawnCare: true });
-    api.updatePropertyPreferences.mockRejectedValue(failure);
+    api.updatePropertyPreferences.mockRejectedValueOnce(failure)
+      .mockImplementation(async (payload) => ({ saved: true, preferences: { ...SPRAY_PREFS, ...STAFF_RAIN_BIRD, ...payload } }));
     render(<PropertyTab customer={lawnCustomer} />);
     fireEvent.click(await screen.findByRole('button', { name: /^X2/ }));
     expect(await screen.findByText(shown, {}, { timeout: 8000 })).toBeInTheDocument();
     expect(screen.getByText(status)).toBeInTheDocument();
     expect(screen.queryByText('On file')).not.toBeInTheDocument();
     expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(screen.getByLabelText('Side Gate / Backyard Access'), { target: { value: 'Lift latch' } });
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(2), { timeout: 8000 });
+    expect(await screen.findByText(afterNextSave)).toBeInTheDocument();
+    expect(screen.getByText('Hunter X2')).toBeInTheDocument();
+  }, 20000);
+
+  it('a timer staff saved while the page was open replaces the old one after the next save', async () => {
+    api.getPropertyPreferences.mockResolvedValue({
+      preferences: { ...SPRAY_PREFS, irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: 'yes' },
+      hasLawnCare: true,
+    });
+    // Staff set a Rain Bird in Customer 360 meanwhile: the next save answers with that row.
+    api.updatePropertyPreferences.mockImplementation(async (payload) => ({ saved: true, preferences: { ...SPRAY_PREFS, ...payload, ...STAFF_RAIN_BIRD } }));
+    render(<PropertyTab customer={lawnCustomer} />);
+    expect(await screen.findByText('Hunter X2')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Side Gate / Backyard Access'), { target: { value: 'Lift latch' } });
+    expect(await screen.findByText('Rain Bird', {}, { timeout: 8000 })).toBeInTheDocument();
+    expect(screen.getByText('On file')).toBeInTheDocument();
+    expect(api.updatePropertyPreferences.mock.calls[0][0]).not.toHaveProperty('irrigationControllerBrand');
   }, 15000);
 
   it('a customer with no lawn service does not get the card', async () => {
