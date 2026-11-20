@@ -260,6 +260,20 @@ describe('parseInspectionReport', () => {
     expect(svc.parseInspectionReport(page('ROACH\0ES')).findings[0].text).toBe('ROACH ES');
   });
 
+  test('a cell or a row without its end tag still counts, so a 35A code cell without </td> is never read as "no pests"', () => {
+    const whole = svc.parseInspectionReport(fixture('report-35a.html'));
+    // The two 35A code cells lose </td> (HTML allows it); the 35B cell keeps it.
+    const open = fixture('report-35a.html').replace('<u>35A-02-8</u></a></td>', '<u>35A-02-8</u></a>').replace('<u>35A-01-8</u></a></td>', '<u>35A-01-8</u></a>');
+    expect(open).not.toContain('35A-02-8</u></a></td>');
+    expect(svc.parseInspectionReport(open)).toEqual(whole);
+    // No </td> and no </tr> anywhere: each row still ends at the next one, so the 35B note never joins the 35A entry.
+    const bare = '<p>Inspection Information</p><table><tr><td>35A-02-8<td>High Priority - Live flies at the bar.'
+      + '<tr><td>35B-03-4<td>Basic - Back door propped open.</table><p>2601 Blair Stone Road</p>';
+    expect(svc.parseInspectionReport(bare)).toEqual({ pestEvidence: true, findings: [{ code: '35A-02-8', text: 'High Priority - Live flies at the bar.' }] });
+    // A header cell (th) is a cell too.
+    expect(svc.parseInspectionReport(bare.replaceAll('<td>', '<th>')).findings).toHaveLength(1);
+  });
+
   test('a follow-up report puts the newest visit note first, so the cap never drops the visit the page reports', () => {
     const page = (note) => `<p>Inspection Information</p><table><tr><td>35A-02-8</td><td>${note}</td></tr></table><p>2601 Blair Stone Road</p>`;
     const initial = `Live, small flying insects found. ${'Observed flies at the bar. '.repeat(20)}`;

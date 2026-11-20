@@ -257,8 +257,10 @@ const ENTITIES = { '&nbsp;': ' ', '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot
 // The state office's street address closes every whole page.
 const PAGE_FOOTER_RE = /2601 Blair Stone Road/;
 const VIOLATION_CODE_RE = /^\d\d[A-Z]?-\d\d-\d$/;
-// A leaf cell (no cell or table inside it), or a row end.
-const CELL_OR_ROW_END_RE = /<td\b[^>]*>((?:(?!<td\b|<\/td>|<table\b)[\s\S])*)<\/td>|<\/tr>/gi;
+// A cell (td or th), or a row end. HTML lets a page leave out </td> and </tr>, and the state's pages do, so a cell runs
+// to the next table tag (a cell, a row or a table, start or end), as a browser closes it, and any row or table tag
+// ends the row. A cell that holds a table gives only its text before that table.
+const CELL_OR_ROW_END_RE = /<t[dh]\b[^>]*>((?:(?!<\/?(?:t[dhr]|table|tbody|thead|tfoot)\b)[\s\S])*)|<\/?(?:tr|table|tbody|thead|tfoot)\b[^>]*>/gi;
 
 // Tags out, the six entities the pages use decoded, NUL characters and runs of white space made one space.
 function htmlText(html) {
@@ -305,7 +307,7 @@ function parseInspectionReport(html) {
   let open = null;
   for (const match of page.matchAll(CELL_OR_ROW_END_RE)) {
     if (match[1] === undefined) {
-      open = null; // a row end closes the entry
+      open = null; // a row or table tag closes the entry
       continue;
     }
     const cell = htmlText(match[1]);
