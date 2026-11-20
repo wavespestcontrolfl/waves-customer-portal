@@ -364,14 +364,20 @@ function issueFyiAddresses(issue) {
   return Object.keys(recorded).map(normalizeEmail).filter(Boolean);
 }
 
-// Records the address a planned issue's FYI copy is about to go to, before it goes out.
-function recordFyiRecipient(sendId, to) {
-  return db('pest_insider_issues').where({ send_id: sendId }).update({
+// Records the address a planned issue's FYI copy is about to go to, and the copy's text by digest
+// (fyiCopyDigest), before it goes out. Only while the issue is still linked and 'drafted': a draft
+// deleted in History while the copy rendered holds the issue and clears its link. Returns whether
+// the row was written.
+async function recordFyiRecipient(sendId, to, copyText) {
+  const written = await db('pest_insider_issues').where({ send_id: sendId, status: 'drafted' }).update({
     diagnostics: db.raw(
-      "coalesce(diagnostics, '{}'::jsonb) || jsonb_build_object('fyiTo', coalesce(diagnostics->'fyiTo', '{}'::jsonb) || jsonb_build_object(?::text, true))",
-      [normalizeEmail(to)],
+      "coalesce(diagnostics, '{}'::jsonb) || jsonb_build_object("
+        + "'fyiTo', coalesce(diagnostics->'fyiTo', '{}'::jsonb) || jsonb_build_object(?::text, true), "
+        + "'fyiCopies', coalesce(diagnostics->'fyiCopies', '{}'::jsonb) || jsonb_build_object(?::text, true))",
+      [normalizeEmail(to), fyiCopyDigest(copyText)],
     ),
   });
+  return Number(written) > 0;
 }
 
 /** Who may HOLD a planned issue, before the sender is verified: an approver, or an address its FYI copy went to (the current proof address when none was recorded). */
@@ -404,19 +410,50 @@ function verifiedHoldSender(email, fyiTos) {
 }
 
 /**
- * A planned issue's HOLD, read one way by the reply handler and the send-time check: a reply to its
- * FYI copy, not a forward of it (email-strip.isForwardSubject: a forward passes the copy on, and its
- * note, such as "please hold this for review", is not an answer to it), whose own text asks to stop.
+ * A planned issue's FYI copy as its text part reads, with no whitespace and case aside, so a line
+ * wrapped again on its way still matches: the issue's row records it with the address the copy goes
+ * to, before it goes out (recordFyiRecipient). SendGrid leaves that part as sent (no text click
+ * tracking, no subscription footer); it rewrites the HTML part's links and adds an open-tracking
+ * image, so the HTML part is not read.
  */
-function isPlannedHoldReply(email) {
+function fyiCopyDigest(text) {
+  return crypto.createHash('sha256').update(String(text || '').replace(/\s+/g, '').toLowerCase()).digest('hex');
+}
+
+/** The FYI copies a planned issue's row recorded, by digest (recordFyiRecipient). */
+function issueFyiCopies(issue) {
+  const recorded = issue?.diagnostics?.fyiCopies;
+  return recorded && typeof recorded === 'object' && !Array.isArray(recorded) ? recorded : {};
+}
+
+/**
+ * The FYI copy itself, wherever it lands (in this mailbox when the proof address is this mailbox, a
+ * group that relays it, or a rule that forwards it on): its text part is, word for word, a copy the
+ * issue's row recorded as it went out. It carries the token and the HOLD line, so whoever it comes
+ * from, it is never an answer to itself. Anything else reads differently and is read for a HOLD: a
+ * reply, whatever its subject, headers or layout, also one typed inside the copy. A copy changed on
+ * its way (a relay's footer) or never recorded is read for a HOLD too: that can only hold an issue,
+ * never send one.
+ */
+function isProofCopyItself(email, copies) {
+  return Boolean(email?.body_text) && copies[fyiCopyDigest(email.body_text)] === true;
+}
+
+/**
+ * A planned issue's HOLD, read one way by the reply handler and the send-time check: a reply to its
+ * FYI copy, not the copy itself (isProofCopyItself) and not a forward of it
+ * (email-strip.isForwardSubject: a forward passes the copy on, and its note, such as "please hold
+ * this for review", is not an answer to it), whose own text asks to stop.
+ */
+function isPlannedHoldReply(email, copies) {
   const { isForwardSubject } = require('./email/email-strip');
-  return !isForwardSubject(email?.subject)
+  return !isProofCopyItself(email, copies) && !isForwardSubject(email?.subject)
     && isHoldReply(extractTopReplyText(email?.body_text || htmlReplyToText(email?.body_html)));
 }
 
 /** A HOLD reply to the FYI copy with this token (isPlannedHoldReply), from a verified sender. */
-function isVerifiedHold(email, token, fyiTos) {
-  return parseProofToken(email?.subject) === token && isPlannedHoldReply(email) && verifiedHoldSender(email, fyiTos);
+function isVerifiedHold(email, token, fyiTos, copies) {
+  return parseProofToken(email?.subject) === token && isPlannedHoldReply(email, copies) && verifiedHoldSender(email, fyiTos);
 }
 
 /** More messages than this carrying one FYI copy's token: the search did not read them all. */
@@ -439,20 +476,21 @@ async function holdReplyOnRecord(send, issue = null) {
   if (!isProofToken(send?.proof_token)) throw new Error('its FYI copy has no valid token');
   const token = send.proof_token.toLowerCase();
   const fyiTos = issueFyiAddresses(issue);
+  const copies = issueFyiCopies(issue);
   // Every FYI copy of this draft carries its token (a retry keeps it), so the search starts at the
   // draft, not at the latest copy; an hour of margin covers clock differences.
   const since = send.created_at ? new Date(new Date(send.created_at).getTime() - 60 * 60 * 1000) : null;
   const stored = db('emails').where('subject', 'ilike', `%[PROOF-${token}]%`);
   if (since) stored.where('received_at', '>=', since);
   const rows = await stored.select('from_address', 'to_address', 'cc_address', 'bcc_address', 'subject', 'body_text', 'body_html', 'label_ids', 'authentication_results');
-  if (rows.some((email) => isVerifiedHold(email, token, fyiTos))) return true;
+  if (rows.some((email) => isVerifiedHold(email, token, fyiTos, copies))) return true;
   const gmail = require('./email/gmail-client');
   const query = `subject:"PROOF-${token}"${since ? ` after:${Math.floor(since.getTime() / 1000)}` : ''}`;
   // Spam and Trash too: a HOLD the spam filter moved, or one deleted after it was sent, still holds.
   const { messages, truncated } = await gmail.listAllMessages(query, HOLD_SEARCH_CAP, { includeSpamTrash: true });
   if (truncated) throw new Error(`more than ${HOLD_SEARCH_CAP} messages carry its FYI copy's token`);
   const found = await Promise.all((messages || []).map(({ id }) => gmail.getMessage(id)));
-  return found.some((email) => isVerifiedHold(email, token, fyiTos));
+  return found.some((email) => isVerifiedHold(email, token, fyiTos, copies));
 }
 
 /**
@@ -839,9 +877,6 @@ async function sendNewsletterProof(sendId) {
   if (!claimed) return { skipped: true, reason: 'proof_claimed_elsewhere' };
 
   try {
-    // Every address a copy of a planned issue's FYI goes to may HOLD it (verifiedHoldSender), so it
-    // is recorded with its row before the copy goes out; a write that fails sends nothing.
-    if (issueContext) await recordFyiRecipient(send.id, to);
     // Internal diagnostics render between the proof banner and the
     // recipient preview — proof email ONLY, never the list send.
     const diagnosticsHtml = issueContext
@@ -850,8 +885,16 @@ async function sendNewsletterProof(sendId) {
     const { html, text } = await renderSendPreview({
       ...send,
       html_body: delivery.bannerHtml + diagnosticsHtml + (send.html_body || ''),
-      text_body: send.text_body ? delivery.bannerText + send.text_body : send.text_body,
+      // A planned issue's copy always has a text part, its banner first, also when the draft has no
+      // text body: its row records that part by digest (isProofCopyItself).
+      text_body: (send.text_body || issueContext) ? delivery.bannerText + (send.text_body || '') : send.text_body,
     }, to);
+    // Every address a copy of a planned issue's FYI goes to may HOLD it (verifiedHoldSender), and the
+    // copy itself never does (isProofCopyItself): both are recorded with its row before the copy goes
+    // out. A write that fails, or finds the issue no longer drafted, sends nothing.
+    if (issueContext && !(await recordFyiRecipient(send.id, to, text))) {
+      throw new Error('its planned issue is no longer drafted (its draft was deleted in History, or it was held)');
+    }
 
     const result = await sendgrid.sendOne({
       to,
@@ -1052,13 +1095,20 @@ async function maybeHandleProofApproval(email) {
   // type such an address into a From line), stops nothing, and the owner is told once.
   const planned = send ? await resolvePestInsiderIssueContext(send) : null;
   if (planned && isHoldReply(replyText)) {
+    // The FYI copy itself, back in this mailbox (it quotes the HOLD line): not an answer, and no
+    // warning. It is proof traffic, so the sync skips classification and auto-actions for it.
+    const copies = issueFyiCopies(planned.issue);
+    if (isProofCopyItself(email, copies)) {
+      logger.info(`[newsletter-proof] ignoring the FYI copy of planned issue send ${send.id} itself`);
+      return true;
+    }
     const fyiTos = issueFyiAddresses(planned.issue);
     const verified = verifiedHoldSender(email, fyiTos);
     if (!verified && !holdAddresses(fyiTos).has(from)) {
       logger.info(`[newsletter-proof] ignoring a HOLD for planned issue send ${send.id} from ${maskEmail(from)}, who may not hold it`);
       return false;
     }
-    if (!isPlannedHoldReply(email)) return ignorePlannedHold(send, from, 'forwarded');
+    if (!isPlannedHoldReply(email, copies)) return ignorePlannedHold(send, from, 'forwarded');
     if (!verified) return ignorePlannedHold(send, from, 'unverified');
   } else if (!approvalSenders().includes(from)) {
     // Ignore our own outbound proof (SendGrid copies can sync back in):
@@ -1290,6 +1340,7 @@ module.exports = {
   isApprovalReply,
   isHoldReply,
   holdReplyOnRecord,
+  fyiCopyDigest,
   renderSendPreview,
   sendNewsletterProof,
   maybeHandleProofApproval,

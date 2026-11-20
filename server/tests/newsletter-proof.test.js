@@ -74,6 +74,7 @@ const {
   maybeHandleProofApproval,
   approvalSenders,
   holdReplyOnRecord,
+  fyiCopyDigest,
 } = require('../services/newsletter-proof');
 
 function chain(overrides = {}) {
@@ -874,16 +875,30 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     authentication_results: null,
   };
 
-  // The write that records an address a copy of the FYI goes to, with its row, before the copy goes out.
+  // A planned issue's FYI copy, as its text part went out (pestInsiderBannerText first).
+  const COPY = 'SENDS BY ITSELF — NO REPLY NEEDED\nThis Waves Pest Insider issue goes to 85 readers. To skip this issue, reply HOLD by 6:30 AM ET that day.';
+
+  // The write that records an address a copy of the FYI goes to, and the copy's text by digest (the
+  // text it went out with), with its row, before the copy goes out.
   const recordedFyi = (address) => ({
     diagnostics: {
-      sql: "coalesce(diagnostics, '{}'::jsonb) || jsonb_build_object('fyiTo', coalesce(diagnostics->'fyiTo', '{}'::jsonb) || jsonb_build_object(?::text, true))",
-      bindings: [address],
+      sql: "coalesce(diagnostics, '{}'::jsonb) || jsonb_build_object("
+        + "'fyiTo', coalesce(diagnostics->'fyiTo', '{}'::jsonb) || jsonb_build_object(?::text, true), "
+        + "'fyiCopies', coalesce(diagnostics->'fyiCopies', '{}'::jsonb) || jsonb_build_object(?::text, true))",
+      bindings: [address, fyiCopyDigest(mockSendOne.mock.calls.at(-1)[0].text)],
     },
   });
 
   beforeEach(() => { process.env.GATE_PEST_INSIDER_AUTO_SEND = 'true'; });
   afterAll(() => { delete process.env.GATE_PEST_INSIDER_AUTO_SEND; });
+
+  test('a planned issue with no text body still sends its copy a text part, its banner, and records that part', async () => {
+    const { issuesChain } = wireDb({ sends: { first: { ...PI_DRAFT, text_body: null } }, issues: { first: ISSUE } });
+    expect(await sendNewsletterProof('send-1')).toEqual(expect.objectContaining({ sent: true }));
+    const { text } = mockSendOne.mock.calls[0][0];
+    expect(text).toMatch(/^SENDS BY ITSELF — NO REPLY NEEDED\n/);
+    expect(issuesChain.update).toHaveBeenCalledWith(recordedFyi('contact@wavespestcontrol.com'));
+  });
 
   test('its FYI copy goes out, and it is queued for its own Thursday 7:00 AM ET with its issue row', async () => {
     const { sendsChain, calendarChain, issuesChain } = wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE } });
@@ -895,7 +910,9 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(queue).toEqual(expect.objectContaining({ status: 'scheduled', scheduled_for: ISSUE_SEND_AT, proof_approval_email_id: null }));
     expect(issuesChain.whereIn).toHaveBeenCalledWith('status', ['drafted']);
     expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
-    // The address the copy goes to is recorded with the row before it goes out: it may HOLD the issue.
+    // The address the copy goes to is recorded with the row, while it is drafted and linked, before
+    // the copy goes out: it may HOLD the issue.
+    expect(issuesChain.where).toHaveBeenCalledWith({ send_id: 'send-1', status: 'drafted' });
     expect(issuesChain.update).toHaveBeenCalledWith(recordedFyi('contact@wavespestcontrol.com'));
     expect(issuesChain.update.mock.invocationCallOrder[0]).toBeLessThan(mockSendOne.mock.invocationCallOrder[0]);
     // The send and its issue row are queued in one transaction.
@@ -936,6 +953,16 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(sendsChain.update.mock.calls.at(-1)[0]).toEqual({ proof_sent_at: null, updated_at: expect.any(Date) });
   });
 
+  test('an issue no longer drafted when its copy is about to go out (its draft deleted in History meanwhile, which holds it and clears its link) gets no copy: the record writes only a drafted issue linked to the send, finds none, and nothing goes out', async () => {
+    const { sendsChain, issuesChain } = wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE, update: 0 } });
+    const r = await sendNewsletterProof('send-1');
+
+    expect(issuesChain.where).toHaveBeenCalledWith({ send_id: 'send-1', status: 'drafted' });
+    expect(r.reason).toBe('proof_send_failed');
+    expect(mockSendOne).not.toHaveBeenCalled();
+    expect(sendsChain.update.mock.calls.at(-1)[0]).toEqual({ proof_sent_at: null, updated_at: expect.any(Date) });
+  });
+
   test('its retry sends the token the failed attempt kept, so every copy of its FYI carries one token', async () => {
     const { sendsChain } = wireDb({ sends: { first: { ...PI_DRAFT, proof_token: 'AB12CD34' } }, issues: { first: ISSUE } });
     const r = await sendNewsletterProof('send-1');
@@ -946,8 +973,10 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
   });
 
   test('an issue row that is no longer drafted rolls the queueing back, and the owner is told', async () => {
-    // The send's queue update matches, but its issue row does not move: the transaction fails.
-    wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE, update: 0 } });
+    // The send's queue update matches, but its issue row does not move: the transaction fails. (The
+    // row was still drafted when the copy went out: its record, the first write, found it.)
+    const { issuesChain } = wireDb({ sends: { first: PI_DRAFT }, issues: { first: ISSUE, update: 0 } });
+    issuesChain.update.mockImplementationOnce(async () => 1);
     mockTrigger.mockResolvedValueOnce({ bellWritten: true });
     const r = await sendNewsletterProof('send-1');
 
@@ -1114,6 +1143,37 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
     expect(mockTrigger).not.toHaveBeenCalled();
   });
 
+  test("the FYI copy itself, back in the synced inbox, holds nothing, also when its sender is set as an approver: it carries the token and the HOLD line", async () => {
+    process.env.NEWSLETTER_PROOF_APPROVERS = `owner@example.com, ${PI_QUEUED.from_email}`;
+    const { issuesChain } = wireDb({ sends: { first: PI_QUEUED }, issues: { first: { ...ISSUE, status: 'scheduled', diagnostics: { fyiCopies: { [fyiCopyDigest(COPY)]: true } } } } });
+    expect(await maybeHandleProofApproval({
+      ...HOLD, subject: HOLD.subject.slice(4), from_address: PI_QUEUED.from_email, label_ids: ['INBOX'],
+      authentication_results: 'mx.google.com; dkim=pass header.i=@wavespestcontrol.com header.s=s1 header.b=abc',
+      // As it arrives: the same words, its own line breaks, and a long line wrapped again mid-word.
+      body_text: COPY.replace(/\n/g, '\r\n').replace('readers', 'read\r\ners'),
+    })).toBe(true); // proof traffic: the sync skips classification and auto-actions for it
+    expect(issuesChain.update).not.toHaveBeenCalled();
+    expect(mockTrigger).not.toHaveBeenCalled();
+  });
+
+  test("a reply that kept the copy's own subject, with HOLD typed inside the unquoted copy, holds the issue: it reads differently from the copy", async () => {
+    const { issuesChain } = wireDb({ sends: { first: PI_QUEUED }, issues: { first: { ...ISSUE, status: 'scheduled', diagnostics: { fyiCopies: { [fyiCopyDigest(COPY)]: true } } } } });
+    expect(await maybeHandleProofApproval({
+      ...HOLD, subject: HOLD.subject.slice(4), body_text: COPY.replace('\n', '\nHOLD\n'),
+    })).toBe(true);
+    expect(issuesChain.update).toHaveBeenCalled();
+  });
+
+  test("a reply from the FYI copy's own sender, set as an approver, still holds the issue: only the copy itself is left out", async () => {
+    process.env.NEWSLETTER_PROOF_APPROVERS = `owner@example.com, ${PI_QUEUED.from_email}`;
+    const { issuesChain } = wireDb({ sends: { first: PI_QUEUED }, issues: { first: { ...ISSUE, status: 'scheduled' } } });
+    expect(await maybeHandleProofApproval({
+      ...HOLD, from_address: PI_QUEUED.from_email, label_ids: ['INBOX'],
+      authentication_results: 'mx.google.com; dkim=pass header.i=@wavespestcontrol.com header.s=s1 header.b=abc',
+    })).toBe(true);
+    expect(issuesChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'held', reason: 'HOLD reply from the owner' }));
+  });
+
   test('a forward of its FYI copy holds nothing, even from a verified sender with a hold word in its note: the owner is told once that only a reply holds', async () => {
     const { issuesChain } = wireDb({ sends: { first: PI_QUEUED }, issues: { first: { ...ISSUE, status: 'scheduled' } } });
     expect(await maybeHandleProofApproval({ ...HOLD, subject: `Fwd: ${HOLD.subject.slice(4)}`, body_text: 'please hold this for review' })).toBe(true);
@@ -1232,6 +1292,65 @@ describe('the send-time HOLD check (a planned issue at 7:00 AM ET)', () => {
   ])('not a HOLD, in either witness: %s', async (_label, email) => {
     wireMailbox({ stored: [email], searched: [email] });
     expect(await holdReplyOnRecord(SEND)).toBe(false);
+  });
+
+  // The copy's own text opens with its banner (pestInsiderBannerText); its row records it as it goes out.
+  const FYI_COPY_TEXT = 'SENDS BY ITSELF — NO REPLY NEEDED\nThis Waves Pest Insider issue goes to 85 readers Thursday, August 6 at 7:00 AM ET. To skip this issue, reply HOLD by 6:30 AM ET that day, or press Cancel schedule in Newsletter → History.';
+  const RECORDED_COPY = { diagnostics: { fyiCopies: { [fyiCopyDigest(FYI_COPY_TEXT)]: true } } };
+  test.each([
+    ['its sender set as an approver', () => { process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com, Newsletter@news.wavespestcontrol.com'; }, null, 'newsletter@news.wavespestcontrol.com', 'news.wavespestcontrol.com'],
+    ['its sender set as the proof address', () => { process.env.NEWSLETTER_PROOF_EMAIL = 'newsletter@news.wavespestcontrol.com'; }, null, 'newsletter@news.wavespestcontrol.com', 'news.wavespestcontrol.com'],
+    ['its sender recorded as an address a copy went to', () => {}, { diagnostics: { fyiTo: { 'newsletter@news.wavespestcontrol.com': true } } }, 'newsletter@news.wavespestcontrol.com', 'news.wavespestcontrol.com'],
+    ['relayed by a group at the address it went to, under that address', () => {}, { diagnostics: { fyiTo: { 'proofs@wavespestcontrol.com': true } } }, 'proofs@wavespestcontrol.com', 'wavespestcontrol.com'],
+  ])("the FYI copy itself is not a HOLD, in either witness, also with %s: it carries the token and the HOLD line", async (_label, configure, issue, from, domain) => {
+    configure();
+    // As stored (the emails row has no In-Reply-To column) and as the Gmail search parses it (null: absent).
+    const copy = received(from, signedBy(domain), { subject: FYI_SUBJECT, body_text: FYI_COPY_TEXT });
+    wireMailbox({ stored: [copy], searched: [{ ...copy, in_reply_to: null }] });
+    const recorded = { ...issue, diagnostics: { ...issue?.diagnostics, fyiCopies: { [fyiCopyDigest(FYI_COPY_TEXT)]: true } } };
+    expect(await holdReplyOnRecord(SEND, recorded)).toBe(false);
+  });
+
+  test("a reply from the FYI copy's own sender, set as an approver, still holds: only the copy itself is left out", async () => {
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com, newsletter@news.wavespestcontrol.com';
+    wireMailbox({ searched: [received('newsletter@news.wavespestcontrol.com', signedBy('news.wavespestcontrol.com'), { body_text: `HOLD\n\n> ${FYI_COPY_TEXT}` })] });
+    expect(await holdReplyOnRecord(SEND)).toBe(true);
+  });
+
+  test("a reply whose sender removed the reply prefix still holds: its own words are on top, the copy quoted below", async () => {
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com';
+    const quoted = `HOLD please\n\nOn Wed, Aug 5, 2026 at 1:05 PM Waves <newsletter@news.wavespestcontrol.com> wrote:\n> ${FYI_COPY_TEXT.split('\n').join('\n> ')}`;
+    wireMailbox({ searched: [received('owner@example.com', signedBy('example.com'), { subject: FYI_SUBJECT, body_text: quoted })] });
+    expect(await holdReplyOnRecord(SEND)).toBe(true);
+  });
+
+  test.each([
+    ['the copy pasted under it with no quote marks', (copy) => `HOLD\n\n${copy}`],
+    ['the copy under an attribution line in another language', (copy) => `HOLD\n\nAm Mi., 5. Aug. 2026 um 13:05 schrieb Waves <newsletter@news.wavespestcontrol.com>:\n${copy}`],
+  ])("a reply that kept the copy's own subject holds when its sender's words open it, with %s", async (_shape, body) => {
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com';
+    wireMailbox({ searched: [received('owner@example.com', signedBy('example.com'), { subject: FYI_SUBJECT, body_text: body(FYI_COPY_TEXT) })] });
+    expect(await holdReplyOnRecord(SEND)).toBe(true);
+  });
+
+  test.each([
+    ['as stored', (reply) => ({ stored: [reply] })],
+    ['as the Gmail search parses it, with no In-Reply-To', (reply) => ({ searched: [{ ...reply, in_reply_to: null }] })],
+  ])("a reply that kept the copy's own subject, with HOLD typed under the banner heading in an unquoted copy, holds %s: it reads differently from the copy", async (_witness, mailbox) => {
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com';
+    const [heading, ...rest] = FYI_COPY_TEXT.split('\n');
+    const inline = [heading, 'HOLD', ...rest].join('\n');
+    wireMailbox(mailbox(received('owner@example.com', signedBy('example.com'), { subject: FYI_SUBJECT, body_text: inline })));
+    expect(await holdReplyOnRecord(SEND, RECORDED_COPY)).toBe(true);
+  });
+
+  test.each([
+    ['changed on its way (a relay footer)', `${FYI_COPY_TEXT}\n\n--\nYou received this message because you are subscribed to a group.`, () => RECORDED_COPY],
+    ['that its row never recorded', FYI_COPY_TEXT, () => null],
+  ])('a copy %s is read for a HOLD: that can only hold the issue, never send it', async (_label, text, issue) => {
+    process.env.NEWSLETTER_PROOF_APPROVERS = 'owner@example.com, newsletter@news.wavespestcontrol.com';
+    wireMailbox({ searched: [received('newsletter@news.wavespestcontrol.com', signedBy('news.wavespestcontrol.com'), { subject: FYI_SUBJECT, body_text: text })] });
+    expect(await holdReplyOnRecord(SEND, issue())).toBe(true);
   });
 
   test('a reply to a forwarded copy of the FYI (Re: Fwd:) is a reply: its HOLD stops the issue', async () => {
