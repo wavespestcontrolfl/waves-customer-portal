@@ -2591,6 +2591,102 @@ router.post('/relay-sandbox', async (req, res) => {
   }
 });
 
+// =========================================================================
+// GPT-Live trial (GATE_VOICE_GPT_LIVE_TEST, owner 2026-11-19, spend cap $5).
+// Cell codes 71 / 72 on the sandbox number connect the call to OpenAI's
+// GPT-Live model through Twilio Media Streams (services/voice-agent/
+// live-bridge.js) instead of ConversationRelay, so the owner can compare the
+// two by ear. Twilio does not allow a query string on a <Stream> url, so the
+// CallSid and the per-call token ride as path segments of /ws/voice-live/.
+// =========================================================================
+const GPT_LIVE_COMPLETE_ACTION = '/api/webhooks/twilio/relay-sandbox/live-complete';
+const GPT_LIVE_CELLS = new Map([['71', 'marin'], ['72', 'delta']]);
+const GPT_LIVE_TIME_LIMIT_S = 600;
+const GPT_LIVE_DEFAULT_MAX_MINUTES = 60;
+const GPT_LIVE_BUDGET_WINDOW_SQL = "created_at > NOW() - INTERVAL '30 days'";
+
+function gptLiveCellFor(digits) {
+  if (!GPT_LIVE_CELLS.has(digits)) return null;
+  if (!require('../config/feature-gates').voiceGptLiveTestLive()) return null;
+  return { cell: digits, voice: GPT_LIVE_CELLS.get(digits) };
+}
+
+function gptLiveMaxSeconds() {
+  const raw = String(process.env.VOICE_GPT_LIVE_TEST_MAX_MINUTES || '').trim();
+  const minutes = raw === '' ? NaN : Number(raw);
+  return (Number.isFinite(minutes) && minutes >= 0 ? minutes : GPT_LIVE_DEFAULT_MAX_MINUTES) * 60;
+}
+
+// True when the last 30 days of GPT-Live seconds (sandbox rows only) reach the
+// cap. A database error throws: the caller refuses the call (fail closed).
+async function gptLiveBudgetSpent() {
+  const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
+  const row = await db('call_log')
+    .where({ source: VOICE_RELAY_SANDBOX_SOURCE })
+    .whereRaw(GPT_LIVE_BUDGET_WINDOW_SQL)
+    .first(db.raw("COALESCE(SUM((metadata->'gpt_live'->>'usage_seconds')::numeric), 0) AS seconds"));
+  return Number(row && row.seconds) >= gptLiveMaxSeconds();
+}
+
+// Twilio's own stop at 10 minutes, in case the bridge never closes. Fail-soft:
+// the bridge's own cap ends the session at the same mark.
+function capGptLiveCall(callSid) {
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return;
+  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  void client.calls(callSid).update({ timeLimit: GPT_LIVE_TIME_LIMIT_S })
+    .catch((err) => logger.warn(`[gpt-live] time limit not set for ${maskSid(callSid)} (${String(err?.code || err?.status || 'error')})`));
+}
+
+function gptLiveSayAndHangup(res, text) {
+  const twiml = new VoiceResponse();
+  twiml.say({ voice: SAY_VOICE }, text);
+  twiml.hangup();
+  return res.type('text/xml').send(twiml.toString());
+}
+
+// The disclosure replay the cell handler always plays (a digit cut the
+// answer-time copy short), then the media stream.
+function gptLiveStreamXml(req, callSid, token) {
+  const twiml = new VoiceResponse();
+  twiml.play(wavesGreetingUrl());
+  const connect = twiml.connect({ action: GPT_LIVE_COMPLETE_ACTION });
+  connect.stream({ url: `wss://${sandboxRelayHost(req)}/ws/voice-live/${encodeURIComponent(callSid)}/${token}` });
+  return twiml.toString();
+}
+
+async function respondGptLiveCell(req, res, callSid, { cell, voice }) {
+  if (!isRelayAttached()) {
+    logger.warn(`[gpt-live] relay not attached — hanging up ${maskSid(callSid)}`);
+    return gptLiveSayAndHangup(res, 'The voice relay is not attached on this deploy. Goodbye.');
+  }
+  try {
+    if (await gptLiveBudgetSpent()) {
+      logger.warn(`[gpt-live] budget used up — refused ${maskSid(callSid)} cell ${cell}`);
+      return gptLiveSayAndHangup(res, 'The GPT-Live test budget is used up. Goodbye.');
+    }
+    const token = require('../services/voice-agent/relay-protocol').mintCallToken(callSid);
+    if (!token) throw new Error('no call token (VOICE_RELAY_WS_SECRET unset)');
+    await db('call_log').where({ twilio_call_sid: callSid }).update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ gpt_live: { cell, voice, started_at: new Date().toISOString() } })]),
+    });
+    capGptLiveCall(callSid);
+    logger.info(`[gpt-live] cell ${cell} voice ${voice} ${maskSid(callSid)}`);
+    return res.type('text/xml').send(gptLiveStreamXml(req, callSid, token));
+  } catch (err) {
+    logger.error(`[gpt-live] refused ${maskSid(callSid)} (fail closed): ${err.message}`);
+    return gptLiveSayAndHangup(res, 'The GPT-Live test is not available right now. Goodbye.');
+  }
+}
+
+// The <Connect action> of a GPT-Live call: the stream ended (caller hung up,
+// the 10 minute cap, or the bridge closed). Nothing follows it: hang up.
+router.post('/relay-sandbox/live-complete', (req, res) => {
+  if (!isSandboxCall(req)) return refuseSandbox(req, res, 'not the sandbox number');
+  const twiml = new VoiceResponse();
+  twiml.hangup();
+  return res.type('text/xml').send(twiml.toString());
+});
+
 router.post('/relay-sandbox/cell', async (req, res) => {
   try {
     if (!isSandboxCall(req)) return refuseSandbox(req, res, 'not the sandbox number');
@@ -2600,6 +2696,10 @@ router.post('/relay-sandbox/cell', async (req, res) => {
     // over a row that is not sandbox-sourced.
     if (!(await sandboxRowOwned(CallSid))) return refuseSandbox(req, res, 'call_log row is not sandbox-sourced');
     const digits = String(req.body?.Digits || '').trim();
+    // GATE_VOICE_GPT_LIVE_TEST: 71 / 72 hand the call to the GPT-Live bridge.
+    // Gate off (or any other digits) ⇒ the production code path below.
+    const liveCell = gptLiveCellFor(digits);
+    if (liveCell) return await respondGptLiveCell(req, res, CallSid, liveCell);
     const { resolveSandboxCell } = require('../services/voice-agent/relay-profiles');
     const cell = resolveSandboxCell(digits);
     logger.info(`[relay-sandbox] cell "${digits}" → ${cell ? cell.relayProfileId : 'production profile'} ${maskSid(CallSid)}`);

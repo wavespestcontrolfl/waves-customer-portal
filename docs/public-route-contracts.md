@@ -7896,6 +7896,19 @@ the test number, can neither create dispatch work nor move a metric. The
 transcript, latency summary and version stamps land on the sandbox row
 exactly as in production; that record is the bake-off. Any change to the
 number gate or the dry-run invariant is security-critical).
+`/api/webhooks/twilio/relay-sandbox/live-complete` + the `/ws/voice-live/{CallSid}/{token}` WebSocket path
+(GPT-Live trial, dark behind `GATE_VOICE_GPT_LIVE_TEST`, owner 2026-11-19, spend cap $5. With the gate on, cell code
+`71` or `72` on the sandbox number answers `/relay-sandbox/cell` with a disclosure replay and
+`<Connect action="…/relay-sandbox/live-complete"><Stream url="wss://HOST/ws/voice-live/CALLSID/TOKEN"/></Connect>`
+(Twilio forbids a query string on a `<Stream>` url, so the CallSid and the per-call minted token are path segments).
+`live-complete` is a POST TwiML webhook, Twilio-signature validated at the mount, refused with a 403 `<Hangup/>` unless
+`To` is exactly `VOICE_RELAY_SANDBOX_NUMBER`, and answers a bare `<Hangup/>`. The WebSocket upgrade runs the relay's
+door in the same order: the token must verify for that CallSid, the call_log row must be sandbox-sourced and carry the
+`metadata.gpt_live` stamp the cell route wrote, the gate must be on, and the token is then burned (one session per
+token); any failure destroys the socket. The socket goes to `services/voice-agent/live-bridge.js`. Its tools are a
+read-only allowlist (open appointment times, services list): no booking, lead, text or transfer. The cell route
+refuses the call when the last 30 days of GPT-Live seconds reach `VOICE_GPT_LIVE_TEST_MAX_MINUTES` (default 60), and
+on any database error there. Reply delay and transcript land on `call_log.metadata.gpt_live`.)
 `/api/webhooks/twilio/tech-voice` (POST; machine-to-machine TwiML webhook —
 the voice URL of the staff-only "Waves Tech" voice line, `TECH_VOICE_NUMBER`,
 which a technician calls from their own cell; dark behind

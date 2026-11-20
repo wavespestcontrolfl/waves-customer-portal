@@ -9,7 +9,7 @@ jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest
 jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(), syncVoiceMessageForCall: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/voice-agent/relay-server', () => ({ isRelayAttached: jest.fn(() => true) }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), voiceGptLiveTestLive: () => process.env.GATE_VOICE_GPT_LIVE_TEST === 'true' }));
 jest.mock('../services/call-recording-processor', () => ({ recoverRecordingForCall: jest.fn() }));
 
 const db = require('../models/db');
@@ -442,6 +442,148 @@ describe('POST /relay-sandbox/cell', () => {
     const res = mockRes();
     await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-8', To: '+19415550188', Digits: '03' } }, res);
     expect(res.status).toHaveBeenCalledWith(403);
+  });
+});
+
+describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
+  // The cell handler's reads and writes: the ownership read (`first`), the
+  // 30-day budget read (`whereRaw(...).first(raw)` answers `seconds`), and the
+  // metadata stamp (`update`).
+  function primeLive({ seconds = 0, budgetFails = false, stampFails = false } = {}) {
+    const update = jest.fn(() => (stampFails ? Promise.reject(new Error('pool down')) : Promise.resolve(1)));
+    const first = jest.fn(async (arg) => {
+      if (arg && arg.sql) {
+        if (budgetFails) throw new Error('pool down');
+        return { seconds };
+      }
+      return { source: VOICE_RELAY_SANDBOX_SOURCE };
+    });
+    const builder = { where: jest.fn(() => builder), whereRaw: jest.fn(() => builder), first, update };
+    db.mockImplementation(() => builder);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    return { update, first, builder };
+  }
+  const cell = (digits, CallSid = 'CA-sb-live') => ({ body: { CallSid, To: SANDBOX, Digits: digits }, headers: {} });
+
+  afterEach(() => {
+    delete process.env.GATE_VOICE_GPT_LIVE_TEST;
+    delete process.env.VOICE_GPT_LIVE_TEST_MAX_MINUTES;
+  });
+
+  test('gate off: 71 is an unknown code and renders the unchanged production-profile TwiML', async () => {
+    process.env.VOICE_RELAY_PROFILE = 'nova_hints_v1';
+    const { update } = primeLive();
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.body).toContain('<ConversationRelay');
+    expect(res.body).toContain('<Parameter name="relay_profile" value="nova_hints_v1" />');
+    expect(res.body).not.toContain('<Stream');
+    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0]).relay_profile_id).toBe('nova_hints_v1');
+  });
+
+  test('gate on: 71 plays the disclosure, then connects a Stream with the CallSid and token as path segments and no query string', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    const { update } = primeLive();
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.body).toMatch(/^<\?xml version="1.0" encoding="UTF-8"\?><Response><Play>https:\/\/[^<]+\.mp3<\/Play><Connect action="\/api\/webhooks\/twilio\/relay-sandbox\/live-complete">/);
+    const url = res.body.match(/<Stream url="([^"]+)"/)[1];
+    expect(url).toMatch(/^wss:\/\/portal\.example\.com\/ws\/voice-live\/CA-sb-live\/[0-9a-z]+\.\d+\.[0-9a-f]{16}\.[0-9a-f]+$/);
+    expect(url).not.toContain('?');
+    expect(res.body).not.toContain('<ConversationRelay');
+    expect(res.body).not.toContain('shh-secret-123');
+    // The stamp the WS upgrade later requires.
+    const stamp = JSON.parse(update.mock.calls[0][0].metadata.bindings[0]).gpt_live;
+    expect(stamp).toEqual({ cell: '71', voice: 'marin', started_at: expect.any(String) });
+    expect(update.mock.calls[0][0].metadata.sql).toContain("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
+  });
+
+  test('gate on: 72 selects the delta voice', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    const { update } = primeLive();
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('72'), res);
+    expect(res.body).toContain('/ws/voice-live/CA-sb-live/');
+    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0]).gpt_live).toMatchObject({ cell: '72', voice: 'delta' });
+  });
+
+  test('gate on: any other code still takes the production path', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    primeLive();
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('09'), res);
+    expect(res.body).toContain('speechModel="flux"');
+    expect(res.body).not.toContain('<Stream');
+  });
+
+  test('budget spent (60 minutes by default, sandbox rows over 30 days): a spoken notice and a hangup, no stamp, no stream', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    const { update, builder } = primeLive({ seconds: 3600 });
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.body).toContain('The GPT-Live test budget is used up. Goodbye.');
+    expect(res.body).toContain('<Hangup/>');
+    expect(res.body).not.toContain('<Stream');
+    expect(update).not.toHaveBeenCalled();
+    expect(builder.where).toHaveBeenCalledWith({ source: VOICE_RELAY_SANDBOX_SOURCE });
+    expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining("INTERVAL '30 days'"));
+  });
+
+  test('VOICE_GPT_LIVE_TEST_MAX_MINUTES moves the cap', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    process.env.VOICE_GPT_LIVE_TEST_MAX_MINUTES = '5';
+    primeLive({ seconds: 299 });
+    let res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.body).toContain('<Stream');
+    primeLive({ seconds: 300 });
+    res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.body).toContain('budget is used up');
+  });
+
+  test('a database error on the budget read or the stamp refuses the call (fail closed)', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    for (const opts of [{ budgetFails: true }, { stampFails: true }]) {
+      primeLive(opts);
+      const res = mockRes();
+      await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+      expect(res.body).toContain('not available right now');
+      expect(res.body).toContain('<Hangup/>');
+      expect(res.body).not.toContain('<Stream');
+    }
+  });
+
+  test('relay not attached: the same spoken notice as the answer handler', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    primeLive();
+    isRelayAttached.mockImplementation(() => false);
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.body).toContain('not attached');
+    expect(res.body).not.toContain('<Stream');
+  });
+
+  test('a row that is not sandbox-sourced is refused before any of this', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    primeLive();
+    const builder = { where: jest.fn(() => builder), first: jest.fn(async () => ({ source: 'twilio_voice' })) };
+    db.mockImplementation(() => builder);
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.statusCode).toBe(403);
+    expect(res.body).not.toContain('<Stream');
+  });
+
+  test('/relay-sandbox/live-complete hangs up, and refuses a number that is not the sandbox', async () => {
+    let res = mockRes();
+    await handlerFor('/relay-sandbox/live-complete')({ body: { CallSid: 'CA-sb-live', To: SANDBOX } }, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('<Hangup/>');
+    res = mockRes();
+    await handlerFor('/relay-sandbox/live-complete')({ body: { CallSid: 'CA-prod', To: '+19415550188' } }, res);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.body).toContain('<Hangup/>');
   });
 });
 

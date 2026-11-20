@@ -153,6 +153,74 @@ async function burnCallToken(token, callSid) {
   }
 }
 
+// ── GPT-Live trial upgrade (GATE_VOICE_GPT_LIVE_TEST, owner 2026-11-19) ─────
+// /ws/voice-live/{callSid}/{token}: Twilio Media Streams does not allow a
+// query string on a <Stream> url, so the CallSid and the per-call token ride
+// as path segments. Same door as /ws/voice-agent, in the same order: verify
+// the token for THIS CallSid, read the call_log row, require the sandbox
+// source AND the gpt_live stamp the cell route wrote AND the gate, then burn
+// the token. The socket goes to its own WebSocketServer, created at the first
+// live upgrade, and to live-bridge.js. Any failure destroys the socket.
+const LIVE_WS_PREFIX = '/ws/voice-live/';
+let liveWss = null;
+
+function destroySocket(socket) {
+  try { socket.destroy(); } catch { /* socket already gone */ }
+}
+
+function parseLivePath(pathname) {
+  const parts = String(pathname || '').slice(LIVE_WS_PREFIX.length).split('/');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  try {
+    return { callSid: decodeURIComponent(parts[0]).trim(), token: parts[1] };
+  } catch {
+    return null; // malformed percent-encoding
+  }
+}
+
+// The stamp the cell route wrote on a sandbox-sourced row, or null.
+async function readLiveStamp(callSid) {
+  const db = require('../../models/db');
+  const row = await db('call_log').where({ twilio_call_sid: callSid }).first('source', 'metadata');
+  if (!row || row.source !== VOICE_RELAY_SANDBOX_SOURCE) return null;
+  let meta = row.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = null; }
+  }
+  const live = meta && meta.gpt_live;
+  if (!live || typeof live !== 'object') return null;
+  return { voice: String(live.voice || ''), cell: String(live.cell || '') };
+}
+
+async function handleLiveUpgrade(req, socket, head, pathname) {
+  const parsed = parseLivePath(pathname);
+  if (!parsed || !verifyCallToken(parsed.token, parsed.callSid)) {
+    logger.warn('[voice-live] rejected ws upgrade: missing/invalid per-call token');
+    return destroySocket(socket);
+  }
+  const { callSid, token } = parsed;
+  try {
+    const stamp = await readLiveStamp(callSid);
+    if (!stamp || !require('../../config/feature-gates').voiceGptLiveTestLive()) {
+      logger.warn(`[voice-live] rejected ws upgrade: not a stamped sandbox call, or gate off callSid=${callSid}`);
+      return destroySocket(socket);
+    }
+    if (!(await burnCallToken(token, callSid))) {
+      logger.warn(`[voice-live] rejected ws upgrade: token already used callSid=${callSid}`);
+      return destroySocket(socket);
+    }
+    if (!liveWss) {
+      const { WebSocketServer } = require('ws');
+      liveWss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD_BYTES });
+    }
+    const { runLiveBridge } = require('./live-bridge');
+    return liveWss.handleUpgrade(req, socket, head, (ws) => runLiveBridge(ws, { callSid, voice: stamp.voice, cell: stamp.cell }));
+  } catch (e) {
+    logger.warn(`[voice-live] rejected ws upgrade: ${e.message} callSid=${callSid}`);
+    return destroySocket(socket);
+  }
+}
+
 /**
  * @param {import('http').Server} httpServer
  * @returns {import('ws').WebSocketServer|null}
@@ -195,6 +263,10 @@ function attachVoiceRelay(httpServer) {
       url = new URL(req.url, 'http://internal');
     } catch {
       return; // malformed — leave it for other listeners / Node default
+    }
+    if (url.pathname.startsWith(LIVE_WS_PREFIX)) {
+      handleLiveUpgrade(req, socket, head, url.pathname).catch(() => destroySocket(socket));
+      return;
     }
     if (url.pathname !== RELAY_WS_PATH) return; // NOT ours — do not touch the socket
     // Authenticate BEFORE accepting the upgrade — this endpoint can spend

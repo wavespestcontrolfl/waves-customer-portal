@@ -30,6 +30,7 @@ jest.mock('ws', () => ({
   })),
 }));
 jest.mock('../services/voice-agent/relay-conversation', () => ({ RelayConversation: jest.fn() }));
+jest.mock('../services/voice-agent/live-bridge', () => ({ runLiveBridge: jest.fn() }));
 
 // The burn is a real INSERT … ON CONFLICT DO NOTHING against
 // voice_relay_token_burns: the FIRST insert of a hash returns a row, every
@@ -581,4 +582,119 @@ test('a failed source read rejects the upgrade WITHOUT burning the token', async
   delete process.env.VOICE_RELAY_ENABLED;
   delete process.env.ANTHROPIC_API_KEY;
   delete process.env.VOICE_RELAY_WS_SECRET;
+});
+
+// ── GPT-Live trial path (GATE_VOICE_GPT_LIVE_TEST) ──────────────────────────
+// /ws/voice-live/{callSid}/{token}: the same door as /ws/voice-agent, with a
+// stamp requirement and its own socket server. `mockCallLogRow` answers the
+// call_log read.
+describe('ws upgrade — GPT-Live path', () => {
+  const { runLiveBridge } = require('../services/voice-agent/live-bridge');
+  const LIVE_SID = 'CA-live-up-1';
+  const STAMP = { gpt_live: { cell: '71', voice: 'marin', started_at: '2026-11-19T12:00:00.000Z' } };
+  let httpServer;
+
+  const liveUrl = (sid = LIVE_SID, token = mintCallToken(sid)) => `/ws/voice-live/${sid}/${token}`;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockBurned.clear();
+    mockBurnFails = false;
+    mockCallLogFails = false;
+    mockCallLogRow = { source: 'voice_relay_sandbox', metadata: STAMP };
+    process.env.VOICE_RELAY_ENABLED = 'true';
+    process.env.ANTHROPIC_API_KEY = 'sk-test';
+    process.env.VOICE_RELAY_WS_SECRET = SECRET;
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    httpServer = attach();
+  });
+
+  afterEach(() => {
+    mockHandleUpgrade.mockReset();
+    mockCallLogRow = undefined;
+    delete process.env.VOICE_RELAY_ENABLED;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.VOICE_RELAY_WS_SECRET;
+    delete process.env.GATE_VOICE_GPT_LIVE_TEST;
+  });
+
+  test('a good token on a stamped sandbox row starts the bridge with the stamped voice and cell', async () => {
+    const ws = { id: 'twilio-ws' };
+    mockHandleUpgrade.mockImplementation((req, socket, head, cb) => cb(ws));
+    const socket = await upgrade(httpServer, liveUrl());
+    expect(socket.destroy).not.toHaveBeenCalled();
+    expect(runLiveBridge).toHaveBeenCalledWith(ws, { callSid: LIVE_SID, voice: 'marin', cell: '71' });
+  });
+
+  test('a bad, missing, wrong-call or malformed token destroys the socket', async () => {
+    const good = mintCallToken(LIVE_SID);
+    for (const url of [
+      `/ws/voice-live/${LIVE_SID}/${good.slice(0, -2)}00`,
+      `/ws/voice-live/${LIVE_SID}/`,
+      `/ws/voice-live/${LIVE_SID}`,
+      `/ws/voice-live/CA-other/${good}`,
+      `/ws/voice-live/${LIVE_SID}/${good}/extra`,
+      `/ws/voice-live/%E0%A4%A/${good}`,
+      `/ws/voice-live/${LIVE_SID}/${SECRET}`,
+    ]) {
+      const socket = await upgrade(httpServer, url);
+      expect(socket.destroy).toHaveBeenCalled();
+    }
+    expect(mockHandleUpgrade).not.toHaveBeenCalled();
+    expect(runLiveBridge).not.toHaveBeenCalled();
+  });
+
+  test('a row that is not sandbox-sourced (or missing, or unstamped) destroys the socket and burns nothing', async () => {
+    for (const row of [
+      { source: 'twilio_voice', metadata: STAMP },
+      { source: 'tech_voice', metadata: STAMP },
+      { source: 'voice_relay_sandbox', metadata: { relay_sandbox: true } },
+      { source: 'voice_relay_sandbox', metadata: null },
+      undefined,
+    ]) {
+      mockCallLogRow = row;
+      const socket = await upgrade(httpServer, liveUrl());
+      expect(socket.destroy).toHaveBeenCalled();
+    }
+    expect(mockBurned.size).toBe(0); // read-then-burn: a refusal leaves the token alone
+    expect(mockHandleUpgrade).not.toHaveBeenCalled();
+  });
+
+  test('gate off destroys the socket', async () => {
+    delete process.env.GATE_VOICE_GPT_LIVE_TEST;
+    const socket = await upgrade(httpServer, liveUrl());
+    expect(socket.destroy).toHaveBeenCalled();
+    expect(mockHandleUpgrade).not.toHaveBeenCalled();
+    expect(mockBurned.size).toBe(0);
+  });
+
+  test('an unreadable row or a failed burn destroys the socket (fail closed)', async () => {
+    mockCallLogFails = true;
+    let socket = await upgrade(httpServer, liveUrl());
+    expect(socket.destroy).toHaveBeenCalled();
+    mockCallLogFails = false;
+    mockBurnFails = true;
+    socket = await upgrade(httpServer, liveUrl());
+    expect(socket.destroy).toHaveBeenCalled();
+    expect(mockHandleUpgrade).not.toHaveBeenCalled();
+  });
+
+  test('the token opens one session only', async () => {
+    mockHandleUpgrade.mockImplementation((req, socket, head, cb) => cb({}));
+    const url = liveUrl();
+    const first = await upgrade(httpServer, url);
+    const second = await upgrade(httpServer, url);
+    expect(first.destroy).not.toHaveBeenCalled();
+    expect(second.destroy).toHaveBeenCalled();
+    expect(runLiveBridge).toHaveBeenCalledTimes(1);
+  });
+
+  test('an ordinary /ws/voice-agent upgrade still goes through and never reaches the live bridge', async () => {
+    const t = mintCallToken('CA-relay-x');
+    mockCallLogRow = undefined;
+    const relay = await upgrade(httpServer, `/ws/voice-agent?callSid=CA-relay-x&t=${t}`);
+    expect(relay.destroy).not.toHaveBeenCalled();
+    expect(mockHandleUpgrade).toHaveBeenCalledTimes(1);
+    expect(runLiveBridge).not.toHaveBeenCalled();
+  });
 });
