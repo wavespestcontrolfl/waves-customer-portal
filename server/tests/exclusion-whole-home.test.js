@@ -365,3 +365,97 @@ describe('the estimator route translation of the Seal scope pick', () => {
     });
   });
 });
+
+describe('whole-home terms are frozen on a saved estimate (Settings changes never move a quote)', () => {
+  const { RODENT } = require('../services/pricing-engine/constants');
+  const { extractEngineInputs } = require('../routes/estimate-public');
+  const { wholeHomeSealReplaySignal } = require('../services/estimate-whole-home-replay');
+  const request = () => baseInput({
+    homeSqFt: 2000,
+    services: { exclusion: { pricingVersion: 'v2', standardWireMeshPoints: 2, waiveInspection: true, sealScope: 'whole_home' } },
+  });
+  const rowsOf = (estimate) => estimate.lineItems.filter((li) => li.service === 'rodent_exclusion');
+  const total = (estimate) => rowsOf(estimate).reduce((sum, li) => sum + li.price, 0);
+
+  // Prices a quote, then edits Settings the way an admin would (the 2,001 to 2,500 sq ft minimum, the standard renewal).
+  function withSettingsChange(fn) {
+    const priorMinimums = SPECIALTY.exclusion.minimumsByHomeSqFt;
+    const priorStandard = RODENT.guarantee.standard;
+    SPECIALTY.exclusion.minimumsByHomeSqFt = priorMinimums.map((b) => (b.maxSqFt === 2500 ? { ...b, minimum: 695 } : b));
+    RODENT.guarantee.standard = 224;
+    try { return fn(); } finally {
+      SPECIALTY.exclusion.minimumsByHomeSqFt = priorMinimums;
+      RODENT.guarantee.standard = priorStandard;
+    }
+  }
+
+  test('price, change Settings, replay: same minimum and renewal; a new quote uses the new table', () => {
+    gateOn(() => {
+      const quoted = generateEstimate(request());
+      expect(total(quoted)).toBe(595);
+      expect(rowsOf(quoted)[0].guaranteeRenewalPrice).toBe(199);
+      const saved = { engineInputs: request(), result: mapV1ToLegacyShape(quoted) };
+      withSettingsChange(() => {
+        // A NEW quote after the change reads the new table.
+        const fresh = generateEstimate(request());
+        expect(total(fresh)).toBe(695);
+        expect(rowsOf(fresh)[0].guaranteeRenewalPrice).toBe(224);
+        // The saved estimate replays what it was quoted (the public read path), gate on or off.
+        for (const value of ['true', undefined]) {
+          withGate(value, () => {
+            const replayInputs = extractEngineInputs(saved);
+            expect(replayInputs.wholeHomeSealReplay).toEqual({ minimum: 595, renewal: 199 });
+            const replayed = generateEstimate(replayInputs);
+            expect(total(replayed)).toBe(595);
+            expect(rowsOf(replayed)[0].guaranteeRenewalPrice).toBe(199);
+          });
+        }
+      });
+    });
+  });
+
+  test('a saved row without the stamp (older) replays the live table, field by field', () => {
+    gateOn(() => {
+      const mapped = mapV1ToLegacyShape(generateEstimate(request()));
+      const stripped = JSON.parse(JSON.stringify(mapped), (key, value) => (key === 'wholeHomeMinimum' ? undefined : value));
+      expect(wholeHomeSealReplaySignal({ result: stripped })).toEqual({ minimum: null, renewal: 199 });
+      withSettingsChange(() => {
+        const replayed = generateEstimate({ ...request(), savedEstimateReplay: true, wholeHomeSealReplay: { minimum: null, renewal: 199 } });
+        expect(total(replayed)).toBe(695);
+        expect(rowsOf(replayed)[0].guaranteeRenewalPrice).toBe(199);
+      });
+    });
+  });
+
+  test('a posted wholeHomeSealReplay is never honored on a new quote', () => {
+    gateOn(() => {
+      const posted = generateEstimate({ ...request(), wholeHomeSealReplay: { minimum: 100, renewal: 50 } });
+      expect(total(posted)).toBe(595);
+      expect(rowsOf(posted)[0].guaranteeRenewalPrice).toBe(199);
+    });
+    const { sanitizeClientIdentityFields } = require('../services/estimate-client-identity-fields');
+    expect(sanitizeClientIdentityFields({ wholeHomeSealReplay: { minimum: 1 } })).toEqual({});
+  });
+});
+
+describe('a whole-home pick needs the V2 shape (validated before the pricing-version branch)', () => {
+  const legacy = { simple: 2, sealScope: 'whole_home' };
+
+  test('gate on: a non-v2 whole-home request is refused, never priced as a legacy line', () => {
+    gateOn(() => {
+      for (const exclusion of [legacy, { ...legacy, pricingVersion: 'v1' }]) {
+        let error;
+        try { generateEstimate(baseInput({ services: { exclusion } })); } catch (err) { error = err; }
+        expect(error).toMatchObject({ statusCode: 400, code: 'EXCLUSION_WHOLE_HOME_INCOMPATIBLE', failClosed: true });
+      }
+    });
+  });
+
+  test('gate off: the same request gets the gated error, and a plain legacy exclusion is unchanged', () => {
+    withGate(undefined, () => {
+      expect(() => generateEstimate(baseInput({ services: { exclusion: legacy } }))).toThrow(/Choose Spot seal/);
+      const plain = generateEstimate(baseInput({ services: { exclusion: { simple: 2 } } }));
+      expect(plain.lineItems.some((li) => li.service === 'exclusion' && li.price > 0)).toBe(true);
+    });
+  });
+});

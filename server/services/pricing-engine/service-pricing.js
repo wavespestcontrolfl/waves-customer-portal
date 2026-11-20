@@ -9734,9 +9734,11 @@ function wholeHomeSealTerms(options = {}) {
   const sqFt = sized ? Number(options.homeSqFt) : 2000;
   // The same home-size table the spot-seal pricer reads: Settings (pricing_config
   // onetime_exclusion.minimums_by_home_sqft, hydrated by db-bridge) reaches whole-home quotes.
-  const tier = _bracketLookup(sqFt, SPECIALTY.exclusion.minimumsByHomeSqFt, 'maxSqFt');
+  // A saved estimate's quote-time minimum (frozenMinimum) beats the live table; older rows without one use it.
+  const frozen = Number(options.frozenMinimum) > 0 ? Number(options.frozenMinimum) : null;
+  const minimum = frozen ?? _bracketLookup(sqFt, SPECIALTY.exclusion.minimumsByHomeSqFt, 'maxSqFt').minimum;
   return {
-    minimum: tier.minimum, homeSqFt: sqFt, sized, stories: options.stories, roofType: options.roofType,
+    minimum, homeSqFt: sqFt, sized, stories: options.stories, roofType: options.roofType, frozenRenewal: options.frozenRenewal,
   };
 }
 
@@ -9757,13 +9759,16 @@ function wholeHomeGuaranteeFields(wholeHome, equivalentExclusionPoints, totalLin
     sealScope: 'whole_home',
     includesReentryGuarantee: true,
     reentryGuaranteeMonths: RODENT.exclusionV2.wholeHomeReentryGuaranteeMonths,
-    guaranteeRenewalPrice: priceRodentGuarantee({
+    // The renewal price the quote carried (frozenRenewal) beats the live tier price.
+    guaranteeRenewalPrice: Number(wholeHome.frozenRenewal) > 0 ? Number(wholeHome.frozenRenewal) : priceRodentGuarantee({
       homeSqFt: wholeHome.homeSqFt,
       stories: wholeHome.stories,
       roofType: wholeHome.roofType,
       equivalentExclusionPoints,
       totalLinearMeshLF,
     }).price,
+    // The quote-time minimum rides the saved row so a replay can restore it (estimate-whole-home-replay.js).
+    wholeHomeMinimum: wholeHome.minimum,
   };
 }
 

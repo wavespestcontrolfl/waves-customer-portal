@@ -869,24 +869,40 @@ function stripBedBugInternalPricing(result) {
 // gate is off is refused (fail closed, like a gated misting pick): pricing it as a spot seal would silently drop the
 // included guarantee and cut the price. A stored estimate re-priced as sold (input.savedEstimateReplay, set by
 // extractEngineInputs and the persisted-estimate replay) keeps the terms it was quoted after a rollback. The
-// pricer and the routes read no gate of their own.
+// pricer and the routes read no gate of their own. Checked BEFORE the pricing-version branch: a whole-home pick
+// only exists on the V2 shape, so any other shape is refused rather than priced as a legacy line.
+//
+// A stored estimate re-priced as sold also restores its quote-time minimum and renewal price (input
+// .wholeHomeSealReplay, read from the saved priced rows by estimate-whole-home-replay.js and honored only on a
+// replay): a Settings change never moves a quoted price. A NEW quote reads the live Settings table.
 function wholeHomeSealInputs(exclusion, property, input) {
   if (exclusion.sealScope !== 'whole_home') return null;
-  if (require('../../config/feature-gates').exclusionWholeHomeLive?.() !== true && input.savedEstimateReplay !== true) {
-    const err = new Error('The whole-home seal is not enabled on this environment (GATE_EXCLUSION_WHOLE_HOME). Choose Spot seal for Seal scope and reprice.');
-    err.status = 400;
-    err.statusCode = 400;
-    err.code = 'EXCLUSION_WHOLE_HOME_GATED';
-    err.failClosed = true;
-    err.isOperational = true;
-    throw err;
+  const replay = input.savedEstimateReplay === true;
+  if (require('../../config/feature-gates').exclusionWholeHomeLive?.() !== true && !replay) {
+    throw wholeHomeInputError('The whole-home seal is not enabled on this environment (GATE_EXCLUSION_WHOLE_HOME). Choose Spot seal for Seal scope and reprice.', 'EXCLUSION_WHOLE_HOME_GATED');
   }
+  if (exclusion.pricingVersion !== 'v2') {
+    throw wholeHomeInputError('A whole-home seal needs the per-point exclusion (pricingVersion v2). Choose Spot seal or reprice from the estimate tool.', 'EXCLUSION_WHOLE_HOME_INCOMPATIBLE');
+  }
+  const frozen = replay ? input.wholeHomeSealReplay : null;
   return {
     sealScope: 'whole_home',
     homeSqFt: exclusion.homeSqFt || property.homeSqFt || property.footprint || 0,
     stories: exclusion.stories || property.stories || 1,
     roofType: exclusion.roofType || property.roofType || 'shingle',
+    ...(frozen ? { frozenMinimum: frozen.minimum, frozenRenewal: frozen.renewal } : {}),
   };
+}
+
+// A fail-closed 400 for a whole-home pick that cannot be priced as asked (never silently priced another way).
+function wholeHomeInputError(message, code) {
+  const err = new Error(message);
+  err.status = 400;
+  err.statusCode = 400;
+  err.code = code;
+  err.failClosed = true;
+  err.isOperational = true;
+  return err;
 }
 
 // A priced exclusion result that already includes the 1-year re-entry guarantee.
@@ -2260,6 +2276,7 @@ function generateEstimate(input) {
   // (equivalent points, mesh LF) even though the estimate now carries the
   // V2 exclusion as per-section line items rather than one combined row.
   let rodentExclusionV2Summary = null;
+  const wholeHomeSeal = wholeHomeSealInputs(services.exclusion || {}, property, input);
   if (services.exclusion && !useCommercialManualQuote(services.exclusion, 'pest_control', {
     // Only the V2 shape is unit-scoped (per point + per LF, no home-sqft
     // floors) — this is the LIVE producer shape (property-lookup-v2 sends
@@ -2272,7 +2289,7 @@ function generateEstimate(input) {
     // A whole-home seal (gate on) is priced from the HOME's size, which a commercial
     // property has no minimum table for: it never counts as a scoped one-time.
     scopedOneTime: services.exclusion.pricingVersion === 'v2'
-      && !wholeHomeSealInputs(services.exclusion, property, input)
+      && !wholeHomeSeal
       && ['standardWireMeshPoints', 'advancedWireMeshPoints', 'standardBirdBoxes', 'tileHighBirdBoxes',
         'customBirdBoxes', 'meshSoftLF', 'meshConcreteLF']
         .some((k) => Number(services.exclusion[k]) > 0),
@@ -2295,7 +2312,7 @@ function generateEstimate(input) {
         approvedTotalForWaiver: services.exclusion.approvedTotal || 0,
         urgency: services.exclusion.urgency || 'ROUTINE',
         afterHours: services.exclusion.afterHours || false,
-        ...wholeHomeSealInputs(services.exclusion, property, input),
+        ...wholeHomeSeal,
       });
       rodentExclusionV2Summary = result;
       // Per-section rows (wire mesh points / bird boxes / linear mesh, plus

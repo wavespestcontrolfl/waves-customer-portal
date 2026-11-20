@@ -20595,6 +20595,9 @@ function savedFloorReplayOverrides(estData) {
   // Mosquito misting quote-time snapshot (GATE_MOSQUITO_MISTING): a sent misting quote keeps the prices it was sent at.
   const mistingKnobs = require('../services/estimate-tree-shrub-knob-replay').mistingKnobSignalForReplay(estData);
   if (mistingKnobs) overrides.mistingPricingKnobs = mistingKnobs;
+  // Whole-home exclusion quote-time minimum and renewal price (GATE_EXCLUSION_WHOLE_HOME): set even when EMPTY
+  // (undefined), like the pins below, so a value stored inside the browser-controlled inputs is neutralized.
+  overrides.wholeHomeSealReplay = require('../services/estimate-whole-home-replay').wholeHomeSealReplaySignal(estData) || undefined;
   // Shared with serverRecomputeFromEstimateData (admin-estimate-persistence)
   // — codex #3432 r2 P0: the authoritative recompute path replays the same
   // stored inputs and must resolve the same commercial-floor evidence.
