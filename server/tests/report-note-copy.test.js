@@ -96,6 +96,24 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       'I treated the lanai. Keep the dog in for hours.',
       'I treated the lanai. The dog can go out at 3 o\u2019clock.',
       'I treated the lanai. The dog can go out at half past three.',
+      // A clock time in any marked form, or an hour after a time word.
+      'I treated the lanai. Pets can return at four PM.',
+      'I treated the lanai. Pets can return at four p.m.',
+      'I treated the lanai. Pets can go out at seven am.',
+      'I treated the lanai. Pets can go out at 7 a.m.',
+      'I treated the lanai. Pets can go out at four-thirty AM.',
+      'I treated the lanai. Pets can go out at four in the afternoon.',
+      'I treated the lanai. Pets can return after four.',
+      'I treated the lanai. Keep pets inside until 4.',
+      'I treated the lanai. Keep pets inside between 2 and 4.',
+      // Each part of the rule alone: no other part catches these.
+      'I treated the lanai. The dog can go out once it is 3:30.',
+      'I treated the lanai. Pets can return once it is four PM.',
+      'I treated the lanai. Pets can go out once it is nine-ish a.m.',
+      'I treated the lanai. Pets can go out once it is seven am.',
+      'I treated the lanai. Pets can go out once it is 3 o\'clock.',
+      'I treated the lanai. Pets can go out once it is four in the afternoon.',
+      'I treated the lanai. Pets can go out at a quarter to four.',
       'I treated the perimeter. The spray dries in 30 minutes.',
       'I treated the perimeter. Allow a 30-minute drying period.',
       'I treated the lanai. Return to the treated area after 30+ minutes.',
@@ -118,6 +136,9 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       'I found a black widow with the red hourglass marking and removed it.',
       'I treated the insect entry points and examined the attic.',
       'I split the bait, half to the front and half to the back.',
+      // "am" after anything but a number, a part of the day with no hour.
+      'I am glad the lanai looks better. I treated the IPM zones.',
+      'I treated the lanai and swept the webs. Have a great afternoon!',
     ]) expect(reportNoteCustomerCopy(stored({ text })).body).toBe(text);
   });
 });

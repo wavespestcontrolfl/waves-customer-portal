@@ -2,12 +2,13 @@
 // customer render of one visit, at two entry points: the signed-in download
 // (GET /api/documents/service-report/:serviceRecordId) and the public share
 // link (GET /api/documents/shared/:token). On a record that carries the
-// technician's own note (structured_notes.reportNote), its lists are the web
-// report's (report-data.js buildProtocolPayload): only what the completion
-// form recorded, each value screened. The merged lists fold in raw [Found] /
-// [Next] lines of technician_notes, and no reviewed path prints ai_report.
-// A record with no note prints as before. The real pdfkit renders; a spy on
-// its text() reads what the PDF prints.
+// Every record prints the web report's customer lists (report-data.js
+// buildProtocolPayload: structuredObservations, structuredRecommendations):
+// only what the completion form recorded. The merged lists fold in raw
+// [Found] / [Next] lines of technician_notes, and no reviewed path prints
+// ai_report. On a record that carries the technician's own note
+// (structured_notes.reportNote) each value is screened too. The real pdfkit
+// renders; a spy on its text() reads what the PDF prints.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../middleware/auth', () => ({
@@ -155,13 +156,36 @@ describe.each([
     expect(text).not.toContain('Seal the soffit');
   });
 
-  test('a record with no note prints its lists as before', async () => {
+  test("a record with no note prints the form's lists too: no raw note line, no AI report", async () => {
     serviceRow = visit(JSON.stringify(LISTS));
     const text = await printed(path);
     expect(text).toContain('Light ant activity');
-    expect(text).toContain(RAW_FOUND);
-    expect(text).toContain(RAW_NEXT);
-    expect(text).toContain('Wasp nest under the eave');
-    expect(text).toContain('Seal the soffit gap');
+    expect(text).toContain('Trim the hedge back from the wall');
+    expect(text).not.toContain('Dog loose');
+    expect(text).not.toContain('bill the builder');
+    expect(text).not.toContain('Sprayed the eaves');
+    expect(text).not.toContain('Wasp nest');
+    expect(text).not.toContain('Seal the soffit');
+    // The note's own screen runs only beside a note: the web report prints
+    // this form value on a record with no note, and so does the PDF.
+    expect(text).toContain('Safe for pets once dry');
+  });
+
+  test('a record with no note and no form lists prints no list, never the merged ones', async () => {
+    serviceRow = visit(JSON.stringify({ observations: LISTS.observations, recommendations: LISTS.recommendations }));
+    const text = await printed(path);
+    expect(text).not.toContain('Light ant activity');
+    expect(text).not.toContain('Dog loose');
+    expect(text).not.toContain('bill the builder');
+    expect(text).not.toContain('Wasp nest');
+    expect(text).not.toContain("What I Noticed");
+    expect(text).not.toContain('What We Recommend');
+  });
+
+  test('a form value that holds an access code drops, on every record', async () => {
+    serviceRow = visit(JSON.stringify({ ...LISTS, formRecommendations: ['Trim the hedge back from the wall', 'Gate code 4545 for next time'] }));
+    const text = await printed(path);
+    expect(text).toContain('Trim the hedge back from the wall');
+    expect(text).not.toContain('4545');
   });
 });

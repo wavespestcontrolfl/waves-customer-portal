@@ -3101,12 +3101,17 @@ label). The note, and every list value and finding field below on such a
 record, passes `noteRecordCopyViolations`: `customerCopyViolations` and any
 time a technician can give: any word that names hours, minutes or seconds, with
 or without a figure ("30+ minutes", "eighteen minutes", "½ hour", "a few
-minutes"); a figure with h or m; a clock time ("3:30", "4 pm", "3 o'clock",
-"half past three"); overnight, tonight, tomorrow, noon or midnight. AGENTS.md
-bans a fixed re-entry or drying time, and a figure can be written in more ways
-than any list names, so the unit word alone decides and each match withholds
-the copy. Days stay legal (the next visit, when results show), and so does the
-ordinal "second". Otherwise it is what the report builds with no free text (the lawn visit
+minutes"); a figure with h or m; a clock time in any marked form ("3:30", any
+pm or a.m., "four am", "3 o'clock", "half past three", "four in the
+afternoon") or as an hour after at, after, until, till, by, before, around,
+past, between or from ("after four"); overnight, tonight, tomorrow, noon or
+midnight. AGENTS.md bans a fixed re-entry or drying time, and a figure can be
+written in more ways than any list names, so a marker alone decides (the unit
+word, the clock marker, the time word before an hour) and each match withholds
+the copy. A count after such a time word ("at 3 stations") is withheld too.
+Days stay legal (the next visit, when results show), and so do the ordinal
+"second", "am" after anything but a number, and a part of the day with no
+hour. Otherwise it is what the report builds with no free text (the lawn visit
 summary, or on a live view a narrative of the typed card under that narrative's
 own gate, which reads an empty recap) or empty, never `customerRecap`. A
 refused or malformed note is no text, and the raw column is never its fallback.
@@ -3145,16 +3150,22 @@ or not. The visit notes on the other surfaces (`customerSafeVisitNotes`) run
 the same rule. The Documents API
 PDF (`routes/documents.js` `generateServiceReportPDF`, at the signed-in
 `/api/documents/service-report/:serviceRecordId` and the shared
-`/api/documents/shared/:token`) prints such a record's observation and
-recommendation lists from `buildProtocolPayload` (the form's screened values
-above), never the merged `structured_notes` lists or `ai_report`. The payload adds
+`/api/documents/shared/:token`) prints every record's observation and
+recommendation lists as the web report shows them to a customer
+(`buildProtocolPayload` `structuredObservations` / `structuredRecommendations`:
+the completion form's values, screened as above on such a record, with lines
+that hold an access code dropped), never the merged `structured_notes` lists
+(which fold in raw `[Found]` / `[Next]` lines) or `ai_report`, on a record with
+no note too. The payload adds
 one key and no query parameter: `summaryIsOwnNote: true`, present only when
 `summary` is the note (on such a record a `technician_report` summary is always
 the note). The page's Visit Summary and the PDF print that summary as stored
 (`printedVisitSummary`), never through `cleanVisitSummary`'s fixes for the
 stored legacy recap, and the lawn layout takes no applied sentence out of it. A record whose stored notes are an object without
 `reportNote` renders exactly as before, and its payload has no
-`summaryIsOwnNote` key.
+`summaryIsOwnNote` key; its Documents API PDF prints the form's lists, as
+above (production 2026-11-20, read-only: 3 of 654 completed visits lose a line
+from that PDF, none from the last 30 days, and no visit has `ai_report` lists).
 
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the

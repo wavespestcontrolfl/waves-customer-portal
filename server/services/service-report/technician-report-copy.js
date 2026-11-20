@@ -656,25 +656,39 @@ function customerCopyViolations(text) {
 // screen above, plus any time a technician can give for re-entry or drying:
 // any word that names hours, minutes or seconds, with or without a figure
 // ("30+ minutes", "eighteen minutes", "½ hour", "a few minutes", "30min"); a
-// figure with h or m ("2h"); a clock time ("3:30", "4 pm", "3 o'clock", "half
-// past three"); or overnight, tonight, tomorrow, noon or midnight. AGENTS.md
-// bans a fixed re-entry or drying time in customer copy. A figure can be
-// written in more ways than any list names (each pre-push audit round on this
-// PR found one more: "dries", a hyphen, a plus, a number word, a fraction), so
-// the unit word alone decides, and no figure list exists to miss one. On such
-// a record each match withholds the copy: a refused note shows nothing, and a
-// refused list value or finding field is left out. Days stay legal: they name
-// the next visit and when results show. Singular "second" stays legal: it is
-// the ordinal ("second visit"), and no re-entry time is one second. A
-// read-only production count (2026-11-20): a unit word in 0 of 474 pest
-// customer recaps, a clock time in 2, days in 61.
+// figure with h or m ("2h"); a clock time, written in any of its marked forms
+// ("3:30", any pm or a.m., "4am" or "four am", "3 o'clock", "half past three",
+// "four in the afternoon") or as an hour after at, after, until, till, by,
+// before, around, past, between or from ("after four", "until 4"); or
+// overnight, tonight, tomorrow, noon or midnight. AGENTS.md bans a fixed
+// re-entry or drying time in customer copy. A figure can be written in more
+// ways than any list names (each pre-push audit round on this PR found one
+// more: "dries", a hyphen, a plus, a number word, a fraction, a spelled-out
+// hour), so a marker alone decides: the unit word, or the clock marker, or a
+// time word before an hour. On such a record each match withholds the copy: a
+// refused note shows nothing, and a refused list value or finding field is
+// left out. Days stay legal: they name the next visit and when results show.
+// Singular "second" stays legal: it is the ordinal ("second visit"), and no
+// re-entry time is one second. So do "am" after anything but a number ("I am")
+// and a part of the day with no hour ("Have a great afternoon!"). A count
+// after one of those time words ("at 3 stations") is withheld too: nothing
+// tells it from a clock time. A read-only production count of this rule
+// (2026-11-20): a match in 2 of 474 pest customer recaps, both clock times,
+// none from a unit word, and none in the form lists or the finding fields.
+const NOTE_HOUR_SRC = '(?:\\p{N}{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)';
+// The number words of a clock's hour and minutes (0 to 59: "four thirty am").
+const NOTE_CLOCK_WORD_SRC = '(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|oh)';
 const NOTE_RECORD_TIME_RE = new RegExp([
   '(?<!\\p{L})(?:half-?|quarter-?)?(?:hours?|minutes?|mins?|hrs?|secs?|seconds)(?!\\p{L})',
   '\\p{N}\\s*[hm](?!\\p{L})',
   '(?<!\\p{N})\\p{N}{1,2}\\s*:\\s*\\p{N}{2}(?!\\p{N})',
-  '\\p{N}\\s*[ap]\\.?\\s*m(?!\\p{L})',
+  '(?<!\\p{L})p\\.?\\s?m\\.?(?!\\p{L})',
+  '(?<!\\p{L})a\\.\\s?m\\.?(?!\\p{L})',
+  `(?:\\p{N}|(?<!\\p{L})${NOTE_CLOCK_WORD_SRC})[\\s-]*a\\.?\\s?m(?!\\p{L})`,
   "(?<!\\p{L})o['\\u2019]?\\s*clock(?!\\p{L})",
   '\\bhalf\\s+past\\b|\\bquarter\\s+(?:past|to|after|till|til)\\b',
+  `(?<!\\p{L})${NOTE_HOUR_SRC}\\s+(?:in\\s+the\\s+(?:morning|afternoon|evening|night)|at\\s+night|this\\s+(?:morning|afternoon|evening))`,
+  `(?<!\\p{L})(?:at|after|until|till|til|by|before|around|past|between|from)\\s+(?:about\\s+|around\\s+)?${NOTE_HOUR_SRC}(?![\\p{L}\\p{N}])`,
   '\\b(?:overnight|tonight|tomorrow|noon|midnight)\\b',
 ].join('|'), 'iu');
 
