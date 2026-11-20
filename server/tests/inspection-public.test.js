@@ -308,6 +308,13 @@ function seedPhoneHousehold(profile, others = []) {
 
 const LINKED_LEAD = { ...LEAD_ROW, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
 
+// A lead row read as the database holds it: linked once phase 1 writes the link
+// (the query mock's update does not change what later reads return).
+const leadLinkedAfterWrite = (lead) => () => {
+  const link = updateCalls.filter((c) => c.table === 'leads' && c.payload.customer_id).at(-1);
+  return link ? { ...lead, customer_id: link.payload.customer_id } : lead;
+};
+
 describe('gate off', () => {
   test('every route 404s while GATE_LEAD_INSPECTION_LINK is off', async () => {
     gateState.live = false;
@@ -2039,20 +2046,20 @@ describe('POST /:token commit', () => {
       expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, Laurel, FL, 34209', city: 'Laurel' });
     });
 
-    // Pre-push P1 on e88162fc27: with no address typed, the page's retry sends none again, and the next commit's resolver
-    // (resolveServiceAddress) reads the profile phase 1 linked: at the same pin, its stored address. A refused booking's
-    // fresh times are built from that address, so the retry's own build reads the zone the refreshed times were built for.
-    test('no typed address: a 409 refreshes with the linked profile\'s address, the address the retry builds with', async () => {
+    // Pre-push P1 on e88162fc27: with no address typed, the page's retry sends none again, and the next commit's
+    // resolver (resolveServiceAddress) reads the trusted profile phase 1 linked. The refusal builds no times of its
+    // own: the page reloads its list (GET), which reads that profile and its address, so the times it offers are built
+    // from the zone the retry's own build reads (nextCommitRefresh).
+    test('no typed address: a 409 carries no times, and the page\'s reload builds from the linked profile\'s address, as the retry does', async () => {
       Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
       listResults.service_zones = [
         { id: 'zone-s', zone_name: 'Sarasota', cities: ['Sarasota'] },
         { id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis'] },
       ];
-      const lead = {
+      firstResults.leads = leadLinkedAfterWrite({
         ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test',
         address: '123 Palm Ave, Sarasota, FL 34209', city: 'Sarasota', zip: '34209',
-      };
-      firstResults.leads = lead;
+      });
       firstResults.call_log = { from_phone: '+19415550101' };
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
       seedPhoneHousehold({
@@ -2064,98 +2071,103 @@ describe('POST /:token commit', () => {
       mockBuildAvailability.mockResolvedValue({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] });
       mockCreateSelfBooking.mockImplementationOnce(async () => ({ ok: false, status: 409, error: 'That time is no longer open.' }));
       const token = mintLeadConsultationToken(LEAD_ID);
+      const builds = () => mockBuildAvailability.mock.calls.map(([a]) => [a.lat, a.zoneFunnelCity]);
 
       const first = await callPost(token, { date: FUTURE_DATE, time: '09:00' });
 
       expect(first.statusCode).toBe(409);
-      expect(first.body.code).toBe('SLOT_TAKEN');
-      // The commit's own build reads the lead's address, as its list did; the fresh times, the linked profile's.
-      expect(mockBuildAvailability.mock.calls.map(([args]) => args.zoneFunnelCity)).toEqual(['Sarasota', 'Nokomis']);
+      expect(first.body).toMatchObject({ code: 'SLOT_TAKEN', availability: null });
+      expect(first.body).not.toHaveProperty('address_changed'); // the page holds no typed address to drop
+      // The commit's own build reads the lead's address, as its list did; no fresh times are built.
+      expect(builds()).toEqual([[27.4, 'Sarasota']]);
       expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, Sarasota, FL, 34209', city: 'Sarasota' });
 
-      // The retry: the lead is linked to that profile now, and nothing is typed again.
+      // The page's reload: phase 1 linked the lead to that profile.
       mockBuildAvailability.mockClear();
-      firstResults.leads = { ...lead, customer_id: 'cust-9' };
+      expect((await callGet(token)).statusCode).toBe(200);
+      expect(builds()).toEqual([[27.4, 'Nokomis']]);
+
+      // The retry types nothing again, and its own build reads what the reload read.
+      mockBuildAvailability.mockClear();
       const second = await callPost(token, { date: FUTURE_DATE, time: '09:00' });
 
       expect(second.statusCode).toBe(200);
-      expect(mockBuildAvailability.mock.calls[0][0]).toMatchObject({ zoneFunnelCity: 'Nokomis' });
+      expect(builds()).toEqual([[27.4, 'Nokomis']]);
       expect(mockCreateSelfBooking.mock.calls[1][0].callbackVisit.zoneAddress).toEqual({ address: '123 Palm Ave, Nokomis, FL, 34209', city: 'Nokomis' });
     });
 
-    // Pre-push P1 on 903ecc5ff0: the retry sends the typed address again and checks it at its own location first (the
-    // anti-forgery build), then at the matched profile's other stored location (the re-check). A refused booking's fresh
-    // times keep only the starts open at both, so a refreshed time passes the retry's two checks.
-    describe('a typed address and a profile at another stored location', () => {
-      const typed = '123 Palm Ave, Bradenton, FL 34209';
-      const nextDay = etDateString(addETDays(new Date(), 4));
-      const open = (date, t) => ({ date, start_time: t, end_time: `${t.slice(0, 2)}:30`, start_label: t, end_label: t, technician_id: 'tech-1', nearby: t === '10:00' });
-      const at = (byDate) => {
-        const days = Object.entries(byDate).map(([date, starts]) => ({ date, nearby: starts.includes('10:00'), slots: starts.map((t) => open(date, t)) }));
-        return { days, slots: days.flatMap((d) => d.slots), nearby: days.some((d) => d.nearby) };
-      };
-      // The typed location (the default mockGeocode pin) has 09:00 and 11:00 open, and nothing the next day; the
-      // profile's has 09:00, a nearby 10:00 and 11:00, and 09:00 the next day.
-      const AT_PROFILE = { [FUTURE_DATE]: ['09:00', '10:00', '11:00'], [nextDay]: ['09:00'] };
-      const AT_TYPED = { [FUTURE_DATE]: ['09:00', '11:00'] };
-      const seedRefusedBooking = () => {
-        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
-        firstResults.call_log = { from_phone: '+19415550101' };
-        firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
-        seedPhoneHousehold({
-          id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
-          address_line1: '123 Palm Ave', city: 'West Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
-          latitude: 27.1, longitude: -82.2, // another stored location: the booking moves there
-        });
-        listResults.scheduled_services = [];
-        firstResults.scheduled_services = { id: 'ss-refresh', reschedule_token: 'tok-refresh' };
-        mockCreateSelfBooking.mockImplementationOnce(async () => ({ ok: false, status: 409, error: 'That time is no longer open.' }));
-      };
+    // Pre-push P1s on 903ecc5ff0, 910b741125 and 0cdae8374e: with an address typed, a booking that moved to a matched
+    // profile's other stored location goes there. That profile is the trusted customer the next commit loads, so the
+    // refusal says the address changed and builds no times: the page drops the typed address and reloads its list
+    // (GET) from that profile's stored location and address, where the retry's own checks run. A time open there but
+    // not at the typed pin is offered and books (nextCommitRefresh).
+    test('a typed address and a profile at another stored location: the 409 drops the typed address, the reload offers the profile\'s times, and the retry books there', async () => {
+      firstResults.leads = leadLinkedAfterWrite({ ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' });
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
+        address_line1: '123 Palm Ave', city: 'West Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
+        latitude: 27.1, longitude: -82.2, // another stored location: the booking moves there
+      });
+      listResults.scheduled_services = [];
+      firstResults.scheduled_services = { id: 'ss-refresh', reschedule_token: 'tok-refresh' };
+      const open = (t) => ({ start_time: t, end_time: `${t.slice(0, 2)}:30`, start_label: t, end_label: t, technician_id: 'tech-1' });
+      // The typed location (the default mockGeocode pin) has 09:00 open; the profile's has 09:00 and 10:00.
+      mockBuildAvailability.mockImplementation(async (args) => ({
+        days: [{ date: FUTURE_DATE, slots: (args.lat === 27.1 ? ['09:00', '10:00'] : ['09:00']).map(open) }],
+      }));
+      mockCreateSelfBooking.mockImplementationOnce(async () => ({ ok: false, status: 409, error: 'That time is no longer open.' }));
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const builds = () => mockBuildAvailability.mock.calls.map(([a]) => [a.lat, a.zoneFunnelCity]);
 
-      test('a 409 offers only starts open at both, and the retry books one', async () => {
-        seedRefusedBooking();
-        mockBuildAvailability.mockImplementation(async (args) => at(args.lat === 27.1 ? AT_PROFILE : AT_TYPED));
-        const token = mintLeadConsultationToken(LEAD_ID);
+      const first = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL 34209' });
 
-        const first = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: typed });
+      expect(first.statusCode).toBe(409);
+      expect(first.body).toMatchObject({ code: 'SLOT_TAKEN', address_changed: true, availability: null });
+      // The anti-forgery build at the typed pin and the re-check at the profile's; no fresh times are built.
+      expect(builds()).toEqual([[27.4, 'Bradenton'], [27.1, 'West Bradenton']]);
 
-        expect(first.statusCode).toBe(409);
-        expect(first.body.code).toBe('SLOT_TAKEN');
-        // The day list, the best picks and the nearby flags keep only those starts; a day left with none drops out.
-        expect(first.body.availability.days).toEqual([expect.objectContaining({ date: FUTURE_DATE, nearby: false })]);
-        expect(first.body.availability.days[0].slots.map((s) => s.start_time)).toEqual(['09:00', '11:00']);
-        expect(first.body.availability.slots.map((s) => `${s.date} ${s.start_time}`)).toEqual([`${FUTURE_DATE} 09:00`, `${FUTURE_DATE} 11:00`]);
-        expect(first.body.availability.nearby).toBe(false);
-        // After the anti-forgery build and the re-check, the refresh builds at the profile's location with its address
-        // (the zone address the booking checks) and at the typed location with the typed address, there with the
-        // one-day rules on each day, as the retry's one-day check reads them (pre-push P1 on 910b741125).
-        expect(mockBuildAvailability.mock.calls.map(([a]) => [a.lat, a.zoneFunnelCity, a.zoneFunnelEachDay])).toEqual([
-          [27.4, 'Bradenton', undefined], [27.1, 'West Bradenton', undefined], [27.1, 'West Bradenton', undefined], [27.4, 'Bradenton', true],
-        ]);
+      // The page's reload: no typed address now, so the profile phase 1 linked, at its stored location and address.
+      mockBuildAvailability.mockClear();
+      const reload = await callGet(token);
 
-        // The retry: phase 1 linked the lead to that profile, and the page sends the typed address again.
-        firstResults.leads = { ...firstResults.leads, customer_id: 'cust-9' };
-        const second = await callPost(token, { date: FUTURE_DATE, time: '11:00', address: typed });
+      expect(reload.body.availability.days[0].slots.map((s) => s.start_time)).toEqual(['09:00', '10:00']);
+      expect(builds()).toEqual([[27.1, 'West Bradenton']]);
 
-        expect(second.statusCode).toBe(200);
-        expect(mockCreateSelfBooking.mock.calls[1][0]).toMatchObject({ technician_id: 'tech-1', slot_start: '11:00' });
+      // The retry books a time open there but not at the typed pin, with the same build the reload made.
+      mockBuildAvailability.mockClear();
+      const second = await callPost(token, { date: FUTURE_DATE, time: '10:00' });
+
+      expect(second.statusCode).toBe(200);
+      expect(builds()).toEqual([[27.1, 'West Bradenton']]);
+      expect(mockCreateSelfBooking.mock.calls[1][0]).toMatchObject({
+        slot_start: '10:00', callbackVisit: { zoneAddress: { address: '123 Palm Ave, West Bradenton, FL, 34209', city: 'West Bradenton' } },
+      });
+    });
+
+    // A moved booking keeps the typed address when the next commit's trusted customer is another profile: without
+    // it, that commit would book that profile's own property. A failed read keeps it too (logged), and the refusal
+    // still answers. Either way no times are built: the page reloads its list for the address it holds.
+    test.each([
+      ['another trusted profile', () => {
+        firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-0', first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+        seedPhoneHousehold({ id: 'cust-0', account_id: 'acct-9', is_primary_profile: true, address_line1: '9 Home St', city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101' });
+      }],
+      ['a failed read', () => {
+        firstResults.leads = () => { throw new Error('leads unreadable'); };
+      }],
+    ])('a typed address whose booking moved, with %s: the refusal keeps the typed address', async (_label, seed) => {
+      seed();
+      const { nextCommitRefresh } = inspectionPublicRouter._test;
+      const verified = require('../utils/lead-consultation-token').verifyLeadConsultationToken(mintLeadConsultationToken(LEAD_ID));
+
+      const refresh = await nextCommitRefresh({
+        lead: { id: LEAD_ID }, verified, resolved: { source: 'supplied' }, custRow: { id: 'cust-9' },
+        zoneSource: { line1: '123 Palm Ave', city: 'Bradenton' }, bookingLocation: { lat: 27.1, lng: -82.2 }, locationMoved: true,
       });
 
-      test('a failed build at the typed location answers the 409 with no times, never the unfiltered list', async () => {
-        seedRefusedBooking();
-        let typedBuilds = 0;
-        mockBuildAvailability.mockImplementation(async (args) => {
-          if (args.lat === 27.1) return at(AT_PROFILE);
-          typedBuilds += 1;
-          if (typedBuilds > 1) throw new Error('weather outlook unavailable');
-          return at(AT_TYPED);
-        });
-
-        const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: typed });
-
-        expect(res.statusCode).toBe(409);
-        expect(res.body).toMatchObject({ code: 'SLOT_TAKEN', availability: null });
-      });
+      expect(refresh).toEqual({ location: null, addressChanged: false });
     });
 
     // Codex #4737 r9 pre-push P1: the matched profile is re-read under its
@@ -3176,7 +3188,7 @@ describe('POST /:token commit', () => {
       });
 
       test('coords mismatch on the matched row → re-validates the slot against ITS stored location and fails closed (SLOT_TAKEN), never books', async () => {
-        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+        firstResults.leads = leadLinkedAfterWrite({ ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' });
         firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
         mockOneSlot(); // satisfies the pre-lock anti-forgery day check only
         // Matches by full address (street + zip) — the OR branch that never
@@ -3199,15 +3211,14 @@ describe('POST /:token commit', () => {
         expect(mockCreateSelfBooking).not.toHaveBeenCalled();
         expect(insertCalls.some((c) => c.table === 'customers')).toBe(false);
         // buildAvailabilityForLead: [0] the pre-lock day check at the lead's
-        // OWN resolved location, [1] phase 1's re-validation at the MATCHED
-        // row's own (far-away) location — not the pre-lock one — and the
-        // SLOT_TAKEN refresh: [2] at the matched location, [3] at the typed
-        // one, whose starts the page's retry checks first (pre-push P1 on
-        // 903ecc5ff0).
-        expect(mockBuildAvailability).toHaveBeenCalledTimes(4);
+        // OWN resolved location and [1] phase 1's re-validation at the MATCHED
+        // row's own (far-away) location — not the pre-lock one. The refusal
+        // builds no fresh times. Phase 1 linked the lead to the matched row,
+        // so the page drops the typed address and reloads its own list there,
+        // where its next commit books (nextCommitRefresh).
+        expect(mockBuildAvailability).toHaveBeenCalledTimes(2);
         expect(mockBuildAvailability.mock.calls[1][0]).toEqual(expect.objectContaining({ lat: 27.1, lng: -82.2 }));
-        expect(mockBuildAvailability.mock.calls[2][0]).toEqual(expect.objectContaining({ lat: 27.1, lng: -82.2 }));
-        expect(mockBuildAvailability.mock.calls[3][0]).toEqual(expect.objectContaining({ lat: 27.4, lng: -82.5 }));
+        expect(res.body).toMatchObject({ availability: null, address_changed: true });
       });
     });
 

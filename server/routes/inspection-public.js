@@ -623,41 +623,32 @@ function storedAddressCandidates(lead, custRow) {
   return candidates;
 }
 
-// The fresh times a refused booking offers are times the page's NEXT commit
-// admits, so a refreshed time passes that commit's own checks (pre-push P1s on
-// e88162fc27 and 903ecc5ff0): built at the booking location with `address`,
-// and with `alsoAt` only the starts also open there. A typed address is sent
-// again (the page re-sends the address its gate resolved), and the next commit
-// checks it at its own location first (its anti-forgery build). When this
-// commit moved to a matched profile's other stored location, the next commit
-// books either there (re-checked with this commit's zone address,
-// revalidateSlotAt) or at the typed location, so only the starts open at both
-// are offered: at the typed location with the one-day rules on each day, as
-// that commit's one-day check reads them. With none typed, the next commit's resolver
-// (resolveServiceAddress) reads the profile phase 1 linked, at its stored
-// location: its stored address, else the lead's own.
-function nextCommitRefresh({ resolved, lead, custRow, zoneSource, locationMoved }) {
-  if (resolved.source !== 'supplied') {
-    return { address: storedAddressCandidates(lead, custRow)[0]?.address || zoneSource, alsoAt: null };
-  }
-  return { address: zoneSource, alsoAt: locationMoved ? { location: resolved.location, address: resolved.address } : null };
-}
-
-// `availability` with only the starts `other` offers too (date and start
-// time): its days (a day left with none drops out), its best picks and its
-// nearby flags.
-function keepStartsOpenAt(availability, other) {
-  const open = new Set(other.days.flatMap((d) => d.slots.map((s) => `${d.date} ${s.start_time}`)));
-  const days = availability.days
-    .map((d) => ({ ...d, slots: d.slots.filter((s) => open.has(`${d.date} ${s.start_time}`)) }))
-    .filter((d) => d.slots.length)
-    .map((d) => ({ ...d, nearby: d.slots.some((s) => s.nearby) }));
-  return {
-    ...availability,
-    slots: availability.slots.filter((s) => open.has(`${s.date} ${s.start_time}`)),
-    days,
-    nearby: days.some((d) => d.nearby),
-  };
+// What a refused booking answers besides its error (sendSlotTaken's fields),
+// so the times the page shows next are times its next commit admits (pre-push
+// P1s on e88162fc27, 903ecc5ff0, 910b741125 and 0cdae8374e). The next commit
+// reads this commit's own inputs only when the page sends a typed address
+// again (it re-sends the address its gate resolved) and the booking stayed at
+// that pin: then the fresh times are built here, with the zone address the
+// booking checked. Any other refusal carries no times (`location` null), and
+// the page reloads its own list (GET, or POST /:token/availability with a
+// typed address), which reads the same resolver and trusted customer as the
+// next commit. A booking moved to a matched profile's other stored location
+// says so (`address_changed`) when that profile is the trusted customer the
+// next commit loads: the page drops the typed address, so its reload and its
+// next commit read that profile, where this booking was going. Otherwise the
+// typed address stays: without it, the next commit would reach another
+// profile. A failed read keeps it too.
+async function nextCommitRefresh({ lead, verified, resolved, custRow, zoneSource, bookingLocation, locationMoved }) {
+  const typed = resolved.source === 'supplied';
+  if (typed && !locationMoved) return { location: bookingLocation, address: zoneSource };
+  if (!typed) return { location: null };
+  const nextCust = await loadLead(db, lead.id)
+    .then((nextLead) => (nextLead ? loadTrustedCustomer(db, nextLead, verified) : null))
+    .catch((err) => {
+      logger.warn(`[inspection-public] next-commit customer read failed for lead ${lead.id}: ${err.message}`);
+      return null;
+    });
+  return { location: null, addressChanged: nextCust != null && String(nextCust.id) === String(custRow.id) };
 }
 
 // Everything the page's own booking address resolves from when no address
@@ -834,9 +825,7 @@ const customerAddressFields = (cust) => ({
 // `address`: the booking address ({line1, line2, city, state, zip}) on every list a customer is OFFERED; the
 // south-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL) reads it. The commit and re-validation rebuilds pass it too:
 // per truck (owner rule B) they drop the same openings as the list (zone-day-funnel.js dropOtherTruckDays).
-// `eachDay`: the funnel's one-day rules on every day of the window, as the commit's one-day rebuild reads them
-// (zoneFunnelEachDay; nextCommitRefresh's check at the typed pin).
-async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, eachDay }) {
+async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null }) {
   const booking = require('./booking');
   const { buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
   const zoneInputs = zoneFunnelInputs(address);
@@ -875,7 +864,7 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     // same gate and grace value.
     bookArrivalGrace: true,
     ...(timeOfDay ? { timeOfDay } : {}),
-    ...(zoneInputs ? { zoneFunnelAddress: zoneInputs.address, zoneFunnelCity: zoneInputs.city, zoneFunnelEachDay: eachDay } : {}),
+    ...(zoneInputs ? { zoneFunnelAddress: zoneInputs.address, zoneFunnelCity: zoneInputs.city } : {}),
   });
 }
 
@@ -2248,17 +2237,13 @@ function sendLocationFailure(res, failure, county, leadId) {
 // (round-10 P2) let a LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY caller
 // hand back the customer's CURRENT address alongside the refreshed times —
 // every other caller omits them and the body is byte-identical to before.
-// `alsoAt` ({ location, address }, nextCommitRefresh): only the starts open
-// there too, read with the one-day rules on each day (eachDay), as the next
-// commit's one-day check there reads them (pre-push P1 on 910b741125: a
-// window build there keeps only the funnel's cluster or seed day).
-async function sendSlotTaken(res, { location, address = null, alsoAt = null, range, config, catalog, leadId, error, leadPayload = null, addressChanged = false }) {
+// `location` null (nextCommitRefresh): no times, so the page reloads its own
+// list; a refused booking moved to a matched profile's other stored location
+// may pass `addressChanged` with it.
+async function sendSlotTaken(res, { location, address = null, range, config, catalog, leadId, error, leadPayload = null, addressChanged = false }) {
   let refreshed = null;
   try {
-    const here = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes, address });
-    const there = alsoAt && await buildAvailabilityForLead(alsoAt.location, { ...range, config, duration: catalog.durationMinutes, address: alsoAt.address, eachDay: true });
-    // Set only once both builds succeed: a failed second build answers with no times, never the unfiltered ones.
-    refreshed = alsoAt ? keepStartsOpenAt(here, there) : here;
+    if (location) refreshed = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes, address });
   } catch (err) {
     logger.warn(`[inspection-public] refresh availability failed for lead ${leadId}: ${err.message}`);
   }
@@ -2557,7 +2542,7 @@ async function trustedLeadProfileIds(dbConn, leadId, token, custId, { includeMer
 // A failed createSelfBooking mapped to the page's responses: ALREADY_BOOKED
 // resolves to GET's already_booked shape; a 409 is SLOT_TAKEN with fresh
 // times; anything else passes through.
-async function sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, bookingAddress, alsoAt = null, range, config, catalog, verified }) {
+async function sendBookingFailure(res, result, { lead, custRow, leadPayload, nextCommit, range, config, catalog, verified }) {
   // A validated, in-area address the lead supplied through their own
   // link stays on the customer even when this attempt fails (owner
   // ruling 2026-09-24): undoing it raced concurrent bookings that had
@@ -2617,10 +2602,10 @@ async function sendBookingFailure(res, result, { lead, custRow, leadPayload, boo
   if (result.code === 'ADDRESS_UNVERIFIED') {
     return res.status(409).json({ error: result.error, code: 'ADDRESS_UNVERIFIED' });
   }
-  // Fresh times at the booking's own location, with the address and the second location the page's next commit checks
-  // (nextCommitRefresh), so the list offers what that commit admits (owner rule B per truck).
+  // Fresh times only where the page's next commit reads this one's inputs, else none and the page reloads its own
+  // list (nextCommitRefresh), so the times it shows are times that commit admits (owner rule B per truck).
   if (result.status === 409) {
-    return sendSlotTaken(res, { location: bookingLocation, address: bookingAddress, alsoAt, range, config, catalog, leadId: lead.id, error: result.error });
+    return sendSlotTaken(res, { ...(await nextCommitRefresh(nextCommit)), range, config, catalog, leadId: lead.id, error: result.error });
   }
   return res.status(result.status || 500).json({ error: result.error });
 }
@@ -2757,9 +2742,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // With the funnel on, createSelfBooking reads its zone from that address,
     // else from its customer's city on file (slot-zone.js leadBookingZone;
     // owner rule B, pre-push P1s on 3e6fd14320, 3b494d3581 and 46fd83d04f).
-    // When the city decides, the re-check and a 409's fresh times build from
-    // the profile's own address, the zone the booking checks, so a refreshed
-    // time is one the next commit books. With the funnel off the booking reads
+    // When the city decides, the re-check builds from the profile's own
+    // address, the zone the booking checks; a 409 answers fresh times only as
+    // nextCommitRefresh says. With the funnel off the booking reads
     // no zone address, so nothing is looked up here. A failed lookup keeps the
     // booking address (logged); the booking still checks its own zone under
     // its date lock (pre-push P1 on 84c9b2d840).
@@ -2771,11 +2756,11 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       })
       : { fromCustomer: false };
     const zoneSource = fromCustomer ? customerAddressFields(custRow) : bookingAddress;
-    const refresh = nextCommitRefresh({ resolved, lead, custRow, zoneSource, locationMoved });
+    const nextCommit = { lead, verified, resolved, custRow, zoneSource, bookingLocation, locationMoved };
     const bookingSlot = await revalidateSlotAt(bookingLocation, {
       slot, moved: locationMoved, zoneMoved: fromCustomer, date, time, config, catalog, leadId: lead.id, address: zoneSource,
     });
-    if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: refresh.address, alsoAt: refresh.alsoAt, range, config, catalog, leadId: lead.id });
+    if (!bookingSlot) return sendSlotTaken(res, { ...(await nextCommitRefresh(nextCommit)), range, config, catalog, leadId: lead.id });
 
     // Phase 2 — createSelfBooking's OWN atomic per-customer lane dedupe
     // (dedupeLane, left at its true default — no transaction of ours wraps
@@ -2814,7 +2799,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, slotGuard, zoneAddress, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), fenceIds: async (conn) => { fencedUniverse = await leadFenceIds(conn, lead.id, verified, custRow.id); return fencedUniverse; }, revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id, fencedUniverse) } });
 
     if (!result.ok) {
-      return sendBookingFailure(res, result, { lead, custRow, leadPayload, bookingLocation, bookingAddress: refresh.address, alsoAt: refresh.alsoAt, range, config, catalog, verified });
+      return sendBookingFailure(res, result, { lead, custRow, leadPayload, nextCommit, range, config, catalog, verified });
     }
 
     return res.json(await finishCommittedBooking({ result, notes, date, bookingSlot }));
@@ -2981,6 +2966,7 @@ router._test = {
   // Test hooks (geocode review quarantine round 3 P0 fixes, PR #5064).
   profileMatchesOrQuarantined,
   resolveOrLinkCustomerForLead,
+  nextCommitRefresh,
 };
 
 module.exports = router;
