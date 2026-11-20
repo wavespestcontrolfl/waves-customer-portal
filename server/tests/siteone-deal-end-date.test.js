@@ -163,6 +163,20 @@ describe('checkAnswer', () => {
     expect(read('2026-03-11', 'Flash sale ends Mar 3 - 11:59 PM')).toEqual(refused);
   });
 
+  // Pre-push audit on c9a07148db (P1): the same for days named without a date.
+  test('a range of weekdays, or from today, ends on its last day too', () => {
+    const sunday = new Date('2026-04-19T14:00:00Z'); // Sunday Apr 19, 10 AM ET
+    const promo = 'Subject\nOffer valid Monday through Friday. Flash deal today through Wednesday. Hat sale ends Friday.';
+    const read = (endDate, quote) => checkAnswer({ end_date: endDate, quote }, promo, sunday);
+    const refused = { ok: false, reason: 'quote_date_mismatch' };
+    expect(read('2026-04-20', 'Offer valid Monday through Friday')).toEqual(refused);
+    expect(read('2026-04-20', 'Offer valid Monday')).toEqual(refused);
+    expect(read('2026-04-24', 'Offer valid Monday through Friday').ok).toBe(true);
+    expect(read('2026-04-19', 'Flash deal today through Wednesday')).toEqual(refused);
+    expect(read('2026-04-22', 'Flash deal today through Wednesday').ok).toBe(true);
+    expect(read('2026-04-24', 'Hat sale ends Friday').ok).toBe(true);
+  });
+
   test('a long run of marks in the quote is refused fast', () => {
     const started = Date.now();
     expect(checkAnswer({ end_date: '2026-04-30', quote: `a${'.'.repeat(8000)}a` }, email, received)).toEqual({ ok: false, reason: 'no_quote' });

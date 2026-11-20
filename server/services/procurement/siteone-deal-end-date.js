@@ -166,8 +166,11 @@ const NUMERIC_DATE = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?\b/g;
 const ISO_DATE = /\b(20\d{2})-(\d{2})-(\d{2})\b/g;
 const MONTH_KEYS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-// The first date of "March 1 - April 30", "11/1-11/30" or "Nov 1 through Nov 30" opens a range: not an end.
+// The first day of "March 1 - April 30", "11/1-11/30", "Monday through Friday" or "today through
+// Sunday" opens a range: not an end.
 const RANGE_JOIN = /^ ?(?:-|to|through|thru|until|till) ?$/;
+// Words that name a day without a date.
+const DAY_WORD = /\b(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday|today|tonight|tomorrow)\b/g;
 
 /** Each calendar date the (comparable) words name, in order: { at, end, month, day, year } (year null when not given). */
 function quoteDates(text) {
@@ -181,30 +184,36 @@ function quoteDates(text) {
     .sort((a, b) => a.at - b.at);
 }
 
-/** True when a range join and another date follow date d in the text. */
-const opensRange = (text, d, dates) => {
-  const next = dates.find((n) => n.at >= d.end);
+/** Each date and day word in the text, in order; a day word has `word`, a date has month, day and year. */
+function dayMarks(text) {
+  const words = [...text.matchAll(DAY_WORD)].map((m) => ({ at: m.index, end: m.index + m[0].length, word: m[0] }));
+  return [...quoteDates(text), ...words].sort((a, b) => a.at - b.at);
+}
+
+/** True when a range join and another date or day word follow mark d in the text. */
+const opensRange = (text, d, marks) => {
+  const next = marks.find((n) => n.at >= d.end);
   return Boolean(next) && RANGE_JOIN.test(text.slice(d.end, next.at));
 };
 
 /**
  * True when the words name endDate; `away` is its day count from the ET day the email came.
  * `text` is the words (text.slice(0, wordsEnd)) and then the email right after them, so a
- * range the quote stops short of still shows its first day as a start, not an end.
+ * range the quote stops short of still shows its first day as a start, not an end. A date
+ * in the words decides; with none, a weekday at most a week on, "today"/"tonight" or
+ * "tomorrow" must land on endDate.
  */
 function quoteNamesDay({ text, wordsEnd }, endDate, away) {
   const [year, month, day] = endDate.split('-').map(Number);
-  const dates = quoteDates(text);
-  const named = dates.filter((d) => d.end <= wordsEnd);
-  if (named.length) {
-    return named.some((d) => d.month === month && d.day === day && (d.year === null || d.year === year)
-      && !opensRange(text, d, dates));
+  const marks = dayMarks(text);
+  const said = marks.filter((d) => d.end <= wordsEnd);
+  const ends = said.filter((d) => !opensRange(text, d, marks));
+  if (said.some((d) => !d.word)) {
+    return ends.some((d) => !d.word && d.month === month && d.day === day && (d.year === null || d.year === year));
   }
-  const words = text.slice(0, wordsEnd);
   const weekday = WEEKDAYS[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
-  return (away <= 7 && new RegExp(`\\b${weekday}\\b`).test(words))
-    || (away === 0 && /\b(?:today|tonight)\b/.test(words))
-    || (away === 1 && /\btomorrow\b/.test(words));
+  const lands = { [weekday]: away <= 7, today: away === 0, tonight: away === 0, tomorrow: away === 1 };
+  return ends.some((d) => lands[d.word] === true);
 }
 
 const WORD_CHAR = /[a-z0-9]/;
@@ -277,8 +286,8 @@ async function readOne(client, email) {
       return { ok: false, reason: `api_${err?.status || err?.name || 'error'}` };
     }
     // The ledger files both of these as failed calls on its own.
-    if (response?.stop_reason === 'refusal') return { ok: false, reason: 'refusal' };
-    if (response?.stop_reason === 'max_tokens') return { ok: false, reason: 'max_tokens' };
+    if (response.stop_reason === 'refusal') return { ok: false, reason: 'refusal' };
+    if (response.stop_reason === 'max_tokens') return { ok: false, reason: 'max_tokens' };
     const read = checkAnswer(parseAnswer(anthropicText(response)), `${subject}\n${body}`, received);
     if (!read.ok) ledgerCallRejected(response, read.reason === 'invalid_json' ? 'invalid_json' : 'schema_invalid');
     // "No end" on part of an email proves nothing: the end may sit in the part a cap dropped.

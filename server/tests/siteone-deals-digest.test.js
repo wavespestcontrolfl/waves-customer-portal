@@ -405,6 +405,8 @@ describe('runSiteOneDealsDigest', () => {
       expect(calls.claims[0].bindings).toEqual(['siteone-deal-end-date-pass', now, now, new Date('2026-11-02T05:00:00Z')]);
       // One read for the week's deals, newest first, on the same connection.
       expect(mockReadEndDates).toHaveBeenCalledTimes(1);
+      // This run's paid pass may rewrite the week's bell.
+      expect(notify.mock.calls[0][2].refreshOnDedupe).toBe(true);
       const [conn, deals] = mockReadEndDates.mock.calls[0];
       expect(conn).toBe(db);
       expect(deals.map((e) => e.id)).toEqual([32, 31, 33, 34]);
@@ -417,7 +419,9 @@ describe('runSiteOneDealsDigest', () => {
     });
 
     // Pre-push audit on b21fc449c9 (P1): a second Monday run in one week (a deploy-overlap tick
-    // that waited out the first run's lock) paid for the reads again.
+    // that waited out the first run's lock) paid for the reads again. And on c9a07148db (P1): its
+    // pattern-only lines then rewrote the bell the paid pass saved. Now it adds a bell only when
+    // none was saved this week (refreshOnDedupe false: a saved one stays as it is).
     test.each([
       ['a run this week already has the claim', 'taken', 'info', "[siteone-deals] end dates: this week's AI pass already ran; date patterns kept"],
       ['the claim cannot be written', 'fails', 'warn', '[siteone-deals] end dates not read by AI: weekly claim not written: claim boom'],
@@ -432,6 +436,7 @@ describe('runSiteOneDealsDigest', () => {
       expect(mockReadEndDates).not.toHaveBeenCalled();
       expect(logger[level]).toHaveBeenCalledWith(line);
       expect(notify.mock.calls[0][2].detail.split('\n').map((l) => l.split(' · ')[3])).toEqual(PATTERN_NOTES);
+      expect(notify.mock.calls[0][2]).toMatchObject({ dedupeKey: 'siteone-deals:2026-11-02', refreshOnDedupe: false });
     });
 
     test('gate on: a long quote is clipped in the line', async () => {

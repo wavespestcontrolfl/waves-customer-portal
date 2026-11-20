@@ -328,16 +328,18 @@ function candidateEmailQuery(conn, since, now) {
 // stamp is older than this ET week's Monday 00:00. A second Monday run that week (a deploy-
 // overlap tick that waited out the first one's lock) finds the claim taken and keeps the date
 // patterns, so a week pays for one pass at most. A claim that cannot be written pays nothing.
+// Either way that run leaves a bell already saved this week as it is (see runSiteOneDealsDigest).
+// `key` is for the Postgres test only, so its cleanup never touches the live claim.
 const AI_PASS_KEY = 'siteone-deal-end-date-pass';
 
-async function claimAiPass(conn, now) {
+async function claimAiPass(conn, now, key = AI_PASS_KEY) {
   try {
     const claimed = await conn.raw(
       `INSERT INTO ops_email_send_state (email_key, last_sent_at, updated_at) VALUES (?, ?, ?)
        ON CONFLICT (email_key) DO UPDATE SET last_sent_at = EXCLUDED.last_sent_at, updated_at = EXCLUDED.updated_at
        WHERE ops_email_send_state.last_sent_at IS NULL OR ops_email_send_state.last_sent_at < ?
        RETURNING email_key`,
-      [AI_PASS_KEY, now, now, parseETDateTime(`${etWeekStart(now)}T00:00`)],
+      [key, now, now, parseETDateTime(`${etWeekStart(now)}T00:00`)],
     );
     if (claimed?.rows?.length) return true;
     logger.info('[siteone-deals] end dates: this week\'s AI pass already ran; date patterns kept');
@@ -381,10 +383,14 @@ async function runSiteOneDealsDigest({ now = new Date(), db, notify, aiEndDates 
   }
 
   // Gate off, or not the Monday run: no model call, and every line keeps its date-pattern deadline.
+  // Gate on, Monday run, but this week's AI pass is not this run's (another run claimed it, or
+  // the claim failed): no model call, and the bell that pass saved keeps its AI dates. The run
+  // only adds a bell when none was saved this week, so a duplicate run never rewrites them.
   let endDates = new Map();
-  if (aiEndDates === true && require('../../config/feature-gates').siteOneDealAiEndDateLive?.() === true
-    && await claimAiPass(conn, now)) {
-    endDates = await require('./siteone-deal-end-date').readDealEndDates(conn, deals);
+  let keepSavedBell = false;
+  if (aiEndDates === true && require('../../config/feature-gates').siteOneDealAiEndDateLive?.() === true) {
+    if (await claimAiPass(conn, now)) endDates = await require('./siteone-deal-end-date').readDealEndDates(conn, deals);
+    else keepSavedBell = true;
   }
 
   const dedupeKey = `siteone-deals:${etWeekStart(now)}`;
@@ -403,7 +409,7 @@ async function runSiteOneDealsDigest({ now = new Date(), db, notify, aiEndDates 
     bell: true,
     detail: [...deals.map((e) => dealLine(e, productNames, endDates.get(e.id))), ...(capped ? [CAP_NOTE] : [])].join('\n'),
     dedupeKey,
-    refreshOnDedupe: true,
+    refreshOnDedupe: !keepSavedBell,
     metadata: { source: 'siteone-deals-digest', dealCount: count, emailIds: deals.map((e) => e.id) },
   });
   // The notification service resolves null when it could not save the row.
