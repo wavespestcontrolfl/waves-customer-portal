@@ -52,8 +52,11 @@ const PLANNED_KEYS = { 1: addressKey('a@example.com'), 2: addressKey('b@example.
 // Tiny knex-shaped chain helper. Mirrors the pattern used in
 // invoice-receipt-email-idempotency.test.js / portal-url.test.js so the
 // failure surface stays familiar.
+// `result` may be a function of the query's whereRaw calls ([sql, bindings] pairs), for a
+// re-check whose rows depend on the SQL it was given.
 function chain({ first, result, returning, count, updated, onUpdate, onWhereIn } = {}) {
   const q = {};
+  const raws = [];
   ['where', 'whereRaw', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereNull',
    'whereNotExists', 'select', 'orderBy', 'limit', 'leftJoin', 'join', 'forUpdate',
    // excludeMarketingOptedOut's pre-filtering CTE (codex #5165) — a no-op
@@ -64,6 +67,8 @@ function chain({ first, result, returning, count, updated, onUpdate, onWhereIn }
     if (onWhereIn) onWhereIn(...args);
     return q;
   });
+  q.whereRaw = jest.fn((sql, bindings) => { raws.push([sql, bindings]); return q; });
+  const rows = () => (typeof result === 'function' ? result(raws) : (result ?? []));
   q.first = jest.fn(async () => first);
   q.count = jest.fn(() => ({
     first: jest.fn(async () => ({ c: count ?? 0 })),
@@ -79,8 +84,8 @@ function chain({ first, result, returning, count, updated, onUpdate, onWhereIn }
     then: (resolve) => Promise.resolve(updated ?? 0).then(resolve),
     };
   });
-  q.then = (resolve, reject) => Promise.resolve(result ?? []).then(resolve, reject);
-  q.catch = (reject) => Promise.resolve(result ?? []).catch(reject);
+  q.then = (resolve, reject) => Promise.resolve().then(rows).then(resolve, reject);
+  q.catch = (reject) => Promise.resolve().then(rows).catch(reject);
   return q;
 }
 
@@ -109,6 +114,8 @@ function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch =
         customer_id: e.customer_id !== undefined
           ? e.customer_id
           : ((subscribers.find((s) => s.id === e.id) || {}).customer_id ?? null),
+        // The address on file at dispatch: the selected one unless a test moves it.
+        email: e.email !== undefined ? e.email : ((subscribers.find((s) => s.id === e.id) || {}).email ?? null),
       })) }),
     ],
     newsletter_send_deliveries: [
@@ -253,6 +260,35 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     expect(result.skipped_ineligible).toBe(1);
   });
 
+  test('a planned issue skips a reader whose address on file changed after the batch was loaded', async () => {
+    let skipUpdate = null;
+    buildDb({
+      send: {
+        id: 'send-1', status: 'draft', html_body: '<p>Body</p>', text_body: 'Body', subject: 'Hello',
+        from_email: 'newsletter@wavespestcontrol.com', from_name: 'Waves', reply_to: 'contact@wavespestcontrol.com',
+        segment_filter: { subscriber_ids: [1, 2], holdout: 'pest-insider', address_keys: PLANNED_KEYS }, subject_b: null,
+      },
+      // Loaded at the planned addresses; #1's was corrected while earlier batches went out.
+      subscribers: [
+        { id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null },
+        { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: KEPT_CUSTOMER },
+      ],
+      deliveries: [
+        { id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null },
+        { id: 'd-2', subscriber_id: 2, status: 'queued', ab_variant: null },
+      ],
+      eligibleAtDispatch: [{ id: 1, email: 'a-corrected@example.com' }, { id: 2 }],
+      skipUpdated: 1,
+      onSkipUpdate: (payload) => { skipUpdate = payload; },
+    });
+
+    const result = await sendCampaign('send-1');
+
+    expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['b@example.com']);
+    expect(skipUpdate).toMatchObject({ status: 'skipped', bounce_reason: 'ineligible_at_dispatch' });
+    expect(result.skipped_ineligible).toBe(1);
+  });
+
   test.each([
     ['no address keys', undefined],
     ['address keys that are not an object', ['k1', 'k2']],
@@ -382,7 +418,7 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     expect(result.accepted).toBe(1);
     // The re-check must ASK for customer_id — selecting only id would leave
     // the stale link in place with no way to notice.
-    expect(recheckQuery.select).toHaveBeenCalledWith('id', 'customer_id');
+    expect(recheckQuery.select).toHaveBeenCalledWith('id', 'customer_id', 'email');
     // Personalization resolves from the TWIN, not the archived profile.
     const recipient = mockSendBroadcast.mock.calls[0][0].recipients[0];
     expect(recipient.email).toBe('a@example.com');
@@ -1418,7 +1454,7 @@ describe('resumeCampaign — preconditions', () => {
           { id: 2, email: mailedAt, unsubscribe_token: 'tok-b', customer_id: null },
         ] }),
         // Dispatch re-check: both still eligible; #2 was a lead at the first send.
-        chain({ result: [{ id: 1, customer_id: KEPT_CUSTOMER }, { id: 2, customer_id: customerAtDispatch }] }),
+        chain({ result: [{ id: 1, customer_id: KEPT_CUSTOMER, email: 'a@example.com' }, { id: 2, customer_id: customerAtDispatch, email: mailedAt }] }),
       ],
     };
     queues.newsletter_calendar = [chain({ updated: 1 })];
@@ -1436,6 +1472,78 @@ describe('resumeCampaign — preconditions', () => {
     expect(skipUpdate).toMatchObject({ status: 'skipped', bounce_reason: 'ineligible_at_dispatch', send_attempt_token: null });
     expect(result.skipped_ineligible).toBe(1);
     expect(finalUpdate.recipient_count).toBe(1);
+  });
+
+  test.each([
+    ['an empty list', [], []],
+    ['no list', undefined, []],
+    ['a list without the second reader', [1], ['a@example.com']],
+  ])('resume: a planned issue whose subscriber_ids is %s mails only the readers that list holds', async (_label, subscriberIds, mailed) => {
+    let skipUpdate = null;
+    const sentSend = {
+      id: 's',
+      status: 'sent',
+      sent_at: new Date('2026-05-01T10:00:00Z'),
+      html_body: '<p>Body</p>',
+      text_body: 'Body',
+      subject: 'Hello',
+      from_email: 'newsletter@wavespestcontrol.com',
+      from_name: 'Waves',
+      reply_to: 'contact@wavespestcontrol.com',
+      segment_filter: { subscriber_ids: subscriberIds, holdout: 'pest-insider', address_keys: PLANNED_KEYS },
+      subject_b: null,
+    };
+    const onFile = [{ id: 1, customer_id: KEPT_CUSTOMER, email: 'a@example.com' }, { id: 2, customer_id: null, email: 'b@example.com' }];
+    // The dispatch re-check answers as SQL would: nobody for 1 = 0, the listed ids for ANY.
+    const recheck = (raws) => {
+      if (raws.some(([sql]) => sql === '1 = 0')) return [];
+      const listed = raws.find(([sql]) => sql.includes('= ANY('));
+      return listed ? onFile.filter((r) => listed[1][0].includes(r.id)) : onFile;
+    };
+    const queues = {
+      newsletter_sends: [
+        chain({ first: sentSend }),                           // resume fetch
+        chain({ returning: [{ id: 's' }] }),                  // conditional preclaim
+        chain({ first: { ...sentSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
+        chain({ updated: 1 }),                                // per-chunk heartbeat
+        chain({ updated: 1 }),                                // final status update
+        chain({ first: null }),
+      ],
+      newsletter_send_deliveries: [
+        chain({ count: 2 }),                                  // rows exist
+        chain({ count: 2 }),                                  // two outstanding
+        chain({ result: [
+          { id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null },
+          { id: 'd-2', subscriber_id: 2, status: 'queued', ab_variant: null },
+        ] }),
+        chain({ returning: [
+          { id: 'd-1', subscriber_id: 1, send_attempt_token: 'attempt-1' },
+          { id: 'd-2', subscriber_id: 2, send_attempt_token: 'attempt-2' },
+        ] }),                                                 // claim both before SendGrid
+        chain({ updated: 2 - mailed.length, onUpdate: (payload) => { skipUpdate = payload; } }), // terminal skip
+        chain({ updated: 1 }),                                // post-send bulk update
+        chain({ count: 0 }),                                  // final retryable ledger count
+      ],
+      newsletter_subscribers: [
+        chain({ result: [
+          { id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: KEPT_CUSTOMER },
+          { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: null },
+        ] }),
+        chain({ result: recheck }),
+      ],
+      newsletter_calendar: [chain({ updated: 1 })],
+    };
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+
+    await resumeCampaign('s');
+
+    const sent = mockSendBroadcast.mock.calls.flatMap(([args]) => args.recipients.map((r) => r.email));
+    expect(sent).toEqual(mailed);
+    expect(skipUpdate).toMatchObject({ status: 'skipped', bounce_reason: 'ineligible_at_dispatch' });
   });
 
   test('resume: a holdout name this server does not know stops the resume before anything is sent (it never reads the subscriber query)', async () => {

@@ -500,14 +500,16 @@ function sendHoldout(segmentFilter) {
 }
 
 // True when a recipient still belongs to its planned issue: not held out on
-// the customer linked now, and about to be mailed at the address the plan
-// qualified. A missing or malformed address_keys keeps nobody.
-function keepsPlannedAudience(plan, segmentFilter, subscriberId, customerId, email) {
+// the customer linked now, and every one of `addresses` (the address about to
+// be mailed and the address on file now) is the one the plan qualified. A
+// missing or malformed address_keys keeps nobody.
+function keepsPlannedAudience(plan, segmentFilter, subscriberId, customerId, addresses) {
   if (plan.heldOut(customerId)) return false;
   const keys = segmentFilter?.address_keys;
   if (!keys || typeof keys !== 'object' || Array.isArray(keys)) return false;
   const id = String(subscriberId);
-  return Object.hasOwn(keys, id) && typeof keys[id] === 'string' && keys[id] === plan.addressKey(email);
+  if (!Object.hasOwn(keys, id) || typeof keys[id] !== 'string') return false;
+  return addresses.every((address) => keys[id] === plan.addressKey(address));
 }
 
 // The keys a planned issue's segment_filter carries (a Waves Pest Insider
@@ -1149,17 +1151,25 @@ async function sendCampaign(sendId, opts = {}) {
       // eligible — but the row we selected still carries the OLD (archived)
       // customer_id, which would personalize the email and file the customer
       // touchpoint against the archived profile.
-      const freshCustomerBySub = new Map((await excludeMailboxNotMailable(excludeArchivedCustomers(excludeGloballySuppressed(
+      // A planned send's own list applies here too (narrowToPlannedAudience): a
+      // resume reads its retryable rows from the ledger and never runs
+      // buildSubscriberQuery, so a reader the list does not hold, or a missing,
+      // empty or malformed list, is skipped here, terminally.
+      const freshRows = await narrowToPlannedAudience(excludeMailboxNotMailable(excludeArchivedCustomers(excludeGloballySuppressed(
         db('newsletter_subscribers').where({ status: 'active' }).whereIn('id', chunkToSend.map((s) => s.id)),
-      ))).select('id', 'customer_id')).map((r) => [r.id, r.customer_id ?? null]));
+      ))), send.segment_filter || {}).select('id', 'customer_id', 'email');
+      const freshCustomerBySub = new Map(freshRows.map((r) => [r.id, r.customer_id ?? null]));
       // A send that names a planned audience (a Waves Pest Insider issue) also
       // skips anyone held out on the customer linked right now, and anyone
-      // about to be mailed at an address the plan did not qualify.
+      // whose address, about to be mailed or on file now, is not the one the
+      // plan qualified (an address corrected while earlier batches went out).
       const plan = sendHoldout(send.segment_filter);
       const mailedAddressBySub = new Map(chunkToSend.map((s) => [s.id, s.email]));
+      const currentAddressBySub = new Map(freshRows.map((r) => [r.id, r.email]));
       const stillEligible = plan
         ? new Map([...freshCustomerBySub].filter(([subscriberId, customerId]) => keepsPlannedAudience(
-          plan, send.segment_filter, subscriberId, customerId, mailedAddressBySub.get(subscriberId),
+          plan, send.segment_filter, subscriberId, customerId,
+          [mailedAddressBySub.get(subscriberId), currentAddressBySub.get(subscriberId)],
         )))
         : freshCustomerBySub;
       const ineligible = chunkToSend.filter((s) => !stillEligible.has(s.id));
