@@ -32,6 +32,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { zipToCity } = require('../utils/zip-to-city');
 const { urgencyForTimeline } = require('./lead-timeline');
+const { quizNoteLine } = require('./lead-quiz');
 const { formatAddress } = require('../utils/address-normalizer');
 
 const HOLD_STAGE = 'lead_webhook_unverified';
@@ -109,8 +110,12 @@ async function holdUnverifiedLead({ intake, leadSourceId = null, reason = 'missi
   // Staff-visible lines the verified path puts on its Customer 360 note. No
   // admin lead UI renders extracted_data, so they ride on the activity note.
   const extraProperties = intake.additionalProperties || [];
+  // A quiz page's three tap answers (fixed tokens): "Pest Quiz: Roaches, condo,
+  // wants it today", the same line the verified path's note carries.
+  const quizNote = quizNoteLine(intake.quiz, intake.timeline);
   const noteLines = [
     intake.signHost ? `Saw our yard sign at: ${intake.signHost} (neighbor page; that home gets a $25 thank-you credit after a new customer's first service).` : '',
+    quizNote ? `${quizNote}.` : '',
     extraProperties.length
       ? `Visitor also asked to cover: ${extraProperties.map((p) => formatAddress({ line1: p.address_line1, line2: p.address_line2, city: p.city, state: p.state, zip: p.zip })).join('; ')}.`
       : '',
