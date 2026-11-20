@@ -27,6 +27,7 @@ const { verifyLeadAttachToken, verifyLeadPrefillToken, ATTACH_TTL_SECONDS } = re
 
 const {
   buildLeadWebhookIntake, commercialLeadFields, TRIAGE_REPLACE_EXTRACTED_SQL, triageExtractedForWrite, quizHandoffFor,
+  submitsServiceKey, normalizeLeadServiceKey,
 } = _test;
 
 const quizBody = (extra = {}) => ({
@@ -156,6 +157,23 @@ describe('the unverified hold keeps the quiz answers', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/lead-unverified-hold.js'), 'utf8');
     const stage = src.slice(src.indexOf('const stage = {'));
     expect(stage.slice(0, stage.indexOf('\n  };'))).toMatch(/\.\.\.\(intake\.quiz \? \{ quiz: intake\.quiz \} : \{\}\),/);
+  });
+});
+
+describe('submitsServiceKey: a submission that names a service key never asks for a hand-off', () => {
+  test('any nonblank value in either field counts, also one the key reader drops or a blank alias masks', () => {
+    expect(submitsServiceKey({ serviceKey: 'pest_quarterly' })).toBe(true);
+    expect(submitsServiceKey({ service_key: 'pest_quarterly' })).toBe(true);
+    const malformed = { serviceKey: 'not a key!' };
+    const masked = { serviceKey: '', service_key: 'pest_quarterly' };
+    expect([normalizeLeadServiceKey(malformed), normalizeLeadServiceKey(masked)]).toEqual([null, null]);
+    expect([submitsServiceKey(malformed), submitsServiceKey(masked)]).toEqual([true, true]);
+  });
+
+  test('absent or blank fields name none', () => {
+    for (const body of [{}, undefined, { serviceKey: null }, { serviceKey: '', service_key: '   ' }, { service_key: undefined }]) {
+      expect(submitsServiceKey(body)).toBe(false);
+    }
   });
 });
 

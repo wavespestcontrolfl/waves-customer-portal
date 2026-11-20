@@ -227,7 +227,14 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
       const drafts = await db('estimates').whereRaw(`${LAST_TEN('customer_phone')} = ?`, [body.phone]);
       expect(drafts.map((row) => [row.source, row.status])).toEqual(FORM_DRAFT);
       expect(JSON.stringify(parsed(drafts[0].estimate_data))).toContain('Submitted service key could not be verified against the catalog');
-    }, 60000);
+      // A value the webhook does not read as a key (malformed, or masked by a
+      // blank alias) still names one: no hand-off, and the draft every form gets.
+      for (const named of [{ serviceKey: 'not a key!' }, { serviceKey: '', service_key: 'no_such_service_key' }]) {
+        const other = priceAsk(named);
+        expect((await post('/api/leads', other)).json.handoff).toBeUndefined();
+        expect(await estimatesOnPhone(other.phone)).toEqual(FORM_DRAFT);
+      }
+    }, 120000);
 
     test('asked, but the answers end on a call, a business call-back or an office review: the draft and no hand-off', async () => {
       const elsewhere = [

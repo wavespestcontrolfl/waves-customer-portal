@@ -4465,10 +4465,10 @@ saves to replay later (nobody is there to use the hand-off, and the lead
 would get no draft). The server's own rule must agree (`quizContinuesToPrice`,
 `server/services/lead-quiz.js`: a named problem, `property` `house` |
 `townhome` | `condo`, `timeline` `this_week` | `this_month` | `browsing`),
-and the submission must name no service key (`serviceKey` / `service_key`,
-confirmed or not: a keyed lead keeps its catalog label, and a key the
-catalog cannot confirm must reach the draft step, which parks it for
-review). When all hold AND this request INSERTS the `leads` row (never an
+and the submission must name no service key (any nonblank `serviceKey` or
+`service_key` value, well-formed or not, confirmed or not: a keyed lead
+keeps its catalog label, and a key the catalog cannot confirm must reach
+the draft step, which parks it for review). When all hold AND this request INSERTS the `leads` row (never an
 attach to a call lead, never the existing-customer or unverified-hold
 reply, never a row the readiness gate marked commercial), the response
 gains `handoff: { lead_id, token, expires_in }`: an ATTACH token for that

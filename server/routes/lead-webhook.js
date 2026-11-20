@@ -760,13 +760,13 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // A quiz page sends `price_handoff: true` when its answers end on a price
     // page and its browser can carry the hand-off there. The server's own
     // rule must agree (quizContinuesToPrice: a named problem, at a home,
-    // that can wait). Never for a submission that names a catalog key,
-    // confirmed or not: a keyed lead's label is its catalog identity (the
+    // that can wait). Never for a submission that names a service key
+    // (submitsServiceKey): a keyed lead's label is its catalog identity (the
     // price page would rewrite the label beside the key), and a key the
     // catalog cannot confirm must reach the draft step, which parks it for
     // review. No other form sends the flag, and a saved replay never does,
     // so nothing below changes for them.
-    const quizPriceAsk = body.price_handoff === true && !serviceKey && quizContinuesToPrice(quiz, timeline);
+    const quizPriceAsk = body.price_handoff === true && !submitsServiceKey(body) && quizContinuesToPrice(quiz, timeline);
 
     // Create estimate/quote record so it appears in Pipeline → Quotes tab
     let createdEstimateId = null;
@@ -1977,6 +1977,14 @@ function normalizeLeadServiceKey(body = {}) {
   return /^[a-z0-9_]{1,80}$/.test(key) ? key : null;
 }
 
+// True when either service key field holds any nonblank value. Wider than
+// normalizeLeadServiceKey on purpose: a value it drops (malformed), or one a
+// blank `serviceKey` masks, still says the page meant a catalog product, and
+// such a submission keeps the path every form takes (the quiz hand-off).
+function submitsServiceKey(body = {}) {
+  return [body.serviceKey, body.service_key].some((value) => String(value ?? '').trim() !== '');
+}
+
 function normalizeLeadServiceInterest(body = {}) {
   const explicit = firstNonEmpty(
     body.service_interest,
@@ -2355,6 +2363,7 @@ module.exports._test = {
   attachOpenCallLeadByPhone,
   buildLeadWebhookIntake,
   quizHandoffFor,
+  submitsServiceKey,
   normalizeSignHost,
   SIGN_HOST_MAX_LENGTH,
   TRIAGE_REPLACE_EXTRACTED_SQL,
