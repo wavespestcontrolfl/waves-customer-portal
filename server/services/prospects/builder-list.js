@@ -18,18 +18,21 @@ const { dateOnlyString, dateOnlyAtNoonUtc } = require('../../utils/date-only');
 const COMPANY_WORDS = new Set(['LLC', 'INC', 'CORP', 'CORPORATION', 'CO', 'COMPANY', 'LTD', 'INCORPORATED']);
 
 /**
- * Upper case, accents dropped (PEÑA -> PENA, so it matches a customer typed without the accent), apostrophes and
- * periods gone (straight or curly), commas and other punctuation a space (POOLS,LLC is POOLS LLC), trailing company
- * words (LLC, INC, ...) dropped.
- * Letters of any script and digits stay, so two names in another alphabet never share a key.
+ * Upper case, accents on Latin letters dropped (PEÑA -> PENA, so it matches a customer typed without the accent),
+ * apostrophes and periods gone (straight or curly), commas and other punctuation a space (POOLS,LLC is POOLS LLC),
+ * trailing company words (LLC, INC, ...) dropped.
+ * Letters of any script, their marks and digits stay, so two names in another alphabet never share a key: in
+ * Japanese or Cyrillic a mark makes another letter (ガ is not カ, Й is not И), and in Devanagari a vowel sign is part
+ * of the word.
  */
 function builderKey(name) {
   const words = String(name == null ? '' : name)
     .normalize('NFKD')
-    .replace(/\p{M}+/gu, '')
+    .replace(/(\p{Script=Latin})\p{M}+/gu, '$1')
+    .normalize('NFC')
     .toUpperCase()
     .replace(/['‘’.]/g, '')
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ')
     .trim()
     .split(' ')
     .filter(Boolean);

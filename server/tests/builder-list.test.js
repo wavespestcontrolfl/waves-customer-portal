@@ -29,6 +29,12 @@ describe('builderKey', () => {
     // Letters of another alphabet stay letters: two such names never share a key.
     ['Пул Плюс LLC', 'ПУЛ ПЛЮС'],
     ['Пул Мир LLC', 'ПУЛ МИР'],
+    // Only Latin letters lose their accents. Elsewhere a mark is part of the letter or the word.
+    ['カナ LLC', 'カナ'],
+    ['ガナ LLC', 'ガナ'],
+    ['ｶﾞﾅ LLC', 'ガナ'],
+    ['Йод Пулс', 'ЙОД ПУЛС'],
+    ['राम बिल्डर्स LLC', 'राम बिल्डर्स'],
   ])('%s -> %s', (input, expected) => expect(builderKey(input)).toBe(expected));
 
   test('keeps a name that is only company words, and returns empty for blank input', () => {
