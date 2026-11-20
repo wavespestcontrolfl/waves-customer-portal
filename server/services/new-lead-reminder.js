@@ -23,11 +23,13 @@
  *   the lead is deleted, not open or already converted (lead-statuses.js isOpenLeadRow: spam, cancelled, won, lost and the like
  *   are out), or has an estimate sent or viewed; the call that made the lead was
  *   answered by a person (only for the bell raised with the lead itself, within 15 minutes of its creation: a later bell,
- *   such as a form sent again on an old call lead, is a fresh inquiry); a person's text or call, or a Gmail send, or a visit
+ *   such as a form sent again on an old call lead, is a fresh inquiry, and a repeat-form bell is always one); a person's
+ *   text or call, or a Gmail send, or a visit
  *   booked, reached the lead's customer or phone since 5 minutes before that bell's inquiry began (for a bell raised with
  *   the lead: the earlier of the bell and the lead's first_contact_at, else created_at; for a later bell: the bell itself; a bell that
  *   names an email, metadata.emailId, counts from that message's received_at; the push deadline stays on the bell);
- *   a person's email to the lead's own address since the same moment; or an estimate was sent (sent_at, as the new-lead
+ *   a person's email to the lead's own address since the same moment (one the shared linkage ties to this lead's customer,
+ *   or to nobody while no other customer holds the address); or an estimate was sent (sent_at, as the new-lead
  *   class of admin-alert-relevance.js reads it: the one the bell names, the lead's own, or any to its customer) or handed
  *   off to the customer. A lead needs a customer, a 10-digit
  *   phone or an email address to be judged: an email-only lead is judged on email and estimate evidence. A lead row that is
@@ -85,18 +87,23 @@ function pushWindow(askedAt, afterMinutes, lateMinutes) {
   return { dueAt, expiresAt: businessDueAt(dueAt, lateMinutes) };
 }
 
+// The relevance sweep's own class for the repeat-form bell (lead-webhook.js ringRepeatFormAlert): its category and
+// dedupeKey prefix. lead-webhook-repeat-form.test.js pins the writer to it.
+const repeatFormClass = () => relevance().CLASSES.find((c) => c.key === 'lead_repeat_form');
+
 // The open, unpushed bell rows: the shared read (lead-reminder-sweep.js) of every new-lead bell, and of the repeat-form
-// bell by the relevance sweep's own class for it (its category and dedupeKey prefix), so the two read one definition.
+// bell by its relevance class, so the two read one definition.
 function kind() {
-  const repeatForm = relevance().CLASSES.find((c) => c.key === 'lead_repeat_form');
+  const repeatForm = repeatFormClass();
   return { stamp: PUSH_STAMP, match: [{ categories: ['new_lead'] }, { categories: repeatForm.categories, keyPrefixes: [repeatForm.prefix] }] };
 }
 const candidateQuery = (since, cursor, pageSize) => sweep.__private.candidateQuery(kind(), since, cursor, pageSize);
 
-// The rows with a push due now: { row, meta, askedAt, leadId, expiresAt }. A row that names no lead (a tracking-line
-// text, or a repeat form from a customer row with no lead row) cannot be judged, so it sends nothing.
+// The rows with a push due now: { row, meta, askedAt, leadId, expiresAt, repeatForm }. A row that names no lead (a
+// tracking-line text, or a repeat form from a customer row with no lead row) cannot be judged, so it sends nothing.
 function dueItems(rows, now) {
   const { bellEventAt, parseMeta, refsFromRow } = relevance();
+  const repeatPrefix = repeatFormClass().prefix;
   const floor = now.getTime() - WINDOW_MS;
   const items = [];
   for (const row of rows) {
@@ -105,7 +112,8 @@ function dueItems(rows, now) {
     const leadId = refsFromRow(row).leadId;
     if (!leadId || !askedAt || askedAt.getTime() <= floor || meta[PUSH_STAMP]) continue;
     const { dueAt, expiresAt } = pushWindow(askedAt, PUSH_AFTER_MINUTES, PUSH_LATE_MINUTES);
-    if (dueAt.getTime() <= now.getTime() && expiresAt.getTime() >= now.getTime()) items.push({ row, meta, askedAt, leadId, expiresAt });
+    if (dueAt.getTime() > now.getTime() || expiresAt.getTime() < now.getTime()) continue;
+    items.push({ row, meta, askedAt, leadId, expiresAt, repeatForm: String(meta.dedupeKey || '').startsWith(repeatPrefix) });
   }
   return items;
 }
@@ -127,9 +135,10 @@ async function emailReceivedAt(items) {
 // own intake looks back to the lead's first contact (an email lead's first_contact_at is the message's receipt time, before
 // the classification that created the lead), and the call that made the lead counts only for that bell. A later bell (a form
 // sent again on a lead already on file) is a fresh inquiry: evidence counts only from the bell itself, or, for a bell that
-// names an email (`emailAt`, the message's received_at), from the message. The push deadline stays on the bell.
-function inquiryOf({ askedAt, lead }, emailAt = null) {
-  const intake = askedAt.getTime() - new Date(lead.created_at).getTime() <= INTAKE_BELL_MS;
+// names an email (`emailAt`, the message's received_at), from the message. A repeat-form bell is always a later bell: the
+// lead was on file before that form, however soon after it the form came. The push deadline stays on the bell.
+function inquiryOf({ askedAt, lead, repeatForm = false }, emailAt = null) {
+  const intake = !repeatForm && askedAt.getTime() - new Date(lead.created_at).getTime() <= INTAKE_BELL_MS;
   const starts = [askedAt.getTime()];
   if (intake) starts.push(new Date(lead.first_contact_at || lead.created_at).getTime());
   if (emailAt) starts.push(emailAt.getTime());
@@ -182,20 +191,41 @@ async function reachedLeads(items) {
 }
 
 // An email a person sent to the lead's own address since the item's anchor (a Gmail SENT row): the witnesses read only a
-// customer's address, and a lead that came in by email may have no customer yet. The read starts at the earliest anchor of
-// these items, so a reply inside an old lead's own window is never cut off. Returns the test for one item.
+// customer's address, and a lead that came in by email may have no customer yet. A send counts only when it is this
+// lead's, by the witnesses' own linkage (resolveEmailCustomerLink): linked to the lead's customer, or linked to nobody
+// while no other customer holds the address. A send linked to another customer, or one to a mailbox another customer
+// shares, says nothing about this lead. The read starts at the earliest anchor of these items, so a reply inside an old
+// lead's own window is never cut off. Returns the test for one item.
 async function personEmailed(items) {
-  const { personSentFilter, extractEmailAddresses } = require('./email/email-customer-link');
+  const { personSentFilter, extractEmailAddresses, resolveEmailCustomerLink } = require('./email/email-customer-link');
   const addresses = [...new Set(items.map(({ lead }) => leadEmail(lead)).filter(Boolean))];
+  if (!addresses.length) return () => false;
   const earliest = new Date(Math.min(...items.map((item) => item.anchor.getTime())));
-  const rows = addresses.length
-    ? await db('emails as er').whereRaw(personSentFilter('er'))
-      .where('er.received_at', '>', earliest)
-      .whereRaw("EXISTS (SELECT 1 FROM unnest(?::text[]) AS a(addr) WHERE strpos(LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address)), a.addr) > 0)", [addresses])
-      .select('er.to_address', 'er.cc_address', 'er.bcc_address', 'er.received_at')
-    : [];
-  const sentTo = rows.map((r) => ({ at: new Date(r.received_at).getTime(), to: new Set(extractEmailAddresses([r.to_address, r.cc_address, r.bcc_address].filter(Boolean).join(','))) }));
-  return ({ lead }, anchor) => !!leadEmail(lead) && sentTo.some((m) => m.at > anchor.getTime() && m.to.has(leadEmail(lead)));
+  const rows = await db('emails as er').whereRaw(personSentFilter('er'))
+    .where('er.received_at', '>', earliest)
+    .whereRaw("EXISTS (SELECT 1 FROM unnest(?::text[]) AS a(addr) WHERE strpos(LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address)), a.addr) > 0)", [addresses])
+    .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.cc_address', 'er.bcc_address', 'er.received_at');
+  // The customers holding each address, read the way the linkage matches a customer's email.
+  const holders = new Map();
+  const customers = await db('customers').whereNull('deleted_at').whereIn(db.raw('LOWER(TRIM(email))'), addresses).select('id', 'email');
+  for (const customer of customers) {
+    for (const address of extractEmailAddresses(customer.email)) holders.set(address, new Set([...(holders.get(address) || []), String(customer.id)]));
+  }
+  const sent = [];
+  for (const r of rows) {
+    sent.push({
+      at: new Date(r.received_at).getTime(),
+      to: new Set(extractEmailAddresses([r.to_address, r.cc_address, r.bcc_address].filter(Boolean).join(','))),
+      linked: await resolveEmailCustomerLink(db, r),
+    });
+  }
+  return ({ lead }, anchor) => {
+    const address = leadEmail(lead);
+    if (!address) return false;
+    const own = lead.customer_id ? String(lead.customer_id) : null;
+    const shared = [...(holders.get(address) || [])].some((id) => id !== own);
+    return sent.some((m) => m.at > anchor.getTime() && m.to.has(address) && (m.linked ? String(m.linked) === own : !shared));
+  };
 }
 
 // A quote sent to the lead since `anchor`, the way the new-lead class of admin-alert-relevance.js (newLeadMovedOn) reads

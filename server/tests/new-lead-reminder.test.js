@@ -6,7 +6,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const mockState = {};
 const resetState = () => Object.assign(mockState, {
-  rows: [], leads: [], answered: [], estimates: [], emails: [], emailRows: [], handedOff: null, customer: null, stampResults: [], open: {}, calls: [], failLeads: false, failOpen: false, pages: null, onOpenRead: null,
+  rows: [], leads: [], answered: [], estimates: [], emails: [], emailRows: [], handedOff: null, customer: null, customerRows: [], links: {}, stampResults: [], open: {}, calls: [], failLeads: false, failOpen: false, pages: null, onOpenRead: null,
 });
 resetState();
 jest.mock('../models/db', () => {
@@ -20,7 +20,7 @@ jest.mock('../models/db', () => {
     if (state.table === 'estimates') return state.verb === 'first' ? mockState.handedOff : mockState.estimates;
     if (state.table === 'emails as er') return mockState.emails;
     if (state.table === 'emails') return mockState.emailRows;
-    if (state.table === 'customers') return state.verb === 'first' ? mockState.customer : [];
+    if (state.table === 'customers') return state.verb === 'first' ? mockState.customer : mockState.customerRows;
     if (state.table !== 'notifications') return [];
     if (state.verb === 'update') return mockState.stampResults.length ? mockState.stampResults.shift() : 1;
     if (state.verb === 'first') {
@@ -74,6 +74,11 @@ jest.mock('../services/call-commitments', () => ({
   whereEstimateCustomerOwnership: jest.fn((q) => q),
 }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: false, push: { sent: 1 } })) }));
+// The witnesses' email linkage, set per test (mockState.links: a sent row's id -> the customer it links to; none = no link).
+jest.mock('../services/email/email-customer-link', () => ({
+  ...jest.requireActual('../services/email/email-customer-link'),
+  resolveEmailCustomerLink: jest.fn(async (_conn, sent) => mockState.links[sent.id] || null),
+}));
 const { triggerNotification } = require('../services/notification-triggers');
 const { loadContactBundles } = require('../services/admin-alert-contact-witnesses');
 const sweepShared = require('../services/lead-reminder-sweep');
@@ -97,6 +102,13 @@ const row = (id, { createdAt = est('09', '10:00'), metadata = {}, title = 'New l
 });
 const lead = (over = {}) => ({
   id: LEAD, customer_id: CUST, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample', status: 'new', deleted_at: null, created_at: est('09', '10:00'), twilio_call_sid: null, estimate_id: null, email: 'pat@example.invalid', ...over,
+});
+// The row lead-webhook.js ringRepeatFormAlert writes: category lead, the lead in metadata and in the link, no triggerKey.
+const repeatFormRow = (id, createdAt = est('09', '10:00')) => ({
+  id, category: 'lead', title: 'Leads — call Pat Sample about the quote form', body: 'Pat sent the quote form; on file as a lead since Nov 2.',
+  link: `/admin/leads?lead=${LEAD}`,
+  metadata: { dedupeKey: `lead-repeat-form:${CUST}`, customerId: CUST, leadId: LEAD, source: 'lead_repeat_form', subject: { type: 'lead', id: LEAD }, doneWhen: 'lead_contacted', who: 'person' },
+  created_at: createdAt, created_at_token: createdAt.toISOString(),
 });
 const pushes = () => triggerNotification.mock.calls.filter(([key]) => key === 'lead_call_reminder');
 const updates = () => mockState.calls.filter((c) => c.table === 'notifications' && c.verb === 'update');
@@ -266,14 +278,7 @@ describe('the 15-minute push (no gate)', () => {
   });
 
   test('a lead who sent the quote form again, nobody reached since that form: one push, judged from the form', async () => {
-    // The row ringRepeatFormAlert writes: category lead, the lead in metadata and in the link, no triggerKey.
-    const repeatForm = (id) => ({
-      id, category: 'lead', title: 'Leads — call Pat Sample about the quote form', body: 'Pat sent the quote form; on file as a lead since Nov 2.',
-      link: `/admin/leads?lead=${LEAD}`,
-      metadata: { dedupeKey: `lead-repeat-form:${CUST}`, customerId: CUST, leadId: LEAD, source: 'lead_repeat_form', subject: { type: 'lead', id: LEAD }, doneWhen: 'lead_contacted', who: 'person' },
-      created_at: est('09', '10:00'), created_at_token: est('09', '10:00').toISOString(),
-    });
-    mockState.rows = [repeatForm('rf-1')];
+    mockState.rows = [repeatFormRow('rf-1')];
     mockState.leads = [lead({ created_at: est('02', '10:00'), status: 'contacted' })];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
     expect(pushes()[0][1]).toMatchObject({ alertRowId: 'rf-1', alertLink: `/admin/leads?lead=${LEAD}` });
@@ -281,8 +286,24 @@ describe('the 15-minute push (no gate)', () => {
     expect(loadContactBundles.mock.calls[0][0][0].bellAt).toEqual(est('09', '09:55'));
 
     jest.clearAllMocks();
-    mockState.rows = [repeatForm('rf-2')];
+    mockState.rows = [repeatFormRow('rf-2')];
     mockBundles.byId['rf-2'] = { textAt: est('09', '10:05') };
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
+  });
+
+  test('a repeat form minutes after a call lead is a fresh inquiry: the answered call that made the lead does not settle it', async () => {
+    // A person answered the call that made the lead at 9:52; the caller sent the quote form at 10:00.
+    mockState.leads = [lead({ created_at: est('09', '09:52'), twilio_call_sid: CALL_SID })];
+    mockState.answered = [{ twilio_call_sid: CALL_SID }];
+    mockState.rows = [repeatFormRow('rf-1')];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
+    // Judged from the form itself, never from the lead's first contact, and the call is not read.
+    expect(loadContactBundles.mock.calls[0][0][0].bellAt).toEqual(est('09', '09:55'));
+    expect(mockState.calls.filter((c) => c.table === 'call_log')).toEqual([]);
+
+    // The new-lead bell written with that lead is its intake bell: the answered call settles it.
+    jest.clearAllMocks();
+    mockState.rows = [row('n-2')];
     expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
   });
 
@@ -434,6 +455,29 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     expect(await run(PUSH_NOW)).toMatchObject({ pushed: 0 });
     mockState.emails = [{ to_address: 'someone.else@example.invalid', cc_address: null, bcc_address: null, received_at: est('09', '10:05') }];
     expect(await run(PUSH_NOW)).toMatchObject({ pushed: 1 });
+  });
+
+  test('a send to a mailbox the lead shares with another customer counts only when the linkage ties it to this lead', async () => {
+    const OTHER = '33333333-3333-4333-8333-333333333333';
+    // Two customers on file with one address (a couple, or a landlord and a tenant).
+    mockState.customerRows = [{ id: CUST, email: 'pat@example.invalid' }, { id: OTHER, email: 'Pat@Example.invalid' }];
+    mockState.emails = [{ id: 'm-1', gmail_thread_id: 't-1', to_address: 'pat@example.invalid', cc_address: '', bcc_address: '', received_at: est('09', '10:05') }];
+    // Linked to the other customer: it says nothing about this lead.
+    mockState.links = { 'm-1': OTHER };
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
+    // Linked to nobody: it may have been for either customer, so it does not settle this lead either.
+    mockState.links = {};
+    mockState.rows = [row('n-2')];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
+    // Linked to the lead's own customer: reached.
+    mockState.links = { 'm-1': CUST };
+    mockState.rows = [row('n-3')];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
+    // The address on no other customer's file: a send linked to nobody reached this lead.
+    mockState.customerRows = [{ id: CUST, email: 'pat@example.invalid' }];
+    mockState.links = {};
+    mockState.rows = [row('n-4')];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
   });
 
   test('an email lead looks back to when the message came in, not only to when classification made the lead', async () => {

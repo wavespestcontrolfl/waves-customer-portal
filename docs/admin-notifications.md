@@ -626,10 +626,11 @@ is written minutes after a call a person already answered): a deleted lead, a le
 (`lead-statuses.js`: status new, contacted, estimate_sent or estimate_viewed, and not converted, so spam, cancelled, won, lost and the
 like are out), or one with an estimate sent or viewed; the call that made the lead answered by a
 person (`answered_by = 'human'`; only for the bell written within 15 minutes of the lead's creation, never for a later bell
-on the same lead); a person's text, call or Gmail send, or a visit booked, for the lead's customer or phone since 5 minutes
+on the same lead, and never for a repeat-form bell); a person's text, call or Gmail send, or a visit booked, for the lead's customer or phone since 5 minutes
 before the bell's inquiry began (the shared contact witnesses, kind `customer`; for the bell written with the lead, the
 earlier of the bell and the lead's `first_contact_at`, else `created_at`; for a later bell, such as a form sent again on a
-lead made days ago, the bell itself); a person's email to the lead's own address since that moment (a bell that names an email, `metadata.emailId`, counts from that message's `received_at`: a follow-up
+lead made days ago, the bell itself); a person's email to the lead's own address since that moment (only one the shared email linkage,
+`resolveEmailCustomerLink`, ties to the lead's customer, or to nobody while no other customer holds the address; a bell that names an email, `metadata.emailId`, counts from that message's `received_at`: a follow-up
 bell is written after classification and drafting; the push deadline stays on the bell); or an estimate sent (`sent_at`, as
 `newLeadMovedOn` reads it: the one the bell names, `metadata.estimateId`, the lead's own, or any to its customer) or handed off. A lead needs a customer, a 10-digit phone or an email
 address to be judged, so a lead from email intake with no phone is judged on email and estimate evidence. A missing lead

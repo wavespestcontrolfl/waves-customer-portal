@@ -3,9 +3,27 @@
  * and the repeat-form bell that the real writer rings (lead-webhook.js ringRepeatFormAlert, through the real alert
  * composer and notifyAdmin), and no other kind of lead bell. Each bell nobody reached is stamped once and pushes once;
  * the next sweep sends nothing. The rules themselves are covered by new-lead-reminder.test.js. Synthetic names only.
+ *
+ * The sweep reads the whole notifications table, so every statement of a test runs in one transaction that is rolled
+ * back after it (as admin-billing-recovery-postgres.test.js does): a bell anything else left open in this database is
+ * stamped, if at all, only inside that transaction, and the fixtures go with it.
  */
 const crypto = require('crypto');
 
+// Every module reaches the database through this handle: the test's open transaction, else the real pool.
+let mockTrx = null;
+jest.mock('../models/db', () => {
+  const actual = jest.requireActual('../models/db');
+  const live = () => mockTrx || actual;
+  return new Proxy(() => {}, {
+    apply: (_target, _self, args) => live()(...args),
+    get: (_target, prop) => {
+      if (prop === 'real') return actual;
+      const value = live()[prop];
+      return typeof value === 'function' ? value.bind(live()) : value;
+    },
+  });
+});
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: false, push: { sent: 1 } })) }));
 // notifyAdmin sends the bell's own banner after the writer's row lands; this suite needs only the row.
 jest.mock('../services/bell-banners', () => ({ ...jest.requireActual('../services/bell-banners'), bannerAfterWrite: jest.fn() }));
@@ -25,7 +43,6 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
   let db;
   let reminder;
   let triggerNotification;
-  const made = { notifications: [], leads: [], customers: [] };
   let phoneN = 9400;
   const mins = (m) => new Date(NOW.getTime() + m * MIN);
 
@@ -37,20 +54,21 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
     ({ triggerNotification } = require('../services/notification-triggers'));
     ({ ringRepeatFormAlert } = require('../routes/lead-webhook')._test);
   }, 120000);
-  beforeEach(() => {
+  beforeEach(async () => {
     jest.clearAllMocks();
     require('../services/lead-reminder-sweep').__private.resumeAfter.clear();
+    mockTrx = await db.real.transaction();
+  });
+  afterEach(async () => {
+    if (mockTrx && !mockTrx.isCompleted()) await mockTrx.rollback();
+    mockTrx = null;
   });
   afterAll(async () => {
-    for (const table of ['notifications', 'leads', 'customers']) {
-      if (made[table].length) await db(table).whereIn('id', made[table]).del();
-    }
-    await db.destroy();
-  }, 180000);
+    await db?.real.destroy();
+  }, 60000);
 
   const insert = async (table, row) => {
     const [r] = await db(table).insert(row).returning('*');
-    made[table].push(r.id);
     return r;
   };
   const metaOf = (row) => (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {});
@@ -80,7 +98,6 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
     await ringRepeatFormAlert(customer, lead.id);
     const written = await db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
       .whereRaw("metadata->>'dedupeKey' = ?", [`lead-repeat-form:${customer.id}`]).first();
-    made.notifications.push(written.id);
     const { rungAt: _rungAt, askedAt: _askedAt, ...meta } = metaOf(written);
     await db('notifications').where({ id: written.id }).update({ created_at: at, metadata: JSON.stringify(meta) });
     return db('notifications').where({ id: written.id }).first();
