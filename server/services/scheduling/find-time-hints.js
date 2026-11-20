@@ -101,8 +101,13 @@ function markUnknownDetours(slots) {
  * walked to latest_start_min and every clear start kept, so a free
  * 09:00–12:00 gap lists 09:00, 10:00 and 11:00 for a one-hour visit. The
  * ranked answer is unchanged by it: one start per gap, deduped, sliced.
+ *
+ * `strict` (the route check's slot rule, day-replan/route-check.js, which
+ * counts the open-times list): a failure throws instead of failing open, so
+ * an unchecked gap is never an answer. Only a walked gap reads the snapshot;
+ * an arrival-search slot was checked by its own simulation.
  */
-async function guardHintStarts(slots, { today, sameDayFloorMin, step, spanMin, excluded, topN, every = false, perTech = false }) {
+async function guardHintStarts(slots, { today, sameDayFloorMin, step, spanMin, excluded, topN, every = false, perTech = false, strict = false }) {
   const floorFor = (date) => (date === today && Number.isInteger(sameDayFloorMin) ? sameDayFloorMin : 0);
   const restart = (s, m) => (m === toMin(s.start_time) ? s : { ...s, start_time: toHHMM(m), end_time: toHHMM(m + spanMin) });
   // A gap's starts at the request's step, from the picker's floor through
@@ -127,7 +132,7 @@ async function guardHintStarts(slots, { today, sameDayFloorMin, step, spanMin, e
   let keptPerGap;
   try {
     const occupancyByDate = new Map();
-    await Promise.all([...new Set(slots.map((s) => s.date))].map(async (d) => {
+    await Promise.all([...new Set(slots.filter((s) => s.route_mode !== 'arrival_windows').map((s) => s.date))].map(async (d) => {
       occupancyByDate.set(d, await loadOccupancy({ dateFrom: d, dateTo: d }));
     }));
     // The slot's own technician scopes the check when GATE_MULTI_TECH_CONFIRM is on (the
@@ -147,6 +152,7 @@ async function guardHintStarts(slots, { today, sameDayFloorMin, step, spanMin, e
       return kept;
     });
   } catch (guardErr) {
+    if (strict) throw guardErr;
     logger.warn('[find-time] hint occupancy guard failed (fail-open):', guardErr.message);
     keptPerGap = slots.map((s) => {
       if (every) return gapStarts(s).map((m) => restart(s, m));

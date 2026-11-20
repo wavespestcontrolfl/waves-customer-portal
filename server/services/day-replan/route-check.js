@@ -14,8 +14,8 @@
  *     measure;
  *   - the live ad rule's campaigns at that hour (`ad_shadow.live`), to compare the counts with;
  *   - the slot rule's decision (`ad_shadow.decision`, decideSlotRule): full or the 1% floor, from the finder that offers
- *     a lead its times (routes/booking.js availabilityForPin), and for today from the finder the office books a
- *     same-day caller with (New Appointment's open times, scheduling/find-time.js).
+ *     a lead its times (routes/booking.js availabilityForPin), and for today from the list the office books a same-day
+ *     caller from (New Appointment's open times, routes/admin-schedule-find-time.js).
  * It measures only: nothing here changes a visit, a time, a budget or a message. Every opening's start and length are
  * stored, so a rule can be counted again from the rows.
  *
@@ -76,6 +76,9 @@ const DISPATCH_DAY_END = Math.min(20 * 60, SHIFT.endMinutes);
 // The office's New Appointment finder offers a same-day start this long after the current minute at the earliest,
 // rounded up to the hour (find-time.js findArrivalWindowSlots: its same-day floor).
 const STAFF_SAME_DAY_LEAD_MIN = 30;
+// The open-times list's step: appointment windows start on the hour (find-time-hints hintSearchPlan, and the box's own
+// request, client useBestTimes).
+const OFFICE_STEP_MIN = 60;
 
 const weekday = (day) => new Date(`${day}T12:00:00Z`).getUTCDay();
 const toMin = (value) => {
@@ -490,14 +493,15 @@ async function measureOne(conn, env, { day, techId, rows, occupancy }) {
  * floor, the van's place today) touch only the wall clock's today, which the decision never takes from /book. A run on
  * another ET day than the wall clock's (a test or replay clock, a run that crossed midnight) gets no decision:
  * 'unknown', reason 'other_day', with no ask.
- * Today (page D2: "today only while a job ends by 18:00"). /book offers nothing today, so today's answer comes from the
- * finder the office books a same-day caller with: New Appointment's open times (sameDayStarts), asked at each zone's
- * center for each technician the run counts today. A start counts when its job ends by the day's end (DISPATCH_DAY_END),
- * from the van's modeled arrival: the office's start is an arrival window, and the van can come after it (a 5 PM start
- * reached at 6:09 PM ends at 7:09 PM). Today is asked only while a job can end in time (sameDayOpen). That finder takes no clock: it reads the
- * wall clock, and so does the window (both on the run's day, by the other-day rule). A route it cannot verify gives
- * today no answer (null) unless another technician has a start. The office's finder drives today's hours on Google
- * road times and this ask buys none, so `sameDay.travel` marks the answer as the free drive model's.
+ * Today (page D2: "today only while a job ends by 18:00"). /book offers nothing today, so today's answer is the list
+ * the office books a same-day caller from: New Appointment's open times (sameDayStarts: that box's technicians, finder
+ * ask and guard), at each zone's center, for each technician the run counts today. A start counts when its job ends by
+ * the day's end (DISPATCH_DAY_END), from the van's modeled arrival: the office's start is an arrival window, and the
+ * van can come after it (a 5 PM start reached at 6:09 PM ends at 7:09 PM). Today is asked only while a job can end in
+ * time (sameDayOpen). That finder takes no clock: it reads the wall clock, and so does the window (both on the run's
+ * day, by the other-day rule). A technician's failed ask or unverifiable route gives today no answer (null) unless
+ * another technician has a start. The office's finder drives today's best hours on Google road times and this ask buys
+ * none, so `sameDay.travel` marks the answer as the free drive model's.
  * The asks carry their own label (PROBE_SURFACE): the customer route check logs them apart from customer searches.
  * Openings only. The asks take no fallback list (`verifiedOnly`): where /book would serve a list it could not check (an
  * unreadable closed-day list, service-line map or territory; a failed occupancy read; a customer route check that
@@ -507,7 +511,8 @@ async function measureOne(conn, env, { day, techId, rows, occupancy }) {
  * would keep its whole week (every slot in it would make a customer late, and /book shows them anyway), that ask
  * throws and the zone has no answer. Else its starts from a day's crew count as the crew's do (one can open between
  * the two reads), and with none the crew's zero stands. A crew slot needs no such ask: /book offers that start either
- * way (its own pick there is the same technician, or one with no stop that day, whom the check never removes).
+ * way (its own pick there is the same technician, or one with no stop that day, whom the check never removes). Today's
+ * list is strict too: its occupancy guard throws where the office's box would list unchecked hours.
  * Shadow only: nothing reads the decision, no budget changes, nothing is held, and nothing is paid for (paidLookups
  * false buys no road lookup and reads no forecast; a zone center is a pin, so nothing is geocoded). Under capacity
  * routing /book itself buys road times, so there the answer is the free drive model's (`travel: 'modeled'`): a
@@ -558,8 +563,11 @@ async function zoneAnswer(zone, { now, today, sameDay, dates, crew }) {
   };
   if (sameDay) {
     try {
-      record(today, await sameDayStarts(zone, today, crew.get(today)));
+      const answer = await sameDayStarts(zone, today, crew.get(today));
+      record(today, answer.starts);
+      errors.push(...answer.errors);
     } catch (err) {
+      record(today, null);
       errors.push(String(err.message));
     }
   }
@@ -590,7 +598,7 @@ async function zoneAnswer(zone, { now, today, sameDay, dates, crew }) {
       errors.push(String(err.message));
     }
   }
-  return { zone: zone.zone_name, byDate, first, ...(errors.length ? { error: errors.join('; ').slice(0, 200) } : {}) };
+  return { zone: zone.zone_name, byDate, first, ...(errors.length ? { error: [...new Set(errors)].join('; ').slice(0, 200) } : {}) };
 }
 
 /**
@@ -604,37 +612,68 @@ function sameDayOpen(clock) {
 }
 
 /**
- * Today's starts at one zone's center whose job, begun at the van's modeled arrival, ends by the day's end, sorted and
- * each start once, from the finder the office books a same-day caller with: New Appointment's open times (admin-schedule-find-time.js), a new stop at the
- * pin on find-time's arrival search, asked for each technician of today's crew. Its options are that box's: the
- * technician's start point, every weekday, blackout days shown (the crew already leaves them out), and today's route
- * continuing from the stop under way exactly when the office's finder does so (pickerRoadCheckLive). No road purchase:
- * no pickerRoadCheck and no provider travel. null, with no ask, when who works today is unknown (`techs` null: a Sunday
- * whose stops read failed); null too when no start and a technician's route could not be verified (the finder offers
- * nothing on it: two stops under way, a stop done with no time), so the zero is not an answer.
+ * Today's open starts at one zone's center, as the office's New Appointment box lists them (admin-schedule-find-time.js,
+ * its open-times list), for each technician of today's crew. A start counts when its job, begun at the van's modeled
+ * arrival, ends by the day's end. Returns { starts, errors }: starts sorted, each start once. The box's chain:
+ * - its technicians: one who cannot do the service is never listed (techsLacking);
+ * - its finder ask (find-time findAvailableSlots): a new stop at the pin, hourly starts, the technician's start point,
+ *   every weekday, blackout days shown (the crew already leaves them out), and today's route continuing from the stop
+ *   under way exactly when the office's finder does so (pickerRoadCheckLive). No road purchase: no pickerRoadCheck and
+ *   no provider travel;
+ * - its guard (find-time-hints guardHintStarts): every start that fits, one per technician. A gap of the legacy finder
+ *   is walked hourly and an occupied hour (an unassigned visit too) is vetoed. `strict`: an unreadable snapshot throws,
+ *   never the box's fail-open list.
+ * starts null (no answer): who works today is unknown (`techs` null: a Sunday whose stops read failed; no ask), or no
+ * start while a technician's ask failed (`errors`) or its route could not be verified (the finder offers nothing on
+ * it: two stops under way, a stop done with no time), so the zero is not an answer. One technician's failure leaves the
+ * others' starts standing.
  */
 async function sameDayStarts(zone, today, techs) {
-  if (techs === null) return null;
+  if (techs === null) return { starts: null, errors: [] };
   const { findAvailableSlots } = require('../scheduling/find-time');
-  const starts = new Set();
+  const { guardHintStarts } = require('../scheduling/find-time-hints');
+  const lacking = await techsLacking(techs);
+  const errors = [];
+  const slots = [];
   let unverified = false;
   for (const technicianId of techs) {
-    const found = await findAvailableSlots({
-      lat: zone.center_lat, lng: zone.center_lng, durationMinutes: JOB_MIN, serviceKey: STANDARD_SERVICE_KEY,
-      dateFrom: today, dateTo: today, technicianId, techStartPoints: true, includeWeekends: true, includeBlackoutDates: true,
-      topN: Number.POSITIVE_INFINITY, providerTravel: false, fromActiveStop: pickerRoadCheckLive(),
-      arrivalWindow: { prospective: { lat: zone.center_lat, lng: zone.center_lng, estimated_duration_minutes: JOB_MIN } },
-    });
-    if (found.error) throw new Error(found.error);
-    for (const slot of found.slots) {
-      // The job begins when the van gets there (the arrival search's estimated_arrival: a start is an arrival window, so
-      // the van may come after it), never before its start; the legacy finder's start is its arrival.
-      const begins = Math.max(toMin(slot.start_time), slot.estimated_arrival ? toMin(slot.estimated_arrival) : 0);
-      if (begins + JOB_MIN <= DISPATCH_DAY_END) starts.add(slot.start_time);
+    if (lacking.has(String(technicianId))) continue;
+    try {
+      const found = await findAvailableSlots({
+        lat: zone.center_lat, lng: zone.center_lng, durationMinutes: JOB_MIN, serviceKey: STANDARD_SERVICE_KEY,
+        dateFrom: today, dateTo: today, technicianId, techStartPoints: true, includeWeekends: true, includeBlackoutDates: true,
+        topN: Number.POSITIVE_INFINITY, providerTravel: false, fromActiveStop: pickerRoadCheckLive(), slotStepMinutes: OFFICE_STEP_MIN,
+        arrivalWindow: { prospective: { lat: zone.center_lat, lng: zone.center_lng, estimated_duration_minutes: JOB_MIN } },
+      });
+      if (found.error) throw new Error(found.error);
+      slots.push(...found.slots);
+      unverified ||= Boolean(found.rejections_by_date?.[today]?.route_unverified);
+    } catch (err) {
+      errors.push(String(err.message));
     }
-    unverified ||= Boolean(found.rejections_by_date?.[today]?.route_unverified);
   }
-  return starts.size || !unverified ? [...starts].sort() : null;
+  const { every } = await guardHintStarts(slots, {
+    today, step: OFFICE_STEP_MIN, spanMin: JOB_MIN, excluded: [], every: true, perTech: true, strict: true,
+  });
+  const starts = new Set();
+  for (const slot of every) {
+    // The job begins when the van gets there (the arrival search's estimated_arrival: a start is an arrival window, so
+    // the van may come after it), never before its start; the legacy finder's start is its arrival.
+    const begins = Math.max(toMin(slot.start_time), slot.estimated_arrival ? toMin(slot.estimated_arrival) : 0);
+    if (begins + JOB_MIN <= DISPATCH_DAY_END) starts.add(slot.start_time);
+  }
+  return { starts: starts.size || !(unverified || errors.length) ? [...starts].sort() : null, errors };
+}
+
+/**
+ * The technicians among `techs` who cannot do the standard service, by the office list's own rule (its
+ * techsLackingServices: the capability rows for the service's name; a failed read throws).
+ */
+async function techsLacking(techs) {
+  const ids = [...techs].map(String);
+  const { inactiveCapabilitiesForServices } = require('../technician-capabilities');
+  const inactive = await inactiveCapabilitiesForServices(db, ids, [{ service_type: STANDARD_SERVICE_KEY }]);
+  return new Set(inactive.map((row) => String(row.technician_id)));
 }
 
 /**

@@ -9,7 +9,12 @@ jest.mock('../services/technician-eligibility', () => ({
   applyAssignable: jest.fn((q) => q), absentTechDays: jest.fn(async () => new Set()),
 }));
 jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: jest.fn(async () => new Set()) }));
-jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false), listOccupiedWindows: jest.fn(async () => []) }));
+jest.mock('../services/scheduling/occupancy', () => ({
+  techScopedConfirmActive: jest.fn(() => false),
+  listOccupiedWindows: jest.fn(async () => []),
+  // The office's occupancy guard compares hours with it (rain-out conflictsForTarget).
+  windowsOverlap: jest.requireActual('../services/scheduling/occupancy').windowsOverlap,
+}));
 jest.mock('../services/scheduling/departure-time', () => ({
   LEGACY_DEPARTURE_MINUTES: 480, readDepartureSetting: jest.fn(async () => ({ saved: true, minutes: 480 })), effectiveDepartureMinutes: jest.fn((s) => s.minutes),
 }));
@@ -27,11 +32,23 @@ jest.mock('../services/scheduling/find-time', () => ({
   ...jest.requireActual('../services/scheduling/find-time'),
   findAvailableSlots: jest.fn(async () => ({ slots: [], rejections_by_date: {} })),
 }));
+// The rest of the office list's chain for today: its capability rule, and its occupancy guard's snapshot
+// (find-time-hints guardHintStarts, which runs as is).
+jest.mock('../services/technician-capabilities', () => ({
+  ...jest.requireActual('../services/technician-capabilities'),
+  inactiveCapabilitiesForServices: jest.fn(async () => []),
+}));
+jest.mock('../services/rain-out', () => ({
+  ...jest.requireActual('../services/rain-out'),
+  loadOccupancy: jest.fn(),
+}));
 
 const db = require('../models/db');
 const { _internals: replan } = require('../services/day-replan/index');
 const { _internals: { availabilityForPin } } = require('../routes/booking');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { inactiveCapabilitiesForServices } = require('../services/technician-capabilities');
+const { loadOccupancy } = require('../services/rain-out');
 const { getBlackoutDates } = require('../services/scheduling/blackout-dates');
 const { absentTechDays } = require('../services/technician-eligibility');
 const { listOccupiedWindows } = require('../services/scheduling/occupancy');
@@ -423,6 +440,10 @@ describe('runRouteCheck', () => {
     availabilityForPin.mockImplementation(async () => ({ days: [] }));
     findAvailableSlots.mockReset();
     findAvailableSlots.mockImplementation(async () => ({ slots: [], rejections_by_date: {} }));
+    inactiveCapabilitiesForServices.mockReset();
+    inactiveCapabilitiesForServices.mockImplementation(async () => []);
+    loadOccupancy.mockReset();
+    loadOccupancy.mockImplementation(async () => ({ rows: [], canName: () => false, nameById: new Map() }));
     getBlackoutDates.mockResolvedValue(new Set(['2026-11-26']));
     absentTechDays.mockResolvedValue(new Set());
     replan.loadDayStops.mockImplementation(async (_c, date) => {
@@ -845,29 +866,36 @@ describe('runRouteCheck', () => {
     expect(availabilityForPin).not.toHaveBeenCalled();
   });
 
-  // The office's finder's answer for one technician-day: its open starts ([start, the van's modeled arrival there], no
-  // arrival in the legacy finder's shape), and its refusals by reason.
-  const found = (slots, rejections = {}) => ({
-    slots: slots.map(([start_time, estimated_arrival]) => ({ date: '2026-11-19', start_time, ...(estimated_arrival ? { estimated_arrival } : {}) })),
+  // The office's finder's answer for one technician-day: its open starts on that technician's route, and its refusals by
+  // reason. A start with the van's modeled arrival there ([start, arrival]) is the arrival search's (production's,
+  // GATE_ADMIN_ARRIVAL_WINDOWS); one without ([start]) is the legacy gap finder's, a gap that holds that start alone.
+  const found = (slots, rejections = {}, technicianId = TECH) => ({
+    slots: slots.map(([start_time, estimated_arrival]) => ({
+      date: '2026-11-19', start_time, technician: { id: technicianId },
+      ...(estimated_arrival ? { estimated_arrival, route_mode: 'arrival_windows' } : {}),
+    })),
     rejections_by_date: { '2026-11-19': rejections },
   });
+  const OFF_THE_SERVICE = (technician_id) => ({ technician_id, service_category: 'general', active: false });
   const OTHER_TECH = '00000000-0000-4000-8000-000000000002';
 
   test("slot rule, today (A2): the office's own finder answers for today, per technician of today's crew; a job must end by 6 PM", async () => {
-    // North's center, TECH: 6 PM (done at 7), 5 PM reached at 5:20 (done at 6:20: an arrival window, and the van comes
-    // late in it), and 4 PM reached at 4:10 (done at 5:10). The office could book all three; the rule counts the last.
-    // OTHER_TECH, asked after: 4 PM too (one start, counted once) and 3 PM, the zone's first.
+    // North's center, TECH: 6 PM (done at 7), 5 PM reached at 5:20 and 4 PM reached at 5:05 (done after 6: a start is an
+    // arrival window, and the van comes late in it), and 3 PM on time. The office could book all four; the rule counts
+    // 3 PM. OTHER_TECH, asked after: 4 PM and 3 PM on time, and 2 PM. An hour counts once, on any technician whose van
+    // makes it: 2, 3 and 4 PM.
     findAvailableSlots.mockImplementation(async ({ lat, technicianId }) => {
       if (lat !== 27.5) return found([]);
       return technicianId === TECH
-        ? found([['18:00', '18:00'], ['17:00', '17:20'], ['16:00', '16:10']]) : found([['16:00', '16:00'], ['15:00', '15:05']]);
+        ? found([['18:00', '18:00'], ['17:00', '17:20'], ['16:00', '17:05'], ['15:00', '15:00']], {}, TECH)
+        : found([['16:00', '16:00'], ['15:00', '15:05'], ['14:00', '14:00']], {}, OTHER_TECH);
     });
     const { writes } = fakeConn({ techs: [TECH, OTHER_TECH] });
     expect((await runRouteCheck({ now: NOW })).status).toBe('completed');
     expect(JSON.parse(writes[0][1].ad_shadow).decision).toEqual({
       ...FLOOR,
       mode: 'full',
-      zones: [{ zone: 'North', byDate: { ...FLOOR.zones[0].byDate, '2026-11-19': 2 }, first: '2026-11-19 15:00' }, FLOOR.zones[1]],
+      zones: [{ zone: 'North', byDate: { ...FLOOR.zones[0].byDate, '2026-11-19': 3 }, first: '2026-11-19 14:00' }, FLOOR.zones[1]],
     });
     // Asked as New Appointment's open-times box asks: a new stop at the pin, today only, each technician of today's crew
     // alone, from the start point, every weekday, the day continuing from the stop under way, and no road purchase.
@@ -875,11 +903,17 @@ describe('runRouteCheck', () => {
       lat: z.center_lat, lng: z.center_lng, durationMinutes: 60, serviceKey: 'pest_control',
       dateFrom: '2026-11-19', dateTo: '2026-11-19', technicianId, techStartPoints: true, includeWeekends: true,
       includeBlackoutDates: true, topN: Number.POSITIVE_INFINITY, providerTravel: false, fromActiveStop: true,
-      arrivalWindow: { prospective: { lat: z.center_lat, lng: z.center_lng, estimated_duration_minutes: 60 } },
+      slotStepMinutes: 60, arrivalWindow: { prospective: { lat: z.center_lat, lng: z.center_lng, estimated_duration_minutes: 60 } },
     });
     expect(findAvailableSlots.mock.calls.map(([ask]) => ask)).toEqual([
       askAt(ZONES[0], TECH), askAt(ZONES[0], OTHER_TECH), askAt(ZONES[1], TECH), askAt(ZONES[1], OTHER_TECH),
     ]);
+    // The list's technicians: the capability rule by the service's name, as the office's list reads it, at each zone.
+    expect(inactiveCapabilitiesForServices.mock.calls).toEqual([
+      [db, [TECH, OTHER_TECH], [{ service_type: 'pest_control' }]], [db, [TECH, OTHER_TECH], [{ service_type: 'pest_control' }]],
+    ]);
+    // Arrival-search starts were checked by their own simulation: the guard reads no snapshot for them.
+    expect(loadOccupancy).not.toHaveBeenCalled();
     // North's slot today needs no second /book ask; South, with none, still asks /book's own pool.
     expect(availabilityForPin.mock.calls.map(([ask]) => [ask.lat, ask.crew instanceof Map])).toEqual([[27.5, true], [27.1, true], [27.1, false]]);
   });
@@ -896,7 +930,7 @@ describe('runRouteCheck', () => {
     expect(unknown.zones.map((z) => z.byDate['2026-11-19'])).toEqual([null, null]);
     // Another technician's start answers for today (here in the legacy finder's shape: a start with no modeled arrival is
     // its own arrival).
-    findAvailableSlots.mockImplementation(async ({ technicianId }) => (technicianId === TECH ? cannot : found([['15:00']])));
+    findAvailableSlots.mockImplementation(async ({ technicianId }) => (technicianId === TECH ? cannot : found([['15:00']], {}, technicianId)));
     const other = fakeConn({ techs: [TECH, OTHER_TECH] });
     expect((await runRouteCheck({ now: NOW })).status).toBe('completed');
     expect(JSON.parse(other.writes[0][1].ad_shadow).decision).toMatchObject({
@@ -955,7 +989,7 @@ describe('runRouteCheck', () => {
       expect((await runRouteCheck({ now: SUNDAY })).status).toBe('completed_with_errors');
       const decision = JSON.parse(unread.writes[0][1].ad_shadow).decision;
       expect(decision).toMatchObject({ mode: 'unknown', sameDay: { date: '2026-11-22' } });
-      expect(decision.zones.map((z) => z.byDate['2026-11-22'])).toEqual([null, null]);
+      expect(decision.zones.map((z) => [z.byDate['2026-11-22'], z.error])).toEqual([[null, undefined], [null, undefined]]);
       expect(findAvailableSlots).not.toHaveBeenCalled();
     } finally {
       jest.setSystemTime(NOW);
@@ -971,7 +1005,7 @@ describe('runRouteCheck', () => {
     expect(JSON.parse(some.writes[0][1].ad_shadow).decision).toMatchObject({
       mode: 'full',
       zones: [
-        { zone: 'North', byDate: { '2026-11-20': 0, '2026-11-21': 0, '2026-11-23': 0 }, first: null, error: 'timeout' },
+        { zone: 'North', byDate: { '2026-11-19': null, '2026-11-20': 0, '2026-11-21': 0, '2026-11-23': 0 }, first: null, error: 'timeout' },
         { zone: 'South', first: '2026-11-21 10:00', error: 'timeout' },
       ],
     });
@@ -982,6 +1016,82 @@ describe('runRouteCheck', () => {
     await runRouteCheck({ now: NOW });
     expect(JSON.parse(none.writes[0][1].ad_shadow).decision).toMatchObject({
       mode: 'unknown', zones: [{ error: 'lat/lng required' }, { error: 'lat/lng required' }],
+    });
+  });
+
+  test("slot rule, today (A2): a technician who cannot do the service is not asked, as the office's list never lists one", async () => {
+    inactiveCapabilitiesForServices.mockImplementation(async () => [OFF_THE_SERVICE(TECH)]);
+    findAvailableSlots.mockImplementation(async ({ technicianId }) => found([['15:00', '15:00']], {}, technicianId));
+    const { writes } = fakeConn({ techs: [TECH, OTHER_TECH] });
+    await runRouteCheck({ now: NOW });
+    expect(findAvailableSlots.mock.calls.map(([ask]) => ask.technicianId)).toEqual([OTHER_TECH, OTHER_TECH]);
+    expect(JSON.parse(writes[0][1].ad_shadow).decision.zones.map((z) => z.byDate['2026-11-19'])).toEqual([1, 1]);
+    // Nobody left who can: no ask, and today's zero is an answer (the office's list is empty).
+    inactiveCapabilitiesForServices.mockImplementation(async (_db, ids) => ids.map(OFF_THE_SERVICE));
+    findAvailableSlots.mockClear();
+    const none = fakeConn({ techs: [TECH, OTHER_TECH] });
+    await runRouteCheck({ now: NOW });
+    expect(findAvailableSlots).not.toHaveBeenCalled();
+    expect(JSON.parse(none.writes[0][1].ad_shadow).decision.zones.map((z) => z.byDate['2026-11-19'])).toEqual([0, 0]);
+    // The rule unread: today has no answer.
+    inactiveCapabilitiesForServices.mockRejectedValue(new Error('capabilities unread'));
+    const unread = fakeConn({ techs: [TECH, OTHER_TECH] });
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+    expect(JSON.parse(unread.writes[0][1].ad_shadow).decision.zones[0]).toMatchObject({
+      byDate: { '2026-11-19': null }, error: 'capabilities unread',
+    });
+  });
+
+  test("slot rule, today (A2): one technician's failed ask leaves the other's starts standing, and is the zone's error", async () => {
+    findAvailableSlots.mockImplementation(async ({ technicianId }) => {
+      if (technicianId === TECH) throw new Error('route read timeout');
+      return found([['15:00', '15:00']], {}, technicianId);
+    });
+    const { writes } = fakeConn({ techs: [TECH, OTHER_TECH] });
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+    expect(JSON.parse(writes[0][1].ad_shadow).decision).toMatchObject({
+      mode: 'full',
+      zones: [
+        { byDate: { '2026-11-19': 1 }, first: '2026-11-19 15:00', error: 'route read timeout' },
+        { byDate: { '2026-11-19': 1 }, first: '2026-11-19 15:00', error: 'route read timeout' },
+      ],
+    });
+    expect(findAvailableSlots.mock.calls.map(([ask]) => ask.technicianId)).toEqual([TECH, OTHER_TECH, TECH, OTHER_TECH]);
+    // With no start from the other, the failure leaves today no answer: its zero is not one. One error, said once.
+    findAvailableSlots.mockImplementation(async ({ technicianId }) => (
+      technicianId === OTHER_TECH ? found([]) : { error: 'lat/lng required', slots: [] }));
+    const none = fakeConn({ techs: [TECH, OTHER_TECH, '00000000-0000-4000-8000-000000000003'] });
+    await runRouteCheck({ now: NOW });
+    expect(JSON.parse(none.writes[0][1].ad_shadow).decision).toMatchObject({
+      mode: 'unknown', zones: [{ byDate: { '2026-11-19': null }, error: 'lat/lng required' }, { byDate: { '2026-11-19': null } }],
+    });
+  });
+
+  test("slot rule, today (A2): the legacy gap finder's starts go through the office's occupancy guard, strict", async () => {
+    // The gap finder (GATE_ADMIN_ARRIVAL_WINDOWS off) gives one candidate per gap: its earliest start and its last. The
+    // office's guard walks it hourly and vetoes the hours an unassigned 3:30-4:30 visit holds: 5 PM stays (done at 6).
+    findAvailableSlots.mockImplementation(async ({ lat, technicianId }) => ({
+      slots: lat === 27.5 ? [{ date: '2026-11-19', start_time: '15:00', latest_start_min: 17 * 60, technician: { id: technicianId } }] : [],
+      rejections_by_date: {},
+    }));
+    loadOccupancy.mockImplementation(async () => ({
+      rows: [{
+        id: 'u1', date: '2026-11-19', startMin: 15 * 60 + 30, endMin: 16 * 60 + 30, customer_id: 'c1', technician_id: null,
+        service_type: 'Pest Control', reservation_expires_at: null,
+      }],
+      canName: () => false,
+      nameById: new Map(),
+    }));
+    const { writes } = fakeConn();
+    await runRouteCheck({ now: NOW });
+    expect(JSON.parse(writes[0][1].ad_shadow).decision.zones[0]).toMatchObject({ byDate: { '2026-11-19': 1 }, first: '2026-11-19 17:00' });
+    expect(loadOccupancy.mock.calls).toEqual([[{ dateFrom: '2026-11-19', dateTo: '2026-11-19' }]]);
+    // The snapshot unreadable: today has no answer, never the office box's fail-open list.
+    loadOccupancy.mockRejectedValue(new Error('snapshot down'));
+    const unread = fakeConn();
+    expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+    expect(JSON.parse(unread.writes[0][1].ad_shadow).decision.zones[0]).toMatchObject({
+      byDate: { '2026-11-19': null }, error: 'snapshot down',
     });
   });
 
