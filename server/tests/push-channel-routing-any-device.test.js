@@ -368,10 +368,14 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     expect(mockSendToCustomer).not.toHaveBeenCalled();
   });
 
-  it('stale-text gate off: a browser-only holder is still reachable as today, and no check-in is stamped', async () => {
+  it('stale-text gate off: a browser-only holder gets the text, since the any-device send goes to phone apps only', async () => {
     mockDevices.push(device({ platform: 'web', updated_at: hoursAgo(40 * 24) }));
-    expect((await send()).delivered).toBe(true);
-    expect(JSON.parse(mockProofRows[0].metadata)).not.toHaveProperty('app_checked_in_at');
+    // Like sendToCustomer: with nativeOnly the browser row is skipped, so no device accepts.
+    mockSendToCustomer.mockImplementation(async (_customerId, _notification, opts = {}) => ({ sent: opts.nativeOnly ? 0 : 1 }));
+    const result = await send();
+    for (const call of mockSendToCustomer.mock.calls) expect(call[2].nativeOnly).toBe(true);
+    expect(result.delivered).toBe(false);
+    expect(mockProofRows).toHaveLength(0);
   });
 
   it('account device status: routing asks plainly; the floor is customerStatus\'s own', async () => {
