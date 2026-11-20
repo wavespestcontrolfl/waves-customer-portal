@@ -1780,8 +1780,12 @@ function initScheduledJobs() {
   // never read again, so a re-run after a deploy kill is harmless.
   // =========================================================================
   const runRestaurantProspectSyncTick = async () => {
-    await runExclusive('restaurant-prospect-sync', () => require('./prospects/dbpr-restaurants').syncRestaurantProspects())
-      .catch((err) => logger.error(`Restaurant prospect sync lease failed: ${err.message}`));
+    await runExclusive('restaurant-prospect-sync', async () => {
+      const result = await require('./prospects/dbpr-restaurants').syncRestaurantProspects();
+      // A failed file or a database failure must read as a FAILED run in job_health: rethrow (a count only) so
+      // runExclusive records it.
+      if (result.failures > 0) throw new Error(`restaurant prospect sync: ${result.failures} failure(s)`);
+    }).catch((err) => logger.error(`Restaurant prospect sync failed: ${err.message}`));
   };
   cron.schedule('36 10 * * 1', () => runRestaurantProspectSyncTick(), { timezone: 'America/New_York' });
   registerDeployKillRetry('restaurant-prospect-sync', () => runRestaurantProspectSyncTick());

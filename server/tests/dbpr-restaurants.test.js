@@ -62,6 +62,18 @@ describe('parseUsDate', () => {
 describe('parseInspectionRows', () => {
   const { parseDbprCsv } = require('../services/commercial-suite-size/dbpr-food-license');
 
+  test('leaves out a row without both digit-only report ids, so a corrected copy in a later file can still enter', () => {
+    const rows = parseDbprCsv(inspCsv([
+      inspRow({ visit: '9101' }),
+      inspRow({ visit: '9102', licenseId: '' }),
+      inspRow({ visit: '9103', licenseId: '50-01' }),
+      inspRow({ visit: '91O4' }),
+      inspRow({ visit: '' }),
+      inspRow({ visit: '9105', licenseId: '1234567890123' }),
+    ]));
+    expect(svc.parseInspectionRows(rows).map((r) => [r.source_key, r.license_id])).toEqual([['9101', '5001']]);
+  });
+
   test('keeps only code-35 visits in the three counties outside Punta Gorda, with trimmed headers and a plain date', () => {
     const rows = parseDbprCsv(inspCsv([
       inspRow({ visit: '9001' }),
@@ -73,9 +85,12 @@ describe('parseInspectionRows', () => {
       // Punta Gorda is not served (owner ruling 2026-10-22): by city name, or by a ZIP only Punta Gorda uses.
       inspRow({ visit: '9007', county: 'Charlotte', city: 'PUNTA GORDA', zip: '33983' }),
       inspRow({ visit: '9008', county: 'Charlotte', city: '', zip: '33950' }),
+      // The shared county test (call-triage-flags.js): any case, with or without the word County.
+      inspRow({ visit: '9009', county: 'SARASOTA COUNTY' }),
+      inspRow({ visit: '9010', county: 'Lee County' }),
     ]));
     const out = svc.parseInspectionRows(rows);
-    expect(out.map((r) => r.source_key)).toEqual(['9001', '9002', '9003']);
+    expect(out.map((r) => r.source_key)).toEqual(['9001', '9002', '9003', '9009']);
     expect(out[0]).toMatchObject({
       kind: 'inspection', license_id: '5001', license_number: 'SEA0000001', license_type_code: '2010', business_name: 'SAMPLE DINER',
       address: '200 SAMPLE TRL', city: 'BRADENTON', zip: '34208', county: 'Manatee', event_date: '2026-10-20',
@@ -311,10 +326,12 @@ describe('syncRestaurantProspects', () => {
     expect(store.upsertRecords).not.toHaveBeenCalled();
   });
 
-  test('the Monday job runs under its own lease and a deploy-kill retry', () => {
+  test('the Monday job runs under its own lease and a deploy-kill retry, and a failure fails the run', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
     expect(src).toMatch(/cron\.schedule\('36 10 \* \* 1', \(\) => runRestaurantProspectSyncTick\(\), \{ timezone: 'America\/New_York' \}\)/);
-    expect(src).toMatch(/runExclusive\('restaurant-prospect-sync', \(\) => require\('\.\/prospects\/dbpr-restaurants'\)\.syncRestaurantProspects\(\)\)/);
+    expect(src).toMatch(/runExclusive\('restaurant-prospect-sync', async \(\) => \{\s*const result = await require\('\.\/prospects\/dbpr-restaurants'\)\.syncRestaurantProspects\(\);/);
+    // A failed file or database call must read as a failed run in job_health: the leased callback throws (a count only).
+    expect(src).toMatch(/if \(result\.failures > 0\) throw new Error\(`restaurant prospect sync: \$\{result\.failures\} failure\(s\)`\);/);
     expect(src).toMatch(/registerDeployKillRetry\('restaurant-prospect-sync'/);
   });
 });

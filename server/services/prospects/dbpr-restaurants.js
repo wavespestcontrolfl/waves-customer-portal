@@ -13,13 +13,14 @@
  * inspection is read to split them: pest_evidence NULL = not read yet, true = a 35A finding, false = 35B only.
  *
  * Fail soft: a download, parse or database failure logs a count-only warning and goes into the result object; the
- * sync never throws into the scheduler. Logs carry counts and elapsed time only, never a business name, address
- * or phone. Kill switch: env DBPR_PROSPECT_SYNC_DISABLED (1, true or on).
+ * sync itself never throws. The scheduler marks a run with failures as failed in job_health. Logs carry counts and
+ * elapsed time only, never a business name, address or phone. Kill switch: env DBPR_PROSPECT_SYNC_DISABLED (1, true
+ * or on).
  */
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { SERVICE_AREA_COUNTIES } = require('../call-triage-flags');
+const { isInServiceAreaCounty } = require('../call-triage-flags');
 const { isExcludedLocality, isExcludedZip } = require('../excluded-localities');
 const { parseDbprCsv, defaultFetchText } = require('../commercial-suite-size/dbpr-food-license');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
@@ -50,8 +51,6 @@ const REPORT_MAX_ATTEMPTS = 3;
 const FINDING_TEXT_MAX = 400;
 const UPSERT_CHUNK = 500;
 
-const COUNTIES = new Set([...SERVICE_AREA_COUNTIES].map((c) => c.toUpperCase()));
-
 function syncDisabled(env = process.env) {
   return /^(1|true|on)$/i.test(String(env.DBPR_PROSPECT_SYNC_DISABLED || '').trim());
 }
@@ -73,11 +72,11 @@ function parseUsDate(value) {
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
-// The three served counties, less the places inside them Waves does not serve (Punta Gorda, owner ruling 2026-10-22).
-// services/excluded-localities.js is the one list of those places; it decides by city name or by a Punta Gorda-only ZIP.
+// The three served counties (the shared county test: "Sarasota" and "Sarasota County" both count), less the places
+// inside them Waves does not serve (Punta Gorda, owner ruling 2026-10-22). services/excluded-localities.js is the one
+// list of those places; it decides by city name or by a Punta Gorda-only ZIP.
 function inServiceArea(county, city, zip) {
-  if (!COUNTIES.has(String(county || '').trim().toUpperCase())) return false;
-  return !isExcludedLocality(city) && !isExcludedZip(zip);
+  return isInServiceAreaCounty(county) && !isExcludedLocality(city) && !isExcludedZip(zip);
 }
 
 // A trailing extension ("x12", "ext. 12", "extension 12", "#12") is dropped first, so its digits never join the number.
@@ -97,6 +96,9 @@ function pickPhone(row) {
 
 const wholeNumber = (v) => (/^\d+$/.test(String(v || '').trim()) ? Number(String(v).trim()) : null);
 
+// The report page's two ids are digits only (reportUrl builds the address from nothing else).
+const ID_RE = /^\d{1,12}$/;
+
 /** Inspection rows -> one record per visit that cited violation 35, in the three counties. */
 function parseInspectionRows(rows) {
   const out = [];
@@ -104,13 +106,16 @@ function parseInspectionRows(rows) {
     if (!inServiceArea(row['County Name'], row['Location City'], row['Location Zip Code'])) continue;
     if (!(Number(row['Violation 35']) > 0)) continue;
     const sourceKey = clean(row['Inspection Visit ID']);
+    const licenseId = clean(row['License ID'], 40);
     const eventDate = parseUsDate(row['Inspection Date']);
-    if (!sourceKey || !eventDate) continue;
+    // A row without both report ids is left out: its report could never be read, and once stored it would block a
+    // corrected copy (a known key only refreshes last_seen_at). A later file with the ids adds it.
+    if (!ID_RE.test(sourceKey || '') || !ID_RE.test(licenseId || '') || !eventDate) continue;
     out.push({
       kind: 'inspection',
       source_key: sourceKey,
       license_number: clean(row['License Number'], 40),
-      license_id: clean(row['License ID'], 40),
+      license_id: licenseId,
       license_type_code: clean(row['License Type Code'], 20),
       business_name: clean(row['Business Name'] || row['Business (DBA-Does Business As) Name'], 200),
       address: clean(row['Location Address'], 200),
@@ -242,8 +247,6 @@ async function bumpAttempts(id) {
 
 const defaultStore = { upsertRecords, pendingInspections, saveReport, bumpAttempts };
 const defaultSleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
-
-const ID_RE = /^\d{1,12}$/;
 
 function reportUrl(visitId, licenseId) {
   if (!ID_RE.test(String(visitId)) || !ID_RE.test(String(licenseId))) return null;
