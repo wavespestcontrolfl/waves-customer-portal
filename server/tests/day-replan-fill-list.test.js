@@ -106,7 +106,7 @@ const ZERO_VISITS = { checked: 0, fitted: 0, remindersOff: 0, sharedDay: 0, unre
 // `addOns` are the plan visits' add-on services (scheduled_service_addons), and `planHolds` the plan_holds rows (read by
 // customer and family).
 function fakeConn({ estimates = [], taken = [], inactive = {}, scheduleBlocks = [], leads = [], leadEstimates = [], customerVisits = [],
-  plan = [], sameDay = null, addOns = [], planHolds = [] } = {}) {
+  plan = [], sameDay = null, addOns = [], planHolds = [], services = CATALOG } = {}) {
   const calls = [];
   // The plan visits' own read (the one joined to customers), apart: other reads use some of the same clauses.
   const planCalls = [];
@@ -133,8 +133,11 @@ function fakeConn({ estimates = [], taken = [], inactive = {}, scheduleBlocks = 
       if (typeof args[0] === 'function') args[0](q);
       else record('where', args);
       if (args[0] && typeof args[0] === 'object') Object.assign(q.match, args[0]);
+      if (typeof args[0] === 'string' && args.length === 2) q.match[args[0]] = args[1];
       return q;
     };
+    // The catalog row as stored (the Leads screen's booking reads it), apart from getServices' answer.
+    q.first = async () => (table === 'services' ? services.find((row) => row.id === q.match.id) || null : null);
     q.select = async (first) => {
       if (table === 'estimates') return first === '*' ? estimates : leadEstimates;
       if (table === 'leads') {
@@ -895,12 +898,16 @@ describe('fillList', () => {
     }
   });
 
-  test('a lead\'s look is sized by the catalog (1 hour when it names none) and needs the technician\'s capability for it', async () => {
+  test('a lead\'s look is sized as the Leads screen books it (the stored catalog row, 1 hour when it names none) and needs the technician\'s capability for it', async () => {
     dayStops({ [DAY]: [stop('first', '08:00')] });
-    getServices.mockResolvedValue({ services: CATALOG.map((row) => (row.id === 'svc-wdo' ? { ...row, default_duration_minutes: null } : row)) });
+    // getServices gives a scheduling policy's length in capacity mode (30 here); the booking reads the row's own length.
+    getServices.mockResolvedValue({ services: CATALOG.map((row) => (row.id === 'svc-wdo' ? { ...row, default_duration_minutes: 30 } : row)) });
+    const stored = (minutes) => CATALOG.map((row) => (row.id === 'svc-wdo' ? { ...row, default_duration_minutes: minutes } : row));
     const wdo = () => [lead('wdo', { service_interest: 'WDO Inspection' })];
-    const { conn } = fakeConn({ leads: wdo() });
+    const { conn } = fakeConn({ leads: wdo(), services: stored(null) });
     expect((await fillList(conn, [morning], NOW)).byBlock).toEqual([[expect.objectContaining({ kind: 'lead', id: 'wdo', label: 'WDO Inspection Service', length: 60 })]]);
+    expect((await fillList(fakeConn({ leads: wdo(), services: stored(45) }).conn, [morning], NOW)).byBlock)
+      .toEqual([[expect.objectContaining({ kind: 'lead', id: 'wdo', length: 45 })]]);
     // The customer's rules for the service the lead asked for.
     expect(getCustomerSchedulingPreferences).toHaveBeenCalledWith('c-wdo', 'WDO Inspection Service', conn, { serviceId: 'svc-wdo', serviceKey: 'wdo_inspection' });
     // A technician set off for the inspection's category (termite) gets no line.
