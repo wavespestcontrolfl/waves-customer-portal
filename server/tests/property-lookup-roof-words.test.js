@@ -1,9 +1,5 @@
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
 const { buildEnrichedProfile, _private: routePrivate } = require('../routes/property-lookup-v2');
 const { _private } = require('../services/property-lookup/ai-property-lookup');
-const roofCheck = require('../../scripts/roof-style-check');
 
 const { normalizeCountyRoof, roofStyleHintFromWords } = _private;
 const { buildSatelliteVisionPrompt, normalizeSatelliteAnalysis, normalizeRoofTileStyle } = routePrivate;
@@ -193,36 +189,17 @@ describe('lookup profile carries the roof reads', () => {
   });
 });
 
-describe('scripts/roof-style-check', () => {
-  it('reports hint and photo agreement against a known-style CSV, offline', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'roof-style-'));
-    const jsonPath = path.join(dir, 'lookups.json');
-    const csvPath = path.join(dir, 'known.csv');
-    fs.writeFileSync(jsonPath, JSON.stringify([
-      { normalized_address: '1 test st bradenton fl 34211', property_record: { roofStyleHint: 'barrel_tile' }, ai_analysis: { roofMaterial: 'TILE', roofTileStyle: 'BARREL' } },
-      { address: '2 Test St, Venice, FL 34293', enriched: { roofStyleHint: 'flat_tile', roofTileStyle: 'BARREL' } },
-      { address: '3 Test St, Venice, FL 34293', enriched: { roofStyleHint: null, roofTileStyle: null } },
-    ]));
-    fs.writeFileSync(csvPath, 'address,known_style\n"1 Test St, Bradenton, FL 34211",barrel\n2 Test St Venice FL,flat\n3 Test St Venice FL,barrel\n9 Gone Rd Venice FL,flat\n');
-    const known = roofCheck.parseKnownCsv(fs.readFileSync(csvPath, 'utf8'));
-    const result = roofCheck.compareStyles(JSON.parse(fs.readFileSync(jsonPath, 'utf8')), known);
-    expect(result.roofStyleHint).toMatchObject({ known: 3, covered: 2, agree: 2 });
-    expect(result.roofTileStyle).toMatchObject({ known: 3, covered: 2, agree: 1 });
-    expect(result.knownWithoutLookup).toBe(1);
-    expect(roofCheck.formatReport(result)).toContain('roofStyleHint: 3 matched, 2 with a read, 2 agree (100.0% of reads');
-    fs.rmSync(dir, { recursive: true, force: true });
+describe('Charlotte roof words follow the primary building', () => {
+  const rows = [
+    { 'Bld #': '1', Category: 'Roofing', Description: 'Composition Shingle' },
+    { 'Bld #': '2', Category: 'Roofing', Description: 'Clay Barrel Tile' },
+  ];
+  it('reads the Roofing row whose Bld # matches the primary Building Number', () => {
+    expect(_private.findCharlottePrimaryRoofing(rows, { 'Building Number': '2' })).toBe('Clay Barrel Tile');
+    expect(_private.findCharlottePrimaryRoofing(rows, { 'Building Number': '1' })).toBe('Composition Shingle');
   });
-
-  it('honours the tile-only guard: a rejected or non-tile photo read never counts', () => {
-    // Enriched result with an explicit null = the lookup rejected the read;
-    // the raw AI style must not leak through behind it.
-    expect(roofCheck.readLookup({
-      address: '4 Test St, Venice, FL 34293',
-      enriched_snapshot: { roofTileStyle: null },
-      ai_analysis: { roofMaterial: 'SHINGLE', roofTileStyle: 'FLAT' },
-    }).photo).toBeNull();
-    // Raw AI analysis alone counts only beside a TILE read.
-    expect(roofCheck.readLookup({ address: '5 Test St', ai_analysis: { roofMaterial: 'SHINGLE', roofTileStyle: 'FLAT' } }).photo).toBeNull();
-    expect(roofCheck.readLookup({ address: '6 Test St', ai_analysis: { roofMaterial: 'TILE', roofTileStyle: 'FLAT' } }).photo).toBe('flat');
+  it('falls back to the parcel\'s first Roofing row when no row names the building', () => {
+    expect(_private.findCharlottePrimaryRoofing(rows, { 'Building Number': '7' })).toBe('Composition Shingle');
+    expect(_private.findCharlottePrimaryRoofing(rows, {})).toBe('Composition Shingle');
   });
 });

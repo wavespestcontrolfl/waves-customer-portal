@@ -4549,8 +4549,8 @@ function parseCharlottePaoRecord({ address, search, detailHtml, ownership }) {
     stories: coerceStoriesValue(primaryBuilding.Floors, { commercial: commercialSized }),
     propertyType,
     constructionMaterial: normalizeCountyConstruction(findCharlotteComponentDescription(componentRows, 'Exterior Walls')),
-    roofType: normalizeCountyRoof(findCharlotteComponentDescription(componentRows, 'Roofing')),
-    ...countyRoofDetail('charlotte', findCharlotteComponentDescription(componentRows, 'Roofing'), null),
+    roofType: normalizeCountyRoof(findCharlottePrimaryRoofing(componentRows, primaryBuilding)),
+    ...countyRoofDetail('charlotte', findCharlottePrimaryRoofing(componentRows, primaryBuilding), null),
     source,
     confidence: 'high',
     county: 'Charlotte',
@@ -4601,6 +4601,18 @@ function pickPrimaryHtmlBuildingIndex(rows, areaFields) {
 function findCharlotteComponentDescription(rows, category) {
   const match = rows.find((row) => normalizeCountyCityName(row.Category) === normalizeCountyCityName(category));
   return match?.Description || '';
+}
+
+// The roof component of the building the record was priced from: on a
+// multi-building parcel the component table lists every building ("Bld #"),
+// so the roof words follow the primary building's "Building Number" and fall
+// back to the parcel's first Roofing row only when no row names that building.
+function findCharlottePrimaryRoofing(rows, primaryBuilding) {
+  const buildingNumber = String(primaryBuilding?.['Building Number'] ?? '').trim();
+  const own = buildingNumber
+    ? rows.filter((row) => String(row['Bld #'] ?? '').trim() === buildingNumber)
+    : [];
+  return findCharlotteComponentDescription(own, 'Roofing') || findCharlotteComponentDescription(rows, 'Roofing');
 }
 
 function coerceCharlotteOwnershipLotSize(ownership) {
@@ -6087,6 +6099,7 @@ module.exports = {
   lookupPropertyFromCountyByParcel,
   searchCountyParcelByAddress,
   _private: {
+    findCharlottePrimaryRoofing,
     applyCountyGisTypeOverride,
     attachParcelMeta,
     buildCadastralRecord,
