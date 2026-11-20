@@ -50,6 +50,7 @@
  */
 
 const db = require('../../models/db');
+const { paymentMetadataValueSql } = require('../payer-linkage');
 
 const HOLD_FLAG = 'collection_hold';
 const DISPUTE_REASON_PREFIX = 'dispute';
@@ -561,7 +562,7 @@ function isNeverAttemptedHoldDeferral(p) {
 // keeps the NOT() NULL-safe for rows with no metadata.
 function excludeNeverAttemptedHoldDeferrals(query, alias = 'payments') {
   return query.whereRaw(
-    `NOT (COALESCE(${alias}.metadata->>'deferred_reason', '') = ? AND ${alias}.stripe_payment_intent_id IS NULL AND ((COALESCE(${alias}.retry_count, 0) = 0 AND ${alias}.next_retry_at IS NOT NULL) OR (${alias}.superseded_by_payment_id IS NOT NULL AND ${alias}.superseded_by_payment_id <> ${alias}.id) OR COALESCE(${alias}.metadata->>'deferred_resolution', '') = ?))`,
+    `NOT (COALESCE(${paymentMetadataValueSql(alias, 'deferred_reason')}, '') = ? AND ${alias}.stripe_payment_intent_id IS NULL AND ((COALESCE(${alias}.retry_count, 0) = 0 AND ${alias}.next_retry_at IS NOT NULL) OR (${alias}.superseded_by_payment_id IS NOT NULL AND ${alias}.superseded_by_payment_id <> ${alias}.id) OR COALESCE(${paymentMetadataValueSql(alias, 'deferred_resolution')}, '') = ?))`,
     [HOLD_DEFERRAL_REASON, ABSORBED_RESOLUTION],
   );
 }

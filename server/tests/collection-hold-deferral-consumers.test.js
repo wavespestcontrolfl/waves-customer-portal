@@ -83,9 +83,10 @@ describe('excludeNeverAttemptedHoldDeferrals', () => {
     const qb = { whereRaw: (...a) => { calls.push(a); return qb; } };
     expect(excludeNeverAttemptedHoldDeferrals(qb)).toBe(qb);
     excludeNeverAttemptedHoldDeferrals(qb, 'p');
-    expect(calls[0][0]).toContain("COALESCE(payments.metadata->>'deferred_reason', '') = ?");
+    expect(calls[0][0]).toContain("pg_input_is_valid(payments.metadata #>> '{}', 'jsonb')");
+    expect(calls[0][0]).toContain("->>'deferred_reason'");
     expect(calls[0][1]).toEqual(['collection_hold', 'absorbed_annual_prepay']);
-    expect(calls[0][0]).toContain("COALESCE(payments.metadata->>'deferred_resolution', '') = ?");
+    expect(calls[0][0]).toContain("->>'deferred_resolution'");
     expect(calls[1][0]).toContain('p.stripe_payment_intent_id IS NULL');
   });
 });

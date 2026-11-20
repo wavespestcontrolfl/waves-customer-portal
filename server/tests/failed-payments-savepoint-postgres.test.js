@@ -34,6 +34,8 @@ postgres('failed-payment status lookup savepoint (PostgreSQL)', () => {
       table.integer('retry_count');
       table.timestamp('next_retry_at', { useTz: true });
       table.uuid('superseded_by_payment_id');
+      table.date('payment_date');
+      table.timestamp('created_at', { useTz: true });
     });
     // Deliberately omit status: the failed-invoice classification statement
     // errors after entering PostgreSQL, exactly the case that poisons a
@@ -67,6 +69,86 @@ postgres('failed-payment status lookup savepoint (PostgreSQL)', () => {
     const q = excludeLiveOwnedPayerPayments(excludeDirectPayerPayments(app('payments').where({ customer_id: owner })), { payerInvRows });
     expect(q.toSQL().bindings.length).toBeLessThan(10);
     expect(await q.pluck('id')).toEqual([ownPayment]);
+  });
+
+  test('string-encoded deferrals cannot win the portal latest-attempt query', async () => {
+    const { excludeNeverAttemptedDeferrals } = require('../services/failed-payments');
+    const customerId = randomUUID();
+    const paidId = randomUUID();
+    const lockId = randomUUID();
+    const holdId = randomUUID();
+    const absorbedId = randomUUID();
+    await app('payments').insert([
+      {
+        id: paidId, customer_id: customerId, status: 'paid', amount: 33,
+        metadata: {}, payment_date: '2026-11-01', created_at: new Date('2026-11-01T14:00:00Z'),
+      },
+      {
+        id: lockId, customer_id: customerId, status: 'failed', amount: 33,
+        metadata: app.raw('to_jsonb(?::text)', [JSON.stringify({ deferred_reason: 'lock_contention' })]),
+        retry_count: 0, next_retry_at: new Date('2026-11-20T14:00:00Z'),
+        payment_date: '2026-11-02', created_at: new Date('2026-11-02T14:00:00Z'),
+      },
+      {
+        id: holdId, customer_id: customerId, status: 'failed', amount: 33,
+        metadata: app.raw('to_jsonb(?::text)', [JSON.stringify({ deferred_reason: 'collection_hold' })]),
+        retry_count: 0, next_retry_at: new Date('2026-11-20T14:00:00Z'),
+        payment_date: '2026-11-03', created_at: new Date('2026-11-03T14:00:00Z'),
+      },
+      {
+        id: absorbedId, customer_id: customerId, status: 'failed', amount: 33,
+        metadata: app.raw('to_jsonb(?::text)', [JSON.stringify({
+          deferred_reason: 'collection_hold', deferred_resolution: 'absorbed_annual_prepay',
+        })]),
+        retry_count: 0, superseded_by_payment_id: absorbedId,
+        payment_date: '2026-11-04', created_at: new Date('2026-11-04T14:00:00Z'),
+      },
+    ]);
+
+    const latest = await excludeNeverAttemptedDeferrals(app('payments')
+      .where({ customer_id: customerId })
+      .whereIn('status', ['paid', 'failed', 'refunded'])
+      .whereNull('superseded_by_payment_id'))
+      .orderBy('payment_date', 'desc')
+      .orderBy('created_at', 'desc')
+      .orderBy('id', 'desc')
+      .first('id', 'status');
+    expect(latest).toEqual({ id: paidId, status: 'paid' });
+
+    // The shared consumer predicate also recognizes the string-encoded
+    // resolution field when the self-superseded row is not prefiltered.
+    expect(await excludeNeverAttemptedDeferrals(app('payments')
+      .where({ customer_id: customerId })).pluck('id')).toEqual([paidId]);
+  });
+
+  test('annual-prepay resolution normalization preserves legacy-string and object metadata', async () => {
+    const { paymentMetadataObjectSql } = require('../services/payer-linkage');
+    const customerId = randomUUID();
+    const legacyId = randomUUID();
+    const objectId = randomUUID();
+    const legacy = { billed_month: '2026-08', base_amount: 33 };
+    const object = { billed_month: '2026-09', base_amount: 44 };
+    await app('payments').insert([
+      {
+        id: legacyId, customer_id: customerId, status: 'failed', amount: 33,
+        metadata: app.raw('to_jsonb(?::text)', [JSON.stringify(legacy)]),
+      },
+      {
+        id: objectId, customer_id: customerId, status: 'failed', amount: 44,
+        metadata: object,
+      },
+    ]);
+
+    await app('payments').whereIn('id', [legacyId, objectId]).update({
+      metadata: app.raw(`${paymentMetadataObjectSql('payments')} || ?::jsonb`, [
+        JSON.stringify({ deferred_resolution: 'absorbed_annual_prepay' }),
+      ]),
+    });
+
+    const byId = new Map((await app('payments').whereIn('id', [legacyId, objectId])
+      .select('id', 'metadata')).map((row) => [row.id, row.metadata]));
+    expect(byId.get(legacyId)).toEqual({ ...legacy, deferred_resolution: 'absorbed_annual_prepay' });
+    expect(byId.get(objectId)).toEqual({ ...object, deferred_resolution: 'absorbed_annual_prepay' });
   });
 
   test('a failed classification read is withheld and the read-only snapshot remains usable', async () => {

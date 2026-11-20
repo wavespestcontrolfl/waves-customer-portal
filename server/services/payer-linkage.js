@@ -71,7 +71,19 @@ function buildPayerLinkage(payerInvRows, { failed = false } = {}) {
 
 // Older payment writers stored a JSON string inside their JSONB column.
 // PostgreSQL 16 validates that inner string before the cast (even malformed
-// historical text cannot abort the balance query). Keys are internal literals.
+// historical text cannot abort the balance query). Keep the whole-object form
+// shared too: writers that add a key must normalize the legacy string first,
+// or jsonb concatenation turns it into ["{...}", {"new_key": ...}].
+function paymentMetadataObjectSql(alias) {
+  const column = `${alias}.metadata`;
+  return `(CASE WHEN jsonb_typeof(${column}) = 'string' AND pg_input_is_valid(${column} #>> '{}', 'jsonb')
+    THEN CASE WHEN jsonb_typeof((${column} #>> '{}')::jsonb) = 'object'
+      THEN (${column} #>> '{}')::jsonb ELSE '{}'::jsonb END
+    WHEN jsonb_typeof(${column}) = 'object' THEN ${column} ELSE '{}'::jsonb END)`;
+}
+
+// Values keep the compact reader used by bounded filters. Keys are internal
+// literals.
 function paymentMetadataValueSql(alias, key) {
   const column = `${alias}.metadata`;
   return `(CASE WHEN jsonb_typeof(${column}) = 'string' AND pg_input_is_valid(${column} #>> '{}', 'jsonb')
@@ -242,6 +254,7 @@ function excludeLiveOwnedPayerPayments(qb, linkage) {
 
 module.exports = {
   LIVE_CANDIDATE_PAYER_SQL, LIVE_SETTLED_EXCLUSION_SQL, LIVE_ANNUAL_PREPAY_MARKER_SQL,
-  LIVE_SCAN_MAX_INVOICES, LIVE_SCAN_MAX_RESOLUTIONS, LIVE_PACKET_SCAN_MAX_PACKETS, uuidFromMetadata, excludeLiveOwnedPayerPayments,
+  LIVE_SCAN_MAX_INVOICES, LIVE_SCAN_MAX_RESOLUTIONS, LIVE_PACKET_SCAN_MAX_PACKETS,
+  paymentMetadataObjectSql, paymentMetadataValueSql, uuidFromMetadata, excludeLiveOwnedPayerPayments,
   invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, isCombinedPayment, descriptionInvoiceNumberOf, buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage, excludeDirectPayerPayments,
 };

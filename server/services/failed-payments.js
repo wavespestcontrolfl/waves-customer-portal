@@ -11,6 +11,7 @@
 // invoice keeps counting (the invoice sum only covers sent / viewed / overdue).
 const db = require('../models/db');
 const { isNeverAttemptedHoldDeferral, excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
+const { paymentMetadataValueSql } = require('./payer-linkage');
 
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -51,7 +52,7 @@ const isNeverAttemptedDeferral = (p) => isNeverAttemptedHoldDeferral(p) || isNev
 function excludeNeverAttemptedDeferrals(query, alias = 'payments') {
   excludeNeverAttemptedHoldDeferrals(query, alias);
   return query.whereRaw(
-    `NOT (COALESCE(${alias}.metadata->>'deferred_reason', '') = ? AND ${alias}.stripe_payment_intent_id IS NULL AND ((COALESCE(${alias}.retry_count, 0) = 0 AND ${alias}.next_retry_at IS NOT NULL) OR (${alias}.superseded_by_payment_id IS NOT NULL AND ${alias}.superseded_by_payment_id <> ${alias}.id)))`,
+    `NOT (COALESCE(${paymentMetadataValueSql(alias, 'deferred_reason')}, '') = ? AND ${alias}.stripe_payment_intent_id IS NULL AND ((COALESCE(${alias}.retry_count, 0) = 0 AND ${alias}.next_retry_at IS NOT NULL) OR (${alias}.superseded_by_payment_id IS NOT NULL AND ${alias}.superseded_by_payment_id <> ${alias}.id)))`,
     [LOCK_DEFERRAL_REASON],
   );
 }

@@ -25,10 +25,27 @@ const { whereAwaitingAuthentication } = require('./invoice-payment-authenticatio
 // belonging to the requesting customer.
 const paymentMetadataOf = (payment) => {
   try {
-    const metadata = typeof payment?.metadata === 'string'
+    let metadata = typeof payment?.metadata === 'string'
       ? JSON.parse(payment.metadata)
       : payment?.metadata;
-    return metadata && typeof metadata === 'object' ? metadata : null;
+    // Before billing-cron normalized legacy JSONB strings, PostgreSQL's
+    // string || object concatenation stored ["{...}", { resolution... }].
+    // Recover that one historical shape so a self-superseded retry reads as
+    // resolved, not as an uncertain charge awaiting verification.
+    if (Array.isArray(metadata) && metadata.length === 2
+      && typeof metadata[0] === 'string'
+      && metadata[1] && typeof metadata[1] === 'object' && !Array.isArray(metadata[1])) {
+      let original = null;
+      try {
+        const parsed = JSON.parse(metadata[0]);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) original = parsed;
+      } catch {
+        // The cron-authored resolution object remains authoritative even if
+        // the older inner text was malformed.
+      }
+      metadata = { ...(original || {}), ...metadata[1] };
+    }
+    return metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : null;
   } catch {
     return null;
   }

@@ -259,6 +259,10 @@ describe('processPaymentRetries — suppression guards', () => {
     const absorb = mockPaymentUpdates[0];
     expect(absorb.next_retry_at).toBeNull();
     expect(absorb.superseded_by_payment_id).toBe('pay-failed-1');
+    expect(absorb.metadata).toEqual(expect.objectContaining({
+      sql: expect.stringContaining("pg_input_is_valid(payments.metadata #>> '{}', 'jsonb')"),
+      bindings: [JSON.stringify({ deferred_resolution: 'absorbed_annual_prepay' })],
+    }));
     expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_annual_prepay',
       expect.objectContaining({ paymentId: 'pay-failed-1' }));
   });
