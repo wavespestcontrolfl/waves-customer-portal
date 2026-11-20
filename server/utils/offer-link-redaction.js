@@ -28,7 +28,9 @@
  *   or by the bare marker when it holds none. The bare marker is not a link, so the replay leaves it as it is.
  * - A link or a copy split by anything a reader does not see. A reader sees a shown or copied link run together:
  *   markup, white space (raw or written as a character reference such as &nbsp;), controls and other invisible
- *   characters drop out (a <wbr> or a <span> inside it, a quoted reply that wraps it). So for copies each unit's reader
+ *   characters drop out (a <wbr> or a <span> inside it, a quoted reply that wraps it), and so do the angle brackets:
+ *   no unit of raw text holds one, so a quoted reply's "> " at each line start drops out of plain text, and the same
+ *   marker written "&gt; " in html drops out once decoded. So for copies each unit's reader
  *   text is read with all of those dropped, and the units are also read joined, with nothing between them: once with
  *   every unit, as plain text shows it, and once with the units outside tags only, as an email shows it. There
  *   "careers" may end a longer word, and the token is the 64 hex after "offer/" whatever follows. A token on an offer
@@ -121,8 +123,9 @@ const DECODE_PASSES = 4;
 
 // A reading as a reader sees it run together: every character with no mark of its own dropped (white space, raw or
 // decoded from a character reference, controls, format and other default-ignorable characters, the blank braille
-// pattern).
-const compact = (seen) => seen.replace(/[\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, '');
+// pattern), and the angle brackets. No unit of raw text holds a "<" or a ">", so a quote marker drops out of plain
+// text; the same marker decoded from html ("&gt; " at the start of each quoted line) drops out here the same way.
+const compact = (seen) => seen.replace(/[\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2800<>]/gu, '');
 // Text as a reader reads it, case kept: full-width forms folded, tabs, line breaks and format characters dropped,
 // backslashes as slashes. Case is kept until decoding is done, since a named character reference (&Tab;) needs it.
 const typedOf = (text) => text.normalize('NFKC').replace(/[\t\n\r]|\p{Cf}/gu, '').replace(/\\/g, '/');

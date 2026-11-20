@@ -724,6 +724,30 @@ describe('the email ledger snapshot', () => {
     expect(history.find((e) => e.channel === 'email').body).not.toContain(token.slice(0, 20));
   });
 
+  // An owner who pastes a quoted reply: the link wraps over two quoted lines. The edited path wraps the text into html,
+  // which writes each line's "> " as "&gt; "; a reader skips it there as in the text.
+  test('hides a token a pasted quoted reply wraps over two lines, in the html and the text', async () => {
+    const token = require('crypto').createHash('sha256').update('ledger quoted wrap').digest('hex');
+    const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
+    const app = baseApp({ interview_token: 'a'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockSendOne.mockClear();
+    const emailBody = `Thanks!\n\n> Your offer: ${link.slice(0, 80)}\n> ${link.slice(80)}`;
+    await RecruitingComms.sendStageComms(app, 'interview_invite', { sms: false, email: true, by: 'tech-1', emailSubject: 'Re: your offer', emailBody });
+    const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
+    expect(row.html_snapshot).toContain('&gt; Your offer: [link hidden]'); // the edited text, wrapped into html
+    expect(row.text_snapshot).toContain('> Your offer: [link hidden]');
+    for (const field of ['subject_snapshot', 'html_snapshot', 'text_snapshot']) {
+      expect(row[field]).not.toContain(token.slice(0, 20));
+      expect(row[field]).not.toContain(token.slice(-20));
+    }
+    expect(mockSendOne.mock.calls[0][0].text).toContain(`${link.slice(0, 80)}\n> ${link.slice(80)}`); // the provider gets it as typed
+    const history = mockDb.__tables.job_applications.find((r) => r.id === 'app-1').comms_history;
+    const body = history.find((e) => e.channel === 'email').body;
+    expect(body).not.toContain(token.slice(0, 20));
+    expect(body).not.toContain(token.slice(-20));
+  });
+
   // An email may also show the link as text with an &nbsp; or a <wbr> inside the token; a reader still reads it whole.
   test('hides a token the email shows split by an &nbsp; or a tag, beside the hidden href', async () => {
     const token = require('crypto').createHash('sha256').update('ledger split').digest('hex');

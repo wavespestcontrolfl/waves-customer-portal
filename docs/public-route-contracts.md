@@ -8655,7 +8655,8 @@ history, another offer's link in the offer text) is not queued, and the owner se
 units' reader text is also read run together (once with every unit, once with the units outside tags only) with
 every character a reader does not see dropped, so a link or a copy split by markup, white space (also `&nbsp;`), line
 breaks or invisible characters (a `<wbr>` or `<span>` inside it, a quoted reply that wraps it) is found and hidden in
-every piece: the marker in the first unit, nothing in the rest, the tags kept. A copy is looked for at every stage of
+every piece (angle brackets drop out too: no unit of raw text holds one, so a quoted reply's `> ` at each line start,
+which the html copy writes as `&gt; `, reads the same in both copies): the marker in the first unit, nothing in the rest, the tags kept. A copy is looked for at every stage of
 decoding, as typed and after each step of each pass, since a step can use up part of a token (a `%` before two of its
 hex digits) while the stored text still shows it whole; each unit is also decoded with the characters a reader does not
 see dropped first, so an escape split by one of them (a space in a quoted value) decodes. The run-together text is also

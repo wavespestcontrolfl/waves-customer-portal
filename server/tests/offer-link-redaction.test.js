@@ -233,7 +233,7 @@ describe('every link a browser opens as the signing page is stored without its t
 });
 
 // What a reader can see in stored text, run together: once as plain text, once with the tags an email does not show
-// dropped. Both decoded, quote markers and white space dropped, lowercase.
+// dropped. Both decoded, quote markers (also decoded from &gt;), angle brackets and white space dropped, lowercase.
 function readerViews(text) {
   const read = (value) => {
     let out = value.replace(/^>+ ?/gm, '');
@@ -244,7 +244,7 @@ function readerViews(text) {
       if (next === out) break;
       out = next;
     }
-    return out.normalize('NFKC').replace(/[\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, '').toLowerCase();
+    return out.normalize('NFKC').replace(/[\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2800<>]/gu, '').toLowerCase();
   };
   return [read(text), read(text.replace(/<!--[\s\S]*?-->|<[^>]*>/g, ''))];
 }
@@ -252,13 +252,14 @@ function readerViews(text) {
 describe('a found token split anywhere is hidden in every piece', () => {
   // A token that does not repeat, as a real one does not. Every split point inside it, with each separator a reader
   // skips: markup an email shows nothing for, a space (also written &nbsp;, %C2%A0 or as a figure space), a line break,
-  // a quoted reply's wrap, an invisible character (a zero-width space, a soft hyphen, a blank braille pattern).
+  // a quoted reply's wrap (also as html writes it: "&gt; " after a line break or a <br>), an invisible character (a
+  // zero-width space, a soft hyphen, a blank braille pattern).
   // The link split alone, beside the whole link in an href, and as a plain copy.
   const token = createHash('sha256').update('split grid').digest('hex');
   const link = `https://portal.wavespestcontrol.com/careers/offer/${token}`;
   const at = link.length - 64;
   const SEPARATORS = [
-    '<wbr>', '<span>', '</span><span style="x">', '<!-- -->', ' ', '\n', '\n> ', '&#8203;', '%E2%80%8B',
+    '<wbr>', '<span>', '</span><span style="x">', '<!-- -->', ' ', '\n', '\n> ', '\n&gt; ', '<br>&gt;&gt; ', '&#8203;', '%E2%80%8B',
     '&nbsp;', '%C2%A0', '&#x2007;', '&shy;', '&#10240;',
   ];
 
