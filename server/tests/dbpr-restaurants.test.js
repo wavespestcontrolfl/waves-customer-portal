@@ -261,6 +261,9 @@ describe('parseInspectionReport', () => {
     const page = (note) => reportPage(`<tr><td>35A-02-8</td><td>${note}</td></tr>`);
     expect(svc.parseInspectionReport(page('x'.repeat(2000))).findings[0].text).toHaveLength(400);
     expect(svc.parseInspectionReport(page('ROACH\0ES')).findings[0].text).toBe('ROACH ES');
+    // A 35 row with no observation text cannot answer: a code alone is not a finding.
+    expect(svc.parseInspectionReport(page('&nbsp;'), { cited35: 1 })).toBeNull();
+    expect(svc.parseInspectionReport(reportPage('<tr><td>35B-03-4</td><td></td></tr>'), { cited35: 1 })).toBeNull();
     // The cap cuts between characters: an emoji across it is kept whole or left out, never cut in half.
     const emoji = svc.parseInspectionReport(page(`${'x'.repeat(399)}\u{1FAB3}yy`)).findings[0].text;
     expect(emoji).toBe(`${'x'.repeat(399)}\u{1FAB3}`);
@@ -382,6 +385,11 @@ describe('parseInspectionReport', () => {
       const odd = reportPage(`<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - - From initial inspection : Flies. - ${label} Flies.</td></tr>`);
       expect(read('2026-08-28', 1, odd)).toBeNull();
     }
+    // On a follow-up report an unlabelled 35 row cannot be tied to a visit, whichever row carries the labels.
+    const plain = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - Live flies at the bar.</td></tr>';
+    expect(read('2026-09-03', 3, reportPage(`${plain}\n${door}`))).toBeNull();
+    const other = '<tr><td>22-11-4</td><td>&nbsp;</td><td>Basic - - From initial inspection : Basic - Soiled shelf.</td></tr>';
+    expect(read('2026-09-03', 3, reportPage(`${plain}\n${other}`))).toBeNull();
     // A routine report (no visit labels) is the read visit's own, as before.
     expect(svc.parseInspectionReport(fixture('report-35a.html'), { cited35: 1, visitDate: '2026-11-16', visitNumber: 2 }))
       .toMatchObject({ pestEvidence: true });

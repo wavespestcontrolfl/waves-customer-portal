@@ -331,7 +331,8 @@ const capText = (text) => Array.from(text).slice(0, FINDING_TEXT_MAX).join('');
  *   observation), so a code quoted in a note, a comment or a script never starts an entry. A row whose Violation cell
  *   is not a code alone (blank, or 35A-02-8*), or a code cell outside that table (another table, the footer), means
  *   the page is not laid out as expected;
- * - every visit label on its 35 rows reads, and it lists at least as many 35A or 35B rows of the read visit
+ * - each 35 row has observation text; every visit label on them reads, and on a follow-up report (any violations row
+ *   labelled) each 35 row is labelled; it lists at least as many 35A or 35B rows of the read visit
  *   (visitDate, visitNumber) as the file counted for it (cited35): the missing one could be 35A. A follow-up report
  *   also lists earlier visits' rows; only a row with a note of the read visit is its own. Without the count only a
  *   35A row answers;
@@ -380,7 +381,10 @@ function parseInspectionReport(html, { cited35 = null, visitDate = null, visitNu
     const text = entry.parts.join(' ');
     return { code: entry.code, text, notes: visitNotes(text) };
   });
-  if (unreadable || rows35.some((row) => row.notes.unreadable)) return null;
+  // A follow-up report (any violations row labelled with its visit) ties each row to a visit, so an unlabelled 35 row
+  // on it cannot be tied to one. A 35 row with no observation text cannot answer either.
+  const followUp = entries.some((entry) => !visitNotes(entry.parts.join(' ')).routine);
+  if (unreadable || rows35.some((row) => row.notes.unreadable || !row.text || (followUp && row.notes.routine))) return null;
   // The read visit's own 35 rows: every row of a routine report; on a follow-up report a row with a note of that
   // visit (a status alone counts: the violation was still open at the visit).
   const ofVisit = rows35.filter((row) => row.notes.routine || row.notes.notes.some((note) => isVisitNote(note, visit)));
