@@ -549,6 +549,51 @@ describe('the new-sod record — staff-only sodLaidOn / sodCovers / sodArea', ()
   });
 });
 
+describe('the sprinkler timer on file: one record, saved whole (services/controller-timer.js)', () => {
+  const X2_ON_APP = { irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: 'yes' };
+  const timerOf = (row) => [row?.irrigation_controller_brand ?? null, row?.irrigation_controller_model ?? null, row?.irrigation_controller_app ?? null];
+
+  it('saves a whole timer, stamps no irrigation system, and audits the three field names', async () => {
+    const res = await putPrefs(X2_ON_APP);
+    expect(res.status).toBe(200);
+    expect(timerOf(mockState.prefsRow)).toEqual(['hunter', 'x2', 'yes']);
+    expect(mockState.prefsRow.irrigation_system).toBeUndefined();
+    expect(recordAuditEvent.mock.calls[0][0].metadata.fields).toEqual(['irrigation_controller_app', 'irrigation_controller_brand', 'irrigation_controller_model']);
+  });
+
+  it('a model sent alone is a 400 and writes nothing: it could land on a brand the customer has since changed', async () => {
+    mockState.prefsRow = { id: 'pref-1', customer_id: 'cust-1', irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null, irrigation_controller_app: 'yes' };
+    const res = await putPrefs({ irrigationControllerModel: 'x2' });
+    expect(res.status).toBe(400);
+    expect(res.body.rejected).toEqual([{ field: 'irrigationControllerModel', message: expect.stringMatching(/saves as one record/) }]);
+    expect(timerOf(mockState.prefsRow)).toEqual(['rain_bird', null, 'yes']);
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it('a timer that cannot exist is rejected whole; the rest of the batch saves and the audit names only what saved', async () => {
+    const res = await putPrefs({ irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x_core', irrigationControllerApp: 'yes', accessNotes: 'Side gate' });
+    expect(res.status).toBe(200);
+    expect(res.body.rejected.map((r) => r.field)).toEqual(['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp']);
+    expect(res.body.rejected[0].message).toMatch(/no phone-app question/);
+    expect(mockState.prefsRow.access_notes).toBe('Side gate');
+    expect(timerOf(mockState.prefsRow)).toEqual([null, null, null]);
+    expect(recordAuditEvent.mock.calls[0][0].metadata.fields).toEqual(['access_notes']);
+  });
+
+  it('after a move, a form rendered before it cannot set or clear the timer; the matching stamp can', async () => {
+    const movedAt = '2026-11-10T15:00:00.000Z';
+    mockState.prefsRow = { id: 'pref-1', customer_id: 'cust-1', irrigation_home_changed_at: movedAt, irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null, irrigation_controller_app: null };
+    for (const stale of [X2_ON_APP, { ...X2_ON_APP, confirmedAsOf: '2026-09-01T00:00:00.000Z' }, { irrigationControllerBrand: null, irrigationControllerModel: null, irrigationControllerApp: null }]) {
+      const res = await putPrefs(stale);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/home on this account changed/);
+      expect(timerOf(mockState.prefsRow)).toEqual(['rain_bird', null, null]);
+    }
+    expect((await putPrefs({ ...X2_ON_APP, confirmedAsOf: movedAt })).status).toBe(200);
+    expect(timerOf(mockState.prefsRow)).toEqual(['hunter', 'x2', 'yes']);
+  });
+});
+
 // Away Watch dates (GATE_AWAY_WATCH): the admin writer shares the portal's rules; gate off = an unknown field.
 describe('PUT /api/admin/customers/:id/property-preferences — Away Watch dates', () => {
   const { etDateString, addETDays } = require('../utils/datetime-et');

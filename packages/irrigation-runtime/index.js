@@ -54,6 +54,21 @@ const HEAD_LABELS = Object.freeze({
 // Same seven keys the portal pills emit (watering_days / mowing_days).
 const DAY_KEYS = Object.freeze(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']);
 
+// The sprinkler timer on file (property_preferences.irrigation_controller_brand / _model / _app): one list for the
+// customer card, the staff form, the validator and the staff count. Keys are stored; labels are display text.
+// A timer is not a watering input: nothing here enters a plan or a derived figure.
+const CONTROLLER_BRANDS = Object.freeze({ hunter: 'Hunter', rain_bird: 'Rain Bird', other: 'Another brand' });
+// Asked for Hunter only: the model decides whether the timer can go on Hunter's Hydrawise phone app.
+const CONTROLLER_MODELS = Object.freeze({ x2: 'X2', x_core: 'X-Core', pro_c: 'Pro-C', hydrawise: 'Hydrawise touchscreen' });
+// Whether the customer runs the timer from its maker's phone app. 'unknown' is the customer's "Not sure".
+const CONTROLLER_APP_ANSWERS = Object.freeze({ yes: 'Yes', no: 'No', unknown: 'Not sure' });
+// The phone-app question exists only for a timer whose maker has a phone app for it: a Rain Bird, or a Hunter
+// model that can go on Hydrawise. One rule for the customer card, the staff form and the server.
+const CONTROLLER_APP_MODELS = Object.freeze(['x2', 'pro_c', 'hydrawise']);
+function controllerAsksAboutApp(brand, model) {
+  return brand === 'rain_bird' || (brand === 'hunter' && CONTROLLER_APP_MODELS.includes(model));
+}
+
 const MAX_RUN_MINUTES = 240;
 
 // Same ceiling the portal's explicit weekly-inches field validates against
@@ -430,6 +445,10 @@ module.exports = {
   OWNER_HEAD_RATE_IN_PER_HR,
   HEAD_LABELS,
   DAY_KEYS,
+  CONTROLLER_BRANDS,
+  CONTROLLER_MODELS,
+  CONTROLLER_APP_ANSWERS,
+  controllerAsksAboutApp,
   MAX_RUN_MINUTES,
   MAX_INCHES_PER_WEEK,
   deriveIrrigationInchesPerWeek,

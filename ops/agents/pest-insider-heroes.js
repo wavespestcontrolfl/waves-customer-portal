@@ -4,9 +4,11 @@
  * Draws every top picture in server/data/pest-insider-heroes-v1.json
  * (checked by server/services/pest-insider/heroes.js) as a 582x326 JPEG at
  * 2x, and writes it to client/public/pest-insider/heroes/<fact>-<hash>.jpg,
- * where the portal serves it to email readers. Run it on a Mac after any
- * change to the heroes file, a fact's title or the drawing, then commit the
- * pictures with the change.
+ * where the portal serves it to email readers. A picture with motion also
+ * gets <fact>-<hash>.gif: the same picture with its motion drawn over the
+ * art (pest-insider-motion.js), 16 frames that play 3 times. Run it on a Mac
+ * after any change to the heroes file, a fact's title or the drawing, then
+ * commit the pictures with the change.
  *
  *   node ops/agents/pest-insider-heroes.js [--execute] [--out <dir>] [--only T03,R01]
  *
@@ -30,7 +32,8 @@
  * network; a picture is refused when either font did not load, so none
  * ships in a fallback font. Every color comes from cards.js WAVES_COLORS, and a
  * test refuses any other. Change the drawing below -> bump HERO_DESIGN in
- * heroes.js, so every picture gets a new file name.
+ * heroes.js, so every picture gets a new file name; change the motion or its
+ * GIF settings -> bump HERO_MOTION_DESIGN.
  */
 /* global document */
 'use strict';
@@ -48,6 +51,7 @@ const { chromium } = require('playwright');
 const sharp = require('sharp');
 const { WAVES_COLORS: C } = require('../../server/services/pest-insider/cards');
 const { fontStyle } = require('./pest-insider-fonts');
+const { motionSvg, MOTION_FRAMES, MOTION_DELAY_MS, MOTION_LOOPS } = require('./pest-insider-motion');
 
 // The command line, checked whole: an unknown flag, a flag with no value,
 // a flag given twice or an extra word stops the run (exit 2), so a typo
@@ -154,8 +158,11 @@ async function draw(H) {
   const wanted = Object.entries(HEROES).filter(([key]) => !only || only.has(key));
   const unknown = only ? [...only].filter((id) => !Object.prototype.hasOwnProperty.call(HEROES, id)) : [];
   if (unknown.length) { console.error(`No top picture for ${unknown.join(', ')}; nothing drawn.`); process.exit(2); }
+  // A picture's files: its still, and its GIF when it moves.
+  const filesOf = (hero) => [hero.file, hero.gifFile].filter(Boolean);
+  const drawn = (file) => fs.existsSync(path.join(outDir, file));
   if (!execute) {
-    for (const [id, hero] of wanted) console.log(`${id}  ${hero.file}  ${fs.existsSync(path.join(outDir, hero.file)) ? 'drawn' : 'would draw'}`);
+    for (const [id, hero] of wanted) console.log(`${id}  ${filesOf(hero).map((file) => `${file}  ${drawn(file) ? 'drawn' : 'would draw'}`).join('  ')}`);
     console.log(`Dry run: nothing written. Add --execute to draw into ${outDir}.`);
     return;
   }
@@ -165,7 +172,8 @@ async function draw(H) {
   const page = await browser.newPage({ viewport: { width: HERO_WIDTH, height: HERO_HEIGHT }, deviceScaleFactor: 2 });
   let failed = 0;
   for (const [id, hero] of wanted) {
-    if (fs.existsSync(path.join(outDir, hero.file))) { console.log(`${id}  ${hero.file}  already drawn; kept`); continue; }
+    const missing = filesOf(hero).filter((file) => !drawn(file));
+    if (!missing.length) { console.log(`${id}  ${filesOf(hero).join('  ')}  already drawn; kept`); continue; }
     let artUrl = null;
     if (hero.art) {
       const art = fs.readFileSync(path.join(repoRoot, ART_DIR, hero.artFile));
@@ -178,9 +186,24 @@ async function draw(H) {
     const size = await fitTitle(page, hero.art ? { width: 250, height: 250 } : { width: 534, height: 220 });
     if (!size) { console.error(`${id}: the title does not fit`); failed += 1; continue; }
     const shot = await page.screenshot({ clip: { x: 0, y: 0, width: HERO_WIDTH, height: HERO_HEIGHT } });
-    const jpg = await sharp(shot).jpeg({ quality: 82, mozjpeg: true }).toBuffer();
-    publish(outDir, hero.file, jpg);
-    console.log(`${id}  ${hero.file}  ${hero.art ? 'art' : 'no art'}  title ${size}px  ${Math.round(jpg.length / 1024)} KB`);
+    if (missing.includes(hero.file)) {
+      const jpg = await sharp(shot).jpeg({ quality: 82, mozjpeg: true }).toBuffer();
+      publish(outDir, hero.file, jpg);
+      console.log(`${id}  ${hero.file}  ${hero.art ? 'art' : 'no art'}  title ${size}px  ${Math.round(jpg.length / 1024)} KB`);
+    }
+    if (missing.includes(hero.gifFile)) {
+      // Frame 0 is the whole picture, as every frame is: the motion only moves over the art.
+      const frames = [];
+      for (let f = 0; f < MOTION_FRAMES; f += 1) {
+        frames.push(await sharp(shot).composite([{ input: Buffer.from(motionSvg(hero.motion, f, HERO_WIDTH * 2, HERO_HEIGHT * 2)) }]).png().toBuffer());
+      }
+      // Dithered, so the art's soft fades show no bands; a pixel that did not move is kept from the frame before.
+      const gif = await sharp(frames, { join: { animated: true } })
+        .gif({ delay: Array(MOTION_FRAMES).fill(MOTION_DELAY_MS), loop: MOTION_LOOPS, dither: 1, effort: 7, interFrameMaxError: 6, interPaletteMaxError: 3, reuse: true })
+        .toBuffer();
+      publish(outDir, hero.gifFile, gif);
+      console.log(`${id}  ${hero.gifFile}  ${hero.motion.kind}  ${Math.round(gif.length / 1024)} KB`);
+    }
   }
   await browser.close();
   if (failed) process.exit(1);

@@ -20598,6 +20598,8 @@ function savedFloorReplayOverrides(estData) {
   // Whole-home exclusion quote-time minimum and renewal price (GATE_EXCLUSION_WHOLE_HOME): set even when EMPTY
   // (undefined), like the pins below, so a value stored inside the browser-controlled inputs is neutralized.
   overrides.wholeHomeSealReplay = require('../services/estimate-whole-home-replay').wholeHomeSealReplaySignal(estData) || undefined;
+  // Roof style quote-time multiplier and per-foot terms (GATE_EXCLUSION_ROOF_STYLE_PRICING): same contract, set even when empty.
+  overrides.roofStyleReplay = require('../services/estimate-roof-style-replay').roofStyleReplaySignal(estData) || undefined;
   // Shared with serverRecomputeFromEstimateData (admin-estimate-persistence)
   // — codex #3432 r2 P0: the authoritative recompute path replays the same
   // stored inputs and must resolve the same commercial-floor evidence.

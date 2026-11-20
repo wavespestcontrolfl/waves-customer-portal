@@ -1800,6 +1800,8 @@ describe('admin actions', () => {
     expect(r.outcome).toBe('posted');
     const call = mockPublish.mock.calls[0][0];
     expect(call.expectedAccountFingerprint).toBe('fp:Venice|new');
+    // A pipeline draft is agent text: the publisher's strict app-name rule (owner 2026-11-19).
+    expect(call.fromDraft).toBe(true);
     expect(JSON.parse(call.autoFields.auto_reply_grounding)).toMatchObject({ accountFingerprint: 'fp:Venice|new' });
   });
 
@@ -1813,6 +1815,28 @@ describe('admin actions', () => {
     expect(af).toMatchObject({ auto_reply_draft: human, auto_reply_version: 'human', auto_reply_mode: null, auto_reply_grounding: null });
     expect(mockPublish.mock.calls[0][0].auditMeta).toMatchObject({ version: 'human', mode: null, intent: 'post_now' });
     expect(af.auto_reply_drafted_at).not.toBe('2026-08-20T00:00:00Z');
+    // A person's own [DRAFT] meets the never list only.
+    expect(mockPublish.mock.calls[0][0].fromDraft).toBe(false);
+  });
+
+  test('owner 2026-11-19: postNow of an attempt from an AI draft that the sync restored as a [DRAFT] (version agent_ops) is agent text', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const text = 'Thanks Dana. Glad the Waves app helps.';
+    state.rows = [row({ id: 'ra', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain_cleared', review_reply: '[DRAFT] ' + text, auto_reply_draft: null, auto_reply_version: 'agent_ops', auto_reply_mode: null })];
+    const r = await Runner.postNow('ra', { type: 'admin' }, { expectedDraft: text });
+    expect(r.outcome).toBe('posted');
+    // It keeps its agent origin through the post: version agent_ops, never human.
+    expect(mockPublish.mock.calls[0][0]).toMatchObject({ text, fromDraft: true, auditMeta: { version: 'agent_ops' }, autoFields: { auto_reply_version: 'agent_ops' } });
+  });
+
+  test('owner 2026-11-19: a restored agent draft that times out again under Post now keeps version agent_ops for its next restore', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    const text = 'Thanks Dana. Glad the Waves app helps.';
+    state.rows = [row({ id: 'rb', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain_cleared', review_reply: '[DRAFT] ' + text, auto_reply_draft: null, auto_reply_version: 'agent_ops', auto_reply_mode: null })];
+    mockPublish.mockRejectedValueOnce(new ReviewReplyError('google_uncertain', 'GBP replyToReview timed out', { status: 502 }));
+    await expect(Runner.postNow('rb', { type: 'admin' }, { expectedDraft: text })).rejects.toMatchObject({ code: 'google_uncertain' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_draft: text, auto_reply_version: 'agent_ops', auto_reply_mode: null });
   });
 
   test('a malformed grounding token is never an unguarded submission (codex r47)', async () => {

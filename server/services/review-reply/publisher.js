@@ -23,6 +23,7 @@ const logger = require('../logger');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { hasRealReply, asDraft, isDraftReply, stripDraftPrefix, removedOwnerReplyFields } = require('./draft-prefix');
 const { reviewFingerprint } = require('./fingerprint');
+const { appNameRefusal } = require('./app-name');
 
 class ReviewReplyError extends Error {
   constructor(code, message, { status = 500, cause = null } = {}) {
@@ -52,6 +53,8 @@ const CODES = {
   // DB error): retryable, and it must NOT be read as a definitive
   // "someone else replied" (codex r74).
   RECONCILE_FAILED: 'reconcile_failed',
+  // The reply names the app another way than "the Waves app" (owner 2026-11-19).
+  APP_NAME: 'app_name',
 };
 
 const MISSING_MSG = 'This review has been removed from Google — replies are disabled.';
@@ -130,9 +133,14 @@ async function resolveGbpReviewName(review, { conn = db } = {}) {
       && String(g.comment || '').trim() === rText;
   });
   if (candidates.length === 1 && candidates[0].name) {
-    // The match stands even when saving it fails: the next publish looks it up again.
-    await conn('google_reviews').where({ id: review.id }).update({ gbp_review_name: candidates[0].name })
-      .catch((e) => logger.warn(`GBP resource name not saved for review ${review.id}: ${e.message}`));
+    // The match is saved before any Google write: Retract finds the reply by
+    // this name. A failed save posts nothing (null: NO_RESOURCE, retried).
+    try {
+      await conn('google_reviews').where({ id: review.id }).update({ gbp_review_name: candidates[0].name });
+    } catch (e) {
+      logger.warn(`GBP resource name not saved for review ${review.id}: ${require('../notification-service').safeErrorSummary(e)}`);
+      return null;
+    }
     return candidates[0].name;
   }
   if (candidates.length > 1) logger.warn(`GBP resource name lookup ambiguous for review ${review.id} (${candidates.length} candidates) — not resolved`);
@@ -230,12 +238,14 @@ function updatedCount(updated) {
  * @param {object} [p.autoFields]    extra google_reviews columns to stamp in the SAME conditional write (runner)
  * @param {object} [p.auditMeta]     activity_log metadata
  * @param {boolean} [p.requireGoogle=false]  refuse the dev local-only save (callers that report "posted")
+ * @param {boolean} [p.fromDraft=false]  a person's post that started from an AI or Agent Ops draft, edited or not
+ *        (Use Draft, AI Reply, a restored agent draft, Post now on an agent draft): the strict app-name rule
  * @param {(fresh: object) => (string|null)} [p.guard]  re-checked INSIDE the publish claim,
  *        immediately before the Google call, against a fresh row read: return a reason
  *        string to abort (e.g. the caller's auto claim was lost to a human skip/dismiss)
  * @returns {Promise<{googlePosted:boolean, reviewId:string, localOnly:boolean}>}
  */
-async function publishReviewReply({ reviewId, text, actor, allowOverwrite = false, autoFields = null, auditMeta = null, guard = null, requireGoogle = false, expectedReply = undefined, expectedDraft = undefined, expectedReview = undefined, expectedAccountFingerprint = undefined }) {
+async function publishReviewReply({ reviewId, text, actor, allowOverwrite = false, autoFields = null, auditMeta = null, guard = null, requireGoogle = false, fromDraft = false, expectedReply = undefined, expectedDraft = undefined, expectedReview = undefined, expectedAccountFingerprint = undefined }) {
   const replyText = String(text || '').trim();
   if (!replyText) throw new ReviewReplyError(CODES.EMPTY, 'Reply text required', { status: 400 });
   if (!actor?.type) throw new Error('publishReviewReply: actor.type required');
@@ -243,6 +253,15 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
   const review = await db('google_reviews').where({ id: reviewId }).first();
   if (!review || review.reviewer_name === '_stats') throw new ReviewReplyError(CODES.NOT_FOUND, 'Review not found', { status: 404 });
   if (review.missing_since) throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
+  // Owner 2026-11-19: the app is "the Waves app" (app-name.js). Checked
+  // here, where every path to Google meets, before any write. Agent text
+  // meets the strict rule: the runner and the Intelligence Bar post it, and
+  // a person's post says so (fromDraft) when it started from an AI or Agent
+  // Ops draft. Every other reply is a person's own words and meets the never
+  // list. No row state is read to guess who wrote the text.
+  const agentText = actor.type !== 'admin' || fromDraft;
+  const appRefusal = appNameRefusal(replyText, { agentText });
+  if (appRefusal) throw new ReviewReplyError(CODES.APP_NAME, appRefusal, { status: 422 });
   if (!allowOverwrite && hasRealReply(review.review_reply)) {
     throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has a posted reply', { status: 409 });
   }
@@ -539,7 +558,10 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       // A manual attempt (admin editor / IB): keep the exact text and mark
       // the version manual, so the sync that later clears the park hands
       // that text back to a person instead of the automatic lane (codex r75).
-      Object.assign(uncertain, { auto_reply_draft: replyText, auto_reply_version: auditMeta?.version || 'human', auto_reply_mode: null });
+      // 'agent_ops' (machine-authored) when the text started from an AI or
+      // Agent Ops draft: the restored [DRAFT] keeps that origin, so Use Draft
+      // and Post now send it with the strict app-name rule.
+      Object.assign(uncertain, { auto_reply_draft: replyText, auto_reply_version: auditMeta?.version || (agentText ? 'agent_ops' : 'human'), auto_reply_mode: null });
     }
     const q = db('google_reviews').where({ id: reviewId });
     if (allowOverwrite) {

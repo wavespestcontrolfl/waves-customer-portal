@@ -103,10 +103,26 @@ describe('property preferences — irrigation on by default', () => {
     expect(src).toMatch(/const confirmedNow = \[\.\.\.IRRIGATION_SIZING_FIELDS, 'rain_sensor', 'irrigation_water_source'\]\.filter\(\(f\) => f in updates\);/);
     // gh-r43: confirmations require the request's rendered-against stamp to match the CURRENT move stamp —
     // a queued pre-move autosave (old/absent token) saves its fields but never re-confirms them.
-    expect(src).toMatch(/const requestFresh = stampMs\(current\?\.irrigation_home_changed_at\) == null\s*\|\| \(hasRenderStamp && renderedAgainstMs === stampMs\(current\.irrigation_home_changed_at\)\);/);
+    // The rule itself moved to the shared preferences module (one freshness rule for the customer and the staff
+    // writer): no move on record passes; after a move the request must carry the matching stamp.
+    expect(src).toMatch(/const renderStamp = prefsRenderStamp\(req\.body\);/);
+    expect(src).toMatch(/const requestFresh = renderedAgainstCurrentHome\(current, renderStamp\);/);
+    const { prefsRenderStamp, renderedAgainstCurrentHome } = require('../services/property-preferences-schema');
+    const movedAt = '2026-11-10T15:00:00.000Z';
+    const moved = { irrigation_home_changed_at: new Date(movedAt) };
+    expect(renderedAgainstCurrentHome({ irrigation_home_changed_at: null }, prefsRenderStamp({}))).toBe(true);
+    expect(renderedAgainstCurrentHome(undefined, prefsRenderStamp(undefined))).toBe(true);
+    expect(renderedAgainstCurrentHome(moved, prefsRenderStamp({ confirmed_as_of: movedAt }))).toBe(true);
+    expect(renderedAgainstCurrentHome(moved, prefsRenderStamp({ confirmedAsOf: movedAt }))).toBe(true);
+    for (const stale of [{}, { confirmed_as_of: null }, { confirmed_as_of: '2026-09-01T00:00:00.000Z' }, { confirmed_as_of: 'not a date' }]) {
+      expect(renderedAgainstCurrentHome(moved, prefsRenderStamp(stale))).toBe(false);
+    }
     expect(src).toMatch(/const confirmFields = \(confirmedNow\.length && requestFresh\)/);
     const portal = fs.readFileSync(path.join(__dirname, '..', '..', 'client', 'src', 'pages', 'PortalPage.jsx'), 'utf8');
-    expect(portal).toMatch(/toSave\.confirmed_as_of = lastSavedRef\.current\?\.irrigationHomeChangedAt \?\? null;/);
+    // The stamp is the one the screen loaded with, never a newer one a save response reported (pre-push audit on #8107).
+    expect(portal).toMatch(/screenStampRef\.current = d\.preferences\?\.irrigationHomeChangedAt \?\? null;/);
+    expect(portal).toMatch(/toSave\.confirmed_as_of = screenStampRef\.current;/);
+    expect(portal).not.toMatch(/confirmed_as_of = lastSavedRef/);
     // gh-r26: the union is ONE atomic statement over the row's CURRENT value (no read-modify-write race with the move reset).
     expect(src).toMatch(/jsonb_array_elements_text\(COALESCE\(irrigation_confirmed_fields, '\[\]'::jsonb\) \|\| \?::jsonb\)/);
     expect(src).toMatch(/irrigation_confirmed_fields: trx\.raw\(/);

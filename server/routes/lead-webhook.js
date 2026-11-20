@@ -1104,9 +1104,23 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
                 ? db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(safeTriageExtracted)])
                 : db.raw(TRIAGE_REPLACE_EXTRACTED_SQL, [JSON.stringify(safeTriageExtracted)]);
             }
+            // The quiz hand-off's attach token can take this lead to the price
+            // page before the triage answers. The price page then owns the
+            // row: its stages carry the address verdict, the quote snapshot
+            // and the service the visitor priced, and this intake-time answer
+            // must not replace them. The check is in the WHERE, so it cannot
+            // race the price page's own write. An attached call lead merges
+            // and is unchanged. Nothing of a dropped answer is recorded: no
+            // re-price of the form's draft, and no ai_triage activity (the
+            // Lead Response Agent reads the newest one as current).
             if (Object.keys(updates).length > 0) {
               updates.updated_at = new Date();
-              await db('leads').where('id', leadRecord.id).update(updates);
+              const triageWrite = db('leads').where('id', leadRecord.id);
+              if (!attachedCallLead) triageWrite.whereRaw("COALESCE(extracted_data->>'stage', '') = ?", [webhookStageBase.stage]);
+              if (!(await triageWrite.update(updates))) {
+                logger.info(`[lead-webhook] AI triage answer dropped for lead ${leadRecord.id}: the lead has moved past intake`);
+                return;
+              }
             }
             if (createdEstimateId && triageServiceInterestUpdate) {
               const triageReadiness = applyLeadEstimateAutomationGate(evaluateLeadEstimateAutomationReadiness({

@@ -2,7 +2,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
-const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+const { OPEN_LEAD_STATUSES, exceptClosedWebFormLead } = require('../services/lead-statuses');
 const { followDuplicateLink } = require('../services/lead-estimate-link');
 const { whereLiveCourtship } = require('../services/lead-courtship');
 const { heardAboutFromBody, heardAboutFillIfEmpty } = require('../services/heard-about');
@@ -2432,10 +2432,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // the answer and its prompt are judged on the same pre-write row.
       Object.assign(updateFields, heardAboutFillIfEmpty(db, wizardHeardAbout));
       const RETURNING = ['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data', 'created_at'];
+      // A web-form lead reaches this route only through the quiz hand-off,
+      // and keeps the hand-off's rule on this write too (still open, not
+      // commercial): the lead webhook returns its id before the property
+      // lookup has judged it. A refused lead matches zero rows, like a wrong
+      // id, and this run files its own quote_wizard lead below.
       const ownRow = () => db('leads')
         .where({ id: leadId })
         .whereNull('deleted_at')
-        .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()]);
+        .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
+        .modify(exceptClosedWebFormLead);
       // The normal wizard flow mints a 'new' row at the property-lookup
       // stage and hands its token here, so this is where a repeat through
       // the documented flow is first fully typed (codex #3834 r7 P1). And a
@@ -2553,7 +2559,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         }
       }
       if (lead && !lead.lead_source_id && sourceMeta.leadSourceId) {
-        await db('leads').where({ id: lead.id }).update({ lead_source_id: sourceMeta.leadSourceId });
+        // Fills an EMPTY source only, judged in the write itself: a source
+        // the office set since the ownership write above is kept.
+        await db('leads').where({ id: lead.id }).whereNull('lead_source_id').update({ lead_source_id: sourceMeta.leadSourceId });
       }
     }
     // Same inquiry submitted again without the lead token (a fresh browser
@@ -2932,7 +2940,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       }
 
       if (customerId) {
-        await db('leads').where({ id: lead.id }).update({ customer_id: customerId });
+        // The office's convert or close also writes this column. A web-form
+        // lead (the quiz hand-off) it acted on since this run's ownership
+        // write keeps the customer that action gave it (0 rows here).
+        await db('leads').where({ id: lead.id }).modify(exceptClosedWebFormLead).update({ customer_id: customerId });
       }
     } catch (e) {
       logger.error(`[public-quote] Customer upsert failed: ${e.message}`);
@@ -4512,11 +4523,14 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
     }
 
     // leadId + email match = good-enough public auth (customer just typed the
-    // email in the same session). Avoids any-id-overwrite abuse.
+    // email in the same session). Avoids any-id-overwrite abuse. Never a
+    // web-form lead: its id reaches a visitor only through the quiz hand-off,
+    // and no page of the hand-off calls this route.
     const lead = await db('leads')
       .where({ id: leadId })
       .whereNull('deleted_at')
       .whereRaw('LOWER(email) = ?', [String(email).toLowerCase().trim()])
+      .whereRaw("lead_type IS DISTINCT FROM 'form_submission'")
       .first();
     if (!lead) return res.status(404).json({ error: 'Lead not found.' });
 
