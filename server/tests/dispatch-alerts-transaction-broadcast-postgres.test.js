@@ -114,9 +114,10 @@ postgres('dispatch alert broadcasts require a real transaction commit', () => {
     });
     expect(mockEmit).not.toHaveBeenCalled();
 
+    const createdBroadcast = new Promise((resolve) => mockEmit.mockImplementationOnce(resolve));
     await createTrx.commit();
     await createTrx.executionPromise;
-    await settleHooks();
+    await createdBroadcast;
     expect(mockTo).toHaveBeenCalledTimes(1);
     expect(mockTo).toHaveBeenCalledWith(DispatchAlerts.ROOM);
     expect(mockEmit).toHaveBeenCalledTimes(1);
@@ -137,9 +138,10 @@ postgres('dispatch alert broadcasts require a real transaction commit', () => {
     expect(resolved?.resolved_at).toBeTruthy();
     expect(mockEmit).not.toHaveBeenCalled();
 
+    const resolvedBroadcast = new Promise((resolve) => mockEmit.mockImplementationOnce(resolve));
     await resolveTrx.commit();
     await resolveTrx.executionPromise;
-    await settleHooks();
+    await resolvedBroadcast;
     expect(mockTo).toHaveBeenCalledTimes(1);
     expect(mockTo).toHaveBeenCalledWith(DispatchAlerts.ROOM);
     expect(mockEmit).toHaveBeenCalledTimes(1);
