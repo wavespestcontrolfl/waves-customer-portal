@@ -82,10 +82,17 @@ if (only && !only.size) { console.error('--only needs fact ids, such as --only T
 
 const sha16 = (buf) => crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16);
 
-// The heroes file with one fact per line, as it is kept.
+// The heroes file with one fact per line, as it is kept. The text is read
+// back before it is used: it must parse to the same file and pass heroes.js.
 function heroesFileText(raw) {
+  const top = Object.entries(raw).filter(([key, value]) => key !== 'heroes' && value !== undefined)
+    .map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)},\n`).join('');
   const lines = Object.entries(raw.heroes).map(([id, h]) => `    ${JSON.stringify(id)}: { "art": ${JSON.stringify(h.art)} }`);
-  return `{\n  "version": ${raw.version},\n  "notes": ${JSON.stringify(raw.notes)},\n  "heroes": {\n${lines.join(',\n')}\n  }\n}\n`;
+  const text = `{\n${top}  "heroes": {\n${lines.join(',\n')}\n  }\n}\n`;
+  const back = JSON.parse(text);
+  validateHeroes(back);
+  if (JSON.stringify(back.heroes) !== JSON.stringify(raw.heroes)) throw new Error('the heroes file text does not hold the heroes it was built from');
+  return text;
 }
 
 const tempName = (file, tag) => path.join(path.dirname(file), `.${path.basename(file)}.${tag}.tmp`);

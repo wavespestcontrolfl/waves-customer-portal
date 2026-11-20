@@ -177,10 +177,16 @@ describe('taking new art', () => {
 
   test('swaps in new art under its hash name, then removes the art it replaced, and leaves no temporary file or lock', async () => {
     fs.writeFileSync(path.join(input, 't03.png'), await t03png(true));
-    const old = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8')).heroes;
+    // a heroes file with no notes still comes back as valid JSON
+    const file = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8'));
+    delete file.notes;
+    fs.writeFileSync(path.join(root, MANIFEST), JSON.stringify(file, null, 2));
+    const old = file.heroes;
     const done = run('--execute');
     expect(done.status).toBe(0);
-    const now = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8')).heroes;
+    const after = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf8'));
+    expect(Object.keys(after)).toEqual(['version', 'heroes']);
+    const now = after.heroes;
     expect(now.T03.art).not.toBe(old.T03.art);
     expect({ ...now, T03: null }).toEqual({ ...old, T03: null });
     expect(everything(path.join(root, ART_DIR))).toEqual([`t03-${now.T03.art}.webp`]);
