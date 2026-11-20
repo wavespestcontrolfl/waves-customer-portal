@@ -132,7 +132,7 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
     }
   });
 
-  test('a value that speaks of getting in is withheld, whatever the code is; pest copy about doors stands', () => {
+  test('a value that speaks of getting in is withheld, whatever the code is; pest copy about doors and entry points stands', () => {
     // Round 27: a code that is a word has no shape.
     expect(noteRecordCopyViolations('I treated the yard. I used the word ROSE to unlock the side gate.')).toEqual(['note_record_access_code']);
     // One line for each part of the rule: no other part catches it.
@@ -143,8 +143,17 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       'I tried a new code.',
       'Rose is the magic word.',
       'Rose grants access to the yard.',
+      // Round 28, and how anyone gets in: getting or letting in, entering,
+      // keying a word in, a security device.
+      'I punched rose into the security panel to get inside.',
+      'Rose is how to get in.',
       'Rose lets you in.',
-      'We got in with rose.',
+      'Enter rose at the back.',
+      'I punched rose at the back.',
+      'Say rose at the back.',
+      'Rose works on the panel.',
+      'Side entry: rose.',
+      'ROSE at the side entry.',
       // A door, garage, entrance or lanai only when it is keyed, followed by
       // a colon or a dash, or beside a word in capitals on its line.
       'Say rose at the front door.',
@@ -155,13 +164,21 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
       const value = `I treated the yard. ${text}`;
       expect([value, noteRecordCopyViolations(value)]).toEqual([value, ['note_record_access_code']]);
     }
-    // Pest copy about doors and pests that get in stands.
+    // Pests that get in are refused too: no list tells their way in from a
+    // person's (production: 6 more of 401 raw notes, 2 of 474 recaps).
     for (const text of [
-      'I treated around the doors with a granular product.',
       'Ants enter through gaps under the door.',
       'Ants were getting inside through the slider track.',
-      'Pests get in through gaps by the garage.',
+    ]) {
+      expect([text, noteRecordCopyViolations(text)]).toEqual([text, ['note_record_access_code']]);
+    }
+    // Pest copy about doors and entry points stands.
+    for (const text of [
+      'I treated around the doors with a granular product.',
       'I treated the garage-door frame.',
+      'I sealed the entry points by the HVAC pad.',
+      'I treated inside and outside.',
+      'I treated along the slider track and through the garage.',
     ]) {
       expect([text, noteRecordCopyViolations(text)]).toEqual([text, []]);
     }

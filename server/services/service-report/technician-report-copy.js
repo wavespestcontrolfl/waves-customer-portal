@@ -699,7 +699,7 @@ function customerCopyViolations(text) {
 // (2026-11-20): a match in 47 of 474 pest customer recaps (2 clock times; in
 // 41 a drying word and a day unit share a sentence) and in 56 of 401
 // technician notes, none in the form lists or the finding fields. The access
-// check below catches 7 of the 56 too.
+// check below catches 12 of the 56 too.
 const NOTE_HOUR_SRC = '(?:\\p{N}{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)';
 // A 24-hour clock with no colon: 3 or 4 digits, hour 0 to 23 and minutes 00
 // to 59, or 2400 (midnight).
@@ -807,12 +807,18 @@ const CODE_SHAPED_NUMBER_RE = new RegExp([
 // gate; a lock, latch, key, keypad, lockbox, fob, buzzer, intercom or
 // opener; a code, PIN, passcode, password, passphrase or combination
 // ("a combination of ants" too: no list tells it from a lock's); a magic,
-// secret or pass word; access, or gaining entry; or a person let or getting
-// in ("lets you in", "we got in"; pests that get in stay legal). Production
-// (2026-11-20, read-only, counts only), with the door rules below and the
-// code shape's line breaks: 9 more of 401 raw pest technician notes withheld
-// (the screen refused 107), 5 more of 474 pest recaps, and no finding field
-// or form value; it catches every value the two checks it replaces caught.
+// secret or pass word; access, or gaining entry. And it fails closed on
+// how anyone or anything gets in (round 28: "I punched rose into the
+// security panel to get inside."): getting or letting in, inside, into,
+// through or past, entering, keying a word in (punch, tap, dial, input, key
+// or type in, press, say), and a security panel, alarm, call box or touch
+// pad. Pests that get in are refused too ("Ants enter through gaps"): no
+// list tells their way in from a person's. "Entry points" and "inside"
+// alone stay legal. Production (2026-11-20, read-only, counts only), with
+// the door rules below and the code shape's line breaks: 15 more of 401 raw
+// pest technician notes withheld (the screen refused 107) and 7 more of 474
+// pest recaps; no finding field or form value. It catches every value the
+// two checks it replaces caught.
 const NOTE_ACCESS_WORD_RE = new RegExp(`(?<!\\p{L})(?:${[
   'gates?',
   '(?:un|re)?lock(?:s|ed|ing)?|padlocks?|deadbolts?|lock\\s?box(?:es)?|keypads?|latch(?:es|ed|ing)?',
@@ -820,16 +826,18 @@ const NOTE_ACCESS_WORD_RE = new RegExp(`(?<!\\p{L})(?:${[
   'codes?|pins?|passcodes?|passwords?|passphrases?|combos?|combinations?',
   '(?:magic|secret|pass|code|safe)\\s?words?|the\\s+words?',
   'access(?:es|ed|ing|ible)?|gain(?:s|ed|ing)?\\s+(?:entry|entrance)',
-  '(?:let|lets|letting|get|gets|got|getting|gotten)\\s+(?:me|us|you|myself|ourselves|yourself|the\\s+(?:tech|techs|technician|technicians|team|crew))\\s+(?:in|into|inside|through|past)',
-  '(?:i|we|you)\\s+(?:(?:can|could|will|would)\\s+)?(?:get|got)\\s+(?:in|into|inside|through|past)',
+  '(?:get|gets|got|getting|gotten|let|lets|letting)(?:\\s+\\p{L}+){0,2}?\\s+(?:in|inside|into|through|past)',
+  'enter(?:s|ed|ing)?',
+  'punch(?:es|ed|ing)?|tapped|tapping|tap\\s+in|dial(?:s|ed|ing)?|input(?:s|ted|ting)?|keyed|keying|key\\s+in|typed|typing|type\\s+(?:in|it)|press(?:es|ed|ing)?|say|says|saying',
+  'panels?|alarms?|security|call\\s?box(?:es)?|touch\\s?pads?',
 ].join('|')})(?!\\p{L})`, 'iu');
-// A door, garage, entrance or lanai is named in about half of all pest
-// notes (the treatment goes around them: production, 193 of 401), so it
-// counts only in a sentence that opens it or keys a word in (open, unlatch,
-// say, type, punch, press), with a colon or a dash after it, or with a word
-// in capitals on its line. "Enter", "through" and "with" stay legal: ants enter
-// through a door, and a technician treats around one with a product.
-const NOTE_DOOR_WORDS_SRC = 'doors?|doorways?|garages?|entrances?|entryways?|lanais?|sliders?';
+// A door, garage, entrance, entry (not "entry points") or lanai is named
+// in about half of all pest notes (the treatment goes around them:
+// production, 193 of 401), so it counts only in a sentence that opens it
+// or keys a word in (open, unlatch, say, type, punch, press), with a colon
+// or a dash after it, or with a word in capitals on its line. "Through" and
+// "with" stay legal: a technician treats around a door with a product.
+const NOTE_DOOR_WORDS_SRC = 'doors?|doorways?|garages?|entrances?|entryways?|entry(?! +points?)|entries|lanais?|sliders?';
 const NOTE_DOOR_SRC = `(?<!\\p{L})(?:${NOTE_DOOR_WORDS_SRC})(?!\\p{L})`;
 const NOTE_DOOR_KEYING_SRC = '(?<!\\p{L})(?:open(?:s|ed|ing)?|unlatch(?:es|ed|ing)?|say|says|said|saying|type[ds]?|typing|punch(?:es|ed|ing)?|press(?:es|ed|ing)?)(?!\\p{L})';
 const NOTE_DOOR_KEYED_RE = new RegExp([

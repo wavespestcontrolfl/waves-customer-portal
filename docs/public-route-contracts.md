@@ -3109,17 +3109,21 @@ a figure with a unit, "150 feet", is withheld too); any word about getting in
 ("I used the word ROSE to unlock the side gate"): a gate, a lock, latch, key,
 keypad, lockbox, fob, buzzer, intercom or opener, a code, PIN, passcode,
 password, passphrase or combination ("a combination of ants" too), a magic,
-secret or pass word, access or gaining entry, or a person let or getting in
-(pests that get in stay legal); and a door, garage, entrance or lanai in a
-sentence that opens it or keys a word in (open, unlatch, say, type, punch,
-press), with a colon or a dash after it, or with a word in capitals on its
-line ("enter", "through" and "with" stay legal: ants enter through a door).
+secret or pass word, access or gaining entry; how anyone or anything gets in
+("I punched rose into the security panel to get inside"): getting or letting
+in, inside, into, through or past, entering, keying a word in (punch, tap,
+dial, input, key or type in, press, say), and a security panel, alarm, call
+box or touch pad, so a pest that gets in is refused too ("entry points" and
+"inside" alone stay legal); and a door, garage, entrance, entry (not "entry
+points") or lanai in a sentence that opens it or keys a word in (open,
+unlatch, say, type, punch, press), with a colon or a dash after it, or with a
+word in capitals on its line ("through" and "with" stay legal).
 It catches every value the completion access-code check
 (`COMPLETION_ACCESS_CODE_RE`) and the visit-history reader's redactor
 (`redactAccessCodes`) caught: each needs a run of digits or a code noun.
 Production, 2026-11-20, read-only, counts only: the code shape added 10 of 401
 raw pest technician notes; the words about getting in and the door rules add
-9 more, and 5 of 474 pest recaps; no finding field or form value. And any time a technician can give: any word that names hours, minutes or seconds, with
+15 more, and 7 of 474 pest recaps; no finding field or form value. And any time a technician can give: any word that names hours, minutes or seconds, with
 or without a figure ("30+ minutes", "eighteen minutes", "½ hour", "a few
 minutes"); a figure with h, m or s ("90s"); a clock time in any marked form ("3:30", any
 pm or a.m., "four am", "3 o'clock", "half past three", "four in the
