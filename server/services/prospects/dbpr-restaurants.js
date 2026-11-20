@@ -154,12 +154,14 @@ function hasEveryColumn(row, kind) {
 // An inspection row is kept when it cited violation 35, or when it is a later visit (a callback), cited or not.
 const keepsInspection = (cited, visitNumber) => cited > 0 || visitNumber > 1;
 
-// Notes a copy's visit number against its visit: the highest one any copy gives wins.
+// Notes a copy's later visit number (2 or more) against its visit: the highest one any copy gives wins. Only a later
+// visit is noted, so another copy can only make a visit less readable: it can mark the visit as a callback (never
+// read), never make it a first visit. A record is a first visit only by its own valid row.
 function noteHighest(highest, key, number) {
-  if (key && number) highest.set(key, Math.max(highest.get(key) || 0, number));
+  if (key && number > 1) highest.set(key, Math.max(highest.get(key) || 0, number));
 }
 
-// The record with the highest visit number any copy of its visit gave (noteHighest), or the record as it is.
+// The record raised to the highest later visit any copy of its visit gave (noteHighest), or the record as it is.
 function raiseVisit(record, visits) {
   const highest = visits.get(record.source_key);
   return highest ? { ...record, detail: { ...record.detail, visitNumber: highest } } : record;
@@ -171,9 +173,10 @@ function raiseVisit(record, visits) {
  * first visit; nothing reads or lists it). A row cut short, or a row
  * in the area with a bad report id, date (or one after `today`, when given), violation-35 count or visit number, is
  * skipped and counted in counts.malformed; a row in the area that passes counts in counts.valid, cited or not.
- * Every copy of a visit whose visit number reads, in the area or not (a visit id names one visit statewide), cited
- * or not, valid or not, notes it in `visits`, and each record takes the highest: a visit any copy names as a later
- * visit (a callback listed once more as visit 1) is never a first visit. loadFile reads a row at a time, so it
+ * Every copy of a visit that names a later visit (2 or more), in the area or not (a visit id names one visit
+ * statewide), cited or not, valid or not, notes it in `visits`, and each record takes the highest: a visit any copy
+ * names as a later visit (a callback listed once more as visit 1) is never a first visit. No copy makes a visit a
+ * first visit: a record's visit 1 comes from its own valid row only. loadFile reads a row at a time, so it
  * passes one `visits` for the whole file, raises the kept records again once every row is read, and hands the
  * store every later visit, kept or not (raiseVisits).
  */

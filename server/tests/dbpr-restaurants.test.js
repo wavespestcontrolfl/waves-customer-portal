@@ -151,10 +151,17 @@ describe('parseInspectionRows', () => {
     expect(visits([uncited('2'), cited])).toEqual([['9020', 2]]);
     // A copy that is malformed (a bad date) still names the later visit.
     expect(visits([cited, uncited('2', { date: '13/45/2026' })])).toEqual([['9020', 2]]);
-    // A blank copy changes nothing; a numbered copy fills a blank one; another visit's copy changes nothing.
+    // A blank copy changes nothing; another visit's copy changes nothing.
     expect(visits([cited, uncited('')])).toEqual([['9020', 1]]);
-    expect(visits([withVisit(cited, ''), uncited('1')])).toEqual([['9020', 1]]);
     expect(visits([withVisit(cited, ''), uncited('')])).toEqual([['9020', null]]);
+    // No other copy makes a visit a first visit: a blank visit number stays blank (never read) beside a copy that
+    // says visit 1, valid or rejected (a bad date), in either order.
+    const rejected = withVisit(inspRow({ visit: '9020', date: '13/45/2026' }), '1');
+    expect(rejected).toContain('13/45/2026');
+    expect(visits([withVisit(cited, ''), uncited('1')])).toEqual([['9020', null]]);
+    expect(visits([uncited('1'), withVisit(cited, '')])).toEqual([['9020', null]]);
+    expect(visits([withVisit(cited, ''), rejected])).toEqual([['9020', null]]);
+    expect(visits([rejected, withVisit(cited, '')])).toEqual([['9020', null]]);
     expect(visits([cited, withVisit(inspRow({ visit: '9021', v35: 0 }), '2')])).toEqual([['9020', 1]]);
     // An uncited later visit is kept as its own record, so its visit number holds in the store; an uncited first
     // visit is not kept.
