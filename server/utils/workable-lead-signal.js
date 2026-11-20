@@ -35,14 +35,15 @@ function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false
   // Phone-only prospect (owner 2026-11-19): a live caller who gave no name,
   // street or email made no lead, so a caller who heard a price and said "I
   // will call back" was in no list. The caller ID is the reachback, as on a
-  // voicemail, when the call was left open: `call_left_open` is the
-  // processor's stamp on the stored extraction (stampCallLeftOpen: a valid
-  // V2 extraction that did not end with nothing to do). Read from the
-  // extraction, never passed in, so both callers of this gate judge the
-  // same stored fact and a call processed before the stamp existed keeps
-  // its old verdict.
-  const leftOpen = extracted.call_left_open === true;
-  return hasServiceIntent && (hasReachback || voicemail === true || leftOpen);
+  // voicemail, when the processor stamped `caller_id_reachback: true` on the
+  // stored extraction (stampCallerIdReachback: an adopted V2 extraction that
+  // did not end with nothing to do, from a caller who did not disclaim the
+  // line). Read from the extraction, never passed in, so both callers of
+  // this gate judge the same stored fact. A call stored without the stamp
+  // (processed before it existed, or one that left before the lead step)
+  // keeps its old verdict.
+  const callerIdReachback = extracted.caller_id_reachback === true;
+  return hasServiceIntent && (hasReachback || voicemail === true || callerIdReachback);
 }
 
 module.exports = { EMAIL_RE, hasWorkableLeadSignal };

@@ -1123,7 +1123,7 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     isNonLeadCallContent,
     leadContactCompleteness,
     hasWorkableLeadSignal,
-    stampCallLeftOpen,
+    stampCallerIdReachback,
     normalizeCallExtraction,
   } = CallRecordingProcessor._test;
 
@@ -1395,66 +1395,87 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     })).toBe(false);
   });
 
-  test('a phone-only prospect makes a lead only when the call was left open (owner 2026-11-19)', () => {
+  test('a phone-only prospect makes a lead only when the processor stamped the caller ID as its reachback (owner 2026-11-19)', () => {
     // A caller heard the WDO price and said "I will call back": no name, no
     // street, no email. The caller ID is the only reachback.
     const phoneOnly = { matched_service: 'WDO Inspection Service', requested_service: 'WDO inspection' };
     const phone = '+19415550100';
-    expect(hasWorkableLeadSignal({ extracted: { ...phoneOnly, call_left_open: true }, phone })).toBe(true);
-    // Waves closed the call on the phone, or the call predates the stamp.
-    expect(hasWorkableLeadSignal({ extracted: { ...phoneOnly, call_left_open: false }, phone })).toBe(false);
+    expect(hasWorkableLeadSignal({ extracted: { ...phoneOnly, caller_id_reachback: true }, phone })).toBe(true);
+    // Waves closed the call on the phone, or the call never reached the lead
+    // step, or it predates the stamp.
+    expect(hasWorkableLeadSignal({ extracted: { ...phoneOnly, caller_id_reachback: false }, phone })).toBe(false);
     expect(hasWorkableLeadSignal({ extracted: phoneOnly, phone })).toBe(false);
     // Only the processor's boolean counts, never a model-written string.
-    expect(hasWorkableLeadSignal({ extracted: { ...phoneOnly, call_left_open: 'true' }, phone })).toBe(false);
+    expect(hasWorkableLeadSignal({ extracted: { ...phoneOnly, caller_id_reachback: 'true' }, phone })).toBe(false);
     // No service intent: nothing to sell.
-    expect(hasWorkableLeadSignal({ extracted: { call_left_open: true }, phone })).toBe(false);
+    expect(hasWorkableLeadSignal({ extracted: { caller_id_reachback: true }, phone })).toBe(false);
     // No caller ID: the stamp is no reachback, a valid email is still required.
-    expect(hasWorkableLeadSignal({ extracted: { ...phoneOnly, call_left_open: true }, phone: null })).toBe(false);
+    expect(hasWorkableLeadSignal({ extracted: { ...phoneOnly, caller_id_reachback: true }, phone: null })).toBe(false);
   });
 
-  test('stampCallLeftOpen writes the adopted V2 verdict on the stored extraction on every pass', () => {
+  test('stampCallerIdReachback writes the adopted V2 verdict on the stored extraction', () => {
     // The V2 extraction primary adoption used for this pass.
     const adopted = (over = {}) => ({
       meta: { schema_version: '1.28.0', is_voicemail: false },
       recommended_disposition: 'lead_response_flow_triggered',
       scheduling: { status: 'none', follow_up_mentioned: false },
       service_request: { quote_promised: false },
+      caller: { caller_id_disclaimed: false },
       ...over,
     });
+    const ani = '+19415550100';
     const stored = { matched_service: 'WDO Inspection Service' };
+    const stamp = (v2) => stampCallerIdReachback(stored, v2, { ani }).caller_id_reachback;
     // The caller will call back: the model left the call open.
-    expect(stampCallLeftOpen(stored, adopted())).toEqual({ ...stored, call_left_open: true });
+    expect(stampCallerIdReachback(stored, adopted(), { ani })).toEqual({ ...stored, caller_id_reachback: true });
     // Waves does not sell the service: the model closed it with nothing to do.
-    expect(stampCallLeftOpen(stored, adopted({ recommended_disposition: 'no_action_needed' })).call_left_open).toBe(false);
+    expect(stamp(adopted({ recommended_disposition: 'no_action_needed' }))).toBe(false);
     // ...but a quote Waves promised keeps the same call open (the canonical rule).
-    expect(stampCallLeftOpen(stored, adopted({
-      recommended_disposition: 'no_action_needed', service_request: { quote_promised: true },
-    })).call_left_open).toBe(true);
+    expect(stamp(adopted({ recommended_disposition: 'no_action_needed', service_request: { quote_promised: true } }))).toBe(true);
+    // The caller said the line is not theirs and gave no other number: the
+    // caller ID reaches somebody else, so it is no reachback.
+    expect(stamp(adopted({ caller: { caller_id_disclaimed: true, phone_e164: null } }))).toBe(false);
+    // ...nor when the number they gave is the same line, or one digit off it.
+    expect(stamp(adopted({ caller: { caller_id_disclaimed: true, phone_e164: ani, phone_source: 'spoken' } }))).toBe(false);
+    expect(stamp(adopted({ caller: { caller_id_disclaimed: true, phone_e164: '+19415550109', phone_source: 'spoken' } }))).toBe(false);
+    // A different number given on the call clears the disclaimer (callerIdDisclaimedNeedsCallback).
+    expect(stamp(adopted({ caller: { caller_id_disclaimed: true, phone_e164: '+17275550123', phone_source: 'spoken' } }))).toBe(true);
     // Adoption did not run (no valid V2 result, shadow mode, or the primary
     // switch is off): the processor passes null and the old rule stands.
-    expect(stampCallLeftOpen(stored, null).call_left_open).toBe(false);
-    // A retry overwrites an earlier pass's true.
-    expect(stampCallLeftOpen({ ...stored, call_left_open: true }, null).call_left_open).toBe(false);
+    expect(stamp(null)).toBe(false);
+    // A later pass overwrites an earlier pass's true.
+    expect(stampCallerIdReachback({ ...stored, caller_id_reachback: true }, null, { ani }).caller_id_reachback).toBe(false);
   });
 
-  test('the processor stamps call_left_open from the ADOPTED V2 extraction only (rollback: CALL_EXTRACTION_V2_PRIMARY=false)', () => {
-    // A valid V2 result in shadow mode, or with the primary switch off, may not
-    // drive the canonical writes. The stamp must read the extraction only
-    // after the same condition that runs adoptV2PrimaryFields.
+  test('the processor stamps the reachback from the ADOPTED V2 extraction, after every exit that skips the lead step (pre-push P1 x2)', () => {
+    // 1. A valid V2 result in shadow mode, or with CALL_EXTRACTION_V2_PRIMARY=false,
+    //    may not drive the canonical writes: the stamp reads only the extraction
+    //    the adoption block used.
+    // 2. A call that leaves before the lead step (the hard veto, the tech
+    //    follow-up, spam or a non-lead voicemail) never stores the stamp, so the
+    //    ads attribution mirror cannot treat it as a linked phone-only call.
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    const adoptionIf = src.indexOf("if (callExtractionV2PrimaryEnabled() && v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {\n      const adoption = adoptV2PrimaryFields(");
-    const decl = src.lastIndexOf('let adoptedV2Extraction = null;', adoptionIf);
-    const assign = src.indexOf('adoptedV2Extraction = v2Result.extraction;', adoptionIf);
+    const at = (needle) => {
+      expect(src.split(needle).length - 1).toBe(1);
+      return src.indexOf(needle);
+    };
+    const adoptionIf = at("if (callExtractionV2PrimaryEnabled() && v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {\n      const adoption = adoptV2PrimaryFields(");
+    const decl = at('let adoptedV2Extraction = null;');
+    const assign = at('adoptedV2Extraction = v2Result.extraction;');
     const blockEnd = src.indexOf('\n    }\n', adoptionIf);
-    const stamp = src.indexOf('extracted = stampCallLeftOpen(extracted, adoptedV2Extraction);', adoptionIf);
-    expect(adoptionIf).toBeGreaterThan(-1);
-    expect(decl).toBeGreaterThan(-1);
-    // Assigned once, inside the adoption block; the stamp runs after it.
+    const stamp = at('extracted = stampCallerIdReachback(extracted, adoptedV2Extraction, { ani: contactPhone });');
+    // Declared before the adoption block, assigned only inside it.
+    expect(decl).toBeLessThan(adoptionIf);
     expect(assign).toBeGreaterThan(adoptionIf);
     expect(assign).toBeLessThan(blockEnd);
     expect(src.split('adoptedV2Extraction = ').length - 1).toBe(2);
-    expect(stamp).toBeGreaterThan(blockEnd);
-    expect(src.split('stampCallLeftOpen(').length - 1).toBe(2);
+    // One call site: after every early exit, before the Step 4 write and the Step 4b gate.
+    expect(src.split('stampCallerIdReachback(').length - 1).toBe(2);
+    expect(stamp).toBeGreaterThan(at('return finalizeTechFollowUpCall({'));
+    expect(stamp).toBeGreaterThan(at("return { success: true, skipped: true, reason: extracted.is_spam ? 'spam' : 'voicemail' };"));
+    expect(stamp).toBeGreaterThan(at("return { success: true, skipped: true, reason: 'v2_canonical_write_blocked' };"));
+    expect(stamp).toBeLessThan(at('// Step 4: Update call log with extraction results.'));
+    expect(stamp).toBeLessThan(at('hasWorkableLeadSignal({ extracted, phone, voicemail: extracted.is_voicemail === true })'));
   });
 
   test('normalizeCallExtraction carries is_lead + call_type through', () => {

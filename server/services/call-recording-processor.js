@@ -150,7 +150,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, spelledLettersSettleEmailDisagreement, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards, callEndedWithNothingToDo, thirdPartyCustomerOnlyCards, thirdPartyCallMakesNoServiceAsk } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, spelledLettersSettleEmailDisagreement, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards, callEndedWithNothingToDo, callerIdDisclaimedNeedsCallback, thirdPartyCustomerOnlyCards, thirdPartyCallMakesNoServiceAsk } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -11189,18 +11189,24 @@ async function finalizeTechFollowUpCall({ call, callSid, procToken, procGenerati
 // lead, a hot or warm caller, a quote ask or a Waves promise.
 const OUT_OF_AREA_HOLD_REASON = 'out_of_service_area_hold';
 
-// Phone-only prospects (owner 2026-11-19). `call_left_open` on the stored extraction is true when
-// the V2 extraction that primary adoption used did not end with nothing to do
-// (callEndedWithNothingToDo, the canonical rule). hasWorkableLeadSignal reads it: a live caller who
-// gave only a phone number then makes a customer-less lead in Needs Review, where before the call
-// made none. A call Waves closed on the phone (service not sold, price refused, nothing asked)
-// keeps making none. `adoptedV2Extraction` is null when adoption did not run (no valid V2 result,
-// shadow mode, or CALL_EXTRACTION_V2_PRIMARY=false): a V2 result that may not drive the canonical
-// writes never opens a lead, so the stamp is false and the old rule stands. Written on every pass,
-// false included, so a retry never inherits an earlier pass's true.
-function stampCallLeftOpen(extracted, adoptedV2Extraction) {
-  const leftOpen = !!adoptedV2Extraction && !callEndedWithNothingToDo(adoptedV2Extraction);
-  return { ...extracted, call_left_open: leftOpen };
+// Phone-only prospects (owner 2026-11-19). `caller_id_reachback` on the stored extraction is true
+// when the caller ID may stand in as the reachback for a customer-less lead: the V2 extraction that
+// primary adoption used did not end with nothing to do (callEndedWithNothingToDo, the canonical
+// rule), and the caller did not disclaim the line without giving another number
+// (callerIdDisclaimedNeedsCallback, the rule behind callback_number_needed). hasWorkableLeadSignal
+// reads it: a live caller who gave only a phone number then makes a customer-less lead in Needs
+// Review, where before the call made none. A call Waves closed on the phone (service not sold,
+// price refused, nothing asked) keeps making none. `adoptedV2Extraction` is null when adoption did
+// not run (no valid V2 result, shadow mode, or CALL_EXTRACTION_V2_PRIMARY=false): a V2 result that
+// may not drive the canonical writes never opens a lead. The processor stamps once, just before the
+// Step 4 write, so only a pass that reaches the lead step stores it (true or false). The hard veto,
+// the tech follow-up and the spam/voicemail exits store none, so the ads attribution mirror
+// (phoneSuccessorActuallyLinked) keeps the old verdict for a call the processor never linked.
+function stampCallerIdReachback(extracted, adoptedV2Extraction, { ani = null } = {}) {
+  const reachback = !!adoptedV2Extraction
+    && !callEndedWithNothingToDo(adoptedV2Extraction)
+    && !callerIdDisclaimedNeedsCallback(adoptedV2Extraction.caller, { ani });
+  return { ...extracted, caller_id_reachback: reachback };
 }
 
 function isOutOfAreaOnlyHold(finalFlags) {
@@ -12873,7 +12879,7 @@ const CallRecordingProcessor = {
     // is a service disagreement, not a WDO).
     const preAdoptionExtracted = { ...extracted };
     let serviceFieldsAdopted = [];
-    // The V2 extraction when primary adoption ran for this pass, else null (stampCallLeftOpen).
+    // The V2 extraction when primary adoption ran for this pass, else null (stampCallerIdReachback).
     let adoptedV2Extraction = null;
     if (callExtractionV2PrimaryEnabled() && v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
       const adoption = adoptV2PrimaryFields(extracted, v2Result.extraction, {
@@ -12905,7 +12911,6 @@ const CallRecordingProcessor = {
       // Only while the no-price assessment lane is live (gate off: the persisted record is unchanged).
       if (assessmentLaneActive) extracted = { ...extracted, pre_adoption_price_fields: preAdoptionPriceFields(preAdoptionExtracted) };
     }
-    extracted = stampCallLeftOpen(extracted, adoptedV2Extraction);
 
     // (Hold helpers live above the tech follow-up and voicemail returns: both arm the hold too; codex #6112 r10/r12 P2.)
     // Codex round 7 P1 (PR #4807): the NUMBER-keyed hold is persisted AT
@@ -17157,6 +17162,10 @@ const CallRecordingProcessor = {
       }
       }
     }
+
+    // Phone-only reachback (stampCallerIdReachback): stamped after every exit that skips the lead
+    // step, before the Step 4 write that stores it and the Step 4b gate that reads it.
+    extracted = stampCallerIdReachback(extracted, adoptedV2Extraction, { ani: contactPhone });
 
     // Step 4: Update call log with extraction results.
     // Keep the row claimed as 'processing' while downstream side effects run.
@@ -26456,7 +26465,7 @@ CallRecordingProcessor._test = {
   isOutOfAreaOnlyHold,
   lastNameOnFileBeforeCall,
   outOfAreaHoldDisposition,
-  stampCallLeftOpen,
+  stampCallerIdReachback,
   buildOutOfAreaHoldAlert,
   keepOutOfAreaHoldRecords,
   buildComplaintCallAlert,

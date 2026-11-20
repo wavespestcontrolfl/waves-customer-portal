@@ -1085,10 +1085,12 @@ describe('phone successor arm requires durable lead evidence (codex P1 r18)', ()
       && u.row.source_call_id === 'call-vm-lead')).toBeTruthy();
   });
 
-  test('a customer-less PHONE-ONLY call the processor stamped as left open inherits (owner 2026-11-19)', async () => {
+  test('a customer-less PHONE-ONLY call the processor stamped with the caller-ID reachback inherits (owner 2026-11-19)', async () => {
     // The processor links a live phone-only prospect call only when its stored
-    // extraction carries call_left_open: true. The same call without the stamp
-    // (processed before it existed, or closed on the phone) is the
+    // extraction carries caller_id_reachback: true, which it stores only on a
+    // pass that reached the lead step. The same call without the stamp
+    // (processed before it existed, closed on the phone, or held by the hard
+    // veto such as a do-not-contact or out-of-area hold) is the
     // "NO reachability" case above and keeps failing the mirror.
     const successor = {
       id: 'call-phone-only-open',
@@ -1096,7 +1098,7 @@ describe('phone successor arm requires durable lead evidence (codex P1 r18)', ()
       from_phone: '+12025550101',
       created_at: '2026-11-20T12:00:00Z',
       metadata: {},
-      ai_extraction: evidence({ email: undefined, call_left_open: true }),
+      ai_extraction: evidence({ email: undefined, caller_id_reachback: true }),
     };
     firstQueueByTable.call_log = [undefined, successor];
     firstQueueByTable.leads = [PHONE_LEAD, undefined];
