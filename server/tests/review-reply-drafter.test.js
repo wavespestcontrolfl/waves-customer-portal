@@ -902,21 +902,26 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
     expect(w('Thanks for using YOUR APP.')).toBe('Thanks for using the Waves app.');
     expect(w('Glad the Waves app helps. Thanks! our app is new.')).toBe('Glad the Waves app helps. Thanks! The Waves app is new.');
     expect(w('Hi Dana,\n\nthe app works. Try the Waves Pest Control app and our Waves mobile app.')).toBe('Hi Dana,\n\nThe Waves app works. Try the Waves app and the Waves app.');
-    // No known article: the rewrite does not guess one (the verifier rejects these). A bare "an app" is not ours.
+    // "stores" is a verb here, not the App Store.
+    expect(w('Good news: the app stores your service notes.')).toBe('Good news: the Waves app stores your service notes.');
+    // No known article: the rewrite does not guess one (the verifier rejects these).
     const unsure = 'Glad your family finds Waves app helpful, a new Waves Pest Control app is coming, and an app is fine.';
     expect(w(unsure)).toBe(unsure);
     const same = 'Happy to apply the apps and our application, the App Store and the app-based tools.';
     expect(w(same)).toBe(same);
   });
-  test('the verifier rejects any mention of the app that is not exactly "the Waves app"', () => {
+  test('the verifier rejects every "app" that is not part of exactly "the Waves app"', () => {
     const g = grounding({ text: appReview });
     const verdict = (said) => Drafter.verifyReplyDetailed(good(`Hi Dana,\n\nThank you for the kind words about ${said} and Marcus.`), g);
     expect(verdict('Waves app')).toEqual({ code: 'app_name', span: 'Waves app' });
-    for (const said of ['the new Waves app', 'our app', 'the mobile app', 'the Waves Pest Control app', 'a Waves mobile app']) {
+    for (const said of ['the new Waves app', 'our app', 'the mobile app', 'the Waves Pest Control app', 'a Waves mobile app', 'an app', 'our customer app', 'the Waves customer app']) {
       expect(verdict(said)).toMatchObject({ code: 'app_name' });
     }
     expect(verdict('the Waves app')).toBeNull();
-    expect(verdict('an app')).toBeNull();
+    // "apps", "application", "app-based" and the App Store are other words; "the app stores" is the app.
+    expect(Drafter.offAppName('Happy to apply the apps and our application, the App Store and the app-based tools.')).toBeNull();
+    expect(Drafter.offAppName('Find the Waves app in the App Store.')).toBeNull();
+    expect(Drafter.offAppName('Good news: the app stores your service notes.')).toBe('the app');
   });
   test('a draft that says "the app" is stored as "the Waves app" on the first attempt', async () => {
     const g = grounding({ text: appReview });

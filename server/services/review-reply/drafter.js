@@ -561,13 +561,12 @@ function classifyReplyMode(grounding) {
 //   [Waves [Pest Control]] [mobile] app" becomes "the Waves app" ("The" at the
 //   start of a sentence or a line). That is the common slip, and a rewrite
 //   costs no extra attempt.
-// - offAppName finds any other mention that names Waves but is not exactly
-//   "the Waves app" ("a new Waves app", "finds Waves app helpful"). The
-//   verifier rejects it (app_name) and the model writes the reply again: the
-//   right article cannot be guessed from the words around the name.
-// A bare "app" with no "the/our/your" and no "Waves" ("an app") is not ours
-// to name and is left alone.
-const APP_MENTION_RE = /\b(?:(?:the|our|your)\s+)?(?:waves\s+(?:pest\s+control\s+)?)?(?:mobile\s+)?app\b(?!-|\s+store)/gi;
+// - offAppName finds any other use of the word "app" ("a new Waves app",
+//   "our customer app", "an app"). The verifier rejects it (app_name) and the
+//   model writes the reply again: the right words cannot be guessed from the
+//   words around "app", and in a reply to a Waves review an app is the Waves
+//   app. "apps", "application", "app-based" and "App Store" are other words.
+const APP_MENTION_RE = /\b(?:(?:the|our|your)\s+)?(?:waves\s+(?:pest\s+control\s+)?)?(?:mobile\s+)?app\b(?!-|\s+store\b)/gi;
 const OWN_APP_RE = /^(?:the|our|your)\s/i;
 const SENTENCE_START_RE = /(?:^|[.!?]["')\]\u2019\u201d]*\s+|\n\s*)$/;
 function wavesApp(text) {
@@ -578,8 +577,7 @@ function wavesApp(text) {
 }
 function offAppName(text) {
   for (const [m] of String(text || '').matchAll(APP_MENTION_RE)) {
-    const ours = OWN_APP_RE.test(m) || /^waves\s/i.test(m);
-    if (ours && m.replace(/\s+/g, ' ').toLowerCase() !== 'the waves app') return m;
+    if (m.replace(/\s+/g, ' ').toLowerCase() !== 'the waves app') return m;
   }
   return null;
 }
@@ -1207,7 +1205,7 @@ HARD RULES (a reply breaking any of these is discarded):
 - No incentives of any kind (discount, free, credit, gift, reward). Never ask for stars or for the review to be changed.
 - No safety claims ("safe", "non-toxic", "EPA"), no re-entry or drying times, no guarantees or warranties, no "best"/"#1" claims, no competitor names.
 - No emoji in the body. No em dashes. No stock phrases: "means the world", "thrilled", "delighted to hear", "made our day", "taking the time to", "pest and lawn team", "down here", "here in the neighborhood".
-- If the reply mentions the app, call it "the Waves app" ("The Waves app" at the start of a sentence), word for word. Never "the app", "our app", "your app", "Waves app" without "the", or "the Waves Pest Control app".
+- If the reply mentions an app, it is the Waves app: call it "the Waves app" ("The Waves app" at the start of a sentence), word for word, and write "app" nowhere else. Never "the app", "our app", "your app", "an app", "Waves app" without "the", or "the Waves Pest Control app".
 - Do not repeat the openings or phrasing of the recent replies you are shown.
 - Do not summarize the review back to the reviewer.
 
@@ -1283,7 +1281,7 @@ const FEEDBACK_FOR = {
   emoji: 'an emoji appeared in the body',
   em_dash: 'an em dash was used',
   first_person_singular: 'used "I"/"my" instead of "we"/"our"',
-  app_name: 'named the app wrong: write "the Waves app" word for word ("The Waves app" at the start of a sentence)',
+  app_name: 'named the app wrong: write "the Waves app" word for word ("The Waves app" at the start of a sentence) and write "app" nowhere else',
   url: 'contained a link', email: 'contained an email address', phone: 'contained a phone number',
   money: 'mentioned money', address: 'contained a street address',
   banned_phrase: 'used a banned phrase (incentive, safety claim, guarantee, rank claim, competitor, or rating request)',
@@ -1404,6 +1402,7 @@ module.exports = {
   // tests
   splitReply,
   wavesApp,
+  offAppName,
   greetingName,
   reviewEchoBans,
   relationshipAllowedTerms,
