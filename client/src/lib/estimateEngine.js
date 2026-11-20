@@ -1482,7 +1482,7 @@ const TRENCHING_TERMITICIDE_PRODUCTS = {
     containerOz: 128,
     standardOzPerGal: 1.0,
     highOzPerGal: 2.0,
-    highRateReducesVolume: true, // mirrors SPECIALTY.trenching: 0.12% only at half the 0.06% volume (label)
+    labelHalfVolumeOzPerGal: 2.0, // mirrors SPECIALTY.trenching: the label's 0.12% (2 fl oz a gallon) only at half the 0.06% volume
     warning: 'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Do not attach long repair-and-retreat warranty without admin approval.',
   },
   talstar_p: {
@@ -1495,7 +1495,7 @@ const TRENCHING_TERMITICIDE_PRODUCTS = {
     containerOz: 128,
     standardOzPerGal: 1.0,
     highOzPerGal: 2.0,
-    highRateReducesVolume: true, // mirrors SPECIALTY.trenching: 0.12% only at half the 0.06% volume (label)
+    labelHalfVolumeOzPerGal: 2.0, // mirrors SPECIALTY.trenching: the label's 0.12% (2 fl oz a gallon) only at half the 0.06% volume
     warning: 'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Do not attach long repair-and-retreat warranty without admin approval.',
   },
 };
@@ -3152,11 +3152,11 @@ export function calculateEstimate(inputs) {
       const concretePad = 0.20;
       const labeledDirtGallons = dl * 0.4 * depth;
       const labeledConcreteGallons = cl * 0.4 * depth * (1 + concretePad);
-      // Mirrors server priceTrenching: a label that allows its high-rate dilution only at a reduced volume (the bifenthrin
-      // bottles) charts one adjustment, twice the standard dilution at half the volume; any other dilution keeps the full
-      // volume. The included chemistry stays the labeled volume.
-      const labelHalfVolume = applicationRate === 'high' && product.highRateReducesVolume
-        && Math.abs(product.highOzPerGal - 2 * product.standardOzPerGal) < 1e-9;
+      // Mirrors server priceTrenching: a label that allows a stronger dilution only at a reduced volume (the bifenthrin
+      // bottles) charts one adjustment, its 0.12% dilution (labelHalfVolumeOzPerGal) at half the volume; any other dilution
+      // keeps the full volume. The included chemistry stays the labeled volume.
+      const labelHalfVolume = applicationRate === 'high' && product.labelHalfVolumeOzPerGal > 0
+        && Math.abs(product.highOzPerGal - product.labelHalfVolumeOzPerGal) < 1e-9;
       const volumeFactor = labelHalfVolume ? 0.5 : 1;
       const dirtFinishedGallons = labeledDirtGallons * volumeFactor;
       const concreteFinishedGallons = labeledConcreteGallons * volumeFactor;

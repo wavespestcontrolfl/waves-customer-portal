@@ -169,11 +169,11 @@ const PLANS = {
 
 const VENDOR_COLUMNS = ['previous_price', 'price', 'price_amount', 'landed_cost', 'price_per_oz', 'normalized_unit_price', 'landed_unit_price', 'last_checked_at',
   'latest_snapshot_id'];
-// The handler's price_snapshots fields for a manual entry with no URL, branch, availability, expiry or confidence entered (its
-// defaults: confidence 0.80, source confidence 0.75, availability unknown).
+// The handler's price_snapshots fields for a manual entry with no URL, branch, availability or confidence entered (its defaults:
+// confidence 0.80, source confidence 0.75, availability unknown). Its expiry is the one the vendor row keeps (pre-push audit 21).
 const SNAPSHOT_COLUMNS = ['product_id', 'vendor_id', 'vendor_pricing_id', 'price', 'price_amount', 'quantity', 'uom', 'normalized_unit_price',
-  'normalized_unit', 'landed_unit_price', 'availability_status', 'fetched_at', 'captured_at', 'source_type', 'price_type', 'confidence_score',
-  'source_confidence', 'price_confidence', 'metadata'];
+  'normalized_unit', 'landed_unit_price', 'availability_status', 'fetched_at', 'captured_at', 'expires_at', 'source_type', 'price_type',
+  'confidence_score', 'source_confidence', 'price_confidence', 'metadata'];
 // The catalog prices a recalculation rewrites (the stale mark's own columns aside): the stale mark keeps them as it saw them, so
 // down() can tell no price was entered since.
 const CATALOG_SEEN_COLUMNS = ['best_price', 'best_price_amount_cached', 'best_price_updated_at', 'best_vendor_pricing_id', 'unit_size_oz'];
@@ -278,7 +278,8 @@ async function insertPriceSnapshot(knex, productId, row, now) {
   const inserted = await knex('price_snapshots').insert(pickColumns({
     product_id: productId, vendor_id: row.vendor_id, vendor_pricing_id: row.id, price: NEW_PRICE, price_amount: NEW_PRICE,
     quantity: row.quantity, uom: row.unit ?? null, normalized_unit_price: NEW_PER_OZ, normalized_unit: 'oz', landed_unit_price: NEW_PER_OZ,
-    availability_status: 'unknown', fetched_at: now, captured_at: now, source_type: 'manual', price_type: 'manual', confidence_score: 0.8,
+    availability_status: 'unknown', fetched_at: now, captured_at: now, expires_at: row.expires_at ?? null, source_type: 'manual',
+    price_type: 'manual', confidence_score: 0.8,
     source_confidence: 0.75, price_confidence: 0.8, metadata: JSON.stringify({ source: TAG }),
   }, columns)).returning('id');
   const first = Array.isArray(inserted) ? inserted[0] : inserted;

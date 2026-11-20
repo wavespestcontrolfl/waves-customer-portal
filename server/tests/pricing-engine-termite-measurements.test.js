@@ -257,13 +257,23 @@ describe('termite measurement overrides and safeguards', () => {
     expect(high.warnings.join(' ')).toMatch(/reduced finished volume, the same active ingredient per foot/);
     const products = require('../services/pricing-engine/constants').SPECIALTY.trenching.products;
     const savedHigh = products.talstar_p.productOzPerFinishedGallonAtHighRate;
-    // The label charts one adjustment, twice the standard dilution at half the volume: a configured high dilution off that chart
-    // keeps the full volume, as on main (pre-push audit 20).
-    products.talstar_p.productOzPerFinishedGallonAtHighRate = 1.5;
+    // The label charts one adjustment, its 0.12% dilution (2 fl oz a finished gallon) at half the volume, whatever the configured
+    // rates: a configured high dilution off that chart keeps the full volume, as on main, even when the standard rate moves with it
+    // (0.75 and 1.5 keep the 1:2 ratio, not the label's dilution); the label's own 2 oz keeps the half volume when only the
+    // standard rate moves (pre-push audits 20 and 21).
+    const savedStandard = products.talstar_p.productOzPerFinishedGallonAtStandardRate;
     try {
+      products.talstar_p.productOzPerFinishedGallonAtHighRate = 1.5;
       expect(trench({ applicationRate: 'high' })).toMatchObject({ finishedGallons: 80, productOz: 120 });
+      products.talstar_p.productOzPerFinishedGallonAtStandardRate = 0.75;
+      const movedPair = trench({ applicationRate: 'high' });
+      expect(movedPair).toMatchObject({ finishedGallons: 80, productOz: 120 });
+      expect(movedPair.warnings.join(' ')).not.toMatch(/reduced finished volume/);
+      products.talstar_p.productOzPerFinishedGallonAtHighRate = 2;
+      expect(trench({ applicationRate: 'high' })).toMatchObject({ finishedGallons: 40, productOz: 80 });
     } finally {
       products.talstar_p.productOzPerFinishedGallonAtHighRate = savedHigh;
+      products.talstar_p.productOzPerFinishedGallonAtStandardRate = savedStandard;
     }
     const taurus = priceTrenching({}, { measurements, productKey: 'taurus_sc', applicationRate: 'high', labelConfirmed: true });
     expect(taurus).toMatchObject({ finishedGallons: 80, productOz: 128 });
@@ -1302,7 +1312,7 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
   // A high-rate quote priced before the label fix used the full labeled volume (main's math: 168 oz for 400 LF at 2 oz a finished
   // gallon). Its pin matches that volume, so both replay paths keep its sent surcharge (pre-push audit 10).
   test('a quote priced at the full volume before the label fix keeps its sent price on both replay paths', async () => {
-    const engineResult = sentQuote({}, { highRateReducesVolume: false });
+    const engineResult = sentQuote({}, { labelHalfVolumeOzPerFinishedGallon: undefined });
     const pin = { ...PIN, productOz: 168, productSurcharge: 68 };
     expect(trenchLine(engineResult)).toMatchObject({ price: 4996, finishedGallons: 84, ...pin });
     const stored = { engineInputs: input(), engineResult };
@@ -1315,7 +1325,7 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
     expect(priced({}, { ...pin, productOz: 336 }).price).toBe(4928); // any other oz is another quote: it prices fresh
     // A custom rate priced the full volume then too: 336 oz at 4 oz a finished gallon keeps its sent $4,573.
     const custom = { applicationRate: 'standard', customProductOzPerFinishedGallon: 4 };
-    expect(trenchLine(sentQuote(custom, { highRateReducesVolume: false }))).toMatchObject({ price: 4573, productOz: 336, productSurcharge: 173 });
+    expect(trenchLine(sentQuote(custom, { labelHalfVolumeOzPerFinishedGallon: undefined }))).toMatchObject({ price: 4573, productOz: 336, productSurcharge: 173 });
     expect(priced(custom, { ...pin, applicationRate: 'standard', productOz: 336, productSurcharge: 173 }).price).toBe(4573);
   });
 

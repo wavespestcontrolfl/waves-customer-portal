@@ -7123,13 +7123,14 @@ function priceTrenching(property = {}, options = {}, replay) {
       ? product.productOzPerFinishedGallonAtHighRate
       : product.productOzPerFinishedGallonAtStandardRate,
   );
-  // A label that allows a stronger dilution only at a reduced volume (highRateReducesVolume: the bifenthrin bottles) charts one
-  // adjustment: twice the standard dilution at half the finished volume (0.12% at half the 0.06% volume), so the active ingredient
-  // per foot stays the standard-rate amount. The cut applies to that dilution only, the high rate's or the same one typed as a
-  // custom dilution (pre-push audit 12). Any other dilution is off the label's chart: it keeps the full volume, as on main, and a
-  // custom one stays a manual override sent to review (pre-push audit 20).
-  const labelHalfVolume = product.highRateReducesVolume
-    && Math.abs(productOzPerFinishedGallon - 2 * product.productOzPerFinishedGallonAtStandardRate) < 1e-9;
+  // A label that allows a stronger dilution only at a reduced volume (the bifenthrin bottles) charts one adjustment: its 0.12%
+  // dilution at half the labeled finished volume, so the active ingredient per foot stays the 0.06% amount. The bottle names that
+  // dilution in code (labelHalfVolumeOzPerFinishedGallon), and the cut applies to it only: the high rate's, or the same one typed as
+  // a custom dilution (pre-push audit 12). Any other dilution is off the chart, whatever the configured rates (a standard and high
+  // pair moved together keeps their ratio, not the label's dilution): it keeps the full volume, as on main, and a custom one stays
+  // a manual override sent to review (pre-push audits 20 and 21).
+  const labelHalfVolume = product.labelHalfVolumeOzPerFinishedGallon > 0
+    && Math.abs(productOzPerFinishedGallon - product.labelHalfVolumeOzPerFinishedGallon) < 1e-9;
   const volumeFactor = labelHalfVolume ? 0.5 : 1;
   const containerCost = optionPositiveNumber(options, 'customProductCost', product.containerCost);
   const containerOz = optionPositiveNumber(options, 'customContainerOz', product.containerOz);

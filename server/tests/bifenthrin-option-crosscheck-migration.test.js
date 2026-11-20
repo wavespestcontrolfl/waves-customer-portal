@@ -291,7 +291,7 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(added).toMatchObject({
         product_id: 'p1', vendor_id: 'ven1', vendor_pricing_id: 'v1', price: 30.9, price_amount: 30.9, quantity: '1 gal',
         normalized_unit_price: 0.2414, normalized_unit: 'oz', landed_unit_price: 0.2414, source_type: 'manual', price_type: 'manual',
-        availability_status: 'unknown', confidence_score: 0.8, source_confidence: 0.75, price_confidence: 0.8,
+        availability_status: 'unknown', confidence_score: 0.8, source_confidence: 0.75, price_confidence: 0.8, expires_at: null,
       });
       expect(JSON.parse(added.metadata)).toEqual({ source: 'migration:20261119020000_bifenthrin_option_crosscheck' });
       expect(db.vendor_pricing[0]).toMatchObject({ price: 30.9, latest_snapshot_id: added.id });
@@ -527,11 +527,15 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       bothRowsRewritten(db);
     });
 
-    test('a vendor quote that expires later is corrected like an open one', async () => {
+    // The new snapshot keeps the expiry the vendor row keeps, so the price evidence never outlives the quote (pre-push audit 21).
+    test('a vendor quote that expires later is corrected like an open one, and its snapshot expires with it', async () => {
       const later = new Date(Date.now() + 30 * 24 * 3600 * 1000);
       const db = world({ vendors: [vendorRow({ expires_at: later })] });
+      db.price_snapshots = [];
       await migration.up(fakeKnex(db));
       expect(db.vendor_pricing[0]).toMatchObject({ price: 30.9, price_amount: 30.9, expires_at: later });
+      expect(db.price_snapshots).toEqual([expect.objectContaining({ price: 30.9, expires_at: later })]);
+      expect(db.vendor_pricing[0].latest_snapshot_id).toBe(db.price_snapshots[0].id);
       expect(db.products_catalog[0]).toMatchObject({ best_price: 30.9, needs_pricing: false, best_price_status: 'current' });
       expect(warn).not.toHaveBeenCalled();
     });

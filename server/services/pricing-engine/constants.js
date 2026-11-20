@@ -1996,8 +1996,10 @@ const SPECIALTY = {
         productOzPerFinishedGallonAtHighRate: 2.0,
         // The label (Crosscheck Plus, EPA 10404-120; the Talak 7.9 F label, EPA 91234-145, says the same) allows the 0.12%
         // termite dilution only at a reduced volume, so the active ingredient per foot stays the 0.06% amount (Volume
-        // Adjustment Chart: 4.0 gal per 10 LF at 0.06%, 2.0 gal at 0.12%). priceTrenching cuts the high-rate volume to match.
-        highRateReducesVolume: true,
+        // Adjustment Chart: 4.0 gal per 10 LF at 0.06%, 2.0 gal at 0.12%). The 0.12% dilution of this 7.9% bottle is 2 fl oz
+        // a finished gallon. Code only (the label is the bottle's, not a config value): priceTrenching halves the volume at
+        // exactly this dilution, whatever the configured rates.
+        labelHalfVolumeOzPerFinishedGallon: 2.0,
         standardConcentrationLabel: '0.06%',
         highConcentrationLabel: 'high_rate',
         defaultWarrantyPositioning: 'limited',
@@ -2019,7 +2021,7 @@ const SPECIALTY = {
         containerOz: 128,
         productOzPerFinishedGallonAtStandardRate: 1.0,
         productOzPerFinishedGallonAtHighRate: 2.0,
-        highRateReducesVolume: true, // the same label rule as bifen_it
+        labelHalfVolumeOzPerFinishedGallon: 2.0, // the same bottle and label rule as bifen_it
         standardConcentrationLabel: '0.06%',
         highConcentrationLabel: 'high_rate',
         defaultWarrantyPositioning: 'limited',
