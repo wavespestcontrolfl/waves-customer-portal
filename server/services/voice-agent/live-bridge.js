@@ -200,6 +200,7 @@ class LiveBridge {
     this.ambiguousReplies = []; // reply starts inside a barge-in's tail-drop window
     this.openingAudio = []; // caller frames before session.started (memory only)
     this.replyAmbiguous = false;
+    this.ambiguousUntil = null; // reply starts before this follow a barge-in too closely to time
   }
 
   // ── plumbing ─────────────────────────────────────────────────────────────
@@ -378,7 +379,9 @@ class LiveBridge {
     const newReply = this.lastAudioAt === null || t - this.lastAudioAt >= NEW_REPLY_GAP_MS;
     this.lastAudioAt = t;
     if (newReply) {
-      const ambiguous = this.tailDropSince !== null && t - this.tailDropSince < TAIL_DROP_MAX_MS;
+      // The ambiguity window runs its full 1.5 s from the barge-in, apart from
+      // tail suppression (which the first gap ends).
+      const ambiguous = this.ambiguousUntil !== null && t < this.ambiguousUntil;
       this.tailDropSince = null;
       this.onReplyStart(t, ambiguous);
     } else if (this.tailDropSince !== null) {
@@ -431,6 +434,7 @@ class LiveBridge {
       this.toTwilio({ event: 'clear', streamSid: this.streamSid });
       this.playbackEndsAt = t;
       this.tailDropSince = t;
+      this.ambiguousUntil = t + TAIL_DROP_MAX_MS;
       this.interruptions += 1;
     }
   }

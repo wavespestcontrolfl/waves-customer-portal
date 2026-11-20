@@ -2687,6 +2687,18 @@ function capGptLiveCall(callSid) {
     .catch((err) => logger.warn(`[gpt-live] time limit not set for ${maskSid(callSid)} (${String(err?.code || err?.status || 'error')})`));
 }
 
+// The live cell spends money (a ledger reservation and a Twilio REST update),
+// so it needs a verified Twilio signature itself: the shared middleware lets an
+// unsigned request through in its `log` and `disabled` modes. No auth token,
+// no header or a bad one: refused before any write.
+function gptLiveRequestSigned(req) {
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  const signature = typeof req.get === 'function' ? req.get('X-Twilio-Signature') : undefined;
+  if (!authToken || typeof signature !== 'string' || !signature) return false;
+  const { reconstructUrl } = require('../middleware/twilio-signature');
+  return twilio.validateRequest(authToken, signature, reconstructUrl(req), req.body || {});
+}
+
 function gptLiveSayAndHangup(res, text) {
   const twiml = new VoiceResponse();
   twiml.say({ voice: SAY_VOICE }, text);
@@ -2748,6 +2760,10 @@ router.post('/relay-sandbox/cell', async (req, res) => {
     // GATE_VOICE_GPT_LIVE_TEST: 71 / 72 hand the call to the GPT-Live bridge.
     // Gate off (or any other digits) ⇒ the production code path below.
     const liveCell = gptLiveCellFor(digits);
+    if (liveCell && !gptLiveRequestSigned(req)) {
+      logger.warn(`[gpt-live] unsigned or invalid Twilio signature — refused ${maskSid(CallSid)}`);
+      return gptLiveSayAndHangup(res, 'The GPT-Live test is not available right now. Goodbye.');
+    }
     if (liveCell) return await respondGptLiveCell(req, res, CallSid, liveCell);
     const { resolveSandboxCell } = require('../services/voice-agent/relay-profiles');
     const cell = resolveSandboxCell(digits);

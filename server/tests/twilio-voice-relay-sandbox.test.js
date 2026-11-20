@@ -487,11 +487,54 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     db.transaction = jest.fn(async (fn) => fn(trx));
     return { update, prodUpdate, spent, insert, release, ledger, tb, trx };
   }
-  const cell = (digits, CallSid = 'CA-sb-live') => ({ body: { CallSid, To: SANDBOX, Digits: digits }, headers: {} });
+  // A cell request as Twilio sends it: signed over the public URL and the form
+  // body (the route checks it itself; the shared middleware may only log).
+  const CELL_PATH = '/api/webhooks/twilio/relay-sandbox/cell';
+  const cell = (digits, CallSid = 'CA-sb-live', { signed = true } = {}) => {
+    const body = { CallSid, To: SANDBOX, Digits: digits };
+    const headers = { host: 'portal.example.com', 'x-forwarded-proto': 'https' };
+    if (signed) {
+      headers['x-twilio-signature'] = require('twilio').getExpectedTwilioSignature(process.env.TWILIO_AUTH_TOKEN || '', `https://portal.example.com${CELL_PATH}`, body);
+    }
+    return { body, headers, originalUrl: CELL_PATH, protocol: 'http', get: (name) => headers[String(name).toLowerCase()] };
+  };
 
+  beforeEach(() => { process.env.TWILIO_AUTH_TOKEN = 'test-token'; });
   afterEach(() => {
     delete process.env.GATE_VOICE_GPT_LIVE_TEST;
     delete process.env.VOICE_GPT_LIVE_TEST_MAX_USD;
+    delete process.env.TWILIO_AUTH_TOKEN;
+    delete process.env.TWILIO_SIGNATURE_VALIDATION;
+  });
+
+  test('an unsigned or wrongly signed live cell request is refused before any ledger write or Twilio update, whatever the middleware mode', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    process.env.TWILIO_ACCOUNT_SID = 'AC-test';
+    try {
+      for (const mode of ['log', 'disabled', 'enforce']) {
+        process.env.TWILIO_SIGNATURE_VALIDATION = mode;
+        const tampered = cell('71');
+        tampered.body.Digits = '72'; // signed over 71
+        for (const req of [cell('71', 'CA-sb-live', { signed: false }), tampered]) {
+          primeLive();
+          mockCallUpdate.mockClear();
+          const res = mockRes();
+          await handlerFor('/relay-sandbox/cell')(req, res);
+          expect(res.body).toContain('not available right now');
+          expect(res.body).not.toContain('<Stream');
+          expect(db.transaction).not.toHaveBeenCalled();
+          expect(mockCallUpdate).not.toHaveBeenCalled();
+        }
+      }
+      delete process.env.TWILIO_AUTH_TOKEN; // nothing to verify with: refused too
+      primeLive();
+      const res = mockRes();
+      await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+      expect(res.body).toContain('not available right now');
+      expect(db.transaction).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.TWILIO_ACCOUNT_SID;
+    }
   });
 
   test('gate off: 71 is an unknown code and renders the unchanged production-profile TwiML', async () => {

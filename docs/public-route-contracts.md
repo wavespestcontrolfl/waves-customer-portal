@@ -7969,7 +7969,9 @@ relay socket refuses such a token, and this path refuses a relay token) and be t
 burned; any failure destroys the socket. The socket goes to `services/voice-agent/live-bridge.js`, which admits the
 call's ledger row once after the handshake and before OpenAI opens (a reservation already released or settled opens
 no OpenAI session). It has no tools and no lookups (client
-delegation: the bridge answers every delegation with one fixed sentence). No booking, lead, text or transfer. The cell route
+delegation: the bridge answers every delegation with one fixed sentence). No booking, lead, text or transfer. Before any write, the cell
+route verifies the request's Twilio signature itself (the shared middleware lets unsigned requests through in its
+`log` and `disabled` modes); unsigned or invalid = refused with no ledger write and no Twilio update. The cell route
 reserves one call's worst-case OpenAI cost in its own ledger table (`voice_gpt_live_ledger`, one row per CallSid)
 under an advisory lock before it issues the token (first releasing at $0 any reservation whose stream never opened
 within the token's life), and refuses the call

@@ -341,6 +341,28 @@ describe('model audio, barge-in and latency', () => {
     expect(s.turns).toEqual([]);
   });
 
+  test('two gaps inside one barge-in window, with a transcript fragment between them, are both kept apart from turns', async () => {
+    const t = setup();
+    await t.ready();
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // greeting at t0
+    t.twilioMedia();
+    t.advance(1000);
+    streamReply(t, 6); // a reply streams +1000..+1500
+    t.advance(100);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'wait', start_ms: 1300, end_ms: 1500 }); // barge-in at +1600
+    t.advance(400);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // first gap at +2000
+    t.advance(200);
+    t.openai.receive({ type: 'session.input_transcript.delta', delta: 'no', start_ms: 2050, end_ms: 2150 });
+    t.advance(400);
+    t.openai.receive({ type: 'session.output_audio.delta', delta: b64(160) }); // second gap at +2600, still inside +3100
+    t.twilioStop();
+    await flush();
+    const s = summaryOf(t);
+    expect(s.turns).toEqual([]);
+    expect(s.after_barge_in_ambiguous_ms).toEqual([500, 450]);
+  });
+
   test('a tail chunk delayed past the gap by a network stall is never timed into turns; a later reply outside the window is', async () => {
     const t = setup();
     await t.ready();
