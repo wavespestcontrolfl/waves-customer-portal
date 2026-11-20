@@ -774,7 +774,7 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue, trx
   // rate and the yearly cap (creditReferralOnFirstService never selects an already-earned referral).
   // Under the gate the live row is required before anything is staged or paid (milestone bonuses included): getSettings()
   // would stand in defaults for a failed read. Gate off: getSettings(), as before.
-  const settings = withStep2Deferral(isEnabled('referralStep2') ? await liveSettingsOrThrow(db) : await getSettings());
+  const settings = withStep2Deferral(isEnabled('referralStep2') ? await liveSettingsOrThrow(callerTrx || db) : await getSettings());
 
   // Calculate reward (base + tier bonus)
   // GATE_REFERRAL_STEP2: the amount staged on the promoter's pending earnings is the Step 2 standard member credit
@@ -826,6 +826,9 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue, trx
       converted_tier: tier || null,
       converted_monthly_value: monthlyValue || null,
       referrer_reward_status: settings.require_service_completion ? 'pending_service' : 'earned',
+      // GATE_REFERRAL_STEP2: marks a referral staged under Step 2, so its settlement takes the Step 2 bookkeeping even
+      // if the gate has been switched off by then. The settlement replaces it with the final reason.
+      ...(isEnabled('referralStep2') ? { referrer_reward_reason: 'staged' } : {}),
       updated_at: new Date(),
     };
     await trx('referrals').where({ id: referralId }).update(updates);
@@ -1204,6 +1207,10 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
     const memberCredit = step2On
       ? await step2MemberCredit(trx, { referral, friendCustomerId: customerId, settings: rules })
       : null;
+    // Step 2 bookkeeping (the amount posted and its reason recorded, total earned reconciled): when the gate is on, or
+    // the referral was staged under Step 2 and the gate has since been switched off. A referral with no marker settled
+    // with the gate off is exactly the legacy path, adjusted by nothing.
+    const step2Row = step2On || referral.referrer_reward_reason === 'staged';
     const referrerDollars = memberCredit
       ? memberCredit.dollars
       : round2((Number(settings.referrer_reward_cents) / 100) || 0);
@@ -1244,9 +1251,9 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
       referrer_reward_status: 'earned',
       referee_credited: true,
       referrer_credited: !memberCredit || memberCredit.dollars > 0,
-      ...(memberCredit ? {
-        referrer_credit_cents: Math.round(memberCredit.dollars * 100),
-        referrer_reward_reason: memberCredit.reason,
+      ...(step2Row ? {
+        referrer_credit_cents: referral.referrer_customer_id ? Math.round(referrerDollars * 100) : 0,
+        referrer_reward_reason: memberCredit ? memberCredit.reason : 'standard',
         // The friend's customer row, for the finance views (no phone matching).
         referee_customer_id: customerId,
       } : {}),
@@ -1266,10 +1273,9 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
     // from the amount staged ($50 near, $0 at the cap, or a different rule after a gate flip), so total earned moves
     // by the difference and the promoter dashboard shows what was truly earned.
     if (referral.promoter_id) {
-      // Posted minus staged, whichever way the gate stands now: a referral staged under Step 2 and settled after the
-      // gate was switched off (or the reverse) differs, a legacy referral (staged = posted) adjusts by 0.
+      // Posted minus staged for a Step 2 row (see step2Row); a legacy row adjusts by nothing, as before.
       const postedCents = referral.referrer_customer_id ? Math.round(referrerDollars * 100) : 0;
-      const earnedAdjust = postedCents - referrerCents;
+      const earnedAdjust = step2Row ? postedCents - referrerCents : 0;
       await trx('referral_promoters').where({ id: referral.promoter_id }).update({
         pending_earnings_cents: db.raw('GREATEST(pending_earnings_cents - ?, 0)', [referrerCents]),
         ...(earnedAdjust ? { total_earned_cents: db.raw('GREATEST(total_earned_cents + ?, 0)', [earnedAdjust]) } : {}),

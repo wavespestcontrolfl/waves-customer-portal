@@ -22,6 +22,7 @@ jest.mock('../services/logger', () => ({
 // Anything the engine tried to send would land here; every test asserts none.
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplate: jest.fn(async () => 'text') }));
+jest.mock('../services/automation-enroll', () => ({ enrollSequenceFromEvent: jest.fn(async () => ({ enrolled: true })) }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
   redactEmailAddresses: (s) => s,
@@ -259,6 +260,13 @@ const DAY = 86400000;
       t.decimal('latitude', 10, 7);
       t.decimal('longitude', 10, 7);
     });
+    await s.createTable('email_suppressions', (t) => {
+      t.increments('id');
+      t.string('email');
+      t.string('status');
+      t.string('group_key');
+      t.string('suppression_type');
+    });
     await s.createTable('referral_clicks', (t) => {
       t.increments('id');
       t.integer('promoter_id');
@@ -304,7 +312,7 @@ const DAY = 86400000;
     }
     await db('referral_program_settings').where({ id: 1 }).update({
       require_service_completion: true, referee_discount_cents: 2500, step2_annual_credit_cap: 10, step2_near_radius_miles: 0.5,
-      step2_referrer_reward_cents: 2500, step2_near_referrer_reward_cents: 5000,
+      step2_referrer_reward_cents: 2500, step2_near_referrer_reward_cents: 5000, bonus_silver_cents: 0,
     });
     await db('referrals').whereNot({ referral_code: 'WAVES-OLD' }).del();
     await db('referral_promoters').del();
@@ -426,6 +434,27 @@ const DAY = 86400000;
       await firstService(ctx.friend, ctx.visit);
       expect(await amounts(ctx.member.id)).toEqual([25]);
       expect(await db('referral_promoters').where({ id: ctx.ref.promoter_id }).first()).toMatchObject({ pending_earnings_cents: 0, total_earned_cents: 2500 });
+      // The settlement records what was posted, for the dashboards and the finance views.
+      expect(await row(ctx.ref.id)).toMatchObject({ referrer_credit_cents: 2500, referrer_reward_reason: 'standard', referee_customer_id: ctx.friend.id });
+    });
+
+    test('conversion under Step 2 marks the referral staged until it settles', async () => {
+      const ctx = await performed();
+      expect(await row(ctx.ref.id)).toMatchObject({ referrer_reward_reason: 'staged' });
+      await firstService(ctx.friend, ctx.visit);
+      expect(await row(ctx.ref.id)).toMatchObject({ referrer_reward_reason: 'standard' });
+    });
+
+    test('a legacy referral (no marker) settled with the gate off is untouched: no adjustment, nothing recorded', async () => {
+      gates.referralStep2 = false;
+      await db('referral_program_settings').where({ id: 1 }).update({ bonus_silver_cents: 1000 });
+      const ctx = await performed(); // staged $25 + $10 tier bonus = $35 on the promoter
+      expect(await row(ctx.ref.id)).toMatchObject({ referrer_reward_reason: null });
+      expect(await db('referral_promoters').where({ id: ctx.ref.promoter_id }).first()).toMatchObject({ pending_earnings_cents: 3500, total_earned_cents: 3500 });
+      await firstService(ctx.friend, ctx.visit);
+      expect(await amounts(ctx.member.id)).toEqual([25]);
+      expect(await db('referral_promoters').where({ id: ctx.ref.promoter_id }).first()).toMatchObject({ pending_earnings_cents: 0, total_earned_cents: 3500 });
+      expect(await row(ctx.ref.id)).toMatchObject({ referrer_credit_cents: null, referrer_reward_reason: null, referee_customer_id: null });
     });
 
     test('a home with no map point pays $25', async () => {
@@ -584,6 +613,77 @@ const DAY = 86400000;
       // Other counts still accept 0.
       expect((await engine.updateSettings({ max_referrals_per_month: 0 })).max_referrals_per_month).toBe(0);
       await engine.updateSettings({ max_referrals_per_month: 20 });
+    });
+  });
+
+  describe('the referral_nudge automation', () => {
+    const { sendReferralInviteEmail } = require('../services/referral-invite-email');
+    let enroll;
+    let saved;
+    beforeEach(() => {
+      ({ enrollSequenceFromEvent: enroll } = require('../services/automation-enroll'));
+      enroll.mockClear();
+      saved = gates.referralNudgeEnroll;
+      gates.referralNudgeEnroll = true;
+    });
+    afterEach(() => { gates.referralNudgeEnroll = saved; });
+
+    const atLimit = async () => {
+      const member = await customer({ email: 'nudge@example.invalid' });
+      for (let i = 0; i < 10; i += 1) {
+        const [prior] = await db('referrals').insert({
+          referrer_customer_id: member.id, referee_name: `Prior ${i}`, referee_phone: `+1941568${String(1000 + i)}`,
+          referral_code: 'WAVES-PRIOR', status: 'credited',
+        }).returning('id');
+        await db('customer_credit_ledger').insert({
+          customer_id: member.id, delta: 25, balance_after: 25 * (i + 1), source: 'referral', referral_id: prior.id,
+        });
+      }
+      return member;
+    };
+
+    test('gate on: a member at the yearly limit is not enrolled; one under it is', async () => {
+      const capped = await atLimit();
+      expect(await sendReferralInviteEmail({ customerId: capped.id })).toBeNull();
+      expect(enroll).not.toHaveBeenCalled();
+      const fresh = await customer({ email: 'fresh@example.invalid' });
+      await sendReferralInviteEmail({ customerId: fresh.id });
+      expect(enroll).toHaveBeenCalledTimes(1);
+    });
+
+    test('gate off: enrolled as before, whatever the member has earned', async () => {
+      gates.referralStep2 = false;
+      const capped = await atLimit();
+      await sendReferralInviteEmail({ customerId: capped.id });
+      expect(enroll).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('conversion reads the live settings on the caller\'s transaction', () => {
+    test('a deferred conversion inside a transaction runs its settings read on that transaction', async () => {
+      const member = await customer();
+      const friend = await planFriend();
+      await recurringVisit(friend.id);
+      const ref = await referral(member, friend, { ageDays: 1 });
+      const seen = [];
+      const onQuery = (q) => {
+        if (/referral_program_settings/.test(q.sql || '')) seen.push(q.__knexTxId);
+        if (/select 1 as marker/i.test(q.sql || '')) trxId = q.__knexTxId;
+      };
+      db.on('query', onQuery);
+      let trxId;
+      try {
+        await db.transaction(async (trx) => {
+          await trx.raw('select 1 as marker');
+          await engine.convertReferral(ref.id, { customerId: friend.id, tier: 'Silver', monthlyValue: 119.1, trx, deferredOnly: true });
+        });
+      } finally {
+        db.removeListener('query', onQuery);
+      }
+      expect(seen.length).toBeGreaterThan(0);
+      expect(trxId).toBeTruthy();
+      expect(seen.every((id) => id === trxId)).toBe(true);
+      expect(await row(ref.id)).toMatchObject({ status: 'signed_up' });
     });
   });
 
