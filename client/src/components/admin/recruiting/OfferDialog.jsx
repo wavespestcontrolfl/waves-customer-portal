@@ -37,7 +37,10 @@ import {
   offerErrorMessage,
   offerIn,
   offersOf,
+  OFFER_OUT_TEXT,
+  OUT_STATES,
   sendChannels,
+  shownOffer,
   stepDateFor,
   todayET,
 } from "./offerLogic";
@@ -315,8 +318,9 @@ function formView({ edits, pinned, data, contact, busy, locked }) {
 // A read with other offers out (an answer, a date request) while the draft itself is
 // unchanged locks a saved draft too (outOnly): the notice says what changed, and
 // Continue with this draft takes the new stamp and keeps the draft and the edits.
-// closed: the page's last read of the application shows it hired, rejected or withdrawn. Every offer write is refused
-// then (APPLICATION_CLOSED), and a form with no draft yet has no draft row whose change would lock it.
+// refused: why the server refuses every write from this form now, else false. The page's last read of the application
+// shows it hired, rejected or withdrawn (`closed`; APPLICATION_CLOSED), or, for a form with no draft yet, the read holds
+// an offer out: another session sent the first one (OFFER_ALREADY_OPEN). Neither changes a draft row this form holds.
 function formLock({ data, draftId, pinned, needRead, conflict, reviewedOut, closed }) {
   const latest = reviewedDraft(data, draftId);
   // A form with no draft yet: an open draft in the read is another admin's (this form's own
@@ -324,14 +328,16 @@ function formLock({ data, draftId, pinned, needRead, conflict, reviewedOut, clos
   const newer = latest || (!draftId ? openDraft(data) : null);
   // A form for a draft: that draft is gone or another version. A form with no draft yet: another admin opened one.
   const draftMoved = draftId ? !latest || Boolean(pinned && latest.draftHash !== pinned.draftHash) : Boolean(newer);
+  const sentFirst = !draftId && !newer && OUT_STATES.includes(shownOffer(data.current)?.status);
+  const refused = closed ? APPLICATION_CLOSED_TEXT : sentFirst && OFFER_OUT_TEXT;
   const outOnly = Boolean(pinned) && !draftMoved && data.outStamp !== reviewedOut;
   const changed = !needRead && (conflict || draftMoved || outOnly);
-  return { newer, changed, outOnly, locked: closed || needRead || changed || Boolean(draftId && !pinned) };
+  return { newer, changed, outOnly, refused, locked: Boolean(refused) || needRead || changed || Boolean(draftId && !pinned) };
 }
 
-function ReadOnlyNotice({ closed, changed, locked, message, hasNewer, outChange, onAdopt, onRetry, refreshFailed }) {
-  // A closed application: the typed fields stay on screen, read-only, until the application is moved back.
-  if (closed) return <ActionFeedback error>{APPLICATION_CLOSED_TEXT}</ActionFeedback>;
+function ReadOnlyNotice({ refused, changed, locked, message, hasNewer, outChange, onAdopt, onRetry, refreshFailed }) {
+  // Every write is refused (formLock): the typed fields stay on screen, read-only, with the reason.
+  if (refused) return <ActionFeedback error>{refused}</ActionFeedback>;
   // Only the offers out changed: say what changed, and let the owner go on with the same draft and edits.
   if (changed && outChange) {
     return (
@@ -405,7 +411,7 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, cl
     onBusyChange(busy);
     return () => onBusyChange(false);
   }, [busy, onBusyChange]);
-  const { newer, changed, outOnly, locked } = formLock({ data, draftId, pinned, needRead: needRead || stale, conflict, reviewedOut, closed });
+  const { newer, changed, outOnly, refused, locked } = formLock({ data, draftId, pinned, needRead: needRead || stale, conflict, reviewedOut, closed });
   // A refused write's sentence shows once, in the read-only notice (after the re-read); else a change to the offers out.
   const notice = conflict ? error : outOnly && OUT_CHANGED_TEXT;
   const { base, fields, firstName, sendTo, startError, rateErrors, textErrors, stepError, fieldsOk, dirty, sendReady, canSend } = formView({ edits, pinned, data, contact, busy, locked });
@@ -627,7 +633,7 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, cl
         <div className="flex flex-col gap-4">
           {!busy && (
             <ReadOnlyNotice
-              closed={closed}
+              refused={refused}
               changed={changed}
               locked={locked}
               message={notice}

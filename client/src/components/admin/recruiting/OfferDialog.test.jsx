@@ -324,6 +324,19 @@ describe("OfferDialog", () => {
     expect(rate()).toBeEnabled();
   });
 
+  // Another session can send the first offer while this form has no draft yet: the read then holds that offer out, and
+  // a first draft is refused (OFFER_ALREADY_OPEN). The form locks, keeps the typing, and points to the card's Revise.
+  it("a form with no draft yet locks when a read shows an offer another session sent, and keeps the typing", async () => {
+    const outside = {};
+    render(<Harness initial={{ ...panel(draftRow()), current: null, letterPreview: null }} reads={[]} outside={outside} />);
+    fireEvent.change(rate(), { target: { value: "24" } });
+    expect(screen.getByRole("button", { name: "Save draft" })).toBeEnabled();
+    act(() => outside.read({ ...panel(draftRow({ id: "offer-2", status: "sent", draftHash: null })), draft: null }));
+    expect(await screen.findByText("An offer is already out. Close this form and use Revise on the offer card to make an updated one.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save draft" })).toBeDisabled();
+    expect(rate()).toHaveValue("24");
+  });
+
   // Typed edits on a saved draft, then a background read fails. Try again's read shows the draft gone (another admin
   // sent it): the form keeps the edits, read-only, and says so, as after any read of that state. The owner closes it.
   it("keeps the typed edits when Try again finds the draft gone, and says the draft is no longer open", async () => {

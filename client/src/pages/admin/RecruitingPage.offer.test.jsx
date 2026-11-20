@@ -563,6 +563,26 @@ describe('RecruitingPage offer flow: read failures, re-offers and drafts', () =>
     await screen.findByLabelText('Hourly rate ($)');
   });
 
+  // The applicant can sign while the first offer read is failing. Try again re-reads the offer and then the application,
+  // as every re-read after an action does, so the stage follows the signed offer: no Make an offer once it is Hired.
+  it('Try again after a failed first offer read re-reads the application too, so a signature moves the stage', async () => {
+    let fail = true;
+    let detailReads = 0;
+    const signed = offerRecord({ status: 'accepted', timeline: [] });
+    const { calls } = setupFetch(
+      { 'GET /admin/careers/app-1': () => res(200, { application: detailFixture({ status: detailReads++ === 0 ? 'offer' : 'hired' }) }) },
+      { offer: () => (fail ? res(500, { error: 'Server error' }) : res(200, offerPayload({ current: signed }))) },
+    );
+    await openDetail();
+    expect(await screen.findByText('Server error')).toBeInTheDocument();
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(calls.filter((c) => c.method === 'GET' && c.path === '/admin/careers/app-1?peek=1')).toHaveLength(1));
+    await screen.findByTestId('offer-card');
+    await waitFor(() => expect(within(screen.getByTestId('offer-card')).queryByRole('button', { name: 'Make an offer' })).toBeNull());
+    expect(detailReads).toBe(2);
+  });
+
   it('a 404 without enabled:false is a failure, not the gate-off answer', async () => {
     setupFetch({}, { offer: () => res(404, { error: 'Not found' }) });
     await openDetail();

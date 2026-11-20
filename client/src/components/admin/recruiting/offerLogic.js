@@ -138,6 +138,10 @@ export function money(value) {
 
 const OFFERS_OFF_TEXT = "Job offers are turned off, so this did not go through. The plain Offer move works as before.";
 
+// A first draft is refused while an offer is out (OFFER_ALREADY_OPEN): the card's Revise makes the next one. The form
+// with no draft yet says it before any write, too.
+export const OFFER_OUT_TEXT = "An offer is already out. Close this form and use Revise on the offer card to make an updated one.";
+
 // Every offer write on a closed application is refused (APPLICATION_CLOSED). The form says it before any write, too.
 export const APPLICATION_CLOSED_TEXT = "This application is closed (hired, rejected or withdrawn). Move it back before sending an offer.";
 
@@ -146,6 +150,7 @@ const ERROR_TEXT = {
   OFFER_NOT_DRAFT: "This offer is no longer a draft. Close this form and check its state.",
   NO_CONTACT: "This applicant has no phone or email on file, so nothing can be sent.",
   APPLICATION_CLOSED: APPLICATION_CLOSED_TEXT,
+  OFFER_ALREADY_OPEN: OFFER_OUT_TEXT,
   ROLE_NOT_SUPPORTED: "Offers are for technician applications only.",
   // Save, Send and Discard all answer these two codes: the words name no action.
   DRAFT_CHANGED: "This draft changed after you opened it, so nothing was done. Review the new version first.",
@@ -162,6 +167,9 @@ const ERROR_TEXT = {
 // answer or a date request): the form locks with this and outChangeDetail until
 // the owner presses Continue with this draft.
 export const OUT_CHANGED_TEXT = "The offer you sent before changed after you opened this form.";
+
+// An offer the applicant can act on (the server's OUT_STATUSES).
+export const OUT_STATES = ["sent", "date_requested"];
 
 // An offer's state, as the card names it.
 export const STATUS_LABEL = {

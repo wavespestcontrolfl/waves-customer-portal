@@ -1183,7 +1183,8 @@ export default function RecruitingPage() {
   // Returns the offer read.
   const refreshAfterOffer = async () => {
     const forId = detail?.id;
-    const next = await offerFlow.reload();
+    // retry: as reload, but a failed first offer read blanks to loading while it re-reads (OfferSection's Try again).
+    const next = await offerFlow.retry();
     if (forId) {
       await openDetail(forId, { refresh: true });
       load(tabRef.current);

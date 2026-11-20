@@ -12,14 +12,16 @@ import { offerErrorMessage, shownOffer } from "./offerLogic";
 const LIVE_STATES = ["draft", "sent", "date_requested"];
 
 export default function OfferSection({ detail, offerFlow, onChanged, detailStale = false }) {
-  const { enabled, data, openForm, error: readError, refreshError, ownerActions, retry } = offerFlow;
+  const { enabled, data, openForm, error: readError, refreshError, ownerActions } = offerFlow;
   const [signed, setSigned] = useState(null);
   const [error, setError] = useState(null);
   const [reading, setReading] = useState(false); // a signed copy is loading: one read at a time (History)
   if (detail.role !== "technician") return null;
+  // A failed first read is retried with the combined re-read too (the offer, then the application): an offer signed
+  // meanwhile moves the application, and the stage must follow it.
   if (readError) {
     return (
-      <ActionFeedback error className="mb-4" onRetry={retry}>
+      <ActionFeedback error className="mb-4" onRetry={onChanged}>
         {readError}
       </ActionFeedback>
     );
