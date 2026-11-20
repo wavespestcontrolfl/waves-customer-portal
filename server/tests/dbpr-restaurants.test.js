@@ -451,6 +451,13 @@ describe('parseInspectionReport', () => {
     expect(parse(reportPage(roaches)).findings[0].text).toBe('Roaches \u2014 under the sink & bar.');
   });
 
+  test('a literal "<" in an observation is text, as a browser shows it: only markup is taken out', () => {
+    const fewer = '<tr><td>35A-02-8</td><td>&nbsp;</td><td><font>Observed < 5 live roaches under the sink.</font></td></tr>';
+    expect(parse(reportPage(fewer)).findings[0].text).toBe('Observed < 5 live roaches under the sink.');
+    expect(parse(reportPage(fewer.replace('< 5', '<5'))).findings[0].text).toBe('Observed <5 live roaches under the sink.');
+    expect(parse(reportPage(fewer.replace('< 5', '&lt; 5'))).findings[0].text).toBe('Observed < 5 live roaches under the sink.');
+  });
+
   test('a page answers only for the visit whose date its inspection table gives', () => {
     const rows = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - Live flies at the bar.</td></tr>';
     const read = (html, visitDate) => parse(html, { violation35: 1, visitDate, visitNumber: 1 });

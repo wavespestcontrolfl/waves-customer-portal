@@ -268,10 +268,11 @@ function violationsColumn(cells) {
   return cells.findIndex((cell) => /^violation$/i.test(cell));
 }
 
-// Tags out, every character reference decoded (named or numeric: "&nbsp;", "&#45;", "&#x2D;"), NUL characters and
-// runs of white space made one space.
+// Tags out (as a browser reads them: "<" then a letter, "/", "!" or "?", so "Observed < 5 roaches" keeps its "<"),
+// every character reference decoded (named or numeric: "&nbsp;", "&#45;", "&#x2D;"), NUL characters and runs of
+// white space made one space.
 function htmlText(html) {
-  return decodeHTML(String(html || '').replace(/<[^>]+>/g, ' '))
+  return decodeHTML(String(html || '').replace(/<[A-Za-z/!?][^>]*>/g, ' '))
     .replaceAll('\0', ' ')
     .replace(/\s+/g, ' ')
     .trim();
