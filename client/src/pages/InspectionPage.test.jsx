@@ -10,7 +10,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ScheduleFlowPage from './ScheduleFlowPage';
 
@@ -733,21 +733,27 @@ describe('InspectionPage: an address race without availability refreshes at the 
     expect(availabilityPosts).toHaveLength(1); // only the gate's own resolve, never a refresh with the stale address
   });
 
-  // Pre-push P1s on 979f0dbec9 and dda1a52814: a booking moved to the
-  // matched profile's address on file answers address_changed with no times
-  // and no address. The page drops the typed address, so its next confirm
-  // books the address on file, and only a full reload shows that address
-  // with its times. When the reload fails, the page shows the load-error
-  // card: no old times, no search and no Book under the typed address.
-  // "Try again" then reloads the address and its times together.
-  it('address_changed with no address + a failed reload → the load-error card; "Try again" shows the address on file and books it', async () => {
+  // Pre-push P1s on 979f0dbec9, dda1a52814 and 75054400e5: a booking moved
+  // to the matched profile's address on file answers address_changed with no
+  // times and no address. The page drops the typed address, so its next
+  // confirm books the address on file. When the reload fails, or answers no
+  // list, nothing on the page can show times for that address under the
+  // typed one: the times clear, the search closes, and the page asks for a
+  // reload. A newly typed address brings its own list, and the search opens.
+  it.each([
+    ['fails', () => jsonResponse({ error: 'unavailable' }, 503)],
+    ['answers 200 with no list', () => jsonResponse(okPayload({ availability: null }))],
+  ])('address_changed with no address + a reload that %s → the times clear and the search closes; a newly typed address opens it', async (_label, reloadAnswer) => {
     const commitBodies = [];
+    let availabilityPosts = 0;
     let getCalls = 0;
     const fetchMock = vi.fn((url, opts = {}) => {
       const u = String(url);
       if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
       if (u.includes('/availability') && opts.method === 'POST') {
-        return Promise.resolve(jsonResponse({ availability: okPayload().availability, needs_address: false }));
+        availabilityPosts += 1;
+        const availability = availabilityPosts === 1 ? okPayload().availability : mondayAvailability('09:00', '9:00 AM');
+        return Promise.resolve(jsonResponse({ availability, needs_address: false }));
       }
       if (opts.method === 'POST') {
         commitBodies.push(JSON.parse(opts.body));
@@ -771,11 +777,7 @@ describe('InspectionPage: an address race without availability refreshes at the 
           lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
         })));
       }
-      if (getCalls === 2) return Promise.resolve(jsonResponse({ error: 'unavailable' }, 503));
-      return Promise.resolve(jsonResponse(okPayload({
-        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: '456 Stored St, Sarasota 34231' },
-        availability: mondayAvailability('09:00', '9:00 AM'),
-      })));
+      return Promise.resolve(reloadAnswer());
     });
     vi.stubGlobal('fetch', fetchMock);
     renderPage();
@@ -785,19 +787,21 @@ describe('InspectionPage: an address race without availability refreshes at the 
     fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
     fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
 
-    expect(await screen.findByText(/couldn't load your consultation options/i)).toBeInTheDocument();
+    expect(await screen.findByText(/couldn't load the latest open times\. Please reload this page/i)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Book /i })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Search for a service date or time')).not.toBeInTheDocument();
-    expect(screen.queryByText(/123 Palm Ave/i)).not.toBeInTheDocument();
     expect(getCalls).toBe(2);
+    expect(availabilityPosts).toBe(1); // the reload never posts the dropped address
 
-    fireEvent.click(screen.getByRole('button', { name: /Try again/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Different address?' }));
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '9 Gulf Dr, Sarasota, FL 34231' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
     fireEvent.click(await screen.findByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i }));
-    expect(screen.getByText(/456 Stored St/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('Search for a service date or time')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
     await waitFor(() => expect(commitBodies).toHaveLength(2));
-    expect(commitBodies[1]).not.toHaveProperty('address');
+    expect(commitBodies[1]).toMatchObject({ address: '9 Gulf Dr, Sarasota, FL 34231' });
   });
 
   // Pre-push P1 on 8f40c19990: with no address typed, phase one can link a
@@ -826,7 +830,43 @@ describe('InspectionPage: an address race without availability refreshes at the 
     expect(await screen.findByText(/couldn't load the latest open times\. Please reload this page/i)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i })).not.toBeInTheDocument();
     expect(screen.queryByText(/here are the latest open times/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Search for a service date or time')).not.toBeInTheDocument();
     expect(getCalls).toBe(2);
+  });
+
+  // A full load (here, the page opened for another link) brings an address
+  // with its times, so the search opens again.
+  it('after a failed reload closes the search, a full load opens it again', async () => {
+    let getCalls = 0;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (opts.method === 'POST') return Promise.resolve(jsonResponse({ error: 'That time is no longer open.', code: 'SLOT_TAKEN', availability: null }, 409));
+      getCalls += 1;
+      return Promise.resolve(getCalls === 2 ? jsonResponse({ error: 'unavailable' }, 503) : jsonResponse(okPayload()));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    function OtherLink() {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => navigate('/inspection/feedface')}>Open another link</button>;
+    }
+    render(
+      <MemoryRouter initialEntries={['/inspection/deadbeef']}>
+        <OtherLink />
+        <Routes>
+          <Route path="/inspection/:token" element={<ScheduleFlowPage flow="inspection" />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    expect(await screen.findByText(/couldn't load the latest open times\. Please reload this page/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText('Search for a service date or time')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open another link' }));
+    expect(await screen.findByLabelText('Search for a service date or time')).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/inspection/feedface'))).toBe(true);
   });
 
   // Pre-push P1 on 8f40c19990: a search still running when the refusal lands
