@@ -633,3 +633,63 @@ describe('one tile multiplier source: the Settings-hydrated value, with a frozen
     });
   });
 });
+
+describe('the rounding remainder never makes a row negative, and the saved total equals the priced total', () => {
+  // Prices through the engine, maps it the way a saved estimate is, and returns both views of the exclusion rows.
+  function priceAndSave(exclusionExtra) {
+    return gateOn(() => {
+      const estimate = generateEstimate(baseInput({
+        services: { exclusion: { pricingVersion: 'v2', waiveInspection: true, ...exclusionExtra } },
+      }));
+      const mapped = mapV1ToLegacyShape(estimate);
+      const savedRows = [...(mapped.oneTime.items || []), ...(mapped.oneTime.specItems || [])].filter((r) => r.service === 'rodent_exclusion');
+      const sumCents = (rows) => Math.round(rows.reduce((sum, r) => sum + r.price, 0) * 100) / 100;
+      return {
+        pricedRows: rowsOf(estimate),
+        pricedTotal: sumCents(rowsOf(estimate)),
+        savedRows,
+        savedTotal: sumCents(savedRows),
+        mappedTotal: mapped.oneTime.total,
+      };
+    });
+  }
+  const expectConsistent = (result, total) => {
+    expect(result.pricedTotal).toBe(total);
+    expect(result.savedTotal).toBe(total);
+    expect(result.mappedTotal).toBe(total);
+    for (const row of [...result.pricedRows, ...result.savedRows]) expect(row.price).toBeGreaterThanOrEqual(0);
+  };
+
+  test('0.01 LF soft mesh + 40.02 ft barrel: no negative mesh row; the closure takes the remainder; saved total = $480', () => {
+    const result = priceAndSave({ meshSoftLF: 0.01, roofStyle: 'barrel_tile', barrelEaveFt: 40.02 });
+    expectConsistent(result, 480);
+    expect(result.pricedRows.map((li) => [li.component, li.price])).toEqual([['linear_mesh', 0.14], ['barrel_eave_closure', 479.86]]);
+    expect(result.savedRows.map((r) => r.price)).toEqual([0.14, 479.86]);
+  });
+
+  test('1 tile roof point + 33.3 ft stays $587 (the remainder goes to the largest non-closure row that stays >= 0)', () => {
+    const result = priceAndSave({ advancedWireMeshPoints: 1, roofStyle: 'barrel_tile', barrelEaveFt: 33.3 });
+    expectConsistent(result, 587);
+    expect(result.pricedRows.map((li) => [li.component, li.price])).toEqual([['wire_mesh_points', 187.4], ['barrel_eave_closure', 399.6]]);
+  });
+
+  test('a tiny mesh row beside real points and no closure: no negative row, saved total = priced total', () => {
+    // No pick: the long-standing rule (last row) still applies and stays >= 0.
+    expectConsistent(priceAndSave({ standardWireMeshPoints: 6, meshSoftLF: 0.01 }), 450);
+    // A tile pick: the largest row absorbs the remainder.
+    const tile = priceAndSave({ advancedWireMeshPoints: 3, meshSoftLF: 0.01, roofStyle: 'flat_tile' });
+    expectConsistent(tile, 563);
+    expect(tile.pricedRows.map((li) => [li.component, li.price])).toEqual([['wire_mesh_points', 562.86], ['linear_mesh', 0.14]]);
+    // A remainder the tiny row cannot absorb goes to the largest row that can, never below zero.
+    expectConsistent(priceAndSave({ standardWireMeshPoints: 6, meshSoftLF: 0.01, roofStyle: 'metal' }), 450);
+  });
+
+  test('the largest eligible non-closure row takes it, not the last one', () => {
+    const result = priceAndSave({ advancedWireMeshPoints: 1, standardBirdBoxes: 3, meshSoftLF: 0.01, roofStyle: 'flat_tile' });
+    expectConsistent(result, 638);
+    const byComponent = Object.fromEntries(result.pricedRows.map((li) => [li.component, li.price]));
+    expect(byComponent.bird_boxes).toBe(450.36);
+    expect(byComponent.wire_mesh_points).toBe(187.5);
+    expect(byComponent.linear_mesh).toBe(0.14);
+  });
+});

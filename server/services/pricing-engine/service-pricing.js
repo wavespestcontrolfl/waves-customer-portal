@@ -10001,11 +10001,18 @@ function priceRodentExclusionV2(options = {}) {
       const minimumRow = exclusionMinimumRowText(wholeHome, floor);
       pushComponent(minimumRow.component, minimumRow.label, floorDelta, minimumRow.detail);
     } else if (roundingDelta !== 0) {
-      // Round once: the closure row keeps its exact cent amount (max(minimum, feet x rate)) and the install total takes the
-      // whole-dollar rounding. The remainder goes to the last non-closure row; only with no other row does the closure take it.
-      const last = [...componentLineItems].reverse().find((row) => row.component !== 'barrel_eave_closure')
-        || componentLineItems[componentLineItems.length - 1];
-      last.price = cents(last.price + roundingDelta);
+      // Round once: the install total takes the whole-dollar rounding; a barrel closure row keeps its exact cent amount
+      // (max(minimum, feet x rate)). The remainder (|r| <= $0.50) goes to the LARGEST non-closure row that stays >= 0 after
+      // the adjustment (ties: the later row); if none can absorb it, the closure row takes it (it is >= the minimum, so it
+      // always can). No row is ever negative, and the rows always sum to the price. Without a roof style pick the long-standing
+      // rule is kept byte for byte: the last row takes it, unless that would make it negative.
+      const absorbs = componentLineItems.filter((row) => row.component !== 'barrel_eave_closure' && row.price + roundingDelta >= 0);
+      const largest = absorbs.reduce((best, row) => (!best || row.price >= best.price ? row : best), null);
+      const lastRow = componentLineItems[componentLineItems.length - 1];
+      const target = (!roof && lastRow.price + roundingDelta >= 0 ? lastRow : largest)
+        || componentLineItems.find((row) => row.component === 'barrel_eave_closure')
+        || lastRow;
+      target.price = cents(target.price + roundingDelta);
     }
     if (urgencyDelta > 0) {
       pushComponent('urgency_surcharge', 'Rodent Exclusion — Urgency Surcharge', urgencyDelta,
