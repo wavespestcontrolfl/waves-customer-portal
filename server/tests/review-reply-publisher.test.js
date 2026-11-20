@@ -653,6 +653,21 @@ describe('publishReviewReply', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana.', auto_reply_version: 'human', auto_reply_mode: null });
   });
 
+  test('owner 2026-11-19: an Intelligence Bar post that times out records its exact text with version agent_ops, so the sync hands it to a person', async () => {
+    process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
+    state.rows[0].auto_reply_status = null; // never queued
+    const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
+    mockLock.mockImplementationOnce(async (id, fn) => { out.result = await fn(); return out; });
+    mockGbp.replyToReview.mockImplementationOnce(() => new Promise(() => {}));
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const p = publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad the Waves app helps.', actor: { type: 'ib' } });
+    const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_UNCERTAIN });
+    await jest.advanceTimersByTimeAsync(31000);
+    await assertion;
+    jest.useRealTimers();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops', auto_reply_mode: null, review_reply: null });
+  });
+
   test('owner 2026-11-19: a timed-out post that started from an AI draft keeps that origin (version agent_ops) for its restored [DRAFT]', async () => {
     process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
     state.rows[0].auto_reply_status = null;

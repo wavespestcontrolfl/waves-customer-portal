@@ -524,10 +524,12 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     const e = outcome.result.error;
     outcome.abandonClaim();
     const uncertain = { auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_error: String(e.message).slice(0, 1000) };
-    if (allowOverwrite) {
+    if (allowOverwrite || actor.type === 'ib') {
       // A manual attempt (admin editor / IB): keep the exact text and mark
       // the version manual, so the sync that later clears the park hands
       // that text back to a person instead of the automatic lane (codex r75).
+      // The Intelligence Bar posts without overwrite, so its CAS below stays
+      // the non-overwrite one; only these recorded fields are shared.
       // 'agent_ops' (machine-authored) when the text started from an AI or
       // Agent Ops draft: the restored [DRAFT] keeps that origin, so Use Draft
       // and Post now send it with the strict app-name rule.
