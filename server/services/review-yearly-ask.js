@@ -196,7 +196,11 @@ function planDeadlineMs(seq) {
   try {
     const plan = Array.isArray(seq.plan) ? seq.plan : JSON.parse(seq.plan || '[]');
     const step = plan.find((st) => st && st.notAfter);
-    return step ? new Date(step.notAfter).getTime() : null;
+    if (step) return new Date(step.notAfter).getTime();
+    // A row written before the deadline was stored: enrollment always falls inside the window, so
+    // the window ends no later than 14 days after it. No enrollment time = unreadable (retired).
+    const enrolledAt = seq.started_at || seq.created_at;
+    return enrolledAt ? new Date(enrolledAt).getTime() + ANNIVERSARY_WINDOW_DAYS * 86400000 : NaN;
   } catch {
     return NaN;
   }
@@ -208,7 +212,7 @@ function planDeadlineMs(seq) {
 async function dispatchStopReason(seq, { ClickGuard = require('./review-click-guard'), now = new Date() } = {}) {
   if (!gateLive()) return 'yearly_gate_off';
   const deadlineMs = planDeadlineMs(seq);
-  if (deadlineMs === null || Number.isNaN(deadlineMs) || now.getTime() > deadlineMs) return 'anniversary_window_over';
+  if (Number.isNaN(deadlineMs) || now.getTime() > deadlineMs) return 'anniversary_window_over';
   try {
     return (await ClickGuard.tapPauseActive(seq.customer_id)) ? 'tap_pause' : null;
   } catch (err) {

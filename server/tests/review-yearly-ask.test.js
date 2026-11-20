@@ -229,10 +229,17 @@ describe('dispatchStopReason', () => {
     ['inside the window, no tap', future, async () => false, null],
     ['inside the window, lookup fails', future, async () => { throw new Error('x'); }, 'lookup_failed'],
     ['past the deadline', past, async () => false, 'anniversary_window_over'],
-    ['no deadline on the row', null, async () => false, 'anniversary_window_over'],
+    ['no deadline and no enrollment time on the row', null, async () => false, 'anniversary_window_over'],
   ])('gate on, %s', async (_label, notAfter, tapPauseActive, expected) => {
     process.env.GATE_REVIEW_YEARLY_ASK = 'true';
     expect(await dispatchStopReason(seqWith(notAfter), { ClickGuard: { tapPauseActive }, now: NOW })).toBe(expected);
+  });
+  test('gate on, a row written before the deadline was stored: 14 days from enrollment', async () => {
+    process.env.GATE_REVIEW_YEARLY_ASK = 'true';
+    const ClickGuard = { tapPauseActive: async () => false };
+    const legacy = (agoDays) => ({ ...seqWith(null), started_at: new Date(NOW.getTime() - agoDays * DAY).toISOString() });
+    expect(await dispatchStopReason(legacy(1), { ClickGuard, now: NOW })).toBe(null);
+    expect(await dispatchStopReason(legacy(15), { ClickGuard, now: NOW })).toBe('anniversary_window_over');
   });
   test('the deadline is the end of the 14th ET day after the anniversary', () => {
     expect(askDeadline('2025-11-15').toISOString()).toBe('2025-11-30T04:59:59.000Z');

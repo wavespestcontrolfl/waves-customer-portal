@@ -8414,6 +8414,13 @@ describe('Yearly review ask at dispatch', () => {
       expect(await ReviewService.smsRecipientReachable(cust('y-9'))).toEqual({ reachable: true, reason: null });
       db.mockImplementation(makeMock({ ...voip, phone_line_types: [] }));
       expect(await ReviewService.smsRecipientReachable(cust('y-9'))).toEqual({ reachable: true, reason: null });
+      // A failed cache read is not a miss: it throws (no phone in the message) so the picker skips.
+      const okDb = makeMock(voip);
+      db.mockImplementation((t, ...rest) => (t === 'phone_line_types'
+        ? { where: () => ({ first: async () => { throw new Error('pg blip on phone_line_types'); } }) }
+        : okDb(t, ...rest)));
+      const cacheErr = await ReviewService.smsRecipientReachable(cust('y-9')).then(() => null, (e) => e);
+      expect(cacheErr && cacheErr.message).toBe('line-type cache read failed');
     } finally {
       mockGates.proactiveLineTypeLookup = false;
     }
