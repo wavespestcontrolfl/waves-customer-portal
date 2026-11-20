@@ -1768,6 +1768,25 @@ function initScheduledJobs() {
   }
 
   // =========================================================================
+  // MONDAY 10:36 AM ET — Weekly restaurant prospect list (owner 2026-11-19):
+  // new food licenses, ownership changes and violation-35 inspections in
+  // Manatee / Sarasota / Charlotte from Florida's public restaurant files,
+  // then the public report page of each recent code-35 inspection to split
+  // 35A (pest evidence) from 35B (outer openings). Fills restaurant_prospects
+  // only: sends nothing, calls no AI, no gate. Kill = env
+  // DBPR_PROSPECT_SYNC_DISABLED. Minute 36, not :25: the hourly :25 check
+  // runs then. It is clear of the Monday 6:40-7:15 and the 8:40-9:40 deploy
+  // windows. Every step upserts by (kind, source_key) and a read report is
+  // never read again, so a re-run after a deploy kill is harmless.
+  // =========================================================================
+  const runRestaurantProspectSyncTick = async () => {
+    await runExclusive('restaurant-prospect-sync', () => require('./prospects/dbpr-restaurants').syncRestaurantProspects())
+      .catch((err) => logger.error(`Restaurant prospect sync lease failed: ${err.message}`));
+  };
+  cron.schedule('36 10 * * 1', () => runRestaurantProspectSyncTick(), { timezone: 'America/New_York' });
+  registerDeployKillRetry('restaurant-prospect-sync', () => runRestaurantProspectSyncTick());
+
+  // =========================================================================
   // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural
   // renames from the unit-review queue only: "Gallons" -> gal at factor 1;
   // missing-unit and ambiguous-oz rows stay parked for review). Gate is
