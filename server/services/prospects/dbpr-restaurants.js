@@ -252,8 +252,8 @@ function parseLicenseRows(rows, kind, counts = {}, today = null) {
 // ── Store ───────────────────────────────────────────────────────
 
 // One record per (kind, source_key); a repeated key keeps its last copy. PostgreSQL refuses an upsert that names the
-// same row twice in one statement. A repeated inspection keeps the highest violation-35 count and the last visit
-// number its copies give, as a re-read of a later file does (FILL_DETAIL_SQL).
+// same row twice in one statement. A repeated inspection keeps the highest violation-35 count and the highest visit
+// number its copies give, as a re-read of another file does (FILL_DETAIL_SQL).
 function dedupeByKey(records) {
   const byKey = new Map();
   for (const record of records) {
@@ -264,28 +264,25 @@ function dedupeByKey(records) {
   return [...byKey.values()];
 }
 
-// The later copy of an inspection, with the highest count and the last visit number of the two copies.
+// The later copy of an inspection, with the highest count and the highest visit number of the two copies.
 function withFileValues(record, before) {
-  const counts = [before.detail.violation35, record.detail.violation35].filter(Number.isInteger);
-  return {
-    ...record,
-    detail: {
-      ...record.detail,
-      violation35: counts.length ? Math.max(...counts) : null,
-      visitNumber: record.detail.visitNumber ?? before.detail.visitNumber ?? null,
-    },
+  const highest = (key) => {
+    const values = [before.detail[key], record.detail[key]].filter(Number.isInteger);
+    return values.length ? Math.max(...values) : null;
   };
+  return { ...record, detail: { ...record.detail, violation35: highest('violation35'), visitNumber: highest('visitNumber') } };
 }
 
-// What a re-read takes from the file into detail. While the row is unanswered (pest_evidence NULL): the higher
-// violation-35 count (the missing citation could be 35A; jsonb compares numbers as numbers) and the file's visit number.
-// An answered row only fills a missing one (stored before they were kept, or blank: JSON null, so ->> tests it). A blank
-// in the file erases nothing (jsonb_strip_nulls), and nothing else in detail changes.
+// What a re-read takes from the file into detail. A missing count or visit number is filled (stored before they were
+// kept, or blank: JSON null, so ->> tests it). While the row is unanswered (pest_evidence NULL), each only rises: the
+// higher count (the missing citation could be 35A) and the higher visit number (once any file names a later visit,
+// the row stays a later visit, so a stale file cannot make a callback a first visit again). jsonb compares numbers
+// as numbers. A blank in the file erases nothing (jsonb_strip_nulls), and nothing else in detail changes.
 const FILL_DETAIL_SQL = `COALESCE(restaurant_prospects.detail, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
   'violation35', CASE WHEN restaurant_prospects.detail->>'violation35' IS NULL OR (restaurant_prospects.pest_evidence IS NULL
     AND excluded.detail->'violation35' > restaurant_prospects.detail->'violation35') THEN excluded.detail->'violation35' END,
-  'visitNumber', CASE WHEN restaurant_prospects.detail->>'visitNumber' IS NULL OR restaurant_prospects.pest_evidence IS NULL
-    THEN excluded.detail->'visitNumber' END))`;
+  'visitNumber', CASE WHEN restaurant_prospects.detail->>'visitNumber' IS NULL OR (restaurant_prospects.pest_evidence IS NULL
+    AND excluded.detail->'visitNumber' > restaurant_prospects.detail->'visitNumber') THEN excluded.detail->'visitNumber' END))`;
 
 // A re-read of a known row refreshes last_seen_at and the two keys above: a pest_evidence answer, the findings and the
 // attempt count are never overwritten by a later file. Returns the number of rows written.

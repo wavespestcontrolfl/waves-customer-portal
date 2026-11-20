@@ -116,7 +116,7 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     expect(new Date(after.last_seen_at).getTime()).toBeGreaterThan(new Date('2026-01-01T00:00:00Z').getTime());
   });
 
-  test('a re-read fills the count and the visit number; an unanswered row takes the higher count and the file\'s visit number', async () => {
+  test('a re-read fills the count and the visit number; on an unanswered row each only rises', async () => {
     await svc.upsertRecords([rec(20), rec(21)]);
     const [answered] = await rows().where({ source_key: key(21) });
     await svc.saveReport(readOf(answered), { pestEvidence: true, findings: [{ code: '35A-02-8', text: 'Flies' }] });
@@ -131,24 +131,25 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     await svc.upsertRecords([rec(21, { detail: { disposition: 'changed', violation35: 3, visitNumber: 1 } })]);
     expect((await detail(21)).violation35).toBe(1);
     expect((await detail(21)).visitNumber).toBe(2);
-    // An unanswered row takes a higher count (compared as numbers: 10 over 5), never a lower one, and the file's visit
-    // number; a blank in the file erases nothing, and nothing else changes.
-    await svc.upsertRecords([rec(20, { detail: { disposition: 'changed', violation35: 5, visitNumber: 3 } })]);
-    expect(await detail(20)).toEqual({ disposition: 'Warning Issued', violation35: 5, visitNumber: 3 });
+    // An unanswered row takes a higher count (compared as numbers: 10 over 5) and a higher visit number, never a lower
+    // one: a stale file that still says visit 1 cannot make the corrected callback a first visit again. A blank in the
+    // file erases nothing, and nothing else changes.
+    await svc.upsertRecords([rec(20, { detail: { disposition: 'changed', violation35: 5, visitNumber: 2 } })]);
+    expect(await detail(20)).toEqual({ disposition: 'Warning Issued', violation35: 5, visitNumber: 2 });
     await svc.upsertRecords([rec(20, { detail: { disposition: 'changed', violation35: 10, visitNumber: 1 } })]);
     await svc.upsertRecords([rec(20, { detail: { disposition: 'changed', violation35: 2, visitNumber: null } })]);
-    expect(await detail(20)).toEqual({ disposition: 'Warning Issued', violation35: 10, visitNumber: 1 });
+    expect(await detail(20)).toEqual({ disposition: 'Warning Issued', violation35: 10, visitNumber: 2 });
     // A blank visit number (JSON null) is filled when a later file has it.
     await svc.upsertRecords([rec(22, { detail: { disposition: 'Warning Issued', violation35: 1, visitNumber: null } })]);
     await svc.upsertRecords([rec(22, { detail: { disposition: 'Warning Issued', violation35: 1, visitNumber: 1 } })]);
     expect(await detail(22)).toEqual({ disposition: 'Warning Issued', violation35: 1, visitNumber: 1 });
   });
 
-  test('a visit listed twice in one file keeps the highest count and the last visit number its copies give', async () => {
+  test('a visit listed twice in one file keeps the highest count and the highest visit number its copies give', async () => {
     const copy = (violation35, visitNumber, disposition) => rec(6, { detail: { disposition, violation35, visitNumber } });
-    expect(await svc.upsertRecords([copy(2, 1, 'first'), copy(1, null, 'last')])).toBe(1);
+    expect(await svc.upsertRecords([copy(2, 2, 'first'), copy(1, 1, 'second'), copy(1, null, 'last')])).toBe(1);
     const [row] = await rows().where({ source_key: key(6) });
-    expect(row.detail).toEqual({ disposition: 'last', violation35: 2, visitNumber: 1 });
+    expect(row.detail).toEqual({ disposition: 'last', violation35: 2, visitNumber: 2 });
   });
 
   test('saveReport saves only while the row holds the count and visit number the page was read with', async () => {
