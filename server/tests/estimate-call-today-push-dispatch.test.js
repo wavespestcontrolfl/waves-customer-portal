@@ -34,10 +34,12 @@ beforeEach(() => {
   admins = async () => [{ id: 'admin-1', role: 'admin' }];
   mockLastCalled.mockResolvedValue(new Map());
   PushService.sendToAdminUsers.mockResolvedValue({ subscriptions: 1, sent: 1, expired: 0, failed: 0, skipped: 0, results: [] });
-  db.raw = jest.fn(async (_sql, [key]) => {
-    if (claimed.has(key)) return { rows: [] };
+  db.raw = jest.fn((sql, bindings) => {
+    if (!bindings) return { raw: sql }; // a select expression (the undelivered self-serve flag)
+    const [key] = bindings;
+    if (claimed.has(key)) return Promise.resolve({ rows: [] });
     claimed.add(key);
-    return { rows: [{ id: 1 }] };
+    return Promise.resolve({ rows: [{ id: 1 }] });
   });
   db.mockImplementation((table) => {
     const q = {};

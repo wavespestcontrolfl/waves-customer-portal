@@ -4528,9 +4528,11 @@ router.get('/', async (req, res, next) => {
           createdAt: e.created_at,
           // The "Call today" rule's fields (status, phone, archivedAt, views, click, follow-up, newest answered call):
           // one mapping shared with the 9 AM push (services/estimate-call-list.js callTodayFields).
+          // undeliveredSelfServe also keeps the quote out of Going cold and Follow-up overdue.
           ...callTodayFields(e, {
             lastClickedAt: clickStats.get(e.id)?.last_clicked_at,
             lastCalledAt: lastCalledById.get(e.id),
+            undeliveredSelfServe: require('../services/self-serve-estimates').isUndeliveredSelfServe(e.source, estData),
           }),
           source: e.source || 'manual',
           serviceInterest,

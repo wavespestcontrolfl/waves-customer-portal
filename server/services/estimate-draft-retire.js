@@ -165,10 +165,10 @@ const SENT_TIME_SQL = (alias) => `(CASE
 // never count: /api/public/quote/calculate is unauthenticated, so a caller
 // who knows a prospect's email and address could otherwise mint a "sent" row
 // that archives that customer's staff drafts (codex security review).
-// Report click-to-estimate and plan-restart mints stamp sent_at
-// at mint time with nothing delivered (publish-without-delivery), so they
-// count only once deliveryState records a delivery — the same witness the
-// unworked-comms watcher uses for these two sources.
+// Report click-to-estimate, plan-restart and portal plan-start mints stamp
+// sent_at at mint time with nothing delivered (publish-without-delivery), so
+// they count only once deliveryState records a delivery — the same witness
+// the unworked-comms watcher uses for these sources.
 const SENT_EVIDENCE_SQL = (alias) => `(${alias}.sent_at IS NOT NULL OR COALESCE(${DELIVERED_AT_SQL(alias)}, false))
   AND ${alias}.status <> 'draft'
   AND ${LINKAGE_MARKERS_ABSENT_SQL(alias)}
@@ -176,7 +176,7 @@ const SENT_EVIDENCE_SQL = (alias) => `(${alias}.sent_at IS NOT NULL OR COALESCE(
   AND (jsonb_typeof(${alias}.estimate_data->'deliveryState') IS DISTINCT FROM 'object'
        OR COALESCE(${DELIVERED_AT_SQL(alias)}, false)
        OR COALESCE(${SENT_CHANNELS_SQL(alias)}, false))
-  AND (COALESCE(${alias}.source, '') NOT IN ('service_report_cta', 'plan_restart')
+  AND (COALESCE(${alias}.source, '') NOT IN ('service_report_cta', 'plan_restart', 'plan_start')
        OR COALESCE(${alias}.estimate_data #>> '{deliveryState,firstDeliveredAt}', '') <> '')`;
 
 // Archive one draft and mark its open "draft ready" bells done, in one

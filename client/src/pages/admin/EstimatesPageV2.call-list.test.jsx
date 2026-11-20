@@ -106,6 +106,7 @@ function response(body) {
 }
 
 let patches;
+let listRows;
 
 // The page's current URL and a navigate function, read from inside the router.
 const routerProbe = { search: null, navigate: null };
@@ -130,6 +131,7 @@ function renderPage(width = 1440, search = "?tab=estimates") {
 beforeEach(() => {
   flags.estimates_v2_status_pills = false;
   patches = [];
+  listRows = ROWS;
   window.HTMLElement.prototype.scrollIntoView = vi.fn();
   vi.stubGlobal(
     "fetch",
@@ -142,7 +144,7 @@ beforeEach(() => {
       if (parsed.pathname === "/api/admin/estimates") {
         if (parsed.searchParams.get("archived") === "only") return response({ estimates: [] });
         if (parsed.searchParams.get("status") === "draft") return response({ estimates: [] });
-        return response({ estimates: ROWS, truncated: false });
+        return response({ estimates: listRows, truncated: false });
       }
       return response({ resolved: 0, drafted: 0, sources: [] });
     }),
@@ -328,6 +330,35 @@ it.each([
   expect(await screen.findByText(/^Pick reason \(1\)$/)).toBeInTheDocument();
   fireEvent.click(screen.getByText(/^Call today \(2\)$/));
   await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+});
+
+// A quote the customer opened from the portal (plan restart, plan start) that nobody delivered
+// carries the zero-follow-up contract: the list row's undeliveredSelfServe keeps it out of every
+// follow-up prompt on the page (codex pre-push P1). The same row unflagged is the control.
+it.each([
+  ["a staff quote (control)", false, { followUp: 6, awaiting: 0, action: 4 }],
+  ["a self-serve quote nobody delivered", true, { followUp: 5, awaiting: 1, action: 3 }],
+])("%s viewed 3 days ago: row badge, Follow Up Now, Awaiting Response and Action Required", async (_label, flagged, counts) => {
+  listRows = [...ROWS, viewed("ss-1", "Portal Quote", 3 * DAY, { source: "plan_start", undeliveredSelfServe: flagged })];
+  const { container } = renderPage();
+  await screen.findByText("Portal Quote");
+  const row = container.querySelector('[data-estimate-id="ss-1"]');
+  if (flagged) expect(within(row).queryByText("Follow up")).not.toBeInTheDocument();
+  else expect(within(row).getByText("Follow up")).toBeInTheDocument();
+  cleanup();
+
+  renderPage(390);
+  await screen.findByText("Portal Quote");
+  fireEvent.click(screen.getByRole("button", { name: /^Filter: / }));
+  expect(await screen.findByText(`Follow Up Now (${counts.followUp})`)).toBeInTheDocument();
+  expect(screen.getByText(`Awaiting Response (${counts.awaiting})`)).toBeInTheDocument();
+  cleanup();
+
+  flags.estimates_v2_status_pills = true;
+  renderPage(390);
+  await screen.findByText("Portal Quote");
+  fireEvent.click(screen.getByRole("button", { name: /^Filter: / }));
+  expect(await screen.findByText(`Action Required (${counts.action})`)).toBeInTheDocument();
 });
 
 // The click-to-call answers before the customer picks up, so the answered-call proof (lastCalledAt)

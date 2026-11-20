@@ -95,6 +95,9 @@ function detectCompetitor(notes) {
 
 /* ── Urgency indicator logic based on timestamps ──────────── */
 function getUrgencyIndicator(e) {
+  // No follow-up badge on a self-serve quote nobody delivered (the list row's
+  // undeliveredSelfServe: plan restart, plan start): the zero-follow-up contract.
+  if (e.undeliveredSelfServe) return null;
   const now = Date.now();
   const HOUR = 3600000;
 
@@ -522,6 +525,10 @@ function classifyEstimate(e) {
     return "needs_estimate";
   if (e.status === "draft" && e.monthlyTotal > 0) return "ready_to_send";
   if (e.status === "scheduled") return "scheduled";
+  // A self-serve quote nobody delivered (undeliveredSelfServe) waits on the
+  // customer and is never Follow Up Now: the zero-follow-up contract.
+  if (e.undeliveredSelfServe && (e.status === "sent" || e.status === "viewed"))
+    return "awaiting";
   if (e.status === "sent" && !e.viewedAt) return "awaiting";
   if (e.status === "viewed") return "follow_up";
   if (e.status === "sent" && e.viewedAt) return "follow_up";

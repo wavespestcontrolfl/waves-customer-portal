@@ -160,7 +160,7 @@ describe('runPromisedEstimateWatcher', () => {
     );
     const block = src.split('e.sent_at IS NOT NULL')[1].slice(0, 2600);
     // plan_restart joined the publish-without-delivery set (C4, #3671 r8).
-    expect(block).toMatch(/COALESCE\(e\.source, ''\) NOT IN \('service_report_cta', 'plan_restart'\)/);
+    expect(block).toMatch(/COALESCE\(e\.source, ''\) NOT IN \('service_report_cta', 'plan_restart', 'plan_start'\)/);
     // …but a mint an operator LATER actually delivered keeps the promise
     // (GitHub #3391 round P2). The witness is deliveryState.firstDeliveredAt
     // — stamped only for REAL deliveries (never suppression sentinels),

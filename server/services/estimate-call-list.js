@@ -124,9 +124,10 @@ function estimateListQuery(database, { status, sentOnly = false, sources = null,
  * viewedAt and lastViewedAt stay null on a row that was never sent (the list's own rule).
  *
  * @param {object} row  estimates row (snake_case columns)
- * @param {{lastClickedAt?: *, lastCalledAt?: *}} [extra]  the two values read in batches (short_codes, call_log)
+ * @param {{lastClickedAt?: *, lastCalledAt?: *, undeliveredSelfServe?: boolean}} [extra]  the two values read in
+ *   batches (short_codes, call_log), and the self-serve rule's answer for the row (services/self-serve-estimates.js)
  */
-function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null } = {}) {
+function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null, undeliveredSelfServe = false } = {}) {
   const hasBeenSent = !!row.sent_at;
   return {
     status: row.status,
@@ -137,6 +138,9 @@ function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null } = {}
     lastClickedAt: lastClickedAt || null,
     lastFollowUpAt: row.last_follow_up_at,
     lastCalledAt: lastCalledAt || null,
+    // A self-serve quote nobody delivered (plan restart, plan start) never makes the list: the
+    // zero-follow-up contract (services/self-serve-estimates.js). The caller passes the rule's answer.
+    undeliveredSelfServe: Boolean(undeliveredSelfServe),
   };
 }
 

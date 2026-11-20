@@ -374,6 +374,8 @@ describe('winLossSlices — audit slices', () => {
       }),
       // CTA mint stamped sent_at with nothing delivered → not a cohort row.
       row({ id: 'mint', status: 'sent', accepted_at: null, sent_at: daysAgo(9), source: 'service_report_cta', estimate_data: {} }),
+      // Portal plan-start mint (GATE_PORTAL_PLAN_START): the same publish-without-delivery shape.
+      row({ id: 'start-mint', status: 'sent', accepted_at: null, sent_at: daysAgo(9), source: 'plan_start', estimate_data: {} }),
       // CTA mint an operator later really delivered → anchored on that
       // handoff; the mint-time self-redirect view (before delivery) must
       // NOT count as an opened send.
