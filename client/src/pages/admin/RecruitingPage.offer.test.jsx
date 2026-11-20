@@ -1098,6 +1098,32 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     expect(screen.getByLabelText('Hourly rate ($)')).toBeInTheDocument();
   });
 
+  // Another admin can close the application (Rejected, say) while the first offer form is open with no draft yet. No
+  // draft row changes, so only the application read shows it: the form then locks with the reason and keeps the typed
+  // fields, instead of offering a Save the server refuses (APPLICATION_CLOSED).
+  it('an offer form with no draft yet locks when a read shows the application closed, and keeps the typed fields', async () => {
+    let reads = 0;
+    setupFetch({
+      'GET /admin/careers/app-1': () => res(200, { application: detailFixture({ status: reads++ === 0 ? 'interview' : 'rejected' }) }),
+    });
+    function Bell() {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => navigate('/?application=app-1')}>bell</button>;
+    }
+    render(<MemoryRouter><Bell /><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    await screen.findByRole('heading', { name: /Jordan Rivera — / });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Offer' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Offer' }));
+    fireEvent.change(await screen.findByLabelText('Start date'), { target: { value: '2027-01-11' } });
+    expect(screen.getByRole('button', { name: 'Save draft' })).not.toBeDisabled();
+    fireEvent.click(screen.getByText('bell'));
+    expect(await screen.findByText('This application is closed (hired, rejected or withdrawn). Move it back before sending an offer.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save draft' })).toBeDisabled();
+    expect(screen.getByLabelText('Start date')).toHaveValue('2027-01-11');
+    expect(reads).toBe(2);
+  });
+
   // A closed application's Offer move is the plain stage move: the offer read does not decide it.
   it('a failed offer read leaves a closed application its Offer move, the plain stage move', async () => {
     setupFetch({}, { offer: () => res(500, { error: 'Server error' }), detail: detailFixture({ status: 'rejected' }) });

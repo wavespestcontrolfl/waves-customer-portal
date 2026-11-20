@@ -138,11 +138,14 @@ export function money(value) {
 
 const OFFERS_OFF_TEXT = "Job offers are turned off, so this did not go through. The plain Offer move works as before.";
 
+// Every offer write on a closed application is refused (APPLICATION_CLOSED). The form says it before any write, too.
+export const APPLICATION_CLOSED_TEXT = "This application is closed (hired, rejected or withdrawn). Move it back before sending an offer.";
+
 const ERROR_TEXT = {
   TERMS_NOT_ISSUED: "The shared Technician Terms are not issued yet. Issue them in Staff Documents first.",
   OFFER_NOT_DRAFT: "This offer is no longer a draft. Close this form and check its state.",
   NO_CONTACT: "This applicant has no phone or email on file, so nothing can be sent.",
-  APPLICATION_CLOSED: "This application is closed (hired, rejected or withdrawn). Move it back before sending an offer.",
+  APPLICATION_CLOSED: APPLICATION_CLOSED_TEXT,
   ROLE_NOT_SUPPORTED: "Offers are for technician applications only.",
   // Save, Send and Discard all answer these two codes: the words name no action.
   DRAFT_CHANGED: "This draft changed after you opened it, so nothing was done. Review the new version first.",
@@ -178,10 +181,20 @@ export function dateRequestText(offer) {
   return `Asked to start ${formatDay(offer.requestedStartDate)}.${offer.dateRequestNote ? ` Note: ${offer.dateRequestNote}` : ""}`;
 }
 
+// Every offer a read holds: the current one, a revision, the history.
+export function offersOf(data) {
+  return [data.current, data.draft, ...(data.history || [])].filter(Boolean);
+}
+
+// The offer with this id, wherever the read holds it; null with no read, or for an offer the read does not hold.
+export function offerIn(data, id) {
+  return (data && offersOf(data).find((o) => o.id === id)) || null;
+}
+
 // What changed, when only the offers out moved while a draft was open: the offer
 // the draft replaces, as the card words it (a date request with its day and note).
 export function outChangeDetail(data, draft) {
-  const replaced = [data.current, ...(data.history || [])].find((o) => o && o.id === draft?.supersedesId);
+  const replaced = offerIn(data, draft?.supersedesId);
   if (!replaced) return "Check the offer card before you send.";
   return dateRequestText(replaced) || `It now shows: ${STATUS_LABEL[replaced.status] || replaced.status}.`;
 }

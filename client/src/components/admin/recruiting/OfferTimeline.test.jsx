@@ -95,7 +95,7 @@ describe("OfferTimeline", () => {
   });
 
   // Another owner session can send the revision before the read after Revise: the editor opens only for a row the
-  // read still holds as a draft, and otherwise the refreshed card shows where the offer stands.
+  // read still holds as a draft, and otherwise the card says what the read shows now.
   it("opens the revision's editor only while the read still holds it as a draft", async () => {
     const revision = record({ id: "offer-2", status: "draft", draftHash: "hash-2" });
     reviseOffer.mockResolvedValue({ offer: revision });
@@ -105,12 +105,27 @@ describe("OfferTimeline", () => {
     await waitFor(() => expect(reviseOffer).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByRole("button", { name: "Revise" })).toBeEnabled());
     expect(onOpenDraft).not.toHaveBeenCalled();
+    expect(screen.getByText("The new draft is no longer a draft. It now shows: Sent.")).toBeInTheDocument();
     expect(screen.queryByText("The new draft could not be loaded. Try again.")).toBeNull();
     unmount();
     render(card({ onOpenDraft, onChanged: async () => ({ current: record(), draft: revision, outStamp: "out-2" }) }));
     fireEvent.click(screen.getByRole("button", { name: "Revise" }));
     // The form opens on the offers out this card showed before the Revise, not the read after it.
     await waitFor(() => expect(onOpenDraft).toHaveBeenCalledWith(revision, "out-1"));
+  });
+
+  // Another session can discard the revision before the read after Revise: the read holds it in the history, and the
+  // offer sent before stays current. The card says so; it does not report a failed read or ask for a retry, which
+  // would make another draft.
+  it("a revision discarded before the read after Revise says so, with no retry", async () => {
+    const revision = record({ id: "offer-2", status: "draft", draftHash: "hash-2" });
+    reviseOffer.mockResolvedValue({ offer: revision });
+    const onOpenDraft = vi.fn();
+    render(card({ onOpenDraft, onChanged: async () => ({ current: record(), draft: null, history: [{ ...revision, status: "withdrawn" }] }) }));
+    fireEvent.click(screen.getByRole("button", { name: "Revise" }));
+    expect(await screen.findByText("The new draft is no longer a draft. It now shows: Withdrawn.")).toBeInTheDocument();
+    expect(screen.queryByText("The new draft could not be loaded. Try again.")).toBeNull();
+    expect(onOpenDraft).not.toHaveBeenCalled();
   });
 
   // Two signed copies in the history: while one loads, every signed-copy button waits, so a slower read can never

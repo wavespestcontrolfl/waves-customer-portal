@@ -21,6 +21,7 @@ import {
 import SafeMarkdown from "../../SafeMarkdown";
 import { saveOfferDraft, sendOffer } from "./offerApi";
 import {
+  APPLICATION_CLOSED_TEXT,
   describeSend,
   expiryLabel,
   formatIssued,
@@ -34,6 +35,8 @@ import {
   outChangeDetail,
   isValidDay,
   offerErrorMessage,
+  offerIn,
+  offersOf,
   sendChannels,
   stepDateFor,
   todayET,
@@ -172,19 +175,9 @@ function openDraft(data) {
   return [data.draft, data.current].find((o) => o && o.status === "draft") || null;
 }
 
-// Every offer the read holds: the current one, a revision, the history.
-function offersOf(data) {
-  return [data.current, data.draft, ...(data.history || [])].filter(Boolean);
-}
-
 // Every offer the read holds, by id.
 function offerIdsOf(data) {
   return new Set(offersOf(data).map((o) => o.id));
-}
-
-// The offer with this id in a read; null with no read, or for an offer the read does not hold.
-function offerIn(data, id) {
-  return (data && offersOf(data).find((o) => o.id === id)) || null;
 }
 
 // The status a send's result shows for its offer: from the newer of the send's answer and the latest read, by the
@@ -322,7 +315,9 @@ function formView({ edits, pinned, data, contact, busy, locked }) {
 // A read with other offers out (an answer, a date request) while the draft itself is
 // unchanged locks a saved draft too (outOnly): the notice says what changed, and
 // Continue with this draft takes the new stamp and keeps the draft and the edits.
-function formLock({ data, draftId, pinned, needRead, conflict, reviewedOut }) {
+// closed: the page's last read of the application shows it hired, rejected or withdrawn. Every offer write is refused
+// then (APPLICATION_CLOSED), and a form with no draft yet has no draft row whose change would lock it.
+function formLock({ data, draftId, pinned, needRead, conflict, reviewedOut, closed }) {
   const latest = reviewedDraft(data, draftId);
   // A form with no draft yet: an open draft in the read is another admin's (this form's own
   // save sets draftId first). It shows as changed, with the owner's edits kept, until they load it.
@@ -331,10 +326,12 @@ function formLock({ data, draftId, pinned, needRead, conflict, reviewedOut }) {
   const draftMoved = draftId ? !latest || Boolean(pinned && latest.draftHash !== pinned.draftHash) : Boolean(newer);
   const outOnly = Boolean(pinned) && !draftMoved && data.outStamp !== reviewedOut;
   const changed = !needRead && (conflict || draftMoved || outOnly);
-  return { newer, changed, outOnly, locked: needRead || changed || Boolean(draftId && !pinned) };
+  return { newer, changed, outOnly, locked: closed || needRead || changed || Boolean(draftId && !pinned) };
 }
 
-function ReadOnlyNotice({ changed, locked, message, hasNewer, outChange, onAdopt, onRetry, refreshFailed }) {
+function ReadOnlyNotice({ closed, changed, locked, message, hasNewer, outChange, onAdopt, onRetry, refreshFailed }) {
+  // A closed application: the typed fields stay on screen, read-only, until the application is moved back.
+  if (closed) return <ActionFeedback error>{APPLICATION_CLOSED_TEXT}</ActionFeedback>;
   // Only the offers out changed: say what changed, and let the owner go on with the same draft and edits.
   if (changed && outChange) {
     return (
@@ -381,7 +378,7 @@ function LetterBox({ letter }) {
 // stale: the page's last read of the offer, or of the application, failed (a background re-read
 // after a stage change, say), so the data on screen may be out of date. The card turns its
 // actions off then; the form stays read-only until a read works (Try again re-reads both).
-function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, onClose, onChanged, onSent, onBusyChange }) {
+function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, closed, onClose, onChanged, onSent, onBusyChange }) {
   const [edits, setEdits] = useState({});
   const [draftId, setDraftId] = useState(() => initialDraftId(draft, data));
   const [pinned, setPinned] = useState(() => reviewedDraft(data, initialDraftId(draft, data)));
@@ -408,7 +405,7 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, on
     onBusyChange(busy);
     return () => onBusyChange(false);
   }, [busy, onBusyChange]);
-  const { newer, changed, outOnly, locked } = formLock({ data, draftId, pinned, needRead: needRead || stale, conflict, reviewedOut });
+  const { newer, changed, outOnly, locked } = formLock({ data, draftId, pinned, needRead: needRead || stale, conflict, reviewedOut, closed });
   // A refused write's sentence shows once, in the read-only notice (after the re-read); else a change to the offers out.
   const notice = conflict ? error : outOnly && OUT_CHANGED_TEXT;
   const { base, fields, firstName, sendTo, startError, rateErrors, textErrors, stepError, fieldsOk, dirty, sendReady, canSend } = formView({ edits, pinned, data, contact, busy, locked });
@@ -630,6 +627,7 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, on
         <div className="flex flex-col gap-4">
           {!busy && (
             <ReadOnlyNotice
+              closed={closed}
               changed={changed}
               locked={locked}
               message={notice}
@@ -685,7 +683,7 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, on
   );
 }
 
-export default function OfferDialog({ open, applicationId, contact, data, draft, seenOut = null, stale = false, onClose, onChanged, onSent }) {
+export default function OfferDialog({ open, applicationId, contact, data, draft, seenOut = null, stale = false, closed = false, onClose, onChanged, onSent }) {
   const [busy, setBusy] = useState(false);
   const name = String(contact?.name || "Applicant");
   const status = (draft || data?.current)?.status;
@@ -705,6 +703,7 @@ export default function OfferDialog({ open, applicationId, contact, data, draft,
           draft={draft}
           seenOut={seenOut}
           stale={stale}
+          closed={closed}
           onClose={onClose}
           onChanged={onChanged}
           onSent={onSent}

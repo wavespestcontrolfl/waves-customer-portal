@@ -24,6 +24,7 @@ import {
   LOST_ANSWER_TEXT,
   money,
   offerErrorMessage,
+  offerIn,
   STATUS_LABEL,
   todayET,
 } from "./offerLogic";
@@ -288,14 +289,16 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
     act(async () => {
       const { offer: draft } = await reviseOffer(applicationId, offer.id, offer.status, startDate);
       // Open the new draft only after a read that still holds it as a draft; on a
-      // failed read the section's Try again stays on screen. Another owner session
-      // may have sent it meanwhile: the refreshed card then shows where it stands.
+      // failed read the section's Try again stays on screen. Another session may have
+      // sent it (the read holds it as the current offer) or discarded it (the read
+      // holds it in the history) meanwhile: the card then says what it shows now.
       const next = await onChanged();
-      const held = next ? [next.draft, next.current].find((o) => o?.id === draft.id) : null;
+      const held = offerIn(next, draft.id);
       // The form opens on the offers out as this card showed them before the Revise (outStamp, from the render the
       // owner pressed it in), so an answer or a date request that landed meanwhile shows in the form before any Send.
       if (held?.status === "draft") onOpenDraft(held, outStamp);
-      else if (next && !held) setError("The new draft could not be loaded. Try again.");
+      else if (held) setError(`The new draft is no longer a draft. It now shows: ${STATUS_LABEL[held.status] || held.status}.`);
+      else if (next) setError("The new draft could not be loaded. Try again.");
     });
 
   // A refused or unanswered write also closes the question: the card re-read, so it shows the truth.

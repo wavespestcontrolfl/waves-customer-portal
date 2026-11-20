@@ -905,6 +905,8 @@ function SamePhoneBlock({ records, onOpenApplication }) {
 // branching) rather than a one-use helper — moving it out is what actually
 // removes those decisions from RecruitingPage.
 const CLOSED_STATUSES = ["hired", "rejected", "withdrawn"];
+// A hired, rejected or withdrawn application: the server refuses every offer write on it (APPLICATION_CLOSED).
+const isClosed = (application) => CLOSED_STATUSES.includes(application?.status);
 
 // The Offer button opens the Offer form while the offer flow is on for a
 // technician application, and is today's status-only move only when the
@@ -914,7 +916,7 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, on
   const technician = detail.role === "technician";
   // A closed application cannot take an offer: Offer is the plain status move there, whatever the offer read says (the
   // stage preview and the move check it).
-  const closed = CLOSED_STATUSES.includes(detail.status);
+  const closed = isClosed(detail);
   const offerForm = offerFlow.enabled && technician && !closed;
   // Until the offer read confirms on or off, a technician in an open application has no Offer move.
   const offerPending = technician && !closed && (offerFlow.loading || Boolean(offerFlow.error) || Boolean(offerFlow.refreshError));
@@ -1359,6 +1361,8 @@ export default function RecruitingPage() {
         draft={formDraft}
         seenOut={seenOut}
         stale={Boolean(offerFlow.refreshError || detailRefreshError)}
+        // Another admin can close the application while the form is open; a re-read of it then locks the form.
+        closed={isClosed(detail)}
         // Bound to the form open at this render: a close from an action that started in it (a Try again whose read
         // finds the draft gone) cannot close a form opened since.
         onClose={() => offerFlow.closeForm(formKey)}
