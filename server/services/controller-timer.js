@@ -65,7 +65,8 @@ const TIMER_CHANGED = 'The sprinkler timer on this account changed while this pa
 // and the lock orders the writes but says nothing about when the form was rendered), `stored` = the row read under
 // the lock, and `seen` = the timer the form showed (controllerTimerSeen). A change lands only over that timer: a page
 // left open never puts back a timer someone else replaced, and an app answer never lands on another box. A write
-// that names no timer it saw (null) is refused.
+// that names no timer it saw (null) is refused. A timer equal to the one stored changes nothing and needs no check:
+// the retry of a save that landed but whose answer was lost.
 // Returns the rejections ([{ field, message }], one for each timer field the write named). When it returns any,
 // no timer field is left in `updates`, so the stored timer is never a mix of two writes.
 function settleControllerTimer(updates, { fresh = true, stored = null, seen = null } = {}) {
@@ -73,7 +74,8 @@ function settleControllerTimer(updates, { fresh = true, stored = null, seen = nu
   if (!named.length) return [];
   let message = controllerTimerProblem({ brand: updates[BRAND], model: updates[MODEL], app: updates[APP] });
   if (named.length < CONTROLLER_TIMER_FIELDS.length) message = NOT_WHOLE;
-  if (!message && seen !== controllerTimerKey(stored)) message = TIMER_CHANGED;
+  const storedKey = controllerTimerKey(stored);
+  if (!message && seen !== storedKey && controllerTimerKey(updates) !== storedKey) message = TIMER_CHANGED;
   if (!fresh) message = STALE_HOME;
   if (!message) return [];
   for (const field of named) delete updates[field];

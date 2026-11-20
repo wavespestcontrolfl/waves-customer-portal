@@ -111,6 +111,9 @@ test('a timer change lands only over the timer the form showed: a page left open
   expect(settle({ irrigation_zones: 6 }, { seen: null })).toEqual({ rejected: [], left: { irrigation_zones: 6 } });
   // A move outranks it: the reason names the home.
   expect(settle({ ...X2 }, { stored: RAIN_BIRD, seen: 'hunter|x2|yes', fresh: false }).rejected[0].message).toMatch(/home on this account changed/);
+  // A timer equal to the one stored changes nothing: the retry of a save that landed but whose answer was lost.
+  expect(settle({ ...X2, irrigation_zones: 6 }, { stored: X2, seen: '||' })).toEqual({ rejected: [], left: { ...X2, irrigation_zones: 6 } });
+  expect(settle({ ...X2 }, { stored: X2, seen: null }).rejected).toEqual([]);
 });
 
 test('the timer a form saw comes from either writer\'s field, as brand|model|app', () => {

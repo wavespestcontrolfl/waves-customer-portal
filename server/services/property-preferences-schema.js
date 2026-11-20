@@ -276,6 +276,15 @@ async function customerHasLawnService(customer = {}) {
   return customerHasLawnCare(customer) || hasLawnServiceEvidence(customer.id);
 }
 
+// Both lawn answers with one lookup of each kind: `lawnService` (the timer card) and `lawnInches` (Weekly Inches and
+// the watering plan: lawn service, or the Monday irrigation email's opt-in). THROWS on a lookup failure.
+async function customerLawnStanding(customer = {}) {
+  const lawnService = await customerHasLawnService(customer);
+  // Opted into the Monday irrigation email without lawn service (owner
+  // 2026-09-28): that email asks for their schedule and links the plan here.
+  return { lawnService, lawnInches: lawnService || await hasIrrigationEmailOptIn(customer.id) };
+}
+
 // Weekly Inches eligibility. The tier / lawn_type shortcut misses standalone
 // lawn-plan customers with no turf type on file, so fall back to live
 // lawn-service evidence (any live lawn-flavored visit in the trailing window
@@ -286,10 +295,7 @@ async function customerHasLawnService(customer = {}) {
 // (a GET/render) or fail the write (a false here would delete the
 // customer's inches with a 200 — GH codex P2 on #3557).
 async function customerQualifiesForLawnInches(customer = {}) {
-  if (await customerHasLawnService(customer)) return true;
-  // Opted into the Monday irrigation email without lawn service (owner
-  // 2026-09-28): that email asks for their schedule and links the plan here.
-  return hasIrrigationEmailOptIn(customer.id);
+  return (await customerLawnStanding(customer)).lawnInches;
 }
 
 // The render-time home stamp a prefs request carries (codex gh-r43): { sent, ms }. The portal sends
@@ -344,6 +350,7 @@ module.exports = {
   transformKeys,
   customerHasLawnCare,
   customerHasLawnService,
+  customerLawnStanding,
   customerQualifiesForLawnInches,
   normalizeUpdatesForStorage,
   prefsRenderStamp,

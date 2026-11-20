@@ -266,6 +266,12 @@ describe('PUT /api/property/preferences — the sprinkler timer on file', () => 
     }
     expect((await putPrefs({ ...X2_ON_APP, controller_timer_seen: 'rain_bird||' })).status).toBe(200);
     expect(timerOf(db._state.row)).toEqual(['hunter', 'x2', 'yes']);
+    // That save landed but its answer was lost: the page sends it again, with the timer it showed before it. The row
+    // already holds this timer, so the retry is no conflict.
+    const retry = await putPrefs({ ...X2_ON_APP, controller_timer_seen: 'rain_bird||' });
+    expect(retry.status).toBe(200);
+    expect(retry.body.rejected).toBeUndefined();
+    expect(timerOf(db._state.row)).toEqual(['hunter', 'x2', 'yes']);
   });
 
   test('a timer is not a watering input, and a change to it adds nothing to the account-updated email', () => {

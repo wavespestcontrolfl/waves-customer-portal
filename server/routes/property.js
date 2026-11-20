@@ -60,7 +60,7 @@ const {
   snakeToCamel,
   transformKeys,
   customerHasLawnCare,
-  customerHasLawnService,
+  customerLawnStanding,
   customerQualifiesForLawnInches,
   normalizeUpdatesForStorage,
   prefsRenderStamp,
@@ -159,17 +159,16 @@ router.get('/pet-name-ask', async (req, res) => {
 
 router.get('/preferences', async (req, res, next) => {
   try {
-    const lawnLookupFailed = (err) => {
-      logger.warn(`[property] lawn evidence lookup failed for ${req.customerId}: ${err.message}`);
-      return false;
-    };
-    const [prefs, hasLawnCare, hasLawnService] = await Promise.all([
+    const [prefs, lawn] = await Promise.all([
       db('property_preferences').where({ customer_id: req.customerId }).first(),
-      customerQualifiesForLawnInches(req.customer).catch(lawnLookupFailed),
-      // The sprinkler timer card's audience: lawn service only. The Monday irrigation email's opt-ins get Weekly
-      // Inches and the watering plan (hasLawnCare), not the card.
-      customerHasLawnService(req.customer).catch(lawnLookupFailed),
+      customerLawnStanding(req.customer).catch((err) => {
+        logger.warn(`[property] lawn evidence lookup failed for ${req.customerId}: ${err.message}`);
+        return { lawnService: false, lawnInches: false };
+      }),
     ]);
+    // Weekly Inches and the watering plan (hasLawnCare) also take the Monday irrigation email's opt-ins; the sprinkler
+    // timer card (hasLawnService) asks lawn-service customers only.
+    const { lawnInches: hasLawnCare, lawnService: hasLawnService } = lawn;
 
     if (!prefs) {
       // Return empty defaults
