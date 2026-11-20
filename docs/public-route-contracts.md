@@ -7770,7 +7770,10 @@ changes of address the latest one wins. A booking and a search or reset never ov
 while a booking runs, no search or reset starts, so that booking's refusal always shows;
 while a search or reset runs, every Book button is off, because a reset answers the
 address on file now, and a booking from the calendar it replaces would book that address.
-A list for another address keeps no picked or emailed time, even at the same start. A
+No search starts while a reset runs, so a search never cancels the reset that brings that
+address; a reset may cancel a search. A list for another address (the street, city and ZIP
+the page shows) keeps no picked or emailed time, even at the same start. A change of unit
+alone keeps the pick: the commit books the unit on file either way. A
 booking's success or terminal state always shows. A held address's reload that answers `422 out_of_area` stops on the
 out-of-area card with its waitlist ticket, as the address form does. A terminal state, the address form, or the GET's own no-times answers
 (`service_area_unavailable`, `booking_unavailable`) in that answer still replace the

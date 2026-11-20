@@ -1202,9 +1202,10 @@ describe('InspectionPage: an address race without availability refreshes at the 
     expect(searches).toBe(1);
   });
 
-  // Pre-push P1 on 833e0337bd: a search started while "Show all open times"
-  // runs is the newest request, so it wins even when it lands first.
-  it('a search started while "Show all open times" runs wins, even when it lands first', async () => {
+  // Pre-push P1 on 2bb65f3c3a: the search is off while "Show all open times"
+  // runs. The reset brings the address on file now and a search only times,
+  // so a search must not cancel it: the reset's address always lands.
+  it('the search is off while "Show all open times" runs, so the reset\'s address always lands', async () => {
     let searches = 0;
     let finishReset = null;
     let getCalls = 0;
@@ -1213,10 +1214,7 @@ describe('InspectionPage: an address race without availability refreshes at the 
       if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
       if (u.includes('/find-slots')) {
         searches += 1;
-        if (searches === 1) return Promise.resolve(jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }));
-        const sundayAtThree = okPayload().availability;
-        sundayAtThree.days[0].slots = [{ start_time: '15:00', end_time: '15:30', start_label: '3:00 PM', end_label: '3:30 PM', technician_id: 'tech-1' }];
-        return Promise.resolve(jsonResponse({ availability: sundayAtThree, summary: 'Open Sunday at 3.' }));
+        return Promise.resolve(jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }));
       }
       getCalls += 1;
       if (getCalls === 1) return Promise.resolve(jsonResponse(okPayload()));
@@ -1230,16 +1228,22 @@ describe('InspectionPage: an address race without availability refreshes at the 
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Show all open times' }));
     await waitFor(() => expect(finishReset).not.toBeNull());
-    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'sunday at 3' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
-    expect(await screen.findByText('Open Sunday at 3.')).toBeInTheDocument();
+    const input = screen.getByLabelText('Search for a service date or time');
+    fireEvent.change(input, { target: { value: 'monday morning' } });
+    expect(screen.getByRole('button', { name: 'Search' })).toBeDisabled();
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(searches).toBe(1);
     await act(async () => {
-      finishReset(jsonResponse(okPayload({ availability: mondayAvailability('09:00', '9:00 AM') })));
+      finishReset(jsonResponse(okPayload({
+        availability: mondayAvailability('09:00', '9:00 AM'),
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: true, address_display: '9 Gulf Dr, Sarasota 34231' },
+      })));
     });
-    await new Promise((r) => { setTimeout(r, 20); });
-    expect(screen.getByRole('button', { name: /Choose 3:00 PM on Sunday, July 12/i })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i })).not.toBeInTheDocument();
-    expect(screen.getByText('Open Sunday at 3.')).toBeInTheDocument();
+    expect(await screen.findByText('9 Gulf Dr, Sarasota 34231')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Choose 9:00 AM on Monday, July 13/i })).toBeInTheDocument();
+    expect(searches).toBe(1);
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'monday morning' } });
+    expect(screen.getByRole('button', { name: 'Search' })).toBeEnabled();
   });
 
   // Pre-push P1 on 72a9851828: a booking and a list request never overlap.

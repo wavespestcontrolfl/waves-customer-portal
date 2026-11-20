@@ -327,12 +327,18 @@ function EmptyTimesCard({ aiFiltered, serviceAreaUnavailable, locationReviewRequ
 
 const ASK_PROMPTS = ['Tomorrow morning', 'This weekend', 'Next week', 'Saturday', 'Late afternoon'];
 
-function AskCard({ onSearch, aiFiltered, onShowAll, closed, busy }) {
+// The page's list request state when no search or reset runs (listRequest).
+const NO_LIST_REQUEST = { controller: null, reset: false };
+
+// busy: the page books a time. resetting: "Show all open times" runs; it
+// brings the address on file, so no search may cancel it.
+function AskCard({ onSearch, aiFiltered, onShowAll, closed, busy, resetting }) {
   const [question, setQuestion] = useState('');
   const [asking, setAsking] = useState(false);
   const [notice, setNotice] = useState(null); // { text, isError }
-  // No search starts while one runs or while the page books a time.
-  const off = asking || busy;
+  // No search starts while one runs, while the page books a time, or while
+  // a reset runs.
+  const off = asking || busy || resetting;
 
   const ask = async (text) => {
     const q = String((text ?? question) || '').trim();
@@ -1954,9 +1960,10 @@ function ScheduleFlowPage({ flow }) {
   // refresh) — always falls back to the first day with openings.
   const [selectedDate, setSelectedDate] = useState(null);
   const [submitting, setSubmitting] = useState(false);
-  // The controller of the search or reset still running, if any: no booking
-  // starts while one runs (listRequest).
-  const [listing, setListing] = useState(null);
+  // The search or reset still running ({ controller, reset }; NO_LIST_REQUEST
+  // when none): no booking starts while one runs, and no search while a
+  // reset runs (listRequest).
+  const [listing, setListing] = useState(NO_LIST_REQUEST);
   const [submitError, setSubmitError] = useState(null);
   // Inspection: a refusal's reload failed, so the page no longer knows which
   // address its next commit books (confirm). The search stays closed until a
@@ -2057,24 +2064,27 @@ function ScheduleFlowPage({ flow }) {
   // `busy`, pre-push P1 on 833e0337bd), and while a search or reset runs, no
   // booking starts (`listing`). A reset can bring another address, and a
   // booking from the calendar it replaces would book that address (pre-push
-  // P1 on 72a9851828). A booking's success or terminal state always shows.
+  // P1 on 72a9851828). No search starts while a reset runs either: the reset
+  // brings the address on file now and a search only times, so a search
+  // must not cancel it (pre-push P1 on 2bb65f3c3a). A reset may cancel a
+  // search. A booking's success or terminal state always shows.
   const supersedeSearches = () => {
     loadAbortRef.current?.abort();
     loadAbortRef.current = new AbortController();
-    setListing(null);
+    setListing(NO_LIST_REQUEST);
   };
 
-  // Runs a search or reset as the newest list request, with every Book off
-  // until it ends. Only the request that set `listing` clears it, so one it
-  // superseded never turns Book on early.
-  const listRequest = (run) => async (...args) => {
+  // Runs a search or reset (`reset`) as the newest list request, with every
+  // Book off until it ends, and the search too for a reset. Only the request
+  // that set `listing` clears it, so one it superseded never turns them on early.
+  const listRequest = (reset, run) => async (...args) => {
     supersedeSearches();
     const controller = loadAbortRef.current;
-    setListing(controller);
+    setListing({ controller, reset });
     try {
       return await run(controller.signal, ...args);
     } finally {
-      setListing((current) => (current === controller ? null : current));
+      setListing((current) => (current.controller === controller ? NO_LIST_REQUEST : current));
     }
   };
 
@@ -2086,7 +2096,10 @@ function ScheduleFlowPage({ flow }) {
   // The emailed pick (EmailPickCard) follows the same rule on its own.
   // A list for another address keeps no pick, even at the same start: the
   // customer picked it, and the email offered it, for the address shown
-  // before (pre-push P1 on 72a9851828).
+  // before (pre-push P1 on 72a9851828). That address is the one the page
+  // shows (street, city and ZIP). A change of unit alone keeps it, and the
+  // pick with it: the commit books the unit on file, at a time it checks
+  // again, whether or not the page kept the pick (pre-push P1 on 2bb65f3c3a).
   const selectedSlotRef = useRef(null);
   selectedSlotRef.current = selectedSlot;
   const emailPickRef = useRef(null);
@@ -2226,7 +2239,7 @@ function ScheduleFlowPage({ flow }) {
   // card. Throwing lets the card show its own call-us fallback line.
   // The newest list request: a reset or an older search still running
   // must not land over this one (listRequest).
-  const runAiSearch = listRequest(async (signal, query) => {
+  const runAiSearch = listRequest(false, async (signal, query) => {
     const res = await fetch(`${API_BASE}/public/${cfg.endpoint}/${token}/find-slots`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2289,7 +2302,7 @@ function ScheduleFlowPage({ flow }) {
   // still what's on screen, so the reset link must survive for another try.
   // A refresh starts a new page view, and can change the address: a search
   // still running belongs to the old view (pre-push P1 on b91bb3768f).
-  const showAllTimes = listRequest(async (signal) => {
+  const showAllTimes = listRequest(true, async (signal) => {
     try {
       await refreshInspectionAvailability({ signal });
       if (signal?.aborted) return;
@@ -2304,7 +2317,7 @@ function ScheduleFlowPage({ flow }) {
   // resultMarks rides into the success result ({ wePicked: true } from the
   // customer-pick card's "you pick for me").
   const confirm = async (slotToBook, fromTop, resultMarks) => {
-    if (!slotToBook || submitting || listing || !cfg.canConfirm({ lane: selectedLane, data, details })) return;
+    if (!slotToBook || submitting || listing.controller || !cfg.canConfirm({ lane: selectedLane, data, details })) return;
     setBookedFromTop(fromTop);
     setSubmitting(true);
     setSubmitError(null);
@@ -2510,7 +2523,7 @@ function ScheduleFlowPage({ flow }) {
             error={submitError}
             showError={bookedFromTop}
             submitting={submitting}
-            busy={Boolean(listing)}
+            busy={Boolean(listing.controller)}
             onBook={() => confirm(emailPick, true)}
             onPickAnother={() => pickerRef.current?.scrollIntoView?.({ behavior: scrollBehavior(), block: 'start' })}
           />
@@ -2551,7 +2564,7 @@ function ScheduleFlowPage({ flow }) {
         view={pickView}
         cardProps={{
           submitting,
-          busy: Boolean(listing),
+          busy: Boolean(listing.controller),
           error: submitError,
           showError: bookedFromTop,
           onBook: (slot) => confirm(slot, true),
@@ -2565,7 +2578,7 @@ function ScheduleFlowPage({ flow }) {
       ) : (<>
         {flow === 'reservice' && data?.location_review_required
           ? null
-          : <AskCard key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} closed={searchClosed} busy={submitting} />}
+          : <AskCard key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} closed={searchClosed} busy={submitting} resetting={listing.reset} />}
         <div ref={pickerRef} />
         <SchedulePicker
           availability={data?.availability}
@@ -2613,7 +2626,7 @@ function ScheduleFlowPage({ flow }) {
                 data-glass-size="primary"
                 className="wpk-action-btn"
                 onClick={() => confirm(selectedSlot, false)}
-                disabled={submitting || Boolean(listing) || !cfg.canConfirm({ lane: selectedLane, data, details })}
+                disabled={submitting || Boolean(listing.controller) || !cfg.canConfirm({ lane: selectedLane, data, details })}
               >
                 {cfg.actionLabel({ submitting, lane: selectedLane, slot, data, details })}
               </button>
