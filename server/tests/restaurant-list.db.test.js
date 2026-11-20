@@ -167,37 +167,38 @@ describeDb('Restaurants list (PostgreSQL)', () => {
       prospect({ kind: 'inspection', event_date: '2026-11-15', pest_evidence: true, detail: JSON.stringify({ findings: ROACHES }) }),
     ]);
     const result = await listRestaurants({ days: 30, now: NOW });
-    expect(result.pestRead).toBe(true);
     expect(result.counts.pest_finding).toBe(1);
     expect(result.rows.map((row) => row.reason)).toEqual(['pest_finding']);
-  });
-
-  test('pestRead turns true once any inspection report is answered, in any period, 35B only too', async () => {
-    await mockPg('restaurant_prospects').insert([
-      prospect({ event_date: '2026-11-18' }),
-      prospect({ kind: 'inspection', event_date: '2026-11-15', pest_evidence: null, detail: JSON.stringify({ visitNumber: 1 }) }),
-    ]);
-    expect((await listRestaurants({ days: 30, now: NOW })).pestRead).toBe(false);
-    // An answer long before the period still says the reads run.
-    await mockPg('restaurant_prospects').insert(prospect({ kind: 'inspection', event_date: '2026-06-01', pest_evidence: false }));
-    expect((await listRestaurants({ days: 30, now: NOW })).pestRead).toBe(true);
   });
 
   test('before the first file read the answer is empty, with no read time', async () => {
     const result = await listRestaurants({ days: 30, now: NOW });
     expect(result).toEqual({
-      days: 30, from: '2026-10-21', through: '2026-11-19', readAt: null,
-      counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, pestRead: false, rows: [],
+      days: 30, from: '2026-10-21', through: '2026-11-19', readAt: null, readFailedAt: null,
+      counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, rows: [],
     });
   });
 
-  test('a good run that kept no row still sets the read time; a failed run after it leaves the last good read', async () => {
+  test('a good run sets the read time; a failed run after it keeps the last good read and names the failure', async () => {
     await mockPg('job_health').insert(syncRun({ last_success_at: daysAgo(1), last_started_at: daysAgo(1), last_finished_at: daysAgo(1) }));
     const quiet = await listRestaurants({ days: 30, now: NOW });
-    expect([quiet.readAt, quiet.rows]).toEqual([daysAgo(1).toISOString(), []]);
+    expect([quiet.readAt, quiet.readFailedAt, quiet.rows]).toEqual([daysAgo(1).toISOString(), null, []]);
     await mockPg('job_health').where({ job_name: SYNC_JOB })
       .update({ last_started_at: NOW, last_finished_at: NOW, last_status: 'failed', consecutive_failures: 1 });
-    expect((await listRestaurants({ days: 30, now: NOW })).readAt).toBe(daysAgo(1).toISOString());
+    const failed = await listRestaurants({ days: 30, now: NOW });
+    expect([failed.readAt, failed.readFailedAt]).toEqual([daysAgo(1).toISOString(), NOW.toISOString()]);
+    // A run under way after the failure leaves the last finished run's outcome.
+    await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_started_at: new Date(NOW.getTime() + 60000), last_status: 'running' });
+    expect((await listRestaurants({ days: 30, now: NOW })).readFailedAt).toBe(NOW.toISOString());
+    // A good run after it clears the failure: it writes the finish and the success with one value.
+    const later = new Date(NOW.getTime() + 120000);
+    await mockPg('job_health').where({ job_name: SYNC_JOB })
+      .update({ last_finished_at: later, last_success_at: later, last_status: 'success', consecutive_failures: 0 });
+    const good = await listRestaurants({ days: 30, now: NOW });
+    expect([good.readAt, good.readFailedAt]).toEqual([later.toISOString(), null]);
+    // A failed first run, with no good read before it.
+    await mockPg('job_health').where({ job_name: SYNC_JOB }).update({ last_success_at: null, last_status: 'failed' });
+    expect((await listRestaurants({ days: 30, now: NOW })).readFailedAt).toBe(later.toISOString());
   });
 
   test('a period that is not offered is refused before any read', async () => {

@@ -36,35 +36,36 @@ const phoneText = (phone) => (/^\d{10}$/.test(phone || "") ? `(${phone.slice(0, 
 // At 1100 px and under the table shows each restaurant as a stacked record (the shared records layout): counts read left there.
 const COUNT_CELL = "align-middle max-[1100px]:text-left";
 
-// The pest count is per inspection (one row each), whatever the number of findings in it. Before any inspection
-// report has been answered (pestRead false) there is no pest count to give, so the line leaves it out.
+// The line counts the two reasons a full read of the license files proves: new restaurants and new owners. It gives no
+// pest count: an inspection shows only once its report has been read, so a count of them would say nothing about the
+// period. Pest rows show in the list as their reports are read.
 export function summaryText(data) {
   const { counts, from, through } = data;
-  const licenses = `${plural(counts.new_restaurant, "new restaurant")}`;
-  const parts = data.pestRead
-    ? `${licenses}, ${plural(counts.new_owner, "new owner")} and ${plural(counts.pest_finding, "inspection")} that found pests`
-    : `${licenses} and ${plural(counts.new_owner, "new owner")}`;
-  return `${parts} from ${shortDay(from)} to ${shortDay(through)}.`;
+  return `${plural(counts.new_restaurant, "new restaurant")} and ${plural(counts.new_owner, "new owner")} from ${shortDay(from)} to ${shortDay(through)}.`;
 }
 
-// While no inspection report has been answered (pestRead false), the line says when pest findings show.
-export function pestText(data) {
-  return data.pestRead ? "" : "Pest findings show once the inspection reports are read.";
-}
+const readDay = (value) => formatETDate(value, { month: "short", day: "numeric", year: "numeric" });
 
 // readAt is the weekly job's last run that read all three state files without a failure.
 export function readText(readAt) {
-  return readAt ? `The state files were last read on ${formatETDate(readAt, { month: "short", day: "numeric", year: "numeric" })}.` : "";
+  return readAt ? `The state files were last read on ${readDay(readAt)}.` : "";
 }
 
-// The line above the list. Before the first run that read all three files (readAt null), the rows may come from one
-// file only: counts would claim zeros the state has not answered, so the line says the list is not complete. The
-// counts cover the whole period; the list stops at its newest 1,000 rows, and then says so.
+// readFailedAt is the end of the latest weekly run when that run failed: the rows then mix two reads.
+export function failedText(data) {
+  return `The weekly read on ${readDay(data.readFailedAt)} failed, so this list may be missing restaurants. The state files were last read in full on ${readDay(data.readAt)}.`;
+}
+
+// The line above the list. Before the first run that read all three files (readAt null), or after a run that failed
+// (readFailedAt), the rows may come from one file or mix two reads: counts would claim what the state has not
+// answered, so the line says the list may be missing restaurants. The counts cover the whole period; the list stops
+// at its newest 1,000 rows, and then says so.
 export function headlineText(data) {
   if (!data.readAt) return "Not every state file has been read yet, so this list may be missing restaurants.";
+  if (data.readFailedAt) return failedText(data);
   const total = data.counts.new_restaurant + data.counts.new_owner + data.counts.pest_finding;
   const cut = data.rows.length < total ? `The list shows the newest ${countText(data.rows.length)}.` : "";
-  return [summaryText(data), pestText(data), readText(data.readAt), cut].filter(Boolean).join(" ");
+  return [summaryText(data), readText(data.readAt), cut].filter(Boolean).join(" ");
 }
 
 // One request per period. A late answer for a period the owner already left is dropped.
@@ -140,6 +141,7 @@ export default function RestaurantProspectsPage({ embedded = false }) {
       <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-ui-body text-ink-secondary">
         New restaurants, new owners and inspections that found pests, from the state&apos;s public restaurant files. Manatee,
         Sarasota and Charlotte counties, without Punta Gorda. Food trucks are left out. The state files are read each Monday.
+        An inspection shows once its report has been read.
       </div>
 
       <div className="mb-3 flex flex-wrap items-center gap-2" role="group" aria-label="Period">
@@ -160,7 +162,7 @@ export default function RestaurantProspectsPage({ embedded = false }) {
         <>
           <p className="mb-3 text-ui-body text-zinc-900">{headlineText(data)}</p>
           {data.rows.length === 0
-            ? <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Nothing in the {period.label.toLowerCase()}{data.pestRead ? "" : " so far"}.</div>
+            ? <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Nothing in the {period.label.toLowerCase()} so far.</div>
             : <RestaurantTable rows={data.rows} />}
         </>
       )}

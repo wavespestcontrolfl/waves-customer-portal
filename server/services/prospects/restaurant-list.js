@@ -8,7 +8,6 @@
  *   pest_finding    an inspection whose public report holds a 35A finding (kind inspection, pest_evidence true)
  * Food trucks (license type 2014, mobile food vehicles) are left out: there is no building to treat. An inspection
  * whose report is not read yet (pest_evidence NULL), or that cites 35B only (a door or an opening), is left out too.
- * pestRead says whether any report has been answered yet: until one has, a pest count counts nothing.
  * It sends nothing and calls no AI. Public business records only.
  */
 
@@ -57,27 +56,21 @@ function toRow(row, newSince) {
   };
 }
 
-// Whether any inspection report has been answered yet (pest_evidence set, in any period). Until the report reads run
-// and answer one, a pest count counts nothing, so the page shows none.
-function pestReadQuery() {
-  return db('restaurant_prospects').where({ kind: 'inspection' }).whereNotNull('pest_evidence').first('id');
-}
-
 /**
  * The list for the last `days` days by the row's own date (a license's approval day, an inspection's day), Eastern,
- * today included; newest first, at most ROW_LIMIT rows. counts cover the whole period, past the cap too. pestRead
- * says whether any report has been answered yet (pestReadQuery). readAt is when the weekly job last read all three
- * files without a failure (null before its first good run).
- * @returns {Promise<{ days: number, from: string, through: string, readAt: string|null,
- *   counts: { new_restaurant: number, new_owner: number, pest_finding: number }, pestRead: boolean,
- *   rows: object[] }>}
+ * today included; newest first, at most ROW_LIMIT rows. counts cover the whole period, past the cap too. readAt is
+ * when the weekly job last read all three files without a failure (null before its first good run). readFailedAt is
+ * when the latest finished run ended, if that run failed (a file not read): the rows may then mix two reads. A
+ * success writes last_finished_at and last_success_at with one value, so a later finish is a failure.
+ * @returns {Promise<{ days: number, from: string, through: string, readAt: string|null, readFailedAt: string|null,
+ *   counts: { new_restaurant: number, new_owner: number, pest_finding: number }, rows: object[] }>}
  */
 async function listRestaurants({ days = PERIODS[0], now = new Date() } = {}) {
   if (!PERIODS.includes(days)) throw new Error('unknown period');
   const through = etDateString(now);
   const from = shiftDay(through, -(days - 1));
   const newSince = new Date(now.getTime() - NEW_DAYS * 24 * 60 * 60 * 1000);
-  const [rows, answered, health] = await Promise.all([
+  const [rows, health] = await Promise.all([
     db('restaurant_prospects')
       .whereBetween('event_date', [from, through])
       .whereRaw("COALESCE(license_type_code, '') <> ?", [FOOD_TRUCK])
@@ -91,8 +84,7 @@ async function listRestaurants({ days = PERIODS[0], now = new Date() } = {}) {
         db.raw("count(*) FILTER (WHERE kind = 'new_license') OVER () AS total_new_restaurant"),
         db.raw("count(*) FILTER (WHERE kind = 'owner_change') OVER () AS total_new_owner"),
         db.raw("count(*) FILTER (WHERE kind = 'inspection') OVER () AS total_pest_finding")),
-    pestReadQuery(),
-    db('job_health').where({ job_name: SYNC_JOB }).first('last_success_at'),
+    db('job_health').where({ job_name: SYNC_JOB }).first('last_success_at', 'last_finished_at'),
   ]);
   const list = rows.map((row) => toRow(row, newSince));
   // No row means the period holds none. count() is a bigint: the driver gives a string.
@@ -102,13 +94,15 @@ async function listRestaurants({ days = PERIODS[0], now = new Date() } = {}) {
     new_owner: Number(totals.total_new_owner || 0),
     pest_finding: Number(totals.total_pest_finding || 0),
   };
+  const success = health && health.last_success_at ? new Date(health.last_success_at) : null;
+  const finish = health && health.last_finished_at ? new Date(health.last_finished_at) : null;
   return {
     days,
     from,
     through,
-    readAt: health && health.last_success_at ? new Date(health.last_success_at).toISOString() : null,
+    readAt: success ? success.toISOString() : null,
+    readFailedAt: finish && (!success || finish > success) ? finish.toISOString() : null,
     counts,
-    pestRead: Boolean(answered),
     rows: list,
   };
 }
