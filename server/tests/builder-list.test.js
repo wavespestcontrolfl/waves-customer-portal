@@ -4,9 +4,15 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockRaw = jest.fn();
+// A read inside the snapshot transaction reaches mockRaw with a third argument, 'snapshot', so a test can tell them apart.
+const mockSnapshots = [];
 jest.mock('../models/db', () => {
   const db = () => { throw new Error('the builders list uses raw SQL only'); };
   db.raw = (...args) => mockRaw(...args);
+  db.transaction = async (work, options) => {
+    mockSnapshots.push(options);
+    return work({ raw: (sql, bindings) => mockRaw(sql, bindings, 'snapshot') });
+  };
   return db;
 });
 
@@ -27,6 +33,14 @@ describe('builderKey', () => {
     ['SAMPLE POOLS INCORPORATED', 'SAMPLE POOLS'],
     ['SAMPLE HOMES LTD', 'SAMPLE HOMES'],
     ['SAMPLE COMPANY', 'SAMPLE'],
+    // An accent never splits a word, so "Peña" matches a customer typed "Pena".
+    ['Peña Pools LLC', 'PENA POOLS'],
+    ['PEÑA POOLS', 'PENA POOLS'],
+    // A curly apostrophe is an apostrophe.
+    ['Sample’s Pools', 'SAMPLES POOLS'],
+    // Letters of another alphabet stay letters: two such names never share a key.
+    ['Пул Плюс LLC', 'ПУЛ ПЛЮС'],
+    ['Пул Мир LLC', 'ПУЛ МИР'],
   ])('%s -> %s', (input, expected) => expect(builderKey(input)).toBe(expected));
 
   test('keeps a name that is only company words, and returns empty for blank input', () => {
@@ -110,7 +124,7 @@ describe('mergeBuilders', () => {
 });
 
 describe('listBuilders', () => {
-  beforeEach(() => mockRaw.mockReset());
+  beforeEach(() => { mockRaw.mockReset(); mockSnapshots.length = 0; });
 
   function answer({ groups = [], newest = null, customers = [] } = {}) {
     mockRaw.mockImplementation(async (sql) => {
@@ -158,6 +172,14 @@ describe('listBuilders', () => {
     expect(aggregate[0]).toMatch(/FROM construction_permit_records/);
     expect(aggregate[0]).toMatch(/type_of_work ILIKE 'New%'/);
     expect(aggregate[0]).toMatch(/LOWER\(COALESCE\(permit_type, ''\)\) = 'residential'/);
+  });
+
+  test('the newest date and the counts are read in one read-only REPEATABLE READ snapshot', async () => {
+    answer({ newest: '2026-11-16' });
+    await listBuilders({ kind: 'pool', now: new Date('2026-11-19T15:00:00Z') });
+    expect(mockSnapshots).toEqual([{ isolationLevel: 'repeatable read', readOnly: true }]);
+    const inSnapshot = mockRaw.mock.calls.filter((call) => call[2] === 'snapshot').map(([sql]) => sql);
+    expect(inSnapshot).toEqual([expect.stringMatching(/AS newest/), expect.stringMatching(/GROUP BY/)]);
   });
 
   test('a failed customer lookup fails the list, so no customer is shown as a fresh prospect', async () => {

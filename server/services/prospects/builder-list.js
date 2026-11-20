@@ -53,12 +53,18 @@ function sourceFor(kind) {
   return SOURCES[kind];
 }
 
-/** Upper case, punctuation gone, one space between words, trailing company words (LLC, INC, ...) dropped. */
+/**
+ * Upper case, accents dropped (PEÑA -> PENA, so it matches a customer typed without the accent), apostrophes and
+ * periods gone (straight or curly), other punctuation a space, trailing company words (LLC, INC, ...) dropped.
+ * Letters of any script and digits stay, so two names in another alphabet never share a key.
+ */
 function builderKey(name) {
   const words = String(name == null ? '' : name)
+    .normalize('NFKD')
+    .replace(/\p{M}+/gu, '')
     .toUpperCase()
-    .replace(/['.,]/g, '')
-    .replace(/[^A-Z0-9]+/g, ' ')
+    .replace(/['‘’.,]/g, '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim()
     .split(' ')
     .filter(Boolean);
@@ -154,10 +160,14 @@ function mergeBuilders(rows, { newSince, customerKeys = new Set() }) {
   };
 }
 
+// The newest-date read and the counts share one read-only snapshot: a Monday sync that commits between them could
+// otherwise leave a newest permit later than the week the answer names.
+const PERMIT_SNAPSHOT = { isolationLevel: 'repeatable read', readOnly: true };
+
 // Counts are per name and license across the whole table, so the first permit really is the first one on file.
 // A permit dated after today (a county typing slip) is left out, so the counts and the first and newest dates agree.
-async function readGroups(source, cut) {
-  const result = await db.raw(
+async function readGroups(conn, source, cut) {
+  const result = await conn.raw(
     `SELECT UPPER(BTRIM(contractor_name)) AS name,
             UPPER(BTRIM(contractor_license)) AS license,
             COUNT(*) FILTER (WHERE issued_date >= ?::date AND issued_date <= ?::date) AS permits7,
@@ -174,8 +184,8 @@ async function readGroups(source, cut) {
   return result.rows.map(toRow);
 }
 
-async function readDataThrough(source, today) {
-  const result = await db.raw(`SELECT MAX(issued_date) AS newest FROM ${source.table} WHERE issued_date <= ?::date`, [today]);
+async function readDataThrough(conn, source, today) {
+  const result = await conn.raw(`SELECT MAX(issued_date) AS newest FROM ${source.table} WHERE issued_date <= ?::date`, [today]);
   return dateOnlyString(result.rows[0] && result.rows[0].newest);
 }
 
@@ -196,9 +206,12 @@ async function listBuilders({ kind, now = new Date() }) {
   const source = sourceFor(kind);
   const started = Date.now();
   const today = etDateString(now);
-  const dataThrough = await readDataThrough(source, today);
-  const cut = cutoffsFor(today, dataThrough);
-  const [rows, customerKeys] = await Promise.all([readGroups(source, cut), readCustomerKeys()]);
+  const permitRead = db.transaction(async (trx) => {
+    const newest = await readDataThrough(trx, source, today);
+    const cutoffs = cutoffsFor(today, newest);
+    return { newest, cutoffs, groups: await readGroups(trx, source, cutoffs) };
+  }, PERMIT_SNAPSHOT);
+  const [{ newest: dataThrough, cutoffs: cut, groups: rows }, customerKeys] = await Promise.all([permitRead, readCustomerKeys()]);
   const merged = mergeBuilders(rows, { newSince: cut.d30, customerKeys });
   logger.info(`[builder-list] ${kind}: ${merged.builders.length} builders in ${Date.now() - started} ms`);
   return { kind, dataThrough, week: { from: cut.weekStart, through: cut.weekEnd, ...merged.week }, builders: merged.builders };
