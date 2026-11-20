@@ -106,7 +106,6 @@
  *   GATE_AI_CHANGE_CHECK=true (owner 2026-10-30, "all": before-and-after AI check for every content change. The daily impact tracker compares how often AI answers cited a changed page in the 14 days before its deploy with the 14 days after, adjusted for site-wide Waves citations, and stores gained / lost / moved / flat / no_data on the content_optimization_impact row ("moved" = a loss whose questions still cite Waves through another page; no alert). A "lost" verdict adds one FIX leg to the impact digest (also needs GATE_IMPACT_DIGEST), at most one email a day. Reads seo_llm_mentions that the daily prober already stored; fires no probes, costs $0, sends nothing to a customer. Read at call time via aiChangeCheckLive(), strict 'true', dark by default; off = no check runs and the digest has no such leg.)
  *   GATE_SAME_QUESTION_CHECK=true (content engine, owner 2026-10-30 "all": before a NEW supporting blog is drafted, topic-targeting-gate looks for a live post whose title, slug or primary keyword already holds every topic word of the brief's keyword (geo and framing words dropped, singular/plural folded; a one-word topic blocks only when at most 3 live posts hold it and it is not a broad pest or service word like termite or lawn). Off = the rule runs in shadow: it records run.topic_targeting_result.same_question and logs, and never blocks. On = the row is skipped by design (topic_targeting:TOPIC_SAME_QUESTION_LIVE) and one same_question_refresh row is queued against the owner page, which adds the candidate question as an answer block (ANSWER-GAP MODE) through the normal refresh chain: protected pages, in-flight page edit and the 28-day page cooldown still apply. Strict opt-in: exactly 'true', read at call time via sameQuestionCheckLive(). Ships DARK. Off also stops same_question_refresh rows already queued from being claimed (opportunity-queue lane fence); they wait and expire unclaimed after 60 days.)
  *   GATE_DATAFORSEO_RESOLVE_POISONED=true (owner 2026-11-19, "yes": every Google organic search sent through dataforseo.serpOrganic() (rank tracker, AI Overview tracker, blog-brief SERP profiler, serp-analyzer, competitor discovery, local prospector, listing size) carries DataForSEO's resolve_poisoned_results flag. Since 2026-09-26 Google has served automated searches "poisoned" pages (normal layout, most organic results swapped for unrelated sites); with the flag DataForSEO checks page one against Google's Web view and replaces poisoned organic results (marked checks: ["from_web"]); every other item comes back as collected. Paid: one more SERP page per task, clean or not. serpMaps, AI Mode, the AI Overview captures and checkIndexed are unchanged. Strict === 'true', read at call time via dataforseoResolvePoisonedLive(); dark by default. Kill: unset.)
- *   GATE_CONTENT_PII_ALL_LANES=true (security audit run 3, 2026-11-05, fix E: the autonomous content engine's deterministic body privacy check (phones, emails, names, street addresses; `redaction_passed` in services/content/content-quality-gate.js) ran only on city-service and customer-question drafts. On, it also runs on supporting-blog and refresh drafts; a draft that fails holds for review through the existing hard-failure path and never publishes. On also stops the brief (`customer_signal`) and the get_customer_questions tool from passing `example_phrasing_anonymized` and `redaction_confidence` (a customer's own words with regex redaction only) to the writer and refresher agents; the topic (`normalized_question`) still goes. Sends nothing to a customer. Strict 'true', read at call time via contentPiiAllLanesLive(); dark by default; off = byte-identical to before. Kill switch: unset.)
  *   GATE_PORTAL_MESSAGES=true (owner 2026-11-04, "lets build it out" after "do we now have the ability to answer clients in the portal?": the office answers a customer's portal ask INSIDE the portal. Admin > Communications > Portal gets "Reply in portal" on chat hand-offs, service requests and the customer's own portal messages. The answer is saved in the customer's portal thread (the unified comms tables, channel 'portal'), closes the item it answers and that item's bells, and the customer gets ONE notice: the in-app bell plus a push to the Waves app, or, when no app device took the push, an email with the whole answer (template portal_reply). The customer reads the thread and writes back on the portal's Messages page; a customer message is a Portal-tab item (kind message) with its own admin bell and phone page. Nothing is sent unless a staff member presses Send. With it on, the Ask Waves AI hand-off reply tells the customer the team will reply on their Messages page, or by text or email (owner 2026-11-12). Read at call time via portalMessagesLive(), strict 'true', dark by default; off = no Reply in portal, no Messages page, every new route answers 404.)
  *   GATE_PORTAL_MESSAGES_NIGHT_AI=true (owner 2026-11-05, "we first respond with a human, after hours Waves AI", build ok 2026-11-12: a customer's message on the portal Messages page written outside 8 AM to 8 PM Eastern, any day, is read by the Ask Waves assistant on the thread's own short prompt and four tools (ai-assistant/thread-lane.js; owner 2026-11-12 "A" after a replay of 82 night texts), text only: no buttons or cards. It sends nothing for a thank-you, an acknowledgment or a reaction. It answers inside the same thread, labelled Waves AI, only from a schedule tool's result: the next visit's date and arrival window, or a pointer to the Reschedule button on the Visits tab. The office bell and phone page ring as today and the Portal-tab item stays open until a staff answer or Mark handled; the AI answer never closes it. A hand-off (every other message, text the model wrote with no tool result, a failed turn) saves one fixed reply, the thread's own item is the hand-off and no second item, bell or page is made. The customer gets the in-app bell plus an app push, never the reply email. Needs GATE_PORTAL_MESSAGES on, and PORTAL_CHAT_SELF_SERVE on (default on). Calls the paid model: the owner flips it. Read at call time via portalMessagesNightAiLive(), strict 'true', dark by default; off = no AI answer, Messages behaves as before. Kill: unset or false, no redeploy.)
  *   GATE_PORTAL_MESSAGES_DAY_AI=true (owner 2026-11-13, "Let Waves AI answer during office hours when no person answers in time": a customer's message on the portal Messages page that has waited 120 open minutes (8 AM to 8 PM Eastern, the owner's 2026-10-02 rule for texts) with no answer from a person gets the same Waves AI turn as the night step (GATE_PORTAL_MESSAGES_NIGHT_AI): the thread's own short prompt and four tools, text only, an answer only from a schedule tool's result. A thank-you or a reaction gets nothing. A hand-off sends NOTHING in the day: the message stays the office's open item, as it was. A five-minute sweep (portal-messages-day-ai.js) acts only inside office hours, on the thread's newest customer message of the last 72 hours that the night step has not taken. The customer gets the in-app bell plus an app push. Needs GATE_PORTAL_MESSAGES on, and PORTAL_CHAT_SELF_SERVE on (default on); does not need the night gate. Calls the paid model and writes to customers: the owner flips it. Read at call time via portalMessagesDayAiLive(), strict 'true', dark by default; off = the sweep returns at once. Kill: unset or false, no redeploy.)
@@ -325,7 +324,6 @@
  *   GATE_ALERT_CALL_BUTTON=true (owner 2026-11-02 "cant we add a call button, where we can call them from the admin notification": a Call button the server sets on admin bell rows about one caller (missed call, voicemail, promise chaser, repeat caller, Sandy hand-offs, landline, lead CALL replies, text call-back follow-ups); a tap reads the call or customer again and runs POST /api/admin/communications/call in-process with the body the linked page's own Call button sends, so the owner's phone rings first and press 1 connects; the row stays open until the caller is reached, Called back / Handled or Done. Read at call time via alertCallButtonLive(), strict 'true', dark by default; off = no Call button is served and a tap answers 409. A row's Called back / Handled button is always served.)
  *   GATE_BID_ALERT_BUTTONS=true (owner 2026-10-29 "bid buttons, as a trial", PR 3 of the bell buttons: No bid on a new bid invite's bell row, and Bid only once the bid's due date is confirmed; a tap runs the Bid desk's own save step, sends nothing to a buyer or customer and moves no money. Week-1 read-out: ops job bid-buttons-trial-week1, Nov 5. Read at call time via bidAlertButtonsLive(), strict 'true', dark by default; off = the rows serve no such button and a tap answers 409.)
  *   GATE_ADS_NEGATIVES=true (owner plan A 2026-11-02: the owner's negative word list goes to Google Ads as phrase negatives on every linked campaign, each ads-advisor word arrives as one bell row with Add and Decline (3 a day at most), and every block can be undone on the Ads page; sends nothing to a customer and moves no money, but changes where the ads can show. Read at call time via adsNegativesLive(), strict 'true', dark by default; off = the /negatives routes answer 404, the bell rows serve no buttons, the advisor writes no rows, the 6 AM sync skips the step and no Google write runs.)
- *   GATE_ADS_HEALTH_CARD=true (owner 2026-11-04, option A on the PPC gap page: a read-only Ad health card on Ads → Dashboard. GET /api/admin/ads/health returns each Google campaign's live serving status and Google's reasons, ad disapprovals, the portal's 30-day conversion upload counts with Google's own upload check, and a 30-day who-changed-what timeline (Google change history from people and Google tools, plus the portal's budget log and negative keyword decisions). Reads only: it sends nothing, moves no money and changes no ad. Read at call time via adsHealthCardLive(), strict 'true', dark by default; off = the route answers 404 and the card renders nothing.)
  *   GATE_ADS_HEALTH_ALERTS=shadow|true (owner 2026-11-05, "ALERT", after the Ad health card: every 2 hours one standing Leads bell for a person while an enabled Google Ads campaign cannot serve (Google's primary status Not eligible or Misconfigured, for a reason nobody chose: a pause or a date never counts) or an enabled ad in an enabled ad group of an enabled campaign is disapproved; it rings when a campaign or ad joins the set and closes itself at zero; plus one engineering row in Claude's queue while a live Google or Meta conversion upload failed on a try in the last 48 hours or Google's upload check reads Needs attention, retired at the first clean check. `shadow` = the same reads and one audit_log row (ads_health_alert.shadow) when the problems change, no alert; `true` = raise and close. Anything else = off: no query. Reads Google only; changes no ad or budget; sends nothing to a customer. Read at call time via adsHealthAlertsMode(). See services/ads/ads-health-alerts.js.)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
@@ -2904,8 +2902,6 @@ const gates = {
   bidAlertButtons: process.env.GATE_BID_ALERT_BUTTONS === 'true',
   // GATE_ADS_NEGATIVES (negative keywords: owner word list to Google, bell Add / Decline, Undo, dark). Boot-log entry only; the call-time reader is adsNegativesLive().
   adsNegatives: process.env.GATE_ADS_NEGATIVES === 'true',
-  // GATE_ADS_HEALTH_CARD (read-only Ad health card on Ads → Dashboard, dark). Boot-log entry only; the call-time reader is adsHealthCardLive().
-  adsHealthCard: process.env.GATE_ADS_HEALTH_CARD === 'true',
   // GATE_ADS_HEALTH_ALERTS (ads health alerts: a Google Ads serving and disapproval bell, upload faults to Claude's queue; dark). Boot-log entry only; the call-time reader is adsHealthAlertsMode().
   adsHealthAlerts: ['shadow', 'true'].includes(String(process.env.GATE_ADS_HEALTH_ALERTS || '').trim().toLowerCase()),
 
@@ -6647,14 +6643,6 @@ function adsNegativesLive() {
   return process.env.GATE_ADS_NEGATIVES === 'true';
 }
 
-// GATE_ADS_HEALTH_CARD read at CALL time, strict `=== 'true'`, dark by default. The one reader for the read-only Ad
-// health card (owner 2026-11-04, PPC gap page option A): GET /api/admin/ads/health and the card on Ads → Dashboard.
-// Off: the route answers 404 and the card renders nothing. It reads only (Google Ads queries + portal tables); it
-// sends nothing and changes no ad. Kill: unset.
-function adsHealthCardLive() {
-  return process.env.GATE_ADS_HEALTH_CARD === 'true';
-}
-
 // GATE_ADS_HEALTH_ALERTS read at CALL time: 'shadow', 'true' or 'off' (services/ads/ads-health-alerts.js, owner
 // 2026-11-05 "ALERT"). 'shadow' (trimmed, any case) reads Google and the upload log and writes one audit_log row when
 // the problems change, with no alert; 'true' raises and closes the Google Ads bell and the upload row in Claude's
@@ -7444,13 +7432,6 @@ function estimateSlotOnePerHourLive() {
 // GATE_LEAD_DRAFT_PROPERTY_LOOKUP read at CALL time (so a flip needs no redeploy); strict 'true'.
 function leadDraftPropertyLookupLive() {
   return process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP === 'true';
-}
-
-// GATE_CONTENT_PII_ALL_LANES read at CALL time (so a flip needs no redeploy); strict 'true', dark (security audit run 3, fix E).
-// On, supporting-blog and refresh drafts get the same body privacy hard check as city-service and customer-question, and the writer
-// and refresher agents stop receiving a customer's own (regex-redacted) words. Off = unchanged.
-function contentPiiAllLanesLive() {
-  return process.env.GATE_CONTENT_PII_ALL_LANES === 'true';
 }
 
 // GATE_CASH_FORECAST read at CALL time (so a flip needs no redeploy); strict 'true'.
@@ -8729,8 +8710,6 @@ module.exports.alertCallButtonLive = alertCallButtonLive;
 module.exports.bidAlertButtonsLive = bidAlertButtonsLive;
 // GATE_ADS_NEGATIVES reader, on its own line so gate PRs never conflict.
 module.exports.adsNegativesLive = adsNegativesLive;
-// GATE_ADS_HEALTH_CARD reader, on its own line so gate PRs never conflict.
-module.exports.adsHealthCardLive = adsHealthCardLive;
 // GATE_ADS_HEALTH_ALERTS reader, on its own line so gate PRs never conflict.
 module.exports.adsHealthAlertsMode = adsHealthAlertsMode;
 module.exports.reservicePhotosLive = reservicePhotosLive;
@@ -9331,8 +9310,6 @@ module.exports.autoDispatchDryTimeOrderMode = autoDispatchDryTimeOrderMode;
 module.exports.recapGlassesClipsLive = recapGlassesClipsLive;
 // GATE_TECH_SET_TEXTS reader, on its own line so gate PRs never conflict.
 module.exports.techSetTextsLive = techSetTextsLive;
-// GATE_CONTENT_PII_ALL_LANES reader, on its own line so gate PRs never conflict.
-module.exports.contentPiiAllLanesLive = contentPiiAllLanesLive;
 // GATE_RESERVICE_ASKS reader, on its own line so gate PRs never conflict.
 module.exports.reserviceAsksLive = reserviceAsksLive;
 // GATE_IN_PERSON_CARD reader, on its own line so gate PRs never conflict.
@@ -9522,16 +9499,6 @@ function voicemailTextCallerOnlyLive() {
 }
 // GATE_VOICEMAIL_TEXT_CALLER_ONLY reader, on its own line so gate PRs never conflict.
 module.exports.voicemailTextCallerOnlyLive = voicemailTextCallerOnlyLive;
-// GATE_CLAUDE_INPUT_GUARD read at CALL time, strict `=== 'true'`, dark in every environment (security audit run 3, owner 2026-11-05
-// "ALL"). On, three paths stop handing an outside sender's words to the owner's Claude sessions: the admin MCP `needs_me` keeps an
-// alert's `why` only for categories whose body our code writes; `list_gap_reports` marks every gap row quoted_words (the Intelligence
-// Bar writes its rows from model text, not from words the owner typed); and Send to Claude no longer offers purchase-receipt
-// inventory bells (they quote a marketplace listing title and a model reason). Off = all three as before.
-function claudeInputGuardLive() {
-  return process.env.GATE_CLAUDE_INPUT_GUARD === 'true';
-}
-// GATE_CLAUDE_INPUT_GUARD reader, on its own line so gate PRs never conflict.
-module.exports.claudeInputGuardLive = claudeInputGuardLive;
 
 // GATE_MONDAY_FELL_OFF_LINE read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
 // Owner 2026-11-05, "go" on the admin-bell plan, decision D3: the Monday review bell's first list becomes the customer
