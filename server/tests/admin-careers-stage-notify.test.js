@@ -202,6 +202,13 @@ async function patch(id, payload) {
   return { status: res.status, body: await res.json() };
 }
 
+// What the stage preview says a move does to the job offers: its `offers`, with the stamp the move sends back.
+async function previewOffers(id, status) {
+  const res = await fetch(`${base}/api/admin/careers/${id}/stage-preview?status=${status}`);
+  expect(res.status).toBe(200);
+  return (await res.json()).offers;
+}
+
 describe('GET /:id/stage-preview', () => {
   test('non-interview status -> templated:false, bodies null', async () => {
     mockDb.__setRows([appRow()]);
@@ -610,6 +617,21 @@ describe('GET /:id detail never exposes the raw token', () => {
     expect(args.readBefore.getTime()).toBeLessThanOrEqual(Date.now());
   });
 
+  // The page's own re-reads (after an offer action, or its Try again) ask with ?peek=1: a reply that arrived meanwhile
+  // may sit behind a dialog, so only an explicit open acknowledges it.
+  test('a peek re-read returns the same detail and acknowledges no reply', async () => {
+    mockDb.__setRows([appRow({
+      status: 'offer',
+      comms_history: [{ id: 'e-1', stage: 'applicant_reply', channel: 'sms', outcome: 'received', unified_message_id: 'm-1' }],
+    })]);
+    mockMarkInboundSmsRead.mockClear();
+    const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001?peek=1`);
+    expect(res.status).toBe(200);
+    expect((await res.json()).application.comms_history).toHaveLength(1);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(mockMarkInboundSmsRead).not.toHaveBeenCalled();
+  });
+
   test('detail signs applicant attachments per ledger entry (reply_media)', async () => {
     const smsMedia = require('../services/sms-media');
     const spy = jest.spyOn(smsMedia, 'signMediaForClient').mockResolvedValue([{ key: 'k', url: 'https://signed/x', contentType: 'image/jpeg' }]);
@@ -762,15 +784,129 @@ describe('PATCH /:id/status — closing an application withdraws its outstanding
   });
 });
 
+// The stage dialog reads what a move does to the job offers from the preview: the same rule and the same owner check as
+// the move itself, with the offer gate on or off.
+describe('GET /:id/stage-preview — what the move does to job offers', () => {
+  const APP_ID = 'aaaaaaaa-0000-4000-8000-000000000001';
+  const inDays = (n) => new Date(Date.now() + n * 86400000).toISOString();
+  const offersFor = (status) => previewOffers(APP_ID, status);
+  // A move that keeps the offers withdraws none: its stamp is the empty list's.
+  const EMPTY = require('../services/job-offers').offerStampOf([]);
+  const NONE = { held: false, draft: false, owner_only: false, stamp: EMPTY };
+  const STAMP = expect.stringMatching(/^[0-9a-f]{32}$/);
+  afterEach(() => { mockStaffEmail = null; });
+
+  test('a move out of Offer names the held offer and the draft; only the owner account may make it', async () => {
+    mockDb.__setRows([appRow({ status: 'offer' })]);
+    mockDb.__setHeldOffers([{ id: 'o1', status: 'sent', expires_at: inDays(3) }, { id: 'o2', status: 'draft', expires_at: null }]);
+    expect(await offersFor('reviewed')).toEqual({ held: true, draft: true, owner_only: true, stamp: STAMP });
+    expect(await offersFor('interview')).toEqual({ held: true, draft: true, owner_only: true, stamp: STAMP }); // the templated preview too
+    mockStaffEmail = 'contact@wavespestcontrol.com';
+    expect(await offersFor('rejected')).toEqual({ held: true, draft: true, owner_only: false, stamp: STAMP });
+  });
+
+  test('a date request is held past its expiry, an expired sent offer is not, and a draft alone needs no owner', async () => {
+    mockDb.__setRows([appRow({ status: 'offer' })]);
+    mockDb.__setHeldOffers([{ id: 'o1', status: 'date_requested', expires_at: inDays(-2) }]);
+    expect(await offersFor('hired')).toEqual({ held: true, draft: false, owner_only: true, stamp: STAMP });
+    mockDb.__setHeldOffers([{ id: 'o1', status: 'sent', expires_at: inDays(-2) }]);
+    expect(await offersFor('hired')).toEqual({ held: false, draft: false, owner_only: false, stamp: STAMP });
+    mockDb.__setHeldOffers([{ id: 'o2', status: 'draft', expires_at: null }]);
+    expect(await offersFor('reviewed')).toEqual({ held: false, draft: true, owner_only: false, stamp: STAMP });
+  });
+
+  test('a move that keeps the offers says nothing about them', async () => {
+    mockDb.__setRows([appRow({ status: 'reviewed' })]);
+    mockDb.__setHeldOffers([{ id: 'o1', status: 'sent', expires_at: inDays(3) }]);
+    expect(await offersFor('interview')).toEqual(NONE);
+    expect(await offersFor('offer')).toEqual(NONE);
+  });
+
+  test('with the offer gate off the move still withdraws, so the preview still says so', async () => {
+    mockIsEnabled.mockImplementation((name) => name !== 'jobOffers');
+    mockDb.__setRows([appRow({ status: 'offer' })]);
+    mockDb.__setHeldOffers([{ id: 'o1', status: 'sent', expires_at: inDays(3) }]);
+    expect(await offersFor('withdrawn')).toEqual({ held: true, draft: false, owner_only: true, stamp: STAMP });
+  });
+
+  // The move withdraws only the offers its dialog showed: the preview's stamp rides back as expected_offers.
+  test('a move whose offers changed since the preview is refused, and nothing changes', async () => {
+    mockStaffEmail = 'contact@wavespestcontrol.com';
+    mockDb.__setRows([appRow({ status: 'offer' })]);
+    mockDb.__setHeldOffers([{ id: 'o2', status: 'draft', expires_at: null }]);
+    const { stamp } = await offersFor('reviewed');
+    // Another session sends the draft before Confirm.
+    mockDb.__setHeldOffers([{ id: 'o2', status: 'sent', expires_at: inDays(7) }]);
+    const refused = await patch(APP_ID, { status: 'reviewed', expected_status: 'offer', expected_offers: stamp });
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({ code: 'OFFERS_CHANGED', application: expect.objectContaining({ status: 'offer' }) });
+    expect(mockDb.__rows()[0].status).toBe('offer');
+    expect(mockDb.__closedOffers()).toEqual([]);
+    // A fresh preview names the sent offer; the move with its stamp goes through and withdraws it.
+    const fresh = await offersFor('reviewed');
+    expect(fresh).toMatchObject({ held: true, draft: false });
+    expect(fresh.stamp).not.toBe(stamp);
+    const moved = await patch(APP_ID, { status: 'reviewed', expected_status: 'offer', expected_offers: fresh.stamp });
+    expect(moved.status).toBe(200);
+    expect(mockDb.__closedOffers()).toHaveLength(1);
+  });
+
+  test('a draft edited in place after the preview is refused too', async () => {
+    mockDb.__setRows([appRow({ status: 'offer' })]);
+    mockDb.__setHeldOffers([{ id: 'o2', status: 'draft', expires_at: null, updated_at: '2026-11-20T10:00:00.000Z' }]);
+    const { stamp } = await offersFor('reviewed');
+    // Another admin saves new pay terms: the same draft row, a newer version.
+    mockDb.__setHeldOffers([{ id: 'o2', status: 'draft', expires_at: null, updated_at: '2026-11-20T10:05:00.000Z' }]);
+    const refused = await patch(APP_ID, { status: 'reviewed', expected_status: 'offer', expected_offers: stamp });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('OFFERS_CHANGED');
+    expect(mockDb.__rows()[0].status).toBe('offer');
+    expect(mockDb.__closedOffers()).toEqual([]);
+  });
+
+  // The preview read the application at one stage and the move leaves another (the detail on screen was stale, and the
+  // stage came back to it before Confirm): the move would withdraw other offers than the preview named, so it is refused.
+  test('a move the preview read at another stage is refused either way, and the stamp must be a stamp', async () => {
+    mockStaffEmail = 'contact@wavespestcontrol.com';
+    // The preview read Reviewed, where a move to Interview keeps the offers. By Confirm the application is back in
+    // Offer with an offer out, so the same move would withdraw it.
+    mockDb.__setRows([appRow({ status: 'reviewed' })]);
+    const keeps = await offersFor('interview');
+    expect(keeps).toEqual(NONE);
+    mockDb.__setRows([appRow({ status: 'offer' })]);
+    mockDb.__setHeldOffers([{ id: 'o3', status: 'sent', expires_at: inDays(7), updated_at: '2026-11-20T10:00:00.000Z' }]);
+    const refused = await patch(APP_ID, { status: 'interview', expected_status: 'offer', expected_offers: keeps.stamp });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('OFFERS_CHANGED');
+    // The other way: the preview read Offer, where the move withdraws o3. By Confirm the application is in Reviewed,
+    // where the move keeps it.
+    const withdraws = await offersFor('interview');
+    expect(withdraws).toMatchObject({ held: true, stamp: STAMP });
+    mockDb.__setRows([appRow({ status: 'reviewed' })]);
+    const kept = await patch(APP_ID, { status: 'interview', expected_status: 'reviewed', expected_offers: withdraws.stamp });
+    expect(kept.status).toBe(409);
+    expect(kept.body.code).toBe('OFFERS_CHANGED');
+    expect(mockDb.__rows()[0].status).toBe('reviewed');
+    expect(mockDb.__closedOffers()).toEqual([]);
+    // The move its preview named goes through; a value that is not a stamp is a 400.
+    expect((await patch(APP_ID, { status: 'interview', expected_status: 'reviewed', expected_offers: keeps.stamp })).status).toBe(200);
+    expect((await patch(APP_ID, { status: 'rejected', expected_offers: 'not a stamp' })).status).toBe(400);
+    expect(mockDb.__closedOffers()).toEqual([]);
+  });
+});
+
 describe('PATCH /:id/status — an offer the applicant holds is withdrawn only by the owner account', () => {
   const APP_ID = 'aaaaaaaa-0000-4000-8000-000000000001';
   const inDays = (n) => new Date(Date.now() + n * 86400000).toISOString();
   afterEach(() => { mockStaffEmail = null; });
 
+  // Each move carries the stamp of its preview, as the stage dialog sends it.
+  const stampFor = async (status) => (await previewOffers(APP_ID, status)).stamp;
+
   test.each(['rejected', 'reviewed'])('another admin moving an application with a sent offer to %s is refused; nothing changes', async (status) => {
     mockDb.__setRows([appRow({ status: 'offer' })]);
     mockDb.__setHeldOffers([{ id: 'o1', status: 'sent', expires_at: inDays(3) }]);
-    const res = await patch(APP_ID, { status });
+    const res = await patch(APP_ID, { status, expected_offers: await stampFor(status) });
     expect(res.status).toBe(403);
     expect(res.body).toMatchObject({ code: 'OWNER_ONLY' });
     expect(mockDb.__rows()[0].status).toBe('offer');
@@ -780,9 +916,9 @@ describe('PATCH /:id/status — an offer the applicant holds is withdrawn only b
   test('a date request is held even past the expiry; an expired sent offer is not', async () => {
     mockDb.__setRows([appRow({ status: 'offer' })]);
     mockDb.__setHeldOffers([{ id: 'o1', status: 'date_requested', expires_at: inDays(-2) }]);
-    expect((await patch(APP_ID, { status: 'rejected' })).status).toBe(403);
+    expect((await patch(APP_ID, { status: 'rejected', expected_offers: await stampFor('rejected') })).status).toBe(403);
     mockDb.__setHeldOffers([{ id: 'o1', status: 'sent', expires_at: inDays(-2) }]);
-    expect((await patch(APP_ID, { status: 'rejected' })).status).toBe(200);
+    expect((await patch(APP_ID, { status: 'rejected', expected_offers: await stampFor('rejected') })).status).toBe(200);
     expect(mockDb.__closedOffers()).toHaveLength(1);
   });
 
@@ -790,8 +926,27 @@ describe('PATCH /:id/status — an offer the applicant holds is withdrawn only b
     mockStaffEmail = 'contact@wavespestcontrol.com';
     mockDb.__setRows([appRow({ status: 'offer' })]);
     mockDb.__setHeldOffers([{ id: 'o1', status: 'sent', expires_at: inDays(3) }]);
-    const res = await patch(APP_ID, { status: 'rejected' });
+    const res = await patch(APP_ID, { status: 'rejected', expected_offers: await stampFor('rejected') });
     expect(res.status).toBe(200);
     expect(mockDb.__closedOffers()).toEqual([expect.objectContaining({ payload: expect.objectContaining({ status: 'withdrawn' }) })]);
+  });
+
+  // A page loaded before the offers stamp sends none. Its dialog never showed an offer, so its move goes through only
+  // when it withdraws none; otherwise it is told to reload, and nothing changes.
+  test('a move without the offers stamp is refused when it would withdraw an offer or a draft, and goes through when it withdraws none', async () => {
+    mockStaffEmail = 'contact@wavespestcontrol.com';
+    for (const live of [{ id: 'o1', status: 'sent', expires_at: inDays(3) }, { id: 'o2', status: 'draft', expires_at: null }]) {
+      mockDb.__setRows([appRow({ status: 'offer' })]);
+      mockDb.__setHeldOffers([live]);
+      const refused = await patch(APP_ID, { status: 'rejected' });
+      expect(refused.status).toBe(409);
+      expect(refused.body).toMatchObject({ code: 'OFFERS_UNSEEN', application: expect.objectContaining({ status: 'offer' }) });
+      expect(refused.body.error).toMatch(/^This application has a job offer this page does not show\. Reload the page/);
+      expect(mockDb.__rows()[0].status).toBe('offer');
+      expect(mockDb.__closedOffers()).toEqual([]);
+    }
+    mockDb.__setHeldOffers([]);
+    expect((await patch(APP_ID, { status: 'rejected' })).status).toBe(200);
+    expect(mockDb.__rows()[0].status).toBe('rejected');
   });
 });
