@@ -25,6 +25,7 @@ import {
   watchPageUse,
 } from './lib/staleChunkReload';
 import { registerReloadHold } from './lib/reloadHolds';
+import { reloadForNewBuild, waitForWork } from './lib/portalReload';
 import { installPortalVersionWatch, noteServerAnswer, resetPortalVersionForTests } from './lib/portalVersion';
 
 // Held work on a staff tab (lib/reloadHolds.js), as a manual card charge
@@ -648,7 +649,7 @@ describe('on a staff page', () => {
 
   // Back changes the address before the routes render. For that moment a
   // reload would close the staff page in view and open a customer page.
-  test('while the address already names a customer page, the staff page in view keeps its rules: held work keeps the tab, and missing page code gets the staff recovery', async () => {
+  test('while the address already names a customer page, the staff page in view keeps its rules: held work keeps the tab, and missing page code gets the staff retry screen, which names the work first', async () => {
     renderGate(['/admin/dashboard']);
     vi.stubGlobal('location', { ...window.location, pathname: '/', reload });
     holding = true;
@@ -657,7 +658,12 @@ describe('on a staff page', () => {
     expect(stale.defaultPrevented).toBe(false);
     renderInBoundary(lazyWithRetry(missingChunk));
     renderInBoundary(lazy(missingChunk));
-    expect(await screen.findAllByText('Couldn’t load this page')).toHaveLength(2);
+    // The staff retry screen, not the customer one, whose Try Again reloads
+    // at once: its Retry names the held work first.
+    const retries = await screen.findAllByRole('button', { name: 'Retry' });
+    expect(retries).toHaveLength(2);
+    tap(retries[0]);
+    expect(screen.getByText('A card payment is still going through.')).toBeInTheDocument();
     expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
     expect(document.getElementById('chunk-reload-toast')).toBeNull();
     expect(reported.calls).toEqual([]);
@@ -809,6 +815,28 @@ describe('on a staff page', () => {
   test('a page that closed during the wait does not reload', async () => {
     await expect(reloadForMissingCode({ current: () => false, reload })).resolves.toBe('moved');
     expect(reload).not.toHaveBeenCalled();
+  });
+
+  test('a request the move already waited out is not waited for again: the page whose code is missing names it at once', async () => {
+    const pending = [];
+    const target = { fetch: () => new Promise((resolve) => pending.push(resolve)) };
+    const uninstall = installPortalVersionWatch({ target });
+    try {
+      const read = target.fetch('/api/admin/dashboard');
+      // #8121's wait at the move runs out on this request (lib/portalReload.js).
+      let t = 0;
+      await expect(reloadForNewBuild({ reload, now: () => (t += 20000) })).resolves.toBe('request');
+      const waited = new Promise((resolve) => { setTimeout(() => resolve('waited'), 500); });
+      await expect(Promise.race([reloadForMissingCode({ reload }), waited])).resolves.toBe('request');
+      expect(reload).not.toHaveBeenCalled();
+      // The stalled state ends once no work is open, so later tests start
+      // clean.
+      pending[0]({ headers: new Headers() });
+      await read;
+      await waitForWork();
+    } finally {
+      uninstall();
+    }
   });
 
   test('held work that starts as the wait for open work ends keeps the tab: the holds are read in the same turn as the reload', async () => {

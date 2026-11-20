@@ -310,8 +310,10 @@ function showReloadToast() {
 // becomes "Reload anyway". When the tab was used on this page since the last
 // page move, it asks once about the page too, as the bar does after a use.
 function ChunkLoadFallback({ newVersion = false }) {
-  // Case-insensitive, as the routes match: /ADMIN/... is a staff page too.
-  const operatorPath = /^\/(admin|tech)(\/|$)/i.test(window.location.pathname);
+  // A staff page in view or at the address (staffTab: Back changes the
+  // address before the routes render), or a /tech URL. Case-insensitive, as
+  // the routes match: /ADMIN/... is a staff page too.
+  const operatorPath = staffTab() || /^\/tech(\/|$)/i.test(window.location.pathname);
   const { named, heldText, tryReload, clearNamed } = useHoldAwareReload(null, clearChunkReloadFlag);
   // The staff layout can stay around this screen, the Ask Waves draft
   // included: a use of the page clears what the button named, so it asks

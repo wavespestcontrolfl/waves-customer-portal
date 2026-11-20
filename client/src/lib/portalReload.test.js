@@ -139,11 +139,14 @@ describe('reloadBlockers', () => {
 });
 
 describe('reloadForNewBuild', () => {
-  test('reloads and counts the try; a reload that came back on the old page tries again, three times at most', async () => {
+  test('reloads and counts the try, in the same turn when no work is open; a reload that came back on the old page tries again, three times at most', async () => {
     liveBuild('bbb222bbb222', Date.now());
     const reload = vi.fn();
-    await expect(reloadForNewBuild({ reload })).resolves.toBeNull();
+    const first = reloadForNewBuild({ reload });
+    // No work is open, so there is no wait (waitForWork): the reload runs in
+    // the gate's own effect, as before the stale-chunk reload shared the wait.
     expect(reload).toHaveBeenCalledTimes(1);
+    await expect(first).resolves.toBeNull();
     expect(JSON.parse(sessionStorage.getItem('portal-reloaded-for'))).toEqual({ build: 'bbb222bbb222', tries: 1 });
     await expect(reloadForNewBuild({ reload })).resolves.toBeNull();
     await expect(reloadForNewBuild({ reload })).resolves.toBeNull();

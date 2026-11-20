@@ -123,8 +123,9 @@ const pause = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 // Work that outlasted a full wait, such as a device write that never settles,
 // would make every later move wait 10 s again. So until all work settles, a
-// move opens its page at once and the bar stays; after that, moves are due as
-// before.
+// move opens its page at once and the bar stays, and a page whose code is
+// missing does not wait for it again (waitForWork); after that, moves are due
+// as before.
 let workStalled = false;
 
 function stalledWork() {
@@ -139,17 +140,26 @@ async function waitOutStalledWork() {
 }
 
 // Waits up to 10 s for open requests and device writes to settle (a closing
-// page can start one), then reloads once for the live build. Resolves the
-// blocker's name when it does not reload; `current()` turns false when the
-// user moved on meanwhile.
+// page can start one). Stalled work is not waited for again, so one hung
+// request costs one wait, whether the reload at a page move or a page whose
+// code is missing (staleChunkReload.js) waits first.
+export async function waitForWork({ now = () => Date.now() } = {}) {
+  if (stalledWork()) return;
+  const until = now() + WRITE_WAIT_MS;
+  while (workInFlight() > 0 && now() < until) await pause(200);
+  if (workInFlight() > 0 && !workStalled) void waitOutStalledWork();
+}
+
+// Waits for open work (waitForWork), then reloads once for the live build.
+// Resolves the blocker's name when it does not reload; `current()` turns
+// false when the user moved on meanwhile.
 export async function reloadForNewBuild({
   current = () => true,
   reload = () => window.location.reload(),
   now = () => Date.now(),
 } = {}) {
-  const until = now() + WRITE_WAIT_MS;
-  while (workInFlight() > 0 && now() < until) await pause(200);
-  if (workInFlight() > 0 && !workStalled) void waitOutStalledWork();
+  // With no work open there is no wait, and the reload runs in this turn.
+  if (workInFlight() > 0) await waitForWork({ now });
   const blocker = current() ? reloadBlocker() : 'moved';
   if (blocker) return blocker;
   const build = newerBuild();
@@ -161,12 +171,4 @@ export async function reloadForNewBuild({
   try { sessionStorage.setItem(RELOADED_FOR, JSON.stringify({ build, tries: tries + 1 })); } catch { return 'storage'; }
   reload();
   return null;
-}
-
-// Waits up to 10 s for open requests and device writes to settle, as a page
-// move does. The stale-chunk reload then reads the holds itself, in the same
-// turn as its reload (staleChunkReload.js).
-export async function waitForWork({ now = () => Date.now() } = {}) {
-  const until = now() + WRITE_WAIT_MS;
-  while (workInFlight() > 0 && now() < until) await pause(200);
 }
