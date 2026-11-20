@@ -54,18 +54,21 @@ function isUndeliveredSelfServe(source, estimateData) {
   return SELF_SERVE_ESTIMATE_SOURCES.includes(String(source || '')) && !hasDeliveryStamp(estimateData);
 }
 
-// The one rule for reading a deliveryState stamp (the send path writes
-// toISOString()) as an instant, here and in estimate-draft-retire.js: an ISO
-// shape AND a value PostgreSQL can read. The shape alone lets an ISO-looking
-// but impossible value (Feb 30) abort a whole query at the cast;
-// pg_input_is_valid alone accepts special literals such as 'now' and
-// 'infinity', which would date a send anew on every read, or never (codex
-// pre-push P1). Such a stamp is present but unreadable. `expr` is SQL text
-// built from code constants; the pattern holds no ?, as these strings go into
-// raw SQL with bindings.
-const ISO_DATE_PREFIX = '^[0-9]{4}-[0-9]{2}-[0-9]{2}';
+// The one rule for reading a deliveryState stamp as an instant, here and in
+// estimate-draft-retire.js. The send path writes toISOString(). A stamp is an
+// instant only in that complete ISO form with an explicit offset, AND when
+// PostgreSQL can read it, so SQL and JavaScript agree on every stamp (codex
+// pre-push P1). The form alone lets an impossible day (Feb 30) abort a whole
+// query at the cast; pg_input_is_valid alone accepts 'now', 'infinity' and a
+// zone name that JavaScript cannot read, so a send would date anew on every
+// read, or differ between the funnel and win/loss. Any other stamp is present
+// but unreadable. `expr` is SQL text built from code constants. The pattern
+// holds no ? ({0,1} instead): these strings go into raw SQL with bindings.
+const ISO_INSTANT_PATTERN = '^(19|20)[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])'
+  + 'T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]{1,3}){0,1}(Z|[+-](0[0-9]|1[0-4]):[0-5][0-9])$';
+const ISO_INSTANT_RE = new RegExp(ISO_INSTANT_PATTERN);
 function isoInstantSql(expr) {
-  return `(${expr} ~ '${ISO_DATE_PREFIX}' AND pg_input_is_valid(${expr}, 'timestamptz'))`;
+  return `(${expr} ~ '${ISO_INSTANT_PATTERN}' AND pg_input_is_valid(${expr}, 'timestamptz'))`;
 }
 
 // The stamp deliveryState.<key> of the row under `alias` as a timestamptz,
@@ -79,16 +82,15 @@ function firstDeliveredAtSql(alias) {
   return deliveryInstantSql(alias, 'firstDeliveredAt');
 }
 
-// The same first delivery in JavaScript (win/loss), in epoch ms, null where
-// SQL reads NULL: JavaScript reads no special literal, but rolls an
-// impossible day over (Feb 30 to Mar 1), which PostgreSQL refuses.
+// The same first delivery in JavaScript (win/loss, the service-line card), in
+// epoch ms, null exactly where SQL reads NULL. JavaScript rolls an impossible
+// day over (Feb 30 to Mar 1), which PostgreSQL refuses, so that day is
+// checked here.
 function firstDeliveredAtMs(estimateData) {
   const stamp = estimateData?.deliveryState?.firstDeliveredAt;
-  const date = typeof stamp === 'string' ? new RegExp(ISO_DATE_PREFIX).exec(stamp) : null;
-  const ms = date ? Date.parse(stamp) : NaN;
-  if (!Number.isFinite(ms)) return null;
-  const [year, month, day] = date[0].split('-').map(Number);
-  return new Date(Date.UTC(year, month - 1, day)).getUTCDate() === day ? ms : null;
+  if (typeof stamp !== 'string' || !ISO_INSTANT_RE.test(stamp)) return null;
+  const [year, month, day] = stamp.slice(0, 10).split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day)).getUTCDate() === day ? Date.parse(stamp) : null;
 }
 function selfServeOr(alias, selfServeSql, otherSql) {
   return `(CASE WHEN ${alias}.source IN (${SELF_SERVE_SOURCES_SQL}) THEN ${selfServeSql} ELSE ${otherSql} END)`;
