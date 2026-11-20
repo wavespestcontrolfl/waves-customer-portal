@@ -111,6 +111,7 @@ const REASONS = {
   visit_payer: "The booked visit has its own billing party (a payer, or self-pay). The plan's next visits would not.",
   visit_free_type: 'The booked visit is a visit type that is never billed (a re-service, a follow-up or an appointment).',
   visit_address_hold: 'The booked visit waits for the office to confirm its address.',
+  visit_unreviewed: 'The booked visit waits for the office to review it (the customer cannot see it yet).',
   visit_in_past: 'The booked visit date has passed. It may be done but not closed out.',
   existing_plan: 'The customer already has a live plan or a WaveGuard membership.',
   estimate_not_delivered: 'The estimate shows no delivery to the customer (each send was held back or failed), and they have not opened it.',
@@ -301,6 +302,9 @@ async function visitProblem(conn, visit, estimate, now) {
   // A billing party set on this visit alone: the converter's next visits do not carry it, so the plan's first visit and
   // the rest would bill different parties.
   if (ownBillingParty(visit)) return 'visit_payer';
+  // A booking the office has not reviewed (a voice-agent or outbound-review request still pending, hidden from the
+  // customer), by the customer surfaces' own rule: the plan would start billing and email the customer first.
+  if (require('./call-booking-source-actions').isUnreviewedDispatchOwned(visit)) return 'visit_unreviewed';
   // A street-level address hold: the office still confirms the address, and the plan's next visits would not wait.
   if (await require('./street-level-hold').isStreetLevelHoldVisit(visit.id, conn)) return 'visit_address_hold';
   const { estimateFamilyKeysForAdoption, appointmentMatchesEstimateFamily } = require('../routes/estimate-public');
@@ -1086,13 +1090,13 @@ async function acceptPhoneYesCard({ item, adminUserId = null, previewToken = nul
   try {
     result = await Manual.markEstimateManuallyAccepted({
       estimateId: estimate.id,
-      // Checked inside the accept's transaction before the claim: the estimate row and the booked visit as read, with
-      // no add-on line. A change since refuses (preview_changed) before anything is written.
-      // `ungrouped`: the estimate is still in no group, read on the locked row (a group can form without a version bump).
-      expected: {
-        ...Manual.estimateRowPin(estimate), ungrouped: true,
-        bookedVisits: { ids: [visit.id], pin: Manual.bookedVisitsPinOf([visit]), noAddons: true },
-      },
+      // Checked inside the accept's transaction before the claim: the estimate row as read. A change since refuses
+      // (preview_changed) before anything is written. `ungrouped`: the estimate is still in no group, read on the locked
+      // row (a group can form without a version bump). No customer-phase pin (bookedVisits): its read takes the
+      // property-preferences lock with a wait while the accept holds customer-comms, and a property-role change takes
+      // the two in the other order. The booked visit is the link step's, under the visit's row lock (its pin, add-ons
+      // and every visit check), after its no-wait take of that lock.
+      expected: { ...Manual.estimateRowPin(estimate), ungrouped: true },
       beforeConvert: linkVisitStep({
         visit, customerId, bookingCallId: item.call_log_id, cardId: item.id, expectedUpdatedAt, word,
       }),

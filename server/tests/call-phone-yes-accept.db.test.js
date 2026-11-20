@@ -330,6 +330,9 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     ['the visit carries an appointment discount', { visitOver: { discount_type: 'fixed_amount', discount_amount: 10, discount_dollars: 10 } }, 'visit_priced'],
     // A billing party on this visit alone: the plan's next visits would bill the account's own party.
     ['the visit is set to self-pay', { visitOver: { self_pay_override: true } }, 'visit_payer'],
+    // A booking the office has not reviewed yet (hidden from the customer): the plan would start before it is confirmed.
+    ['the visit is a voice-agent booking still pending review', { visitOver: { source_action: 'voice_agent', status: 'pending', customer_confirmed: false } }, 'visit_unreviewed'],
+    ['the visit is an outbound-review booking still pending review', { visitOver: { source_action: 'ai_call_outbound_review', status: 'pending', customer_confirmed: false } }, 'visit_unreviewed'],
     // Visit types completion never bills, by the label or the catalog key: a plan from one would bill $0.
     ['the visit is a re-service by its label', { visitOver: { service_type: 'Pest Control Re-Service' } }, 'visit_free_type'],
     ['the visit is a re-service by its catalog key', { visitOver: { service_key_snapshot: 'pest_re_service' } }, 'visit_free_type'],
@@ -1078,6 +1081,31 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       const audit = await trx('activity_log').where({ estimate_id: est.id, action: 'estimate_manual_accept' }).first('metadata');
       expect(JSON.parse(typeof audit.metadata === 'string' ? audit.metadata : JSON.stringify(audit.metadata)).source).toBe(ACCEPT_SOURCE);
       expect(await cards(bookingCallId)).toEqual([expect.objectContaining({ status: 'resolved', resolution_source: 'human' })]);
+    });
+
+    test('another change holds the property-preferences lock: the whole accept refuses at once (customer_busy), never waiting while it holds customer-comms', async () => {
+      const ctx = await filed();
+      const row = await listed(ctx.card.id);
+      // A bounded wait on this connection: a blocking take anywhere in the accept would fail as a lock timeout (another
+      // reason), not as customer_busy.
+      const prior = (await trx.raw("SELECT current_setting('lock_timeout') AS v")).rows[0].v;
+      await trx.raw("SELECT set_config('lock_timeout', '2s', true)");
+      const other = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
+      try {
+        await other.transaction(async (o) => {
+          await o.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(ctx.customerId)]);
+          const out = await post(`${ctx.card.id}/accept-call-phone-yes`, { expected_updated_at: ctx.card.updated_at, preview_token: row.call_phone_yes.preview_token });
+          expect(out.status).toBe(409);
+          expect(out.body).toEqual({ code: 'customer_busy', error: TAP_REFUSALS.customer_busy });
+        });
+      } finally {
+        await other.destroy();
+        await trx.raw("SELECT set_config('lock_timeout', ?, true)", [prior]);
+      }
+      await unchanged(ctx);
+      // The lock released, the same tap goes through.
+      const out = await post(`${ctx.card.id}/accept-call-phone-yes`, { expected_updated_at: ctx.card.updated_at, preview_token: row.call_phone_yes.preview_token });
+      expect(out.status).toBe(200);
     });
 
     test('no yes heard: the tap is still offered (the person decides) and accepts the same way', async () => {
