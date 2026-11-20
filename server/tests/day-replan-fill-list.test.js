@@ -1,8 +1,8 @@
 /**
  * The 07:05 notice's fill list (services/day-replan/fill-list.js, owner 2026-11-20 *b*, then *1a 2a*): the open
  * estimates, the leads that asked for a look and the booked plan visits that could move up, whose visit fits a listed
- * block, by the schedule gap tool's own check (the real analyzeGapCandidate and arrival search). New work comes first,
- * least added drive first, with a place for the best plan visit. The reads are faked; synthetic ids and names only.
+ * block, by the schedule gap tool's own check (the real analyzeGapCandidate and arrival search). Each block lists each
+ * kind's best fit, then the next best, least added drive first. The reads are faked; synthetic ids and names only.
  */
 // The module database: the fill list is built on it only. Each test's fake knex answers through it (fakeConn).
 jest.mock('../models/db', () => {
@@ -93,13 +93,14 @@ const ZERO_VISITS = { checked: 0, fitted: 0, remindersOff: 0, sharedDay: 0, unre
 // A fake knex: each table's chain records its calls; a where(fn) runs fn on a recorder of its own. `inactive` maps a
 // capability category to the technicians set to off for it; `scheduleBlocks` are the tech_schedule_blocks rows; `leads`
 // are the lead rows, `leadEstimates` and `customerVisits` their customers' estimates and visits; `plan` are the booked
-// plan visits, and `sameDay` the visits of their customers in the range (each plan visit alone on its day by default).
+// plan visits, and `sameDay` the visits of their customers in the range (each plan visit alone on its day by default);
+// `addOns` are the plan visits' add-on services (scheduled_service_addons).
 function fakeConn({ estimates = [], taken = [], inactive = {}, scheduleBlocks = [], leads = [], leadEstimates = [], customerVisits = [],
-  plan = [], sameDay = null } = {}) {
+  plan = [], sameDay = null, addOns = [] } = {}) {
   const calls = [];
   const conn = (table) => {
     const q = { categories: [], joined: false };
-    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'whereBetween', 'orWhere', 'orderBy', 'limit']) {
+    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'whereBetween', 'orWhere', 'orWhereNotIn', 'orderBy', 'limit']) {
       q[m] = (...args) => {
         calls.push([table, m, args]);
         if (m === 'whereIn' && args[0] === 'service_category') q.categories = args[1];
@@ -123,6 +124,7 @@ function fakeConn({ estimates = [], taken = [], inactive = {}, scheduleBlocks = 
         return leads;
       }
       if (table === 'tech_schedule_blocks') return scheduleBlocks;
+      if (table === 'scheduled_service_addons') return addOns;
       if (table === 'scheduled_services') {
         if (q.joined) return plan;
         if (first === 'id') return sameDay || plan.map((row) => ({ id: row.id, customer_id: row.customer_id, scheduled_date: row.scheduled_date }));
@@ -293,26 +295,36 @@ describe('leads that asked for a look (owner *1a*)', () => {
     expect(leads.map(({ lead: row, visit }) => [row.id, visit.id])).toEqual([['newer-look', 'svc-wdo'], ['l2', 'svc-assess']]);
   });
 
-  test('a customer already quoted or booked is left out: a live estimate, an estimate since the lead, a visit since its ET day', async () => {
+  test('a customer already quoted or booked is left out: an open estimate, an estimate since the lead, a live visit since its ET day', async () => {
     const cameIn = new Date('2040-09-05T03:00:00Z'); // Sep 4, 11 PM ET
-    const ids = ['quoted', 'requoted', 'old-decline', 'booked', 'served-before', 'open'];
+    const ids = ['quoted', 'requoted', 'old-decline', 'old-job', 'lapsed-quote', 'booked', 'served-before', 'open'];
+    const quote = (id, status, created, expires = null) => ({ customer_id: `c-${id}`, status, created_at: new Date(created), expires_at: expires && new Date(expires) });
     const { conn, calls } = fakeConn({
       leads: ids.map((id) => lead(id, { created_at: cameIn })),
       leadEstimates: [
-        { customer_id: 'c-quoted', status: 'sent', created_at: new Date('2040-08-01T12:00:00Z') },
-        { customer_id: 'c-requoted', status: 'declined', created_at: new Date('2040-09-06T12:00:00Z') },
-        { customer_id: 'c-old-decline', status: 'declined', created_at: new Date('2040-08-01T12:00:00Z') },
+        // Open (sent or viewed, not expired): it is on the estimate list.
+        quote('quoted', 'sent', '2040-08-01T12:00:00Z', '2040-10-01T12:00:00Z'),
+        quote('requoted', 'declined', '2040-09-06T12:00:00Z'),
+        // An earlier job's quote, closed or lapsed, never hides a new ask.
+        quote('old-decline', 'declined', '2040-08-01T12:00:00Z'),
+        quote('old-job', 'accepted', '2038-03-01T12:00:00Z'),
+        quote('lapsed-quote', 'viewed', '2040-08-01T12:00:00Z', '2040-08-31T12:00:00Z'),
       ],
       // The lead came in on Sep 4 (ET): a visit that day counts, the day before does not.
       customerVisits: [{ customer_id: 'c-booked', scheduled_date: '2040-09-04' }, { customer_id: 'c-served-before', scheduled_date: '2040-09-03' }],
     });
-    expect((await _internals.openLeads(conn, NOW)).leads.map(({ lead: row }) => row.id)).toEqual(['old-decline', 'served-before', 'open']);
+    expect((await _internals.openLeads(conn, NOW)).leads.map(({ lead: row }) => row.id))
+      .toEqual(['old-decline', 'old-job', 'lapsed-quote', 'served-before', 'open']);
     const customers = ids.map((id) => `c-${id}`);
+    // Live visits only: a cancelled, skipped, no-show or rescheduled visit, or a lapsed hold, never hides the ask (a NULL
+    // status is a live row); a completed visit does.
     expect(calls).toEqual(expect.arrayContaining([
       ['estimates', 'whereIn', ['customer_id', customers]], ['estimates', 'whereNull', ['archived_at']],
-      ['scheduled_services', 'whereIn', ['customer_id', customers]], ['scheduled_services', 'whereNot', ['status', 'cancelled']],
+      ['scheduled_services', 'whereIn', ['customer_id', customers]], ['scheduled_services', 'whereNull', ['status']],
+      ['scheduled_services', 'orWhereNotIn', ['status', ['cancelled', 'skipped', 'no_show', 'rescheduled']]],
       ['scheduled_services', 'whereNull', ['reservation_expires_at']], ['scheduled_services', 'orWhere', ['reservation_expires_at', '>', NOW]],
     ]));
+    expect(calls).not.toContainEqual(['scheduled_services', 'whereNot', ['status', 'cancelled']]);
   });
 
   test('at most 40, newest first; with no lead that asked for a look nothing else is read; a failed read throws', async () => {
@@ -336,13 +348,18 @@ describe('booked plan visits that could move up (owner *2a*)', () => {
   // Listed out of order: the range runs from the day after the first to 7 days after the last.
   const blocks = [{ day: '2040-09-12', techId: TECH, start: 540, min: 240 }, { day: DAY, techId: TECH, start: 540, min: 240 }];
 
-  test('recurring, not a re-service, pending or confirmed, not a hold, booked in the range; test contacts left out', async () => {
+  test('recurring, not a re-service, pending or confirmed, not a hold, booked in the range, placed; test contacts left out', async () => {
     const row = planVisit('v1', '2040-09-13');
+    // A visit kept by date alone is booked; a due date with no time yet is the night dispatch's to place (isUnplacedDueDate).
+    const dateOnly = planVisit('date-only', '2040-09-14', { window_start: null });
+    const unplaced = planVisit('unplaced', '2040-09-13', { window_start: null, recurring_dispatch_due_date: '2040-09-13' });
     loadGapCandidate.mockResolvedValue(loaded(row));
-    const { conn, calls } = fakeConn({ plan: [row, planVisit('shakedown', '2040-09-13', { first_name: 'Shakedown', last_name: 'Test' })] });
+    const { conn, calls } = fakeConn({ plan: [row, unplaced, dateOnly, planVisit('shakedown', '2040-09-13', { first_name: 'Shakedown', last_name: 'Test' })] });
     const { visits, counts } = await _internals.movableVisits(conn, blocks, NOW);
-    expect(visits.map((v) => v.row.id)).toEqual(['v1']);
-    expect(counts).toEqual({ ...ZERO_VISITS, checked: 1 });
+    expect(visits.map((v) => v.row.id)).toEqual(['v1', 'date-only']);
+    expect(counts).toEqual({ ...ZERO_VISITS, checked: 2 });
+    expect(loadReminderOffIds).toHaveBeenCalledWith(conn, [row, dateOnly]);
+    expect(calls).toContainEqual(['scheduled_service_addons', 'whereIn', ['scheduled_service_id', ['v1', 'date-only']]]);
     expect(calls).toEqual(expect.arrayContaining([
       ['scheduled_services', 'join', ['customers', 'customers.id', 'scheduled_services.customer_id']],
       ['scheduled_services', 'where', ['scheduled_services.is_recurring', true]],
@@ -353,7 +370,7 @@ describe('booked plan visits that could move up (owner *2a*)', () => {
       ['scheduled_services', 'orderBy', ['scheduled_services.scheduled_date']], ['scheduled_services', 'orderBy', ['scheduled_services.window_start']],
     ]));
     // The gap tool's own load of the saved visit: its rules, its series and its plan.
-    expect(loadGapCandidate.mock.calls).toEqual([['v1', conn]]);
+    expect(loadGapCandidate.mock.calls).toEqual([['v1', conn], ['date-only', conn]]);
   });
 
   test('a visit whose 24-hour reminder will not go out, or that shares its day with another visit of the customer, is left out and counted', async () => {
@@ -372,11 +389,12 @@ describe('booked plan visits that could move up (owner *2a*)', () => {
     // The senders' own rule reads the visits; neither left-out visit is loaded.
     expect(loadReminderOffIds).toHaveBeenCalledWith(conn, rows);
     expect(loadGapCandidate.mock.calls.map(([id]) => id)).toEqual(['ok']);
-    // The customer's live stops in the range: not cancelled, skipped, no-show or rescheduled, and no lapsed hold.
+    // The customer's live stops in the range: not cancelled, skipped, no-show or rescheduled (a NULL status is live), and
+    // no lapsed hold.
     expect(calls).toEqual(expect.arrayContaining([
       ['scheduled_services', 'whereIn', ['customer_id', ['c-quiet', 'c-pair', 'c-ok']]],
       ['scheduled_services', 'whereBetween', ['scheduled_date', ['2040-09-11', '2040-09-19']]],
-      ['scheduled_services', 'whereNotIn', ['status', ['cancelled', 'skipped', 'no_show', 'rescheduled']]],
+      ['scheduled_services', 'whereNull', ['status']], ['scheduled_services', 'orWhereNotIn', ['status', ['cancelled', 'skipped', 'no_show', 'rescheduled']]],
       ['scheduled_services', 'whereNull', ['reservation_expires_at']], ['scheduled_services', 'orWhere', ['reservation_expires_at', '>', NOW]],
     ]));
   });
@@ -406,12 +424,35 @@ describe('booked plan visits that could move up (owner *2a*)', () => {
     expect(['2040-09-09', '2040-09-10', '2040-09-16', '2040-09-17', '2040-09-18'].map(candidate.dayOpen)).toEqual([false, true, true, false, false]);
   });
 
-  test('at most 60 are loaded, nearest first; none booked: nothing else is read; a failed reminder read throws', async () => {
+  test('its add-on services count: the technician needs the capability for each, and a lawn add-on keeps the mowing-day rule', async () => {
+    const rows = [planVisit('mosquito', '2040-09-13'), planVisit('lawn', '2040-09-13'), planVisit('plain', '2040-09-13')];
+    // The customer's mowing rule blocks Mondays: DAY (2040-09-10) is one.
+    loadGapCandidate.mockImplementation(async (id) => {
+      const base = loaded(rows.find((row) => row.id === id));
+      return { ...base, preferences: { ...base.preferences, mowing: { mode: 'true', blocked_weekdays: [1], days: [] } } };
+    });
+    const addOn = (id, name) => ({ scheduled_service_id: id, service_id: null, service_name: name, service_key_snapshot: null });
+    const { conn, calls } = fakeConn({ plan: rows, inactive: { mosquito: [TECH] },
+      addOns: [addOn('mosquito', 'Mosquito Control Service'), addOn('lawn', 'Lawn Care Service')] });
+    const byId = Object.fromEntries((await _internals.movableVisits(conn, blocks, NOW)).visits.map((v) => [v.row.id, v.candidate]));
+    expect([byId.mosquito, byId.lawn, byId.plain].map((c) => c.deactivated)).toEqual([[TECH], [], []]);
+    expect([byId.mosquito, byId.lawn, byId.plain].map((c) => c.dayOpen(DAY))).toEqual([true, false, true]);
+    expect(byId.lawn.dayOpen('2040-09-11')).toBe(true);
+    expect(calls).toContainEqual(['scheduled_service_addons', 'whereIn', ['scheduled_service_id', ['mosquito', 'lawn', 'plain']]]);
+  });
+
+  test('at most 60 are loaded, nearest first, a refused one too; none booked: nothing else is read; a failed reminder read throws', async () => {
     const rows = Array.from({ length: 65 }, (_, i) => planVisit(`v${String(i).padStart(2, '0')}`, '2040-09-13'));
     loadGapCandidate.mockImplementation(async (id) => loaded(rows.find((row) => row.id === id)));
     const { conn } = fakeConn({ plan: rows });
     const { visits } = await _internals.movableVisits(conn, blocks, NOW);
     expect(visits.map((v) => v.row.id)).toEqual(rows.slice(0, _internals.MAX_VISITS).map((row) => row.id));
+    expect(loadGapCandidate).toHaveBeenCalledTimes(_internals.MAX_VISITS);
+    // A backlog of visits the gap tool refuses (locked, a stopped plan) is read no further than the cap.
+    loadGapCandidate.mockReset();
+    loadGapCandidate.mockResolvedValue({ unavailable: 'candidate_locked_or_excluded' });
+    expect(await _internals.movableVisits(fakeConn({ plan: rows }).conn, blocks, NOW))
+      .toEqual({ visits: [], counts: { ...ZERO_VISITS, checked: _internals.MAX_VISITS } });
     expect(loadGapCandidate).toHaveBeenCalledTimes(_internals.MAX_VISITS);
     loadReminderOffIds.mockClear();
     const none = fakeConn();

@@ -88,9 +88,7 @@ async function estimateGapCandidate(estimate, conn, picker = {}) {
   };
   const preferences = await getCustomerSchedulingPreferences(estimate.customer_id, service.service_type, conn,
     { serviceKey: service.service_key_snapshot });
-  // The office list's capability rule, by each service's catalog category or name (technician-capabilities.js).
-  const categories = [...new Set(await categoriesForServices(conn, performs.length ? performs : [primary]))];
-  const deactivated = await conn('technician_capabilities').whereIn('service_category', categories).where('active', false).pluck('technician_id');
+  const deactivated = await deactivatedFor(conn, performs.length ? performs : [primary]);
   const seasonal = slots.seasonalSelectionProfile(profile);
   const moveInDate = await slots.estimateMoveInDate(estimate);
   const mowing = mowingDays.unitRule(preferences, performs);
@@ -125,9 +123,18 @@ async function leadGapCandidate(lead, visit, conn) {
   };
   const preferences = await getCustomerSchedulingPreferences(lead.customer_id, service.service_type, conn,
     { serviceId: visit.id, serviceKey: service.service_key_snapshot });
-  const categories = [...new Set(await categoriesForServices(conn, [service]))];
-  const deactivated = await conn('technician_capabilities').whereIn('service_category', categories).where('active', false).pluck('technician_id');
+  const deactivated = await deactivatedFor(conn, [service]);
   return { service, preferences, holds: [], siblingDates: [], deactivated, label: visit.name, prospective: true, dayOpen: () => true };
+}
+
+/**
+ * The technicians set to Off for any of the services in `rows` ({ service_type, service_id?, service_key_snapshot? }):
+ * the office list's capability rule, by each service's catalog category or name (technician-capabilities.js
+ * categoriesForServices). A failed read throws.
+ */
+async function deactivatedFor(conn, rows) {
+  const categories = [...new Set(await categoriesForServices(conn, rows))];
+  return conn('technician_capabilities').whereIn('service_category', categories).where('active', false).pluck('technician_id');
 }
 
 function analyzeGapCandidate(candidate, rows, {
@@ -231,4 +238,4 @@ function analyzeGapCandidate(candidate, rows, {
       : 'Fits preserve the dispatch order produced by the existing save. They do not authorize a date/time change or create a booking hold.' };
 }
 
-module.exports = { loadGapCandidate, estimateGapCandidate, leadGapCandidate, analyzeGapCandidate };
+module.exports = { loadGapCandidate, estimateGapCandidate, leadGapCandidate, deactivatedFor, analyzeGapCandidate };

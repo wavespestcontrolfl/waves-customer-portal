@@ -23,16 +23,17 @@
  * estimates, and the ones whose page already shows an appointment. The visit is the one the booking page offers.
  *
  * Lead (owner *1a*, leadGapCandidate): new or contacted, from the last LEAD_DAYS days, not commercial, with a customer
- * record, no estimate and no visit since it came in, that asked for a Waves Assessment or an inspection. It is listed
- * as that visit (leadVisit), at the length the Leads screen's Schedule button books, at the customer's stored location.
- * Any other ask needs a price first.
+ * record, no open estimate, no estimate or live visit since it came in, that asked for a Waves Assessment or an
+ * inspection. It is listed as that visit (leadVisit), at the length the Leads screen's Schedule button books, at the
+ * customer's stored location. Any other ask needs a price first.
  *
- * Plan visit (owner *2a*, movableVisits): a booked recurring visit may move up to MOVE_UP_DAYS days earlier. It is
- * loaded and checked as the gap tool checks a saved visit (loadGapCandidate and analyzeGapCandidate: the customer's
- * rules, the series' other dates and due date, a paused or stopped plan, a visit locked from moves, a series' first
- * visit) on the days before its own. Left out: a visit whose 24-hour reminder will not go out (owner 2026-11-07 lock),
- * and one that shares its day with another visit of the same customer (a move would split that visit). Every booked
- * customer was told a day: staff call first.
+ * Plan visit (owner *2a*, movableVisits): a booked and placed recurring visit may move up to MOVE_UP_DAYS days
+ * earlier. It is loaded and checked as the gap tool checks a saved visit (loadGapCandidate and analyzeGapCandidate: the
+ * customer's rules, the series' other dates and due date, a paused or stopped plan, a visit locked from moves, a series'
+ * first visit) on the days before its own, with its add-on services in the capability and mowing-day rules
+ * (planVisitCandidate). Left out: a visit whose 24-hour reminder will not go out (owner 2026-11-07 lock), and one that
+ * shares its day with another live visit of the same customer (a move would split that visit). Every booked customer
+ * was told a day: staff call first.
  *
  * Nothing here is paid: no geocoding and no road times.
  */
@@ -44,16 +45,19 @@ const { isInternalTestContact } = require('../internal-test-customers');
 const { isAssessmentServiceRow } = require('../assessment-booking');
 const { dayStopsQuery } = require('../scheduling/day-stops');
 const { QUALITY_EXCLUDED_STATUSES, dayStopSelect } = require('../scheduling/day-quality');
-const { estimateGapCandidate, leadGapCandidate, loadGapCandidate, analyzeGapCandidate } = require('../scheduling/gap-candidates');
+const { estimateGapCandidate, leadGapCandidate, loadGapCandidate, deactivatedFor, analyzeGapCandidate } = require('../scheduling/gap-candidates');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
 const { dayDepartureMinutes } = require('../scheduling/departure-time');
 const { shiftDateStr } = require('../auto-dispatch/dates');
+const { isUnplacedDueDate } = require('../auto-dispatch/move-rules');
+const mowingDays = require('../auto-dispatch/mowing-days');
 const { loadReminderOffIds } = require('../auto-dispatch/reminder-off');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { DISPATCH_DAY_END } = require('./route-check');
 
 // The newest open estimates checked each morning (9 were open on 2026-11-20).
 const MAX_ESTIMATES = 40;
+const OPEN_ESTIMATE_STATUSES = ['sent', 'viewed'];
 // Leads (owner 2026-11-20 *1a*): the open ones from the last 30 days (7 asked for a look on 2026-11-20).
 const LEAD_DAYS = 30;
 const MAX_LEADS = 40;
@@ -72,6 +76,10 @@ const toMin = (hhmm) => {
 const fullName = (row) => [row.first_name, row.last_name].map((p) => String(p || '').trim()).filter(Boolean).join(' ') || null;
 const testContact = (row, customerId) => isInternalTestContact({ customerId, firstName: row.first_name, lastName: row.last_name,
   email: row.email, phone: row.phone });
+// Live visit rows: not cancelled, skipped, a no-show or rescheduled (stops-ahead.js; a NULL status is a live row), and
+// not a lapsed hold.
+const liveRows = (query, now) => query.where((q) => q.whereNull('status').orWhereNotIn('status', NOT_A_ROUTE_STOP_STATUSES))
+  .where((q) => q.whereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', now));
 
 /**
  * The newest MAX_ESTIMATES open estimates, each with its page picker ({ estimates: [{ estimate, picker }], unread }):
@@ -80,7 +88,7 @@ const testContact = (row, customerId) => isInternalTestContact({ customerId, fir
  * off, counted as unread and logged. A failed read of the estimates or their visits throws.
  */
 async function openEstimates(conn, now) {
-  const rows = await conn('estimates').whereIn('status', ['sent', 'viewed']).whereNull('archived_at').whereNotNull('customer_id')
+  const rows = await conn('estimates').whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at').whereNotNull('customer_id')
     .where((q) => q.whereNull('expires_at').orWhere('expires_at', '>', now))
     .orderBy('created_at', 'desc').select('*');
   const open = rows.filter((row) => {
@@ -139,9 +147,11 @@ function leadVisit(serviceInterest, catalog) {
  * The open leads that asked for a look, newest first, at most MAX_LEADS ({ leads: [{ lead, visit }] }): new or
  * contacted, from the last LEAD_DAYS days, not deleted, not commercial, with a live customer record and no estimate on
  * the lead, that asked for a Waves Assessment or an inspection (leadVisit). Each customer once, by its newest such lead.
- * Left out first, so they never take a place: internal test contacts; a customer with a live estimate (it is on the
- * estimate list) or an estimate made since the lead came in (the quote happened); a customer with a visit or live hold
- * on or after the day the lead came in (it is booked or was served). A failed read throws.
+ * Left out first, so they never take a place: internal test contacts; a customer with an open estimate (sent or viewed
+ * and not expired: it is on the estimate list) or an estimate made since the lead came in (the quote happened); a
+ * customer with a live visit or hold on or after the day the lead came in (it is booked or was served). An older closed
+ * estimate (an earlier job) and a cancelled, skipped, no-show or rescheduled visit never hide a new ask. A failed read
+ * throws.
  */
 async function openLeads(conn, now) {
   const since = new Date(now.getTime() - LEAD_DAYS * 24 * 3600 * 1000);
@@ -164,27 +174,44 @@ async function openLeads(conn, now) {
   }
   if (!asked.length) return { leads: [] };
   const ids = [...seen];
-  const estimates = await conn('estimates').whereIn('customer_id', ids).whereNull('archived_at').select('customer_id', 'status', 'created_at');
-  const visits = await conn('scheduled_services').whereIn('customer_id', ids).whereNot('status', 'cancelled')
-    .where((q) => q.whereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', now))
-    .select('customer_id', 'scheduled_date');
+  const estimates = await conn('estimates').whereIn('customer_id', ids).whereNull('archived_at')
+    .select('customer_id', 'status', 'created_at', 'expires_at');
+  const visits = await liveRows(conn('scheduled_services').whereIn('customer_id', ids), now).select('customer_id', 'scheduled_date');
+  const open = (e) => OPEN_ESTIMATE_STATUSES.includes(e.status) && (!e.expires_at || new Date(e.expires_at) > now);
   const quoted = (lead) => estimates.some((e) => String(e.customer_id) === String(lead.customer_id)
-    && (!['declined', 'expired'].includes(e.status) || new Date(e.created_at) >= new Date(lead.created_at)));
+    && (open(e) || new Date(e.created_at) >= new Date(lead.created_at)));
   const cameIn = (lead) => etDateString(new Date(lead.created_at));
   const visited = (lead) => visits.some((v) => String(v.customer_id) === String(lead.customer_id) && dateOnlyString(v.scheduled_date) >= cameIn(lead));
   return { leads: asked.filter(({ lead }) => !quoted(lead) && !visited(lead)).slice(0, MAX_LEADS) };
 }
 
 /**
+ * A booked plan visit as a gap candidate, or null when the gap tool refuses it (loadGapCandidate: locked or excluded, a
+ * stopped or lapsed plan, an inactive customer). A new stop, open only on the days up to MOVE_UP_DAYS before its own.
+ * The technician capability and mowing-day rules cover its add-on services too (`addOns`: scheduled_service_addons
+ * rows, as the rain pass reads them), as they cover every service an estimate's visit performs. A failed read throws.
+ */
+async function planVisitCandidate(conn, row, day, addOns) {
+  const loaded = await loadGapCandidate(row.id, conn);
+  if (loaded.unavailable) return null;
+  const extra = addOns.filter((a) => String(a.scheduled_service_id) === String(row.id))
+    .map((a) => ({ service_type: a.service_name, service_id: a.service_id, service_key_snapshot: a.service_key_snapshot }));
+  const deactivated = extra.length ? [...new Set([...loaded.deactivated, ...await deactivatedFor(conn, extra)])] : loaded.deactivated;
+  const mowing = mowingDays.unitRule(loaded.preferences, [loaded.service, ...extra]);
+  const earliest = shiftDateStr(day, -MOVE_UP_DAYS);
+  return { ...loaded, deactivated, prospective: true, label: loaded.service.service_type || row.service_type,
+    dayOpen: (date) => date >= earliest && date < day && !mowingDays.blocksLive(date, mowing) };
+}
+
+/**
  * The booked plan visits that could move up into a listed block (owner 2026-11-20 *2a*), nearest first: recurring, not
  * a re-service, pending or confirmed, not a hold, booked after the first listed day and at most MOVE_UP_DAYS after the
- * last, and not an internal test contact's. Each is loaded as the schedule gap tool loads a saved visit
- * (loadGapCandidate) and is open only on a day up to MOVE_UP_DAYS before its own. Left out first, and counted: a visit
- * whose 24-hour reminder will not go out (owner 2026-11-07 lock: the senders' own rule, auto-dispatch/reminder-off.js),
- * and one that shares its day with another visit of the same customer (a move would split that visit). The rest are
- * checked; one whose own reads fail is counted as unread and logged, and one the gap tool refuses (locked, a stopped
- * plan, an inactive customer) never fits. At most MAX_VISITS are loaded. A failed read of the visits or of their
- * reminders throws.
+ * last, placed (a due date with no time yet is the night dispatch's to place: move-rules.js isUnplacedDueDate), and not
+ * an internal test contact's. Left out first, and counted: a visit whose 24-hour reminder will not go out (owner
+ * 2026-11-07 lock: the senders' own rule, auto-dispatch/reminder-off.js), and one that shares its day with another live
+ * visit of the same customer (a move would split that visit). The rest are checked as the gap tool checks a saved visit
+ * (planVisitCandidate), at most MAX_VISITS, a refused one too; one whose own reads fail is counted as unread and logged.
+ * A failed read of the visits, their reminders or their add-ons throws.
  */
 async function movableVisits(conn, blocks, now) {
   const days = blocks.map((b) => b.day).sort();
@@ -199,13 +226,11 @@ async function movableVisits(conn, blocks, now) {
     .select('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id', 'scheduled_services.scheduled_date',
       'scheduled_services.window_start', 'scheduled_services.recurring_dispatch_due_date', 'scheduled_services.service_type',
       'customers.first_name', 'customers.last_name', 'customers.email', 'customers.phone'))
-    .filter((row) => !testContact(row, row.customer_id));
+    .filter((row) => !isUnplacedDueDate(row) && !testContact(row, row.customer_id));
   const counts = { checked: 0, fitted: 0, remindersOff: 0, sharedDay: 0, unread: 0 };
   if (!rows.length) return { visits: [], counts };
   const ids = [...new Set(rows.map((row) => String(row.customer_id)))];
-  const sameDay = await conn('scheduled_services').whereIn('customer_id', ids).whereBetween('scheduled_date', [from, to])
-    .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
-    .where((q) => q.whereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', now))
+  const sameDay = await liveRows(conn('scheduled_services').whereIn('customer_id', ids).whereBetween('scheduled_date', [from, to]), now)
     .select('id', 'customer_id', 'scheduled_date');
   const onDay = new Map();
   for (const row of sameDay) {
@@ -213,19 +238,18 @@ async function movableVisits(conn, blocks, now) {
     onDay.set(key, (onDay.get(key) || 0) + 1);
   }
   const off = await loadReminderOffIds(conn, rows);
+  const addOns = await conn('scheduled_service_addons').whereIn('scheduled_service_id', rows.map((row) => row.id))
+    .select('scheduled_service_id', 'service_id', 'service_name', 'service_key_snapshot');
   const visits = [];
   for (const row of rows) {
-    if (visits.length + counts.unread >= MAX_VISITS) break;
     const day = dateOnlyString(row.scheduled_date);
     if (off.has(String(row.id))) { counts.remindersOff += 1; continue; }
     if ((onDay.get(`${row.customer_id}|${day}`) || 0) > 1) { counts.sharedDay += 1; continue; }
+    if (counts.checked >= MAX_VISITS) break;
     counts.checked += 1;
     try {
-      const loaded = await loadGapCandidate(row.id, conn);
-      if (loaded.unavailable) continue;
-      const earliest = shiftDateStr(day, -MOVE_UP_DAYS);
-      visits.push({ row, day, candidate: { ...loaded, prospective: true, label: loaded.service.service_type || row.service_type,
-        dayOpen: (date) => date >= earliest && date < day } });
+      const candidate = await planVisitCandidate(conn, row, day, addOns);
+      if (candidate) visits.push({ row, day, candidate });
     } catch (err) {
       counts.unread += 1;
       logger.warn(`[fill-list] plan visit ${row.id} unread (${err.message}); left off the list`);
