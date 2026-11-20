@@ -66,6 +66,16 @@ import {
 import { formatCalendarDate, moveEstimateForm } from "../../lib/moveEstimateForm";
 import { MISTING_FORM_DEFAULTS, NO_MISTING, defaultMistingLabel, mistingOption, readMistingAvailability } from "../../lib/mosquitoMisting";
 import MistingLayoutDesigner from "../../components/admin/MistingLayoutDesigner";
+import RoofReadPanel, { roofSpotFrom, roofAddressDoubtful } from "../../components/admin/RoofReadPanel";
+
+// The estimate a roof read belongs to: a draft saved this session, or a reopened estimate only while the form
+// still shows that estimate's saved address (an edited address is a different roof). The panel is keyed on the
+// same value, so it restarts exactly when the estimate it writes to changes.
+export function roofReadEstimateIdFor(savedId, editMode, address) {
+  if (savedId) return savedId;
+  if (editMode?.id && String(editMode.address || "").trim() === String(address || "").trim()) return editMode.id;
+  return null;
+}
 import ScopeQuestionPrompt, { SCOPE_QUESTION } from "../../components/admin/ScopeQuestionPrompt";
 
 const SCOPE_STALE_NOTICE = "The business type changed. Run Property Lookup again before pricing.";
@@ -2655,6 +2665,8 @@ export default function EstimateToolViewV2({
           status: d.status,
           editVersion: d.editVersion,
           customerName: d.customerName || "",
+          // The address the estimate was saved with, for the roof read's estimate link.
+          address: seeded.address || "",
           hasInputs: !!d.inputs,
         });
         setMoveEstimate(d.moveEstimate ? { ...d.moveEstimate, estimateId: d.id } : null);
@@ -3725,6 +3737,10 @@ export default function EstimateToolViewV2({
   // Whole-home rodent seal (GATE_EXCLUSION_WHOLE_HOME): explicit true from the rodent_waveguard row read below,
   // so a 404, a failed read or an older server hides the Seal scope choice and sends nothing new.
   const [exclusionWholeHomeAvailable, setExclusionWholeHomeAvailable] = useState(false);
+  // Staff roof read (GATE_ROOF_ENTRY_READ): explicit true from the same rodent_waveguard row, so a 404, a failed
+  // read or an older server hides the panel. The epoch restarts the panel on Next estimate.
+  const [roofReadAvailable, setRoofReadAvailable] = useState(false);
+  const [roofReadEpoch, setRoofReadEpoch] = useState(0);
   const [exclusionRoofStyleAvailable, setExclusionRoofStyleAvailable] = useState(false);
   // Bahia as a NEW lawn plan (GATE_LAWN_V13 has no bahia program, so the server parks it for review).
   // Only an explicit false hides the option; an older server or a failed read keeps it, and a
@@ -3834,7 +3850,7 @@ export default function EstimateToolViewV2({
         if (r.status === 404) return { ok: true, data: null };
         if (!r.ok) return { ok: false, data: null };
         const body = await r.json();
-        return { ok: true, data: body?.data ?? null, wholeHome: body?.exclusionWholeHome === true, roofStyle: body?.exclusionRoofStyle === true };
+        return { ok: true, data: body?.data ?? null, wholeHome: body?.exclusionWholeHome === true, roofRead: body?.roofEntryRead === true, roofStyle: body?.exclusionRoofStyle === true };
       } catch {
         return { ok: false, data: null };
       }
@@ -3847,6 +3863,7 @@ export default function EstimateToolViewV2({
       ]);
       if (!active) return;
       setExclusionWholeHomeAvailable(waveguardRow.wholeHome === true);
+      setRoofReadAvailable(waveguardRow.roofRead === true);
       setExclusionRoofStyleAvailable(waveguardRow.roofStyle === true);
       // ALL THREE rows or nothing (codex #3591 r55 local P1): applying a
       // partial set leaves module defaults beside live values — the sidebar
@@ -4162,6 +4179,9 @@ export default function EstimateToolViewV2({
         campusParcel: data.meta?.campusParcel || null,
         // This lookup's own cage era: a two-size lookup's size is never reclassified.
         poolCageTwoSizes: data.meta?.poolCageTwoSizes === true,
+        // The home's map point and county, for the staff roof read.
+        roofSpot: roofSpotFrom(data),
+        roofAddressDoubt: roofAddressDoubtful(data),
       });
       setCageTwoSizes(data.meta?.poolCageTwoSizes === true);
       setVerifySaveState({});
@@ -5316,7 +5336,8 @@ export default function EstimateToolViewV2({
         setAddressUnverified({ source: 'county_roll', reason: 'County records could not confirm this house number. Correct the address on the estimate (or confirm it) before sending — the customer link stays off until then.' });
         setConfirmAddress(false);
       }
-      setEditMode({ id, status: d.status || "draft", editVersion: d.editVersion, customerName: form.customerName || "", hasInputs: true });
+      // The address this save persisted, so the roof read stays linked to this estimate through non-address edits.
+      setEditMode({ id, status: d.status || "draft", editVersion: d.editVersion, customerName: form.customerName || "", address: String(form.address || "").trim(), hasInputs: true });
       if (!isEditRevision && moveRequestId) {
         const savedMove = moveSeed.data?.move || {};
         setMoveEstimate({ estimateId: id, moveId: moveRequestId, moveOutDate: savedMove.moveOutDate || null, moveInDate: savedMove.moveInDate || null });
@@ -5372,6 +5393,8 @@ export default function EstimateToolViewV2({
     setGroupAnchorId(null);
     // The previous estimate's saved cage size no longer applies to the next estimate.
     setLoadedCageSize("");
+    // The last roof read belongs to the last estimate.
+    setRoofReadEpoch((n) => n + 1);
     setForm((f) => ({
       ...f,
       ...clearedPropertyFields(),
@@ -8553,6 +8576,17 @@ export default function EstimateToolViewV2({
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 space-y-3">
                   {(exclusionWholeHomeAvailable || form.exclSealScope === "whole_home") && (
                     <ExclusionSealScope estimate={estimate} commercial={commercialDetected} blockedReason={wholeHomeRegenerateBlock(form, exclusionWholeHomeAvailable)} />
+                  )}
+                  {roofReadAvailable && (
+                    <RoofReadPanel
+                      // A new estimate id (the draft was saved) also restarts the panel: a read taken before it
+                      // belongs to the pre-draft context, so staff tap again and get this estimate's own copy.
+                      key={`${roofReadEpoch}|${form.address}|${form.customerId || ""}|${form.leadId || ""}|${form.propertyId || ""}|${roofReadEstimateIdFor(savedId, editMode, form.address) || ""}|${lookupMeta?.roofSpot?.lat ?? ""},${lookupMeta?.roofSpot?.lng ?? ""}`}
+                      spot={lookupMeta?.address === String(form.address || "").trim() ? lookupMeta?.roofSpot || null : null}
+                      addressDoubt={lookupMeta?.address === String(form.address || "").trim() && lookupMeta?.roofAddressDoubt === true}
+                      estimateId={roofReadEstimateIdFor(savedId, editMode, form.address)}
+                      customerId={form.customerId || null}
+                    />
                   )}
                   {(exclusionRoofStyleAvailable || form.exclRoofStyle) && (
                     <ExclusionRoofStyle

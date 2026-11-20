@@ -1537,6 +1537,10 @@ router.get('/:key', async (req, res, next) => {
       // tells it whether to offer the Whole home seal scope. Present only while the gate is on.
       ...(req.params.key === 'rodent_waveguard' && require('../config/feature-gates').exclusionWholeHomeLive?.() === true
         ? { exclusionWholeHome: true } : {}),
+      // GATE_ROOF_ENTRY_READ (strict 'true' like its router): the estimator's startup read of this row tells it
+      // whether to show the staff Roof read panel. Present only while the gate is on.
+      ...(req.params.key === 'rodent_waveguard' && require('../config/feature-gates').roofEntryReadLive?.() === true
+        ? { roofEntryRead: true } : {}),
       // GATE_EXCLUSION_ROOF_STYLE_PRICING (strict 'true' like its reader): the estimator's startup read of this row
       // tells it whether to show the Roof style control. Present only while the gate is on.
       ...(req.params.key === 'rodent_waveguard' && require('../config/feature-gates').exclusionRoofStylePricingLive?.() === true
