@@ -9021,11 +9021,12 @@ only) is: `quote` (the main quote form on any site) = `view`, `start`,
 `phone`, `address`, `lead`; `pest_quiz` and `lawn_quiz` (same list for both) =
 `view`, `start`, `seeing`, `property`, `timeline`, `name`, `email`, `phone`,
 `address`, `lead`, `end_call`, `end_business`, `end_price`, `end_review`,
-`call_tap`, `price_tap`. An unknown form, a step from another form's list, a
-non-JSON or non-object body, a body over 1 KB, or `__proto__`/`constructor`
-style keys is dropped silently: the answer is ALWAYS 204 (the only other answer
-is the limiter's 429), sent before any write, so the response never says what
-counted. `site` is derived ONLY from the `Origin` header (never the body). The
+`call_tap`, `price_tap`. An unknown form (a prototype name such as `__proto__`
+or `constructor` as the form or the step is unknown too), a step from another
+form's list, a non-JSON or non-object body, or a body over 1 KB is dropped
+silently: the answer is ALWAYS 204 (the only other answer is the limiter's
+429), sent before any write, so the response never says what counted. Only `f`
+and `s` are read; any other key in the body is ignored and never stored. `site` is derived ONLY from the `Origin` header (never the body). The
 header must be ONE serialized `https` origin with no port (`scheme://host`
 and nothing else: a bare domain, a path, a JSON list or a comma-joined pair is
 refused before the registry sees it), and its hostname must be a fleet site in
