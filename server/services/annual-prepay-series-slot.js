@@ -84,19 +84,20 @@ async function assignableTechnicianId(conn, technicianId) {
  * soleActivePropertyId, so it resolves. Reads in a savepoint. Never throws.
  */
 async function coverageSeriesSlot(conn, {
-  customerId, coverageServiceType, propertyId = null, today, normalize = defaultNormalize,
+  customerId, coverageServiceType, propertyId = null, seriesRootId = null, matchesBookedBait = null, today, normalize = defaultNormalize,
 } = {}) {
   try {
     if (!customerId || !coverageServiceType || !propertyId) return null;
     const wanted = normalize(coverageServiceType);
     return await inSavepoint(conn, async (q) => {
-      const rows = await q('scheduled_services')
-        .where({ customer_id: customerId })
+      const query = q('scheduled_services').where({ customer_id: customerId });
+      if (seriesRootId) query.where(function bookedSeries() { this.where('id', seriesRootId).orWhere('recurring_parent_id', seriesRootId); });
+      const rows = await query
         .whereNotIn('status', NOT_A_SOURCE_STATUSES)
         .whereNotNull('technician_id')
         .whereNotNull('window_start')
-        .select('id', 'service_type', 'property_id', 'scheduled_date', 'technician_id', 'window_start');
-      const sources = (rows || []).filter((row) => normalize(row.service_type) === wanted
+        .select('id', 'service_id', 'service_type', 'property_id', 'scheduled_date', 'technician_id', 'window_start');
+      const sources = (rows || []).filter((row) => (matchesBookedBait ? matchesBookedBait(row) : normalize(row.service_type) === wanted)
         && (row.property_id == null || String(row.property_id) === String(propertyId))
         && hhmm(row.window_start));
       const source = pickSource(sources, today);

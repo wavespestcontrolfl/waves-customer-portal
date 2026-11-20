@@ -6630,13 +6630,22 @@ const EstimateConverter = {
     // first paid application: it is dropped here so it cannot set the series
     // start nor be priced as a plan visit, and the normal auto-schedule path
     // runs when it was the only stamped row.
-    const reservedRows = linkedVisitCount > 0
-      ? await withoutAssessmentVisits(await database('scheduled_services')
+    const commercialSetupSale = billingTerm === 'prepay_annual'
+      ? opts.commercialPrepaySale || await require('./commercial-prepay-sale-visits')
+        .resolveCommercialPrepaySale(database, customerId, estimateData, opts)
+      : null;
+    const confirmedCommercialVisits = commercialSetupSale?.visits || [];
+    const confirmedCommercialSelectedExisting = commercialSetupSale?.selectedExisting || [];
+    let reservedRows = [];
+    if (commercialSetupSale) {
+      reservedRows = commercialSetupSale.reservedRoots;
+    } else if (linkedVisitCount > 0) {
+      reservedRows = await withoutAssessmentVisits(await database('scheduled_services')
         .where({ source_estimate_id: estimateId })
         .whereNotNull('customer_id')
         .whereNull('reservation_expires_at')
-        .orderBy('scheduled_date', 'asc'), database)
-      : [];
+        .orderBy('scheduled_date', 'asc'), database);
+    }
     const reservationRowsExist = reservedRows.length > 0;
     const capacitySnapshot = VisitCapacity.capacityFromReservation(reservedRows[0]);
     const combinedCapacity = capacitySnapshot && !capacitySnapshot.allocatedServiceIds ? capacitySnapshot : null;
@@ -6829,6 +6838,16 @@ const EstimateConverter = {
         `[estimate-converter] Skipping recurring conversion for estimate ${estimateId} — ` +
         `$${monthlyRate}/mo standard accept is treated as one-time fallback`
       );
+    } else if (commercialSetupSale && confirmedCommercialSelectedExisting.length) {
+      // An explicitly adopted existing occurrence (root or child) is the
+      // customer's chosen visit, not a newly committed reservation. Use its
+      // date/window identity without promotion or seeding. A legacy child
+      // passed only as a booked id keeps this same safe shortcut.
+      const confirmedStart = confirmedCommercialSelectedExisting[0];
+      termStartDate = confirmedStart.scheduled_date || null;
+      firstScheduledServiceId = confirmedStart.id || null;
+      scheduledCount = confirmedCommercialSelectedExisting.length;
+      logger.info(`[estimate-converter] Commercial annual prepay ${estimateId}: confirmed visit ${firstScheduledServiceId} owns the start date; series recurrence left unchanged`);
     } else if (reservationRowsExist) {
       logger.info(
         `[estimate-converter] Skipping auto-schedule for estimate ${estimateId} — ` +
@@ -8252,6 +8271,37 @@ const EstimateConverter = {
       }
     }
 
+    // Resolve commercial setup ownership once, from the exact visits this
+    // acceptance positively confirmed (or the parent it just created). This
+    // decision is needed before invoice mint: an invoice-only marker must be
+    // written in the invoice transaction so createTermForAnnualPrepay's first
+    // refresh cannot adopt an unrelated existing visit.
+    let commercialRodentSetupOwner = null;
+    if (commercialSetupSale && frozenRodentBaitSetupAmount(estimateData) > 0) {
+      const { authoritativeServiceKey } = require('./secure-appointment-plans');
+      const confirmedStart = confirmedCommercialVisits.find(
+        (visit) => String(visit.id) === String(firstScheduledServiceId),
+      );
+      // Ownership follows the exact selected occurrence. A child resolves to
+      // its existing parent; a freshly created parent resolves to itself.
+      // Never choose from every confirmed root: multiple accepted ids may
+      // include an older, different series and unordered SQL cannot decide
+      // which sale owns the setup.
+      const ownerRootId = confirmedStart
+        ? (confirmedStart.recurring_parent_id || confirmedStart.id)
+        : (!skipAutoSchedule && firstScheduledServiceId ? firstScheduledServiceId : null);
+      if (ownerRootId) {
+        const root = await database('scheduled_services')
+          .where({ customer_id: customerId })
+          .whereNull('recurring_parent_id')
+          .where({ id: ownerRootId })
+          .first('id', 'customer_id', 'service_id', 'service_type');
+        if (root && await authoritativeServiceKey(database, root) === 'commercial_rodent_bait') {
+          commercialRodentSetupOwner = root;
+        }
+      }
+    }
+
     // 4. Create the setup/prepay invoice. Public accepts auto-send it and
     //    return the pay URL; admin/manual conversion can disable auto-send.
     //    Standard pay-per-application invoices include first app and the
@@ -8261,6 +8311,7 @@ const EstimateConverter = {
     let draftInvoicePayUrl = null;
     let invoiceDelivery = null;
     let annualPrepayTermId = null;
+    let commercialSetupClaimRecorded = false;
     // Set by createTermForAnnualPrepay when THIS accept inserted the term.
     const prepayVisitPriceRecord = {};
     // Set below when this accept is a termite-annual-plan sign-before-pay
@@ -8576,6 +8627,31 @@ const EstimateConverter = {
                 throw new Error(`deposit allocation mismatch on annual prepay invoice (applied ${appliedPrepayDepositCredit}, allocated ${allocated})`);
               }
             }
+            if (created?.id && commercialSetupSale && prepayRodentSetupAmount > 0) {
+              const plans = require('./secure-appointment-plans');
+              if (commercialRodentSetupOwner) {
+                // A booked commercial sale discovers completion contention
+                // before its invoice can commit. Claim + positive-stamp
+                // retirement share this invoice transaction, so a negative
+                // in-flight completion marker rolls the invoice back rather
+                // than leaving a collectible prepay behind for void cleanup.
+                await plans.retireDirectSetupClaimForPrepay(invoiceTrx, {
+                  invoiceId: created.id,
+                  anchorId: commercialRodentSetupOwner.id,
+                  amount: prepayRodentSetupAmount,
+                  estimateId,
+                });
+              } else {
+                await plans.recordSetupFeeClaimForInvoice(invoiceTrx, {
+                  invoiceId: created.id,
+                  anchorId: null,
+                  amount: prepayRodentSetupAmount,
+                  unbookedCommercial: true,
+                  estimateId,
+                });
+              }
+              commercialSetupClaimRecorded = true;
+            }
             return created;
           });
           // A mismatch rolled back the invoice with its ledger writes. Once
@@ -8791,7 +8867,7 @@ const EstimateConverter = {
                   - (prepayRodentSetupAmount + annualPlanSetupFeeAmount + (mistingInstall ? mistingInstall.amount : 0))
                     * (1 + (hasCommercialRecurring ? (Number(prepayCommercialBaseRate) || 0) : 0))) * 100) / 100)
                 : draftInvoiceAmount,
-              termStart: termStartDate || null,
+              termStart: commercialSetupSale && skipAutoSchedule ? commercialSetupSale.termStart : termStartDate || null,
               // Coverage config for the single recurring service → visits get
               // stamped on payment. A single service that couldn't be derived
               // fails closed above, so a single-service term always ships WITH
@@ -8992,39 +9068,65 @@ const EstimateConverter = {
       // silently forgiving the setup. Fail closed: inside the accept
       // transaction, a ledger failure fails the accept rather than minting a
       // prepay whose setup could never be restored.
-      if (billingTerm === 'prepay_annual' && draftInvoiceId && frozenRodentBaitSetupAmount(estimateData) > 0) {
-        const { authoritativeServiceKey, recordSetupFeeClaimForInvoice, assertFrozenRodentSetupStillOwed } = require('./secure-appointment-plans');
+      if (billingTerm === 'prepay_annual' && draftInvoiceId && frozenRodentBaitSetupAmount(estimateData) > 0
+        && !commercialSetupClaimRecorded) {
+        const {
+          authoritativeServiceKey,
+          recordSetupFeeClaimForInvoice,
+          retireDirectSetupClaimForPrepay,
+          assertFrozenRodentSetupStillOwed,
+        } = require('./secure-appointment-plans');
         // Gained-family recheck under the customer-row lock (codex #3591
         // r79 P1): a qualifying booking that committed since the unlocked
         // pre-accept reconciliation waives a RESIDENTIAL setup — refuse
         // retryably so a refresh reprices the quote without it. Commercial
         // bait is never family-waived, so it is exempt.
-        if (!estimateRodentBaitIsCommercial(estimateData)) {
+        if (!commercialSetupSale) {
           await assertFrozenRodentSetupStillOwed(database, customerId);
         }
-        const roots = await database('scheduled_services')
-          .where({ source_estimate_id: estimateId, customer_id: customerId })
-          .whereNull('recurring_parent_id')
-          .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
-          .select('id', 'service_type', 'service_id');
-        let rodentRoot = null;
-        for (const root of roots || []) {
-          if ((await authoritativeServiceKey(database, root)) === 'rodent_bait') { rodentRoot = root; break; }
+        // Setup ownership is either the confirmed occurrence's original root
+        // or the parent the converter just created. The confirmed child still
+        // owns firstScheduledServiceId/date; older estimate rows never enter
+        // the setup-root selection.
+        const roots = database('scheduled_services').where({ customer_id: customerId })
+          .whereNull('recurring_parent_id');
+        if (commercialSetupSale) {
+          roots.whereIn('id', commercialRodentSetupOwner ? [commercialRodentSetupOwner.id] : []);
+        } else {
+          roots.whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+            .where({ source_estimate_id: estimateId });
         }
-        // No root yet (manual Mark Won runs skipAutoSchedule — the series is
-        // seeded by the operator afterwards): the record is still written,
-        // anchor-less, keyed to the prepay invoice (codex #3591 r39 P1). The
-        // term-cancel restore resolves the anchor THEN, from the term's
-        // source estimate, so a refund of this prepay can still put the
-        // setup obligation back on the series that was booked later.
-        await recordSetupFeeClaimForInvoice(database, {
-          invoiceId: draftInvoiceId,
-          anchorId: rodentRoot ? rodentRoot.id : null,
-          amount: frozenRodentBaitSetupAmount(estimateData),
-          estimateId,
-        });
+        let rodentRoot = null;
+        const expectedKey = commercialSetupSale ? 'commercial_rodent_bait' : 'rodent_bait';
+        for (const root of await roots.select('id', 'customer_id', 'service_id', 'service_type')) {
+          if (await authoritativeServiceKey(database, root) === expectedKey) { rodentRoot = root; break; }
+        }
+        const unbookedCommercial = commercialSetupSale && !rodentRoot;
+        const setupAmount = frozenRodentBaitSetupAmount(estimateData);
+        if (rodentRoot) {
+          // The invoice claim and positive-stamp retirement are one guarded
+          // write unit. The shared helper locks the selected root, refuses a
+          // negative completion claim, checks for a live sibling claim, then
+          // records and clears by exact-value CAS. A bare database caller
+          // needs this transaction; an accept-side caller gets a savepoint
+          // inside its already-atomic acceptance transaction.
+          await database.transaction((setupTrx) => retireDirectSetupClaimForPrepay(setupTrx, {
+            invoiceId: draftInvoiceId,
+            anchorId: rodentRoot.id,
+            amount: setupAmount,
+            estimateId,
+          }));
+        } else {
+          await recordSetupFeeClaimForInvoice(database, {
+            invoiceId: draftInvoiceId,
+            anchorId: null,
+            amount: setupAmount,
+            unbookedCommercial,
+            estimateId,
+          });
+        }
         if (!rodentRoot) {
-          logger.info(`[estimate-converter] Estimate ${estimateId}: prepay billed the rodent setup before any series root exists — claim ledgered anchor-less; the restore resolves the root from the estimate`);
+          logger.info(`[estimate-converter] Estimate ${estimateId}: recorded the rodent setup on prepay invoice ${draftInvoiceId} without a linked visit`);
         }
       }
       if (draftInvoiceId && autoSendInvoice && canAutoSendDraftInvoice({ billingTerm, annualPrepayTermId })) {

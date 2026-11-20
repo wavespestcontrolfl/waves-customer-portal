@@ -481,7 +481,7 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
     expect(InvoiceService.create).not.toHaveBeenCalled();
   });
 
-  test('annual coverage overlap returns a billing code and rolls back acceptance', async () => {
+  test.each([false, true])('annual coverage overlap rolls back acceptance (invoice-owned commercial setup %s)', async (invoiceOwned) => {
     resetStore(recurringPestEstimate());
     const scheduledDate = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000));
     db.__state.tables.scheduled_services = [{
@@ -492,6 +492,9 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
       reservation_expires_at: new Date(Date.now() + 15 * 60000),
     }];
     const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+    const today = require('../utils/datetime-et').etDateString();
+    const selection = jest.spyOn(require('../services/commercial-prepay-sale-visits'), 'resolveCommercialPrepaySale');
+    if (invoiceOwned) selection.mockResolvedValueOnce({ visits: [], reservedRoots: [], selectedExisting: [], termStart: today });
     const overlap = new Error('Annual coverage already exists');
     overlap.annualPrepayOverlap = true;
     lockAndAssertNoAnnualPrepayOverlap.mockRejectedValueOnce(overlap);
@@ -500,8 +503,10 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
       paymentMethodPreference: 'prepay_annual',
       slotId: `${scheduledDate}_09-00_unassigned`,
     });
+    selection.mockRestore();
 
     expect(response.status).toBe(409);
+    if (invoiceOwned) expect(lockAndAssertNoAnnualPrepayOverlap.mock.calls.at(-1)[2]).toBe(today);
     expect(response.data).toEqual({
       code: 'ANNUAL_PREPAY_OVERLAP',
       error: expect.stringContaining('already has an active annual prepay plan'),

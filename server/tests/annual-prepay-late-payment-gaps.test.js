@@ -59,6 +59,8 @@ function makeConn(queues) {
   const tableQueues = new Map(Object.entries(queues));
   const conn = jest.fn((table) => {
     const queue = tableQueues.get(table);
+    // These ordinary pest terms carry no commercial setup-fee claim.
+    if (!queue?.length && table === 'setup_fee_claims') return query();
     if (!queue || !queue.length) throw new Error(`Unexpected conn table ${table}`);
     return queue.shift();
   });

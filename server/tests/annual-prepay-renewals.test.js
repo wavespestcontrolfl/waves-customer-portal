@@ -90,6 +90,13 @@ jest.mock('../services/customer-credit', () => ({
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn().mockResolvedValue({ id: 'notif-1' }),
 }));
+// Ownership classification has its own PostgreSQL coverage. Ordinary renewal
+// fixtures should keep exercising their existing SQL without having to model
+// the classifier's setup-claim/term/invoice reads on every helper call.
+jest.mock('../services/commercial-prepay-original-invoice', () => ({
+  findOriginalCommercialPrepayInvoice: jest.fn(async () => null),
+  bookedCommercialSetupRootId: jest.fn(async () => null),
+}));
 // The portal decline's dated station-retrieval task (Codex #4940 r4) —
 // its own suites cover the task body/dedupe; here only the call is pinned.
 jest.mock('../services/cancellation-processor', () => ({
@@ -104,8 +111,13 @@ const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const CancellationResolution = require('../services/cancellation-resolution');
 const NotificationService = require('../services/notification-service');
+const { findOriginalCommercialPrepayInvoice } = require('../services/commercial-prepay-original-invoice');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 const { _private } = AnnualPrepayRenewals;
+
+beforeEach(() => {
+  findOriginalCommercialPrepayInvoice.mockReset().mockResolvedValue(null);
+});
 
 // An awaited .update() resolves to the affected-row count like knex does
 // (default 1; `updateCount` overrides — e.g. 0 for a zero-row witness
@@ -1720,6 +1732,32 @@ describe('annual prepay renewal helpers', () => {
       estimated_price: 100,
       create_invoice_on_complete: true,
     }));
+  });
+
+  test('an original commercial prepay awaiting assignment never seeds customer-wide visits', async () => {
+    const term = {
+      id: 'term-unbooked-commercial',
+      customer_id: 'customer-1',
+      prepay_invoice_id: 'inv-unbooked-commercial',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Commercial Rodent Bait Stations',
+      coverage_visit_count: 4,
+    };
+    findOriginalCommercialPrepayInvoice.mockResolvedValueOnce({
+      claim: { id: 'claim-1', invoice_id: term.prepay_invoice_id },
+      term,
+      invoice: { id: term.prepay_invoice_id, customer_id: term.customer_id },
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm(term, db)).resolves.toEqual({
+      createdCount: 0,
+      targetDates: [],
+      effectiveTermEnd: '2027-06-15',
+      reason: 'awaiting_commercial_setup_assignment',
+    });
+    expect(findOriginalCommercialPrepayInvoice).toHaveBeenCalledWith(db, term.prepay_invoice_id);
+    expect(db).not.toHaveBeenCalled();
   });
 
   test('reuses existing off-cadence visits instead of seeding a duplicate series', async () => {

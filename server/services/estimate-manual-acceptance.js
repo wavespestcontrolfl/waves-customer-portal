@@ -1125,10 +1125,13 @@ async function applyAnnualPrepayOptions(trx, ctx, updatedEstimate, annualPrepayA
     convertOptions.coverageCadence = annualPrepayCoverage.coverageCadence;
   }
   const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+  const sale = await require('./commercial-prepay-sale-visits')
+    .resolveCommercialPrepaySale(trx, updatedEstimate.customer_id, parseEstimateData(updatedEstimate.estimate_data), convertOptions);
+  if (sale) convertOptions.commercialPrepaySale = sale;
   await lockAndAssertNoAnnualPrepayOverlap(
     trx,
     updatedEstimate.customer_id,
-    annualPrepayTermStart || etDateString(),
+    sale?.termStart || annualPrepayTermStart || etDateString(),
     false,
     'Customer already has an annual prepay term through',
     updatedEstimate.id,

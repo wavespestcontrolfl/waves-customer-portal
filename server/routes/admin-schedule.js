@@ -10368,7 +10368,7 @@ async function scheduleCreateHandler(req, res, next) {
       if (isRecurring && (!linkedEstimateId || acceptEstimateOnBook)) {
         const plans = require('../services/secure-appointment-plans');
         const owedSetup = await plans.resolveDirectRodentSetupObligation(trx, { id: svc.id });
-        if (owedSetup > 0) {
+        if (owedSetup > 0 && !(linkedEstimateId && await plans.originalInvoiceOwnsEstimateSetup(trx, linkedEstimateId))) {
           // A Customer 360 coverage-only prepay already billed this setup
           // before any series existed (codex #3591 r73 P1): its claim sits
           // anchor-less on the live prepay invoice. This booking IS the
@@ -10584,6 +10584,9 @@ async function scheduleCreateHandler(req, res, next) {
           ? await settledSetupClaimForEstimate(db, linkedEstimateId)
           : await settledSetupClaimForInvoice(db, acceptResult?.conversion?.draftInvoiceId || null);
         if (claim) return { claim };
+        if (await require('../services/secure-appointment-plans').originalInvoiceOwnsEstimateSetup(db, linkedEstimateId)) {
+          return { originalInvoice: true };
+        }
         const { frozenRodentBaitSetupAmount } = require('../services/estimate-converter');
         const disclosed = frozenRodentBaitSetupAmount(linkedEstimate?.estimate_data || {});
         return disclosed > 0 ? { disclosed } : { waived: 'estimate_disclosed_no_setup' };
@@ -10627,7 +10630,7 @@ async function scheduleCreateHandler(req, res, next) {
               const { settledSetupClaimForInvoice } = require('../services/secure-appointment-plans');
               await trx('invoices').where({ id: settled.claim.invoice_id }).forUpdate().first('id');
               liveClaim = await settledSetupClaimForInvoice(trx, settled.claim.invoice_id);
-              if (!liveClaim) {
+              if (!liveClaim && !(await require('../services/secure-appointment-plans').originalInvoiceOwnsEstimateSetup(trx, linkedEstimateId))) {
                 logger.info(`[schedule] rodent setup stamp ($${directRodentSetupStamp}) kept on ${svc.id}: the acceptance's setup invoice was reversed before the retire — first completion collects it`);
                 return;
               }
@@ -10636,7 +10639,39 @@ async function scheduleCreateHandler(req, res, next) {
               .where({ id: svc.id, pending_setup_fee: directRodentSetupStamp })
               .update({ pending_setup_fee: null, updated_at: new Date() });
             if (Number(retired) !== 1) {
-              const live = await trx('scheduled_services').where({ id: svc.id }).first('pending_setup_fee');
+              const live = await trx('scheduled_services').where({ id: svc.id }).first('id', 'pending_setup_fee');
+              // The prepay converter can retire this exact stamp while it
+              // mints the acceptance invoice (retireDirectSetupClaimForPrepay).
+              // That is a successful hand-off, not the consumed/refrozen
+              // conflict this CAS is meant to report. Accept it only with the
+              // complete durable proof: this acceptance's still-live invoice
+              // owns a positive setup claim for the accepted quote, anchored
+              // to THIS staff-booked root, and the real root's stamp is now
+              // absent. The converter deliberately replaces any positive
+              // booking-time stamp with the estimate's frozen amount, so the
+              // claim need not equal directRodentSetupStamp (for example, a
+              // live $99 fallback stamp can validly become the quoted $55).
+              const { frozenRodentBaitSetupAmount } = require('../services/estimate-converter');
+              const quotedSetupAmount = frozenRodentBaitSetupAmount(linkedEstimate?.estimate_data || {});
+              const expectedClaimAmount = quotedSetupAmount > 0
+                ? quotedSetupAmount
+                : Number(settled.claim?.amount);
+              const liveClaimAmount = Number(liveClaim?.amount);
+              const converterAlreadyRetired = !!live
+                && live.pending_setup_fee == null
+                && !!liveClaim
+                && Number.isFinite(liveClaimAmount)
+                && liveClaimAmount > 0
+                && Number.isFinite(expectedClaimAmount)
+                && expectedClaimAmount > 0
+                && String(liveClaim.invoice_id || '') === String(settled.claim?.invoice_id || '')
+                && String(liveClaim.scheduled_service_id || '') === String(svc.id)
+                && Math.round(liveClaimAmount * 100) === Math.round(expectedClaimAmount * 100);
+              if (converterAlreadyRetired) {
+                logger.info(`[schedule] rodent setup stamp ($${directRodentSetupStamp}) on ${svc.id} was already retired by live acceptance invoice ${liveClaim.invoice_id}`);
+                directRodentSetupStamp = 0;
+                return;
+              }
               logger.error(`[schedule] FIX: rodent setup stamp on ${svc.id} was ${live?.pending_setup_fee ?? 'null'} (expected ${directRodentSetupStamp}) when estimate acceptance tried to retire it — the stamp was consumed or refrozen while the acceptance billed the setup; reconcile the two setup charges`);
               bookingWarnings.push('The estimate acceptance covered the bait-station setup, but the booking-time setup stamp had already been consumed or changed — check the customer for a second setup charge and clear or refund it.');
               return;

@@ -59,8 +59,15 @@ function conn({ scheduledService = null, claim = null, updateResult = 1, rootsFo
   const writes = [];
   const trx = (table) => {
     const q = { _where: null };
-    q.where = (w) => { if (typeof w === 'function') { w.call(q); return q; } q._where = w; return q; };
+    q.where = (w) => {
+      if (typeof w === 'function') { w.call(q); return q; }
+      q._where = w && typeof w === 'object' && q._where && typeof q._where === 'object'
+        ? { ...q._where, ...w }
+        : w;
+      return q;
+    };
     q.whereNot = () => q;
+    q.whereNotExists = () => q;
     q.orWhere = () => q;
     q.orWhereNotNull = () => q;
     q.whereNull = (col) => { q._whereNull = col; return q; };
@@ -68,7 +75,9 @@ function conn({ scheduledService = null, claim = null, updateResult = 1, rootsFo
     q.forUpdate = () => q;
     q.first = async () => {
       if (table === 'scheduled_services') return q._whereIn ? liveVisitProbe : scheduledService;
-      if (table === 'setup_fee_claims') return q._where && 'scheduled_service_id' in q._where ? siblingClaim : claim;
+      if (table === 'setup_fee_claims') {
+        return q._where && q._where.scheduled_service_id != null ? siblingClaim : claim;
+      }
       if (table === 'annual_prepay_terms') return prepayTerm;
       if (table === 'invoices') return invoice;
       if (table === 'services') return catalog;
@@ -122,10 +131,12 @@ describe('retireDirectSetupClaimForPrepay — the mint side', () => {
 
   test('a POSITIVE claim: ledger the fee against the prepay, then retire the stamp by exact-value CAS', async () => {
     const trx = conn({ scheduledService: { id: 'svc-parent', pending_setup_fee: '99.00' } });
-    const out = await retireDirectSetupClaimForPrepay(trx, { anchorId: 'svc-parent', invoiceId: 'inv-prepay', amount: 99 });
+    const out = await retireDirectSetupClaimForPrepay(trx, {
+      anchorId: 'svc-parent', invoiceId: 'inv-prepay', amount: 99, estimateId: 'est-1',
+    });
     expect(out).toEqual({ recorded: true, retired: true });
     expect(trx.writes).toEqual([
-      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', onConflict: 'invoice_id', row: { invoice_id: 'inv-prepay', scheduled_service_id: 'svc-parent', amount: 99 } }),
+      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', onConflict: 'invoice_id', row: { invoice_id: 'inv-prepay', scheduled_service_id: 'svc-parent', amount: 99, estimate_id: 'est-1', unbooked_commercial_setup: false } }),
       expect.objectContaining({ table: 'scheduled_services', op: 'update', where: { id: 'svc-parent', pending_setup_fee: '99.00' }, patch: expect.objectContaining({ pending_setup_fee: null }) }),
     ]);
   });
@@ -216,9 +227,10 @@ describe('settlement + stamp probes for the booking route (codex #3591 r64/r65 P
     expect(await estimateSetupCarriedElsewhere(conn(), null)).toBe(false);
   });
   test('anchorSetupFeeClaim fills only an EMPTY anchor; stampedSetupForVisit reads the positive anchor stamp', async () => {
-    const c = conn({ updateResult: 1 });
+    const assignable = { id: 'claim-1', invoice_id: 'inv-prepay', scheduled_service_id: null, unbooked_commercial_setup: false };
+    const c = conn({ claim: assignable, updateResult: 1 });
     expect(await anchorSetupFeeClaim(c, { claimId: 'claim-1', anchorId: 'svc-parent' })).toBe(true);
-    expect(c.writes).toEqual([expect.objectContaining({ table: 'setup_fee_claims', op: 'update', where: { id: 'claim-1' }, whereNull: 'scheduled_service_id', patch: { scheduled_service_id: 'svc-parent' } })]);
+    expect(c.writes).toEqual([expect.objectContaining({ table: 'setup_fee_claims', op: 'update', where: { id: 'claim-1', unbooked_commercial_setup: false }, whereNull: 'scheduled_service_id', patch: { scheduled_service_id: 'svc-parent' } })]);
     expect(await anchorSetupFeeClaim(conn(), { claimId: null, anchorId: 'svc-parent' })).toBe(false);
     const stamped = conn({ scheduledService: { id: 'svc-parent', customer_id: 'cust-1', recurring_parent_id: null, pending_setup_fee: '99.00', service_type: 'Rodent Bait Stations', service_id: null } });
     expect(await stampedSetupForVisit(stamped, { id: 'svc-parent' })).toBe(99);
@@ -242,7 +254,7 @@ describe('retirePrepayOnBookSetupClaim — the Customer 360 / prepay-on-book min
     expect(out).toEqual({ recorded: true, retired: false });
     expect(owedSpy).toHaveBeenCalledWith(trx, { id: 'svc-parent' });
     expect(trx.writes).toEqual([
-      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', row: { invoice_id: 'inv-prepay', scheduled_service_id: 'svc-parent', amount: 99 } }),
+      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', row: { invoice_id: 'inv-prepay', scheduled_service_id: 'svc-parent', amount: 99, unbooked_commercial_setup: false } }),
     ]);
   });
 
@@ -485,7 +497,7 @@ describe('findDirectRodentSetupObligationForCoverage — the Customer 360 dialog
     expect(await retireCoverageOnlySetupClaim(c, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations', invoiceId: 'inv-prepay', amount: 99 }))
       .toEqual({ recorded: true, retired: false });
     expect(c.writes).toEqual([
-      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', row: { invoice_id: 'inv-prepay', scheduled_service_id: null, amount: 99 } }),
+      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', row: { invoice_id: 'inv-prepay', scheduled_service_id: null, amount: 99, unbooked_commercial_setup: false } }),
     ]);
     await expect(retireCoverageOnlySetupClaim(conn({ rootsForCoverage: [] }), { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations', invoiceId: 'inv-prepay', amount: 79 }))
       .rejects.toMatchObject({ switchConflict: true, message: expect.stringMatching(/changed since the preview/) });
@@ -504,7 +516,7 @@ describe('findDirectRodentSetupObligationForCoverage — the Customer 360 dialog
     const fnAt = plansSrc.indexOf('async function retireCoverageOnlySetupClaim');
     const lockAt = plansSrc.indexOf("await trx('customers').where({ id: customerId }).forUpdate().first('id');", fnAt);
     const probeAt = plansSrc.indexOf('findDirectRodentSetupObligationForCoverage(trx, { customerId, coverageServiceType })', fnAt);
-    const insertAt = plansSrc.indexOf('recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId: null, amount: fee })', fnAt);
+    const insertAt = plansSrc.indexOf('recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId: null, amount: fee, unbookedCommercial })', fnAt);
     expect(fnAt).toBeGreaterThan(-1);
     expect(lockAt).toBeGreaterThan(fnAt);
     expect(lockAt).toBeLessThan(probeAt);
@@ -644,11 +656,14 @@ describe('source contracts — where the lifecycle is wired', () => {
     // DISCLOSED figure (engine result), not the wizard-only setupFeeQuote
     // (codex #3591 r65 P1). A disclosed-but-unbilled setup keeps the stamp,
     // aligned to the disclosed figure.
-    expect(adminSchedule).toMatch(/const rodentSetupSettledByAcceptance = async \(acceptResult\) => \{[\s\S]*?acceptResult\?\.alreadyAccepted\s+\? await settledSetupClaimForEstimate\(db, linkedEstimateId\)\s+: await settledSetupClaimForInvoice\(db, acceptResult\?\.conversion\?\.draftInvoiceId \|\| null\);[\s\S]*?const disclosed = frozenRodentBaitSetupAmount\(linkedEstimate\?\.estimate_data \|\| \{\}\);\s+return disclosed > 0 \? \{ disclosed \} : \{ waived: 'estimate_disclosed_no_setup' \};/);
+    expect(adminSchedule).toMatch(/const rodentSetupSettledByAcceptance = async \(acceptResult\) => \{[\s\S]*?acceptResult\?\.alreadyAccepted\s+\? await settledSetupClaimForEstimate\(db, linkedEstimateId\)\s+: await settledSetupClaimForInvoice\(db, acceptResult\?\.conversion\?\.draftInvoiceId \|\| null\);[\s\S]*?if \(claim\) return \{ claim \};\s+if \(await require\('\.\.\/services\/secure-appointment-plans'\)\.originalInvoiceOwnsEstimateSetup\(db, linkedEstimateId\)\) \{\s+return \{ originalInvoice: true \};\s+\}[\s\S]*?const disclosed = frozenRodentBaitSetupAmount\(linkedEstimate\?\.estimate_data \|\| \{\}\);\s+return disclosed > 0 \? \{ disclosed \} : \{ waived: 'estimate_disclosed_no_setup' \};/);
     // r76: the retire + anchor run in ONE transaction, with the claim's
     // invoice row locked and liveness re-verified under the lock; a
-    // reversal that won keeps the stamp for the first completion.
-    expect(adminSchedule).toMatch(/const settled = await rodentSetupSettledByAcceptance\(acceptResult\);\s+if \(settled\.disclosed\) \{[\s\S]*?\.update\(\{ pending_setup_fee: settled\.disclosed, updated_at: new Date\(\) \}\);[\s\S]*?return;\s+\}[\s\S]*?await db\.transaction\(async \(trx\) => \{\s+let liveClaim = null;\s+if \(settled\.claim\) \{[\s\S]*?await trx\('invoices'\)\.where\(\{ id: settled\.claim\.invoice_id \}\)\.forUpdate\(\)\.first\('id'\);\s+liveClaim = await settledSetupClaimForInvoice\(trx, settled\.claim\.invoice_id\);\s+if \(!liveClaim\) \{[\s\S]*?return;\s+\}\s+\}\s+const retired = await trx\('scheduled_services'\)/);
+    // reversal that won keeps the stamp for the first completion, unless the
+    // acceptance's invoice-only ownership still verifies under that lock. An
+    // invoice-only sale has no visit to anchor, but it still retires the
+    // booking-time stamp so the setup is not collected twice.
+    expect(adminSchedule).toMatch(/const settled = await rodentSetupSettledByAcceptance\(acceptResult\);\s+if \(settled\.disclosed\) \{[\s\S]*?\.update\(\{ pending_setup_fee: settled\.disclosed, updated_at: new Date\(\) \}\);[\s\S]*?return;\s+\}[\s\S]*?await db\.transaction\(async \(trx\) => \{\s+let liveClaim = null;\s+if \(settled\.claim\) \{[\s\S]*?await trx\('invoices'\)\.where\(\{ id: settled\.claim\.invoice_id \}\)\.forUpdate\(\)\.first\('id'\);\s+liveClaim = await settledSetupClaimForInvoice\(trx, settled\.claim\.invoice_id\);\s+if \(!liveClaim && !\(await require\('\.\.\/services\/secure-appointment-plans'\)\.originalInvoiceOwnsEstimateSetup\(trx, linkedEstimateId\)\)\) \{[\s\S]*?return;\s+\}\s+\}\s+const retired = await trx\('scheduled_services'\)/);
     expect(adminSchedule).toMatch(/if \(liveClaim && !liveClaim\.scheduled_service_id\) \{[\s\S]*?await anchorSetupFeeClaim\(trx, \{ claimId: liveClaim\.id, anchorId: svc\.id \}\);/);
     expect(adminSchedule.includes("('setup_fee_claims')")).toBe(false);
     expect(adminSchedule).toMatch(/const retired = await trx\('scheduled_services'\)\s+\.where\(\{ id: svc\.id, pending_setup_fee: directRodentSetupStamp \}\)\s+\.update\(\{ pending_setup_fee: null/);
@@ -792,7 +807,7 @@ describe('source contracts — where the lifecycle is wired', () => {
     const estimatePublicSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
     expect((estimatePublicSrc.match(/estimateRodentBaitIsCommercial\((acceptedEstDataForPricing|conversionEstData)\)\)\s*\{\s+await (plans\.|require\('\.\.\/services\/secure-appointment-plans'\)\.)assertFrozenRodentSetupStillOwed\(trx, customerId\);/g) || []).length).toBe(2);
     const converterSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-converter.js'), 'utf8');
-    expect(converterSrc).toMatch(/if \(!estimateRodentBaitIsCommercial\(estimateData\)\) \{\s+await assertFrozenRodentSetupStillOwed\(database, customerId\);\s+\}/);
+    expect(converterSrc).toMatch(/if \(!commercialSetupSale\) \{\s+await assertFrozenRodentSetupStillOwed\(database, customerId\);\s+\}/);
     // The C360 prepay retry's authoritative re-read runs under the same
     // customer-row lock the booking creators hold.
     const retryAt = plansSrc.indexOf('async function retirePrepayOnBookSetupClaim');
@@ -885,7 +900,9 @@ describe('source contracts — where the lifecycle is wired', () => {
   test('every accept-side mint keys its claim to the estimate; the column ships guarded both ways (codex #3591 r70 P1)', () => {
     const estimatePublicSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
     expect((estimatePublicSrc.match(/await plans\.recordSetupFeeClaimForInvoice\(trx, \{[\s\S]*?estimateId: estimate\.id,\s+\}\);/g) || []).length).toBe(2);
-    expect(converter).toMatch(/await recordSetupFeeClaimForInvoice\(database, \{\s+invoiceId: draftInvoiceId,\s+anchorId: rodentRoot \? rodentRoot\.id : null,\s+amount: frozenRodentBaitSetupAmount\(estimateData\),\s+estimateId,\s+\}\);/);
+    expect((estimatePublicSrc.match(/bookedAppointmentIds: reservationCommitted\s+\? acceptedAppointmentsToRegister\.map\(\(row\) => row\.id\)\.filter\(Boolean\)\s+: \[\],/g) || []).length).toBe(1);
+    expect(converter).toMatch(/await database\.transaction\(\(setupTrx\) => retireDirectSetupClaimForPrepay\(setupTrx, \{\s+invoiceId: draftInvoiceId,\s+anchorId: rodentRoot\.id,\s+amount: setupAmount,\s+estimateId,\s+\}\)\);/);
+    expect(converter).toMatch(/await recordSetupFeeClaimForInvoice\(database, \{\s+invoiceId: draftInvoiceId,\s+anchorId: null,\s+amount: setupAmount,\s+unbookedCommercial,\s+estimateId,\s+\}\);/);
     const migration = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260831000030_setup_fee_claims_estimate_id.js'), 'utf8');
     expect(migration).toMatch(/hasTable\('setup_fee_claims'\)[\s\S]*?hasColumn\('setup_fee_claims', 'estimate_id'\)[\s\S]*?t\.uuid\('estimate_id'\)\.nullable\(\)/);
     expect(migration).toMatch(/exports\.down[\s\S]*?hasColumn\('setup_fee_claims', 'estimate_id'\)[\s\S]*?dropColumn\('estimate_id'\)/);
@@ -925,9 +942,18 @@ describe('source contracts — where the lifecycle is wired', () => {
     expect(booking.slice(reload, queued)).toMatch(/\.filter\(\(key\) => key !== 'rodent_bait'\)[\s\S]*retireOrWaiveDraft\('existing_member'\)/);
   });
 
-  test('the estimate-accept prepay ledgers the billed rodent setup on the scheduled rodent root, inside the accept transaction (codex #3591 r37 P1)', () => {
-    expect(converter).toMatch(/if \(billingTerm === 'prepay_annual' && draftInvoiceId && frozenRodentBaitSetupAmount\(estimateData\) > 0\) \{/);
-    expect(converter).toMatch(/recordSetupFeeClaimForInvoice\(database, \{\s*invoiceId: draftInvoiceId,\s*anchorId: rodentRoot \? rodentRoot\.id : null,/);
+  test('estimate-accept records and retires commercial setup before the invoice commits or the term refreshes (codex #3591 r37 P1)', () => {
+    const invoiceOnlyClaimAt = converter.indexOf("if (created?.id && commercialSetupSale && prepayRodentSetupAmount > 0");
+    const termRefreshAt = converter.indexOf('const annualPrepayTerm = await AnnualPrepayRenewals.createTermForAnnualPrepay', invoiceOnlyClaimAt);
+    expect(invoiceOnlyClaimAt).toBeGreaterThan(-1);
+    expect(termRefreshAt).toBeGreaterThan(invoiceOnlyClaimAt);
+    expect(converter.slice(invoiceOnlyClaimAt, termRefreshAt)).toMatch(/recordSetupFeeClaimForInvoice\(invoiceTrx, \{\s+invoiceId: created\.id,\s+anchorId: null,\s+amount: prepayRodentSetupAmount,\s+unbookedCommercial: true,\s+estimateId,/);
+    expect(converter.slice(invoiceOnlyClaimAt, termRefreshAt)).toMatch(/retireDirectSetupClaimForPrepay\(invoiceTrx, \{\s+invoiceId: created\.id,\s+anchorId: commercialRodentSetupOwner\.id,\s+amount: prepayRodentSetupAmount,\s+estimateId,/);
+    // Every commercial prepay records its ownership in the invoice's own
+    // transaction. Residential prepay retains the ordinary post-scheduling
+    // path, and a commercial write cannot be duplicated after term refresh.
+    expect(converter).toMatch(/if \(billingTerm === 'prepay_annual' && draftInvoiceId && frozenRodentBaitSetupAmount\(estimateData\) > 0\s+&& !commercialSetupClaimRecorded\) \{/);
+    expect(converter).toMatch(/retireDirectSetupClaimForPrepay\(setupTrx, \{\s*invoiceId: draftInvoiceId,\s*anchorId: rodentRoot\.id,/);
     // …and the restore resolves an anchor-less record from the term's source estimate (codex #3591 r39 P1).
     const renewals = fs.readFileSync(path.join(__dirname, '..', 'services', 'annual-prepay-renewals.js'), 'utf8');
     expect((renewals.match(/restoreRetiredSetupFeeClaimForPrepay\([a-z]+\.prepay_invoice_id, (?:conn|t), \{ sourceEstimateId: [a-z]+\.source_estimate_id \|\| null, customerId: [a-z]+\.customer_id \|\| null, coverageServiceType: [a-z]+\.coverage_service_type \|\| null \}\)/g) || []).length).toBe(2);
@@ -1133,7 +1159,7 @@ describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prep
     expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(c, 'inv-prepay'))
       .toEqual({ scheduledServiceId: 'root-rb', amount: 99, retired: true });
     expect(c.writes).toEqual([
-      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', onConflict: 'invoice_id', row: { invoice_id: 'inv-prepay', scheduled_service_id: 'root-rb', amount: 99 } }),
+      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', onConflict: 'invoice_id', row: { invoice_id: 'inv-prepay', scheduled_service_id: 'root-rb', amount: 99, unbooked_commercial_setup: false } }),
       expect.objectContaining({ table: 'scheduled_services', op: 'update', where: { id: 'root-rb', pending_setup_fee: '99.00' }, patch: expect.objectContaining({ pending_setup_fee: null }) }),
     ]);
   });
@@ -1176,7 +1202,7 @@ describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prep
     expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(renamed, 'inv-prepay'))
       .toEqual({ scheduledServiceId: 'root-rb', amount: 99, retired: true });
     expect(renamed.writes).toEqual([
-      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', onConflict: 'invoice_id', row: { invoice_id: 'inv-prepay', scheduled_service_id: 'root-rb', amount: 99 } }),
+      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', onConflict: 'invoice_id', row: { invoice_id: 'inv-prepay', scheduled_service_id: 'root-rb', amount: 99, unbooked_commercial_setup: false } }),
       expect.objectContaining({ table: 'scheduled_services', op: 'update', where: { id: 'root-rb', pending_setup_fee: '99.00' }, patch: expect.objectContaining({ pending_setup_fee: null }) }),
     ]);
   });
@@ -1407,7 +1433,7 @@ describe('r47 wiring — commercial bait, anchor-less revival sweep, unvoid reti
       .toEqual({ scheduledServiceId: null, amount: 99, retired: false });
     expect(wrapped.writes).toEqual([
       expect.objectContaining({ table: 'invoices', op: 'update', patch: expect.objectContaining({ status: 'void' }) }),
-      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', row: { invoice_id: 'inv-prepay', scheduled_service_id: null, amount: 99 } }),
+      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', row: { invoice_id: 'inv-prepay', scheduled_service_id: null, amount: 99, unbooked_commercial_setup: false } }),
     ]);
   });
 
