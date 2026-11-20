@@ -749,6 +749,21 @@ describe('publishReviewReply', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'drafted', review_reply: '[DRAFT] Runner words.' });
   });
 
+  test('a database error from the pre-post fence posts nothing, and the reply text and the reviewer name stay out of the log and the answer', async () => {
+    const logger = require('../services/logger');
+    state.rows[0].auto_reply_status = null;
+    // The mock's error quotes the bound reply text and the reviewer's name, as a Postgres error can.
+    state.failNextUpdate = true;
+    const err = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad the Waves app helps.', actor: { type: 'ib' } }).catch((e) => e);
+    expect(err).toMatchObject({ code: CODES.LOCAL_WRITE_FAILED, status: 503 });
+    expect(err.message).toMatch(/ECONNRESET.*nothing was sent to Google/);
+    expect(err.message).not.toMatch(/Dana|update/);
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    const logged = [...logger.warn.mock.calls, ...logger.error.mock.calls].map((c) => c.join(' ')).join('\n');
+    expect(logged).toMatch(/pre-post fence failed for rev-1: ECONNRESET/);
+    expect(logged).not.toMatch(/Dana|update/);
+  });
+
   test('an Intelligence Bar timeout records nothing when the row changed during the PUT (the change wins)', async () => {
     state.rows[0].auto_reply_status = null;
     await ibTimeout({ duringPut: () => Object.assign(state.rows[0], { auto_reply_status: 'skipped', auto_reply_reason: 'dismissed' }) });

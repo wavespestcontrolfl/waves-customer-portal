@@ -124,6 +124,8 @@ describe('POST /admin/reviews/:id/reply — the account facts for the post-PUT c
     AutoReply.manualReplyCloseFields = jest.fn(() => ({}));
     AutoReply.pipelineDraftGuard = jest.fn(() => async () => null);
     AutoReply.parseGroundingToken = jest.fn(() => null);
+    AutoReply.STATUS = { PARKED: 'parked' };
+    AutoReply.RECONCILE_REASONS = new Set(['google_uncertain', 'persist_failed']);
   });
   afterEach(() => db.mockReset());
 
@@ -146,5 +148,19 @@ describe('POST /admin/reviews/:id/reply — the account facts for the post-PUT c
     Publisher.publishReviewReply.mockClear();
     row = { review_reply: '[DRAFT] Hi Dana, pipeline words.', auto_reply_draft: 'Hi Dana, pipeline words.', auto_reply_version: 'reply-v3', auto_reply_grounding: { accountFingerprint: 'acct-stored' } };
     expect(await expectedAccountFor({ replyText: 'Hi Dana, pipeline words.', draftToken: 'f'.repeat(40) })).toBe('acct-stored');
+  });
+
+  test('an Intelligence Bar attempt still parked after a timeout, submitted unchanged, keeps its account facts and its agent origin; edited text or a person\'s attempt does not', async () => {
+    const parked = { review_reply: null, auto_reply_draft: text, auto_reply_version: 'agent_ops', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_grounding: { fingerprint: 'f'.repeat(40), accountFingerprint: 'acct-parked' } };
+    row = parked;
+    expect(await expectedAccountFor({ replyText: text })).toBe('acct-parked');
+    expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(true);
+    Publisher.publishReviewReply.mockClear();
+    expect(await expectedAccountFor({ replyText: `${text} Thanks again.` })).toBeUndefined();
+    expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(false);
+    Publisher.publishReviewReply.mockClear();
+    row = { ...parked, auto_reply_version: 'human', auto_reply_grounding: { fingerprint: 'f'.repeat(40), accountFingerprint: null } };
+    expect(await expectedAccountFor({ replyText: text })).toBeUndefined();
+    expect(Publisher.publishReviewReply.mock.calls[0][0].fromDraft).toBe(false);
   });
 });

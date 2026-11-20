@@ -1341,13 +1341,21 @@ describe('processDueAutoReplies — state machine', () => {
     state.rows = [{ ...parked, auto_reply_status: 'skipped', auto_reply_reason: 'admin_skip' }];
     expect(await Runner.applyRequeueOnIdentity('p', parked, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toBe(0);
     expect(state.rows[0].auto_reply_status).toBe('skipped');
-    // A person's post in flight on the row: the requeue waits for the next sync.
-    state.rows = [{ ...parked, publish_claimed_until: '2099-01-01T00:00:00Z' }];
-    expect(await Runner.applyRequeueOnIdentity('p', parked, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toBe(0);
-    expect(state.rows[0].auto_reply_status).toBe('parked');
     state.rows = [{ ...parked }];
     expect(await Runner.applyRequeueOnIdentity('p', parked, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toBe(1);
     expect(state.rows[0].auto_reply_status).toBe('queued');
+    // The one-time requeue never waits for a publish claim: this sync saves the GBP name, so no later sync could requeue the row.
+    state.rows = [{ ...parked, publish_claimed_until: '2099-01-01T00:00:00Z' }];
+    expect(await Runner.applyRequeueOnIdentity('p', parked, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toBe(1);
+    expect(state.rows[0].auto_reply_status).toBe('queued');
+    // A row parked gbp_not_configured can take a person's post meanwhile: its requeue waits for the claim, and the next sync requeues it.
+    const unconfigured = row({ id: 'p', auto_reply_status: 'parked', auto_reply_reason: 'gbp_not_configured', dismissed: false });
+    state.rows = [{ ...unconfigured, publish_claimed_until: '2099-01-01T00:00:00Z' }];
+    expect(await Runner.applyRequeueOnIdentity('p', unconfigured, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toBe(0);
+    expect(state.rows[0].auto_reply_status).toBe('parked');
+    state.rows[0].publish_claimed_until = null;
+    expect(await Runner.applyRequeueOnIdentity('p', unconfigured, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toBe(1);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'gbp_connected' });
   });
 
   test('publisher REVIEW_CHANGED (live review differs from the synced row) → re-queued AFTER the next sync window, not every tick', async () => {

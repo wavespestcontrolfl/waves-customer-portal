@@ -53,6 +53,9 @@ const CODES = {
   // DB error): retryable, and it must NOT be read as a definitive
   // "someone else replied" (codex r74).
   RECONCILE_FAILED: 'reconcile_failed',
+  // A local write before the PUT failed (transient database error): nothing
+  // reached Google, and the caller may try again.
+  LOCAL_WRITE_FAILED: 'local_write_failed',
   // The reply names the app another way than "the Waves app" (owner 2026-11-19).
   APP_NAME: 'app_name',
 };
@@ -539,7 +542,17 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         const fence = db('google_reviews').where({ id: reviewId });
         if (prePutState.status == null) fence.whereNull('auto_reply_status'); else fence.where('auto_reply_status', prePutState.status);
         if (prePutState.slot == null) fence.whereNull('review_reply'); else fence.where('review_reply', prePutState.slot);
-        const fenced = await fence.update({ auto_reply_claimed_until: null });
+        let fenced;
+        try {
+          fenced = await fence.update({ auto_reply_claimed_until: null });
+        } catch (dbErr) {
+          // The WHERE binds the earlier reply text, so a database error
+          // message can quote it (and the reviewer's name): only its code
+          // goes into the log and the answer (AGENTS.md, PII in logs).
+          const summary = require('../notification-service').safeErrorSummary(dbErr);
+          logger.warn(`[review-reply] pre-post fence failed for ${reviewId}: ${summary}`);
+          throw new ReviewReplyError(CODES.LOCAL_WRITE_FAILED, `Could not prepare this review for posting (${summary}) — nothing was sent to Google; try again.`, { status: 503 });
+        }
         if (!(Array.isArray(fenced) ? fenced.length : fenced)) {
           throw new ReviewReplyError(CODES.STALE, 'This review changed while the reply was being checked — reload it and try again.', { status: 409 });
         }

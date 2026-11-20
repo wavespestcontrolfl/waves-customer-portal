@@ -1419,11 +1419,18 @@ async function applyReviewEditFields(reviewId, existing, normalized, { conn = db
 async function applyRequeueOnIdentity(reviewId, existing, normalized, { conn = db } = {}) {
   const fields = requeueFieldsOnIdentity(existing, normalized);
   if (!Object.keys(fields).length) return 0;
-  const n = await conn('google_reviews')
-    .where({ id: reviewId, auto_reply_status: existing.auto_reply_status, auto_reply_reason: existing.auto_reply_reason })
-    // Never under an in-flight publish (see claimDueRows).
-    .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()])
-    .update(fields);
+  const q = conn('google_reviews')
+    .where({ id: reviewId, auto_reply_status: existing.auto_reply_status, auto_reply_reason: existing.auto_reply_reason });
+  // A row parked gbp_not_configured can take a person's post once the
+  // location's credentials work, so its requeue waits for a live publish
+  // claim (see claimDueRows); every authoritative sync checks it again. The
+  // one-time requeues (identity attached, review reinstated) cannot wait:
+  // this sync saves the GBP name or clears missing_since in the same pass,
+  // so a deferred requeue would leave the row parked for good. Neither runs
+  // under a manual PUT: the publisher saves the GBP name before its PUT and
+  // refuses a missing review.
+  if (fields.auto_reply_reason === 'gbp_connected') q.whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()]);
+  const n = await q.update(fields);
   return Array.isArray(n) ? n.length : n;
 }
 
