@@ -359,3 +359,45 @@ describe('clickStatsByEstimateId (the click read the list route and the Call tod
     }
   });
 });
+
+describe('callTodayFields reads a delivered self-serve quote as the send it is (codex pre-push P1)', () => {
+  const { callTodayFields } = require('../services/estimate-call-list');
+  const LOOK = '2026-11-10T15:00:00.000Z'; // the customer's portal look
+  const SENT = '2026-11-12T15:00:00.000Z'; // staff's first delivery
+  const LATER = '2026-11-14T15:00:00.000Z';
+  const stored = (over = {}) => ({
+    status: 'viewed', customer_phone: '+19415550101', archived_at: null, sent_at: '2026-11-16T15:00:00.000Z',
+    viewed_at: LOOK, last_viewed_at: LOOK, last_follow_up_at: null, ...over,
+  });
+
+  test('any other row reads exactly as stored', () => {
+    const row = stored();
+    expect(callTodayFields(row, { lastClickedAt: LOOK })).toMatchObject({
+      status: 'viewed', sentAt: row.sent_at, viewedAt: LOOK, lastViewedAt: LOOK, lastClickedAt: LOOK,
+    });
+  });
+
+  test('opened only before the send: sent, dated by the first delivery, no view and no tap yet', () => {
+    // sent_at is a later suppressed resend attempt; the first delivery never moves.
+    expect(callTodayFields(stored(), { lastClickedAt: LOOK, selfServeDeliveredAt: SENT })).toMatchObject({
+      status: 'sent', sentAt: SENT, viewedAt: null, lastViewedAt: null, lastClickedAt: null,
+    });
+  });
+
+  test('opened again after the send: viewed, timed from that open', () => {
+    expect(callTodayFields(stored({ last_viewed_at: LATER }), { lastClickedAt: LATER, selfServeDeliveredAt: SENT }))
+      .toMatchObject({ status: 'viewed', sentAt: SENT, viewedAt: LATER, lastViewedAt: LATER, lastClickedAt: LATER });
+    // A first view after the send stays the first view.
+    expect(callTodayFields(stored({ viewed_at: SENT, last_viewed_at: LATER }), { selfServeDeliveredAt: SENT }))
+      .toMatchObject({ status: 'viewed', viewedAt: SENT, lastViewedAt: LATER });
+  });
+
+  test('the list route passes the delivery read from estimate_data; the push passes the same value in SQL', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-estimates.js'), 'utf8');
+    const push = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-call-today-push.js'), 'utf8');
+    expect(route).toContain('selfServeDeliveredAt: selfServeDeliveredAt(e.source, estData)');
+    expect(push).toContain('selfServeDeliveredAt: row.self_serve_delivered_at');
+  });
+});

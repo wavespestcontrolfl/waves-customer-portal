@@ -125,23 +125,16 @@ export function resolutionDate(estimate) {
 // None of the three follow-up buckets lists a self-serve quote nobody delivered
 // (undeliveredSelfServe, from the server: plan restart, plan start, report
 // card): the customer opened it from the portal, and it carries a
-// zero-follow-up contract. A delivered one counts touches from its delivery
-// (selfServeDeliveredAt, read by lastEngagementMs), so one opened only before
-// the send is an unopened send.
+// zero-follow-up contract. The server sends a delivered one as the send it is
+// (callTodayFields), so these checks need no case of their own for it.
 export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
   if (estimate?.undeliveredSelfServe) return false;
-  const last = lastEngagementMs(estimate);
-  const unopened =
-    estimate?.status === "sent"
-      ? !estimate.viewedAt
-      : estimate?.status === "viewed" &&
-        !!estimate.selfServeDeliveredAt &&
-        last == null;
-  if (unopened && estimate.sentAt) {
+  if (estimate?.status === "sent" && !estimate.viewedAt && estimate.sentAt) {
     const sentAt = new Date(estimate.sentAt).getTime();
     return !Number.isNaN(sentAt) && nowMs - sentAt > 72 * HOUR;
   }
   if (estimate?.status === "viewed") {
+    const last = lastEngagementMs(estimate);
     return last != null && nowMs - last >= 168 * HOUR;
   }
   return false;

@@ -11,9 +11,9 @@
  * (a send count or funnel, a staff follow-up prompt) leaves such a row out,
  * unless staff really delivered it later: the admin send path stamps
  * estimate_data.deliveryState.firstDeliveredAt. A reader that dates a send or a
- * view reads sentAtSql / countableViewAtSql, and one that times follow-up by
- * the customer's last touch counts touches from selfServeDeliveredAt (or its
- * SQL form). Customer comms use the separate
+ * view reads sentAtSql / countableViewAtSql, and the list row mapping reads a
+ * delivered one from selfServeDeliveredAt (or its SQL form). Customer comms
+ * use the separate
  * noEngagementAutomation rule (estimate-comms-eligibility.js).
  *
  * A leaf module (no requires), so any reader can load it with no cycle.
@@ -97,14 +97,14 @@ function countableViewAtSql(alias) {
     `${alias}.viewed_at`);
 }
 
-// A delivered self-serve quote's first delivery: the instant its customer
-// engagement counts from, for a reader that times follow-up by the last touch
-// (the Call today rule, shared/estimate-call-today.cjs). The customer opened
-// the quote in the portal before staff sent it, and that look is no response
-// to the send (codex pre-push P1). Null for any other row, and for a stamp
-// that is absent or unreadable (then every touch counts, as sent_at stays
-// the send for sentAtSql). selfServeDeliveredAtSql is the same value in SQL,
-// for a reader that does not load estimate_data.
+// A delivered self-serve quote's first delivery, from which the list row
+// mapping (callTodayFields, estimate-call-list.js) reads it as the send it is:
+// dated by the delivery, with views and taps counted from then on. The
+// customer opened the quote in the portal before staff sent it, and that look
+// is no response to the send (codex pre-push P1). Null for any other row, and
+// for a stamp that is absent or unreadable (then the row reads as stored, as
+// sent_at stays the send for sentAtSql). selfServeDeliveredAtSql is the same
+// value in SQL, for a reader that does not load estimate_data (the 9 AM push).
 function selfServeDeliveredAt(source, estimateData) {
   if (!SELF_SERVE_ESTIMATE_SOURCES.includes(String(source || ''))) return null;
   const stamp = estimateData?.deliveryState?.firstDeliveredAt;

@@ -123,8 +123,8 @@ describe('the count is the page list', () => {
     const judged = estimateRows.map((r) => shared.isCallTodayEstimate(
       callTodayFields(r, { selfServeDeliveredAt: r.self_serve_delivered_at }), NOW.getTime()));
     expect(judged).toEqual([false, true]);
-    // A tap on the sent link is a touch since the send.
-    clickRows = [{ entity_id: 'looked-then-sent', last_clicked_at: ago(2.5) }];
+    // An open of the sent quote puts it on the list, as it does any send.
+    estimateRows[0] = { ...estimateRows[0], last_viewed_at: ago(2.5) };
     expect(await countCallToday(NOW.getTime())).toBe(2);
   });
 

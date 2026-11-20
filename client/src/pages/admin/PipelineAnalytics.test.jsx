@@ -392,39 +392,6 @@ describe("engagement-based idle checks", () => {
     expect(isFollowUpOverdueEstimate(cases[2], now)).toBe(true);
   });
 
-  it("times a delivered self-serve quote's touches from its first delivery (codex pre-push P1)", () => {
-    const now = NOW.getTime();
-    // A portal look 5 h ago, then staff's first send 3 h ago: the look is no
-    // response to the send, so the quote is not on Call today ...
-    const lookedThenSent = estimate({
-      id: "looked-then-sent",
-      status: "viewed",
-      customerPhone: "+19415550101",
-      viewedAt: hoursAgo(5),
-      lastViewedAt: hoursAgo(5),
-      sentAt: hoursAgo(3),
-      selfServeDeliveredAt: hoursAgo(3),
-    });
-    expect(isCallTodayEstimate(lookedThenSent, now)).toBe(false);
-    // ... until the customer opens the sent quote.
-    const openedSince = { ...lookedThenSent, lastViewedAt: hoursAgo(2.5) };
-    expect(isCallTodayEstimate(openedSince, now)).toBe(true);
-    // A look 100 h ago and a send 96 h ago with no open since: an unopened
-    // send past 72 h is follow-up overdue, not going cold.
-    const unopenedSend = {
-      ...lookedThenSent,
-      viewedAt: hoursAgo(100),
-      lastViewedAt: hoursAgo(100),
-      sentAt: hoursAgo(96),
-      selfServeDeliveredAt: hoursAgo(96),
-    };
-    expect(isFollowUpOverdueEstimate(unopenedSend, now)).toBe(true);
-    expect(isGoingColdEstimate(unopenedSend, now)).toBe(false);
-    // Sent 30 h ago instead: not overdue yet.
-    const recentSend = { ...unopenedSend, sentAt: hoursAgo(30), selfServeDeliveredAt: hoursAgo(30) };
-    expect(isFollowUpOverdueEstimate(recentSend, now)).toBe(false);
-  });
-
   it("uses last engagement for the going-cold window", () => {
     const reEngaged = estimate({
       id: "warm",
