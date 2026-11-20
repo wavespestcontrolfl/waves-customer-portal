@@ -364,4 +364,41 @@ describe("Reviews workspace foundation", () => {
       body: { customerId: "customer-dana", result: "pause" },
     }));
   });
+
+  it("shows the monthly review cap and labels a payout over it (owner 2026-11-20 D4)", async () => {
+    const incentives = (policy, payouts) => vi.fn(async (url) => {
+      const path = String(url);
+      if (path.includes("/admin/reviews/incentives/attribution-queue?")) return response({ items: [] });
+      if (path.includes("/admin/reviews/incentives?")) {
+        return response({ summary: { confirmedGoogleReviews: 1 }, payouts, leaderboard: [], policy });
+      }
+      if (path.includes("/admin/reviews")) {
+        return response({ reviews: [], locations: [], stats: { totalReviews: 0, avgRating: 0, unresponded: 0, responded: 0 } });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const payout = (id, patch) => ({
+      id, technicianName: "Sample Alpha", source: "google_review", amountCents: 1500, status: "earned",
+      earnedAt: "2027-01-10T15:00:00Z", ...patch,
+    });
+    vi.stubGlobal("fetch", incentives(
+      { enabled: true, amountCents: 1500, monthlyCapCount: 15 },
+      [payout("p-ok"), payout("p-over", { overMonthlyCap: true })],
+    ));
+    render(<ReviewsPage />);
+    await screen.findByText("No reviews match your filters");
+    fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    expect(await screen.findByText("15 reviews a month")).toBeInTheDocument();
+    expect(screen.getByText("Over monthly cap \u2014 not paid")).toBeInTheDocument();
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+
+    cleanup();
+    vi.stubGlobal("fetch", incentives({ enabled: true, amountCents: 500, monthlyCapCount: null }, []));
+    render(<ReviewsPage />);
+    await screen.findByText("No reviews match your filters");
+    fireEvent.click(screen.getByRole("button", { name: "Outreach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Incentives" }));
+    expect(await screen.findByText("No monthly cap")).toBeInTheDocument();
+  });
 });

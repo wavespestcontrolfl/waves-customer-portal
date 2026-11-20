@@ -1528,3 +1528,38 @@ describe('review bonus attribution: the ask that reached the customer (GATE_REVI
     expect(await payout(conn)).toMatchObject({ technician_id: 'tech-owner' });
   });
 });
+
+describe('monthly cap policy (owner 2026-11-20 D4)', () => {
+  const { parsePolicy } = ReviewIncentives.__private;
+
+  test('default policy has no monthly cap', () => {
+    expect(ReviewIncentives.DEFAULT_POLICY.monthlyCapCount).toBeNull();
+    expect(parsePolicy(null).monthlyCapCount).toBeNull();
+    expect(parsePolicy({ amountCents: 1500 }).monthlyCapCount).toBeNull();
+  });
+
+  test.each([
+    [null, null], [undefined, null], [0, null], [-1, null], [2.5, null], ['15', null], [1001, null], [5000, null],
+    [NaN, null], [1, 1], [15, 15], [1000, 1000],
+  ])('monthlyCapCount %p normalizes to %p', (input, expected) => {
+    expect(parsePolicy({ monthlyCapCount: input }).monthlyCapCount).toBe(expected);
+  });
+
+  test('a stored JSON policy keeps its cap', () => {
+    expect(parsePolicy(JSON.stringify({ amountCents: 1500, monthlyCapCount: 15 }))).toMatchObject({ amountCents: 1500, monthlyCapCount: 15 });
+  });
+
+  test('no cap: overCapPayoutIds returns an empty set without querying', async () => {
+    const conn = jest.fn(() => { throw new Error('no query expected'); });
+    expect((await ReviewIncentives.overCapPayoutIds(conn, { cap: null })).size).toBe(0);
+    expect((await ReviewIncentives.overCapPayoutIds(conn, { cap: 0 })).size).toBe(0);
+  });
+
+  test('toCsv labels an over-cap payout in the Status column', () => {
+    const csv = ReviewIncentives.toCsv([{
+      technicianName: 'Sample Alpha', customerName: 'Sample Customer', source: 'google_review', amount: 15,
+      status: 'earned', overMonthlyCap: true, earnedAt: '2027-01-10', payPeriodStart: null, payPeriodEnd: null,
+    }]);
+    expect(csv).toContain('"over monthly cap - not paid"');
+  });
+});

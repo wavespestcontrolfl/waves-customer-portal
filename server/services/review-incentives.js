@@ -4,6 +4,7 @@ const { scrubSentryText } = require('../utils/sentry-scrub');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const featureGates = require('../config/feature-gates');
+const { STAFF_TIME_ZONE } = require('../utils/staff-time-work-date');
 
 // Looked up on the module at call time: tests load this file under partial
 // feature-gates mocks, and a missing reader must read as "gate off".
@@ -19,6 +20,8 @@ const DEFAULT_POLICY = {
   minRating: 1,
   requireCustomerMatchForGoogle: true,
   programStartsAt: null,
+  // Reviews a technician can be paid for in one ET calendar month (owner 2026-11-20 D4: 15). null = no cap.
+  monthlyCapCount: null,
 };
 
 const PAYOUT_ELIGIBLE_SOURCES = ['google_review'];
@@ -81,6 +84,11 @@ function weekPeriodFor(date) {
   };
 }
 
+// Owner 2026-11-20 D4: a whole number 1..1000 is a cap; 0, a fraction, text or anything else means no cap.
+function normalizeMonthlyCap(value) {
+  return Number.isInteger(value) && value >= 1 && value <= 1000 ? value : null;
+}
+
 function parsePolicy(value) {
   if (!value) return { ...DEFAULT_POLICY };
   try {
@@ -95,6 +103,7 @@ function parsePolicy(value) {
       minRating: Math.max(1, Math.min(5, toInt(parsed.minRating, DEFAULT_POLICY.minRating))),
       eligibleSources: PAYOUT_ELIGIBLE_SOURCES,
       programStartsAt: normalizedIsoDate(parsed.programStartsAt) || null,
+      monthlyCapCount: normalizeMonthlyCap(parsed.monthlyCapCount),
     };
   } catch {
     return { ...DEFAULT_POLICY };
@@ -121,6 +130,30 @@ function operationalError(message, statusCode = 400, code = 'review_incentive_er
   err.statusCode = statusCode;
   err.code = code;
   return err;
+}
+
+/**
+ * Ids of the payouts over the monthly cap (owner 2026-11-20 D4), computed on read: no
+ * status or amount column ever changes for the cap. Each technician's payouts are ranked
+ * per ET calendar month, paid rows first, then earned_at, then id, so a late-arriving
+ * earlier-dated review can never push an already-paid row out. A payout ranked past `cap`
+ * is over it. Counts only the payout sources with an amount. `technicianIds` (an array or a
+ * subquery) only narrows the scan; ranks stay whole-month. No cap returns an empty set.
+ */
+async function overCapPayoutIds(conn, { cap, technicianIds = null } = {}) {
+  if (!normalizeMonthlyCap(cap)) return new Set();
+  const ranked = conn('review_incentive_payouts as p')
+    .whereIn('p.source', PAYOUT_ELIGIBLE_SOURCES)
+    .where('p.amount_cents', '>', 0)
+    .whereNotNull('p.technician_id')
+    .select('p.id', conn.raw(
+      `row_number() over (partition by p.technician_id, date_trunc('month', p.earned_at AT TIME ZONE ?)
+        order by (p.status = 'paid') desc, p.earned_at, p.id) as month_rank`,
+      [STAFF_TIME_ZONE],
+    ));
+  if (technicianIds) ranked.whereIn('p.technician_id', technicianIds);
+  const rows = await conn.select('ranked.id').from(ranked.as('ranked')).where('ranked.month_rank', '>', cap);
+  return new Set(rows.map((row) => row.id));
 }
 
 async function getPolicy(conn = db) {
@@ -1588,7 +1621,15 @@ async function getDashboard(options = {}) {
       'gr.review_text as review_text',
     );
 
-  const payouts = rows.map(serializePayout);
+  // Owner 2026-11-20 D4: an unpaid payout over the monthly cap is shown but never counted as pending.
+  const overCap = await overCapPayoutIds(conn, {
+    cap: policy.monthlyCapCount,
+    technicianIds: [...new Set(rows.map((row) => row.technician_id).filter(Boolean))],
+  });
+  const payouts = rows.map((row) => ({
+    ...serializePayout(row),
+    overMonthlyCap: row.status !== 'paid' && overCap.has(row.id),
+  }));
   const leaderboardByTech = new Map();
   for (const payout of payouts) {
     const key = payout.technicianId;
@@ -1606,7 +1647,7 @@ async function getDashboard(options = {}) {
     row.reviewCount += 1;
     row.earnedCents += payout.amountCents;
     if (payout.status === 'paid') row.paidCents += payout.amountCents;
-    else row.pendingCents += payout.amountCents;
+    else if (!payout.overMonthlyCap) row.pendingCents += payout.amountCents;
   }
 
   const leaderboard = Array.from(leaderboardByTech.values())
@@ -1664,9 +1705,10 @@ async function getDashboard(options = {}) {
     unattributedGoogleReviews = 0;
   }
 
+  const pendingPayouts = payouts.filter(p => p.status !== 'paid' && !p.overMonthlyCap);
   const earnedCents = payouts.reduce((sum, p) => sum + p.amountCents, 0);
   const paidCents = payouts.filter(p => p.status === 'paid').reduce((sum, p) => sum + p.amountCents, 0);
-  const pendingCents = earnedCents - paidCents;
+  const pendingCents = pendingPayouts.reduce((sum, p) => sum + p.amountCents, 0);
 
   return {
     policy,
@@ -1687,7 +1729,7 @@ async function getDashboard(options = {}) {
       paid: dollars(paidCents),
       pendingCents,
       pending: dollars(pendingCents),
-      pendingCount: payouts.filter(p => p.status !== 'paid').length,
+      pendingCount: pendingPayouts.length,
       paidCount: payouts.filter(p => p.status === 'paid').length,
       unattributedGoogleReviews,
       unattributedReviewRequests: 0,
@@ -1700,19 +1742,28 @@ async function getDashboard(options = {}) {
 async function markPaid(ids = [], options = {}) {
   const conn = options.conn || db;
   const cleanIds = ids.filter(Boolean);
-  if (!cleanIds.length) return { updated: 0 };
+  if (!cleanIds.length) return { updated: 0, skippedOverCap: 0 };
   const patch = {
     status: 'paid',
     paid_at: new Date(),
     paid_by: options.paidBy || null,
     updated_at: new Date(),
   };
+  // Owner 2026-11-20 D4: a payout over its technician's monthly cap is never marked paid.
+  const { monthlyCapCount } = await getPolicy(conn);
+  const overCap = await overCapPayoutIds(conn, {
+    cap: monthlyCapCount,
+    technicianIds: conn('review_incentive_payouts').whereIn('id', cleanIds).select('technician_id'),
+  });
+  const payableIds = cleanIds.filter((id) => !overCap.has(id));
+  const skippedOverCap = cleanIds.length - payableIds.length;
+  if (!payableIds.length) return { updated: 0, skippedOverCap };
   const updated = await conn('review_incentive_payouts')
-    .whereIn('id', cleanIds)
+    .whereIn('id', payableIds)
     .where('source', 'google_review')
     .whereNot('status', 'paid')
     .update(patch);
-  return { updated: toInt(updated, 0) };
+  return { updated: toInt(updated, 0), skippedOverCap };
 }
 
 function toCsv(rows = []) {
@@ -1742,7 +1793,7 @@ function toCsv(rows = []) {
     row.customerName,
     row.source,
     row.amount.toFixed(2),
-    row.status,
+    row.overMonthlyCap ? 'over monthly cap - not paid' : row.status,
     row.earnedAt,
     row.payPeriodStart,
     row.payPeriodEnd,
@@ -1765,6 +1816,7 @@ module.exports = {
   manualAttributeGoogleReview,
   getDashboard,
   markPaid,
+  overCapPayoutIds,
   toCsv,
   __private: {
     parsePolicy,

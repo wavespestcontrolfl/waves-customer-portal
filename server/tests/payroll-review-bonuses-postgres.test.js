@@ -33,7 +33,7 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
-const { markPaid } = require('../services/review-incentives');
+const { markPaid, savePolicy, getDashboard, overCapPayoutIds } = require('../services/review-incentives');
 const { markPayoutsPaid } = require('../services/payroll-review-bonuses');
 
 jest.setTimeout(60000);
@@ -230,7 +230,7 @@ postgres('payroll review bonus import', () => {
       const created = await draft(W1);
       expect(byName(created.body.run, 'Sample Alpha').reviewBonusCents).toBe(1000);
 
-      expect(await markPaid([byHand], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 1 });
+      expect(await markPaid([byHand], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 1, skippedOverCap: 0 });
       const recomputed = await recompute(created.body.run.id);
       expect(byName(recomputed.body.run, 'Sample Alpha').reviewBonusCents).toBe(500);
       expect((await importedLines()).map((l) => l.source_id)).toEqual([kept]);
@@ -317,6 +317,119 @@ postgres('payroll review bonus import', () => {
       const error = await trx.transaction(async (inner) => markPayoutsPaid(inner, created.body.run.id, ADMIN_ID)).catch((err) => err);
       expect(error).toMatchObject({ status: 409, message: 'A review bonus changed while the run was finalized. Review the new numbers.' });
       expect((await payoutRow(bonus)).paid_by).toBeNull();
+    });
+  });
+
+  // Owner 2026-11-20 D4: an optional monthly cap per technician, counted by Eastern calendar
+  // month and computed on read. The cap never changes a payout's status or amount.
+  describe('monthly cap', () => {
+    const setCap = (cap) => savePolicy({ monthlyCapCount: cap }, trx);
+    const lineIds = async () => (await importedLines()).map((l) => l.source_id);
+
+    it('adds no line past the cap, in earned order, and leaves the payouts untouched', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      await setCap(2);
+      const third = await payout(id, '2026-09-17T15:00:00Z');
+      const first = await payout(id, '2026-09-15T15:00:00Z');
+      const second = await payout(id, '2026-09-16T15:00:00Z');
+      const created = await draft(W1);
+      expect(byName(created.body.run, 'Sample Alpha').reviewBonusCents).toBe(1000);
+      expect((await lineIds()).sort()).toEqual([first, second].sort());
+      expect(await payoutRow(third)).toMatchObject({ status: 'earned', amount_cents: 500, paid_at: null });
+    });
+
+    it('counts a paid payout first, so a late earlier-dated review cannot push it out', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      await setCap(2);
+      await payout(id, '2026-09-16T15:00:00Z', { status: 'paid', paid_at: new Date() });
+      const earlier = await payout(id, '2026-09-15T15:00:00Z');
+      const later = await payout(id, '2026-09-17T15:00:00Z');
+      const created = await draft(W1);
+      expect(byName(created.body.run, 'Sample Alpha').reviewBonusCents).toBe(500);
+      expect(await lineIds()).toEqual([earlier]);
+      expect([...(await overCapPayoutIds(trx, { cap: 2 }))]).toEqual([later]);
+    });
+
+    it('splits months by the Eastern calendar, not UTC', async () => {
+      const id = await readyTech('Sample Alpha');
+      await setCap(1);
+      // 2027-02-01 04:30Z is Jan 31 23:30 Eastern; 05:30Z is Feb 1 00:30 Eastern.
+      const januaryNight = await payout(id, '2027-02-01T04:30:00Z');
+      const februaryNight = await payout(id, '2027-02-01T05:30:00Z');
+      const januaryEarlier = await payout(id, '2027-01-10T15:00:00Z');
+      const februaryLater = await payout(id, '2027-02-20T15:00:00Z');
+      const over = await overCapPayoutIds(trx, { cap: 1 });
+      expect([...over].sort()).toEqual([januaryNight, februaryLater].sort());
+      expect(over.has(januaryEarlier) || over.has(februaryNight)).toBe(false);
+    });
+
+    it('ranks each technician on their own', async () => {
+      const first = await readyTech('Sample Alpha');
+      const second = await readyTech('Sample Bravo');
+      const a1 = await payout(first, '2026-09-15T15:00:00Z');
+      const a2 = await payout(first, '2026-09-16T15:00:00Z');
+      const b1 = await payout(second, '2026-09-16T15:00:00Z');
+      const over = await overCapPayoutIds(trx, { cap: 1 });
+      expect([...over]).toEqual([a2]);
+      expect(over.has(a1) || over.has(b1)).toBe(false);
+    });
+
+    it('with no cap, every payout gets a line as before', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      await setCap(null);
+      const ids = [await payout(id, '2026-09-15T15:00:00Z'), await payout(id, '2026-09-16T15:00:00Z'), await payout(id, '2026-09-17T15:00:00Z')];
+      const created = await draft(W1);
+      expect(byName(created.body.run, 'Sample Alpha').reviewBonusCents).toBe(1500);
+      expect((await lineIds()).sort()).toEqual(ids.sort());
+      expect((await overCapPayoutIds(trx, { cap: null })).size).toBe(0);
+    });
+
+    it('drops an open line whose payout falls over the cap after earlier reviews move into that month', async () => {
+      const first = await readyTech('Sample Alpha');
+      const second = await readyTech('Sample Bravo');
+      await approvedWeek(first, W1);
+      await setCap(2);
+      const mine = await payout(first, '2026-09-17T15:00:00Z');
+      const created = await draft(W1);
+      expect(await lineIds()).toEqual([mine]);
+      // Two earlier reviews are re-attributed to this technician: the 09-17 one is now third.
+      const moved1 = await payout(second, '2026-09-15T15:00:00Z');
+      const moved2 = await payout(second, '2026-09-16T15:00:00Z');
+      await trx('review_incentive_payouts').whereIn('id', [moved1, moved2]).update({ technician_id: first });
+      const recomputed = await recompute(created.body.run.id);
+      expect(byName(recomputed.body.run, 'Sample Alpha').reviewBonusCents).toBe(1000);
+      expect((await lineIds()).sort()).toEqual([moved1, moved2].sort());
+      expect(await payoutRow(mine)).toMatchObject({ status: 'earned', amount_cents: 500 });
+      const events = await syncEvents();
+      expect(events.map((e) => e.metadata)).toContainEqual(expect.objectContaining({ added_count: 2, removed_count: 1, removed_payout_ids: [mine] }));
+    });
+
+    it('markPaid skips payouts over the cap and says how many', async () => {
+      const id = await readyTech('Sample Alpha');
+      await setCap(2);
+      const a = await payout(id, '2026-09-15T15:00:00Z');
+      const b = await payout(id, '2026-09-16T15:00:00Z');
+      const c = await payout(id, '2026-09-17T15:00:00Z');
+      expect(await markPaid([a, b, c], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 2, skippedOverCap: 1 });
+      expect((await payoutRow(c)).status).toBe('earned');
+      expect(await markPaid([c], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 0, skippedOverCap: 1 });
+    });
+
+    it('the dashboard marks over-cap rows, leaves them out of pending, and reports the cap', async () => {
+      const id = await readyTech('Sample Alpha');
+      // savePolicy stamps programStartsAt with today when none is set, which would hide September.
+      await savePolicy({ monthlyCapCount: 1, programStartsAt: '2026-01-01T00:00:00Z' }, trx);
+      const a = await payout(id, '2026-09-15T15:00:00Z');
+      const b = await payout(id, '2026-09-16T15:00:00Z');
+      const dashboard = await getDashboard({
+        conn: trx, periodStart: '2026-09-01T00:00:00Z', periodEnd: '2026-09-30T23:59:59Z',
+      });
+      expect(dashboard.policy.monthlyCapCount).toBe(1);
+      expect(Object.fromEntries(dashboard.payouts.map((p) => [p.id, p.overMonthlyCap]))).toEqual({ [a]: false, [b]: true });
+      expect(dashboard.summary).toMatchObject({ pendingCount: 1, pendingCents: 500, earnedCents: 1000 });
     });
   });
 
