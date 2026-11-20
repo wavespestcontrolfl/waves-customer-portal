@@ -13,6 +13,18 @@ const {
 const cents = (value) => Math.round((Number(value) || 0) * 100);
 const millis = (value) => (value ? new Date(value).getTime() : null);
 
+function exactCents(value) {
+  if (value == null || value === '') return null;
+  const match = /^([+-]?)(\d+)(?:\.(\d{1,2}))?$/.exec(String(value).trim());
+  if (!match) return null;
+  const whole = Number(match[2]);
+  const fraction = Number((match[3] || '').padEnd(2, '0'));
+  if (!Number.isSafeInteger(whole) || !Number.isSafeInteger(fraction)) return null;
+  const result = whole * 100 + fraction;
+  if (!Number.isSafeInteger(result)) return null;
+  return match[1] === '-' ? -result : result;
+}
+
 function metadata(value) {
   if (!value) return {};
   if (typeof value !== 'string') return value;
@@ -233,7 +245,7 @@ function fullRefund(payment) {
   return payment.status === 'refunded' || payment.refund_status === 'full' || fullLostDispute;
 }
 
-async function hasUnresolvedCombinedPartialRefund(conn, invoice, payments) {
+async function hasUnresolvedCombinedPartialCase(conn, invoice, payments) {
   if (!invoice.stripe_charge_id
     || !payments.some((payment) => metadata(payment.metadata).combined_payment === true)) return false;
   const row = await conn('stripe_orphan_charges')
@@ -242,14 +254,20 @@ async function hasUnresolvedCombinedPartialRefund(conn, invoice, payments) {
       source: 'combined_pay_webhook',
       resolved: false,
     })
-    .where('stripe_payment_intent_id', 'like', '%:partial-refund:%')
+    .where(function unresolvedPartialCase() {
+      this.where('stripe_payment_intent_id', 'like', '%:partial-refund:%')
+        .orWhere('stripe_payment_intent_id', 'like', '%:partial-dispute:%');
+    })
     .first('id');
   return !!row;
 }
 
 function recordedCents(column, dollars) {
-  if (column != null) return Number(column);
-  return dollars == null ? null : Math.round(Number(dollars) * 100);
+  if (column != null) {
+    const value = Number(column);
+    return Number.isSafeInteger(value) ? value : null;
+  }
+  return dollars == null ? undefined : exactCents(dollars);
 }
 
 function withinAmount(value, limit) {
@@ -258,29 +276,60 @@ function withinAmount(value, limit) {
 
 function paymentAmounts(payment) {
   const value = metadata(payment.metadata);
-  const gross = cents(payment.amount);
+  const gross = exactCents(payment.amount);
   const explicitBase = recordedCents(payment.base_amount_cents, value.base_amount);
   const explicitSurcharge = recordedCents(payment.surcharge_amount_cents, value.card_surcharge);
-  if (payment.processor === 'stripe' && explicitBase == null && explicitSurcharge == null) return null;
+  if (!withinAmount(gross, Number.MAX_SAFE_INTEGER)
+    || explicitBase === null || explicitSurcharge === null
+    || (payment.processor === 'stripe' && explicitBase === undefined && explicitSurcharge === undefined)) return null;
   const surcharge = explicitSurcharge ?? 0;
   const baseCents = explicitBase ?? gross - surcharge;
   if (!withinAmount(baseCents, gross) || !withinAmount(surcharge, gross)) return null;
-  if (Math.abs(baseCents + surcharge - gross) > 1) return null;
-  const refund = cents(payment.refund_amount);
-  if (fullRefund(payment)) {
-    if (payment.status !== 'disputed' && refund !== gross) return null;
-    return { baseCents, netBaseCents: 0 };
-  }
+  if (baseCents + surcharge !== gross) return null;
+  const refund = exactCents(payment.refund_amount ?? 0);
   const refundedSurcharge = Number(payment.refunded_surcharge_cents ?? 0);
   const recordedRefundBase = Number(payment.refunded_base_cents ?? 0);
+  if (!Number.isSafeInteger(refundedSurcharge) || !Number.isSafeInteger(recordedRefundBase)) return null;
   const refundBase = recordedRefundBase || refund - refundedSurcharge;
   if (!withinAmount(refund, gross) || !withinAmount(refundedSurcharge, surcharge)
     || !withinAmount(refundBase, baseCents)) return null;
-  if (Math.abs(refundBase + refundedSurcharge - refund) > 1) return null;
+  if (refundBase + refundedSurcharge !== refund) return null;
+  if (fullRefund(payment)) {
+    if (payment.status !== 'disputed'
+      && (refund !== gross || refundBase !== baseCents || refundedSurcharge !== surcharge)) return null;
+    return { baseCents, netBaseCents: 0 };
+  }
   return { baseCents, netBaseCents: baseCents - refundBase };
 }
 
-function creditMovementKind(invoice, row) {
+function savedCardMovementKind(row, savedCardEvidence) {
+  const note = String(row.note || '');
+  const deltaCents = exactCents(row.delta);
+  if (deltaCents == null) return null;
+  const reservedByAttempt = note.match(/^Account credit reserved for saved-card reconciliation attempt (.+)$/);
+  if (reservedByAttempt) {
+    const attempt = savedCardEvidence.reservableById.get(String(reservedByAttempt[1]));
+    if (attempt && Math.abs(deltaCents) === attempt.creditDeltaCents) return 'application';
+  }
+  const consumedByAttempt = note.match(/^Account credit consumed by (?:reconciled|processing) saved-card attempt (.+)$/);
+  if (consumedByAttempt) {
+    const attempt = savedCardEvidence.succeededById.get(String(consumedByAttempt[1]));
+    if (attempt && Math.abs(deltaCents) === attempt.creditDeltaCents) return 'application';
+  }
+  const byOrphanPi = note.match(/^Account credit reserved for saved-card reconciliation orphan PI (.+)$/);
+  if (byOrphanPi) {
+    const attempt = savedCardEvidence.reservableByPi.get(String(byOrphanPi[1]));
+    if (attempt && Math.abs(deltaCents) === attempt.creditDeltaCents) return 'application';
+  }
+  const released = note.match(/^Account credit released after failed saved-card attempt (.+)$/);
+  if (released) {
+    const attempt = savedCardEvidence.failedById.get(String(released[1]));
+    if (attempt && deltaCents === attempt.creditDeltaCents) return 'saved_card_release';
+  }
+  return null;
+}
+
+function creditMovementKind(invoice, row, savedCardEvidence) {
   const note = String(row.note || '');
   const label = invoice.invoice_number || invoice.id;
   if (row.source === 'adjustment'
@@ -299,13 +348,14 @@ function creditMovementKind(invoice, row) {
     if (canonicalUnwind) return 'application_unwind';
   }
   if (['invoice_application', 'invoice_prepaid'].includes(row.source)) return 'application';
+  if (row.source === 'adjustment') return savedCardMovementKind(row, savedCardEvidence);
   return null;
 }
 
-function creditMovementEvidence(invoice, rows) {
+function creditMovementEvidence(invoice, rows, savedCardEvidence) {
   const movements = rows.map((row) => ({
-    delta: cents(row.delta),
-    kind: creditMovementKind(invoice, row),
+    delta: exactCents(row.delta),
+    kind: creditMovementKind(invoice, row, savedCardEvidence),
     at: millis(row.created_at),
   })).filter(({ delta }) => delta !== 0);
   const groups = [];
@@ -348,7 +398,47 @@ async function committedCreditEvidence(conn, invoice, requiredCents) {
     .orderBy('created_at', 'asc')
     .orderBy('id', 'asc')
     .select('id', 'delta', 'source', 'note', 'created_at');
-  const evidence = creditMovementEvidence(invoice, rows);
+  const hasSavedCardMovement = !invoice.payer_id && rows.some((row) => row.source === 'adjustment'
+    && /^Account credit (?:reserved for saved-card reconciliation|consumed by (?:reconciled|processing) saved-card attempt|released after failed saved-card attempt)/.test(String(row.note || '')));
+  const attempts = hasSavedCardMovement ? await conn('stripe_invoice_charge_attempts')
+    .where({ invoice_id: invoice.id })
+    .whereIn('status', ['succeeded', 'failed'])
+    .whereNotNull('resolved_at')
+    .select('id', 'status', 'stripe_payment_intent_id', 'credit_applied_delta') : [];
+  const needsSettledPayment = attempts.some((attempt) => attempt.status === 'succeeded');
+  const sourcePaymentRows = needsSettledPayment ? await conn('payments')
+    .where({ customer_id: invoice.customer_id })
+    .whereRaw("metadata->>'invoice_id' = ?", [String(invoice.id)])
+    .whereIn('status', ['paid', 'refunded', 'disputed'])
+    .select('customer_id', 'stripe_payment_intent_id', 'payer_id', 'metadata') : [];
+  const sourcePaymentIntents = new Set(sourcePaymentRows.filter((row) => billToMatches(invoice, row)
+    && metadata(row.metadata).source === 'admin_card_on_file')
+    .map((row) => String(row.stripe_payment_intent_id || ''))
+    .filter(Boolean));
+  const savedCardEvidence = {
+    reservableById: new Map(),
+    reservableByPi: new Map(),
+    succeededById: new Map(),
+    failedById: new Map(),
+  };
+  for (const attempt of attempts) {
+    const creditDeltaCents = exactCents(attempt.credit_applied_delta);
+    if (!(creditDeltaCents > 0)) continue;
+    const normalized = { ...attempt, creditDeltaCents };
+    if (attempt.status === 'failed') {
+      savedCardEvidence.failedById.set(String(attempt.id), normalized);
+      savedCardEvidence.reservableById.set(String(attempt.id), normalized);
+      if (attempt.stripe_payment_intent_id) {
+        savedCardEvidence.reservableByPi.set(String(attempt.stripe_payment_intent_id), normalized);
+      }
+    } else if (attempt.stripe_payment_intent_id
+      && sourcePaymentIntents.has(String(attempt.stripe_payment_intent_id))) {
+      savedCardEvidence.succeededById.set(String(attempt.id), normalized);
+      savedCardEvidence.reservableById.set(String(attempt.id), normalized);
+      savedCardEvidence.reservableByPi.set(String(attempt.stripe_payment_intent_id), normalized);
+    }
+  }
+  const evidence = creditMovementEvidence(invoice, rows, savedCardEvidence);
   if (evidence.invalidTimestamp || (evidence.hasUnknown && (evidence.hasApplication || recorded > 0))) return null;
 
   let consumed = 0;
@@ -400,7 +490,7 @@ async function readReceiptState(conn, invoice) {
   const payments = (await sourcePayments(conn, invoice)).filter((row) =>
     billToMatches(invoice, row) && (row.status !== 'disputed'
       || String(metadata(row.metadata).dispute_invoice_id || '') === String(invoice.id)));
-  if (await hasUnresolvedCombinedPartialRefund(conn, invoice, payments)) return 'unconfirmed';
+  if (await hasUnresolvedCombinedPartialCase(conn, invoice, payments)) return 'unconfirmed';
   const money = payments.filter((payment) => payment.status === 'paid' || fullRefund(payment));
   const valued = money.map((payment) => ({ payment, amounts: paymentAmounts(payment) }));
   const depositCents = invoiceDepositCreditCents(invoice);

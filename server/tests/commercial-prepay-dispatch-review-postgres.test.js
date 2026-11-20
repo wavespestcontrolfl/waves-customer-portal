@@ -126,14 +126,17 @@ async function seedOriginal({ status = 'paid', paymentIntentId = null, unbookedS
 
 async function insertCardPayment(ids, {
   paymentIntentId,
+  chargeId = null,
   status = 'paid',
   refundStatus = null,
   refundAmount = 0,
   amount = 55,
   baseCents = 5500,
   surchargeCents = 0,
+  refundedBaseCents = 0,
   refundedSurchargeCents = 0,
   invoiceId = null,
+  metadata = {},
   createdAt = new Date(),
 } = {}) {
   const [row] = await trx('payments').insert({
@@ -142,17 +145,40 @@ async function insertCardPayment(ids, {
     amount,
     base_amount_cents: baseCents,
     surcharge_amount_cents: surchargeCents,
+    refunded_base_cents: refundedBaseCents,
     refunded_surcharge_cents: refundedSurchargeCents,
     status,
     refund_status: refundStatus,
     refund_amount: refundAmount,
     stripe_payment_intent_id: paymentIntentId,
+    stripe_charge_id: chargeId,
     processor: 'stripe',
     description: 'Synthetic commercial prepay receipt',
-    metadata: invoiceId ? { invoice_id: invoiceId } : {},
+    metadata: { ...metadata, ...(invoiceId ? { invoice_id: invoiceId } : {}) },
     created_at: createdAt,
   }).returning('*');
   return row;
+}
+
+async function insertSavedCardAttempt(ids, {
+  invoiceId = ids.invoiceId,
+  paymentIntentId,
+  status = 'succeeded',
+  creditDelta = 15,
+} = {}) {
+  const attemptId = randomUUID();
+  await trx('stripe_invoice_charge_attempts').insert({
+    id: attemptId,
+    invoice_id: invoiceId,
+    stripe_payment_method_id: `pm_receipt_${attemptId.slice(0, 12)}`,
+    idempotency_key: `receipt-proof:${attemptId}`,
+    status,
+    stripe_payment_intent_id: paymentIntentId,
+    credit_applied_delta: creditDelta,
+    credit_applied_total: creditDelta,
+    resolved_at: new Date(),
+  });
+  return attemptId;
 }
 
 function reviews(invoiceId) {
@@ -439,6 +465,176 @@ postgres('commercial prepay Dispatch review observes only recovered receipt proo
       .reconcileInvoice(trx, ids.invoiceId);
     expect(['active', 'unconfirmed']).toContain(state);
     expect(await reviews(ids.invoiceId)).toEqual([]);
+  });
+
+  test('an unresolved combined partial dispute keeps a later replacement receipt unconfirmed', async () => {
+    const pi = `pi_combined_dispute_${randomUUID().slice(0, 12)}`;
+    const chargeId = `ch_combined_dispute_${randomUUID().slice(0, 12)}`;
+    const ids = await seedOriginal({ status: 'paid', paymentIntentId: pi });
+    await trx('invoices').where({ id: ids.invoiceId }).update({ stripe_charge_id: chargeId });
+    await insertCardPayment(ids, {
+      paymentIntentId: pi,
+      chargeId,
+      invoiceId: ids.invoiceId,
+      metadata: { combined_payment: true, source: 'combined_payment' },
+    });
+    const [partialCase] = await trx('stripe_orphan_charges').insert({
+      stripe_payment_intent_id: `${pi}:partial-dispute:${randomUUID()}`,
+      stripe_charge_id: chargeId,
+      customer_id: ids.customerId,
+      invoice_id: null,
+      amount: 10,
+      source: 'combined_pay_webhook',
+      original_db_error: 'Synthetic unattributed combined partial dispute',
+    }).returning('*');
+    const review = require('../services/commercial-prepay-dispatch-review');
+    const invoice = await trx('invoices').where({ id: ids.invoiceId }).first();
+    await expect(review.readReceiptState(trx, invoice)).resolves.toBe('unconfirmed');
+
+    await trx('stripe_orphan_charges').where({ id: partialCase.id }).update({
+      resolved: true,
+      resolved_at: new Date(),
+      resolution_notes: 'Synthetic operator allocation complete',
+    });
+    await expect(review.readReceiptState(trx, invoice)).resolves.toBe('active');
+  });
+
+  test.each([
+    ['payment split', { surchargeCents: 1 }],
+    ['refund split', {
+      status: 'refunded', refundStatus: 'full', refundAmount: 55, refundedBaseCents: 5499,
+    }],
+    ['fractional-cent metadata split', {
+      baseCents: null,
+      surchargeCents: null,
+      metadata: { base_amount: 54.999, card_surcharge: 0.001 },
+    }],
+  ])('an inexact %s is unconfirmed', async (_label, payment) => {
+    const pi = `pi_cent_mismatch_${randomUUID().slice(0, 12)}`;
+    const ids = await seedOriginal({ status: payment.status || 'paid', paymentIntentId: pi });
+    await insertCardPayment(ids, { paymentIntentId: pi, ...payment });
+    await expect(require('../services/commercial-prepay-dispatch-review')
+      .readReceiptState(trx, await trx('invoices').where({ id: ids.invoiceId }).first()))
+      .resolves.toBe('unconfirmed');
+  });
+
+  test.each([
+    ['reserved by attempt', ({ attemptId }) => `Account credit reserved for saved-card reconciliation attempt ${attemptId}`],
+    ['reserved by orphan PI', ({ paymentIntentId }) => `Account credit reserved for saved-card reconciliation orphan PI ${paymentIntentId}`],
+    ['consumed on reconciled success', ({ attemptId }) => `Account credit consumed by reconciled saved-card attempt ${attemptId}`],
+    ['consumed while processing', ({ attemptId }) => `Account credit consumed by processing saved-card attempt ${attemptId}`],
+  ])('a saved-card credit %s is accepted with its exact settled evidence', async (_label, noteFor) => {
+    const paymentIntentId = `pi_saved_credit_${randomUUID().slice(0, 12)}`;
+    const ids = await seedOriginal({ status: 'paid', paymentIntentId });
+    await trx('invoices').where({ id: ids.invoiceId }).update({ credit_applied: 15 });
+    await insertCardPayment(ids, {
+      paymentIntentId,
+      amount: 40,
+      baseCents: 4000,
+      invoiceId: ids.invoiceId,
+      metadata: { source: 'admin_card_on_file' },
+    });
+    const attemptId = await insertSavedCardAttempt(ids, { paymentIntentId });
+    await trx('customer_credit_ledger').insert({
+      customer_id: ids.customerId,
+      invoice_id: ids.invoiceId,
+      delta: -15,
+      balance_after: 0,
+      source: 'adjustment',
+      note: noteFor({ attemptId, paymentIntentId }),
+      created_by: 'system:saved_card_reconciliation',
+    });
+    await expect(require('../services/commercial-prepay-dispatch-review')
+      .readReceiptState(trx, await trx('invoices').where({ id: ids.invoiceId }).first()))
+      .resolves.toBe('active');
+  });
+
+  test.each(['attempt', 'invoice', 'payer', 'amount'])(
+    'saved-card credit with mismatched %s evidence stays unconfirmed',
+    async (mismatch) => {
+      const paymentIntentId = `pi_saved_mismatch_${randomUUID().slice(0, 12)}`;
+      const ids = await seedOriginal({ status: 'paid', paymentIntentId });
+      await trx('invoices').where({ id: ids.invoiceId }).update({ credit_applied: 15 });
+      await insertCardPayment(ids, {
+        paymentIntentId,
+        amount: 40,
+        baseCents: 4000,
+        invoiceId: ids.invoiceId,
+        metadata: {
+          source: 'admin_card_on_file',
+          ...(mismatch === 'payer' ? { payer_id: randomUUID() } : {}),
+        },
+      });
+      let attemptInvoiceId = ids.invoiceId;
+      if (mismatch === 'invoice') {
+        const other = await seedOriginal({ status: 'paid', paymentIntentId: null });
+        attemptInvoiceId = other.invoiceId;
+      }
+      const attemptId = await insertSavedCardAttempt(ids, {
+        invoiceId: attemptInvoiceId,
+        paymentIntentId,
+      });
+      await trx('customer_credit_ledger').insert({
+        customer_id: ids.customerId,
+        invoice_id: ids.invoiceId,
+        delta: mismatch === 'amount' ? -14.99 : -15,
+        balance_after: 0,
+        source: 'adjustment',
+        note: `Account credit reserved for saved-card reconciliation attempt ${
+          mismatch === 'attempt' ? randomUUID() : attemptId
+        }`,
+        created_by: 'system:saved_card_reconciliation',
+      });
+      await expect(require('../services/commercial-prepay-dispatch-review')
+        .readReceiptState(trx, await trx('invoices').where({ id: ids.invoiceId }).first()))
+        .resolves.toBe('unconfirmed');
+    },
+  );
+
+  test('an exact failed saved-card reservation and release does not poison later credit proof', async () => {
+    const paymentIntentId = `pi_saved_failed_${randomUUID().slice(0, 12)}`;
+    const ids = await seedOriginal({ status: 'prepaid', paymentIntentId: null });
+    await trx('invoices').where({ id: ids.invoiceId }).update({ credit_applied: 55 });
+    const attemptId = await insertSavedCardAttempt(ids, {
+      paymentIntentId,
+      status: 'failed',
+    });
+    const startedAt = new Date(Date.now() - 120_000);
+    await trx('customer_credit_ledger').insert([
+      {
+        customer_id: ids.customerId,
+        invoice_id: ids.invoiceId,
+        delta: -15,
+        balance_after: 0,
+        source: 'adjustment',
+        note: `Account credit reserved for saved-card reconciliation attempt ${attemptId}`,
+        created_by: 'system:saved_card_reconciliation',
+        created_at: startedAt,
+      },
+      {
+        customer_id: ids.customerId,
+        invoice_id: ids.invoiceId,
+        delta: 15,
+        balance_after: 15,
+        source: 'adjustment',
+        note: `Account credit released after failed saved-card attempt ${attemptId}`,
+        created_by: 'system:saved_card_reconciliation',
+        created_at: new Date(startedAt.getTime() + 30_000),
+      },
+      {
+        customer_id: ids.customerId,
+        invoice_id: ids.invoiceId,
+        delta: -55,
+        balance_after: 0,
+        source: 'invoice_prepaid',
+        note: 'Synthetic later prepaid settlement',
+        created_by: 'synthetic',
+        created_at: new Date(startedAt.getTime() + 60_000),
+      },
+    ]);
+    await expect(require('../services/commercial-prepay-dispatch-review')
+      .readReceiptState(trx, await trx('invoices').where({ id: ids.invoiceId }).first()))
+      .resolves.toBe('active');
   });
 
   test('applying office credit and reversing it moves the same review through three episodes once', async () => {
