@@ -2105,9 +2105,11 @@ async function ledgerProgress(trx, send) {
   const total = await ledger().count('* as c').first();
   const notYet = await applyDeliveryNoSuccessFilter(ledger()).whereNotIn('status', TERMINAL_SUCCESS_STATUSES).count('* as c').first();
   // A hard bounce keeps the sent_at SendGrid's acceptance wrote (bounced_at marks it), but that reader
-  // never got it, and no Resume can reach them: refused, never counted as reached.
+  // never got it, and no Resume can reach them: refused, never counted as reached. These are the
+  // bounced rows the success signal above (hasDeliverySuccessSignal) would count as reached.
   const refused = await ledger().whereNotNull('bounced_at')
-    .where((q) => q.whereNotNull('sent_at').orWhereNotNull('delivered_at').orWhereNotNull('opened_at').orWhereNotNull('clicked_at'))
+    .where((q) => q.whereIn('status', TERMINAL_SUCCESS_STATUSES).orWhereNotNull('sent_at').orWhereNotNull('delivered_at')
+      .orWhereNotNull('opened_at').orWhereNotNull('clicked_at'))
     .count('* as c').first();
   const outstanding = outstandingEligibleDeliveries(send.id, { database: trx });
   const plan = sendHoldout(send.segment_filter);
@@ -2175,7 +2177,7 @@ async function settledOutcome(issue, send, trx) {
       if (!failureToldAt) return { status: 'sent', reason: null };
       return {
         status: 'sent',
-        reason: `went out after all: all ${got} readers got it, after a Resume or delivery confirmations that came late; there is nothing to resume`,
+        reason: `went out after all: ${got} readers got it, after a Resume or delivery confirmations that came late; there is nothing to resume`,
         alert: 'recovered',
         // The failure was told; this correction is not yet.
         failureToldAt,

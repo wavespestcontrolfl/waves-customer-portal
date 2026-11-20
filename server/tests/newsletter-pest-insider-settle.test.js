@@ -213,7 +213,7 @@ test("a sent issue whose readers' mail servers blocked it after SendGrid accepte
 test('a failed issue whose send became sent (a Resume that finished, or delivery confirmations that came late) becomes sent, with one correction for the alert it had', async () => {
   const failed = { ...ISSUE, status: 'failed', reason: 'did not go out: its send failed after 40 of 85 readers got it; Resume in Newsletter → History sends it to the rest', diagnostics: { outcomeToldAt: '2026-12-03T12:30:00.000Z' } };
   const { writes } = fakeDb({ issues: [failed], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 0 } });
-  const correction = 'went out after all: all 85 readers got it, after a Resume or delivery confirmations that came late; there is nothing to resume';
+  const correction = 'went out after all: 85 readers got it, after a Resume or delivery confirmations that came late; there is nothing to resume';
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
   expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
@@ -262,11 +262,11 @@ test('a failed issue nobody was told about, whose send recovered to sent, become
 });
 
 test('a correction that reached no one is told the next minute, in the words the row recorded', async () => {
-  const recovered = { ...ISSUE, status: 'sent', reason: 'went out after all: all 85 readers got it', diagnostics: { failureToldAt: '2026-12-03T12:30:00.000Z' } };
+  const recovered = { ...ISSUE, status: 'sent', reason: 'went out after all: 85 readers got it', diagnostics: { failureToldAt: '2026-12-03T12:30:00.000Z' } };
   const { writes } = fakeDb({ issues: [recovered], sends: [{ ...AUTO_QUEUED, status: 'sent' }], counts: { got: 85, left: 0 } });
 
   expect(await settlePlannedIssues(IN_WINDOW)).toEqual({ settled: 1 });
-  expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({ errors: ['Went out after all: all 85 readers got it'] }), { dedupeKey: 'pest-insider-recovered:issue-1' });
+  expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({ errors: ['Went out after all: 85 readers got it'] }), { dedupeKey: 'pest-insider-recovered:issue-1' });
   expect(writes).toEqual([toldMark('issue-1', 'sent')]);
 });
 
