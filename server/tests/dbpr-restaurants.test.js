@@ -277,6 +277,9 @@ describe('namesFirstVisit', () => {
     expect(['Routine - Food', 'Complaint - Food', 'Licensing - Food'].map((type) => svc.namesFirstVisit(type))).toEqual([true, true, true]);
     const later = ['Callback - Food', 'Call Back - Food', 'call-back', 'Follow-up', 'Follow Up - Food', 'Re-inspection', 'Reinspection'];
     expect(later.map((type) => svc.namesFirstVisit(type))).toEqual(later.map(() => false));
+    // A word split by a tag (htmlText makes the tag a space) still names a later visit.
+    const split = ['Callba ck - Food', 'Call Ba ck - Food', 'Fol low-up', 'Follow-u p - Food', 'Re-inspec tion', 'Rein spection'];
+    expect(split.map((type) => svc.namesFirstVisit(type))).toEqual(split.map(() => false));
     const none = ['', '   ', null, undefined, 7];
     expect(none.map((type) => svc.namesFirstVisit(type))).toEqual(none.map(() => false));
   });
@@ -604,6 +607,10 @@ describe('parseInspectionReport', () => {
     // A blank inspection type, or no type column: no answer.
     expect(read(reportPage(rows, '10/20/2026').replace('Routine - Food', ''), '2026-10-20')).toBeNull();
     expect(read(reportPage(rows, '10/20/2026').replace('<td>Inspection Type</td>', '<td>Kind</td>'), '2026-10-20')).toBeNull();
+    // A tag inside the type's words, in the real layout: still a callback's page, so no answer.
+    const splitType = fixture('report-35a.html').replace('<td>Routine - Food</td>', '<td>Callba<wbr>ck - Food</td>');
+    expect(splitType).toContain('Callba<wbr>ck');
+    expect(parse(splitType, { visitDate: '2026-10-20' })).toBeNull();
     // The fixtures carry the real layout.
     expect(parse(fixture('report-35a.html'), { visitDate: '2026-10-20' })).toMatchObject({ pestEvidence: true });
     expect(parse(fixture('report-35b.html'), { violation35: 1, visitDate: '2026-10-21' })).toEqual({ pestEvidence: false, findings: [] });

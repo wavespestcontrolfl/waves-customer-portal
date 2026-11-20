@@ -294,8 +294,11 @@ const CALLBACK_TYPE_RE = /call\W{0,3}back|follow\W{0,3}up|re\W{0,3}inspect/i;
 
 // Whether a report page's own inspection type names a first visit: given, and naming no callback, follow-up or
 // re-inspection. The page has the last word on that, not the files: the state can relabel a visit between files.
+// The type is tested with every space taken out, so a tag inside a word ("Callba<wbr>ck", which htmlText makes a
+// space) cannot hide a callback. Joined words can only add a match ("Structure Inspection"), which gives no answer.
 function namesFirstVisit(inspectionType) {
-  return typeof inspectionType === 'string' && inspectionType.trim() !== '' && !CALLBACK_TYPE_RE.test(inspectionType);
+  return typeof inspectionType === 'string' && inspectionType.trim() !== ''
+    && !CALLBACK_TYPE_RE.test(inspectionType.replace(/\s+/g, ''));
 }
 
 // ── Report page (pure) ──────────────────────────────────────────
