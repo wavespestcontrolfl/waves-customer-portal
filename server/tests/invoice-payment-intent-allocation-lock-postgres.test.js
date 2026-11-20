@@ -184,6 +184,57 @@ postgres('invoice PaymentIntent allocation locking', () => {
     }
   });
 
+  test('saved-card charging waits for the entire existing checkout and refuses a replacement without contacting Stripe', async () => {
+    const targetId = invoiceIds[1];
+    const methodId = randomUUID();
+    await database('payment_methods').insert({ id: methodId, customer_id: customerId, processor: 'stripe',
+      method_type: 'card', stripe_payment_method_id: 'pm_simulated_saved_card' });
+    const client = jest.spyOn(StripeService, 'ensureStripeCustomer').mockResolvedValue('cus_simulated');
+    const blocker = await database.transaction();
+    let outcome;
+    try {
+      await blocker('invoices').where({ id: invoiceIds[0] }).forUpdate().first('id');
+      outcome = StripeService.chargeInvoiceWithSavedCard(targetId, methodId).then(() => null, (err) => err);
+      await waitForBlockedBackend(blocker);
+      expect(stripeClient.paymentIntents.retrieve).not.toHaveBeenCalled();
+      expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+      await database.transaction(async (replacement) => {
+        await replacement.raw("SET LOCAL lock_timeout = '500ms'");
+        await replacement('invoices').where({ id: targetId }).update({ stripe_payment_intent_id: 'pi_replacement' });
+      });
+      await blocker.commit();
+      await expect(outcome).resolves.toMatchObject({ statusCode: 409 });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+      expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+    } finally {
+      await blocker.rollback().catch(() => {});
+      await outcome;
+      client.mockRestore();
+      await database('stripe_invoice_charge_attempts').where({ invoice_id: targetId }).del();
+      await database('payment_methods').where({ id: methodId }).del();
+    }
+  });
+
+  test('a failed staff ledger transaction clears only the checkout already canceled at Stripe', async () => {
+    const targetId = invoiceIds[1];
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({ id: piId, status: 'requires_payment_method', metadata: {} });
+    stripeClient.paymentIntents.cancel.mockResolvedValue({ id: piId, status: 'canceled' });
+    const completePlan = jest.spyOn(require('../services/payment-plans'), 'completeActivePlansForInvoice')
+      .mockRejectedValueOnce(new Error('simulated late ledger write failure'));
+    try {
+      const { recordManualPayment } = require('../services/invoice-manual-payment');
+      await expect(recordManualPayment(targetId, { method: 'cash', sendReceipt: false }))
+        .rejects.toThrow('simulated late ledger write failure');
+      expect(stripeClient.paymentIntents.cancel).toHaveBeenCalledTimes(1);
+      const invoices = await database('invoices').whereIn('id', invoiceIds).orderBy('id');
+      expect(invoices.map((row) => row.stripe_payment_intent_id)).toEqual([null, null]);
+      expect(invoices.map((row) => row.status)).toEqual(['viewed', 'sent']);
+      expect(await database('payments').where({ customer_id: customerId })).toHaveLength(0);
+    } finally {
+      completePlan.mockRestore();
+    }
+  });
+
   test('a page void that waited and finds changed status rejects without canceling or clearing the PI', async () => {
     const targetId = invoiceIds[1];
     const blocker = await database.transaction();

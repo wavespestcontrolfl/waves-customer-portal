@@ -12,6 +12,7 @@ const {
   VALID_PAYMENT_METHODS,
   recordManualPayment,
   retireLockedPaymentSessionsBeforeSettlement,
+  rethrowAfterSettlementRollback,
 } = require('../services/invoice-manual-payment');
 const { undoManualPayment, describeManualPaymentUndo } = require('../services/invoice-manual-payment-undo');
 const { undoManualPaymentLive, partialPaymentsLive, techCardOnFileLive } = require('../config/feature-gates');
@@ -2667,6 +2668,7 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     // Settlement stopped their reminders and the reopen skips the re-arm
     // inside a transaction, so it runs after commit (below).
     let coveredInvoiceIds = [];
+    const retiredCheckout = {};
     const txResult = await db.transaction(async (trx) => {
       // Chokepoint B (pre-push lock order): the parent-decision gate for the
       // termite term this flag removal cancels is the FIRST lock — gate →
@@ -2729,7 +2731,7 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         const openPi = await retireLockedPaymentSessionsBeforeSettlement(
           trx,
           locked,
-          { action: 'removing the annual prepay flag' },
+          { retiredCheckout, action: 'removing the annual prepay flag' },
         );
         if (openPi) throw refuse(openPi.error);
       }
@@ -2790,7 +2792,7 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           .update({ dispute_suspended_at: null, updated_at: new Date() });
       }
       return null;
-    });
+    }).catch((err) => rethrowAfterSettlementRollback(db, retiredCheckout, err));
 
     if (txResult?.chargeReconciliationPending) {
       return res.status(409).json({ error: txResult.chargeReconciliationPending });
@@ -3218,6 +3220,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     // ── Atomic credit draw-down + prepaid transition ──
     let outcome;
     try {
+      const retiredCheckout = {};
       outcome = await db.transaction(async (trx) => {
         // Serialize with combined /setup before taking customer/invoice rows;
         // this advisory reservation stays held through the prepaid flip.
@@ -3334,7 +3337,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         const openPi = await retireLockedPaymentSessionsBeforeSettlement(
           trx,
           locked,
-          { action: 'applying credit' },
+          { retiredCheckout, action: 'applying credit' },
         );
         if (openPi) {
           const err = new Error(openPi.error);
@@ -3384,7 +3387,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         // as income (owner decision 2026-06-17).
 
         return { invoice: locked, cover: lockedDue, balanceAfter };
-      });
+      }).catch((err) => rethrowAfterSettlementRollback(db, retiredCheckout, err));
     } catch (err) {
       if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
       throw err;

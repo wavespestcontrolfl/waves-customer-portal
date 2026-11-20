@@ -2331,11 +2331,15 @@ const StripeService = {
     let chargeCreditAppliedTotal = chargeOriginalCreditApplied;
     try {
       await db.transaction(async (trx) => {
-        const lockedInvoice = await trx('invoices')
-          .where({ id: invoiceId })
-          .forUpdate()
-          .first();
+        const checkoutPiId = invoice.stripe_payment_intent_id || null;
+        const { lockInvoicePaymentIntentAllocation } = require('./invoice-payment-intent-allocation');
+        const lockedInvoice = await lockInvoicePaymentIntentAllocation(trx, {
+          id: invoiceId, customerId: invoice.customer_id, piId: checkoutPiId, targetForUpdate: true,
+        });
         if (!lockedInvoice) throw new Error('Invoice not found');
+        if ((lockedInvoice.stripe_payment_intent_id || null) !== checkoutPiId) {
+          throw Object.assign(new Error('Payment session changed. Refresh the invoice before charging.'), { statusCode: 409 });
+        }
         // The invoice's OWN Bill-To, under its row lock (Codex #4971 r10 P1).
         // A payer stamped on the invoice (at mint — InvoiceService.create
         // persists it — or by a writer racing the unlocked read above) makes

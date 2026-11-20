@@ -159,10 +159,11 @@ async function retireOpenPaymentIntentBeforeSettlement(invoice, { action, connec
 // and preserves its exact verdicts (including ACH microdeposit handling).
 // Provider neutralization runs exactly once; sibling stamp cleanup then stays
 // on the caller transaction with the paid/prepaid transition.
-async function retireLockedPaymentSessionsBeforeSettlement(trx, invoice, { action }) {
+async function retireLockedPaymentSessionsBeforeSettlement(trx, invoice, { action, retiredCheckout }) {
   const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action, connection: trx });
   if (openPi) return openPi;
   if (invoice.stripe_payment_intent_id) {
+    if (retiredCheckout) retiredCheckout.id = invoice.stripe_payment_intent_id;
     // The invoice writer clears its own stamp. Clear any combined siblings on
     // this transaction so their view cannot escape a rolled-back settlement.
     await require('./pay-combined').clearPaymentIntentStamps(
@@ -172,6 +173,19 @@ async function retireLockedPaymentSessionsBeforeSettlement(trx, invoice, { actio
     );
   }
   return null;
+}
+
+// Provider cancellation survives a database rollback. Only clear collectible
+// rows that still point at the exact intent already verified by this request.
+async function rethrowAfterSettlementRollback(database, retiredCheckout, originalError) {
+  if (retiredCheckout.id) {
+    try {
+      await require('./pay-combined').clearPaymentIntentStamps(database, retiredCheckout.id);
+    } catch (cleanupError) {
+      logger.error(`[invoice-manual-payment] Cleanup for canceled checkout ${retiredCheckout.id} failed: ${cleanupError.message}`);
+    }
+  }
+  throw originalError;
 }
 
 // Why this invoice cannot take a part payment right now, or null. `conn` is the pool (before the lock) or the transaction holding the invoice
@@ -379,6 +393,7 @@ async function recordManualPayment(id, {
   // The cash this call booked (the part, or the remainder of a part-paid invoice): the paid flip resets amount_paid, so the row read after it
   // no longer says what was owed.
   let settledAmount = null;
+  const retiredCheckout = {};
   const updatedInvoice = await db.transaction(async (trx) => {
     // Standard collection lock order: reserve combined setup for the stable
     // owner before taking the invoice row. The advisory lock stays held to
@@ -491,7 +506,7 @@ async function recordManualPayment(id, {
     const openPi = await retireLockedPaymentSessionsBeforeSettlement(
       trx,
       locked,
-      { action: 'recording a manual payment' },
+      { action: 'recording a manual payment', retiredCheckout },
     );
     if (openPi) throw refusal(openPi.status, openPi.error);
     if (partCents != null) {
@@ -643,7 +658,7 @@ async function recordManualPayment(id, {
       await require('./receipt-delivery-queue').enqueueReceiptDelivery({ invoiceId: id, source: 'zelle_notice_reconciler', customerInitiated: true, database: trx });
     }
     return row;
-  });
+  }).catch((err) => rethrowAfterSettlementRollback(db, retiredCheckout, err));
 
   if (updatedInvoice?.racedNewPaymentIntent) {
     throw refusal(409, 'A new payment session started for this invoice — retry recording the payment');
@@ -887,4 +902,5 @@ module.exports = {
   partPaymentRefusal,
   retireOpenPaymentIntentBeforeSettlement,
   retireLockedPaymentSessionsBeforeSettlement,
+  rethrowAfterSettlementRollback,
 };
