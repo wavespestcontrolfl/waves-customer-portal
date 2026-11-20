@@ -4521,17 +4521,15 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
     }
 
     // leadId + email match = good-enough public auth (customer just typed the
-    // email in the same session). Avoids any-id-overwrite abuse. A web-form
-    // lead (the quiz hand-off) must also still pass the hand-off's rule, as
-    // on /calculate. The write below repeats this whole predicate, so a lead
-    // the office closes, removes or re-addresses between this read and that
-    // write is left alone.
-    const ownLead = () => db('leads')
+    // email in the same session). Avoids any-id-overwrite abuse. Never a
+    // web-form lead: its id reaches a visitor only through the quiz hand-off,
+    // and no page of the hand-off calls this route.
+    const lead = await db('leads')
       .where({ id: leadId })
       .whereNull('deleted_at')
       .whereRaw('LOWER(email) = ?', [String(email).toLowerCase().trim()])
-      .modify(exceptClosedWebFormLead);
-    const lead = await ownLead().first();
+      .whereRaw("lead_type IS DISTINCT FROM 'form_submission'")
+      .first();
     if (!lead) return res.status(404).json({ error: 'Lead not found.' });
 
     const addLabels = valid.map(id => UPSELL_LABELS[id]);
@@ -4552,12 +4550,11 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
     const mergedUpsells = Array.from(new Set([...prevUpsells, ...valid]));
     const updatedData = { ...existingData, upsell_interests: mergedUpsells, upsell_added_at: new Date().toISOString() };
 
-    const written = await ownLead().update({
+    await db('leads').where({ id: leadId }).update({
       service_interest: mergedInterest,
       extracted_data: JSON.stringify(updatedData),
       updated_at: new Date(),
     });
-    if (!written) return res.status(404).json({ error: 'Lead not found.' });
 
     // Keep the quote_wizard estimate row in sync — admins viewing the pipeline
     // should see the merged service_interest after an upsell add, not the

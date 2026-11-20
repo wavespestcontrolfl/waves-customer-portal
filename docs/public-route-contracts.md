@@ -4448,7 +4448,14 @@ every other commercial signal). The quiz answers are NOT a pricing input:
 `property` never becomes the draft's property type. They are not
 staff-only: the Lead Response Agent may read them. The response is
 unchanged. Safe in either deploy order: a portal without this change
-ignores the unknown key and files an ordinary form lead;
+ignores the unknown key and files an ordinary form lead. The AI triage,
+which the webhook starts without waiting, writes a lead this request
+inserted only while the row still holds the intake stage
+(`lead_webhook_received`, checked in the UPDATE's WHERE): once a price page
+has continued the lead (the attach token, see
+`/api/public/estimator/property-lookup` below), a late triage answer is
+dropped and never replaces the price page's stage, address verdict or
+profile;
 and both accept an OPTIONAL `heard_about` —
 the quote form's self-reported "How did you hear about us?" answer,
 validated against a FIXED allowlist (`server/services/heard-about.js`
@@ -5367,10 +5374,10 @@ that lead passes the hand-off's rule: open, not deleted, not commercial
 ownership UPDATE). A refused lead matches zero rows, like a wrong id, and
 the run files its own `quote_wizard` lead. The run's later customer link
 (`customer_id`) repeats the rule, so a web-form lead the office converted
-or closed mid-request keeps its customer. `/upsell` holds its read and its
-write to one predicate (the id, the typed email, not deleted, and this
-rule) and answers 404 when either matches no row. A `leadId` of any other
-lead type is held to its own route's conditions only.
+or closed mid-request keeps its customer. `/upsell` never writes a
+web-form lead (its read excludes the type and answers 404): no page of the
+hand-off calls it. A `leadId` of any other lead type is held to its own
+route's conditions only.
 Optional `heard_about` / `heard_about_prompt` (owner-approved 2026-10-30,
 "count customers from AI"): the wizard's self-reported "How did you hear
 about us?" answer and its AI-only "What did you ask it?" follow-up, validated

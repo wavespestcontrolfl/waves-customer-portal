@@ -47,10 +47,10 @@ function applyQuizHandoffLeadPredicate(query) {
   return applyOpenLeadPredicate(query).whereNull('deleted_at').whereRaw('is_commercial IS NOT TRUE');
 }
 
-// For a public write that takes a lead id of any type (the price calculation
-// and its add-on step). A web-form lead's id reaches a visitor only through
-// the quiz hand-off, so that lead must pass the hand-off's rule. Every other
-// lead type keeps the rule its own route already applies.
+// For a public write that takes a lead id of any type (the price
+// calculation). A web-form lead's id reaches a visitor only through the quiz
+// hand-off, so that lead must pass the hand-off's rule. Every other lead
+// type keeps the rule its own route already applies.
 function exceptClosedWebFormLead(query) {
   return query.where((own) => own
     .whereRaw("lead_type IS DISTINCT FROM 'form_submission'")

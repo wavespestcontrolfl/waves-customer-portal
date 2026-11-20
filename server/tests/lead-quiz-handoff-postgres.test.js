@@ -1,7 +1,7 @@
 /**
  * Quiz hand-off, the price page's half, end to end on real rows: the public
  * routes themselves (the property lookup, the lead-prefill read-back, the
- * price calculation and its add-on step).
+ * price calculation and its add-on step, the lead webhook's AI triage).
  *
  * An attach token names one web-form lead (a quiz lead). With it, the price
  * page's lookup updates that lead instead of filing a second one, and the
@@ -14,21 +14,34 @@
  *    commercial; a wrong or expired token attaches nothing; and an attach
  *    token never reads a lead back. That visitor files a quote_wizard lead as
  *    before;
- *  - the price calculation and its add-on step keep the same rule on their
- *    own writes, so a lead id sent straight to them cannot write a web-form
- *    lead the office closed;
- *  - every other lead type keeps its own rule.
- * Outbound services (texts, email, alerts, the property lookup's paid
- * sources) are stubbed. The rows are this suite's own (synthetic names,
+ *  - the price calculation keeps the same rule on its own write, so a lead
+ *    id sent straight to it cannot write a web-form lead the office closed,
+ *    and the add-on step never writes a web-form lead;
+ *  - every other lead type keeps its own rule;
+ *  - the webhook's AI triage, answering late, writes nothing once a price
+ *    page has continued the lead.
+ * Outbound services (texts, email, alerts, the AI triage, the lead agent,
+ * the property lookup's paid sources) are stubbed. The rows are this suite's own (synthetic names,
  * numbers in the unassigned area code 999) and are removed after. It refuses
  * any database but a private QA one or CI's.
  */
+const mockTriage = jest.fn(async () => null);
 // The routes' own request limits (5 lookups an hour for one address) are not
 // under test here.
 jest.mock('express-rate-limit', () => () => (_req, _res, next) => next());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
+jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({})) }));
+jest.mock('../services/owner-alerts', () => ({ recordOwnerAlert: jest.fn(async () => ({})) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: false })) }));
+jest.mock('../services/lead-auto-reply', () => ({
+  sendLeadAutoReplyOnce: jest.fn(async () => ({ sent: false })),
+  sendCurrentCustomerQuoteText: jest.fn(async () => ({ sent: false })),
+}));
+jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn(async () => ({ enrolled: false })) }));
+jest.mock('../services/lead-triage', () => ({ aiTriageLead: (...args) => mockTriage(...args) }));
+// Never a paid agent session from a test.
+jest.mock('../services/lead-response-agent', () => ({ isLeadAgentConfigured: () => false, processLead: jest.fn(async () => ({})) }));
 jest.mock('../services/sendgrid-mail', () => ({
   isConfigured: jest.fn(() => false), sendOne: jest.fn(async () => ({})), newsletterGroupId: () => null, serviceGroupId: () => null,
 }));
@@ -70,6 +83,7 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
     ({ mintLeadAttachToken, mintLeadPrefillToken } = require('../utils/lead-prefill-token'));
     const app = express();
     app.use(express.json());
+    app.use('/api/leads', require('../routes/lead-webhook'));
     app.use('/api/public/estimator', require('../routes/public-property-lookup'));
     app.use('/api/public/quote', require('../routes/public-quote'));
     server = app.listen(0, () => { base = `http://127.0.0.1:${server.address().port}`; done(); });
@@ -91,7 +105,7 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
     for (const table of ['activity_log', 'customer_interactions', 'notification_prefs', 'property_preferences']) {
       await quietly(db(table).whereIn('customer_id', customerIds).del());
     }
-    await quietly(db('estimates').whereRaw(`${LAST_TEN('customer_phone')} = ANY(?)`, [phones]).del());
+    await quietly(db('estimates').whereIn('customer_id', customerIds).orWhereRaw(`${LAST_TEN('customer_phone')} = ANY(?)`, [phones]).del());
     await quietly(db('leads').whereIn('id', leadIds).del());
     await quietly(db('customers').whereIn('id', customerIds).del());
     await quietly(db('customer_accounts').whereIn('id', customers.map((row) => row.account_id).filter(Boolean)).del());
@@ -148,6 +162,12 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
     services: { pest: { frequency: 'quarterly' } },
   });
   const upsell = (contact, leadId) => post('/api/public/quote/upsell', { leadId, email: contact.email, addOns: ['mosquito'] });
+  // A quiz page's submission to the lead webhook.
+  const quizSubmission = () => ({
+    name: 'Pat Synthetic', phone: syntheticPhone(), email: `pat.${randomUUID().slice(0, 8)}@example.com`, address: ADDRESS,
+    interest: 'pest', specific_service: 'cockroach_control', service_interest: 'Cockroach Control',
+    timeline: 'this_week', quiz: QUIZ, source: 'astro-pest-quiz',
+  });
 
   describe('the property lookup', () => {
     test('continues the lead the token names: one lead, its type and answers kept, and the price page\'s draft is the only estimate', async () => {
@@ -200,15 +220,17 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
   });
 
   describe('the price calculation and its add-on step, sent a lead id directly', () => {
-    test('an open web-form lead is priced in place', async () => {
+    test('an open web-form lead is priced in place, and the add-on step never writes it', async () => {
       const lead = await quizLead();
       const priced = await calculate(lead, lead.leadId);
       expect(priced).toMatchObject({ status: 200, json: { lead_id: lead.leadId } });
       expect((await leadsOnPhone(lead.phone)).map((row) => row.id)).toEqual([lead.leadId]);
 
+      const before = await leadRow(lead.leadId);
       const added = await upsell(lead, lead.leadId);
-      expect(added).toMatchObject({ status: 200, json: { ok: true } });
-      expect((await leadRow(lead.leadId)).service_interest).toContain('Mosquito');
+      expect(added).toEqual({ status: 404, json: { error: 'Lead not found.' } });
+      const after = await leadRow(lead.leadId);
+      expect([after.service_interest, after.updated_at]).toEqual([before.service_interest, before.updated_at]);
     }, 120000);
 
     test.each(CLOSED)('a web-form lead the office %s is left alone: the run files its own lead, and the add-on step answers 404', async (_label, change) => {
@@ -234,7 +256,44 @@ maybeDescribe('quiz hand-off: the price page continues the lead an attach token 
       const priced = await calculate(lead, lead.leadId);
       expect(priced).toMatchObject({ status: 200, json: { lead_id: lead.leadId } });
       expect(await stageOf(lead.leadId)).toBe('quote_calculated');
-      expect((await leadRow(lead.leadId)).status).toBe('lost');
+
+      const added = await upsell(lead, lead.leadId);
+      expect(added).toMatchObject({ status: 200, json: { ok: true } });
+      const row = await leadRow(lead.leadId);
+      expect(row.service_interest).toContain('Mosquito');
+      expect(row.status).toBe('lost');
+    }, 120000);
+  });
+
+  describe('the lead webhook\'s AI triage, answering late', () => {
+    afterEach(() => { mockTriage.mockImplementation(async () => null); });
+
+    test('writes nothing once a price page has continued the lead; a lead still at intake takes it', async () => {
+      const answers = [];
+      mockTriage.mockImplementation(() => new Promise((resolve) => { answers.push(resolve); }));
+      const continued = quizSubmission();
+      const atIntake = quizSubmission();
+      await post('/api/leads', continued);
+      await post('/api/leads', atIntake);
+      const [{ id: continuedId }] = await leadsOnPhone(continued.phone);
+      const [{ id: intakeId }] = await leadsOnPhone(atIntake.phone);
+      expect(answers).toHaveLength(2);
+
+      const looked = await lookup(continued, { prefill_lead_id: continuedId, prefill_token: mintLeadAttachToken(continuedId) });
+      expect(looked).toMatchObject({ status: 200, json: { lead_id: continuedId } });
+      // Both triages answer now; the continued lead's write is issued first.
+      for (const answer of answers) answer({ extractedData: { summary: 'late triage' } });
+      const dataOf = async (id) => parsed((await leadRow(id)).extracted_data);
+      const deadline = Date.now() + 10000;
+      while ((await dataOf(intakeId)).summary !== 'late triage' && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      expect(await dataOf(intakeId)).toMatchObject({ summary: 'late triage', quiz: QUIZ });
+      const kept = await dataOf(continuedId);
+      expect(kept).toMatchObject({ stage: 'property_lookup_complete', quiz: QUIZ });
+      expect(kept.summary).toBeUndefined();
     }, 120000);
   });
 });
