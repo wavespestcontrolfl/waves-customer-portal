@@ -270,13 +270,32 @@ function htmlText(html) {
     .trim();
 }
 
+// A follow-up report keeps the first visit's note first and adds each later visit's note after it:
+// "High Priority - - From initial inspection : ... - From follow-up inspection 2026-09-03: ...".
+const VISIT_NOTE_RE = /-\s*From (?:initial inspection|follow-up inspection (\d{4}-\d\d-\d\d))\s*:/g;
+
+// The visit notes newest first, each with its label, so the cap never drops the visit the page reports. Text with
+// fewer than two notes (a routine report) is unchanged.
+function newestNoteFirst(text) {
+  const marks = [...text.matchAll(VISIT_NOTE_RE)];
+  if (marks.length < 2) return text;
+  const notes = marks.map((mark, i) => ({
+    date: mark[1] || '',
+    text: text.slice(mark.index, i + 1 < marks.length ? marks[i + 1].index : undefined).replace(/^-\s*/, '').trim(),
+  }));
+  // The initial note has no date, so it sorts last; a stable sort keeps the page order within a day.
+  notes.sort((a, b) => (a.date === b.date ? 0 : a.date > b.date ? -1 : 1));
+  const label = text.slice(0, marks[0].index).trim();
+  return [label, notes.map((note) => note.text).join(' - ')].filter(Boolean).join(' ');
+}
+
 /**
  * Report page HTML -> { pestEvidence, findings: [{ code, text }] }, or null when the page cannot answer. A page
  * answers only when it is whole (the state office footer closes it) and lists the violation 35 the file counted (a
  * 35A or 35B code). An error page, a changed layout or a page cut short is a failed read, retried later, never
  * "no pests". An entry starts at a table cell that holds a violation code alone and takes the cells after it in
  * its row, so a code quoted in a note, a comment, a script or the footer never starts one. findings holds the
- * 35A entries only.
+ * 35A entries only, each note of a follow-up report newest first (newestNoteFirst).
  */
 function parseInspectionReport(html) {
   const page = String(html || '').replace(/<!--[\s\S]*?-->|<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ');
@@ -300,7 +319,7 @@ function parseInspectionReport(html) {
   if (!entries.some((entry) => /^35[AB]-/.test(entry.code))) return null;
   const findings = entries
     .filter((entry) => /^35A-/.test(entry.code))
-    .map((entry) => ({ code: entry.code, text: entry.parts.join(' ').slice(0, FINDING_TEXT_MAX) }));
+    .map((entry) => ({ code: entry.code, text: newestNoteFirst(entry.parts.join(' ')).slice(0, FINDING_TEXT_MAX) }));
   return { pestEvidence: findings.length > 0, findings };
 }
 

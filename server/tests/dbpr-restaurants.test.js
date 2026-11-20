@@ -259,6 +259,22 @@ describe('parseInspectionReport', () => {
     expect(svc.parseInspectionReport(page('x'.repeat(2000))).findings[0].text).toHaveLength(400);
     expect(svc.parseInspectionReport(page('ROACH\0ES')).findings[0].text).toBe('ROACH ES');
   });
+
+  test('a follow-up report puts the newest visit note first, so the cap never drops the visit the page reports', () => {
+    const page = (note) => `<p>Inspection Information</p><table><tr><td>35A-02-8</td><td>${note}</td></tr></table><p>2601 Blair Stone Road</p>`;
+    const initial = `Live, small flying insects found. ${'Observed flies at the bar. '.repeat(20)}`;
+    const note = `High Priority - - From initial inspection : High Priority - ${initial}`
+      + '- From follow-up inspection 2026-09-01: Observed 2 live flies at the bar. **Admin Complaint** '
+      + '- From follow-up inspection 2026-09-03: Observed 1 dead roach in dry storage.';
+    const { text } = svc.parseInspectionReport(page(note)).findings[0];
+    expect(text).toHaveLength(400);
+    expect(text.startsWith('High Priority - From follow-up inspection 2026-09-03: Observed 1 dead roach in dry storage. '
+      + '- From follow-up inspection 2026-09-01: Observed 2 live flies at the bar. **Admin Complaint** '
+      + '- From initial inspection : High Priority - Live, small flying insects found.')).toBe(true);
+    // One note (a routine report, or a first citation) is unchanged.
+    const one = 'High Priority - - From initial inspection : High Priority - Rodent droppings in dry storage.';
+    expect(svc.parseInspectionReport(page(one)).findings[0].text).toBe(one);
+  });
 });
 
 describe('reportUrl', () => {
