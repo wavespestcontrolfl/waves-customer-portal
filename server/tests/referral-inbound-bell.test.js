@@ -367,20 +367,44 @@ describe('a tap', () => {
   test('under GATE_REFERRAL_STEP2 a confirm with no visit yet states the rule', async () => {
     gates.isEnabled.mockImplementation((gate) => gate === 'referralStep2');
     inbound.confirmInboundReferral.mockResolvedValue({ referralId: 'r-1', converted: true, creditsNow: false, credited: null, error: null });
-    await expect(run(CONFIRM)).resolves.toMatchObject({ message: expect.stringContaining('Member: $25, or $50 within half a mile; friend: $25 credit at their first visit.') });
+    await expect(run(CONFIRM)).resolves.toMatchObject({ message: expect.stringContaining('Credits follow the program settings.') });
   });
 });
 
 describe('under GATE_REFERRAL_STEP2 the prompts state the rule, not a flat $25 each', () => {
   beforeEach(() => gates.isEnabled.mockImplementation((gate) => gate === 'referralStep2'));
 
+  // What referral-inbound.js attaches to a card from the live settings: here the owner's numbers, and a changed row.
+  const NORMAL = { atCap: false, text: 'Member: $25, or $50 within half a mile; friend: $25 credit', short: 'member $25 or $50 within half a mile; friend $25' };
+  const CHANGED = { atCap: false, text: 'Member: $30, or $60 within 1 mile; friend: $20 credit', short: 'member $30 or $60 within 1 mile; friend $20' };
+  const CAPPED = { atCap: true, text: 'Member is at the yearly limit: $0; friend: $25 credit', short: 'member at the yearly limit: $0; friend $25' };
+
   test('the row, the Confirm prompt and the full text', () => {
-    const composed = composeCard(card());
+    const composed = composeCard(card({ terms: NORMAL }));
     const row = composeAdminAlert(composed.spec);
-    expect(row.why).toBe("Came in through Lea Quill's referral link; member $25 ($50 near), friend $25 after the first plan visit.");
+    expect(row.why).toBe("Came in Oct 27 through Lea Quill's referral link; member $25 or $50 within half a mile; friend $25.");
     const [confirm] = composed.spec.buttons.items;
-    expect(confirm.prompt).toBe('Make Lea Quill the referrer of Ames Fenn (member $25 or $50 near; friend $25)?');
-    expect(composed.detail).toContain('Member: $25, or $50 within half a mile; friend: $25 credit at their first visit, at Ames\'s first completed plan visit');
+    expect(confirm.prompt).toBe('Make Lea Quill the referrer of Ames Fenn (member $25 or $50 within half a mile; friend $25)?');
+    expect(composed.detail).toContain("Member: $25, or $50 within half a mile; friend: $25 credit, at Ames's first completed plan visit, and the referrer then gets one thank-you email");
     expect(`${row.why} ${confirm.prompt} ${composed.detail}`).not.toMatch(/\$25 each|both \$25|Both accounts get the \$25/i);
   });
+
+  test('the words follow the effective settings, not literals', () => {
+    const composed = composeCard(card({ terms: CHANGED }));
+    expect(composed.spec.buttons.items[0].prompt).toContain('member $30 or $60 within 1 mile; friend $20');
+    expect(composed.detail).toContain('Member: $30, or $60 within 1 mile; friend: $20 credit');
+  });
+
+  test('a member at the yearly limit is told so, and no member thank-you email is promised', () => {
+    const composed = composeCard(card({ terms: CAPPED }));
+    expect(composed.spec.buttons.items[0].prompt).toBe('Make Lea Quill the referrer of Ames Fenn (member at the yearly limit: $0; friend $25)?');
+    expect(composed.detail).toContain('Member is at the yearly limit: $0; friend: $25 credit, at Ames\'s first completed plan visit.');
+    expect(composed.detail).not.toMatch(/thank-you email/);
+  });
+
+  test('settings that could not be read say credits follow the program settings', () => {
+    const composed = composeCard(card());
+    expect(composed.detail).toContain('Credits follow the program settings, at Ames');
+  });
+
 });

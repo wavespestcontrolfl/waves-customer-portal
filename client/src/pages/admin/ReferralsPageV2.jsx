@@ -540,7 +540,7 @@ function InboundReferralCard({ item, step2, onDone, flash }) {
           <div style={{ fontSize: 14, color: D.heading }}>
             Confirm {chosen.name || "this customer"} as the referrer.{" "}
             {step2
-              ? `Member: $25, or $50 within half a mile; friend: $25 credit ${item.creditsNow ? "now" : `at ${firstName}'s next completed plan visit`}. The referrer gets one thank-you email at the next 9:00 AM ET, and no text.`
+              ? `${item.terms?.text || "Credits follow the program settings"} ${item.creditsNow ? "now" : `at ${firstName}'s next completed plan visit`}.${item.terms?.atCap ? "" : " The referrer gets one thank-you email at the next 9:00 AM ET, and no text."}`
               : item.creditsNow
                 ? "Both accounts get the $25 credit now. The referrer gets one thank-you email at the next 9:00 AM ET, and no text."
                 : `Both accounts get the $25 credit at ${firstName}'s next completed plan visit. The referrer then gets one thank-you email at the next 9:00 AM ET, and no text.`}{" "}

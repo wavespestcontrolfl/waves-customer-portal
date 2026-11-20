@@ -283,8 +283,11 @@ async function listInboundReferrals(conn = db, { customerId = null } = {}) {
     .map((r) => r.customer_id));
 
   const items = [];
+  const step2On = isEnabled('referralStep2');
   for (const { customer, evidence } of open) {
     const { suggestions, selfReferral } = await suggestionsFor(conn, customer, evidence);
+    // GATE_REFERRAL_STEP2: the effective rule and the likely referrer's standing, for the Queue and the bell prompts.
+    const terms = step2On ? await engine.step2TermsFor(conn, sureReferrerOf({ suggestions, selfReferral })?.customerId || null) : undefined;
     items.push({
       customerId: customer.id,
       name: fullName(customer),
@@ -296,6 +299,7 @@ async function listInboundReferrals(conn = db, { customerId = null } = {}) {
       evidence,
       selfReferral,
       suggestions,
+      ...(terms !== undefined ? { terms } : {}),
     });
   }
   return items;

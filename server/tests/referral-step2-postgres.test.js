@@ -124,6 +124,11 @@ const DAY = 86400000;
       t.string('last_name');
       t.string('phone');
       t.string('email');
+      t.string('address_line1');
+      t.string('address_line2');
+      t.string('city');
+      t.string('state');
+      t.string('zip');
       t.uuid('account_id');
       t.boolean('active').defaultTo(true);
       t.decimal('monthly_rate', 10, 2);
@@ -227,6 +232,32 @@ const DAY = 86400000;
       t.jsonb('structured_notes');
       t.timestamp('created_at', { useTz: true }).defaultTo(db.fn.now());
     });
+    await s.createTable('customer_geocode_reviews', (t) => {
+      t.uuid('customer_id').primary();
+      t.jsonb('address_snapshot').notNullable();
+      t.string('status').notNullable();
+      t.string('reason').notNullable();
+      t.string('source');
+      t.text('evidence');
+      t.uuid('reviewed_by');
+      t.timestamp('reviewed_at', { useTz: true });
+      t.decimal('latitude', 10, 7);
+      t.decimal('longitude', 10, 7);
+      t.timestamp('updated_at', { useTz: true }).defaultTo(db.fn.now());
+    });
+    await s.createTable('customer_properties', (t) => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+      t.uuid('customer_id').notNullable();
+      t.boolean('is_primary').notNullable().defaultTo(false);
+      t.boolean('active').notNullable().defaultTo(true);
+      t.string('address_line1');
+      t.string('address_line2');
+      t.string('city');
+      t.string('state');
+      t.string('zip');
+      t.decimal('latitude', 10, 7);
+      t.decimal('longitude', 10, 7);
+    });
     await s.createTable('referral_clicks', (t) => {
       t.increments('id');
       t.integer('promoter_id');
@@ -265,10 +296,13 @@ const DAY = 86400000;
     jest.clearAllMocks();
     gates.referralStep2 = true;
     for (const table of [
-      'referral_clicks', 'referral_payouts', 'customer_credit_ledger', 'service_records', 'scheduled_services']) {
+      'customer_geocode_reviews', 'customer_properties', 'referral_clicks', 'referral_payouts', 'customer_credit_ledger', 'service_records', 'scheduled_services']) {
       await db(table).del();
     }
-    await db('referral_program_settings').where({ id: 1 }).update({ require_service_completion: true });
+    await db('referral_program_settings').where({ id: 1 }).update({
+      require_service_completion: true, referee_discount_cents: 2500, step2_annual_credit_cap: 10, step2_near_radius_miles: 0.5,
+      step2_referrer_reward_cents: 2500, step2_near_referrer_reward_cents: 5000,
+    });
     await db('referrals').whereNot({ referral_code: 'WAVES-OLD' }).del();
     await db('referral_promoters').del();
     await db('customers').whereNot('id', legacyMemberId).del();
@@ -505,6 +539,142 @@ const DAY = 86400000;
         });
       }
       expect(await engine.step2OfferFor(db, member.id, await engine.getSettings())).toMatchObject({ creditsThisYear: 10, capReached: true });
+    });
+  });
+
+  describe('the Step 2 money path fails closed', () => {
+    test('a settings row that cannot be read leaves the referral pending, with nothing credited and no guard consumed', async () => {
+      const { member, friend, visit, ref } = await performed();
+      const saved = await db('referral_program_settings').where({ id: 1 }).first();
+      await db('referral_program_settings').del();
+      await expect(firstService(friend, visit)).rejects.toMatchObject({ code: 'SETTINGS_UNAVAILABLE' });
+      expect(await credits(member.id)).toHaveLength(0);
+      expect(await credits(friend.id)).toHaveLength(0);
+      expect(await row(ref.id)).toMatchObject({ status: 'signed_up', first_service_completed: false, referrer_reward_status: 'pending_service' });
+      await db('referral_program_settings').insert(saved);
+      // The next completion settles it.
+      expect(await firstService(friend, visit)).toMatchObject({ referrerDollars: 25, refereeDollars: 25 });
+    });
+
+    test('the cap and amounts come from the live row read in the transaction', async () => {
+      await db('referral_program_settings').where({ id: 1 }).update({ step2_annual_credit_cap: 5, referee_discount_cents: 3000 });
+      const member = await customer();
+      const friend = await planFriend();
+      const visit = await recurringVisit(friend.id, { status: 'completed' });
+      for (let i = 0; i < 5; i += 1) {
+        const [prior] = await db('referrals').insert({
+          referrer_customer_id: member.id, referee_name: `Prior ${i}`, referee_phone: `+1941562${String(1000 + i)}`,
+          referral_code: 'WAVES-PRIOR', status: 'credited',
+        }).returning('id');
+        await db('customer_credit_ledger').insert({
+          customer_id: member.id, delta: 25, balance_after: 25 * (i + 1), source: 'referral', referral_id: prior.id,
+        });
+      }
+      const ref = await referral(member, friend, { ageDays: 1 });
+      await convert(ref, friend);
+      expect(await firstService(friend, visit)).toMatchObject({ referrerReason: 'cap_reached', referrerDollars: 0, refereeDollars: 30 });
+    });
+  });
+
+  describe('homes are read through the geocode review', () => {
+    const ADDRESS = { address_line1: '1 Test St', city: 'Bradenton', state: 'FL', zip: '34202' };
+    const snapshot = (c) => JSON.stringify([c.address_line1 ?? null, c.address_line2 ?? null, c.city ?? null, c.state ?? null, c.zip ?? null]);
+    const NEAR = { latitude: HOME.latitude + 0.005, longitude: HOME.longitude };
+    const OLD = process.env.GATE_GEOCODE_REVIEW;
+    beforeEach(() => { process.env.GATE_GEOCODE_REVIEW = 'true'; });
+    afterEach(() => {
+      if (OLD === undefined) delete process.env.GATE_GEOCODE_REVIEW; else process.env.GATE_GEOCODE_REVIEW = OLD;
+    });
+
+    test('a pin the office marked needs_pin or outside_area is no map point: $25, not the near $50', async () => {
+      for (const status of ['needs_pin', 'outside_area']) {
+        const ctx = await performed({ memberFields: { ...HOME, ...ADDRESS }, friendFields: { ...NEAR, ...ADDRESS, address_line1: '2 Test St' } });
+        await db('customer_geocode_reviews').insert({
+          customer_id: ctx.friend.id, address_snapshot: snapshot({ ...ADDRESS, address_line1: '2 Test St' }), status, reason: 'fixture',
+        });
+        await firstService(ctx.friend, ctx.visit);
+        expect(await amounts(ctx.member.id)).toEqual([25]);
+        expect(await row(ctx.ref.id)).toMatchObject({ referrer_reward_reason: 'standard' });
+      }
+    });
+
+    test('a valid primary-property pin counts when the customer row has none: $50', async () => {
+      const ctx = await performed({ memberFields: { ...HOME, ...ADDRESS }, friendFields: { ...ADDRESS, address_line1: '3 Test St' } });
+      await db('customer_properties').insert({ customer_id: ctx.friend.id, is_primary: true, active: true, ...ADDRESS, address_line1: '3 Test St', ...NEAR });
+      await firstService(ctx.friend, ctx.visit);
+      expect(await amounts(ctx.member.id)).toEqual([50]);
+      expect(await row(ctx.ref.id)).toMatchObject({ referrer_reward_reason: 'near' });
+    });
+
+    test('an ordinary pin with no review row is still a pin', async () => {
+      const ctx = await performed({ memberFields: { ...HOME, ...ADDRESS }, friendFields: { ...NEAR, ...ADDRESS, address_line1: '4 Test St' } });
+      await firstService(ctx.friend, ctx.visit);
+      expect(await amounts(ctx.member.id)).toEqual([50]);
+    });
+  });
+
+  describe('what staff are told, and the reward email at the limit', () => {
+    test('the terms come from the live row and the member\'s standing', async () => {
+      await db('referral_program_settings').where({ id: 1 }).update({
+        referee_discount_cents: 2000, step2_referrer_reward_cents: 3000, step2_near_referrer_reward_cents: 6000, step2_near_radius_miles: 1,
+      });
+      const member = await customer();
+      expect(await engine.step2TermsFor(db, member.id)).toMatchObject({ atCap: false, text: 'Member: $30, or $60 within 1 mile; friend: $20 credit' });
+      for (let i = 0; i < 10; i += 1) {
+        const [prior] = await db('referrals').insert({
+          referrer_customer_id: member.id, referee_name: `Prior ${i}`, referee_phone: `+1941563${String(1000 + i)}`,
+          referral_code: 'WAVES-PRIOR', status: 'credited',
+        }).returning('id');
+        await db('customer_credit_ledger').insert({
+          customer_id: member.id, delta: 25, balance_after: 25 * (i + 1), source: 'referral', referral_id: prior.id,
+        });
+      }
+      expect(await engine.step2TermsFor(db, member.id)).toMatchObject({ atCap: true, text: 'Member is at the yearly limit: $0; friend: $20 credit' });
+    });
+
+    test('a $0 member credit leaves nothing for the thank-you email; a posted credit is a candidate', async () => {
+      const normal = await performed();
+      await firstService(normal.friend, normal.visit);
+      expect(await engine.sendDueReferralRewardEmails({ now: new Date() })).toEqual({ credits: 1, immediate: 0, attempted: 0 });
+
+      await db('customer_credit_ledger').del();
+      const capped = await performed();
+      for (let i = 0; i < 10; i += 1) {
+        const [prior] = await db('referrals').insert({
+          referrer_customer_id: capped.member.id, referee_name: `Prior ${i}`, referee_phone: `+1941564${String(1000 + i)}`,
+          referral_code: 'WAVES-PRIOR', status: 'credited',
+        }).returning('id');
+        await db('customer_credit_ledger').insert({
+          customer_id: capped.member.id, delta: 25, balance_after: 25 * (i + 1), source: 'referral', referral_id: prior.id,
+        });
+      }
+      await firstService(capped.friend, capped.visit);
+      expect(await row(capped.ref.id)).toMatchObject({ referrer_reward_reason: 'cap_reached', status: 'credited' });
+      expect(await engine.sendDueReferralRewardEmails({ now: new Date() })).toEqual({ credits: 0, immediate: 0, attempted: 0 });
+    });
+  });
+
+  describe('referral cost in finance views', () => {
+    test('settled Step 2 referrals count the posted amounts, others the flat settings; gate off is flat', async () => {
+      const near = await performed({ memberFields: HOME, friendFields: { latitude: HOME.latitude + 0.005, longitude: HOME.longitude } });
+      await firstService(near.friend, near.visit);
+      const capped = await performed();
+      for (let i = 0; i < 10; i += 1) {
+        const [prior] = await db('referrals').insert({
+          referrer_customer_id: capped.member.id, referee_name: `Prior ${i}`, referee_phone: `+1941565${String(1000 + i)}`,
+          referral_code: 'WAVES-PRIOR', status: 'credited',
+        }).returning('id');
+        await db('customer_credit_ledger').insert({
+          customer_id: capped.member.id, delta: 25, balance_after: 25 * (i + 1), source: 'referral', referral_id: prior.id,
+        });
+      }
+      await firstService(capped.friend, capped.visit);
+      const legacy = await planFriend();
+      const ids = [near.friend.id, capped.friend.id, legacy.id];
+      // near: $50 member + $25 friend; capped: $0 + $25; legacy: the flat $40.
+      expect(await engine.referralAcquisitionCost(db, ids, 40)).toBe(140);
+      gates.referralStep2 = false;
+      expect(await engine.referralAcquisitionCost(db, ids, 40)).toBe(120);
     });
   });
 

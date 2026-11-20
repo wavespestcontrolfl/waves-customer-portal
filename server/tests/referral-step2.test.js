@@ -5,7 +5,7 @@ jest.mock('../services/logger', () => ({
 }));
 
 const {
-  step2Settings, memberCredit, etYearBounds, capReached, STEP2_DEFAULTS,
+  step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, STEP2_DEFAULTS,
 } = require('../services/referral-step2');
 
 describe('step2Settings', () => {
@@ -91,5 +91,20 @@ describe('etYearBounds', () => {
     const before = new Date('2027-01-01T04:59:00Z');
     expect(before >= start).toBe(false);
     expect(end.toISOString()).toBe('2028-01-01T05:00:00.000Z');
+  });
+});
+
+describe('ruleTerms (what staff read before confirming a referral)', () => {
+  test('the owner numbers, and the live row when the office changes them', () => {
+    expect(ruleTerms({ referee_discount_cents: 2500 }).text).toBe('Member: $25, or $50 within half a mile; friend: $25 credit');
+    expect(ruleTerms({
+      referee_discount_cents: 2000, step2_referrer_reward_cents: 3000, step2_near_referrer_reward_cents: 6000, step2_near_radius_miles: '1.00',
+    })).toMatchObject({ atCap: false, text: 'Member: $30, or $60 within 1 mile; friend: $20 credit', short: 'member $30 or $60 within 1 mile; friend $20' });
+    expect(ruleTerms({ referee_discount_cents: 2550, step2_near_radius_miles: 0.75 }).text).toBe('Member: $25, or $50 within 0.75 miles; friend: $25.5 credit');
+  });
+  test('a member at the yearly limit gets $0, stated, and the friend credit still shows', () => {
+    expect(ruleTerms({ referee_discount_cents: 2500 }, true)).toEqual({
+      atCap: true, text: 'Member is at the yearly limit: $0; friend: $25 credit', short: 'member at the yearly limit: $0; friend $25',
+    });
   });
 });

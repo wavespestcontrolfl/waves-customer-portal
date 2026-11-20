@@ -13,6 +13,7 @@ const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-
 const { promoterPhoneInUseError } = require('./referral-errors');
 const { isEnabled } = require('../config/feature-gates');
 const step2 = require('./referral-step2');
+const { reviewedCustomerLocation } = require('./customer-geocode-review');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1175,6 +1176,12 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
   const step2On = isEnabled('referralStep2');
 
   const outcome = await db.transaction(async (trx) => {
+    // GATE_REFERRAL_STEP2: the money rules (amounts, radius, yearly limit, the friend's credit) come from the live
+    // row read INSIDE this transaction, never from getSettings(), whose defaults stand in for a failed read. A
+    // read that fails or finds no row ends the transaction here: nothing posts and no guard is consumed, so the
+    // referral stays pending for the next completion.
+    const rules = step2On ? await liveSettingsOrThrow(trx) : settings;
+    const refereeDollarsNow = step2On ? round2((Number(rules.referee_discount_cents) || 0) / 100) : refereeDollars;
     // Re-read under lock; these guards are the single-use protection.
     const referral = await trx('referrals').where({ id: candidate.id }).forUpdate().first();
     if (!referral
@@ -1191,7 +1198,7 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
     // a flat $25, so a Silver/Gold/Platinum signup still credits a flat $25.
     // GATE_REFERRAL_STEP2: the amount is $25, $50 near, or nothing at the yearly cap (step2MemberCredit).
     const memberCredit = step2On
-      ? await step2MemberCredit(trx, { referral, friendCustomerId: customerId, settings })
+      ? await step2MemberCredit(trx, { referral, friendCustomerId: customerId, settings: rules })
       : null;
     const referrerDollars = memberCredit
       ? memberCredit.dollars
@@ -1204,10 +1211,10 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
     const referrerCents = Math.round((Number.isFinite(frozenStaked) ? frozenStaked : referrerDollars) * 100);
 
     // Referee — the customer who just completed their first recurring service.
-    if (refereeDollars > 0) {
+    if (refereeDollarsNow > 0) {
       await postCreditMovement({
         customerId,
-        delta: refereeDollars,
+        delta: refereeDollarsNow,
         source: 'referral',
         referralId: referral.id,
         note: 'Referral welcome credit — first recurring service completed',
@@ -1261,18 +1268,58 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
       });
     }
 
-    return { skipped: false, referral, referrerDollars, memberCredit };
+    return { skipped: false, referral, referrerDollars, memberCredit, refereeDollars: refereeDollarsNow };
   });
 
   if (outcome.skipped) return null;
 
-  logger.info(`[ReferralEngine] First recurring service for customer ${customerId} → credited referral ${outcome.referral.id}: referrer $${outcome.referrerDollars}, referee $${refereeDollars}`);
+  logger.info(`[ReferralEngine] First recurring service for customer ${customerId} → credited referral ${outcome.referral.id}: referrer $${outcome.referrerDollars}, referee $${outcome.refereeDollars}`);
   return {
     referralId: outcome.referral.id,
     referrerDollars: outcome.referrerDollars,
-    refereeDollars,
+    refereeDollars: outcome.refereeDollars,
     ...(outcome.memberCredit ? { referrerReason: outcome.memberCredit.reason } : {}),
   };
+}
+
+// The live settings row, read on `conn` (the posting transaction), or an error: the Step 2 money path never runs on
+// the defaults getSettings() falls back to.
+async function liveSettingsOrThrow(conn) {
+  const row = await getLiveSettings(conn);
+  if (!row) throw referralError(503, 'SETTINGS_UNAVAILABLE', 'Referral program settings could not be read; nothing was credited');
+  return row;
+}
+
+// What staff are told before confirming a referral, under the gate: the rule from the live settings and whether the
+// member is at the yearly limit (null when the settings cannot be read; the prompts then say credits follow the
+// program settings). referral-inbound attaches it to each Queue card.
+async function step2TermsFor(conn, memberId) {
+  const live = await getLiveSettings(conn);
+  if (!live) return null;
+  const atCap = memberId ? step2.capReached(await memberCreditsThisYear(conn, memberId), live) : false;
+  return step2.ruleTerms(live, atCap);
+}
+
+// What a set of referred customers cost in referral credits: the posted amounts for a settled Step 2 referral (the
+// member's referrer_credit_cents plus the credit the friend actually got), the flat `perConversionDollars` for any
+// other (legacy, or still waiting). Gate off: the flat amount for all, as before. Returns dollars.
+async function referralAcquisitionCost(conn, customerIds, perConversionDollars) {
+  const flat = customerIds.length * perConversionDollars;
+  if (!isEnabled('referralStep2') || !customerIds.length) return flat;
+  const settled = await conn('customers as c')
+    .joinRaw(`JOIN referrals r ON r.status = 'credited' AND r.referrer_credit_cents IS NOT NULL
+      AND right(regexp_replace(COALESCE(r.referee_phone, ''), '\D', '', 'g'), 10) = right(regexp_replace(COALESCE(c.phone, ''), '\D', '', 'g'), 10)`)
+    .whereIn('c.id', customerIds)
+    .select('c.id as customer_id', 'r.id as referral_id', 'r.referrer_credit_cents',
+      conn.raw(`COALESCE((SELECT SUM(l.delta) FROM customer_credit_ledger l
+        WHERE l.referral_id = r.id AND l.customer_id = c.id AND l.source = 'referral' AND l.delta > 0), 0) AS friend_dollars`));
+  const byCustomer = new Map();
+  for (const row of settled) {
+    if (!byCustomer.has(row.customer_id)) byCustomer.set(row.customer_id, Number(row.referrer_credit_cents) / 100 + Number(row.friend_dollars));
+  }
+  let total = flat;
+  for (const actual of byCustomer.values()) total += actual - perConversionDollars;
+  return round2(total);
 }
 
 // How many member credits this member holds in the current America/New_York calendar year. The year is read from
@@ -1324,7 +1371,11 @@ async function step2MemberCredit(trx, { referral, friendCustomerId, settings }) 
 
   if (step2.capReached(await memberCreditsThisYear(trx, memberId), settings)) return { dollars: 0, reason: 'cap_reached' };
 
-  const homes = await trx('customers').whereIn('id', [memberId, friendCustomerId]).select('id', 'latitude', 'longitude');
+  // Both homes through the review-aware reader (customer-geocode-review), not the raw columns: a pin the office
+  // marked needs_pin, outside_area or unverified is no map point, and a valid primary-property pin counts.
+  const rows = await trx('customers').whereIn('id', [memberId, friendCustomerId])
+    .select('id', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+  const homes = await Promise.all(rows.map((row) => reviewedCustomerLocation(row, trx)));
   const homeOf = (id) => homes.find((h) => h.id === id);
   const { cents, reason } = step2.memberCredit(homeOf(memberId), homeOf(friendCustomerId), settings);
   return { dollars: round2(cents / 100), reason };
@@ -1677,6 +1728,8 @@ module.exports = {
   updateReferralStatus,
   creditReferralOnFirstService,
   step2OfferFor,
+  step2TermsFor,
+  referralAcquisitionCost,
   sendDueReferralRewardEmails,
   nextRewardEmailAt,
   recentRewardCreditsQuery,

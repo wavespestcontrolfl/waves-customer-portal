@@ -59,4 +59,22 @@ function capReached(creditsThisYear, settings) {
   return Number(creditsThisYear) >= step2Settings(settings).step2_annual_credit_cap;
 }
 
-module.exports = { STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached };
+const dollars = (cents) => `$${Number((Number(cents) / 100).toFixed(2))}`;
+const miles = (n) => (n === 0.5 ? 'half a mile' : `${n} ${n === 1 ? 'mile' : 'miles'}`);
+
+// The rule as staff read it before confirming a referral, from the EFFECTIVE settings (the live row, never literals)
+// and whether the member is already at the yearly limit (then the member gets $0, and no member thank-you email
+// follows because the email goes out for a posted credit). `text` for the full line, `short` for a button prompt.
+function ruleTerms(settings, atCap = false) {
+  const s = step2Settings(settings);
+  const friend = dollars(Number(settings?.referee_discount_cents) || 0);
+  if (atCap) {
+    return { atCap: true, text: `Member is at the yearly limit: $0; friend: ${friend} credit`, short: `member at the yearly limit: $0; friend ${friend}` };
+  }
+  const std = dollars(s.step2_referrer_reward_cents);
+  const near = dollars(s.step2_near_referrer_reward_cents);
+  const within = miles(s.step2_near_radius_miles);
+  return { atCap: false, text: `Member: ${std}, or ${near} within ${within}; friend: ${friend} credit`, short: `member ${std} or ${near} within ${within}; friend ${friend}` };
+}
+
+module.exports = { STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached, ruleTerms };

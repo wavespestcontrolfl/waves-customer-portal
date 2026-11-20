@@ -1274,11 +1274,17 @@ router.get('/ebitda-bridge', dashboardCache, async (req, res, next) => {
         const s = await require('../services/referral-engine').getSettings();
         perConversion = ((Number(s?.referrer_reward_cents) || 0) + (Number(s?.referee_discount_cents) || 0)) / 100;
       } catch { /* settings unreadable — keep the default */ }
-      const [{ n }] = await db('ad_service_attribution')
+      const completedReferrals = () => db('ad_service_attribution')
         .where({ lead_source: 'referral', funnel_stage: 'completed' })
-        .where('lead_date', '>=', monthStart)
-        .countDistinct({ n: 'customer_id' });
-      referralRewards = (Number(n) || 0) * perConversion;
+        .where('lead_date', '>=', monthStart);
+      if (((require('../config/feature-gates').gates) || {}).referralStep2 === true) {
+        // GATE_REFERRAL_STEP2: the posted amounts for a settled Step 2 referral, the flat settings for any other.
+        const ids = (await completedReferrals().distinct('customer_id')).map((r) => r.customer_id).filter(Boolean);
+        referralRewards = await require('../services/referral-engine').referralAcquisitionCost(db, ids, perConversion);
+      } else {
+        const [{ n }] = await completedReferrals().countDistinct({ n: 'customer_id' });
+        referralRewards = (Number(n) || 0) * perConversion;
+      }
     } catch { /* no attribution rows — no referral cost */ }
 
     // Overhead assumptions: latest company_financials row. Admin overhead is

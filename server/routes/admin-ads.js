@@ -1278,13 +1278,22 @@ async function fetchChannelAttribution(since, months = 1, exclude = null) {
     } catch { /* settings unreadable — keep the default */ }
     // Same exclusions as the completed rows — an excluded internal/deleted
     // "conversion" must not add reward cost the card's rows don't show.
-    const [{ n }] = await applyAttributionExclusions(
+    const completedReferrals = () => applyAttributionExclusions(
       db('ad_service_attribution as asa')
         .where({ 'asa.lead_source': 'referral', 'asa.funnel_stage': 'completed' })
         .where('asa.lead_date', '>=', since),
       exclude,
-    ).countDistinct({ n: 'asa.customer_id' });
-    const refCost = round((Number(n) || 0) * perConversion, 2);
+    );
+    let refCost;
+    if (((require('../config/feature-gates').gates) || {}).referralStep2 === true) {
+      // GATE_REFERRAL_STEP2: the posted amounts for a settled Step 2 referral (a near $50 and a capped $0 member
+      // credit, plus the friend's credit), the flat settings for any other.
+      const ids = (await completedReferrals().distinct('asa.customer_id')).map((r) => r.customer_id).filter(Boolean);
+      refCost = round(await require('../services/referral-engine').referralAcquisitionCost(db, ids, perConversion), 2);
+    } else {
+      const [{ n }] = await completedReferrals().countDistinct({ n: 'asa.customer_id' });
+      refCost = round((Number(n) || 0) * perConversion, 2);
+    }
     if (refCost > 0) fixedCostBySource.referral = (fixedCostBySource.referral || 0) + refCost;
   } catch { /* ad_service_attribution shape / no referrals — no-op */ }
 
