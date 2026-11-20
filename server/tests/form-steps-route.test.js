@@ -30,6 +30,7 @@ process.env.FORM_STEPS_RATE_MAX = '100000';
 
 const http = require('http');
 const express = require('express');
+const helmet = require('helmet');
 const { notFoundBody } = require('../middleware/errors');
 const { FORM_STEPS, _private } = require('../routes/public-form-steps');
 
@@ -46,6 +47,10 @@ const mockFellThrough = jest.fn();
 
 function startServer() {
   const app = express();
+  // As in server/index.js: helmet runs above the router and marks every
+  // response `Cross-Origin-Resource-Policy: same-origin`.
+  app.use(helmet());
+  app.get('/helmet-control', (req, res) => res.status(200).end());
   app.use('/api/public/form-steps', require('../routes/public-form-steps'));
   // Stands in for everything mounted after the router in server/index.js
   // (the request logger among it): nothing may ever reach it.
@@ -329,6 +334,7 @@ describe('rate limiting', () => {
     try {
       jest.isolateModules(() => {
         const app = express();
+        app.use(helmet());
         app.use('/api/public/form-steps', require('../routes/public-form-steps'));
         isolatedServer = app.listen(0);
       });
@@ -340,15 +346,17 @@ describe('rate limiting', () => {
           headers: { 'Content-Type': 'text/plain;charset=UTF-8', Origin: SPOKE_ORIGIN },
         }, (res) => {
           res.resume();
-          res.on('end', () => resolve(res.statusCode));
+          res.on('end', () => resolve({ status: res.statusCode, corp: res.headers['cross-origin-resource-policy'] }));
         });
         req.on('error', reject);
         req.write(JSON.stringify(GOOD_BODY));
         req.end();
       });
-      const statuses = [];
-      for (let i = 0; i < 5; i += 1) statuses.push(await hit());
-      expect(statuses).toEqual([204, 204, 204, 429, 429]);
+      const answers = [];
+      for (let i = 0; i < 5; i += 1) answers.push(await hit());
+      expect(answers.map((a) => a.status)).toEqual([204, 204, 204, 429, 429]);
+      // The limiter's 429 is an answer to a beacon too: a browser must accept it.
+      expect(answers.map((a) => a.corp)).toEqual(Array(5).fill('cross-origin'));
     } finally {
       if (prevMax === undefined) delete process.env.FORM_STEPS_RATE_MAX;
       else process.env.FORM_STEPS_RATE_MAX = prevMax;
@@ -435,6 +443,48 @@ describe('daily totals only: a bucket never records when', () => {
     expect(up.match(/\bt\.[a-zA-Z]+\('([a-z_]+)'/g)).toEqual(["t.date('day'", "t.text('site'", "t.text('form'", "t.text('step'", "t.integer('count'"]);
     expect(up).toMatch(/t\.primary\(\['day', 'site', 'form', 'step'\]\);/);
     expect(up).not.toMatch(/timestamp|created_at|updated_at/);
+  });
+});
+
+describe('a browser accepts every answer: Cross-Origin-Resource-Policy', () => {
+  // The sites send this beacon cross-origin with `mode: 'no-cors'`. A browser
+  // turns a no-cors response marked `same-origin` into a network error, so
+  // the router replaces the header helmet set above it.
+  test('the harness helmet marks other routes same-origin, as production does', async () => {
+    const res = await send('GET', '/helmet-control');
+    expect(res.status).toBe(200);
+    expect(res.headers['cross-origin-resource-policy']).toBe('same-origin');
+  });
+
+  test.each([
+    ['a counted step', GOOD_BODY, SPOKE_ORIGIN],
+    ['a step from the hub', GOOD_BODY, HUB_ORIGIN],
+    ['an unknown step', { f: 'quote', s: 'made_up' }, SPOKE_ORIGIN],
+    ['an unknown origin', GOOD_BODY, 'https://example.com'],
+    ['no origin', GOOD_BODY, undefined],
+  ])('%s: the 204 is marked cross-origin', async (_name, body, origin) => {
+    const res = await post(body, { origin });
+    expect(res.status).toBe(204);
+    expect(res.headers['cross-origin-resource-policy']).toBe('cross-origin');
+  });
+
+  test('a bad body and the terminal 404 are marked cross-origin too', async () => {
+    const bad = await post(null, { origin: SPOKE_ORIGIN, raw: 'x'.repeat(5000) });
+    expect(bad.status).toBe(204);
+    expect(bad.headers['cross-origin-resource-policy']).toBe('cross-origin');
+    const missing = await send('GET', '/api/public/form-steps/nope', { origin: SPOKE_ORIGIN });
+    expect(missing.status).toBe(404);
+    expect(missing.headers['cross-origin-resource-policy']).toBe('cross-origin');
+  });
+
+  test('server/index.js runs helmet above the router, so the router has the last word', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+    const helmetAt = src.indexOf('return strictHelmet(req, res, next);');
+    const mountAt = src.indexOf("app.use('/api/public/form-steps', require('./routes/public-form-steps'));");
+    expect(helmetAt).toBeGreaterThan(-1);
+    expect(mountAt).toBeGreaterThan(helmetAt);
   });
 });
 

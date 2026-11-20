@@ -9007,7 +9007,13 @@ visitor's beacons never spend the shared budget a customer's quote-form or
 booking calls need. The router sets no-store/
 noindex/no-referrer headers first, sets no CORS headers, and ends in a terminal
 generic unknown-route 404, so no request that reaches it (any method, any
-subpath other than `POST /`) falls through to the app's request logger.
+subpath other than `POST /`) falls through to the app's request logger. Every
+answer (the 204, the 429, the 404) carries `Cross-Origin-Resource-Policy:
+cross-origin`, replacing the `same-origin` the app's helmet sets above the
+router: a browser turns a no-cors response marked `same-origin` into a network
+error, so without it the step would count while the page's fetch rejected and
+the console logged a blocked request for every step. No answer has a body
+worth keeping same-origin (two are empty, the 404 is the generic one).
 Body: `{"f":"<form>","s":"<step>"}` as `text/plain`. The allowlist
 (`FORM_STEPS` in `server/routes/public-form-steps.js`, own-property lookup
 only) is: `quote` (the main quote form on any site) = `view`, `start`,

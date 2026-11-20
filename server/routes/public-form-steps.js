@@ -24,7 +24,13 @@
  * need. The router ends in a terminal 404, so no request that reaches it —
  * any method, any subpath — falls through to the app's request logger.
  * Beacons are no-cors `text/plain` POSTs whose response the page never
- * reads, so the route sets no CORS headers.
+ * reads, so the route sets no CORS headers. It does set
+ * `Cross-Origin-Resource-Policy: cross-origin` on every answer: the app's
+ * helmet runs above this router and marks every response `same-origin`, and
+ * a browser turns a no-cors response with that header into a network error
+ * (the step counts, but the page's fetch rejects and the console logs a
+ * blocked request for every step). The 204 and the 429 have no body, and the
+ * 404 is the generic one, so there is nothing to keep same-origin.
  *
  * Answers: every POST gets the same 204 — a valid step, an unknown form or
  * step, a bad or oversized body, an unknown Origin — sent BEFORE any write,
@@ -157,6 +163,13 @@ const router = express.Router();
 // Privacy headers FIRST, so every answer from this router (the 204, the 429
 // and the terminal 404) carries no-store/noindex/no-referrer.
 router.use(noStore);
+
+// Every answer may be received cross-origin (see the header comment): helmet
+// set `same-origin` above this router, and this replaces it.
+router.use((req, res, next) => {
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  next();
+});
 
 // Per-IP limiter ahead of the body parser, so a flood is refused before any
 // body is buffered, and so beacons cannot exhaust the global limiter's
