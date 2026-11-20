@@ -297,24 +297,26 @@ function etClock(date) {
 // bells, each whole, as the daily run would; it never updates or closes another
 // bell and runs no close pass. Like the daily run's exception, these rings
 // spend no budget and count in the 24-hour read. Same gate as the run.
-// Its job health is its own row ('same-start-urgent-pass'): it only borrows
-// the daily run's lock (recordHealth false), so a good hourly pass never
-// clears a failed 6:40 run. A pass skipped because the daily run holds the
-// lock loses nothing: that run judges the same pairs. Anything short of a
-// clean pass (a failed read, a bell not delivered) throws, so this job's
-// health shows it.
+// It takes the daily run's lock first, with no job health, so a pass skipped
+// because that lock is held records nothing (it loses nothing: that run judges
+// the same pairs; the 6:40 tick never arrives while a pass from 7:25 AM to
+// 8:25 PM is in flight, so the shared lock never makes that run skip). Only
+// then does it run as its own job, so its job health ('same-start-urgent-pass')
+// is written only by a pass that ran, and a good hourly pass never clears a
+// failed 6:40 run. Anything short of a clean pass (a failed read, a bell not
+// delivered) throws, so this job's health shows it.
 async function runSameStartUrgentPass({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('scheduleIntegrityWatchdog')) return { skipped: true, reason: 'gated_off' };
   const { runExclusive } = require('../utils/cron-lock');
-  return runExclusive('same-start-urgent-pass', async () => {
-    const result = await runExclusive('schedule-integrity-watchdog', () => sameStartUrgentInner({ now }), { recordHealth: false });
-    if (result?.failed) {
+  return runExclusive('schedule-integrity-watchdog', () => runExclusive('same-start-urgent-pass', async () => {
+    const result = await sameStartUrgentInner({ now });
+    if (result.failed) {
       const n = result.undelivered;
       throw new Error(n ? `${n} ${n === 1 ? 'bell' : 'bells'} not delivered` : 'the same-start check failed');
     }
     return result;
-  });
+  }), { recordHealth: false });
 }
 
 async function sameStartUrgentInner({ now }) {
@@ -335,14 +337,16 @@ async function sameStartUrgentInner({ now }) {
 
 // One same-start delivery (the daily late loop and the hourly pass): whether it
 // was a real ring. A lost write is logged and counted in `lost.count`, never
-// thrown, so one customer's failure never holds back the rest; each caller
-// fails after its loop (this job's only output is the bell).
+// thrown, so one customer's failure never holds back the rest; each job then
+// fails after its loop (this class's only output is the bell).
 async function deliverSameStart(episodes, alert, lost) {
   try {
     return realRing(await ringAlert(episodes, ...alert), episodes, { countRefreshRings: true });
   } catch (err) {
     lost.count += 1;
-    logger.error(`[schedule-integrity] ${alert[0]} not delivered (${err.message})`);
+    // The code, never err.message: a failed knex write's message carries its
+    // SQL with the bound title, which names the customer (AGENTS.md: no PII in logs).
+    logger.error(`[schedule-integrity] ${alert[0]} not delivered (${err.code || err.name || 'error'})`);
     return false;
   }
 }
@@ -357,7 +361,17 @@ async function runScheduleIntegrityWatchdog({ now = new Date() } = {}) {
   // — serialize ticks so deploy overlap can't build two different alert sets
   // from an overlapping read.
   const { runExclusive } = require('../utils/cron-lock');
-  return runExclusive('schedule-integrity-watchdog', () => runInner({ now }));
+  return runExclusive('schedule-integrity-watchdog', async () => {
+    const result = await runInner({ now });
+    // The same-start class's only output is the bell: a failed scan or a lost
+    // bell fails the run, after every class did its work, so the run's job
+    // health shows it (the hourly pass does the same).
+    const n = result.sameStartUndelivered;
+    if (result.sameStartCheckFailed || n) {
+      throw new Error(`[schedule-integrity] ${n ? `${n} same-start ${n === 1 ? 'bell' : 'bells'} not delivered` : 'the same-start check failed'}`);
+    }
+    return result;
+  });
 }
 
 // The coverage scan's shared FROM/joins/select: the main scan adds its own
@@ -915,6 +929,8 @@ async function runInner({ now = new Date() } = {}) {
     churnedWorkCheckFailed: churned.failed,
     sameStartVisits: sameStart.alerts.length,
     sameStartCheckFailed: sameStart.failed,
+    // Same-start bells not delivered (each logged); the job wrapper fails the run.
+    sameStartUndelivered: late.undelivered,
     combinedBooking,
     combinedBookingCheckFailed,
     // Same-start bells closed past the budget, none of their days still a finding.
@@ -1022,8 +1038,9 @@ async function standingBellDays(prefix) {
 // days gets its whole update. Killed: the given order with no bell read, and
 // past the budget only an alert whose first day is `alwaysRingBy` or sooner is
 // delivered, whole (it rings if anything on it is new). Returns the real rings
-// and the bells closed. A lost write never holds back the rest: every alert is
-// tried and the closes run, then the loop throws, so the run fails loudly.
+// and the bells closed, and the bells not delivered: a lost write never holds
+// back the rest (every alert is tried and the closes run), and the job wrapper
+// then fails the run.
 const NO_NEW_DAY = '9999-12-31';
 async function ringWithinBudget(alerts, { episodes, now, budget, prefix, alwaysRingBy }) {
   let rang = 0;
@@ -1055,8 +1072,7 @@ async function ringWithinBudget(alerts, { episodes, now, budget, prefix, alwaysR
   }
   if (held) capHit();
   const closed = over.length ? await alertEpisodes.closeAdminAlertKeys(db, over, 'its days no longer start together', { now }) : 0;
-  if (lost.count) throw new Error(`[schedule-integrity] ${lost.count} same-start ${lost.count === 1 ? 'bell' : 'bells'} not delivered`);
-  return { rang, closed };
+  return { rang, closed, undelivered: lost.count };
 }
 
 // Delivers one run's findings: rings them in order, capped at

@@ -1201,7 +1201,7 @@ describe('same-start visits (class 5)', () => {
       bell: true, dedupeKey: 'same-start-visits:cust-pair-1', refreshOnDedupe: true,
       metadata: { dedupeKey: 'same-start-visits:cust-pair-1', customer_id: 'cust-pair-1', itemKeys: ['2026-08-10'] },
     });
-    expect(result).toMatchObject({ sameStartVisits: 1, sameStartCheckFailed: false, alerted: 3 });
+    expect(result).toMatchObject({ sameStartVisits: 1, sameStartCheckFailed: false, sameStartUndelivered: 0, alerted: 3 });
   });
 
   test('they ring within what the classes and the combined-booking check left of the budget; the rest wait for a later run', async () => {
@@ -1224,16 +1224,22 @@ describe('same-start visits (class 5)', () => {
     expect(sameStartKeys()).toEqual(['same-start-visits:cust-pair-1']);
   });
 
-  test('a lost write never holds back the next customer; the run then fails loudly', async () => {
+  test('a lost write never holds back the next customer; the run then fails, and its log names only the key and the error code', async () => {
+    isEnabled.mockReturnValue(true);
     sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [pairAlert('cust-pair-1'), pairAlert('cust-pair-2')], failed: false });
     makeDbMock();
-    episodeHelpers.raiseAdminAlertWithReopen.mockImplementation(async (...args) => (
-      args[3]?.dedupeKey === 'same-start-visits:cust-pair-1' ? null : delegatingRaise(...args)));
-    await expect(runInner({ now: NOW })).rejects.toThrow('1 same-start bell not delivered');
+    // A failed knex write's message carries its SQL with the bound title, which names the customer.
+    const knexError = Object.assign(new Error('update "notifications" set "title" = \'Schedule — split Pat Example\'s visits at the same time\' - deadlock detected'), { code: '40P01' });
+    episodeHelpers.raiseAdminAlertWithReopen.mockImplementation(async (...args) => {
+      if (args[3]?.dedupeKey === 'same-start-visits:cust-pair-1') throw knexError;
+      return delegatingRaise(...args);
+    });
+    await expect(runScheduleIntegrityWatchdog({ now: NOW })).rejects.toThrow('1 same-start bell not delivered');
     const sameStartKeys = (mock) => mock.calls.map((c) => c[3].dedupeKey).filter((k) => k.startsWith('same-start-visits:'));
     expect(sameStartKeys(episodeHelpers.raiseAdminAlertWithReopen.mock)).toEqual(['same-start-visits:cust-pair-1', 'same-start-visits:cust-pair-2']);
     expect(sameStartKeys(NotificationService.notifyAdmin.mock)).toEqual(['same-start-visits:cust-pair-2']);
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('same-start-visits:cust-pair-1 not delivered'));
+    expect(logger.error).toHaveBeenCalledWith('[schedule-integrity] same-start-visits:cust-pair-1 not delivered (40P01)');
+    expect(JSON.stringify([logger.error.mock.calls, logger.warn.mock.calls])).not.toContain('Pat Example');
   });
 
   test('a failed combined-booking check may have rung before it threw: the same-start bells wait for a later run, all but a new pair for tomorrow', async () => {
@@ -1418,15 +1424,15 @@ describe('same-start visits (class 5)', () => {
     expect(result).toMatchObject({ closed: 1, closePassFailed: false });
   });
 
-  test('a failed check never closes its bells; the other classes still close', async () => {
+  test('a failed check never closes its bells and fails the run, after the other classes did their work (they still close)', async () => {
+    isEnabled.mockReturnValue(true);
     sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [], failed: true });
     makeDbMock();
     openKeysByPrefix({
       'same-start-visits:': ['same-start-visits:cust-pair-1'],
       'churned-live-work:': ['churned-live-work:cust-gone'],
     });
-    const result = await runInner({ now: NOW });
-    expect(result).toMatchObject({ sameStartCheckFailed: true, sameStartVisits: 0 });
+    await expect(runScheduleIntegrityWatchdog({ now: NOW })).rejects.toThrow('the same-start check failed');
     expect(closedBy()).toEqual({ 'no live work left': ['churned-live-work:cust-gone'] });
   });
 });
@@ -1641,11 +1647,20 @@ describe('same-start urgent pass (hourly; owner 2026-11-19, "A")', () => {
     expect(calls[0][3].metadata.itemKeys).toEqual(['2026-08-04', '2026-08-20']);
     expect(episodeHelpers.closeAdminAlertKeys).not.toHaveBeenCalled();
     expect(runCombinedBookingCheck).not.toHaveBeenCalled();
-    // Its own job health; the daily run's lock is only borrowed, so this pass never records over that run's health.
+    // The daily run's lock first, with no job health; then its own job, so only a pass that ran records health.
     const { runExclusive } = require('../utils/cron-lock');
     expect(runExclusive.mock.calls.map(([name, , opts]) => [name, opts])).toEqual([
-      ['same-start-urgent-pass', undefined], ['schedule-integrity-watchdog', { recordHealth: false }],
+      ['schedule-integrity-watchdog', { recordHealth: false }], ['same-start-urgent-pass', undefined],
     ]);
+  });
+
+  test('while the daily run holds its lock the pass skips: it reads nothing and never starts its own job, so that job\'s health stands', async () => {
+    watchdogOn();
+    const { runExclusive } = require('../utils/cron-lock');
+    runExclusive.mockImplementationOnce(async () => ({ skipped: true, reason: 'lease_held' }));
+    expect(await runSameStartUrgentPass({ now: NOW })).toEqual({ skipped: true, reason: 'lease_held' });
+    expect(runExclusive.mock.calls.map(([name]) => name)).toEqual(['schedule-integrity-watchdog']);
+    expect(sameStartVisitAlerts).not.toHaveBeenCalled();
   });
 
   test('a failed check writes nothing and fails the pass', async () => {
