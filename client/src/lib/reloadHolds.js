@@ -25,3 +25,19 @@ export function reloadHoldNames() {
 export function reloadHoldName() {
   return reloadHoldNames()[0] ?? null;
 }
+
+// A send that prepares its data before its request starts (photos resized,
+// a sketch or a map drawn into an image) has no save open until then. It runs
+// through here and holds the reload by name from its start until it settles,
+// failed or not. Returns what `work` returns.
+const sendsOpen = new Map();
+
+export async function holdReloadWhileSending(name, work) {
+  if (!sendsOpen.has(name)) registerReloadHold(name, () => sendsOpen.get(name) > 0);
+  sendsOpen.set(name, (sendsOpen.get(name) ?? 0) + 1);
+  try {
+    return await work();
+  } finally {
+    sendsOpen.set(name, sendsOpen.get(name) - 1);
+  }
+}
