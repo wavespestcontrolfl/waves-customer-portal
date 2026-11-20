@@ -2151,12 +2151,18 @@ async function ledgerProgress(trx, send) {
   return { got, left, refused: refusedCount };
 }
 
+// Why a planned issue did not go out: its 'failed' outcome, with the 'outcome' alert.
+const notOut = (why, more = {}) => ({ status: 'failed', reason: `did not go out: ${why}`, alert: 'outcome', ...more });
+const SEND_ENDED = Object.freeze({ sent: 'its send ended', failed: 'its send failed', sending: 'its send stopped part way' });
+// A send some readers got, with readers a Resume would still mail: the planned issue's reason, the
+// same the minute it fails (plannedSendOutcome) and on every later minute (settledOutcome).
+const partlySent = (status, got, left) => `${SEND_ENDED[status]} after ${got} of ${got + left} readers got it; Resume in Newsletter → History sends it to the rest`;
+
 /**
  * What became of a 'scheduled' planned issue's send: sent ({ status: 'sent' }, quietly), why it did
  * not go out ({ status: 'failed', reason, alert, revert, revokeClaim }), or null while it still may.
  */
 async function plannedSendOutcome(issue, send, now, trx) {
-  const notOut = (why, more = {}) => ({ status: 'failed', reason: `did not go out: ${why}`, alert: 'outcome', ...more });
   if (!send) return notOut('its draft no longer exists');
   // sendingClaimIsStale is false for any status but 'sending'. A stale claim is revoked with the
   // outcome, so its paused worker can send no further batch.
@@ -2173,10 +2179,9 @@ async function plannedSendOutcome(issue, send, now, trx) {
     if (left === 0 && got > 0) return { status: 'sent', revokeClaim: stale };
     // No reader got it and none is left: every planned reader failed the send-time re-check ('skipped'), or the plan held none.
     if (send.status === 'sent' && left === 0 && refused === 0) return notOut('no planned reader was still eligible when it sent');
-    const how = { sent: 'its send ended', failed: 'its send failed', sending: 'its send stopped part way' }[send.status];
     return got > 0
-      ? notOut(`${how} after ${got} of ${got + left} readers got it; Resume in Newsletter → History sends it to the rest`, { revokeClaim: stale })
-      : notOut(`${how}, and no reader got it`, { revokeClaim: stale });
+      ? notOut(partlySent(send.status, got, left), { revokeClaim: stale })
+      : notOut(`${SEND_ENDED[send.status]}, and no reader got it`, { revokeClaim: stale });
   }
   const windowEnd = issueSendAt(dateOnlyString(issue.issue_date)).getTime() + SEND_WINDOW_MS;
   // Still able to go out: before the window's end, or a send in progress (its deadline stops it).
@@ -2191,13 +2196,14 @@ async function plannedSendOutcome(issue, send, now, trx) {
 
 /**
  * A planned issue that is no longer 'scheduled', read again. A 'failed' one whose send has since
- * become 'sent' and reached a reader (a Resume that finished, or delivery confirmations that came
- * after the send was marked failed, as after a lost SendGrid response; the webhook's
- * reconcileNewsletterSendStatus then sets it 'sent') becomes 'sent', with its counts then: with the
- * 'blocked' alert while readers a Resume would still mail remain (that alert says it went out), else
- * quietly if nobody was told it failed (alertToldAt), else with one correction (alert 'recovered',
- * told once by its own mark, recoveredToldAt). It is then read as any 'sent' one is; a correction that reached no one is owed
- * only while it holds (nobody left to resume, and no block told since). Otherwise what nobody was told yet: a
+ * become 'sent' with every planned reader done (a Resume that finished, or delivery confirmations
+ * that came after the send was marked failed, as after a lost SendGrid response; the webhook's
+ * reconcileNewsletterSendStatus then sets it 'sent') becomes 'sent': quietly if nobody was told it
+ * failed (alertToldAt), else with one correction (alert 'recovered', told once by its own mark,
+ * recoveredToldAt). It is then read as any 'sent' one is; a correction that reached no one is owed
+ * only while it holds (nobody left to resume, and no block told since). One whose 'sent' send still
+ * has readers a Resume would mail stays 'failed', as plannedSendOutcome read it, in words from the
+ * counts now (its alert, while nobody was told, says them). Otherwise what nobody was told yet: a
  * 'failed' one (its reason), a 'sent' one whose finished send has readers a Resume would still
  * mail (a provider block after SendGrid accepted the batch resets a reader's delivery), which
  * stays 'sent' (alert 'blocked', told once by its own mark, blockedToldAt, so the issue is still
@@ -2206,20 +2212,22 @@ async function plannedSendOutcome(issue, send, now, trx) {
  * becomes 'failed', also after a 'blocked' alert. Null when there is nothing to change or tell.
  */
 const recoveredReason = (got) => `went out after all: ${got} readers got it, after a Resume or delivery confirmations that came late; there is nothing to resume`;
-const blockedReason = (got, left) => `went out to ${got} readers, but ${left} readers' mail servers blocked it after SendGrid accepted it; Resume in Newsletter → History sends it to them`;
 
 async function settledOutcome(issue, send, trx) {
   const diagnostics = issueDiagnostics(issue);
   const sendSent = send?.status === 'sent';
   if (issue.status === 'failed' && sendSent) {
     const { got, left } = await ledgerProgress(trx, send);
-    if (got > 0) {
-      const failureToldAt = (await alertToldAt(trx, issue.id, diagnostics, 'outcome')) || undefined;
-      if (left > 0) return { status: 'sent', reason: blockedReason(got, left), alert: 'blocked', failureToldAt };
+    if (got > 0 && left === 0) {
+      const failureToldAt = await alertToldAt(trx, issue.id, diagnostics, 'outcome');
       if (!failureToldAt) return { status: 'sent', reason: null };
       // The failure was told; this correction is not yet.
       return { status: 'sent', reason: recoveredReason(got), alert: 'recovered', failureToldAt };
     }
+    // Readers a Resume would still mail: still 'failed', as plannedSendOutcome read it, in words from
+    // the counts now (a Resume that reached some, or confirmations that came late). Told already: only
+    // its reason changes (no write when it is already current).
+    if (got > 0) return notOut(partlySent(send.status, got, left), diagnostics.outcomeToldAt ? { alert: null } : {});
   }
   if (diagnostics.outcomeToldAt) return null;
   if (issue.status === 'failed') return { status: 'failed', reason: issue.reason || 'did not go out', alert: 'outcome' };
@@ -2240,7 +2248,7 @@ async function settledOutcome(issue, send, trx) {
     // clears, quietly (no write when it is already clear).
     return correctionOwed ? { status: 'sent', reason: recoveredReason(got), alert: 'recovered' } : { status: 'sent', reason: null };
   }
-  const reason = blockedReason(got, left);
+  const reason = `went out to ${got} readers, but ${left} readers' mail servers blocked it after SendGrid accepted it; Resume in Newsletter → History sends it to them`;
   // Told once: later minutes only keep the counts current.
   return diagnostics.blockedToldAt ? { status: 'sent', reason } : { status: 'sent', reason, alert: 'blocked' };
 }
