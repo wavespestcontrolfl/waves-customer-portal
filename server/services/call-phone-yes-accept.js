@@ -111,6 +111,7 @@ const REASONS = {
   visit_free_type: 'The booked visit is a visit type that is never billed (a re-service, a follow-up or an appointment).',
   visit_address_hold: 'The booked visit waits for the office to confirm its address.',
   visit_unreviewed: 'The booked visit waits for the office to review it (the customer cannot see it yet).',
+  visit_off_hour: 'The booked visit starts off the hour, and the plan would copy that start to every next visit.',
   visit_in_past: 'The booked visit date has passed. It may be done but not closed out.',
   existing_plan: 'The customer already has a live plan or a WaveGuard membership.',
   estimate_not_delivered: 'The estimate shows no delivery to the customer (each send was held back or failed), and they have not opened it.',
@@ -298,12 +299,8 @@ async function visitProblem(conn, visit, estimate, now) {
   if (visit.estimated_price != null || require('./completion-pricing').visitPriceDecisionRecorded(visit)) return 'visit_priced';
   // An invoice completion would reuse (a pre-minted one) or park the visit on: the bill would not be the plan price.
   if ((await require('./completion-invoice-candidate').completionInvoicesOnVisits(conn, [visit.id])).length) return 'visit_invoiced';
-  // A billing party set on this visit alone: the converter's next visits do not carry it, so the plan's first visit and
-  // the rest would bill different parties.
-  if (ownBillingParty(visit)) return 'visit_payer';
-  // A booking the office has not reviewed (a voice-agent or outbound-review request still pending, hidden from the
-  // customer), by the customer surfaces' own rule: the plan would start billing and email the customer first.
-  if (require('./call-booking-source-actions').isUnreviewedDispatchOwned(visit)) return 'visit_unreviewed';
+  const ownRule = TAP_ROW_RULES.find(([, breaks]) => breaks(visit));
+  if (ownRule) return ownRule[0];
   // A street-level address hold: the office still confirms the address, and the plan's next visits would not wait.
   if (await require('./street-level-hold').isStreetLevelHoldVisit(visit.id, conn)) return 'visit_address_hold';
   const { estimateFamilyKeysForAdoption, appointmentMatchesEstimateFamily } = require('../routes/estimate-public');
@@ -320,6 +317,19 @@ async function visitProblem(conn, visit, estimate, now) {
 function ownBillingParty(row) {
   return row.payer_id != null || row.self_pay_override === true;
 }
+
+// The tap's own rules on the booked visit row, in order (visitProblem reads them after the price and invoice checks).
+const TAP_ROW_RULES = [
+  // A billing party set on this visit alone: the converter's next visits do not carry it, so the plan's first visit and
+  // the rest would bill different parties.
+  ['visit_payer', ownBillingParty],
+  // A booking the office has not reviewed (a voice-agent or outbound-review request still pending, hidden from the
+  // customer), by the customer surfaces' own rule: the plan would start billing and email the customer first.
+  ['visit_unreviewed', (row) => require('./call-booking-source-actions').isUnreviewedDispatchOwned(row)],
+  // A start off the hour (AGENTS.md: window_start is always HH:00): the seeder copies the parent's start to every next
+  // visit. A visit with no start time is not refused.
+  ['visit_off_hour', (row) => row.window_start != null && !require('./annual-prepay-series-slot').wholeHourStart(row.window_start)],
+];
 
 // The customer already holds a plan: a WaveGuard membership (tier or legacy monthly rate; strict, so a failed read
 // throws instead of reading as "no plan") or another live recurring obligation, by the shared reader
@@ -764,6 +774,7 @@ const TAP_UNAVAILABLE = {
   catalog_busy: 'The service catalog is being updated. Try again in a minute.',
   plan_not_shown: "The plan's visits or per-visit price would not be the ones the card showed. Accept it from the estimate instead.",
   customer_busy: 'Another change to this customer is being saved. Try again in a minute.',
+  estimate_no_send_time: 'The estimate has no send time on record. Accept it from the estimate.',
   accept_failed: 'The accept failed. Try again, or accept it from the estimate.',
 };
 const whyNot = (reason) => TAP_UNAVAILABLE[reason] || REASONS[reason] || TAP_UNAVAILABLE.accept_failed;
@@ -837,6 +848,9 @@ async function tapCheck(shown, { now }) {
   if (!cardEstimateIds(card).includes(String(evaluation.estimate.id))) {
     return { ok: false, reason: 'estimate_not_on_card', note: note(TAP_UNAVAILABLE.estimate_not_on_card) };
   }
+  // An estimate with no send time (an older row; the send path always stamps one): the word's window starts at its
+  // creation, but the accept stamps sent_at as it claims the row, so the link step would read another window each try.
+  if (!evaluation.estimate.sent_at) return { ok: false, reason: 'estimate_no_send_time', note: note(TAP_UNAVAILABLE.estimate_no_send_time) };
   const booking = await db('call_log').where({ id: card.call_log_id, customer_id: customerId }).first(Word.CALL_COLUMNS);
   const bookingWhy = bookingCallProblem(booking);
   if (bookingWhy) return { ok: false, reason: bookingWhy, note: note(whyNot(bookingWhy)) };

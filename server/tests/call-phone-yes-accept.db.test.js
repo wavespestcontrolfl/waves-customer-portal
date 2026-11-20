@@ -333,6 +333,8 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     // A booking the office has not reviewed yet (hidden from the customer): the plan would start before it is confirmed.
     ['the visit is a voice-agent booking still pending review', { visitOver: { source_action: 'voice_agent', status: 'pending', customer_confirmed: false } }, 'visit_unreviewed'],
     ['the visit is an outbound-review booking still pending review', { visitOver: { source_action: 'ai_call_outbound_review', status: 'pending', customer_confirmed: false } }, 'visit_unreviewed'],
+    // A start off the hour: the seeder copies the parent's start to every next visit (AGENTS.md: starts on the hour).
+    ['the visit starts off the hour', { visitOver: { window_start: '09:30', window_end: '11:30' } }, 'visit_off_hour'],
     // Visit types completion never bills, by the label or the catalog key: a plan from one would bill $0.
     ['the visit is a re-service by its label', { visitOver: { service_type: 'Pest Control Re-Service' } }, 'visit_free_type'],
     ['the visit is a re-service by its catalog key', { visitOver: { service_key_snapshot: 'pest_re_service' } }, 'visit_free_type'],
@@ -1106,6 +1108,17 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       // The lock released, the same tap goes through.
       const out = await post(`${ctx.card.id}/accept-call-phone-yes`, { expected_updated_at: ctx.card.updated_at, preview_token: row.call_phone_yes.preview_token });
       expect(out.status).toBe(200);
+    });
+
+    test('an estimate with no send time on record offers no tap: the accept would stamp one and move the word window', async () => {
+      // An older row: open, no send time, created before the call (the card files from its creation time).
+      const ctx = await filed({ estimateOver: { sent_at: null, created_at: new Date(Date.now() - 3 * DAY) } });
+      const row = await listed(ctx.card.id);
+      expect(row.call_phone_yes).toMatchObject({ can_accept: false, preview_token: null });
+      expect(row.call_phone_yes.message).toBe(`The tap cannot accept this one. ${TAP_REFUSALS.estimate_no_send_time.replace(/^Nothing was accepted\. /, '')}`);
+      const out = await post(`${ctx.card.id}/accept-call-phone-yes`, { expected_updated_at: ctx.card.updated_at, preview_token: 'tok' });
+      expect(out).toMatchObject({ status: 409, body: { code: 'estimate_no_send_time', error: TAP_REFUSALS.estimate_no_send_time } });
+      await unchanged(ctx);
     });
 
     test('no yes heard: the tap is still offered (the person decides) and accepts the same way', async () => {
