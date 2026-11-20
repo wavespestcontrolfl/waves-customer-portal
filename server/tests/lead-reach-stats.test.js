@@ -78,7 +78,7 @@ describe('judgeReach', () => {
     ]);
     const result = judgeReach([a, b, c, d], {
       ...none,
-      owners,
+      owners: { open: owners, prospects: new Map() },
       texts: [{ key: 'phone:9415550100', scope: 'phone', customerId: null, at: at(5) }, { key: phoneKey(d), scope: 'phone', customerId: null, at: at(6) }],
       emails: [{ key: 'email:shared.fixture@example.invalid', scope: 'email', customerId: null, at: at(8) }],
     });
@@ -103,6 +103,56 @@ describe('judgeReach', () => {
     expect(result.get('1')).toBeNull();
     expect(result.get('2')).toBe(9);
     expect(result.get('3')).toBe(11);
+  });
+
+  // Round 6, finding 4: who owns a shared contact never depends on the date range the figure shows.
+  test('a contact on a shared phone goes to the newest prospect lead that had contacted us by then, in any range', () => {
+    const older = lead(1, { status: 'won', phone: '+19415550400' });
+    const newer = lead(2, { status: 'won', phone: '+19415550400', first_contact_at: new Date(at(10)).toISOString() });
+    const owners = { open: new Map(), prospects: new Map([['phone:9415550400', [{ id: '1', firstAt: at(0) }, { id: '2', firstAt: at(10) }]]]) };
+    const texts = [5, 20].map((m) => ({ key: 'phone:9415550400', scope: 'phone', customerId: null, at: at(m) }));
+    const both = judgeReach([older, newer], { ...none, owners, texts });
+    expect(both.get('1')).toBe(5); // before the newer lead existed: the older lead's
+    expect(both.get('2')).toBe(10); // after it: the newer lead's (minute 20, 10 minutes after its first contact)
+    // The same buckets when only one of them is in the range shown.
+    expect(judgeReach([older], { ...none, owners, texts }).get('1')).toBe(5);
+    expect(judgeReach([newer], { ...none, owners, texts }).get('2')).toBe(10);
+  });
+
+  test('one other open lead on the phone makes the contact ambiguous for a closed lead too', () => {
+    const closed = lead(1, { status: 'won', phone: '+19415550500' });
+    const owners = { open: new Map([['phone:9415550500', new Set(['open-2'])]]), prospects: new Map() };
+    const result = judgeReach([closed], { ...none, owners, texts: [{ key: 'phone:9415550500', scope: 'phone', customerId: null, at: at(4) }] });
+    expect(result.get('1')).toBeNull();
+  });
+
+  // Round 6, finding 2: a group sibling is not automated itself; whether its delivery was the group send's
+  // or a person's is unknown.
+  test('a group sibling\'s delivery is possible, never certain', () => {
+    const a = lead(1);
+    const sibling = { leadId: '1', at: at(5), lastAt: at(5), automated: false, groupAutomated: true, deliveries: 1, autoDeliveries: 0 };
+    expect(judgeReach([a], { ...none, estimates: [sibling] }).get('1')).toBe(NOT_JUDGED);
+    // A proven person contact inside the window still judges the lead.
+    expect(judgeReach([a], { ...none, texts: [{ key: phoneKey(a), at: at(3) }], estimates: [sibling] }).get('1')).toBe(3);
+    // Delivered only before first contact: nothing after it to judge.
+    expect(judgeReach([a], { ...none, estimates: [{ ...sibling, at: at(-5), lastAt: at(-5) }] }).get('1')).toBeNull();
+  });
+
+  // Round 6, finding 1: a staff send's receipt bounds when a person reached the customer.
+  test('a staff send receipt that handed off is a person\'s contact between its start and its completion', () => {
+    const [a, b, c] = [lead(1), lead(2), lead(3)];
+    const receipt = (start, end) => ({ startedAt: at(start), completedAt: at(end) });
+    const automatedFirst = { at: at(1), automated: true, autoDeliveries: 1, deliveries: 2 };
+    const result = judgeReach([a, b, c], { ...none, estimates: [
+      { leadId: '1', ...automatedFirst, resendAt: at(8), personSends: [receipt(7, 8)] },
+      // Started inside the window, completed after it: possible inside, certain only after.
+      { leadId: '2', ...automatedFirst, resendAt: at(16), personSends: [receipt(14, 17)] },
+      // Before first contact: never counts.
+      { leadId: '3', at: at(-10), automated: true, autoDeliveries: 1, deliveries: 1, personSends: [receipt(-9, -8)] },
+    ] });
+    expect(result.get('1')).toBe(8);
+    expect(result.get('2')).toBe(NOT_JUDGED);
+    expect(result.get('3')).toBeNull();
   });
 
   // Finding 3: the originating call is found by its sid, not by the lead's current phone.
@@ -277,7 +327,7 @@ describe('judgeReach', () => {
 // A chainable stand-in for knex: every builder method returns the builder, awaiting it
 // yields the rows registered for the table, and each table's chain is counted.
 // A table's value may be a list of row lists: the first query on the table reads the first list, the
-// second reads the next (`leads` is read twice: the linked estimates, then the identity owners).
+// second reads the next.
 function fakeConn(rowsByTable) {
   const calls = [];
   const queues = {};
@@ -289,7 +339,7 @@ function fakeConn(rowsByTable) {
     const builder = new Proxy({}, {
       get: (_t, prop) => {
         if (prop === 'then') return (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
-        if (prop === 'whereRaw') return (sql) => { (conn.raws[name] = conn.raws[name] || []).push(String(sql)); return builder; };
+        if (prop === 'whereRaw' || prop === 'orWhereRaw') return (sql) => { (conn.raws[name] = conn.raws[name] || []).push(String(sql)); return builder; };
         // A grouped condition (where/orWhere with a callback) runs on the same builder, so its SQL is recorded too.
         if (['where', 'orWhere', 'andWhere'].includes(prop)) return (...args) => { if (typeof args[0] === 'function') args[0](builder); return builder; };
         return () => builder;
@@ -317,21 +367,56 @@ describe('loadLeadReachStats', () => {
     });
     const stats = await loadLeadReachStats(leads, { conn });
     expect(stats).toEqual({ cohort: 4, reachedWithin: 2, reachedLater: 1, neverReached: 1, notJudged: 0, withinMinutes: 15 });
-    // Batched: one query per kind for the whole cohort (the leads have no email, so none for email). The two leads
-    // reads are the identity owners and the leads that originated the calls' sids (from all leads, not the cohort).
-    expect(conn.calls.sort()).toEqual(['call_log', 'estimates', 'leads', 'leads', 'sms_log']);
+    // Batched: one query per kind for the whole cohort (the leads have no email, so none for email). The three leads
+    // reads are the open leads and the prospect leads sharing an identity, and the leads that originated the calls'
+    // sids, all from every lead, never the cohort.
+    expect(conn.calls.sort()).toEqual(['call_log', 'estimates', 'leads', 'leads', 'leads', 'sms_log']);
   });
 
   // Finding 1: the estimate witness is the first REAL delivery. A suppressed send, a website
   // self-service publication and the lead's 'estimate_sent' activity row (written even when every
   // channel was suppressed) all leave deliveryState.firstDeliveredAt empty or are not read at all.
-  test('estimate evidence is the first real delivery by a person, not an activity row or sent_at', async () => {
+  test('estimate evidence is the first real delivery by a person, not an activity row; sent_at only before the stamp existed', async () => {
     const conn = fakeConn({});
     await loadLeadReachStats([lead(1)], { conn });
     expect(conn.calls).not.toContain('lead_activities');
     const sql = conn.raws.estimates.join(' | ');
     expect(sql).toContain("deliveryState,firstDeliveredAt}' IS NOT NULL");
-    expect(sql).not.toContain('sent_at');
+    // sent_at is read only beside the creation cutoff (a legacy row), never alone.
+    expect(sql.match(/sent_at/g)).toHaveLength(1);
+    expect(sql).toMatch(/e\.created_at < \?::timestamptz AND e\.sent_at IS NOT NULL/);
+  });
+
+  // Round 6, finding 3: an estimate sent before the first-delivery stamp existed has no stamp.
+  test('an estimate created before the first-delivery stamp existed is possible from first contact, never certain', async () => {
+    const mine = lead(1);
+    const legacy = (sentMinute) => ({ id: 'e1', linked_lead_id: 1, at: null, created_at: new Date('2026-08-01T12:00:00Z'), sent_at: new Date(at(sentMinute)), automated: false, deliveries: 0 });
+    const run = (row, more = {}) => loadLeadReachStats([mine], { conn: fakeConn({ estimates: [row], ...more }) });
+    // Sent after first contact: it may have reached the lead inside the window.
+    expect(await run(legacy(30))).toMatchObject({ notJudged: 1, neverReached: 0 });
+    // Last sent before first contact: every send came before it.
+    expect(await run(legacy(-30))).toMatchObject({ notJudged: 0, neverReached: 1 });
+    // A proven contact inside the window still judges the lead.
+    expect(await run(legacy(30), { sms_log: [{ peer: mine.phone.replace('+1', ''), customer_id: null, at: new Date(at(4)) }] }))
+      .toMatchObject({ notJudged: 0, reachedWithin: 1 });
+    // Created after the cutoff: no stamp means no real delivery.
+    expect(await run({ ...legacy(30), created_at: new Date('2026-09-01T12:00:00Z') })).toMatchObject({ notJudged: 0, neverReached: 1 });
+  });
+
+  test('only a completed staff receipt that really handed off is read as a person\'s send', async () => {
+    const mine = lead(1);
+    const iso = (m) => new Date(at(m)).toISOString();
+    const attempt = (channels) => ({ key: 'k', binding: 'b', startedAt: iso(3), completedAt: iso(4), result: { sent: true, channels } });
+    // An automated first delivery whose only proven delivery is the automation's: the receipt is the only evidence.
+    const run = (attempts) => loadLeadReachStats([mine], { conn: fakeConn({
+      estimates: [{ id: 'e1', linked_lead_id: 1, at: iso(1), automated: true, auto_deliveries: 1, deliveries: 1, manual_attempts: attempts }],
+    }) });
+    expect(await run([attempt({ sms: { ok: true, real: true } })])).toMatchObject({ reachedWithin: 1 });
+    expect(await run([attempt({ email: { ok: true, providerAccepted: true } })])).toMatchObject({ reachedWithin: 1 });
+    // A suppressed text, an uncertain send (no result yet) or no receipt at all: no evidence.
+    expect(await run([attempt({ sms: { ok: false, real: false, suppressed: true } })])).toMatchObject({ reachedWithin: 0, neverReached: 1 });
+    expect(await run([{ key: 'k', binding: 'b', startedAt: iso(3), channels: { sms: { uncertain: true } } }])).toMatchObject({ reachedWithin: 0, neverReached: 1 });
+    expect(await run(null)).toMatchObject({ reachedWithin: 0, neverReached: 1 });
   });
 
   test('a phone another open lead holds does not credit the cohort lead', async () => {
@@ -390,22 +475,20 @@ describe('loadLeadReachStats', () => {
     ], [{ id: 'cust-b', email: addr }, { id: 'cust-z', email: 'z.fixture@example.invalid' }])).toMatchObject({ reachedWithin: 0, neverReached: 1 });
   });
 
-  // Round 5, finding 1: a group auto-send records its automation on the estimate it sent but stamps
-  // every published sibling's delivery.
-  test('a sibling a group auto-send published counts as automated, with one proven delivery', async () => {
+  // Round 5, finding 1 and round 6, finding 2: a group auto-send records its automation on the estimate it
+  // sent but stamps every published sibling's delivery. The sibling is read with its own automation only, and a
+  // separate group flag: its deliveries are possible, never certain (judgeReach).
+  test('a group sibling carries its own automation and a separate group flag', async () => {
     const conn = fakeConn({});
     const raws = [];
     conn.raw = (sql) => { raws.push(String(sql)); return sql; };
     await loadLeadReachStats([lead(1)], { conn });
     const automated = raws.find((sql) => sql.endsWith(' as automated'));
     const autoDeliveries = raws.find((sql) => sql.endsWith(' as auto_deliveries'));
-    for (const sql of [automated, autoDeliveries]) {
-      expect(sql).toContain('g.estimate_group_id = e.estimate_group_id AND g.id <> e.id');
-      expect(sql).toContain("g.estimate_data->'automation'->'autoSend'->>'result'");
-    }
-    // The sibling's own proven count, or one (its publication) when only another member is automated.
-    expect(autoDeliveries).toMatch(/^GREATEST\(/);
-    expect(autoDeliveries).toMatch(/THEN 1 ELSE 0 END\) as auto_deliveries$/);
+    const group = raws.find((sql) => sql.endsWith(' as group_automated'));
+    for (const sql of [automated, autoDeliveries]) expect(sql).not.toContain('estimate_group_id');
+    expect(group).toContain('g.estimate_group_id = e.estimate_group_id AND g.id <> e.id');
+    expect(group).toContain("g.estimate_data->'automation'->'autoSend'->>'result'");
   });
 
   // Round 5, finding 5: deliveredAt keeps only the newest 25 deliveries.
@@ -497,10 +580,25 @@ describe('loadLeadReachStats', () => {
     const older = lead(1);
     const conn = fakeConn({
       call_log: [{ peer: older.phone.replace('+1', ''), sid: 'CA-theirs', at: new Date(at(5)), direction: 'inbound', settled: true }],
-      // 1st read: shared identity; 2nd read: the sid's owner, a lead outside the cohort.
-      leads: { queue: [[], [{ id: 'outside', twilio_call_sid: 'CA-theirs' }]] },
+      // 1st read: open leads sharing an identity; 2nd: prospect leads sharing one; 3rd: the sid's owner, a lead
+      // outside the cohort.
+      leads: { queue: [[], [], [{ id: 'outside', twilio_call_sid: 'CA-theirs' }]] },
     });
     expect(await loadLeadReachStats([older], { conn })).toMatchObject({ reachedWithin: 0, neverReached: 1 });
+  });
+
+  test('a newer prospect lead on the same phone, read from all leads, takes a later contact', async () => {
+    const older = lead(1, { status: 'won' });
+    const peer = older.phone.replace('+1', '');
+    const run = (prospects) => loadLeadReachStats([older], { conn: fakeConn({
+      sms_log: [{ peer, customer_id: null, at: new Date(at(30)) }],
+      // 1st read: no open lead shares the phone; 2nd: every prospect lead on it, any status or date.
+      leads: { queue: [[], prospects] },
+    }) });
+    const self = { id: 1, email: null, peer, first_contact_at: new Date(T0) };
+    expect(await run([self])).toMatchObject({ reachedLater: 1, neverReached: 0 });
+    // A lead outside the cohort first contacted us on it at minute 20: the text at minute 30 is that lead's.
+    expect(await run([self, { id: 'newer', email: null, peer, first_contact_at: new Date(at(20)) }])).toMatchObject({ reachedLater: 0, neverReached: 1 });
   });
 
   test('an inbound call is timed from the staff acceptance; with none and an answer window across the edge it is left out', async () => {
