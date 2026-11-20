@@ -157,15 +157,16 @@ describe('processRecording call_log writes are ownership-fenced', () => {
     expect(at).toBeGreaterThan(-1);
     const stat = source.slice(at - 700, at);
     expect(stat).toContain("OR ((transcription_metadata::jsonb ->> 'pan_detected') = 'true' AND transcription IS NOT NULL)");
-    expect(stat).toContain("(NULLIF(btrim(recording_url), '') IS NOT NULL AND COALESCE(recording_duration_seconds, duration_seconds, 0) > 10)");
+    // The length half is the sweep's own rule (config/call-extraction-retry.js), so the metric cannot drift from it.
+    expect(stat).toContain("(NULLIF(btrim(recording_url), '') IS NOT NULL AND ${sweepLengthSql()})");
   });
 
   test('the retrying stat mirrors the sweep\'s media and duration eligibility (codex #3736 gh-r16 P2)', () => {
-    const at = source.indexOf(') as retrying"');
+    const at = source.indexOf(') as retrying`');
     expect(at).toBeGreaterThan(-1);
     const stat = source.slice(source.lastIndexOf('db.raw(`COUNT(*) FILTER (WHERE ((processing_status = \'no_transcription\' AND COALESCE(extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)})', at), at);
     expect(stat).toContain("NULLIF(btrim(recording_url), '') IS NOT NULL OR ((transcription_metadata::jsonb ->> 'pan_detected') = 'true' AND transcription IS NOT NULL)");
-    expect(stat).toContain("COALESCE(recording_duration_seconds, duration_seconds, 0) > 10 OR (transcription_metadata::jsonb ->> 'pan_detected') = 'true'");
+    expect(stat).toContain("${sweepLengthSql()} OR (transcription_metadata::jsonb ->> 'pan_detected') = 'true'");
     expect(stat).toContain('${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days');
   });
 

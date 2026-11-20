@@ -45,7 +45,6 @@ jest.mock('../services/call-recording-processor', () => ({ CALL_EXTRACTION_MAX_A
 // The stall rule is the watchdog's; here it is a fixture: c1 is stalled.
 jest.mock('../services/call-processing-stall-watchdog', () => ({
   computeStalledCalls: (rows) => rows.filter((r) => r.id === 'c1'),
-  MIN_DURATION_SECONDS: 11,
 }));
 
 const { getOpsQueue, LANES } = require('../services/ops-queue');

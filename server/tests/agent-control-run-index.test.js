@@ -251,6 +251,16 @@ describe('adapters project onto the canonical shape', () => {
     expect(callLog.fromRow({ ...eligible, recording_url: '' }).lifecycle).toBe('terminal');
     expect(callLog.fromRow({ ...eligible, duration_seconds: 8, recording_duration_seconds: null }).lifecycle).toBe('terminal');
     expect(callLog.fromRow({ ...eligible, duration_seconds: 8, recording_duration_seconds: 40 }).lifecycle).toBe('queued');
+    // … and with GATE_SHORT_CALL_RECORDING_SWEEP on (owner 2026-11-19 "FIX") the sweep also takes a short recording while its call is under 24 h old
+    const gateBefore = process.env.GATE_SHORT_CALL_RECORDING_SWEEP;
+    process.env.GATE_SHORT_CALL_RECORDING_SWEEP = 'true';
+    try {
+      expect(callLog.fromRow({ ...eligible, duration_seconds: 8, recording_duration_seconds: null, created_at: realAgo(36e5) }).lifecycle).toBe('queued');
+      expect(callLog.fromRow({ ...eligible, duration_seconds: 8, recording_duration_seconds: null, created_at: realAgo(25 * 36e5) }).lifecycle).toBe('terminal');
+    } finally {
+      if (gateBefore === undefined) delete process.env.GATE_SHORT_CALL_RECORDING_SWEEP;
+      else process.env.GATE_SHORT_CALL_RECORDING_SWEEP = gateBefore;
+    }
     expect(callLog.fromRow({ ...eligible, recording_url: null, pan_detected: true, has_transcript: true }).lifecycle).toBe('queued');
     expect(callLog.fromRow({ ...eligible, recording_url: null, pan_detected: true, has_transcript: false }).lifecycle).toBe('terminal');
     expect(callLog.fromRow({ ...eligible, duration_seconds: 3, pan_detected: true }).lifecycle).toBe('queued');

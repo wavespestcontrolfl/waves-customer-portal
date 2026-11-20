@@ -18,7 +18,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { getScheduledJobHealth } = require('./intelligence-bar/job-health-tools');
-const { computeStalledCalls, MIN_DURATION_SECONDS } = require('./call-processing-stall-watchdog');
+const { computeStalledCalls } = require('./call-processing-stall-watchdog');
+const { sweepLengthSql } = require('../config/call-extraction-retry');
 const { EXECUTING_RECOVERY_MINUTES } = require('./content/email-approvals');
 const { STALE_CLAIM_MS: DELIVERY_STALE_CLAIM_MS } = require('./service-report/delivery-queue');
 const { STALE_CLAIM_MS: PDF_STALE_CLAIM_MS } = require('./service-report/pdf-queue');
@@ -114,8 +115,9 @@ async function laneCallProcessing() {
   // Open rows (null / pending / processing) carry NO date window — an
   // indefinitely stalled call is exactly what this lane must surface.
   // Only terminal failures are windowed to the recent week.
-  // Live rows carry the watchdog's time-independent eligibility prefilter
-  // (a SID, something to process, long enough to process) BEFORE the scan
+  // Live rows carry the watchdog's eligibility prefilter (a SID, something
+  // to process, long enough to process; only a short call's 24-hour window,
+  // gate on, depends on time) BEFORE the scan
   // cap, exactly as its candidates() query does — otherwise rows that can
   // never become stalls (dead-air blips, SID-less rows) fill the oldest-first
   // page and hide the real ones behind them.
@@ -125,7 +127,7 @@ async function laneCallProcessing() {
   const eligible = (b) => b
           .whereNotNull('twilio_call_sid')
           .where(function longEnoughToProcess() {
-            this.whereRaw('COALESCE(recording_duration_seconds, duration_seconds, 0) > ?', [MIN_DURATION_SECONDS - 1])
+            this.whereRaw(sweepLengthSql())
               .orWhere(function panQuarantined() {
                 this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'").whereNotNull('transcription');
               });

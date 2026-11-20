@@ -1013,7 +1013,7 @@ function isImplausibleTranscript(transcription, recordingSeconds) {
 // under this cap (≥10 min between attempts via the sweep's age gate), which
 // rides out transient provider errors. At the cap a blocking triage item is
 // filed so the call can't die silently.
-const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS } = require('../config/call-extraction-retry');
+const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS, sweepLengthSql } = require('../config/call-extraction-retry');
 
 // Human-readable "confirm before dispatch" reasons surfaced by the address /
 // identity bridge below. Shown on the lead's AI-triage activity so Virginia
@@ -25809,7 +25809,11 @@ const CallRecordingProcessor = {
         });
       })
       .where(function () {
-        this.where(db.raw('COALESCE(recording_duration_seconds, duration_seconds, 0) > ?', [10]))
+        // The length rule (config/call-extraction-retry.js): over 10 s, or,
+        // with GATE_SHORT_CALL_RECORDING_SWEEP on, any recording of a call
+        // under 24 h old, so a short call whose in-memory timer a deploy
+        // wiped is swept too (owner 2026-11-19, "FIX").
+        this.whereRaw(sweepLengthSql())
           // Quarantined rows already proved they carry real content (a card
           // readback was heard) — never duration-filter them out.
           .orWhereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'");
@@ -26152,7 +26156,7 @@ const CallRecordingProcessor = {
       // sweep's duration floor, or the sweep will never pick it up.
       db.raw(`COUNT(*) FILTER (WHERE ((processing_status = 'no_transcription' AND COALESCE(extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)}) OR (processing_status = 'extraction_failed' AND COALESCE(extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)} AND created_at > NOW() - INTERVAL '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'))`
         + " AND (NULLIF(btrim(recording_url), '') IS NOT NULL OR ((transcription_metadata::jsonb ->> 'pan_detected') = 'true' AND transcription IS NOT NULL))"
-        + " AND (COALESCE(recording_duration_seconds, duration_seconds, 0) > 10 OR (transcription_metadata::jsonb ->> 'pan_detected') = 'true')) as retrying"),
+        + ` AND (${sweepLengthSql()} OR (transcription_metadata::jsonb ->> 'pan_detected') = 'true')) as retrying`),
       db.raw("COUNT(*) FILTER (WHERE review_status IN ('open', 'in_progress')) as review_open"),
       // Live parked audio only: an entry still carrying a URL, or one whose
       // Twilio delete is owed — never an empty list or a quarantined
@@ -26164,7 +26168,7 @@ const CallRecordingProcessor = {
       // PAN-quarantined call keeps no audio but its masked transcript is
       // still processable, so it counts as unfinished work here too.
       db.raw("EXTRACT(EPOCH FROM (NOW() - MIN(created_at) FILTER (WHERE (processing_status IS NULL OR processing_status IN ('pending', 'processing'))"
-        + " AND ((NULLIF(btrim(recording_url), '') IS NOT NULL AND COALESCE(recording_duration_seconds, duration_seconds, 0) > 10)"
+        + ` AND ((NULLIF(btrim(recording_url), '') IS NOT NULL AND ${sweepLengthSql()})`
         + " OR ((transcription_metadata::jsonb ->> 'pan_detected') = 'true' AND transcription IS NOT NULL))))) / 60 as oldest_unfinished_minutes"),
       db.raw("percentile_cont(0.5) WITHIN GROUP (ORDER BY (metadata -> 'processing_timings' ->> 'total_ms')::numeric) FILTER (WHERE created_at > NOW() - INTERVAL '7 days' AND metadata -> 'processing_timings' ->> 'total_ms' IS NOT NULL) as p50_pass_ms_7d"),
       db.raw("percentile_cont(0.5) WITHIN GROUP (ORDER BY (metadata -> 'processing_timings' ->> 'transcription_ms')::numeric) FILTER (WHERE created_at > NOW() - INTERVAL '7 days' AND metadata -> 'processing_timings' ->> 'transcription_ms' IS NOT NULL) as p50_transcription_ms_7d"),
