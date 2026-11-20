@@ -46,7 +46,7 @@ const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { dayOnlyIds, dayOnlyFields } = require('../time-display');
 const { applyRodentReportNarrative, applyTypedReportNarrative, isTypedNarrativeFallback } = require('./rodent-report-narrative');
 const { visitReportCustomerCopy, carriesReportNote, printedReportSummary, customerCopyViolations } = require('./technician-report-copy');
-const { findingHasOwnText } = require('./finding-provenance');
+const { findingHasOwnText, provenFindingRows } = require('./finding-provenance');
 const {
   PROPERTY_SCOPE_COLUMNS, loadRodentCatalogIndex, isSameLineVisit, nextSameLineVisitAtProperty,
 } = require('./same-line-visit');
@@ -4703,8 +4703,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // text the form's observations carried, a [Found] line of the raw note among
   // them, never proven form copy. It never reaches the report
   // (ServiceReportDocument drops it too). The screened form labels above
-  // already carry their detail.
-  if (ownNote) findings = findings.filter(findingHasOwnText);
+  // already carry their detail. A stored row whose only text is the stock
+  // detail is the picked label alone: it stands only when that label passes
+  // the screen, as in every other findings reader (finding-provenance.js).
+  if (ownNote) findings = provenFindingRows(findings.filter(findingHasOwnText), service.structured_notes);
 
   let lawnHistory = opts.lawnHistory || null;
   if (propertyHistoryEnabled && serviceLine === 'lawn' && !lawnHistory) {

@@ -507,7 +507,10 @@ form's free-text observations, a `[Found]` line of the raw technician note
 among them) never prints, as in the report document, the texting prompt and
 the voice relay. On a record that carries the technician's own note
 (`carriesReportNote`), a label proves a row only when it passes
-`customerCopyViolations`, as that record's report lists do.
+`customerCopyViolations`, as that record's report lists do. There a row whose
+only text is the stock detail completion writes for a picked label
+(`STRUCTURED_OBSERVATION_FINDING_DETAIL`) is that label alone, so it stands
+only when the label passes the same screen.
 
 Pest rain outlook (owner 2026-10-24; no new route, token, key, privacy or
 rate-limit surface): on the pest-line service-report payload
@@ -3083,7 +3086,9 @@ completion form recorded (`structured_notes.formProtocolActions`,
 and each value passes `customerCopyViolations` as it renders. Completion writes
 `formProtocolActions` (the picked labels that pass that screen) beside the
 merged `protocolActionsCompleted` on every visit. `findings` drops a row with a
-bare title (no detail, no recommendation; text of only spaces counts as none),
+bare title (no detail, no recommendation; text of only spaces counts as none)
+and a stored row whose only text is the stock detail unless its label passes
+`customerCopyViolations` (`provenFindingRows`, as in the readers above),
 and the render adds no "no activity" row: the completion writes that row from
 the merged lists. The lawn write gate's report build reads stored notes that
 cannot be read as stored, never an object it rebuilt around its frozen facts,

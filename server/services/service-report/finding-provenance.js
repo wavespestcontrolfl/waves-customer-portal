@@ -15,12 +15,23 @@
  * record that carries the technician's own note (carriesReportNote), a label
  * proves a row only when it passes the complete customer-copy screen
  * (customerCopyViolations), as that record's report lists do (report-data
- * buildProtocolPayload).
+ * buildProtocolPayload). There a row whose only text is the stock detail is
+ * the picked label alone, so it stands only as a screened label does.
  */
+const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../../shared/service-completion-observations');
+
 // A row the findings pipeline wrote: a detail or a recommendation with
 // visible text. A value of spaces is no text.
 function findingHasOwnText(row) {
   return Boolean(String(row?.detail || '').trim() || String(row?.recommendation || '').trim());
+}
+
+// A row whose only text is the stock detail that completion writes for a
+// picked form label (complete-scheduled-service.js; report-data gives an
+// older bare label row the same detail).
+function stockDetailOnly(row) {
+  return String(row?.detail || '').trim() === STRUCTURED_OBSERVATION_FINDING_DETAIL
+    && !String(row?.recommendation || '').trim();
 }
 
 function provenFindingRows(rows, structuredNotes) {
@@ -37,8 +48,11 @@ function provenFindingRows(rows, structuredNotes) {
     .map((label) => label.trim())
     .filter((label) => !screened || !customerCopyViolations(label).length)
     .map((label) => label.toLowerCase()));
-  return (Array.isArray(rows) ? rows : []).filter((row) => findingHasOwnText(row)
-    || formTitles.has(String(row?.title || '').trim().toLowerCase()));
+  return (Array.isArray(rows) ? rows : []).filter((row) => {
+    const label = String(row?.title || '').trim().toLowerCase();
+    if (screened && stockDetailOnly(row)) return formTitles.has(label);
+    return findingHasOwnText(row) || formTitles.has(label);
+  });
 }
 
 module.exports = { provenFindingRows, findingHasOwnText };

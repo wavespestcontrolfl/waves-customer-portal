@@ -232,6 +232,25 @@ describe('the report payload', () => {
     expect((await build({ structured_notes: '{}' })).findings.map((f) => f.category)).toEqual(['no_activity']);
   });
 
+  test('a stored row whose only text is the stock detail stands only when its label passes the screen', async () => {
+    const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../shared/service-completion-observations');
+    // Completion saves each picked form label with the stock detail
+    // (complete-scheduled-service.js). This snapshot lists a label the
+    // customer-copy screen refuses.
+    const row = (title) => ({
+      id: `s-${title.length}`, service_record_id: SERVICE.id, category: 'observation', severity: 'low',
+      title, detail: STRUCTURED_OBSERVATION_FINDING_DETAIL, recommendation: null,
+    });
+    const findings = [row('Safe for pets once dry'), row('Light ant activity')];
+    const form = { formObservations: ['Safe for pets once dry', 'Light ant activity'] };
+    const data = await build({ structured_notes: JSON.stringify({ ...stored(), ...form }) }, { service_findings: findings });
+    expect(data.findings.map((f) => f.title)).toEqual(['Light ant activity']);
+    expect(JSON.stringify(data)).not.toContain('Safe for pets');
+    // A record with no note keeps both rows, as today.
+    const legacy = await build({ structured_notes: JSON.stringify(form) }, { service_findings: findings });
+    expect(legacy.findings.map((f) => f.title)).toEqual(['Safe for pets once dry', 'Light ant activity']);
+  });
+
   test('the PDF key hashes the summary the report prints', async () => {
     const data = await build();
     expect(summaryCopySignature(SERVICE)).toBe(`${keyOf(data.summary)}-rn`);

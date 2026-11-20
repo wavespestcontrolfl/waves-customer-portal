@@ -8,6 +8,7 @@
  * the voice relay already drop those rows, and these readers printed them.
  */
 const { provenFindingRows } = require('../services/service-report/finding-provenance');
+const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../shared/service-completion-observations');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const { buildReportCopyContext } = require('../services/service-report/report-copy-context');
 
@@ -97,6 +98,22 @@ describe('provenFindingRows', () => {
     expect(provenFindingRows([RAW, FORM_LABEL], { ...NOTE_RECORD, formObservations }).map((r) => r.id)).toEqual(['f-form']);
     expect(provenFindingRows([RAW, FORM_LABEL], JSON.stringify({ ...NOTE_RECORD, formObservations })).map((r) => r.id)).toEqual(['f-form']);
   });
+
+  test("on a note record, a row whose only text is the stock detail stands only when its label passes the screen", () => {
+    // Completion saves each picked form label with the stock detail.
+    const stock = (id, title, extra = {}) => row(id, title, { detail: STRUCTURED_OBSERVATION_FINDING_DETAIL, ...extra });
+    const refused = stock('f-stock-refused', 'Safe for pets once dry');
+    const label = stock('f-stock-label', 'Yellowjacket');
+    const formObservations = ['Yellowjacket', 'Safe for pets once dry'];
+    expect(provenFindingRows([refused, label], { ...NOTE_RECORD, formObservations }).map((r) => r.id)).toEqual(['f-stock-label']);
+    // A label the snapshot does not list proves nothing either.
+    expect(provenFindingRows([label], NOTE_RECORD).map((r) => r.id)).toEqual([]);
+    // A recommendation is the row's own text.
+    const recommended = stock('f-stock-rec', 'Safe for pets once dry', { recommendation: 'Keep pets off the lawn until it dries.' });
+    expect(provenFindingRows([recommended], { ...NOTE_RECORD, formObservations }).map((r) => r.id)).toEqual(['f-stock-rec']);
+    // A record with no note keeps both rows, as today.
+    expect(provenFindingRows([refused, label], { formObservations }).map((r) => r.id)).toEqual(['f-stock-refused', 'f-stock-label']);
+  });
 });
 
 describe('customer readers of a visit\'s findings', () => {
@@ -115,8 +132,14 @@ describe('customer readers of a visit\'s findings', () => {
   test("on a note record, a form label the customer-copy screen refuses never prints", async () => {
     // The form snapshot lists the access code too; the record's report lists
     // drop it (report-data buildProtocolPayload), and so does every reader here.
+    // Completion saved the refused label with the stock detail as well.
     const notes = JSON.stringify({ ...NOTE_RECORD, formObservations: ['Yellowjacket', RAW.title] });
-    const tables = { ...TABLES, service_records: [{ ...TABLES.service_records[0], structured_notes: notes }, TABLES.service_records[1]] };
+    const stockRow = row('f-stock', RAW.title, { detail: STRUCTURED_OBSERVATION_FINDING_DETAIL });
+    const tables = {
+      ...TABLES,
+      service_records: [{ ...TABLES.service_records[0], structured_notes: notes }, TABLES.service_records[1]],
+      service_findings: [...TABLES.service_findings, stockRow],
+    };
     const context = await buildServiceReportDynamicContext({ recordId: RECORD_ID, omitPestPressureContext: false, knex: fakeKnex(tables) });
     expect(JSON.stringify(context.aiSummary)).toContain('Yellowjacket');
     expect(context.sinceLastVisit.activityLine).toContain('Ant trail at the slab');
