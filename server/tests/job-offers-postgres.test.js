@@ -218,13 +218,21 @@ jest.setTimeout(120000);
       expect((await JobOffers.adminPanel(emailOnly.id, actor())).sendTo).toEqual({ sms: null, email: 's***@example.test' });
     });
 
-    test('a comms failure after the commit leaves the offer sent and reports the channels as failed', async () => {
+    test('a comms failure after the commit leaves the offer sent and reports each channel it tried as uncertain', async () => {
+      // The send threw partway, so the text may already have gone out: no channel reads as failed.
       const app = await newApplication();
       const draft = await JobOffers.saveDraft(app.id, {}, actor());
       mockSendStageComms.mockRejectedValueOnce(new Error('boom'));
       const sent = await JobOffers.sendOffer(app.id, draft.id, actor(), draft.draftHash);
       expect(sent.offer.status).toBe('sent');
-      expect(sent.comms.sms.outcome).toBe('failed');
+      expect(sent.comms).toEqual({ sms: { outcome: 'uncertain', code: 'comms_threw' }, email: { outcome: 'uncertain', code: 'comms_threw' } });
+      // A channel with nothing on file was not tried.
+      const textOnly = await newApplication({ contact_snapshot: JSON.stringify({ name: 'Sam Lee', phone: '(941) 555-0101' }) });
+      const second = await JobOffers.saveDraft(textOnly.id, {}, actor());
+      mockSendStageComms.mockRejectedValueOnce(new Error('boom'));
+      expect((await JobOffers.sendOffer(textOnly.id, second.id, actor(), second.draftHash)).comms).toEqual({
+        sms: { outcome: 'uncertain', code: 'comms_threw' }, email: { outcome: 'not_requested', code: null },
+      });
     });
 
     test('revise leaves the old offer out until the new draft is sent; sending supersedes it', async () => {
@@ -248,6 +256,19 @@ jest.setTimeout(120000);
       expect(view.terms).toBeUndefined();
       expect(view.message).toMatch(/^This offer was updated\. Please use the newest link /);
       expect((await root('job_applications').where({ id: app.id }).first()).status_history.at(-1).note).toBe('Updated job offer sent');
+    });
+
+    test('the offer read names the offer a Send of the revision replaces, while its link still works', async () => {
+      const app = await newApplication();
+      const draft = await JobOffers.saveDraft(app.id, {}, actor());
+      expect((await JobOffers.adminPanel(app.id, actor())).sendReplacesId).toBeNull();
+      const sent = await JobOffers.sendOffer(app.id, draft.id, actor(), draft.draftHash);
+      expect((await JobOffers.adminPanel(app.id, actor())).sendReplacesId).toBeNull();
+      await JobOffers.reviseOffer(app.id, sent.offer.id, { expectedStatus: 'sent' }, actor());
+      expect((await JobOffers.adminPanel(app.id, actor())).sendReplacesId).toBe(sent.offer.id);
+      // Past its expiry the old link already says so: a Send stops no working link.
+      const later = new Date(Date.parse(sent.offer.expiresAt) + 60 * 1000);
+      expect((await JobOffers.adminPanel(app.id, actor(), later)).sendReplacesId).toBeNull();
     });
 
     test('a date request becomes a revised offer at the requested date', async () => {

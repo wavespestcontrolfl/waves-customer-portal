@@ -555,6 +555,9 @@ async function adminPanel(applicationId, actor, now = new Date()) {
     termsBlockers: blockers,
     defaults,
     sendTo: sendTargetsOf(application),
+    // The offer out now that sending the open draft replaces (its link stops working at the send), or null. `out` is
+    // already null for an offer past its expiry, whose link no longer works.
+    sendReplacesId: replacedBySend(out, revision),
     // The preview names the offer its letter belongs to (the open draft, else the frozen letter of the current offer, else
     // none: the defaults) and that draft's hash, so a Save, Send or Discard can be tied to what was read.
     letterPreview: {
@@ -816,14 +819,21 @@ async function assertSendable(trx, application, offer, { now, ownerName, draftHa
   return issued;
 }
 
+// The id of the offer out now that a Send of `draft` replaces (its link stops working at the send, before any text or
+// email), or null. supersedePrior applies it under the lock; the offer read names it, so the Send question can say so.
+function replacedBySend(out, draft) {
+  return out && draft && out.id === draft.supersedes_id ? out.id : null;
+}
+
 async function supersedePrior(trx, applicationId, offer, now) {
   const out = await trx('job_offers').where({ application_id: applicationId }).whereIn('status', OUT_STATUSES).forUpdate().first();
   if (!out) return;
-  if (out.id !== offer.supersedes_id && expiredByClock(out, now)) {
+  const replaced = replacedBySend(out, offer);
+  if (!replaced && expiredByClock(out, now)) {
     await trx('job_offers').where({ id: out.id }).update({ status: 'expired', updated_at: new Date() });
     return;
   }
-  if (out.id !== offer.supersedes_id) {
+  if (!replaced) {
     throw new OfferError(409, 'OFFER_ALREADY_OPEN', 'An offer is already out. Use Revise to make an updated one.', { offerId: out.id });
   }
   await trx('job_offers').where({ id: out.id }).update({ status: 'superseded', superseded_by_id: offer.id, updated_at: new Date() });
@@ -912,7 +922,11 @@ async function deliverOfferComms({ offer, application, ownerName, snapshot }, ac
     return outcomesOf(comms);
   } catch (err) {
     logger.error(`[job-offers] offer comms failed after the committed send (offer ${offer.id}): ${errTag(err)}`);
-    return { sms: { outcome: 'failed', code: 'comms_threw' }, email: { outcome: 'failed', code: 'comms_threw' } };
+    // The send threw partway, so a channel it tried may already have gone out (the text leg runs before the email
+    // leg): its outcome is not known. 'uncertain', never 'failed', so the page does not ask for a Revise that would
+    // stop a link the applicant may already have. A channel with nothing on file was not tried.
+    const unknown = (target) => (target ? { outcome: 'uncertain', code: 'comms_threw' } : { outcome: 'not_requested', code: null });
+    return { sms: unknown(to.sms), email: unknown(to.email) };
   }
 }
 

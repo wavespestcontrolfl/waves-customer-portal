@@ -46,6 +46,7 @@ function panel(current) {
     terms: { title: "Technician Terms", versionId: "terms-1", issuedAt: "2026-11-01T14:00:00.000Z" },
     defaults: DEFAULTS,
     sendTo: { sms: "(941) ***-0142", email: "j***@example.com" },
+    sendReplacesId: null,
     draft: null,
     current,
     letterPreview: { offerId: current.id, draftHash: current.draftHash, markdown: `Letter for ${current.draftHash}.` },

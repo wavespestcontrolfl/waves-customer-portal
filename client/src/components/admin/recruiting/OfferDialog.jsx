@@ -123,7 +123,9 @@ function OfferFields({ fields, onChange, startError, rateErrors, sendTo, disable
   );
 }
 
-function ConfirmSend({ open, firstName, sends, busy, error, onCancel, onConfirm }) {
+// replaces: the server's offer read names an offer out now that this Send replaces
+// (sendReplacesId). Its link stops working at the send, before any text or email.
+function ConfirmSend({ open, firstName, sends, replaces, busy, error, onCancel, onConfirm }) {
   return (
     <Dialog open={open} onClose={busy ? undefined : onCancel} size="sm" layer={140}>
       <DialogHeader>
@@ -133,6 +135,11 @@ function ConfirmSend({ open, firstName, sends, busy, error, onCancel, onConfirm 
         <p className="text-14 text-zinc-800">
           Send this offer to {firstName}?{sends ? ` It sends ${sends}.` : ""}
         </p>
+        {replaces && (
+          <p className="mt-2 text-14 text-zinc-800">
+            It replaces the offer you sent before. That link stops working when you press Send offer, even if this one does not reach {firstName}.
+          </p>
+        )}
         {error && (
           <ActionFeedback error className="mt-3">
             {error}
@@ -565,6 +572,7 @@ function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, on
         open={confirming}
         firstName={firstName}
         sends={sends}
+        replaces={Boolean(data.sendReplacesId)}
         busy={busy}
         error={error}
         onCancel={() => {

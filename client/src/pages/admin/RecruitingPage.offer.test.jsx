@@ -52,6 +52,8 @@ function offerPayload(overrides = {}) {
     defaults: DEFAULTS,
     // Who Send reaches, as the server names them (masked).
     sendTo: { sms: '(941) ***-0123', email: 'j***@example.com' },
+    // The offer out now that sending the open draft replaces, or null.
+    sendReplacesId: null,
     current: null,
     draft: null,
     history: [],
@@ -260,6 +262,8 @@ describe('RecruitingPage offer flow: form', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
     expect(await screen.findByText('Send this offer to Jordan? It sends one text and one email.')).toBeInTheDocument();
+    // A first offer replaces nothing, so the question says nothing about an old link.
+    expect(screen.queryByText(/That link stops working/)).toBeNull();
     expect(calls.some((c) => c.path.endsWith('/send'))).toBe(false);
     const confirmDialog = screen.getByText('Send this offer to Jordan? It sends one text and one email.').closest('[role="dialog"]');
     fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Send offer' }));
@@ -1054,6 +1058,18 @@ describe('RecruitingPage offer flow: one source of truth', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Open the updated draft' }));
     expect(await screen.findByLabelText('Start date')).toHaveValue('2027-01-11');
+  });
+
+  it('the Send question for a revision says the offer out now stops working at the send', async () => {
+    const revision = offerRecord({ id: 'offer-2', draftHash: 'hash-draft', supersedesId: 'offer-1' });
+    setupFetch({}, { offer: offerPayload({ current: sent, draft: revision, sendReplacesId: 'offer-1' }), detail: detailFixture({ status: 'offer' }) });
+    await openDetail();
+    fireEvent.click(await within(await screen.findByTestId('offer-card')).findByRole('button', { name: 'Open the updated draft' }));
+    await screen.findByLabelText('Hourly rate ($)');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send offer' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
+    const confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
+    expect(within(confirm).getByText('It replaces the offer you sent before. That link stops working when you press Send offer, even if this one does not reach Jordan.')).toBeInTheDocument();
   });
 
   it('a failed re-read with no offer yet shows Try again in the section after the dialog is closed', async () => {
