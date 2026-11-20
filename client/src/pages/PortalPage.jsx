@@ -10996,6 +10996,11 @@ function PricingActionButton({ onClick, busy, disabled = false, label, busyLabel
   );
 }
 
+// Plan-start refusals that file today's request: the server could not price or book the option
+// online. Any other coded refusal shows the server's own message and files nothing; one is
+// delivery_in_flight, a quote staff are sending this customer right now (codex pre-push P1).
+const PLAN_START_REQUEST_CODES = ['pricing_unavailable', 'not_eligible', 'offer_changed'];
+
 function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secondaryButton, onExploreTiers }) {
   const [prompt, setPrompt] = useState("I'm interested in adding lawn care");
   const [result, setResult] = useState(null);
@@ -11084,25 +11089,37 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   // answer, or a server or gateway error, may hide a quote the server already made (codex pre-push P1).
   const startRefused = (err) => Number.isInteger(err?.status) && err.status >= 400 && err.status < 500;
 
-  // Opens the priced estimate (pick a time, save a card there). A refusal falls back to today's
-  // request, so the customer never hits a dead end. Any other failure asks once more (a repeat
-  // tap hands back the quote the first one may have made) and never files a request, so one tap
-  // never makes both a quote and a request. Off while a new answer loads (the option on screen is
-  // the old answer's) and while an earlier start still mints (codex pre-push P1s).
+  // Opens the priced estimate (pick a time, save a card there). A pricing or eligibility refusal,
+  // or a refusal before the mint ran (a 4xx with no code), falls back to today's request, so the
+  // customer never hits a dead end. A failure with no sure answer asks once more (a repeat hands
+  // back the quote the first call may have made), under the tap's own credentials only: a repeat
+  // after the account changed could mint on the new account (codex pre-push P1). It never files a
+  // request, so one tap never makes both a quote and a request. Off while a new answer loads (the
+  // option on screen is the old answer's) and while an earlier start still mints (codex pre-push P1s).
   const startPlan = async () => {
     if (minting || startingPlan || requesting || loading || !selected) return;
     const seq = planStartSeq.current;
+    const tapToken = api.token;
     setMinting(true);
     setStartingPlan(true);
     const { serviceKey, id: optionId, monthly, perVisit, dueAtStart, oneTime, setupFee } = selected;
     const start = () => api.startPlan({ serviceKey, optionId, shown: { monthly, perVisit, dueAtStart, oneTime, setupFee } });
     let out = null;
-    let refused = false;
+    let refusal = null;
+    // The API client cancels a request whose account changed while it waited (requestSuperseded).
+    // It swapped the token first, so the token check below already refuses that repeat.
+    let superseded = false;
     try {
       out = await start();
     } catch (err) {
-      refused = startRefused(err);
-      if (!refused && seq === planStartSeq.current) out = await start().catch(() => null);
+      superseded = err?.requestSuperseded === true;
+      if (startRefused(err)) refusal = err;
+      else if (seq === planStartSeq.current && api.token === tapToken) {
+        out = await start().catch((again) => {
+          superseded = again?.requestSuperseded === true;
+          return null;
+        });
+      }
     } finally {
       setMinting(false);
     }
@@ -11114,11 +11131,12 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
       return;
     }
     setStartingPlan(false);
-    if (refused) {
+    if (superseded) return; // another account is active now: this card is not its card
+    if (refusal && (!refusal.code || PLAN_START_REQUEST_CODES.includes(refusal.code))) {
       await submitRequest();
       return;
     }
-    showCustomerAlert('We could not confirm your estimate. Please tap again in a moment, or call us at (941) 297-5749.');
+    showCustomerAlert(refusal?.message || 'We could not confirm your estimate. Please tap again in a moment, or call us at (941) 297-5749.');
   };
 
   const promptChips = [

@@ -88,9 +88,13 @@ it('posts the selected option and every amount it shows, then hands off to the e
   }
 });
 
-it('falls back to today\'s request on a refusal the server answered (a 409), so the customer never hits a dead end', async () => {
-  const err = Object.assign(new Error('The price changed.'), { status: 409 });
-  api.startPlan.mockRejectedValue(err);
+it.each([
+  ['a 404 with no code (the gate went off before the mint ran)', 404, undefined],
+  ['a 409 pricing_unavailable', 409, 'pricing_unavailable'],
+  ['a 409 not_eligible', 409, 'not_eligible'],
+  ['a 409 offer_changed', 409, 'offer_changed'],
+])('falls back to today\'s request on %s, so the customer never hits a dead end', async (_label, status, code) => {
+  api.startPlan.mockRejectedValue(Object.assign(new Error('The price changed.'), { status, code }));
   await priceIt(priced(OFFER));
   fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
   await waitFor(() => expect(api.createRequest).toHaveBeenCalledOnce());
@@ -98,6 +102,25 @@ it('falls back to today\'s request on a refusal the server answered (a 409), so 
     category: 'add_service', subject: 'Add Pest Control to my plan', description: 'Customer priced Quarterly pest control in the portal.',
   });
   expect(await screen.findByText('Request sent')).toBeInTheDocument();
+  expect(api.startPlan).toHaveBeenCalledOnce();
+});
+
+it('a quote staff are sending right now (409 delivery_in_flight) shows the server\'s message and files no request (codex pre-push P1)', async () => {
+  const message = 'This quote is on its way to you right now — give it a moment, then try again.';
+  api.startPlan.mockRejectedValue(Object.assign(new Error(message), { status: 409, code: 'delivery_in_flight' }));
+  const alerts = [];
+  const onDialog = (event) => alerts.push(event.detail.message);
+  window.addEventListener('waves:customer-dialog', onDialog);
+  try {
+    await priceIt(priced(OFFER));
+    fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
+    await waitFor(() => expect(alerts).toEqual([message]));
+    expect(api.startPlan).toHaveBeenCalledOnce();
+    expect(api.createRequest).not.toHaveBeenCalled();
+    expect(screen.queryByText('Request sent')).toBeNull();
+  } finally {
+    window.removeEventListener('waves:customer-dialog', onDialog);
+  }
 });
 
 it('a start whose answer was lost asks once more and opens the quote; it never files a request (codex pre-push P1)', async () => {
@@ -123,11 +146,15 @@ it('a start whose answer was lost asks once more and opens the quote; it never f
   }
 });
 
+const lostAnswer = () => new TypeError('Failed to fetch');
+const gatewayError = () => Object.assign(new Error('Request failed (502)'), { status: 502 });
 it.each([
-  ['no answer', () => new TypeError('Failed to fetch')],
-  ['a gateway error', () => Object.assign(new Error('Request failed (502)'), { status: 502 })],
-])('a start that gets %s twice tells the customer to tap again and files no request (codex pre-push P1)', async (_label, failure) => {
-  api.startPlan.mockRejectedValue(failure());
+  ['no answer twice', lostAnswer, lostAnswer],
+  ['a gateway error twice', gatewayError, gatewayError],
+  // The first call may have made a quote, so the repeat's refusal must not file a request either.
+  ['no answer, then a refusal of the repeat', lostAnswer, () => Object.assign(new Error('The price changed since you last looked. Please check the new price.'), { status: 409, code: 'offer_changed' })],
+])('a start that gets %s tells the customer to tap again and files no request (codex pre-push P1)', async (_label, first, second) => {
+  api.startPlan.mockRejectedValueOnce(first()).mockRejectedValueOnce(second());
   const alerts = [];
   const onDialog = (event) => alerts.push(event.detail.message);
   window.addEventListener('waves:customer-dialog', onDialog);
@@ -140,6 +167,32 @@ it.each([
     expect(api.createRequest).not.toHaveBeenCalled();
   } finally {
     window.removeEventListener('waves:customer-dialog', onDialog);
+  }
+});
+
+it.each([
+  ['the API client cancels it (requestSuperseded)', () => Object.assign(new Error('Request canceled because the active account changed.'), { requestSuperseded: true }), []],
+  ['its answer is lost', lostAnswer, ['We could not confirm your estimate. Please tap again in a moment, or call us at (941) 297-5749.']],
+])('a start whose account changed while it waited, where %s, is never repeated under the new account (codex pre-push P1)', async (_label, failure, expectedAlerts) => {
+  api.token = 'token-a';
+  // Any repeat would fail too, so a wrong repeat shows up as a second call, never as a hang.
+  api.startPlan.mockRejectedValue(lostAnswer()).mockImplementationOnce(() => {
+    api.token = 'token-b'; // another account became active while the start waited
+    return Promise.reject(failure());
+  });
+  const alerts = [];
+  const onDialog = (event) => alerts.push(event.detail.message);
+  window.addEventListener('waves:customer-dialog', onDialog);
+  try {
+    await priceIt(priced(OFFER));
+    fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'See my price and book' })).toBeEnabled());
+    expect(api.startPlan).toHaveBeenCalledOnce();
+    expect(api.createRequest).not.toHaveBeenCalled();
+    expect(alerts).toEqual(expectedAlerts);
+  } finally {
+    window.removeEventListener('waves:customer-dialog', onDialog);
+    api.token = undefined;
   }
 });
 
