@@ -435,30 +435,30 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
       .where({ customer_id: customerId, status: 'accepted' })
       .select('id', 'address', 'estimate_data');
     const bodyById = new Map(bodies.map((body) => [body.id, body]));
-    // The batch keeps the listed order, so the first surviving row is the
-    // most recently accepted same-property estimate.
-    for (const row of batch) {
-      const body = bodyById.get(row.id);
-      if (!body || !atThisHome(body.address)) continue;
-      const estData = parseJsonColumn(body.estimate_data);
+    // The batch's bodies in the listed order, so the first surviving row is
+    // the most recently accepted same-property estimate; a row that left the
+    // accepted set before this read has none.
+    for (const body of batch.map((row) => bodyById.get(row.id)).filter(Boolean)) {
+      if (!atThisHome(body.address)) continue;
+      const estData = parseJsonColumn(body.estimate_data) || {};
       // engineInputs / inputs (admin + agent saves) or the public quote's
       // singular engineInput — the normalized request it priced, which is
       // where its footprint-trust stamp lives (Codex #6398 r20).
-      const inputs = estData?.engineInputs || estData?.inputs || estData?.engineInput;
-      if (!inputs || typeof inputs !== 'object') continue;
-      // Inputs with no dimension cannot seed (codex pre-push r29 P1): an empty
-      // object, or one holding only service picks, must not stop the scan
-      // before an older same-premises estimate with measurements, whose review
-      // markers then apply.
+      const inputs = estData.engineInputs || estData.inputs || estData.engineInput || {};
+      // Inputs with no dimension cannot seed (codex pre-push r29 P1): none, a
+      // value that is not an object, an empty object, or one holding only
+      // service picks must not stop the scan before an older same-premises
+      // estimate with measurements, whose review markers then apply.
       if (![inputs.homeSqFt, inputs.lotSqFt, inputs.lawnSqFt, inputs.turfSf, inputs.bedArea, inputs.stories].some(positiveOrNull)) continue;
-      pick = { row, inputs, estData };
+      pick = { inputs, estData };
       break;
     }
   }
   if (!pick) return null;
   const inputs = pick.inputs;
   const cleanString = (value) => (typeof value === 'string' && value.trim() ? value.trim() : null);
-  let cleanedFeatures = inputs.features && typeof inputs.features === 'object' && !Array.isArray(inputs.features)
+  // A JSON object (not an array, null or a scalar) is copied.
+  let cleanedFeatures = Object.prototype.toString.call(inputs.features) === '[object Object]'
     ? { ...inputs.features }
     : null;
   // attachedGarage is a TOP-LEVEL estimator input, not a features member
@@ -471,8 +471,8 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
   // hasAttachedGarageForPest already looks (property.features.attachedGarage),
   // so it inherits the same fill-only and lookup-rejection safeguards as
   // every other modifier.
-  if (inputs.attachedGarage !== undefined && inputs.attachedGarage !== null) {
-    cleanedFeatures = { ...(cleanedFeatures || {}), attachedGarage: !!inputs.attachedGarage };
+  if (inputs.attachedGarage != null) {
+    cleanedFeatures = { ...cleanedFeatures, attachedGarage: !!inputs.attachedGarage };
   }
   // Water adjacency has the same top-level/feature split, with a twist
   // (codex #3367 PR r18): the V2 adapter persists the real enum
@@ -492,7 +492,7 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
   // by construction. Only ever upgrades to true; a features member that
   // already says true is never contradicted.
   if (hasPresenceValue(inputs.nearWater)) {
-    cleanedFeatures = { ...(cleanedFeatures || {}), nearWater: true };
+    cleanedFeatures = { ...cleanedFeatures, nearWater: true };
   }
   let zeroTreeCountAmbiguous = false;
   if (cleanedFeatures
