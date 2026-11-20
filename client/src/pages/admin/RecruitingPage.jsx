@@ -600,6 +600,11 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refresh
         );
         if (seq !== previewSeq.current) return null;
         setPreview(data);
+        // A channel this preview cannot reach is never selected. The dialog opens with
+        // every channel on, so this leaves on the ones it can reach; a re-read turns off
+        // one that closed since and keeps the owner's other choices.
+        setSmsChecked((on) => on && Boolean(data.templated && data.channels?.sms?.available));
+        setEmailChecked((on) => on && Boolean(data.templated && data.channels?.email?.available));
         return data;
       } catch (err) {
         if (seq !== previewSeq.current) return null;
@@ -625,10 +630,10 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refresh
       setStageError(null);
       setNote("");
       setMoveWithoutNotifying(false);
+      setSmsChecked(true);
+      setEmailChecked(true);
       const data = await readPreview(status);
       if (!data) return;
-      setSmsChecked(Boolean(data.templated && data.channels?.sms?.available));
-      setEmailChecked(Boolean(data.templated && data.channels?.email?.available));
       setSmsBody(data.sms_body || "");
       setEmailSubject(data.email_subject || "");
       setEmailBody(data.email_body || "");

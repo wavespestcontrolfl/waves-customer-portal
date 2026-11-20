@@ -752,14 +752,15 @@ function stageMoveClosesOffers(fromStatus, toStatus) {
 // The live offers such a move withdraws (a draft, a sent offer, a date request).
 function liveOffersOf(knex, applicationId, { lock = false } = {}) {
   const query = knex('job_offers').where({ application_id: applicationId }).whereIn('status', LIVE_STATUSES);
-  return (lock ? query.forUpdate() : query).select('id', 'status', 'expires_at');
+  return (lock ? query.forUpdate() : query).select('id', 'status', 'expires_at', 'updated_at');
 }
 
-// One stamp for those offers, from their ids and statuses: what the move would withdraw changes only when an offer is
-// sent, revised (a new row), withdrawn, discarded, declined, signed or answered with a date request. The stage preview
-// returns it and the move compares it under its lock, so a move never withdraws an offer the dialog did not show.
+// One stamp for the offers a stage move withdraws, from their ids, statuses and versions (updated_at, which every offer
+// write sets, so a draft edited in place changes it too). A move that keeps the offers withdraws none: the empty list
+// has a stamp of its own. The stage preview returns it and the move names the offers again under its lock, so a move
+// never withdraws an offer, or a version of one, that its dialog did not show.
 function offerStampOf(rows) {
-  const parts = rows.map((o) => `${o.id}:${o.status}`).sort();
+  const parts = rows.map((o) => `${o.id}:${o.status}:${iso(o.updated_at)}`).sort();
   return crypto.createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 32);
 }
 

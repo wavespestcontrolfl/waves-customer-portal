@@ -718,6 +718,47 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     expect(within(stage).getByRole('button', { name: 'Confirm' })).toBeEnabled();
   });
 
+  it('after the offers changed, the preview read again turns off a channel that closed since, and the move asks only for the other', async () => {
+    const channels = (smsOpen) => ({
+      sms: smsOpen ? { available: true, to: '(941) ***-1234', reason: null } : { available: false, to: null, reason: null },
+      email: { available: true, to: 'j***@example.com', reason: null },
+    });
+    let preview = {
+      status: 'interview', templated: true, sending_enabled: true, channels: channels(true),
+      sms_body: 'Hi Jordan, pick a time: [interview link]', email_subject: 'Your interview', email_body: 'Pick a time: [interview link]',
+      offers: { held: false, draft: true, owner_only: false, stamp: 'a'.repeat(32) },
+    };
+    let patches = 0;
+    const { calls } = setupFetch(
+      {
+        'GET /admin/careers/app-1/stage-preview?status=interview': () => res(200, preview),
+        'PATCH /admin/careers/app-1/status': () => {
+          patches += 1;
+          if (patches > 1) return res(200, { application: detailFixture({ status: 'interview' }), sent: null });
+          // Another session sent the draft, and the applicant's number stopped taking texts.
+          preview = { ...preview, channels: channels(false), offers: { held: true, draft: false, owner_only: false, stamp: 'b'.repeat(32) } };
+          return res(409, { error: 'The job offer changed since this opened. Nothing was changed. Check the move again.', code: 'OFFERS_CHANGED', application: detailFixture({ status: 'offer' }) });
+        },
+      },
+      { offer: offerPayload({ current: offerRecord() }), detail: detailFixture({ status: 'offer' }) },
+    );
+    await openDetail();
+    await screen.findByTestId('offer-card');
+    fireEvent.click(screen.getByRole('button', { name: 'Interview' }));
+    const stage = (await screen.findByRole('heading', { name: 'Move to Interview' })).closest('[role="dialog"]');
+    expect(await within(stage).findByRole('checkbox', { name: /^Text/ })).toBeChecked();
+    fireEvent.click(within(stage).getByRole('button', { name: 'Confirm' }));
+    expect(await within(stage).findByText(/withdraws the offer you sent to Jordan/)).toBeInTheDocument();
+    const text = within(stage).getByRole('checkbox', { name: /^Text/ });
+    expect(text).not.toBeChecked();
+    expect(text).toBeDisabled();
+    expect(within(stage).getByRole('checkbox', { name: /^Email/ })).toBeChecked();
+    fireEvent.click(within(stage).getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(patches).toBe(2));
+    const second = calls.filter((c) => c.method === 'PATCH')[1].body;
+    expect(second).toMatchObject({ expected_offers: 'b'.repeat(32), notify: { sms: false, email: true } });
+  });
+
   it('re-reads the application after an offer action with ?peek=1, so no reply is marked read behind a dialog', async () => {
     const { calls } = setupFetch(
       { 'POST /admin/careers/app-1/offer/offer-1/withdraw': () => res(200, { offer: { ...sent, status: 'withdrawn' } }) },

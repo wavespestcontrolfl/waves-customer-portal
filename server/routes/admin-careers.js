@@ -236,9 +236,12 @@ router.get('/:id', async (req, res) => {
 // What a stage move does to the application's job offers, by the rule the move applies (applyStatusTransition), with
 // GATE_JOB_OFFERS on or off: whether it withdraws an offer the applicant holds or discards a draft, and whether this
 // account may make it (a held offer is withdrawn only by the owner account). The stage dialog says it before Confirm.
-// stamp: the offers this preview saw; the move sends it back as expected_offers and is refused if they changed.
+// stamp: the offers this move withdraws, as the preview saw them (none, for a move that keeps them). The move sends it
+// back as expected_offers and is refused if it would withdraw anything else.
 async function stageOfferEffect(req, row, status) {
-  if (!JobOffers.stageMoveClosesOffers(row.status, status)) return { held: false, draft: false, owner_only: false, stamp: null };
+  if (!JobOffers.stageMoveClosesOffers(row.status, status)) {
+    return { held: false, draft: false, owner_only: false, stamp: JobOffers.offerStampOf([]) };
+  }
   const { held, draft, stamp } = await JobOffers.liveOfferStake(db, row.id);
   return { held, draft, owner_only: held && !ibFullAccess(req), stamp };
 }
@@ -470,11 +473,13 @@ async function applyStatusTransition(trx, applicationId, technicianId, plan, { o
   // outstanding job offers in the same transaction, so an old link cannot sign over the owner's newer decision or revive
   // when the application is moved back (the offer flow, GATE_JOB_OFFERS).
   const closesOffers = JobOffers.stageMoveClosesOffers(row.status, plan.status);
-  // The move withdraws only the offers its dialog showed: if another session sent, revised or withdrew one since the
-  // preview, refuse before anything is written; the dialog reads the preview again.
-  if (closesOffers && plan.expectedOffers
-    && JobOffers.offerStampOf(await JobOffers.liveOffersOf(trx, applicationId, { lock: true })) !== plan.expectedOffers) {
-    return { row, offersChanged: true };
+  // The move withdraws exactly what its dialog showed. The preview's stamp names the offers it withdraws (none, for a
+  // move that keeps them); the same rule names them again here, under the lock. Any difference is refused before
+  // anything is written, and the dialog reads the preview again: another session sent, edited or withdrew an offer, or
+  // the preview read the application at another stage than this move leaves.
+  if (plan.expectedOffers) {
+    const withdrawn = closesOffers ? await JobOffers.liveOffersOf(trx, applicationId, { lock: true }) : [];
+    if (JobOffers.offerStampOf(withdrawn) !== plan.expectedOffers) return { row, offersChanged: true };
   }
   // An offer the applicant holds is withdrawn only by the owner account, as on POST .../withdraw: any other admin's
   // stage move is refused here, before anything is written.
