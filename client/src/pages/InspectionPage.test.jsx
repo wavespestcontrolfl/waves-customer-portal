@@ -864,16 +864,47 @@ describe('InspectionPage: an address race without availability refreshes at the 
     expect(screen.getByText(/here are the latest open times/i)).toBeInTheDocument();
   });
 
-  // A full load (here, the page opened for another link) brings an address
-  // with its times, so the search opens again.
-  it('after a failed reload closes the search, a full load opens it again', async () => {
-    let getCalls = 0;
+  // Pre-push P1 on 5ea559c939: another link opened in the same page starts a
+  // fresh page. Link A's typed address (the server books a supplied address
+  // first) never rides along with link B's search or booking, and B's search
+  // is open though A's had closed.
+  it('another link opened in the same page starts fresh: no typed address from the first link, and an open search', async () => {
+    let availabilityPosts = 0;
+    const findSlotsBodies = [];
+    const otherCommitBodies = [];
     const fetchMock = vi.fn((url, opts = {}) => {
       const u = String(url);
       if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/feedface')) {
+        if (u.includes('/find-slots')) {
+          findSlotsBodies.push(JSON.parse(opts.body));
+          return Promise.resolve(jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }));
+        }
+        if (opts.method === 'POST') {
+          otherCommitBodies.push(JSON.parse(opts.body));
+          return Promise.resolve(jsonResponse({
+            success: true,
+            state: 'ok',
+            visit: { date: '2026-07-12', window: { start: '13:00', end: '13:30' } },
+            startLabel: '1:00 PM',
+            endLabel: '1:30 PM',
+            rescheduleUrl: '/reschedule/feedface',
+          }));
+        }
+        return Promise.resolve(jsonResponse(okPayload()));
+      }
+      if (u.includes('/availability') && opts.method === 'POST') {
+        availabilityPosts += 1;
+        return Promise.resolve(availabilityPosts === 1
+          ? jsonResponse({ availability: okPayload().availability, needs_address: false })
+          : jsonResponse({ error: 'unavailable' }, 503));
+      }
       if (opts.method === 'POST') return Promise.resolve(jsonResponse({ error: 'That time is no longer open.', code: 'SLOT_TAKEN', availability: null }, 409));
-      getCalls += 1;
-      return Promise.resolve(getCalls === 2 ? jsonResponse({ error: 'unavailable' }, 503) : jsonResponse(okPayload()));
+      return Promise.resolve(jsonResponse(okPayload({
+        needs_address: true,
+        availability: null,
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
+      })));
     });
     vi.stubGlobal('fetch', fetchMock);
     function OtherLink() {
@@ -889,14 +920,24 @@ describe('InspectionPage: an address race without availability refreshes at the 
       </MemoryRouter>
     );
 
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '123 Palm Ave, Bradenton, FL 34209' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
     fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
     fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
     expect(await screen.findByText(/couldn't load the latest open times\. Please reload this page/i)).toBeInTheDocument();
     expect(screen.queryByLabelText('Search for a service date or time')).not.toBeInTheDocument();
+    expect(availabilityPosts).toBe(2);
 
     fireEvent.click(screen.getByRole('button', { name: 'Open another link' }));
-    expect(await screen.findByLabelText('Search for a service date or time')).toBeInTheDocument();
-    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/inspection/feedface'))).toBe(true);
+    fireEvent.change(await screen.findByLabelText('Search for a service date or time'), { target: { value: 'this weekend' } });
+    expect(screen.queryByText(/couldn't load the latest open times/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(findSlotsBodies).toHaveLength(1));
+    expect(findSlotsBodies[0]).not.toHaveProperty('address');
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Book /i }));
+    await waitFor(() => expect(otherCommitBodies).toHaveLength(1));
+    expect(otherCommitBodies[0]).not.toHaveProperty('address');
   });
 
   // Pre-push P1 on 8f40c19990: a search still running when the refusal lands

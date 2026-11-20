@@ -1915,7 +1915,16 @@ FLOWS.assessment = {
   Success: ({ result }) => <InspectionSuccessCard result={result} serviceName={ASSESSMENT_NAME} />,
 };
 
-export default function ScheduleFlowPage({ flow }) {
+// One page per link: a link opened in place of another (another token, same
+// flow) remounts the page, so nothing from the old link carries over — a
+// typed address (the server books a supplied address first), a closed
+// search, a result or an out-of-area stop (pre-push P1 on 5ea559c939).
+export default function ScheduleFlowRoute(props) {
+  const { token } = useParams();
+  return <ScheduleFlowPage key={token} {...props} />;
+}
+
+function ScheduleFlowPage({ flow }) {
   const cfg = FLOWS[flow];
   // The estimate-token assessment page answers the inspection contract (terminal states, error codes, the service
   // area notice); only the lead-only address and emailed-time features stay inspection's own.
@@ -1935,7 +1944,8 @@ export default function ScheduleFlowPage({ flow }) {
   const [submitError, setSubmitError] = useState(null);
   // Inspection: a refusal's reload failed, so the page no longer knows which
   // address its next commit books (confirm). The search stays closed until a
-  // full load or a newly typed address brings an address with its times.
+  // newly typed address brings an address with its times, or the page opens
+  // again (another link remounts it: ScheduleFlowRoute).
   const [searchClosed, setSearchClosed] = useState(false);
   const [result, setResult] = useState(null);
   // True while the calendar shows an AI search's results instead of the full
@@ -1998,7 +2008,6 @@ export default function ScheduleFlowPage({ flow }) {
     setLoading(true);
     setNotFound(false);
     setLoadError(false);
-    setSearchClosed(false);
     try {
       const res = await fetch(availabilityUrl, { signal: controller.signal });
       if (controller.signal.aborted) return;
