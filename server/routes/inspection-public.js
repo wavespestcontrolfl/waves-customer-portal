@@ -2696,8 +2696,17 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // always uses the global `db` connection and can do real network I/O
     // of its own (a gated weather-outlook call), neither of which may run
     // while that lock is held.
-    const bookingAddress = locationMoved ? customerAddressFields(custRow) : resolved.address;
-    const bookingSlot = locationMoved
+    // The same re-check, with the profile's own address, when a matched
+    // profile at the same pin has another city on file (owner rule B,
+    // pre-push P1 on 3e6fd14320): a visit with no zone stamp is read later by
+    // its customer's city (zone-day-funnel.js zoneStopDays), so the zone its
+    // booking checks and stamps, and a 409's fresh times, read that city too.
+    // A profile with no city on file leaves the stamp alone to decide.
+    const cityKey = (city) => String(city || '').trim().toLowerCase();
+    const profileCity = cityKey(custRow.city);
+    const profileAddress = locationMoved || (!!profileCity && profileCity !== cityKey(resolved.address?.city));
+    const bookingAddress = profileAddress ? customerAddressFields(custRow) : resolved.address;
+    const bookingSlot = profileAddress
       ? await revalidateSlotAt(bookingLocation, { date, time, config, catalog, leadId: lead.id, address: bookingAddress })
       : slot;
     if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: bookingAddress, range, config, catalog, leadId: lead.id });

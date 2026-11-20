@@ -7613,7 +7613,10 @@ own city (the zone that lists it, else the zone whose city its name contains;
 the address text only when there is no city), and with the far-south funnel on
 the booking resolves its zone from the same address the same way
 (`callbackVisit.zoneAddress`; off, from the customer's city as before), so its
-stamp and its check match the list. A refused booking's `SLOT_TAKEN` refresh uses the
+stamp and its check match the list. A matched profile with another city on
+file, at its stored location or at the same pin, books with its own address
+(the slot is checked again with it): a visit with no zone stamp is read later by
+its customer's city. A refused booking's `SLOT_TAKEN` refresh uses the
 address that booking checked. No field, status, error code, limiter or header
 changes. `POST /:token/find-slots` is the same natural-language search
 reservice uses, READ-ONLY, same booking-window clamp on both ends, and
