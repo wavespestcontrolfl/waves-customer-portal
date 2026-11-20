@@ -43,6 +43,12 @@ export function summaryText(data) {
   return `${parts} from ${shortDay(from)} to ${shortDay(through)}.`;
 }
 
+// The period's inspections whose pest answer is not known yet (a report still to be read, or one that could not be
+// read): while any remain, the pest count may be low, so the line says so.
+export function unknownText(count) {
+  return count > 0 ? `Pests are not known yet for ${plural(count, "inspection")}.` : "";
+}
+
 // readAt is the weekly job's last run that read all three state files without a failure.
 export function readText(readAt) {
   return readAt ? `The state files were last read on ${formatETDate(readAt, { month: "short", day: "numeric", year: "numeric" })}.` : "";
@@ -54,8 +60,8 @@ export function readText(readAt) {
 export function headlineText(data) {
   if (!data.readAt) return "Not every state file has been read yet, so this list may be missing restaurants.";
   const total = data.counts.new_restaurant + data.counts.new_owner + data.counts.pest_finding;
-  const cut = data.rows.length < total ? ` The list shows the newest ${countText(data.rows.length)}.` : "";
-  return `${summaryText(data)} ${readText(data.readAt)}${cut}`;
+  const cut = data.rows.length < total ? `The list shows the newest ${countText(data.rows.length)}.` : "";
+  return [summaryText(data), unknownText(Number(data.pestUnknown || 0)), readText(data.readAt), cut].filter(Boolean).join(" ");
 }
 
 // One request per period. A late answer for a period the owner already left is dropped.
@@ -151,7 +157,7 @@ export default function RestaurantProspectsPage({ embedded = false }) {
         <>
           <p className="mb-3 text-ui-body text-zinc-900">{headlineText(data)}</p>
           {data.rows.length === 0
-            ? <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Nothing in the {period.label.toLowerCase()}.</div>
+            ? <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Nothing in the {period.label.toLowerCase()}{data.pestUnknown > 0 ? " so far" : ""}.</div>
             : <RestaurantTable rows={data.rows} />}
         </>
       )}

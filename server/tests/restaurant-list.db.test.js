@@ -157,11 +157,29 @@ describeDb('Restaurants list (PostgreSQL)', () => {
     expect(result.counts).toEqual({ new_restaurant: 1000, new_owner: 2, pest_finding: 1 });
   });
 
+  test('pestUnknown counts the inspections without a pest answer that a read answers for, never a callback', async () => {
+    const unread = (over) => prospect({ kind: 'inspection', event_date: '2026-11-15', pest_evidence: null, ...over });
+    await mockPg('restaurant_prospects').insert([
+      unread({ detail: JSON.stringify({ visitNumber: 1 }) }), // a first visit still to be read: counts
+      unread({ detail: JSON.stringify({ visitNumber: 1 }), detail_attempts: 3 }), // could not be read: counts
+      unread({ detail: JSON.stringify({}) }), // a visit number not known yet: counts
+      unread({ detail: JSON.stringify({ visitNumber: 2 }) }), // a callback: never answered, left out
+      unread({ license_type_code: '2014', detail: JSON.stringify({ visitNumber: 1 }) }), // a food truck: left out
+      unread({ event_date: '2026-10-20', detail: JSON.stringify({ visitNumber: 1 }) }), // before the period: left out
+      prospect({ kind: 'inspection', event_date: '2026-11-15', pest_evidence: false }), // answered, 35B only: left out
+      prospect({ kind: 'inspection', event_date: '2026-11-15', pest_evidence: true, detail: JSON.stringify({ findings: ROACHES }) }),
+    ]);
+    const result = await listRestaurants({ days: 30, now: NOW });
+    expect(result.pestUnknown).toBe(3);
+    expect(result.counts.pest_finding).toBe(1);
+    expect(result.rows.map((row) => row.reason)).toEqual(['pest_finding']);
+  });
+
   test('before the first file read the answer is empty, with no read time', async () => {
     const result = await listRestaurants({ days: 30, now: NOW });
     expect(result).toEqual({
       days: 30, from: '2026-10-21', through: '2026-11-19', readAt: null,
-      counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, rows: [],
+      counts: { new_restaurant: 0, new_owner: 0, pest_finding: 0 }, pestUnknown: 0, rows: [],
     });
   });
 
