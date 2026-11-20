@@ -1,5 +1,5 @@
 /**
- * The lead call-back reminder against live Postgres, the SQL as the sweep runs it (GATE_LEAD_CALL_REMINDER): an open
+ * The lead call-back reminder against live Postgres, the SQL as the sweep runs it: an open
  * "Missed call request" or night call-back bell one business hour old, with nobody reaching the lead since, is stamped
  * once and sends one banner; the next sweep sends nothing. A person's text or Gmail send after the bell, a young bell,
  * an old bell, a closed bell and another kind of lead bell send nothing, and a row changed since it was read is not
@@ -39,9 +39,7 @@ maybeDescribe('lead call-back reminder (live Postgres)', () => {
   });
   beforeEach(() => {
     jest.clearAllMocks();
-    process.env.GATE_LEAD_CALL_REMINDER = 'true';
   });
-  afterEach(() => { delete process.env.GATE_LEAD_CALL_REMINDER; });
   afterAll(async () => {
     for (const table of ['notifications', 'sms_log', 'emails', 'leads', 'customers']) {
       if (made[table].length) await db(table).whereIn('id', made[table]).del();
