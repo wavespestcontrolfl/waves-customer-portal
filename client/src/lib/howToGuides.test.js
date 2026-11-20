@@ -9,9 +9,10 @@ const guide = (key) => HOW_TO_GUIDE_LINKS.find((link) => link.key === `howto:${k
 const insert = (body, link) => appendStaticLinkClause(body, { url: link.url, clause: libraryLinkClause(link), guide: link });
 
 describe("how-to guide rows", () => {
-  it("ships the nine guides in the How-to group, each with plain-ASCII steps", () => {
+  it("ships the eleven guides in the How-to group, each with plain-ASCII steps", () => {
     expect(HOW_TO_GUIDE_LINKS.map((link) => link.key)).toEqual([
-      "howto:add_contact", "howto:autopay", "howto:notifications", "howto:get_app", "howto:documents",
+      "howto:add_contact", "howto:autopay", "howto:notifications", "howto:get_app",
+      "howto:alerts_iphone", "howto:alerts_android", "howto:documents",
       "howto:reschedule", "howto:access_notes", "howto:add_property", "howto:refer",
     ]);
     for (const link of HOW_TO_GUIDE_LINKS) {
