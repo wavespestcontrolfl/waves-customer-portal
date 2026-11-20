@@ -126,6 +126,12 @@ function NoTimeSoonNote({ blocked, searching, answer, slots }) {
 
 // The review shape the slot reads answer for an estimate parked for the office (B18).
 const isContactReview = (body) => body?.reviewBeforeBooking === true && body?.reason === 'contact_review';
+// A response body as JSON, or {} when it has none.
+async function readJsonBody(res) {
+  try { return (await res.json()) || {}; } catch { return {}; }
+}
+// The main list's answer when the page took its refusal (onRefusal): nothing to show here.
+const PAGE_TOOK_REFUSAL = Symbol('page took the refusal');
 
 export default function SlotPicker({
   website = false,
@@ -149,10 +155,17 @@ export default function SlotPicker({
   // B18: the server parked this estimate for the office - its slot reads answer an empty review shape
   // (reviewBeforeBooking + reason 'contact_review'). The page owns the transition to its review state.
   onContactReview = null,
+  // A 409 the page owns (its refused plan-quote banner): every slot read hands the 409 body up first, and shows
+  // nothing more when the page answers true.
+  onRefusal = null,
 }) {
   // The page's transition is async: its rejection must never surface as an unhandled one from a slot read.
   const reportContactReview = (body) => {
     try { Promise.resolve(onContactReview?.(body)).catch(() => {}); } catch { /* the page owns the transition */ }
+  };
+  // Never throws into a slot read.
+  const pageTookRefusal = (body) => {
+    try { return onRefusal?.(409, body) === true; } catch { return false; }
   };
   const [data, setData] = useState(null);
   // Report the first open slot date up (hero {date} token).
@@ -284,9 +297,17 @@ export default function SlotPicker({
     }
     const query = params.toString();
     fetch(`${API_BASE}/public/estimates/${token}/available-slots${query ? `?${query}` : ''}`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('slot fetch failed'))))
+      .then(async (r) => {
+        if (r.ok) return r.json();
+        if (r.status === 409) {
+          const body = await readJsonBody(r);
+          if (!cancelled && pageTookRefusal(body)) return PAGE_TOOK_REFUSAL;
+        }
+        throw new Error('slot fetch failed');
+      })
       .then((body) => {
         if (cancelled) return;
+        if (body === PAGE_TOOK_REFUSAL) { setLoading(false); return; }
         if (isContactReview(body)) { setLoading(false); reportContactReview(body); return; }
         setData(body);
         setLoading(false);
@@ -368,7 +389,10 @@ export default function SlotPicker({
       body: JSON.stringify({ query, serviceMode, selectedFrequency, ...(serviceCadences ? { serviceCadences } : {}) }),
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || 'search failed');
+    if (!res.ok) {
+      if (res.status === 409 && pageTookRefusal(body)) return { summary: null };
+      throw new Error(body.error || 'search failed');
+    }
     if (isContactReview(body)) { reportContactReview(body); return { summary: null }; }
     if (glass) body.summary = glassRewriteSlotSummary(body.summary, query);
     latestPickedRequestRef.current += 1;
@@ -417,7 +441,11 @@ export default function SlotPicker({
       const p = freqParams();
       p.set('date', date);
       const res = await fetch(`${API_BASE}/public/estimates/${token}/available-slots?${p.toString()}`);
-      if (!res.ok) throw Object.assign(new Error('slot fetch failed'), { limit: await bookingLimitFrom(res) });
+      if (!res.ok) {
+        // bookingLimitFrom reads only a 400's body.
+        if (res.status === 409 && pageTookRefusal(await readJsonBody(res))) return;
+        throw Object.assign(new Error('slot fetch failed'), { limit: await bookingLimitFrom(res) });
+      }
       const body = await res.json();
       if (latestPickedRequestRef.current !== requestId) return;
       if (isContactReview(body)) { reportContactReview(body); return; }

@@ -90,6 +90,18 @@ describe('a refused plan quote (RESTART_STATE_CHANGED / PLAN_START_STATE_CHANGED
     expect(answer).toBeLessThan(generic);
   });
 
+  it('hands the slot picker the same answer for its slot reads (codex pre-push P1)', () => {
+    expect(pageSource).toContain('onRefusal={(status, body) => refuseStaleQuoteRef.current(status, body)}');
+  });
+
+  it('a hold extension carries the captured recurring card, so the route retires it on a refused quote (codex pre-push P0)', () => {
+    const extend = pageSource.indexOf('/reserve/${encodeURIComponent(scheduledServiceId)}/extend`');
+    const call = pageSource.slice(pageSource.lastIndexOf('const capturedSetupIntentId = recurringCardSetupIntentIdRef.current;', extend), extend + 400);
+    expect(call).toContain('body: JSON.stringify({ recurringCardSetupIntentId: capturedSetupIntentId })');
+    // A 503 (Stripe could not confirm) stays retryable, so the card is kept for the accept's own retirement.
+    expect(pageSource.slice(extend)).toContain("if (r.status === 429 || r.status >= 500) return 'retryable';");
+  });
+
   it('reads a refused quote on a hold extension as a no-booking answer: the settle releases the hold and reloads into the banner', () => {
     const extend = pageSource.indexOf('/reserve/${encodeURIComponent(scheduledServiceId)}/extend`');
     const ok = pageSource.indexOf('if (r.ok) {', extend);

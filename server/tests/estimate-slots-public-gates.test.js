@@ -626,7 +626,7 @@ describe('a plan quote that staff changed takes no time and no card (codex pre-p
   test('the texting AI\'s slot gate offers no time for it; a clean plan quote passes the gate', async () => {
     const { slotBrowseRefusal, offerableEstimateSlots } = internals();
     const changed = planQuote({ bill_by_invoice: true });
-    await expect(slotBrowseRefusal(changed)).resolves.toEqual({ status: 409, body: expected(changed) });
+    await expect(slotBrowseRefusal(changed)).resolves.toEqual({ status: 409, retiresCapture: true, body: expected(changed) });
     await expect(slotBrowseRefusal(planQuote())).resolves.toBeNull();
     currentEstimate = changed;
     const acceptance = require('../routes/estimate-public').resolveEstimateAcceptance;
@@ -646,15 +646,15 @@ describe('a plan quote that staff changed takes no time and no card (codex pre-p
     const reserved = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
     expect(reserved.status).toBe(409);
     expect(await reserved.json()).toEqual(expected(changed));
-    expect(reserveRefusal).toEqual({ status: 409, body: expected(changed) });
+    expect(reserveRefusal).toEqual({ status: 409, retiresCapture: true, body: expected(changed) });
     let extendPredicate;
     slotReservation.extendReservation.mockImplementationOnce(async (args) => { extendPredicate = args.revalidateEstimate; return { scheduledServiceId: HOLD, expiresAt: null }; });
     expect((await fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, { method: 'POST' })).status).toBe(200);
-    await expect(extendPredicate(changed, TRX)).resolves.toEqual({ status: 409, body: expected(changed) });
+    await expect(extendPredicate(changed, TRX)).resolves.toEqual({ status: 409, retiresCapture: true, body: expected(changed) });
     // A briefly held customer row skips only the park decision on an extend: the plan-quote rule reads the row alone.
     const busy = () => estimatePublicBlockingState.mockRejectedValueOnce(Object.assign(new Error('could not obtain lock'), { code: '55P03' }));
     busy();
-    await expect(extendPredicate(changed, TRX)).resolves.toEqual({ status: 409, body: expected(changed) });
+    await expect(extendPredicate(changed, TRX)).resolves.toEqual({ status: 409, retiresCapture: true, body: expected(changed) });
     busy();
     await expect(extendPredicate(planQuote(), TRX)).resolves.toBeNull();
     // A reserve keeps its retryable busy answer.
@@ -678,7 +678,7 @@ describe('a plan quote that staff changed takes no time and no card (codex pre-p
       expect(JSON.parse(text)).toEqual(expected(currentEstimate));
       expect(holds.createCardHoldSetupIntentForEstimate).toHaveBeenCalledTimes(1);
       // The recurring route's exit runs the same re-read, and retires its minted intent first (pinned above by source).
-      await expect(internals().postMintRefusal({ id: 'est-plan-q' }, { requestedServiceMode: '' })).resolves.toEqual({ status: 409, body: expected(currentEstimate) });
+      await expect(internals().postMintRefusal({ id: 'est-plan-q' }, { requestedServiceMode: '' })).resolves.toEqual({ status: 409, retiresCapture: true, body: expected(currentEstimate) });
       // Control: still clean at the re-read -> the secret is returned.
       currentEstimate = planQuote();
       holds.createCardHoldSetupIntentForEstimate.mockResolvedValueOnce({ clientSecret: 'cs_SECRET', setupIntentId: 'seti_2', noShowFeeAmount: 49, cancelWindowHours: 24 });
@@ -690,12 +690,62 @@ describe('a plan quote that staff changed takes no time and no card (codex pre-p
     }
   });
 
+  test('a hold extension that names the captured recurring card has it retired before the 409 (codex pre-push P0)', async () => {
+    const { retireOrDenyDroppedCapture } = require('../routes/estimate-public');
+    retireOrDenyDroppedCapture.mockClear();
+    const extend = (body) => fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    // On the first read (trimmed, for THIS estimate).
+    currentEstimate = planQuote({ bill_by_invoice: true });
+    const pre = await extend({ recurringCardSetupIntentId: ' seti_captured ' });
+    expect(pre.status).toBe(409);
+    expect(await pre.json()).toEqual(expected(currentEstimate));
+    expect(retireOrDenyDroppedCapture).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-plan-q' }), 'seti_captured');
+    // Stripe could not confirm: the existing 503, which the page reads as retryable and so keeps the card.
+    retireOrDenyDroppedCapture.mockRejectedValueOnce(Object.assign(new Error('Stripe could not confirm the retirement'), { code: 'RECURRING_CARD_RETIRE_FAILED' }));
+    const failed = await extend({ recurringCardSetupIntentId: 'seti_captured' });
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toMatchObject({ code: 'RECURRING_CARD_RETIRE_FAILED' });
+    // On the locked row.
+    retireOrDenyDroppedCapture.mockClear();
+    currentEstimate = planQuote();
+    slotReservation.extendReservation.mockImplementationOnce(async (args) => {
+      const refusal = await args.revalidateEstimate(planQuote({ show_one_time_option: true }), TRX);
+      const err = new Error('estimate cannot be self-booked'); err.code = 'ESTIMATE_NO_BOOKING'; err.response = refusal; throw err;
+    });
+    const locked = await extend({ recurringCardSetupIntentId: 'seti_captured' });
+    expect(locked.status).toBe(409);
+    expect(await locked.json()).toEqual(expected(planQuote({ show_one_time_option: true })));
+    expect(retireOrDenyDroppedCapture).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-plan-q' }), 'seti_captured');
+    // A clean quote extends and retires nothing; a refused quote with no card named retires nothing.
+    retireOrDenyDroppedCapture.mockClear();
+    slotReservation.extendReservation.mockResolvedValueOnce({ scheduledServiceId: HOLD, expiresAt: null });
+    expect((await extend({ recurringCardSetupIntentId: 'seti_captured' })).status).toBe(200);
+    currentEstimate = planQuote({ bill_by_invoice: true });
+    expect((await extend({})).status).toBe(409);
+    expect(retireOrDenyDroppedCapture).not.toHaveBeenCalled();
+  });
+
+  test('another no-booking answer on an extension retires nothing: the page keeps replaying that card on this estimate', async () => {
+    const { retireOrDenyDroppedCapture } = require('../routes/estimate-public');
+    retireOrDenyDroppedCapture.mockClear();
+    currentEstimate = planQuote({ bill_by_invoice: true });
+    estimatePublicBlockingState.mockResolvedValueOnce({ state: 'quote_required' });
+    const res = await fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recurringCardSetupIntentId: 'seti_captured' }),
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'Estimate is no longer active' });
+    expect(retireOrDenyDroppedCapture).not.toHaveBeenCalled();
+  });
+
   test('order: the blocking state answers first (as in the accept), then the plan-quote rule', async () => {
     const { slotBlockingRefusal } = internals();
     const changed = planQuote({ show_one_time_option: true });
     estimatePublicBlockingState.mockResolvedValueOnce({ state: 'quote_required' });
     await expect(slotBlockingRefusal(changed, {})).resolves.toEqual({ status: 409, body: { error: 'Estimate is no longer active' } });
-    await expect(slotBlockingRefusal(changed, {})).resolves.toEqual({ status: 409, body: expected(changed) });
+    await expect(slotBlockingRefusal(changed, {})).resolves.toEqual({ status: 409, retiresCapture: true, body: expected(changed) });
   });
 });
 

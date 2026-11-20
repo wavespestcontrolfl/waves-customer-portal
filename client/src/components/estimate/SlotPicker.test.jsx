@@ -403,6 +403,47 @@ describe('date availability failures', () => {
   });
 });
 
+// A refused plan quote (codex pre-push P1): the slot reads answer the accept's own 409, and the page owns its banner.
+describe('SlotPicker (a 409 the page owns: onRefusal)', () => {
+  const REFUSED = { error: 'This estimate changed since it was created — please go back to your portal for a current price.', code: 'PLAN_START_STATE_CHANGED' };
+  const refused = () => ({ ok: false, status: 409, json: async () => REFUSED });
+
+  it('the slot list hands its 409 body up, and shows no load error when the page takes it', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(refused()));
+    const onRefusal = vi.fn(() => true);
+    render(<SlotPicker token="tok" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} onRefusal={onRefusal} />);
+    await waitFor(() => expect(onRefusal).toHaveBeenCalledWith(409, REFUSED));
+    await waitFor(() => expect(screen.queryByText(/Loading available times/)).not.toBeInTheDocument());
+    expect(screen.queryByText(/Couldn't load times right now/)).not.toBeInTheDocument();
+  });
+
+  it('a 409 the page does not take (or no page hook) keeps the existing load error', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(refused()));
+    const onRefusal = vi.fn(() => false);
+    const { unmount } = render(<SlotPicker token="tok" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} onRefusal={onRefusal} />);
+    expect(await screen.findByText(/Couldn't load times right now/)).toBeInTheDocument();
+    expect(onRefusal).toHaveBeenCalledTimes(1);
+    unmount();
+    render(<SlotPicker token="tok" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} />);
+    expect(await screen.findByText(/Couldn't load times right now/)).toBeInTheDocument();
+  });
+
+  it('a picked date and the date search hand their 409 up too, with no date or search error', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', '2099-06-01')], expander: [] }));
+    fetchMock.mockResolvedValue(refused());
+    vi.stubGlobal('fetch', fetchMock);
+    const onRefusal = vi.fn(() => true);
+    render(<SlotPicker token="tok" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} onRefusal={onRefusal} />);
+    fireEvent.change(await screen.findByLabelText(/pick one that works for you/i), { target: { value: ymdFromToday(10) } });
+    await waitFor(() => expect(onRefusal).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(/We couldn’t load times for that day/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'run-date-search' }));
+    await waitFor(() => expect(onRefusal).toHaveBeenCalledTimes(2));
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/find-slots'))).toBe(true);
+    expect(onRefusal).toHaveBeenLastCalledWith(409, REFUSED);
+  });
+});
+
 describe('SlotPicker (B18: an estimate parked for the office)', () => {
   const REVIEW_BODY = { primary: [], expander: [], availableSlots: [], summary: null, reviewBeforeBooking: true, reason: 'contact_review', message: 'parked' };
 

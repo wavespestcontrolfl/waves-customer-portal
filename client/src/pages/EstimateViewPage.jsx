@@ -7009,8 +7009,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     }
     const run = (async () => {
       try {
+        // The recurring card this checkout captured rides along: a refused plan quote retires it before its 409, since
+        // the settle below drops it on that answer (codex pre-push P0). A 503 (Stripe could not confirm) is
+        // 'retryable', so the card stays for the accept's own retirement.
+        const capturedSetupIntentId = recurringCardSetupIntentIdRef.current;
         const r = await fetch(`${API_BASE}/public/estimates/${token}/reserve/${encodeURIComponent(scheduledServiceId)}/extend`, {
           method: 'POST',
+          ...(capturedSetupIntentId ? {
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ recurringCardSetupIntentId: capturedSetupIntentId }),
+          } : {}),
         });
         const body = await r.json().catch(() => ({}));
         if (r.ok) {
@@ -10774,6 +10782,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                   onFirstSlotDate={setFirstSlotDate}
                   cityLabel={estimateCity}
                   onContactReview={(body) => enterContactReviewRef.current(body).catch(() => {})}
+                  // A refused plan quote from a slot read (codex pre-push P1): the same banner.
+                  onRefusal={(status, body) => refuseStaleQuoteRef.current(status, body)}
                 />
               </div>
             ) : (

@@ -2161,9 +2161,14 @@ shortcut, on the first read and again on the locked row (an extend that skips th
 busy customer row still applies this rule, which reads the row alone). Both card steps apply it again
 on the row they re-read after Stripe answers, so a change that lands during the mint withholds the
 client secret (the recurring step retires its minted intent first). The texting AI offers no time for
-such a quote. The page answers that 409 from every card step (the modal mint, the replace-method call
-and the inline pre-mint) and from the reserve with the same banner, and reads it on a hold extension
-as a no-booking answer (release the hold, then reload into the banner). The office's stuck-booking
+such a quote. A hold extension that names the recurring card the tab captured
+(`recurringCardSetupIntentId`; the page sends it after Stripe's confirmation) has that capture retired
+before this 409, because the page drops it on that answer; Stripe unable to confirm = the existing
+503, which the page reads as retryable, so the card stays for the accept's own retirement. The page
+answers that 409 from every card step (the modal mint, the replace-method call and the inline
+pre-mint), from the reserve and from its slot reads (the slot picker hands a 409 up through
+`onRefusal`: the list, a picked date and the date search) with the same banner, and reads it on a
+hold extension as a no-booking answer (release the hold, then reload into the banner). The office's stuck-booking
 alert treats both codes as routine, since the banner walks the customer back to the portal. A re-check that cannot read its state, or that finds the
 customer's property-preferences key held by another change (the re-check tries that key and never
 waits on it while it holds the comms key), answers 409
@@ -6817,7 +6822,10 @@ and the same generic 404 for an unknown token, an unknown hold, a hold
 belonging to ANOTHER estimate, an already-committed row, or a hold past the
 grace — the route is not an enumeration oracle for hold ids. It never creates
 a hold, never changes the slot, and never touches price, customer or estimate
-state. A hold may not live past `MAX_HOLD_MINUTES` (60) from its own
+state. Its one optional body field, `recurringCardSetupIntentId`, names the
+recurring card the page captured for this checkout: only a refused plan quote's
+409 (`RESTART_STATE_CHANGED` / `PLAN_START_STATE_CHANGED`) retires that capture
+first, with the accept's helper, and every other answer ignores the field. A hold may not live past `MAX_HOLD_MINUTES` (60) from its own
 `created_at` however many times it is extended (409 `HOLD_LIMIT_REACHED` with
 the unchanged `expiresAt`); the same ceiling binds `/reserve`'s same-slot
 refresh, so re-POSTing `/reserve` is not a way around it. An extension whose
