@@ -22,13 +22,8 @@ async function loadGapCandidate(serviceId, conn) {
   if (service.auto_dispatch_locked || service.auto_dispatch_excluded) return { unavailable: 'candidate_locked_or_excluded' };
   const preferences = await getCustomerSchedulingPreferences(service.customer_id, service.service_type, conn, { serviceId: service.service_id, serviceKey: service.service_key_snapshot });
   const deactivated = await conn('technician_capabilities').where({ service_category: preferences.service_category, active: false }).pluck('technician_id');
-  const { seedingFamilyKey, comboRouteFamiliesFromCatalogKey } = require('../estimate-converter');
-  const catalog = service.service_id ? await conn('services').where('id', service.service_id).first('service_key') : null;
-  const identity = catalog?.service_key || service.service_key_snapshot;
-  const combo = comboRouteFamiliesFromCatalogKey(identity);
-  const families = combo.length ? combo : [seedingFamilyKey({ service: identity, name: service.service_type })];
-  const holds = await conn('plan_holds').where({ customer_id: service.customer_id, status: 'active' })
-    .whereIn('family_key', families).select('starts_on', 'resume_on');
+  const families = await planFamilies(conn, service);
+  const holds = await planHoldsFor(conn, service.customer_id, families);
   let siblingDates = [];
   if (service.is_recurring) {
     const parentId = service.recurring_parent_id || service.id;
@@ -45,7 +40,7 @@ async function loadGapCandidate(serviceId, conn) {
       .whereNotIn('status', service.recurring_dispatch_due_date ? ['cancelled'] : ['cancelled', 'rescheduled'])
       .pluck('scheduled_date')).map(toDateStr);
   }
-  return { service, preferences, holds, siblingDates, deactivated };
+  return { service, preferences, holds, siblingDates, deactivated, families };
 }
 
 /**
@@ -88,9 +83,7 @@ async function estimateGapCandidate(estimate, conn, picker = {}) {
   };
   const preferences = await getCustomerSchedulingPreferences(estimate.customer_id, service.service_type, conn,
     { serviceKey: service.service_key_snapshot });
-  // The office list's capability rule, by each service's catalog category or name (technician-capabilities.js).
-  const categories = [...new Set(await categoriesForServices(conn, performs.length ? performs : [primary]))];
-  const deactivated = await conn('technician_capabilities').whereIn('service_category', categories).where('active', false).pluck('technician_id');
+  const deactivated = await deactivatedFor(conn, performs.length ? performs : [primary]);
   const seasonal = slots.seasonalSelectionProfile(profile);
   const moveInDate = await slots.estimateMoveInDate(estimate);
   const mowing = mowingDays.unitRule(preferences, performs);
@@ -100,6 +93,63 @@ async function estimateGapCandidate(estimate, conn, picker = {}) {
   // books its own visits in the profile's label.
   return { service, preferences, holds: [], siblingDates: [], deactivated,
     label: slots.formatServiceProfileLabel(performed) || profile.serviceLabel, prospective: true, dayOpen };
+}
+
+/**
+ * An open lead's visit as a gap candidate (the 07:05 fill list, owner 2026-11-20 *1a*): the Waves Assessment or the
+ * inspection the lead asked for (`visit`: its catalog row, day-replan/fill-list.js leadVisit), at the catalog's length,
+ * which the Leads screen's Schedule button books (admin-leads.js schedule-appointment: the catalog default, else 60
+ * minutes). It stands at the lead's customer's stored location (`lead.latitude`/`lead.longitude`, the customer row the
+ * booking routes by), never geocoded. A new stop, checked as an estimate's first visit is (`prospective`). The
+ * customer's day and time rules and the capability rule apply as for estimateGapCandidate. `{ unavailable:
+ * 'no_stored_location' }` when the customer has none. A failed read throws.
+ */
+async function leadGapCandidate(lead, visit, conn) {
+  const lat = Number(lead.latitude);
+  const lng = Number(lead.longitude);
+  if (lead.latitude == null || lead.longitude == null || !Number.isFinite(lat) || !Number.isFinite(lng) || !lat || !lng) {
+    return { unavailable: 'no_stored_location' };
+  }
+  const length = Number(visit.default_duration_minutes);
+  const service = {
+    id: '__candidate__', customer_id: lead.customer_id, status: 'pending', lat, lng,
+    estimated_duration_minutes: Number.isInteger(length) && length > 0 ? length : 60,
+    service_type: visit.name, service_id: visit.id, service_key_snapshot: visit.service_key || null,
+  };
+  const preferences = await getCustomerSchedulingPreferences(lead.customer_id, service.service_type, conn,
+    { serviceId: visit.id, serviceKey: service.service_key_snapshot });
+  const deactivated = await deactivatedFor(conn, [service]);
+  return { service, preferences, holds: [], siblingDates: [], deactivated, label: visit.name, prospective: true, dayOpen: () => true };
+}
+
+/**
+ * The plan families a service belongs to ({ service_type, service_id?, service_key_snapshot? }): its catalog key (by
+ * service_id, else its key snapshot) names a combined row's families (estimate-converter.js
+ * comboRouteFamiliesFromCatalogKey: pest + termite bait), else its one seeding family (seedingFamilyKey). A failed read
+ * throws.
+ */
+async function planFamilies(conn, row) {
+  const { seedingFamilyKey, comboRouteFamiliesFromCatalogKey } = require('../estimate-converter');
+  const catalog = row.service_id ? await conn('services').where('id', row.service_id).first('service_key') : null;
+  const identity = catalog?.service_key || row.service_key_snapshot;
+  const combo = comboRouteFamiliesFromCatalogKey(identity);
+  return combo.length ? combo : [seedingFamilyKey({ service: identity, name: row.service_type })];
+}
+
+/** The customer's active plan holds ({ starts_on, resume_on }) on any of the plan `families`. A failed read throws. */
+function planHoldsFor(conn, customerId, families) {
+  return conn('plan_holds').where({ customer_id: customerId, status: 'active' })
+    .whereIn('family_key', [...new Set(families)]).select('starts_on', 'resume_on');
+}
+
+/**
+ * The technicians set to Off for any of the services in `rows` ({ service_type, service_id?, service_key_snapshot? }):
+ * the office list's capability rule, by each service's catalog category or name (technician-capabilities.js
+ * categoriesForServices). A failed read throws.
+ */
+async function deactivatedFor(conn, rows) {
+  const categories = [...new Set(await categoriesForServices(conn, rows))];
+  return conn('technician_capabilities').whereIn('service_category', categories).where('active', false).pluck('technician_id');
 }
 
 function analyzeGapCandidate(candidate, rows, {
@@ -176,9 +226,10 @@ function analyzeGapCandidate(candidate, rows, {
   // vanDepartureMin: with GATE_SCHEDULING_CAPACITY on the route opens at the
   // van's departure (the Settings time; 08:00 with the day rules off), not at
   // the 08:00 shift open, the way the night tool's arrival search plans it.
-  // A new visit (`prospective`: an estimate's first visit, estimateGapCandidate) is tried at every place in the route:
-  // the staff finder's check of a new customer (arrival-route.js staffPlacement, with its margin for later stops). A
-  // saved visit keeps the order its save would produce.
+  // A new stop on the day (`prospective`: an estimate's or a lead's first visit, or a booked plan visit tried on an
+  // earlier day, day-replan/fill-list.js) is tried at every place in the route: the staff finder's check of a new
+  // customer (arrival-route.js staffPlacement, with its margin for later stops). A saved visit keeps the order its save
+  // would produce.
   const context = { target, rows: others, date, now, grouped: false, activeTarget: false, home, vanDepartureMin: modeledDepartureMinutes,
     prospective, blocks };
   const result = enumerateArrivalPlacements(context, { durationMinutes: duration, earliestStartMin: earliestStart,
@@ -202,4 +253,4 @@ function analyzeGapCandidate(candidate, rows, {
       : 'Fits preserve the dispatch order produced by the existing save. They do not authorize a date/time change or create a booking hold.' };
 }
 
-module.exports = { loadGapCandidate, estimateGapCandidate, analyzeGapCandidate };
+module.exports = { loadGapCandidate, estimateGapCandidate, leadGapCandidate, planFamilies, planHoldsFor, deactivatedFor, analyzeGapCandidate };
