@@ -83,25 +83,32 @@ const markerUuid = (extracted) => `(CASE WHEN ${extracted}->>'duplicate_of_lead_
 // persisted) under a root won on estimate A is two deals whichever row is
 // asked, before and after the root's own win (pre-push P1s).
 const WON_SCOPE_TEXT = (r) => `COALESCE(${r}.extracted_data->>'won_estimate_id', ${r}.estimate_id::text)`;
-const secondWinSql = (t) => `(${t}.status IS DISTINCT FROM 'won' OR NOT EXISTS (
+// The second-win walk, with the ancestor test passed in: does t have a live
+// ancestor up its marker chain (through live 'duplicate' hops, bounded) on the
+// same deal as t (the person and won-scope rules above) that passes `test`?
+// `test` is SQL over the chain row; `cols` names any further lead columns it
+// reads. The second-win rule asks for a won ancestor; the ad conversion
+// upload (services/ads/data-manager.js) asks for a qualifying one.
+const sameDealAncestorSql = (t, test, cols = []) => `EXISTS (
   WITH RECURSIVE chain AS (
-    SELECT o.status, o.deleted_at, o.customer_id, ${WON_SCOPE_TEXT('o')} AS won_scope, o.phone, o.email, ${markerUuid('o.extracted_data')} AS parent_id, 1 AS depth
+    SELECT o.status, o.deleted_at, o.customer_id, ${WON_SCOPE_TEXT('o')} AS won_scope, o.phone, o.email, ${cols.map((c) => `o.${c}, `).join('')}${markerUuid('o.extracted_data')} AS parent_id, 1 AS depth
     FROM leads o
     WHERE o.id = ${markerUuid(`${t}.extracted_data`)}
     UNION ALL
-    SELECT p.status, p.deleted_at, p.customer_id, ${WON_SCOPE_TEXT('p')}, p.phone, p.email, ${markerUuid('p.extracted_data')}, chain.depth + 1
+    SELECT p.status, p.deleted_at, p.customer_id, ${WON_SCOPE_TEXT('p')}, p.phone, p.email, ${cols.map((c) => `p.${c}, `).join('')}${markerUuid('p.extracted_data')}, chain.depth + 1
     FROM chain JOIN leads p ON p.id = chain.parent_id
     WHERE chain.status = 'duplicate' AND chain.deleted_at IS NULL AND chain.depth < 8
   )
   SELECT 1 FROM chain
-  WHERE chain.status = 'won' AND chain.deleted_at IS NULL
+  WHERE ${test} AND chain.deleted_at IS NULL
     AND NOT (chain.won_scope IS NOT NULL AND ${WON_SCOPE_TEXT(t)} IS NOT NULL AND chain.won_scope <> ${WON_SCOPE_TEXT(t)})
     AND CASE
       WHEN chain.customer_id IS NOT NULL AND ${t}.customer_id IS NOT NULL THEN chain.customer_id = ${t}.customer_id
       ELSE (${phoneDigits('chain.phone')} <> '' AND ${phoneDigits('chain.phone')} = ${phoneDigits(`${t}.phone`)})
         OR (LOWER(TRIM(COALESCE(chain.email, ''))) <> '' AND LOWER(TRIM(chain.email)) = LOWER(TRIM(${t}.email)))
     END
-))`;
+)`;
+const secondWinSql = (t) => `(${t}.status IS DISTINCT FROM 'won' OR NOT ${sameDealAncestorSql(t, "chain.status = 'won'")})`;
 const SECOND_WIN_SQL = secondWinSql('leads');
 // The mirror of the second-win rule, from the root's side: an OPEN row whose
 // ancestry holds a live won repeat of the same opportunity is that deal
@@ -194,8 +201,8 @@ module.exports = {
   isOpenLeadRow,
   scopeToProspects,
   PROSPECT_SCOPE_SQL,
-  // The second-win rule alone, over an aliased leads query (ad conversion uploads).
-  secondWinSql,
+  // The second-win walk with its ancestor test passed in (ad conversion uploads).
+  sameDealAncestorSql,
   // exported for tests
   SECOND_WIN_SQL,
   WON_DESCENDANT_SQL,

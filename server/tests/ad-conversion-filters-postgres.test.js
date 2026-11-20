@@ -76,13 +76,18 @@ jest.setTimeout(30000);
     await database('leads').insert(row);
     return row;
   }
-  // A merge as customer-dedupe records it: the journal row with the loser's
-  // snapshot, the loser's leads moved, its email cleared and phone retired, the loser retired.
-  async function merge(loser, winner) {
+  // A merge's journal row alone, with the loser's snapshot: what a run sees when
+  // the merge commits after the run read its candidates.
+  async function journal(loser, winner) {
     await database('customer_merge_journal').insert({
       id: randomUUID(), winner_customer_id: winner.id, loser_customer_id: loser.id, loser_snapshot: JSON.stringify(loser),
       tier: 'manual', performed_by: 'test', created_at: new Date(Date.now() - 2 * 3600000),
     });
+  }
+  // A merge as customer-dedupe records it: the journal row, the loser's leads
+  // moved, its email cleared and phone retired, the loser retired.
+  async function merge(loser, winner) {
+    await journal(loser, winner);
     await database('leads').where({ customer_id: loser.id }).update({ customer_id: winner.id });
     await database('customers').where({ id: loser.id })
       .update({ email: null, phone: `merged-${loser.id.slice(0, 8)}`, deleted_at: new Date() });
@@ -101,6 +106,10 @@ jest.setTimeout(30000);
     return serviceRecordId;
   }
   const qualified = () => _private.collectCandidates('qualified_lead', RANGE);
+  // A quote-wizard repeat run: its own lead row, marked with the original's id.
+  const repeatOf = (root, fields) => lead(null, {
+    lead_type: 'quote_wizard', status: 'won', extracted_data: JSON.stringify({ duplicate_of_lead_id: root.id }), ...fields,
+  });
 
   test('a qualified lead later marked junk or non-engaged is not collected, whatever its case or spacing', async () => {
     const c = await customer();
@@ -110,9 +119,6 @@ jest.setTimeout(30000);
   });
 
   test('a won quote-wizard repeat of a won lead is one conversion on the same estimate, and two on another estimate', async () => {
-    const repeatOf = (root, fields) => lead(null, {
-      lead_type: 'quote_wizard', status: 'won', extracted_data: JSON.stringify({ duplicate_of_lead_id: root.id }), ...fields,
-    });
     // One sale: the original and its repeat are both won on one estimate.
     const c = await customer();
     const estimate = randomUUID();
@@ -124,6 +130,22 @@ jest.setTimeout(30000);
     const original2 = await lead(c2, { status: 'won', estimate_id: randomUUID(), ...contact2 });
     const repeat2 = await repeatOf(original2, { customer_id: c2.id, estimate_id: randomUUID(), ...contact2 });
     expect((await qualified()).map((x) => x.leadId).sort()).toEqual([original.id, original2.id, repeat2.id].sort());
+  });
+
+  test('a won repeat yields to an open original that qualified on its own; an unqualified or junk original holds nothing', async () => {
+    // Each deal is one person, with their own contact.
+    const deal = async (n, originalFields) => {
+      const contact = { email: `pat.deal${n}@example.com`, phone: `+1941555030${n}` };
+      const c = await customer(contact);
+      const original = await lead(c, { ...contact, ...originalFields });
+      return { original, repeat: await repeatOf(original, { customer_id: c.id, ...contact }) };
+    };
+    // The estimate went out on the original (is_qualified), it stays open, and the repeat wins.
+    const held = await deal(1, { status: 'estimate_sent', is_qualified: true });
+    const unqualified = await deal(2, { status: 'new', is_qualified: false });
+    const junk = await deal(3, { status: 'disqualified', is_qualified: true });
+    expect((await qualified()).map((x) => x.leadId).sort())
+      .toEqual([held.original.id, unqualified.repeat.id, junk.repeat.id].sort());
   });
 
   // The row order of a job's leads is the plan's, so the owner-cell lead goes in first and last.
@@ -168,6 +190,20 @@ jest.setTimeout(30000);
     expect((await qualified())[0]).toMatchObject({ email: null, phone: null, consentSuppressed: true });
     await database('customer_merge_journal').update({ undone_at: new Date() });
     expect((await qualified())[0]).toMatchObject({ email: 'pat.two@example.com' });
+  });
+
+  // The run read the lead before the merge committed: the lead still names the retired customer.
+  test.each([
+    ['opt-out on its current email', { email: 'optout@example.com' }, { email: null, phone: null, consentSuppressed: true }],
+    ['test-record mark on its current phone', { phone: OWNER_CELL }, { internalTest: true }],
+  ])("a lead read before its customer's merge counts the survivor's %s", async (_label, survivorFields, expected) => {
+    mockSuppressedEmails.add('optout@example.com');
+    const retired = await customer({ email: 'pat.three@example.com', phone: '+19415550133' });
+    const survivor = await customer({ email: 'pat.two@example.com', phone: '+19415550144', ...survivorFields });
+    await lead(retired, { email: 'pat.three@example.com', phone: '+19415550133' });
+    expect((await qualified())[0]).toMatchObject({ email: 'pat.three@example.com', internalTest: false });
+    await journal(retired, survivor);
+    expect((await qualified())[0]).toMatchObject(expected);
   });
 
   // A test record merged into a real customer survives only in the journal: its id and its cleared contact.

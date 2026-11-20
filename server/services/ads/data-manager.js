@@ -17,7 +17,7 @@ const { runExclusive } = require('../../utils/cron-lock');
 const { loadMarketingSuppression, normPhone: consentNormPhone } = require('./ad-audience-consent');
 const matchFields = require('./ad-match-fields');
 const { isInternalTestContact } = require('../internal-test-customers');
-const { NON_ENGAGED_LEAD_STATUSES, secondWinSql } = require('../lead-statuses');
+const { NON_ENGAGED_LEAD_STATUSES, sameDealAncestorSql } = require('../lead-statuses');
 
 let _googleapis;
 function getGoogle() {
@@ -59,6 +59,14 @@ const CONVERSIONS = {
 // (lead-statuses.js: cancelled, spam, duplicate, handled) plus disqualified. A
 // lead later marked one of these must not go out even though is_qualified is sticky.
 const JUNK_LEAD_STATUSES = [...NON_ENGAGED_LEAD_STATUSES, 'disqualified'];
+// Lead statuses that make a lead a Qualified Lead (as does is_qualified).
+const QUALIFYING_LEAD_STATUSES = ['qualified', 'booked', 'converted', 'won'];
+const sqlList = (values) => values.map((v) => `'${v}'`).join(', ');
+// A lead that would upload as a Qualified Lead on its own: the qualified-lead
+// query's two status filters (qualifying, then not junk), over any alias. The
+// one-deal rule asks it of a repeat's original.
+const qualifyingLeadSql = (alias) => `(${alias}.is_qualified IS TRUE OR LOWER(COALESCE(${alias}.status, '')) IN (${sqlList(QUALIFYING_LEAD_STATUSES)}))`
+  + ` AND LOWER(TRIM(COALESCE(${alias}.status, ''))) NOT IN (${sqlList(JUNK_LEAD_STATUSES)})`;
 
 function boolEnv(name, defaultValue = false) {
   const raw = process.env[name];
@@ -523,7 +531,7 @@ function mapCompletedJobCandidate(row) {
     estimateId: row.estimate_id || null,
     customerId: row.customer_id || null,
     // The estimate lead can belong to another customer: consent reads that
-    // customer's merged-away contacts too. Never uploaded.
+    // customer's merge family contacts too. Never uploaded.
     leadCustomerId: row.lead_customer_id,
     invoiceId: row.invoice_id || null,
     serviceRecordId: row.service_record_id || null,
@@ -577,18 +585,21 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
     .whereRaw(`${eventTimestampSql} < ?::timestamptz`, [addDateStringDays(endDate, 1)])
     .where((q) => {
       q.where('l.is_qualified', true)
-        .orWhereRaw("LOWER(COALESCE(l.status, '')) IN ('qualified', 'booked', 'converted', 'won')");
+        .orWhereRaw(`LOWER(COALESCE(l.status, '')) IN (${sqlList(QUALIFYING_LEAD_STATUSES)})`);
     })
     // is_qualified is sticky, so a lead later marked junk or non-engaged still
     // matches above. It is dropped here, before the limit, so junk never takes
     // an upload slot from an older real lead.
     .whereRaw(`LOWER(TRIM(COALESCE(l.status, ''))) NOT IN (${JUNK_LEAD_STATUSES.map(() => '?').join(', ')})`, JUNK_LEAD_STATUSES)
-    // A won quote-wizard repeat whose original lead is also won on the same
-    // deal (same customer, same estimate) is one sale counted twice: the shared
-    // second-win rule (lead-statuses.js) drops the repeat and keeps the
-    // original, which carries the first click. A repeat won on another
-    // estimate is another sale and stays.
-    .whereRaw(secondWinSql('l'))
+    // One deal, one Qualified Lead. A quote-wizard repeat whose original (up
+    // its marker chain, on the same deal: lead-statuses.js sameDealAncestorSql)
+    // qualifies on its own yields to it, before the limit. The original went
+    // out when it qualified, or goes out now, with the first click. This is
+    // wider than the second-win rule (a won original only): an original that
+    // qualified when its estimate went out, and stays open while the repeat
+    // wins, still holds the deal. A repeat won on another estimate is another
+    // sale and stays.
+    .whereRaw(`NOT ${sameDealAncestorSql('l', qualifyingLeadSql('chain'), ['is_qualified'])}`)
     .select(
       'l.id',
       'l.estimate_id',
@@ -734,21 +745,27 @@ const MERGE_FAMILY_CTE = `
     JOIN customer_merge_journal j ON f.id IN (j.loser_customer_id, j.winner_customer_id) AND j.undone_at IS NULL
   )`;
 
-// Each customer id with the id, name, email and phone its merge family's
-// retired customers had when a merge retired them (loser_snapshot). The merge
-// clears them from the retired row, and the person's opt-out (or a test
-// record's mark) may sit on them.
-async function mergedAwayContacts(customerIds) {
+// Each customer id with the id, name, email and phone of every customer in its
+// merge family: each one's CURRENT row, and each retired one's as the merge
+// left it (loser_snapshot: the merge clears them from the retired row). The
+// person's opt-out, or a test record's mark, may sit on any of them. The
+// current rows also cover a merge that commits after the run read its
+// candidates: a candidate that still names the retired customer reaches the
+// survivor's current contact here.
+async function mergeFamilyContacts(customerIds) {
   const ids = [...new Set(customerIds.filter(Boolean).map(String))];
   const contacts = new Map(ids.map((id) => [id, []]));
   if (!ids.length) return contacts;
   const { rows } = await db.raw(`${MERGE_FAMILY_CTE}
-    SELECT f.start_id, j.loser_customer_id, j.loser_snapshot->>'first_name' AS first_name,
+    SELECT f.start_id, j.loser_customer_id AS customer_id, j.loser_snapshot->>'first_name' AS first_name,
       j.loser_snapshot->>'last_name' AS last_name, j.loser_snapshot->>'email' AS email, j.loser_snapshot->>'phone' AS phone
-    FROM family f JOIN customer_merge_journal j ON j.loser_customer_id = f.id AND j.undone_at IS NULL`, [ids]);
+    FROM family f JOIN customer_merge_journal j ON j.loser_customer_id = f.id AND j.undone_at IS NULL
+    UNION ALL
+    SELECT f.start_id, c.id, c.first_name, c.last_name, c.email, c.phone
+    FROM family f JOIN customers c ON c.id = f.id`, [ids]);
   for (const r of rows) {
     contacts.get(String(r.start_id)).push({
-      customerId: String(r.loser_customer_id), firstName: r.first_name, lastName: r.last_name, email: r.email || null, phone: r.phone || null,
+      customerId: String(r.customer_id), firstName: r.first_name, lastName: r.last_name, email: r.email || null, phone: r.phone || null,
     });
   }
   return contacts;
@@ -770,8 +787,8 @@ async function mergedAwayContacts(customerIds) {
 async function applyMarketingConsent(conversionType, candidates) {
   if (!Array.isArray(candidates) || candidates.length === 0) return candidates || [];
   const sup = await loadMarketingSuppression();
-  const mergedAway = await mergedAwayContacts(candidates.flatMap((c) => [c.customerId, c.leadCustomerId]));
-  const mergedAwayOf = (candidate) => [mergedAway.get(String(candidate.customerId)), mergedAway.get(String(candidate.leadCustomerId))]
+  const family = await mergeFamilyContacts(candidates.flatMap((c) => [c.customerId, c.leadCustomerId]));
+  const familyOf = (candidate) => [family.get(String(candidate.customerId)), family.get(String(candidate.leadCustomerId))]
     .filter(Array.isArray).flat();
   let suppressed = 0;
   let strippedPhones = 0;
@@ -779,11 +796,12 @@ async function applyMarketingConsent(conversionType, candidates) {
   // identifier the mapper carried (consentIdentifiers) — an opt-out on the
   // customer's current email opts the person out even when a stale lead
   // email won the collapsed pick. suppressionIdentifiers (a completed job's
-  // estimate-lead customer) and the contacts a merge cleared from a joined
-  // customer (the candidate's, and that estimate-lead customer's) count here
+  // estimate-lead customer) and the merge family's contacts (of the
+  // candidate's customer and of that estimate-lead customer: every family
+  // customer's current contact and every contact a merge cleared) count here
   // only: never promoted below, never uploaded.
   const personSuppressed = (candidate) => sup.isSuppressed(candidate)
-    || [candidate.consentIdentifiers, candidate.suppressionIdentifiers, mergedAwayOf(candidate)]
+    || [candidate.consentIdentifiers, candidate.suppressionIdentifiers, familyOf(candidate)]
       .some((ids) => Array.isArray(ids) && ids.some((id) => sup.isSuppressed(id)));
   // ...and the opt-out propagates across TRANSACTION SIBLINGS: duplicate join
   // rows of one transaction are the same person seen through different links
@@ -830,11 +848,11 @@ async function applyMarketingConsent(conversionType, candidates) {
     }
     return candidate;
   })
-    // Raw sources never leave this step. A test record merged into another
-    // customer survives only in the journal (its id and cleared contact), so a
-    // candidate whose merge family holds one is a test record too.
+    // Raw sources never leave this step. A candidate whose merge family holds a
+    // test record (a family customer's current row, or a retired one's id and
+    // cleared contact, which survive only in the journal) is a test record too.
     .map(({ identitySources, suppressionIdentifiers, ...rest }) => (
-      mergedAwayOf(rest).some((r) => isInternalTestContact(r)) ? { ...rest, internalTest: true } : rest));
+      familyOf(rest).some((r) => isInternalTestContact(r)) ? { ...rest, internalTest: true } : rest));
   if (suppressed || strippedPhones) {
     logger.info(`[ad-consent] ${conversionType} conversions: stripped identifiers from ${suppressed} opted-out contacts, ${strippedPhones} invalid phones`);
   }
@@ -1292,8 +1310,10 @@ module.exports = {
     dedupeCandidatesByTransaction,
     destinationFor,
     exclusionReason,
-    mergedAwayContacts,
+    mergeFamilyContacts,
     JUNK_LEAD_STATUSES,
+    QUALIFYING_LEAD_STATUSES,
+    qualifyingLeadSql,
     googleAddressParts,
     hashedUserData,
     mapCompletedJobCandidate,
