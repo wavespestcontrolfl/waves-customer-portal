@@ -53,4 +53,21 @@ function offAppName(text) {
   return hit ? hit[0] : null;
 }
 
-module.exports = { wavesApp, offAppName };
+// The publisher's rule for every reply, a person's own words included. It
+// refuses the owner's "never" list: "the/our/your [Waves [Pest Control]]
+// [mobile] app" that is not exactly "the Waves app" ("the app", "our app",
+// "your app", "the Waves Pest Control app", "the waves app", a doubled
+// space). Other uses of the word pass there ("the App Store", "apps",
+// "app-based", "did the Waves app store your notes"): a word test cannot
+// tell the App Store from the verb, and a false refusal blocks a correct
+// reply. The agent's own drafts meet the stricter offAppName when written.
+function appNameSlip(text) {
+  const s = String(text || '');
+  for (const m of s.matchAll(OWN_APP_RE)) {
+    if (/^[Tt]he Waves app$/.test(m[0]) || NAME_GOES_ON_RE.test(s.slice(m.index + m[0].length))) continue;
+    return m[0];
+  }
+  return null;
+}
+
+module.exports = { wavesApp, offAppName, appNameSlip };

@@ -23,7 +23,7 @@ const logger = require('../logger');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { hasRealReply, asDraft, isDraftReply, stripDraftPrefix, removedOwnerReplyFields } = require('./draft-prefix');
 const { reviewFingerprint } = require('./fingerprint');
-const { offAppName } = require('./app-name');
+const { appNameSlip } = require('./app-name');
 
 class ReviewReplyError extends Error {
   constructor(code, message, { status = 500, cause = null } = {}) {
@@ -216,10 +216,11 @@ function updatedCount(updated) {
 async function publishReviewReply({ reviewId, text, actor, allowOverwrite = false, autoFields = null, auditMeta = null, guard = null, requireGoogle = false, expectedReply = undefined, expectedDraft = undefined, expectedReview = undefined, expectedAccountFingerprint = undefined }) {
   const replyText = String(text || '').trim();
   if (!replyText) throw new ReviewReplyError(CODES.EMPTY, 'Reply text required', { status: 400 });
-  // Owner 2026-11-19: every reply that names the app says "the Waves app".
-  // Checked here, where every path to Google meets, before any write.
-  const offName = offAppName(replyText);
-  if (offName) throw new ReviewReplyError(CODES.APP_NAME, `This reply says "${offName}" outside the name "the Waves app". In a review reply every app mention is "the Waves app" ("The Waves app" at the start of a sentence). Change it, then post again.`, { status: 422 });
+  // Owner 2026-11-19: no reply calls the app "the app", "our app" or "your
+  // app" (the owner's never list, appNameSlip). Checked here, where every
+  // path to Google meets, before any write.
+  const slip = appNameSlip(replyText);
+  if (slip) throw new ReviewReplyError(CODES.APP_NAME, `This reply says "${slip}". Name the app "the Waves app" ("The Waves app" at the start of a sentence), then post again.`, { status: 422 });
   if (!actor?.type) throw new Error('publishReviewReply: actor.type required');
 
   const review = await db('google_reviews').where({ id: reviewId }).first();

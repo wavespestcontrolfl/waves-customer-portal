@@ -105,22 +105,22 @@ describe('publishReviewReply', () => {
     expect(JSON.parse(state.activity[0].metadata).source).toBe('ib');
   });
 
-  test('owner 2026-11-19: any reply that names the app another way than "the Waves app" is refused before anything is written, on every path', async () => {
+  test('owner 2026-11-19: a reply that says "our app" (the owner\'s never list) is refused before anything is written, on every path', async () => {
     for (const actor of [{ type: 'admin' }, { type: 'ib' }, { type: 'auto' }]) {
       await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad our app helps.', actor, allowOverwrite: actor.type !== 'auto' }))
-        .rejects.toMatchObject({ code: CODES.APP_NAME, status: 422 });
+        .rejects.toMatchObject({ code: CODES.APP_NAME, status: 422, message: expect.stringContaining('says "our app"') });
     }
-    // A person's own words too: "all references ... need to use waves in them".
-    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Find us in the Waves App Store.', actor: { type: 'admin' }, allowOverwrite: true }))
-      .rejects.toMatchObject({ code: CODES.APP_NAME, message: expect.stringContaining('says "App" outside the name "the Waves app"') });
     expect(mockLock).not.toHaveBeenCalled();
     expect(mockGbp.replyToReview).not.toHaveBeenCalled();
     expect(state.rows[0].review_reply).toBeNull();
     expect(state.activity).toEqual([]);
-    // The name itself posts.
-    const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad the Waves app helps.', actor: { type: 'admin' }, allowOverwrite: true });
-    expect(r.googlePosted).toBe(true);
-    expect(state.rows[0].review_reply).toBe('Thanks Dana. Glad the Waves app helps.');
+    // The name posts, and so do other uses of the word in a person's reply: a word test cannot tell the App Store from a verb.
+    for (const text of ['Thanks Dana. Glad the Waves app helps.', 'Thanks Dana. Did the Waves app store your service notes?', 'Thanks Dana. Get the Waves app on the App Store.']) {
+      state.rows[0].review_reply = null;
+      const r = await publishReviewReply({ reviewId: 'rev-1', text, actor: { type: 'admin' }, allowOverwrite: true });
+      expect(r.googlePosted).toBe(true);
+      expect(state.rows[0].review_reply).toBe(text);
+    }
   });
 
   test('P0: a human reply that lands between the pre-check and the publish claim aborts inside the claim', async () => {

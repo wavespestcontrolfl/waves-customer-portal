@@ -934,6 +934,18 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
     expect(off('Thanks for using the waves app.')).toBe('app');
     expect(off('Thanks for using THE WAVES APP.')).toBe('APP');
   });
+  test('appNameSlip (the publisher, every reply) refuses only the owner\'s never list', () => {
+    const slip = AppName.appNameSlip;
+    expect(slip('Thanks for using our app.')).toBe('our app');
+    expect(slip('The app is great. Your mobile app too.')).toBe('The app');
+    expect(slip('Try the Waves Pest Control app.')).toBe('the Waves Pest Control app');
+    expect(slip('Glad the app\u2019s alerts help.')).toBe('the app');
+    expect(slip('Thanks for using the waves app.')).toBe('the waves app');
+    expect(slip('Thanks for using the  Waves app.')).toBe('the  Waves app');
+    for (const ok of ['Glad the Waves app helps. The Waves app is free.', 'Did the Waves app store your service notes?', 'Get the Waves app on the App Store.', 'Thanks for trying our apps.', 'Our app-based reminders help.', 'Your next lawn app is Friday.', 'Happy to apply our application.']) {
+      expect(slip(ok)).toBeNull();
+    }
+  });
   test('the verifier rejects every "app" that is not part of exactly "the Waves app"', () => {
     const g = grounding({ text: appReview });
     const verdict = (said) => Drafter.verifyReplyDetailed(good(`Hi Dana,\n\nThank you for the kind words about ${said} and Marcus.`), g);
