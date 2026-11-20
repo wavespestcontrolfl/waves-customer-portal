@@ -50,6 +50,16 @@ function writerConfigFor(brief) {
   return configs.find((c) => c && c.name === name) || null;
 }
 
+// Blog fact check (GATE_EDITORIAL_EVIDENCE): the draft carries the answer plan
+// an agent would send to validate_answer_plan, in the same input shape.
+function answerPlanPack(brief, config) {
+  if (!tw.editorialPlanRequired(brief)) return {};
+  return { answer_plan_shape: {
+    note: 'Required while the blog fact check is on. It is reviewed when the draft is taken. For a new post every section is a body H2, in this order (a Frequently Asked Questions / FAQ / Common Questions heading is exempt). For a refresh every section must appear as a heading in the body. Put it in the draft JSON as answer_plan, next to frontmatter and body.',
+    input_schema: config?.tools?.find((t) => t.name === 'validate_answer_plan')?.input_schema || null,
+  } };
+}
+
 async function writingPack(opportunityId) {
   // The kill switch covers the pack too: with the gate off the agent drafts,
   // and a draft written from a leftover waiting row would never be read.
@@ -110,6 +120,7 @@ async function writingPack(opportunityId) {
         },
       },
     },
+    ...answerPlanPack(brief, config),
     writer_system_prompt: config?.system || null,
     brief,
   };

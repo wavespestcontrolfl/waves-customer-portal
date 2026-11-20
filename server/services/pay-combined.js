@@ -247,12 +247,19 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
     }
 
     let incomplete = null;
-    const candidates = await openBalanceInvoices(anchorInvoice.customer_id, {
+    const openInvoices = await openBalanceInvoices(anchorInvoice.customer_id, {
       excludeInvoiceId: anchorInvoice.id,
       database,
       onResolveFailure: () => { incomplete = 'payer resolve failed'; },
       onTruncation: () => { incomplete = 'candidate bound hit'; },
     });
+    // A pay-page plan-choice prepay (pay-plan-choice.js) and the first invoice
+    // its note names are ALTERNATIVES: paying the year closes that invoice, so
+    // it is never a previous balance on the prepay's own charge. The reverse
+    // pairing cannot occur (the unpaid prepay is an undelivered draft, which
+    // the open-balance read never returns).
+    const { prepayNoteNamesInvoice } = require('./pay-plan-choice');
+    const candidates = openInvoices.filter((inv) => !prepayNoteNamesInvoice(anchorInvoice.notes, inv.invoice_number));
     if (incomplete) {
       logger.warn(`[pay-combined] sibling read incomplete for invoice ${anchorInvoice.invoice_number} (${incomplete}) — combined flow disabled for this session`);
       return degrade('incomplete');

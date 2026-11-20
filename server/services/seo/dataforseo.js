@@ -41,6 +41,19 @@ function serpLocation(location) {
   return { location_name: location };
 }
 
+// GATE_DATAFORSEO_RESOLVE_POISONED (owner 2026-11-19): since 2026-09-26 Google has served some automated
+// searches "poisoned" pages: a normal-looking results page whose organic results are mostly unrelated
+// sites. With resolve_poisoned_results DataForSEO checks page one against Google's Web view and swaps
+// poisoned organic results for verified ones (each marked checks: ['from_web']); every other item
+// (AI Overview, People also ask, paid, map pack) comes back as collected, and a failed check returns
+// the original page. Paid: one more SERP page per task. Read at call time; `?.()` so a whole-module
+// feature-gates mock reads off.
+function resolvePoisonedParam() {
+  return require('../../config/feature-gates').dataforseoResolvePoisonedLive?.() === true
+    ? { resolve_poisoned_results: true }
+    : {};
+}
+
 class DataForSEO {
   constructor() {
     this.login = process.env.DATAFORSEO_LOGIN;
@@ -118,6 +131,8 @@ class DataForSEO {
   // can cache distinct mobile vs desktop snapshots; defaults to mobile to
   // preserve the prior call shape (serp-analyzer.js etc. pass 2 args).
   // `location` may be a place name OR a "lat,lng" coordinate (see serpLocation).
+  // With GATE_DATAFORSEO_RESOLVE_POISONED on, the task also asks DataForSEO to repair a
+  // poisoned page (resolvePoisonedParam above).
   async serpOrganic(keyword, location = 'Bradenton,Florida,United States', device = 'mobile', { signal = null } = {}) {
     return this.request('/serp/google/organic/live/advanced', [{
       keyword,
@@ -125,6 +140,7 @@ class DataForSEO {
       language_name: 'English',
       device,
       os: device === 'desktop' ? 'macos' : 'iOS',
+      ...resolvePoisonedParam(),
     }], 3, { signal });
   }
 

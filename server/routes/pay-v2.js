@@ -41,6 +41,10 @@ const payLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: unauthenticatedAuthLimitKey,
+  // AGENTS.md: a dark GATE_* route skips its limiter, so a probe never sees
+  // a revealing 429 or spends the caller's quota for the live pay routes.
+  skip: (req) => req.method === 'POST' && /\/plan-choice\/?$/.test(req.path)
+    && !require('../config/feature-gates').isEnabled('payPlanChoice'),
   message: { error: 'Too many requests — please slow down.' },
 });
 router.use(payLimiter);
@@ -640,6 +644,11 @@ router.get('/:token', async (req, res, next) => {
         logger.warn(`[pay-v2] promo code block suppressed for invoice ${data.id}: ${err.code || err.message}`);
         return null;
       });
+    // Never on a bill a payer owns (the live resolve above). The read
+    // answers null on any failure, so it never fails the page.
+    const planChoice = payerOwnedLive
+      ? null
+      : await require('../services/pay-plan-choice').planChoiceForInvoice(data);
     // Off-Stripe tenders (see isZelleTransferEligible for the full
     // predicate and its history) — extracted so every other caller that
     // needs to know "would the pay page offer Zelle for this invoice"
@@ -835,6 +844,11 @@ router.get('/:token', async (req, res, next) => {
       // entered on this invoice, and the code already on it. Absent with the
       // gate off, so the gate-off payload stays byte-identical. A read only.
       ...(promoCode ? { promoCode } : {}),
+      // Pay per application vs. annual prepay (GATE_PAY_PLAN_CHOICE) on the
+      // first invoice of an accepted plan. Absent with the gate off or when
+      // the choice is not offered, so that payload stays byte-identical. A
+      // read only; it never carries the prepay invoice's token.
+      ...(planChoice ? { planChoice } : {}),
     });
   } catch (err) {
     if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') {
@@ -1124,6 +1138,32 @@ router.post('/:token/promo-code', promoCodeLimiter, async (req, res) => {
   } catch (err) {
     logger.warn(`[pay-v2] promo-code failed (code=${err?.code || 'none'}, invoice=${invoiceId || 'unresolved'})`);
     return res.status(503).json({ error: 'Promo code unavailable — please try again' });
+  }
+});
+
+// =========================================================================
+// POST /api/pay/:token/plan-choice — the customer picks annual prepay on the
+// first invoice of an accepted plan (GATE_PAY_PLAN_CHOICE, 404 while off).
+// Body { plan: 'prepay_annual' }: the only plan with an action. Paying per
+// application is paying this invoice as it stands. Every amount is derived
+// server-side (services/pay-plan-choice.js); the answer is the prepay
+// invoice's own pay link. Nothing is charged, sent or voided here.
+// =========================================================================
+router.post('/:token/plan-choice', async (req, res) => {
+  const notFound = () => res.status(404).json({ error: 'Invoice not found' });
+  if (!require('../config/feature-gates').isEnabled('payPlanChoice')) return notFound();
+  let invoiceId = null;
+  try {
+    const invoice = await db('invoices').where({ token: req.params.token }).first();
+    if (!invoice) return notFound();
+    invoiceId = invoice.id;
+    if (req.body?.plan !== 'prepay_annual') return res.status(400).json({ error: 'invalid_plan' });
+    const outcome = await require('../services/pay-plan-choice').selectAnnualPrepay(invoice);
+    if (outcome.refused) return res.status(409).json({ error: 'plan_choice_unavailable' });
+    return res.json({ success: true, payUrl: outcome.payUrl });
+  } catch (err) {
+    logger.warn(`[pay-v2] plan-choice failed (invoice=${invoiceId || 'unresolved'}): ${err.message}`);
+    return res.status(503).json({ error: 'Plan choice unavailable — please try again' });
   }
 });
 
