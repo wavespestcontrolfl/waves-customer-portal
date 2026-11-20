@@ -303,9 +303,7 @@ describe('past the decoding budget the text fails closed', () => {
   });
 });
 
-describe('malformed markup is read in one pass', () => {
-  // The tag scan reads the body once. The old tag pattern rescanned the rest of the body from each unfinished "<":
-  // 200 KB of "<a " took about 25 s, and an inbound text with no offer link is scanned too.
+describe('malformed markup', () => {
   const token = createHash('sha256').update('malformed markup').digest('hex');
   test.each([
     ['unfinished tag starts', '<a '],
@@ -318,14 +316,38 @@ describe('malformed markup is read in one pass', () => {
       .toBe(`${filler} Open ${portalUrl('/careers/offer/[link hidden]')} today`);
   });
 
-  test('200 KB of unfinished tag starts comes back unchanged in seconds', () => {
+});
+
+describe('a large text costs work in proportion to its length', () => {
+  // Every stored text is redacted on the request, inbound ones with no offer link included, so the work must grow with
+  // the length of the text only. Measured in CPU time, which a busy machine does not stretch as it does wall time.
+  // On the code before round 25: 100 KB of "<a " took about 6 s of CPU (the tag pattern rescanned the rest of the body
+  // from each "<"), and 6,000 distinct links about 7 s (one search of the whole text per found token). Both now take
+  // under 1 s.
+  const cpuMs = (run) => {
+    const start = process.cpuUsage();
+    run();
+    const { user, system } = process.cpuUsage(start);
+    return (user + system) / 1000;
+  };
+
+  test('200 KB of unfinished tag starts comes back unchanged', () => {
     for (const piece of ['<a ', '<<a']) {
       const body = piece.repeat(Math.ceil(200000 / piece.length));
-      const started = Date.now();
-      expect(redactOfferLinks(body)).toBe(body);
-      expect(Date.now() - started).toBeLessThan(10000);
+      let stored;
+      expect(cpuMs(() => { stored = redactOfferLinks(body); })).toBeLessThan(3000);
+      expect(stored).toBe(body);
     }
-  }, 60000);
+  }, 120000);
+
+  test('6,000 distinct links, each also copied split by markup, are all hidden', () => {
+    const tokens = Array.from({ length: 6000 }, (_, i) => createHash('sha256').update(`many links ${i}`).digest('hex'));
+    const text = tokens.map((t, i) => `Link ${i}: ${portalUrl(`/careers/offer/${t}`)} and copy ${t.slice(0, 32)}<wbr>${t.slice(32)}`).join('\n');
+    let stored;
+    expect(cpuMs(() => { stored = redactOfferLinks(text); })).toBeLessThan(3000);
+    expect(stored).not.toMatch(/[0-9a-f]{32}/);
+    expect(stored.split(portalUrl('/careers/offer/[link hidden]')).length - 1).toBe(6000);
+  }, 120000);
 });
 
 describe('the deferred replay body', () => {

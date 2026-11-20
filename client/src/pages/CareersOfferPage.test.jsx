@@ -408,6 +408,22 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.queryByText(/You signed this offer/)).toBeNull();
   });
 
+  // Codex P1: the server answers a sign in the name already signed (another
+  // tab signed first) with 200 and a replay mark. This tab signed nothing, so
+  // the page names the stored signature, never "You signed".
+  it('a sign answered as a replay names the stored signer, never "You signed"', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z', signedName: 'Jordan Rivera', replay: true }));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'jordan rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    expect(await screen.findByText(/^This offer was signed by Jordan Rivera on Sat, Dec 12, 2026\. Welcome to Waves\./)).toBeInTheDocument();
+    expect(screen.queryByText(/You signed this offer/)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   // Codex P1: this tab's sign was refused, then a signature in the same name
   // came from elsewhere. Nothing this tab sent went through, so the page names
   // the signer, never "You signed".
@@ -505,7 +521,7 @@ describe('CareersOfferPage — open state', () => {
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockRejectedValueOnce(new Error('offline')) // sign: reply lost
       .mockResolvedValueOnce(jsonResponse(openPayload())) // the read: the sign has not landed yet
-      .mockResolvedValueOnce(jsonResponse({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' })); // the resend: it had landed
+      .mockResolvedValueOnce(jsonResponse({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' })); // the resend signs
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
@@ -550,7 +566,7 @@ describe('CareersOfferPage — open state', () => {
       .mockResolvedValueOnce(jsonResponse(openPayload())) // the read: not landed yet
       .mockResolvedValueOnce(jsonResponse({ error: 'Too many requests, please try again shortly.' }, 429)) // the resend
       .mockResolvedValueOnce(jsonResponse(openPayload())) // the read after it: still open
-      .mockResolvedValueOnce(jsonResponse({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' })); // the next resend: it had landed
+      .mockResolvedValueOnce(jsonResponse({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' })); // the next resend signs
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });

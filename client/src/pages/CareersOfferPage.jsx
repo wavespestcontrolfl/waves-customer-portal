@@ -211,13 +211,13 @@ function ClosedState({ data }) {
 }
 
 // signer: who signed, as far as this page can tell. 'self': the server answered
-// this tab's own sign with that signature. 'record': the page opened on a
-// signed offer, or a read shows the name this tab last sent but the server
-// never answered that send with it (its reply was lost, or it was refused and
-// another tab signed in the same name), so the page cannot tell whose
-// signature it is; it names the signer and the date, never "you". 'other':
-// the page saw the offer open, and the name on record is not the one this tab
-// last sent.
+// this tab's own sign as the one that signed. 'record': the page opened on a
+// signed offer, or it shows the name this tab last sent but the server never
+// answered that send as the one that signed (its reply was lost, it was
+// refused, or it was answered as a replay of the same name signed first), so
+// the page cannot tell whose signature it is; it names the signer and the
+// date, never "you". 'other': the page saw the offer open, and the name on
+// record is not the one this tab last sent.
 function resultMessage(data, signer) {
   const who = ownerFirstName(data);
   if (data.state === 'signed') {
@@ -638,8 +638,12 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onO
   const accept = useOfferAction({
     token,
     onApplied: (b, sent) => {
-      onOwnSign({ name: sent.signedName, answered: true });
-      onApplied({ ...b, signedName: sent.signedName });
+      // A replay signed nothing: the same name was signed first (another tab,
+      // or an earlier send of this one whose reply was lost). It names the
+      // stored signature, and it is not this tab's to claim.
+      const { replay, ...answer } = b || {};
+      onOwnSign({ name: sent.signedName, answered: !replay });
+      onApplied({ ...answer, signedName: answer.signedName || sent.signedName });
     },
     onRefused,
     onReload,
@@ -793,8 +797,9 @@ function OfferPage({ token }) {
   const [error, setError] = useState(null); // null | 'notfound' | 'temporary'
   const [firstState, setFirstState] = useState(null); // the state the first read showed
   // The last signature this tab sent, { name, answered }, or null. answered:
-  // the server answered that sign with it. Only then does the page say "You
-  // signed": a sent name alone may be in flight, lost or refused.
+  // the server answered that sign as the one that signed (a 200 with no replay
+  // mark). Only then does the page say "You signed": a sent name alone may be
+  // in flight, lost, refused or a replay.
   const [ownSign, setOwnSign] = useState(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const seq = useRef(0);

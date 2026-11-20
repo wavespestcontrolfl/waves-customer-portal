@@ -8689,8 +8689,10 @@ version}` (trimmed,
 and a change since then (another tab's text choice) answers the same 409 `{state:'open'}` with no write, so a signature,
 a date request or a decline never fixes a text choice the applicant did not see. A body without `version` is the
 contract before it and is answered as before, with no version check; the page always sends one. Each acts only from state `open`; any
-other state answers 409 with the current state body (an identical replay of a signature answers 200 with the stored
-signature). Every action runs in one transaction that
+other state answers 409 with the current state body (an identical replay of a signature, the same name in any letter
+case, answers 200 with the stored signature and a replay mark, `{state:'signed', signedAt, signedName, replay: true}`:
+it signs nothing, so the page names the signer and never says "You signed"; the page says "You signed" only on a 200
+without that mark to its own sign). Every action runs in one transaction that
 locks the application row, then the offer row, and re-reads the state under the lock, so a double tap or a replay
 cannot sign twice. Accept records the IP, user agent and a signature hash (sha256 of the snapshot hash, the Terms
 content hash, the typed name and the signing instant), moves the application to `hired` and raises an owner bell;

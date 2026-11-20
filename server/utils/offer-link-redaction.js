@@ -229,6 +229,18 @@ function overlapping(spans, from, to) {
   return out;
 }
 
+// Where a found token occurs in `text` (lowercase, as every reading is). A token is 64 hex, so only the runs of 64 or
+// more hex are read, and each 64-hex window of a run is looked up in the set once: one pass over the text, however many
+// tokens were found.
+function* foundAt(text, linked) {
+  for (const run of text.matchAll(/[0-9a-f]{64,}/g)) {
+    for (let k = 0; k + 64 <= run[0].length; k += 1) {
+      if (linked.has(run[0].slice(k, k + 64))) yield run.index + k;
+    }
+  }
+}
+const holdsFound = (text, linked) => !foundAt(text, linked).next().done;
+
 // The units a piece of a view covers: the first is marked 'first', the rest 'rest'.
 function markParts(marks, parts) {
   parts.forEach(({ u }, k) => {
@@ -242,11 +254,9 @@ function markParts(marks, parts) {
 function splitMarks(views, linked) {
   const marks = new Map();
   for (const { text, spans } of views) {
-    for (const token of linked) {
-      for (let at = text.indexOf(token); at !== -1; at = text.indexOf(token, at + 1)) {
-        const parts = overlapping(spans, at, at + token.length);
-        if (parts.length > 1) markParts(marks, parts);
-      }
+    for (const at of foundAt(text, linked)) {
+      const parts = overlapping(spans, at, at + 64);
+      if (parts.length > 1) markParts(marks, parts);
     }
   }
   return marks;
@@ -265,7 +275,7 @@ function storedUnit(u, mark, linked, tokens) {
     });
     const seen = kept === u.text ? u.seen : readable(kept);
     const flat = kept === u.text ? u.flat : compact(seen);
-    if (!offerTokensOf(kept, seen).length && ![...linked].some((token) => flat.includes(token))) {
+    if (!offerTokensOf(kept, seen).length && !holdsFound(flat, linked)) {
       tokens.push(...sent);
       return kept;
     }

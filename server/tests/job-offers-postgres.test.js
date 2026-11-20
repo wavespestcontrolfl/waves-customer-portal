@@ -328,6 +328,7 @@ jest.setTimeout(120000);
         expect(await JobOffers.acceptOffer(token, { signedName: '  ' })).toMatchObject({ invalid: expect.any(String) });
         const signed = await JobOffers.acceptOffer(token, { signedName: '  Jordan   Rivera ', ip: '203.0.113.9', userAgent: 'TestAgent/1.0', version: await shownVersion(token) });
         expect(signed.body).toMatchObject({ state: 'signed' });
+        expect(signed.body.replay).toBeUndefined(); // this request signed
         const row = await root('job_offers').where({ id: offer.id }).first();
         expect(row).toMatchObject({ status: 'accepted', signed_name: 'Jordan Rivera', signed_ip: '203.0.113.9', signed_user_agent: 'TestAgent/1.0' });
         expect(row.signature_hash).toBe(JobOffers.signatureHashOf({
@@ -342,8 +343,9 @@ jest.setTimeout(120000);
         expect(spec.action).toBe('Jordan Rivera signed the job offer');
         expect(opts).toMatchObject({ bell: true, dedupeKey: `job-offer-signed:${offer.id}` });
 
+        // A replay signs nothing and says so, with the stored signature, so a second tab never claims it (Codex P1).
         const replay = await JobOffers.acceptOffer(token, { signedName: 'jordan rivera' });
-        expect(replay.body).toMatchObject({ state: 'signed' });
+        expect(replay.body).toEqual({ state: 'signed', signedAt: row.signed_at.toISOString(), signedName: 'Jordan Rivera', replay: true });
         expect(await JobOffers.acceptOffer(token, { signedName: 'Someone Else' })).toMatchObject({ refused: true, body: { state: 'signed' } });
         expect(mockRaise).toHaveBeenCalledTimes(1);
         expect(await JobOffers.declineOffer(token, {})).toMatchObject({ refused: true, body: { state: 'signed' } });
