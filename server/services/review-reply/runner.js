@@ -310,18 +310,21 @@ async function enqueueMissedReviews({ now = new Date(), cfg = config(), limit = 
 // Deploy-forward also bounds how long a row may WAIT in the lane (codex r74):
 // rows queued before a pause (gate off, location removed from scope) must
 // not auto-publish when automation resumes weeks later — a review of that
-// age first seen now would never enter the lane. An over-age QUEUED row
-// leaves the lane silently (auto state cleared, reason stamped): nothing was
-// ever tried, Post now still works on it, and the catch-up enqueue will not
-// re-queue it (same cutoff). An over-age FAILED row had a retry pending and a
-// draft the agent could not post, so while its review is still on Google and
-// still has no real reply it PARKS (retry_expired) and rings the same "needs
-// you" bell as any other park, instead of vanishing from the lane; a FAILED
-// row whose review is gone from Google or already answered leaves silently
-// like a QUEUED one. This is the backstop for the runner's early park, which
-// already parks a retry that would fall due past the window. A row under a
-// live claim, the runner's or a person's publish (Post now, the Intelligence
-// Bar), is left for the next sweep: its publisher owns the row until then.
+// age first seen now would never enter the lane. An over-age row the agent
+// never tried (QUEUED, no attempts) leaves the lane silently (auto state
+// cleared, reason stamped): Post now still works on it, and the catch-up
+// enqueue will not re-queue it (same cutoff). An over-age row the agent DID
+// try (FAILED with a retry pending, or QUEUED again after a live review
+// change: review_changed keeps its attempts) PARKS (retry_expired) while its
+// review is still on Google and still has no real reply, and rings the same
+// "needs you" bell as any other park, instead of vanishing from the lane; a
+// tried row whose review is gone from Google or already answered leaves
+// silently. This is the backstop for the runner's early park, which already
+// parks a retry that would fall due past the window. At most DEFAULT_BATCH
+// rows park per sweep (each rings a bell); the rest park on later sweeps,
+// and the claim's own age check keeps them from posting meanwhile. A row
+// under a live claim, the runner's or a person's publish (Post now, the
+// Intelligence Bar), is left for the next sweep: its publisher owns it.
 // Returns how many rows left the lane (expired + parked).
 async function expireOverAgeQueued({ now = new Date(), cfg = config() } = {}) {
   const cutoff = new Date(now.getTime() - cfg.maxQueueAgeHours * 3600000).toISOString();
@@ -330,11 +333,15 @@ async function expireOverAgeQueued({ now = new Date(), cfg = config() } = {}) {
     .where('review_created_at', '<', cutoff)
     .whereRaw('(auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)', [now.toISOString()])
     .modify(whereNoLivePublishClaim);
+  const overAgeTried = () => overAge([STATUS.FAILED, STATUS.QUEUED])
+    .whereRaw('(auto_reply_status = ? OR COALESCE(auto_reply_attempts, 0) > 0)', [STATUS.FAILED]);
   const counted = (n) => (Array.isArray(n) ? n.length : (n || 0));
-  const candidates = await overAge([STATUS.FAILED])
+  const candidates = await overAgeTried()
     .whereNull('missing_since')
     .modify(whereNeedsRealReply)
-    .select('id', 'location_id', 'star_rating', 'reviewer_name', 'auto_reply_reason', 'auto_reply_draft', 'auto_reply_error', 'review_reply');
+    .orderBy('review_created_at', 'asc')
+    .limit(DEFAULT_BATCH)
+    .select('id', 'location_id', 'star_rating', 'reviewer_name', 'auto_reply_status', 'auto_reply_attempts', 'auto_reply_reason', 'auto_reply_draft', 'auto_reply_error', 'review_reply');
   let parked = 0;
   for (const r of candidates) {
     // reconcile_failed: Google already shows an owner reply that the
@@ -344,12 +351,12 @@ async function expireOverAgeQueued({ now = new Date(), cfg = config() } = {}) {
     // ONE statement per row, compare-and-set on the values just read: the
     // park, the draft in an empty "[DRAFT]" slot (the Reviews card shows it,
     // Post now checks it; a person's text is never replaced) and a pending
-    // bell stamp. A sync edit meanwhile (it clears the draft and requeues)
-    // makes the statement miss, so no stale draft comes back. The bell clears
-    // the stamp once it rings; a crash before that leaves the row for the
-    // failed-bell sweep.
-    const park = overAge([STATUS.FAILED]).where({ id: r.id }).whereNull('missing_since');
-    for (const col of ['auto_reply_draft', 'auto_reply_error', 'review_reply']) {
+    // bell stamp. A sync edit or a retry meanwhile (each changes the status,
+    // attempts, draft or error) makes the statement miss, so no stale draft
+    // comes back. The bell clears the stamp once it rings; a crash before
+    // that leaves the row for the failed-bell sweep.
+    const park = overAgeTried().where({ id: r.id }).whereNull('missing_since');
+    for (const col of ['auto_reply_status', 'auto_reply_attempts', 'auto_reply_draft', 'auto_reply_error', 'review_reply']) {
       if (r[col] == null) park.whereNull(col); else park.where(col, r[col]);
     }
     const n = await park.update({
@@ -362,25 +369,28 @@ async function expireOverAgeQueued({ now = new Date(), cfg = config() } = {}) {
     if (reconcile) await reconcileFailedBell(r);
     else await bell(r, { title: 'Review reply needs you', body: `${summarize(r)} — the reply agent ran out of time to post it.${r.auto_reply_draft ? ' The draft is saved on the review.' : ''}`, reason, action: true });
   }
-  // Only a row no person needs leaves silently: a QUEUED row (never tried) and
-  // a FAILED row whose review is gone from Google or already has a real reply.
-  // Any other FAILED row stays for the park above, so one that a publish
-  // released while the bells rang parks on the next sweep.
+  // Only a row no person needs leaves silently: a QUEUED row never tried, and
+  // a tried row whose review is gone from Google or already has a real reply.
+  // Any other tried row stays for the park above, so one that a publish
+  // released while the bells rang parks on a later sweep.
   const expired = { auto_reply_status: null, auto_reply_reason: 'queue_expired', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_error: null };
-  const left = counted(await overAge([STATUS.QUEUED]).update(expired))
-    + counted(await overAge([STATUS.FAILED]).whereNotNull('missing_since').update(expired))
-    + counted(await overAge([STATUS.FAILED]).whereNull('missing_since').modify(whereHasRealReply).update(expired));
+  const left = counted(await overAge([STATUS.QUEUED]).whereRaw('COALESCE(auto_reply_attempts, 0) = 0').update(expired))
+    + counted(await overAgeTried().whereNotNull('missing_since').update(expired))
+    + counted(await overAgeTried().whereNull('missing_since').modify(whereHasRealReply).update(expired));
   const count = left + parked;
   if (count) logger.info(`[review-auto-reply] ${count} pending review(s) older than ${cfg.maxQueueAgeHours}h left the lane unposted (${parked} parked for a person)`);
   return count;
 }
 
-async function claimDueRows({ limit = DEFAULT_BATCH, now = new Date(), force = null } = {}) {
+async function claimDueRows({ limit = DEFAULT_BATCH, now: fixedNow = null, force = null } = {}) {
+  const cfg = config();
+  if (!force) await expireOverAgeQueued({ now: fixedNow || new Date(), cfg });
+  // The claim reads the clock AFTER the sweep: its bells can take a while,
+  // and a row that ages past the cutoff meanwhile must not be claimed.
+  const now = fixedNow || new Date();
   const token = new Date(now.getTime() + CLAIM_MS).toISOString();
   const nowIso = now.toISOString();
-  const cfg = config();
   const cutoff = new Date(now.getTime() - cfg.maxQueueAgeHours * 3600000).toISOString();
-  if (!force) await expireOverAgeQueued({ now, cfg });
   // The claim re-checks the age itself (a row can age past the cutoff
   // between the expiry sweep and this statement).
   const forceClause = force ? "AND id = ? AND COALESCE(auto_reply_status, '') NOT IN ('skipped','retracted')" : `AND auto_reply_status IN ('queued','failed') AND auto_reply_due_at <= ? AND review_created_at >= ?`;
