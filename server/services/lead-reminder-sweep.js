@@ -16,6 +16,12 @@
  * or lost its stamp since then sends nothing. Before that read, the reminder judges the lead again with fresh reads (its
  * own `waiting`): a person who reached the lead, or a lead closed or quoted, since the page was read sends nothing. The
  * row read comes last, so a Done or a new ring during the lead's reads still stops the push.
+ *
+ * A reminder may cap its pushes per claim (the new-lead re-alert: one per lead, new-lead-reminder.js leadClaim): the
+ * stamp then also takes an advisory lock on the claim's key, after the dedupe-key lock, and asks whether the claim is
+ * taken, all in the stamp's transaction, so two sweeps that reach two bells of one lead never both push. Each push
+ * carries an expiry (the reminder's close that day, or the item's late window, whichever is first), so a phone that
+ * comes online later never shows a stale reminder.
  */
 
 const db = require('../models/db');
@@ -70,13 +76,17 @@ const stampedMeta = (stamp, meta, now) => ({ ...meta, [stamp]: now.toISOString()
 // dedupe key is stamped under notifyAdmin's advisory lock for that key (notification-service.js dedupeAndInsert): a
 // refresh reads the row and writes its whole metadata back under that lock, so a stamp landing between its read and
 // its write would be overwritten, and the bell could push a second time. With the lock the stamp waits for the
-// refresh, whose new metadata then fails the fence; a refresh after the stamp merges onto it and keeps it. `ready`
-// (optional) is asked again once the lock is held: a stamp that waited past the reminder's hours or the item's late
-// window is not written, so the next open sweep can still judge the bell.
-async function stampOnce(stamp, { row, meta }, now, ready = () => true) {
+// refresh, whose new metadata then fails the fence; a refresh after the stamp merges onto it and keeps it. `claim`
+// (optional, { key, taken(conn) }) caps the pushes per claim: its own lock is taken after the dedupe-key lock (always in
+// that order, and notifyAdmin takes only the first), and `taken` reads in this transaction; a claim already taken
+// writes nothing. `ready` (optional) is asked again once the locks are held: a stamp that waited past the reminder's
+// hours or the item's late window is not written, so the next open sweep can still judge the bell.
+async function stampOnce(stamp, { row, meta }, now, ready = () => true, claim = null) {
   return db.transaction(async (trx) => {
     if (meta.dedupeKey) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${meta.dedupeKey}`]);
+    if (claim) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [claim.key]);
     if (!ready()) return false;
+    if (claim && (await claim.taken(trx))) return false;
     const landed = await trx('notifications')
       .where({ id: row.id, recipient_type: 'admin' })
       .whereNull('done_at')
@@ -108,14 +118,16 @@ async function rowStillOpen(id, label, stamped = null) {
 // sweep began. `stillWaiting` (optional, async) judges the lead again: false means a person reached it, or it closed,
 // since the page was read. The open-row read runs after it, the last read before the handoff. The same check runs before
 // the dispatch and again before each device's handoff (the push service's beforeHandoff), so a Done, a contact or the
-// cutoff while an earlier device's request runs stops the remaining devices. Never throws.
-async function sendPush({ row, customerId, stamped = null }, label, ready = () => true, stillWaiting = async () => true) {
+// cutoff while an earlier device's request runs stops the remaining devices. `expiresAt` (optional, an ISO time) is
+// when the providers drop the push undelivered (notification-triggers.js pushExpiryFor). Never throws.
+async function sendPush({ row, customerId, stamped = null }, label, ready = () => true, stillWaiting = async () => true, expiresAt = null) {
   const stillDue = async () => ready() && (await stillWaiting()) && (await rowStillOpen(row.id, label, stamped)) && ready();
   try {
     const { triggerNotification } = require('./notification-triggers');
     return await triggerNotification(TRIGGER_KEY, {
       alertRowId: row.id, alertTitle: row.title, alertBody: row.body || null, alertLink: row.link || null,
       ...(customerId ? { customerId } : {}),
+      ...(expiresAt ? { expiresAt } : {}),
     }, {
       // bellAuthorized: the bell row's writer rang it (bell: true), so the push keeps that answer. pushOnly: the row is
       // not rewritten. adminOnly: nothing goes to a lead, a customer or a technician.
@@ -148,8 +160,11 @@ async function waitingNow(kind, item) {
  * sweep's `now` can be old by the time its closes and the reads above have finished. When the hours have closed the
  * sweep stops with the rest unstamped, for the next open sweep while they are still inside their late window. An item
  * may carry `expiresAt`, the end of its late window: once the fresh clock passes it, the item is not stamped, and a
- * push already stamped is refused at dispatch. Returns { due, sent, sends }; `sends` are the pushes, never awaited
- * here. Throws only when a page cannot be read.
+ * push already stamped is refused at dispatch. `closesAt(date)` (optional) is when the reminder's hours end on that
+ * day: each push expires then, or at the item's `expiresAt` if that is first. `claim(item)` (optional) caps the pushes
+ * per claim (stampOnce). Every page is judged first, then the stamps go in the kind's `order` (optional comparator), so
+ * the item a claim prefers is stamped first even when its row was read on a later page. Returns { due, sent, sends };
+ * `sends` are the pushes, never awaited here. Throws only when a page cannot be read.
  */
 async function runSweep(kind, { now, pageSize = PAGE_SIZE, clock = () => new Date() }) {
   const { label, stamp } = kind;
@@ -157,7 +172,13 @@ async function runSweep(kind, { now, pageSize = PAGE_SIZE, clock = () => new Dat
   const total = { due: 0, sent: 0 };
   const ready = () => !kind.inHours || kind.inHours(clock());
   const expired = (item) => !!item.expiresAt && clock().getTime() > item.expiresAt.getTime();
+  // The push's expiry, read with the fresh clock: the reminder's close today, or the item's late window, if first.
+  const expiryOf = (item) => {
+    const ends = [kind.closesAt?.(clock()), item.expiresAt].filter(Boolean).map((at) => at.getTime());
+    return ends.length ? new Date(Math.min(...ends)).toISOString() : null;
+  };
   const sends = [];
+  const waiting = [];
   let cursor = resumeAfter.get(stamp) || null;
   resumeAfter.delete(stamp);
   for (let page = 0; page < MAX_PAGES; page += 1) {
@@ -167,31 +188,32 @@ async function runSweep(kind, { now, pageSize = PAGE_SIZE, clock = () => new Dat
     cursor = { createdAt: last.created_at_token, id: last.id };
     const due = kind.dueItems(rows, now);
     total.due += due.length;
-    let waiting = [];
     try {
-      waiting = await kind.waiting(due);
+      waiting.push(...(await kind.waiting(due)));
     } catch (err) {
       logger.warn(`[${label}] contact witnesses failed to load, nothing sent on this page: ${safeError(err)}`);
-    }
-    for (const item of waiting) {
-      if (!ready()) {
-        logger.info(`[${label}] hours closed while the sweep ran: the rest waits for the next open sweep`);
-        return { ...total, sends };
-      }
-      // Its late window closed while the reads above ran: not stamped, and no later sweep finds it due.
-      if (expired(item)) continue;
-      try {
-        if (!(await stampOnce(stamp, item, now, () => ready() && !expired(item)))) continue;
-        total.sent += 1;
-        sends.push(sendPush({ ...item, stamped: stampedMeta(stamp, item.meta, now) }, label, () => ready() && !expired(item), () => waitingNow(kind, item)));
-      } catch (err) {
-        logger.warn(`[${label}] notification ${item.row.id} not stamped: ${safeError(err)}`);
-      }
     }
     if (rows.length < pageSize) break;
     if (page === MAX_PAGES - 1) {
       resumeAfter.set(stamp, cursor);
       logger.warn(`[${label}] stopped after ${MAX_PAGES} pages; the next sweep resumes after them`);
+    }
+  }
+  if (kind.order) waiting.sort(kind.order);
+  for (const item of waiting) {
+    if (!ready()) {
+      logger.info(`[${label}] hours closed while the sweep ran: the rest waits for the next open sweep`);
+      return { ...total, sends };
+    }
+    // Its late window closed while the reads above ran: not stamped, and no later sweep finds it due.
+    if (expired(item)) continue;
+    try {
+      if (!(await stampOnce(stamp, item, now, () => ready() && !expired(item), kind.claim ? kind.claim(item) : null))) continue;
+      total.sent += 1;
+      sends.push(sendPush({ ...item, stamped: stampedMeta(stamp, item.meta, now) }, label, () => ready() && !expired(item),
+        () => waitingNow(kind, item), expiryOf(item)));
+    } catch (err) {
+      logger.warn(`[${label}] notification ${item.row.id} not stamped: ${safeError(err)}`);
     }
   }
   return { ...total, sends };

@@ -175,6 +175,8 @@ describe('the banner', () => {
       alertBody: 'Missed call request: Pat replied CALL to our lead text and nobody pressed 1.',
       alertLink: `/admin/leads?lead=${LEAD}`,
       customerId: CUST,
+      // 8 PM that day: the banner's send hours end then.
+      expiresAt: est('05', '20:00').toISOString(),
     });
     expect(opts).toMatchObject({ pushOnly: true, adminOnly: true, bellAuthorized: true });
     // The witnesses read the lead's own customer and phone, from the bell's event.
@@ -238,6 +240,12 @@ describe('the banner', () => {
     expect(await beforePush()).toBe(false);
     // A device whose turn comes after 8 PM, behind a slow earlier device, sends nothing either.
     expect(await beforeHandoff()).toBe(false);
+  });
+
+  test('the banner expires at 8 PM that day, so a phone that comes online later never shows it', async () => {
+    const result = await runLeadCallReminder({ now: NOW });
+    await Promise.all(result.sends || []);
+    expect(reminders()[0][1].expiresAt).toBe(est('05', '20:00').toISOString());
   });
 
   test('a banner that throws is logged and never reaches the sweep', async () => {

@@ -8,7 +8,9 @@
  *
  * The sweep reads the whole notifications table, so every statement of a test runs in one transaction that is rolled
  * back after it (as admin-billing-recovery-postgres.test.js does): a bell anything else left open in this database is
- * stamped, if at all, only inside that transaction, and the fixtures go with it.
+ * stamped, if at all, only inside that transaction, and the fixtures go with it. One test needs two real connections
+ * at once (two stamps racing for one lead's lock): it commits two bells dated 2020, which no sweep's 48-hour scan can
+ * read, and deletes them after.
  */
 const crypto = require('crypto');
 
@@ -161,6 +163,86 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
     await run();
     expect(pushesFor(formBell.id)).toHaveLength(0);
     expect(pushesFor(webBell.id)).toHaveLength(0);
+  }, 180000);
+
+  test('one lead\'s new-lead bell and the repeat-form bell the writer rings push once, for the later inquiry; a bell after that push pushes again', async () => {
+    const { customer, lead } = await leadOnFile();
+    const webBell = await newLeadBell(lead, mins(-25));
+    const formBell = await repeatFormBell(customer, lead, mins(-18));
+    await run();
+    expect(pushesFor(formBell.id)).toHaveLength(1);
+    expect(pushesFor(webBell.id)).toHaveLength(0);
+    expect(metaOf(await db('notifications').where({ id: formBell.id }).first())[reminder.PUSH_STAMP]).toBe(NOW.toISOString());
+    // Held back by the lead's claim, not stamped: the next sweep judges it again, and the claim holds it again.
+    expect(metaOf(await db('notifications').where({ id: webBell.id }).first())).not.toHaveProperty(reminder.PUSH_STAMP);
+    jest.clearAllMocks();
+    await run();
+    expect(pushesFor(webBell.id)).toHaveLength(0);
+
+    // The lead asks again 10 minutes after that push (a new bell row), and nobody reaches it in 15 minutes.
+    const later = mins(30);
+    const nextBell = await newLeadBell(lead, mins(10));
+    jest.clearAllMocks();
+    const result = await reminder.runNewLeadReminder({ now: later, clock: () => later });
+    await Promise.all(result.sends || []);
+    expect(pushesFor(nextBell.id)).toHaveLength(1);
+    expect(pushesFor(webBell.id)).toHaveLength(0);
+  }, 180000);
+
+  // Two sweeps (two app instances, or a slow sweep and the next one) can reach two bells of one lead at once. Each stamp
+  // takes the lead's lock in its own transaction and reads the claim under it, so the second waits for the first to
+  // commit, then reads its stamp and writes nothing.
+  test('two stamps of one lead\'s bells at once: the lead\'s lock makes the second wait, read the first stamp and write nothing', async () => {
+    await mockTrx.rollback();
+    mockTrx = null;
+    const { stampOnce } = require('../services/lead-reminder-sweep').__private;
+    const { leadClaim } = reminder.__private;
+    const at = new Date('2020-03-02T15:00:00-05:00');
+    const leadId = crypto.randomUUID();
+    const bell = async (minutesBefore) => {
+      const [r] = await db.real('notifications').insert({
+        recipient_type: 'admin', category: 'new_lead', title: 'New lead', body: 'Lead Sample via the website - Wants pest control',
+        link: `/admin/leads?lead=${leadId}`, created_at: new Date(at.getTime() - minutesBefore * MIN),
+        metadata: JSON.stringify({ triggerKey: 'new_lead', doneWhen: 'lead_contacted', payload: { leadId } }),
+      }).returning('*');
+      return r;
+    };
+    const item = (r) => ({ row: r, meta: metaOf(r), leadId, anchor: new Date(r.created_at) });
+    const ungrantedAdvisoryLocks = async () => (await db.real.raw(`SELECT count(*)::int AS n FROM pg_locks l
+      JOIN pg_database d ON d.oid = l.database WHERE l.locktype = 'advisory' AND NOT l.granted AND d.datname = current_database()`)).rows[0].n;
+    const ids = [];
+    let release = () => {};
+    const stamps = [];
+    try {
+      const older = await bell(25);
+      ids.push(older.id);
+      const newer = await bell(18);
+      ids.push(newer.id);
+      // The first stamp (the newer bell) holds the lead's lock, its transaction open, until the second is seen waiting.
+      let locked;
+      const gotLock = new Promise((resolve) => { locked = resolve; });
+      const held = new Promise((resolve) => { release = resolve; });
+      const claim = leadClaim(item(newer));
+      const holding = { key: claim.key, taken: async (conn) => { const taken = await claim.taken(conn); locked(); await held; return taken; } };
+      stamps.push(stampOnce(reminder.PUSH_STAMP, item(newer), at, () => true, holding));
+      await gotLock;
+      stamps.push(stampOnce(reminder.PUSH_STAMP, item(older), at, () => true, leadClaim(item(older))));
+      let sawWait = false;
+      for (let i = 0; i < 100 && !sawWait; i += 1) {
+        sawWait = (await ungrantedAdvisoryLocks()) > 0;
+        if (!sawWait) await new Promise((resolve) => { setTimeout(resolve, 100); });
+      }
+      expect(sawWait).toBe(true);
+      release();
+      expect(await Promise.all(stamps)).toEqual([true, false]);
+      const after = new Map((await db.real('notifications').whereIn('id', ids)).map((r) => [r.id, metaOf(r)]));
+      expect(after.get(newer.id)[reminder.PUSH_STAMP]).toBe(at.toISOString());
+      expect(after.get(older.id)).not.toHaveProperty(reminder.PUSH_STAMP);
+    } finally {
+      release();
+      await Promise.allSettled(stamps);
+      if (ids.length) await db.real('notifications').whereIn('id', ids).del();
+    }
   }, 180000);
 
   test('a bell that rang again or moved to Activity, or whose lead converted, between its stamp and its push sends nothing', async () => {

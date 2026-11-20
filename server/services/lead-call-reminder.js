@@ -38,7 +38,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etParts } = require('../utils/datetime-et');
+const { etParts, etDateString, parseETDateTime } = require('../utils/datetime-et');
 const sweep = require('./lead-reminder-sweep');
 
 const { TRIGGER_KEY } = sweep;
@@ -74,6 +74,9 @@ function inSendHours(date) {
   const { hour } = etParts(date);
   return hour >= SEND_FROM_HOUR && hour < SEND_UNTIL_HOUR;
 }
+
+// 8:00 PM Eastern on the day of `date`: a banner sent that day expires then (lead-reminder-sweep.js closesAt).
+const sendHoursClose = (date) => parseETDateTime(`${etDateString(date)}T${String(SEND_UNTIL_HOUR).padStart(2, '0')}:00`);
 
 // When a call request whose bell last became news at `askedAt` is due its reminder: one business hour, or null.
 function dueAtFor(askedAt) {
@@ -169,7 +172,7 @@ async function runLeadCallReminder({ now = new Date(), pageSize, clock } = {}) {
   if (!inSendHours(now)) return { skipped: true, reason: 'quiet_hours' };
   // inHours: the 8 PM cutoff is asked again with a fresh clock before each stamp and at each push's dispatch, since a
   // sweep that began at 7:59 PM can reach them after 8.
-  const out = await sweep.runSweep({ ...KIND, label: LABEL, windowMs: WINDOW_MS, dueItems, waiting: stillWaiting, inHours: inSendHours }, { now, pageSize, clock });
+  const out = await sweep.runSweep({ ...KIND, label: LABEL, windowMs: WINDOW_MS, dueItems, waiting: stillWaiting, inHours: inSendHours, closesAt: sendHoursClose }, { now, pageSize, clock });
   if (out.sent) logger.info(`[${LABEL}] queued ${out.sent} reminder banner(s): a lead's call request is still open after 1 business hour`);
   return { skipped: false, due: out.due, reminded: out.sent, sends: out.sends };
 }

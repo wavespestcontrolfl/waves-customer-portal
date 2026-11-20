@@ -1483,6 +1483,12 @@ function pushTagFor(triggerKey, payload = {}) {
 // A push that is true for one ET day only expires with that day (push-notifications.js webPushTtl, apns.js, fcm.js): a
 // phone that reconnects days later never shows an old "Call today" count. The end of the day is the next ET midnight.
 function pushExpiryFor(triggerKey, payload = {}) {
+  // The lead reminders' push (lead-reminder-sweep.js): the reminder's close that day, or the bell's late window, whichever
+  // is first, so a phone that comes online later never shows a stale "call this lead".
+  if (triggerKey === 'lead_call_reminder') {
+    const at = Date.parse(payload.expiresAt || '');
+    return Number.isFinite(at) ? { expiresAt: new Date(at).toISOString() } : {};
+  }
   if (triggerKey !== 'estimate_call_today' || !validCalendarDate(payload.day)) return {};
   const nextDay = etDateString(addETDays(parseETDateTime(`${payload.day}T12:00`), 1));
   return { expiresAt: parseETDateTime(`${nextDay}T00:00`).toISOString() };

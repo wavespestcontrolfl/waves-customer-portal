@@ -10,7 +10,9 @@
  * has reached gets ONE more phone push 15 minutes after the bell's latest event. No gate: the push goes to admin users
  * only. (A second step, a ring to the owner's cell at 60 minutes behind its own gate, is a separate change.)
  * At most one push per bell row: it is stamped first, in one statement fenced on the row being open and unchanged since
- * it was read (metadata.newLeadRealertAt), under notifyAdmin's lock for the bell's dedupe key. Stamp first, then send:
+ * it was read (metadata.newLeadRealertAt), under notifyAdmin's lock for the bell's dedupe key. And one push per lead for
+ * each inquiry (leadClaim): a lead with two bells due in one sweep (its intake bell and a repeat form) gets one, for the
+ * latest inquiry; a later inquiry, one that came in after that push, can get its own. Stamp first, then send:
  * a send that fails after its stamp is lost, never repeated. The push goes only while the row is still an open bell in
  * the bell feed with exactly the stamped metadata (a bell that rang again since then sends nothing), and while the lead
  * still waits when judged again with fresh reads just before it goes (lead-reminder-sweep.js).
@@ -46,7 +48,7 @@
  */
 
 const db = require('../models/db');
-const { etParts } = require('../utils/datetime-et');
+const { etParts, etDateString, parseETDateTime } = require('../utils/datetime-et');
 const logger = require('./logger');
 const sweep = require('./lead-reminder-sweep');
 const { isOpenLeadRow } = require('./lead-statuses');
@@ -82,6 +84,9 @@ function inBusinessHours(date) {
 
 // `minutes` of business time after `from`.
 const businessDueAt = (from, minutes) => require('./callback-cards').staffedDeadline(from, OFFICE, minutes);
+
+// 6:00 PM Eastern on the day of `date`: a push sent that day expires then (lead-reminder-sweep.js closesAt).
+const businessDayClose = (date) => parseETDateTime(`${etDateString(date)}T${OFFICE.end}`);
 
 // The push window of a bell whose latest event is `askedAt`: due `afterMinutes` of business time after it, and stale
 // (`expiresAt`) `lateMinutes` of business time after that.
@@ -202,6 +207,32 @@ async function reachedLeads(items) {
   return still;
 }
 
+// The sweep stamps the latest inquiry first (lead-reminder-sweep.js runSweep `order`): when two bells of one lead are due
+// in one sweep, the newer one is stamped and pushes, and leadClaim then holds the older one back.
+const latestInquiryFirst = (a, b) => b.anchor.getTime() - a.anchor.getTime();
+
+// One push per lead for each inquiry. A bell does not push when another bell of its lead was stamped at or after this
+// bell's inquiry began: that push already told the office about this lead after this inquiry came in. A later inquiry
+// (a repeat form after that push) can push again. The stamp asks it under a lock on the lead, in its own transaction
+// (lead-reminder-sweep.js stampOnce), so two sweeps never both push one lead. A stamp holds the claim even when its
+// push did not go (the row rang again, a Done, the close): at most once, as for the row itself. Only this reminder stamps
+// PUSH_STAMP, so the stamped rows are its bells; each names its lead the way dueItems reads it (refsFromRow). The read is
+// bounded like the scan: a row stamped at or after the anchor was a candidate of a sweep at that time.
+function leadClaim(item) {
+  return {
+    key: `${LABEL}:lead:${item.leadId}`,
+    taken: async (conn) => {
+      const { refsFromRow } = relevance();
+      const since = new Date(item.anchor.getTime() - WINDOW_MS).toISOString();
+      const stamped = await conn('notifications').where({ recipient_type: 'admin' }).whereNot('id', item.row.id)
+        .whereRaw(`metadata->>'${PUSH_STAMP}' >= ?`, [item.anchor.toISOString()])
+        .where((q) => q.where('created_at', '>', since).orWhereRaw("metadata->>'rungAt' > ?", [since]))
+        .select('id', 'link', 'metadata');
+      return stamped.some((r) => String(refsFromRow(r).leadId || '').toLowerCase() === String(item.leadId).toLowerCase());
+    },
+  };
+}
+
 // An email a person sent to the lead's own address since the item's anchor (a Gmail SENT row): the witnesses read only a
 // customer's address, and a lead that came in by email may have no customer yet. A send counts only when the witnesses'
 // own linkage (emailCustomerLink) says it is this lead's: linked to the lead's customer, or provably naming no customer
@@ -266,7 +297,10 @@ async function estimatesSent(items) {
  */
 async function runNewLeadReminder({ now = new Date(), pageSize, clock } = {}) {
   if (!inBusinessHours(now)) return { skipped: true, reason: 'quiet_hours' };
-  const out = await sweep.runSweep({ ...kind(), label: LABEL, windowMs: WINDOW_MS, dueItems, waiting: reachedLeads, inHours: inBusinessHours }, { now, pageSize, clock });
+  const out = await sweep.runSweep({
+    ...kind(), label: LABEL, windowMs: WINDOW_MS, dueItems, waiting: reachedLeads, inHours: inBusinessHours,
+    closesAt: businessDayClose, claim: leadClaim, order: latestInquiryFirst,
+  }, { now, pageSize, clock });
   if (out.sent) logger.info(`[${LABEL}] queued ${out.sent} push(es): a new lead nobody has reached`);
   return { skipped: false, due: out.due, pushed: out.sent, sends: out.sends };
 }
@@ -274,5 +308,5 @@ async function runNewLeadReminder({ now = new Date(), pageSize, clock } = {}) {
 module.exports = {
   runNewLeadReminder,
   PUSH_STAMP,
-  __private: { inBusinessHours, businessDueAt, pushWindow, kind, dueItems, reachedLeads, inquiryOf, emailReceivedAt, candidateQuery, ESTIMATE_STATUSES },
+  __private: { inBusinessHours, businessDueAt, businessDayClose, pushWindow, kind, dueItems, reachedLeads, inquiryOf, leadClaim, emailReceivedAt, candidateQuery, ESTIMATE_STATUSES },
 };

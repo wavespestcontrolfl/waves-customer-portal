@@ -603,7 +603,9 @@ nobody has reached the lead since. "Reached" uses the shared contact witnesses a
 a person placed and spoke on, an inbound call a person answered, a person's Gmail send to the lead's customer's own
 address, a visit booked for that customer, or an estimate handed off. A deleted lead, or one a person closed, sends nothing. Banners go out
 only from 8:00 AM up to 8:00 PM Eastern (asked again with a fresh clock before each stamp and at the banner's dispatch),
-and only for bells of the last 24 hours. The banner carries the row's own title,
+and only for bells of the last 24 hours. Each banner expires at the push provider at 8:00 PM that day
+(`payload.expiresAt`, which `pushExpiryFor` turns into the web push TTL, the APNs expiration and the FCM ttl), so a
+phone that was offline does not show it later. The banner carries the row's own title,
 body and link, led by "Reminder: nobody has reached this lead yet.", `pushOnly` to admin-role phones with a tag per row.
 The bell row is not rewritten: it is stamped `metadata.leadCallReminderAt` in one statement fenced on the row being open
 and unchanged since it was read, under notifyAdmin's advisory lock for the row's dedupe key (a refresh rewrites the
@@ -628,9 +630,13 @@ row's own title, body and link). The clock counts only Monday to Saturday, 8:00 
 are not skipped), and nothing is sent outside those hours: they are judged again with a fresh clock before each stamp and before
 each push goes, and a sweep that runs past 6 PM stops and leaves the rest unstamped. A push more than 2 business hours past due is dropped,
 also when that time passes while the sweep reads (checked again before the stamp, and before and after the push's open-row read). Bells of
-the last 48 hours only. The push is stamped first, fenced on the row being open and unchanged (`metadata.newLeadRealertAt`),
+the last 48 hours only. Each push expires at the push provider at 6:00 PM that day, or at the end of its late window if that
+comes first (`payload.expiresAt`, as for the call-back banner). The push is stamped first, fenced on the row being open and unchanged (`metadata.newLeadRealertAt`),
 under the same dedupe-key lock (the hours and the late window are asked again once the lock is held), so a row gets
-at most one; as with the call-back reminder, it goes only while the row is
+at most one. A lead gets one push for each inquiry: the stamp also takes an advisory lock on the lead, after the
+dedupe-key lock, and holds back a bell whose lead already has a bell stamped at or after this bell's inquiry began. So a
+lead with an open intake bell and a repeat form gets one push, for the latest inquiry (the sweep judges every page first,
+then stamps the latest inquiry first), and a bell written after that push can push again. As with the call-back reminder, it goes only while the row is
 still an open bell in the bell feed with exactly the stamped metadata, and while the lead still waits when judged again
 with fresh reads (a person who reached it, or a lead closed or quoted, since the sweep read it sends nothing). The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead still waits for a
 call"). "Reached" is judged on the lead, whatever the close gates say, and not only after the bell (a "New call lead" bell

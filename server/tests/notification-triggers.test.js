@@ -553,13 +553,23 @@ describe('triggerNotification bell outcome', () => {
     });
     const answers = [true, false];
     const beforeHandoff = jest.fn(async () => answers.shift());
-    const stats = await triggerNotification('lead_call_reminder', { alertRowId: 'n-1', alertTitle: 'Leads — call Pat Sample back', alertBody: 'b' },
+    const expiresAt = '2026-11-09T23:00:00.000Z';
+    const stats = await triggerNotification('lead_call_reminder', { alertRowId: 'n-1', alertTitle: 'Leads — call Pat Sample back', alertBody: 'b', expiresAt },
       { pushOnly: true, adminOnly: true, bellAuthorized: true, beforePush: async () => true, beforeHandoff });
+    // The reminder's expiry reaches every device's payload (web push TTL, apns-expiration, FCM ttl).
+    expect(PushService.sendToAdminUsers.mock.calls[0][1]('admin-1')).toMatchObject({ expiresAt });
     expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
     expect(PushService.sendToAdminUsers.mock.calls[0][2].beforeHandoff).toBe(beforeHandoff);
     expect(beforeHandoff).toHaveBeenCalledTimes(2);
     // One device has the push: the count stays, it is not read as "stopped before the push".
     expect(stats.push).toMatchObject({ sent: 1, superseded: true });
+  });
+
+  test('pushExpiryFor: the lead reminders\' push carries its own expiry; no other trigger reads one from its payload', () => {
+    expect(__private.pushExpiryFor('lead_call_reminder', { expiresAt: '2026-11-09T23:00:00.000Z' })).toEqual({ expiresAt: '2026-11-09T23:00:00.000Z' });
+    expect(__private.pushExpiryFor('lead_call_reminder', {})).toEqual({});
+    expect(__private.pushExpiryFor('lead_call_reminder', { expiresAt: 'not a time' })).toEqual({});
+    expect(__private.pushExpiryFor('new_lead', { expiresAt: '2026-11-09T23:00:00.000Z' })).toEqual({});
   });
 
   test('portal_ask is a pushOnly page: it writes no bell row and pushes one banner tagged by the ask', async () => {
