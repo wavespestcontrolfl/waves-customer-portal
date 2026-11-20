@@ -14,6 +14,19 @@ const MOSQUITO_DEFAULT_LOT_CATEGORIES = constants.MOSQUITO.lotCategories.map(c =
 // removes from the DB row reverts to the code default on the NEXT sync
 // instead of lingering until a process restart.
 const PEST_INITIAL_ROACH_DISPLAY_DEFAULTS = JSON.parse(JSON.stringify(constants.PEST.pestInitialRoach.display));
+// Pristine in-code values for recurringPestPriceIsFromRows (below), read
+// before any sync changes the constants: the value of the one optional pest
+// field, the property types and the tiers the engine knows, and the service
+// count that earns each tier.
+const PEST_ATTACHED_GARAGE_DEFAULT = constants.PEST.additionalAdjustments.attachedGarage;
+const PEST_PROPERTY_TYPE_KEYS = Object.freeze(Object.keys(constants.PROPERTY_TYPE_ADJ));
+const WAVEGUARD_TIER_KEYS = Object.freeze(Object.keys(constants.WAVEGUARD.tiers));
+// The engine's tier picker (determineWaveGuardTier, discount-engine.js) counts
+// by these fixed thresholds and never reads the minServices a sync loads. The
+// pest price rows suite pins the picker to them.
+const WAVEGUARD_TIER_ENGINE_MIN_SERVICES = Object.freeze(Object.fromEntries(
+  WAVEGUARD_TIER_KEYS.map((tier) => [tier, constants.WAVEGUARD.tiers[tier].minServices]),
+));
 // Pristine code defaults for the rodent bracket ladder (codex #3591 r54
 // P1): a DB row that disappears or invalidates after a prior sync must
 // fall back to these, not keep the stale process-global values.
@@ -770,6 +783,107 @@ function syncBedBugPricingConfig(bedBugConfig) {
 let _lastSync = 0;
 const SYNC_INTERVAL = 60_000; // 1 minute cache
 
+// Did the recurring pest price inputs come from their pricing_config rows?
+// A sync keeps what the engine had for a row or a field that is missing: the
+// in-code default on a cold start, an earlier value on a warm process (two
+// processes can then hold different prices). That is the answer every
+// surface a person reads shows. A price that nobody watches must come from
+// the rows, so that caller asks recurringPestPriceIsFromRows() (same idea as
+// mistingRefillPriceIsFromRow).
+//
+// The rows are every pricing_config row the recurring pest price reads: the
+// four pest rows and the tier row (the frequency discounts, the roach
+// modifiers and the home-age steps are in-code only). The answer is yes when
+// the rows of the last SUCCESSFUL sync carried EVERY required field as a
+// number:
+//   pest_base           base and floor, each above 0
+//   pest_footprint      breakpoints: a list, each entry with sqft and adj
+//   pest_features       each field the sync reads but attached_garage
+//   pest_property_type  each property type the engine knows
+//   waveguard_tiers     for each tier the engine knows: discount (0 up to,
+//                       not including, 1, the bound the Pricing Logic route
+//                       saves) and min_services (the count the engine's tier
+//                       picker uses for that tier: 1, 2, 3, 4)
+// That is what the migrated schema seeds and what production carries, and
+// the route refuses a save that drops a stored key. A direct write or a
+// migration can still leave a row without a field.
+// min_services is the one field the engine's own picker does not read: it
+// counts by fixed thresholds, and the estimate converter picks the tier of an
+// accepted estimate from the loaded ones. The route saves any whole number of
+// 1 or more, and with a threshold other than the picker's the two disagree
+// (a silver threshold of 1: the engine quotes one pest service at bronze, the
+// converter starts it at silver). Such a row does not state the price the
+// engine quotes, so the answer is no for it.
+// The answer is a function of the rows of that ONE sync. It does not depend
+// on what an earlier sync of the process loaded, so a process that just
+// started and a warm one answer the same for the same rows.
+// Two fields are optional, and each has one value in every process when the
+// row leaves it out. A row that carries one must carry the kind the sync
+// reads it as; null is "left out", as the sync reads it.
+// - pest_features.attached_garage (no row has carried it). The sync rebases
+//   it to its in-code value before it reads the row, so a process that once
+//   took a value from a row does not keep it either. A row that carries it
+//   must carry a number, like a required field: the sync applies what its
+//   arithmetic can read (true becomes 1, "5" becomes 5), and such a value is
+//   not a price input the row states.
+// - pest_base.enforce_floor_post_discount (the program floor switch, false
+//   when left out). The sync takes it only as a boolean and reads anything
+//   else as false. A row that carries "true" as text, or 1, asks for the
+//   floor and the engine would price without it, so the row must carry a
+//   boolean.
+// The answer moves together with _lastSync: a failed sync restores the
+// constants and leaves this answer as it was.
+const PEST_REQUIRED_FEATURE_ROW_FIELDS = Object.freeze([
+  'pool_cage', 'pool_cage_small', 'pool_cage_medium', 'pool_cage_large', 'pool_cage_oversized', 'pool_no_cage',
+  'shrubs_heavy', 'shrubs_moderate', 'shrubs_light', 'landscape_complex', 'landscape_moderate', 'landscape_simple',
+  'near_water', 'indoor',
+]);
+const PEST_OPTIONAL_FEATURE_ROW_FIELDS = Object.freeze(['attached_garage']);
+const pestPriceRow = (config, key) => (config[key] && typeof config[key] === 'object' ? config[key] : {});
+const RECURRING_PEST_PRICE_ROW_FIELDS = Object.freeze([
+  'pest_base.base', 'pest_base.floor', 'pest_footprint.breakpoints',
+  ...PEST_REQUIRED_FEATURE_ROW_FIELDS.map((field) => `pest_features.${field}`),
+  ...PEST_PROPERTY_TYPE_KEYS.map((type) => `pest_property_type.${type}`),
+  ...WAVEGUARD_TIER_KEYS.flatMap((tier) => [`waveguard_tiers.${tier}.discount`, `waveguard_tiers.${tier}.min_services`]),
+]);
+// A value a row carries as a number. Not isFiniteNumber above, which also
+// takes null and text.
+const isRowNumber = (value) => typeof value === 'number' && Number.isFinite(value);
+// The required fields that the rows of one sync (its parsed `config`) carry.
+function recurringPestPriceFieldsInRows(config) {
+  const fields = new Set();
+  const add = (name, carried) => { if (carried) fields.add(name); };
+  const row = (key) => pestPriceRow(config, key);
+  for (const field of ['base', 'floor']) add(`pest_base.${field}`, isRowNumber(row('pest_base')[field]) && row('pest_base')[field] > 0);
+  const breakpoints = row('pest_footprint').breakpoints;
+  add('pest_footprint.breakpoints', Array.isArray(breakpoints) && breakpoints.length > 0
+    && breakpoints.every((bp) => isRowNumber(bp?.sqft) && isRowNumber(bp?.adj)));
+  for (const field of PEST_REQUIRED_FEATURE_ROW_FIELDS) add(`pest_features.${field}`, isRowNumber(row('pest_features')[field]));
+  for (const type of PEST_PROPERTY_TYPE_KEYS) add(`pest_property_type.${type}`, isRowNumber(row('pest_property_type')[type]));
+  for (const tier of WAVEGUARD_TIER_KEYS) {
+    const values = row('waveguard_tiers')[tier] || {};
+    add(`waveguard_tiers.${tier}.discount`, isRowNumber(values.discount) && values.discount >= 0 && values.discount < 1);
+    add(`waveguard_tiers.${tier}.min_services`, isRowNumber(values.min_services) && values.min_services === WAVEGUARD_TIER_ENGINE_MIN_SERVICES[tier]);
+  }
+  return fields;
+}
+// Do the rows of one sync (its parsed `config`) state every price input the
+// sync applies? Every required field is carried, and an optional field is
+// left out or of its kind: a number in the features row, a boolean for the
+// floor switch.
+function rowsStateRecurringPestPrice(config) {
+  const carried = recurringPestPriceFieldsInRows(config);
+  const features = pestPriceRow(config, 'pest_features');
+  const floorSwitch = pestPriceRow(config, 'pest_base').enforce_floor_post_discount;
+  return RECURRING_PEST_PRICE_ROW_FIELDS.every((name) => carried.has(name))
+    && PEST_OPTIONAL_FEATURE_ROW_FIELDS.every((field) => features[field] == null || isRowNumber(features[field]))
+    && (floorSwitch == null || typeof floorSwitch === 'boolean');
+}
+let _pestPriceIsFromRows = false; // the answer of the last successful sync
+function recurringPestPriceIsFromRows() {
+  return _pestPriceIsFromRows;
+}
+
 // ── Pre-slab inventory-price link (owner decision 2026-07-10) ─────────────
 // Approved inventory prices drive pre-slab container costs: each product
 // with a catalogProductName is looked up in products_catalog, and an active,
@@ -1242,6 +1356,12 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         constants.PEST.pestInitialRoach = next;
       }
     }
+    // attached_garage is the one optional field of the pest rows (no row has
+    // carried it). It rebases to its in-code value on EVERY sync, like the
+    // flag above: a process that took a value from a row must not keep it
+    // after the row loses the field, and then price differently from a
+    // process that just started (recurringPestPriceIsFromRows).
+    constants.PEST.additionalAdjustments.attachedGarage = PEST_ATTACHED_GARAGE_DEFAULT;
     if (config.pest_features) {
       const f = config.pest_features;
       const adj = constants.PEST.additionalAdjustments;
@@ -2299,6 +2419,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
 
     assertValidPestPricingConfig(constants);
 
+    _pestPriceIsFromRows = rowsStateRecurringPestPrice(config);
     _lastSync = Date.now();
     console.log(`[pricing-engine] Synced ${Object.keys(config).length} pricing configs from DB`);
     return true;
@@ -2335,6 +2456,7 @@ module.exports = {
   readRodentAdditionalCheckPriceFromCatalog,
   needsSync,
   invalidatePricingConfigCache,
+  recurringPestPriceIsFromRows,
   validatePestPricingConfig,
   assertValidPestPricingConfig,
 };
