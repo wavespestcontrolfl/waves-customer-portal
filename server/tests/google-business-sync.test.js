@@ -341,6 +341,28 @@ describe('Google Business review sync', () => {
     await expect(service.deleteReply('accounts/1/locations/2/reviews/rev-1', 'sarasota')).rejects.toMatchObject({ message: 'GBP deleteReply 500', googleStatus: 500 });
   });
 
+  test('the GBP name step never replaces a name the publisher saved after the step read the rows', async () => {
+    const created = '2026-11-18T15:00:00.000Z';
+    db.__state.rows.google_reviews.push(
+      { id: 'r-raced', reviewer_name: 'Dana W.', review_created_at: created, location_id: 'bradenton', gbp_review_name: null },
+      { id: 'r-free', reviewer_name: 'Lee K.', review_created_at: created, location_id: 'bradenton', gbp_review_name: null },
+    );
+    const [raced, free] = db.__state.rows.google_reviews;
+    service.getAllLocationReviews = jest.fn(async () => {
+      // The publisher saves its match while this step waits on Google's list.
+      raced.gbp_review_name = 'accounts/1/locations/2/reviews/publisher-match';
+      return [
+        { name: 'accounts/1/locations/2/reviews/sync-match', reviewer: { displayName: 'Dana W.' }, createTime: created },
+        { name: 'accounts/1/locations/2/reviews/lee', reviewer: { displayName: 'Lee K.' }, createTime: created },
+      ];
+    });
+    await service._resolveGbpResourceNames();
+    expect(raced.gbp_review_name).toBe('accounts/1/locations/2/reviews/publisher-match');
+    expect(free.gbp_review_name).toBe('accounts/1/locations/2/reviews/lee');
+    const lines = require('../services/logger').info.mock.calls.map(([line]) => String(line)).filter((line) => line.includes('Resolved GBP resource name'));
+    expect(lines).toEqual(['[gbp] Resolved GBP resource name for review r-free: accounts/1/locations/2/reviews/lee']);
+  });
+
   describe('getReviews transient retry', () => {
     const failRes = (status) => ({ ok: false, status, headers: { get: () => 'application/json' }, text: async () => `{"error":{"status":"E${status}"}}` });
     const loc = 'accounts/1/locations/2';
