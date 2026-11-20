@@ -247,7 +247,7 @@ function formLock({ data, draftId, pinned, needRead, conflict }) {
   return { newer, changed, locked: needRead || changed || Boolean(draftId && !pinned) };
 }
 
-function ReadOnlyNotice({ changed, locked, message, hasNewer, onAdopt, onRetry }) {
+function ReadOnlyNotice({ changed, locked, message, hasNewer, onAdopt, onRetry, refreshFailed }) {
   if (changed) {
     return (
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -265,7 +265,7 @@ function ReadOnlyNotice({ changed, locked, message, hasNewer, onAdopt, onRetry }
   if (!locked) return null;
   return (
     <ActionFeedback error onRetry={onRetry}>
-      The offer could not be loaded after your last change. Fields and Send stay off until it loads.
+      {refreshFailed ? "The offer could not be refreshed." : "The offer could not be loaded after your last change."} Fields and Send stay off until it loads.
     </ActionFeedback>
   );
 }
@@ -278,7 +278,10 @@ function LetterBox({ letter }) {
   );
 }
 
-function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged, onSent, onBusyChange }) {
+// stale: the page's last read of the offer, or of the application, failed (a background re-read
+// after a stage change, say), so the data on screen may be out of date. The card turns its
+// actions off then; the form stays read-only until a read works (Try again re-reads both).
+function OfferFormBody({ applicationId, contact, data, draft, stale, onClose, onChanged, onSent, onBusyChange }) {
   const [edits, setEdits] = useState({});
   const [draftId, setDraftId] = useState(() => initialDraftId(draft, data));
   const [pinned, setPinned] = useState(() => reviewedDraft(data, initialDraftId(draft, data)));
@@ -300,7 +303,7 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
     onBusyChange(busy);
     return () => onBusyChange(false);
   }, [busy, onBusyChange]);
-  const { newer, changed, locked } = formLock({ data, draftId, pinned, needRead, conflict });
+  const { newer, changed, locked } = formLock({ data, draftId, pinned, needRead: needRead || stale, conflict });
   // A refused write's sentence shows once, in the read-only notice (after the re-read).
   const notice = conflict ? error : null;
   const { base, fields, firstName, sendTo, startError, fieldsOk, dirty, sendReady, canSend } = formView({ edits, pinned, data, contact, busy, locked });
@@ -503,6 +506,7 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
               hasNewer={Boolean(newer)}
               onAdopt={adoptLatest}
               onRetry={retryRead}
+              refreshFailed={stale && !needRead}
             />
           )}
           <OfferFields fields={fields} onChange={onChange} startError={startError} sendTo={sendTo} disabled={busy || locked} />
@@ -549,7 +553,7 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
   );
 }
 
-export default function OfferDialog({ open, applicationId, contact, data, draft, onClose, onChanged, onSent }) {
+export default function OfferDialog({ open, applicationId, contact, data, draft, stale = false, onClose, onChanged, onSent }) {
   const [busy, setBusy] = useState(false);
   const name = String(contact?.name || "Applicant");
   const status = (draft || data?.current)?.status;
@@ -567,6 +571,7 @@ export default function OfferDialog({ open, applicationId, contact, data, draft,
           contact={contact}
           data={data}
           draft={draft}
+          stale={stale}
           onClose={onClose}
           onChanged={onChanged}
           onSent={onSent}

@@ -1243,6 +1243,7 @@ export default function RecruitingPage() {
         contact={detail?.contact_snapshot}
         data={offerFlow.data}
         draft={offerFlow.form?.draft}
+        stale={Boolean(offerFlow.refreshError || detailRefreshError)}
         onClose={offerFlow.closeForm}
         onChanged={refreshAfterOffer}
         onSent={refreshAfterOffer}

@@ -27,12 +27,13 @@ export default function useOfferFlow(applicationId, applicationStatus) {
     const mine = ++seq.current;
     try {
       const data = await fetchOffer(id);
-      if (mine === seq.current) {
-        const on = data.enabled === true;
-        setState({ id, status: on ? "ready" : "off", data, error: null });
-        // The gate went off: close the form, so the application is back on the status-only Offer move.
-        if (!on) setForm(null);
-      }
+      // A newer read replaced this one: its answer, not this one, is what the page shows, so
+      // this caller gets null (as for a failed read) and never acts on data the page dropped.
+      if (mine !== seq.current) return null;
+      const on = data.enabled === true;
+      setState({ id, status: on ? "ready" : "off", data, error: null });
+      // The gate went off: close the form, so the application is back on the status-only Offer move.
+      if (!on) setForm(null);
       return data;
     } catch (err) {
       if (mine === seq.current) {

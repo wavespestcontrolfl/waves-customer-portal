@@ -54,15 +54,22 @@ function panel(current) {
 const offersOff = () => Object.assign(new Error("Not found"), { status: 404, body: { enabled: false } });
 
 // Holds the panel read as the offer flow does: a read that works replaces it (a read with offers off closes the
-// form), and a failed read keeps the data on screen and answers null. `outside.read(next)` is a read the form did
-// not ask for (another screen's write, a stage change).
+// form), and a failed read keeps the data on screen, marks it stale (the page's refreshError) and answers null.
+// `outside.read(next)` is a read the form did not ask for (another screen's write, a stage change);
+// `outside.fail()` is one that failed.
 function Harness({ initial, reads, onSent = async () => {}, outside = {} }) {
   const [data, setData] = useState(initial);
   const [open, setOpen] = useState(true);
+  const [stale, setStale] = useState(false);
   outside.read = setData;
+  outside.fail = () => setStale(true);
   const onChanged = async () => {
     const next = reads.shift();
-    if (!next) return null;
+    if (!next) {
+      setStale(true);
+      return null;
+    }
+    setStale(false);
     setData(next);
     if (next.enabled !== true) setOpen(false);
     return next;
@@ -74,6 +81,7 @@ function Harness({ initial, reads, onSent = async () => {}, outside = {} }) {
       contact={CONTACT}
       data={data}
       draft={null}
+      stale={stale}
       onClose={() => setOpen(false)}
       onChanged={onChanged}
       onSent={onSent}
@@ -166,6 +174,25 @@ describe("OfferDialog", () => {
     act(() => outside.read(panel(draftRow({ hourlyRate: 26, draftHash: "hash-3" }))));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Send offer" })).toBeNull());
     expect(screen.getByText("This draft changed. Review the new version.")).toBeInTheDocument();
+    expect(sendOffer).not.toHaveBeenCalled();
+  });
+
+  // A background read that fails (after a stage change, say) leaves the data on screen out of date. The card turns its
+  // actions off; the form goes read-only too, closes an open Send question, and reads again on Try again.
+  it("locks the form and closes the Send question when a background read fails, until Try again reads", async () => {
+    const outside = {};
+    render(<Harness initial={panel(draftRow())} reads={[panel(draftRow())]} outside={outside} />);
+    fireEvent.click(screen.getByRole("button", { name: "Send offer" }));
+    expect(await screen.findByRole("dialog", { name: "Send offer" })).toBeInTheDocument();
+    act(() => outside.fail());
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Send offer" })).toBeNull());
+    expect(screen.getByText(/The offer could not be refreshed\. Fields and Send stay off until it loads\./)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save draft" })).toBeDisabled();
+    expect(rate()).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Send offer" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send offer" })).toBeEnabled());
+    expect(rate()).toBeEnabled();
     expect(sendOffer).not.toHaveBeenCalled();
   });
 
