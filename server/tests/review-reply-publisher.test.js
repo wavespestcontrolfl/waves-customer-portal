@@ -671,19 +671,44 @@ describe('publishReviewReply', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops', auto_reply_mode: null });
   });
 
-  test('a non-overwriting PUT timeout on a never-queued (NULL state) row still records google_uncertain', async () => {
+  // An Intelligence Bar post whose PUT times out (non-overwrite path).
+  async function ibTimeout({ duringPut } = {}) {
     process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
-    state.rows[0].auto_reply_status = null;
     const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
     mockLock.mockImplementationOnce(async (id, fn) => { out.result = await fn(); return out; });
-    mockGbp.replyToReview.mockImplementationOnce(() => new Promise(() => {}));
+    mockGbp.replyToReview.mockImplementationOnce(() => { if (duringPut) duringPut(); return new Promise(() => {}); });
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
-    const p = publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'ib' } });
+    const p = publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad the Waves app helps.', actor: { type: 'ib' }, expectedAccountFingerprint: 'acct-fp-1' });
     const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_UNCERTAIN });
     await jest.advanceTimersByTimeAsync(31000);
     await assertion;
     jest.useRealTimers();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
+    expect(out.abandonClaim).toHaveBeenCalled();
+  }
+
+  test('an Intelligence Bar post that times out records its exact text, version agent_ops and its own grounding on a never-queued row', async () => {
+    state.rows[0].auto_reply_status = null;
+    const { reviewFingerprint } = require('../services/review-reply/fingerprint');
+    const fingerprint = reviewFingerprint(state.rows[0]);
+    await ibTimeout();
+    // The clearing sync hands this text back to a person as a [DRAFT] (never
+    // the automatic lane), or marks it posted once Google shows it.
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops', auto_reply_mode: null });
+    expect(JSON.parse(state.rows[0].auto_reply_grounding)).toEqual({ fingerprint, accountFingerprint: 'acct-fp-1' });
+  });
+
+  test('an Intelligence Bar timeout on a skipped review with no reply records the attempt: the status the claim read, not the automatic lane\'s', async () => {
+    Object.assign(state.rows[0], { auto_reply_status: 'skipped', auto_reply_reason: 'low_rating' });
+    await ibTimeout();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana. Glad the Waves app helps.', auto_reply_version: 'agent_ops' });
+  });
+
+  test('an Intelligence Bar timeout records nothing when the row changed during the PUT (the change wins)', async () => {
+    state.rows[0].auto_reply_status = null;
+    await ibTimeout({ duringPut: () => Object.assign(state.rows[0], { auto_reply_status: 'skipped', auto_reply_reason: 'dismissed' }) });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'dismissed' });
+    expect(state.rows[0].auto_reply_draft).toBeUndefined();
+    expect(state.rows[0].auto_reply_grounding).toBeUndefined();
   });
 
   test('a live GET that never completes → GOOGLE_FAILED (retryable), no PUT attempted', async () => {

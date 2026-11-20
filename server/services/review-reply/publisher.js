@@ -292,6 +292,10 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
   // live claim, so this write is the only place that can notice).
   let prePutFingerprint = null;
   let prePutContent = null;
+  // The pipeline status and reply slot the claim read before the PUT: an
+  // Intelligence Bar attempt that times out is recorded only on that
+  // unchanged row (a change made meanwhile wins).
+  let prePutState = null;
   // Predicate: the row's review CONTENT still equals the pre-check snapshot
   // (rating / text / reviewer / attribution). Used to make the persist a
   // compare-and-set on the review the reply was written for.
@@ -312,6 +316,7 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     if (fresh.dismissed) throw new ReviewReplyError(CODES.STALE, 'This review was dismissed since the page was loaded — reload it.', { status: 409 });
     prePutFingerprint = reviewFingerprint(fresh);
     prePutContent = { star_rating: fresh.star_rating, review_text: fresh.review_text, reviewer_name: fresh.reviewer_name, customer_id: fresh.customer_id };
+    prePutState = { status: fresh.auto_reply_status ?? null, slot: fresh.review_reply ?? null };
     // The review CONTENT the browser displayed (codex r33): manually
     // written text carries no draft token, so the editor sends the review
     // token from the list API; a reviewer rewrite the sync recorded since
@@ -557,7 +562,10 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     const e = outcome.result.error;
     outcome.abandonClaim();
     const uncertain = { auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_error: String(e.message).slice(0, 1000) };
-    if (allowOverwrite) {
+    // An Intelligence Bar submission is a person's confirmed action, not the
+    // automatic lane, though it posts without overwrite.
+    const ibAttempt = actor.type === 'ib';
+    if (allowOverwrite || ibAttempt) {
       // A manual attempt (admin editor / IB): keep the exact text and mark
       // the version manual, so the sync that later clears the park hands
       // that text back to a person instead of the automatic lane (codex r75).
@@ -566,6 +574,14 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       // and Post now send it with the strict app-name rule.
       Object.assign(uncertain, { auto_reply_draft: replyText, auto_reply_version: auditMeta?.version || (agentText ? 'agent_ops' : 'human'), auto_reply_mode: null });
     }
+    if (ibAttempt) {
+      // The grounding the sync checks before it marks a landed reply posted
+      // (syncReplyFields, validatePromotionAccountFacts) and Post now checks
+      // before it offers the text again: the review as the claim read it
+      // before the PUT, and the account facts the Intelligence Bar draft
+      // was written from. Never an earlier draft's snapshot.
+      uncertain.auto_reply_grounding = JSON.stringify({ fingerprint: prePutFingerprint, accountFingerprint: expectedAccountFingerprint || null });
+    }
     const q = db('google_reviews').where({ id: reviewId });
     if (allowOverwrite) {
       // Human / IB-edit publishers: the row may be never-queued (NULL) or
@@ -573,9 +589,16 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       // slot exactly as this attempt observed it, so a sync that already
       // reconciled a newer reply is left alone.
       if (review.review_reply == null) q.whereNull('review_reply'); else q.where('review_reply', review.review_reply);
+    } else if (ibAttempt) {
+      // An Intelligence Bar submission may answer any unanswered review,
+      // whatever its pipeline status (never queued, skipped, retracted, a
+      // pipeline draft): CAS on the status and the reply slot the claim read
+      // before the PUT, so an unchanged row records the attempt and a change
+      // made meanwhile wins.
+      if (prePutState.status == null) q.whereNull('auto_reply_status'); else q.where('auto_reply_status', prePutState.status);
+      if (prePutState.slot == null) q.whereNull('review_reply'); else q.where('review_reply', prePutState.slot);
     } else {
-      // NULL (never queued — e.g. an IB submission) must match too: SQL
-      // NOT IN never matches NULL.
+      // NULL (never queued) must match too: SQL NOT IN never matches NULL.
       q.where(function stateOwned() { this.whereNull('auto_reply_status').orWhereNotIn('auto_reply_status', ['posted', 'skipped', 'retracted']); })
         .where(function ownSlot() {
           this.whereNull('review_reply');
