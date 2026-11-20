@@ -64,11 +64,13 @@ describe('reloadDueAtMove', () => {
     expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(false);
   });
 
-  test('once per live build, and never without session storage', () => {
+  test('up to three tries per live build, as a reload can come back on the old page, and never without session storage', () => {
     liveBuild('bbb222bbb222');
-    sessionStorage.setItem('portal-reloaded-for', 'bbb222bbb222');
+    sessionStorage.setItem('portal-reloaded-for', JSON.stringify({ build: 'bbb222bbb222', tries: 2 }));
+    expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(true);
+    sessionStorage.setItem('portal-reloaded-for', JSON.stringify({ build: 'bbb222bbb222', tries: 3 }));
     expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(false);
-    sessionStorage.setItem('portal-reloaded-for', 'old000old000');
+    sessionStorage.setItem('portal-reloaded-for', JSON.stringify({ build: 'old000old000', tries: 3 }));
     expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(true);
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
     expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(false);
@@ -121,14 +123,17 @@ describe('reloadBlockers', () => {
 });
 
 describe('reloadForNewBuild', () => {
-  test('reloads once and records the build', async () => {
+  test('reloads and counts the try; a reload that came back on the old page tries again, three times at most', async () => {
     liveBuild('bbb222bbb222', Date.now());
     const reload = vi.fn();
     await expect(reloadForNewBuild({ reload })).resolves.toBeNull();
     expect(reload).toHaveBeenCalledTimes(1);
-    expect(sessionStorage.getItem('portal-reloaded-for')).toBe('bbb222bbb222');
+    expect(JSON.parse(sessionStorage.getItem('portal-reloaded-for'))).toEqual({ build: 'bbb222bbb222', tries: 1 });
+    await expect(reloadForNewBuild({ reload })).resolves.toBeNull();
+    await expect(reloadForNewBuild({ reload })).resolves.toBeNull();
+    expect(reload).toHaveBeenCalledTimes(3);
     await expect(reloadForNewBuild({ reload })).resolves.toBe('reloaded');
-    expect(reload).toHaveBeenCalledTimes(1);
+    expect(reload).toHaveBeenCalledTimes(3);
   });
 
   test('waits for a write to the device storage that the closing page started, then reloads', async () => {

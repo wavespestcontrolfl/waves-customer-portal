@@ -21,11 +21,21 @@ import { isWavesAdminApp } from '../native/platform';
 export const RECENT_ANSWER_MS = 5 * 60 * 1000;
 export const WRITE_WAIT_MS = 10 * 1000;
 const RELOADED_FOR = 'portal-reloaded-for';
+export const RELOAD_TRIES = 3;
 
-// One automatic reload per live build. Without session storage the tab could
-// not tell that it already reloaded, so it never reloads by itself.
-function reloadedFor(build) {
-  try { return sessionStorage.getItem(RELOADED_FOR) === build; } catch { return true; }
+// The automatic reloads this tab made for this live build. A reload can come
+// back on the old page: when the network fails at that moment, the service
+// worker answers with its saved copy. So the tab may try again at a later
+// move, up to three times for one build, and each try needs a recent answer
+// from the new server (hasSignal), which a page that just loaded has not had
+// yet. Without session storage the tab cannot count its tries, so it never
+// reloads by itself.
+function reloadTries(build) {
+  try {
+    const marker = JSON.parse(sessionStorage.getItem(RELOADED_FOR));
+    if (marker?.build !== build) return 0;
+    return Number.isInteger(marker.tries) ? marker.tries : RELOAD_TRIES;
+  } catch { return RELOAD_TRIES; }
 }
 
 const browserOffline = () => typeof navigator !== 'undefined' && navigator.onLine === false;
@@ -43,7 +53,7 @@ export function reloadDueAtMove(pathname, now = Date.now(), from = null) {
   return Boolean(build)
     && isAdminPath(pathname) && !isFieldPath(pathname) && !isFieldPath(from) && !isWavesAdminApp()
     && hasSignal(now)
-    && !reloadedFor(build)
+    && reloadTries(build) < RELOAD_TRIES
     && !reloadHoldName();
 }
 
@@ -98,10 +108,11 @@ export async function reloadForNewBuild({
   if (blocker) return blocker;
   const build = newerBuild();
   if (!build) return 'current';
-  if (reloadedFor(build)) return 'reloaded';
+  const tries = reloadTries(build);
+  if (tries >= RELOAD_TRIES) return 'reloaded';
   // The wait for writes can outlast the signal: ask again.
   if (!hasSignal(now())) return 'no-signal';
-  try { sessionStorage.setItem(RELOADED_FOR, build); } catch { return 'storage'; }
+  try { sessionStorage.setItem(RELOADED_FOR, JSON.stringify({ build, tries: tries + 1 })); } catch { return 'storage'; }
   reload();
   return null;
 }

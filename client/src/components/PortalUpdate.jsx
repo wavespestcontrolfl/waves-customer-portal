@@ -55,6 +55,7 @@ const HOLD_TEXT = {
   'bank-import': 'A bank statement is still being imported.',
   'bank-link': 'A bank connection is still open.',
   'push-setup': 'Push notifications are still being turned on or off.',
+  'text-attachment': 'A photo for a text is still being attached.',
   'page-use': 'Anything not saved on this page will be lost.',
   offline: 'This device is offline. A reload may show an error page.',
 };
