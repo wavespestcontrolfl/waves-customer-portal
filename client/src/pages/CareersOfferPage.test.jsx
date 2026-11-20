@@ -660,6 +660,27 @@ describe('CareersOfferPage — open state', () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
+  // The same, but another tab saved the very choice this one asked for before Check again read it: the box shows
+  // that choice, and the line that the change did not go through goes, so no one clicks the box back.
+  it('drops the did-not-go-through line when Check again reads the choice the applicant asked for', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ state: 'open' }, 409)) // another tab changed the offer since this read
+      .mockRejectedValueOnce(new Error('offline')) // the read after the refusal fails
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true, version: '2026-12-11T15:30:00.000Z' }))); // that tab saved yes
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    expect(await screen.findByText('That did not go through. Please try again.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Text me about this offer')).not.toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
+    expect(screen.getByLabelText('Text me about this offer')).toBeChecked(); // the choice asked for, saved by the other tab
+    expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
   // The 409 says where the offer stands. A closed offer comes back whole, with
   // no read. An answer given in another tab names only its state: the page
   // shows it at once, and a failed read for its details does not hide it.

@@ -338,6 +338,10 @@ function TextConsent({ token, initial, version, onPending, onStale, onUnknown, o
   // Set once a resend of a save whose reply was lost met a 404: CallUsLine.
   const [stuck, setStuck] = useState(false);
   const [error, setError] = useState('');
+  // The choice a 409 refused while the offer may still be open. "That did not go
+  // through" shows only while the box does not show it, so the line goes when a
+  // later read shows that choice stored (another tab saved it).
+  const [refused, setRefused] = useState(null);
   // The choice the applicant just made, while its save has no answer yet. It
   // survives a failed read, and Try again sends it again.
   const wanted = useRef(null);
@@ -392,6 +396,7 @@ function TextConsent({ token, initial, version, onPending, onStale, onUnknown, o
     onPending(true);
     setUnconfirmed(false);
     setError('');
+    setRefused(null);
     let res;
     try {
       res = await postJson(token, '/text-consent', { consent: next, version: versionRef.current });
@@ -442,7 +447,7 @@ function TextConsent({ token, initial, version, onPending, onStale, onUnknown, o
       // The offer is still open, or may be, after a 409: the change was made on an
       // older read and refused, and the box shows the stored choice again. Say so,
       // so no one signs on a choice that was never saved.
-      if (res.status === 409 && (after === 'open' || after === 'failed')) setError(NOT_SAVED_ERROR);
+      if (res.status === 409 && (after === 'open' || after === 'failed')) setRefused(next);
     } else if (!res.ok) setError(res.body?.error || CONNECTION_ERROR);
     setSaving(false);
     onPending(false);
@@ -469,6 +474,7 @@ function TextConsent({ token, initial, version, onPending, onStale, onUnknown, o
           </div>
         </div>
       )}
+      {refused !== null && checked !== refused && <div style={ERROR_BANNER_STYLE} role="alert">{NOT_SAVED_ERROR}</div>}
       {error && <div style={ERROR_BANNER_STYLE} role="alert">{error}</div>}
     </div>
   );
