@@ -460,7 +460,7 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
   // production path stamps with db `update` = prodUpdate), then ONE transaction
   // for GPT-Live: the budget lock, the spent read (`whereNot(...).first(raw)`
   // answers `usd`) and the reservation stamp (trx `update`).
-  // The ledger (voice_gpt_live_spend): the spent read (`first(raw)` answers
+  // The ledger (voice_gpt_live_ledger): the spent read (`first(raw)` answers
   // `usd`) and the claim (`insert().onConflict().ignore().returning()`,
   // [] = already claimed). call_log in the same transaction: the stamp.
   function primeLive({ usd = 0, budgetFails = false, stampFails = false, stampRows = 1, claimed = true } = {}) {
@@ -481,7 +481,7 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     };
     const update = jest.fn(() => (stampFails ? Promise.reject(new Error('pool down')) : Promise.resolve(stampRows)));
     const tb = { where: jest.fn(() => tb), whereRaw: jest.fn(() => tb), update };
-    const trx = jest.fn((table) => (table === 'voice_gpt_live_spend' ? ledger : tb));
+    const trx = jest.fn((table) => (table === 'voice_gpt_live_ledger' ? ledger : tb));
     trx.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     trx.fn = { now: () => 'NOW()' };
     db.transaction = jest.fn(async (fn) => fn(trx));
@@ -527,7 +527,7 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     expect(res.body).not.toContain('shh-secret-123');
     // The ledger read, the ledger claim and the stamp run under one lock, in one transaction.
     expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['voice_gpt_live_budget']);
-    expect(trx).toHaveBeenCalledWith('voice_gpt_live_spend');
+    expect(trx).toHaveBeenCalledWith('voice_gpt_live_ledger');
     // First, reservations whose stream never opened within the token's life go back at $0.
     expect(ledger.whereNull).toHaveBeenCalledWith('admitted_at');
     expect(ledger.whereNull).toHaveBeenCalledWith('cost_usd');

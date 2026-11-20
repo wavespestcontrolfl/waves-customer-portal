@@ -630,6 +630,26 @@ describe('ws upgrade — GPT-Live path', () => {
     expect(runLiveBridge).not.toHaveBeenCalled();
   });
 
+  test('a STALLED stamp read refuses the upgrade within the deadline, before any token burn', async () => {
+    jest.useFakeTimers();
+    try {
+      const db = require('../models/db');
+      db.mockImplementation((table) => (table === 'call_log'
+        ? { where: () => ({ first: () => new Promise(() => {}) }) }
+        : mockDbImpl(table)));
+      const path = liveUrl();
+      const socket = { destroy: jest.fn() };
+      httpServer.emit('upgrade', { url: path, headers: { 'x-twilio-signature': sign(path) } }, socket, Buffer.alloc(0));
+      await jest.advanceTimersByTimeAsync(3000); // past the read deadline
+      expect(socket.destroy).toHaveBeenCalled();
+      expect(mockBurned.size).toBe(0);
+      expect(runLiveBridge).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+      require('../models/db').mockImplementation(mockDbImpl);
+    }
+  });
+
   test('an unsigned, wrongly signed or unverifiable handshake is refused before any database read, and the token stays usable', async () => {
     const db = require('../models/db');
     const otherPath = liveUrl(LIVE_SID, mintLive(LIVE_SID));

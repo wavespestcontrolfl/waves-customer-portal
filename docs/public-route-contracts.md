@@ -7913,7 +7913,7 @@ burned; any failure destroys the socket. The socket goes to `services/voice-agen
 call's ledger row once after the handshake and before OpenAI opens (a reservation already released or settled opens
 no OpenAI session). It has no tools and no lookups (client
 delegation: the bridge answers every delegation with one fixed sentence). No booking, lead, text or transfer. The cell route
-reserves one call's worst-case OpenAI cost in its own ledger table (`voice_gpt_live_spend`, one row per CallSid)
+reserves one call's worst-case OpenAI cost in its own ledger table (`voice_gpt_live_ledger`, one row per CallSid)
 under an advisory lock before it issues the token (first releasing at $0 any reservation whose stream never opened
 within the token's life), and refuses the call
 when that reservation does not fit under `VOICE_GPT_LIVE_TEST_MAX_USD` (default 5), and on any database error there.

@@ -58,9 +58,9 @@ function setup({ closeReply = true, deps = {} } = {}) {
   });
   const update = jest.fn().mockResolvedValue(1); // call_log
   const where = jest.fn(() => ({ update }));
-  const ledgerUpdate = jest.fn().mockResolvedValue(1); // voice_gpt_live_spend
+  const ledgerUpdate = jest.fn().mockResolvedValue(1); // voice_gpt_live_ledger
   const ledgerWhere = jest.fn(() => ({ update: ledgerUpdate }));
-  const db = jest.fn((table) => (table === 'voice_gpt_live_spend' ? { where: ledgerWhere } : { where }));
+  const db = jest.fn((table) => (table === 'voice_gpt_live_ledger' ? { where: ledgerWhere } : { where }));
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   const openaiFactory = jest.fn(() => openai);
   const admit = jest.fn(async () => true);
@@ -710,6 +710,15 @@ describe('reservation admission', () => {
     expect(t.admit.mock.invocationCallOrder[0]).toBeLessThan(t.openaiFactory.mock.invocationCallOrder[0]);
   });
 
+  test('a connected socket that never sends a start frame ends at the start deadline and settles at $0', async () => {
+    const t = setup({ deps: { startDeadlineMs: 20, closeWaitMs: 20 } });
+    await waitFor(() => t.update.mock.calls.length > 0);
+    expect(t.openaiFactory).not.toHaveBeenCalled();
+    expect(t.twilio.close).toHaveBeenCalled();
+    expect(t.ledgerUpdate).toHaveBeenCalledWith({ cost_usd: 0, settled_at: expect.any(Date) });
+    expect(summaryOf(t)).toMatchObject({ close_reason: 'start_timeout', openai_contacted: false });
+  });
+
   test('a stalled admission ends the call at the start deadline; OpenAI never opens and the ledger is left alone', async () => {
     const t = setup({ deps: { admit: () => new Promise(() => {}), startDeadlineMs: 20, closeWaitMs: 20 } });
     await t.twilioStart();
@@ -753,7 +762,7 @@ describe('reservation admission', () => {
     db.fn = { now: () => 'NOW()' };
     await expect(bridgeMod.admitReservation(CALL_SID)).resolves.toBe(true);
     await expect(bridgeMod.admitReservation(CALL_SID)).resolves.toBe(false);
-    expect(db).toHaveBeenCalledWith('voice_gpt_live_spend');
+    expect(db).toHaveBeenCalledWith('voice_gpt_live_ledger');
     expect(chain.where).toHaveBeenCalledWith({ call_sid: CALL_SID });
     expect(chain.whereNull).toHaveBeenCalledWith('admitted_at');
     expect(chain.whereNull).toHaveBeenCalledWith('cost_usd');

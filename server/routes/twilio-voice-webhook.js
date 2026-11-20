@@ -2601,11 +2601,11 @@ const GPT_LIVE_CELLS = new Map([['71', 'marin'], ['72', 'delta']]);
 const GPT_LIVE_TIME_LIMIT_S = 600;
 const GPT_LIVE_DEFAULT_MAX_USD = 5; // the owner's spend yes, 2026-11-19: $5 of OpenAI charges in all
 const GPT_LIVE_BUDGET_LOCK = 'voice_gpt_live_budget';
-// The spend ledger is its own table (migration 20261120010000), never call_log:
+// The spend ledger is its own table (migration 20261120020000), never call_log:
 // call_log rows can be deleted (spam disposition, orphan cleanup), and a
 // deleted row must not give back billed spend. A row counts its settled cost,
 // else its reservation: a call whose summary never landed keeps it for good.
-const GPT_LIVE_LEDGER = 'voice_gpt_live_spend';
+const GPT_LIVE_LEDGER = 'voice_gpt_live_ledger';
 const GPT_LIVE_SPENT_SQL = 'COALESCE(SUM(COALESCE(cost_usd, reserved_usd)), 0) AS usd';
 // A reservation whose stream never opened within the stream token's life (the
 // caller hung up during the disclosure) used nothing: the next reservation

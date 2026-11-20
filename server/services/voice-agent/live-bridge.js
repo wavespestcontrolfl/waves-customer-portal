@@ -109,13 +109,13 @@ function errCode(err) {
   return String((err && (err.code || err.name)) || 'error').replace(/[^\w.-]/g, '').slice(0, 32);
 }
 
-// The call's ledger row (voice_gpt_live_spend) turns admitted once, after the
+// The call's ledger row (voice_gpt_live_ledger) turns admitted once, after the
 // WebSocket handshake and before OpenAI opens. A row the cell route released
 // (never admitted within the token's life) or already settled cannot be, so a
 // stream never opens a paid session on a freed reservation.
 async function admitReservation(callSid) {
   const db = require('../../models/db');
-  const n = await db('voice_gpt_live_spend')
+  const n = await db('voice_gpt_live_ledger')
     .where({ call_sid: callSid })
     .whereNull('admitted_at')
     .whereNull('cost_usd')
@@ -221,6 +221,15 @@ class LiveBridge {
       .catch(() => { this.noteError('admit_failed'); return false; });
     this.capTimer = setTimeout(() => { void this.finalize('cap'); }, this.deps.sessionCapMs);
     if (this.capTimer.unref) this.capTimer.unref();
+    // No session.started in time = no Twilio start frame, a stalled admission,
+    // or a refused or stuck OpenAI start: end the call rather than leave the
+    // caller on a silent line. A late admission then finds the call finalizing.
+    this.startTimer = setTimeout(() => {
+      if (this.ready) return;
+      this.noteError('start_timeout');
+      void this.finalize('start_timeout');
+    }, this.deps.startDeadlineMs);
+    if (this.startTimer.unref) this.startTimer.unref();
     this.twilio.on('message', (raw) => this.onTwilioMessage(raw));
     this.twilio.on('close', () => { void this.finalize('twilio_closed'); });
     this.twilio.on('error', () => { this.noteError('twilio_socket'); void this.finalize('twilio_error'); });
@@ -251,15 +260,6 @@ class LiveBridge {
       return;
     }
     this.streamSid = streamSid;
-    // No session.started in time (admission included) = a stalled database, a
-    // refused or stuck start: end the call rather than leave the caller on a
-    // silent line. A late admission then finds the call finalizing.
-    this.startTimer = setTimeout(() => {
-      if (this.ready) return;
-      this.noteError('start_timeout');
-      void this.finalize('start_timeout');
-    }, this.deps.startDeadlineMs);
-    if (this.startTimer.unref) this.startTimer.unref();
     // OpenAI opens only on an admitted reservation.
     void this.admission.then((ok) => {
       if (this._finalizing) return;
@@ -569,7 +569,7 @@ class LiveBridge {
   // Never throws: a failed write leaves the reservation standing (fail closed).
   async settleLedger(costUsd) {
     try {
-      await this.deps.db()('voice_gpt_live_spend').where({ call_sid: this.callSid }).update({ cost_usd: costUsd, settled_at: new Date() });
+      await this.deps.db()('voice_gpt_live_ledger').where({ call_sid: this.callSid }).update({ cost_usd: costUsd, settled_at: new Date() });
     } catch (err) {
       logger.warn(`[voice-live] ledger settle failed callSid=${this.callSid} code=${errCode(err)}`);
     }

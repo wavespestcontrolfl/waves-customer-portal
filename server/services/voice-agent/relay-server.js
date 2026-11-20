@@ -181,9 +181,25 @@ function parseLivePath(pathname) {
 }
 
 // The stamp the cell route wrote on a sandbox-sourced row, or null.
+// The stamp read has the burn's deadline: a stalled pool must not leave the
+// handshake pending (the bridge's own start deadline only begins once the
+// socket is accepted). Past it the upgrade is refused before any token burn.
 async function readLiveStamp(callSid) {
   const db = require('../../models/db');
-  const row = await db('call_log').where({ twilio_call_sid: callSid }).first('source', 'metadata');
+  // Materialized once (a Knex builder re-runs on every .then()).
+  const read = Promise.resolve(db('call_log').where({ twilio_call_sid: callSid }).first('source', 'metadata'));
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`stamp read exceeded ${TOKEN_BURN_DEADLINE_MS}ms`)), TOKEN_BURN_DEADLINE_MS);
+    timer.unref?.();
+  });
+  let row;
+  try {
+    row = await Promise.race([read, deadline]);
+  } finally {
+    clearTimeout(timer);
+    read.catch(() => {}); // a late loser never surfaces as unhandled
+  }
   if (!row || row.source !== VOICE_RELAY_SANDBOX_SOURCE) return null;
   let meta = row.metadata;
   if (typeof meta === 'string') {
