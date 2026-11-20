@@ -8686,6 +8686,18 @@ describe('resolveSequencePlanForEnrollment results-visit rule (GATE_REVIEW_ASK_R
     expect((await resolve('pk', 'pk-lawn')).skip).toBe('results_not_yet');
   });
 
+  test('a packet member missing from the visit read is never judged: log and ask', async () => {
+    mockGates.reviewAskResultsVisit = true;
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
+    // Two packet members, but only the early lawn row comes back (the tree member vanished between reads).
+    const rows = [visit('pm-lawn', 'pm', 'Lawn Care Program', 0)];
+    const items = [{ packet_id: 'p2', scheduled_service_id: 'pm-lawn' }, { packet_id: 'p2', scheduled_service_id: 'pm-tree' }];
+    db.mockImplementation(makeMock({ scheduled_services: rows, visit_completion_packet_items: items }));
+    expect((await resolve('pm', 'pm-lawn')).skip).toBeUndefined();
+    expect(logger.warn.mock.calls.some((c) => String(c[0]).includes('results-visit check failed'))).toBe(true);
+  });
+
   test('a recorded "customer asked for the link" bypasses the skip on every path', async () => {
     mockGates.reviewAskResultsVisit = true;
     mockGates.reviewSequences = true;

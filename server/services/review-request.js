@@ -204,7 +204,8 @@ async function resultsVisitVerdict({ customerId, serviceRecordId = null, schedul
   if ([...notes.values()].flat().some((n) => n.customerRequestedReview && typeof n.customerRequestedReview === "object")) return null;
   const members = await db("scheduled_services as s").leftJoin("services as sv", "s.service_id", "sv.id").whereIn("s.id", ids)
     .select("s.id", "s.service_type", "s.scheduled_date", "s.window_start", "s.created_at", "s.is_recurring", "s.is_callback", "sv.service_key", "sv.name as service_name");
-  if (!members.length) return null;
+  // A member that vanished between the two reads was never judged: throw to the log-and-ask fallback.
+  if (members.length !== new Set(ids.map(String)).size) throw new Error(`packet members changed (${members.length} of ${ids.length})`);
   for (const m of members) {
     if (!(await resultsVisitMemberSkips(customerId, m, notes.get(m.id) || []))) return null;
   }
