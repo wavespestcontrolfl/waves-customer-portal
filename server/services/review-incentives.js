@@ -231,10 +231,16 @@ async function lockTechnicianCap(conn, technicianIds) {
   }
 }
 
-async function savePolicy(policyPatch = {}, conn = db) {
+// Every policy field a full replacement must carry (eligibleSources is fixed by the code).
+const REPLACEMENT_FIELDS = Object.keys(DEFAULT_POLICY).filter((key) => key !== 'eligibleSources');
+
+async function savePolicy(rawPatch = {}, conn = db) {
   // Read, merge and upsert in one transaction under a lock per settings key, taken BEFORE the read so
   // it also works when the row is absent: two PATCHes cannot overwrite each other's fields (owner
-  // 2026-11-20 D4). A failed read must not overwrite a stored cap with the defaults; a garbled row is replaced.
+  // 2026-11-20 D4). A failed read must not overwrite a stored cap with the defaults. While the stored
+  // row is unreadable a partial patch is refused: only an explicit full replacement (replace: true
+  // with every field) overwrites it.
+  const { replace = false, ...policyPatch } = rawPatch || {};
   return conn.transaction(async (trx) => {
     await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`system_settings:${POLICY_KEY}`]);
     let current;
@@ -242,7 +248,17 @@ async function savePolicy(policyPatch = {}, conn = db) {
       current = await getPolicyStrict(trx);
     } catch (err) {
       if (err.code !== 'review_policy_malformed') throw err;
+      if (replace !== true) {
+        throw operationalError('The review bonus settings are unreadable; save the full settings to replace them', 409, 'review_policy_unreadable');
+      }
       current = { ...DEFAULT_POLICY };
+    }
+    if (replace === true) {
+      const missing = REPLACEMENT_FIELDS.filter((key) => !(key in policyPatch));
+      if (missing.length) {
+        throw operationalError(`A full replacement needs every setting (missing: ${missing.join(', ')})`, 422, 'review_policy_incomplete');
+      }
+      current = {};
     }
     const policy = parsePolicy({ ...current, ...policyPatch });
     const now = new Date();

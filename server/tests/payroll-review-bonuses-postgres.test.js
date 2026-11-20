@@ -516,9 +516,19 @@ postgres('payroll review bonus import', () => {
       await storePolicy(JSON.stringify({ enabled: true, amountCents: 500 }));
       expect((await getPolicyStrict(trx)).monthlyCapCount).toBeNull();
       expect(await markPaid([a], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 1, skippedOverCap: 0 });
-      // savePolicy replaces a garbled row instead of failing, and keeps a stored cap when it can read it.
+      // While the stored row is unreadable a partial patch is refused and the row stays as it was;
+      // only an explicit full replacement overwrites it.
       await storePolicy('{not json');
-      expect((await savePolicy({ monthlyCapCount: 1 }, trx)).monthlyCapCount).toBe(1);
+      await expect(savePolicy({ amountCents: 1500 }, trx)).rejects.toMatchObject({ code: 'review_policy_unreadable', statusCode: 409 });
+      expect((await trx('system_settings').where({ key: POLICY_ROW.key }).first()).value).toBe('{not json');
+      await expect(savePolicy({ replace: true, amountCents: 1500 }, trx)).rejects.toMatchObject({ code: 'review_policy_incomplete', statusCode: 422 });
+      expect((await trx('system_settings').where({ key: POLICY_ROW.key }).first()).value).toBe('{not json');
+      const full = {
+        replace: true, enabled: true, amountCents: 1500, currency: 'USD', minRating: 1,
+        requireCustomerMatchForGoogle: true, programStartsAt: null, monthlyCapCount: 1,
+      };
+      expect(await savePolicy(full, trx)).toMatchObject({ amountCents: 1500, monthlyCapCount: 1 });
+      expect(await getPolicyStrict(trx)).toMatchObject({ amountCents: 1500, monthlyCapCount: 1 });
       expect(await markPaid([b], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 0, skippedOverCap: 1 });
     });
 
@@ -550,15 +560,60 @@ postgres('payroll review bonus import', () => {
       expect(locked.map((row) => row.id)).toEqual([...ids].sort());
     });
 
-    it('two policy PATCHes in overlapping transactions keep both fields', async () => {
-      await trx('system_settings').where({ key: POLICY_ROW.key }).del();
-      await Promise.all([
-        savePolicy({ monthlyCapCount: 15 }, trx),
-        savePolicy({ amountCents: 1500 }, trx),
-      ]);
-      expect(await getPolicyStrict(trx)).toMatchObject({ monthlyCapCount: 15, amountCents: 1500 });
-      await savePolicy({ amountCents: 1600 }, trx);
-      expect(await getPolicyStrict(trx)).toMatchObject({ monthlyCapCount: 15, amountCents: 1600 });
+    it('two policy PATCHes on separate connections serialize and keep both fields', async () => {
+      // Two real top-level transactions on separate connections. The first reads the policy and then
+      // waits before it writes; the second must wait on the per-key lock, then see the first's field.
+      // Without the lock the second would finish first and the first would overwrite its field.
+      const other = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 4 } });
+      const key = POLICY_ROW.key;
+      const backup = await other('system_settings').where({ key }).first();
+      let release = () => {};
+      const running = [];
+      try {
+        await other('system_settings').where({ key }).del();
+        const released = new Promise((resolve) => { release = resolve; });
+        let paused;
+        const reachedWrite = new Promise((resolve) => { paused = resolve; });
+        const gatedConn = {
+          transaction: (fn) => other.transaction((real) => {
+            let calls = 0;
+            const gated = new Proxy((...args) => {
+              const builder = real(...args);
+              calls += 1;
+              if (args[0] !== 'system_settings' || calls !== 2) return builder;
+              // The second system_settings statement is the write: hold it until released.
+              return {
+                insert: (row) => ({
+                  onConflict: (column) => ({
+                    merge: (patch) => ({
+                      then: (resolve, reject) => { paused(); return released.then(() => builder.insert(row).onConflict(column).merge(patch)).then(resolve, reject); },
+                    }),
+                  }),
+                }),
+              };
+            }, { get: (_target, prop) => (typeof real[prop] === 'function' ? real[prop].bind(real) : real[prop]) });
+            return fn(gated);
+          }),
+        };
+        const first = savePolicy({ monthlyCapCount: 15 }, gatedConn);
+        running.push(first);
+        await reachedWrite;
+        let secondDone = false;
+        const second = savePolicy({ amountCents: 1500 }, other).then((value) => { secondDone = true; return value; });
+        running.push(second);
+        await new Promise((resolve) => { setTimeout(resolve, 400); });
+        expect(secondDone).toBe(false);
+        release();
+        await Promise.all([first, second]);
+        expect(await getPolicyStrict(other)).toMatchObject({ monthlyCapCount: 15, amountCents: 1500 });
+      } finally {
+        // Release the held transaction first, so a failed assertion cannot leave it open.
+        release();
+        await Promise.allSettled(running);
+        await other('system_settings').where({ key }).del();
+        if (backup) await other('system_settings').insert(backup);
+        await other.destroy();
+      }
     });
 
     it('the technician Pay Overview flags the over-cap payout and fails when the policy cannot be read', async () => {
