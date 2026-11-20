@@ -17,11 +17,12 @@
  * own `waiting`): a person who reached the lead, or a lead closed or quoted, since the page was read sends nothing. The
  * row read comes last, so a Done or a new ring during the lead's reads still stops the push.
  *
- * A reminder may cap its pushes per claim (the new-lead re-alert: one per lead, new-lead-reminder.js leadClaim): the
- * stamp then also takes an advisory lock on the claim's key, after the dedupe-key lock, and asks whether the claim is
- * taken, all in the stamp's transaction, so two sweeps that reach two bells of one lead never both push. Each push
- * carries an expiry (the reminder's close that day, or the item's late window, whichever is first), so a phone that
- * comes online later never shows a stale reminder.
+ * A reminder may cap its pushes per claim (the new-lead re-alert: one per lead in 48 hours, new-lead-reminder.js
+ * leadClaim): the stamp then also takes an advisory lock on the claim's key, after the dedupe-key lock, and asks whether
+ * the claim is taken, all in the stamp's transaction, so two sweeps that reach two bells of one lead never both push. A
+ * reminder that re-arms on a ring (`rearm`) also reads a row that rang again after its stamp: its latest event is news
+ * again, and its claim decides. Each push carries an expiry (the reminder's close that day, or the item's late window,
+ * whichever is first), so a phone that comes online later never shows a stale reminder.
  */
 
 const db = require('../models/db');
@@ -42,7 +43,9 @@ const safeError = (err) => require('./notification-service').safeErrorSummary(er
 // its first created_at and carries its latest ring in metadata.rungAt, so either may be recent. `match` lists the bells
 // the reminder reads, each { categories, keyPrefixes? }: a row matches an entry when its category is one of
 // `categories` and, with `keyPrefixes`, its dedupeKey starts with one of them (plain text: no LIKE wildcard in any).
-function candidateQuery({ stamp, match }, since, cursor, pageSize) {
+// With `rearm`, a row that rang again after its stamp is read too (both are toISOString text, so text order is time
+// order; notifyAdmin's refresh keeps the stamp and advances rungAt).
+function candidateQuery({ stamp, match, rearm = false }, since, cursor, pageSize) {
   return openBell(db('notifications'))
     .where((any) => {
       for (const { categories, keyPrefixes = null } of match) {
@@ -52,7 +55,10 @@ function candidateQuery({ stamp, match }, since, cursor, pageSize) {
         });
       }
     })
-    .whereRaw(`metadata->>'${stamp}' IS NULL`)
+    .where((q) => {
+      q.whereRaw(`metadata->>'${stamp}' IS NULL`);
+      if (rearm) q.orWhereRaw(`metadata->>'rungAt' > metadata->>'${stamp}'`);
+    })
     .where((q) => q.where('created_at', '>', since).orWhereRaw("metadata->>'rungAt' > ?", [since.toISOString()]))
     .modify((q) => { if (cursor) q.whereRaw('(created_at, id) > (?::timestamptz, ?::uuid)', [cursor.createdAt, cursor.id]); })
     .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
@@ -77,22 +83,24 @@ const stampedMeta = (stamp, meta, now) => ({ ...meta, [stamp]: now.toISOString()
 // refresh reads the row and writes its whole metadata back under that lock, so a stamp landing between its read and
 // its write would be overwritten, and the bell could push a second time. With the lock the stamp waits for the
 // refresh, whose new metadata then fails the fence; a refresh after the stamp merges onto it and keeps it. `claim`
-// (optional, { key, taken(conn) }) caps the pushes per claim: its own lock is taken after the dedupe-key lock (always in
-// that order, and notifyAdmin takes only the first), and `taken` reads in this transaction; a claim already taken
-// writes nothing. `ready` (optional) is asked again once the locks are held: a stamp that waited past the reminder's
-// hours or the item's late window is not written, so the next open sweep can still judge the bell.
-async function stampOnce(stamp, { row, meta }, now, ready = () => true, claim = null) {
+// (optional, { key, taken(conn, at) }) caps the pushes per claim: its own lock is taken after the dedupe-key lock (always
+// in that order, and notifyAdmin takes only the first), and `taken` reads in this transaction; a claim already taken
+// writes nothing. `ready` (optional) is asked last, just before the write: a stamp that waited on a lock or a slow read
+// past the reminder's hours or the item's late window is not written, so the next open sweep can still judge the bell.
+// The stamp is the fresh clock at the write. Returns that time (a Date) when the stamp landed, else null.
+async function stampOnce(stamp, { row, meta }, clock, ready = () => true, claim = null) {
   return db.transaction(async (trx) => {
     if (meta.dedupeKey) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${meta.dedupeKey}`]);
     if (claim) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [claim.key]);
-    if (!ready()) return false;
-    if (claim && (await claim.taken(trx))) return false;
+    if (claim && (await claim.taken(trx, clock()))) return null;
+    if (!ready()) return null;
+    const at = clock();
     const landed = await trx('notifications')
       .where({ id: row.id, recipient_type: 'admin' })
       .whereNull('done_at')
       .whereRaw('metadata IS NOT DISTINCT FROM ?::jsonb', [JSON.stringify(meta)])
-      .update({ metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(stampedMeta(stamp, {}, now))]) });
-    return Number(landed) === 1;
+      .update({ metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(stampedMeta(stamp, {}, at))]) });
+    return Number(landed) === 1 ? at : null;
   });
 }
 
@@ -208,9 +216,10 @@ async function runSweep(kind, { now, pageSize = PAGE_SIZE, clock = () => new Dat
     // Its late window closed while the reads above ran: not stamped, and no later sweep finds it due.
     if (expired(item)) continue;
     try {
-      if (!(await stampOnce(stamp, item, now, () => ready() && !expired(item), kind.claim ? kind.claim(item) : null))) continue;
+      const at = await stampOnce(stamp, item, clock, () => ready() && !expired(item), kind.claim ? kind.claim(item) : null);
+      if (!at) continue;
       total.sent += 1;
-      sends.push(sendPush({ ...item, stamped: stampedMeta(stamp, item.meta, now) }, label, () => ready() && !expired(item),
+      sends.push(sendPush({ ...item, stamped: stampedMeta(stamp, item.meta, at) }, label, () => ready() && !expired(item),
         () => waitingNow(kind, item), expiryOf(item)));
     } catch (err) {
       logger.warn(`[${label}] notification ${item.row.id} not stamped: ${safeError(err)}`);

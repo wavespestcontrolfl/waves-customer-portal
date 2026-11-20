@@ -158,7 +158,7 @@ async function stillWaiting(items) {
 }
 
 // The shared once-only stamp and push, under this reminder's own stamp key and log label.
-const stampReminder = (item, now) => sweep.__private.stampOnce(STAMP, item, now);
+const stampReminder = async (item, now) => (await sweep.__private.stampOnce(STAMP, item, () => now)) !== null;
 const rowStillOpen = (id) => sweep.__private.rowStillOpen(id, LABEL);
 const sendReminder = (item) => sweep.__private.sendPush(item, LABEL);
 

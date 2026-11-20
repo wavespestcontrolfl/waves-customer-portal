@@ -165,7 +165,7 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
     expect(pushesFor(webBell.id)).toHaveLength(0);
   }, 180000);
 
-  test('one lead\'s new-lead bell and the repeat-form bell the writer rings push once, for the later inquiry; a bell after that push pushes again', async () => {
+  test('one lead\'s new-lead bell and the repeat-form bell the writer rings push once, for the later inquiry; none again in 48 hours; then the re-rung row can', async () => {
     const { customer, lead } = await leadOnFile();
     const webBell = await newLeadBell(lead, mins(-25));
     const formBell = await repeatFormBell(customer, lead, mins(-18));
@@ -179,14 +179,42 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
     await run();
     expect(pushesFor(webBell.id)).toHaveLength(0);
 
-    // The lead asks again 10 minutes after that push (a new bell row), and nobody reaches it in 15 minutes.
-    const later = mins(30);
+    const sweepAt = async (at) => {
+      jest.clearAllMocks();
+      const result = await reminder.runNewLeadReminder({ now: at, clock: () => at });
+      await Promise.all(result.sends || []);
+      return result;
+    };
+    // The lead asks again 10 minutes after that push (a new bell row), and nobody reaches it in 15 minutes: capped.
     const nextBell = await newLeadBell(lead, mins(10));
-    jest.clearAllMocks();
-    const result = await reminder.runNewLeadReminder({ now: later, clock: () => later });
-    await Promise.all(result.sends || []);
-    expect(pushesFor(nextBell.id)).toHaveLength(1);
-    expect(pushesFor(webBell.id)).toHaveLength(0);
+    await sweepAt(mins(30));
+    expect(pushesFor(nextBell.id)).toHaveLength(0);
+    // The lead sends the form again at +40 minutes: the writer refreshes the stamped repeat-form row. Its stamp is kept;
+    // the ring moves created_at (bumpOnRefresh) and rungAt to the real time, both set to the suite's clock here. The
+    // scan reads it again, and the cap holds it.
+    const ringAgain = async (at) => {
+      await ringRepeatFormAlert(customer, lead.id);
+      await db('notifications').where({ id: formBell.id })
+        .update({ created_at: at, metadata: db.raw('metadata || ?::jsonb', [JSON.stringify({ rungAt: at.toISOString() })]) });
+      return metaOf(await db('notifications').where({ id: formBell.id }).first());
+    };
+    // The rows the scan reads at `at` and finds due (the sweep's own two steps).
+    const dueAt = async (at) => {
+      const { candidateQuery, dueItems } = reminder.__private;
+      const rows = await candidateQuery(new Date(at.getTime() - 48 * 60 * MIN), null, 1000);
+      return dueItems(rows, at).map((i) => i.row.id);
+    };
+    expect(await ringAgain(mins(40))).toMatchObject({ [reminder.PUSH_STAMP]: NOW.toISOString(), rungAt: mins(40).toISOString() });
+    expect(await dueAt(mins(60))).toContain(formBell.id);
+    await sweepAt(mins(60));
+    expect(pushesFor(formBell.id)).toHaveLength(0);
+    // It rings again 49 hours after the push (Saturday 3:40 PM), and nobody reaches the lead: that event pushes.
+    await ringAgain(mins(49 * 60 - 20));
+    const saturday = mins(49 * 60);
+    expect(await dueAt(saturday)).toContain(formBell.id);
+    await sweepAt(saturday);
+    expect(pushesFor(formBell.id)).toHaveLength(1);
+    expect(metaOf(await db('notifications').where({ id: formBell.id }).first())[reminder.PUSH_STAMP]).toBe(saturday.toISOString());
   }, 180000);
 
   // Two sweeps (two app instances, or a slow sweep and the next one) can reach two bells of one lead at once. Each stamp
@@ -223,10 +251,10 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
       const gotLock = new Promise((resolve) => { locked = resolve; });
       const held = new Promise((resolve) => { release = resolve; });
       const claim = leadClaim(item(newer));
-      const holding = { key: claim.key, taken: async (conn) => { const taken = await claim.taken(conn); locked(); await held; return taken; } };
-      stamps.push(stampOnce(reminder.PUSH_STAMP, item(newer), at, () => true, holding));
+      const holding = { key: claim.key, taken: async (conn, t) => { const taken = await claim.taken(conn, t); locked(); await held; return taken; } };
+      stamps.push(stampOnce(reminder.PUSH_STAMP, item(newer), () => at, () => true, holding));
       await gotLock;
-      stamps.push(stampOnce(reminder.PUSH_STAMP, item(older), at, () => true, leadClaim(item(older))));
+      stamps.push(stampOnce(reminder.PUSH_STAMP, item(older), () => at, () => true, leadClaim(item(older))));
       let sawWait = false;
       for (let i = 0; i < 100 && !sawWait; i += 1) {
         sawWait = (await ungrantedAdvisoryLocks()) > 0;
@@ -234,7 +262,7 @@ maybeDescribe('new-lead re-alert (live Postgres)', () => {
       }
       expect(sawWait).toBe(true);
       release();
-      expect(await Promise.all(stamps)).toEqual([true, false]);
+      expect(await Promise.all(stamps)).toEqual([at, null]);
       const after = new Map((await db.real('notifications').whereIn('id', ids)).map((r) => [r.id, metaOf(r)]));
       expect(after.get(newer.id)[reminder.PUSH_STAMP]).toBe(at.toISOString());
       expect(after.get(older.id)).not.toHaveProperty(reminder.PUSH_STAMP);

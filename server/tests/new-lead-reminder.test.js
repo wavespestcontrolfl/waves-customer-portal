@@ -6,7 +6,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const mockState = {};
 const resetState = () => Object.assign(mockState, {
-  rows: [], leads: [], answered: [], estimates: [], emails: [], emailRows: [], handedOff: null, customer: null, links: {}, unsettled: [], stampResults: [], open: {}, calls: [], failLeads: false, failOpen: false, pages: null, onOpenRead: null, onRaw: null, recordStamps: false, stamped: [], served: [],
+  rows: [], leads: [], answered: [], estimates: [], emails: [], emailRows: [], handedOff: null, customer: null, links: {}, unsettled: [], stampResults: [], open: {}, calls: [], failLeads: false, failOpen: false, pages: null, onOpenRead: null, onRaw: null, recordStamps: false, stamped: [], served: [], onClaimRead: null,
 });
 resetState();
 jest.mock('../models/db', () => {
@@ -22,12 +22,13 @@ jest.mock('../models/db', () => {
     if (state.table === 'emails') return mockState.emailRows;
     if (state.table === 'customers') return state.verb === 'first' ? mockState.customer : [];
     if (state.table !== 'notifications') return [];
-    // The per-lead claim's read (new-lead-reminder.js leadClaim): the bells stamped at or after the anchor, but this one.
-    // With mockState.recordStamps, each landed stamp is recorded as the database would hold it; otherwise there are none.
-    const claimRead = state.raws.find(([sql]) => String(sql).includes("'newLeadRealertAt' >= ?"));
+    // The per-lead claim's read (new-lead-reminder.js leadClaim): the bells stamped after `from`. With
+    // mockState.recordStamps, each landed stamp is recorded as the database would hold it; otherwise there are none.
+    const claimRead = state.raws.find(([sql]) => String(sql).includes("'newLeadRealertAt' >"));
     if (claimRead) {
+      if (mockState.onClaimRead) mockState.onClaimRead();
       const from = claimRead[1][0];
-      return mockState.stamped.filter((r) => r.stampedAt >= from && !state.nots.some(([col, val]) => col === 'id' && String(val) === String(r.id)));
+      return mockState.stamped.filter((r) => r.stampedAt > from);
     }
     if (state.verb === 'update') {
       const landed = mockState.stampResults.length ? mockState.stampResults.shift() : 1;
@@ -51,7 +52,7 @@ jest.mock('../models/db', () => {
     return mockState.rows;
   };
   const db = jest.fn((table) => {
-    const state = { table, verb: 'select', id: null, update: null, wheres: [], raws: [], ins: [], nots: [] };
+    const state = { table, verb: 'select', id: null, update: null, wheres: [], raws: [], ins: [] };
     const chain = new Proxy({}, {
       get(_, prop) {
         if (prop === 'then') return (res, rej) => Promise.resolve().then(() => handle(state)).then(res, rej);
@@ -63,7 +64,6 @@ jest.mock('../models/db', () => {
           // A grouped condition (where(fn), orWhere(fn)) runs on this same chain, so its parts are recorded too.
           if ((prop === 'where' || prop === 'orWhere') && typeof args[0] === 'function') args[0](chain);
           if (prop === 'whereIn' || prop === 'orWhereIn') state.ins.push(args);
-          if (prop === 'whereNot') state.nots.push(args);
           if (prop === 'whereRaw' || prop === 'orWhereRaw') state.raws.push(args);
           if (prop === 'where' && args[0] && typeof args[0] === 'object' && args[0].id) state.id = args[0].id;
           return chain;
@@ -433,14 +433,45 @@ describe('the 15-minute push (no gate)', () => {
     expect(pushes().map(([, payload]) => payload.alertRowId)).toEqual(['rf-1']);
   });
 
-  test('a later inquiry, one that came in after the lead\'s re-alert, can push again', async () => {
+  test('a lead pushed once gets no second push in 48 hours, from a later bell or the same row ringing again; after that it can', async () => {
     mockState.recordStamps = true;
     expect(await run(PUSH_NOW)).toMatchObject({ pushed: 1 });
     // The lead sent the form again at 10:30, after the 10:20 push, and nobody reached it by 10:50.
     triggerNotification.mockClear();
     mockState.rows = [repeatFormRow('rf-1', est('09', '10:30'))];
-    expect(await run(est('09', '10:50'))).toMatchObject({ due: 1, pushed: 1 });
-    expect(pushes().map(([, payload]) => payload.alertRowId)).toEqual(['rf-1']);
+    expect(await run(est('09', '10:50'))).toMatchObject({ due: 1, pushed: 0 });
+    // The first bell rang again at 11:00 (a refresh keeps its stamp): its new event is due at 11:15, and still capped.
+    const rang = (at) => row('n-1', { metadata: { rungAt: at.toISOString(), [PUSH_STAMP]: PUSH_NOW.toISOString() } });
+    mockState.rows = [rang(est('09', '11:00'))];
+    expect(await run(est('09', '11:20'))).toMatchObject({ due: 1, pushed: 0 });
+    expect(triggerNotification).not.toHaveBeenCalled();
+    // It rings again on Wednesday at 11:00, more than 48 hours after the 10:20 Monday push: it pushes for that event.
+    mockState.rows = [rang(est('11', '11:00'))];
+    expect(await run(est('11', '11:20'))).toMatchObject({ due: 1, pushed: 1 });
+    expect(pushes().map(([, payload]) => payload.alertRowId)).toEqual(['n-1']);
+  });
+
+  test('the stamp is the clock when it is written, and the push\'s dispatch check expects exactly that stamp', async () => {
+    // The sweep began at 10:20; its reads ran to 10:21, when the stamp is written.
+    const result = await runNewLeadReminder({ now: PUSH_NOW, clock: () => est('09', '10:21') });
+    await Promise.all(result.sends);
+    expect(JSON.parse(updates()[0].update.metadata.bindings[0])).toEqual({ [PUSH_STAMP]: est('09', '10:21').toISOString() });
+    mockState.calls.length = 0;
+    expect(await pushes()[0][2].beforePush()).toBe(true);
+    const [read] = mockState.calls.filter((c) => c.table === 'notifications' && c.verb === 'first');
+    const stamped = { ...row('n-1').metadata, [PUSH_STAMP]: est('09', '10:21').toISOString() };
+    expect(read.raws).toContainEqual(['metadata IS NOT DISTINCT FROM ?::jsonb', [JSON.stringify(stamped)]]);
+  });
+
+  test('a stamp whose lead read ran past 6 PM writes nothing', async () => {
+    mockState.rows = [row('n-1', { createdAt: est('09', '17:40') })];
+    let at = est('09', '17:59');
+    mockState.onClaimRead = () => { at = est('09', '18:01'); };
+    const result = await runNewLeadReminder({ now: est('09', '17:59'), clock: () => at });
+    await Promise.all(result.sends);
+    expect(result).toMatchObject({ due: 1, pushed: 0 });
+    expect(updates()).toEqual([]);
+    expect(triggerNotification).not.toHaveBeenCalled();
   });
 
   test('each push expires at 6 PM that day, or at the end of its late window if that comes first', async () => {

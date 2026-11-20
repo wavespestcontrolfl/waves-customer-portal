@@ -9,10 +9,12 @@
  * ringRepeatFormAlert: a lead sent the quote form again; the relevance sweep's lead_repeat_form class), that no person
  * has reached gets ONE more phone push 15 minutes after the bell's latest event. No gate: the push goes to admin users
  * only. (A second step, a ring to the owner's cell at 60 minutes behind its own gate, is a separate change.)
- * At most one push per bell row: it is stamped first, in one statement fenced on the row being open and unchanged since
- * it was read (metadata.newLeadRealertAt), under notifyAdmin's lock for the bell's dedupe key. And one push per lead for
- * each inquiry (leadClaim): a lead with two bells due in one sweep (its intake bell and a repeat form) gets one, for the
- * latest inquiry; a later inquiry, one that came in after that push, can get its own. Stamp first, then send:
+ * At most one push for each event of a bell row: it is stamped first, in one statement fenced on the row being open and
+ * unchanged since it was read (metadata.newLeadRealertAt), under notifyAdmin's lock for the bell's dedupe key. And at most one push per
+ * lead in 48 hours (leadClaim; the plan's "at most twice per lead" is this push and the 60-minute call): a lead with two
+ * bells due in one sweep (its intake bell and a repeat form) gets one, for the latest inquiry, and a bell of that lead
+ * that rings or is written in the next 48 hours gets none. A row that rang again after its stamp (a repeat form
+ * refreshes its row and keeps the stamp) is read again: after those 48 hours, it can push for its new event. Stamp first, then send:
  * a send that fails after its stamp is lost, never repeated. The push goes only while the row is still an open bell in
  * the bell feed with exactly the stamped metadata (a bell that rang again since then sends nothing), and while the lead
  * still waits when judged again with fresh reads just before it goes (lead-reminder-sweep.js).
@@ -103,7 +105,12 @@ const repeatFormClass = () => relevance().CLASSES.find((c) => c.key === 'lead_re
 // bell by its relevance class, so the two read one definition.
 function kind() {
   const repeatForm = repeatFormClass();
-  return { stamp: PUSH_STAMP, match: [{ categories: ['new_lead'] }, { categories: repeatForm.categories, keyPrefixes: [repeatForm.prefix] }] };
+  return {
+    stamp: PUSH_STAMP,
+    match: [{ categories: ['new_lead'] }, { categories: repeatForm.categories, keyPrefixes: [repeatForm.prefix] }],
+    // A row that rang again after its stamp is news again (lead-reminder-sweep.js candidateQuery); leadClaim decides.
+    rearm: true,
+  };
 }
 const candidateQuery = (since, cursor, pageSize) => sweep.__private.candidateQuery(kind(), since, cursor, pageSize);
 
@@ -113,6 +120,14 @@ const candidateQuery = (since, cursor, pageSize) => sweep.__private.candidateQue
 // its writer had just created, which the writer marks payload.createdLead (lead-webhook.js, call-recording-processor.js
 // notifyNewCallLead, booking-preferred-time.js). Any other bell is a later inquiry: a form the webhook attached to an
 // open call lead (createdLead false), or a bell written before the mark existed. inquiryOf reads it.
+// The row was stamped at or after its latest event: that event already had its push. A stamp that does not parse counts
+// as current, so the row is not read as news.
+function stampedSince(meta, askedAt) {
+  if (!meta[PUSH_STAMP]) return false;
+  const at = Date.parse(meta[PUSH_STAMP]);
+  return !(at < askedAt.getTime());
+}
+
 function dueItems(rows, now) {
   const { bellEventAt, parseMeta, refsFromRow } = relevance();
   const floor = now.getTime() - WINDOW_MS;
@@ -121,7 +136,7 @@ function dueItems(rows, now) {
     const meta = parseMeta(row.metadata);
     const askedAt = bellEventAt(row);
     const leadId = refsFromRow(row).leadId;
-    if (!leadId || !askedAt || askedAt.getTime() <= floor || meta[PUSH_STAMP]) continue;
+    if (!leadId || !askedAt || askedAt.getTime() <= floor || stampedSince(meta, askedAt)) continue;
     const { dueAt, expiresAt } = pushWindow(askedAt, PUSH_AFTER_MINUTES, PUSH_LATE_MINUTES);
     if (dueAt.getTime() > now.getTime() || expiresAt.getTime() < now.getTime()) continue;
     items.push({ row, meta, askedAt, leadId, expiresAt, intakeTrigger: meta.triggerKey === 'new_lead' && meta.payload?.createdLead === true });
@@ -211,21 +226,23 @@ async function reachedLeads(items) {
 // in one sweep, the newer one is stamped and pushes, and leadClaim then holds the older one back.
 const latestInquiryFirst = (a, b) => b.anchor.getTime() - a.anchor.getTime();
 
-// One push per lead for each inquiry. A bell does not push when another bell of its lead was stamped at or after this
-// bell's inquiry began: that push already told the office about this lead after this inquiry came in. A later inquiry
-// (a repeat form after that push) can push again. The stamp asks it under a lock on the lead, in its own transaction
-// (lead-reminder-sweep.js stampOnce), so two sweeps never both push one lead. A stamp holds the claim even when its
-// push did not go (the row rang again, a Done, the close): at most once, as for the row itself. Only this reminder stamps
-// PUSH_STAMP, so the stamped rows are its bells; each names its lead the way dueItems reads it (refsFromRow). The read is
-// bounded like the scan: a row stamped at or after the anchor was a candidate of a sweep at that time.
+// At most one push per lead in 48 hours (the same window the scan reads). The plan's "at most twice per lead" is this
+// push and the 60-minute call; a lead that sends the form again while it waits does not ring the phones again here (the
+// writer's own ring does). A bell does not push when any bell of its lead, this row included, was stamped in the 48
+// hours before `at`. The stamp asks it under a lock on the lead, in its own transaction (lead-reminder-sweep.js
+// stampOnce), so two sweeps never both push one lead. A stamp holds the claim even when its push did not go (the row
+// rang again, a Done, the close): at most once, as for the row itself. Only this reminder stamps PUSH_STAMP, so the
+// stamped rows are its bells; each names its lead the way dueItems reads it (refsFromRow). The read is bounded like the
+// scan: a row stamped after `from` was a candidate then, so its latest event was after `from` less the window.
 function leadClaim(item) {
   return {
     key: `${LABEL}:lead:${item.leadId}`,
-    taken: async (conn) => {
+    taken: async (conn, at) => {
       const { refsFromRow } = relevance();
-      const since = new Date(item.anchor.getTime() - WINDOW_MS).toISOString();
-      const stamped = await conn('notifications').where({ recipient_type: 'admin' }).whereNot('id', item.row.id)
-        .whereRaw(`metadata->>'${PUSH_STAMP}' >= ?`, [item.anchor.toISOString()])
+      const from = new Date(at.getTime() - WINDOW_MS);
+      const since = new Date(from.getTime() - WINDOW_MS).toISOString();
+      const stamped = await conn('notifications').where({ recipient_type: 'admin' })
+        .whereRaw(`metadata->>'${PUSH_STAMP}' > ?`, [from.toISOString()])
         .where((q) => q.where('created_at', '>', since).orWhereRaw("metadata->>'rungAt' > ?", [since]))
         .select('id', 'link', 'metadata');
       return stamped.some((r) => String(refsFromRow(r).leadId || '').toLowerCase() === String(item.leadId).toLowerCase());

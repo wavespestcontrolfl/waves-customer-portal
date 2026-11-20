@@ -633,10 +633,14 @@ also when that time passes while the sweep reads (checked again before the stamp
 the last 48 hours only. Each push expires at the push provider at 6:00 PM that day, or at the end of its late window if that
 comes first (`payload.expiresAt`, as for the call-back banner). The push is stamped first, fenced on the row being open and unchanged (`metadata.newLeadRealertAt`),
 under the same dedupe-key lock (the hours and the late window are asked again once the lock is held), so a row gets
-at most one. A lead gets one push for each inquiry: the stamp also takes an advisory lock on the lead, after the
-dedupe-key lock, and holds back a bell whose lead already has a bell stamped at or after this bell's inquiry began. So a
-lead with an open intake bell and a repeat form gets one push, for the latest inquiry (the sweep judges every page first,
-then stamps the latest inquiry first), and a bell written after that push can push again. As with the call-back reminder, it goes only while the row is
+at most one for each event of the row. A lead gets at most one push in 48 hours (the plan's "at most twice per lead" is
+this push and the 60-minute call): the stamp also takes an advisory lock on the lead, after the dedupe-key lock, and holds
+back a bell when any bell of its lead, itself included, was stamped in the 48 hours before. So a lead with an open intake
+bell and a repeat form gets one push, for the latest inquiry (the sweep judges every page first, then stamps the latest
+inquiry first), and a bell of that lead written or rung in the next 48 hours gets none (the writer's own ring still
+reaches the phones). A row that rang again after its stamp (a repeat form refreshes its row and keeps the stamp) is read
+again, so after those 48 hours it can push for its new event. The stamp is the clock when it is written, and the hours
+and the late window are asked last, just before that write. As with the call-back reminder, it goes only while the row is
 still an open bell in the bell feed with exactly the stamped metadata, and while the lead still waits when judged again
 with fresh reads (a person who reached it, or a lead closed or quoted, since the sweep read it sends nothing). The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead still waits for a
 call"). "Reached" is judged on the lead, whatever the close gates say, and not only after the bell (a "New call lead" bell
