@@ -1,6 +1,6 @@
 // Pest Insider renderer: reviewed copy only, escaping, absolute links, dark-mode hooks.
 const {
-  renderIssue, withToolBlock, wrapIssueHtml, speciesEmoji, POST_LINK_TEXT, VERDICTS, SIGNOFF_TEXT, CATEGORY_EMOJI, SPECIES_EMOJI,
+  renderIssue, withToolBlock, wrapIssueHtml, speciesEmoji, escapeHtml, POST_LINK_TEXT, VERDICTS, SIGNOFF_TEXT, CATEGORY_EMOJI, SPECIES_EMOJI,
 } = require('../services/pest-insider/render');
 const { SPECIES } = require('../services/pest-insider/plan');
 const { cardFor } = require('../services/pest-insider/cards');
@@ -50,27 +50,65 @@ describe('renderIssue', () => {
     hrefs.filter((h) => h !== POST).forEach((h) => expect(h).toMatch(/^https:\/\/www\.wavespestcontrol\.com\/pest-identifier\//));
     // Pictures: with no lead fact, only the Waves badge (no top picture, no card).
     expect(imgSrcs(r.html_body)).toEqual([DIVIDER]);
-    // With the lead fact: its top picture, linked to the post too, then its card.
-    const t03 = renderIssue({ ...BASE, lead: titledLead('T03') });
-    expect(imgSrcs(t03.html_body)).toEqual([heroFor('T03').url, cardFor('T03').url, DIVIDER]);
-    expect([...t03.html_body.matchAll(/href="([^"]+)"/g)].filter((m) => m[1] === postUrl('T03'))).toHaveLength(2);
+    // With the lead fact: its top picture, linked to the post too, then its
+    // card; a picture that moves comes as its still (for Outlook) and its GIF.
+    for (const id of Object.keys(POSTS)) {
+      const [hero, card] = [heroFor(id), cardFor(id)];
+      const issue = renderIssue({ ...BASE, lead: titledLead(id) });
+      expect([id, imgSrcs(issue.html_body)]).toEqual([id, [hero.url, hero.gifUrl, card.url, card.gifUrl, DIVIDER].filter(Boolean)]);
+      expect([id, [...issue.html_body.matchAll(/href="([^"]+)"/g)].filter((m) => m[1] === postUrl(id)).length]).toEqual([id, 2]);
+    }
   });
 
   test("the top picture is the lead fact's own: its title as alt text, linked to the post, before the greeting, and every Outlook shows it", () => {
+    // A top picture whose art does not move (which facts move is data): one
+    // JPEG with its size in the tag, in no Outlook comment
+    const stillId = Object.keys(POSTS).find((id) => !heroFor(id).gifUrl);
+    expect(stillId).toBeDefined();
+    const still = heroFor(stillId);
+    const plain = renderIssue({ ...BASE, lead: titledLead(stillId) });
+    expect(plain.html_body).toContain(`<a href="${postUrl(stillId)}" style="text-decoration:none;"><img src="${still.url}" alt="${escapeHtml(still.alt)}" width="582" height="326" style="width:100%;max-width:582px;height:auto;border:0;border-radius:12px;display:block;" /></a>`);
+    expect(plain.html_body.slice(0, plain.html_body.indexOf(still.url))).not.toContain('<!--');
     const hero = heroFor('T03');
     const r = renderIssue({ ...BASE, lead: titledLead('T03') });
     expect(hero.url).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/pest-insider\/heroes\/t03-[0-9a-f]{10}\.jpg$/);
-    expect(r.html_body).toContain(`<a href="${postUrl('T03')}" style="text-decoration:none;"><img src="${hero.url}" alt="Native termites can swarm in winter" width="582" height="326" style="width:100%;max-width:582px;height:auto;border:0;border-radius:12px;display:block;" /></a>`);
+    expect(hero.alt).toBe('Native termites can swarm in winter');
     const at = r.html_body.indexOf(hero.url);
     expect(at).toBeGreaterThan(r.html_body.indexOf('Waves Pest Insider · '));
-    expect(at).toBeLessThan(r.html_body.indexOf('Hey there!'));
-    // outside Outlook's skip: a JPEG with its size in the tag
-    expect(r.html_body.slice(r.html_body.lastIndexOf('<!--', at), at)).not.toContain('[if !mso]');
+    // the whole top picture, a moving one's GIF too, comes before the greeting
+    expect(r.html_body.lastIndexOf('/pest-insider/heroes/')).toBeLessThan(r.html_body.indexOf('Hey there!'));
     // the blog post's own picture is not in the email, and the plain-text copy has no picture
     expect(r.html_body).not.toContain('www.wavespestcontrol.com/images/');
     expect(r.text_body).not.toContain('/pest-insider/heroes/');
     // every fact with a reviewed post opens with its own picture
     for (const factId of Object.keys(POSTS)) expect(imgSrcs(renderIssue({ ...BASE, lead: titledLead(factId) }).html_body)[0]).toBe(heroFor(factId).url);
+  });
+
+  test('a picture that moves comes with its still: classic Outlook and a reader who asked for less motion get the still, every other mail app the GIF, and the still comes first for the Waves website feed', () => {
+    const img = (src, alt, height) => `<img src="${src}" alt="${escapeHtml(alt)}" width="582" height="${height}" style="width:100%;max-width:582px;height:auto;border:0;border-radius:12px;display:block;" />`;
+    // A moving picture: the still for classic Outlook, then the GIF in a
+    // <picture> whose <source> is the still, for a reader who asked for less
+    // motion. A picture that does not move is one plain tag.
+    const markup = (p, height) => (p.gifUrl
+      ? `<!--[if mso]>${img(p.url, p.alt, height)}<![endif]--><!--[if !mso]><!--><picture style="display:block;"><source srcset="${p.url}" media="(prefers-reduced-motion: reduce)" />${img(p.gifUrl, p.alt, height)}</picture><!--<![endif]-->`
+      : img(p.url, p.alt, height));
+    // Which facts move is data (new art drops a fact's motion), so every fact is checked.
+    const ids = Object.keys(POSTS);
+    expect(ids.filter((id) => heroFor(id).gifUrl).length).toBeGreaterThan(0);
+    expect(ids.filter((id) => cardFor(id).gifUrl).length).toBeGreaterThan(0);
+    for (const id of ids) {
+      const [hero, card] = [heroFor(id), cardFor(id)];
+      const r = renderIssue({ ...BASE, lead: titledLead(id) });
+      expect([id, r.html_body.includes(`<a href="${postUrl(id)}" style="text-decoration:none;">${markup(hero, 326)}</a>`), r.html_body.includes(markup(card, 300))]).toEqual([id, true, true]);
+      // only a reduced-motion setting picks a still: one <source> per moving picture, and no other
+      expect([id, [...r.html_body.matchAll(/<source [^>]*>/g)].map((m) => m[0])])
+        .toEqual([id, [hero, card].filter((p) => p.gifUrl).map((p) => `<source srcset="${p.url}" media="(prefers-reduced-motion: reduce)" />`)]);
+      // a mail app that reads no Outlook comment shows the GIFs
+      expect([id, imgSrcs(r.html_body.replace(/<!--[\s\S]*?-->/g, ''))]).toEqual([id, [hero.gifUrl || hero.url, card.gifUrl || card.url, DIVIDER]]);
+      // classic Outlook shows what [if mso] holds and skips what [if !mso] holds: the stills
+      const outlook = r.html_body.replace(/<!--\[if mso\]>([\s\S]*?)<!\[endif\]-->/g, '$1').replace(/<!--\[if !mso\]><!-->[\s\S]*?<!--<!\[endif\]-->/g, '');
+      expect([id, imgSrcs(outlook)]).toEqual([id, [hero.url, card.url, DIVIDER]]);
+    }
   });
 
   test("no top picture without the lead fact, or under a headline that is not the fact's title; a caller's picture never renders", () => {

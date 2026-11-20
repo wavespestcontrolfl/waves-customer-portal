@@ -150,16 +150,33 @@ const SIGNOFF_HTML = `<div class="dm-text">
 </div>`;
 const SIGNOFF_TEXT = `${SIGNOFF_LINE}\n${SIGNOFF_NAME}\n`;
 
+// A Waves picture as wide as the column on a desktop screen (582px in
+// wrapNewsletter's card), with its size in the tag. A picture that moves
+// comes with its still: classic Outlook for Windows plays no GIF, so it gets
+// the still; every other mail app gets the GIF, whose first frame is the
+// whole picture. A reader who asked for less motion gets the still: a mail
+// app that reads that setting (Apple Mail does) picks the <source>, and one
+// that does not know <picture> shows its <img>, the GIF. The still comes
+// first in the HTML, so the Waves website's newsletter feed
+// (newsletter-feed.js extractCardImage, which reads <img> tags only and
+// skips GIFs) keeps the still as the issue's picture.
+function pictureHtml({ url, gifUrl, alt, width, height }) {
+  const img = (src) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" width="${width}" height="${height}" style="width:100%;max-width:${width}px;height:auto;border:0;border-radius:12px;display:block;" />`;
+  if (!gifUrl) return img(url);
+  const moving = `<picture style="display:block;"><source srcset="${escapeHtml(url)}" media="(prefers-reduced-motion: reduce)" />${img(gifUrl)}</picture>`;
+  return `<!--[if mso]>${img(url)}<![endif]--><!--[if !mso]><!-->${moving}<!--<![endif]-->`;
+}
+
 // The lead fact's top picture (heroes.js), linked to the post: the fact's
-// title in big gold letters on a navy panel beside its art. A JPEG as wide
-// as the column on a desktop screen (582px in wrapNewsletter's card), with
-// its size in the tag, so every Outlook shows it. Its words are the fact's
-// title, so it shows only over that headline.
+// title in big gold letters on a navy panel beside its art, a JPEG, or a GIF
+// with its JPEG when the art moves. Its words are the fact's title, so it
+// shows only over that headline.
 function heroHtml(lead) {
   const fact = leadFact(lead);
   const hero = fact ? heroFor(fact.id) : null;
   if (!hero || lead.headline !== hero.title) return '';
-  return `<div style="margin:0 0 18px 0;"><a href="${escapeHtml(lead.postUrl)}" style="text-decoration:none;"><img src="${escapeHtml(hero.url)}" alt="${escapeHtml(hero.alt)}" width="${HERO_WIDTH}" height="${HERO_HEIGHT}" style="width:100%;max-width:${HERO_WIDTH}px;height:auto;border:0;border-radius:12px;display:block;" /></a></div>`;
+  const picture = pictureHtml({ url: hero.url, gifUrl: hero.gifUrl, alt: hero.alt, width: HERO_WIDTH, height: HERO_HEIGHT });
+  return `<div style="margin:0 0 18px 0;"><a href="${escapeHtml(lead.postUrl)}" style="text-decoration:none;">${picture}</a></div>`;
 }
 
 // About 220 words a minute, never under one.
@@ -205,9 +222,9 @@ function leadBlock({ lead }) {
     `<p class="dm-ink" style="margin:0 0 10px 0;font-size:17px;line-height:1.55;font-weight:600;">${escapeHtml(first)}</p>`,
     ...(rest.length ? [paragraph(escapeHtml(rest.join(' ')))] : []),
     // The fact's card, as a recap after its sentences (its words repeat the
-    // title or a sentence, so it does not sit right under them). A PNG, so
-    // every Outlook shows it; its alt text is its words.
-    ...(card ? [`<div style="margin:4px 0 16px 0;"><img src="${escapeHtml(card.url)}" alt="${escapeHtml(card.alt)}" width="${CARD_WIDTH}" height="${CARD_HEIGHT}" style="width:100%;max-width:${CARD_WIDTH}px;height:auto;border:0;border-radius:12px;display:block;" /></div>`] : []),
+    // title or a sentence, so it does not sit right under them). A PNG, or a
+    // GIF with its PNG for a months card; its alt text is its words.
+    ...(card ? [`<div style="margin:4px 0 16px 0;">${pictureHtml({ url: card.url, gifUrl: card.gifUrl, alt: card.alt, width: CARD_WIDTH, height: CARD_HEIGHT })}</div>`] : []),
     metaBox([
       ...(source ? [`📚 <em>${escapeHtml(source)}</em>`] : []),
       `🔗 ${link(lead.postUrl, POST_LINK_TEXT)}`,

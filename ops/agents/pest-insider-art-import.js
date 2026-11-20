@@ -32,6 +32,10 @@
  * - If step 2 fails before the switch, the art it added is removed. A run
  *   that is killed leaves at most an art file no fact names (the heroes test
  *   names it) and its lock file (remove it once no import runs).
+ * - A fact's motion (heroes.js MOTION_KINDS) is placed on its art: new art
+ *   drops it, so a person places it again. The run says so once the new
+ *   heroes file is in place (a dry run says it would). The same art imported
+ *   again keeps its motion.
  *
  * The art: ChatGPT on the owner's plan (owner 2026-11-19: "just use
  * chatgpt"), through Codex on the Mac with Codex's built-in image tool, never
@@ -45,6 +49,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { isDeepStrictEqual } = require('util');
 
 for (const name of Object.keys(process.env)) {
   if (/^(DATABASE_|POSTGRES_|PG[A-Z]+$)/.test(name)) delete process.env[name];
@@ -89,11 +94,12 @@ const sha16 = (buf) => crypto.createHash('sha256').update(buf).digest('hex').sli
 function heroesFileText(raw) {
   const top = Object.entries(raw).filter(([key, value]) => key !== 'heroes' && value !== undefined)
     .map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)},\n`).join('');
-  const lines = Object.entries(raw.heroes).map(([id, h]) => `    ${JSON.stringify(id)}: { "art": ${JSON.stringify(h.art)} }`);
+  const lines = Object.entries(raw.heroes).map(([id, h]) => `    ${JSON.stringify(id)}: { "art": ${JSON.stringify(h.art)}${h.motion === undefined ? '' : `, "motion": ${JSON.stringify(h.motion)}`} }`);
   const text = `{\n${top}  "heroes": {\n${lines.join(',\n')}\n  }\n}\n`;
   const back = JSON.parse(text);
   validateHeroes(back);
-  if (JSON.stringify(back.heroes) !== JSON.stringify(raw.heroes)) throw new Error('the heroes file text does not hold the heroes it was built from');
+  // Same heroes, whatever order a person wrote an entry's keys in (motion before art is fine).
+  if (!isDeepStrictEqual(back.heroes, raw.heroes)) throw new Error('the heroes file text does not hold the heroes it was built from');
   return text;
 }
 
@@ -102,12 +108,27 @@ const readHeroes = () => JSON.parse(fs.readFileSync(HEROES_FILE, 'utf8'));
 
 // The heroes file with this batch's art, checked by heroes.js. The current
 // file is checked first: its old art hashes name the files removed later.
+// New art drops the fact's motion (it was placed on the old art); the same
+// art keeps the entry as it is.
 function merged(raw, batch) {
   validateHeroes(raw);
   const next = { ...raw, heroes: { ...raw.heroes } };
-  for (const item of batch) next.heroes[item.id] = { art: item.art };
+  for (const item of batch) {
+    const current = raw.heroes[item.id];
+    next.heroes[item.id] = current && current.art === item.art ? current : { art: item.art };
+  }
   validateHeroes(next);
   return next;
+}
+
+// The facts whose motion this batch drops: new art, motion placed on the old.
+const motionDropped = (raw, batch) => batch.filter((item) => {
+  const current = raw.heroes[item.id];
+  return current && current.motion !== undefined && current.art !== item.art;
+}).map((item) => item.id);
+
+function noteDropped(verb, ids) {
+  if (ids.length) console.log(`New art ${verb} the motion of ${ids.join(', ')}: place it again on the new art in the heroes file.`);
 }
 
 // Step 1: cut every picture and check the new heroes file. Writes nothing.
@@ -151,7 +172,8 @@ function removeOldArt(raw, next, batch, artDir) {
 }
 
 // Step 2, under the lock: new art under hash names, then one atomic swap of
-// the heroes file, then the old art of the changed facts is removed.
+// the heroes file, then the old art of the changed facts is removed. Returns
+// the facts whose motion the swapped-in file dropped (read under the lock).
 function publish({ batch, artDir }) {
   fs.mkdirSync(artDir, { recursive: true });
   const lock = `${HEROES_FILE}.lock`;
@@ -185,6 +207,7 @@ function publish({ batch, artDir }) {
     fs.renameSync(tempName(HEROES_FILE, tag), HEROES_FILE);
     swapped = true;
     removeOldArt(raw, next, batch, artDir);
+    return motionDropped(raw, batch);
   } catch (err) {
     if (!swapped) {
       for (const file of added) fs.rmSync(file, { force: true });
@@ -205,7 +228,12 @@ function publish({ batch, artDir }) {
   const staged = await stage();
   for (const item of staged.batch) console.log(`${item.id}  art ${item.art}  ${Math.round(item.webp.length / 1024)} KB`);
   if (!staged.batch.length) { console.log(`No <fact>.png in ${dir}; nothing to take.`); return; }
-  if (!execute) { console.log(`Dry run: ${staged.batch.length} art file(s) checked; nothing written. Add --execute.`); return; }
-  publish(staged);
+  if (!execute) {
+    noteDropped('would drop', motionDropped(readHeroes(), staged.batch));
+    console.log(`Dry run: ${staged.batch.length} art file(s) checked; nothing written. Add --execute.`);
+    return;
+  }
+  // Said only once the new heroes file is in place: an import that stops drops nothing.
+  noteDropped('dropped', publish(staged));
   console.log(`${staged.batch.length} art file(s) taken; now draw: node ops/agents/pest-insider-heroes.js --execute`);
 })().catch((e) => { console.error(e); process.exit(1); });
