@@ -942,6 +942,10 @@ describe('2026-11-19 owner ruling: the app is always "the Waves app"', () => {
     expect(slip('Glad the app\u2019s alerts help.')).toBe('the app');
     expect(slip('Thanks for using the waves app.')).toBe('the waves app');
     expect(slip('Thanks for using the  Waves app.')).toBe('the  Waves app');
+    // A dash between clauses ends the phrase; a hyphen makes a longer word.
+    expect(slip('Glad you like our app\u2014we built it for you.')).toBe('our app');
+    expect(slip('Glad you like our app \u2013 we built it for you.')).toBe('our app');
+    expect(AppName.offAppName('Glad you like the Waves app\u2014we built it for you.')).toBeNull();
     for (const ok of ['Glad the Waves app helps. The Waves app is free.', 'Did the Waves app store your service notes?', 'Get the Waves app on the App Store.', 'Thanks for trying our apps.', 'Our app-based reminders help.', 'Your next lawn app is Friday.', 'Happy to apply our application.']) {
       expect(slip(ok)).toBeNull();
     }

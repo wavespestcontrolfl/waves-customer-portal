@@ -521,6 +521,9 @@ router.post('/:id/reply', async (req, res, next) => {
       text: replyText,
       actor: { type: 'admin', adminUserId: req.technicianId || null },
       allowOverwrite: true,
+      // A draft or grounding token marks text that came from an AI draft
+      // (Use Draft, AI Reply): the publisher checks the app name strictly.
+      fromDraft: Boolean((typeof draftToken === 'string' && draftToken) || (typeof groundingToken === 'string' && groundingToken)),
       // A human posting closes out a pending/posted auto-reply state on the
       // row; a never-queued row keeps NULL.
       autoFields: AutoReply.manualReplyCloseFields(db),

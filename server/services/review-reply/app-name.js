@@ -30,12 +30,13 @@ const APP_WORD_RE = /\bapps?\b/i;
 // after a line break. An opening quote or bracket may come between:
 // '. “The Waves app helps.”'.
 const SENTENCE_START_RE = /(?:^|[.!?]["')\]’”]*\s+|\n\s*)["'(\[‘“]*$/;
-// The name ends only at the end of the text, a space or closing punctuation
-// ("app's" passes). Any other next character (a hyphen of any kind, a
+// The name ends only at the end of the text, a space, closing punctuation
+// or a dash between clauses (em or en dash: "the Waves app—we built it";
+// "app's" passes). Any other next character (a hyphen of any kind, a
 // letter, a digit, a slash) makes a longer word: "app-based", "app‑based"
 // (U+2011), "apps". " store" after it is the App Store, or the verb in "let
 // our app store your notes".
-const NAME_GOES_ON_RE = /^(?:[^\s.,!?;:)\]"'’”…]|\s+store\b)/i;
+const NAME_GOES_ON_RE = /^(?:[^\s.,!?;:)\]"'’”…—–]|\s+store\b)/i;
 const nameAt = (s, at) => (SENTENCE_START_RE.test(s.slice(0, at)) ? 'The Waves app' : 'the Waves app');
 
 function wavesApp(text) {
@@ -70,4 +71,14 @@ function appNameSlip(text) {
   return null;
 }
 
-module.exports = { wavesApp, offAppName, appNameSlip };
+// The refusal message for a reply, or null. Agent text meets the strict rule
+// (offAppName); a person's own words meet the never list (appNameSlip).
+function appNameRefusal(text, { agentText = false } = {}) {
+  const said = agentText ? offAppName(text) : appNameSlip(text);
+  if (!said) return null;
+  return agentText
+    ? `This reply came from an AI draft and says "${said}" outside the name "the Waves app". Write "the Waves app" ("The Waves app" at the start of a sentence), then post again.`
+    : `This reply says "${said}". Name the app "the Waves app" ("The Waves app" at the start of a sentence), then post again.`;
+}
+
+module.exports = { wavesApp, offAppName, appNameSlip, appNameRefusal };

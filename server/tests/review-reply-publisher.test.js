@@ -106,9 +106,12 @@ describe('publishReviewReply', () => {
   });
 
   test('owner 2026-11-19: a reply that says "our app" (the owner\'s never list) is refused before anything is written, on every path', async () => {
-    for (const actor of [{ type: 'admin' }, { type: 'ib' }, { type: 'auto' }]) {
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad our app helps.', actor: { type: 'admin' }, allowOverwrite: true }))
+      .rejects.toMatchObject({ code: CODES.APP_NAME, status: 422, message: expect.stringContaining('says "our app"') });
+    // The runner and the Intelligence Bar post agent text: the strict rule.
+    for (const actor of [{ type: 'ib' }, { type: 'auto' }]) {
       await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana. Glad our app helps.', actor, allowOverwrite: actor.type !== 'auto' }))
-        .rejects.toMatchObject({ code: CODES.APP_NAME, status: 422, message: expect.stringContaining('says "our app"') });
+        .rejects.toMatchObject({ code: CODES.APP_NAME, status: 422, message: expect.stringContaining('came from an AI draft and says "app"') });
     }
     expect(mockLock).not.toHaveBeenCalled();
     expect(mockGbp.replyToReview).not.toHaveBeenCalled();
@@ -121,6 +124,26 @@ describe('publishReviewReply', () => {
       expect(r.googlePosted).toBe(true);
       expect(state.rows[0].review_reply).toBe(text);
     }
+  });
+
+  test('owner 2026-11-19: agent text meets the strict app-name rule: a draft token, the stored draft unchanged, or a restored Agent Ops draft', async () => {
+    const { asDraft } = require('../services/review-reply/draft-prefix');
+    const machine = 'Thanks Dana. Glad our customer app helps.';
+    const refused = { code: CODES.APP_NAME, status: 422, message: expect.stringContaining('came from an AI draft and says "app"') };
+    // Sent from an AI draft (the route saw a Use Draft or AI Reply token), edited or not.
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: machine, actor: { type: 'admin' }, allowOverwrite: true, fromDraft: true })).rejects.toMatchObject(refused);
+    // The stored pipeline draft posted unchanged (Use Draft, Post now).
+    Object.assign(state.rows[0], { auto_reply_draft: machine, auto_reply_version: 'reply-v2', review_reply: asDraft(machine) });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: machine, actor: { type: 'admin' }, allowOverwrite: true })).rejects.toMatchObject(refused);
+    // An Agent Ops draft the sync restored as a [DRAFT] after an uncertain post (auto_reply_draft cleared).
+    Object.assign(state.rows[0], { auto_reply_draft: null, auto_reply_version: 'agent_ops', review_reply: asDraft(machine) });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: machine, actor: { type: 'admin' }, allowOverwrite: true })).rejects.toMatchObject(refused);
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    // A person's own [DRAFT] with the same words meets the never list only, and posts.
+    Object.assign(state.rows[0], { auto_reply_version: 'human' });
+    const r = await publishReviewReply({ reviewId: 'rev-1', text: machine, actor: { type: 'admin' }, allowOverwrite: true });
+    expect(r.googlePosted).toBe(true);
+    expect(state.rows[0].review_reply).toBe(machine);
   });
 
   test('P0: a human reply that lands between the pre-check and the publish claim aborts inside the claim', async () => {

@@ -23,7 +23,7 @@ const logger = require('../logger');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { hasRealReply, asDraft, isDraftReply, stripDraftPrefix, removedOwnerReplyFields } = require('./draft-prefix');
 const { reviewFingerprint } = require('./fingerprint');
-const { appNameSlip } = require('./app-name');
+const { appNameRefusal } = require('./app-name');
 
 class ReviewReplyError extends Error {
   constructor(code, message, { status = 500, cause = null } = {}) {
@@ -197,6 +197,17 @@ function updatedCount(updated) {
   return Array.isArray(updated) ? updated.length : updated;
 }
 
+// Did the agent write this text? The runner and the Intelligence Bar post
+// agent text; a person's post is agent text when it came from an AI draft
+// (Use Draft, AI Reply: a token, edited or not), when it is the stored
+// pipeline draft unchanged, or when it is an Agent Ops draft the sync
+// restored as a [DRAFT] after an uncertain post (it keeps that version).
+function isAgentText(review, text, { actor, fromDraft }) {
+  if (actor.type !== 'admin' || fromDraft) return true;
+  if (text === String(review.auto_reply_draft || '').trim()) return true;
+  return review.auto_reply_version === 'agent_ops' && isDraftReply(review.review_reply) && stripDraftPrefix(review.review_reply).trim() === text;
+}
+
 /**
  * Publish a reply.
  *
@@ -208,24 +219,24 @@ function updatedCount(updated) {
  * @param {object} [p.autoFields]    extra google_reviews columns to stamp in the SAME conditional write (runner)
  * @param {object} [p.auditMeta]     activity_log metadata
  * @param {boolean} [p.requireGoogle=false]  refuse the dev local-only save (callers that report "posted")
+ * @param {boolean} [p.fromDraft=false]  the text came from an AI draft (the route saw a draft or grounding token)
  * @param {(fresh: object) => (string|null)} [p.guard]  re-checked INSIDE the publish claim,
  *        immediately before the Google call, against a fresh row read: return a reason
  *        string to abort (e.g. the caller's auto claim was lost to a human skip/dismiss)
  * @returns {Promise<{googlePosted:boolean, reviewId:string, localOnly:boolean}>}
  */
-async function publishReviewReply({ reviewId, text, actor, allowOverwrite = false, autoFields = null, auditMeta = null, guard = null, requireGoogle = false, expectedReply = undefined, expectedDraft = undefined, expectedReview = undefined, expectedAccountFingerprint = undefined }) {
+async function publishReviewReply({ reviewId, text, actor, allowOverwrite = false, autoFields = null, auditMeta = null, guard = null, requireGoogle = false, fromDraft = false, expectedReply = undefined, expectedDraft = undefined, expectedReview = undefined, expectedAccountFingerprint = undefined }) {
   const replyText = String(text || '').trim();
   if (!replyText) throw new ReviewReplyError(CODES.EMPTY, 'Reply text required', { status: 400 });
-  // Owner 2026-11-19: no reply calls the app "the app", "our app" or "your
-  // app" (the owner's never list, appNameSlip). Checked here, where every
-  // path to Google meets, before any write.
-  const slip = appNameSlip(replyText);
-  if (slip) throw new ReviewReplyError(CODES.APP_NAME, `This reply says "${slip}". Name the app "the Waves app" ("The Waves app" at the start of a sentence), then post again.`, { status: 422 });
   if (!actor?.type) throw new Error('publishReviewReply: actor.type required');
 
   const review = await db('google_reviews').where({ id: reviewId }).first();
   if (!review || review.reviewer_name === '_stats') throw new ReviewReplyError(CODES.NOT_FOUND, 'Review not found', { status: 404 });
   if (review.missing_since) throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
+  // Owner 2026-11-19: the app is "the Waves app" (app-name.js). Checked
+  // here, where every path to Google meets, before any write.
+  const appRefusal = appNameRefusal(replyText, { agentText: isAgentText(review, replyText, { actor, fromDraft }) });
+  if (appRefusal) throw new ReviewReplyError(CODES.APP_NAME, appRefusal, { status: 422 });
   if (!allowOverwrite && hasRealReply(review.review_reply)) {
     throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has a posted reply', { status: 409 });
   }
