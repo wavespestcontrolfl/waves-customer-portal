@@ -4811,6 +4811,13 @@ describe('GATE_PORTAL_PLAN_START — plan-start accept revalidation runs inside 
     const res = await putAccept('tok-plan-start-3-x012345', heldSlot('est-plan-start-3'));
     expect(res.status).toBe(200);
     expect(storedEstimate().status).toBe('accepted');
+    // The global lock order (prefs advisory → comms; admin-customers.js): the accept takes the
+    // property-preferences key before its first customer-comms key (codex pre-push P1).
+    const lockAt = (match) => db.__state.ops.findIndex((op) => op.type === 'raw' && Array.isArray(op.bindings) && match(op.bindings));
+    const prefsAt = lockAt((b) => b[0] === 'property-preferences' && b[1] === 'cust-9');
+    const commsAt = lockAt((b) => b[0] === 'customer-comms:cust-9');
+    expect(prefsAt).toBeGreaterThanOrEqual(0);
+    expect(commsAt).toBeGreaterThan(prefsAt);
   });
 
   test('a slotless accept is refused and leaves the quote open: plan start books a visit (codex pre-push r23 P1)', async () => {
