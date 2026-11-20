@@ -74,7 +74,7 @@ describe('wiring', () => {
     inOrder(service.slice(service.indexOf('function linkVisitStep('), service.indexOf('function priceSeriesStep(')), [
       "['property-preferences', String(customerId)]",
       "trx('customers').where({ id: customerId }).forUpdate()",
-      'await lockTriageCall(trx, bookingCallId);',
+      "lockNoWaitOrStop(trx, [TRIAGE_LOCK_NAMESPACE, bookingCallId], 'call_busy')",
       'await lockCustomerEstimates(trx, customerId);',
       "require('./scheduling/catalog-lock').lockCatalogIdentity(trx)",
       "trx('scheduled_services').where({ id: visit.id }).forUpdate()",

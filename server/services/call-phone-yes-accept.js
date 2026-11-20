@@ -37,7 +37,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
+const { lockTriageCall, syncCallReviewStatus, LOCK_NAMESPACE: TRIAGE_LOCK_NAMESPACE } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
 const Word = require('./call-phone-yes-word');
 
@@ -778,6 +778,7 @@ const TAP_UNAVAILABLE = {
   catalog_busy: 'The service catalog is being updated. Try again in a minute.',
   plan_not_shown: "The plan's visits or per-visit price would not be the ones the card showed. Accept it from the estimate instead.",
   customer_busy: 'Another change to this customer is being saved. Try again in a minute.',
+  call_busy: 'The call or its card is being changed. Try again in a minute.',
   estimate_no_send_time: 'The estimate has no send time on record. Accept it from the estimate.',
   accept_failed: 'The accept failed. Try again, or accept it from the estimate.',
 };
@@ -952,6 +953,14 @@ async function lockCustomerEstimates(trx, customerId) {
   if (await estimateBeingSent(trx, customerId, new Date())) throw stop('estimate_being_sent');
 }
 
+// Takes a transaction advisory lock WITHOUT waiting, or refuses with `code`: another change holds it, it finishes, and
+// the office taps again. Taken, the lock is this transaction's, so a later take of it is immediate. One row, always: a
+// SELECT of one function.
+async function lockNoWaitOrStop(trx, [namespace, key], code) {
+  const taken = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS ok', [namespace, String(key)]);
+  if (taken.rows[0].ok !== true) throw stop(code);
+}
+
 // Step 1, inside the accept's transaction before the conversion: lock and read again every fact the tap read outside it
 // (the card, the booking call and the word's window, the booked visit and the call's other visits, the estimate's
 // links, the customer's other open estimates and plan), then link the visit to the estimate. The caller's word itself
@@ -967,14 +976,15 @@ function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdat
     // or rolls back.
     // The property-preferences lock is taken WITHOUT waiting: the accept already holds customer-comms, and a
     // property-role change takes property-preferences first and then waits for customer-comms
-    // (property-role-proposals.js), so a wait here could deadlock. A held lock refuses (customer_busy); the other change
-    // finishes, and the office taps again. Taken, it is this transaction's: the converter's own take later is immediate.
-    // One row, always: a SELECT of one function.
-    const pp = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS ok', ['property-preferences', String(customerId)]);
-    if (pp.rows[0].ok !== true) throw stop('customer_busy');
+    // (property-role-proposals.js), so a wait here could deadlock (customer_busy). The converter's own take later is
+    // immediate.
+    await lockNoWaitOrStop(trx, ['property-preferences', String(customerId)], 'customer_busy');
     await require('../utils/customer-comms-lock').lockCustomerComms(trx, customerId);
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
-    await lockTriageCall(trx, bookingCallId);
+    // The triage lock, also WITHOUT waiting: the accept may hold the estimate's linked lead by now
+    // (estimate-manual-acceptance.js locks it before this step), and call processing takes this lock before a lead row,
+    // so a wait here could deadlock (call_busy). The card's Resolve later in this transaction takes it again at once.
+    await lockNoWaitOrStop(trx, [TRIAGE_LOCK_NAMESPACE, bookingCallId], 'call_busy');
     // FOR UPDATE, as the sweep's filing takes it: no read of the call changes until the commit, and the card's Resolve
     // (transitionCore, same transaction) needs no lock upgrade.
     const booking = await trx('call_log').where({ id: bookingCallId, customer_id: customerId }).forUpdate().first(Word.CALL_COLUMNS);

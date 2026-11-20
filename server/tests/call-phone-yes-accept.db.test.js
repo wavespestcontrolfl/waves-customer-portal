@@ -39,6 +39,7 @@ jest.mock('../middleware/admin-auth', () => ({
 const knex = require('knex');
 const express = require('express');
 const { randomUUID } = require('crypto');
+const { LOCK_NAMESPACE: TRIAGE_LOCK_NAMESPACE } = require('../utils/triage-locks');
 const AppointmentReminders = require('../services/appointment-reminders');
 const acceptance = require('../services/estimate-manual-acceptance');
 const { sendMembershipStarted } = require('../services/account-membership-email');
@@ -1418,15 +1419,23 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
         const expectedUpdatedAt = await version();
         return trx.transaction((t) => step({ expectedUpdatedAt, ...over })(t, { estimate: estimateRow }));
       };
-      // Another transaction holds the property-preferences lock (a property-role change takes it before customer-comms):
-      // the step refuses at once, never waiting while the accept holds customer-comms.
-      const other = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
-      try {
-        await other.transaction(async (o) => {
-          await o.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
-          await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'customer_busy' });
-        });
-      } finally { await other.destroy(); }
+      // Another transaction holds a lock the step takes WITHOUT waiting, so the step refuses at once, never waiting while
+      // the accept holds its own locks: property-preferences (a property-role change takes it before customer-comms), or
+      // the call's triage lock (call processing takes it before a lead row the accept may hold). The triage case names a
+      // call this test's transaction never locked: the filing's own take of the real call's lock lasts until rollback.
+      const lockedCallId = randomUUID();
+      for (const [lock, over, code] of [
+        [['property-preferences', String(customerId)], {}, 'customer_busy'],
+        [[TRIAGE_LOCK_NAMESPACE, lockedCallId], { bookingCallId: lockedCallId }, 'call_busy'],
+      ]) {
+        const other = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
+        try {
+          await other.transaction(async (o) => {
+            await o.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', lock);
+            await expect(run(over)).rejects.toMatchObject({ phoneYesRefusal: code });
+          });
+        } finally { await other.destroy(); }
+      }
       // The card: another version than the screen showed, closed by another admin, or not naming this estimate.
       await expect(run({ expectedUpdatedAt: new Date(Date.now() - DAY) })).rejects.toMatchObject({ phoneYesRefusal: 'card_changed' });
       await trx('triage_items').where({ id: card.id }).update({ status: 'dismissed' });
