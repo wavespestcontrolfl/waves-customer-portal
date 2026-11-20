@@ -678,8 +678,9 @@ function assertExpectedStatus(offer, expectedStatus, allowed) {
   }
 }
 
-// Revise ALWAYS yields an editable draft: a start date that no longer works (passed, or not Monday to Thursday) falls back
-// to the suggested start, and the raise date follows the start date. Save and Send validate dates; Revise never refuses.
+// Revise yields an editable draft: a start date that no longer works (passed, or not Monday to Thursday) falls back to the
+// suggested start, and the raise date follows the start date. Save and Send validate dates. Only an explicit start date
+// that no longer works is refused (reviseOffer), so the fallback here applies to the asked or the old start date.
 function reviseInput(offer, requested, now) {
   const base = inputOfRow(offer);
   const wanted = requested || base.startDate;
@@ -690,8 +691,12 @@ function reviseInput(offer, requested, now) {
   return { ...base, startDate, stepEffectiveOn: base.stepRate === null ? null : stepDateFor(startDate) };
 }
 
-/** POST /:id/offer/:offerId/revise — a new draft copied from a sent / date_requested offer. Needs { expectedStatus }. */
-async function reviseOffer(applicationId, offerId, input, actor, now = new Date()) {
+/**
+ * POST /:id/offer/:offerId/revise — a new draft copied from a sent / date_requested offer. Needs { expectedStatus }; an
+ * optional { startDate } (the card's dated update) must still be a start date the server takes, or nothing is written.
+ * fixedNow: a clock for tests; without it the clock is read once every row lock is held.
+ */
+async function reviseOffer(applicationId, offerId, input, actor, fixedNow) {
   const request = input && typeof input === 'object' ? input : {};
   if (!OUT_STATUSES.includes(request.expectedStatus)) {
     throw new OfferError(400, 'EXPECTED_STATUS_REQUIRED', 'Say which state of the offer you are acting on.');
@@ -701,16 +706,30 @@ async function reviseOffer(applicationId, offerId, input, actor, now = new Date(
     assertOfferable(application);
     const offer = await loadOffer(trx, applicationId, offerId, { lock: true });
     assertExpectedStatus(offer, request.expectedStatus, OUT_STATUSES);
+    const existing = await trx('job_offers').where({ application_id: applicationId, status: 'draft' }).forUpdate().first();
+    // Every row lock is held: the clock is read now, so a request that waited for a lock across Eastern midnight is
+    // judged by the day it writes in (the expiry, the start date and the draft alike).
+    const now = fixedNow || new Date();
     if (expiredByClock(offer, now)) {
       throw new OfferError(409, 'OFFER_NOT_REVISABLE', 'Only an offer that is out can be revised.', { status: 'expired' });
     }
-    const existing = await trx('job_offers').where({ application_id: applicationId, status: 'draft' }).forUpdate().first();
     if (existing && existing.supersedes_id !== offer.id) {
       throw new OfferError(409, 'DRAFT_EXISTS', 'There is already a draft. Send or withdraw it first.', { offerId: existing.id });
     }
     const ownerName = await actorName(trx, actor);
     // A retry (or a second tab) gets the draft that is already there, untouched: it may hold newer edits.
     if (existing) return presentDraft(trx, existing, ownerName, now);
+    // An explicit start date comes from the card's dated update, whose button names that day. When the server no longer
+    // takes it (the Eastern day came while the click was on its way), the revision is refused and nothing is written, so
+    // no draft starts on another day than the button named. Any value the request carries is checked, an empty one too;
+    // only a request without the field falls back (reviseInput).
+    if (request.startDate !== undefined) {
+      const checks = [];
+      checkStartDate(checks, request.startDate, now);
+      if (checks.length) {
+        throw new OfferError(409, 'START_DATE_UNAVAILABLE', `${checks.map((c) => c.message).join(' ')} Nothing was changed. Use Revise to choose another start date.`);
+      }
+    }
 
     const requested = request.startDate || (offer.requested_start_date ? ymdOf(offer.requested_start_date) : null);
     const [row] = await trx('job_offers').insert({

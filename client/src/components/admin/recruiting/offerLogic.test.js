@@ -141,6 +141,12 @@ describe('offer helpers', () => {
       headline: 'This offer is no longer open.',
       lines: ['The text did not go out.', 'The email did not go out.', 'It passed its expiry before Jordan signed it. The offer card shows it as Closed unsigned.'],
     });
+    // An expiry only the page's clock saw (the row still says sent): the applicant may have signed since the last read,
+    // so the words claim only the expiry and say how to read the offer again.
+    expect(describeSend(failed, 'Jordan', 'expired', true)).toEqual({
+      headline: "This offer's expiry has passed.",
+      lines: ['The text did not go out.', 'The email did not go out.', 'Open the application again to see whether Jordan signed it before then.'],
+    });
     expect(describeSend({ sms: { outcome: 'sent' } }, 'Jordan', 'accepted')).toEqual({
       headline: 'Offer sent to Jordan.',
       lines: ['Jordan has already answered it. The offer card shows the answer.'],

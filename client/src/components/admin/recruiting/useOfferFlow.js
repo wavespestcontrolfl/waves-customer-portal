@@ -5,21 +5,26 @@ import { offerErrorMessage } from "./offerLogic";
 const IDLE = { id: null, status: "idle", data: null, error: null };
 // A timer waits at most 2^31 - 1 ms (about 24.8 days); a longer wait fires early and arms again.
 const MAX_TIMER_MS = 2 ** 31 - 1;
+const sentExpiry = (offer) => (offer?.status === "sent" ? offer.expiresAt : null);
 
 /**
- * Renders the caller again once the offer read's current offer passes its expiry. From then on a sent offer reads as
- * closed unsigned by the page's clock (shownOffer), so a card or a form left open changes with no other read.
+ * Renders the caller again once a sent offer it shows passes its expiry: the offer read's current offer, and the offer
+ * in a send's answer (`sent`, the form's result) while that result is open. From then on a sent offer reads as closed
+ * unsigned by the page's clock (shownOffer), so a card or a form left open changes with no other read. The send's
+ * answer counts on its own: when the read after the send failed, that read still holds the draft.
  */
-export function useRenderAtExpiry(data) {
+export function useRenderAtExpiry(data, sent = null) {
   const [tick, setTick] = useState(0);
-  const offer = data?.current;
-  const at = offer?.status === "sent" ? Date.parse(offer.expiresAt) : NaN;
+  // The next expiry by this render's clock, the one that showed the offer as sent (NaN: none still ahead).
+  const now = Date.now();
+  const ahead = [sentExpiry(data?.current), sentExpiry(sent?.offer)].map((at) => Date.parse(at)).filter((at) => at >= now);
+  const next = ahead.length ? Math.min(...ahead) : NaN;
   useEffect(() => {
-    const wait = at - Date.now();
-    if (!(wait >= 0)) return undefined; // no expiry ahead: none, or already past
-    const timer = setTimeout(() => setTick((n) => n + 1), Math.min(wait + 1, MAX_TIMER_MS));
+    if (Number.isNaN(next)) return undefined;
+    // An expiry that passed after the render, before this effect ran, renders again at once.
+    const timer = setTimeout(() => setTick((n) => n + 1), Math.min(Math.max(next - Date.now() + 1, 0), MAX_TIMER_MS));
     return () => clearTimeout(timer);
-  }, [at, tick]);
+  }, [next, tick]);
 }
 
 /**

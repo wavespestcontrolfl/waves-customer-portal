@@ -163,6 +163,29 @@ describe("OfferTimeline", () => {
     }
   });
 
+  // A card left open across Eastern midnight still shows the dated update for the day that has come. The server would
+  // start that draft on another date, so the click writes nothing: the card says why and drops the button.
+  it("a dated update clicked after its day has come writes nothing, says why, and leaves Revise", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-22T15:00:00Z")); // 10 AM ET, Sunday Nov 22
+    try {
+      const onChanged = vi.fn(async () => null);
+      render(card({ offer: record({ status: "date_requested", requestedStartDate: "2026-11-23" }), onChanged }));
+      const update = screen.getByRole("button", { name: "Make an updated offer for Mon, Nov 23, 2026" });
+      vi.setSystemTime(new Date("2026-11-23T05:30:00Z")); // 12:30 AM ET, Monday Nov 23: the asked day has come
+      fireEvent.click(update);
+      expect(reviseOffer).not.toHaveBeenCalled();
+      expect(onChanged).not.toHaveBeenCalled();
+      expect(
+        screen.getByText("Mon, Nov 23, 2026 is no longer in the future, so an updated offer cannot start then. Nothing was changed. Use Revise to choose another start date."),
+      ).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Make an updated offer for/ })).toBeNull();
+      expect(screen.getByRole("button", { name: "Revise" })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("withdraws what the owner saw while the question is still valid", async () => {
     withdrawOffer.mockResolvedValueOnce({ offer: record({ status: "withdrawn" }) });
     render(card());

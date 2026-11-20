@@ -190,11 +190,13 @@ function offerIdsOf(data) {
 // replaced the offer, or the applicant answered, while the result is open) or older (a read that started during the
 // send and landed after its answer). A read of the same version is the same row read later: it can add only the
 // server's expiry, which closes a sent offer by the clock without a write. The page's clock applies the same expiry to
-// a result left open (shownOffer). Without both versions, the send's answer.
-function sentStatus(result, data) {
+// a result left open (shownOffer). Without both versions, the send's answer. byClock: the page's clock, not the server,
+// closed it (the row still says sent), so the result words only the expiry (describeSend).
+function sentView(result, data) {
   const now = offerIn(data, result.offer.id);
-  const newest = now && Date.parse(now.updatedAt) >= Date.parse(result.offer.updatedAt) ? now : result.offer;
-  return shownOffer(newest).status;
+  const row = now && Date.parse(now.updatedAt) >= Date.parse(result.offer.updatedAt) ? now : result.offer;
+  const offer = shownOffer(row);
+  return { offer, byClock: offer.status !== row.status };
 }
 
 function initialDraftId(draft, data) {
@@ -411,8 +413,9 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, cl
   const [error, setError] = useState(null);
   const [confirming, setConfirming] = useState(false);
   const [result, setResult] = useState(null);
-  // An offer out passing its expiry while the form is open: the send result and the lock follow it with no other read.
-  useRenderAtExpiry(data);
+  // An offer out passing its expiry while the form is open: the lock and the send result follow it with no other read.
+  // The result's own offer counts too: after a send whose read failed, the read still holds the draft.
+  useRenderAtExpiry(data, result);
   // The dialog's own close handler (Escape, backdrop) honors the same busy state.
   useEffect(() => {
     onBusyChange(busy);
@@ -601,7 +604,7 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, cl
       const out = await sendOffer(applicationId, pinned.id, pinned.draftHash, reviewedOut);
       // The answer's offer row is read after delivery: it can already be withdrawn or replaced. An answer without this
       // offer and the channels never gets here (sendOffer throws it as a lost answer, and the read decides). The result
-      // keeps the send's own delivery outcomes; the status it shows follows the newest version (sentStatus).
+      // keeps the send's own delivery outcomes; the status it shows follows the newest version (sentView).
       setResult({ offer: out.offer, comms: out.comms });
       await onSent();
       setConfirming(false);
@@ -613,7 +616,8 @@ function OfferFormBody({ applicationId, contact, data, draft, seenOut, stale, cl
   };
 
   if (result) {
-    const sent = describeSend(result.comms, firstName, sentStatus(result, data));
+    const view = sentView(result, data);
+    const sent = describeSend(result.comms, firstName, view.offer.status, view.byClock);
     return (
       <>
         <DialogBody>
