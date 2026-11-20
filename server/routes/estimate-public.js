@@ -17004,16 +17004,30 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // same refusal also answers a merge or undo that moved the estimate to another customer, whose later accept this
     // request must not be handed (it carries that customer's pay link). Such a request keeps its 409, and an accepted
     // estimate's card is not its to retire. The owner is read on a row not yet accepted too (codex pre-push P1): the new
-    // owner's accept may still be in flight with this same card, so a request whose estimate moved retires nothing. A
-    // read that fails answers the error path, again with nothing retired.
+    // owner's accept may still be in flight with this same card, so a request whose estimate moved retires nothing.
+    // The read and the retirement run in one transaction on the estimate row lock (codex pre-push P1), as
+    // replaceRecurringCardIntent does: an accept takes that lock before it re-reads its card live
+    // (verifyRecurringCardIntentUnderLock), so an accept that commits first reads as accepted here, and one that
+    // commits after finds the card retired and asks for a new one (402). A read that fails answers the error path with
+    // nothing retired; a retirement Stripe cannot confirm answers 503, and the tab keeps its intent.
     if (err && err.status === 409 && (err.code === 'RESTART_STATE_CHANGED' || err.code === 'PLAN_START_STATE_CHANGED')) {
       try {
-        const current = await db('estimates').where({ token: req.params.token }).first();
-        const sameOwner = !!acceptOwner && current?.id === acceptOwner.id
-          && (current.customer_id || null) === acceptOwner.customerId;
-        if (sameOwner && current.status === 'accepted') return await respondAlreadyAccepted(res, current);
-        if (!sameOwner || current.status === 'accepted') droppedCaptureToRetire = null;
+        const replayRow = await db.transaction(async (trx) => {
+          const current = await trx('estimates').where({ token: req.params.token }).forUpdate().first();
+          const sameOwner = !!acceptOwner && current?.id === acceptOwner.id
+            && (current.customer_id || null) === acceptOwner.customerId;
+          if (sameOwner && current.status === 'accepted') return current;
+          if (sameOwner && droppedCaptureToRetire) {
+            await retireOrDenyDroppedCapture(droppedCaptureToRetire.estimate, droppedCaptureToRetire.setupIntentId);
+          }
+          return null;
+        });
+        droppedCaptureToRetire = null;
+        if (replayRow) return await respondAlreadyAccepted(res, replayRow);
       } catch (replayErr) {
+        if (replayErr?.code === 'RECURRING_CARD_RETIRE_FAILED' && replayErr.status === 503) {
+          return res.status(503).json({ error: replayErr.message, code: replayErr.code });
+        }
         return next(replayErr);
       }
     }
@@ -19703,8 +19717,8 @@ function consumerNoticePreGuard(req, res, next) {
 // POST /api/estimates/:token/consumer-notice — the estimate page's "Read and sign the notice" tap. Issues, or re-opens,
 // the FDACS-13692 consumer notice for the estimate's customer and returns its public signing URL. The estimate is never
 // changed. The generic 404 covers a dark gate, an unknown token, an estimate that is not open, a staff preview and an
-// estimate with no termite line; the distinct 409s (no account, no representative, already signed) come only after the
-// token has cleared every check.
+// estimate with no termite line; the distinct 409s (a plan quote staff changed, no account, no representative, already
+// signed) come only after the token has cleared every check.
 router.post('/:token/consumer-notice', consumerNoticeLimiter, async (req, res, next) => {
   stampCommercialAgreementHeaders(res);
   const notFound = () => res.status(404).json({ error: 'Estimate not found' });
@@ -19716,7 +19730,14 @@ router.post('/:token/consumer-notice', consumerNoticeLimiter, async (req, res, n
     if (!isEstimateCustomerViewable(estimate) || !isEstimateAcceptActive(estimate)) return notFound();
     const consumerNotice = require('../services/estimate-consumer-notice');
     if (!consumerNotice.estimateNeedsConsumerNotice(estimate)) return notFound();
-    const result = await consumerNotice.ensureEstimateConsumerNotice({ estimate, req, blockedFor: commercialAgreementBlockedFor });
+    // A customer's own plan quote that staff changed: the accept refuses it, so a tab loaded before the change gets the
+    // accept's 409 here and no form to sign (codex pre-push P1). The service judges it again on the estimate row it locks.
+    const { staffChangedQuoteRefusal } = require('../services/cancellation-resolution/restart');
+    const quoteRefusal = staffChangedQuoteRefusal(estimate);
+    if (quoteRefusal) return res.status(409).json({ error: quoteRefusal.message, code: quoteRefusal.code });
+    const result = await consumerNotice.ensureEstimateConsumerNotice({
+      estimate, req, blockedFor: commercialAgreementBlockedFor, quoteRefusalFor: staffChangedQuoteRefusal,
+    });
     if (!result.ok) {
       return res.status(result.status).json(result.status === 404 ? { error: 'Estimate not found' } : { error: result.error, code: result.code });
     }

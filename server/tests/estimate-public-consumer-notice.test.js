@@ -176,6 +176,23 @@ describe('POST /:token/consumer-notice', () => {
     expect(res).toMatchObject({ status: 200, body: { signingUrl: 'https://portal.example.test/contract/def' } });
   });
 
+  test('a stale tab on a customer\'s own plan quote that staff changed gets the accept\'s 409 and no form (codex pre-push P1)', async () => {
+    gateOn();
+    const res = await post(makeEstimate({ source: 'plan_start', bill_by_invoice: true }));
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'PLAN_START_STATE_CHANGED', error: expect.any(String) });
+    expect(res.body).not.toHaveProperty('signingUrl');
+    expect(mockEnsure).not.toHaveBeenCalled();
+  });
+
+  test('the service judges that refusal again on the estimate row it locks (codex pre-push P1)', async () => {
+    gateOn();
+    await post(makeEstimate());
+    expect(mockEnsure).toHaveBeenCalledTimes(1);
+    expect(mockEnsure.mock.calls[0][0].quoteRefusalFor)
+      .toBe(require('../services/cancellation-resolution/restart').staffChangedQuoteRefusal);
+  });
+
   test('an estimate with no termite line is the generic 404 and never reaches the service', async () => {
     gateOn();
     const res = await post(makeEstimate({ estimate_data: PEST_DATA }));

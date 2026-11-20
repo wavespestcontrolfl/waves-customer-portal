@@ -125,7 +125,9 @@ jest.mock('../models/db', () => {
     // (commitReservation's FOR UPDATE read, applyWindowOverlapFilter,
     // findConflictingVisits' hold filter). Lock/OR semantics are inert here —
     // fixtures keep the tables small enough that the eq/null filters decide.
-    b.forUpdate = () => b;
+    // forUpdate also records the table it locked in the open transaction (state.txLocks), so a test can assert what a
+    // step ran under.
+    b.forUpdate = () => { if (state.txDepth > 0) state.txLocks.push(table); return b; };
     b.andWhereRaw = () => b;
     b.orWhereNull = () => b;
     b.orWhereNot = () => b;
@@ -224,13 +226,19 @@ jest.mock('../models/db', () => {
     return { __raw: sql, bindings };
   };
   dbFn.schema = { hasColumn: async () => false };
+  // state.txDepth counts the open transactions; state.txLocks lists the tables FOR UPDATE reads locked since the
+  // outermost one began.
   dbFn.transaction = async (cb) => {
     const snapshot = structuredClone(state.tables);
+    state.txDepth = (state.txDepth || 0) + 1;
+    if (state.txDepth === 1) state.txLocks = [];
     try {
       return await cb(dbFn);
     } catch (err) {
       state.tables = snapshot; // rollback
       throw err;
+    } finally {
+      state.txDepth -= 1;
     }
   };
   dbFn.__state = state;
@@ -421,6 +429,8 @@ function resetStore(estimateRow) {
   db.__state.ops = [];
   db.__state.tryDepositLedgerBusy = false;
   db.__state.onTable = null;
+  db.__state.txDepth = 0;
+  db.__state.txLocks = [];
 }
 
 function storedEstimate() {
@@ -2557,6 +2567,36 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
       expect(res.status).toBe(409);
       expect(res.data.code).toBe('RESTART_STATE_CHANGED');
       expect(retire).toHaveBeenCalledWith({ estimate: expect.objectContaining({ id: 'est-restart-15' }), setupIntentId: 'si_cof_9' });
+    });
+
+    test('the owner read and the retirement share one transaction on the estimate row lock (codex pre-push P1)', async () => {
+      const body = verifiedCapture();
+      resetStore(restartEstimate({ id: 'est-restart-18', token: 'tok-restart-18-x012345678' }));
+      db.__state.tables.customers = [churnedCustomer({ active: true, pipeline_stage: 'active_customer' })];
+      // An accept takes this lock before it re-reads its card live: one that commits first reads as accepted here, and
+      // one that commits after finds the card retired.
+      let atRetire = null;
+      retire.mockImplementation(async () => {
+        atRetire = { inTransaction: db.__state.txDepth > 0, estimateRowLocked: db.__state.txLocks.includes('estimates') };
+        return { ok: true, retired: true };
+      });
+      const res = await putAccept('tok-restart-18-x012345678', body);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('RESTART_STATE_CHANGED');
+      expect(retire).toHaveBeenCalledTimes(1);
+      expect(atRetire).toEqual({ inTransaction: true, estimateRowLocked: true });
+    });
+
+    test('a retirement Stripe cannot confirm under that lock answers 503 and accepts nothing (codex pre-push P1)', async () => {
+      const body = verifiedCapture();
+      resetStore(restartEstimate({ id: 'est-restart-19', token: 'tok-restart-19-x012345678' }));
+      db.__state.tables.customers = [churnedCustomer({ active: true, pipeline_stage: 'active_customer' })];
+      retire.mockResolvedValue({ ok: false, reason: 'retire_failed' });
+      const res = await putAccept('tok-restart-19-x012345678', body);
+      expect(res.status).toBe(503);
+      expect(res.data.code).toBe('RECURRING_CARD_RETIRE_FAILED');
+      expect(retire).toHaveBeenCalledTimes(1);
+      expect(storedEstimate().status).toBe('sent');
     });
   });
 
