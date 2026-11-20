@@ -477,9 +477,12 @@ function purchasedTermsForRow(item) {
 }
 
 // A whole-home exclusion row's included guarantee, as the row's service-specific terms (nothing without the flag).
+// An exclusion row without it projects an explicit [] (authoritative, like a removed trenching warranty): the
+// merge then clears a same-label whole-home row an older snapshot still carries.
 function includedReentryProjection(item) {
   const purchasedTerms = includedReentryPurchasedTerms(item);
-  return purchasedTerms.length ? { purchasedTerms } : {};
+  const isExclusionRow = /^(rodent_)?exclusion/.test(cleanText(item.service || item.serviceKey).toLowerCase());
+  return purchasedTerms.length || isExclusionRow ? { purchasedTerms } : {};
 }
 
 function mergeOneTimeServiceRows(primaryRows = [], fallbackRows = []) {

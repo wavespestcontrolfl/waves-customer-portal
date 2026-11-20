@@ -296,3 +296,34 @@ describe('customer copy for an included re-entry guarantee', () => {
     expect(copy.terms).not.toMatch(/renew/i);
   });
 });
+
+describe('the estimator route translation of the Seal scope pick', () => {
+  const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+  const profile = { homeSqFt: 2000, stories: 1, lotSqFt: 9000, propertyType: 'single_family' };
+  const translate = (options) => translateV2CallToV1Input(profile, ['EXCLUSION'], { exclStandardWireMesh: 2, ...options });
+
+  test('gate on: a Whole home pick reaches services.exclusion with the home facts', () => {
+    gateOn(() => {
+      expect(translate({ exclSealScope: 'whole_home' }).services.exclusion).toMatchObject({
+        pricingVersion: 'v2', sealScope: 'whole_home', homeSqFt: 2000,
+      });
+    });
+  });
+
+  test('gate off: an explicit Whole home pick is refused (never priced as a spot seal)', () => {
+    withGate(undefined, () => {
+      let error;
+      try { translate({ exclSealScope: 'whole_home' }); } catch (err) { error = err; }
+      expect(error).toMatchObject({ statusCode: 400, code: 'EXCLUSION_WHOLE_HOME_GATED', failClosed: true });
+      expect(error.message).toMatch(/Choose Spot seal/);
+    });
+  });
+
+  test('gate off, no Whole home pick: byte-identical to a request that never mentions the scope', () => {
+    withGate(undefined, () => {
+      const plain = translate({});
+      expect(translate({ exclSealScope: 'spot', exclusionChecklist: ['eave_gaps'] })).toEqual(plain);
+      expect(plain.services.exclusion.sealScope).toBeUndefined();
+    });
+  });
+});

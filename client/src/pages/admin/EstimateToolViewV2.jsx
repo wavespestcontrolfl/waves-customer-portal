@@ -1265,7 +1265,7 @@ function wholeHomeGuaranteeRenewal(estimate) {
 }
 
 // The Seal scope choice and, for Whole home, the point checklist and the included guarantee note.
-function ExclusionSealScope({ estimate, blockedReason = "" }) {
+function ExclusionSealScope({ estimate, blockedReason = "", commercial = false }) {
   const { form, set } = useContext(FormCtx);
   const picked = Array.isArray(form.exclusionChecklist) ? form.exclusionChecklist : [];
   const guarantee = form.exclSealScope === "whole_home" ? wholeHomeGuaranteeRenewal(estimate) : null;
@@ -1276,7 +1276,7 @@ function ExclusionSealScope({ estimate, blockedReason = "" }) {
           k="exclSealScope"
           options={[
             { value: "spot", label: "Spot seal — the active points" },
-            { value: "whole_home", label: "Whole home — every point, 1-year re-entry guarantee included" },
+            { value: "whole_home", label: commercial ? "Whole home" : "Whole home — every point, 1-year re-entry guarantee included" },
           ]}
         />
       </Field>
@@ -1293,10 +1293,15 @@ function ExclusionSealScope({ estimate, blockedReason = "" }) {
               onChange={() => set("exclusionChecklist", picked.includes(key) ? picked.filter((k) => k !== key) : [...picked, key])}
             />
           ))}
-          <div className="text-14 text-zinc-600" data-testid="exclusion-guarantee-note">
-            1-year re-entry guarantee included
-            {guarantee?.renewal ? ` — renews at $${guarantee.renewal} a year.` : " — the renewal price shows once the estimate is generated."}
-          </div>
+          {commercial ? (
+            // The engine sends commercial exclusion to a manual quote: no whole-home price or guarantee to promise.
+            <div className="text-14 text-zinc-600" data-testid="exclusion-commercial-note">Commercial: manual quote</div>
+          ) : (
+            <div className="text-14 text-zinc-600" data-testid="exclusion-guarantee-note">
+              1-year re-entry guarantee included
+              {guarantee?.renewal ? ` — renews at $${guarantee.renewal} a year.` : " — the renewal price shows once the estimate is generated."}
+            </div>
+          )}
         </div>
       )}
     </>
@@ -8457,7 +8462,7 @@ export default function EstimateToolViewV2({
               {form.svcExclusion && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 space-y-3">
                   {(exclusionWholeHomeAvailable || form.exclSealScope === "whole_home") && (
-                    <ExclusionSealScope estimate={estimate} blockedReason={wholeHomeRegenerateBlock(form, exclusionWholeHomeAvailable)} />
+                    <ExclusionSealScope estimate={estimate} commercial={commercialDetected} blockedReason={wholeHomeRegenerateBlock(form, exclusionWholeHomeAvailable)} />
                   )}
                   <p className="text-14 text-zinc-400 font-medium">Wire Mesh Points</p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

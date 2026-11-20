@@ -415,6 +415,25 @@ describe('estimate assistant no-guarantee context', () => {
     }
   });
 
+  test('a current spot exclusion row clears an older snapshot\'s whole-home guarantee with the same label', () => {
+    const label = 'Rodent Exclusion — Wire Mesh Points';
+    const current = { service: 'rodent_exclusion', label, amount: 150, price: 150, detail: '2 standard @ $75/pt' };
+    const older = { ...current, includesReentryGuarantee: true, guaranteeRenewalPrice: 199 };
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 150 },
+      estData: {
+        result: { oneTime: { items: [current] } },
+        engineResult: { oneTime: { items: [older] } },
+      },
+      pricingBundle: { anchorOneTimePrice: 150 },
+      noGuaranteeClaims: true,
+    });
+    const rows = context.oneTime.items.filter((row) => row.label === label);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].purchasedTerms || []).toEqual([]);
+    expect(answerEstimateQuestionFallback('Is re-entry covered by a guarantee?', context)).not.toContain('1-year re-entry guarantee');
+  });
+
   test.each(['pricing', 'saved'])('%s purchased warranty scope survives without allowing arbitrary warranty prose', (source) => {
     const row = { service: 'termite_trenching', label: 'Front foundation', amount: 1200, price: 1200,
       warrantyTier: 'one_year_retreat', warrantyAdder: 100, detail: 'Guaranteed termite-free forever' };

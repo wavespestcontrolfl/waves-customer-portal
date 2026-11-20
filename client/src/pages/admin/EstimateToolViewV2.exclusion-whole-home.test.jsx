@@ -82,6 +82,16 @@ describe("Whole-home rodent seal choice", () => {
     expect(findCheckboxByLabel(container, /Eave gaps/).checked).toBe(true);
   });
 
+  it("a commercial property shows a manual quote and no guarantee promise", async () => {
+    const { container, findByTestId } = await openExclusion({ data: {}, exclusionWholeHome: true });
+    await waitFor(() => expect(container.querySelector("#estimate-exclSealScope")).toBeTruthy());
+    fireEvent.change(document.getElementById("estimate-isCommercial"), { target: { value: "YES" } });
+    fireEvent.change(container.querySelector("#estimate-exclSealScope"), { target: { value: "whole_home" } });
+    expect(await findByTestId("exclusion-commercial-note")).toHaveTextContent("Commercial: manual quote");
+    expect(container.querySelector('[data-testid="exclusion-guarantee-note"]')).toBeNull();
+    expect(container.querySelector("#estimate-exclSealScope").textContent).not.toMatch(/guarantee/i);
+  });
+
   it("hides the choice when the gate is off, the row is missing or the read fails", async () => {
     for (const row of [{ data: {} }, { data: {}, exclusionWholeHome: false }]) {
       cleanup();
