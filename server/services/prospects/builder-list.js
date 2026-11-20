@@ -230,6 +230,9 @@ async function namesForKey(conn, source, key, today) {
 // the job sites share one snapshot, so a sync that renames a builder between the two reads cannot drop a permit.
 async function builderPermits({ kind, key, limit = DEFAULT_PERMIT_LIMIT, now = new Date() }) {
   const source = sourceFor(kind);
+  // An empty key is no builder: the list skips a name that folds to nothing ("-", "."), and an empty key would
+  // match every such name.
+  if (!key) return [];
   const started = Date.now();
   const today = etDateString(now);
   const take = Math.min(Math.max(Math.trunc(Number(limit)) || DEFAULT_PERMIT_LIMIT, 1), MAX_PERMIT_LIMIT);
