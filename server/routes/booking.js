@@ -2307,15 +2307,20 @@ async function availabilityForExistingCustomer({ customerId, serviceKey }) {
 // (services/scheduling/text-offer-times.js, GATE_MULTI_TECH_TEXT_TIMES) share,
 // so a text-offered time and the website's come from one finder. Null when
 // /book is off, the service is no funnel service or the pin is missing.
-// Three options only the hourly route check's slot-rule decision passes
+// Five options only the hourly route check's slot-rule decision passes
 // (day-replan/route-check.js, which only reads the offer); unset = as before:
 //   `paidLookups: false` buys nothing: no road lookup (find-time
 //     travelAllowance) and no forecast (the rain chips and the rain rank; both
 //     only stamp or order the offers, never add or drop one);
 //   `through` (YYYY-MM-DD) searches at least to that date, as /book's own
 //     "Find more dates" request can, never past the 90-day horizon;
-//   `crew` offers each date only from the technicians who work it (crewSlots).
-async function availabilityForPin({ lat, lng, serviceKey, internal = false, paidLookups, through, crew }) {
+//   `crew` offers each date only from the technicians who work it (crewSlots);
+//   `now` (a Date) is the clock the offer is built for (the offer window and
+//     the notice window): the run's own; unset = the wall clock;
+//   `surface` labels the ask for the customer route check (default 'book'):
+//     the route check's asks log as 'route_check', apart from customer
+//     searches, under the same rules.
+async function availabilityForPin({ lat, lng, serviceKey, internal = false, paidLookups, through, crew, now, surface }) {
   const funnelKey = normalizeBookingServiceKey(serviceKey);
   // A SQL NULL / blank must not read as 0 (Number(null) is 0: the Gulf of Guinea).
   const pin = [lat, lng].map((v) => (v == null || String(v).trim() === '' ? NaN : Number(v)));
@@ -2324,12 +2329,12 @@ async function availabilityForPin({ lat, lng, serviceKey, internal = false, paid
   // the PUBLIC funnel's kill switch; every customer-facing reader keeps it.
   if (!internal && !require('../config/feature-gates').isEnabled('selfBooking')) return null;
   const config = await loadBookingConfig();
-  const today = new Date();
+  const today = now || new Date();
   const { minDate, maxDate, defaultTo } = bookingOfferWindow(config, today);
   const rangeTo = through && through > defaultTo ? [through, maxDate].sort()[0] : defaultTo;
   return buildFunnelAvailability({
     // Customer-facing text offers only; a staff-side pick (`internal`) is never filtered.
-    ...(internal ? {} : { surface: 'book' }),
+    ...(internal ? {} : { surface: surface || 'book' }),
     lat: pin[0], lng: pin[1], duration: resolveBookingDuration(null, config, funnelKey),
     rangeFrom: minDate, rangeTo, config, today, serviceKey: funnelKey,
     // The /book page's own first request always sends expand=open

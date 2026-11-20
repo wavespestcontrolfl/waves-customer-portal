@@ -172,6 +172,49 @@ describe("availabilityForPin — the hourly route check's read-only ask", () => 
     expect(await searchedTo({ through: dayOffset(20) })).toBe(dayOffset(20));
     expect(await searchedTo({ through: dayOffset(120) })).toBe(dayOffset(90));
   });
+
+  test("now: the offer is built for the caller's clock (its window and its notice); unset = the wall clock", async () => {
+    const { availabilityForPin } = require('../routes/booking')._internals;
+    const pin = { lat: 27.4, lng: -82.4, serviceKey: 'pest_control', paidLookups: false };
+    const saved = process.env.SELF_SERVE_NOTICE_HOURS;
+    process.env.SELF_SERVE_NOTICE_HOURS = '24';
+    findAvailableSlots.mockResolvedValue({ slots: [sharedStart('tech-1', 1)], total_feasible: 1 });
+    try {
+      // The wall clock: D is 10 days out, inside the window and past the 24-hour notice, so its 9:00 AM is offered.
+      expect(offeredAt9(await availabilityForPin(pin))).toEqual(['tech-1']);
+      expect(findAvailableSlots.mock.calls[0][0]).toMatchObject({ dateFrom: dayOffset(1), dateTo: dayOffset(14) });
+      // A clock at noon the day before D: the window opens on D, and D's 9:00 AM is inside the notice.
+      findAvailableSlots.mockClear();
+      const noonBeforeD = parseETDateTime(`${dayOffset(9)}T12:00`);
+      expect(offeredAt9(await availabilityForPin({ ...pin, now: noonBeforeD }))).toEqual([]);
+      expect(findAvailableSlots.mock.calls[0][0]).toMatchObject({ dateFrom: D, dateTo: dayOffset(23) });
+    } finally {
+      if (saved === undefined) delete process.env.SELF_SERVE_NOTICE_HOURS;
+      else process.env.SELF_SERVE_NOTICE_HOURS = saved;
+    }
+  });
+
+  test("surface: the customer route check labels the ask with the caller's surface; 'book' by default, none for a staff pick", async () => {
+    const { availabilityForPin } = require('../routes/booking')._internals;
+    const routeCheck = require('../services/scheduling/customer-route-check');
+    const mode = jest.spyOn(routeCheck, 'customerRouteCheckMode').mockReturnValue('shadow');
+    const filter = jest.spyOn(routeCheck, 'filterOfferedSlots').mockImplementation(async ({ slots }) => ({ slots, report: {} }));
+    const labels = () => filter.mock.calls.map(([args]) => args.surface);
+    try {
+      const pin = { lat: 27.4, lng: -82.4, serviceKey: 'pest_control', paidLookups: false };
+      await availabilityForPin({ ...pin, surface: 'route_check' });
+      expect(labels()).toEqual(['route_check']);
+      filter.mockClear();
+      await availabilityForPin(pin);
+      expect(labels()).toEqual(['book']);
+      filter.mockClear();
+      await availabilityForPin({ ...pin, internal: true, surface: 'route_check' });
+      expect(filter).not.toHaveBeenCalled();
+    } finally {
+      mode.mockRestore();
+      filter.mockRestore();
+    }
+  });
 });
 
 // Codex round 2 P1 on PR #5231: an offer minted while capacityPlacement is

@@ -62,6 +62,9 @@ const DEMAND_DAYS = 7;
 const SCAN_DAYS = 14;
 // The slot rule's stated job (decideSlotRule): the /book funnel's pest control visit, at its funnel length.
 const STANDARD_SERVICE_KEY = 'pest_control';
+// The slot rule's own label on its asks (availabilityForPin `surface`): the customer route check logs them as
+// surface=route_check, apart from a customer's /book search, and applies the same rules.
+const PROBE_SURFACE = 'route_check';
 // A job slot's parts (close-gaps SLOT_MIN: the 60-minute median job and its added drive). The drive comes first, so
 // the service can start on the hour (AGENTS.md).
 const JOB_MIN = 60;
@@ -476,18 +479,27 @@ async function measureOne(conn, env, { day, techId, rows, occupancy }) {
  * a stop booked) and offers each date only from it, before it picks one technician per start. A Sunday whose stops
  * read failed has no known crew: its slots are not counted (byDate null). The finder reads the live tables itself,
  * just after the snapshot.
+ * One database, one clock. The finder reads the shared handle (models/db) in every module it calls (find-time, the
+ * occupancy mirror, the zone route days, the customer route check), and none of them takes a connection. So the run
+ * reads that handle too (runRouteCheck has no other), and the crew and the bookings come from one database. The finder
+ * gets the run's clock (`now`: the offer window and the notice window). Its own wall-clock reads (find-time's same-day
+ * floor, the van's place today) touch only the wall clock's today, which the decision never counts while the run is on
+ * that day. A run on another ET day than the wall clock's (a test or replay clock, a run that crossed midnight) gets no
+ * decision: 'unknown', reason 'other_day', with no ask.
+ * The asks carry their own label (PROBE_SURFACE): the customer route check logs them apart from customer searches.
  * Shadow only: nothing reads the decision, no budget changes, nothing is held, and nothing is paid for (paidLookups
  * false buys no road lookup and reads no forecast; a zone center is a pin, so nothing is geocoded). Under capacity
  * routing /book itself buys road times, so there the answer is the free drive model's (`travel: 'modeled'`): a
  * borderline slot can differ from /book's.
  *   mode 'full': some zone has a slot. 'floor': every zone answered for every date and none has a slot, or no staffed
  *   day is ahead. 'unknown': no slot, and the zones, a zone's answer or a date's crew could not be read (`reason`, a
- *   zone's `error`, or a null in byDate). A zone with no pin, or /book off, gets no answer (`no_offer`): an error,
- *   never "no slot".
+ *   zone's `error`, or a null in byDate), or the run is not on the wall clock's day (reason 'other_day'). A zone with
+ *   no pin, or /book off, gets no answer (`no_offer`): an error, never "no slot".
  */
-async function decideSlotRule(conn, dates, crew) {
+async function decideSlotRule({ now, dates, crew }) {
+  if (etDateString(new Date()) !== etDateString(now)) return { mode: 'unknown', reason: 'other_day', dates };
   if (!dates.length) return { mode: 'floor', reason: 'no_staffed_days', dates };
-  const zones = (await conn('service_zones').select('zone_name', 'center_lat', 'center_lng'))
+  const zones = (await db('service_zones').select('zone_name', 'center_lat', 'center_lng'))
     .sort((a, b) => String(a.zone_name).localeCompare(String(b.zone_name)));
   if (!zones.length) return { mode: 'unknown', reason: 'no_zones', dates };
   const { availabilityForPin } = require('../../routes/booking')._internals;
@@ -498,7 +510,7 @@ async function decideSlotRule(conn, dates, crew) {
     try {
       const offer = await availabilityForPin({
         lat: zone.center_lat, lng: zone.center_lng, serviceKey: STANDARD_SERVICE_KEY, paidLookups: false,
-        through: dates[dates.length - 1], crew,
+        through: dates[dates.length - 1], crew, now, surface: PROBE_SURFACE,
       });
       if (!offer) throw new Error('no_offer');
       for (const day of dates) {
@@ -532,32 +544,33 @@ async function decideSlotRule(conn, dates, crew) {
  * status (`duplicate: true`), so job health keeps a failed hour failed and never clears it.
  * run_hour is the hour the run starts, which is its tick's hour: a tick waits at most SLOT_WAIT_MAX_MS (10 minutes)
  * past :30 for a slot (utils/cron-lock.js).
+ * The run reads the shared handle only, the one the decision's finder reads (decideSlotRule): it takes no connection.
  */
-async function runRouteCheck({ conn = db, now = new Date() } = {}) {
+async function runRouteCheck({ now = new Date() } = {}) {
   const today = etDateString(now);
   const hour = etParts(now).hour;
   let run;
   try {
-    run = await inSnapshot(conn, (reader) => measureRun(reader, now));
+    run = await inSnapshot(db, (reader) => measureRun(reader, now));
   } catch (err) {
     logger.warn(`[route-check] ${today}: run failed (${err.message}); recorded`);
     run = { status: 'failed', days: [], totals: { error: String(err.message).slice(0, 200) }, ad: {} };
   }
   // A decision the run could not make, or an ask that failed, is an error of the run, as an unread campaign list is.
   if (run.status !== 'failed') {
-    const decision = await decideSlotRule(conn, run.totals.next.dates, run.crew).catch((err) => {
+    const decision = await decideSlotRule({ now, dates: run.totals.next.dates, crew: run.crew }).catch((err) => {
       logger.warn(`[route-check] ${today}: slot-rule decision failed (${err.message})`);
       return { mode: 'unknown', error: String(err.message).slice(0, 200) };
     });
     run.ad.decision = decision;
     if (decision.mode === 'unknown' || decision.zones?.some((z) => z.error)) run.status = 'completed_with_errors';
   }
-  const written = await conn(TABLE).insert({
+  const written = await db(TABLE).insert({
     run_at: now, service_date: today, run_hour: hour, status: run.status,
     days: JSON.stringify(run.days), totals: JSON.stringify(run.totals), ad_shadow: JSON.stringify(run.ad),
   }).onConflict(['service_date', 'run_hour']).ignore().returning('id');
   if (!written.length) {
-    const recorded = await conn(TABLE).where({ service_date: today, run_hour: hour }).first('status');
+    const recorded = await db(TABLE).where({ service_date: today, run_hour: hour }).first('status');
     const status = recorded?.status || 'failed';
     logger.info(`[route-check] ${today} ${hour}:00 already recorded (${status}) by another instance; this run wrote nothing`);
     return { status, duplicate: true, totals: {}, days: 0 };
@@ -628,6 +641,6 @@ module.exports = {
   _internals: {
     recoverable, physicalStops, heldSpans, unheldWork, hourSlots, simulateBookedDay, latestHomeDeparture, measureTechDay, staffed,
     datesToMeasure, summarize, unmeasurable, DISPATCH_DAY_END, decideSlotRule,
-    STAFFED_DAYS, DEMAND_DAYS, STANDARD_SERVICE_KEY,
+    STAFFED_DAYS, DEMAND_DAYS, STANDARD_SERVICE_KEY, PROBE_SURFACE,
   },
 };
