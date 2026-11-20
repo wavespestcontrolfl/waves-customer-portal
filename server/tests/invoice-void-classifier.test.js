@@ -49,11 +49,13 @@ describe('moneyRefusal on a given connection', () => {
     expect(conn.calls).toContain('payment_plans');
   });
 
-  test('an unresolved saved-card charge refuses (the fence reads on the given connection, read-only)', async () => {
-    mockFence.mockRejectedValueOnce(Object.assign(new Error('x'), { code: 'STRIPE_AMBIGUOUS_OUTCOME', reconciliationRequired: true }));
+  test('an unstamped authentication hold refuses (the fence reads on the given connection, read-only checkout-aware)', async () => {
+    mockFence.mockRejectedValueOnce(Object.assign(new Error('authentication pending'), {
+      code: 'STRIPE_CHARGE_IN_PROGRESS', chargeAttemptId: 'attempt-auth',
+    }));
     const conn = fakeConn();
     expect(await moneyRefusal(INV, conn)).toMatchObject({ code: 'by_owner_rule', reason: 'charge_in_progress' });
-    expect(mockFence).toHaveBeenCalledWith('inv-1', conn, { readOnly: true });
+    expect(mockFence).toHaveBeenCalledWith('inv-1', conn, { readOnly: true, checkout: true });
   });
 
   test('a fence read that fails for another reason is reported as unverified, never as clear', async () => {

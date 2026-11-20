@@ -177,7 +177,7 @@ async function manualPaymentUndoRefusal(conn, invoice) {
     // A saved-card charge for the rest that is submitted or unresolved keeps its own claim row even when a crash rolled the invoice
     // write back: if it settles after this Undo, the settle books the invoice paid without the part. Read only, never released here.
     try {
-      await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoice.id, conn, { readOnly: true });
+      await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoice.id, conn, { readOnly: true, checkout: true });
     } catch (err) {
       if (!['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(err.code)) throw err;
       return notEligible('card_charge_pending', 'A card charge for the rest of this invoice is still being settled, so the part payment cannot be undone now. Try again later.');

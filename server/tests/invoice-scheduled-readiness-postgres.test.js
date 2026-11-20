@@ -50,6 +50,7 @@ const { restoreAccountCreditForVoidedInvoice } = require('../services/customer-c
 const { enrollForPaidInvoice } = require('../services/review-request');
 const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
 const { stripPayLinkLineFromBody } = require('../services/dispatch-completion-deferred');
+const { recordAuthenticationCancellation } = require('../services/invoice-payment-authentication');
 
 jest.setTimeout(30000);
 postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () => {
@@ -382,6 +383,77 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     );
     expect(row.scheduled_send_attempts).toBe(1); // unchanged — voided, not a spent attempt
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('Schedule/Dispatch cancellation preserves applied credit until the exact authentication PI is canceled', async () => {
+    const attemptId = randomUUID();
+    const intentId = `pi_${attemptId.replaceAll('-', '')}`;
+    const stripeMethodId = 'pm_synthetic_cancel_void_hold';
+    await trx('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
+    await trx('invoices').where({ id: invoiceId }).update({
+      status: 'sent',
+      total: 150,
+      credit_applied: 25,
+    });
+    await trx('stripe_invoice_charge_attempts').insert({
+      id: attemptId,
+      invoice_id: invoiceId,
+      stripe_payment_method_id: stripeMethodId,
+      stripe_payment_intent_id: intentId,
+      status: 'failed',
+      decline_code: 'authentication_required',
+      idempotency_key: randomUUID(),
+      submitted_at: new Date(),
+      resolved_at: new Date(),
+    });
+
+    expect(Array.from(await Invoice.voidOpenInvoicesForCancelledService(visitId))).toEqual([]);
+    await expect(read()).resolves.toMatchObject({ status: 'sent', credit_applied: '25.00' });
+    expect(restoreAccountCreditForVoidedInvoice).not.toHaveBeenCalled();
+
+    await recordAuthenticationCancellation({
+      id: intentId,
+      status: 'canceled',
+      payment_method: stripeMethodId,
+      metadata: {
+        source: 'admin_card_on_file',
+        saved_card_attempt_id: attemptId,
+        waves_invoice_id: invoiceId,
+        waves_customer_id: customerId,
+      },
+    }, trx);
+
+    expect(Array.from(await Invoice.voidOpenInvoicesForCancelledService(visitId))).toEqual([invoiceId]);
+    await expect(read()).resolves.toMatchObject({ status: 'void' });
+    expect(restoreAccountCreditForVoidedInvoice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        invoice: expect.objectContaining({ id: invoiceId, credit_applied: '25.00' }),
+        createdBy: 'system:service_cancel',
+      }),
+      expect.anything(),
+    );
+  });
+
+  test('Schedule/Dispatch cancellation commits a stale submitted-claim promotion while leaving the invoice open', async () => {
+    const attemptId = randomUUID();
+    await trx('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'sent', credit_applied: 25 });
+    await trx('stripe_invoice_charge_attempts').insert({
+      id: attemptId,
+      invoice_id: invoiceId,
+      stripe_payment_method_id: 'pm_synthetic_cancel_stale',
+      stripe_payment_intent_id: `pi_${attemptId.replaceAll('-', '')}`,
+      status: 'claimed',
+      idempotency_key: randomUUID(),
+      submitted_at: new Date(Date.now() - 6 * 60 * 1000),
+      created_at: new Date(Date.now() - 6 * 60 * 1000),
+    });
+
+    expect(Array.from(await Invoice.voidOpenInvoicesForCancelledService(visitId))).toEqual([]);
+    await expect(read()).resolves.toMatchObject({ status: 'sent', credit_applied: '25.00' });
+    await expect(trx('stripe_invoice_charge_attempts').where({ id: attemptId }).first('status', 'resolved_at'))
+      .resolves.toMatchObject({ status: 'ambiguous', resolved_at: null });
+    expect(restoreAccountCreditForVoidedInvoice).not.toHaveBeenCalled();
   });
 
   // Both payer-billed re-validation tests need a REAL visit_completion_packets
