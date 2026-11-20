@@ -423,6 +423,27 @@ jest.setTimeout(120000);
         expect((await root('job_applications').where({ id: app.id }).first()).status).toBe('offer');
       });
 
+      // The server signs only a frozen offer that carries every term the page shows, so no client (a tab from before
+      // the page's own check included) signs a gap. The answer is the same 409, and nothing is written.
+      test.each([
+        ['no hourly rate', { hourlyRate: null }],
+        ['an hourly rate that shows as $0.00', { hourlyRate: 0.001 }],
+        ['a step rate with no step date', { stepEffectiveOn: null }],
+        ['no pay step fields', { stepRate: undefined, stepEffectiveOn: undefined }],
+        ['no job', { jobTitle: ' ' }],
+        ['no start date', { startDate: null }],
+        ['empty Terms', { terms: { title: 'Technician Terms', markdown: '' } }],
+      ])('a signature on a frozen offer with %s is refused, and nothing is written', async (_, gap) => {
+        const sent = await root('job_offers').where({ id: offer.id }).first();
+        const snapshot = typeof sent.snapshot === 'string' ? JSON.parse(sent.snapshot) : sent.snapshot;
+        await root('job_offers').where({ id: offer.id }).update({ snapshot: JSON.stringify({ ...snapshot, ...gap }) });
+        const version = await shownVersion(token); // read before the row: a view stamps last_viewed_at
+        const before = await root('job_offers').where({ id: offer.id }).first();
+        expect(await JobOffers.acceptOffer(token, { signedName: 'Jordan Rivera', version })).toEqual({ refused: true, body: { state: 'open' } });
+        expect(await root('job_offers').where({ id: offer.id }).first()).toEqual(before);
+        expect((await root('job_applications').where({ id: app.id }).first()).status).toBe('offer');
+      });
+
       // A text choice equal to the stored one writes nothing either way, so with no version it answers as any resend
       // does: the stored choice and the version on file.
       test('a text choice equal to the stored one, sent with no version, writes nothing and answers the stored choice', async () => {

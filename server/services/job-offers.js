@@ -1007,6 +1007,23 @@ function parseSignedName(value) {
 const sameName = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
 
 /** POST /:token/v2/accept. `version`: see changedSince. */
+// The terms a signature binds, as the page shows them (offerFormat.hasOfferFacts): the job, a real start date, an hourly
+// rate of whole cents (at least one cent), the week, who they report to, pay day and the Terms, and a pay step only with
+// both its rate and its date (no raise: both null). buildSnapshot freezes a checked draft, so a gap here is a bug; the
+// check holds for every client, a tab from before the page's own check included.
+const textFact = (value) => typeof value === 'string' && value.trim() !== '';
+const centsFact = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0.01
+  && /^\d+\.\d{2}$/.test(value.toFixed(2)) && Number(value.toFixed(2)) === value;
+
+function signableSnapshot(snapshot) {
+  const s = snapshot || {};
+  const noStep = s.stepRate === null && s.stepEffectiveOn === null;
+  return textFact(s.jobTitle) && textFact(s.hoursLine) && textFact(s.reportTo) && textFact(s.payDayLine)
+    && isYmd(s.startDate) && centsFact(s.hourlyRate)
+    && (noStep || (centsFact(s.stepRate) && isYmd(s.stepEffectiveOn)))
+    && Boolean(s.terms) && textFact(s.terms.markdown);
+}
+
 async function acceptOffer(token, { signedName, version, ip, userAgent }) {
   const name = parseSignedName(signedName);
   const result = await db.transaction(async (trx) => {
@@ -1022,6 +1039,12 @@ async function acceptOffer(token, { signedName, version, ip, userAgent }) {
     if (state !== 'open') return refusal(state, offer);
     if (!name) return { invalid: 'Type your full name to sign.' };
     if (changedSince(offer, version)) return CHANGED;
+    // A frozen offer missing a term it shows is never signed: the same 409 with no write, and the page's read of it
+    // shows the load error.
+    if (!signableSnapshot(asObject(offer.snapshot))) {
+      logger.warn(`[job-offers] signature refused: offer ${offer.id} lacks a term the page shows`);
+      return CHANGED;
+    }
     return { body: await signOffer(trx, offer, { name, ip, userAgent, now: found.now }), forBell: offer };
   });
   if (result.forBell) await bell('signed', result.forBell, null);

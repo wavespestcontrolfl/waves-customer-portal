@@ -30,6 +30,7 @@ describe('offerFormat', () => {
     expect(hasOfferFacts({ ...facts, stepRate: null, stepEffectiveOn: null })).toBe(true);
     expect(hasOfferFacts({ ...facts, hourlyRate: 23.5, stepRate: 25 })).toBe(true);
     expect(hasOfferFacts({ ...facts, hourlyRate: '0.01' })).toBe(true);
+    expect(hasOfferFacts({ ...facts, hourlyRate: '23', stepRate: '25.5' })).toBe(true);
     const { stepRate, stepEffectiveOn, ...withoutStep } = facts;
     expect([stepRate, stepEffectiveOn]).toEqual(['25.00', '2027-04-05']);
     expect(hasOfferFacts(withoutStep)).toBe(false); // a read that leaves the step out may hide a raise
@@ -37,6 +38,8 @@ describe('offerFormat', () => {
       { stepRate: '', stepEffectiveOn: '' }, { stepRate: undefined, stepEffectiveOn: undefined },
       { hourlyRate: '0.001' }, { hourlyRate: 0.004 }, { hourlyRate: '23.005' }, { stepRate: '0.001' },
       { stepRate: 25.999 }, { hourlyRate: 1e21 }, { hourlyRate: Infinity }, { hourlyRate: '1e400' },
+      { hourlyRate: '23.000000000000001' }, { hourlyRate: '99999999999999999999' }, { hourlyRate: '1e2' },
+      { hourlyRate: ' 23.00' }, { stepRate: '25.000' }, { hourlyRate: '0.00' },
       { jobTitle: '' }, { hoursLine: null }, { reportTo: '  ' }, { payDayLine: undefined },
       { startDate: null }, { startDate: '2027-02-30' }, { startDate: 'soon' },
       { hourlyRate: null }, { hourlyRate: '' }, { hourlyRate: 0 }, { hourlyRate: '-1' }, { hourlyRate: true },

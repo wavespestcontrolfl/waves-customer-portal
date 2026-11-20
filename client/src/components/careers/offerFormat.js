@@ -84,14 +84,20 @@ export function tomorrowET(now = new Date()) {
 
 const filled = (value) => typeof value === 'string' && value.trim() !== '';
 
-// An amount that money() shows exactly: a number (or a numeric string) of whole
-// cents, at least one cent. A rate that would read "$0.00", or that money()
-// would round or write in exponent form, is not one.
+// An amount that money() shows exactly: whole cents, at least one cent. A number
+// must be the value its two-decimal form names. A string must be a plain
+// decimal of at most two places that money() writes back digit for digit, so
+// no rounding, no exponent and no precision lost in the conversion. A rate
+// that would read "$0.00" is not one.
 function exactAmount(value) {
-  if (typeof value !== 'number' && !filled(value)) return false;
+  if (typeof value !== 'number' && typeof value !== 'string') return false;
   const n = Number(value);
-  const shown = Number.isFinite(n) ? n.toFixed(2) : '';
-  return /^\d+\.\d{2}$/.test(shown) && Number(shown) === n && n >= 0.01;
+  if (!Number.isFinite(n) || n < 0.01) return false;
+  const shown = n.toFixed(2);
+  if (!/^\d+\.\d{2}$/.test(shown)) return false;
+  if (typeof value === 'number') return Number(shown) === n;
+  const parts = /^(\d+)(?:\.(\d{1,2}))?$/.exec(value);
+  return Boolean(parts) && shown === `${parts[1].replace(/^0+(?=\d)/, '')}.${(parts[2] || '').padEnd(2, '0')}`;
 }
 
 // True when an offer read carries every term the page shows, exactly as the
