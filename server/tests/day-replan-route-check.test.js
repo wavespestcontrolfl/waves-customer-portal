@@ -730,8 +730,10 @@ describe('runRouteCheck', () => {
       const none = fakeConn();
       expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
       expect(JSON.parse(none.writes[0][1].ad_shadow).decision).toEqual({
-        // Today's answer (the office's finder) stands beside /book's failure.
-        ...FLOOR, mode: 'unknown', zones: [{ zone: 'North', byDate: { '2026-11-19': 0 }, first: null, error }, FLOOR.zones[1]],
+        // Today's answer (the office's finder) stands beside /book's failure; the next days have no answer.
+        ...FLOOR,
+        mode: 'unknown',
+        zones: [{ zone: 'North', byDate: { '2026-11-19': 0, '2026-11-20': null, '2026-11-21': null, '2026-11-23': null }, first: null, error }, FLOOR.zones[1]],
       });
     }
     // Any slot is full, so a slot in another zone still decides it; the zone with no answer still marks the run.
@@ -759,8 +761,10 @@ describe('runRouteCheck', () => {
     });
     const kept = fakeConn();
     expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
+    // The crew's zeros were provisional: the next days have no answer.
+    const unanswered = { '2026-11-19': 0, '2026-11-20': null, '2026-11-21': null, '2026-11-23': null };
     expect(JSON.parse(kept.writes[0][1].ad_shadow).decision).toEqual({
-      ...FLOOR, mode: 'unknown', zones: FLOOR.zones.map((z) => ({ ...z, error: 'route check: floor_kept' })),
+      ...FLOOR, mode: 'unknown', zones: FLOOR.zones.map((z) => ({ ...z, byDate: unanswered, error: 'route check: floor_kept' })),
     });
     // A crew start /book's own pool offers counts (it opened between the two reads); another technician's does not.
     const OTHER = '00000000-0000-4000-8000-000000000002';
@@ -787,7 +791,7 @@ describe('runRouteCheck', () => {
     availabilityForPin.mockClear();
     const empty = fakeConn({ zones: [] });
     expect((await runRouteCheck({ now: NOW })).status).toBe('completed_with_errors');
-    expect(JSON.parse(empty.writes[0][1].ad_shadow).decision).toEqual({ mode: 'unknown', reason: 'no_zones', dates: FLOOR.dates });
+    expect(JSON.parse(empty.writes[0][1].ad_shadow).decision).toEqual({ mode: 'unknown', reason: 'no_zones', dates: FLOOR.dates, sameDay: FLOOR.sameDay });
     expect(availabilityForPin).not.toHaveBeenCalled();
     // A read that throws is unknown too, with its message, and the row is still written.
     const unread = fakeConn({ zones: new Error('timeout') });
@@ -934,8 +938,8 @@ describe('runRouteCheck', () => {
   });
 
   test("slot rule, today (A2): a slot today does not stand in for /book's own-pool check of the next days", async () => {
-    // North has a start today, and /book's check would keep its whole week there (its own-pool ask throws): the next
-    // days' zeros are no answer. Today's slot still makes the decision full, and the zone has the error.
+    // North has a start today, and /book's check would keep its whole week (its own-pool ask throws): the next days have
+    // no answer (null). Today's slot still makes the decision full, and each zone has the error.
     findAvailableSlots.mockImplementation(async ({ lat, technicianId }) => found(lat === 27.5 ? [['15:00', '15:00']] : [], {}, technicianId));
     availabilityForPin.mockImplementation(async ({ crew }) => {
       if (!crew) throw new Error('route check: floor_kept');
@@ -947,8 +951,8 @@ describe('runRouteCheck', () => {
       ...FLOOR,
       mode: 'full',
       zones: [
-        { ...FLOOR.zones[0], byDate: { ...FLOOR.zones[0].byDate, '2026-11-19': 1 }, first: '2026-11-19 15:00', error: 'route check: floor_kept' },
-        { ...FLOOR.zones[1], error: 'route check: floor_kept' },
+        { zone: 'North', byDate: { '2026-11-19': 1, '2026-11-20': null, '2026-11-21': null, '2026-11-23': null }, first: '2026-11-19 15:00', error: 'route check: floor_kept' },
+        { zone: 'South', byDate: { '2026-11-19': 0, '2026-11-20': null, '2026-11-21': null, '2026-11-23': null }, first: null, error: 'route check: floor_kept' },
       ],
     });
   });
@@ -1030,17 +1034,27 @@ describe('runRouteCheck', () => {
       expect(unknownCrew).toMatchObject({ mode: 'unknown', sameDay: { date: '2026-11-22' } });
       expect(unknownCrew.zones.map((z) => [z.byDate['2026-11-22'], z.error])).toEqual([[null, undefined], [null, undefined]]);
       expect(findAvailableSlots).not.toHaveBeenCalled();
-      // TECH's stop booked, the done read failing: TECH is still asked. With no start, today has no answer (someone else
-      // may work today); TECH's start counts.
+      // TECH's stop booked, the done read failing: TECH is still asked. OTHER_TECH may work today too (a done stop the
+      // failed read would show), so with no start today has no answer; TECH's start counts.
       const sundayStart = (technicianId) => ({
         slots: [{ date: '2026-11-22', start_time: '15:00', estimated_arrival: '15:00', route_mode: 'arrival_windows', technician: { id: technicianId } }],
         rejections_by_date: {},
       });
       replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-22' ? [stop('s1', '13:00:00', '14:00:00')] : []));
-      const bookedOnly = fakeConn({ done: new Error('timeout') });
+      const bookedOnly = fakeConn({ done: new Error('timeout'), techs: [TECH, OTHER_TECH] });
       expect((await runRouteCheck({ now: SUNDAY })).status).toBe('completed_with_errors');
       expect(JSON.parse(bookedOnly.writes[0][1].ad_shadow).decision.zones.map((z) => z.byDate['2026-11-22'])).toEqual([null, null]);
       expect(findAvailableSlots.mock.calls.map(([ask]) => ask.technicianId)).toEqual([TECH, TECH]);
+      // TECH alone could work today and is known to: the failed read can add nobody, so TECH's empty list is the answer.
+      const whole = fakeConn({ done: new Error('timeout') });
+      expect((await runRouteCheck({ now: SUNDAY })).status).toBe('completed');
+      expect(JSON.parse(whole.writes[0][1].ad_shadow).decision).toMatchObject({ mode: 'floor', zones: [{ byDate: { '2026-11-22': 0 } }, { byDate: { '2026-11-22': 0 } }] });
+      // OTHER_TECH off today could not work it either: the read can add nobody, and TECH's empty list is the answer.
+      absentTechDays.mockResolvedValue(new Set([`${OTHER_TECH}:2026-11-22`]));
+      const otherOff = fakeConn({ done: new Error('timeout'), techs: [TECH, OTHER_TECH] });
+      expect((await runRouteCheck({ now: SUNDAY })).status).toBe('completed');
+      expect(JSON.parse(otherOff.writes[0][1].ad_shadow).decision.zones.map((z) => z.byDate['2026-11-22'])).toEqual([0, 0]);
+      absentTechDays.mockResolvedValue(new Set());
       findAvailableSlots.mockImplementation(async ({ technicianId }) => sundayStart(technicianId));
       const bookedStart = fakeConn({ done: new Error('timeout') });
       expect((await runRouteCheck({ now: SUNDAY })).status).toBe('completed');
@@ -1219,6 +1233,9 @@ describe('runRouteCheck', () => {
       const some = fakeConn();
       await runRouteCheck({ now: NOW });
       expect(JSON.parse(some.writes[0][1].ad_shadow).decision).toMatchObject({ mode: 'full', sameDay: { box: 'off' } });
+      // Today the only staffed date: the floor, saying why today is not there.
+      expect(await rc.decideSlotRule({ now: NOW, dates: [], crew: new Map([['2026-11-19', new Set([TECH])]]) }))
+        .toEqual({ mode: 'floor', reason: 'no_staffed_days', dates: [], sameDay: { date: '2026-11-19', box: 'off' } });
     }
   });
 

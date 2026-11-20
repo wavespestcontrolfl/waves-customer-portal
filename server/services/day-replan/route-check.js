@@ -554,10 +554,11 @@ async function decideSlotRule({ now, dates, crew, todayWhole = true }) {
   // today: it is not counted, as before this ask, and the record says so (sameDay.box 'off').
   const listed = sameDay && require('../scheduling/find-time-hints').openTimesBoxLive();
   const counted = listed ? [today, ...dates] : dates;
-  if (!counted.length) return { mode: 'floor', reason: 'no_staffed_days', dates: counted };
+  const todayRecord = sameDay ? { sameDay: { date: today, ...(listed ? sameDayTravel() : { box: 'off' }) } } : {};
+  if (!counted.length) return { mode: 'floor', reason: 'no_staffed_days', dates: counted, ...todayRecord };
   const zones = (await db('service_zones').select('zone_name', 'center_lat', 'center_lng'))
     .sort((a, b) => String(a.zone_name).localeCompare(String(b.zone_name)));
-  if (!zones.length) return { mode: 'unknown', reason: 'no_zones', dates: counted };
+  if (!zones.length) return { mode: 'unknown', reason: 'no_zones', dates: counted, ...todayRecord };
   const asked = [];
   const todayAsk = listed ? { techs: todayCrew, whole: todayWhole } : null;
   for (const zone of zones) asked.push(await zoneAnswer(zone, { now, today, todayAsk, dates, crew }));
@@ -565,8 +566,7 @@ async function decideSlotRule({ now, dates, crew, todayWhole = true }) {
   const unread = asked.some((z) => z.error || Object.values(z.byDate).includes(null));
   const mode = anySlot ? 'full' : (unread ? 'unknown' : 'floor');
   return {
-    mode, service: STANDARD_SERVICE_KEY, ...(capacityEnabled() ? { travel: 'modeled' } : {}), dates: counted,
-    ...(sameDay ? { sameDay: { date: today, ...(listed ? sameDayTravel() : { box: 'off' }) } } : {}),
+    mode, service: STANDARD_SERVICE_KEY, ...(capacityEnabled() ? { travel: 'modeled' } : {}), dates: counted, ...todayRecord,
     zones: asked,
   };
 }
@@ -620,6 +620,9 @@ async function zoneAnswer(zone, { now, today, todayAsk, dates, crew }) {
       // in: another finder gave it, and /book's dates are still to verify.
       if (!dates.some((day) => byDate[day] > 0)) tally(await ask({}));
     } catch (err) {
+      // A failed ask leaves the next days with no answer (null), never the crew's provisional zeros. (The own-pool ask
+      // runs only when the crew's counted no slot there.)
+      for (const day of dates) byDate[day] = null;
       errors.push(String(err.message));
     }
   }
@@ -786,7 +789,11 @@ async function measureRun(conn, now) {
   // Today's crew too, for the decision's same-day ask, by the same rule. Only a Sunday reads today's stops, booked and
   // done (sundayWorkToday); a read failing leaves the crew whom the other found, and todayWhole false.
   const sunday = weekday(today) === 0 ? await sundayWorkToday(conn, today, await withStopsOn(today)) : { techs: new Set(), whole: true };
-  crew.set(today, new Set(elig.techIds.filter((techId) => staffed(elig, today, techId, sunday.techs.has(techId)))));
+  const todayCrew = new Set(elig.techIds.filter((techId) => staffed(elig, today, techId, sunday.techs.has(techId))));
+  crew.set(today, todayCrew);
+  // A failed read can add only a technician who could work today (workable, assignable, not absent) and is not known to:
+  // with none left, the crew is whole.
+  const todayWhole = sunday.whole || elig.techIds.every((techId) => todayCrew.has(techId) || !staffed(elig, today, techId, true));
   for (const day of datesToMeasure(elig, today, stopsOn)) {
     const rows = await rowsOn(day);
     const withStops = await withStopsOn(day);
@@ -817,7 +824,7 @@ async function measureRun(conn, now) {
     return { live: null, error: String(err.message).slice(0, 200) };
   });
   const failed = ad.live === null || days.some((d) => d.skip === 'FAILED');
-  return { status: failed ? 'completed_with_errors' : 'completed', days, totals, ad, crew, todayWhole: sunday.whole };
+  return { status: failed ? 'completed_with_errors' : 'completed', days, totals, ad, crew, todayWhole };
 }
 
 module.exports = {
