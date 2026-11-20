@@ -77,11 +77,12 @@ describe('reloadDueAtMove', () => {
 
 describe('offline', () => {
   test('a tab the browser reports offline is not due, and never reloads or records the build', async () => {
-    liveBuild('bbb222bbb222');
+    liveBuild('bbb222bbb222', Date.now());
+    expect(reloadDueAtMove('/admin/pipeline')).toBe(true);
     vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
-    expect(reloadDueAtMove('/admin/pipeline', NOW)).toBe(false);
+    expect(reloadDueAtMove('/admin/pipeline')).toBe(false);
     const reload = vi.fn();
-    await expect(reloadForNewBuild({ reload })).resolves.toBe('offline');
+    await expect(reloadForNewBuild({ reload })).resolves.toBe('no-signal');
     expect(reload).not.toHaveBeenCalled();
     expect(sessionStorage.getItem('portal-reloaded-for')).toBeNull();
   });
@@ -100,7 +101,7 @@ describe('staffReloadBlocker', () => {
 
 describe('reloadForNewBuild', () => {
   test('reloads once and records the build', async () => {
-    liveBuild('bbb222bbb222');
+    liveBuild('bbb222bbb222', Date.now());
     const reload = vi.fn();
     await expect(reloadForNewBuild({ reload })).resolves.toBeNull();
     expect(reload).toHaveBeenCalledTimes(1);
@@ -110,7 +111,7 @@ describe('reloadForNewBuild', () => {
   });
 
   test('a hold that starts as the old page closes still stops it', async () => {
-    liveBuild('bbb222bbb222');
+    liveBuild('bbb222bbb222', Date.now());
     holding = true;
     const reload = vi.fn();
     await expect(reloadForNewBuild({ reload })).resolves.toBe('test-hold');
@@ -118,7 +119,7 @@ describe('reloadForNewBuild', () => {
   });
 
   test('does not reload after the user moved on', async () => {
-    liveBuild('bbb222bbb222');
+    liveBuild('bbb222bbb222', Date.now());
     const reload = vi.fn();
     await expect(reloadForNewBuild({ reload, current: () => false })).resolves.toBe('moved');
     expect(reload).not.toHaveBeenCalled();
@@ -132,7 +133,7 @@ describe('reloadForNewBuild', () => {
       const target = { fetch: () => new Promise((resolve) => { finishSave = () => resolve({ headers: new Headers() }); }) };
       uninstall = installPortalVersionWatch({ target });
       target.fetch('/api/admin/estimates', { method: 'POST' });
-      liveBuild('bbb222bbb222');
+      liveBuild('bbb222bbb222', Date.now());
     });
     afterEach(() => uninstall());
 
@@ -145,6 +146,18 @@ describe('reloadForNewBuild', () => {
       await vi.advanceTimersByTimeAsync(400);
       await expect(done).resolves.toBeNull();
       expect(reload).toHaveBeenCalledTimes(1);
+    });
+
+    test('a wait that outlasts the 5-minute signal ends with no reload', async () => {
+      liveBuild('bbb222bbb222', Date.now() - RECENT_ANSWER_MS + 2000);
+      const reload = vi.fn();
+      const done = reloadForNewBuild({ reload });
+      await vi.advanceTimersByTimeAsync(3000);
+      finishSave();
+      await vi.advanceTimersByTimeAsync(400);
+      await expect(done).resolves.toBe('no-signal');
+      expect(reload).not.toHaveBeenCalled();
+      expect(sessionStorage.getItem('portal-reloaded-for')).toBeNull();
     });
 
     test('gives up after 10 seconds', async () => {

@@ -40,6 +40,8 @@ const HOLD_TEXT = {
   'text-draft': 'A text draft is not saved in this tab.',
   'estimate-send': 'Send is locked on an estimate in this tab. A reload unlocks it.',
   'schedule-notice': 'A schedule notice is still open.',
+  'recap-upload': 'A recap clip is still uploading.',
+  'ask-draft': 'An Ask Waves question is not sent yet.',
 };
 
 // Every staff page, Waves Admin and the field pages included: says that a

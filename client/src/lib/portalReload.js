@@ -23,16 +23,19 @@ function reloadedFor(build) {
   try { return sessionStorage.getItem(RELOADED_FOR) === build; } catch { return true; }
 }
 
-// A reload with no connection swaps a working page for an offline error.
-function offline() {
-  return typeof navigator !== 'undefined' && navigator.onLine === false;
+// A reload with no connection swaps a working page for an offline error, so
+// it needs a recent answer from the new server, and the browser must not
+// report itself offline.
+function hasSignal(now) {
+  const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  return !offline && heardFromServerWithin(RECENT_ANSWER_MS, now);
 }
 
 export function reloadDueAtMove(pathname, now = Date.now()) {
   const build = newerBuild();
   return Boolean(build)
     && isAdminPath(pathname) && !isFieldPath(pathname) && !isWavesAdminApp()
-    && !offline() && heardFromServerWithin(RECENT_ANSWER_MS, now)
+    && hasSignal(now)
     && !reloadedFor(build)
     && !reloadHoldName();
 }
@@ -72,7 +75,8 @@ export async function reloadForNewBuild({
   const build = newerBuild();
   if (!build) return 'current';
   if (reloadedFor(build)) return 'reloaded';
-  if (offline()) return 'offline';
+  // The wait for writes can outlast the signal: ask again.
+  if (!hasSignal(now())) return 'no-signal';
   try { sessionStorage.setItem(RELOADED_FOR, build); } catch { return 'storage'; }
   reload();
   return null;
