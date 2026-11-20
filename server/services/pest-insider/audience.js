@@ -15,13 +15,16 @@
  * sender mails a reader only at that address: if the subscriber's address changes before the
  * send, on a first send or a resume, that reader is skipped.
  *
- * Holdout: a fixed 10% of customer-linked subscribers never get an issue, so the issues'
- * effect on renewals and add-ons can be measured against them. Membership is a hash of the
- * customer id with a fixed salt, so the same customers are held out every issue. A subscriber
- * with no customer (a lead) is never held out. The plan drops held-out customers, and the
- * sender checks the holdout again right before each batch, on the subscriber's customer link
- * at that moment (segment_filter.holdout): a lead that became a held-out customer after the
- * plan, or a relink to another customer, never gets the issue, on a first send or a resume.
+ * Holdout: a fixed 10% of customers never get an issue, so the issues' effect on renewals and
+ * add-ons can be measured against them. Membership is a hash of the customer id with a fixed
+ * salt, so the same customers are held out every issue. The holdout covers a whole mailbox: a
+ * reader is held out when its own customer link, or any customer behind its mailbox (linked to
+ * another subscriber row on it, an alias included, or whose own email is on it), is held out
+ * (mailboxCustomerIds in the sender). A lead with no customer behind its mailbox is never held
+ * out. The plan drops held-out readers, and the sender checks the holdout again right before
+ * each batch, on the links at that moment (segment_filter.holdout): a lead that became a
+ * held-out customer after the plan, or a relink, never gets the issue, on a first send or a
+ * resume.
  *
  * The audience starts from the send path's own subscriber query (buildSubscriberQuery: active,
  * not suppressed, not archived, mailable), after the same archived-link relink sweep the send
@@ -64,6 +67,11 @@ function addressKey(email) {
   return crypto.createHash('sha256').update(`${ADDRESS_KEY_PREFIX}:${normalized}`).digest('hex').slice(0, 32);
 }
 
+/** True when `value` has addressKey's form (32 lower-case hex characters). */
+function isAddressKey(value) {
+  return typeof value === 'string' && /^[0-9a-f]{32}$/.test(value);
+}
+
 /**
  * The warm readers as a query: every subscriber the send path would mail whose CURRENT address
  * has an open event in the SendGrid webhook log from `since` through `until` (both inclusive,
@@ -99,15 +107,18 @@ function warmAudienceQuery({ since, until }) {
 async function selectIssueAudience({ asOf = new Date() } = {}) {
   const db = require('../../models/db');
   const NewsletterSubscribers = require('../newsletter-subscribers');
+  const { mailboxCustomerIds } = require('../newsletter-sender');
 
   await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);
   const warm = await warmAudienceQuery({ since: new Date(asOf.getTime() - WARM_DAYS * DAY_MS), until: asOf });
+  const behindMailbox = await mailboxCustomerIds(warm.map((row) => Number(row.id)));
 
   const subscriberIds = [];
   const addressKeys = {};
   let heldOut = 0;
   for (const row of warm) {
-    if (isHeldOut(row.customer_id)) {
+    const customers = [row.customer_id, ...(behindMailbox.get(Number(row.id)) || [])];
+    if (customers.some((customerId) => isHeldOut(customerId))) {
       heldOut += 1;
     } else {
       const id = Number(row.id);
@@ -127,6 +138,6 @@ function audienceSegmentFilter(audience) {
 }
 
 module.exports = {
-  isHeldOut, addressKey, warmAudienceQuery, selectIssueAudience, audienceSegmentFilter,
+  isHeldOut, addressKey, isAddressKey, warmAudienceQuery, selectIssueAudience, audienceSegmentFilter,
   WARM_DAYS, HOLDOUT_PERCENT, HOLDOUT_SALT, HOLDOUT_NAME,
 };

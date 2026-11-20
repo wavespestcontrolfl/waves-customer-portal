@@ -38,7 +38,10 @@ const SEND = {
   id: 'send-pi-1', status: 'scheduled', newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — October',
   html_body: '<p>Body</p>', text_body: 'Body', event_ids: [],
   // A Waves Pest Insider issue goes out only with a planned audience.
-  segment_filter: { subscriber_ids: [1], holdout: 'pest-insider', address_keys: { 1: 'key-1' } },
+  segment_filter: {
+    subscriber_ids: [1], holdout: 'pest-insider',
+    address_keys: { 1: require('../services/pest-insider/audience').addressKey('a@example.com') },
+  },
   scheduled_for: new Date('2026-10-06T13:56:00Z'), updated_at: READ_AT, proof_approved_at: APPROVED_AT,
   // Approved by an APPROVED reply (email-sync always passes the stored email
   // row); no email id would mean the auto-send switch queued it.

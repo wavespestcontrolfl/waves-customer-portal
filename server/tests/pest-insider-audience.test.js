@@ -10,13 +10,13 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/newsletter-subscribers', () => ({ relinkArchivedLinkedSubscribers: jest.fn() }));
-jest.mock('../services/newsletter-sender', () => ({ buildSubscriberQuery: jest.fn() }));
+jest.mock('../services/newsletter-sender', () => ({ buildSubscriberQuery: jest.fn(), mailboxCustomerIds: jest.fn() }));
 
 const crypto = require('crypto');
 const NewsletterSubscribers = require('../services/newsletter-subscribers');
-const { buildSubscriberQuery } = require('../services/newsletter-sender');
+const { buildSubscriberQuery, mailboxCustomerIds } = require('../services/newsletter-sender');
 const {
-  isHeldOut, addressKey, selectIssueAudience, audienceSegmentFilter, WARM_DAYS, HOLDOUT_PERCENT, HOLDOUT_SALT, HOLDOUT_NAME,
+  isHeldOut, addressKey, isAddressKey, selectIssueAudience, audienceSegmentFilter, WARM_DAYS, HOLDOUT_PERCENT, HOLDOUT_SALT, HOLDOUT_NAME,
 } = require('../services/pest-insider/audience');
 
 // Runs a knex where-builder callback against a recorder: each call as [method, ...args], with a
@@ -84,6 +84,7 @@ describe('selectIssueAudience', () => {
     order = [];
     captured = {};
     NewsletterSubscribers.relinkArchivedLinkedSubscribers.mockImplementation(async () => { order.push('relink'); return 0; });
+    mailboxCustomerIds.mockImplementation(async () => { order.push('mailbox'); return new Map(); });
   });
 
   test('keeps leads and kept customers, drops held-out customers, and counts each', async () => {
@@ -93,14 +94,19 @@ describe('selectIssueAudience', () => {
       { id: 9, customer_id: null, email: 'Nine@Example.invalid' },
       { id: '12', customer_id: KEPT[1], email: 'twelve@example.invalid' },
       { id: 15, customer_id: HELD[1], email: 'fifteen@example.invalid' },
+      // A lead whose mailbox has a held-out customer behind it (an alias row or a customer email).
+      { id: 20, customer_id: null, email: 'twenty@example.invalid' },
     ]));
+    mailboxCustomerIds.mockImplementation(async () => new Map([[4, [KEPT[0]]], [9, [KEPT[1]]], [20, [KEPT[1], HELD[0]]]]));
     const audience = await selectIssueAudience({ asOf: new Date('2026-12-02T12:00:00Z') });
     expect(audience).toEqual({
       subscriberIds: [4, 9, 12],
       // The key of the address that qualified, for each kept reader.
       addressKeys: { 4: addressKey('four@example.invalid'), 9: addressKey('nine@example.invalid'), 12: addressKey('twelve@example.invalid') },
-      counts: { warm: 5, heldOut: 2, recipients: 3 },
+      counts: { warm: 6, heldOut: 3, recipients: 3 },
     });
+    // Every warm reader's mailbox is asked, by id.
+    expect(mailboxCustomerIds).toHaveBeenCalledWith([4, 7, 9, 12, 15, 20]);
     expect(buildSubscriberQuery).toHaveBeenCalledWith(null);
     expect(captured.select).toEqual(['newsletter_subscribers.id', 'newsletter_subscribers.customer_id', 'newsletter_subscribers.email']);
     expect(captured.orderBy).toEqual(['newsletter_subscribers.id', 'asc']);
@@ -109,7 +115,7 @@ describe('selectIssueAudience', () => {
   test('runs the relink sweep before it reads the audience, as the send path does', async () => {
     buildSubscriberQuery.mockReturnValue(fakeQuery([]));
     await selectIssueAudience();
-    expect(order).toEqual(['relink', 'query']);
+    expect(order).toEqual(['relink', 'query', 'mailbox']);
   });
 
   test('asks for an open event on the current address in the SendGrid log, in the 90 days up to asOf', async () => {
@@ -136,6 +142,13 @@ describe('selectIssueAudience', () => {
     const audience = await selectIssueAudience();
     expect(audience).toEqual({ subscriberIds: [], addressKeys: {}, counts: { warm: 0, heldOut: 0, recipients: 0 } });
     expect(audienceSegmentFilter(audience)).toEqual({ subscriber_ids: [], holdout: 'pest-insider', address_keys: {} });
+  });
+});
+
+test('isAddressKey accepts only addressKey\'s form: 32 lower-case hex characters', () => {
+  expect(isAddressKey(addressKey('a@b.com'))).toBe(true);
+  ['key-1', '', 'BF6A6E734818AB4C5A2EB5612E010E04', addressKey('a@b.com').slice(1), null, undefined, 42].forEach((value) => {
+    expect(isAddressKey(value)).toBe(false);
   });
 });
 

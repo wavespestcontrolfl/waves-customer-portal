@@ -4,7 +4,8 @@
  * address, inside the window on the open's own time, under every send-path rule. Covers what
  * the toSQL shape test cannot: a repeat open inside the window counts when the first open was
  * before it, an open by a former address does not qualify a corrected one, a batch logged late
- * counts by when the open happened, and both window bounds hold.
+ * counts by when the open happened, and both window bounds hold. Also the customers behind a
+ * mailbox (newsletter-sender mailboxCustomerIds), which the holdout asks.
  * Self-skips unless DATABASE_URL is set (CI's DB-gated suites step).
  * Safe on a shared database: synthetic rows, asserted by id, removed after.
  */
@@ -25,19 +26,30 @@ const { randomUUID } = require('crypto');
 postgres('warmAudienceQuery (real Postgres)', () => {
   const db = require('../models/db');
   const { warmAudienceQuery } = require('../services/pest-insider/audience');
+  const { mailboxCustomerIds } = require('../services/newsletter-sender');
   const DAY = 24 * 60 * 60 * 1000;
   const until = new Date('2026-12-02T12:00:00Z');
   const since = new Date(until.getTime() - 90 * DAY);
   const at = (base, days) => new Date(base.getTime() + days * DAY);
   const tag = randomUUID().slice(0, 8);
   const address = (name) => `pi-warm-${tag}-${name}@example.invalid`;
-  const created = { subscribers: [], events: [] };
+  const created = { subscribers: [], events: [], customers: [] };
   const ids = {};
 
-  async function subscriber(name, { email = address(name), status = 'active' } = {}) {
-    const [row] = await db('newsletter_subscribers').insert({ email, status }).returning(['id']);
+  async function subscriber(name, { email = address(name), status = 'active', customerId = null } = {}) {
+    const [row] = await db('newsletter_subscribers').insert({ email, status, customer_id: customerId }).returning(['id']);
     created.subscribers.push(row.id);
     ids[name] = row.id;
+  }
+
+  // A synthetic customer (no real person).
+  async function customer({ email = null } = {}) {
+    const id = randomUUID();
+    await db('customers').insert({
+      id, first_name: 'Synthetic', last_name: 'PiMailbox', phone: `+1555${id.replace(/-/g, '').slice(0, 7)}`, email,
+    });
+    created.customers.push(id);
+    return id;
   }
 
   // An event SendGrid reported at `when` and the webhook logged at `loggedAt` (the same moment
@@ -83,11 +95,22 @@ postgres('warmAudienceQuery (real Postgres)', () => {
     // The send path's own rules still apply: an unsubscribed reader who opened is left out.
     await subscriber('unsubscribed', { status: 'unsubscribed' });
     await logged(address('unsubscribed'), 'open', at(until, -2));
+
+    // The customers behind a mailbox. A lead and a Gmail alias of the same mailbox (dots and
+    // +tag ignored) linked to a customer; a lead whose address is a customer's own email (case
+    // aside); a lead with nobody behind it.
+    ids.aliasCustomer = await customer();
+    await subscriber('aliasLead', { email: `pi.alias.${tag}@gmail.com` });
+    await subscriber('aliasLinked', { email: `pialias${tag}+news@gmail.com`, customerId: ids.aliasCustomer });
+    ids.sharedCustomer = await customer({ email: address('shared') });
+    await subscriber('sharedLead', { email: address('shared').toUpperCase() });
+    await subscriber('plainLead');
   });
 
   afterAll(async () => {
     if (created.events.length) await db('sendgrid_webhook_events').whereIn('event_id', created.events).del();
     if (created.subscribers.length) await db('newsletter_subscribers').whereIn('id', created.subscribers).del();
+    if (created.customers.length) await db('customers').whereIn('id', created.customers).del();
     await db.destroy();
   });
 
@@ -96,5 +119,14 @@ postgres('warmAudienceQuery (real Postgres)', () => {
     const warm = (await warmAudienceQuery({ since, until })).map((row) => row.id).filter((id) => mine.has(id));
     const byId = (a, b) => a - b;
     expect(warm).toEqual([ids.recent, ids.repeat, ids.mixedCase, ids.atStart, ids.atEnd, ids.legacyRow].sort(byId));
+  });
+
+  test('mailboxCustomerIds finds the customer behind a mailbox through an alias row or a customer email', async () => {
+    const behind = await mailboxCustomerIds([ids.aliasLead, ids.aliasLinked, ids.sharedLead, ids.plainLead]);
+    expect(behind.get(ids.aliasLead)).toEqual([ids.aliasCustomer]);
+    expect(behind.get(ids.aliasLinked)).toEqual([ids.aliasCustomer]);
+    expect(behind.get(ids.sharedLead)).toEqual([ids.sharedCustomer]);
+    expect(behind.get(ids.plainLead)).toEqual([]);
+    expect(await mailboxCustomerIds([])).toEqual(new Map());
   });
 });

@@ -35,8 +35,9 @@ const db = require('../models/db');
 // The pre-send archived-link relink sweep (relinkArchivedLinkedSubscribers)
 // runs in its own small transaction (advisory lock + one raw UPDATE) at the
 // top of sendCampaign; nothing stale in these scenarios, so it's a 0-row
-// no-op.
-db.raw = jest.fn(async () => ({ rowCount: 0 }));
+// no-op. A planned issue's per-chunk re-check also asks which customers are
+// behind each mailbox (mailboxCustomerIds): none here unless a test says so.
+db.raw = jest.fn(async () => ({ rowCount: 0, rows: [] }));
 db.transaction = jest.fn(async (cb) => cb({ raw: db.raw }));
 const { recordTouchpoint } = require('../services/conversations');
 const RETRYABLE_DELIVERY_STATUSES_FOR_TEST = ['queued', 'failed', 'sending'];
@@ -269,6 +270,39 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     Object.values(PLANNED_KEYS).forEach((key) => expect(logged).not.toContain(key));
   });
 
+  test('a planned issue skips a reader whose mailbox has a held-out customer behind it (an alias row or a customer email)', async () => {
+    let skipUpdate = null;
+    buildDb({
+      send: {
+        id: 'send-1', status: 'draft', html_body: '<p>Body</p>', text_body: 'Body', subject: 'Hello',
+        from_email: 'newsletter@wavespestcontrol.com', from_name: 'Waves', reply_to: 'contact@wavespestcontrol.com',
+        segment_filter: PLANNED_PI, subject_b: null,
+      },
+      // #1 is a lead; a held-out customer sits behind its mailbox. #2 has only a kept customer.
+      subscribers: [
+        { id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null },
+        { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: KEPT_CUSTOMER },
+      ],
+      deliveries: [
+        { id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null },
+        { id: 'd-2', subscriber_id: 2, status: 'queued', ab_variant: null },
+      ],
+      eligibleAtDispatch: [{ id: 1 }, { id: 2 }],
+      skipUpdated: 1,
+      onSkipUpdate: (payload) => { skipUpdate = payload; },
+    });
+    const behind = jest.fn(async () => ({ rows: [{ id: 1, customer_ids: [HELD_CUSTOMER] }, { id: 2, customer_ids: [KEPT_CUSTOMER] }] }));
+    db.raw.mockImplementation(async (sql, bindings) => (String(sql).includes('linked AS') ? behind(sql, bindings) : { rowCount: 0, rows: [] }));
+
+    const result = await sendCampaign('send-1');
+    db.raw.mockImplementation(async () => ({ rowCount: 0, rows: [] }));
+
+    expect(behind).toHaveBeenCalledWith(expect.any(String), [[1, 2]]);
+    expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['b@example.com']);
+    expect(skipUpdate).toMatchObject({ status: 'skipped', bounce_reason: 'ineligible_at_dispatch' });
+    expect(result.skipped_ineligible).toBe(1);
+  });
+
   test('a planned issue skips a reader whose address on file changed after the batch was loaded', async () => {
     let skipUpdate = null;
     buildDb({
@@ -304,6 +338,8 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     ['no address key for one reader', { subscriber_ids: [1, 2], address_keys: { 1: PLANNED_KEYS[1] } }],
     ['an empty reader list', { subscriber_ids: [], address_keys: PLANNED_KEYS }],
     ['no reader list', { address_keys: PLANNED_KEYS }],
+    ['a key that is not an address key', { subscriber_ids: [1, 2], address_keys: { 1: PLANNED_KEYS[1], 2: 'key-2' } }],
+    ['an empty key', { subscriber_ids: [1, 2], address_keys: { 1: PLANNED_KEYS[1], 2: '' } }],
   ])('a planned issue with %s is refused before any claim work, so it never ends sent to nobody', async (_label, plan) => {
     const queues = {
       newsletter_sends: [chain({ first: {

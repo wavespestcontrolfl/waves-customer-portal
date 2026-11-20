@@ -290,6 +290,36 @@ function excludeMailboxNotMailable(query) {
     });
 }
 
+// The customers behind each subscriber's mailbox (MAILBOX_KEY_SQL): every
+// customer linked to a subscriber row on that mailbox, whatever its status,
+// and every customer whose own email is on it. A planned issue's holdout
+// covers the whole mailbox: the sender mails one row per mailbox, so a
+// held-out customer must not be reached through an alias row, a lead row or
+// a shared address. Returns Map(subscriber id -> customer ids as text).
+async function mailboxCustomerIds(subscriberIds) {
+  if (!subscriberIds.length) return new Map();
+  const { rows } = await db.raw(`
+    WITH target AS (
+      SELECT id, ${MAILBOX_KEY_SQL('email')} AS mailbox_key
+      FROM newsletter_subscribers
+      WHERE id = ANY(?::int[])
+    ), linked AS (
+      SELECT ${MAILBOX_KEY_SQL('email')} AS mailbox_key, customer_id::text AS customer_id
+      FROM newsletter_subscribers
+      WHERE customer_id IS NOT NULL AND TRIM(COALESCE(email, '')) <> ''
+      UNION
+      SELECT ${MAILBOX_KEY_SQL('email')} AS mailbox_key, id::text AS customer_id
+      FROM customers
+      WHERE deleted_at IS NULL AND TRIM(COALESCE(email, '')) <> ''
+    )
+    SELECT target.id,
+      COALESCE(array_agg(linked.customer_id) FILTER (WHERE linked.customer_id IS NOT NULL), '{}') AS customer_ids
+    FROM target
+    LEFT JOIN linked ON linked.mailbox_key = target.mailbox_key
+    GROUP BY target.id`, [subscriberIds]);
+  return new Map(rows.map((row) => [Number(row.id), row.customer_ids]));
+}
+
 // Keys that can't be expressed in SQL against newsletter_subscribers — they
 // depend on classifying each customer's active recurring services, so they are
 // resolved to a customer_id set by resolveSegmentCustomerIds() first.
@@ -480,16 +510,20 @@ function buildSubscriberQuery(segmentFilter, customerIds = null) {
 // a planned issue's own rules, which the per-chunk re-check in sendCampaign
 // asks again right before each batch, on a first send and on a resume.
 // - heldOut(customerId): customers the issue must never reach, asked on each
-//   recipient's CURRENT customer link, so a lead that became a held-out
-//   customer after the plan, or a relink to another customer, is skipped.
+//   recipient's CURRENT customer link and on every customer behind its
+//   mailbox (mailboxCustomerIds), so a lead that became a held-out customer
+//   after the plan, a relink to another customer, or an alias of a held-out
+//   customer's mailbox is skipped.
 // - addressKey(email): the key of an address. segment_filter.address_keys
 //   holds, by subscriber id, the key of the address the plan qualified; a
 //   recipient about to be mailed at any other address is skipped, because the
 //   plan chose that mailbox, not whatever address the row carries now.
+// - isAddressKey(value): whether a stored key has addressKey's form.
 const SEND_HOLDOUTS = Object.freeze({
   'pest-insider': Object.freeze({
     heldOut: (customerId) => require('./pest-insider/audience').isHeldOut(customerId),
     addressKey: (email) => require('./pest-insider/audience').addressKey(email),
+    isAddressKey: (value) => require('./pest-insider/audience').isAddressKey(value),
   }),
 });
 
@@ -499,12 +533,13 @@ function sendHoldout(segmentFilter) {
   return name != null && Object.hasOwn(SEND_HOLDOUTS, name) ? SEND_HOLDOUTS[name] : null;
 }
 
-// True when a recipient still belongs to its planned issue: not held out on
-// the customer linked now, and every one of `addresses` (the address about to
-// be mailed and the address on file now) is the one the plan qualified. A
+// True when a recipient still belongs to its planned issue: none of
+// `customerIds` (the customer linked now and every customer behind its
+// mailbox) is held out, and every one of `addresses` (the address about to be
+// mailed and the address on file now) is the one the plan qualified. A
 // missing or malformed address_keys keeps nobody.
-function keepsPlannedAudience(plan, segmentFilter, subscriberId, customerId, addresses) {
-  if (plan.heldOut(customerId)) return false;
+function keepsPlannedAudience(plan, segmentFilter, subscriberId, customerIds, addresses) {
+  if (customerIds.some((customerId) => plan.heldOut(customerId))) return false;
   const keys = segmentFilter?.address_keys;
   if (!keys || typeof keys !== 'object' || Array.isArray(keys)) return false;
   const id = String(subscriberId);
@@ -520,9 +555,9 @@ function keepsPlannedAudience(plan, segmentFilter, subscriberId, customerId, add
 // - a Waves Pest Insider issue with no planned audience (its planner sets
 //   one): without it the issue would go to every subscriber, the holdout and
 //   readers who never open Waves mail included;
-// - a planned audience without a usable reader list or without an address
-//   key for every reader on it: the batches would skip everyone, and the
-//   issue would end 'sent' to nobody.
+// - a planned audience without a usable reader list or without a
+//   well-formed address key for every reader on it: the batches would skip
+//   everyone, and the issue would end 'sent' to nobody.
 function audienceRefusal(send) {
   const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
   const filter = send.segment_filter;
@@ -533,12 +568,13 @@ function audienceRefusal(send) {
   if (send.newsletter_type === PEST_INSIDER_TYPE && filter?.holdout !== 'pest-insider') {
     return refused('UNPLANNED_AUDIENCE', 'a Waves Pest Insider issue goes only to its planned readers, and this one has no plan');
   }
-  if (filter?.holdout != null) {
+  const plan = sendHoldout(filter);
+  if (plan) {
     const { subscriber_ids: ids, address_keys: keys } = filter;
     const keyed = Boolean(keys) && typeof keys === 'object' && !Array.isArray(keys);
     if (!usableIdList(ids) || !keyed
-      || !ids.every((id) => Object.hasOwn(keys, String(id)) && typeof keys[String(id)] === 'string')) {
-      return refused('INCOMPLETE_PLAN', 'the planned audience needs a reader list and an address key for every reader on it');
+      || !ids.every((id) => Object.hasOwn(keys, String(id)) && plan.isAddressKey(keys[String(id)]))) {
+      return refused('INCOMPLETE_PLAN', 'the planned audience needs a reader list and a well-formed address key for every reader on it');
     }
   }
   return null;
@@ -1204,15 +1240,17 @@ async function sendCampaign(sendId, opts = {}) {
       ))), send.segment_filter || {}).select('id', 'customer_id', 'email');
       const freshCustomerBySub = new Map(freshRows.map((r) => [r.id, r.customer_id ?? null]));
       // A send that names a planned audience (a Waves Pest Insider issue) also
-      // skips anyone held out on the customer linked right now, and anyone
-      // whose address, about to be mailed or on file now, is not the one the
-      // plan qualified (an address corrected while earlier batches went out).
+      // skips anyone held out on the customer linked right now or on any
+      // customer behind its mailbox, and anyone whose address, about to be
+      // mailed or on file now, is not the one the plan qualified (an address
+      // corrected while earlier batches went out).
       const plan = sendHoldout(send.segment_filter);
       const mailedAddressBySub = new Map(chunkToSend.map((s) => [s.id, s.email]));
       const currentAddressBySub = new Map(freshRows.map((r) => [r.id, r.email]));
+      const behindMailbox = plan ? await mailboxCustomerIds([...freshCustomerBySub.keys()].map(Number)) : null;
       const stillEligible = plan
         ? new Map([...freshCustomerBySub].filter(([subscriberId, customerId]) => keepsPlannedAudience(
-          plan, send.segment_filter, subscriberId, customerId,
+          plan, send.segment_filter, subscriberId, [customerId, ...(behindMailbox.get(Number(subscriberId)) || [])],
           [mailedAddressBySub.get(subscriberId), currentAddressBySub.get(subscriberId)],
         )))
         : freshCustomerBySub;
@@ -1909,4 +1947,4 @@ async function markEventsFeatured(send) {
 module.exports = {
   applyRetryableDeliveryFilter,
   outstandingEligibleDeliveries,
-  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };
+  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, mailboxCustomerIds, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };
